@@ -1,0 +1,223 @@
+package constants
+
+import "time"
+
+// Storage operation thresholds
+const (
+	// MultipartThreshold - files larger than this use multipart/block upload (100 MB)
+	// Used by both S3 multipart and Azure block blob uploads
+	MultipartThreshold = 100 * 1024 * 1024
+
+	// ChunkSize - size of each chunk for uploads and downloads (16 MB)
+	// This is used as:
+	// - PartSize for S3 multipart uploads
+	// - BlockSize for Azure block blob uploads
+	// - RangeChunkSize for S3/Azure downloads
+	// Set to 16 MB for smoother progress updates and better EWMA calculation
+	ChunkSize = 16 * 1024 * 1024
+
+	// MinPartSize - AWS S3 minimum part size (5 MB, except last part)
+	// Azure has no equivalent minimum (can use any size)
+	MinPartSize = 5 * 1024 * 1024
+)
+
+// Credential refresh intervals
+const (
+	// GlobalCredentialRefreshInterval - interval for global credential manager refresh (10 minutes)
+	// AWS credentials expire at ~15 minutes, refresh with 5 min buffer
+	// Azure SAS tokens also expire at ~15 minutes
+	GlobalCredentialRefreshInterval = 10 * time.Minute
+
+	// AzurePeriodicRefreshInterval - periodic refresh for Azure long-running operations (8 minutes)
+	// Only used for Azure uploads/downloads of files >1GB
+	// Provides additional safety layer since Azure SDK has no automatic refresh
+	AzurePeriodicRefreshInterval = 8 * time.Minute
+
+	// LargeFileThreshold - files larger than this trigger periodic credential refresh (1 GB)
+	// Only applies to Azure backend (S3 uses AWS SDK automatic refresh)
+	LargeFileThreshold = 1 * 1024 * 1024 * 1024
+)
+
+// Retry configuration
+const (
+	// MaxRetries - maximum number of retries for transient errors
+	MaxRetries = 10
+
+	// RetryInitialDelay - initial delay before first retry (200ms)
+	RetryInitialDelay = 200 * time.Millisecond
+
+	// RetryMaxDelay - maximum delay between retries (15s)
+	// Exponential backoff with jitter caps at this value
+	RetryMaxDelay = 15 * time.Second
+)
+
+// Disk space safety margin
+const (
+	// DiskSpaceBufferPercent - additional space to require beyond file size (15%)
+	// Accounts for temporary files, encryption overhead, etc.
+	DiskSpaceBufferPercent = 0.15
+)
+
+// Event System
+const (
+	// EventBusDefaultBuffer - default buffer size for event channels (1000)
+	// Reduced from 10,000 to decrease memory footprint per subscriber
+	// 1000 events is still generous for typical event throughput
+	EventBusDefaultBuffer = 1000
+
+	// EventBusMaxBuffer - maximum buffer size for high-throughput scenarios (5000)
+	EventBusMaxBuffer = 5000
+)
+
+// Pipeline Queues
+const (
+	// DefaultQueueMultiplier - multiplier for queue size based on worker count
+	// Queue size = workers * multiplier for optimal throughput
+	DefaultQueueMultiplier = 2
+
+	// MaxQueueSize - absolute maximum queue size to prevent unbounded growth
+	MaxQueueSize = 1000
+)
+
+// UI Updates
+const (
+	// TableRefreshMinInterval - minimum time between table refreshes (100ms)
+	// Prevents excessive UI updates during rapid state changes
+	TableRefreshMinInterval = 100 * time.Millisecond
+
+	// TableRefreshBatchInterval - interval for batched table updates (1 second)
+	// Used during bulk operations to improve performance
+	TableRefreshBatchInterval = 1 * time.Second
+
+	// ProgressUpdateInterval - interval for progress bar updates (250ms)
+	// Balances responsiveness with performance
+	ProgressUpdateInterval = 250 * time.Millisecond
+)
+
+// Activity Log
+const (
+	// ActivityLogInitialCapacity - initial capacity for activity log entries
+	ActivityLogInitialCapacity = 100
+
+	// ActivityLogMaxEntries - maximum number of log entries to retain
+	ActivityLogMaxEntries = 10000
+)
+
+// Thread Pool
+const (
+	// AbsoluteMaxThreads - absolute maximum threads allowed
+	AbsoluteMaxThreads = 32
+
+	// MemoryPerThreadMB - estimated memory usage per thread (128 MB)
+	// Accounts for: 64MB part buffer + 64MB encryption/decryption + overhead
+	MemoryPerThreadMB = 128
+)
+
+// Monitoring
+const (
+	// JobPollInterval - interval for polling job status updates (30 seconds)
+	JobPollInterval = 30 * time.Second
+
+	// HealthCheckInterval - interval for system health checks (60 seconds)
+	HealthCheckInterval = 60 * time.Second
+)
+
+// CLI Concurrency Limits
+const (
+	// DefaultMaxConcurrent - default concurrent file operations
+	DefaultMaxConcurrent = 5
+
+	// MinMaxConcurrent - minimum concurrent operations (sequential mode)
+	MinMaxConcurrent = 1
+
+	// MaxMaxConcurrent - maximum concurrent operations allowed
+	MaxMaxConcurrent = 10
+)
+
+// Resource Manager - Thread Limits
+const (
+	// MaxBaselineThreads - maximum baseline threads from CPU cores
+	MaxBaselineThreads = 16
+
+	// MinThreadsPerFile - minimum threads per file transfer
+	MinThreadsPerFile = 1
+
+	// MaxThreadsPerFile - maximum threads per file transfer
+	MaxThreadsPerFile = 10
+)
+
+// Resource Manager - File Size Thresholds
+const (
+	// SmallFileThreshold - files below this use sequential transfer (100 MB)
+	SmallFileThreshold = 100 * 1024 * 1024
+
+	// MediumFileThreshold - threshold for medium-sized files (500 MB)
+	MediumFileThreshold = 500 * 1024 * 1024
+
+	// LargeFile1GB - 1 GB threshold for thread allocation
+	LargeFile1GB = 1 * 1024 * 1024 * 1024
+
+	// LargeFile5GB - 5 GB threshold for thread allocation
+	LargeFile5GB = 5 * 1024 * 1024 * 1024
+
+	// LargeFile10GB - 10 GB threshold for thread allocation
+	LargeFile10GB = 10 * 1024 * 1024 * 1024
+)
+
+// Resource Manager - Thread Allocation (Non-AutoScale)
+const (
+	// ThreadsForSmallFiles - threads for files < 500MB
+	ThreadsForSmallFiles = 1
+
+	// ThreadsForMediumFiles - threads for files 500MB - 1GB
+	ThreadsForMediumFiles = 2
+
+	// ThreadsForLargeFiles - threads for files > 1GB
+	ThreadsForLargeFiles = 3
+)
+
+// Resource Manager - Thread Allocation (AutoScale)
+const (
+	// ThreadsFor500MBto1GB - threads for 500MB - 1GB range
+	ThreadsFor500MBto1GB = 3
+
+	// ThreadsFor1GBto5GB - threads for 1GB - 5GB range
+	ThreadsFor1GBto5GB = 5
+
+	// ThreadsFor5GBto10GB - threads for 5GB - 10GB range
+	ThreadsFor5GBto10GB = 8
+
+	// ThreadsFor10GBPlus - threads for files 10GB+
+	ThreadsFor10GBPlus = 10
+)
+
+// Resource Manager - Throughput Monitoring
+const (
+	// MaxThroughputSamples - keep last N samples for throughput analysis
+	MaxThroughputSamples = 10
+
+	// MinScaleUpThroughputMBps - minimum MB/s to consider scaling up
+	MinScaleUpThroughputMBps = 10.0
+
+	// MaxScaleUpVarianceMBps - maximum variance MB/s for scale-up eligibility
+	MaxScaleUpVarianceMBps = 2.0
+
+	// ScaleDownThresholdPercent - throughput drop percentage that triggers scale-down
+	ScaleDownThresholdPercent = 0.8
+)
+
+// System Memory Limits
+const (
+	// MinSystemMemory - minimum available memory (512 MB)
+	MinSystemMemory = 512 * 1024 * 1024
+
+	// MaxSystemMemory - maximum memory cap (8 GB)
+	MaxSystemMemory = 8 * 1024 * 1024 * 1024
+)
+
+// Encryption
+const (
+	// EncryptionChunkSize - chunk size for AES encryption operations (16 KB)
+	// Different from upload/download ChunkSize which is for network transfers
+	EncryptionChunkSize = 16 * 1024
+)

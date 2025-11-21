@@ -1,0 +1,2 @@
+Directory,JobName,AnalysisCode,AnalysisVersion,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings
+./Run_License,LicenseJob,powerflow,6-2024-hf1,pf2ens -c _Moving_Belt_CSYS Run_1.avg.fnc,calcitev2,4,48.0,1,"{""RLM_LICENSE"":""123@license-server"",""FLEXLM_LICENSE"":""456@flex-server""}"

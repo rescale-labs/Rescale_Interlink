@@ -1,0 +1,54 @@
+# Binaries (in project root, not in bin/)
+/rescale-int
+/rescale-int-*
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts (binaries distributed via GitHub Releases)
+bin/
+dist/
+build/
+
+# Test data (user-specific)
+*.csv
+*.state
+!testdata/**/*.csv
+
+# Old reference files (not for GitHub)
+old-reference/
+
+# Development files (not for GitHub)
+CLAUDE.md
+.claude/
+
+# Internal development documentation (not for public GitHub)
+FEATURE_SUMMARY.md
+TODO_AND_PROJECT_STATUS.md
+DOCUMENTATION_SUMMARY.md
+
+# Logs
+*.log
+
+# Local config files with sensitive data
+config.local.csv
+.env
+.api_key

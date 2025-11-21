@@ -1,0 +1,557 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/widget"
+
+	"github.com/rescale/rescale-int/internal/core"
+	"github.com/rescale/rescale-int/internal/events"
+)
+
+// JobsTab manages the jobs interface with workflow-based UI
+type JobsTab struct {
+	// Core dependencies
+	engine *core.Engine
+	window fyne.Window
+	app    fyne.App
+
+	// State management
+	workflow   *JobsWorkflow
+	apiCache   *APICache
+	workflowUI *WorkflowUIComponents
+
+	// UI containers
+	mainContainer        *fyne.Container
+	progressBarContainer *fyne.Container
+	contentContainer     *fyne.Container
+	tableContainer       *fyne.Container
+	statusContainer      *fyne.Container
+
+	// Jobs table
+	table       *widget.Table
+	progressBar *widget.ProgressBar
+	statsLabel  *widget.Label
+
+	// Data
+	loadedJobs []JobRow
+	jobsLock   sync.RWMutex
+
+	// Execution state
+	ctx       context.Context
+	cancel    context.CancelFunc
+	isRunning bool
+
+	// Refresh throttling
+	lastRefresh  time.Time
+	refreshMutex sync.Mutex
+}
+
+// JobRow represents a row in the jobs table
+type JobRow struct {
+	Index          int
+	Directory      string
+	JobName        string
+	TarStatus      string
+	UploadStatus   string
+	UploadProgress float64 // 0.0 to 1.0, for displaying upload percentage
+	CreateStatus   string
+	SubmitStatus   string
+	Status         string
+	JobID          string
+	Progress       float64
+	Error          string
+}
+
+// NewJobsTab creates a new jobs tab
+func NewJobsTab(engine *core.Engine, window fyne.Window, app fyne.App) *JobsTab {
+	jt := &JobsTab{
+		engine:      engine,
+		window:      window,
+		app:         app,
+		workflow:    NewJobsWorkflow(),
+		apiCache:    NewAPICache(),
+		loadedJobs:  []JobRow{},
+		progressBar: widget.NewProgressBar(),
+		statsLabel:  widget.NewLabel(""),
+	}
+
+	jt.workflowUI = NewWorkflowUIComponents(jt)
+
+	// Start fetching core types in background
+	go jt.fetchCoreTypes()
+
+	return jt
+}
+
+// Build creates the jobs tab UI
+func (jt *JobsTab) Build() fyne.CanvasObject {
+	// Create progress bar (breadcrumb)
+	jt.progressBarContainer = jt.workflowUI.CreateProgressBar()
+
+	// Create content container (will change based on state)
+	jt.contentContainer = container.NewVBox()
+
+	// Create jobs table
+	jt.createTable()
+
+	// Create scroll container with minimum size so table is visible
+	scrollContainer := container.NewScroll(jt.table)
+	scrollContainer.SetMinSize(fyne.NewSize(800, 300)) // Set minimum size for table visibility
+
+	jt.tableContainer = container.NewVBox(
+		widget.NewSeparator(),
+		widget.NewLabel("Jobs:"),
+		scrollContainer,
+	)
+	jt.tableContainer.Hide() // Hidden until jobs are loaded
+
+	// Create status container
+	jt.statusContainer = container.NewVBox(
+		widget.NewSeparator(),
+		container.NewHBox(
+			widget.NewLabel("Status:"),
+			jt.statsLabel,
+		),
+		jt.progressBar,
+	)
+
+	// Main container layout
+	jt.mainContainer = container.NewBorder(
+		container.NewVBox(
+			jt.progressBarContainer,
+			jt.contentContainer,
+		),
+		jt.statusContainer,
+		nil,
+		nil,
+		jt.tableContainer,
+	)
+
+	// Initialize view
+	jt.updateView()
+
+	return jt.mainContainer
+}
+
+// updateView updates the UI based on current workflow state
+func (jt *JobsTab) updateView() {
+	// Print stack trace to see who called this
+	// buf := make([]byte, 1<<16)
+	// stackSize := runtime.Stack(buf, false)
+	// fmt.Printf("DEBUG: updateView called from:\n%s\n", buf[:stackSize])
+
+	fmt.Printf("DEBUG: updateView called, CurrentState=%s, isRunning=%v\n", jt.workflow.CurrentState, jt.isRunning)
+
+	// Update progress bar
+	jt.progressBarContainer.Objects = []fyne.CanvasObject{
+		jt.workflowUI.CreateProgressBar(),
+	}
+	jt.progressBarContainer.Refresh()
+
+	// Update content based on state
+	var newContent fyne.CanvasObject
+
+	switch jt.workflow.CurrentState {
+	case StateInitial:
+		newContent = jt.workflowUI.CreatePathSelectionView()
+		jt.tableContainer.Hide()
+
+	case StatePathChosen:
+		if jt.workflow.CurrentPath == PathCreateNew {
+			newContent = jt.workflowUI.CreateTemplateSelectionView()
+		} else {
+			// For LoadCSV path, we go directly to validation after loading
+			newContent = widget.NewLabel("Loading jobs...")
+		}
+		jt.tableContainer.Hide()
+
+	case StateTemplateReady:
+		newContent = jt.workflowUI.CreateDirectoryScanView()
+		jt.tableContainer.Hide()
+
+	case StateDirectoriesScanned, StateJobsValidated:
+		fmt.Printf("DEBUG: JobsValidated state, loaded jobs count=%d\n", len(jt.loadedJobs))
+		fmt.Printf("DEBUG: Calling tableContainer.Show()\n")
+		newContent = jt.workflowUI.CreateExecutionView()
+		jt.tableContainer.Show()
+		fmt.Printf("DEBUG: tableContainer.Show() completed, table should be visible=%v\n", jt.tableContainer.Visible())
+
+	case StateExecuting:
+		// Only show ProgressView if actually running
+		// If stopped (isRunning=false), show ExecutionView instead
+		if jt.isRunning {
+			fmt.Printf("DEBUG: Creating ProgressView (pipeline is running)\n")
+			newContent = jt.workflowUI.CreateProgressView()
+		} else {
+			fmt.Printf("DEBUG: Creating ExecutionView (pipeline stopped but state still Executing)\n")
+			newContent = jt.workflowUI.CreateExecutionView()
+		}
+		jt.tableContainer.Show()
+
+	case StateCompleted:
+		fmt.Printf("DEBUG: Creating CompletedView\n")
+		newContent = jt.workflowUI.CreateCompletedView()
+		jt.tableContainer.Show()
+
+	case StateError:
+		fmt.Printf("DEBUG: Creating ErrorView\n")
+		newContent = jt.workflowUI.CreateErrorView()
+		jt.tableContainer.Show()
+
+	default:
+		newContent = widget.NewLabel("Unknown state")
+	}
+
+	// Update content container
+	jt.contentContainer.Objects = []fyne.CanvasObject{newContent}
+	jt.contentContainer.Refresh()
+
+	jt.mainContainer.Refresh()
+}
+
+// createTable creates the jobs table
+func (jt *JobsTab) createTable() {
+	headers := []string{
+		"#", "Job Name", "Directory", "Tar", "Upload",
+		"Create", "Submit", "Status", "Job ID",
+	}
+
+	jt.table = widget.NewTable(
+		// Length
+		func() (int, int) {
+			jt.jobsLock.RLock()
+			defer jt.jobsLock.RUnlock()
+			rows := len(jt.loadedJobs) + 1
+			cols := len(headers)
+			// Commented out - this was causing excessive output
+			// fmt.Printf("DEBUG: Table Length callback called: %d rows, %d cols (jobs=%d)\n", rows, cols, len(jt.loadedJobs))
+			return rows, cols
+		},
+		// Create cell
+		func() fyne.CanvasObject {
+			return widget.NewLabel("cell")
+		},
+		// Update cell
+		func(cell widget.TableCellID, obj fyne.CanvasObject) {
+			label := obj.(*widget.Label)
+
+			if cell.Row == 0 {
+				// Header row
+				if cell.Col < len(headers) {
+					label.SetText(headers[cell.Col])
+					label.TextStyle = fyne.TextStyle{Bold: true}
+				}
+				return
+			}
+
+			// Data row
+			jt.jobsLock.RLock()
+			defer jt.jobsLock.RUnlock()
+
+			rowIndex := cell.Row - 1
+			if rowIndex >= len(jt.loadedJobs) {
+				return
+			}
+
+			job := jt.loadedJobs[rowIndex]
+
+			switch cell.Col {
+			case 0: // Index
+				label.SetText(fmt.Sprintf("%d", job.Index+1))
+			case 1: // Job Name
+				label.SetText(job.JobName)
+			case 2: // Directory
+				label.SetText(filepath.Base(job.Directory))
+			case 3: // Tar
+				label.SetText(jt.formatStatus(job.TarStatus))
+			case 4: // Upload
+				// Show percentage if upload is in progress
+				if job.UploadStatus == "in_progress" && job.UploadProgress > 0 {
+					label.SetText(fmt.Sprintf("Uploading %d%%", int(job.UploadProgress*100)))
+				} else {
+					label.SetText(jt.formatStatus(job.UploadStatus))
+				}
+			case 5: // Create
+				label.SetText(jt.formatStatus(job.CreateStatus))
+			case 6: // Submit
+				label.SetText(jt.formatStatus(job.SubmitStatus))
+			case 7: // Status
+				status := job.Status
+				if job.Progress > 0 && job.Progress < 1.0 {
+					status += fmt.Sprintf(" (%.0f%%)", job.Progress*100)
+				}
+				label.SetText(status)
+			case 8: // Job ID
+				if job.JobID != "" {
+					label.SetText(job.JobID)
+				} else {
+					label.SetText("-")
+				}
+			}
+
+			// Color coding for errors
+			if job.Error != "" {
+				label.TextStyle = fyne.TextStyle{Bold: true}
+			} else {
+				label.TextStyle = fyne.TextStyle{}
+			}
+		},
+	)
+
+	// Set column widths
+	jt.table.SetColumnWidth(0, 40)  // Index
+	jt.table.SetColumnWidth(1, 180) // Job Name
+	jt.table.SetColumnWidth(2, 200) // Directory
+	jt.table.SetColumnWidth(3, 90)  // Tar (wider for "Working...")
+	jt.table.SetColumnWidth(4, 120) // Upload (wider for "Uploading 100%")
+	jt.table.SetColumnWidth(5, 90)  // Create (wider for "Working...")
+	jt.table.SetColumnWidth(6, 90)  // Submit (wider for "Working...")
+	jt.table.SetColumnWidth(7, 150) // Status
+	jt.table.SetColumnWidth(8, 120) // Job ID
+
+	// Add selection handler to show error details
+	jt.table.OnSelected = func(id widget.TableCellID) {
+		if id.Row == 0 {
+			// Header row - ignore
+			return
+		}
+
+		jt.jobsLock.RLock()
+		rowIndex := id.Row - 1
+		if rowIndex < 0 || rowIndex >= len(jt.loadedJobs) {
+			jt.jobsLock.RUnlock()
+			return
+		}
+		job := jt.loadedJobs[rowIndex]
+		jt.jobsLock.RUnlock()
+
+		// If job has an error, show it in a dialog
+		if job.Error != "" {
+			dialog.ShowInformation(
+				fmt.Sprintf("Job Error: %s", job.JobName),
+				fmt.Sprintf("This job failed with the following error:\n\n%s", job.Error),
+				jt.window,
+			)
+		}
+	}
+}
+
+// formatStatus formats status for display
+func (jt *JobsTab) formatStatus(status string) string {
+	switch status {
+	case "pending":
+		return "Pending"
+	case "in_progress":
+		return "Working..."
+	case "completed":
+		return "Done"
+	case "failed":
+		return "Failed"
+	case "success":
+		return "Done"
+	default:
+		return "-"
+	}
+}
+
+// UpdateProgress updates job progress from events
+func (jt *JobsTab) UpdateProgress(event *events.ProgressEvent) {
+	if event.Stage == "overall" {
+		jt.progressBar.SetValue(event.Progress)
+		jt.updateStats()
+		return
+	}
+
+	// Update specific job
+	jt.jobsLock.Lock()
+
+	for i := range jt.loadedJobs {
+		if jt.loadedJobs[i].JobName == event.JobName {
+			jt.loadedJobs[i].Progress = event.Progress
+
+			// Update stage-specific status
+			switch event.Stage {
+			case "tar":
+				if event.Progress >= 1.0 {
+					jt.loadedJobs[i].TarStatus = "completed"
+				} else {
+					jt.loadedJobs[i].TarStatus = "in_progress"
+				}
+			case "upload":
+				if event.Progress >= 1.0 {
+					jt.loadedJobs[i].UploadStatus = "completed"
+				} else {
+					jt.loadedJobs[i].UploadStatus = "in_progress"
+				}
+			case "create":
+				if event.Progress >= 1.0 {
+					jt.loadedJobs[i].CreateStatus = "completed"
+				} else {
+					jt.loadedJobs[i].CreateStatus = "in_progress"
+				}
+			case "submit":
+				if event.Progress >= 1.0 {
+					jt.loadedJobs[i].SubmitStatus = "completed"
+				} else {
+					jt.loadedJobs[i].SubmitStatus = "in_progress"
+				}
+			}
+
+			// Update overall status
+			jt.loadedJobs[i].Status = event.Message
+			break
+		}
+	}
+
+	// CRITICAL FIX: Release lock BEFORE calling refresh to avoid deadlock
+	jt.jobsLock.Unlock()
+
+	// Refresh table (check for nil in case called before initialization)
+	if jt.table != nil {
+		jt.table.Refresh()
+	}
+}
+
+// UpdateJobState updates job state from state change events
+func (jt *JobsTab) UpdateJobState(event *events.StateChangeEvent) {
+	fmt.Printf("[DEBUG] UpdateJobState called: job=%s, stage=%s, status=%s, progress=%.2f\n",
+		event.JobName, event.Stage, event.NewStatus, event.UploadProgress)
+
+	// Update data with lock held
+	jt.jobsLock.Lock()
+
+	// Debug: print loaded jobs
+	fmt.Printf("[DEBUG] Looking for job '%s' in %d loaded jobs\n", event.JobName, len(jt.loadedJobs))
+	for idx, job := range jt.loadedJobs {
+		fmt.Printf("[DEBUG]   Job[%d]: name='%s'\n", idx, job.JobName)
+	}
+
+	found := false
+	for i := range jt.loadedJobs {
+		if jt.loadedJobs[i].JobName == event.JobName {
+			fmt.Printf("[DEBUG] Found job at index %d, updating status\n", i)
+			jt.loadedJobs[i].Status = event.NewStatus
+			if event.JobID != "" {
+				jt.loadedJobs[i].JobID = event.JobID
+			}
+			if event.ErrorMessage != "" {
+				jt.loadedJobs[i].Error = event.ErrorMessage
+				jt.loadedJobs[i].Status = "failed"
+			}
+
+			// Update stage status
+			if event.Stage != "" {
+				switch event.Stage {
+				case "tar":
+					jt.loadedJobs[i].TarStatus = event.NewStatus
+					fmt.Printf("[DEBUG] Updated TarStatus to '%s'\n", event.NewStatus)
+				case "upload":
+					jt.loadedJobs[i].UploadStatus = event.NewStatus
+					jt.loadedJobs[i].UploadProgress = event.UploadProgress
+					fmt.Printf("[DEBUG] Updated UploadStatus to '%s', progress=%.2f\n", event.NewStatus, event.UploadProgress)
+				case "create":
+					jt.loadedJobs[i].CreateStatus = event.NewStatus
+					fmt.Printf("[DEBUG] Updated CreateStatus to '%s'\n", event.NewStatus)
+				case "submit":
+					jt.loadedJobs[i].SubmitStatus = event.NewStatus
+					fmt.Printf("[DEBUG] Updated SubmitStatus to '%s'\n", event.NewStatus)
+				}
+			}
+
+			found = true
+			break
+		}
+	}
+
+	// If job not found, add it (from state load)
+	if !found {
+		fmt.Printf("[DEBUG] Job '%s' not found in loadedJobs, adding it\n", event.JobName)
+		jt.loadedJobs = append(jt.loadedJobs, JobRow{
+			Index:   len(jt.loadedJobs),
+			JobName: event.JobName,
+			Status:  event.NewStatus,
+			JobID:   event.JobID,
+			Error:   event.ErrorMessage,
+		})
+	}
+
+	// CRITICAL FIX: Release lock BEFORE calling refresh
+	// table.Refresh() will call back into our callbacks which need to acquire RLock
+	// Calling refresh while holding the write lock causes deadlock!
+	jt.jobsLock.Unlock()
+
+	// Now safe to refresh - callbacks can acquire RLock without deadlocking
+	jt.throttledRefresh()
+}
+
+// throttledRefresh refreshes the table but limits frequency to once per 100ms
+func (jt *JobsTab) throttledRefresh() {
+	jt.refreshMutex.Lock()
+	defer jt.refreshMutex.Unlock()
+
+	now := time.Now()
+	if now.Sub(jt.lastRefresh) < 100*time.Millisecond {
+		// Too soon, skip this refresh
+		return
+	}
+
+	jt.lastRefresh = now
+	if jt.table != nil {
+		jt.table.Refresh()
+	}
+}
+
+// updateStats updates the statistics label
+func (jt *JobsTab) updateStats() {
+	jt.jobsLock.RLock()
+	defer jt.jobsLock.RUnlock()
+
+	total := len(jt.loadedJobs)
+	completed := 0
+	failed := 0
+	inProgress := 0
+
+	for _, job := range jt.loadedJobs {
+		if job.SubmitStatus == "completed" && job.Error == "" {
+			completed++
+		} else if job.Error != "" || job.Status == "failed" {
+			failed++
+		} else if job.TarStatus == "in_progress" || job.UploadStatus == "in_progress" ||
+			job.CreateStatus == "in_progress" || job.SubmitStatus == "in_progress" {
+			inProgress++
+		}
+	}
+
+	pending := total - completed - failed - inProgress
+
+	jt.statsLabel.SetText(fmt.Sprintf("Total: %d | Completed: %d | In Progress: %d | Pending: %d | Failed: %d",
+		total, completed, inProgress, pending, failed))
+}
+
+// fetchCoreTypes fetches core types from API in background
+func (jt *JobsTab) fetchCoreTypes() {
+	// Only fetch if not already cached
+	if _, isLoading, _ := jt.apiCache.GetCoreTypes(); isLoading {
+		return
+	}
+
+	// Create a simple wrapper for the API client
+	apiClient := &struct {
+		engine *core.Engine
+	}{
+		engine: jt.engine,
+	}
+
+	// Implement the GetCoreTypes method inline
+	// For now, we skip the actual fetch since the engine doesn't expose the API client
+	// This will be addressed in future iterations
+	_ = apiClient
+}
