@@ -63,7 +63,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 2. **Decryption Progress Feedback**: Added progress message before large file decryption
 3. **Progress Bar Corruption Fix**: Routed all output through mpb io.Writer to prevent ghost bars
 
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) and [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md) for complete details.
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete details.
 
 ## Quick Start
 
@@ -96,10 +96,24 @@ xattr -d com.apple.quarantine rescale-int
 
 #### Option 2: Build from Source
 
+**Linux Prerequisites (required for GUI/Fyne):**
+
+The GUI uses [Fyne](https://fyne.io/), which requires X11 development libraries on Linux:
+
+```bash
+# RHEL/CentOS/Rocky/Alma:
+sudo dnf install -y libX11-devel libXcursor-devel libXrandr-devel libXinerama-devel libXi-devel libXxf86vm-devel mesa-libGL-devel mesa-libGLU-devel
+
+# Ubuntu/Debian:
+sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev libgl1-mesa-dev libglu1-mesa-dev
+```
+
+**Build:**
+
 ```bash
 # Clone the repository
-git clone https://github.com/rescale/rescale-int.git
-cd rescale-int
+git clone https://github.com/rescale-labs/Rescale_Interlink.git
+cd Rescale_Interlink
 
 # Build
 go build -o rescale-int ./cmd/rescale-int
@@ -582,15 +596,12 @@ Dinal P. -- early prototyping
 
 ## Documentation
 
-- **[FEATURE_SUMMARY.md](FEATURE_SUMMARY.md)** - Comprehensive verified feature list (v2.3.0)
 - **[CLI_GUIDE.md](CLI_GUIDE.md)** - Complete command-line reference with examples
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design and code organization
 - **[TESTING.md](TESTING.md)** - Test strategy and procedures
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Developer onboarding guide
 - **[LESSONS_LEARNED.md](LESSONS_LEARNED.md)** - Development insights and best practices
-- **[TODO_AND_PROJECT_STATUS.md](TODO_AND_PROJECT_STATUS.md)** - Current status and roadmap
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Version history and release details
-- **[DOCUMENTATION_SUMMARY.md](DOCUMENTATION_SUMMARY.md)** - Documentation navigation guide
 
 ---
 
