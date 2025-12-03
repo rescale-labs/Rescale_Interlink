@@ -1,0 +1,10 @@
+key,value
+api_key,test_api_key_12345
+api_base_url,https://platform.rescale.com
+tar_workers,2
+upload_workers,2
+job_workers,2
+proxy_mode,no-proxy
+validation_pattern,*.avg.fnc
+tar_compression,none
+max_retries,1
