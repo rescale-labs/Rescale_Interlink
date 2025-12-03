@@ -1,0 +1,3 @@
+Directory,JobName,AnalysisCode,AnalysisVersion,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings,Submit
+./Run_1,TestJob1,user_included,1.0,./run.sh,emerald,1,1.0,1,"{""LICENSE"":""value""}",yes
+./Run_2,TestJob2,user_included,1.0,./run.sh,emerald,1,1.0,1,"{""LICENSE"":""value""}",yes

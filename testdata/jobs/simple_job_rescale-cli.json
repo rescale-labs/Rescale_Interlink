@@ -1,0 +1,20 @@
+{
+  "name": "Simple Test Job (rescale-cli)",
+  "jobanalyses": [{
+    "analysis": {
+      "code": "user_included"
+    },
+    "command": "./simple_job.sh",
+    "hardware": {
+      "coresPerSlot": 1,
+      "slots": 1,
+      "coreType": {
+        "code": "emerald"
+      },
+      "walltime": 1
+    },
+    "inputFiles": [{
+      "id": "qWcein"
+    }]
+  }]
+}

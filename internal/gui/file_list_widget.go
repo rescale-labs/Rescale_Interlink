@@ -1,0 +1,1091 @@
+// Package gui provides the graphical user interface for rescale-int.
+// File list widget - reusable component for displaying files and folders.
+// v2.6.1 (November 26, 2025)
+// - Added pagination support (default 40 items/page, adjustable 20-200)
+// - Changed path label to canvas.Text for font size consistency with file names
+// - Added padding around sort button and filter
+// - Added FormatTransferRate helper function
+// v2.6.0 (November 25, 2025)
+// - Added filter/search functionality
+// v2.5.2 (November 24, 2025)
+// - Added canvas.Text for font size control (23% reduction)
+// - Added padding around size/type columns
+// - Added sort functionality with menu
+// - Added ModTime field for date sorting (local files only)
+package gui
+
+import (
+	"fmt"
+	"image/color"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+)
+
+const (
+	// FileListFontScale reduces font size for compact display (70% = 30% reduction)
+	FileListFontScale = 0.70
+
+	// Pagination defaults
+	DefaultPageSize = 25  // Default items per page (matches API page size)
+	MinPageSize     = 10  // Minimum items per page
+	MaxPageSize     = 200 // Maximum items per page
+)
+
+// FileItem represents a file or folder in the list
+type FileItem struct {
+	ID       string    // File/folder ID (for remote) or path (for local)
+	Name     string
+	Size     int64
+	IsFolder bool
+	Selected bool
+	ModTime  time.Time // Modification time (for local files; zero for remote)
+}
+
+// FileListWidget is a reusable widget for displaying a list of files and folders
+type FileListWidget struct {
+	widget.BaseWidget
+
+	mu            sync.RWMutex
+	items         []FileItem
+	selectedItems map[string]bool
+
+	// Sort state
+	sortBy        string // "name", "size", "type", "date"
+	sortAscending bool
+	hasDateInfo   bool // True if items have ModTime populated (local files only)
+	isJobsView    bool // True when viewing jobs (limits sort options to name/date only)
+
+	// Filter state
+	filterQuery   string     // Current filter query (lowercase)
+	filteredItems []FileItem // Filtered items (nil if no filter active)
+
+	// Pagination state
+	pageSize          int  // Items per page (default 25, max 200)
+	currentPage       int  // Current page (0-indexed)
+	hasMoreServerData bool // True if more data available on server (for lazy loading)
+
+	// Callbacks
+	OnFolderOpen       func(item FileItem)                  // Called when folder is double-clicked/entered
+	OnSelectionChanged func(selected []FileItem)            // Called when selection changes
+	OnPageChange       func(page, pageSize, totalItems int) // Called when page changes (for lazy loading)
+
+	// UI components
+	list           *widget.List
+	selectAllCheck *widget.Check
+	statusLabel    *widget.Label
+	pathLabel      *canvas.Text // Changed to canvas.Text for font size consistency
+	sortBtn        *widget.Button
+	filterEntry    *widget.Entry
+	currentPath    string
+
+	// Pagination UI
+	prevPageBtn        *widget.Button
+	nextPageBtn        *widget.Button
+	pageLabel          *widget.Label
+	pageSizeEntry      *widget.Entry
+	paginationBar      *fyne.Container // Container for pagination controls
+	paginationHidden   bool            // When true, pagination controls are hidden
+
+	// Selection state management
+	updatingSelectAll bool // Flag to prevent callback recursion when programmatically updating select all
+}
+
+// NewFileListWidget creates a new file list widget
+func NewFileListWidget() *FileListWidget {
+	w := &FileListWidget{
+		selectedItems: make(map[string]bool),
+		currentPath:   "",
+		sortBy:        "type", // Default: folders first, then by date
+		sortAscending: true,
+		hasDateInfo:   false,
+		pageSize:      DefaultPageSize,
+		currentPage:   0,
+	}
+	w.ExtendBaseWidget(w)
+	return w
+}
+
+// createSizedText creates a canvas.Text with scaled font size for compact display
+func createSizedText(content string, align fyne.TextAlign) *canvas.Text {
+	text := canvas.NewText(content, theme.ForegroundColor())
+	text.TextSize = theme.TextSize() * FileListFontScale
+	text.Alignment = align
+	return text
+}
+
+// CreateRenderer implements fyne.Widget
+func (w *FileListWidget) CreateRenderer() fyne.WidgetRenderer {
+	// Path/breadcrumb label at top - using canvas.Text for font size consistency with file names
+	w.pathLabel = canvas.NewText("", theme.ForegroundColor())
+	w.pathLabel.TextSize = theme.TextSize() * FileListFontScale
+	w.pathLabel.TextStyle = fyne.TextStyle{Bold: true}
+	w.pathLabel.Alignment = fyne.TextAlignCenter // Center the path text
+
+	// Sort button with label to the left
+	w.sortBtn = widget.NewButtonWithIcon("", theme.MenuDropDownIcon(), w.showSortMenu)
+
+	// Filter entry (width constrained by fixedWidthLayout in topBar)
+	w.filterEntry = widget.NewEntry()
+	w.filterEntry.SetPlaceHolder("Filter...")
+	w.filterEntry.OnChanged = w.applyFilter
+
+	// Create the list widget with pagination support
+	w.list = widget.NewList(
+		func() int {
+			w.mu.RLock()
+			defer w.mu.RUnlock()
+			displayItems := w.getDisplayItemsLocked()
+			totalItems := len(displayItems)
+			// Return items for current page only
+			startIdx := w.currentPage * w.pageSize
+			if startIdx >= totalItems {
+				return 0
+			}
+			endIdx := startIdx + w.pageSize
+			if endIdx > totalItems {
+				endIdx = totalItems
+			}
+			return endIdx - startIdx
+		},
+		func() fyne.CanvasObject {
+			// Template for each row: checkbox, icon, name, size, type
+			check := widget.NewCheck("", nil)
+			icon := widget.NewIcon(theme.FileIcon())
+
+			// Use widget.RichText for name - supports truncation AND custom size
+			name := widget.NewRichText(&widget.TextSegment{
+				Text: "Filename placeholder",
+				Style: widget.RichTextStyle{
+					TextStyle: fyne.TextStyle{},
+				},
+			})
+			name.Truncation = fyne.TextTruncateEllipsis
+
+			// Use canvas.Text for size, type, and date (fixed width, no truncation needed)
+			size := createSizedText("999.9 MB", fyne.TextAlignTrailing)
+			typeText := createSizedText("Folder", fyne.TextAlignCenter)
+			dateText := createSizedText("2025-01-01", fyne.TextAlignCenter)
+
+			// Add padding around size, type, and date for better spacing
+			sizeContainer := container.NewPadded(container.NewStack(size))
+			typeStack := container.NewStack(typeText)
+			typeContainer := container.NewPadded(typeStack)
+			// Date column needs extra right padding to avoid touching the edge/divider
+			dateStack := container.NewStack(dateText)
+			dateWithRightPadding := container.NewHBox(dateStack, HorizontalSpacer(12))
+			dateContainer := container.NewPadded(dateWithRightPadding)
+
+			// Use Border layout: checkbox+icon on left, size+type+date on right, name in center
+			row := container.NewBorder(
+				nil, nil,
+				container.NewHBox(check, icon),
+				container.NewHBox(sizeContainer, typeContainer, dateContainer),
+				name, // RichText in center - will truncate to fit
+			)
+			return row
+		},
+		func(i widget.ListItemID, obj fyne.CanvasObject) {
+			w.updateListItem(i, obj)
+		},
+	)
+
+	// Handle item selection (single click)
+	w.list.OnSelected = func(id widget.ListItemID) {
+		w.onItemTapped(id)
+		w.list.UnselectAll() // Don't keep visual selection, we use checkboxes
+	}
+
+	// Select all checkbox
+	w.selectAllCheck = widget.NewCheck("Select All", func(checked bool) {
+		// Ignore programmatic updates (e.g., from updateSelectAllState)
+		if w.updatingSelectAll {
+			return
+		}
+		w.setAllSelected(checked)
+	})
+
+	// Status label
+	w.statusLabel = widget.NewLabel("")
+	w.statusLabel.TextStyle = fyne.TextStyle{Italic: true}
+
+	// Layout: sort button + filter at top, list in center, controls at bottom
+	// Path text removed - redundant with nav bar above
+	// Add "Sort:" label and padding around sort button on left side
+	sortLabel := widget.NewLabel("Sort:")
+	sortWithPadding := container.NewHBox(
+		HorizontalSpacer(4), // Buffer from left edge
+		sortLabel,
+		w.sortBtn,
+	)
+	// Wrap filter entry in a container with fixed max width and right padding
+	filterWrapper := container.New(&fixedWidthLayout{width: 130}, w.filterEntry)
+	filterWithPadding := container.NewHBox(
+		filterWrapper,
+		HorizontalSpacer(4), // Buffer from right edge
+	)
+	// Simple top bar with sort on left, filter on right (no center path text)
+	topBar := container.NewBorder(nil, nil, sortWithPadding, filterWithPadding, nil)
+
+	// Pagination controls - compact layout to minimize width impact
+	w.prevPageBtn = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), w.previousPage)
+	w.nextPageBtn = widget.NewButtonWithIcon("", theme.NavigateNextIcon(), w.nextPage)
+	w.pageLabel = widget.NewLabel("1/1") // Compact format: "1/1" instead of "Page 1 of 1"
+
+	// Page size entry with validation - narrower
+	w.pageSizeEntry = widget.NewEntry()
+	w.pageSizeEntry.SetText(fmt.Sprintf("%d", w.pageSize))
+	w.pageSizeEntry.OnSubmitted = w.onPageSizeChanged
+	pageSizeWrapper := container.New(&fixedWidthLayout{width: 40}, w.pageSizeEntry)
+
+	// Pagination bar: compact layout [< 1/1 > | 40]
+	w.paginationBar = container.NewHBox(
+		w.prevPageBtn,
+		w.pageLabel,
+		w.nextPageBtn,
+		HorizontalSpacer(8),
+		pageSizeWrapper,
+	)
+
+	// Bottom bar: select all on left, status in center, pagination on right
+	bottomBar := container.NewBorder(nil, nil, w.selectAllCheck, w.paginationBar, w.statusLabel)
+
+	// Create white background for the list
+	listBackground := canvas.NewRectangle(color.White)
+	listWithBackground := container.NewStack(listBackground, w.list)
+
+	content := container.NewBorder(
+		topBar,
+		bottomBar,
+		nil, nil,
+		listWithBackground,
+	)
+
+	return widget.NewSimpleRenderer(content)
+}
+
+// updateListItem updates a single list item with data
+// This is called from the main thread during list rendering
+func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
+	// Copy item data with lock, then release before UI updates
+	w.mu.RLock()
+	displayItems := w.getDisplayItemsLocked()
+	// Map page-relative index to actual index
+	actualIndex := w.currentPage*w.pageSize + index
+	if actualIndex >= len(displayItems) {
+		w.mu.RUnlock()
+		return
+	}
+	item := displayItems[actualIndex]
+	w.mu.RUnlock()
+
+	// All UI updates happen on main thread (this function is called by Fyne during rendering)
+	// No need for fyne.Do() here, but we released the lock first to minimize contention
+	row := obj.(*fyne.Container)
+
+	// Get components from the Border layout
+	// Structure: row.Objects[0]=center(nameRichText), [1]=left(HBox), [2]=right(HBox)
+	leftBox := row.Objects[1].(*fyne.Container)
+	rightBox := row.Objects[2].(*fyne.Container)
+	nameRichText := row.Objects[0].(*widget.RichText) // RichText for smaller font
+
+	check := leftBox.Objects[0].(*widget.Check)
+	icon := leftBox.Objects[1].(*widget.Icon)
+
+	// Navigate through padded containers to get canvas.Text objects
+	// rightBox is HBox containing [sizeContainer (Padded), typeContainer (Padded), dateContainer (Padded)]
+	sizePadded := rightBox.Objects[0].(*fyne.Container)    // Padded container
+	typePadded := rightBox.Objects[1].(*fyne.Container)    // Padded container
+	datePadded := rightBox.Objects[2].(*fyne.Container)    // Padded container
+	sizeStack := sizePadded.Objects[0].(*fyne.Container)   // Stack inside Padded
+	// Type column: Padded -> Stack -> Text
+	typeStack := typePadded.Objects[0].(*fyne.Container)   // Stack inside Padded
+	// Date column: Padded -> HBox -> Stack -> Text
+	dateHBox := datePadded.Objects[0].(*fyne.Container)    // HBox inside Padded
+	dateStack := dateHBox.Objects[0].(*fyne.Container)     // Stack inside HBox
+	sizeText := sizeStack.Objects[0].(*canvas.Text)
+	typeText := typeStack.Objects[0].(*canvas.Text)
+	dateText := dateStack.Objects[0].(*canvas.Text)
+
+	// CRITICAL FIX: Capture item ID (immutable) instead of index (which changes on scroll)
+	// This prevents selection state corruption when scrolling causes list item recycling
+	itemID := item.ID
+
+	// Disable callback before setting checked state to prevent spurious triggers during recycling
+	check.OnChanged = nil
+	check.SetChecked(item.Selected)
+	check.OnChanged = func(checked bool) {
+		w.setItemSelectedByID(itemID, checked)
+	}
+
+	// Update icon
+	if item.IsFolder {
+		icon.SetResource(theme.FolderIcon())
+	} else {
+		icon.SetResource(theme.FileIcon())
+	}
+
+	// Update name (RichText with smaller font, handles truncation)
+	nameRichText.Segments = []widget.RichTextSegment{
+		&widget.TextSegment{
+			Text: item.Name,
+			Style: widget.RichTextStyle{
+				TextStyle: fyne.TextStyle{},
+				SizeName:  theme.SizeNameCaptionText, // Smaller text size
+			},
+		},
+	}
+	nameRichText.Refresh()
+
+	if item.IsFolder {
+		sizeText.Text = "--"
+	} else {
+		sizeText.Text = FormatFileSize(item.Size)
+	}
+	sizeText.Color = theme.ForegroundColor()
+	sizeText.Refresh()
+
+	if item.IsFolder {
+		typeText.Text = "Folder"
+	} else {
+		typeText.Text = "File"
+	}
+	typeText.Color = theme.ForegroundColor()
+	typeText.Refresh()
+
+	// Format date as YYYY-MM-DD, or "--" if no date
+	if item.ModTime.IsZero() {
+		dateText.Text = "--"
+	} else {
+		dateText.Text = item.ModTime.Format("2006-01-02")
+	}
+	dateText.Color = theme.ForegroundColor()
+	dateText.Refresh()
+}
+
+// onItemTapped handles when an item is tapped
+func (w *FileListWidget) onItemTapped(index int) {
+	w.mu.RLock()
+	displayItems := w.getDisplayItemsLocked()
+	// Map page-relative index to actual index
+	actualIndex := w.currentPage*w.pageSize + index
+	if actualIndex >= len(displayItems) {
+		w.mu.RUnlock()
+		return
+	}
+	item := displayItems[actualIndex]
+	w.mu.RUnlock()
+
+	if item.IsFolder {
+		// Open folder
+		if w.OnFolderOpen != nil {
+			w.OnFolderOpen(item)
+		}
+	} else {
+		// Toggle selection for files
+		w.mu.Lock()
+		newSelected := !item.Selected
+
+		// Update original items by ID
+		for i := range w.items {
+			if w.items[i].ID == item.ID {
+				w.items[i].Selected = newSelected
+				break
+			}
+		}
+
+		// Update filtered items if active
+		if w.filteredItems != nil && index < len(w.filteredItems) {
+			w.filteredItems[index].Selected = newSelected
+		}
+
+		w.selectedItems[item.ID] = newSelected
+		w.mu.Unlock()
+		w.list.RefreshItem(widget.ListItemID(index))
+		w.notifySelectionChanged()
+		w.updateSelectAllState()
+	}
+}
+
+// setItemSelectedByID sets the selection state of a single item by ID
+// This is the preferred method as it's immune to scroll-induced index changes
+func (w *FileListWidget) setItemSelectedByID(itemID string, selected bool) {
+	w.mu.Lock()
+
+	// Update the original items array by finding the item by ID
+	for i := range w.items {
+		if w.items[i].ID == itemID {
+			w.items[i].Selected = selected
+			break
+		}
+	}
+
+	// Also update filtered items if filtering is active
+	if w.filteredItems != nil {
+		for i := range w.filteredItems {
+			if w.filteredItems[i].ID == itemID {
+				w.filteredItems[i].Selected = selected
+				break
+			}
+		}
+	}
+
+	w.selectedItems[itemID] = selected
+	w.mu.Unlock()
+
+	// Refresh the list to show updated checkbox state
+	if w.list != nil {
+		fyne.Do(func() {
+			w.list.Refresh()
+		})
+	}
+
+	w.notifySelectionChanged()
+	w.updateSelectAllState()
+}
+
+// setAllSelected sets all items to selected or unselected
+func (w *FileListWidget) setAllSelected(selected bool) {
+	w.mu.Lock()
+	for i := range w.items {
+		w.items[i].Selected = selected
+		w.selectedItems[w.items[i].ID] = selected
+	}
+	w.mu.Unlock()
+
+	// UI updates must be on main thread
+	fyne.Do(func() {
+		w.list.Refresh()
+	})
+	w.notifySelectionChanged()
+}
+
+// notifySelectionChanged calls the selection changed callback
+func (w *FileListWidget) notifySelectionChanged() {
+	if w.OnSelectionChanged != nil {
+		w.OnSelectionChanged(w.GetSelectedItems())
+	}
+}
+
+// updateSelectAllState updates the select all checkbox based on current selections
+func (w *FileListWidget) updateSelectAllState() {
+	w.mu.RLock()
+	allSelected := len(w.items) > 0
+	for _, item := range w.items {
+		if !item.Selected {
+			allSelected = false
+			break
+		}
+	}
+	w.mu.RUnlock()
+
+	// UI updates must be on main thread
+	// Set flag to prevent checkbox callback from triggering setAllSelected
+	if w.selectAllCheck != nil {
+		fyne.Do(func() {
+			w.updatingSelectAll = true
+			w.selectAllCheck.SetChecked(allSelected)
+			w.updatingSelectAll = false
+		})
+	}
+}
+
+// SetItems sets the items to display
+// This preserves the current scroll position for smooth scrolling
+// Items are automatically sorted according to current sort settings
+func (w *FileListWidget) SetItems(items []FileItem) {
+	w.mu.Lock()
+	oldCount := len(w.items)
+	w.items = items
+	w.selectedItems = make(map[string]bool)
+	// Only reset to first page if items decreased (new folder)
+	// Preserve page if items increased (loading more data)
+	if len(items) < oldCount {
+		w.currentPage = 0
+	}
+	w.mu.Unlock()
+
+	// Apply current sort and refresh
+	w.sortAndRefresh()
+	w.refreshPagination() // Update pagination buttons and display
+	w.updateStatus()
+	w.updateSelectAllState()
+}
+
+// SetItemsAndScrollToTop sets the items and resets scroll to top
+// Use this when navigating to a new directory/folder
+// Items are automatically sorted according to current sort settings
+func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
+	w.mu.Lock()
+	w.items = items
+	w.selectedItems = make(map[string]bool)
+	w.currentPage = 0 // Reset to first page when items change
+	w.mu.Unlock()
+
+	// Apply current sort and refresh with scroll to top
+	w.sortAndRefresh()
+	if w.list != nil {
+		fyne.Do(func() {
+			w.list.ScrollToTop()
+		})
+	}
+	w.refreshPagination() // Update pagination UI (includes hasMoreServerData awareness)
+	w.updateStatus()
+	w.updateSelectAllState()
+}
+
+// GetItems returns all items
+func (w *FileListWidget) GetItems() []FileItem {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	result := make([]FileItem, len(w.items))
+	copy(result, w.items)
+	return result
+}
+
+// GetSelectedItems returns all selected items
+func (w *FileListWidget) GetSelectedItems() []FileItem {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	var selected []FileItem
+	for _, item := range w.items {
+		if item.Selected {
+			selected = append(selected, item)
+		}
+	}
+	return selected
+}
+
+// GetSelectedCount returns the number of selected items
+func (w *FileListWidget) GetSelectedCount() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	count := 0
+	for _, item := range w.items {
+		if item.Selected {
+			count++
+		}
+	}
+	return count
+}
+
+// SetPath sets the current path display
+func (w *FileListWidget) SetPath(path string) {
+	w.mu.Lock()
+	w.currentPath = path
+	w.mu.Unlock()
+
+	// UI updates must be on main thread
+	if w.pathLabel != nil {
+		fyne.Do(func() {
+			w.pathLabel.Text = path
+			w.pathLabel.Color = theme.ForegroundColor() // Handle theme changes
+			w.pathLabel.Refresh()
+		})
+	}
+}
+
+// GetPath returns the current path
+func (w *FileListWidget) GetPath() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.currentPath
+}
+
+// SetStatus sets the status text
+func (w *FileListWidget) SetStatus(status string) {
+	// UI updates must be on main thread
+	if w.statusLabel != nil {
+		fyne.Do(func() {
+			w.statusLabel.SetText(status)
+		})
+	}
+}
+
+// updateStatus updates the status text based on current items
+// NOTE: This only updates the status text. Pagination UI is updated by refreshPagination()
+func (w *FileListWidget) updateStatus() {
+	w.mu.RLock()
+	folderCount := 0
+	fileCount := 0
+	for _, item := range w.items {
+		if item.IsFolder {
+			folderCount++
+		} else {
+			fileCount++
+		}
+	}
+	w.mu.RUnlock()
+
+	status := fmt.Sprintf("%d folders, %d files", folderCount, fileCount)
+	w.SetStatus(status)
+}
+
+// ClearSelection clears all selections
+func (w *FileListWidget) ClearSelection() {
+	w.mu.Lock()
+	for i := range w.items {
+		w.items[i].Selected = false
+	}
+	w.selectedItems = make(map[string]bool)
+	w.mu.Unlock()
+
+	// UI updates must be on main thread
+	if w.list != nil {
+		fyne.Do(func() {
+			w.list.Refresh()
+		})
+	}
+	w.updateSelectAllState()
+	w.notifySelectionChanged()
+}
+
+// Refresh refreshes the widget
+func (w *FileListWidget) Refresh() {
+	// UI updates must be on main thread
+	if w.list != nil {
+		fyne.Do(func() {
+			w.list.Refresh()
+		})
+	}
+	fyne.Do(func() {
+		w.BaseWidget.Refresh()
+	})
+}
+
+// Sort functionality
+
+// showSortMenu displays the sort options menu
+func (w *FileListWidget) showSortMenu() {
+	w.mu.RLock()
+	hasDate := w.hasDateInfo
+	isJobs := w.isJobsView
+	w.mu.RUnlock()
+
+	var items []*fyne.MenuItem
+
+	if isJobs {
+		// Jobs view: only Name and Date Created (no Size or Type since jobs don't report size)
+		items = []*fyne.MenuItem{
+			fyne.NewMenuItem("Name (A→Z)", func() { w.setSortMode("name", true) }),
+			fyne.NewMenuItem("Name (Z→A)", func() { w.setSortMode("name", false) }),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Date Created (Oldest)", func() { w.setSortMode("date", true) }),
+			fyne.NewMenuItem("Date Created (Newest)", func() { w.setSortMode("date", false) }),
+		}
+	} else {
+		// Full options for files view
+		items = []*fyne.MenuItem{
+			fyne.NewMenuItem("Type (Folders First)", func() { w.setSortMode("type", true) }),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Name (A→Z)", func() { w.setSortMode("name", true) }),
+			fyne.NewMenuItem("Name (Z→A)", func() { w.setSortMode("name", false) }),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Size (Smallest)", func() { w.setSortMode("size", true) }),
+			fyne.NewMenuItem("Size (Largest)", func() { w.setSortMode("size", false) }),
+		}
+
+		// Add date sorting if date info is available (local or remote with dates)
+		if hasDate {
+			items = append(items,
+				fyne.NewMenuItemSeparator(),
+				fyne.NewMenuItem("Date Created (Oldest)", func() { w.setSortMode("date", true) }),
+				fyne.NewMenuItem("Date Created (Newest)", func() { w.setSortMode("date", false) }),
+			)
+		}
+	}
+
+	menu := fyne.NewMenu("Sort By", items...)
+	canvas := fyne.CurrentApp().Driver().CanvasForObject(w)
+	popup := widget.NewPopUpMenu(menu, canvas)
+	if w.sortBtn != nil {
+		// Get button's absolute position on canvas by walking up the widget tree
+		absPos := getAbsolutePosition(w.sortBtn)
+		size := w.sortBtn.Size()
+		popup.ShowAtPosition(fyne.NewPos(absPos.X, absPos.Y+size.Height))
+	} else {
+		popup.Show()
+	}
+}
+
+// setSortMode sets the sort mode and refreshes the list
+func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
+	w.mu.Lock()
+	w.sortBy = sortBy
+	w.sortAscending = ascending
+	w.mu.Unlock()
+	w.sortAndRefresh()
+}
+
+// sortAndRefresh sorts the items and refreshes the list
+func (w *FileListWidget) sortAndRefresh() {
+	w.mu.Lock()
+	sortBy := w.sortBy
+	ascending := w.sortAscending
+
+	sort.Slice(w.items, func(i, j int) bool {
+		item1, item2 := w.items[i], w.items[j]
+
+		// For "type" sort: folders ALWAYS come first (ascending/descending only affects secondary sort)
+		if sortBy == "type" {
+			if item1.IsFolder != item2.IsFolder {
+				return item1.IsFolder // Folders always first
+			}
+			// Secondary sort by date (newest first by default when ascending=true for "type")
+			less := item1.ModTime.After(item2.ModTime) // Newest first
+			if !ascending {
+				less = !less
+			}
+			return less
+		}
+
+		// For other sorts, always put folders before files
+		if item1.IsFolder != item2.IsFolder {
+			return item1.IsFolder
+		}
+
+		var less bool
+		switch sortBy {
+		case "name":
+			less = strings.ToLower(item1.Name) < strings.ToLower(item2.Name)
+		case "size":
+			less = item1.Size < item2.Size
+		case "date":
+			less = item1.ModTime.Before(item2.ModTime)
+		default:
+			less = strings.ToLower(item1.Name) < strings.ToLower(item2.Name)
+		}
+
+		if !ascending {
+			less = !less
+		}
+		return less
+	})
+	w.mu.Unlock()
+
+	if w.list != nil {
+		fyne.Do(func() {
+			w.list.Refresh()
+		})
+	}
+}
+
+// SetHasDateInfo indicates whether items have ModTime populated (for local files)
+func (w *FileListWidget) SetHasDateInfo(hasDate bool) {
+	w.mu.Lock()
+	w.hasDateInfo = hasDate
+	w.mu.Unlock()
+}
+
+// SetIsJobsView sets whether this widget is showing jobs (limits sort options)
+func (w *FileListWidget) SetIsJobsView(isJobs bool) {
+	w.mu.Lock()
+	w.isJobsView = isJobs
+	// When switching to jobs view and current sort is size/type, reset to date
+	if isJobs && (w.sortBy == "size" || w.sortBy == "type") {
+		w.sortBy = "date"
+		w.sortAscending = false // Newest first
+	}
+	w.mu.Unlock()
+}
+
+// GetPageSize returns the current page size setting
+func (w *FileListWidget) GetPageSize() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.pageSize
+}
+
+// SetHasMoreServerData tells the widget if more data is available on the server
+// When true, allows navigating to next page even if local items are exhausted
+func (w *FileListWidget) SetHasMoreServerData(hasMore bool) {
+	w.mu.Lock()
+	w.hasMoreServerData = hasMore
+	w.mu.Unlock()
+	w.refreshPagination()
+}
+
+// SetPaginationVisible shows or hides the local pagination controls.
+// When hidden, use external pagination controls (e.g., for server-side pagination).
+func (w *FileListWidget) SetPaginationVisible(visible bool) {
+	w.mu.Lock()
+	w.paginationHidden = !visible
+	// When hiding local pagination, set pageSize very high so all items show
+	if !visible {
+		w.pageSize = 10000 // Effectively unlimited
+		w.currentPage = 0
+	}
+	w.mu.Unlock()
+
+	if w.paginationBar != nil {
+		fyne.Do(func() {
+			if visible {
+				w.paginationBar.Show()
+			} else {
+				w.paginationBar.Hide()
+			}
+		})
+	}
+}
+
+// applyFilter filters items based on the search query
+func (w *FileListWidget) applyFilter(query string) {
+	w.mu.Lock()
+
+	query = strings.ToLower(strings.TrimSpace(query))
+	w.filterQuery = query
+	w.currentPage = 0 // Reset to first page when filter changes
+
+	if query == "" {
+		// Clear filter
+		w.filteredItems = nil
+	} else {
+		// Apply filter
+		w.filteredItems = make([]FileItem, 0)
+		for _, item := range w.items {
+			if strings.Contains(strings.ToLower(item.Name), query) {
+				w.filteredItems = append(w.filteredItems, item)
+			}
+		}
+	}
+	w.mu.Unlock()
+
+	// Refresh list (must schedule on main thread)
+	fyne.Do(func() {
+		if w.list != nil {
+			w.list.Refresh()
+		}
+	})
+	w.updateStatus()
+}
+
+// getDisplayItemsLocked returns the items to display (filtered or all)
+// Must be called with w.mu held (at least RLock)
+func (w *FileListWidget) getDisplayItemsLocked() []FileItem {
+	if w.filteredItems != nil {
+		return w.filteredItems
+	}
+	return w.items
+}
+
+// ClearFilter clears the current filter
+func (w *FileListWidget) ClearFilter() {
+	if w.filterEntry != nil {
+		w.filterEntry.SetText("")
+	}
+	w.applyFilter("")
+}
+
+// Pagination methods
+
+// previousPage navigates to the previous page
+func (w *FileListWidget) previousPage() {
+	w.mu.Lock()
+	if w.currentPage > 0 {
+		w.currentPage--
+	}
+	page := w.currentPage
+	pageSize := w.pageSize
+	totalItems := len(w.getDisplayItemsLocked())
+	callback := w.OnPageChange
+	w.mu.Unlock()
+	w.refreshPagination()
+
+	// Notify listener of page change
+	if callback != nil {
+		callback(page, pageSize, totalItems)
+	}
+}
+
+// nextPage navigates to the next page
+func (w *FileListWidget) nextPage() {
+	w.mu.Lock()
+	displayItems := w.getDisplayItemsLocked()
+	totalPages := (len(displayItems) + w.pageSize - 1) / w.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+
+	// Only allow navigation if we have local data for the next page
+	// Don't allow speculative navigation based on hasMoreServerData
+	if w.currentPage >= totalPages-1 {
+		w.mu.Unlock()
+		return
+	}
+
+	w.currentPage++
+	page := w.currentPage
+	pageSize := w.pageSize
+	totalItems := len(displayItems)
+	callback := w.OnPageChange
+	w.mu.Unlock()
+
+	w.refreshPagination()
+
+	// Notify listener
+	if callback != nil {
+		callback(page, pageSize, totalItems)
+	}
+}
+
+// onPageSizeChanged handles changes to the page size entry
+func (w *FileListWidget) onPageSizeChanged(value string) {
+	newSize := 0
+	fmt.Sscanf(value, "%d", &newSize)
+
+	// Clamp to valid range
+	if newSize < MinPageSize {
+		newSize = MinPageSize
+	} else if newSize > MaxPageSize {
+		newSize = MaxPageSize
+	}
+
+	w.mu.Lock()
+	w.pageSize = newSize
+	w.currentPage = 0 // Reset to first page
+	// Clear hasMoreServerData until callback confirms there's actually more data
+	// This prevents navigation to empty pages during the loading period
+	w.hasMoreServerData = false
+	page := w.currentPage
+	pageSize := w.pageSize
+	totalItems := len(w.getDisplayItemsLocked())
+	callback := w.OnPageChange
+	w.mu.Unlock()
+
+	// Update the entry to show clamped value
+	if w.pageSizeEntry != nil {
+		fyne.Do(func() {
+			w.pageSizeEntry.SetText(fmt.Sprintf("%d", newSize))
+		})
+	}
+
+	w.refreshPagination()
+
+	// Notify listener of page size change (may need more data)
+	// The callback will call SetHasMoreServerData with the actual value
+	if callback != nil {
+		callback(page, pageSize, totalItems)
+	}
+}
+
+// refreshPagination updates the pagination UI and list
+func (w *FileListWidget) refreshPagination() {
+	w.mu.RLock()
+	displayItems := w.getDisplayItemsLocked()
+	totalItems := len(displayItems)
+	totalPages := (totalItems + w.pageSize - 1) / w.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	currentPage := w.currentPage
+	pageSize := w.pageSize
+	hasMoreServer := w.hasMoreServerData
+	callback := w.OnPageChange
+	w.mu.RUnlock()
+
+	// Update pagination UI on main thread (compact format)
+	fyne.Do(func() {
+		// Update page label - show "+" if more server data available
+		if w.pageLabel != nil {
+			if hasMoreServer {
+				w.pageLabel.SetText(fmt.Sprintf("%d/%d+", currentPage+1, totalPages))
+			} else {
+				w.pageLabel.SetText(fmt.Sprintf("%d/%d", currentPage+1, totalPages))
+			}
+		}
+
+		// Update button states
+		if w.prevPageBtn != nil {
+			if currentPage > 0 {
+				w.prevPageBtn.Enable()
+			} else {
+				w.prevPageBtn.Disable()
+			}
+		}
+		if w.nextPageBtn != nil {
+			// Enable next ONLY if we have local data for the next page
+			// Don't enable speculatively based on hasMoreServerData
+			if currentPage < totalPages-1 {
+				w.nextPageBtn.Enable()
+			} else {
+				w.nextPageBtn.Disable()
+			}
+		}
+
+		// Refresh list
+		if w.list != nil {
+			w.list.Refresh()
+			w.list.ScrollToTop()
+		}
+	})
+
+	// If on last local page but server might have more, trigger preload
+	// This loads more data in the background so the button can be enabled later
+	if currentPage >= totalPages-1 && hasMoreServer && callback != nil {
+		go callback(currentPage+1, pageSize, totalItems)
+	}
+
+	w.updateStatus()
+}
+
+// FormatFileSize formats a file size in bytes to human-readable format
+func FormatFileSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// FormatTransferRate formats a transfer rate (bytes per second) to human-readable format
+func FormatTransferRate(bytesPerSec float64) string {
+	const unit = 1024
+	if bytesPerSec < unit {
+		return fmt.Sprintf("%.0f B/s", bytesPerSec)
+	}
+	div, exp := float64(unit), 0
+	for n := bytesPerSec / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB/s", bytesPerSec/div, "KMGTPE"[exp])
+}
+
+// fixedWidthLayout is a custom layout that constrains width to a fixed value
+type fixedWidthLayout struct {
+	width float32
+}
+
+func (l *fixedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	if len(objects) == 0 {
+		return fyne.NewSize(l.width, 0)
+	}
+	minHeight := objects[0].MinSize().Height
+	return fyne.NewSize(l.width, minHeight)
+}
+
+func (l *fixedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, obj := range objects {
+		obj.Resize(fyne.NewSize(l.width, size.Height))
+		obj.Move(fyne.NewPos(0, 0))
+	}
+}
+
+// getAbsolutePosition calculates the absolute position of a canvas object
+// using Fyne's driver method
+func getAbsolutePosition(obj fyne.CanvasObject) fyne.Position {
+	driver := fyne.CurrentApp().Driver()
+	return driver.AbsolutePositionForObject(obj)
+}

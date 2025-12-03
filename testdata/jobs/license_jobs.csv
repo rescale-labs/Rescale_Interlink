@@ -1,0 +1,2 @@
+Directory,JobName,AnalysisCode,AnalysisVersion,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings
+./Run_License,LicenseJob,user_included,1.0,./run.sh,emerald,4,48.0,1,"{""RLM_LICENSE"":""123@license-server"",""FLEXLM_LICENSE"":""456@flex-server""}"
