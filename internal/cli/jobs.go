@@ -1188,8 +1188,10 @@ func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.C
 			}
 
 			// Add per-request timeout
+			// Note: GetJob() doesn't return jobStatus - use GetJobStatuses() instead
+			// See models/job.go comment: "The /jobs/{id}/ GET endpoint does NOT include jobStatus"
 			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			job, err := apiClient.GetJob(reqCtx, jobID)
+			statuses, err := apiClient.GetJobStatuses(reqCtx, jobID)
 			cancel()
 
 			if err != nil {
@@ -1207,7 +1209,12 @@ func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.C
 
 			consecutiveErrors = 0 // Reset on success
 
-			currentStatus := job.JobStatus.Status
+			// Statuses are returned newest-first; first entry is current status
+			if len(statuses) == 0 {
+				logger.Warn().Msg("No status entries returned for job")
+				continue
+			}
+			currentStatus := statuses[0].Status
 			if currentStatus != lastStatus {
 				// Status changed, show update
 				timestamp := time.Now().Format("15:04:05")

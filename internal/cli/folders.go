@@ -674,10 +674,11 @@ Examples:
 			// Start timing
 			startTime := time.Now()
 
-			// Validate output directory
+			// Validate and normalize output directory
 			if outputDir == "" {
 				outputDir = "."
 			}
+			outputDir = filepath.Clean(outputDir) // Normalize path (removes trailing slash)
 
 			// Validate max-concurrent
 			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
