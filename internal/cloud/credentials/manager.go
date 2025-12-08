@@ -21,6 +21,7 @@ import (
 //
 // Cached data:
 //   - Storage credentials: Refreshed every 10 minutes (5-minute safety margin before 15-min expiry)
+//   - Storage-specific credentials: Same refresh interval, keyed by storage ID (for cross-storage downloads)
 //   - User profile: Refreshed every 5 minutes (rarely changes, but refresh to catch updates)
 //   - Root folders: Refreshed every 5 minutes (rarely changes)
 type Manager struct {
@@ -33,6 +34,12 @@ type Manager struct {
 	rootFolders        *models.RootFolders
 	lastFoldersRefresh time.Time
 	mu                 sync.RWMutex
+
+	// Storage-specific credential caches (for cross-storage/job file downloads)
+	// Keyed by storage ID to share credentials across files from the same storage
+	storageS3Creds      map[string]*models.S3Credentials
+	storageAzureCreds   map[string]*models.AzureCredentials
+	storageCredsRefresh map[string]time.Time
 }
 
 // Global singleton instance shared across all upload/download operations
@@ -55,7 +62,10 @@ func GetManager(apiClient *api.Client) *Manager {
 	// (in case API client changes between sessions)
 	if globalManager == nil || globalManager.apiClient != apiClient {
 		globalManager = &Manager{
-			apiClient: apiClient,
+			apiClient:           apiClient,
+			storageS3Creds:      make(map[string]*models.S3Credentials),
+			storageAzureCreds:   make(map[string]*models.AzureCredentials),
+			storageCredsRefresh: make(map[string]time.Time),
 		}
 	}
 
@@ -165,6 +175,136 @@ func (m *Manager) GetAge() time.Duration {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return time.Since(m.lastCredsRefresh)
+}
+
+// GetS3CredentialsForStorage returns cached S3 credentials for a specific storage, refreshing if needed.
+// This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
+// The cache is keyed by storage ID to share credentials across files from the same storage.
+// Thread-safe with same double-checked locking pattern as GetS3Credentials.
+//
+// If fileInfo is nil or has no storage info, falls back to GetS3Credentials for user's default storage.
+func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *models.CloudFile) (*models.S3Credentials, error) {
+	// If no file info or storage info, fall back to default credentials
+	if fileInfo == nil || fileInfo.Storage == nil {
+		return m.GetS3Credentials(ctx)
+	}
+
+	storageID := fileInfo.Storage.ID
+	if storageID == "" {
+		return m.GetS3Credentials(ctx)
+	}
+
+	// Fast path: check if refresh is needed (read lock only)
+	m.mu.RLock()
+	lastRefresh := m.storageCredsRefresh[storageID]
+	creds := m.storageS3Creds[storageID]
+	needsRefresh := time.Since(lastRefresh) > constants.GlobalCredentialRefreshInterval || creds == nil
+	if !needsRefresh {
+		m.mu.RUnlock()
+		return creds, nil
+	}
+	m.mu.RUnlock()
+
+	// Slow path: refresh needed (write lock)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Double-check: another goroutine might have refreshed while we waited
+	lastRefresh = m.storageCredsRefresh[storageID]
+	creds = m.storageS3Creds[storageID]
+	if time.Since(lastRefresh) <= constants.GlobalCredentialRefreshInterval && creds != nil {
+		return creds, nil
+	}
+
+	// Fetch new credentials for this specific storage
+	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh storage-specific credentials: %w", err)
+	}
+
+	// Update cached credentials for this storage
+	m.storageS3Creds[storageID] = s3Creds
+	m.storageAzureCreds[storageID] = azureCreds
+	m.storageCredsRefresh[storageID] = time.Now()
+
+	return s3Creds, nil
+}
+
+// GetAzureCredentialsForStorage returns cached Azure credentials for a specific storage, refreshing if needed.
+// This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
+// The cache is keyed by storage ID to share credentials across files from the same storage.
+// Thread-safe with same double-checked locking pattern as GetAzureCredentials.
+//
+// If fileInfo is nil or has no storage info, falls back to GetAzureCredentials for user's default storage.
+func (m *Manager) GetAzureCredentialsForStorage(ctx context.Context, fileInfo *models.CloudFile) (*models.AzureCredentials, error) {
+	// If no file info or storage info, fall back to default credentials
+	if fileInfo == nil || fileInfo.Storage == nil {
+		return m.GetAzureCredentials(ctx)
+	}
+
+	storageID := fileInfo.Storage.ID
+	if storageID == "" {
+		return m.GetAzureCredentials(ctx)
+	}
+
+	// Fast path: check if refresh is needed (read lock only)
+	m.mu.RLock()
+	lastRefresh := m.storageCredsRefresh[storageID]
+	creds := m.storageAzureCreds[storageID]
+	needsRefresh := time.Since(lastRefresh) > constants.GlobalCredentialRefreshInterval || creds == nil
+	if !needsRefresh {
+		m.mu.RUnlock()
+		return creds, nil
+	}
+	m.mu.RUnlock()
+
+	// Slow path: refresh needed (write lock)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Double-check: another goroutine might have refreshed while we waited
+	lastRefresh = m.storageCredsRefresh[storageID]
+	creds = m.storageAzureCreds[storageID]
+	if time.Since(lastRefresh) <= constants.GlobalCredentialRefreshInterval && creds != nil {
+		return creds, nil
+	}
+
+	// Fetch new credentials for this specific storage
+	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh storage-specific credentials: %w", err)
+	}
+
+	// Update cached credentials for this storage
+	m.storageS3Creds[storageID] = s3Creds
+	m.storageAzureCreds[storageID] = azureCreds
+	m.storageCredsRefresh[storageID] = time.Now()
+
+	return azureCreds, nil
+}
+
+// ForceRefreshForStorage forces an immediate credential refresh for a specific storage.
+// Useful for recovering from token expiration errors on cross-storage operations.
+func (m *Manager) ForceRefreshForStorage(ctx context.Context, fileInfo *models.CloudFile) error {
+	if fileInfo == nil || fileInfo.Storage == nil || fileInfo.Storage.ID == "" {
+		return m.ForceRefresh(ctx)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	storageID := fileInfo.Storage.ID
+
+	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
+	if err != nil {
+		return fmt.Errorf("failed to force refresh storage-specific credentials: %w", err)
+	}
+
+	m.storageS3Creds[storageID] = s3Creds
+	m.storageAzureCreds[storageID] = azureCreds
+	m.storageCredsRefresh[storageID] = time.Now()
+
+	return nil
 }
 
 // GetUserProfile returns cached user profile, refreshing if needed
