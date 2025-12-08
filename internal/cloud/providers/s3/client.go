@@ -138,23 +138,24 @@ func (c *S3Client) PathBase() string {
 }
 
 // EnsureFreshCredentials refreshes S3 credentials.
-// Sprint F.3: Uses file-specific credentials if fileInfo is set (for cross-bucket downloads),
-// otherwise uses the global credential manager for user's default storage.
-// This is thread-safe and shares credentials across all concurrent operations.
+// Uses the credential manager's cache for BOTH user's default storage AND file-specific storage.
+// This prevents redundant API calls during concurrent downloads from the same storage.
+// Thread-safe and shares credentials across all concurrent operations.
 // IMPORTANT: Reuses the existing HTTP client to maintain connection pool.
 func (c *S3Client) EnsureFreshCredentials(ctx context.Context) error {
 	var s3Creds *models.S3Credentials
 	var err error
 
-	// Sprint F.3: Use file-specific credentials for cross-bucket downloads
+	// Use credential manager for all credential fetching (both default and file-specific)
+	// The manager handles caching keyed by storage ID, avoiding redundant API calls
 	if c.fileInfo != nil {
-		// Get credentials for the specific file's storage (not user's default)
-		s3Creds, _, err = c.apiClient.GetStorageCredentials(ctx, c.fileInfo)
+		// Get cached credentials for the specific file's storage
+		s3Creds, err = c.credManager.GetS3CredentialsForStorage(ctx, c.fileInfo)
 		if err != nil {
 			return fmt.Errorf("failed to get file-specific credentials: %w", err)
 		}
 	} else {
-		// No fileInfo - use global manager for user's default storage (uploads, personal files)
+		// Get cached credentials for user's default storage
 		s3Creds, err = c.credManager.GetS3Credentials(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to get credentials: %w", err)
