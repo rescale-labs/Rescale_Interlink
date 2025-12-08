@@ -92,17 +92,14 @@ func NewAzureClient(storageInfo *models.StorageInfo, apiClient *api.Client, file
 	// Get the global credential manager (for user's default storage)
 	credManager := credentials.GetManager(apiClient)
 
-	// Get initial credentials
-	// Sprint F.2: Support file-specific credentials for cross-storage downloads
+	// Get initial credentials (using credential manager's cache for both default and file-specific)
 	var creds *models.AzureCredentials
 	if fileInfo != nil {
-		// File-specific credentials: fetch for the file's storage, not user's default
-		// This enables cross-storage (e.g., S3 user downloading Azure-stored job outputs)
-		_, azureCreds, err := apiClient.GetStorageCredentials(context.Background(), fileInfo)
+		// File-specific credentials: use cached credentials for the file's storage
+		creds, err = credManager.GetAzureCredentialsForStorage(context.Background(), fileInfo)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Azure credentials for file %s: %w", fileInfo.ID, err)
 		}
-		creds = azureCreds
 	} else {
 		// Default storage credentials (user's Azure storage)
 		creds, err = credManager.GetAzureCredentials(context.Background())
@@ -205,18 +202,17 @@ func (c *AzureClient) Container() string {
 // file's specific storage (not user's default). This maintains cross-storage access
 // during long-running operations.
 func (c *AzureClient) EnsureFreshCredentials(ctx context.Context) error {
-	// Get fresh credentials using the appropriate method
-	// Sprint F.2: Support file-specific credentials for cross-storage downloads
+	// Get fresh credentials using credential manager's cache (for both default and file-specific)
+	// This prevents redundant API calls during concurrent downloads from the same storage
 	var creds *models.AzureCredentials
 	var err error
 
-	if c.fileInfo != nil && c.apiClient != nil {
-		// File-specific credentials: fetch for the file's storage, not user's default
-		_, azureCreds, err := c.apiClient.GetStorageCredentials(ctx, c.fileInfo)
+	if c.fileInfo != nil {
+		// File-specific credentials: use cached credentials for the file's storage
+		creds, err = c.credManager.GetAzureCredentialsForStorage(ctx, c.fileInfo)
 		if err != nil {
 			return fmt.Errorf("failed to refresh Azure credentials for file: %w", err)
 		}
-		creds = azureCreds
 	} else {
 		// Default storage credentials (user's Azure storage)
 		creds, err = c.credManager.GetAzureCredentials(ctx)
