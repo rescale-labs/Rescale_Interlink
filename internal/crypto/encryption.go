@@ -212,6 +212,12 @@ func DecryptFile(inputPath, outputPath string, key, iv []byte) error {
 	}
 	fileSize := fileInfo.Size()
 
+	// Validate that encrypted file size is a multiple of AES block size
+	// Properly encrypted files with PKCS7 padding are always block-aligned
+	if fileSize%int64(aes.BlockSize) != 0 {
+		return fmt.Errorf("encrypted file size (%d bytes) is not a multiple of AES block size (%d) - file may be corrupted or download was interrupted", fileSize, aes.BlockSize)
+	}
+
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -256,6 +262,13 @@ func DecryptFile(inputPath, outputPath string, key, iv []byte) error {
 		}
 
 		if len(toProcess) > 0 {
+			// Defensive check: ensure data is block-aligned before decryption
+			// This should never fail due to the file size validation above, but provides
+			// an extra safety net to prevent panics from cipher.CryptBlocks
+			if len(toProcess)%aes.BlockSize != 0 {
+				return fmt.Errorf("internal error: data not block-aligned (%d bytes) - this should not happen", len(toProcess))
+			}
+
 			// Decrypt the blocks
 			decrypted := make([]byte, len(toProcess))
 			mode.CryptBlocks(decrypted, toProcess)

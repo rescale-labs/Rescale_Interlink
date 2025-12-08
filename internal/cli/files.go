@@ -191,6 +191,9 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
+			// Normalize output directory (removes trailing slash)
+			outputDir = filepath.Clean(outputDir)
+
 			// Validate max-concurrent
 			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
 				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",

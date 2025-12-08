@@ -203,6 +203,7 @@ func (ui *UI) Build() fyne.CanvasObject {
 	var previousTabIndex int
 
 	// Auto-apply config when navigating away from Setup tab (index 0)
+	// Also force refresh on Linux to work around rendering issues (RHEL/CentOS 8+)
 	tabs.OnSelected = func(tab *container.TabItem) {
 		currentIndex := tabs.SelectedIndex()
 		if previousTabIndex == 0 && currentIndex != 0 {
@@ -215,6 +216,12 @@ func (ui *UI) Build() fyne.CanvasObject {
 			}
 		}
 		previousTabIndex = currentIndex
+
+		// Linux workaround: force refresh on tab change to fix rendering issues
+		// Some Linux systems (RHEL/CentOS 8+) don't properly redraw tabs
+		if runtime.GOOS == "linux" {
+			tabs.Refresh()
+		}
 	}
 
 	// Select Setup tab by default (index 0)

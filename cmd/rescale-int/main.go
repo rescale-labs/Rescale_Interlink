@@ -1,8 +1,5 @@
-// Rescale Interlink - Unified CLI and GUI Tool
-// Version 3.2.0 - Create Job Template Improvements (FIPS 140-3 Compliant)
-// - Fixed layout issues with button sizing and section headers
-// - Added input file/folder selection for job payload
-// - Removed customer-specific defaults
+// Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
+// FIPS 140-3 Compliant Build Required
 package main
 
 import (
@@ -17,8 +14,8 @@ import (
 
 // Version information
 var (
-	Version   = "3.2.0"
-	BuildTime = "2025-11-30"
+	Version   = "3.2.1"
+	BuildTime = "2025-12-08"
 )
 
 // FIPSEnabled indicates whether FIPS 140-3 mode is active

@@ -203,9 +203,16 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 	targetDir := filepath.Dir(localPath)
 	encryptedPath := localPath + ".encrypted"
 
-	// Get file size from file info
-	// DecryptedSize is the actual file size from Rescale API
+	// Get DECRYPTED file size from file info for disk space calculation
+	// Note: The encrypted file in storage is slightly larger due to PKCS7 padding
+	// DecryptedSize is what we'll end up with after decryption
 	fileSize := prep.Params.FileInfo.DecryptedSize
+
+	// IMPORTANT: Pass 0 as FileSize to let the provider fetch the actual encrypted
+	// blob size from storage. Using DecryptedSize would truncate the encrypted file
+	// incorrectly since encrypted size = DecryptedSize + PKCS7 padding (1-16 bytes).
+	// This was causing "input not full blocks" panics when the truncated encrypted
+	// file wasn't a multiple of AES block size (16 bytes).
 
 	// CHECK DISK SPACE before download (with 15% safety buffer for both encrypted + decrypted)
 	// Need space for: encrypted file + decrypted file during transition
@@ -227,12 +234,13 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 	}()
 
 	// Download encrypted file via provider
+	// FileSize set to 0 so provider fetches actual encrypted blob size from storage
 	downloadParams := LegacyDownloadParams{
 		RemotePath:       prep.Params.RemotePath,
 		EncryptedPath:    encryptedPath,
 		EncryptionKey:    prep.EncryptionKey,
 		IV:               prep.IV,
-		FileSize:         fileSize,
+		FileSize:         0, // Let provider fetch actual encrypted size from storage
 		FileInfo:         prep.Params.FileInfo,
 		TransferHandle:   prep.TransferHandle,
 		ProgressCallback: prep.Params.ProgressCallback,

@@ -560,10 +560,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 // This is used for validation to ensure jobs use valid core types.
 // By default (includeInactive=false), only returns active core types.
 // Set includeInactive=true to include deprecated/inactive types (for validation).
-// Handles pagination to retrieve all core types (183+ as of Nov 2025).
-// Added in v1.0.0 (October 7, 2025) for core type validation feature.
-// Fixed in v1.0.8 (November 6, 2025) to handle pagination correctly.
-// Changed in v2.4.10 (November 22, 2025) to default to active-only.
+// Handles pagination to retrieve all core types.
 func (c *Client) GetCoreTypes(ctx context.Context, includeInactive bool) ([]models.CoreType, error) {
 	var allCoreTypes []models.CoreType
 	nextURL := "/api/v3/coretypes/"

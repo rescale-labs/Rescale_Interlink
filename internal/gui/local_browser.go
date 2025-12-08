@@ -1,10 +1,5 @@
 // Package gui provides the graphical user interface for rescale-int.
 // Local filesystem browser component.
-// v2.6.1 (November 26, 2025)
-// - Added proper spacing/padding around navigation buttons
-// v2.5.2 (November 24, 2025)
-// - Removed hardcoded sorting (now handled by FileListWidget)
-// - Added ModTime population for date sorting
 package gui
 
 import (
