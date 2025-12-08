@@ -58,14 +58,14 @@ var (
 )
 
 // Color returns the color for the specified name, forcing light mode appearance.
-// The variant parameter is respected for foreground colors to support proper contrast
-// on colored backgrounds (e.g., selected tabs, primary-colored buttons).
+// IMPORTANT: We always return light mode colors regardless of the variant parameter.
+// This ensures consistent appearance on Linux systems where the OS may report dark mode,
+// but we want to force a light UI appearance.
+// Fyne uses separate color names (ForegroundOnPrimary, etc.) for text on colored backgrounds.
 func (t *rescaleTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
-	// For foreground colors, respect the variant to enable proper contrast
-	// This allows selected tabs and buttons to have white text on blue backgrounds
-	if name == theme.ColorNameForeground && variant == theme.VariantDark {
-		return color.White // White text for dark variant (e.g., on colored backgrounds)
-	}
+	// Explicitly ignore variant - we force light mode for all colors.
+	// Without this, Linux systems in dark mode would get white foreground on our light background.
+	_ = variant
 
 	switch name {
 	// Brand colors
