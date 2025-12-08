@@ -12,10 +12,10 @@ import (
 )
 
 // RescaleCredentialProvider implements AWS SDK's CredentialsProvider interface
-// with automatic credential refresh from Rescale API
+// with automatic credential refresh from Rescale API.
 //
-// This provider integrates seamlessly with AWS SDK's CredentialsCache to provide
-// automatic credential refresh:
+// This provider works with AWS SDK's CredentialsCache to provide automatic
+// credential refresh:
 //   - AWS SDK calls Retrieve() when credentials are needed
 //   - Returns credentials with 15-minute expiry
 //   - CredentialsCache will refresh 5 minutes before expiry (configurable via ExpiryWindow)

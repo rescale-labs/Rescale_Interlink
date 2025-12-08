@@ -1,19 +1,5 @@
 // Package gui provides the graphical user interface for rescale-int.
 // File browser tab implementation - two-pane layout with local and remote browsers.
-// v3.0.1 (November 28, 2025)
-// - Added 60-second timeout to remote delete operations to prevent indefinite hangs
-// v2.7.0 (November 26, 2025)
-// - Moved hardcoded timeouts to constants/app.go for consistency
-// v2.6.1 (November 26, 2025)
-// - Added proper spacing/padding around header buttons
-// - Added transfer rate display to individual file progress
-// v2.6.0 (November 25, 2025)
-// - Added delete functionality for local and remote files/folders
-// v2.5.2 (November 24, 2025)
-// - Removed middle section, buttons now above each pane
-// - Added per-file progress display alongside overall progress
-// - Implemented concurrent transfers using CLI patterns (semaphore, transfer manager)
-// - Replaced collectFilesFromRemoteFolder with CLI-based downloadFolderWithCLILogic
 package gui
 
 import (
@@ -219,12 +205,17 @@ func (fbt *FileBrowserTab) Build() fyne.CanvasObject {
 	clearBtn.Hide() // Hidden initially, shown when transfer completes
 	fbt.clearBtn = clearBtn
 
-	// Overall progress row with cancel and clear buttons
-	overallRow := container.NewBorder(
+	// Overall progress section: label on its own line, then progress bar with buttons
+	// This prevents the label from being cut off on narrow windows
+	overallBarRow := container.NewBorder(
 		nil, nil,
-		fbt.overallProgressLabel,
+		nil, // No left element - label is on separate line above
 		container.NewHBox(fbt.cancelBtn, clearBtn),
 		fbt.overallProgressBar,
+	)
+	overallRow := container.NewVBox(
+		fbt.overallProgressLabel,
+		overallBarRow,
 	)
 
 	// File progress area (scrollable) - default 100px, resized dynamically based on file count
@@ -983,13 +974,23 @@ func (fbt *FileBrowserTab) downloadFolderWithCLILogic(
 
 // Progress scroll area height constants for dynamic sizing
 const (
-	progressRowHeight   float32 = 30  // Approximate row height (label + progress bar)
-	maxScrollAreaHeight float32 = 250 // Max scroll area height
-	minScrollAreaHeight float32 = 50  // Min scroll area height
+	progressRowHeight    float32 = 30  // Approximate row height (label + progress bar)
+	maxScrollAreaHeight  float32 = 250 // Max scroll area height
+	minScrollAreaHeight  float32 = 50  // Min scroll area height
+	progressLabelWidth   float32 = 280 // Fixed width for per-file progress labels
+	maxFilenameLen       int     = 25  // Max filename length before truncation
 )
 
-// initProgressUIWithFiles initializes progress UI and pre-creates all progress bars for uploads
-// v3.2.1: Added compact progress bars, dynamic scroll height, and progress interpolation
+// truncateName truncates a filename to maxFilenameLen chars with ellipsis if needed
+func truncateName(name string) string {
+	if len(name) <= maxFilenameLen {
+		return name
+	}
+	return name[:maxFilenameLen-3] + "..."
+}
+
+// initProgressUIWithFiles initializes progress UI and pre-creates all progress bars for uploads.
+// Uses compact progress bars with fixed-width labels, dynamic scroll height, and progress interpolation.
 func (fbt *FileBrowserTab) initProgressUIWithFiles(totalFiles int, _ string, files []uploadFileInfo) {
 	// Initialize data structures (not UI operations)
 	fbt.mu.Lock()
@@ -1011,15 +1012,16 @@ func (fbt *FileBrowserTab) initProgressUIWithFiles(totalFiles int, _ string, fil
 		bar.SetValue(0)
 
 		name := filepath.Base(f.LocalPath)
+		displayName := truncateName(name) // Truncate long filenames
 		sizeStr := FormatFileSize(f.Size)
-		labelText := fmt.Sprintf("↑ %s (%s)", name, sizeStr)
+		labelText := fmt.Sprintf("↑ %s (%s)", displayName, sizeStr)
 		label := widget.NewLabel(labelText)
 
 		fbt.mu.Lock()
 		fbt.fileProgressBars[f.LocalPath] = bar
 		fbt.fileProgressLabels[f.LocalPath] = label
 		fbt.activeTransfers[f.LocalPath] = &FileTransferProgress{
-			Name:         name,
+			Name:         name, // Store full name for internal use
 			Size:         f.Size,
 			Progress:     0,
 			Interpolated: 0,
@@ -1031,7 +1033,9 @@ func (fbt *FileBrowserTab) initProgressUIWithFiles(totalFiles int, _ string, fil
 		}
 		fbt.mu.Unlock()
 
-		row := container.NewBorder(nil, nil, label, nil, bar)
+		// Use fixed-width container for label to prevent pushing progress bar off screen
+		labelContainer := container.NewGridWrap(fyne.NewSize(progressLabelWidth, 20), label)
+		row := container.NewBorder(nil, nil, labelContainer, nil, bar)
 		widgetList = append(widgetList, fileWidgets{bar: bar, label: label, row: row})
 	}
 
@@ -1071,8 +1075,8 @@ func (fbt *FileBrowserTab) initProgressUIWithFiles(totalFiles int, _ string, fil
 	fbt.startProgressInterpolation()
 }
 
-// initProgressUIForDownloads initializes progress UI and pre-creates all progress bars for downloads
-// v3.2.1: Added compact progress bars, dynamic scroll height, and progress interpolation
+// initProgressUIForDownloads initializes progress UI and pre-creates all progress bars for downloads.
+// Uses compact progress bars with fixed-width labels, dynamic scroll height, and progress interpolation.
 func (fbt *FileBrowserTab) initProgressUIForDownloads(totalFiles int, files []downloadFileInfo) {
 	// Initialize data structures (not UI operations)
 	fbt.mu.Lock()
@@ -1093,15 +1097,16 @@ func (fbt *FileBrowserTab) initProgressUIForDownloads(totalFiles int, files []do
 		bar := widget.NewProgressBar()
 		bar.SetValue(0)
 
+		displayName := truncateName(f.Name) // Truncate long filenames
 		sizeStr := FormatFileSize(f.Size)
-		labelText := fmt.Sprintf("↓ %s (%s)", f.Name, sizeStr)
+		labelText := fmt.Sprintf("↓ %s (%s)", displayName, sizeStr)
 		label := widget.NewLabel(labelText)
 
 		fbt.mu.Lock()
 		fbt.fileProgressBars[f.FileID] = bar
 		fbt.fileProgressLabels[f.FileID] = label
 		fbt.activeTransfers[f.FileID] = &FileTransferProgress{
-			Name:         f.Name,
+			Name:         f.Name, // Store full name for internal use
 			Size:         f.Size,
 			Progress:     0,
 			Interpolated: 0,
@@ -1113,7 +1118,9 @@ func (fbt *FileBrowserTab) initProgressUIForDownloads(totalFiles int, files []do
 		}
 		fbt.mu.Unlock()
 
-		row := container.NewBorder(nil, nil, label, nil, bar)
+		// Use fixed-width container for label to prevent pushing progress bar off screen
+		labelContainer := container.NewGridWrap(fyne.NewSize(progressLabelWidth, 20), label)
+		row := container.NewBorder(nil, nil, labelContainer, nil, bar)
 		widgetList = append(widgetList, fileWidgets{bar: bar, label: label, row: row})
 	}
 
@@ -1153,9 +1160,9 @@ func (fbt *FileBrowserTab) initProgressUIForDownloads(totalFiles int, files []do
 	fbt.startProgressInterpolation()
 }
 
-// updateFileProgress updates the progress for a specific file
-// v3.2.1: Now calculates BytesPerSec for progress interpolation
-// Must use fyne.Do() for all widget updates since this is called from goroutines
+// updateFileProgress updates the progress for a specific file.
+// Calculates BytesPerSec for progress interpolation and uses truncated filenames for display.
+// Must use fyne.Do() for all widget updates since this is called from goroutines.
 func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, status string, err error) {
 	// Read references with lock
 	fbt.mu.RLock()
@@ -1200,7 +1207,7 @@ func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, statu
 		transfer.Interpolated = progress // Reset interpolated to real progress
 		transfer.Status = status
 		transfer.Error = err
-		name := transfer.Name
+		name := truncateName(transfer.Name) // Truncate for display
 		size := transfer.Size
 		startTime := transfer.StartTime
 		transfer.LastUpdate = now
@@ -1340,7 +1347,8 @@ func (fbt *FileBrowserTab) interpolateProgress() {
 				pct := newProgress * 100
 				sizeStr := FormatFileSize(transfer.Size)
 				rateStr := FormatTransferRate(transfer.BytesPerSec)
-				labelText := fmt.Sprintf("⟳ %s (%s) %.1f%% @ %s", transfer.Name, sizeStr, pct, rateStr)
+				displayName := truncateName(transfer.Name) // Truncate for display
+				labelText := fmt.Sprintf("⟳ %s (%s) %.1f%% @ %s", displayName, sizeStr, pct, rateStr)
 
 				updates = append(updates, barUpdate{
 					bar:       bar,

@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/rescale/rescale-int/internal/config"
@@ -80,6 +81,22 @@ func (st *SetupTab) Build() fyne.CanvasObject {
 		st.apiKeyEntry.SetText(cfg.APIKey)
 	}
 
+	// Paste button for API key - workaround for Linux clipboard issues with PasswordEntry
+	// On some Linux systems (RHEL/CentOS 8+), paste via Ctrl+V may not work in password fields
+	pasteAPIKeyBtn := widget.NewButtonWithIcon("", theme.ContentPasteIcon(), func() {
+		clipboard := st.window.Clipboard()
+		if clipboard != nil {
+			content := clipboard.Content()
+			if content != "" {
+				st.apiKeyEntry.SetText(strings.TrimSpace(content))
+			}
+		}
+	})
+	pasteAPIKeyBtn.Importance = widget.LowImportance
+
+	// Wrap API key entry with paste button
+	apiKeyRow := container.NewBorder(nil, nil, nil, pasteAPIKeyBtn, st.apiKeyEntry)
+
 	// Create token file button first (before radio group triggers callbacks)
 	st.tokenFileButton = widget.NewButton("Select Token File...", st.selectTokenFile)
 	st.tokenFileButton.Importance = widget.HighImportance
@@ -105,7 +122,7 @@ func (st *SetupTab) Build() fyne.CanvasObject {
 		widget.NewFormItem("Platform URL", st.tenantURLEntry),
 		widget.NewFormItem("Token Source", st.tokenSourceRadio),
 		widget.NewFormItem("Token File", st.tokenFileButton),
-		widget.NewFormItem("API Key", st.apiKeyEntry),
+		widget.NewFormItem("API Key", apiKeyRow), // Use row with paste button
 		widget.NewFormItem("", container.NewHBox(testButton, st.connectionStatus)),
 	)
 
