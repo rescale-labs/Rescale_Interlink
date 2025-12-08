@@ -1,13 +1,5 @@
 // Package gui provides the graphical user interface for rescale-int.
 // Remote (Rescale) filesystem browser component.
-// v3.2.0 (November 30, 2025)
-// - Sprint F.4: Server-side pagination with fast first-page load
-// v2.6.1 (November 26, 2025)
-// - Added proper spacing/padding around navigation buttons and controls
-// v2.5.2 (November 24, 2025)
-// - Added back button for navigation
-// - Smart breadcrumb truncation (root > ... > parent > current)
-// - Removed hardcoded sorting (now handled by FileListWidget)
 package gui
 
 import (

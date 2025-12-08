@@ -1,6 +1,5 @@
 // Package gui provides the graphical user interface for rescale-int.
 // StatusBar widget - unified status display component with level-based icons.
-// v2.6.0 (November 25, 2025)
 package gui
 
 import (

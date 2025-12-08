@@ -92,10 +92,10 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	// Calculate total parts
 	totalParts := transfer.CalculateTotalParts(params.FileSize, partSize)
 
-	if params.OutputWriter != nil {
-		fmt.Fprintf(params.OutputWriter, "Initialized streaming upload: %d %s of %d MB\n",
-			totalParts, pluralize("block", totalParts), partSize/(1024*1024))
-	}
+	// Note: "Initialized streaming upload" message removed to prevent visual artifacts
+	// during concurrent multi-file uploads. The message was low-value information
+	// that caused ghost progress bar copies when interleaved with mpb output.
+	_ = params.OutputWriter // Suppress unused warning - writer still used for other messages
 
 	// Pre-allocate block IDs slice
 	blockIDs := make([]string, totalParts)

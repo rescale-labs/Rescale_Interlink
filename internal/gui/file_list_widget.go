@@ -1,17 +1,5 @@
 // Package gui provides the graphical user interface for rescale-int.
 // File list widget - reusable component for displaying files and folders.
-// v2.6.1 (November 26, 2025)
-// - Added pagination support (default 40 items/page, adjustable 20-200)
-// - Changed path label to canvas.Text for font size consistency with file names
-// - Added padding around sort button and filter
-// - Added FormatTransferRate helper function
-// v2.6.0 (November 25, 2025)
-// - Added filter/search functionality
-// v2.5.2 (November 24, 2025)
-// - Added canvas.Text for font size control (23% reduction)
-// - Added padding around size/type columns
-// - Added sort functionality with menu
-// - Added ModTime field for date sorting (local files only)
 package gui
 
 import (
