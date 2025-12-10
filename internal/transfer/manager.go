@@ -10,7 +10,6 @@ import (
 // Manager coordinates all file transfers and manages resource allocation
 type Manager struct {
 	resourceMgr *resources.Manager
-	mu          sync.Mutex
 }
 
 // NewManager creates a new transfer manager

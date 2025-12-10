@@ -1,5 +1,64 @@
 # Release Notes - Rescale Interlink
 
+## v3.2.4 - December 10, 2025
+
+### Bug Fixes & Code Cleanup
+
+This release includes a bug fix, dead code removal, and documentation improvements.
+
+#### Bug Fix
+
+**1. Throughput Monitor Index Bounds Fix**
+
+Fixed potential panic in `ShouldScaleDown` function when exactly 5 throughput samples were present:
+- Function checked `len(samples) < 5` but accessed `samples[len(samples)-6:]`, requiring 6 samples
+- Changed bounds check to require 6 samples minimum
+
+**Files Modified:** `internal/resources/manager.go`
+
+#### Code Cleanup
+
+**2. Dead Code Removal**
+
+Removed unused code identified during code review:
+- Removed unused `globalManagerOnce sync.Once` from credential manager
+- Removed unused `mu sync.Mutex` from transfer Manager struct
+
+**Files Modified:** `internal/cloud/credentials/manager.go`, `internal/transfer/manager.go`
+
+**3. Stale Comment Cleanup**
+
+Removed outdated "BUG FIX #3 (v1.0.8):" prefixes from tar utility comments:
+- Updated comments in `CreateTarGz`, `CreateTarGzWithOptions`, `GenerateTarPath` functions
+- Kept explanatory text, removed historical version references
+
+**Files Modified:** `internal/util/tar/tar.go`
+
+#### Documentation Updates
+
+**4. FIPS 140-3 Build Requirements**
+
+Added explicit FIPS 140-3 build requirements section to CONTRIBUTING.md:
+- Documents mandatory GOFIPS140=latest build flag
+- Explains RESCALE_ALLOW_NON_FIPS development escape hatch
+- Links to Go FIPS 140-3 documentation
+
+**Files Modified:** `CONTRIBUTING.md`
+
+**5. Documentation Version Sync**
+
+Synchronized all documentation files to version 3.2.4:
+- README.md, CLI_GUIDE.md, ARCHITECTURE.md, FEATURE_SUMMARY.md
+- CONTRIBUTING.md, GITHUB_READY.md, TODO_AND_PROJECT_STATUS.md
+- TESTING.md, DOCUMENTATION_SUMMARY.md
+
+#### Notes
+
+- FIPS 140-3 compliance: Mandatory for all production builds
+- All E2E tests passed (S3 and Azure backends)
+
+---
+
 ## v3.2.0 - November 30, 2025
 
 ### GUI Improvements & Bug Fixes

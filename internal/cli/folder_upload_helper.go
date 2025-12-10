@@ -444,7 +444,7 @@ func uploadDirectoryPipelined(
 	}
 	fileConflictMode := FileOverwriteOnce
 	if skipExisting {
-		fileConflictMode = FileIgnoreAll
+		fileConflictMode = FileSkipAll
 	}
 	errorMode := ErrorContinueOnce
 
@@ -543,7 +543,7 @@ func uploadDirectoryPipelined(
 					if exists {
 						// Handle file conflict
 						action := fileConflictMode
-						if action == FileIgnoreOnce || action == FileOverwriteOnce {
+						if action == FileSkipOnce || action == FileOverwriteOnce {
 							var promptErr error
 							action, promptErr = promptFileConflict(fileName, relativePath)
 							if promptErr != nil {
@@ -553,13 +553,13 @@ func uploadDirectoryPipelined(
 								resultMutex.Unlock()
 								return
 							}
-							if action == FileIgnoreAll || action == FileOverwriteAll {
+							if action == FileSkipAll || action == FileOverwriteAll {
 								fileConflictMode = action
 							}
 						}
 
 						switch action {
-						case FileIgnoreOnce, FileIgnoreAll:
+						case FileSkipOnce, FileSkipAll:
 							logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
 							resultMutex.Lock()
 							result.FilesIgnored++
@@ -740,7 +740,7 @@ func uploadFiles(
 			if cfg.CheckConflictsBeforeUpload && exists {
 				// Handle file conflict
 				action := *fileConflictMode
-				if action == FileIgnoreOnce || action == FileOverwriteOnce {
+				if action == FileSkipOnce || action == FileOverwriteOnce {
 					// Prompt user
 					folderPath := filepath.Dir(relativePath)
 					if folderPath == "." {
@@ -752,13 +752,13 @@ func uploadFiles(
 						return
 					}
 					// Update mode if "all" selected
-					if action == FileIgnoreAll || action == FileOverwriteAll {
+					if action == FileSkipAll || action == FileOverwriteAll {
 						*fileConflictMode = action
 					}
 				}
 
 				switch action {
-				case FileIgnoreOnce, FileIgnoreAll:
+				case FileSkipOnce, FileSkipAll:
 					logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
 					fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
 					resultMutex.Lock()
@@ -878,7 +878,7 @@ func uploadFiles(
 
 					// Prompt user for conflict resolution
 					action := *fileConflictMode
-					if action == FileIgnoreOnce || action == FileOverwriteOnce {
+					if action == FileSkipOnce || action == FileOverwriteOnce {
 						folderPath := filepath.Dir(relativePath)
 						if folderPath == "." {
 							folderPath = filepath.Base(rootPath)
@@ -888,13 +888,13 @@ func uploadFiles(
 							logger.Error().Err(promptErr).Msg("Error prompting user")
 							return
 						}
-						if action == FileIgnoreAll || action == FileOverwriteAll {
+						if action == FileSkipAll || action == FileOverwriteAll {
 							*fileConflictMode = action
 						}
 					}
 
 					switch action {
-					case FileIgnoreOnce, FileIgnoreAll:
+					case FileSkipOnce, FileSkipAll:
 						logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
 						fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
 						resultMutex.Lock()

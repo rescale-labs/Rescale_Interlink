@@ -2,16 +2,14 @@
 // This provider implements cloud storage operations directly using the S3Client,
 // without depending on the legacy upload/download package implementations.
 //
-// Phase 7F: Provider now uses S3Client directly for ALL operations (upload and download).
-// No more dependencies on upload.NewS3Uploader() or download.NewS3Downloader().
-//
-// Version: 3.2.0 (Sprint 7F - S3 True Consolidation Complete)
-// Date: 2025-11-29
+// Version: 3.2.4
+// Date: 2025-12-10
 package s3
 
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -20,17 +18,18 @@ import (
 
 // Provider implements the CloudTransfer interface for S3 storage.
 // Uses S3Client directly for all operations (no wrapper dependencies).
-// Sprint F.2: Supports cross-storage downloads via stored fileInfo.
+// Supports cross-storage downloads via stored fileInfo.
 type Provider struct {
 	storageInfo *models.StorageInfo
 	apiClient   *api.Client
 
 	// S3 client for all S3 operations (upload and download)
-	// Created lazily on first use
-	s3Client *S3Client
+	// Created lazily on first use, protected by s3ClientMu
+	s3Client   *S3Client
+	s3ClientMu sync.Mutex
 
-	// Sprint F.2: Stored fileInfo for cross-storage credential fetching
-	// When set, all subsequent operations use file-specific credentials
+	// Stored fileInfo for cross-storage credential fetching.
+	// When set, all subsequent operations use file-specific credentials.
 	fileInfo *models.CloudFile
 }
 
@@ -54,11 +53,15 @@ func NewProvider(storageInfo *models.StorageInfo, apiClient *api.Client) (*Provi
 }
 
 // SetFileInfo sets the file info for cross-storage credential fetching.
-// Sprint F.2: This should be called by the download orchestrator before any download operations.
+// This should be called by the download orchestrator before any download operations.
 // When set, all subsequent operations (DetectFormat, DownloadStreaming, etc.) will use
 // file-specific credentials, enabling cross-storage downloads (e.g., Azure user downloading
 // S3-stored job outputs).
+// Thread-safe: uses mutex protection.
 func (p *Provider) SetFileInfo(fileInfo *models.CloudFile) {
+	p.s3ClientMu.Lock()
+	defer p.s3ClientMu.Unlock()
+
 	p.fileInfo = fileInfo
 	// Reset the cached client so next operation creates a new one with correct credentials
 	p.s3Client = nil
@@ -66,15 +69,18 @@ func (p *Provider) SetFileInfo(fileInfo *models.CloudFile) {
 
 // getOrCreateS3Client returns the S3 client, creating it if necessary.
 // The client is cached for reuse across operations.
-// Sprint F.2: Uses stored fileInfo for cross-storage credential fetching if available.
+// Uses stored fileInfo for cross-storage credential fetching if available.
+// Thread-safe: uses mutex protection.
 func (p *Provider) getOrCreateS3Client(ctx context.Context) (*S3Client, error) {
+	p.s3ClientMu.Lock()
+	defer p.s3ClientMu.Unlock()
+
 	if p.s3Client != nil {
 		return p.s3Client, nil
 	}
 
-	// Sprint F.2: Use stored fileInfo for cross-storage downloads
-	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials
-	// Otherwise, use nil for user's default storage (uploads, personal files)
+	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials.
+	// Otherwise, use nil for user's default storage (uploads, personal files).
 	client, err := NewS3Client(p.storageInfo, p.apiClient, p.fileInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
@@ -86,7 +92,6 @@ func (p *Provider) getOrCreateS3Client(ctx context.Context) (*S3Client, error) {
 // getOrCreateS3ClientForFile returns an S3 client with file-specific credentials.
 // This is used for downloads where we need credentials for the file's storage,
 // which may be different from the user's default storage (e.g., job outputs).
-// Phase 7H: Supports cross-storage credential fetching.
 func (p *Provider) getOrCreateS3ClientForFile(ctx context.Context, fileInfo *models.CloudFile) (*S3Client, error) {
 	// If no fileInfo provided, fall back to default client
 	if fileInfo == nil {
@@ -106,9 +111,8 @@ func (p *Provider) getOrCreateS3ClientForFile(ctx context.Context, fileInfo *mod
 // Uses streaming encryption by default (no temp file), unless PreEncrypt is true.
 // If TransferHandle is provided with multiple threads, parts are uploaded concurrently.
 //
-// Phase 7E: This method now delegates to the transfer orchestrator, which calls back
-// to the provider's interface methods (InitStreamingUpload, UploadEncryptedFile, etc.).
-// The provider methods use S3Client directly instead of wrapping upload.S3Uploader.
+// This method delegates to the transfer orchestrator, which calls back to the provider's
+// interface methods (InitStreamingUpload, UploadEncryptedFile, etc.).
 func (p *Provider) Upload(ctx context.Context, params cloud.UploadParams) (*cloud.UploadResult, error) {
 	// Ensure S3 client is initialized
 	_, err := p.getOrCreateS3Client(ctx)
@@ -137,7 +141,6 @@ func (p *Provider) Upload(ctx context.Context, params cloud.UploadParams) (*clou
 // Download downloads and decrypts a file from S3 storage.
 // Automatically detects encryption format (legacy v0 or streaming v1).
 // If TransferHandle is provided with multiple threads, chunks are downloaded concurrently.
-// Phase 7F: Uses S3Client directly for all download operations.
 func (p *Provider) Download(ctx context.Context, params cloud.DownloadParams) error {
 	// The download is handled by the transfer orchestrator, which calls:
 	// - DetectFormat to determine format version

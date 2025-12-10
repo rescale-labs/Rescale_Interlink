@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 3.2.0
-**Last Updated**: November 30, 2025
+**Version**: 3.2.4
+**Last Updated**: December 10, 2025
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -32,6 +32,27 @@ go build -o rescale-int ./cmd/rescale-int
 # Run tests
 go test ./...
 ```
+
+## Build Requirements (CRITICAL)
+
+**FIPS 140-3 Compliance is MANDATORY**
+
+All production builds MUST be compiled with FIPS 140-3 support for FedRAMP compliance:
+
+```bash
+# Required build command (production)
+GOFIPS140=latest go build -o rescale-int ./cmd/rescale-int
+
+# Or use the Makefile (recommended - includes all necessary flags)
+make build
+
+# Development only (not for production releases)
+RESCALE_ALLOW_NON_FIPS=true go build -o rescale-int ./cmd/rescale-int
+```
+
+Non-FIPS builds will refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. This environment variable is for development purposes only and must not be used in production.
+
+See [Go FIPS 140-3 Documentation](https://go.dev/doc/security/fips140) for details.
 
 ## Code Style
 
