@@ -64,3 +64,10 @@ rescale_token*.txt
 
 # This release checklist file (internal use only)
 GITHUB_READY.md
+
+# Release tarballs (distributed via GitHub Releases)
+*.tar.gz
+
+# Internal investigation/checkpoint files
+BINARY_SIZE_INVESTIGATION.md
+CHECKPOINT_SESSION.md

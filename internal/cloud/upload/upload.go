@@ -1,8 +1,7 @@
 // Package upload provides the canonical entry point for file uploads to Rescale cloud storage.
-// Phase 7H: Uses provider factory instead of old S3Uploader/AzureUploader classes.
 //
-// Version: 3.2.0 (Sprint 7H - Entry Point Consolidation)
-// Date: 2025-11-29
+// Version: 3.2.4
+// Date: 2025-12-10
 package upload
 
 import (
@@ -24,9 +23,6 @@ import (
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
-// ProgressCallback is called during upload to report progress (0.0 to 1.0)
-type ProgressCallback func(progress float64)
-
 // UploadParams consolidates all parameters for upload operations.
 // This is the single canonical way to specify upload options.
 type UploadParams struct {
@@ -40,7 +36,7 @@ type UploadParams struct {
 	APIClient *api.Client
 
 	// Optional: Progress callback (receives values from 0.0 to 1.0)
-	ProgressCallback ProgressCallback
+	ProgressCallback cloud.ProgressCallback
 
 	// Optional: Transfer handle for concurrent part uploads
 	// If nil or threads <= 1, uses sequential upload
@@ -67,8 +63,6 @@ type UploadParams struct {
 //   - Creates encrypted temp file first
 //   - Uses concurrent part uploads if TransferHandle has threads > 1
 //   - Compatible with legacy Rescale clients (e.g., Python client)
-//
-// Phase 7H: Uses provider factory instead of old S3Uploader/AzureUploader classes.
 //
 // Returns the registered CloudFile on success, or an error on failure.
 func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, error) {

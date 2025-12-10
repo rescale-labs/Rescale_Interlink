@@ -13,12 +13,17 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
-	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/util/filter"
+	"github.com/rescale/rescale-int/internal/utils/paths"
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // executeFileDownload - Common download logic for both files download and download shortcut
+//
+// v3.2.3: Restructured to fix filename collision bug. Now fetches all file metadata
+// first, resolves collisions using shared paths.ResolveCollisions(), then downloads.
+// This ensures multiple files with the same name don't corrupt each other.
 func executeFileDownload(
 	ctx context.Context,
 	fileIDs []string,
@@ -49,10 +54,100 @@ func executeFileDownload(
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	fmt.Printf("Downloading %d file(s) to: %s\n\n", len(fileIDs), outputDir)
+	fmt.Printf("Fetching metadata for %d file(s)...\n", len(fileIDs))
+
+	// PHASE 1: Fetch all file metadata first (v3.2.3 collision fix)
+	// This allows us to detect filename collisions before downloading.
+	type fileMetadata struct {
+		ID            string
+		Name          string
+		DecryptedSize int64
+		CloudFile     *models.CloudFile
+	}
+	fileMetadataList := make([]fileMetadata, len(fileIDs))
+	metadataErrors := make([]error, len(fileIDs))
+
+	// Use semaphore to limit concurrent metadata fetches
+	metaSemaphore := make(chan struct{}, maxConcurrent)
+	var metaWg sync.WaitGroup
+
+	for i, fileID := range fileIDs {
+		metaWg.Add(1)
+		go func(idx int, fid string) {
+			defer metaWg.Done()
+
+			// Acquire semaphore
+			metaSemaphore <- struct{}{}
+			defer func() { <-metaSemaphore }()
+
+			// Get file metadata
+			fileInfo, err := apiClient.GetFileInfo(ctx, fid)
+			if err != nil {
+				metadataErrors[idx] = fmt.Errorf("failed to get file info for %s: %w", fid, err)
+				return
+			}
+
+			// Validate filename from API to prevent path traversal
+			if err := validation.ValidateFilename(fileInfo.Name); err != nil {
+				metadataErrors[idx] = fmt.Errorf("invalid filename from API for file %s: %w", fid, err)
+				return
+			}
+
+			fileMetadataList[idx] = fileMetadata{
+				ID:            fid,
+				Name:          fileInfo.Name,
+				DecryptedSize: fileInfo.DecryptedSize,
+				CloudFile:     fileInfo,
+			}
+		}(i, fileID)
+	}
+	metaWg.Wait()
+
+	// Check for metadata fetch errors
+	var validFiles []fileMetadata
+	for i, meta := range fileMetadataList {
+		if metadataErrors[i] != nil {
+			fmt.Printf("⚠️  %v\n", metadataErrors[i])
+			continue
+		}
+		if meta.ID != "" {
+			validFiles = append(validFiles, meta)
+		}
+	}
+
+	if len(validFiles) == 0 {
+		return fmt.Errorf("no valid files to download")
+	}
+
+	// PHASE 2: Build file list and resolve collisions using shared utility
+	downloadFiles := make([]paths.FileForDownload, len(validFiles))
+	for i, meta := range validFiles {
+		downloadFiles[i] = paths.FileForDownload{
+			FileID:    meta.ID,
+			Name:      meta.Name,
+			LocalPath: filepath.Join(outputDir, meta.Name),
+			Size:      meta.DecryptedSize,
+		}
+	}
+
+	// Resolve filename collisions (v3.2.3: uses shared utility for consistency with GUI)
+	downloadFiles, collisionCount := paths.ResolveCollisions(downloadFiles)
+	if collisionCount > 0 {
+		fmt.Printf("⚠️  Found %d files with duplicate names. File IDs will be appended to ensure unique downloads.\n", collisionCount)
+	}
+
+	// Build map from file ID to resolved path
+	fileIDToPath := make(map[string]string)
+	fileIDToMeta := make(map[string]fileMetadata)
+	for i, df := range downloadFiles {
+		fileIDToPath[df.FileID] = df.LocalPath
+		fileIDToMeta[df.FileID] = validFiles[i]
+	}
+
+	fmt.Printf("Downloading %d file(s) to: %s\n\n", len(validFiles), outputDir)
 
 	// Create DownloadUI for professional progress bars
-	downloadUI := progress.NewDownloadUI(len(fileIDs))
+	downloadUI := progress.NewDownloadUI(len(validFiles))
 
 	// NOTE: Do NOT redirect zerolog through downloadUI.Writer()
 	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
@@ -60,7 +155,7 @@ func executeFileDownload(
 
 	defer downloadUI.Wait()
 
-	downloadedFiles := make([]string, 0, len(fileIDs))
+	downloadedFiles := make([]string, 0, len(validFiles))
 	skippedFiles := make([]string, 0)
 	var downloadMutex sync.Mutex
 	var conflictMode DownloadConflictAction = DownloadSkipOnce
@@ -82,32 +177,20 @@ func executeFileDownload(
 	// Use semaphore to limit concurrent downloads
 	semaphore := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
-	errChan := make(chan error, len(fileIDs))
+	errChan := make(chan error, len(validFiles))
 
-	// Download each file concurrently
-	for i, fileID := range fileIDs {
+	// PHASE 3: Download each file concurrently using resolved paths
+	for i, df := range downloadFiles {
 		wg.Add(1)
-		go func(idx int, fid string) {
+		go func(idx int, fileDownload paths.FileForDownload) {
 			defer wg.Done()
 
 			// Acquire semaphore
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			// Get file metadata first
-			fileInfo, err := apiClient.GetFileInfo(ctx, fid)
-			if err != nil {
-				errChan <- fmt.Errorf("failed to get file info for %s: %w", fid, err)
-				return
-			}
-
-			// Validate filename from API to prevent path traversal
-			if err := validation.ValidateFilename(fileInfo.Name); err != nil {
-				errChan <- fmt.Errorf("invalid filename from API for file %s: %w", fid, err)
-				return
-			}
-
-			outputPath := filepath.Join(outputDir, fileInfo.Name)
+			meta := fileIDToMeta[fileDownload.FileID]
+			outputPath := fileDownload.LocalPath
 
 			// Check if file exists and handle conflict
 			if _, err := os.Stat(outputPath); err == nil {
@@ -127,7 +210,8 @@ func executeFileDownload(
 				default:
 					// Prompt user (serialize prompts)
 					conflictMutex.Lock()
-					action, err = promptDownloadConflict(fileInfo.Name, outputPath)
+					var err error
+					action, err = promptDownloadConflict(meta.Name, outputPath)
 					if err != nil {
 						conflictMutex.Unlock()
 						errChan <- fmt.Errorf("conflict prompt failed: %w", err)
@@ -164,13 +248,13 @@ func executeFileDownload(
 					_, outErr := os.Stat(outputPath)
 
 					// Calculate expected encrypted size (decrypted size + 1-16 bytes PKCS7 padding)
-					minEncryptedSize := fileInfo.DecryptedSize + 1
-					maxEncryptedSize := fileInfo.DecryptedSize + 16
+					minEncryptedSize := meta.DecryptedSize + 1
+					maxEncryptedSize := meta.DecryptedSize + 16
 
 					// If encrypted file exists and has size within expected range, skip download and retry decryption
 					if encErr == nil && encryptedInfo.Size() >= minEncryptedSize && encryptedInfo.Size() <= maxEncryptedSize {
 						fmt.Fprintf(downloadUI.Writer(), "✓ Encrypted file complete (%d bytes), retrying decryption for %s...\n",
-							encryptedInfo.Size(), fileInfo.Name)
+							encryptedInfo.Size(), meta.Name)
 						// Remove partial decrypted file if it exists
 						if outErr == nil {
 							os.Remove(outputPath)
@@ -182,9 +266,9 @@ func executeFileDownload(
 						if resumeState != nil {
 							if err := state.ValidateDownloadState(resumeState, outputPath); err == nil {
 								// Valid resume state exists - let the downloader handle byte-offset resume
-								progress := state.GetDownloadResumeProgress(resumeState)
+								resumeProgress := state.GetDownloadResumeProgress(resumeState)
 								fmt.Fprintf(downloadUI.Writer(), "↻ Resuming download for %s from %.1f%% (%d/%d bytes)...\n",
-									fileInfo.Name, progress*100, resumeState.DownloadedBytes, resumeState.TotalSize)
+									meta.Name, resumeProgress*100, resumeState.DownloadedBytes, resumeState.TotalSize)
 								// Remove partial decrypted file if it exists (we'll re-decrypt after download completes)
 								if outErr == nil {
 									os.Remove(outputPath)
@@ -193,7 +277,7 @@ func executeFileDownload(
 							} else {
 								// Resume state exists but is invalid/expired - cleanup and restart
 								fmt.Fprintf(downloadUI.Writer(), "Resume state invalid for %s (reason: %v). Starting fresh download...\n",
-									fileInfo.Name, err)
+									meta.Name, err)
 								state.CleanupExpiredDownloadResume(resumeState, outputPath, false)
 								os.Remove(outputPath)
 							}
@@ -201,7 +285,7 @@ func executeFileDownload(
 							// No resume state - fresh start (encrypted file might be from a different/failed download)
 							if encErr == nil {
 								fmt.Fprintf(downloadUI.Writer(), "Encrypted file has unexpected size (%d bytes, expected %d-%d bytes). Starting fresh download for %s...\n",
-									encryptedInfo.Size(), minEncryptedSize, maxEncryptedSize, fileInfo.Name)
+									encryptedInfo.Size(), minEncryptedSize, maxEncryptedSize, meta.Name)
 								os.Remove(encryptedPath)
 							}
 							os.Remove(outputPath)
@@ -211,15 +295,15 @@ func executeFileDownload(
 			}
 
 			// Show "Preparing..." message before fetching credentials
-			fmt.Fprintf(downloadUI.Writer(), "[%d/%d] Preparing to download %s...\n", idx+1, len(fileIDs), fileInfo.Name)
+			fmt.Fprintf(downloadUI.Writer(), "[%d/%d] Preparing to download %s...\n", idx+1, len(downloadFiles), meta.Name)
 
 			// Allocate transfer handle for this file
-			transferHandle := transferMgr.AllocateTransfer(fileInfo.DecryptedSize, len(fileIDs))
+			transferHandle := transferMgr.AllocateTransfer(meta.DecryptedSize, len(downloadFiles))
 
 			// Print thread info if multi-threaded
-			if transferHandle.GetThreads() > 1 && fileInfo.DecryptedSize > 100*1024*1024 {
+			if transferHandle.GetThreads() > 1 && meta.DecryptedSize > 100*1024*1024 {
 				fmt.Fprintf(downloadUI.Writer(), "Using %d concurrent threads for %s\n",
-					transferHandle.GetThreads(), fileInfo.Name)
+					transferHandle.GetThreads(), meta.Name)
 			}
 
 			// Create progress bar for this file (will be created just before download starts)
@@ -227,14 +311,14 @@ func executeFileDownload(
 			var barOnce sync.Once
 
 			// Download file with progress callback and transfer handle
-			err = download.DownloadFile(ctx, download.DownloadParams{
-				FileID:    fid,
+			err := download.DownloadFile(ctx, download.DownloadParams{
+				FileID:    fileDownload.FileID,
 				LocalPath: outputPath,
 				APIClient: apiClient,
 				ProgressCallback: func(fraction float64) {
 					// Create progress bar on first progress update (lazy initialization)
 					barOnce.Do(func() {
-						fileBar = downloadUI.AddFileBar(idx+1, fid, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
+						fileBar = downloadUI.AddFileBar(idx+1, fileDownload.FileID, meta.Name, outputPath, meta.DecryptedSize)
 					})
 					if fileBar != nil {
 						fileBar.UpdateProgress(fraction)
@@ -247,34 +331,34 @@ func executeFileDownload(
 			if err != nil {
 				// Ensure progress bar exists before completing it
 				if fileBar == nil {
-					fileBar = downloadUI.AddFileBar(idx+1, fid, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
+					fileBar = downloadUI.AddFileBar(idx+1, fileDownload.FileID, meta.Name, outputPath, meta.DecryptedSize)
 				}
 				fileBar.Complete(err)
 
 				// Check if resume state exists to provide helpful guidance
 				if state.DownloadResumeStateExists(outputPath) {
-					fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", fileInfo.Name)
+					fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", meta.Name)
 				}
 
-				errChan <- fmt.Errorf("failed to download %s: %w", fid, err)
+				errChan <- fmt.Errorf("failed to download %s: %w", fileDownload.FileID, err)
 				return
 			}
 
 			logger.Info().
-				Str("file_id", fid).
+				Str("file_id", fileDownload.FileID).
 				Str("path", outputPath).
 				Msg("File downloaded successfully")
 
 			// Ensure progress bar exists before completing it
 			if fileBar == nil {
-				fileBar = downloadUI.AddFileBar(idx+1, fid, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
+				fileBar = downloadUI.AddFileBar(idx+1, fileDownload.FileID, meta.Name, outputPath, meta.DecryptedSize)
 			}
 			fileBar.Complete(nil)
 
 			downloadMutex.Lock()
 			downloadedFiles = append(downloadedFiles, outputPath)
 			downloadMutex.Unlock()
-		}(i, fileID)
+		}(i, df)
 	}
 
 	// Wait for all downloads
@@ -382,10 +466,43 @@ func executeJobDownload(
 		outputDir = "."
 	}
 
-	// v3.2.2: Pre-compute output paths and detect filename collisions
+	// v3.2.3: Pre-compute output paths and detect filename collisions
+	// Using shared paths.ResolveCollisions() utility for consistency with GUI and CLI.
 	// When multiple files have the same name (e.g., from different job runs), we must
 	// give them unique output paths to prevent concurrent download corruption.
-	fileOutputPaths := buildJobFileOutputPaths(files, outputDir)
+	downloadFiles := make([]paths.FileForDownload, len(files))
+	for i, file := range files {
+		var basePath string
+		if file.RelativePath != "" {
+			// Validate relative path to prevent escaping output directory
+			if validation.ValidatePathInDirectory(file.RelativePath, outputDir) == nil {
+				basePath = filepath.Join(outputDir, file.RelativePath)
+			} else {
+				// Invalid path - use name only
+				basePath = filepath.Join(outputDir, file.Name)
+			}
+		} else {
+			basePath = filepath.Join(outputDir, file.Name)
+		}
+		downloadFiles[i] = paths.FileForDownload{
+			FileID:    file.ID,
+			Name:      file.Name,
+			LocalPath: basePath,
+			Size:      file.DecryptedSize,
+		}
+	}
+
+	// Resolve filename collisions using shared utility
+	downloadFiles, collisionCount := paths.ResolveCollisions(downloadFiles)
+	if collisionCount > 0 {
+		fmt.Printf("⚠️  Found %d files with duplicate names. File IDs will be appended to ensure unique downloads.\n", collisionCount)
+	}
+
+	// Build map from file ID to resolved path
+	fileOutputPaths := make(map[string]string, len(downloadFiles))
+	for _, df := range downloadFiles {
+		fileOutputPaths[df.FileID] = df.LocalPath
+	}
 
 	logger.Info().
 		Int("count", len(files)).
@@ -628,63 +745,6 @@ func executeJobDownload(
 	return nil
 }
 
-// buildJobFileOutputPaths pre-computes output paths for all job files, handling filename collisions.
-// When multiple files have the same name (common when downloading outputs from parallel runs),
-// the file ID is appended to disambiguate: "model.sim" -> "model_ABC123.sim"
-// This prevents concurrent downloads from corrupting each other by writing to the same file.
-//
-// v3.2.2: Added to fix concurrent download corruption bug for same-name files.
-func buildJobFileOutputPaths(files []models.JobFile, outputDir string) map[string]string {
-	result := make(map[string]string, len(files))
-
-	// First pass: count occurrences of each output path
-	pathToFiles := make(map[string][]models.JobFile)
-
-	for _, file := range files {
-		var basePath string
-		if file.RelativePath != "" {
-			// Validate relative path to prevent escaping output directory
-			if validation.ValidatePathInDirectory(file.RelativePath, outputDir) == nil {
-				basePath = filepath.Join(outputDir, file.RelativePath)
-			} else {
-				// Invalid path - use name only
-				basePath = filepath.Join(outputDir, file.Name)
-			}
-		} else {
-			// Validate filename
-			if validation.ValidateFilename(file.Name) == nil {
-				basePath = filepath.Join(outputDir, file.Name)
-			} else {
-				// Invalid filename - skip (will error during download)
-				basePath = filepath.Join(outputDir, file.Name)
-			}
-		}
-		pathToFiles[basePath] = append(pathToFiles[basePath], file)
-	}
-
-	// Second pass: assign unique paths
-	duplicateCount := 0
-	for basePath, fileList := range pathToFiles {
-		if len(fileList) == 1 {
-			// No collision - use original path
-			result[fileList[0].ID] = basePath
-		} else {
-			// Collision detected - append file ID to each
-			duplicateCount += len(fileList)
-			for _, file := range fileList {
-				// Insert file ID before extension: "model.sim" -> "model_ABC123.sim"
-				ext := filepath.Ext(basePath)
-				base := basePath[:len(basePath)-len(ext)]
-				uniquePath := fmt.Sprintf("%s_%s%s", base, file.ID, ext)
-				result[file.ID] = uniquePath
-			}
-		}
-	}
-
-	// Warn user about filename collisions
-	if duplicateCount > 0 {
-		fmt.Printf("⚠️  Found %d files with duplicate names. File IDs will be appended to ensure unique downloads.\n", duplicateCount)
-	}
-
-	return result
-}
+// NOTE: buildJobFileOutputPaths was removed in v3.2.3.
+// Collision detection is now handled by the shared paths.ResolveCollisions() utility
+// in internal/utils/paths/collision.go for consistency across CLI and GUI.
