@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: November 30, 2025
-**Version**: 3.2.0
+**Last Updated**: December 10, 2025
+**Version**: 3.2.4
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -752,6 +752,6 @@ rm -rf /tmp/test
 
 ---
 
-**Last Updated**: November 30, 2025
-**Version**: 3.2.0
+**Last Updated**: December 10, 2025
+**Version**: 3.2.4
 **Status**: All tests passing, production ready

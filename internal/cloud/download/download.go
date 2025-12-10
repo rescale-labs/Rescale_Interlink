@@ -1,10 +1,8 @@
 // Package download provides the canonical entry point for file downloads from Rescale cloud storage.
 // This package consolidates all download functionality into a single entry point.
 //
-// Phase 7H: Uses provider factory instead of old S3Downloader/AzureDownloader classes.
-//
-// Version: 3.2.0 (Sprint 7H - Entry Point Consolidation)
-// Date: 2025-11-29
+// Version: 3.2.4
+// Date: 2025-12-10
 package download
 
 import (
@@ -24,9 +22,6 @@ import (
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
-// ProgressCallback is called during download to report progress (0.0 to 1.0)
-type ProgressCallback func(progress float64)
-
 // DownloadParams consolidates all parameters for download operations.
 // This is the single canonical way to specify download options.
 type DownloadParams struct {
@@ -45,7 +40,7 @@ type DownloadParams struct {
 	APIClient *api.Client
 
 	// Optional: Progress callback (receives values from 0.0 to 1.0)
-	ProgressCallback ProgressCallback
+	ProgressCallback cloud.ProgressCallback
 
 	// Optional: Transfer handle for concurrent chunk downloads
 	// If nil or threads <= 1, uses sequential download
@@ -105,8 +100,7 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	// This allows downloading job outputs from platform storage (e.g., S3) even if user has Azure
 	storageInfo := getStorageInfo(fileInfo, profile)
 
-	// Create provider using factory
-	// Phase 7H: Provider factory creates S3 or Azure provider based on storage type
+	// Create provider using factory (S3 or Azure based on storage type)
 	factory := providers.NewFactory()
 	provider, err := factory.NewTransferFromStorageInfo(ctx, storageInfo, params.APIClient)
 	if err != nil {

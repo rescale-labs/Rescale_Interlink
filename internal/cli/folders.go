@@ -423,7 +423,7 @@ Examples:
 				// File conflict mode: merge-folder-conflicts means skip existing files
 				fileConflictMode := FileOverwriteOnce
 				if mergeFolderConflicts {
-					fileConflictMode = FileIgnoreAll
+					fileConflictMode = FileSkipAll
 				}
 				errorMode := ErrorContinueOnce
 				uploadResult, err := uploadFiles(

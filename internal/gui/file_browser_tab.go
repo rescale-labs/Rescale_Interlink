@@ -26,6 +26,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/utils/paths"
 )
 
 // Note: DefaultMaxConcurrent is defined in internal/constants/app.go
@@ -895,6 +896,10 @@ type downloadFileInfo struct {
 
 // flattenForDownload expands folders into individual files for download
 // Uses CLI's scan logic for folders to leverage battle-tested code
+//
+// v3.2.3: Added collision detection using shared paths.ResolveCollisions() utility.
+// This ensures multiple files with the same name don't corrupt each other during
+// concurrent downloads (matches CLI behavior per CLAUDE.md north stars).
 func (fbt *FileBrowserTab) flattenForDownload(ctx context.Context, items []FileItem, destPath string, apiClient *api.Client) []downloadFileInfo {
 	var result []downloadFileInfo
 
@@ -914,6 +919,30 @@ func (fbt *FileBrowserTab) flattenForDownload(ctx context.Context, items []FileI
 				LocalPath: filepath.Join(destPath, item.Name),
 				Size:      item.Size,
 			})
+		}
+	}
+
+	// v3.2.3: Resolve filename collisions using shared utility (same as CLI)
+	// Convert to paths.FileForDownload, resolve collisions, convert back
+	if len(result) > 0 {
+		pathFiles := make([]paths.FileForDownload, len(result))
+		for i, f := range result {
+			pathFiles[i] = paths.FileForDownload{
+				FileID:    f.FileID,
+				Name:      f.Name,
+				LocalPath: f.LocalPath,
+				Size:      f.Size,
+			}
+		}
+
+		pathFiles, collisionCount := paths.ResolveCollisions(pathFiles)
+		if collisionCount > 0 {
+			fbt.logger.Warn().Int("count", collisionCount).Msg("Duplicate filenames detected, appending file IDs")
+		}
+
+		// Convert back to downloadFileInfo with resolved paths
+		for i, pf := range pathFiles {
+			result[i].LocalPath = pf.LocalPath
 		}
 	}
 
@@ -1241,15 +1270,13 @@ func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, statu
 			}
 			labelText = fmt.Sprintf("✗ %s: %s", name, errMsg)
 		default:
-			// v3.2.2: Always show 2 decimal places for consistent percentage display
+			// v3.2.3: Always show 2 decimal places for consistent percentage display
 			pct := progress * 100
-			// Calculate transfer rate
-			elapsed := now.Sub(startTime).Seconds()
-			bytesTransferred := int64(float64(size) * progress)
+			// v3.2.3: Use smoothed transfer rate (already calculated with EMA above)
+			// instead of recalculating average, which causes jumpy display
 			rateStr := ""
-			if elapsed > 0.5 && bytesTransferred > 0 { // Wait 0.5s before showing rate
-				rate := float64(bytesTransferred) / elapsed
-				rateStr = fmt.Sprintf(" @ %s", FormatTransferRate(rate))
+			if transfer.BytesPerSec > 0 {
+				rateStr = fmt.Sprintf(" @ %s", FormatTransferRate(transfer.BytesPerSec))
 			}
 			labelText = fmt.Sprintf("⟳ %s (%s) %.2f%%%s", name, sizeStr, pct, rateStr)
 		}
@@ -1347,12 +1374,12 @@ func (fbt *FileBrowserTab) interpolateProgress() {
 			label := fbt.fileProgressLabels[id]
 
 			if bar != nil {
-				// Build label text with interpolated percentage (1 decimal for smoother visual feedback)
+				// v3.2.3: Always show 2 decimal places for consistent percentage display
 				pct := newProgress * 100
 				sizeStr := FormatFileSize(transfer.Size)
 				rateStr := FormatTransferRate(transfer.BytesPerSec)
 				displayName := truncateName(transfer.Name) // Truncate for display
-				labelText := fmt.Sprintf("⟳ %s (%s) %.1f%% @ %s", displayName, sizeStr, pct, rateStr)
+				labelText := fmt.Sprintf("⟳ %s (%s) %.2f%% @ %s", displayName, sizeStr, pct, rateStr)
 
 				updates = append(updates, barUpdate{
 					bar:       bar,
