@@ -1194,9 +1194,12 @@ func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, statu
 			if elapsed > 0.1 { // Need at least 100ms between updates
 				bytesDelta := float64(transfer.Size) * (progress - transfer.Progress)
 				newRate := bytesDelta / elapsed
-				// Smooth the rate (exponential moving average)
+				// v3.2.2: Smooth the rate with exponential moving average
+				// Using alpha=0.25 gives 25% weight to new value, 75% to previous
+				// This provides much smoother speed display while remaining responsive
+				const speedSmoothingAlpha = 0.25
 				if transfer.BytesPerSec > 0 {
-					transfer.BytesPerSec = 0.7*newRate + 0.3*transfer.BytesPerSec
+					transfer.BytesPerSec = speedSmoothingAlpha*newRate + (1-speedSmoothingAlpha)*transfer.BytesPerSec
 				} else {
 					transfer.BytesPerSec = newRate
 				}
@@ -1238,7 +1241,8 @@ func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, statu
 			}
 			labelText = fmt.Sprintf("✗ %s: %s", name, errMsg)
 		default:
-			pct := int(progress * 100)
+			// v3.2.2: Always show 2 decimal places for consistent percentage display
+			pct := progress * 100
 			// Calculate transfer rate
 			elapsed := now.Sub(startTime).Seconds()
 			bytesTransferred := int64(float64(size) * progress)
@@ -1247,7 +1251,7 @@ func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, statu
 				rate := float64(bytesTransferred) / elapsed
 				rateStr = fmt.Sprintf(" @ %s", FormatTransferRate(rate))
 			}
-			labelText = fmt.Sprintf("⟳ %s (%s) %d%%%s", name, sizeStr, pct, rateStr)
+			labelText = fmt.Sprintf("⟳ %s (%s) %.2f%%%s", name, sizeStr, pct, rateStr)
 		}
 	}
 
