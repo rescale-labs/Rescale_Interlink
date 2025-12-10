@@ -1,8 +1,8 @@
 // Package transfer provides unified upload and download orchestration.
 // This file provides streaming encryption helpers for multipart uploads.
 //
-// Version: 3.2.0 (Rescale-Compatible CBC Chaining)
-// Date: 2025-12-02
+// Version: 3.2.4
+// Date: 2025-12-10
 package transfer
 
 import (
@@ -80,7 +80,8 @@ func (s *StreamingEncryptionState) GetKey() []byte {
 }
 
 // GetMasterKey returns the encryption key (for backward compatibility).
-// DEPRECATED: Use GetKey() instead.
+//
+// Deprecated: Use GetKey instead.
 func (s *StreamingEncryptionState) GetMasterKey() []byte {
 	return s.encryptor.GetKey()
 }
@@ -99,8 +100,9 @@ func (s *StreamingEncryptionState) GetCurrentIV() []byte {
 }
 
 // GetFileId returns nil for CBC streaming format.
-// DEPRECATED: v3.2.0 CBC format doesn't use FileId, only IV.
 // Kept for interface compatibility but returns nil.
+//
+// Deprecated: CBC format doesn't use FileId, only IV.
 func (s *StreamingEncryptionState) GetFileId() []byte {
 	return nil
 }
