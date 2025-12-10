@@ -106,12 +106,20 @@ func (u *DownloadUI) AddFileBar(index int, fileID, remoteName, localPath string,
 			mpb.AppendDecorators(
 				decor.CountersKibiByte("% .1f / % .1f", decor.WCSyncSpace),
 				decor.Name("  "),
-				decor.Percentage(decor.WCSyncSpace),
+				// v3.2.2: Custom percentage with consistent 2 decimal places
+				decor.Any(func(s decor.Statistics) string {
+					pct := float64(s.Current) / float64(s.Total) * 100
+					if s.Total == 0 {
+						pct = 0
+					}
+					return fmt.Sprintf("%6.2f%%", pct)
+				}, decor.WCSyncSpace),
 				decor.Name("  "),
-				decor.EwmaSpeed(decor.SizeB1024(0), "% .1f", 30, decor.WCSyncSpace),
+				// v3.2.2: Increased EWMA age from 30 to 60 for smoother speed display
+				decor.EwmaSpeed(decor.SizeB1024(0), "% .1f", 60, decor.WCSyncSpace),
 				decor.Name("  "),
 				decor.Name("ETA ", decor.WCSyncWidth),
-				decor.EwmaETA(decor.ET_STYLE_GO, 30),
+				decor.EwmaETA(decor.ET_STYLE_GO, 60),
 			),
 			mpb.BarRemoveOnComplete(),
 		)
