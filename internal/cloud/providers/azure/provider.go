@@ -1,9 +1,8 @@
 // Package azure provides an Azure implementation of the CloudTransfer interface.
-// Phase 7G: This provider uses AzureClient directly for all operations instead
-// of wrapping the upload/download packages.
+// This provider uses AzureClient directly for all operations.
 //
-// Version: 3.2.0 (Sprint 7G - Azure True Consolidation)
-// Date: 2025-11-29
+// Version: 3.2.4
+// Date: 2025-12-10
 package azure
 
 import (
@@ -17,18 +16,18 @@ import (
 )
 
 // Provider implements the CloudTransfer interface for Azure storage.
-// Phase 7G: Uses AzureClient directly for all Azure operations.
-// Sprint F.2: Supports cross-storage downloads via stored fileInfo.
+// Uses AzureClient directly for all Azure operations.
+// Supports cross-storage downloads via stored fileInfo.
 type Provider struct {
 	storageInfo *models.StorageInfo
 	apiClient   *api.Client
 
-	// Lazy-initialized Azure client (Phase 7G)
+	// Lazy-initialized Azure client, protected by azureClientMu
 	azureClient   *AzureClient
 	azureClientMu sync.Mutex
 
-	// Sprint F.2: Stored fileInfo for cross-storage credential fetching
-	// When set, all subsequent operations use file-specific credentials
+	// Stored fileInfo for cross-storage credential fetching.
+	// When set, all subsequent operations use file-specific credentials.
 	fileInfo *models.CloudFile
 }
 
@@ -52,10 +51,11 @@ func NewProvider(storageInfo *models.StorageInfo, apiClient *api.Client) (*Provi
 }
 
 // SetFileInfo sets the file info for cross-storage credential fetching.
-// Sprint F.2: This should be called by the download orchestrator before any download operations.
+// This should be called by the download orchestrator before any download operations.
 // When set, all subsequent operations (DetectFormat, DownloadStreaming, etc.) will use
 // file-specific credentials, enabling cross-storage downloads (e.g., S3 user downloading
 // Azure-stored job outputs).
+// Thread-safe: uses mutex protection.
 func (p *Provider) SetFileInfo(fileInfo *models.CloudFile) {
 	p.azureClientMu.Lock()
 	defer p.azureClientMu.Unlock()
@@ -69,8 +69,7 @@ func (p *Provider) SetFileInfo(fileInfo *models.CloudFile) {
 
 // getOrCreateAzureClient returns the existing AzureClient or creates a new one.
 // Thread-safe: Uses mutex protection.
-// Phase 7G: This is the centralized client factory for all Azure operations.
-// Sprint F.2: Uses stored fileInfo for cross-storage credential fetching if available.
+// Uses stored fileInfo for cross-storage credential fetching if available.
 func (p *Provider) getOrCreateAzureClient(ctx context.Context) (*AzureClient, error) {
 	p.azureClientMu.Lock()
 	defer p.azureClientMu.Unlock()
@@ -79,9 +78,8 @@ func (p *Provider) getOrCreateAzureClient(ctx context.Context) (*AzureClient, er
 		return p.azureClient, nil
 	}
 
-	// Sprint F.2: Use stored fileInfo for cross-storage downloads
-	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials
-	// Otherwise, use nil for user's default storage (uploads, personal files)
+	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials.
+	// Otherwise, use nil for user's default storage (uploads, personal files).
 	client, err := NewAzureClient(p.storageInfo, p.apiClient, p.fileInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure client: %w", err)
@@ -91,7 +89,7 @@ func (p *Provider) getOrCreateAzureClient(ctx context.Context) (*AzureClient, er
 }
 
 // getOrCreateAzureClientForFile returns an Azure client for file-specific downloads.
-// Sprint F.2: Now properly supports cross-storage downloads by passing fileInfo.
+// Properly supports cross-storage downloads by passing fileInfo.
 //
 // Cross-storage support:
 // When fileInfo is provided (non-nil), creates a new client with credentials for that
@@ -117,21 +115,20 @@ func (p *Provider) getOrCreateAzureClientForFile(ctx context.Context, fileInfo *
 }
 
 // Upload uploads a file to Azure storage.
-// Phase 7G: Returns error - actual upload is handled by the orchestrator through specific interfaces.
+// Returns error - actual upload is handled by the orchestrator through specific interfaces.
 // Use UploadEncryptedFile (pre-encrypt) or streaming upload methods.
 func (p *Provider) Upload(ctx context.Context, params cloud.UploadParams) (*cloud.UploadResult, error) {
 	return nil, fmt.Errorf("use UploadEncryptedFile or streaming upload methods")
 }
 
 // Download downloads and decrypts a file from Azure storage.
-// Phase 7G: Returns error - actual download is handled by the orchestrator through specific interfaces.
+// Returns error - actual download is handled by the orchestrator through specific interfaces.
 // Use DownloadEncryptedFile (legacy) or DownloadStreaming methods.
 func (p *Provider) Download(ctx context.Context, params cloud.DownloadParams) error {
 	return fmt.Errorf("use DownloadEncryptedFile or DownloadStreaming methods")
 }
 
 // RefreshCredentials refreshes Azure storage credentials before they expire.
-// Phase 7G: Delegates to AzureClient.EnsureFreshCredentials().
 func (p *Provider) RefreshCredentials(ctx context.Context) error {
 	client, err := p.getOrCreateAzureClient(ctx)
 	if err != nil {

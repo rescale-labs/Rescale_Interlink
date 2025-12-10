@@ -3,8 +3,8 @@
 // implementations, enabling consistent behavior across storage backends with
 // full support for transfer handles, concurrent operations, and resume capability.
 //
-// Version: 3.2.0 (Sprint 1 - Unified Backend Architecture)
-// Date: 2025-11-28
+// Version: 3.2.4
+// Date: 2025-12-10
 package cloud
 
 import (
@@ -154,7 +154,7 @@ type CloudTransferFactory interface {
 }
 
 // FileInfoSetter is an optional interface for providers that support cross-storage downloads.
-// Sprint F.2: Enables downloading files from storage different than user's default.
+// Enables downloading files from storage different than user's default.
 //
 // When a provider implements this interface, the download orchestrator calls SetFileInfo
 // before any download operations. This allows the provider to fetch credentials for the

@@ -13,7 +13,7 @@ import (
 
 // CreateTarGz creates a tar archive of a directory using system tar command
 // This matches the Python PUR behavior of using subprocess tar
-// BUG FIX #3 (v1.0.8): Added compression parameter to support tar_compression config option
+// Supports both compressed (gzip) and uncompressed archives via the compression parameter
 func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compression string) error {
 	// Validate source directory exists
 	info, err := os.Stat(sourceDir)
@@ -30,8 +30,7 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// BUG FIX #3 (v1.0.8): Build tar command based on compression setting
-	// Previously always used -czf (gzip compression) regardless of config.
+	// Build tar command based on compression setting
 	// Python PUR uses: tar -czf output.tar.gz -C /parent/dir dirname (with compression)
 	// Or: tar -cf output.tar -C /parent/dir dirname (without compression)
 
@@ -70,7 +69,7 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 
 // CreateTarGzWithOptions creates a tar archive with filtering and flattening options
 // This uses Go's archive/tar package for fine-grained control
-// BUG FIX #3 (v1.0.8): Added compression parameter to support tar_compression config option
+// Supports both compressed (gzip) and uncompressed archives via the compression parameter
 func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool, includePatterns, excludePatterns []string, flatten bool, compression string) error {
 	// Validate source directory exists
 	info, err := os.Stat(sourceDir)
@@ -94,8 +93,7 @@ func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool,
 	}
 	defer outFile.Close()
 
-	// BUG FIX #3 (v1.0.8): Create tar writer (with or without compression)
-	// Previously always used gzip compression. Now respects compression config.
+	// Create tar writer (with or without compression based on config)
 	var tarWriter *tar.Writer
 	if compression == "none" {
 		// No compression - write directly to file
@@ -229,8 +227,7 @@ func shouldIncludeFile(fileName string, includePatterns, excludePatterns []strin
 	return true
 }
 
-// GenerateTarPath generates a path for the tar file
-// BUG FIX #3 (v1.0.8): Added compression parameter to set correct file extension
+// GenerateTarPath generates a path for the tar file with correct extension based on compression
 func GenerateTarPath(directory, basePath, compression string) string {
 	// Clean the directory path
 	cleanDir := filepath.Clean(directory)
@@ -242,8 +239,7 @@ func GenerateTarPath(directory, basePath, compression string) string {
 	// Remove any leading dots
 	tarName = strings.TrimPrefix(tarName, ".")
 
-	// BUG FIX #3 (v1.0.8): Add extension based on compression setting
-	// Previously always added .tar.gz. Now uses .tar for uncompressed archives.
+	// Add extension based on compression setting (.tar or .tar.gz)
 	if compression == "none" {
 		tarName = tarName + ".tar"
 	} else {

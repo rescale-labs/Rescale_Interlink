@@ -44,9 +44,8 @@ type Manager struct {
 
 // Global singleton instance shared across all upload/download operations
 var (
-	globalManager     *Manager
-	globalManagerOnce sync.Once
-	globalManagerMu   sync.Mutex
+	globalManager   *Manager
+	globalManagerMu sync.Mutex
 )
 
 // GetManager returns the singleton credential manager for the given API client

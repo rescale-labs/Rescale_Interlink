@@ -302,8 +302,8 @@ func (tm *ThroughputMonitor) ShouldScaleDown(transferID string) bool {
 	defer tm.mu.Unlock()
 
 	samples := tm.samples[transferID]
-	if len(samples) < 5 {
-		return false // Not enough data
+	if len(samples) < 6 {
+		return false // Not enough data (need 6 samples for recent vs older comparison)
 	}
 
 	// Check if throughput is consistently decreasing

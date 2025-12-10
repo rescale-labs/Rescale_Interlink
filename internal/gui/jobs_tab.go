@@ -287,9 +287,9 @@ func (jt *JobsTab) createTable() {
 			case 3: // Tar
 				label.SetText(jt.formatStatus(job.TarStatus))
 			case 4: // Upload
-				// Show percentage if upload is in progress
+				// v3.2.3: Show percentage with 2 decimal places for consistency
 				if job.UploadStatus == "in_progress" && job.UploadProgress > 0 {
-					label.SetText(fmt.Sprintf("Uploading %d%%", int(job.UploadProgress*100)))
+					label.SetText(fmt.Sprintf("Uploading %.2f%%", job.UploadProgress*100))
 				} else {
 					label.SetText(jt.formatStatus(job.UploadStatus))
 				}
@@ -299,8 +299,9 @@ func (jt *JobsTab) createTable() {
 				label.SetText(jt.formatStatus(job.SubmitStatus))
 			case 7: // Status
 				status := job.Status
+				// v3.2.3: Show percentage with 2 decimal places for consistency
 				if job.Progress > 0 && job.Progress < 1.0 {
-					status += fmt.Sprintf(" (%.0f%%)", job.Progress*100)
+					status += fmt.Sprintf(" (%.2f%%)", job.Progress*100)
 				}
 				label.SetText(status)
 			case 8: // Job ID

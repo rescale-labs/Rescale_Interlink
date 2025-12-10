@@ -156,7 +156,7 @@ func executeFileUploadWithDuplicateCheck(
 	case UploadDuplicateModeSkipAll:
 		conflictMode = UploadSkipAll
 	case UploadDuplicateModeUploadAll:
-		conflictMode = UploadAnywayAll
+		conflictMode = UploadOverwriteAll
 	default:
 		conflictMode = UploadSkipOnce // Will prompt
 	}
@@ -172,7 +172,7 @@ func executeFileUploadWithDuplicateCheck(
 
 		// File exists - handle based on mode
 		action := conflictMode
-		if action == UploadSkipOnce || action == UploadAnyway {
+		if action == UploadSkipOnce || action == UploadOverwriteOnce {
 			// Need to prompt for this file
 			action, err = promptUploadConflict(fileName, "")
 			if err != nil {
@@ -180,7 +180,7 @@ func executeFileUploadWithDuplicateCheck(
 			}
 
 			// Update mode if user chose "for all"
-			if action == UploadSkipAll || action == UploadAnywayAll {
+			if action == UploadSkipAll || action == UploadOverwriteAll {
 				conflictMode = action
 			}
 		}
@@ -189,7 +189,7 @@ func executeFileUploadWithDuplicateCheck(
 		case UploadSkipOnce, UploadSkipAll:
 			fmt.Printf("⊘ Skipping duplicate: %s\n", fileName)
 			filesSkipped++
-		case UploadAnyway, UploadAnywayAll:
+		case UploadOverwriteOnce, UploadOverwriteAll:
 			fmt.Printf("⊕ Uploading duplicate: %s\n", fileName)
 			filesToUpload = append(filesToUpload, filePath)
 		case UploadAbort:
