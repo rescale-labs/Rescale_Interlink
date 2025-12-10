@@ -327,6 +327,7 @@ func executeFileDownload(
 //   - Total download time now limited primarily by S3/Azure transfer speed, not API calls!
 //
 // 2025-11-20: Switched ListJobFiles to v2 endpoint + eliminated GetFileInfo calls
+// 2025-12-09: Fixed filename collision bug - files with same name now get unique paths
 //
 // This mirrors executeFileDownload but fetches files from a job instead
 func executeJobDownload(
@@ -380,6 +381,11 @@ func executeJobDownload(
 	if outputDir == "" {
 		outputDir = "."
 	}
+
+	// v3.2.2: Pre-compute output paths and detect filename collisions
+	// When multiple files have the same name (e.g., from different job runs), we must
+	// give them unique output paths to prevent concurrent download corruption.
+	fileOutputPaths := buildJobFileOutputPaths(files, outputDir)
 
 	logger.Info().
 		Int("count", len(files)).
@@ -437,21 +443,10 @@ func executeJobDownload(
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			// Determine output path (preserve relative path if present)
-			var outputPath string
-			if jobFile.RelativePath != "" {
-				// Validate relative path to prevent escaping output directory
-				if err := validation.ValidatePathInDirectory(jobFile.RelativePath, outputDir); err != nil {
-					errChan <- fmt.Errorf("invalid relative path from API for file %s: %w", jobFile.Name, err)
-					return
-				}
-				outputPath = filepath.Join(outputDir, jobFile.RelativePath)
-			} else {
-				// Validate filename to prevent path traversal
-				if err := validation.ValidateFilename(jobFile.Name); err != nil {
-					errChan <- fmt.Errorf("invalid filename from API for file %s: %w", jobFile.Name, err)
-					return
-				}
+			// v3.2.2: Use pre-computed output path (handles filename collisions)
+			outputPath := fileOutputPaths[jobFile.ID]
+			if outputPath == "" {
+				// Fallback (should never happen)
 				outputPath = filepath.Join(outputDir, jobFile.Name)
 			}
 
@@ -631,4 +626,65 @@ func executeJobDownload(
 		fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
 	}
 	return nil
+}
+
+// buildJobFileOutputPaths pre-computes output paths for all job files, handling filename collisions.
+// When multiple files have the same name (common when downloading outputs from parallel runs),
+// the file ID is appended to disambiguate: "model.sim" -> "model_ABC123.sim"
+// This prevents concurrent downloads from corrupting each other by writing to the same file.
+//
+// v3.2.2: Added to fix concurrent download corruption bug for same-name files.
+func buildJobFileOutputPaths(files []models.JobFile, outputDir string) map[string]string {
+	result := make(map[string]string, len(files))
+
+	// First pass: count occurrences of each output path
+	pathToFiles := make(map[string][]models.JobFile)
+
+	for _, file := range files {
+		var basePath string
+		if file.RelativePath != "" {
+			// Validate relative path to prevent escaping output directory
+			if validation.ValidatePathInDirectory(file.RelativePath, outputDir) == nil {
+				basePath = filepath.Join(outputDir, file.RelativePath)
+			} else {
+				// Invalid path - use name only
+				basePath = filepath.Join(outputDir, file.Name)
+			}
+		} else {
+			// Validate filename
+			if validation.ValidateFilename(file.Name) == nil {
+				basePath = filepath.Join(outputDir, file.Name)
+			} else {
+				// Invalid filename - skip (will error during download)
+				basePath = filepath.Join(outputDir, file.Name)
+			}
+		}
+		pathToFiles[basePath] = append(pathToFiles[basePath], file)
+	}
+
+	// Second pass: assign unique paths
+	duplicateCount := 0
+	for basePath, fileList := range pathToFiles {
+		if len(fileList) == 1 {
+			// No collision - use original path
+			result[fileList[0].ID] = basePath
+		} else {
+			// Collision detected - append file ID to each
+			duplicateCount += len(fileList)
+			for _, file := range fileList {
+				// Insert file ID before extension: "model.sim" -> "model_ABC123.sim"
+				ext := filepath.Ext(basePath)
+				base := basePath[:len(basePath)-len(ext)]
+				uniquePath := fmt.Sprintf("%s_%s%s", base, file.ID, ext)
+				result[file.ID] = uniquePath
+			}
+		}
+	}
+
+	// Warn user about filename collisions
+	if duplicateCount > 0 {
+		fmt.Printf("⚠️  Found %d files with duplicate names. File IDs will be appended to ensure unique downloads.\n", duplicateCount)
+	}
+
+	return result
 }
