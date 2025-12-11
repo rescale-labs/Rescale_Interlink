@@ -1,8 +1,13 @@
 // Package transfer provides unified upload and download orchestration.
 // This file implements the unified download orchestrator that works with any CloudTransfer provider.
 //
-// Version: 3.2.0 (Concurrent Streaming Download Implementation)
-// Date: 2025-12-01
+// Version: 3.2.4 (CBC Streaming Download)
+// Date: 2025-12-10
+//
+// Format versions supported:
+//   - v0 (legacy): Download all → decrypt all, requires .encrypted temp file
+//   - v1 (HKDF): Per-part key derivation, parallel decryption, no temp file
+//   - v2 (CBC streaming): Sequential CBC decryption, no temp file (v3.2.4+)
 package transfer
 
 import (
@@ -17,6 +22,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/storage"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/models"
@@ -157,10 +163,18 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 			IV:             effectiveIV,
 		}
 
-		if formatVersion == 1 {
+		// Route to appropriate download method based on format version
+		// v0: Legacy (download all → decrypt all → temp file)
+		// v1: HKDF streaming (per-part keys, parallel decryption possible)
+		// v2: CBC streaming (sequential decryption, no temp file) - v3.2.4+
+		switch formatVersion {
+		case 2:
+			return d.downloadCBCStreaming(ctx, prep)
+		case 1:
 			return d.downloadStreaming(ctx, prep, formatDetector)
+		default:
+			return d.downloadLegacy(ctx, prep)
 		}
-		return d.downloadLegacy(ctx, prep)
 	}
 
 	// Provider doesn't support format detection - fall back to legacy behavior
@@ -274,6 +288,117 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 			}
 		}
 		return fmt.Errorf("decryption failed: %w", err)
+	}
+
+	// Complete transfer handle if provided
+	if prep.TransferHandle != nil {
+		prep.TransferHandle.Complete()
+	}
+
+	return nil
+}
+
+// downloadCBCStreaming downloads using CBC chaining format (v2) with streaming decryption.
+// v3.2.4: Files uploaded by rescale-int with `streamingformat: cbc` metadata can use this path
+// to avoid creating a temp file. Parts are decrypted sequentially using CBCStreamingDecryptor.
+//
+// Key difference from legacy: Instead of download-all → decrypt-all, we download and decrypt
+// each part sequentially, writing directly to the final file.
+//
+// The CBC decryption MUST be sequential because each part's IV is the last ciphertext block
+// of the previous part. HKDF (v1) can decrypt parts in parallel because each part has its own
+// derived key/IV, but CBC cannot.
+func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPrep) error {
+	if prep.Params.OutputWriter != nil {
+		fmt.Fprintf(prep.Params.OutputWriter, "Using CBC streaming format (v2) download - no temp file\n")
+	}
+
+	// Check if provider supports part-level downloads
+	partDownloader, ok := d.provider.(StreamingPartDownloader)
+	if !ok {
+		// Fall back to legacy if provider doesn't support part downloads
+		if prep.Params.OutputWriter != nil {
+			fmt.Fprintf(prep.Params.OutputWriter, "Note: Provider doesn't support part downloads, falling back to legacy\n")
+		}
+		return d.downloadLegacy(ctx, prep)
+	}
+
+	// Get encrypted size from cloud
+	encryptedSize, err := partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
+	if err != nil {
+		return fmt.Errorf("failed to get encrypted size: %w", err)
+	}
+
+	// Create output file directly (no temp file!)
+	outFile, err := os.Create(prep.Params.LocalPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outFile.Close()
+
+	// Create CBC streaming decryptor
+	decryptor, err := encryption.NewCBCStreamingDecryptor(prep.EncryptionKey, prep.IV)
+	if err != nil {
+		return fmt.Errorf("failed to create CBC decryptor: %w", err)
+	}
+
+	// Use standard chunk size for part boundaries
+	// CBC streaming was uploaded with 16MB parts, each part is a multiple of 16 bytes
+	partSize := int64(constants.ChunkSize) // 16MB
+
+	// Calculate number of parts
+	numParts := (encryptedSize + partSize - 1) / partSize
+
+	// Track progress
+	var downloadedBytes int64
+
+	// Download and decrypt each part sequentially
+	for partIndex := int64(0); partIndex < numParts; partIndex++ {
+		// Calculate byte range for this part
+		startByte := partIndex * partSize
+		endByte := startByte + partSize
+		if endByte > encryptedSize {
+			endByte = encryptedSize
+		}
+		partLength := endByte - startByte
+
+		// Download this part's ciphertext
+		ciphertext, err := partDownloader.DownloadEncryptedRange(ctx, prep.Params.RemotePath, startByte, partLength)
+		if err != nil {
+			return fmt.Errorf("failed to download part %d: %w", partIndex, err)
+		}
+
+		// Determine if this is the final part
+		isFinal := (partIndex == numParts-1)
+
+		// Decrypt this part (updates internal IV state for next part)
+		plaintext, err := decryptor.DecryptPart(ciphertext, isFinal)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt part %d: %w", partIndex, err)
+		}
+
+		// Write plaintext directly to output file
+		if _, err := outFile.Write(plaintext); err != nil {
+			return fmt.Errorf("failed to write part %d: %w", partIndex, err)
+		}
+
+		// Update progress
+		downloadedBytes += int64(len(ciphertext))
+		if prep.Params.ProgressCallback != nil && encryptedSize > 0 {
+			prep.Params.ProgressCallback(float64(downloadedBytes) / float64(encryptedSize))
+		}
+
+		// Record throughput if transfer handle available
+		if prep.TransferHandle != nil {
+			// Rough estimate: assume ~100ms per part for throughput calculation
+			bytesPerSec := float64(len(ciphertext)) * 10.0
+			prep.TransferHandle.RecordThroughput(bytesPerSec)
+		}
+	}
+
+	// Report 100% at end
+	if prep.Params.ProgressCallback != nil {
+		prep.Params.ProgressCallback(1.0)
 	}
 
 	// Complete transfer handle if provided

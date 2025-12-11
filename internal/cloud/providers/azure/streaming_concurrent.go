@@ -189,8 +189,10 @@ func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *tra
 	}
 
 	// v3.2.0: Metadata uses `iv` field for Rescale compatibility
+	// v3.2.4: Added `streamingformat: cbc` to enable streaming download (no temp file)
 	metadata := map[string]*string{
-		"iv": to.Ptr(encryption.EncodeBase64(uploadState.InitialIV)),
+		"iv":              to.Ptr(encryption.EncodeBase64(uploadState.InitialIV)),
+		"streamingformat": to.Ptr("cbc"), // v3.2.4: Marks file as CBC-chained streaming
 	}
 
 	// Commit block list using AzureClient
@@ -325,8 +327,9 @@ func (rsc *readSeekCloser) Close() error {
 // =============================================================================
 
 // DetectFormat detects the encryption format from Azure blob metadata.
-// Returns: formatVersion (0=legacy/CBC, 1=HKDF streaming), fileId (base64), partSize, iv, error
+// Returns: formatVersion (0=legacy, 1=HKDF streaming, 2=CBC streaming), fileId (base64), partSize, iv, error
 // v3.2.0: Both new uploads (IV) and old uploads (HKDF) are supported for download.
+// v3.2.4: Added format version 2 for CBC streaming downloads (no temp file needed).
 func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
 	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
@@ -395,7 +398,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		return 1, fileId, partSize, nil, nil
 	}
 
-	// Legacy/CBC format - get IV from metadata
+	// Check for CBC streaming format (v3.2.4+) and get IV from metadata
 	var iv []byte
 	for _, key := range []string{"iv", "IV", "Iv"} {
 		if v, ok := metadata[key]; ok && v != nil && *v != "" {
@@ -408,6 +411,17 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		}
 	}
 
+	// Check for streamingformat: cbc
+	for _, key := range []string{"streamingformat", "streamingFormat", "StreamingFormat", "Streamingformat"} {
+		if v, ok := metadata[key]; ok && v != nil && *v == "cbc" {
+			// CBC streaming format - uploaded by rescale-int v3.2.4+
+			// Can use streaming download (no temp file) with sequential part decryption
+			return 2, "", 0, iv, nil
+		}
+	}
+
+	// Legacy format - file uploaded by Rescale platform or older rescale-int
+	// Must use downloadLegacy() with temp file
 	return 0, "", 0, iv, nil
 }
 

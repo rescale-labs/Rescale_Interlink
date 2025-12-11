@@ -69,6 +69,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 
 	// Create multipart upload on S3 with retry
 	// v3.2.0: Metadata uses `iv` field for Rescale compatibility
+	// v3.2.4: Added `streamingformat: cbc` to enable streaming download (no temp file)
 	var createResp *s3.CreateMultipartUploadOutput
 	err = s3Client.RetryWithBackoff(ctx, "CreateMultipartUpload", func() error {
 		var err error
@@ -76,7 +77,8 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 			Bucket: aws.String(s3Client.Bucket()),
 			Key:    aws.String(objectKey),
 			Metadata: map[string]string{
-				"iv": encryption.EncodeBase64(encryptState.GetInitialIV()),
+				"iv":              encryption.EncodeBase64(encryptState.GetInitialIV()),
+				"streamingformat": "cbc", // v3.2.4: Marks file as CBC-chained streaming
 			},
 		})
 		return err
@@ -330,8 +332,9 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 // =============================================================================
 
 // DetectFormat detects the encryption format from S3 object metadata.
-// Returns: formatVersion (0=legacy/CBC, 1=HKDF streaming), fileId (base64), partSize, iv, error
+// Returns: formatVersion (0=legacy, 1=HKDF streaming, 2=CBC streaming), fileId (base64), partSize, iv, error
 // v3.2.0: Both new uploads (IV) and old uploads (HKDF) are supported for download.
+// v3.2.4: Added format version 2 for CBC streaming downloads (no temp file needed).
 func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
@@ -374,7 +377,9 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		return 1, fileId, partSize, nil, nil
 	}
 
-	// Legacy/CBC format - get IV from metadata
+	// Check for CBC streaming format (v3.2.4+)
+	// This indicates the file was uploaded with rescale-int using CBC chaining
+	// and can be downloaded without a temp file using sequential part decryption
 	var iv []byte
 	if ivStr, ok := headResp.Metadata["iv"]; ok && ivStr != "" {
 		iv, err = encryption.DecodeBase64(ivStr)
@@ -384,6 +389,14 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		}
 	}
 
+	if sf, ok := headResp.Metadata["streamingformat"]; ok && sf == "cbc" {
+		// CBC streaming format - uploaded by rescale-int v3.2.4+
+		// Can use streaming download (no temp file) with sequential part decryption
+		return 2, "", 0, iv, nil
+	}
+
+	// Legacy format - file uploaded by Rescale platform or older rescale-int
+	// Must use downloadLegacy() with temp file
 	return 0, "", 0, iv, nil
 }
 

@@ -426,6 +426,7 @@ func executeJobDownload(
 	filterPatterns []string,
 	excludePatterns []string,
 	searchTerms []string,
+	pathFilterPatterns []string,
 	apiClient *api.Client,
 	logger *logging.Logger,
 ) error {
@@ -444,11 +445,12 @@ func executeJobDownload(
 
 	// Apply filters if any are specified
 	files := allFiles
-	if len(filterPatterns) > 0 || len(excludePatterns) > 0 || len(searchTerms) > 0 {
+	if len(filterPatterns) > 0 || len(excludePatterns) > 0 || len(searchTerms) > 0 || len(pathFilterPatterns) > 0 {
 		filterCfg := filter.Config{
-			Include: filterPatterns,
-			Exclude: excludePatterns,
-			Search:  searchTerms,
+			Include:     filterPatterns,
+			Exclude:     excludePatterns,
+			Search:      searchTerms,
+			PathInclude: pathFilterPatterns,
 		}
 		files = filter.ApplyToJobFiles(allFiles, filterCfg)
 

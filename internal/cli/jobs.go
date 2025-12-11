@@ -771,6 +771,7 @@ func newJobsDownloadCmd() *cobra.Command {
 	var filterPatterns string
 	var excludePatterns string
 	var searchTerms string
+	var pathFilterPatterns string
 
 	cmd := &cobra.Command{
 		Use:   "download",
@@ -802,6 +803,11 @@ Examples:
 
   # Combined filters (include .dat files, exclude debug files, must contain "final")
   rescale-int jobs download -j XxYyZz --filter "*.dat" --exclude "debug*" --search "final"
+
+  # Download files from specific folder paths (--path-filter)
+  rescale-int jobs download -j XxYyZz --path-filter "run_1/*.dat"
+  rescale-int jobs download -j XxYyZz --path-filter "run_*/output/*"
+  rescale-int jobs download -j XxYyZz --path-filter "**/results/*.csv"
 
   # Download all files, overwriting existing
   rescale-int jobs download --job-id XxYyZz --overwrite
@@ -855,9 +861,10 @@ Examples:
 				filterList := filter.ParsePatternList(filterPatterns)
 				excludeList := filter.ParsePatternList(excludePatterns)
 				searchList := filter.ParsePatternList(searchTerms)
+				pathFilterList := filter.ParsePatternList(pathFilterPatterns)
 
 				// Use helper function for symmetry with files download
-				return executeJobDownload(ctx, jobID, outputDir, maxConcurrent, overwriteAll, skipAll, resumeAll, skipChecksum, filterList, excludeList, searchList, apiClient, logger)
+				return executeJobDownload(ctx, jobID, outputDir, maxConcurrent, overwriteAll, skipAll, resumeAll, skipChecksum, filterList, excludeList, searchList, pathFilterList, apiClient, logger)
 			}
 
 			// MODE 2: Download specific file
@@ -965,6 +972,7 @@ Examples:
 	cmd.Flags().StringVar(&filterPatterns, "filter", "", "Include only files matching these patterns (comma-separated glob patterns, e.g. \"*.dat,*.log\")")
 	cmd.Flags().StringVarP(&excludePatterns, "exclude", "x", "", "Exclude files matching these patterns (comma-separated glob patterns, e.g. \"debug*,temp*\")")
 	cmd.Flags().StringVarP(&searchTerms, "search", "s", "", "Include only files containing these terms in filename (comma-separated, case-insensitive)")
+	cmd.Flags().StringVar(&pathFilterPatterns, "path-filter", "", "Include only files matching these path patterns (supports ** for recursive matching, e.g. \"run_1/*.dat\" or \"**/results/*\")")
 
 	cmd.MarkFlagRequired("job-id")
 
@@ -1251,5 +1259,5 @@ func downloadJobResults(ctx context.Context, jobID string, apiClient *api.Client
 	// This provides concurrent downloads, modern progress UI, and fixes zerolog warnings
 	// No filters for E2E workflow - download all files
 	// Use strict checksum verification (skipChecksum=false)
-	return executeJobDownload(ctx, jobID, outputDir, 5, false, false, false, false, nil, nil, nil, apiClient, logger)
+	return executeJobDownload(ctx, jobID, outputDir, 5, false, false, false, false, nil, nil, nil, nil, apiClient, logger)
 }
