@@ -12,20 +12,24 @@ import (
 // Manager manages a shared pool of threads/goroutines for file transfers
 // It allocates threads between concurrent files and concurrent parts within files
 type Manager struct {
-	totalThreads     int            // Total threads in the pool
-	availableThreads int            // Currently available (not allocated)
-	baselineThreads  int            // Baseline calculated from CPU cores
-	memoryLimit      int            // Max threads based on memory
-	autoScale        bool           // Whether auto-scaling is enabled
-	allocations      map[string]int // Track allocations per transfer ID
-	mu               sync.Mutex     // Protects all fields
-	monitor          *ThroughputMonitor
+	totalThreads        int            // Total threads in the pool
+	availableThreads    int            // Currently available (not allocated)
+	baselineThreads     int            // Baseline calculated from CPU cores
+	memoryLimit         int            // Max threads based on memory
+	autoScale           bool           // Whether auto-scaling is enabled
+	aggressiveMode      bool           // Use more threads for large files
+	aggressiveThreshold int64          // File size threshold for aggressive mode
+	allocations         map[string]int // Track allocations per transfer ID
+	mu                  sync.Mutex     // Protects all fields
+	monitor             *ThroughputMonitor
 }
 
 // Config holds configuration for the resource manager
 type Config struct {
-	MaxThreads int  // User-specified max threads (0 = auto-detect)
-	AutoScale  bool // Enable auto-scaling
+	MaxThreads          int   // User-specified max threads (0 = auto-detect)
+	AutoScale           bool  // Enable auto-scaling
+	AggressiveMode      bool  // More aggressive thread allocation for large files
+	AggressiveThreshold int64 // File size threshold for aggressive mode (default 100MB)
 }
 
 // NewManager creates a new resource manager
@@ -64,14 +68,29 @@ func NewManager(config Config) *Manager {
 		}
 	}
 
+	// Set default aggressive mode settings
+	aggressiveMode := config.AggressiveMode
+	aggressiveThreshold := config.AggressiveThreshold
+	if aggressiveThreshold == 0 {
+		aggressiveThreshold = constants.SmallFileThreshold // 100MB default
+	}
+
+	// Enable aggressive mode by default for better performance
+	// This is safe because we cap at CPU cores
+	if !config.AggressiveMode && config.AggressiveThreshold == 0 {
+		aggressiveMode = true
+	}
+
 	return &Manager{
-		totalThreads:     totalThreads,
-		availableThreads: totalThreads,
-		baselineThreads:  baselineThreads,
-		memoryLimit:      memoryThreads,
-		autoScale:        config.AutoScale,
-		allocations:      make(map[string]int),
-		monitor:          NewThroughputMonitor(),
+		totalThreads:        totalThreads,
+		availableThreads:    totalThreads,
+		baselineThreads:     baselineThreads,
+		memoryLimit:         memoryThreads,
+		autoScale:           config.AutoScale,
+		aggressiveMode:      aggressiveMode,
+		aggressiveThreshold: aggressiveThreshold,
+		allocations:         make(map[string]int),
+		monitor:             NewThroughputMonitor(),
 	}
 }
 
@@ -157,6 +176,8 @@ type ManagerStats struct {
 // calculateDesiredThreads determines how many threads a transfer should get
 // This is called with the lock already held
 func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
+	cpuCores := runtime.NumCPU()
+
 	// For small files, use sequential
 	if fileSize < constants.SmallFileThreshold {
 		return constants.MinThreadsPerFile
@@ -196,6 +217,23 @@ func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
 		desired = constants.ThreadsFor10GBPlus
 	}
 
+	// Aggressive mode: double threads for large files, capped at CPU cores
+	// This improves throughput for multi-GB files where network/disk can handle more parallelism
+	if m.aggressiveMode && fileSize >= m.aggressiveThreshold {
+		// Scale factor based on file size
+		if fileSize >= constants.LargeFile10GB {
+			// 10GB+: use up to 2x threads
+			desired = desired * 2
+		} else if fileSize >= constants.LargeFile5GB {
+			// 5-10GB: use up to 1.75x threads
+			desired = desired * 7 / 4
+		} else if fileSize >= constants.LargeFile1GB {
+			// 1-5GB: use up to 1.5x threads
+			desired = desired * 3 / 2
+		}
+		// else: 100MB-1GB uses base allocation
+	}
+
 	// Cap at pool share
 	if desired > poolShare {
 		desired = poolShare
@@ -204,6 +242,11 @@ func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
 	// Never exceed max threads per file
 	if desired > constants.MaxThreadsPerFile {
 		desired = constants.MaxThreadsPerFile
+	}
+
+	// Never exceed CPU cores (hard limit for aggressive mode)
+	if desired > cpuCores {
+		desired = cpuCores
 	}
 
 	return desired
