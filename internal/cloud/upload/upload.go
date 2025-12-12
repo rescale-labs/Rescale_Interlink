@@ -198,7 +198,17 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	return cloudFile, nil
 }
 
+// encryptedPart holds an encrypted part ready for upload (used for pipelining).
+// v3.4.0: Enables encryption to run ahead of uploads.
+type encryptedPart struct {
+	partIndex  int64
+	ciphertext []byte
+	plainSize  int64 // Original plaintext size for accurate tracking
+	err        error
+}
+
 // uploadStreaming uses the StreamingConcurrentUploader interface for streaming uploads.
+// v3.4.0: Pipelined architecture - encryption runs ahead of uploads for 30-50% speedup.
 func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params UploadParams, fileSize int64) (*cloud.UploadResult, error) {
 	// Cast to StreamingConcurrentUploader
 	streamingUploader, ok := provider.(transfer.StreamingConcurrentUploader)
@@ -225,41 +235,85 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	}
 	defer file.Close()
 
-	// Upload parts sequentially (concurrent upload would require worker pool)
+	// v3.4.0: Pipelined upload - encryption runs ahead of network uploads
+	// Buffer 2-3 encrypted parts (32-48 MB) to hide network latency
+	// Encryption is still sequential (CBC constraint), but overlaps with uploads
+	encryptedChan := make(chan encryptedPart, 3)
+
+	// Encryption goroutine: reads file, encrypts parts, sends to channel
+	// Must be sequential due to CBC chaining constraint
+	go func() {
+		defer close(encryptedChan)
+		buffer := make([]byte, uploadState.PartSize)
+		var partIndex int64 = 0
+
+		for {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				encryptedChan <- encryptedPart{err: ctx.Err()}
+				return
+			default:
+			}
+
+			n, readErr := file.Read(buffer)
+			if n > 0 {
+				// Make copy of plaintext (buffer will be reused)
+				plaintext := make([]byte, n)
+				copy(plaintext, buffer[:n])
+
+				// Encrypt this part (sequential, CBC constraint)
+				ciphertext, encErr := streamingUploader.EncryptStreamingPart(ctx, uploadState, partIndex, plaintext)
+				if encErr != nil {
+					encryptedChan <- encryptedPart{err: encErr}
+					return
+				}
+
+				// Send encrypted part to upload goroutine
+				encryptedChan <- encryptedPart{
+					partIndex:  partIndex,
+					ciphertext: ciphertext,
+					plainSize:  int64(n),
+				}
+				partIndex++
+			}
+
+			if readErr == io.EOF {
+				return
+			}
+			if readErr != nil {
+				encryptedChan <- encryptedPart{err: fmt.Errorf("failed to read file: %w", readErr)}
+				return
+			}
+		}
+	}()
+
+	// Upload loop: receives encrypted parts from channel and uploads
+	// Can overlap with encryption (pipelining)
 	var parts []*transfer.PartResult
-	buffer := make([]byte, uploadState.PartSize)
-	var partIndex int64 = 0
 
-	for {
-		n, err := file.Read(buffer)
-		if n > 0 {
-			// Upload this part
-			partData := make([]byte, n)
-			copy(partData, buffer[:n])
-
-			partResult, err := streamingUploader.UploadStreamingPart(ctx, uploadState, partIndex, partData)
-			if err != nil {
-				// Abort upload on failure
-				_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
-				// Don't wrap with "failed to upload part" - the underlying error already has part info
-				return nil, err
-			}
-			parts = append(parts, partResult)
-
-			// Report progress
-			if params.ProgressCallback != nil {
-				progress := float64(partIndex+1) / float64(uploadState.TotalParts)
-				params.ProgressCallback(progress)
-			}
-
-			partIndex++
+	for enc := range encryptedChan {
+		// Check for encryption error
+		if enc.err != nil {
+			_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
+			return nil, enc.err
 		}
-		if err == io.EOF {
-			break
-		}
+
+		// Upload the encrypted part
+		partResult, err := streamingUploader.UploadCiphertext(ctx, uploadState, enc.partIndex, enc.ciphertext)
 		if err != nil {
 			_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
-			return nil, fmt.Errorf("failed to read file: %w", err)
+			return nil, err
+		}
+
+		// Update size to plaintext size for accurate tracking
+		partResult.Size = enc.plainSize
+		parts = append(parts, partResult)
+
+		// Report progress
+		if params.ProgressCallback != nil {
+			progress := float64(len(parts)) / float64(uploadState.TotalParts)
+			params.ProgressCallback(progress)
 		}
 	}
 

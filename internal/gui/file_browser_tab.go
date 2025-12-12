@@ -82,7 +82,8 @@ type FileBrowserTab struct {
 	totalFiles      int32
 	completedFiles  int32
 	activeTransfers map[string]*FileTransferProgress
-	stopInterpolate chan struct{} // Signal to stop progress interpolation ticker
+	stopInterpolate   chan struct{}  // Signal to stop progress interpolation ticker
+	interpolateWg     sync.WaitGroup // v3.4.0: WaitGroup to ensure goroutine exits before restart
 
 	// Status
 	statusBar *StatusBar
@@ -270,6 +271,9 @@ func (fbt *FileBrowserTab) updateTransferButtonsInternal() {
 	isTransferring := fbt.isTransferring
 	fbt.mu.RUnlock()
 
+	// v3.4.0: Check if viewing Jobs (upload not allowed to Jobs)
+	isJobsView := fbt.remoteBrowser.IsJobsView()
+
 	if isTransferring {
 		fbt.uploadBtn.Disable()
 		fbt.downloadBtn.Disable()
@@ -279,13 +283,23 @@ func (fbt *FileBrowserTab) updateTransferButtonsInternal() {
 	}
 
 	// Upload and local delete buttons
-	if localCount > 0 {
+	// v3.4.0: Disable upload when viewing My Jobs (can only upload to My Library)
+	if localCount > 0 && !isJobsView {
 		fbt.uploadBtn.Enable()
 		fbt.uploadBtn.SetText(fmt.Sprintf("Upload %d →", localCount))
-		fbt.deleteLocalBtn.Enable()
 	} else {
 		fbt.uploadBtn.Disable()
-		fbt.uploadBtn.SetText("Upload →")
+		if isJobsView && localCount > 0 {
+			fbt.uploadBtn.SetText("Upload (N/A in Jobs)")
+		} else {
+			fbt.uploadBtn.SetText("Upload →")
+		}
+	}
+
+	// Local delete button (independent of Jobs view)
+	if localCount > 0 {
+		fbt.deleteLocalBtn.Enable()
+	} else {
 		fbt.deleteLocalBtn.Disable()
 	}
 
@@ -554,6 +568,19 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 		go func(f uploadFileInfo) {
 			defer wg.Done()
 
+			// v3.4.0: Panic recovery to prevent GUI crashes from upload failures
+			defer func() {
+				if r := recover(); r != nil {
+					fbt.logger.Error().Msgf("PANIC in upload goroutine for %s: %v", f.LocalPath, r)
+					fyne.Do(func() {
+						fbt.updateFileProgress(f.LocalPath, 1.0, "error", fmt.Errorf("panic: %v", r))
+					})
+					atomic.AddInt32(&errorCount, 1)
+					atomic.AddInt32(&fbt.completedFiles, 1)
+					fbt.updateOverallProgress()
+				}
+			}()
+
 			// Acquire semaphore
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
@@ -820,6 +847,19 @@ func (fbt *FileBrowserTab) executeDownloadConcurrent(items []FileItem, destPath 
 		wg.Add(1)
 		go func(f downloadFileInfo) {
 			defer wg.Done()
+
+			// v3.4.0: Panic recovery to prevent GUI crashes from download failures
+			defer func() {
+				if r := recover(); r != nil {
+					fbt.logger.Error().Msgf("PANIC in download goroutine for %s: %v", f.Name, r)
+					fyne.Do(func() {
+						fbt.updateFileProgress(f.FileID, 1.0, "error", fmt.Errorf("panic: %v", r))
+					})
+					atomic.AddInt32(&errorCount, 1)
+					atomic.AddInt32(&fbt.completedFiles, 1)
+					fbt.updateOverallProgress()
+				}
+			}()
 
 			// Acquire semaphore
 			semaphore <- struct{}{}
@@ -1295,8 +1335,9 @@ func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, statu
 
 // startProgressInterpolation starts a goroutine that interpolates progress
 // between real callbacks for smoother UI updates (2-3 times per second)
+// v3.4.0: Uses WaitGroup to ensure clean goroutine lifecycle management
 func (fbt *FileBrowserTab) startProgressInterpolation() {
-	// Stop any existing interpolation ticker
+	// Stop any existing interpolation ticker and wait for goroutine to exit
 	fbt.stopProgressInterpolation()
 
 	fbt.mu.Lock()
@@ -1304,7 +1345,18 @@ func (fbt *FileBrowserTab) startProgressInterpolation() {
 	stopCh := fbt.stopInterpolate
 	fbt.mu.Unlock()
 
+	fbt.interpolateWg.Add(1)
 	go func() {
+		defer fbt.interpolateWg.Done()
+
+		// v3.4.0: Panic recovery to prevent GUI crashes from interpolation errors
+		defer func() {
+			if r := recover(); r != nil {
+				fbt.logger.Error().Msgf("PANIC in progress interpolation: %v", r)
+				// Don't show dialog - this is a background task, just log and exit
+			}
+		}()
+
 		ticker := time.NewTicker(250 * time.Millisecond) // 4 updates per second for smoother UI
 		defer ticker.Stop()
 
@@ -1319,7 +1371,8 @@ func (fbt *FileBrowserTab) startProgressInterpolation() {
 	}()
 }
 
-// stopProgressInterpolation stops the interpolation ticker
+// stopProgressInterpolation stops the interpolation ticker and waits for goroutine to exit
+// v3.4.0: Added WaitGroup.Wait() to ensure clean shutdown before restart
 func (fbt *FileBrowserTab) stopProgressInterpolation() {
 	fbt.mu.Lock()
 	if fbt.stopInterpolate != nil {
@@ -1327,6 +1380,10 @@ func (fbt *FileBrowserTab) stopProgressInterpolation() {
 		fbt.stopInterpolate = nil
 	}
 	fbt.mu.Unlock()
+
+	// v3.4.0: Wait for goroutine to actually exit before returning
+	// This prevents race conditions when start is called immediately after stop
+	fbt.interpolateWg.Wait()
 }
 
 // interpolateProgress estimates and updates progress bars between real callbacks

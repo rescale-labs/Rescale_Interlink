@@ -269,14 +269,19 @@ func (st *SetupTab) Build() fyne.CanvasObject {
 	saveDefaultButton := widget.NewButton("Save to Default", st.saveConfigToDefault)
 	saveDefaultButton.Importance = widget.HighImportance
 	applyButton := widget.NewButton("Apply Changes", func() {
-		if err := st.applyConfig(); err != nil {
-			dialog.ShowError(err, st.window)
-		} else {
-			// Show success feedback
-			dialog.ShowInformation("Success",
-				"Configuration has been applied successfully.",
-				st.window)
-		}
+		// v3.4.0: Use async apply to prevent GUI freeze during proxy warmup
+		st.applyConfigAsync(
+			func() {
+				// Success callback
+				dialog.ShowInformation("Success",
+					"Configuration has been applied successfully.",
+					st.window)
+			},
+			func(err error) {
+				// Error callback
+				dialog.ShowError(err, st.window)
+			},
+		)
 	})
 	applyButton.Importance = widget.HighImportance
 
@@ -516,94 +521,102 @@ func (st *SetupTab) loadConfig() {
 }
 
 func (st *SetupTab) saveConfig() {
-	// Apply current settings first
-	if err := st.applyConfig(); err != nil {
-		dialog.ShowError(err, st.window)
-		return
-	}
+	// v3.4.0: Use async apply to prevent GUI freeze during proxy warmup
+	st.applyConfigAsync(
+		func() {
+			// Success - now show file save dialog
+			dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
+				if err != nil {
+					dialog.ShowError(err, st.window)
+					return
+				}
+				if writer == nil {
+					return
+				}
+				defer writer.Close()
 
-	dialog.ShowFileSave(func(writer fyne.URIWriteCloser, err error) {
-		if err != nil {
+				// Validate and adjust file extension
+				path := writer.URI().Path()
+				if !strings.HasSuffix(strings.ToLower(path), ".csv") {
+					path = path + ".csv"
+				}
+				if err := st.engine.SaveConfig(path); err != nil {
+					dialog.ShowError(err, st.window)
+					return
+				}
+
+				st.configFilePath = path
+				st.statusLabel.SetText("Config saved to " + path)
+				dialog.ShowInformation("Success",
+					"Configuration saved successfully.\n\n"+
+						"Note: API key and proxy password are not saved to the config file for security.\n"+
+						"Use RESCALE_API_KEY environment variable or token file for API key.",
+					st.window)
+			}, st.window)
+		},
+		func(err error) {
+			// Error applying config
 			dialog.ShowError(err, st.window)
-			return
-		}
-		if writer == nil {
-			return
-		}
-		defer writer.Close()
-
-		// Validate and adjust file extension
-		path := writer.URI().Path()
-		if !strings.HasSuffix(strings.ToLower(path), ".csv") {
-			path = path + ".csv"
-		}
-		if err := st.engine.SaveConfig(path); err != nil {
-			dialog.ShowError(err, st.window)
-			return
-		}
-
-		st.configFilePath = path
-		st.statusLabel.SetText("Config saved to " + path)
-		dialog.ShowInformation("Success",
-			"Configuration saved successfully.\n\n"+
-				"Note: API key and proxy password are not saved to the config file for security.\n"+
-				"Use RESCALE_API_KEY environment variable or token file for API key.",
-			st.window)
-	}, st.window)
+		},
+	)
 }
 
 // saveConfigToDefault saves configuration to the default location (~/.config/rescale-int/config.csv)
 // Also saves API key to the default token file if one is set
 func (st *SetupTab) saveConfigToDefault() {
-	// Apply current settings first
-	if err := st.applyConfig(); err != nil {
-		dialog.ShowError(err, st.window)
-		return
-	}
+	// v3.4.0: Use async apply to prevent GUI freeze during proxy warmup
+	st.applyConfigAsync(
+		func() {
+			// Success - now save to default location
+			// Ensure config directory exists
+			if err := config.EnsureConfigDir(); err != nil {
+				dialog.ShowError(fmt.Errorf("Failed to create config directory: %w", err), st.window)
+				return
+			}
 
-	// Ensure config directory exists
-	if err := config.EnsureConfigDir(); err != nil {
-		dialog.ShowError(fmt.Errorf("Failed to create config directory: %w", err), st.window)
-		return
-	}
+			// Save config to default path
+			configPath := config.GetDefaultConfigPath()
+			if err := st.engine.SaveConfig(configPath); err != nil {
+				dialog.ShowError(err, st.window)
+				return
+			}
 
-	// Save config to default path
-	configPath := config.GetDefaultConfigPath()
-	if err := st.engine.SaveConfig(configPath); err != nil {
-		dialog.ShowError(err, st.window)
-		return
-	}
+			// Also save API key to token file if one is set
+			apiKey := strings.TrimSpace(st.apiKeyEntry.Text)
+			tokenSaved := false
+			tokenPath := config.GetDefaultTokenPath()
+			if apiKey != "" {
+				if err := config.WriteTokenFile(tokenPath, apiKey); err != nil {
+					// Don't fail the whole save, just warn
+					dialog.ShowError(fmt.Errorf("Config saved, but failed to save API key: %w", err), st.window)
+				} else {
+					tokenSaved = true
+				}
+			}
 
-	// Also save API key to token file if one is set
-	apiKey := strings.TrimSpace(st.apiKeyEntry.Text)
-	tokenSaved := false
-	tokenPath := config.GetDefaultTokenPath()
-	if apiKey != "" {
-		if err := config.WriteTokenFile(tokenPath, apiKey); err != nil {
-			// Don't fail the whole save, just warn
-			dialog.ShowError(fmt.Errorf("Config saved, but failed to save API key: %w", err), st.window)
-		} else {
-			tokenSaved = true
-		}
-	}
+			st.configFilePath = configPath
+			st.statusLabel.SetText("Config saved to " + configPath)
 
-	st.configFilePath = configPath
-	st.statusLabel.SetText("Config saved to " + configPath)
-
-	// Build success message based on what was saved
-	var msg string
-	if tokenSaved {
-		msg = fmt.Sprintf("Configuration saved to:\n%s\n\nAPI key saved to:\n%s\n\n"+
-			"These will be automatically loaded next time you start the GUI.\n\n"+
-			"Note: Proxy password is not saved for security.",
-			configPath, tokenPath)
-	} else {
-		msg = fmt.Sprintf("Configuration saved to:\n%s\n\n"+
-			"This configuration will be automatically loaded next time you start the GUI.\n\n"+
-			"Note: No API key was set, so token file was not created.",
-			configPath)
-	}
-	dialog.ShowInformation("Success", msg, st.window)
+			// Build success message based on what was saved
+			var msg string
+			if tokenSaved {
+				msg = fmt.Sprintf("Configuration saved to:\n%s\n\nAPI key saved to:\n%s\n\n"+
+					"These will be automatically loaded next time you start the GUI.\n\n"+
+					"Note: Proxy password is not saved for security.",
+					configPath, tokenPath)
+			} else {
+				msg = fmt.Sprintf("Configuration saved to:\n%s\n\n"+
+					"This configuration will be automatically loaded next time you start the GUI.\n\n"+
+					"Note: No API key was set, so token file was not created.",
+					configPath)
+			}
+			dialog.ShowInformation("Success", msg, st.window)
+		},
+		func(err error) {
+			// Error applying config
+			dialog.ShowError(err, st.window)
+		},
+	)
 }
 
 // ApplyConfig applies the current form settings to the engine configuration
@@ -612,30 +625,33 @@ func (st *SetupTab) ApplyConfig() error {
 	return st.applyConfig()
 }
 
-func (st *SetupTab) applyConfig() error {
+// buildConfigFromForm validates form inputs and builds a config object.
+// This is fast and can be called on the main thread.
+// Returns the config or an error if validation fails.
+func (st *SetupTab) buildConfigFromForm() (*config.Config, error) {
 	// Parse worker counts with better error messages
 	tarWorkers, err := strconv.Atoi(strings.TrimSpace(st.tarWorkersEntry.Text))
 	if err != nil {
-		return fmt.Errorf("Tar Workers must be a number.\n\nYou entered: '%s'", st.tarWorkersEntry.Text)
+		return nil, fmt.Errorf("Tar Workers must be a number.\n\nYou entered: '%s'", st.tarWorkersEntry.Text)
 	}
 	if tarWorkers < 1 {
-		return fmt.Errorf("Tar Workers must be at least 1.\n\nYou entered: %d", tarWorkers)
+		return nil, fmt.Errorf("Tar Workers must be at least 1.\n\nYou entered: %d", tarWorkers)
 	}
 
 	uploadWorkers, err := strconv.Atoi(strings.TrimSpace(st.uploadWorkersEntry.Text))
 	if err != nil {
-		return fmt.Errorf("Upload Workers must be a number.\n\nYou entered: '%s'", st.uploadWorkersEntry.Text)
+		return nil, fmt.Errorf("Upload Workers must be a number.\n\nYou entered: '%s'", st.uploadWorkersEntry.Text)
 	}
 	if uploadWorkers < 1 {
-		return fmt.Errorf("Upload Workers must be at least 1.\n\nYou entered: %d", uploadWorkers)
+		return nil, fmt.Errorf("Upload Workers must be at least 1.\n\nYou entered: %d", uploadWorkers)
 	}
 
 	jobWorkers, err := strconv.Atoi(strings.TrimSpace(st.jobWorkersEntry.Text))
 	if err != nil {
-		return fmt.Errorf("Job Workers must be a number.\n\nYou entered: '%s'", st.jobWorkersEntry.Text)
+		return nil, fmt.Errorf("Job Workers must be a number.\n\nYou entered: '%s'", st.jobWorkersEntry.Text)
 	}
 	if jobWorkers < 1 {
-		return fmt.Errorf("Job Workers must be at least 1.\n\nYou entered: %d", jobWorkers)
+		return nil, fmt.Errorf("Job Workers must be at least 1.\n\nYou entered: %d", jobWorkers)
 	}
 
 	// Parse proxy port
@@ -643,17 +659,17 @@ func (st *SetupTab) applyConfig() error {
 	if strings.TrimSpace(st.proxyPortEntry.Text) != "" {
 		proxyPort, err = strconv.Atoi(strings.TrimSpace(st.proxyPortEntry.Text))
 		if err != nil {
-			return fmt.Errorf("Proxy Port must be a number.\n\nYou entered: '%s'", st.proxyPortEntry.Text)
+			return nil, fmt.Errorf("Proxy Port must be a number.\n\nYou entered: '%s'", st.proxyPortEntry.Text)
 		}
 		if proxyPort < 1 || proxyPort > 65535 {
-			return fmt.Errorf("Proxy Port must be between 1 and 65535.\n\nYou entered: %d", proxyPort)
+			return nil, fmt.Errorf("Proxy Port must be between 1 and 65535.\n\nYou entered: %d", proxyPort)
 		}
 	}
 
 	// Create new config by loading defaults
 	cfg, err := config.LoadConfigCSV("")
 	if err != nil {
-		return fmt.Errorf("failed to create config: %w", err)
+		return nil, fmt.Errorf("failed to create config: %w", err)
 	}
 
 	// Trim whitespace from all text fields to avoid common errors
@@ -698,13 +714,76 @@ func (st *SetupTab) applyConfig() error {
 		cfg.ValidationPattern = ""
 	}
 
-	// Update engine
+	return cfg, nil
+}
+
+// applyConfig validates and applies configuration synchronously.
+// WARNING: This can block for up to 30 seconds during proxy warmup.
+// For UI operations, prefer applyConfigAsync() instead.
+func (st *SetupTab) applyConfig() error {
+	cfg, err := st.buildConfigFromForm()
+	if err != nil {
+		return err
+	}
+
+	// Update engine - THIS CAN BLOCK (proxy warmup, etc.)
 	if err := st.engine.UpdateConfig(cfg); err != nil {
 		return err
 	}
 
 	st.statusLabel.SetText("Configuration applied")
 	return nil
+}
+
+// applyConfigAsync applies configuration in a background goroutine with progress indicator.
+// v3.4.0: This prevents GUI freezing during proxy warmup or network operations.
+func (st *SetupTab) applyConfigAsync(onSuccess func(), onError func(error)) {
+	// Validate and build config on main thread (fast)
+	cfg, err := st.buildConfigFromForm()
+	if err != nil {
+		if onError != nil {
+			onError(err)
+		}
+		return
+	}
+
+	// Show progress dialog
+	progress := dialog.NewProgressInfinite("Applying Configuration",
+		"Initializing API client...", st.window)
+	progress.Show()
+
+	go func() {
+		// Panic recovery
+		defer func() {
+			if r := recover(); r != nil {
+				guiLogger.Error().Msgf("PANIC in applyConfigAsync: %v", r)
+				fyne.Do(func() {
+					progress.Hide()
+					if onError != nil {
+						onError(fmt.Errorf("unexpected error: %v", r))
+					}
+				})
+			}
+		}()
+
+		// Update engine - this can block for proxy warmup
+		err := st.engine.UpdateConfig(cfg)
+
+		fyne.Do(func() {
+			progress.Hide()
+			if err != nil {
+				st.statusLabel.SetText("Configuration failed")
+				if onError != nil {
+					onError(err)
+				}
+			} else {
+				st.statusLabel.SetText("Configuration applied")
+				if onSuccess != nil {
+					onSuccess()
+				}
+			}
+		})
+	}()
 }
 
 func (st *SetupTab) refreshFromEngine() {

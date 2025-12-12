@@ -27,6 +27,9 @@ import (
 var (
 	// guiLogger is the package-level logger for GUI mode
 	guiLogger *logging.Logger
+
+	// v3.4.0: Package-level cancel function for monitorGoroutines shutdown
+	cancelMonitorGoroutines context.CancelFunc
 )
 
 // LaunchGUI launches the full GUI application.
@@ -45,6 +48,12 @@ func LaunchGUI(configFile string) error {
 		// Enable profiling on localhost:6060 (debug mode only)
 		runtime.SetBlockProfileRate(1)
 		go func() {
+			// v3.4.0: Panic recovery for debug server
+			defer func() {
+				if r := recover(); r != nil {
+					guiLogger.Error().Msgf("PANIC in pprof server: %v", r)
+				}
+			}()
 			guiLogger.Debug().Msg("[PROFILING] pprof server listening on http://localhost:6060")
 			if err := http.ListenAndServe("localhost:6060", nil); err != nil {
 				guiLogger.Error().Err(err).Msg("[PROFILING] pprof server failed")
@@ -63,8 +72,10 @@ func LaunchGUI(configFile string) error {
 		}
 	}
 
-	// Start goroutine monitoring
-	go monitorGoroutines()
+	// Start goroutine monitoring with context for clean shutdown
+	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	cancelMonitorGoroutines = monitorCancel
+	go monitorGoroutinesWithContext(monitorCtx)
 
 	// Create Fyne app
 	myApp := app.NewWithID("com.rescale.interlink")
@@ -147,6 +158,11 @@ func LaunchGUI(configFile string) error {
 	// Show and run
 	mainWindow.ShowAndRun()
 
+	// v3.4.0: Clean shutdown of monitorGoroutines when GUI exits
+	if cancelMonitorGoroutines != nil {
+		cancelMonitorGoroutines()
+	}
+
 	return nil
 }
 
@@ -208,12 +224,20 @@ func (ui *UI) Build() fyne.CanvasObject {
 		currentIndex := tabs.SelectedIndex()
 		if previousTabIndex == 0 && currentIndex != 0 {
 			// Leaving Setup tab - auto-apply configuration
-			if err := ui.setupTab.ApplyConfig(); err != nil {
-				guiLogger.Warn().Err(err).Msg("Auto-apply config failed when leaving Setup tab")
-				// Don't show error dialog - just log it. User can fix and re-apply manually.
-			} else {
-				guiLogger.Debug().Msg("Auto-applied config when leaving Setup tab")
-			}
+			// v3.4.0: Run in background goroutine to prevent GUI freeze during proxy warmup
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						guiLogger.Error().Msgf("PANIC in auto-apply config: %v", r)
+					}
+				}()
+				if err := ui.setupTab.ApplyConfig(); err != nil {
+					guiLogger.Warn().Err(err).Msg("Auto-apply config failed when leaving Setup tab")
+					// Don't show error dialog - just log it. User can fix and re-apply manually.
+				} else {
+					guiLogger.Debug().Msg("Auto-applied config when leaving Setup tab")
+				}
+			}()
 		}
 		previousTabIndex = currentIndex
 
@@ -282,6 +306,13 @@ func (ui *UI) Stop() {
 }
 
 func (ui *UI) monitorProgress() {
+	// v3.4.0 fix: Add panic recovery to prevent GUI freezes if event processing panics
+	defer func() {
+		if r := recover(); r != nil {
+			guiLogger.Error().Msgf("PANIC in monitorProgress: %v", r)
+		}
+	}()
+
 	ch := ui.engine.Events().Subscribe(events.EventProgress)
 
 	// Read events and call update methods. Note: The called methods (UpdateProgress,
@@ -305,6 +336,13 @@ func (ui *UI) monitorProgress() {
 }
 
 func (ui *UI) monitorLogs() {
+	// v3.4.0 fix: Add panic recovery to prevent GUI freezes if event processing panics
+	defer func() {
+		if r := recover(); r != nil {
+			guiLogger.Error().Msgf("PANIC in monitorLogs: %v", r)
+		}
+	}()
+
 	ch := ui.engine.Events().Subscribe(events.EventLog)
 
 	// Read events and call AddLog. Note: AddLog handles thread safety internally via fyne.Do().
@@ -324,6 +362,13 @@ func (ui *UI) monitorLogs() {
 }
 
 func (ui *UI) monitorStateChanges() {
+	// v3.4.0 fix: Add panic recovery to prevent GUI freezes if event processing panics
+	defer func() {
+		if r := recover(); r != nil {
+			guiLogger.Error().Msgf("PANIC in monitorStateChanges: %v", r)
+		}
+	}()
+
 	ch := ui.engine.Events().Subscribe(events.EventStateChange)
 
 	// Read events and update UI directly
@@ -346,32 +391,40 @@ func (ui *UI) monitorStateChanges() {
 // Goroutine monitoring (from original main.go)
 var goroutineCount int64
 
-func monitorGoroutines() {
+// monitorGoroutinesWithContext monitors goroutine count with clean shutdown support
+// v3.4.0: Added context parameter for clean shutdown when GUI exits
+func monitorGoroutinesWithContext(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		count := runtime.NumGoroutine()
-		prev := atomic.SwapInt64(&goroutineCount, int64(count))
-		delta := int64(count) - prev
+	for {
+		select {
+		case <-ctx.Done():
+			// v3.4.0: Clean exit when GUI shuts down
+			return
+		case <-ticker.C:
+			count := runtime.NumGoroutine()
+			prev := atomic.SwapInt64(&goroutineCount, int64(count))
+			delta := int64(count) - prev
 
-		// Use Debug level instead of Info to reduce console spam
-		guiLogger.Debug().
-			Int("count", count).
-			Int64("delta", delta).
-			Msg("[MONITOR] Goroutines")
-
-		// Alert if count is high or growing rapidly (keep these as warnings)
-		if count > 100 {
-			guiLogger.Warn().
+			// Use Debug level instead of Info to reduce console spam
+			guiLogger.Debug().
 				Int("count", count).
-				Msg("[MONITOR] High goroutine count")
-		}
-
-		if prev > 0 && delta > 20 {
-			guiLogger.Warn().
 				Int64("delta", delta).
-				Msg("[MONITOR] Rapid goroutine growth")
+				Msg("[MONITOR] Goroutines")
+
+			// Alert if count is high or growing rapidly (keep these as warnings)
+			if count > 100 {
+				guiLogger.Warn().
+					Int("count", count).
+					Msg("[MONITOR] High goroutine count")
+			}
+
+			if prev > 0 && delta > 20 {
+				guiLogger.Warn().
+					Int64("delta", delta).
+					Msg("[MONITOR] Rapid goroutine growth")
+			}
 		}
 	}
 }
