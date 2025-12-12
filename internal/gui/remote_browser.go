@@ -177,15 +177,21 @@ func (b *RemoteBrowser) initialize() {
 	// Get API client
 	apiClient := b.engine.API()
 	if apiClient == nil {
-		b.fileList.SetStatus("Not connected. Configure API key in Setup tab.")
-		b.fileList.SetPath("Not connected")
+		// v3.4.0: Use fyne.Do() for thread safety
+		fyne.Do(func() {
+			b.fileList.SetStatus("Not connected. Configure API key in Setup tab.")
+			b.fileList.SetPath("Not connected")
+		})
 		return
 	}
 
 	// Get root folders
 	roots, err := apiClient.GetRootFolders(ctx)
 	if err != nil {
-		b.fileList.SetStatus("Error: " + err.Error())
+		// v3.4.0: Use fyne.Do() for thread safety
+		fyne.Do(func() {
+			b.fileList.SetStatus("Error: " + err.Error())
+		})
 		b.logger.Error().Err(err).Msg("Failed to get root folders")
 		return
 	}
@@ -216,8 +222,11 @@ func (b *RemoteBrowser) loadCurrentFolder() {
 	b.mu.Unlock()
 
 	// Clear hasMoreServerData in FileListWidget to prevent stale state from previous folder
+	// v3.4.0: Use fyne.Do() for thread safety
 	if b.fileList != nil {
-		b.fileList.SetHasMoreServerData(false)
+		fyne.Do(func() {
+			b.fileList.SetHasMoreServerData(false)
+		})
 	}
 
 	// Load initial data (0 = use FileListWidget's page size)
@@ -617,12 +626,22 @@ func (b *RemoteBrowser) onRootChanged(selected string) {
 	b.mu.Unlock()
 
 	// Update file list sort options based on view type
+	// v3.4.0: Wrap in fyne.Do() for thread safety - this callback may be invoked
+	// from various contexts and SetIsJobsView modifies widget state
 	if b.fileList != nil {
-		b.fileList.SetIsJobsView(isJobs)
+		fyne.Do(func() {
+			b.fileList.SetIsJobsView(isJobs)
+		})
 	}
 
 	b.updateBreadcrumbUI()
 	go b.loadCurrentFolder()
+
+	// v3.4.0: Notify FileBrowserTab of root change so it can update upload button state
+	// Selection is cleared when switching roots, so call with empty selection
+	if b.OnSelectionChanged != nil {
+		b.OnSelectionChanged(nil)
+	}
 }
 
 // refresh reloads the current folder
@@ -652,16 +671,17 @@ func (b *RemoteBrowser) setLoading(loading bool) {
 	b.isLoading = loading
 	b.mu.Unlock()
 
+	// v3.4.0 fix: All UI updates must be on main thread (Fyne 2.5+ requirement)
 	if loading {
-		b.fileList.SetStatus("Loading...")
-		// UI updates must be on main thread
+		fyne.Do(func() {
+			b.fileList.SetStatus("Loading...")
+		})
 		if b.refreshBtn != nil {
 			fyne.Do(func() {
 				b.refreshBtn.Disable()
 			})
 		}
 	} else {
-		// UI updates must be on main thread
 		if b.refreshBtn != nil {
 			fyne.Do(func() {
 				b.refreshBtn.Enable()
@@ -739,4 +759,12 @@ func (b *RemoteBrowser) GetBreadcrumbPath() string {
 		parts[i] = bc.Name
 	}
 	return strings.Join(parts, " > ")
+}
+
+// IsJobsView returns true if currently viewing My Jobs (upload not allowed)
+// v3.4.0: Used to disable upload button when in Jobs view
+func (b *RemoteBrowser) IsJobsView() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.currentRoot == "jobs"
 }

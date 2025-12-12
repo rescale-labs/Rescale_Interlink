@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.2.4-green)
+![Status](https://img.shields.io/badge/status-v3.4.0-green)
 
 ---
 
@@ -67,6 +67,22 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 
 ### Recent Improvements
+
+**v3.4.0 (December 12, 2025) - Background Service Mode + GUI Stability:**
+- **Background Service Mode**: New `daemon` command for auto-downloading completed jobs
+  - `rescale-int daemon run --download-dir ./results` - Start daemon
+  - `rescale-int daemon status` - Check state and statistics
+  - `rescale-int daemon list` - List downloaded/failed jobs
+  - `rescale-int daemon retry --all` - Retry failed downloads
+  - Job name filtering: `--name-prefix`, `--name-contains`, `--exclude`
+  - Configurable poll interval (default 5 minutes)
+  - Run once mode for cron: `--once`
+- **GUI Stability Fixes**: Thread safety improvements for Fyne framework
+  - Fixed config save blocking/lockup during proxy warmup
+  - Added panic recovery to transfer goroutines
+  - Async config apply with progress dialog
+- **My Jobs Upload Button**: Upload disabled when viewing My Jobs (only available in My Library)
+- **Proxy Launch Fix**: GUI now launches correctly when proxy is configured without saved password
 
 **v3.2.0 (November 30, 2025) - GUI Improvements & Bug Fixes:**
 - **JSON Job Template Support**: Load from JSON and Save as JSON buttons in Single Job Tab
@@ -688,6 +704,6 @@ Dinal P. -- early prototyping
 
 ---
 
-**Version**: 3.2.4
+**Version**: 3.4.0
 **Status**: Production Ready, FIPS 140-3 Mandatory
-**Last Updated**: December 10, 2025
+**Last Updated**: December 12, 2025

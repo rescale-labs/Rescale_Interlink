@@ -39,6 +39,7 @@ type Engine struct {
 	// Job monitoring
 	monitorTicker *time.Ticker
 	monitorStop   chan struct{}
+	monitorWg     sync.WaitGroup // v3.4.0: WaitGroup to ensure goroutine exits before restart
 
 	// Event publishing control (to prevent deadlocks)
 	publishEvents bool
@@ -1053,6 +1054,7 @@ func (e *Engine) GetJobStatus(jobID string) (string, error) {
 }
 
 // StartJobMonitoring starts monitoring job statuses on Rescale
+// v3.4.0: Uses WaitGroup to ensure clean goroutine lifecycle management
 func (e *Engine) StartJobMonitoring(interval time.Duration) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1065,7 +1067,9 @@ func (e *Engine) StartJobMonitoring(interval time.Duration) {
 	tickerC := e.monitorTicker.C   // Capture channel to avoid race with StopJobMonitoring
 	stopC := e.monitorStop         // Capture stop channel as well
 
+	e.monitorWg.Add(1)
 	go func() {
+		defer e.monitorWg.Done()
 		for {
 			select {
 			case <-tickerC:
@@ -1080,18 +1084,26 @@ func (e *Engine) StartJobMonitoring(interval time.Duration) {
 }
 
 // StopJobMonitoring stops job status monitoring
+// v3.4.0: Waits for goroutine to exit before returning to prevent race conditions
 func (e *Engine) StopJobMonitoring() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if e.monitorTicker == nil {
+		e.mu.Unlock()
 		return
 	}
 
 	e.monitorTicker.Stop()
 	e.monitorTicker = nil
 	close(e.monitorStop)
+	e.mu.Unlock()
+
+	// v3.4.0: Wait for goroutine to actually exit before creating new channel
+	// This prevents race conditions when start is called immediately after stop
+	e.monitorWg.Wait()
+
+	e.mu.Lock()
 	e.monitorStop = make(chan struct{})
+	e.mu.Unlock()
 
 	e.publishLog(events.InfoLevel, "Stopped job monitoring", "", "")
 }

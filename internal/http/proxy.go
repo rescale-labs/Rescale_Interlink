@@ -60,8 +60,9 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			Timeout: 300 * time.Second,
 		}
 
-		// Perform warmup if requested
-		if cfg.ProxyWarmup {
+		// v3.4.0: Only perform warmup if credentials are complete and warmup is requested
+		// If password is missing, skip warmup - let the caller prompt for password
+		if cfg.ProxyWarmup && cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
 			if err := warmupProxy(client, cfg); err != nil {
 				return nil, fmt.Errorf("proxy warmup failed: %w", err)
 			}
@@ -89,9 +90,13 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			Timeout:   300 * time.Second,
 		}
 
-		// Always perform warmup in basic mode
-		if err := warmupProxy(client, cfg); err != nil {
-			return nil, fmt.Errorf("proxy warmup failed: %w", err)
+		// v3.4.0: Only perform warmup if credentials are complete
+		// If password is missing, skip warmup - let the caller (GUI/CLI) prompt for password
+		// This prevents blocking GUI launch when proxy config is saved without password
+		if cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
+			if err := warmupProxy(client, cfg); err != nil {
+				return nil, fmt.Errorf("proxy warmup failed: %w", err)
+			}
 		}
 
 		return client, nil

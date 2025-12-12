@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v3.2.4.
+Complete command-line interface reference for `rescale-int` v3.4.0.
 
-**Version:** 3.2.4
-**Build Date:** December 10, 2025
+**Version:** 3.4.0
+**Build Date:** December 12, 2025
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -19,6 +19,7 @@ For a comprehensive list of all features with source code references, see [FEATU
   - [File Commands](#file-commands)
   - [Folder Commands](#folder-commands)
   - [Job Commands](#job-commands)
+  - [Daemon Commands](#daemon-commands)
   - [Hardware Commands](#hardware-commands)
   - [Software Commands](#software-commands)
   - [PUR Commands](#pur-commands)
@@ -755,6 +756,118 @@ rescale-int jobs submit --job-file <file> [--no-submit]
 ```bash
 rescale-int jobs submit --job-file job_spec.json
 ```
+
+### Daemon Commands
+
+Background service for automatically downloading completed jobs. Added in v3.4.0.
+
+#### daemon run
+
+Start the daemon to poll for completed jobs and download their output files.
+
+```bash
+rescale-int daemon run [flags]
+```
+
+**Flags:**
+- `-d, --download-dir string` - Directory to download job outputs to (default ".")
+- `--poll-interval string` - How often to check for completed jobs (default "5m")
+- `--name-prefix string` - Only download jobs with names starting with this prefix
+- `--name-contains string` - Only download jobs with names containing this string
+- `--exclude stringArray` - Exclude jobs with names starting with these prefixes
+- `--max-concurrent int` - Maximum concurrent file downloads per job (default 5)
+- `--state-file string` - Path to daemon state file
+- `--use-job-id` - Use job ID instead of job name for output directory names
+- `--once` - Run once and exit (useful for cron jobs)
+- `--log-file string` - Path to log file (empty = stdout)
+
+**Examples:**
+```bash
+# Start daemon (foreground mode, Ctrl+C to stop)
+rescale-int daemon run --download-dir ./results
+
+# With job name filtering
+rescale-int daemon run --download-dir ./results --name-prefix "MyProject"
+rescale-int daemon run --download-dir ./results --name-contains "simulation"
+rescale-int daemon run --download-dir ./results --exclude "Debug" --exclude "Test"
+
+# Configure poll interval
+rescale-int daemon run --poll-interval 2m
+
+# Run once and exit (for cron jobs)
+rescale-int daemon run --once --download-dir ./results
+```
+
+#### daemon status
+
+Show daemon state and statistics.
+
+```bash
+rescale-int daemon status [flags]
+```
+
+**Flags:**
+- `--state-file string` - Path to daemon state file
+
+**Example:**
+```bash
+rescale-int daemon status
+```
+
+Output includes:
+- Last poll time
+- Number of downloaded jobs
+- Number of failed downloads
+- Recent download history
+
+#### daemon list
+
+List downloaded or failed jobs.
+
+```bash
+rescale-int daemon list [flags]
+```
+
+**Flags:**
+- `--state-file string` - Path to daemon state file
+- `--failed` - Show failed downloads instead of successful ones
+- `--limit int` - Limit number of entries shown (0 = all)
+
+**Examples:**
+```bash
+# List downloaded jobs
+rescale-int daemon list
+
+# List failed downloads
+rescale-int daemon list --failed
+
+# Limit to 10 most recent
+rescale-int daemon list --limit 10
+```
+
+#### daemon retry
+
+Mark failed jobs for retry on the next poll cycle.
+
+```bash
+rescale-int daemon retry [flags]
+```
+
+**Flags:**
+- `--state-file string` - Path to daemon state file
+- `--all` - Retry all failed jobs
+- `-j, --job-id stringArray` - Job ID to retry (can be specified multiple times)
+
+**Examples:**
+```bash
+# Retry all failed jobs
+rescale-int daemon retry --all
+
+# Retry specific job
+rescale-int daemon retry --job-id XxYyZz
+```
+
+---
 
 ### Hardware Commands
 

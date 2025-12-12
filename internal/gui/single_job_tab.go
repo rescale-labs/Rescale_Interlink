@@ -272,59 +272,62 @@ func (sjt *SingleJobTab) getErrorStep() int {
 }
 
 // updateView updates the UI based on current state
+// v3.4.0 fix: All widget updates must be on main thread (Fyne 2.5+ requirement)
 func (sjt *SingleJobTab) updateView() {
 	debugf("SingleJobTab.updateView: state=%s, inputMode=%s\n", sjt.state, sjt.inputMode)
 
-	// Update progress indicator
-	sjt.progressContainer.Objects = []fyne.CanvasObject{
-		VerticalSpacer(8),
-		sjt.createProgressIndicator(),
-		VerticalSpacer(8),
-	}
-	sjt.progressContainer.Refresh()
+	fyne.Do(func() {
+		// Update progress indicator
+		sjt.progressContainer.Objects = []fyne.CanvasObject{
+			VerticalSpacer(8),
+			sjt.createProgressIndicator(),
+			VerticalSpacer(8),
+		}
+		sjt.progressContainer.Refresh()
 
-	// Update content based on state
-	var newContent fyne.CanvasObject
+		// Update content based on state
+		var newContent fyne.CanvasObject
 
-	switch sjt.state {
-	case SJStateInitial:
-		newContent = sjt.createJobConfigView()
-		sjt.statusLabel.SetText("Configure your job to get started")
-		sjt.progressBar.Hide()
+		switch sjt.state {
+		case SJStateInitial:
+			newContent = sjt.createJobConfigView()
+			sjt.statusLabel.SetText("Configure your job to get started")
+			sjt.progressBar.Hide()
 
-	case SJStateJobConfigured:
-		newContent = sjt.createInputSelectionView()
-		sjt.statusLabel.SetText("Job configured. Select input files.")
-		sjt.progressBar.Hide()
+		case SJStateJobConfigured:
+			newContent = sjt.createInputSelectionView()
+			sjt.statusLabel.SetText("Job configured. Select input files.")
+			sjt.progressBar.Hide()
 
-	case SJStateInputsReady:
-		newContent = sjt.createReadyToExecuteView()
-		sjt.statusLabel.SetText("Ready to submit job")
-		sjt.progressBar.Hide()
+		case SJStateInputsReady:
+			newContent = sjt.createReadyToExecuteView()
+			sjt.statusLabel.SetText("Ready to submit job")
+			sjt.progressBar.Hide()
 
-	case SJStateExecuting:
-		newContent = sjt.createExecutingView()
-		sjt.statusLabel.SetText("Submitting job...")
-		sjt.progressBar.Show()
+		case SJStateExecuting:
+			newContent = sjt.createExecutingView()
+			sjt.statusLabel.SetText("Submitting job...")
+			sjt.progressBar.Show()
 
-	case SJStateCompleted:
-		newContent = sjt.createCompletedView()
-		sjt.statusLabel.SetText("Job submitted successfully!")
-		sjt.progressBar.Hide()
+		case SJStateCompleted:
+			newContent = sjt.createCompletedView()
+			sjt.statusLabel.SetText("Job submitted successfully!")
+			sjt.progressBar.Hide()
 
-	case SJStateError:
-		newContent = sjt.createErrorView()
-		sjt.statusLabel.SetText("Error: " + sjt.errorMessage)
-		sjt.progressBar.Hide()
+		case SJStateError:
+			newContent = sjt.createErrorView()
+			sjt.statusLabel.SetText("Error: " + sjt.errorMessage)
+			sjt.progressBar.Hide()
 
-	default:
-		newContent = widget.NewLabel("Unknown state")
-	}
+		default:
+			newContent = widget.NewLabel("Unknown state")
+		}
 
-	// Update content container
-	sjt.contentContainer.Objects = []fyne.CanvasObject{newContent}
-	sjt.contentContainer.Refresh()
-	sjt.mainContainer.Refresh()
+		// Update content container
+		sjt.contentContainer.Objects = []fyne.CanvasObject{newContent}
+		sjt.contentContainer.Refresh()
+		sjt.mainContainer.Refresh()
+	})
 }
 
 // createJobConfigView creates the initial job configuration view
@@ -1375,6 +1378,14 @@ func (sjt *SingleJobTab) startExecution() {
 	go func() {
 		var err error
 		var jobID string
+
+		// v3.4.0: Panic recovery to prevent GUI crashes
+		defer func() {
+			if r := recover(); r != nil {
+				guiLogger.Error().Msgf("PANIC in single job execution: %v", r)
+				err = fmt.Errorf("unexpected error: %v", r)
+			}
+		}()
 
 		defer func() {
 			sjt.runLock.Lock()
