@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -171,6 +172,68 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 		PartNumber: int32(partIndex + 1), // 1-based for consistency with S3
 		ETag:       blockID,              // Azure uses block ID instead of ETag
 		Size:       int64(len(plaintext)),
+	}, nil
+}
+
+// EncryptStreamingPart encrypts plaintext and returns ciphertext.
+// Must be called sequentially due to CBC chaining constraint.
+// v3.4.0: Separated from upload to enable pipelining.
+func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, plaintext []byte) ([]byte, error) {
+	providerData, ok := uploadState.ProviderData.(*azureProviderData)
+	if !ok {
+		return nil, fmt.Errorf("invalid provider data for Azure streaming upload")
+	}
+
+	// Determine if this is the final part
+	isFinal := (partIndex == uploadState.TotalParts-1)
+
+	// Encrypt this part with CBC chaining
+	ciphertext, err := providerData.encryptState.EncryptPart(plaintext, isFinal)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt block %d: %w", partIndex, err)
+	}
+
+	return ciphertext, nil
+}
+
+// UploadCiphertext uploads already-encrypted data to cloud storage.
+// Can be called concurrently with EncryptStreamingPart (pipelining).
+// v3.4.0: Separated from encryption to enable pipelining.
+func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
+	providerData, ok := uploadState.ProviderData.(*azureProviderData)
+	if !ok {
+		return nil, fmt.Errorf("invalid provider data for Azure streaming upload")
+	}
+
+	// Generate block ID (must be consistent and base64-encoded)
+	blockIDStr := fmt.Sprintf("block-%010d", partIndex)
+	blockID := base64.StdEncoding.EncodeToString([]byte(blockIDStr))
+
+	// Create context with timeout
+	partCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	// Stage the block using AzureClient
+	err := providerData.azureClient.RetryWithBackoff(partCtx, fmt.Sprintf("StageBlock %d", partIndex), func() error {
+		client := providerData.azureClient.Client()
+		blockBlobClient := client.ServiceClient().NewContainerClient(providerData.container).NewBlockBlobClient(providerData.blobPath)
+		reader := &readSeekCloser{Reader: bytes.NewReader(ciphertext)}
+		_, err := blockBlobClient.StageBlock(partCtx, blockID, reader, nil)
+		return err
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to stage block %d: %w", partIndex, err)
+	}
+
+	// Store block ID at the correct index
+	providerData.blockIDs[partIndex] = blockID
+
+	return &transfer.PartResult{
+		PartIndex:  partIndex,
+		PartNumber: int32(partIndex + 1), // 1-based for consistency with S3
+		ETag:       blockID,              // Azure uses block ID instead of ETag
+		Size:       int64(len(ciphertext)), // Note: ciphertext size, not plaintext
 	}, nil
 }
 
@@ -330,6 +393,7 @@ func (rsc *readSeekCloser) Close() error {
 // Returns: formatVersion (0=legacy, 1=HKDF streaming, 2=CBC streaming), fileId (base64), partSize, iv, error
 // v3.2.0: Both new uploads (IV) and old uploads (HKDF) are supported for download.
 // v3.2.4: Added format version 2 for CBC streaming downloads (no temp file needed).
+// v3.4.0: Added diagnostic logging to help debug format detection issues.
 func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
 	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
@@ -351,8 +415,23 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 	// Check for streaming format metadata
 	// Note: Azure may title-case metadata keys, so check multiple variants
 	metadata := props.Metadata
+
+	// v3.4.0: Log all metadata keys for debugging format detection issues
+	log.Printf("[Azure DetectFormat] Remote path: %s", remotePath)
 	if metadata == nil {
+		log.Printf("[Azure DetectFormat] No metadata found - using legacy format")
 		return 0, "", 0, nil, nil // No metadata, legacy format
+	}
+	log.Printf("[Azure DetectFormat] Metadata keys found: %d", len(metadata))
+	for key, value := range metadata {
+		displayValue := ""
+		if value != nil {
+			displayValue = *value
+			if len(displayValue) > 50 {
+				displayValue = displayValue[:50] + "..."
+			}
+		}
+		log.Printf("[Azure DetectFormat]   %s = %s", key, displayValue)
 	}
 
 	// Check formatVersion (try various case combinations)
@@ -395,6 +474,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 			return 0, "", 0, nil, fmt.Errorf("invalid partSize in metadata: %w", err)
 		}
 
+		log.Printf("[Azure DetectFormat] Detected HKDF streaming format (v1)")
 		return 1, fileId, partSize, nil, nil
 	}
 
@@ -405,6 +485,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 			iv, err = encryption.DecodeBase64(*v)
 			if err != nil {
 				// Log but don't fail - IV might be provided via FileInfo
+				log.Printf("[Azure DetectFormat] Warning: Failed to decode IV from metadata: %v", err)
 				iv = nil
 			}
 			break
@@ -416,12 +497,21 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		if v, ok := metadata[key]; ok && v != nil && *v == "cbc" {
 			// CBC streaming format - uploaded by rescale-int v3.2.4+
 			// Can use streaming download (no temp file) with sequential part decryption
+			log.Printf("[Azure DetectFormat] Detected CBC streaming format (v2) - no temp file needed")
 			return 2, "", 0, iv, nil
 		}
 	}
 
 	// Legacy format - file uploaded by Rescale platform or older rescale-int
 	// Must use downloadLegacy() with temp file
+	log.Printf("[Azure DetectFormat] Detected legacy format (v0) - will use temp file")
+	log.Printf("[Azure DetectFormat] Note: streamingformat key not found or value != 'cbc'")
+	// Log what streamingformat value was found, if any
+	for _, key := range []string{"streamingformat", "streamingFormat", "StreamingFormat", "Streamingformat"} {
+		if v, ok := metadata[key]; ok && v != nil {
+			log.Printf("[Azure DetectFormat] %s value was: '%s' (expected 'cbc')", key, *v)
+		}
+	}
 	return 0, "", 0, iv, nil
 }
 

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -179,6 +180,73 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 	}, nil
 }
 
+// EncryptStreamingPart encrypts plaintext and returns ciphertext.
+// Must be called sequentially due to CBC chaining constraint.
+// v3.4.0: Separated from upload to enable pipelining.
+func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, plaintext []byte) ([]byte, error) {
+	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
+	if !ok {
+		return nil, fmt.Errorf("invalid provider data for S3 streaming upload")
+	}
+
+	// Determine if this is the final part
+	isFinal := (partIndex == uploadState.TotalParts-1)
+
+	// Encrypt this part with CBC chaining
+	ciphertext, err := providerData.encryptState.EncryptPart(plaintext, isFinal)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt part %d: %w", partIndex, err)
+	}
+
+	return ciphertext, nil
+}
+
+// UploadCiphertext uploads already-encrypted data to cloud storage.
+// Can be called concurrently with EncryptStreamingPart (pipelining).
+// v3.4.0: Separated from encryption to enable pipelining.
+func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
+	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
+	if !ok {
+		return nil, fmt.Errorf("invalid provider data for S3 streaming upload")
+	}
+
+	// S3 uses 1-based part numbers
+	partNumber := int32(partIndex + 1)
+
+	// Create context with timeout
+	partCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	// Add HTTP tracing if DEBUG_HTTP is enabled
+	partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d", partNumber))
+
+	// Upload the part using S3Client
+	var uploadResp *s3.UploadPartOutput
+	err := providerData.s3Client.RetryWithBackoff(partCtx, fmt.Sprintf("UploadPart %d", partNumber), func() error {
+		var err error
+		uploadResp, err = providerData.s3Client.Client().UploadPart(partCtx, &s3.UploadPartInput{
+			Bucket:        aws.String(providerData.bucket),
+			Key:           aws.String(uploadState.StoragePath),
+			PartNumber:    aws.Int32(partNumber),
+			UploadId:      aws.String(uploadState.UploadID),
+			Body:          bytes.NewReader(ciphertext),
+			ContentLength: aws.Int64(int64(len(ciphertext))),
+		})
+		return err
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload part %d: %w", partNumber, err)
+	}
+
+	return &transfer.PartResult{
+		PartIndex:  partIndex,
+		PartNumber: partNumber,
+		ETag:       *uploadResp.ETag,
+		Size:       int64(len(ciphertext)), // Note: ciphertext size, not plaintext
+	}, nil
+}
+
 // CompleteStreamingUpload completes the multipart upload.
 // v3.2.0: Returns IV for Rescale-compatible format (FormatVersion=0).
 func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *transfer.StreamingUpload, parts []*transfer.PartResult) (*cloud.UploadResult, error) {
@@ -335,6 +403,7 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 // Returns: formatVersion (0=legacy, 1=HKDF streaming, 2=CBC streaming), fileId (base64), partSize, iv, error
 // v3.2.0: Both new uploads (IV) and old uploads (HKDF) are supported for download.
 // v3.2.4: Added format version 2 for CBC streaming downloads (no temp file needed).
+// v3.4.0: Added diagnostic logging to help debug format detection issues.
 func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
@@ -356,6 +425,18 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		return 0, "", 0, nil, fmt.Errorf("failed to get object metadata: %w", err)
 	}
 
+	// v3.4.0: Log all metadata keys for debugging format detection issues
+	log.Printf("[S3 DetectFormat] Remote path: %s", remotePath)
+	log.Printf("[S3 DetectFormat] Metadata keys found: %d", len(headResp.Metadata))
+	for key, value := range headResp.Metadata {
+		// Truncate long values (like base64 IV) for readability
+		displayValue := value
+		if len(displayValue) > 50 {
+			displayValue = displayValue[:50] + "..."
+		}
+		log.Printf("[S3 DetectFormat]   %s = %s", key, displayValue)
+	}
+
 	// Check for HKDF streaming format metadata (S3 lowercases all metadata keys)
 	// This is for backward compatibility with files uploaded before v3.2.0
 	if fv, ok := headResp.Metadata["formatversion"]; ok && fv == "1" {
@@ -374,6 +455,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 			return 0, "", 0, nil, fmt.Errorf("invalid partSize in metadata: %s", partSizeStr)
 		}
 
+		log.Printf("[S3 DetectFormat] Detected HKDF streaming format (v1)")
 		return 1, fileId, partSize, nil, nil
 	}
 
@@ -385,6 +467,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		iv, err = encryption.DecodeBase64(ivStr)
 		if err != nil {
 			// Log but don't fail - IV might be provided via FileInfo
+			log.Printf("[S3 DetectFormat] Warning: Failed to decode IV from metadata: %v", err)
 			iv = nil
 		}
 	}
@@ -392,11 +475,17 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 	if sf, ok := headResp.Metadata["streamingformat"]; ok && sf == "cbc" {
 		// CBC streaming format - uploaded by rescale-int v3.2.4+
 		// Can use streaming download (no temp file) with sequential part decryption
+		log.Printf("[S3 DetectFormat] Detected CBC streaming format (v2) - no temp file needed")
 		return 2, "", 0, iv, nil
 	}
 
 	// Legacy format - file uploaded by Rescale platform or older rescale-int
 	// Must use downloadLegacy() with temp file
+	log.Printf("[S3 DetectFormat] Detected legacy format (v0) - will use temp file")
+	log.Printf("[S3 DetectFormat] Note: streamingformat key not found or value != 'cbc'")
+	if sf, ok := headResp.Metadata["streamingformat"]; ok {
+		log.Printf("[S3 DetectFormat] streamingformat value was: '%s' (expected 'cbc')", sf)
+	}
 	return 0, "", 0, iv, nil
 }
 

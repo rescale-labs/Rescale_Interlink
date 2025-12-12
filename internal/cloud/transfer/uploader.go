@@ -39,6 +39,16 @@ type StreamingConcurrentUploader interface {
 	// v3.2.0: Parts must be encrypted sequentially due to CBC chaining.
 	UploadStreamingPart(ctx context.Context, upload *StreamingUpload, partIndex int64, plaintext []byte) (*PartResult, error)
 
+	// EncryptStreamingPart encrypts plaintext and returns ciphertext.
+	// Must be called sequentially due to CBC chaining constraint.
+	// v3.4.0: Separated from upload to enable pipelining.
+	EncryptStreamingPart(ctx context.Context, upload *StreamingUpload, partIndex int64, plaintext []byte) ([]byte, error)
+
+	// UploadCiphertext uploads already-encrypted data to cloud storage.
+	// Can be called concurrently with EncryptStreamingPart (pipelining).
+	// v3.4.0: Separated from encryption to enable pipelining.
+	UploadCiphertext(ctx context.Context, upload *StreamingUpload, partIndex int64, ciphertext []byte) (*PartResult, error)
+
 	// CompleteStreamingUpload completes the multipart upload.
 	// parts must contain results for all uploaded parts in order.
 	CompleteStreamingUpload(ctx context.Context, upload *StreamingUpload, parts []*PartResult) (*cloud.UploadResult, error)

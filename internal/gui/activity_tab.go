@@ -362,8 +362,12 @@ func (at *ActivityTab) clearLogs() {
 	at.startTime = time.Now() // Reset uptime
 	at.logsLock.Unlock()
 
-	at.logText.SetText("")
-	at.statusLabel.SetText("Logs cleared")
+	// v3.4.0 fix: All widget updates must be on main thread (Fyne 2.5+ requirement)
+	// This prevents crashes on Linux/Wayland when clearLogs is called from non-main thread
+	fyne.Do(func() {
+		at.logText.SetText("")
+		at.statusLabel.SetText("Logs cleared")
+	})
 	at.refreshDisplay() // Update stats to show zeros
 }
 

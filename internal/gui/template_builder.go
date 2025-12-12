@@ -679,6 +679,18 @@ func (tb *TemplateBuilderDialog) handleScanSoftware() {
 	tb.scanSoftwareBtn.Disable()
 
 	go func() {
+		// v3.4.0: Panic recovery to prevent GUI crashes
+		defer func() {
+			if r := recover(); r != nil {
+				guiLogger.Error().Msgf("PANIC in software scan: %v", r)
+				fyne.Do(func() {
+					tb.scanSoftwareBtn.SetText("Scan Available Software")
+					tb.scanSoftwareBtn.Enable()
+					dialog.ShowError(fmt.Errorf("unexpected error during scan: %v", r), tb.window)
+				})
+			}
+		}()
+
 		// Fetch analyses from API via engine
 		ctx := context.Background()
 		analyses, err := tb.engine.GetAnalyses(ctx)
@@ -774,6 +786,18 @@ func (tb *TemplateBuilderDialog) handleScanHardware() {
 		tb.scanHardwareBtn.Disable()
 
 		go func() {
+			// v3.4.0: Panic recovery to prevent GUI crashes
+			defer func() {
+				if r := recover(); r != nil {
+					guiLogger.Error().Msgf("PANIC in hardware scan fetch: %v", r)
+					fyne.Do(func() {
+						tb.scanHardwareBtn.SetText("Scan Compatible Hardware")
+						tb.scanHardwareBtn.Enable()
+						dialog.ShowError(fmt.Errorf("unexpected error: %v", r), tb.window)
+					})
+				}
+			}()
+
 			ctx := context.Background()
 			analyses, err := tb.engine.GetAnalyses(ctx)
 
