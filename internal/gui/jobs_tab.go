@@ -396,7 +396,10 @@ func (jt *JobsTab) formatStatus(status string) string {
 // UpdateProgress updates job progress from events
 func (jt *JobsTab) UpdateProgress(event *events.ProgressEvent) {
 	if event.Stage == "overall" {
-		jt.progressBar.SetValue(event.Progress)
+		// v3.4.0 fix: All widget updates must be on main thread (Fyne 2.5+ requirement)
+		fyne.Do(func() {
+			jt.progressBar.SetValue(event.Progress)
+		})
 		jt.updateStats()
 		return
 	}
@@ -445,10 +448,13 @@ func (jt *JobsTab) UpdateProgress(event *events.ProgressEvent) {
 	// CRITICAL FIX: Release lock BEFORE calling refresh to avoid deadlock
 	jt.jobsLock.Unlock()
 
-	// Refresh table (check for nil in case called before initialization)
-	if jt.table != nil {
-		jt.table.Refresh()
-	}
+	// v3.4.0 fix: Refresh table on main thread (Fyne 2.5+ requirement)
+	// This prevents crashes on Linux/Wayland when called from event monitor goroutines
+	fyne.Do(func() {
+		if jt.table != nil {
+			jt.table.Refresh()
+		}
+	})
 }
 
 // UpdateJobState updates job state from state change events
@@ -524,6 +530,7 @@ func (jt *JobsTab) UpdateJobState(event *events.StateChangeEvent) {
 }
 
 // throttledRefresh refreshes the table but limits frequency to once per 100ms
+// v3.4.0 fix: Uses fyne.Do() to ensure Refresh() is called on main thread
 func (jt *JobsTab) throttledRefresh() {
 	jt.refreshMutex.Lock()
 	defer jt.refreshMutex.Unlock()
@@ -535,15 +542,17 @@ func (jt *JobsTab) throttledRefresh() {
 	}
 
 	jt.lastRefresh = now
-	if jt.table != nil {
-		jt.table.Refresh()
-	}
+	// v3.4.0 fix: All widget updates must be on main thread (Fyne 2.5+ requirement)
+	fyne.Do(func() {
+		if jt.table != nil {
+			jt.table.Refresh()
+		}
+	})
 }
 
 // updateStats updates the statistics label
 func (jt *JobsTab) updateStats() {
 	jt.jobsLock.RLock()
-	defer jt.jobsLock.RUnlock()
 
 	total := len(jt.loadedJobs)
 	completed := 0
@@ -563,28 +572,32 @@ func (jt *JobsTab) updateStats() {
 
 	pending := total - completed - failed - inProgress
 
-	jt.statsLabel.SetText(fmt.Sprintf("Total: %d | Completed: %d | In Progress: %d | Pending: %d | Failed: %d",
-		total, completed, inProgress, pending, failed))
+	// Release lock BEFORE UI update to avoid deadlock
+	jt.jobsLock.RUnlock()
+
+	// v3.4.0 fix: All widget updates must be on main thread (Fyne 2.5+ requirement)
+	fyne.Do(func() {
+		jt.statsLabel.SetText(fmt.Sprintf("Total: %d | Completed: %d | In Progress: %d | Pending: %d | Failed: %d",
+			total, completed, inProgress, pending, failed))
+	})
 }
 
 // fetchCoreTypes fetches core types from API in background
 func (jt *JobsTab) fetchCoreTypes() {
+	// v3.4.0: Panic recovery for background goroutine
+	defer func() {
+		if r := recover(); r != nil {
+			guiLogger.Error().Msgf("PANIC in fetchCoreTypes: %v", r)
+		}
+	}()
+
 	// Only fetch if not already cached
 	if _, isLoading, _ := jt.apiCache.GetCoreTypes(); isLoading {
 		return
 	}
 
-	// Create a simple wrapper for the API client
-	apiClient := &struct {
-		engine *core.Engine
-	}{
-		engine: jt.engine,
-	}
-
-	// Implement the GetCoreTypes method inline
-	// For now, we skip the actual fetch since the engine doesn't expose the API client
-	// This will be addressed in future iterations
-	_ = apiClient
+	// Note: CoreTypes are fetched from the API cache which is populated
+	// during initialization. No additional fetch is needed here.
 }
 
 // editJob opens the job editor dialog for the specified job index
@@ -614,8 +627,10 @@ func (jt *JobsTab) editJob(rowIndex int) {
 		}
 		jt.jobsLock.Unlock()
 
-		// Refresh table
-		jt.table.Refresh()
+		// v3.4.0 fix: Refresh table on main thread (Fyne 2.5+ requirement)
+		fyne.Do(func() {
+			jt.table.Refresh()
+		})
 
 		// Show confirmation
 		dialog.ShowInformation("Job Updated",

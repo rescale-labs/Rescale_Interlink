@@ -286,6 +286,7 @@ func AddCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(newHardwareCmd())
 	rootCmd.AddCommand(newSoftwareCmd())
 	rootCmd.AddCommand(newConfigCmd())
+	rootCmd.AddCommand(newDaemonCmd()) // v3.4.0: Background service for auto-downloading completed jobs
 
 	// Add shortcuts for convenience
 	AddShortcuts(rootCmd)

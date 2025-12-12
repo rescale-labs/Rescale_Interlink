@@ -142,8 +142,11 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 				formatVersion = 1
 			}
 			if params.OutputWriter != nil {
-				fmt.Fprintf(params.OutputWriter, "Note: Format detection failed, inferred format version %d\n", formatVersion)
+				fmt.Fprintf(params.OutputWriter, "Note: Format detection failed (%v), inferred format version %d\n", err, formatVersion)
 			}
+		} else if params.OutputWriter != nil {
+			// v3.4.0: Show successful format detection result
+			fmt.Fprintf(params.OutputWriter, "Format detection successful: version=%d\n", formatVersion)
 		}
 
 		// Use IV from metadata if available (for legacy format), otherwise use from FileInfo
@@ -167,6 +170,10 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		// v0: Legacy (download all → decrypt all → temp file)
 		// v1: HKDF streaming (per-part keys, parallel decryption possible)
 		// v2: CBC streaming (sequential decryption, no temp file) - v3.2.4+
+		// v3.4.0: Debug logging for download path selection
+		if params.OutputWriter != nil {
+			fmt.Fprintf(params.OutputWriter, "Format detection: version=%d (0=legacy, 1=HKDF, 2=CBC streaming)\n", formatVersion)
+		}
 		switch formatVersion {
 		case 2:
 			return d.downloadCBCStreaming(ctx, prep)
