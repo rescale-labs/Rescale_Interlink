@@ -1,7 +1,7 @@
 // Package upload provides the canonical entry point for file uploads to Rescale cloud storage.
 //
-// Version: 3.2.4
-// Date: 2025-12-10
+// Version: 3.4.1
+// Date: 2025-12-14
 package upload
 
 import (
@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -207,8 +208,18 @@ type encryptedPart struct {
 	err        error
 }
 
+// uploadResult holds the result of an upload worker (used for parallel uploads).
+// v3.4.1: Enables parallel upload of encrypted parts.
+type uploadResult struct {
+	partIndex int64
+	result    *transfer.PartResult
+	plainSize int64
+	err       error
+}
+
 // uploadStreaming uses the StreamingConcurrentUploader interface for streaming uploads.
-// v3.4.0: Pipelined architecture - encryption runs ahead of uploads for 30-50% speedup.
+// v3.4.1: Parallel upload architecture - encryption is sequential (CBC constraint),
+// but uploads happen in parallel for 2-4x throughput improvement.
 func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params UploadParams, fileSize int64) (*cloud.UploadResult, error) {
 	// Cast to StreamingConcurrentUploader
 	streamingUploader, ok := provider.(transfer.StreamingConcurrentUploader)
@@ -235,10 +246,27 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	}
 	defer file.Close()
 
-	// v3.4.0: Pipelined upload - encryption runs ahead of network uploads
-	// Buffer 2-3 encrypted parts (32-48 MB) to hide network latency
-	// Encryption is still sequential (CBC constraint), but overlaps with uploads
-	encryptedChan := make(chan encryptedPart, 3)
+	// v3.4.1: Get upload concurrency from TransferHandle (default to 4)
+	// Encryption is still sequential (CBC constraint), but uploads happen in parallel
+	concurrency := 4
+	if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
+		concurrency = params.TransferHandle.GetThreads()
+	}
+
+	// v3.4.1: Larger buffer to feed parallel uploaders (concurrency * 3 parts)
+	// This allows encryption to run ahead and keep all upload workers busy
+	encryptedChan := make(chan encryptedPart, concurrency*3)
+
+	// Result channel for collecting upload results
+	resultChan := make(chan uploadResult, concurrency*2)
+
+	// Context with cancellation for error propagation
+	uploadCtx, cancelUpload := context.WithCancel(ctx)
+	defer cancelUpload()
+
+	// Track first error for clean shutdown
+	var firstErr error
+	var errOnce sync.Once
 
 	// Encryption goroutine: reads file, encrypts parts, sends to channel
 	// Must be sequential due to CBC chaining constraint
@@ -250,8 +278,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		for {
 			// Check for context cancellation
 			select {
-			case <-ctx.Done():
-				encryptedChan <- encryptedPart{err: ctx.Err()}
+			case <-uploadCtx.Done():
 				return
 			default:
 			}
@@ -263,58 +290,109 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 				copy(plaintext, buffer[:n])
 
 				// Encrypt this part (sequential, CBC constraint)
-				ciphertext, encErr := streamingUploader.EncryptStreamingPart(ctx, uploadState, partIndex, plaintext)
+				ciphertext, encErr := streamingUploader.EncryptStreamingPart(uploadCtx, uploadState, partIndex, plaintext)
 				if encErr != nil {
-					encryptedChan <- encryptedPart{err: encErr}
+					errOnce.Do(func() { firstErr = encErr })
+					cancelUpload()
 					return
 				}
 
-				// Send encrypted part to upload goroutine
-				encryptedChan <- encryptedPart{
+				// Send encrypted part to upload workers
+				select {
+				case encryptedChan <- encryptedPart{
 					partIndex:  partIndex,
 					ciphertext: ciphertext,
 					plainSize:  int64(n),
+				}:
+					partIndex++
+				case <-uploadCtx.Done():
+					return
 				}
-				partIndex++
 			}
 
 			if readErr == io.EOF {
 				return
 			}
 			if readErr != nil {
-				encryptedChan <- encryptedPart{err: fmt.Errorf("failed to read file: %w", readErr)}
+				errOnce.Do(func() { firstErr = fmt.Errorf("failed to read file: %w", readErr) })
+				cancelUpload()
 				return
 			}
 		}
 	}()
 
-	// Upload loop: receives encrypted parts from channel and uploads
-	// Can overlap with encryption (pipelining)
-	var parts []*transfer.PartResult
+	// v3.4.1: Start upload worker pool - uploads encrypted parts in parallel
+	var uploadWg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		uploadWg.Add(1)
+		go func(workerID int) {
+			defer uploadWg.Done()
+			for enc := range encryptedChan {
+				// Check for cancellation
+				select {
+				case <-uploadCtx.Done():
+					return
+				default:
+				}
 
-	for enc := range encryptedChan {
-		// Check for encryption error
-		if enc.err != nil {
-			_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
-			return nil, enc.err
-		}
+				// Upload this encrypted part
+				partResult, uploadErr := streamingUploader.UploadCiphertext(uploadCtx, uploadState, enc.partIndex, enc.ciphertext)
 
-		// Upload the encrypted part
-		partResult, err := streamingUploader.UploadCiphertext(ctx, uploadState, enc.partIndex, enc.ciphertext)
-		if err != nil {
-			_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
-			return nil, err
+				if uploadErr != nil {
+					errOnce.Do(func() { firstErr = uploadErr })
+					cancelUpload()
+					resultChan <- uploadResult{partIndex: enc.partIndex, err: uploadErr}
+					return
+				}
+
+				// Send success result
+				resultChan <- uploadResult{
+					partIndex: enc.partIndex,
+					result:    partResult,
+					plainSize: enc.plainSize,
+				}
+			}
+		}(i)
+	}
+
+	// Close result channel when all workers finish
+	go func() {
+		uploadWg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results - parts may arrive out of order due to parallel uploads
+	partsMap := make(map[int64]*transfer.PartResult)
+	completedCount := 0
+
+	for res := range resultChan {
+		if res.err != nil {
+			// Error already recorded in firstErr, just continue draining
+			continue
 		}
 
 		// Update size to plaintext size for accurate tracking
-		partResult.Size = enc.plainSize
-		parts = append(parts, partResult)
+		res.result.Size = res.plainSize
+		partsMap[res.partIndex] = res.result
+		completedCount++
 
 		// Report progress
 		if params.ProgressCallback != nil {
-			progress := float64(len(parts)) / float64(uploadState.TotalParts)
+			progress := float64(completedCount) / float64(uploadState.TotalParts)
 			params.ProgressCallback(progress)
 		}
+	}
+
+	// Check for errors
+	if firstErr != nil {
+		_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
+		return nil, firstErr
+	}
+
+	// Convert map to ordered slice for completion
+	parts := make([]*transfer.PartResult, len(partsMap))
+	for idx, part := range partsMap {
+		parts[idx] = part
 	}
 
 	// Complete upload

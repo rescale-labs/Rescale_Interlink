@@ -731,7 +731,11 @@ func (st *SetupTab) applyConfig() error {
 		return err
 	}
 
-	st.statusLabel.SetText("Configuration applied")
+	// v3.4.1 fix: Wrap in fyne.Do() since this method can be called from
+	// background goroutine (gui.go auto-apply on tab change)
+	fyne.Do(func() {
+		st.statusLabel.SetText("Configuration applied")
+	})
 	return nil
 }
 
