@@ -718,6 +718,7 @@ Example:
 			ctx := GetContext()
 
 			// List job files
+			fmt.Printf("Fetching output files for job %s...\n", jobID)
 			logger.Info().Str("job_id", jobID).Msg("Fetching job files")
 			files, err := apiClient.ListJobFiles(ctx, jobID)
 			if err != nil {

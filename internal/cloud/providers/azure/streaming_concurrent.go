@@ -16,7 +16,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -416,22 +415,8 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 	// Note: Azure may title-case metadata keys, so check multiple variants
 	metadata := props.Metadata
 
-	// v3.4.0: Log all metadata keys for debugging format detection issues
-	log.Printf("[Azure DetectFormat] Remote path: %s", remotePath)
 	if metadata == nil {
-		log.Printf("[Azure DetectFormat] No metadata found - using legacy format")
 		return 0, "", 0, nil, nil // No metadata, legacy format
-	}
-	log.Printf("[Azure DetectFormat] Metadata keys found: %d", len(metadata))
-	for key, value := range metadata {
-		displayValue := ""
-		if value != nil {
-			displayValue = *value
-			if len(displayValue) > 50 {
-				displayValue = displayValue[:50] + "..."
-			}
-		}
-		log.Printf("[Azure DetectFormat]   %s = %s", key, displayValue)
 	}
 
 	// Check formatVersion (try various case combinations)
@@ -474,7 +459,6 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 			return 0, "", 0, nil, fmt.Errorf("invalid partSize in metadata: %w", err)
 		}
 
-		log.Printf("[Azure DetectFormat] Detected HKDF streaming format (v1)")
 		return 1, fileId, partSize, nil, nil
 	}
 
@@ -484,8 +468,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		if v, ok := metadata[key]; ok && v != nil && *v != "" {
 			iv, err = encryption.DecodeBase64(*v)
 			if err != nil {
-				// Log but don't fail - IV might be provided via FileInfo
-				log.Printf("[Azure DetectFormat] Warning: Failed to decode IV from metadata: %v", err)
+				// IV decode failed - might be provided via FileInfo instead
 				iv = nil
 			}
 			break
@@ -497,21 +480,12 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		if v, ok := metadata[key]; ok && v != nil && *v == "cbc" {
 			// CBC streaming format - uploaded by rescale-int v3.2.4+
 			// Can use streaming download (no temp file) with sequential part decryption
-			log.Printf("[Azure DetectFormat] Detected CBC streaming format (v2) - no temp file needed")
 			return 2, "", 0, iv, nil
 		}
 	}
 
 	// Legacy format - file uploaded by Rescale platform or older rescale-int
 	// Must use downloadLegacy() with temp file
-	log.Printf("[Azure DetectFormat] Detected legacy format (v0) - will use temp file")
-	log.Printf("[Azure DetectFormat] Note: streamingformat key not found or value != 'cbc'")
-	// Log what streamingformat value was found, if any
-	for _, key := range []string{"streamingformat", "streamingFormat", "StreamingFormat", "Streamingformat"} {
-		if v, ok := metadata[key]; ok && v != nil {
-			log.Printf("[Azure DetectFormat] %s value was: '%s' (expected 'cbc')", key, *v)
-		}
-	}
 	return 0, "", 0, iv, nil
 }
 

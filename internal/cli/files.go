@@ -294,6 +294,7 @@ Examples:
 			ctx := GetContext()
 
 			// Get file list
+			fmt.Println("Fetching file list from Rescale...")
 			allFiles, err := apiClient.ListFiles(ctx, limit)
 			if err != nil {
 				return fmt.Errorf("failed to list files: %w", err)

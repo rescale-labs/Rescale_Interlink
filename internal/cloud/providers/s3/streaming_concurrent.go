@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -425,18 +424,6 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		return 0, "", 0, nil, fmt.Errorf("failed to get object metadata: %w", err)
 	}
 
-	// v3.4.0: Log all metadata keys for debugging format detection issues
-	log.Printf("[S3 DetectFormat] Remote path: %s", remotePath)
-	log.Printf("[S3 DetectFormat] Metadata keys found: %d", len(headResp.Metadata))
-	for key, value := range headResp.Metadata {
-		// Truncate long values (like base64 IV) for readability
-		displayValue := value
-		if len(displayValue) > 50 {
-			displayValue = displayValue[:50] + "..."
-		}
-		log.Printf("[S3 DetectFormat]   %s = %s", key, displayValue)
-	}
-
 	// Check for HKDF streaming format metadata (S3 lowercases all metadata keys)
 	// This is for backward compatibility with files uploaded before v3.2.0
 	if fv, ok := headResp.Metadata["formatversion"]; ok && fv == "1" {
@@ -455,7 +442,6 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 			return 0, "", 0, nil, fmt.Errorf("invalid partSize in metadata: %s", partSizeStr)
 		}
 
-		log.Printf("[S3 DetectFormat] Detected HKDF streaming format (v1)")
 		return 1, fileId, partSize, nil, nil
 	}
 
@@ -466,8 +452,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 	if ivStr, ok := headResp.Metadata["iv"]; ok && ivStr != "" {
 		iv, err = encryption.DecodeBase64(ivStr)
 		if err != nil {
-			// Log but don't fail - IV might be provided via FileInfo
-			log.Printf("[S3 DetectFormat] Warning: Failed to decode IV from metadata: %v", err)
+			// IV decode failed - might be provided via FileInfo instead
 			iv = nil
 		}
 	}
@@ -475,17 +460,11 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 	if sf, ok := headResp.Metadata["streamingformat"]; ok && sf == "cbc" {
 		// CBC streaming format - uploaded by rescale-int v3.2.4+
 		// Can use streaming download (no temp file) with sequential part decryption
-		log.Printf("[S3 DetectFormat] Detected CBC streaming format (v2) - no temp file needed")
 		return 2, "", 0, iv, nil
 	}
 
 	// Legacy format - file uploaded by Rescale platform or older rescale-int
 	// Must use downloadLegacy() with temp file
-	log.Printf("[S3 DetectFormat] Detected legacy format (v0) - will use temp file")
-	log.Printf("[S3 DetectFormat] Note: streamingformat key not found or value != 'cbc'")
-	if sf, ok := headResp.Metadata["streamingformat"]; ok {
-		log.Printf("[S3 DetectFormat] streamingformat value was: '%s' (expected 'cbc')", sf)
-	}
 	return 0, "", 0, iv, nil
 }
 

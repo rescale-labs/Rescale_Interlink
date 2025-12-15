@@ -1,5 +1,40 @@
 # Release Notes - Rescale Interlink
 
+## v3.4.2 - December 15, 2025
+
+### Code Cleanup + Documentation Audit
+
+This release focuses on code quality, dead code removal, and documentation consistency.
+
+#### Code Cleanup
+
+**Dead Code Removed:**
+- `internal/cloud/transfer/download_helpers.go` - Removed ~450 lines of unused download infrastructure (ChunkDownloader interface and helper functions that were never adopted)
+- `internal/gui/layout_helpers.go` - Removed unused `NewPrimaryButton` and `NewPrimaryButtonWithIcon` helper functions
+
+**Directory Consolidation:**
+- Merged `internal/utils/` into `internal/util/` for naming consistency
+- Updated all imports referencing the old path
+
+**Stale Comments Fixed:**
+- `internal/gui/gui.go` - Removed misleading "will replace stub" comment
+- `internal/crypto/streaming_test.go` - Updated version reference
+
+#### Bug Fixes (from v3.4.1)
+
+- **Download Speed Display** - Fixed erratic speed display and slowdown at end of large file downloads by recording actual elapsed time instead of fake throughput estimates
+- **Verbose Logging** - Removed 19 DetectFormat diagnostic log statements that cluttered output
+- **Visual Feedback** - Added scanning/fetching messages for folder operations across CLI and GUI
+- **Version String** - Fixed double "v" prefix ("vv3.4.2" → "v3.4.2")
+
+#### Documentation
+
+- Updated all documentation version references to v3.4.2
+- Synchronized version across README, ARCHITECTURE, CLI_GUIDE, and all other .md files
+- Updated GITHUB_READY.md release checklist for v3.4.2
+
+---
+
 ## v3.4.0 - December 12, 2025
 
 ### Background Service Mode + GUI Stability + Upload Pipelining
