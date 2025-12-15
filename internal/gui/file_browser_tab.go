@@ -26,7 +26,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
-	"github.com/rescale/rescale-int/internal/utils/paths"
+	"github.com/rescale/rescale-int/internal/util/paths"
 )
 
 // Note: DefaultMaxConcurrent is defined in internal/constants/app.go
@@ -720,6 +720,7 @@ func (fbt *FileBrowserTab) uploadFolderWithCLILogic(
 	cache := cli.NewFolderCache()
 
 	// Step 1: Scan local directory using CLI logic
+	fbt.statusBar.SetProgress(fmt.Sprintf("Scanning folder: %s...", filepath.Base(localFolderPath)))
 	directories, files, symlinks, err := cli.BuildDirectoryTree(localFolderPath, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan directory: %w", err)
@@ -1001,6 +1002,7 @@ func (fbt *FileBrowserTab) downloadFolderWithCLILogic(
 	localFolderPath := filepath.Join(localParentPath, folderName)
 
 	// Use CLI's scan function to get complete structure
+	fbt.statusBar.SetProgress(fmt.Sprintf("Scanning remote folder: %s...", folderName))
 	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, remoteFolderID, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan remote folder: %w", err)

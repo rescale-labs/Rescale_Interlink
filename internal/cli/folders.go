@@ -298,6 +298,7 @@ Examples:
 			}
 
 			// Build directory tree
+			fmt.Println("Scanning local directory...")
 			logger.Info().Str("path", localPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
 			directories, files, symlinks, err := BuildDirectoryTree(localPath, includeHidden)
 			if err != nil {

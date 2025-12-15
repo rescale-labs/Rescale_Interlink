@@ -71,3 +71,5 @@ GITHUB_READY.md
 # Internal investigation/checkpoint files
 BINARY_SIZE_INVESTIGATION.md
 CHECKPOINT_SESSION.md
+# Session checkpoint files
+CHECKPOINT_*.md
