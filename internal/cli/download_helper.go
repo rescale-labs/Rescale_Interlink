@@ -15,7 +15,7 @@ import (
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/filter"
-	"github.com/rescale/rescale-int/internal/utils/paths"
+	"github.com/rescale/rescale-int/internal/util/paths"
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
@@ -431,6 +431,7 @@ func executeJobDownload(
 	logger *logging.Logger,
 ) error {
 	// List all job output files
+	fmt.Printf("Fetching output files for job %s...\n", jobID)
 	logger.Info().Str("job_id", jobID).Msg("Listing job output files")
 
 	allFiles, err := apiClient.ListJobFiles(ctx, jobID)
@@ -749,4 +750,4 @@ func executeJobDownload(
 
 // NOTE: buildJobFileOutputPaths was removed in v3.2.3.
 // Collision detection is now handled by the shared paths.ResolveCollisions() utility
-// in internal/utils/paths/collision.go for consistency across CLI and GUI.
+// in internal/util/paths/collision.go for consistency across CLI and GUI.

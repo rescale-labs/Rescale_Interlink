@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.4.1-green)
+![Status](https://img.shields.io/badge/status-v3.4.2-green)
 
 ---
 
@@ -453,7 +453,7 @@ rescale-int completion fish > ~/.config/fish/completions/rescale-int.fish
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    rescale-int v3.2.0                        │
+│                    rescale-int v3.4.2                        │
 │                  Unified CLI + GUI Binary                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                               │
@@ -704,6 +704,6 @@ Dinal P. -- early prototyping
 
 ---
 
-**Version**: 3.4.0
+**Version**: 3.4.2
 **Status**: Production Ready, FIPS 140-3 Mandatory
-**Last Updated**: December 12, 2025
+**Last Updated**: December 15, 2025
