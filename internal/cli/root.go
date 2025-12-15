@@ -58,7 +58,7 @@ func NewRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "rescale-int",
 		Short: "Rescale Interlink - CLI and GUI for Rescale platform",
-		Long: `Rescale Interlink v` + Version + ` - Built: ` + BuildTime + ` ` + FIPSStatus() + `
+		Long: `Rescale Interlink ` + Version + ` - Built: ` + BuildTime + ` ` + FIPSStatus() + `
 Tool for interacting with the Rescale platform via CLI or GUI.
 
 CLI Mode (default):

@@ -33,7 +33,6 @@ var (
 )
 
 // LaunchGUI launches the full GUI application.
-// This is the actual implementation that will replace the stub in launcher.go.
 func LaunchGUI(configFile string) error {
 	// Initialize GUI logger
 	guiLogger = logging.NewLogger("gui", nil)

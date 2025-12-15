@@ -369,6 +369,9 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 		partLength := endByte - startByte
 
+		// Track actual timing for accurate throughput recording
+		partStartTime := time.Now()
+
 		// Download this part's ciphertext
 		ciphertext, err := partDownloader.DownloadEncryptedRange(ctx, prep.Params.RemotePath, startByte, partLength)
 		if err != nil {
@@ -395,11 +398,14 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			prep.Params.ProgressCallback(float64(downloadedBytes) / float64(encryptedSize))
 		}
 
-		// Record throughput if transfer handle available
+		// Record actual throughput if transfer handle available
 		if prep.TransferHandle != nil {
-			// Rough estimate: assume ~100ms per part for throughput calculation
-			bytesPerSec := float64(len(ciphertext)) * 10.0
-			prep.TransferHandle.RecordThroughput(bytesPerSec)
+			elapsed := time.Since(partStartTime)
+			if elapsed > 0 {
+				// Calculate actual bytes per second from real timing
+				bytesPerSec := float64(len(ciphertext)) / elapsed.Seconds()
+				prep.TransferHandle.RecordThroughput(bytesPerSec)
+			}
 		}
 	}
 
@@ -618,6 +624,9 @@ func (d *Downloader) downloadStreamingConcurrent(
 				default:
 				}
 
+				// Track actual timing for accurate throughput recording
+				partStartTime := time.Now()
+
 				// Download encrypted part bytes
 				ciphertext, err := partDownloader.DownloadEncryptedRange(
 					opCtx,
@@ -653,11 +662,14 @@ func (d *Downloader) downloadStreamingConcurrent(
 				// Update progress
 				atomic.AddInt64(&downloadedBytes, int64(len(ciphertext)))
 
-				// Record throughput if transfer handle available
+				// Record actual throughput if transfer handle available
 				if prep.TransferHandle != nil {
-					// Rough estimate: assume ~100ms per part for throughput calculation
-					bytesPerSec := float64(len(ciphertext)) * 10.0
-					prep.TransferHandle.RecordThroughput(bytesPerSec)
+					elapsed := time.Since(partStartTime)
+					if elapsed > 0 {
+						// Calculate actual bytes per second from real timing
+						bytesPerSec := float64(len(ciphertext)) / elapsed.Seconds()
+						prep.TransferHandle.RecordThroughput(bytesPerSec)
+					}
 				}
 
 				resultChan <- partResult{
