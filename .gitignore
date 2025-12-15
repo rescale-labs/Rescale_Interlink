@@ -73,3 +73,5 @@ BINARY_SIZE_INVESTIGATION.md
 CHECKPOINT_SESSION.md
 # Session checkpoint files
 CHECKPOINT_*.md
+# Root binary (wrong location)
+rescale-int
