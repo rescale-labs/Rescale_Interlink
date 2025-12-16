@@ -668,41 +668,64 @@ func (w *WorkflowUIComponents) handleScan(baseDir, pattern string) {
 	w.scanInProgress = true
 	w.scanMutex.Unlock()
 
-	// Ensure we reset the flag when done
-	defer func() {
+	// Quick validation (non-blocking string checks)
+	if baseDir == "" {
 		w.scanMutex.Lock()
 		w.scanInProgress = false
 		w.scanMutex.Unlock()
-	}()
-
-	// Validate inputs before proceeding
-	if baseDir == "" {
 		dialog.ShowError(fmt.Errorf("Please select a base directory"), w.jobsTab.window)
 		return
 	}
 
 	if pattern == "" {
+		w.scanMutex.Lock()
+		w.scanInProgress = false
+		w.scanMutex.Unlock()
 		dialog.ShowError(fmt.Errorf("Please enter a directory pattern (e.g., Run_*)"), w.jobsTab.window)
 		return
 	}
 
-	// Check if base directory exists
-	if _, err := os.Stat(baseDir); os.IsNotExist(err) {
-		dialog.ShowError(
-			fmt.Errorf("Base directory does not exist:\n%s\n\nPlease check the path and try again.", baseDir),
-			w.jobsTab.window,
-		)
-		return
-	}
-
-	// Validate pattern is not a path (common mistake)
+	// Validate pattern is not a path (common mistake) - this is a quick string check
 	if strings.Contains(pattern, "/") || strings.Contains(pattern, "\\") {
+		w.scanMutex.Lock()
+		w.scanInProgress = false
+		w.scanMutex.Unlock()
 		dialog.ShowError(
 			fmt.Errorf("Pattern should be a name pattern (e.g., 'Run_*'), not a path.\n\nYou entered: %s", pattern),
 			w.jobsTab.window,
 		)
 		return
 	}
+
+	// Check if base directory exists - do this async to avoid blocking on network drives
+	go func() {
+		// Ensure we reset the flag when done
+		defer func() {
+			w.scanMutex.Lock()
+			w.scanInProgress = false
+			w.scanMutex.Unlock()
+		}()
+
+		// Check directory exists (can be slow on network drives)
+		if _, err := os.Stat(baseDir); os.IsNotExist(err) {
+			fyne.Do(func() {
+				dialog.ShowError(
+					fmt.Errorf("Base directory does not exist:\n%s\n\nPlease check the path and try again.", baseDir),
+					w.jobsTab.window,
+				)
+			})
+			return
+		}
+
+		// Directory exists - continue with scan on UI thread
+		fyne.Do(func() {
+			w.continueScanAfterValidation(baseDir, pattern)
+		})
+	}()
+}
+
+// continueScanAfterValidation continues the scan after async directory validation
+func (w *WorkflowUIComponents) continueScanAfterValidation(baseDir, pattern string) {
 
 	// Get validation and subpath from Setup config
 	cfg := w.jobsTab.engine.GetConfig()

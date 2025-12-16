@@ -80,18 +80,24 @@ func (e *Engine) GetConfig() *config.Config {
 }
 
 // UpdateConfig updates the engine configuration
+// v3.4.3: Fixed mutex contention - create API client BEFORE acquiring lock
+// Previously, the lock was held during api.NewClient() which can take 15+ seconds
+// for proxy warmup. This caused GUI freezes when other code tried to call
+// GetConfig() or API() while UpdateConfig was in progress.
 func (e *Engine) UpdateConfig(cfg *config.Config) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// Create new API client with updated config
+	// Create new API client FIRST (this can be slow due to proxy warmup)
+	// Do NOT hold the mutex during this operation
 	apiClient, err := api.NewClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
+	// Now briefly acquire lock to swap the config and client
+	e.mu.Lock()
 	e.config = cfg
 	e.apiClient = apiClient
+	e.mu.Unlock()
+
 	e.publishLog(events.InfoLevel, "Configuration updated", "", "")
 	return nil
 }
