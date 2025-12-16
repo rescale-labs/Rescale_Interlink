@@ -49,7 +49,7 @@ func newConfigInitCmd() *cobra.Command {
 		Short: "Initialize configuration interactively",
 		Long: `Interactive configuration setup for rescale-int.
 
-The configuration will be saved to ~/.config/rescale-int/config.csv
+The configuration will be saved to ~/.config/rescale/config.csv
 
 Use --force to overwrite existing configuration.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -189,7 +189,8 @@ Use --force to overwrite existing configuration.`,
 			}
 
 			// Save API key to a separate token file (for security, not in config CSV)
-			tokenFilePath := filepath.Join(configDir, "rescale_token")
+			// Use the same filename that GetDefaultTokenPath() expects ("token")
+			tokenFilePath := filepath.Join(configDir, "token")
 			if err := os.WriteFile(tokenFilePath, []byte(apiKeyInput), 0600); err != nil {
 				return fmt.Errorf("failed to save API token file: %w", err)
 			}
@@ -234,7 +235,7 @@ func newConfigShowCmd() *cobra.Command {
 		Long: `Display the current configuration settings.
 
 This command shows the merged configuration from:
-  1. Configuration file (~/.config/rescale-int/config.csv)
+  1. Configuration file (~/.config/rescale/config.csv)
   2. Environment variables (RESCALE_API_KEY, RESCALE_API_URL)
   3. Command-line flags (--api-key, --api-url)
 
