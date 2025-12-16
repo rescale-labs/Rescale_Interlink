@@ -72,6 +72,35 @@ func (t *Transfer) GetThreads() int {
 	return t.threads
 }
 
+// TryAcquireMore attempts to acquire additional threads from the pool.
+// Returns the number of additional threads acquired (0 if none available).
+// This is used for dynamic scaling - as other transfers complete, their threads
+// become available and can be claimed by active transfers to speed up.
+// v3.4.2: Added for dynamic thread reallocation
+func (t *Transfer) TryAcquireMore(maxWanted int) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.completed {
+		return 0
+	}
+
+	// Calculate how many more we could use (up to max for this file size)
+	maxForSize := t.resourceMgr.GetMaxForFileSize(t.fileSize)
+	canUse := maxForSize - t.threads
+	if canUse <= 0 {
+		return 0
+	}
+	if canUse > maxWanted {
+		canUse = maxWanted
+	}
+
+	// Try to acquire from the pool
+	acquired := t.resourceMgr.TryAcquire(t.id, canUse)
+	t.threads += acquired
+	return acquired
+}
+
 // RecordThroughput records throughput for this transfer
 func (t *Transfer) RecordThroughput(bytesPerSecond float64) {
 	t.resourceMgr.RecordThroughput(t.id, bytesPerSecond)
