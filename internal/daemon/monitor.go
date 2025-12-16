@@ -1,6 +1,4 @@
 // Package daemon provides background service functionality for auto-downloading completed jobs.
-// Version: 3.4.0
-// Date: December 2025
 package daemon
 
 import (
@@ -46,18 +44,11 @@ func NewMonitor(client *api.Client, state *State, filter *JobFilter, logger *log
 
 // CompletedJob represents a job ready for download.
 type CompletedJob struct {
-	ID       string
-	Name     string
-	Status   string
-	Owner    string
-	Created  string
-	FileInfo *JobFileInfo
-}
-
-// JobFileInfo contains aggregated file information for a job.
-type JobFileInfo struct {
-	FileCount int
-	TotalSize int64
+	ID      string
+	Name    string
+	Status  string
+	Owner   string
+	Created string
 }
 
 // FindCompletedJobs returns jobs that are completed but not yet downloaded.
@@ -147,24 +138,6 @@ func (m *Monitor) matchesFilter(job models.JobResponse) bool {
 	}
 
 	return true
-}
-
-// GetJobFileInfo retrieves file count and total size for a job.
-func (m *Monitor) GetJobFileInfo(ctx context.Context, jobID string) (*JobFileInfo, error) {
-	files, err := m.apiClient.ListJobFiles(ctx, jobID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list job files: %w", err)
-	}
-
-	info := &JobFileInfo{
-		FileCount: len(files),
-	}
-
-	for _, f := range files {
-		info.TotalSize += f.DecryptedSize
-	}
-
-	return info, nil
 }
 
 // ComputeOutputDir determines the output directory for a job.

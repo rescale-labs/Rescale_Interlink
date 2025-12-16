@@ -1,8 +1,5 @@
 // Package azure provides an Azure implementation of the CloudTransfer interface.
 // This provider uses AzureClient directly for all operations.
-//
-// Version: 3.2.4
-// Date: 2025-12-10
 package azure
 
 import (
@@ -80,7 +77,7 @@ func (p *Provider) getOrCreateAzureClient(ctx context.Context) (*AzureClient, er
 
 	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials.
 	// Otherwise, use nil for user's default storage (uploads, personal files).
-	client, err := NewAzureClient(p.storageInfo, p.apiClient, p.fileInfo)
+	client, err := NewAzureClient(ctx, p.storageInfo, p.apiClient, p.fileInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure client: %w", err)
 	}
@@ -107,7 +104,7 @@ func (p *Provider) getOrCreateAzureClientForFile(ctx context.Context, fileInfo *
 	// Create a client with file-specific credentials
 	// Note: This client is NOT cached because different files may need different credentials
 	// (same pattern as S3Provider.getOrCreateS3ClientForFile)
-	client, err := NewAzureClient(p.storageInfo, p.apiClient, fileInfo)
+	client, err := NewAzureClient(ctx, p.storageInfo, p.apiClient, fileInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure client for file: %w", err)
 	}

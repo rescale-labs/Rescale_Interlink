@@ -28,7 +28,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                 Rescale Interlink v3.4.0                 │
+│                 Rescale Interlink v3.4.2                 │
 │              Unified CLI + GUI Architecture              │
 ├─────────────────────────────────────────────────────────┤
 │                                                          │
@@ -196,7 +196,7 @@ type Engine struct {
 **Key Features**:
 - HTTP client with connection pooling
 - Automatic retry with exponential backoff
-- Rate limiting (dual token bucket)
+- Rate limiting (three-scope token bucket)
 - Folder caching
 - Structured error handling
 

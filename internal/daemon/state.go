@@ -1,6 +1,4 @@
 // Package daemon provides background service functionality for auto-downloading completed jobs.
-// Version: 3.4.0
-// Date: December 2025
 package daemon
 
 import (

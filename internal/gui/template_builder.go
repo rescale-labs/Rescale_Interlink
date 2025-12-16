@@ -1013,7 +1013,3 @@ func (tb *TemplateBuilderDialog) handleSaveAsJSON() {
 			tb.window)
 	}, tb.window)
 }
-
-// NOTE: handleLoadFromSGE and populateFormFromJob were removed as dead code
-// when the "Load from SGE" button was removed from the dialog.
-// The "Save as SGE" functionality is still available.

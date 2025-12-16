@@ -2,9 +2,6 @@
 // This package defines the CloudTransfer interface that abstracts S3 and Azure
 // implementations, enabling consistent behavior across storage backends with
 // full support for transfer handles, concurrent operations, and resume capability.
-//
-// Version: 3.2.4
-// Date: 2025-12-10
 package cloud
 
 import (

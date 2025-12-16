@@ -1,8 +1,5 @@
 // Package download provides the canonical entry point for file downloads from Rescale cloud storage.
 // This package consolidates all download functionality into a single entry point.
-//
-// Version: 3.2.4
-// Date: 2025-12-10
 package download
 
 import (

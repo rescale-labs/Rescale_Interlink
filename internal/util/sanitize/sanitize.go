@@ -1,6 +1,4 @@
 // Package sanitize provides command and field sanitization for CSV input.
-// Version: 1.0.0
-// Date: October 7, 2025
 //
 // This package removes problematic characters from commands and fields:
 //   - Windows/Mac line endings (CRLF/CR → LF)

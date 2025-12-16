@@ -1,8 +1,5 @@
 // Package transfer provides unified upload and download orchestration.
 // This file provides streaming encryption helpers for multipart uploads.
-//
-// Version: 3.2.4
-// Date: 2025-12-10
 package transfer
 
 import (
@@ -13,8 +10,7 @@ import (
 
 // StreamingEncryptionState wraps the crypto.CBCStreamingEncryptor with additional helpers.
 // This provides a convenient interface for use in streaming upload operations.
-//
-// v3.2.0: Uses CBC chaining (Rescale-compatible) instead of HKDF per-part derivation.
+// Uses CBC chaining (Rescale-compatible) instead of HKDF per-part derivation.
 type StreamingEncryptionState struct {
 	encryptor *encryption.CBCStreamingEncryptor
 	partSize  int64
@@ -23,8 +19,7 @@ type StreamingEncryptionState struct {
 
 // NewStreamingEncryptionState creates encryption state for a new upload.
 // partSize is the size of each plaintext part in bytes.
-//
-// v3.2.0: Uses CBC chaining for Rescale platform compatibility.
+// Uses CBC chaining for Rescale platform compatibility.
 func NewStreamingEncryptionState(partSize int64) (*StreamingEncryptionState, error) {
 	encryptor, err := encryption.NewCBCStreamingEncryptor()
 	if err != nil {
@@ -40,8 +35,7 @@ func NewStreamingEncryptionState(partSize int64) (*StreamingEncryptionState, err
 
 // NewStreamingEncryptionStateFromKey creates encryption state for resuming an upload.
 // Uses existing key, initialIV, and currentIV from resume state.
-//
-// v3.2.0: Uses CBC chaining with resume support.
+// Uses CBC chaining with resume support.
 func NewStreamingEncryptionStateFromKey(key, initialIV, currentIV []byte, partSize int64) (*StreamingEncryptionState, error) {
 	encryptor, err := encryption.NewCBCStreamingEncryptorWithKey(key, initialIV, currentIV)
 	if err != nil {
@@ -74,7 +68,6 @@ func (s *StreamingEncryptionState) EncryptPart(plaintext []byte, isFinal bool) (
 }
 
 // GetKey returns the encryption key (for Rescale API storage).
-// v3.2.0: Renamed from GetMasterKey for clarity.
 func (s *StreamingEncryptionState) GetKey() []byte {
 	return s.encryptor.GetKey()
 }
@@ -87,14 +80,13 @@ func (s *StreamingEncryptionState) GetMasterKey() []byte {
 }
 
 // GetInitialIV returns the initial IV (for cloud metadata storage).
-// v3.2.0: New method - IV is stored in metadata for Rescale compatibility.
+// IV is stored in metadata for Rescale compatibility.
 func (s *StreamingEncryptionState) GetInitialIV() []byte {
 	return s.encryptor.GetInitialIV()
 }
 
 // GetCurrentIV returns the current IV (for resume state storage).
-// This is the last ciphertext block from the most recent encrypted part.
-// v3.2.0: New method for resume support with CBC chaining.
+// This is the last ciphertext block from the most recent encrypted part (for resume support).
 func (s *StreamingEncryptionState) GetCurrentIV() []byte {
 	return s.encryptor.GetCurrentIV()
 }

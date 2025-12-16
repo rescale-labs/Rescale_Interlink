@@ -2,12 +2,9 @@
 // This file implements the StreamingConcurrentUploader, StreamingConcurrentDownloader,
 // and StreamingPartDownloader interfaces for concurrent streaming uploads/downloads.
 //
-// v3.2.0: CBC chaining format for Rescale platform compatibility.
-// Upload metadata now uses `iv` field (like legacy format) instead of formatVersion/fileId/partSize.
+// CBC chaining format for Rescale platform compatibility.
+// Upload metadata uses `iv` field (like legacy format) instead of formatVersion/fileId/partSize.
 // Download supports both legacy and HKDF formats for backward compatibility.
-//
-// Version: 3.2.0 (Rescale-Compatible CBC Chaining)
-// Date: 2025-12-02
 package s3
 
 import (
@@ -38,7 +35,7 @@ var _ transfer.StreamingConcurrentDownloader = (*Provider)(nil)
 var _ transfer.StreamingPartDownloader = (*Provider)(nil)
 
 // InitStreamingUpload initializes a multipart upload with streaming encryption.
-// v3.2.0: Uses CBC chaining format compatible with Rescale platform.
+// Uses CBC chaining format compatible with Rescale platform.
 // Metadata stores `iv` (base64) for Rescale decryption compatibility.
 func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.StreamingUploadInitParams) (*transfer.StreamingUpload, error) {
 	// Get or create S3 client
@@ -61,15 +58,15 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	// Calculate part size (use standard chunk size for multipart)
 	partSize := int64(constants.ChunkSize)
 
-	// Create streaming encryption state (v3.2.0: CBC chaining)
+	// Create streaming encryption state (CBC chaining)
 	encryptState, err := transfer.NewStreamingEncryptionState(partSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create encryption state: %w", err)
 	}
 
-	// Create multipart upload on S3 with retry
-	// v3.2.0: Metadata uses `iv` field for Rescale compatibility
-	// v3.2.4: Added `streamingformat: cbc` to enable streaming download (no temp file)
+	// Create multipart upload on S3 with retry.
+	// Metadata uses `iv` field for Rescale compatibility.
+	// `streamingformat: cbc` enables streaming download (no temp file).
 	var createResp *s3.CreateMultipartUploadOutput
 	err = s3Client.RetryWithBackoff(ctx, "CreateMultipartUpload", func() error {
 		var err error
@@ -78,7 +75,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 			Key:    aws.String(objectKey),
 			Metadata: map[string]string{
 				"iv":              encryption.EncodeBase64(encryptState.GetInitialIV()),
-				"streamingformat": "cbc", // v3.2.4: Marks file as CBC-chained streaming
+				"streamingformat": "cbc", // Marks file as CBC-chained streaming
 			},
 		})
 		return err
@@ -100,7 +97,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 		StoragePath:  objectKey,
 		MasterKey:    encryptState.GetKey(),
 		InitialIV:    encryptState.GetInitialIV(),
-		FileID:       nil, // v3.2.0: Not used in CBC format
+		FileID:       nil, // Not used in CBC format
 		PartSize:     partSize,
 		LocalPath:    params.LocalPath,
 		TotalSize:    params.FileSize,
@@ -125,7 +122,7 @@ type s3ProviderData struct {
 }
 
 // UploadStreamingPart encrypts and uploads a single part.
-// v3.2.0: Uses CBC chaining - parts MUST be uploaded sequentially.
+// Uses CBC chaining - parts MUST be uploaded sequentially.
 // The orchestrator already calls this sequentially (see upload.go:217).
 func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, plaintext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
@@ -181,7 +178,7 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 
 // EncryptStreamingPart encrypts plaintext and returns ciphertext.
 // Must be called sequentially due to CBC chaining constraint.
-// v3.4.0: Separated from upload to enable pipelining.
+// Separated from upload to enable pipelining.
 func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, plaintext []byte) ([]byte, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
 	if !ok {
@@ -202,7 +199,7 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 
 // UploadCiphertext uploads already-encrypted data to cloud storage.
 // Can be called concurrently with EncryptStreamingPart (pipelining).
-// v3.4.0: Separated from encryption to enable pipelining.
+// Separated from encryption to enable pipelining.
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
 	if !ok {
@@ -247,7 +244,7 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 }
 
 // CompleteStreamingUpload completes the multipart upload.
-// v3.2.0: Returns IV for Rescale-compatible format (FormatVersion=0).
+// Returns IV for Rescale-compatible format (FormatVersion=0).
 func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *transfer.StreamingUpload, parts []*transfer.PartResult) (*cloud.UploadResult, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
 	if !ok {
@@ -280,13 +277,13 @@ func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *tra
 		return nil, fmt.Errorf("failed to complete multipart upload: %w", err)
 	}
 
-	// v3.2.0: Return IV for Rescale-compatible format
+	// Return IV for Rescale-compatible format
 	return &cloud.UploadResult{
 		StoragePath:   uploadState.StoragePath,
 		EncryptionKey: uploadState.MasterKey,
-		IV:            uploadState.InitialIV, // v3.2.0: IV for Rescale compatibility
-		FormatVersion: 0,                     // v3.2.0: Legacy format (uses IV in metadata)
-		FileID:        "",                    // v3.2.0: Not used in CBC format
+		IV:            uploadState.InitialIV, // IV for Rescale compatibility
+		FormatVersion: 0,                     // Legacy format (uses IV in metadata)
+		FileID:        "",                    // Not used in CBC format
 		PartSize:      uploadState.PartSize,
 	}, nil
 }
@@ -312,7 +309,7 @@ func (p *Provider) AbortStreamingUpload(ctx context.Context, uploadState *transf
 }
 
 // InitStreamingUploadFromState resumes a streaming upload with existing encryption params.
-// v3.2.0: Uses CBC chaining with InitialIV and CurrentIV for resume support.
+// Uses CBC chaining with InitialIV and CurrentIV for resume support.
 func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params transfer.StreamingUploadResumeParams) (*transfer.StreamingUpload, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
@@ -320,11 +317,10 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 		return nil, fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// Create encryption state from existing keys
-	// v3.2.0: Use CBC chaining with InitialIV and CurrentIV
+	// Create encryption state from existing keys using CBC chaining with InitialIV and CurrentIV
 	var encryptState *transfer.StreamingEncryptionState
 	if params.InitialIV != nil && params.CurrentIV != nil {
-		// v3.2.0 CBC format resume
+		// CBC format resume
 		encryptState, err = transfer.NewStreamingEncryptionStateFromKey(
 			params.MasterKey, params.InitialIV, params.CurrentIV, params.PartSize)
 	} else {
@@ -348,7 +344,7 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 		StoragePath:  params.StoragePath,
 		MasterKey:    params.MasterKey,
 		InitialIV:    params.InitialIV,
-		FileID:       nil, // v3.2.0: Not used
+		FileID:       nil, // Not used in CBC format
 		PartSize:     params.PartSize,
 		LocalPath:    params.LocalPath,
 		TotalSize:    params.FileSize,
@@ -400,9 +396,7 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 
 // DetectFormat detects the encryption format from S3 object metadata.
 // Returns: formatVersion (0=legacy, 1=HKDF streaming, 2=CBC streaming), fileId (base64), partSize, iv, error
-// v3.2.0: Both new uploads (IV) and old uploads (HKDF) are supported for download.
-// v3.2.4: Added format version 2 for CBC streaming downloads (no temp file needed).
-// v3.4.0: Added diagnostic logging to help debug format detection issues.
+// Both new uploads (IV/CBC) and old uploads (HKDF) are supported for download.
 func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)

@@ -1,8 +1,5 @@
 // Package transfer provides unified upload and download orchestration.
 // This file contains tests for the downloader.
-//
-// Version: 3.2.0 (Sprint 3 - Unified Download Orchestration)
-// Date: 2025-11-28
 package transfer
 
 import (
