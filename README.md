@@ -68,6 +68,15 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ### Recent Improvements
 
+**v3.4.2 (December 16, 2025) - Dynamic Thread Reallocation + Code Cleanup:**
+- **Dynamic Thread Reallocation**: Transfers can now acquire additional threads mid-flight
+  - New `TryAcquire()` and `GetMaxForFileSize()` methods in resource manager
+  - Background scaler goroutines check for available threads every 500ms
+  - Improves throughput when threads become available during large transfers
+- **GUI Thread Safety**: Fixed Fyne thread safety errors in `setup_tab.go` applyConfig
+- **Code Cleanup**: Removed dead code, stale comments, and version annotations per Go community standards
+- **Documentation**: Fixed internal inconsistencies in ARCHITECTURE.md
+
 **v3.4.0 (December 12, 2025) - Background Service Mode + GUI Stability:**
 - **Background Service Mode**: New `daemon` command for auto-downloading completed jobs
   - `rescale-int daemon run --download-dir ./results` - Start daemon
@@ -706,4 +715,4 @@ Dinal P. -- early prototyping
 
 **Version**: 3.4.2
 **Status**: Production Ready, FIPS 140-3 Mandatory
-**Last Updated**: December 15, 2025
+**Last Updated**: December 16, 2025
