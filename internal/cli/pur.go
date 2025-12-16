@@ -482,7 +482,7 @@ Example:
 func loadConfig() (*config.Config, error) {
 	configPath := cfgFile
 	if configPath == "" {
-		configPath = "config.csv"
+		configPath = config.GetDefaultConfigPath()
 	}
 
 	cfg, err := config.LoadConfigCSV(configPath)

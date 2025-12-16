@@ -1,5 +1,61 @@
 # Release Notes - Rescale Interlink
 
+## v3.4.3 - December 16, 2025
+
+### Configuration Fixes + GUI Stability
+
+This release fixes critical configuration bugs and GUI stability issues, particularly for users with proxy configurations.
+
+#### Critical Fixes
+
+**1. Engine Mutex Contention Fix (GUI Freeze)**
+
+Fixed a critical issue where the GUI would freeze for extended periods (15+ seconds) when proxy was configured:
+
+- **Root Cause**: `engine.UpdateConfig()` held the mutex during `api.NewClient()`, which includes slow proxy warmup
+- **Impact**: Any UI code calling `GetConfig()` or `API()` would block waiting for the lock
+- **Fix**: API client is now created BEFORE acquiring the lock, reducing lock hold time to milliseconds
+
+**Files Modified:** `internal/core/engine.go`
+
+**2. Configuration Path Fixes**
+
+Fixed bugs preventing the `config init` workflow from working properly:
+
+- **Token Filename Mismatch**: `config init` saved to `rescale_token` but auto-load expected `token`
+- **Config Path Mismatch**: `loadConfig()` used local `config.csv` instead of `~/.config/rescale/config.csv`
+- **Config Directory Change**: Moved from `~/.config/rescale-int/` to `~/.config/rescale/` for consistency
+- **Migration Support**: Old config location is auto-detected with migration guidance
+
+**Files Modified:**
+- `internal/cli/config_commands.go`
+- `internal/cli/pur.go`
+- `internal/config/csv_config.go`
+
+**3. GUI Thread Safety Fixes**
+
+- `testConnection()` now uses `applyConfigAsync()` instead of blocking `applyConfig()`
+- `handleScan()` now runs `os.Stat()` asynchronously (prevents freeze on network drives)
+
+**Files Modified:**
+- `internal/gui/setup_tab.go`
+- `internal/gui/jobs_workflow_ui.go`
+
+#### Proxy Improvements
+
+- Basic auth proxy now respects `ProxyWarmup` flag (previously always ran warmup regardless)
+- Reduced proxy warmup timeout from 30s to 15s
+
+**Files Modified:** `internal/http/proxy.go`
+
+#### Documentation
+
+- Added Linux system requirements: GLIBC 2.27+ (RHEL/CentOS 8+, Ubuntu 18.04+)
+- Clarified that CentOS/RHEL 7 is NOT supported (end-of-life, GLIBC too old)
+- Updated CLI_GUIDE.md with system requirements section
+
+---
+
 ## v3.4.2 - December 16, 2025
 
 ### Dynamic Thread Reallocation + Code Cleanup

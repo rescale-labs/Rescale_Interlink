@@ -277,7 +277,7 @@ func (c *Config) MergeWithFlagsAndTokenFile(apiKey, tokenFilePath, apiBaseURL, p
 	if defaultTokenPath := GetDefaultTokenPath(); defaultTokenPath != "" {
 		if tokenKey, err := ReadTokenFile(defaultTokenPath); err == nil && tokenKey != "" {
 			defaultTokenKey = tokenKey
-			apiKeySources = append(apiKeySources, "default token file (~/.config/rescale-int/token)")
+			apiKeySources = append(apiKeySources, fmt.Sprintf("default token file (%s)", defaultTokenPath))
 		}
 	}
 
@@ -396,46 +396,96 @@ func (c *Config) Validate() error {
 }
 
 // ConfigDir is the standard configuration directory name
-const ConfigDir = "rescale-int"
+const ConfigDir = "rescale"
+
+// OldConfigDir is the previous directory name (for migration)
+const OldConfigDir = "rescale-int"
 
 // GetDefaultConfigPath returns the default config file path
-// Standard location: ~/.config/rescale-int/config.csv
+// Standard location: ~/.config/rescale/config.csv
+// Falls back to old location ~/.config/rescale-int/config.csv if new location doesn't exist
 func GetDefaultConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "config.csv"
 	}
-	return filepath.Join(home, ".config", ConfigDir, "config.csv")
+	newPath := filepath.Join(home, ".config", ConfigDir, "config.csv")
+	oldPath := filepath.Join(home, ".config", OldConfigDir, "config.csv")
+
+	// Check if new location exists
+	if _, err := os.Stat(newPath); err == nil {
+		return newPath
+	}
+	// Check if old location exists (migration case)
+	if _, err := os.Stat(oldPath); err == nil {
+		// Warn user about migration
+		log.Printf("[INFO] Config found at old location: %s", oldPath)
+		log.Printf("[INFO] Consider migrating to new location: %s", newPath)
+		log.Printf("[INFO] Run: mkdir -p %s && mv %s/* %s/", filepath.Dir(newPath), filepath.Dir(oldPath), filepath.Dir(newPath))
+		return oldPath
+	}
+	// Neither exists - return new path (for new installations)
+	return newPath
 }
 
 // GetDefaultTokenPath returns the default token file path
-// Standard location: ~/.config/rescale-int/token
+// Standard location: ~/.config/rescale/token
+// Falls back to old location ~/.config/rescale-int/token if new location doesn't exist
 // This is where 'config init' saves the API key
 func GetDefaultTokenPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", ConfigDir, "token")
+	newPath := filepath.Join(home, ".config", ConfigDir, "token")
+	oldPath := filepath.Join(home, ".config", OldConfigDir, "token")
+
+	// Check if new location exists
+	if _, err := os.Stat(newPath); err == nil {
+		return newPath
+	}
+	// Check if old location exists (migration case)
+	if _, err := os.Stat(oldPath); err == nil {
+		return oldPath
+	}
+	// Neither exists - return new path (for new installations)
+	return newPath
 }
 
 // GetConfigDir returns the configuration directory path
-// Standard location: ~/.config/rescale-int/
+// Standard location: ~/.config/rescale/
+// Falls back to old location ~/.config/rescale-int/ if new location doesn't exist
 func GetConfigDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", ConfigDir)
+	newDir := filepath.Join(home, ".config", ConfigDir)
+	oldDir := filepath.Join(home, ".config", OldConfigDir)
+
+	// Check if new directory exists
+	if _, err := os.Stat(newDir); err == nil {
+		return newDir
+	}
+	// Check if old directory exists (migration case)
+	if _, err := os.Stat(oldDir); err == nil {
+		return oldDir
+	}
+	// Neither exists - return new path (for new installations)
+	return newDir
 }
 
 // EnsureConfigDir creates the config directory if it doesn't exist
+// For new installations, this creates the new location (~/.config/rescale/)
+// For existing installations, GetConfigDir() returns the old location if it exists
 func EnsureConfigDir() error {
-	dir := GetConfigDir()
-	if dir == "" {
-		return fmt.Errorf("could not determine config directory")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not determine home directory")
 	}
-	return os.MkdirAll(dir, 0700)
+	// Always create in the new location
+	newDir := filepath.Join(home, ".config", ConfigDir)
+	return os.MkdirAll(newDir, 0700)
 }
 
 // ReadTokenFile reads an API token from a file

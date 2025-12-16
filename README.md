@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.4.2-green)
+![Status](https://img.shields.io/badge/status-v3.4.3-green)
 
 ---
 
@@ -67,6 +67,21 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 
 ### Recent Improvements
+
+**v3.4.3 (December 16, 2025) - Configuration Fixes + GUI Stability:**
+- **Critical GUI Freeze Fix**: Fixed mutex contention in `engine.UpdateConfig()` that caused extended UI freezes when proxy was configured
+  - Previously, the engine mutex was held during slow operations (proxy warmup), blocking any UI code that needed config access
+  - Now creates API client before acquiring lock, reducing lock hold time from 15+ seconds to milliseconds
+- **Configuration Path Fixes**: Fixed bugs preventing `config init` workflow from working properly
+  - Token filename mismatch: `config init` now saves to correct filename (`token` instead of `rescale_token`)
+  - Config path mismatch: Commands now use `~/.config/rescale/config.csv` instead of local `config.csv`
+  - New config directory: Changed from `~/.config/rescale-int/` to `~/.config/rescale/` for consistency
+  - Migration support: Old config location is auto-detected with migration guidance
+- **Proxy Improvements**:
+  - Basic auth proxy now respects `ProxyWarmup` flag (previously always ran warmup)
+  - Reduced proxy warmup timeout from 30s to 15s
+- **GUI Thread Safety**: Fixed `testConnection()` and `handleScan()` to run blocking operations asynchronously
+- **Linux Requirements**: Documented GLIBC 2.27+ requirement (RHEL/CentOS 8+, Ubuntu 18.04+)
 
 **v3.4.2 (December 16, 2025) - Dynamic Thread Reallocation + Code Cleanup:**
 - **Dynamic Thread Reallocation**: Transfers can now acquire additional threads mid-flight
@@ -608,6 +623,16 @@ go mod verify
 
 ### System Requirements
 
+**Operating System:**
+- **macOS**: 10.15 (Catalina) or later (Apple Silicon only)
+- **Windows**: Windows 10 or later (64-bit)
+- **Linux**: GLIBC 2.27+ required
+  - RHEL/CentOS/Rocky/Alma 8+
+  - Ubuntu 18.04+
+  - Debian 10+
+  - **NOT supported**: CentOS/RHEL 7 or older (end-of-life, GLIBC too old)
+
+**Resources:**
 - **RAM**: 50-100MB typical
 - **CPU**: Minimal (event-driven)
 - **Disk**: ~32MB binary
