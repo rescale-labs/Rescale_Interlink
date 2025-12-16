@@ -747,7 +747,3 @@ func executeJobDownload(
 	}
 	return nil
 }
-
-// NOTE: buildJobFileOutputPaths was removed in v3.2.3.
-// Collision detection is now handled by the shared paths.ResolveCollisions() utility
-// in internal/util/paths/collision.go for consistency across CLI and GUI.

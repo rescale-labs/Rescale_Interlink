@@ -1,6 +1,4 @@
 // Package validation provides core type validation against the Rescale API.
-// Version: 1.0.0
-// Date: October 7, 2025
 //
 // This package validates hardware core types by fetching available options
 // from the Rescale API and providing helpful error messages with suggestions

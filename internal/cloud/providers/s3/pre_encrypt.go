@@ -1,11 +1,7 @@
 // Package s3 provides an S3 implementation of the CloudTransfer interface.
 // This file implements the PreEncryptUploader interface for pre-encrypted uploads.
 //
-// Phase 7F: Concurrent upload logic moved directly into provider, eliminating
-// the last dependency on state.NewS3Uploader().
-//
-// Version: 3.2.0 (Sprint 7F - S3 Upload True Consolidation Complete)
-// Date: 2025-11-29
+// Concurrent upload logic is implemented directly in the provider.
 package s3
 
 import (

@@ -1,10 +1,7 @@
 // Package encryption provides cryptographic functions for Rescale Interlink.
 // This file implements streaming encryption for multipart uploads.
 //
-// Version: 3.2.0
-// Date: December 2, 2025
-//
-// Design (v3.2.0 - Rescale-Compatible CBC Chaining):
+// Design (Rescale-Compatible CBC Chaining):
 //   - Single key + IV stored in metadata (compatible with Rescale platform)
 //   - CBC chains across parts: Part N's IV = last 16 bytes of Part N-1's ciphertext
 //   - PKCS7 padding applied ONLY to the final part
@@ -514,34 +511,4 @@ func CalculateEncryptedPartSize(plaintextSize int64) int64 {
 	// If plaintext is already a multiple of 16, a full 16-byte padding block is added
 	padding := int64(aes.BlockSize) - (plaintextSize % int64(aes.BlockSize))
 	return plaintextSize + padding
-}
-
-// CalculateTotalEncryptedSize calculates total encrypted size for streaming upload.
-// For CBC-chained streaming, only the final part has padding overhead.
-func CalculateTotalEncryptedSize(totalPlaintextSize, partSize int64) int64 {
-	if totalPlaintextSize == 0 {
-		// Empty file: one part with just padding (16 bytes)
-		return int64(aes.BlockSize)
-	}
-
-	// Number of full parts (not including possibly partial last part)
-	numFullParts := totalPlaintextSize / partSize
-	lastPartSize := totalPlaintextSize % partSize
-
-	// Full parts: no size change (must be multiple of block size, no padding added)
-	fullPartsSize := numFullParts * partSize
-
-	// Last part: add padding
-	var lastPartEncryptedSize int64
-	if lastPartSize == 0 {
-		// File size is exact multiple of part size
-		// Last full part needs padding
-		lastPartEncryptedSize = partSize + int64(aes.BlockSize)
-		fullPartsSize -= partSize
-	} else {
-		// Partial last part
-		lastPartEncryptedSize = CalculateEncryptedPartSize(lastPartSize)
-	}
-
-	return fullPartsSize + lastPartEncryptedSize
 }

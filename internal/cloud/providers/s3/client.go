@@ -1,12 +1,8 @@
 // Package s3 provides an S3 implementation of the CloudTransfer interface.
 // This file contains the S3 client factory with auto-refreshing credentials.
 //
-// Phase 7E: This file contains the core S3 client logic that was previously
-// duplicated in upload/s3.go. The provider files now use this directly instead
-// of wrapping upload.NewS3Uploader().
-//
-// Version: 3.2.0 (Sprint 7E - S3 Upload True Consolidation)
-// Date: 2025-11-29
+// This file contains the core S3 client logic. The provider files use this
+// directly for all S3 operations.
 package s3
 
 import (
@@ -59,10 +55,11 @@ type S3Client struct {
 //   - Is thread-safe for concurrent operations
 //
 // Parameters:
+//   - ctx: Context for cancellation and timeout control
 //   - storageInfo: S3 storage configuration (bucket, region, path base)
 //   - apiClient: Rescale API client for credential refresh
 //   - fileInfo: Optional file info for cross-storage downloads (nil for uploads)
-func NewS3Client(storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile) (*S3Client, error) {
+func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile) (*S3Client, error) {
 	if storageInfo == nil {
 		return nil, fmt.Errorf("storageInfo is required")
 	}
@@ -90,7 +87,7 @@ func NewS3Client(storageInfo *models.StorageInfo, apiClient *api.Client, fileInf
 	})
 
 	// Load AWS config with custom HTTP client and auto-refreshing credentials
-	cfg, err := config.LoadDefaultConfig(context.Background(),
+	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(storageInfo.ConnectionSettings.Region),
 		config.WithHTTPClient(httpClient),
 		config.WithCredentialsProvider(credCache),

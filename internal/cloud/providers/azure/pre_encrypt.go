@@ -1,10 +1,7 @@
 // Package azure provides an Azure implementation of the CloudTransfer interface.
 // This file implements the PreEncryptUploader interface for pre-encrypted uploads.
 //
-// Phase 7G: Uses AzureClient directly instead of wrapping state.NewAzureUploader().
-//
-// Version: 3.2.0 (Sprint 7G - Azure True Consolidation)
-// Date: 2025-11-29
+// Concurrent upload logic is implemented directly in the provider.
 package azure
 
 import (

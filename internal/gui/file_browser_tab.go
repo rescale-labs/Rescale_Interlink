@@ -530,6 +530,15 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 		return
 	}
 
+	// Provide immediate feedback to user that preparation is starting
+	if len(items) > 1 {
+		fbt.statusBar.SetProgress(fmt.Sprintf("Preparing upload of %d items...", len(items)))
+	} else if len(items) == 1 && items[0].IsFolder {
+		fbt.statusBar.SetProgress(fmt.Sprintf("Preparing folder upload: %s...", items[0].Name))
+	} else {
+		fbt.statusBar.SetProgress("Preparing upload...")
+	}
+
 	// Flatten folder contents to get all files
 	allFiles := fbt.flattenForUpload(items)
 	total := len(allFiles)
@@ -803,6 +812,15 @@ func (fbt *FileBrowserTab) executeDownloadConcurrent(items []FileItem, destPath 
 	if apiClient == nil {
 		fbt.showError("Not connected to Rescale")
 		return
+	}
+
+	// Provide immediate feedback to user that preparation is starting
+	if len(items) > 1 {
+		fbt.statusBar.SetProgress(fmt.Sprintf("Preparing download of %d items...", len(items)))
+	} else if len(items) == 1 && items[0].IsFolder {
+		fbt.statusBar.SetProgress(fmt.Sprintf("Preparing folder download: %s...", items[0].Name))
+	} else {
+		fbt.statusBar.SetProgress("Preparing download...")
 	}
 
 	// Use a short-lived context for flattening (API operations only)
@@ -1337,7 +1355,7 @@ func (fbt *FileBrowserTab) updateFileProgress(id string, progress float64, statu
 
 // startProgressInterpolation starts a goroutine that interpolates progress
 // between real callbacks for smoother UI updates (2-3 times per second)
-// v3.4.0: Uses WaitGroup to ensure clean goroutine lifecycle management
+// Uses WaitGroup to ensure clean goroutine lifecycle management
 func (fbt *FileBrowserTab) startProgressInterpolation() {
 	// Stop any existing interpolation ticker and wait for goroutine to exit
 	fbt.stopProgressInterpolation()
@@ -1345,13 +1363,14 @@ func (fbt *FileBrowserTab) startProgressInterpolation() {
 	fbt.mu.Lock()
 	fbt.stopInterpolate = make(chan struct{})
 	stopCh := fbt.stopInterpolate
+	// Add to WaitGroup inside the lock to prevent race with stopProgressInterpolation
+	fbt.interpolateWg.Add(1)
 	fbt.mu.Unlock()
 
-	fbt.interpolateWg.Add(1)
 	go func() {
 		defer fbt.interpolateWg.Done()
 
-		// v3.4.0: Panic recovery to prevent GUI crashes from interpolation errors
+		// Panic recovery to prevent GUI crashes from interpolation errors
 		defer func() {
 			if r := recover(); r != nil {
 				fbt.logger.Error().Msgf("PANIC in progress interpolation: %v", r)
@@ -1373,8 +1392,8 @@ func (fbt *FileBrowserTab) startProgressInterpolation() {
 	}()
 }
 
-// stopProgressInterpolation stops the interpolation ticker and waits for goroutine to exit
-// v3.4.0: Added WaitGroup.Wait() to ensure clean shutdown before restart
+// stopProgressInterpolation stops the interpolation ticker and waits for goroutine to exit.
+// Uses WaitGroup.Wait() to ensure clean shutdown before restart.
 func (fbt *FileBrowserTab) stopProgressInterpolation() {
 	fbt.mu.Lock()
 	if fbt.stopInterpolate != nil {

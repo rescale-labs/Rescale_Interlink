@@ -1,6 +1,4 @@
 // Package cli provides the daemon CLI commands for rescale-int.
-// Version: 3.4.0
-// Date: December 2025
 package cli
 
 import (

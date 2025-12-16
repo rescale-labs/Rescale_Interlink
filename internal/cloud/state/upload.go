@@ -3,9 +3,6 @@
 //
 // The cycle was: upload → providers → transfer → upload
 // Now: upload → providers → transfer → state (no cycle)
-//
-// Version: 3.2.0 (Sprint E - Dead Code Cleanup)
-// Date: 2025-11-29
 package state
 
 import (

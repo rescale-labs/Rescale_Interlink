@@ -1,12 +1,8 @@
 // Package azure provides an Azure implementation of the CloudTransfer interface.
 // This file contains the Azure client factory with auto-refreshing credentials.
 //
-// Phase 7G: This file contains the core Azure client logic that was previously
-// duplicated in upload/azure.go and download/azure.go. The provider files now
-// use this directly instead of wrapping upload.NewAzureUploader().
-//
-// Version: 3.2.0 (Sprint 7G - Azure True Consolidation)
-// Date: 2025-11-29
+// This file contains the core Azure client logic. The provider files use this
+// directly for all Azure operations.
 package azure
 
 import (
@@ -73,7 +69,7 @@ type AzureClient struct {
 //   - Azure user downloading job outputs stored in S3
 //
 // The pattern mirrors S3Client's handling of file-specific credentials.
-func NewAzureClient(storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile) (*AzureClient, error) {
+func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile) (*AzureClient, error) {
 	if storageInfo == nil {
 		return nil, fmt.Errorf("storageInfo is required")
 	}
@@ -96,13 +92,13 @@ func NewAzureClient(storageInfo *models.StorageInfo, apiClient *api.Client, file
 	var creds *models.AzureCredentials
 	if fileInfo != nil {
 		// File-specific credentials: use cached credentials for the file's storage
-		creds, err = credManager.GetAzureCredentialsForStorage(context.Background(), fileInfo)
+		creds, err = credManager.GetAzureCredentialsForStorage(ctx, fileInfo)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get Azure credentials for file %s: %w", fileInfo.ID, err)
 		}
 	} else {
 		// Default storage credentials (user's Azure storage)
-		creds, err = credManager.GetAzureCredentials(context.Background())
+		creds, err = credManager.GetAzureCredentials(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get initial Azure credentials: %w", err)
 		}

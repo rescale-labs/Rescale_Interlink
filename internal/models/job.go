@@ -1,6 +1,4 @@
 // Package models defines data structures for the PUR application.
-// Version: 1.0.0
-// Date: October 7, 2025
 package models
 
 import "time"
