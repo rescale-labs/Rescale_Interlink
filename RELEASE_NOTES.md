@@ -1,37 +1,77 @@
 # Release Notes - Rescale Interlink
 
-## v3.4.2 - December 15, 2025
+## v3.4.2 - December 16, 2025
 
-### Code Cleanup + Documentation Audit
+### Dynamic Thread Reallocation + Code Cleanup
 
-This release focuses on code quality, dead code removal, and documentation consistency.
+This release adds dynamic thread scaling for improved transfer throughput and comprehensive code cleanup.
+
+#### New Features
+
+**1. Dynamic Thread Reallocation**
+
+Transfers can now dynamically acquire additional threads mid-flight when they become available:
+
+- **TryAcquire()** - Resource manager method for mid-transfer thread acquisition
+- **GetMaxForFileSize()** - Recommends optimal thread count based on file size
+- **TryAcquireMore()** - Transfer manager wrapper for seamless thread scaling
+- **Background Scaler** - Goroutines check every 500ms for available threads
+
+This improves throughput for large files when other transfers complete and free up threads.
+
+**Files Modified:**
+- `internal/resources/manager.go` - New TryAcquire and GetMaxForFileSize methods
+- `internal/transfer/manager.go` - New TryAcquireMore method
+- `internal/cloud/transfer/downloader.go` - Background scaler goroutine
+- `internal/cloud/upload/upload.go` - Background scaler goroutine
+
+#### Bug Fixes
+
+**2. GUI Thread Safety (setup_tab.go)**
+
+Fixed Fyne thread safety error in `applyConfig()`:
+- Wrapped `statusLabel.SetText()` in `fyne.Do()` block
+- Prevents "Error in Fyne call thread" error on Linux
+
+**Files Modified:** `internal/gui/setup_tab.go`
 
 #### Code Cleanup
 
 **Dead Code Removed:**
-- `internal/cloud/transfer/download_helpers.go` - Removed ~450 lines of unused download infrastructure (ChunkDownloader interface and helper functions that were never adopted)
-- `internal/gui/layout_helpers.go` - Removed unused `NewPrimaryButton` and `NewPrimaryButtonWithIcon` helper functions
+- `internal/crypto/streaming.go` - Removed `CalculateTotalEncryptedSize()` (never called)
+- `internal/cloud/transfer/download_helpers.go` - Removed ~450 lines of unused download infrastructure
+- `internal/gui/layout_helpers.go` - Removed unused button helper functions
+
+**Stale Comments Removed:**
+- `internal/cli/download_helper.go` - Removed "NOTE: buildJobFileOutputPaths was removed" comment
+- `internal/gui/template_builder.go` - Removed "NOTE: handleLoadFromSGE and populateFormFromJob were removed" comment
+
+**Version Comments Cleaned (65+ instances):**
+
+Per Go community standards, removed `// vX.Y.Z:` prefix annotations from comments across ~19 files. Git history tracks when changes were made; comments should explain WHY, not WHEN.
+
+Files affected:
+- `internal/gui/*.go` - Fyne thread safety comments
+- `internal/cli/*.go` - Bug fix comments
+- `internal/cloud/**/*.go` - CBC format comments
+- `internal/core/engine.go` - Goroutine lifecycle comments
+- `internal/http/proxy.go` - Proxy warmup comments
 
 **Directory Consolidation:**
 - Merged `internal/utils/` into `internal/util/` for naming consistency
 - Updated all imports referencing the old path
 
-**Stale Comments Fixed:**
-- `internal/gui/gui.go` - Removed misleading "will replace stub" comment
-- `internal/crypto/streaming_test.go` - Updated version reference
-
-#### Bug Fixes (from v3.4.1)
-
-- **Download Speed Display** - Fixed erratic speed display and slowdown at end of large file downloads by recording actual elapsed time instead of fake throughput estimates
-- **Verbose Logging** - Removed 19 DetectFormat diagnostic log statements that cluttered output
-- **Visual Feedback** - Added scanning/fetching messages for folder operations across CLI and GUI
-- **Version String** - Fixed double "v" prefix ("vv3.4.2" → "v3.4.2")
-
 #### Documentation
 
-- Updated all documentation version references to v3.4.2
-- Synchronized version across README, ARCHITECTURE, CLI_GUIDE, and all other .md files
-- Updated GITHUB_READY.md release checklist for v3.4.2
+- Fixed ARCHITECTURE.md: "dual token bucket" → "three-scope token bucket" rate limiting
+- Updated all version references and dates to December 16, 2025
+- Synchronized version across README, TODO_AND_PROJECT_STATUS, and RELEASE_NOTES
+
+#### Testing
+
+- All unit tests pass
+- E2E tested with both S3 and Azure backends
+- Linux build tested on Rescale platform
 
 ---
 
