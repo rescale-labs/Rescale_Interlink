@@ -1,7 +1,4 @@
 // Package upload provides helpers for file upload operations.
-//
-// Version: 3.2.0 (Sprint E - Dead Code Cleanup)
-// Date: 2025-11-29
 package upload
 
 import (

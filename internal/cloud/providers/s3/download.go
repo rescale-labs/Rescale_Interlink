@@ -1,13 +1,9 @@
 // Package s3 provides an S3 implementation of the CloudTransfer interface.
 // This file implements the LegacyDownloader interface for legacy (v0) format downloads.
 //
-// Phase 7F: Uses S3Client directly instead of wrapping state.NewS3Downloader().
-//
-// Note: StreamingConcurrentDownloader (DetectFormat, DownloadStreaming) is already
-// implemented in streaming_concurrent.go.
-//
-// Version: 3.2.0 (Sprint 7F - S3 Download True Consolidation)
-// Date: 2025-11-29
+// Uses S3Client directly for all operations.
+// Note: StreamingConcurrentDownloader (DetectFormat, DownloadStreaming) is in
+// streaming_concurrent.go.
 package s3
 
 import (

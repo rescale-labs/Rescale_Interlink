@@ -1,8 +1,5 @@
 // Package providers contains the cloud storage provider implementations
 // and factory for creating them based on storage type.
-//
-// Version: 3.2.0 (Sprint 1 - Unified Backend Architecture)
-// Date: 2025-11-28
 package providers
 
 import (

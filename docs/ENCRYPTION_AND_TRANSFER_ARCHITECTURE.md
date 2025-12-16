@@ -1,6 +1,6 @@
 # Encryption and Transfer Architecture
 
-**Version**: v3.4.0
+**Version**: v3.4.2
 **Date**: December 2025
 
 ## Overview

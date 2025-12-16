@@ -1,9 +1,5 @@
 // Package s3 provides an S3 implementation of the CloudTransfer interface.
-// This provider implements cloud storage operations directly using the S3Client,
-// without depending on the legacy upload/download package implementations.
-//
-// Version: 3.2.4
-// Date: 2025-12-10
+// This provider implements cloud storage operations directly using the S3Client.
 package s3
 
 import (
@@ -81,7 +77,7 @@ func (p *Provider) getOrCreateS3Client(ctx context.Context) (*S3Client, error) {
 
 	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials.
 	// Otherwise, use nil for user's default storage (uploads, personal files).
-	client, err := NewS3Client(p.storageInfo, p.apiClient, p.fileInfo)
+	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, p.fileInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
@@ -100,7 +96,7 @@ func (p *Provider) getOrCreateS3ClientForFile(ctx context.Context, fileInfo *mod
 
 	// Create a client with file-specific credentials
 	// Note: This client is NOT cached because different files may need different credentials
-	client, err := NewS3Client(p.storageInfo, p.apiClient, fileInfo)
+	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, fileInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client for file: %w", err)
 	}

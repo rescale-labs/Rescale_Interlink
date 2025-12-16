@@ -1,8 +1,5 @@
 // Package encryption provides cryptographic functions for Rescale Interlink.
 // This file implements HKDF-based key derivation for per-part streaming encryption.
-//
-// Version: 3.2.0
-// Date: November 29, 2025
 package encryption
 
 import (

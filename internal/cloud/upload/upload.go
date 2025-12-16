@@ -1,7 +1,4 @@
 // Package upload provides the canonical entry point for file uploads to Rescale cloud storage.
-//
-// Version: 3.2.4
-// Date: 2025-12-10
 package upload
 
 import (
