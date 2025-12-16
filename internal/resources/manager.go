@@ -129,6 +129,41 @@ func (m *Manager) ReleaseTransfer(transferID string) {
 	}
 }
 
+// TryAcquire attempts to acquire up to `count` additional threads for an existing transfer.
+// Returns the number of threads actually acquired (0 if none available).
+// This is used for dynamic scaling - when other transfers complete, their threads
+// become available and can be claimed by remaining active transfers.
+// v3.4.2: Added for dynamic thread reallocation
+func (m *Manager) TryAcquire(transferID string, count int) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Only allow acquiring for existing transfers
+	if _, exists := m.allocations[transferID]; !exists {
+		return 0
+	}
+
+	if count > m.availableThreads {
+		count = m.availableThreads
+	}
+	if count <= 0 {
+		return 0
+	}
+
+	m.availableThreads -= count
+	m.allocations[transferID] += count
+	return count
+}
+
+// GetMaxForFileSize returns the maximum threads recommended for a file of the given size.
+// This is used for dynamic scaling to determine the upper bound for thread acquisition.
+// v3.4.2: Added for dynamic thread reallocation
+func (m *Manager) GetMaxForFileSize(fileSize int64) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calculateDesiredThreads(fileSize, 1) // Assume single file for max
+}
+
 // GetAvailableThreads returns the current number of available threads
 func (m *Manager) GetAvailableThreads() int {
 	m.mu.Lock()
