@@ -1,15 +1,16 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v3.4.2.
+Complete command-line interface reference for `rescale-int` v3.4.3.
 
-**Version:** 3.4.2
-**Build Date:** December 15, 2025
+**Version:** 3.4.3
+**Build Date:** December 16, 2025
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
 ## Table of Contents
 
+- [System Requirements](#system-requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Global Flags](#global-flags)
@@ -27,14 +28,26 @@ For a comprehensive list of all features with source code references, see [FEATU
 - [Shell Completion](#shell-completion)
 - [Examples](#examples)
 
+## System Requirements
+
+**Operating System:**
+- **macOS**: 10.15 (Catalina) or later (Apple Silicon only)
+- **Windows**: Windows 10 or later (64-bit)
+- **Linux**: GLIBC 2.27+ required
+  - RHEL/CentOS/Rocky/Alma 8+
+  - Ubuntu 18.04+
+  - Debian 10+
+  - **NOT supported**: CentOS/RHEL 7 or older (end-of-life, GLIBC too old)
+
+If you see an error like `GLIBC_2.27 not found`, your Linux distribution is too old and not supported.
+
 ## Installation
 
 Download the appropriate binary for your platform from the releases page:
 
-- **macOS ARM64**: `rescale-int-darwin-arm64`
-- **macOS Intel**: `rescale-int-darwin-amd64`
+- **macOS (Apple Silicon)**: `rescale-int-darwin-arm64`
 - **Linux**: `rescale-int-linux-amd64`
-- **Windows**: `rescale-int-windows.exe`
+- **Windows**: `rescale-int-windows-amd64.exe`
 
 Make the binary executable (macOS/Linux):
 ```bash
@@ -58,7 +71,9 @@ This will prompt you for:
 - Worker settings (tar, upload, job workers)
 - Proxy configuration (optional)
 
-Configuration is saved to `~/.config/rescale-int/config.csv`
+Configuration is saved to `~/.config/rescale/config.csv`
+
+**Note:** If you have an existing configuration at the old location (`~/.config/rescale-int/`), it will be detected and used automatically. A migration message will suggest moving to the new location.
 
 ### Manual Configuration
 
@@ -85,11 +100,11 @@ export RESCALE_API_KEY="your-api-key"
 **Option 2: Token File (recommended for scripts)**
 ```bash
 # Create token file with restricted permissions
-echo "your-api-key" > ~/.config/rescale-int/token
-chmod 600 ~/.config/rescale-int/token
+echo "your-api-key" > ~/.config/rescale/token
+chmod 600 ~/.config/rescale/token
 
 # Use token file
-rescale-int --token-file ~/.config/rescale-int/token <command>
+rescale-int --token-file ~/.config/rescale/token <command>
 ```
 
 **Option 3: Command-Line Flag (not recommended)**
@@ -194,7 +209,7 @@ rescale-int files list --api-key your-api-key-here
 
 **`--token-file PATH`** - Read API key from file (v2.4.9+)
 ```bash
-rescale-int files list --token-file ~/.config/rescale-int/token
+rescale-int files list --token-file ~/.config/rescale/token
 ```
 
 **`--api-url URL`** - Override API base URL
@@ -1345,12 +1360,12 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v3.4.2 (December 15, 2025)
+This guide is for `rescale-int` v3.4.3 (December 16, 2025)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v3.4.2 (2025-12-15) [FIPS 140-3]
+# Output: rescale-int version v3.4.3 (2025-12-16) [FIPS 140-3]
 ```
 
 ### v3.0.1 Streaming Encryption (November 28, 2025)

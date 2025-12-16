@@ -84,16 +84,15 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			proxyURL.User = url.UserPassword(cfg.ProxyUser, cfg.ProxyPassword)
 		}
 
-		// Automatic warmup for basic mode to prevent session timeouts
 		client := &nethttp.Client{
 			Transport: transport,
 			Timeout:   300 * time.Second,
 		}
 
-		// v3.4.0: Only perform warmup if credentials are complete
-		// If password is missing, skip warmup - let the caller (GUI/CLI) prompt for password
-		// This prevents blocking GUI launch when proxy config is saved without password
-		if cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
+		// v3.4.3: Only perform warmup if ProxyWarmup is true AND credentials are complete
+		// Previously, basic mode always did warmup regardless of ProxyWarmup flag
+		// This was inconsistent with NTLM mode and could cause 30s delays on startup
+		if cfg.ProxyWarmup && cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
 			if err := warmupProxy(client, cfg); err != nil {
 				return nil, fmt.Errorf("proxy warmup failed: %w", err)
 			}
@@ -143,6 +142,7 @@ func buildProxyURL(cfg *config.Config) *url.URL {
 }
 
 // warmupProxy performs a warmup request to establish proxy connection
+// v3.4.3: Reduced timeout from 30s to 15s to minimize UI blocking
 func warmupProxy(client *nethttp.Client, cfg *config.Config) error {
 	// Use a lightweight endpoint for warmup
 	warmupURL := cfg.APIBaseURL
@@ -150,7 +150,7 @@ func warmupProxy(client *nethttp.Client, cfg *config.Config) error {
 		warmupURL = "https://platform.rescale.com"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	req, err := nethttp.NewRequestWithContext(ctx, "GET", warmupURL+"/api/v3/", nil)

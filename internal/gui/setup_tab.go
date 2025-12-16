@@ -398,65 +398,73 @@ func (st *SetupTab) onProxyModeChange(value string) {
 }
 
 func (st *SetupTab) testConnection() {
-	// First apply current settings
-	if err := st.applyConfig(); err != nil {
-		dialog.ShowError(fmt.Errorf("Failed to apply config: %w", err), st.window)
-		return
-	}
+	st.statusLabel.SetText("Applying configuration...")
+	st.connectionStatus.SetText("Preparing...")
 
-	st.statusLabel.SetText("Testing connection...")
-	st.connectionStatus.SetText("Testing...")
+	// Use async apply to prevent GUI freeze during proxy warmup
+	st.applyConfigAsync(
+		func() {
+			// Config applied successfully - now run the connection test
+			st.statusLabel.SetText("Testing connection...")
+			st.connectionStatus.SetText("Testing...")
 
-	progress := dialog.NewProgressInfinite("Testing Connection",
-		"Connecting to Rescale API...", st.window)
-	progress.Show()
+			progress := dialog.NewProgressInfinite("Testing Connection",
+				"Connecting to Rescale API...", st.window)
+			progress.Show()
 
-	go func() {
-		// Panic recovery - must hide progress and show error
-		defer func() {
-			if r := recover(); r != nil {
-				guiLogger.Error().Msgf("PANIC in test connection goroutine: %v\n", r)
+			go func() {
+				// Panic recovery - must hide progress and show error
+				defer func() {
+					if r := recover(); r != nil {
+						guiLogger.Error().Msgf("PANIC in test connection goroutine: %v\n", r)
+						fyne.Do(func() {
+							progress.Hide()
+							st.connectionStatus.SetText("❌ Failed")
+							dialog.ShowError(
+								fmt.Errorf("An unexpected error occurred during connection test: %v\n\nPlease check the console for details.", r),
+								st.window,
+							)
+							st.statusLabel.SetText("Connection test failed")
+						})
+					}
+				}()
+
+				err := st.engine.TestConnection()
+
+				// Store connection state for persistence
+				st.lastConnectionTest = time.Now()
+				st.lastConnectionResult = (err == nil)
+				if err != nil {
+					st.lastConnectionError = err.Error()
+				} else {
+					st.lastConnectionError = ""
+				}
+
+				// Update UI - hide progress FIRST, then show result dialog
+				// All in one fyne.Do() to ensure proper sequencing
 				fyne.Do(func() {
 					progress.Hide()
-					st.connectionStatus.SetText("❌ Failed")
-					dialog.ShowError(
-						fmt.Errorf("An unexpected error occurred during connection test: %v\n\nPlease check the console for details.", r),
-						st.window,
-					)
-					st.statusLabel.SetText("Connection test failed")
+
+					if err != nil {
+						st.updateConnectionStatusDisplay(false, err.Error())
+						dialog.ShowError(err, st.window)
+						st.statusLabel.SetText("Connection failed")
+					} else {
+						st.updateConnectionStatusDisplay(true, "")
+						dialog.ShowInformation("Connection Successful",
+							"✓ Successfully connected to Rescale API.\n\nYour API key and platform URL are valid.",
+							st.window)
+						st.statusLabel.SetText("Connection successful")
+					}
 				})
-			}
-		}()
-
-		err := st.engine.TestConnection()
-
-		// Store connection state for persistence
-		st.lastConnectionTest = time.Now()
-		st.lastConnectionResult = (err == nil)
-		if err != nil {
-			st.lastConnectionError = err.Error()
-		} else {
-			st.lastConnectionError = ""
-		}
-
-		// Update UI - hide progress FIRST, then show result dialog
-		// All in one fyne.Do() to ensure proper sequencing
-		fyne.Do(func() {
-			progress.Hide()
-
-			if err != nil {
-				st.updateConnectionStatusDisplay(false, err.Error())
-				dialog.ShowError(err, st.window)
-				st.statusLabel.SetText("Connection failed")
-			} else {
-				st.updateConnectionStatusDisplay(true, "")
-				dialog.ShowInformation("Connection Successful",
-					"✓ Successfully connected to Rescale API.\n\nYour API key and platform URL are valid.",
-					st.window)
-				st.statusLabel.SetText("Connection successful")
-			}
-		})
-	}()
+			}()
+		},
+		func(err error) {
+			// Config apply failed
+			st.connectionStatus.SetText("❌ Config Error")
+			dialog.ShowError(fmt.Errorf("Failed to apply config: %w", err), st.window)
+		},
+	)
 }
 
 // updateConnectionStatusDisplay updates the connection status label with result and timestamp
@@ -561,7 +569,7 @@ func (st *SetupTab) saveConfig() {
 	)
 }
 
-// saveConfigToDefault saves configuration to the default location (~/.config/rescale-int/config.csv)
+// saveConfigToDefault saves configuration to the default location (~/.config/rescale/config.csv)
 // Also saves API key to the default token file if one is set
 func (st *SetupTab) saveConfigToDefault() {
 	// v3.4.0: Use async apply to prevent GUI freeze during proxy warmup
