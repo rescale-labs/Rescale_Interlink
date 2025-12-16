@@ -731,7 +731,10 @@ func (st *SetupTab) applyConfig() error {
 		return err
 	}
 
-	st.statusLabel.SetText("Configuration applied")
+	// Must use fyne.Do since this may be called from a background goroutine
+	fyne.Do(func() {
+		st.statusLabel.SetText("Configuration applied")
+	})
 	return nil
 }
 
