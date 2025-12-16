@@ -1,9 +1,6 @@
 // Package transfer provides unified upload and download orchestration.
 // This file implements the unified download orchestrator that works with any CloudTransfer provider.
 //
-// Version: 3.2.4 (CBC Streaming Download)
-// Date: 2025-12-10
-//
 // Format versions supported:
 //   - v0 (legacy): Download all → decrypt all, requires .encrypted temp file
 //   - v1 (HKDF): Per-part key derivation, parallel decryption, no temp file

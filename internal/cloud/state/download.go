@@ -1,7 +1,4 @@
 // Package state provides shared resume state types and I/O for upload/download operations.
-//
-// Version: 3.2.0 (Sprint 7H - Import Cycle Resolution)
-// Date: 2025-11-29
 package state
 
 import (

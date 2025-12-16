@@ -1,6 +1,4 @@
 // Package daemon tests
-// Version: 3.4.0
-// Date: December 2025
 package daemon
 
 import (

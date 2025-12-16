@@ -1,12 +1,9 @@
 // Package daemon provides background service functionality for auto-downloading completed jobs.
-// Version: 3.4.0
-// Date: December 2025
 package daemon
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -150,13 +147,6 @@ func (d *Daemon) Stop() {
 	}
 
 	d.logger.Info().Msg("Daemon stopped")
-}
-
-// IsRunning returns whether the daemon is currently running.
-func (d *Daemon) IsRunning() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.running
 }
 
 // pollLoop runs the periodic polling.
@@ -386,73 +376,3 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// GetStatus returns current daemon status information.
-func (d *Daemon) GetStatus() *Status {
-	return &Status{
-		Running:         d.IsRunning(),
-		LastPoll:        d.state.GetLastPoll(),
-		DownloadedCount: d.state.GetDownloadedCount(),
-		FailedCount:     d.state.GetFailedCount(),
-		DownloadDir:     d.cfg.DownloadDir,
-		PollInterval:    d.cfg.PollInterval,
-	}
-}
-
-// Status contains daemon status information.
-type Status struct {
-	Running         bool
-	LastPoll        time.Time
-	DownloadedCount int
-	FailedCount     int
-	DownloadDir     string
-	PollInterval    time.Duration
-}
-
-// WriteStatus writes status to a writer.
-func (s *Status) WriteStatus(w io.Writer) {
-	fmt.Fprintf(w, "Daemon Status:\n")
-	if s.Running {
-		fmt.Fprintf(w, "  Running: Yes\n")
-	} else {
-		fmt.Fprintf(w, "  Running: No\n")
-	}
-	if !s.LastPoll.IsZero() {
-		fmt.Fprintf(w, "  Last Poll: %s\n", s.LastPoll.Format(time.RFC3339))
-	} else {
-		fmt.Fprintf(w, "  Last Poll: Never\n")
-	}
-	fmt.Fprintf(w, "  Downloaded Jobs: %d\n", s.DownloadedCount)
-	fmt.Fprintf(w, "  Failed Jobs: %d\n", s.FailedCount)
-	fmt.Fprintf(w, "  Download Directory: %s\n", s.DownloadDir)
-	fmt.Fprintf(w, "  Poll Interval: %s\n", s.PollInterval)
-}
-
-// ListDownloaded returns the list of downloaded jobs.
-func (d *Daemon) ListDownloaded(limit int) []*DownloadedJob {
-	return d.state.GetRecentDownloads(limit)
-}
-
-// ListFailed returns the list of failed downloads.
-func (d *Daemon) ListFailed() []*DownloadedJob {
-	return d.state.GetFailedJobs()
-}
-
-// RetryFailed clears failed status for a job, allowing it to be retried on next poll.
-func (d *Daemon) RetryFailed(jobID string) {
-	d.state.ClearFailed(jobID)
-	if err := d.state.Save(); err != nil {
-		d.logger.Error().Err(err).Msg("Failed to save state after retry")
-	}
-}
-
-// RetryAllFailed clears failed status for all failed jobs.
-func (d *Daemon) RetryAllFailed() int {
-	failed := d.state.GetFailedJobs()
-	for _, job := range failed {
-		d.state.ClearFailed(job.JobID)
-	}
-	if err := d.state.Save(); err != nil {
-		d.logger.Error().Err(err).Msg("Failed to save state after retry-all")
-	}
-	return len(failed)
-}

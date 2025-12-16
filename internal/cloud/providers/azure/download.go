@@ -1,13 +1,9 @@
 // Package azure provides an Azure implementation of the CloudTransfer interface.
 // This file implements the LegacyDownloader interface for legacy (v0) format downloads.
 //
-// Note: StreamingConcurrentDownloader (DetectFormat, DownloadStreaming) is already
-// implemented in streaming_concurrent.go.
-//
-// Phase 7G: Uses AzureClient directly instead of wrapping state.NewAzureDownloader().
-//
-// Version: 3.2.0 (Sprint 7G - Azure True Consolidation)
-// Date: 2025-11-29
+// Uses AzureClient directly for all operations.
+// Note: StreamingConcurrentDownloader (DetectFormat, DownloadStreaming) is in
+// streaming_concurrent.go.
 package azure
 
 import (

@@ -1,8 +1,5 @@
 // Package encryption provides cryptographic functions for Rescale Interlink.
 // This file contains unit tests for per-part streaming encryption.
-//
-// Version: 3.4.2
-// Date: December 15, 2025
 package encryption
 
 import (
