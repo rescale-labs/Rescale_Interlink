@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"github.com/rs/zerolog"
 
+	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
@@ -69,6 +70,19 @@ func LaunchGUI(configFile string) error {
 				"DISPLAY and WAYLAND_DISPLAY are not set.\n" +
 				"Use 'rescale-int' without --gui flag for CLI mode")
 		}
+
+		// Force X11 backend on Wayland for consistent window decorations
+		// RHEL 9+ defaults to Wayland which can cause missing minimize/maximize buttons
+		// User can opt-in to native Wayland with RESCALE_USE_WAYLAND=1
+		if os.Getenv("WAYLAND_DISPLAY") != "" && os.Getenv("RESCALE_USE_WAYLAND") == "" {
+			guiLogger.Info().Msg("Wayland detected - forcing X11 backend for consistent window decorations")
+			guiLogger.Info().Msg("Set RESCALE_USE_WAYLAND=1 to use native Wayland support")
+			os.Unsetenv("WAYLAND_DISPLAY")
+			// Ensure DISPLAY is set for X11 fallback
+			if os.Getenv("DISPLAY") == "" {
+				os.Setenv("DISPLAY", ":0")
+			}
+		}
 	}
 
 	// Start goroutine monitoring with context for clean shutdown
@@ -80,8 +94,12 @@ func LaunchGUI(configFile string) error {
 	myApp := app.NewWithID("com.rescale.interlink")
 	myApp.Settings().SetTheme(&rescaleTheme{})
 
-	// Create main window
-	mainWindow := myApp.NewWindow("Rescale Interlink")
+	// Create main window with version in title
+	windowTitle := fmt.Sprintf("Rescale Interlink %s", cli.Version)
+	if cli.FIPSStatus() != "" {
+		windowTitle += " " + cli.FIPSStatus()
+	}
+	mainWindow := myApp.NewWindow(windowTitle)
 	mainWindow.SetMaster()
 
 	// Initialize engine

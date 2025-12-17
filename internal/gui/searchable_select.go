@@ -19,7 +19,7 @@ type SearchableSelect struct {
 	options          []string
 	filtered         []string
 	selected         string
-	onChanged        func(string)
+	OnChanged        func(string) // Callback when selection changes
 	maxVisible       int
 	listVisible      bool
 	selectedIdx      int
@@ -31,7 +31,7 @@ func NewSearchableSelect(placeholder string, onChanged func(string)) *Searchable
 	ss := &SearchableSelect{
 		options:     []string{},
 		filtered:    []string{},
-		onChanged:   onChanged,
+		OnChanged:   onChanged,
 		maxVisible:  10,
 		selectedIdx: -1,
 	}
@@ -138,8 +138,8 @@ func (ss *SearchableSelect) selectItem(value string) {
 	ss.listScroll.Hide()
 	ss.listVisible = false
 
-	if ss.onChanged != nil {
-		ss.onChanged(value)
+	if ss.OnChanged != nil {
+		ss.OnChanged(value)
 	}
 	ss.Refresh()
 }

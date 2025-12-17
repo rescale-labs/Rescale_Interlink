@@ -30,19 +30,20 @@ type TemplateBuilderDialog struct {
 	dialog   dialog.Dialog // Store dialog reference so we can close it
 
 	// Job Configuration
-	jobNameEntry           *widget.Entry
-	analysisCodeSelect     *widget.Select    // Legacy dropdown (kept for fallback)
-	analysisCodeSearchable *SearchableSelect // New searchable entry
-	useSearchable          bool              // Flag to track which widget is active
-	analysisVersionEntry   *widget.Entry
-	commandEntry           *widget.Entry
+	jobNameEntry             *widget.Entry
+	analysisCodeSelect       *widget.Select    // Legacy dropdown (kept for fallback)
+	analysisCodeSearchable   *SearchableSelect // New searchable entry
+	useSearchable            bool              // Flag to track which widget is active
+	analysisVersionSearchable *SearchableSelect // Version dropdown populated from API
+	commandEntry             *widget.Entry
 
 	// Hardware Configuration
-	coreTypeSelect     *widget.Select        // Legacy dropdown (kept for fallback)
-	coreTypeSearchable *SearchableSelect     // New searchable entry (mirrors software)
-	coresPerSlotEntry  *widget.Entry
-	walltimeEntry     *widget.Entry
-	slotsEntry        *widget.Entry
+	coreTypeSelect        *widget.Select        // Legacy dropdown (kept for fallback)
+	coreTypeSearchable    *SearchableSelect     // New searchable entry (mirrors software)
+	coresPerSlotSearchable *SearchableSelect    // Dropdown with valid core counts per hardware type
+	walltimeEntry         *widget.Entry
+	slotsEntry            *widget.Entry
+	coreTypeData          map[string]models.CoreType // Maps code -> CoreType with valid cores
 
 	// Project Configuration
 	orgCodeEntry   *widget.Entry
@@ -73,6 +74,10 @@ type TemplateBuilderDialog struct {
 	selectedVersionIndex int
 	scanSoftwareBtn      *widget.Button
 	scanHardwareBtn      *widget.Button
+
+	// Display name to code mappings for user-friendly dropdowns
+	displayToCode map[string]string // Maps "Name (Code)" -> "Code"
+	codeToDisplay map[string]string // Maps "Code" -> "Name (Code)"
 }
 
 // NewTemplateBuilderDialog creates a new template builder dialog
@@ -85,6 +90,8 @@ func NewTemplateBuilderDialog(window fyne.Window, engine *core.Engine, apiCache 
 		workflow:             workflow,
 		onTemplateCreated:    onCreated,
 		selectedVersionIndex: -1,
+		displayToCode:        make(map[string]string),
+		codeToDisplay:        make(map[string]string),
 	}
 }
 
@@ -164,9 +171,14 @@ func (tb *TemplateBuilderDialog) buildUI(defaults models.JobSpec) {
 	})
 	tb.scanSoftwareBtn.Importance = widget.HighImportance
 
-	tb.analysisVersionEntry = widget.NewEntry()
-	tb.analysisVersionEntry.SetText(defaults.AnalysisVersion)
-	tb.analysisVersionEntry.SetPlaceHolder("(auto-populated after scan)")
+	// Version dropdown - populated when analysis is selected
+	tb.analysisVersionSearchable = NewSearchableSelect("Select version (scan software first)...", func(selected string) {
+		tb.onVersionChanged(selected)
+	})
+	// If we have a default version, set it
+	if defaults.AnalysisVersion != "" {
+		tb.analysisVersionSearchable.SetSelected(defaults.AnalysisVersion)
+	}
 
 	tb.commandEntry = widget.NewEntry()
 	tb.commandEntry.SetText(defaults.Command)
@@ -177,22 +189,28 @@ func (tb *TemplateBuilderDialog) buildUI(defaults models.JobSpec) {
 	// Hardware Configuration Section
 	coreTypes, isLoading, err := tb.apiCache.GetCoreTypes()
 	var coreTypeOptions []string
+	tb.coreTypeData = make(map[string]models.CoreType)
 
 	if isLoading {
 		coreTypeOptions = []string{"Loading core types..."}
 	} else if err != nil || len(coreTypes) == 0 {
 		for _, ct := range getDefaultCoreTypes() {
 			coreTypeOptions = append(coreTypeOptions, ct.Code)
+			tb.coreTypeData[ct.Code] = ct
 		}
 	} else {
 		for _, ct := range coreTypes {
 			coreTypeOptions = append(coreTypeOptions, ct.Code)
+			tb.coreTypeData[ct.Code] = ct
 		}
 	}
 
 	// Hardware - use searchable entry for better UX with large lists (mirrors software)
 	tb.coreTypeSearchable = NewSearchableSelect("Type to search hardware...", nil)
 	tb.coreTypeSearchable.SetOptions(coreTypeOptions)
+	tb.coreTypeSearchable.OnChanged = func(selected string) {
+		tb.onCoreTypeChanged(selected)
+	}
 	if defaults.CoreType != "" {
 		tb.coreTypeSearchable.SetSelected(defaults.CoreType)
 	}
@@ -210,9 +228,11 @@ func (tb *TemplateBuilderDialog) buildUI(defaults models.JobSpec) {
 	tb.scanHardwareBtn.Importance = widget.HighImportance
 	tb.scanHardwareBtn.Disable() // Initially disabled
 
-	tb.coresPerSlotEntry = widget.NewEntry()
-	tb.coresPerSlotEntry.SetText(strconv.Itoa(defaults.CoresPerSlot))
-	tb.coresPerSlotEntry.SetPlaceHolder("4")
+	// Cores per slot - dropdown populated with valid values when coretype selected
+	defaultCores := []string{"1", "2", "4", "8", "16", "32", "64", "128"}
+	tb.coresPerSlotSearchable = NewSearchableSelect("Select cores...", nil)
+	tb.coresPerSlotSearchable.SetOptions(defaultCores)
+	tb.coresPerSlotSearchable.SetSelected(strconv.Itoa(defaults.CoresPerSlot))
 
 	tb.walltimeEntry = widget.NewEntry()
 	tb.walltimeEntry.SetText(fmt.Sprintf("%.1f", defaults.WalltimeHours))
@@ -341,9 +361,9 @@ func (tb *TemplateBuilderDialog) buildUI(defaults models.JobSpec) {
 	softwareSection := container.NewVBox(
 		tb.createSectionHeader("Job Software Configuration"),
 		tb.createFormRow("Job Name", tb.jobNameEntry),
-		tb.createFormRow("Analysis Code", tb.analysisCodeSearchable),
+		tb.createFormRow("Analysis", tb.analysisCodeSearchable),
 		container.NewHBox(container.NewGridWrap(fyne.NewSize(150, 30)), tb.scanSoftwareBtn),
-		tb.createFormRow("Analysis Version", tb.analysisVersionEntry),
+		tb.createFormRow("Version", tb.analysisVersionSearchable),
 		tb.createFormRow("Command", tb.commandEntry),
 	)
 
@@ -351,7 +371,7 @@ func (tb *TemplateBuilderDialog) buildUI(defaults models.JobSpec) {
 		tb.createSectionHeader("Job Hardware Configuration"),
 		tb.createFormRow("Core Type", tb.coreTypeSearchable),
 		container.NewHBox(container.NewGridWrap(fyne.NewSize(150, 30)), tb.scanHardwareBtn),
-		tb.createFormRow("Cores Per Slot", tb.coresPerSlotEntry),
+		tb.createFormRow("Cores Per Slot", tb.coresPerSlotSearchable),
 		tb.createFormRow("Walltime (hours)", tb.walltimeEntry),
 	)
 
@@ -571,14 +591,18 @@ func (tb *TemplateBuilderDialog) handleSaveTemplate() {
 
 // buildAndValidateTemplate extracts template building logic for reuse
 func (tb *TemplateBuilderDialog) buildAndValidateTemplate() (models.JobSpec, []string, []error) {
-	// Get analysis code from searchable widget
-	analysisCode := tb.analysisCodeSearchable.Selected()
+	// Get analysis code from searchable widget - extract actual code from display format
+	selectedAnalysis := tb.analysisCodeSearchable.Selected()
+	analysisCode := tb.extractAnalysisCode(selectedAnalysis)
+
+	// Get version from searchable widget (allows both dropdown and manual entry)
+	analysisVersion := tb.analysisVersionSearchable.Selected()
 
 	template := models.JobSpec{
 		Directory:       "./Run_${index}", // Always use this pattern
 		JobName:         strings.TrimSpace(tb.jobNameEntry.Text),
 		AnalysisCode:    analysisCode,
-		AnalysisVersion: strings.TrimSpace(tb.analysisVersionEntry.Text),
+		AnalysisVersion: strings.TrimSpace(analysisVersion),
 		Command:         strings.TrimSpace(tb.commandEntry.Text),
 		CoreType:        tb.coreTypeSearchable.Selected(), // Use searchable widget
 		SubmitMode:      tb.submitModeSelect.Selected,
@@ -588,7 +612,7 @@ func (tb *TemplateBuilderDialog) buildAndValidateTemplate() (models.JobSpec, []s
 	var parseErrors []string
 
 	// Parse numeric fields
-	coresPerSlot, err := strconv.Atoi(strings.TrimSpace(tb.coresPerSlotEntry.Text))
+	coresPerSlot, err := strconv.Atoi(strings.TrimSpace(tb.coresPerSlotSearchable.Selected()))
 	if err != nil {
 		parseErrors = append(parseErrors, "Cores Per Slot must be a valid number")
 	} else {
@@ -711,59 +735,84 @@ func (tb *TemplateBuilderDialog) handleScanSoftware() {
 		// Store scanned analyses
 		tb.scannedAnalyses = analyses
 
-		// Update with analysis codes
-		var codes []string
+		// Build display options in "Name (Code)" format for better UX
+		var displayOptions []string
+		newDisplayToCode := make(map[string]string)
+		newCodeToDisplay := make(map[string]string)
+
 		for _, a := range analyses {
-			codes = append(codes, a.Code)
+			// Format: "Analysis Name (analysis_code)"
+			display := fmt.Sprintf("%s (%s)", a.Name, a.Code)
+			displayOptions = append(displayOptions, display)
+			newDisplayToCode[display] = a.Code
+			newCodeToDisplay[a.Code] = display
 		}
 
 		// Update UI (must happen on main thread)
 		fyne.Do(func() {
-			// Update searchable widget
-			tb.analysisCodeSearchable.SetOptions(codes)
+			// Update mappings
+			tb.displayToCode = newDisplayToCode
+			tb.codeToDisplay = newCodeToDisplay
+
+			// Update searchable widget with display names
+			tb.analysisCodeSearchable.SetOptions(displayOptions)
 
 			// Also update legacy dropdown for compatibility
-			tb.analysisCodeSelect.Options = codes
+			tb.analysisCodeSelect.Options = displayOptions
 			tb.analysisCodeSelect.Refresh()
 
 			dialog.ShowInformation("Software Scan Complete",
-				fmt.Sprintf("Found %d software applications.\n\nType in the Analysis Code field to search and filter.", len(analyses)),
+				fmt.Sprintf("Found %d software applications.\n\nType in the Analysis field to search by name or code.", len(analyses)),
 				tb.window)
 		})
 	}()
 }
 
 // onAnalysisCodeChanged is called when the user selects an analysis code
+// The selected string may be in "Name (Code)" format or just the code
 func (tb *TemplateBuilderDialog) onAnalysisCodeChanged(selected string) {
+	// Extract actual code from display format if needed
+	actualCode := tb.extractAnalysisCode(selected)
+
 	// Find the selected analysis in our scanned list (if available)
 	tb.selectedAnalysis = nil
 	tb.selectedVersionIndex = -1
 
 	for i := range tb.scannedAnalyses {
-		if tb.scannedAnalyses[i].Code == selected {
+		if tb.scannedAnalyses[i].Code == actualCode {
 			tb.selectedAnalysis = &tb.scannedAnalyses[i]
 			break
 		}
 	}
 
-	// If we found the analysis and it has versions, update the version entry
+	// If we found the analysis and it has versions, populate version dropdown
 	if tb.selectedAnalysis != nil && len(tb.selectedAnalysis.Versions) > 0 {
-		// Use the first version as default
-		tb.selectedVersionIndex = 0
-		// Nil check: entry may not exist yet during initial buildUI (SetSelected triggers this callback)
-		if tb.analysisVersionEntry != nil {
-			if tb.selectedAnalysis.Versions[0].Version != "" {
-				tb.analysisVersionEntry.SetText(tb.selectedAnalysis.Versions[0].Version)
-			} else if tb.selectedAnalysis.Versions[0].VersionCode != "" {
-				tb.analysisVersionEntry.SetText(tb.selectedAnalysis.Versions[0].VersionCode)
+		// Build version options
+		var versionOptions []string
+		for _, v := range tb.selectedAnalysis.Versions {
+			if v.Version != "" {
+				versionOptions = append(versionOptions, v.Version)
+			} else if v.VersionCode != "" {
+				versionOptions = append(versionOptions, v.VersionCode)
 			}
 		}
+
+		// Nil check: widget may not exist yet during initial buildUI
+		if tb.analysisVersionSearchable != nil && len(versionOptions) > 0 {
+			tb.analysisVersionSearchable.SetOptions(versionOptions)
+			// Select the first version as default
+			tb.analysisVersionSearchable.SetSelected(versionOptions[0])
+			tb.selectedVersionIndex = 0
+		}
+	} else if tb.analysisVersionSearchable != nil {
+		// No versions found - clear options but allow manual entry
+		tb.analysisVersionSearchable.SetOptions([]string{})
 	}
 
 	// Enable hardware scan button whenever ANY non-empty software code is entered
 	// (not just when it's in our scanned list - user may type a valid code directly)
 	if tb.scanHardwareBtn != nil {
-		if selected != "" {
+		if actualCode != "" {
 			tb.scanHardwareBtn.Enable()
 		} else {
 			tb.scanHardwareBtn.Disable()
@@ -771,12 +820,55 @@ func (tb *TemplateBuilderDialog) onAnalysisCodeChanged(selected string) {
 	}
 }
 
+// extractAnalysisCode extracts the actual code from a display string
+// Handles both "Name (Code)" format and plain codes
+func (tb *TemplateBuilderDialog) extractAnalysisCode(selected string) string {
+	if selected == "" {
+		return ""
+	}
+
+	// First check if this is a display name we know about
+	if code, ok := tb.displayToCode[selected]; ok {
+		return code
+	}
+
+	// Try to extract code from "Name (Code)" format
+	if idx := strings.LastIndex(selected, "("); idx != -1 {
+		if endIdx := strings.LastIndex(selected, ")"); endIdx > idx {
+			return strings.TrimSpace(selected[idx+1 : endIdx])
+		}
+	}
+
+	// Assume it's already a plain code
+	return selected
+}
+
+// onVersionChanged is called when the user selects a version
+func (tb *TemplateBuilderDialog) onVersionChanged(selected string) {
+	if tb.selectedAnalysis == nil || selected == "" {
+		return
+	}
+
+	// Find the index of the selected version
+	for i, v := range tb.selectedAnalysis.Versions {
+		versionStr := v.Version
+		if versionStr == "" {
+			versionStr = v.VersionCode
+		}
+		if versionStr == selected {
+			tb.selectedVersionIndex = i
+			break
+		}
+	}
+}
+
 // handleScanHardware populates hardware options based on selected software
 func (tb *TemplateBuilderDialog) handleScanHardware() {
-	// Get the current software code from the searchable widget
-	selectedCode := tb.analysisCodeSearchable.Selected()
+	// Get the current software code from the searchable widget - extract actual code
+	selected := tb.analysisCodeSearchable.Selected()
+	selectedCode := tb.extractAnalysisCode(selected)
 	if selectedCode == "" {
-		dialog.ShowError(fmt.Errorf("Please enter or select a software code first."), tb.window)
+		dialog.ShowError(fmt.Errorf("Please enter or select a software first."), tb.window)
 		return
 	}
 
@@ -880,6 +972,43 @@ func (tb *TemplateBuilderDialog) showCompatibleHardware() {
 		fmt.Sprintf("Found %d compatible coretypes for %s.\n\nSelect one from the Coretype dropdown.",
 			len(version.AllowedCoreTypes), tb.selectedAnalysis.Name),
 		tb.window)
+}
+
+// onCoreTypeChanged updates the cores per slot dropdown based on selected core type
+func (tb *TemplateBuilderDialog) onCoreTypeChanged(selected string) {
+	if selected == "" || tb.coresPerSlotSearchable == nil {
+		return
+	}
+
+	// Look up the CoreType data
+	ct, ok := tb.coreTypeData[selected]
+	if !ok || len(ct.Cores) == 0 {
+		// No specific core data - show common defaults
+		defaultCores := []string{"1", "2", "4", "8", "16", "32", "64", "128"}
+		tb.coresPerSlotSearchable.SetOptions(defaultCores)
+		return
+	}
+
+	// Convert cores to string options
+	coreOptions := make([]string, len(ct.Cores))
+	for i, c := range ct.Cores {
+		coreOptions[i] = strconv.Itoa(c)
+	}
+	tb.coresPerSlotSearchable.SetOptions(coreOptions)
+
+	// If current selection is not valid, select the first option
+	currentStr := tb.coresPerSlotSearchable.Selected()
+	current, _ := strconv.Atoi(currentStr)
+	isValid := false
+	for _, c := range ct.Cores {
+		if c == current {
+			isValid = true
+			break
+		}
+	}
+	if !isValid && len(coreOptions) > 0 {
+		tb.coresPerSlotSearchable.SetSelected(coreOptions[0])
+	}
 }
 
 // getLicenseKey returns the license key based on selected type
