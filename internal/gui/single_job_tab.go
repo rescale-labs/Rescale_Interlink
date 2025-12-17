@@ -1116,6 +1116,12 @@ func (sjt *SingleJobTab) showFileSelectionManager() {
 	// Create a list widget to show selected files
 	fileListData := sjt.localFiles
 
+	// File count label - defined early so callbacks can update it
+	fileCountLabel := widget.NewLabel(fmt.Sprintf("%d files selected", len(fileListData)))
+	updateFileCount := func() {
+		fileCountLabel.SetText(fmt.Sprintf("%d files selected", len(fileListData)))
+	}
+
 	// Create list of file basenames for display
 	var listWidget *widget.List
 	listWidget = widget.NewList(
@@ -1140,6 +1146,7 @@ func (sjt *SingleJobTab) showFileSelectionManager() {
 					fileListData = append(fileListData[:id], fileListData[id+1:]...)
 					sjt.localFiles = fileListData
 					listWidget.Refresh()
+					updateFileCount()
 				}
 			}
 		},
@@ -1172,6 +1179,7 @@ func (sjt *SingleJobTab) showFileSelectionManager() {
 			fileListData = append(fileListData, filePath)
 			sjt.localFiles = fileListData
 			listWidget.Refresh()
+			updateFileCount()
 		}, sjt.window)
 		fileDialog.Show()
 	})
@@ -1182,6 +1190,7 @@ func (sjt *SingleJobTab) showFileSelectionManager() {
 		fileListData = []string{}
 		sjt.localFiles = fileListData
 		listWidget.Refresh()
+		updateFileCount()
 	})
 	clearAllBtn.Importance = widget.HighImportance
 
@@ -1189,17 +1198,22 @@ func (sjt *SingleJobTab) showFileSelectionManager() {
 	instructions := widget.NewLabel("Add files to upload. Files will be uploaded individually (not tarred).")
 	instructions.Wrapping = fyne.TextWrapWord
 
-	// File count label
-	fileCountLabel := widget.NewLabel(fmt.Sprintf("%d files selected", len(fileListData)))
-
-	content := container.NewVBox(
+	// Fixed header section (always visible)
+	header := container.NewVBox(
 		instructions,
 		VerticalSpacer(8),
 		container.NewHBox(addFileBtn, HorizontalSpacer(8), clearAllBtn),
 		VerticalSpacer(8),
 		fileCountLabel,
-		container.NewScroll(listWidget),
+		widget.NewLabel("Selected files:"),
 	)
+
+	// Scrollable file list with fixed height
+	fileListScroll := container.NewScroll(listWidget)
+	fileListScroll.SetMinSize(fyne.NewSize(400, 200))
+
+	// Use Border layout: header at top, scrollable list fills center
+	content := container.NewBorder(header, nil, nil, nil, fileListScroll)
 
 	// Custom dialog with confirm/cancel
 	dialog.ShowCustomConfirm("Select Local Files", "Use Selected Files", "Cancel", content, func(confirmed bool) {
