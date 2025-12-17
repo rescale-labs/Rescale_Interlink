@@ -45,8 +45,8 @@ type JobRequest struct {
 	Name          string               `json:"name"`
 	JobAnalyses   []JobAnalysisRequest `json:"jobanalyses"`
 	IsLowPriority bool                 `json:"isLowPriority"`
-	Tags          []string             `json:"tags,omitempty"`      // Added in v1.0.0
-	ProjectID     string               `json:"projectId,omitempty"` // Added in v1.0.0
+	Tags          []string             `json:"tags,omitempty"`
+	ProjectID     string               `json:"projectId,omitempty"`
 }
 
 // JobAnalysisRequest represents an analysis within a job
@@ -109,13 +109,13 @@ type JobSubmitRequest struct {
 }
 
 // CoreType represents a hardware core type from the API.
-// Added in v1.0.0 (October 7, 2025) for core type validation feature.
 // Note: All core types returned by the API are available for use.
 type CoreType struct {
 	Code         string `json:"code"`
 	Name         string `json:"name"`
 	DisplayOrder int    `json:"displayOrder"`
 	IsActive     bool   `json:"isActive"`
+	Cores        []int  `json:"cores"` // Valid core counts for this hardware type
 }
 
 // Analysis represents software analysis/application available on Rescale.

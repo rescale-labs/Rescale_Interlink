@@ -1,5 +1,68 @@
 # Release Notes - Rescale Interlink
 
+## v3.4.4 - December 17, 2025
+
+### GUI Usability Improvements
+
+This release focuses on GUI usability improvements including better software/hardware selection workflow, RHEL 9 compatibility, and UI layout enhancements.
+
+#### New Features
+
+**1. Improved Software Configuration Workflow**
+
+- **Analysis Name Display**: Software dropdown now shows "Analysis Name (code)" format instead of just codes for better readability
+- **Version Dropdown**: After selecting software, a dropdown is populated with available versions from the API (no more manual version entry required)
+- **Core Count Dropdown**: Hardware dropdown now shows valid core counts per hardware type, fetched from the API's `cores` field
+- **Better Labels**: Changed "Analysis Code" label to "Analysis" for clarity
+
+**Files Modified:** `internal/gui/template_builder.go`, `internal/models/job.go`
+
+**2. Version Display in GUI**
+
+- **Window Title**: Main window now displays version and FIPS status (e.g., "Rescale Interlink v3.4.4 [FIPS 140-3]")
+
+**Files Modified:** `internal/gui/gui.go`
+
+**3. RHEL 9 / Wayland Compatibility Fix**
+
+Fixed missing minimize/maximize buttons on RHEL 9 and other Wayland-based Linux distributions:
+
+- **Auto X11 Detection**: GUI now automatically detects Wayland and forces X11 backend for consistent window decorations
+- **Opt-in Wayland**: Users can set `RESCALE_USE_WAYLAND=1` to use native Wayland support if desired
+- **Fallback DISPLAY**: Ensures DISPLAY is set to `:0` if only WAYLAND_DISPLAY was configured
+
+**Files Modified:** `internal/gui/gui.go`
+
+**4. Input File Selection UI Improvement**
+
+Restructured the file selection dialog to make it more obvious that users can select multiple files:
+
+- **Fixed Header**: Instructions and buttons are always visible at top
+- **Scrollable File List**: Selected files appear in a dedicated scroll area with clear "Selected files:" label
+- **Dynamic Count Bug Fix**: Fixed async callback bug where file count didn't update when adding/removing files
+
+**Files Modified:** `internal/gui/single_job_tab.go`
+
+#### Technical Improvements
+
+**FastScroll Widget (Experimental)**
+
+Added a new `FastScroll` widget to address slow mouse wheel scrolling in Fyne (known issue #775):
+
+- **Scroll Multiplier**: 3x scroll speed multiplier for more natural scrolling
+- **Drop-in Replacement**: Can replace `container.NewScroll()` where needed
+- **Debug Mode**: Set `fastScrollDebug=true` to verify event interception
+
+**Files Added:** `internal/gui/fast_scroll.go`
+
+**SearchableSelect Enhancement**
+
+- Made `OnChanged` callback public for external assignment
+
+**Files Modified:** `internal/gui/searchable_select.go`
+
+---
+
 ## v3.4.3 - December 16, 2025
 
 ### Configuration Fixes + GUI Stability
