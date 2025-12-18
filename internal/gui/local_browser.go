@@ -4,10 +4,12 @@ package gui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -18,6 +20,15 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
+const (
+	// DirectoryReadTimeout is max time to wait for directory listing
+	DirectoryReadTimeout = 30 * time.Second
+	// SlowPathWarningThreshold is when to show "slow path" warning
+	SlowPathWarningThreshold = 5 * time.Second
+	// PathValidationTimeout is max time for navigateTo stat check
+	PathValidationTimeout = 10 * time.Second
+)
+
 // LocalBrowser is a widget for browsing the local filesystem
 type LocalBrowser struct {
 	widget.BaseWidget
@@ -25,19 +36,21 @@ type LocalBrowser struct {
 	mu          sync.RWMutex
 	currentPath string
 	history     []string // For back navigation
+	showHidden  bool     // Whether to show hidden files (starting with .)
 
 	// Cancellation for in-flight operations
-	cancelMu    sync.Mutex
-	cancelLoad  context.CancelFunc
-	loadingMu   sync.Mutex // Serializes load operations
+	cancelMu   sync.Mutex
+	cancelLoad context.CancelFunc
+	loadingMu  sync.Mutex // Serializes load operations
 
 	// UI components
-	fileList    *FileListWidget
-	pathEntry   *widget.Entry
-	backBtn     *widget.Button
-	homeBtn     *widget.Button
-	refreshBtn  *widget.Button
-	browseBtn   *widget.Button
+	fileList        *FileListWidget
+	pathEntry       *widget.Entry
+	backBtn         *widget.Button
+	homeBtn         *widget.Button
+	refreshBtn      *widget.Button
+	browseBtn       *widget.Button
+	showHiddenCheck *widget.Check // UI toggle for hidden files
 
 	// Callbacks
 	OnSelectionChanged func(selected []FileItem)
@@ -85,6 +98,12 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 	b.homeBtn = widget.NewButtonWithIcon("", theme.HomeIcon(), b.goHome)
 	b.refreshBtn = widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), b.refresh)
 	b.browseBtn = widget.NewButtonWithIcon("", theme.FolderOpenIcon(), b.showFolderDialog)
+	b.showHiddenCheck = widget.NewCheck("Hidden", func(checked bool) {
+		b.mu.Lock()
+		b.showHidden = checked
+		b.mu.Unlock()
+		b.refresh() // Reload directory with new setting
+	})
 
 	// Navigation bar with proper spacing around buttons
 	// Left side: back + home buttons with spacing from edge and path entry
@@ -94,9 +113,10 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 		b.homeBtn,
 		HorizontalSpacer(8), // Buffer between buttons and path entry
 	)
-	// Right side: browse + refresh buttons with spacing from path entry and edge
+	// Right side: hidden toggle + browse + refresh buttons with spacing
 	rightButtons := container.NewHBox(
 		HorizontalSpacer(8), // Buffer between path entry and buttons
+		b.showHiddenCheck,
 		b.browseBtn,
 		b.refreshBtn,
 		HorizontalSpacer(4), // Buffer from right edge
@@ -134,8 +154,8 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(content)
 }
 
-// loadDirectory loads the contents of a directory
-// This method properly handles cancellation and serialization to prevent lockups
+// loadDirectory loads the contents of a directory with timeout protection
+// This method properly handles cancellation, serialization, and network filesystem issues
 func (b *LocalBrowser) loadDirectory(path string) {
 	// Cancel any previous load operation
 	b.cancelMu.Lock()
@@ -166,7 +186,7 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	b.currentPath = path
 	b.mu.Unlock()
 
-	// Update UI to show we're loading - all UI updates in one fyne.Do()
+	// Update UI to show we're loading
 	fyne.Do(func() {
 		if b.pathEntry != nil {
 			b.pathEntry.SetText(path)
@@ -177,8 +197,49 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		}
 	})
 
-	// Read directory contents (blocking I/O)
-	entries, err := os.ReadDir(path)
+	// Read directory contents with timeout protection
+	type readResult struct {
+		entries []os.DirEntry
+		err     error
+	}
+	resultCh := make(chan readResult, 1)
+
+	// Start directory read in background
+	go func() {
+		entries, err := os.ReadDir(path)
+		resultCh <- readResult{entries: entries, err: err}
+	}()
+
+	// Start slow path warning timer
+	slowTimer := time.AfterFunc(SlowPathWarningThreshold, func() {
+		fyne.Do(func() {
+			if b.fileList != nil {
+				b.fileList.SetStatus("Loading... (network path may be slow)")
+			}
+		})
+	})
+	defer slowTimer.Stop()
+
+	// Wait for result with timeout
+	var entries []os.DirEntry
+	var readErr error
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(DirectoryReadTimeout):
+		b.logger.Warn().Str("path", path).Msg("Directory read timed out")
+		fyne.Do(func() {
+			if b.fileList != nil {
+				b.fileList.SetStatus("Timeout: Path may be unavailable")
+				b.fileList.SetItems(nil)
+			}
+		})
+		return
+	case result := <-resultCh:
+		entries = result.entries
+		readErr = result.err
+	}
+	slowTimer.Stop()
 
 	// Check cancellation after I/O
 	select {
@@ -187,19 +248,25 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	default:
 	}
 
-	if err != nil {
-		b.logger.Error().Err(err).Str("path", path).Msg("Failed to read directory")
+	if readErr != nil {
+		b.logger.Error().Err(readErr).Str("path", path).Msg("Failed to read directory")
 		fyne.Do(func() {
 			if b.fileList != nil {
-				b.fileList.SetStatus("Error: " + err.Error())
+				b.fileList.SetStatus("Error: " + readErr.Error())
 				b.fileList.SetItems(nil)
 			}
 		})
 		return
 	}
 
-	// Process entries (no locks held)
+	// Get hidden file preference
+	b.mu.RLock()
+	showHidden := b.showHidden
+	b.mu.RUnlock()
+
+	// Process entries - show files even if stat fails (key fix for network filesystems)
 	var items []FileItem
+	var statErrorCount int
 
 	for _, entry := range entries {
 		// Check cancellation periodically
@@ -209,32 +276,70 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		default:
 		}
 
-		// Skip hidden files (starting with .)
-		if strings.HasPrefix(entry.Name(), ".") {
+		// Skip hidden files (starting with .) unless showHidden is enabled
+		if !showHidden && strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 
 		fullPath := filepath.Join(path, entry.Name())
-		info, err := entry.Info()
+
+		// Use os.Stat to follow symlinks - critical for network mount symlinks
+		// entry.Info() uses Lstat which does NOT follow symlinks
+		info, err := os.Stat(fullPath)
+
+		var item FileItem
 		if err != nil {
-			continue
-		}
+			// KEY FIX: Don't skip - show the file anyway!
+			// This fixes files "disappearing" when security software blocks stat
+			b.logger.Debug().Err(err).Str("file", entry.Name()).Msg("Cannot access file metadata")
+			statErrorCount++
 
-		item := FileItem{
-			ID:       fullPath,
-			Name:     entry.Name(),
-			IsFolder: entry.IsDir(),
-			ModTime:  info.ModTime(), // Populate ModTime for local files
-		}
+			// Determine if this might be a directory we should allow navigation to
+			// CRITICAL: For symlinks, entry.Type().IsDir() returns FALSE (symlink itself isn't a dir)
+			// But the TARGET might be a directory! We need to handle this case.
+			entryType := entry.Type()
+			isSymlink := entryType&os.ModeSymlink != 0
 
-		if !entry.IsDir() {
-			item.Size = info.Size()
+			// If it's a symlink and stat failed, assume it MIGHT be a directory
+			// This allows users to attempt navigation into network mount symlinks
+			isFolder := entryType.IsDir()
+			if isSymlink {
+				isFolder = true // Optimistic: treat symlinks as folders so user can try to navigate
+				b.logger.Debug().Str("file", entry.Name()).Msg("Symlink with stat failure - treating as potential folder")
+			}
+
+			item = FileItem{
+				ID:       fullPath,
+				Name:     entry.Name(),
+				IsFolder: isFolder,
+				Size:     -1,           // -1 = unknown (stat failed)
+				ModTime:  time.Time{},  // Zero = unknown
+			}
+		} else {
+			item = FileItem{
+				ID:       fullPath,
+				Name:     entry.Name(),
+				IsFolder: info.IsDir(), // True type (follows symlinks)
+				Size:     info.Size(),
+				ModTime:  info.ModTime(),
+			}
+
+			// Folders don't show size
+			if info.IsDir() {
+				item.Size = 0
+			}
 		}
 
 		items = append(items, item)
 	}
 
-	// No sorting here - FileListWidget handles sorting internally
+	// Log summary if there were errors
+	if statErrorCount > 0 {
+		b.logger.Warn().
+			Int("count", statErrorCount).
+			Str("path", path).
+			Msg("Some files could not be fully accessed")
+	}
 
 	// Final cancellation check before UI update
 	select {
@@ -243,48 +348,91 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	default:
 	}
 
-	// Update UI with results - single fyne.Do() call
-	// Set hasDateInfo since local files have ModTime
-	// Use SetItemsAndScrollToTop when navigating to ensure we start at top of new directory
+	// Update UI with results
 	fyne.Do(func() {
 		if b.fileList != nil {
-			b.fileList.SetHasDateInfo(true) // Local files have date info
+			b.fileList.SetHasDateInfo(true)
 			b.fileList.SetItemsAndScrollToTop(items)
+
+			// Show warning if some files couldn't be accessed
+			if statErrorCount > 0 {
+				b.fileList.SetStatus(fmt.Sprintf("%d items (%d inaccessible)", len(items), statErrorCount))
+			}
 		}
 	})
 
 	b.logger.Debug().
 		Str("path", path).
 		Int("items", len(items)).
+		Int("inaccessible", statErrorCount).
 		Msg("Loaded directory")
 }
 
-// navigateTo navigates to a specific path
+// navigateTo navigates to a specific path with timeout protection
+// This method is non-blocking and tries to load even if stat fails (for network paths)
 func (b *LocalBrowser) navigateTo(path string) {
-	// Validate path
-	info, err := os.Stat(path)
-	if err != nil {
-		dialog.ShowError(err, b.window)
-		return
-	}
+	// Show loading state immediately
+	fyne.Do(func() {
+		if b.pathEntry != nil {
+			b.pathEntry.SetText(path)
+		}
+		if b.fileList != nil {
+			b.fileList.SetStatus("Validating path...")
+		}
+	})
 
-	if !info.IsDir() {
-		dialog.ShowInformation("Not a Directory", "Please select a directory, not a file.", b.window)
-		return
-	}
+	// Run validation in background to avoid UI freeze
+	go func() {
+		// Try to stat with timeout
+		type statResult struct {
+			info os.FileInfo
+			err  error
+		}
+		resultCh := make(chan statResult, 1)
+		go func() {
+			info, err := os.Stat(path)
+			resultCh <- statResult{info: info, err: err}
+		}()
 
-	// Save current path to history before navigating
+		// Wait with timeout
+		select {
+		case <-time.After(PathValidationTimeout):
+			// Stat timed out - try to load anyway (might work)
+			b.logger.Warn().Str("path", path).Msg("Path validation timed out - attempting to load anyway")
+			b.saveHistory(path)
+			b.loadDirectory(path)
+			return
+		case result := <-resultCh:
+			if result.err != nil {
+				// Stat failed - log but ALSO try to load (directory might still be listable)
+				b.logger.Warn().Err(result.err).Str("path", path).Msg("Path validation failed - attempting to load anyway")
+				b.saveHistory(path)
+				b.loadDirectory(path)
+				return
+			}
+			if !result.info.IsDir() {
+				fyne.Do(func() {
+					dialog.ShowInformation("Not a Directory", "Please select a directory, not a file.", b.window)
+				})
+				return
+			}
+			// Success - navigate
+			b.saveHistory(path)
+			b.loadDirectory(path)
+		}
+	}()
+}
+
+// saveHistory saves current path to history before navigation
+func (b *LocalBrowser) saveHistory(newPath string) {
 	b.mu.Lock()
-	if b.currentPath != "" && b.currentPath != path {
+	defer b.mu.Unlock()
+	if b.currentPath != "" && b.currentPath != newPath {
 		b.history = append(b.history, b.currentPath)
-		// Limit history size
 		if len(b.history) > 50 {
 			b.history = b.history[1:]
 		}
 	}
-	b.mu.Unlock()
-
-	go b.loadDirectory(path)
 }
 
 // goBack navigates to the previous directory
