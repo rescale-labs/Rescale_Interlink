@@ -334,6 +334,8 @@ func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 
 	if item.IsFolder {
 		sizeText.Text = "--"
+	} else if item.Size < 0 {
+		sizeText.Text = "?" // Unknown size (stat failed)
 	} else {
 		sizeText.Text = FormatFileSize(item.Size)
 	}
