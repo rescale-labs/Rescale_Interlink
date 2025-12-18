@@ -22,7 +22,7 @@ type ActivityTab struct {
 
 	// UI components
 	logText      *widget.Entry
-	logScroll    *container.Scroll
+	logScroll    *AcceleratedScroll
 	progressBar  *widget.ProgressBar
 	statusLabel  *widget.Label
 	levelFilter  *widget.Select
@@ -74,7 +74,7 @@ func (at *ActivityTab) Build() fyne.CanvasObject {
 	at.logText.Wrapping = fyne.TextWrapWord
 	at.logText.Disable() // Read-only
 
-	at.logScroll = container.NewScroll(at.logText)
+	at.logScroll = NewAcceleratedScroll(at.logText)
 	at.logScroll.SetMinSize(fyne.NewSize(800, 500))
 
 	// Create stat labels FIRST (before any callbacks that might use them)
@@ -395,7 +395,7 @@ func (at *ActivityTab) exportLogs() {
 	content.Wrapping = fyne.TextWrapWord
 	content.Disable() // Read-only
 
-	scrollContent := container.NewScroll(content)
+	scrollContent := NewAcceleratedScroll(content)
 	scrollContent.SetMinSize(fyne.NewSize(800, 500))
 
 	// Use proper dialog instead of modal popup

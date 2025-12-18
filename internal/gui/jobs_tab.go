@@ -108,7 +108,8 @@ func (jt *JobsTab) Build() fyne.CanvasObject {
 	jt.createTable()
 
 	// Create scroll container with minimum size so table is visible
-	scrollContainer := container.NewScroll(jt.table)
+	// Uses AcceleratedScroll for faster scroll speed (3x Fyne default)
+	scrollContainer := NewAcceleratedScroll(jt.table)
 	scrollContainer.SetMinSize(fyne.NewSize(800, 300)) // Set minimum size for table visibility
 
 	// Jobs label with bold styling
