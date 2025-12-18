@@ -1,5 +1,40 @@
 # Release Notes - Rescale Interlink
 
+## v3.4.5 - December 18, 2025
+
+### Accelerated Scroll Implementation
+
+This release replaces the experimental FastScroll widget with a proper custom scroll implementation that actually receives scroll events.
+
+#### New Features
+
+**AcceleratedScroll Widget**
+
+The previous `FastScroll` wrapper didn't work because Fyne routes scroll events directly to the deepest `Scrollable` widget, bypassing our wrapper. The new `AcceleratedScroll` widget is built from scratch:
+
+- **Direct Event Handling**: Extends `widget.BaseWidget` and implements `fyne.Scrollable` directly, so scroll events are received
+- **3x Scroll Speed**: Default multiplier of 3.0 makes scrolling feel more natural (Fyne's default ~12px is too slow)
+- **Draggable Scroll Bars**: Includes proper scroll bars that can be dragged to navigate
+- **Theme-Aware**: Uses Fyne's theme colors for scroll bar rendering
+
+**Files Added:** `internal/gui/accelerated_scroll.go` (~380 lines)
+**Files Removed:** `internal/gui/fast_scroll.go` (non-functional)
+
+**Integration:**
+
+All 10 scroll containers in the GUI now use AcceleratedScroll:
+- Activity Tab: Log view, export dialog
+- Jobs Tab: Jobs table
+- File Browser Tab: File progress list
+- Setup Tab: Settings scroll area
+- Single Job Tab: File selection dialog
+- Template Builder: Form content
+- Scan Preview: Table scroll
+- Remote Browser: Breadcrumb bar
+- SearchableSelect: Dropdown list
+
+---
+
 ## v3.4.4 - December 17, 2025
 
 ### GUI Usability Improvements
@@ -45,15 +80,11 @@ Restructured the file selection dialog to make it more obvious that users can se
 
 #### Technical Improvements
 
-**FastScroll Widget (Experimental)**
+**FastScroll Widget (Experimental - Superseded in v3.4.5)**
 
-Added a new `FastScroll` widget to address slow mouse wheel scrolling in Fyne (known issue #775):
+Added a new `FastScroll` widget to address slow mouse wheel scrolling in Fyne (known issue #775).
 
-- **Scroll Multiplier**: 3x scroll speed multiplier for more natural scrolling
-- **Drop-in Replacement**: Can replace `container.NewScroll()` where needed
-- **Debug Mode**: Set `fastScrollDebug=true` to verify event interception
-
-**Files Added:** `internal/gui/fast_scroll.go`
+**Note:** This widget didn't work as intended because Fyne routes scroll events to the deepest Scrollable widget. See v3.4.5 for the working `AcceleratedScroll` replacement.
 
 **SearchableSelect Enhancement**
 

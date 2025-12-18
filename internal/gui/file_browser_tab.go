@@ -72,7 +72,7 @@ type FileBrowserTab struct {
 	overallProgressBar   *widget.ProgressBar
 	overallProgressLabel *widget.Label
 	fileProgressList     *fyne.Container // Container holding per-file progress bars
-	fileProgressScroll   *container.Scroll // Scrollable container for file progress
+	fileProgressScroll   *AcceleratedScroll // Scrollable container for file progress
 	fileProgressBars     map[string]*widget.ProgressBar
 	fileProgressLabels   map[string]*widget.Label
 	cancelBtn            *widget.Button
@@ -221,7 +221,7 @@ func (fbt *FileBrowserTab) Build() fyne.CanvasObject {
 	)
 
 	// File progress area (scrollable) - default 100px, resized dynamically based on file count
-	fbt.fileProgressScroll = container.NewVScroll(fbt.fileProgressList)
+	fbt.fileProgressScroll = NewAcceleratedVScroll(fbt.fileProgressList)
 	fbt.fileProgressScroll.SetMinSize(fyne.NewSize(0, 100)) // Default small, expanded when files known
 
 	fbt.progressPanel = container.NewVBox(

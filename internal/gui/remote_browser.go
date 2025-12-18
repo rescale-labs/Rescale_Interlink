@@ -119,7 +119,7 @@ func (b *RemoteBrowser) CreateRenderer() fyne.WidgetRenderer {
 		nil, nil,
 		leftControls,
 		rightControls,
-		container.NewHScroll(b.breadcrumbBar),
+		NewAcceleratedHScroll(b.breadcrumbBar),
 	)
 
 	// File list widget - uses its own pagination controls

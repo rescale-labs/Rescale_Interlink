@@ -387,7 +387,7 @@ func (sp *ScanPreviewDialog) buildPreviewUI(result ScanPreviewResult, progressDi
 	table.SetColumnWidth(1, 150)
 	table.SetColumnWidth(2, 100)
 
-	scrollContainer := container.NewScroll(table)
+	scrollContainer := NewAcceleratedScroll(table)
 	scrollContainer.SetMinSize(fyne.NewSize(500, 300))
 
 	// Summary statistics

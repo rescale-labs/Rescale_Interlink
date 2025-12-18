@@ -329,7 +329,7 @@ func (st *SetupTab) Build() fyne.CanvasObject {
 		nil,                                     // Bottom
 		nil,                                     // Left
 		nil,                                     // Right
-		container.NewVScroll(scrollableContent), // Center (scrollable)
+		NewAcceleratedVScroll(scrollableContent), // Center (scrollable)
 	)
 }
 

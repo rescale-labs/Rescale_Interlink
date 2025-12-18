@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.4.4-green)
+![Status](https://img.shields.io/badge/status-v3.4.5-green)
 
 ---
 
@@ -68,6 +68,12 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ### Recent Improvements
 
+**v3.4.5 (December 18, 2025) - Accelerated Scroll:**
+- **AcceleratedScroll Widget**: Custom scroll container with 3x scroll speed
+  - Built from scratch to properly receive scroll events (fixes Fyne issue #775)
+  - All 10 GUI scroll containers now use accelerated scrolling
+  - Includes draggable scroll bars with theme-aware rendering
+
 **v3.4.4 (December 17, 2025) - GUI Usability + Configuration Fixes:**
 - **Software Workflow Improvements**:
   - Analysis dropdown now shows "Name (Code)" format for better readability
@@ -77,7 +83,6 @@ A unified tool combining comprehensive command-line interface and graphical inte
   - Version and FIPS status now displayed in window title
   - Fixed file selection count not updating (async callback bug)
   - RHEL 9 Wayland auto-detection forces X11 for consistent window decorations
-  - FastScroll widget created for improved scroll responsiveness (pending integration)
 - **Critical GUI Freeze Fix**: Fixed mutex contention in `engine.UpdateConfig()` that caused extended UI freezes when proxy was configured
 - **Configuration Path Fixes**: Fixed bugs preventing `config init` workflow from working properly
   - Token filename mismatch: `config init` now saves to correct filename (`token` instead of `rescale_token`)
@@ -480,7 +485,7 @@ rescale-int completion fish > ~/.config/fish/completions/rescale-int.fish
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    rescale-int v3.4.4                        │
+│                    rescale-int v3.4.5                        │
 │                  Unified CLI + GUI Binary                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                               │
