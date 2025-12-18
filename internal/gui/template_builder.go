@@ -419,7 +419,7 @@ func (tb *TemplateBuilderDialog) buildUI(defaults models.JobSpec) {
 	)
 
 	// Wrap in scroll container to prevent overflow
-	scrollContent := container.NewVScroll(formContent)
+	scrollContent := NewAcceleratedVScroll(formContent)
 	scrollContent.SetMinSize(fyne.NewSize(800, 600))
 
 	// Create custom buttons with controlled sizing

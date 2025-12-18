@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -15,7 +14,7 @@ type SearchableSelect struct {
 
 	entry            *widget.Entry
 	list             *widget.List
-	listScroll       *container.Scroll
+	listScroll       *AcceleratedScroll
 	options          []string
 	filtered         []string
 	selected         string
@@ -54,7 +53,7 @@ func NewSearchableSelect(placeholder string, onChanged func(string)) *Searchable
 	ss.list.OnSelected = ss.onListSelected
 
 	// Wrap list in scroll container - don't set MinSize to avoid reserving space when hidden
-	ss.listScroll = container.NewVScroll(ss.list)
+	ss.listScroll = NewAcceleratedVScroll(ss.list)
 	ss.listScroll.Hide()
 
 	ss.ExtendBaseWidget(ss)
