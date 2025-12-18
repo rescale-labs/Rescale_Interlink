@@ -1,0 +1,3 @@
+# Mesa DLLs are downloaded during build, not committed to git
+# These files are ~50MB total and would bloat the repository
+*.dll
