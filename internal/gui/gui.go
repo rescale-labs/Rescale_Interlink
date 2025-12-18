@@ -23,6 +23,7 @@ import (
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/mesa"
 )
 
 var (
@@ -85,15 +86,15 @@ func LaunchGUI(configFile string) error {
 		}
 	}
 
-	// Windows: Use Mesa software rendering for maximum compatibility
+	// Windows: Set up Mesa software rendering for maximum compatibility
 	// Works on VMs, RDP, and systems without GPU drivers
-	// Mesa's opengl32.dll must be present alongside the EXE
+	// Mesa DLLs are embedded and extracted to %LOCALAPPDATA%\rescale-int\mesa
 	// Set RESCALE_HARDWARE_RENDER=1 to use GPU acceleration instead
-	if runtime.GOOS == "windows" {
-		if os.Getenv("RESCALE_HARDWARE_RENDER") != "1" {
-			os.Setenv("GALLIUM_DRIVER", "llvmpipe")
-			guiLogger.Info().Msg("Using software rendering for Windows (set RESCALE_HARDWARE_RENDER=1 for GPU)")
-		}
+	// IMPORTANT: Must be called BEFORE Fyne/OpenGL initialization (app.NewWithID)
+	if err := mesa.EnsureSoftwareRendering(); err != nil {
+		guiLogger.Warn().Err(err).Msg("Mesa software rendering setup failed - GPU may be required")
+	} else if mesa.IsSoftwareRenderingEnabled() {
+		guiLogger.Info().Msg("Using Mesa software rendering (set RESCALE_HARDWARE_RENDER=1 for GPU)")
 	}
 
 	// Start goroutine monitoring with context for clean shutdown
