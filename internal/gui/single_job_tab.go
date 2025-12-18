@@ -1209,7 +1209,7 @@ func (sjt *SingleJobTab) showFileSelectionManager() {
 	)
 
 	// Scrollable file list with fixed height
-	fileListScroll := container.NewScroll(listWidget)
+	fileListScroll := NewAcceleratedScroll(listWidget)
 	fileListScroll.SetMinSize(fyne.NewSize(400, 200))
 
 	// Use Border layout: header at top, scrollable list fills center
