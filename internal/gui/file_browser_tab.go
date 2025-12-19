@@ -1080,20 +1080,19 @@ func truncateName(name string) string {
 
 // initProgressUIWithFiles initializes progress UI and pre-creates all progress bars for uploads.
 // Uses compact progress bars with fixed-width labels, dynamic scroll height, and progress interpolation.
+// PERFORMANCE: Lock acquisition is batched instead of per-file to reduce contention.
 func (fbt *FileBrowserTab) initProgressUIWithFiles(totalFiles int, _ string, files []uploadFileInfo) {
-	// Initialize data structures (not UI operations)
-	fbt.mu.Lock()
-	fbt.fileProgressBars = make(map[string]*widget.ProgressBar)
-	fbt.fileProgressLabels = make(map[string]*widget.Label)
-	fbt.activeTransfers = make(map[string]*FileTransferProgress)
-	fbt.mu.Unlock()
-
-	// Pre-create all widgets (creating widgets is safe off main thread)
+	// Pre-create all widgets first (creating widgets is safe off main thread)
 	type fileWidgets struct {
-		bar   *widget.ProgressBar
-		label *widget.Label
-		row   *fyne.Container
+		bar      *widget.ProgressBar
+		label    *widget.Label
+		row      *fyne.Container
+		path     string
+		name     string
+		size     int64
+		transfer *FileTransferProgress
 	}
+	now := time.Now()
 	widgetList := make([]fileWidgets, 0, len(files))
 
 	for _, f := range files {
@@ -1106,27 +1105,39 @@ func (fbt *FileBrowserTab) initProgressUIWithFiles(totalFiles int, _ string, fil
 		labelText := fmt.Sprintf("↑ %s (%s)", displayName, sizeStr)
 		label := widget.NewLabel(labelText)
 
-		fbt.mu.Lock()
-		fbt.fileProgressBars[f.LocalPath] = bar
-		fbt.fileProgressLabels[f.LocalPath] = label
-		fbt.activeTransfers[f.LocalPath] = &FileTransferProgress{
-			Name:         name, // Store full name for internal use
+		// Pre-create transfer progress struct
+		transfer := &FileTransferProgress{
+			Name:         name,
 			Size:         f.Size,
 			Progress:     0,
 			Interpolated: 0,
 			Status:       "pending",
-			StartTime:    time.Now(),
-			LastUpdate:   time.Now(),
+			StartTime:    now,
+			LastUpdate:   now,
 			LastBytes:    0,
 			BytesPerSec:  0,
 		}
-		fbt.mu.Unlock()
 
 		// Use fixed-width container for label to prevent pushing progress bar off screen
 		labelContainer := container.NewGridWrap(fyne.NewSize(progressLabelWidth, 20), label)
 		row := container.NewBorder(nil, nil, labelContainer, nil, bar)
-		widgetList = append(widgetList, fileWidgets{bar: bar, label: label, row: row})
+		widgetList = append(widgetList, fileWidgets{
+			bar: bar, label: label, row: row,
+			path: f.LocalPath, name: name, size: f.Size, transfer: transfer,
+		})
 	}
+
+	// PERFORMANCE: Single lock acquisition to populate all maps
+	fbt.mu.Lock()
+	fbt.fileProgressBars = make(map[string]*widget.ProgressBar, len(files))
+	fbt.fileProgressLabels = make(map[string]*widget.Label, len(files))
+	fbt.activeTransfers = make(map[string]*FileTransferProgress, len(files))
+	for _, w := range widgetList {
+		fbt.fileProgressBars[w.path] = w.bar
+		fbt.fileProgressLabels[w.path] = w.label
+		fbt.activeTransfers[w.path] = w.transfer
+	}
+	fbt.mu.Unlock()
 
 	// Calculate dynamic scroll area height based on file count
 	scrollHeight := float32(len(files)) * progressRowHeight
@@ -1166,20 +1177,17 @@ func (fbt *FileBrowserTab) initProgressUIWithFiles(totalFiles int, _ string, fil
 
 // initProgressUIForDownloads initializes progress UI and pre-creates all progress bars for downloads.
 // Uses compact progress bars with fixed-width labels, dynamic scroll height, and progress interpolation.
+// PERFORMANCE: Lock acquisition is batched instead of per-file to reduce contention.
 func (fbt *FileBrowserTab) initProgressUIForDownloads(totalFiles int, files []downloadFileInfo) {
-	// Initialize data structures (not UI operations)
-	fbt.mu.Lock()
-	fbt.fileProgressBars = make(map[string]*widget.ProgressBar)
-	fbt.fileProgressLabels = make(map[string]*widget.Label)
-	fbt.activeTransfers = make(map[string]*FileTransferProgress)
-	fbt.mu.Unlock()
-
-	// Pre-create all widgets (creating widgets is safe off main thread)
+	// Pre-create all widgets first (creating widgets is safe off main thread)
 	type fileWidgets struct {
-		bar   *widget.ProgressBar
-		label *widget.Label
-		row   *fyne.Container
+		bar      *widget.ProgressBar
+		label    *widget.Label
+		row      *fyne.Container
+		fileID   string
+		transfer *FileTransferProgress
 	}
+	now := time.Now()
 	widgetList := make([]fileWidgets, 0, len(files))
 
 	for _, f := range files {
@@ -1191,27 +1199,39 @@ func (fbt *FileBrowserTab) initProgressUIForDownloads(totalFiles int, files []do
 		labelText := fmt.Sprintf("↓ %s (%s)", displayName, sizeStr)
 		label := widget.NewLabel(labelText)
 
-		fbt.mu.Lock()
-		fbt.fileProgressBars[f.FileID] = bar
-		fbt.fileProgressLabels[f.FileID] = label
-		fbt.activeTransfers[f.FileID] = &FileTransferProgress{
-			Name:         f.Name, // Store full name for internal use
+		// Pre-create transfer progress struct
+		transfer := &FileTransferProgress{
+			Name:         f.Name,
 			Size:         f.Size,
 			Progress:     0,
 			Interpolated: 0,
 			Status:       "pending",
-			StartTime:    time.Now(),
-			LastUpdate:   time.Now(),
+			StartTime:    now,
+			LastUpdate:   now,
 			LastBytes:    0,
 			BytesPerSec:  0,
 		}
-		fbt.mu.Unlock()
 
 		// Use fixed-width container for label to prevent pushing progress bar off screen
 		labelContainer := container.NewGridWrap(fyne.NewSize(progressLabelWidth, 20), label)
 		row := container.NewBorder(nil, nil, labelContainer, nil, bar)
-		widgetList = append(widgetList, fileWidgets{bar: bar, label: label, row: row})
+		widgetList = append(widgetList, fileWidgets{
+			bar: bar, label: label, row: row,
+			fileID: f.FileID, transfer: transfer,
+		})
 	}
+
+	// PERFORMANCE: Single lock acquisition to populate all maps
+	fbt.mu.Lock()
+	fbt.fileProgressBars = make(map[string]*widget.ProgressBar, len(files))
+	fbt.fileProgressLabels = make(map[string]*widget.Label, len(files))
+	fbt.activeTransfers = make(map[string]*FileTransferProgress, len(files))
+	for _, w := range widgetList {
+		fbt.fileProgressBars[w.fileID] = w.bar
+		fbt.fileProgressLabels[w.fileID] = w.label
+		fbt.activeTransfers[w.fileID] = w.transfer
+	}
+	fbt.mu.Unlock()
 
 	// Calculate dynamic scroll area height based on file count
 	scrollHeight := float32(len(files)) * progressRowHeight
@@ -1471,11 +1491,11 @@ func (fbt *FileBrowserTab) interpolateProgress() {
 	fbt.mu.Unlock()
 
 	// Apply UI updates on main thread
+	// PERFORMANCE: SetValue already triggers refresh, no need for explicit Refresh()
 	if len(updates) > 0 {
 		fyne.Do(func() {
 			for _, u := range updates {
 				u.bar.SetValue(u.progress)
-				u.bar.Refresh() // Force redraw
 				if u.label != nil {
 					u.label.SetText(u.labelText)
 				}

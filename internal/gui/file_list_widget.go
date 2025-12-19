@@ -29,12 +29,13 @@ const (
 
 // FileItem represents a file or folder in the list
 type FileItem struct {
-	ID       string    // File/folder ID (for remote) or path (for local)
-	Name     string
-	Size     int64
-	IsFolder bool
-	Selected bool
-	ModTime  time.Time // Modification time (for local files; zero for remote)
+	ID        string    // File/folder ID (for remote) or path (for local)
+	Name      string
+	Size      int64
+	IsFolder  bool
+	Selected  bool
+	ModTime   time.Time // Modification time (for local files; zero for remote)
+	lowerName string    // PERFORMANCE: Cached lowercase name for filtering (internal use)
 }
 
 // FileListWidget is a reusable widget for displaying a list of files and folders
@@ -43,6 +44,7 @@ type FileListWidget struct {
 
 	mu            sync.RWMutex
 	items         []FileItem
+	itemIndexByID map[string]int  // PERFORMANCE: O(1) lookup of item index by ID
 	selectedItems map[string]bool
 
 	// Sort state
@@ -89,6 +91,7 @@ type FileListWidget struct {
 // NewFileListWidget creates a new file list widget
 func NewFileListWidget() *FileListWidget {
 	w := &FileListWidget{
+		itemIndexByID: make(map[string]int),
 		selectedItems: make(map[string]bool),
 		currentPath:   "",
 		sortBy:        "type", // Default: folders first, then by date
@@ -321,6 +324,7 @@ func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 	}
 
 	// Update name (RichText with smaller font, handles truncation)
+	// PERFORMANCE: Don't call Refresh() on individual elements - parent list handles refresh
 	nameRichText.Segments = []widget.RichTextSegment{
 		&widget.TextSegment{
 			Text: item.Name,
@@ -330,7 +334,6 @@ func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 			},
 		},
 	}
-	nameRichText.Refresh()
 
 	if item.IsFolder {
 		sizeText.Text = "--"
@@ -340,7 +343,6 @@ func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 		sizeText.Text = FormatFileSize(item.Size)
 	}
 	sizeText.Color = theme.ForegroundColor()
-	sizeText.Refresh()
 
 	if item.IsFolder {
 		typeText.Text = "Folder"
@@ -348,7 +350,6 @@ func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 		typeText.Text = "File"
 	}
 	typeText.Color = theme.ForegroundColor()
-	typeText.Refresh()
 
 	// Format date as YYYY-MM-DD, or "--" if no date
 	if item.ModTime.IsZero() {
@@ -357,7 +358,6 @@ func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 		dateText.Text = item.ModTime.Format("2006-01-02")
 	}
 	dateText.Color = theme.ForegroundColor()
-	dateText.Refresh()
 }
 
 // onItemTapped handles when an item is tapped
@@ -383,12 +383,9 @@ func (w *FileListWidget) onItemTapped(index int) {
 		w.mu.Lock()
 		newSelected := !item.Selected
 
-		// Update original items by ID
-		for i := range w.items {
-			if w.items[i].ID == item.ID {
-				w.items[i].Selected = newSelected
-				break
-			}
+		// PERFORMANCE: Use index map for O(1) lookup instead of linear search
+		if idx, ok := w.itemIndexByID[item.ID]; ok && idx < len(w.items) {
+			w.items[idx].Selected = newSelected
 		}
 
 		// Update filtered items if active
@@ -406,18 +403,18 @@ func (w *FileListWidget) onItemTapped(index int) {
 
 // setItemSelectedByID sets the selection state of a single item by ID
 // This is the preferred method as it's immune to scroll-induced index changes
+// PERFORMANCE: Uses O(1) index map lookup instead of O(n) linear search
 func (w *FileListWidget) setItemSelectedByID(itemID string, selected bool) {
 	w.mu.Lock()
 
-	// Update the original items array by finding the item by ID
-	for i := range w.items {
-		if w.items[i].ID == itemID {
-			w.items[i].Selected = selected
-			break
-		}
+	// PERFORMANCE: Use index map for O(1) lookup instead of linear search
+	if idx, ok := w.itemIndexByID[itemID]; ok && idx < len(w.items) {
+		w.items[idx].Selected = selected
 	}
 
 	// Also update filtered items if filtering is active
+	// Note: filteredItems doesn't have an index map, but this is less critical
+	// since filtering happens less frequently than selection
 	if w.filteredItems != nil {
 		for i := range w.filteredItems {
 			if w.filteredItems[i].ID == itemID {
@@ -500,6 +497,12 @@ func (w *FileListWidget) SetItems(items []FileItem) {
 	if len(items) < oldCount {
 		w.currentPage = 0
 	}
+	// PERFORMANCE: Cache lowercase names and build index map
+	w.itemIndexByID = make(map[string]int, len(w.items))
+	for i := range w.items {
+		w.items[i].lowerName = strings.ToLower(w.items[i].Name)
+		w.itemIndexByID[w.items[i].ID] = i
+	}
 	w.mu.Unlock()
 
 	// Apply current sort and refresh
@@ -520,14 +523,19 @@ func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	w.selectedItems = make(map[string]bool)
 	w.currentPage = 0 // Reset to first page when items change
 
-	// PERFORMANCE: Calculate folder/file counts now instead of iterating later
+	// PERFORMANCE: Calculate folder/file counts, cache lowercase names, and build index map
 	folderCount, fileCount := 0, 0
-	for i := range items {
-		if items[i].IsFolder {
+	w.itemIndexByID = make(map[string]int, len(w.items))
+	for i := range w.items {
+		if w.items[i].IsFolder {
 			folderCount++
 		} else {
 			fileCount++
 		}
+		// Cache lowercase name for O(1) filtering
+		w.items[i].lowerName = strings.ToLower(w.items[i].Name)
+		// Build ID-to-index map for O(1) selection lookups
+		w.itemIndexByID[w.items[i].ID] = i
 	}
 	w.mu.Unlock()
 
@@ -656,14 +664,12 @@ func (w *FileListWidget) ClearSelection() {
 }
 
 // Refresh refreshes the widget
+// PERFORMANCE: Combined into single fyne.Do() call for efficiency
 func (w *FileListWidget) Refresh() {
-	// UI updates must be on main thread
-	if w.list != nil {
-		fyne.Do(func() {
-			w.list.Refresh()
-		})
-	}
 	fyne.Do(func() {
+		if w.list != nil {
+			w.list.Refresh()
+		}
 		w.BaseWidget.Refresh()
 	})
 }
@@ -733,10 +739,22 @@ func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
 }
 
 // sortAndRefresh sorts the items and refreshes the list
+// PERFORMANCE: For name-based sorts, precompute lowercase strings once instead of
+// calling strings.ToLower() on every comparison (O(n log n) comparisons = 2n allocations).
 func (w *FileListWidget) sortAndRefresh() {
 	w.mu.Lock()
 	sortBy := w.sortBy
 	ascending := w.sortAscending
+	n := len(w.items)
+
+	// For name-based sorts, precompute lowercase names to avoid allocations during sort
+	var lowerNames []string
+	if sortBy == "name" || sortBy == "" {
+		lowerNames = make([]string, n)
+		for i := range w.items {
+			lowerNames[i] = strings.ToLower(w.items[i].Name)
+		}
+	}
 
 	sort.Slice(w.items, func(i, j int) bool {
 		item1, item2 := w.items[i], w.items[j]
@@ -762,13 +780,15 @@ func (w *FileListWidget) sortAndRefresh() {
 		var less bool
 		switch sortBy {
 		case "name":
-			less = strings.ToLower(item1.Name) < strings.ToLower(item2.Name)
+			// PERFORMANCE: Use precomputed lowercase names
+			less = lowerNames[i] < lowerNames[j]
 		case "size":
 			less = item1.Size < item2.Size
 		case "date":
 			less = item1.ModTime.Before(item2.ModTime)
 		default:
-			less = strings.ToLower(item1.Name) < strings.ToLower(item2.Name)
+			// PERFORMANCE: Use precomputed lowercase names
+			less = lowerNames[i] < lowerNames[j]
 		}
 
 		if !ascending {
@@ -776,6 +796,11 @@ func (w *FileListWidget) sortAndRefresh() {
 		}
 		return less
 	})
+
+	// PERFORMANCE: Rebuild index map after sorting (indices have changed)
+	for i := range w.items {
+		w.itemIndexByID[w.items[i].ID] = i
+	}
 	w.mu.Unlock()
 
 	if w.list != nil {
@@ -844,6 +869,7 @@ func (w *FileListWidget) SetPaginationVisible(visible bool) {
 }
 
 // applyFilter filters items based on the search query
+// PERFORMANCE: Uses cached lowerName field instead of calling strings.ToLower() per item
 func (w *FileListWidget) applyFilter(query string) {
 	w.mu.Lock()
 
@@ -855,10 +881,11 @@ func (w *FileListWidget) applyFilter(query string) {
 		// Clear filter
 		w.filteredItems = nil
 	} else {
-		// Apply filter
-		w.filteredItems = make([]FileItem, 0)
+		// Apply filter using cached lowercase names
+		w.filteredItems = make([]FileItem, 0, len(w.items)/4) // Preallocate ~25% capacity
 		for _, item := range w.items {
-			if strings.Contains(strings.ToLower(item.Name), query) {
+			// PERFORMANCE: Use cached lowerName instead of strings.ToLower()
+			if strings.Contains(item.lowerName, query) {
 				w.filteredItems = append(w.filteredItems, item)
 			}
 		}

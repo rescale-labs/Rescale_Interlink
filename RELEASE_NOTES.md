@@ -1,5 +1,78 @@
 # Release Notes - Rescale Interlink
 
+## v3.4.8 - December 19, 2025
+
+### Deep Performance Optimization + Windows Mesa Variants
+
+This release delivers comprehensive GUI performance optimizations and introduces two Windows build variants for different deployment scenarios.
+
+#### Performance Optimizations
+
+**FileListWidget (internal/gui/file_list_widget.go)**
+
+- Removed 4 redundant `Refresh()` calls in `updateListItem()` - parent list handles refresh
+- Precomputed lowercase names before sorting - reduces allocations from 20,000 to 2,000 for 1,000 items
+- Added `itemIndexByID` map for O(1) selection lookups (was O(n) linear search)
+- Added `lowerName` field to `FileItem` for O(1) filtering
+- Combined two separate `fyne.Do()` calls in `Refresh()` method
+
+**FileBrowserTab (internal/gui/file_browser_tab.go)**
+
+- Removed redundant `bar.Refresh()` in progress interpolation - `SetValue()` already triggers refresh
+- Batched lock acquisition in `initProgressUIWithFiles()` and `initProgressUIForDownloads()` - single lock instead of per-file
+
+**JobsTab (internal/gui/jobs_tab.go, jobs_integration.go)**
+
+- Added `jobIndexByName` map for O(1) job updates during pipeline execution (was O(n) linear search)
+- Updates to `UpdateProgress()` and `UpdateJobState()` now use map lookup
+
+**ActivityTab (internal/gui/activity_tab.go)**
+
+- Added `formattedCache` and `lowerCache` fields to `LogEntry` struct
+- Formatted text and lowercase computed once when log is added, not during every filter
+
+#### Windows Build Variants
+
+Two Windows binaries are now available to accommodate different deployment environments:
+
+**Standard Build** (`rescale-int-windows-amd64.zip`)
+- Smaller binary size (~25MB smaller)
+- Requires hardware GPU with OpenGL support
+- Use this for workstations with dedicated graphics
+
+**Mesa Build** (`rescale-int-windows-amd64-mesa.zip`)
+- Includes embedded Mesa3D software renderer
+- Works on VMs, RDP sessions, and headless servers
+- Use this for environments without GPU access
+
+**Build Tags:**
+```bash
+# Standard build (default)
+make build-windows-amd64
+
+# Mesa build
+make build-windows-amd64-mesa
+
+# Both variants
+make build-windows-all
+```
+
+**Files Added:**
+- `internal/mesa/embed_mesa_windows.go` - Mesa DLL embedding (build tag: mesa)
+- `internal/mesa/embed_nomesa_windows.go` - Empty stub for standard build
+
+**Files Modified:**
+- `internal/mesa/mesa_windows.go` - Refactored to use build-tag-selected DLL map
+- `Makefile` - Added Windows build variants and packaging
+
+#### Building on v3.4.7
+
+This release builds on the v3.4.7 network filesystem fixes:
+- Using `entry.Info()` (cached metadata from `os.ReadDir()`) instead of `os.Stat()` (extra network call)
+- Eliminates catastrophic slowdowns on network-mounted filesystems
+
+---
+
 ## v3.4.5 - December 18, 2025
 
 ### Accelerated Scroll Implementation

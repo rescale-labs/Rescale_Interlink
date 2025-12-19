@@ -51,6 +51,12 @@ type LogEntry struct {
 	Stage     string
 	JobName   string
 	Message   string
+
+	// PERFORMANCE: Cached formatted text for O(1) filtering
+	// These are populated when the entry is added and avoid repeated
+	// string formatting and lowercase conversion during search
+	formattedCache string // Cached result of formatLogEntry()
+	lowerCache     string // Cached lowercase of formattedCache for search
 }
 
 // NewActivityTab creates a new activity tab
@@ -208,6 +214,12 @@ func (at *ActivityTab) AddLog(event *events.LogEvent) {
 		Message:   event.Message,
 	}
 
+	// PERFORMANCE: Precompute formatted text and lowercase for O(1) filtering
+	// This moves the cost from filter time (called frequently during search)
+	// to add time (called once per log entry)
+	entry.formattedCache = at.formatLogEntry(entry)
+	entry.lowerCache = strings.ToLower(entry.formattedCache)
+
 	at.logs = append(at.logs, entry)
 
 	// Trim old logs if necessary
@@ -247,11 +259,10 @@ func (at *ActivityTab) refreshDisplay() {
 	// Apply filters
 	filtered := at.filterLogs()
 
-	// Build display text
+	// Build display text - PERFORMANCE: Use cached formatted text
 	var sb strings.Builder
 	for _, entry := range filtered {
-		line := at.formatLogEntry(entry)
-		sb.WriteString(line)
+		sb.WriteString(entry.formattedCache)
 		sb.WriteString("\n")
 	}
 
@@ -313,10 +324,11 @@ func (at *ActivityTab) filterLogs() []LogEntry {
 			continue
 		}
 
-		// Search filter
+		// Search filter - PERFORMANCE: Use cached lowercase text
+		// lowerCache is precomputed in AddLog(), avoiding repeated
+		// formatLogEntry() and strings.ToLower() calls during filtering
 		if searchText != "" {
-			entryText := strings.ToLower(at.formatLogEntry(entry))
-			if !strings.Contains(entryText, searchText) {
+			if !strings.Contains(entry.lowerCache, searchText) {
 				continue
 			}
 		}

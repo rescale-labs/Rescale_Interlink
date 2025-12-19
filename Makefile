@@ -2,7 +2,7 @@
 # Build and package cross-platform FIPS 140-3 compliant binaries
 
 # Variables
-VERSION := v3.4.7
+VERSION := v3.4.8
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
 LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
@@ -20,6 +20,7 @@ DARWIN_ARM64_DIR := $(BIN_DIR)/darwin-arm64
 DARWIN_AMD64_DIR := $(BIN_DIR)/darwin-amd64
 LINUX_AMD64_DIR := $(BIN_DIR)/linux-amd64
 WINDOWS_AMD64_DIR := $(BIN_DIR)/windows-amd64
+WINDOWS_AMD64_MESA_DIR := $(BIN_DIR)/windows-amd64-mesa
 
 # Default target
 .PHONY: all
@@ -56,23 +57,40 @@ build-linux-amd64:
 	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(LINUX_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(LINUX_AMD64_DIR)/$(BINARY_NAME) [FIPS 140-3]"
 
-# Build Windows binary (FIPS 140-3 compliant)
+# Build Windows binary - standard (smaller, requires GPU)
 .PHONY: build-windows-amd64
 build-windows-amd64:
-	@echo "Building Windows AMD64 binary [FIPS 140-3]..."
+	@echo "Building Windows AMD64 binary [FIPS 140-3] (standard, no Mesa)..."
 	@mkdir -p $(WINDOWS_AMD64_DIR)
 	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
-	@echo "✅ Built: $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe [FIPS 140-3]"
+	@echo "✅ Built: $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe [FIPS 140-3] (requires GPU)"
+
+# Build Windows binary with Mesa (larger, software rendering for VMs/RDP)
+.PHONY: build-windows-amd64-mesa
+build-windows-amd64-mesa:
+	@echo "Building Windows AMD64 binary [FIPS 140-3] (with Mesa software rendering)..."
+	@mkdir -p $(WINDOWS_AMD64_MESA_DIR)
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -tags mesa $(LDFLAGS) -o $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@echo "✅ Built: $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe [FIPS 140-3] (Mesa software rendering)"
+
+# Build all Windows variants
+.PHONY: build-windows-all
+build-windows-all: build-windows-amd64 build-windows-amd64-mesa
+	@echo ""
+	@echo "✅ All Windows binaries built:"
+	@echo "   - Standard (GPU): $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe"
+	@echo "   - Mesa (VMs/RDP): $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe"
 
 # Build all platform binaries
 .PHONY: build-all
-build-all: build-darwin-arm64 build-darwin-amd64 build-linux-amd64 build-windows-amd64
+build-all: build-darwin-arm64 build-darwin-amd64 build-linux-amd64 build-windows-all
 	@echo ""
 	@echo "✅ All platform binaries built successfully!"
 	@echo "   - macOS Apple Silicon: $(DARWIN_ARM64_DIR)/$(BINARY_NAME)"
 	@echo "   - macOS Intel:         $(DARWIN_AMD64_DIR)/$(BINARY_NAME)"
 	@echo "   - Linux AMD64:         $(LINUX_AMD64_DIR)/$(BINARY_NAME)"
-	@echo "   - Windows AMD64:       $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe"
+	@echo "   - Windows AMD64:       $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe (standard)"
+	@echo "   - Windows AMD64 Mesa:  $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe (software rendering)"
 
 # Package binaries for GitHub releases
 .PHONY: package
@@ -83,6 +101,7 @@ package:
 	@cd $(DARWIN_AMD64_DIR) && tar -czf ../../../dist/$(BINARY_NAME)-$(VERSION)-darwin-amd64.tar.gz $(BINARY_NAME)
 	@cd $(LINUX_AMD64_DIR) && tar -czf ../../../dist/$(BINARY_NAME)-$(VERSION)-linux-amd64.tar.gz $(BINARY_NAME)
 	@cd $(WINDOWS_AMD64_DIR) && zip -q ../../../dist/$(BINARY_NAME)-$(VERSION)-windows-amd64.zip $(BINARY_NAME).exe
+	@cd $(WINDOWS_AMD64_MESA_DIR) && zip -q ../../../dist/$(BINARY_NAME)-$(VERSION)-windows-amd64-mesa.zip $(BINARY_NAME).exe
 	@echo ""
 	@echo "✅ Release packages created in dist/:"
 	@ls -lh dist/$(BINARY_NAME)-$(VERSION)-*
@@ -158,8 +177,10 @@ help:
 	@echo "  build-darwin-arm64      Build macOS Apple Silicon binary"
 	@echo "  build-darwin-amd64      Build macOS Intel binary"
 	@echo "  build-linux-amd64       Build Linux AMD64 binary"
-	@echo "  build-windows-amd64     Build Windows AMD64 binary"
-	@echo "  build-all               Build all platform binaries"
+	@echo "  build-windows-amd64     Build Windows AMD64 binary (standard, requires GPU)"
+	@echo "  build-windows-amd64-mesa Build Windows AMD64 binary (Mesa software rendering)"
+	@echo "  build-windows-all       Build both Windows variants"
+	@echo "  build-all               Build all platform binaries (including both Windows variants)"
 	@echo ""
 	@echo "Release Targets:"
 	@echo "  package                 Create release archives in dist/"
