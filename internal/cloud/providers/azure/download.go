@@ -30,7 +30,7 @@ var _ transfer.LegacyDownloader = (*Provider)(nil)
 // DownloadEncryptedFile downloads an encrypted file (legacy v0 format) to a local path.
 // This implements the LegacyDownloader interface.
 // The orchestrator handles decryption; this method just downloads the encrypted bytes.
-// Phase 7H: Uses AzureClient with file-aware credential handling.
+// Uses AzureClient with file-aware credential handling.
 func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.LegacyDownloadParams) error {
 	// Get or create Azure client (with file-aware credential handling)
 	azureClient, err := p.getOrCreateAzureClientForFile(ctx, params.FileInfo)
@@ -98,7 +98,7 @@ func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.Le
 }
 
 // downloadSingleWithProgress downloads a blob in a single GET request with progress callback.
-// Phase 7G: Uses AzureClient directly.
+// Uses AzureClient directly.
 func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *AzureClient, remotePath, localPath string, progressCallback func(float64), totalSize int64) error {
 	// Report 0% at start
 	if progressCallback != nil {
@@ -162,7 +162,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 }
 
 // downloadChunkedWithProgress downloads a blob in chunks with progress callback.
-// Phase 7G: Uses AzureClient directly.
+// Uses AzureClient directly.
 func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient *AzureClient, remotePath, localPath string, totalSize int64, progressCallback func(float64)) error {
 	// Report 0% at start
 	if progressCallback != nil {
@@ -217,7 +217,7 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 }
 
 // downloadChunkedConcurrent downloads a blob using concurrent range requests.
-// Phase 7G: Full concurrent download implementation directly in provider, using AzureClient.
+// Full concurrent download implementation directly in provider, using AzureClient.
 func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *AzureClient, remotePath, localPath string, totalSize int64, progressCallback func(float64), transferHandle *internaltransfer.Transfer) error {
 	// Report 0% at start
 	if progressCallback != nil {

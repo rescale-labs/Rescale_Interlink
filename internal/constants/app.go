@@ -10,13 +10,27 @@ const (
 	// Used by both S3 multipart and Azure block blob uploads
 	MultipartThreshold = 100 * 1024 * 1024
 
-	// ChunkSize - size of each chunk for uploads and downloads (16 MB)
-	// This is used as:
+	// ChunkSize - base size of each chunk for uploads and downloads (32 MB)
+	// This is used as the default for:
 	// - PartSize for S3 multipart uploads
 	// - BlockSize for Azure block blob uploads
 	// - RangeChunkSize for S3/Azure downloads
-	// Set to 16 MB for smoother progress updates and better EWMA calculation
-	ChunkSize = 16 * 1024 * 1024
+	//
+	// See CalculateDynamicChunkSize() for adaptive sizing based on file size
+	// and available memory. Dynamic range: 16 MB - 64 MB.
+	//
+	// Trade-offs:
+	// - Smaller chunks = more HTTP requests but better progress granularity
+	// - Larger chunks = better throughput but coarser progress updates
+	ChunkSize = 32 * 1024 * 1024
+
+	// MinChunkSize - minimum chunk size for transfers (16 MB)
+	// Used by dynamic chunk sizing to prevent excessive HTTP overhead.
+	MinChunkSize = 16 * 1024 * 1024
+
+	// MaxChunkSize - maximum chunk size for transfers (64 MB)
+	// Used by dynamic chunk sizing to cap memory usage per chunk.
+	MaxChunkSize = 64 * 1024 * 1024
 
 	// MinPartSize - AWS S3 minimum part size (5 MB, except last part)
 	// Azure has no equivalent minimum (can use any size)
@@ -155,7 +169,8 @@ const (
 	MinThreadsPerFile = 1
 
 	// MaxThreadsPerFile - maximum threads per file transfer
-	MaxThreadsPerFile = 10
+	// Increased to 16 for better utilization of high-bandwidth connections
+	MaxThreadsPerFile = 16
 )
 
 // Resource Manager - File Size Thresholds
@@ -189,18 +204,19 @@ const (
 )
 
 // Resource Manager - Thread Allocation (AutoScale)
+// Increased thread counts for better performance on high-bandwidth connections
 const (
 	// ThreadsFor500MBto1GB - threads for 500MB - 1GB range
-	ThreadsFor500MBto1GB = 3
+	ThreadsFor500MBto1GB = 4
 
 	// ThreadsFor1GBto5GB - threads for 1GB - 5GB range
-	ThreadsFor1GBto5GB = 5
+	ThreadsFor1GBto5GB = 8
 
 	// ThreadsFor5GBto10GB - threads for 5GB - 10GB range
-	ThreadsFor5GBto10GB = 8
+	ThreadsFor5GBto10GB = 12
 
 	// ThreadsFor10GBPlus - threads for files 10GB+
-	ThreadsFor10GBPlus = 10
+	ThreadsFor10GBPlus = 16
 )
 
 // Resource Manager - Throughput Monitoring

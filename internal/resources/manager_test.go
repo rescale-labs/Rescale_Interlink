@@ -140,8 +140,8 @@ func TestFileSizeAllocation(t *testing.T) {
 			name:       "Large file (5GB)",
 			fileSize:   5 * 1024 * 1024 * 1024,
 			totalFiles: 1,
-			expectMin:  5,
-			expectMax:  10,
+			expectMin:  8,
+			expectMax:  16,
 		},
 		{
 			name:       "Multiple files share pool",

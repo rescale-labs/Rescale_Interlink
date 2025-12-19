@@ -432,3 +432,78 @@ func (tm *ThroughputMonitor) Cleanup(transferID string) {
 	defer tm.mu.Unlock()
 	delete(tm.samples, transferID)
 }
+
+// =============================================================================
+// Dynamic Chunk Sizing
+// =============================================================================
+
+// CalculateDynamicChunkSize returns the optimal chunk size for a transfer.
+// Takes into account:
+//   - File size (larger files benefit from larger chunks)
+//   - Available memory (chunk * threads * 2 must fit in available RAM)
+//   - Number of threads (more threads = need smaller chunks per thread)
+//
+// Returns a value between MinChunkSize (16 MB) and MaxChunkSize (64 MB).
+//
+// Usage:
+//
+//	chunkSize := resources.CalculateDynamicChunkSize(fileSize, threads)
+//	// Use chunkSize for upload/download parts
+func CalculateDynamicChunkSize(fileSize int64, numThreads int) int64 {
+	if numThreads < 1 {
+		numThreads = 1
+	}
+
+	// Step 1: Determine base chunk size from file size
+	var baseChunk int64
+
+	switch {
+	case fileSize < constants.SmallFileThreshold: // < 100 MB
+		// Small files: use minimum chunk size
+		baseChunk = constants.MinChunkSize // 16 MB
+
+	case fileSize < constants.MediumFileThreshold: // 100 MB - 500 MB
+		// Medium-small files: use base chunk size
+		baseChunk = constants.ChunkSize // 32 MB
+
+	case fileSize < constants.LargeFile1GB: // 500 MB - 1 GB
+		// Medium files: use base chunk size
+		baseChunk = constants.ChunkSize // 32 MB
+
+	case fileSize < constants.LargeFile5GB: // 1 GB - 5 GB
+		// Large files: use 48 MB for better throughput
+		baseChunk = 48 * 1024 * 1024 // 48 MB
+
+	default: // >= 5 GB
+		// Very large files: use maximum chunk size
+		baseChunk = constants.MaxChunkSize // 64 MB
+	}
+
+	// Step 2: Apply memory constraint
+	// Rule: chunkSize * numThreads * 2 (double buffer) <= availableMemory * 0.75
+	availableMemory := getAvailableMemory()
+	maxFromMemory := int64(float64(availableMemory) * 0.75 / float64(numThreads*2))
+
+	// Apply memory cap
+	if baseChunk > maxFromMemory {
+		baseChunk = maxFromMemory
+	}
+
+	// Step 3: Enforce bounds
+	if baseChunk < constants.MinChunkSize {
+		baseChunk = constants.MinChunkSize
+	}
+	if baseChunk > constants.MaxChunkSize {
+		baseChunk = constants.MaxChunkSize
+	}
+
+	// Step 4: Ensure chunk size is a multiple of 16 bytes (AES block size)
+	// and ideally a power of 2 MB for efficient memory alignment
+	// Round down to nearest MB
+	baseChunk = (baseChunk / (1024 * 1024)) * (1024 * 1024)
+	if baseChunk < constants.MinChunkSize {
+		baseChunk = constants.MinChunkSize
+	}
+
+	return baseChunk
+}
