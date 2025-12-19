@@ -25,8 +25,6 @@ const (
 	DirectoryReadTimeout = 30 * time.Second
 	// SlowPathWarningThreshold is when to show "slow path" warning
 	SlowPathWarningThreshold = 5 * time.Second
-	// PathValidationTimeout is max time for navigateTo stat check
-	PathValidationTimeout = 10 * time.Second
 )
 
 // LocalBrowser is a widget for browsing the local filesystem
@@ -264,8 +262,19 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	showHidden := b.showHidden
 	b.mu.RUnlock()
 
-	// Process entries - show files even if stat fails (key fix for network filesystems)
-	var items []FileItem
+	// Process entries - PERFORMANCE CRITICAL for network filesystems
+	//
+	// Key insight: os.ReadDir() returns DirEntry with cached metadata.
+	// entry.Info() uses this cache - NO network call needed!
+	// os.Stat() makes a SEPARATE network call per file - catastrophically slow.
+	//
+	// Strategy:
+	// 1. Use entry.Info() for all files (uses cached data - fast)
+	// 2. Only call os.Stat() for symlinks (to resolve target type)
+	// 3. Show file with "?" size if both fail
+	//
+	// OPTIMIZATION: Preallocate slice to avoid repeated reallocations
+	items := make([]FileItem, 0, len(entries))
 	var statErrorCount int
 
 	for _, entry := range entries {
@@ -276,50 +285,51 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		default:
 		}
 
-		// Skip hidden files (starting with .) unless showHidden is enabled
+		// Skip hidden files unless showHidden is enabled
 		if !showHidden && strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 
 		fullPath := filepath.Join(path, entry.Name())
+		entryType := entry.Type()
+		isSymlink := entryType&os.ModeSymlink != 0
 
-		// Use os.Stat to follow symlinks - critical for network mount symlinks
-		// entry.Info() uses Lstat which does NOT follow symlinks
-		info, err := os.Stat(fullPath)
+		// Get file info - use cached data from ReadDir (fast!)
+		info, err := entry.Info()
+
+		// For symlinks, we need os.Stat() to follow the link and get target info
+		// This is the ONLY case where we make an extra system call
+		if err == nil && isSymlink {
+			if statInfo, statErr := os.Stat(fullPath); statErr == nil {
+				info = statInfo
+			}
+			// If stat fails for symlink, fall through to use cached info
+		}
 
 		var item FileItem
 		if err != nil {
-			// KEY FIX: Don't skip - show the file anyway!
-			// This fixes files "disappearing" when security software blocks stat
+			// entry.Info() failed - show file anyway with unknown metadata
 			b.logger.Debug().Err(err).Str("file", entry.Name()).Msg("Cannot access file metadata")
 			statErrorCount++
 
-			// Determine if this might be a directory we should allow navigation to
-			// CRITICAL: For symlinks, entry.Type().IsDir() returns FALSE (symlink itself isn't a dir)
-			// But the TARGET might be a directory! We need to handle this case.
-			entryType := entry.Type()
-			isSymlink := entryType&os.ModeSymlink != 0
-
-			// If it's a symlink and stat failed, assume it MIGHT be a directory
-			// This allows users to attempt navigation into network mount symlinks
+			// For symlinks, assume folder so user can attempt navigation
 			isFolder := entryType.IsDir()
 			if isSymlink {
-				isFolder = true // Optimistic: treat symlinks as folders so user can try to navigate
-				b.logger.Debug().Str("file", entry.Name()).Msg("Symlink with stat failure - treating as potential folder")
+				isFolder = true
 			}
 
 			item = FileItem{
 				ID:       fullPath,
 				Name:     entry.Name(),
 				IsFolder: isFolder,
-				Size:     -1,           // -1 = unknown (stat failed)
-				ModTime:  time.Time{},  // Zero = unknown
+				Size:     -1,          // Unknown
+				ModTime:  time.Time{}, // Unknown
 			}
 		} else {
 			item = FileItem{
 				ID:       fullPath,
 				Name:     entry.Name(),
-				IsFolder: info.IsDir(), // True type (follows symlinks)
+				IsFolder: info.IsDir(),
 				Size:     info.Size(),
 				ModTime:  info.ModTime(),
 			}
@@ -368,59 +378,13 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		Msg("Loaded directory")
 }
 
-// navigateTo navigates to a specific path with timeout protection
-// This method is non-blocking and tries to load even if stat fails (for network paths)
+// navigateTo navigates to a specific path
+// PERFORMANCE: Skip os.Stat validation - just try to load directly.
+// os.ReadDir will fail with a clear error if path is not a directory.
+// This eliminates one network round trip per navigation.
 func (b *LocalBrowser) navigateTo(path string) {
-	// Show loading state immediately
-	fyne.Do(func() {
-		if b.pathEntry != nil {
-			b.pathEntry.SetText(path)
-		}
-		if b.fileList != nil {
-			b.fileList.SetStatus("Validating path...")
-		}
-	})
-
-	// Run validation in background to avoid UI freeze
-	go func() {
-		// Try to stat with timeout
-		type statResult struct {
-			info os.FileInfo
-			err  error
-		}
-		resultCh := make(chan statResult, 1)
-		go func() {
-			info, err := os.Stat(path)
-			resultCh <- statResult{info: info, err: err}
-		}()
-
-		// Wait with timeout
-		select {
-		case <-time.After(PathValidationTimeout):
-			// Stat timed out - try to load anyway (might work)
-			b.logger.Warn().Str("path", path).Msg("Path validation timed out - attempting to load anyway")
-			b.saveHistory(path)
-			b.loadDirectory(path)
-			return
-		case result := <-resultCh:
-			if result.err != nil {
-				// Stat failed - log but ALSO try to load (directory might still be listable)
-				b.logger.Warn().Err(result.err).Str("path", path).Msg("Path validation failed - attempting to load anyway")
-				b.saveHistory(path)
-				b.loadDirectory(path)
-				return
-			}
-			if !result.info.IsDir() {
-				fyne.Do(func() {
-					dialog.ShowInformation("Not a Directory", "Please select a directory, not a file.", b.window)
-				})
-				return
-			}
-			// Success - navigate
-			b.saveHistory(path)
-			b.loadDirectory(path)
-		}
-	}()
+	b.saveHistory(path)
+	go b.loadDirectory(path)
 }
 
 // saveHistory saves current path to history before navigation
