@@ -511,23 +511,41 @@ func (w *FileListWidget) SetItems(items []FileItem) {
 
 // SetItemsAndScrollToTop sets the items and resets scroll to top
 // Use this when navigating to a new directory/folder
-// Items are automatically sorted according to current sort settings
+// PERFORMANCE: Items are displayed in filesystem order initially.
+// Sorting only happens when user explicitly requests a sort.
+// This matches Windows Explorer behavior.
 func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	w.mu.Lock()
 	w.items = items
 	w.selectedItems = make(map[string]bool)
 	w.currentPage = 0 // Reset to first page when items change
+
+	// PERFORMANCE: Calculate folder/file counts now instead of iterating later
+	folderCount, fileCount := 0, 0
+	for i := range items {
+		if items[i].IsFolder {
+			folderCount++
+		} else {
+			fileCount++
+		}
+	}
 	w.mu.Unlock()
 
-	// Apply current sort and refresh with scroll to top
-	w.sortAndRefresh()
-	if w.list != nil {
-		fyne.Do(func() {
+	// PERFORMANCE: Batch all UI updates into a single fyne.Do call
+	// This avoids multiple main thread round-trips
+	fyne.Do(func() {
+		if w.list != nil {
+			w.list.Refresh()
 			w.list.ScrollToTop()
-		})
-	}
-	w.refreshPagination() // Update pagination UI (includes hasMoreServerData awareness)
-	w.updateStatus()
+		}
+		// Update status with pre-calculated counts
+		if w.statusLabel != nil {
+			w.statusLabel.SetText(fmt.Sprintf("%d folders, %d files", folderCount, fileCount))
+		}
+		// Update pagination
+		w.refreshPaginationUI()
+	})
+
 	w.updateSelectAllState()
 }
 
@@ -965,6 +983,47 @@ func (w *FileListWidget) onPageSizeChanged(value string) {
 	}
 }
 
+// refreshPaginationUI updates just the pagination buttons and label
+// MUST be called from the main thread (inside fyne.Do or from UI callback)
+// Does NOT refresh the list - caller is responsible for that
+func (w *FileListWidget) refreshPaginationUI() {
+	w.mu.RLock()
+	displayItems := w.getDisplayItemsLocked()
+	totalItems := len(displayItems)
+	totalPages := (totalItems + w.pageSize - 1) / w.pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	currentPage := w.currentPage
+	hasMoreServer := w.hasMoreServerData
+	w.mu.RUnlock()
+
+	// Update page label - show "+" if more server data available
+	if w.pageLabel != nil {
+		if hasMoreServer {
+			w.pageLabel.SetText(fmt.Sprintf("%d/%d+", currentPage+1, totalPages))
+		} else {
+			w.pageLabel.SetText(fmt.Sprintf("%d/%d", currentPage+1, totalPages))
+		}
+	}
+
+	// Update button states
+	if w.prevPageBtn != nil {
+		if currentPage > 0 {
+			w.prevPageBtn.Enable()
+		} else {
+			w.prevPageBtn.Disable()
+		}
+	}
+	if w.nextPageBtn != nil {
+		if currentPage < totalPages-1 {
+			w.nextPageBtn.Enable()
+		} else {
+			w.nextPageBtn.Disable()
+		}
+	}
+}
+
 // refreshPagination updates the pagination UI and list
 func (w *FileListWidget) refreshPagination() {
 	w.mu.RLock()
@@ -980,34 +1039,9 @@ func (w *FileListWidget) refreshPagination() {
 	callback := w.OnPageChange
 	w.mu.RUnlock()
 
-	// Update pagination UI on main thread (compact format)
+	// Update pagination UI on main thread
 	fyne.Do(func() {
-		// Update page label - show "+" if more server data available
-		if w.pageLabel != nil {
-			if hasMoreServer {
-				w.pageLabel.SetText(fmt.Sprintf("%d/%d+", currentPage+1, totalPages))
-			} else {
-				w.pageLabel.SetText(fmt.Sprintf("%d/%d", currentPage+1, totalPages))
-			}
-		}
-
-		// Update button states
-		if w.prevPageBtn != nil {
-			if currentPage > 0 {
-				w.prevPageBtn.Enable()
-			} else {
-				w.prevPageBtn.Disable()
-			}
-		}
-		if w.nextPageBtn != nil {
-			// Enable next ONLY if we have local data for the next page
-			// Don't enable speculatively based on hasMoreServerData
-			if currentPage < totalPages-1 {
-				w.nextPageBtn.Enable()
-			} else {
-				w.nextPageBtn.Disable()
-			}
-		}
+		w.refreshPaginationUI()
 
 		// Refresh list
 		if w.list != nil {
@@ -1017,7 +1051,6 @@ func (w *FileListWidget) refreshPagination() {
 	})
 
 	// If on last local page but server might have more, trigger preload
-	// This loads more data in the background so the button can be enabled later
 	if currentPage >= totalPages-1 && hasMoreServer && callback != nil {
 		go callback(currentPage+1, pageSize, totalItems)
 	}
