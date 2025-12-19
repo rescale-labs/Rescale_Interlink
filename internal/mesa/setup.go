@@ -2,8 +2,11 @@
 //
 // On Windows systems without GPU/OpenGL hardware support, Mesa's software
 // renderer (llvmpipe) provides OpenGL compatibility. This package embeds
-// the necessary Mesa DLLs and extracts them at runtime, then configures
-// Windows to use them via SetDllDirectory.
+// the necessary Mesa DLLs and extracts them at runtime.
+//
+// DLL Extraction Strategy:
+//   1. PREFERRED: Extract to same directory as executable (Windows finds these first)
+//   2. FALLBACK: Extract to %LOCALAPPDATA%\rescale-int\mesa and use SetDllDirectory
 //
 // Usage:
 //
@@ -20,7 +23,8 @@ import (
 	"path/filepath"
 )
 
-// MesaDir returns the directory where Mesa DLLs are extracted.
+// MesaDir returns the fallback directory for Mesa DLLs.
+// This is used when we can't write to the executable's directory.
 // On Windows: %LOCALAPPDATA%\rescale-int\mesa
 // Falls back to ~/.rescale-int/mesa if LOCALAPPDATA not set.
 func MesaDir() string {
@@ -37,41 +41,4 @@ func MesaDir() string {
 	}
 	// Last resort: temp directory (will re-extract each boot)
 	return filepath.Join(os.TempDir(), "rescale-int-mesa")
-}
-
-// DLLInfo describes an embedded DLL file
-type DLLInfo struct {
-	Name string // Filename (e.g., "opengl32.dll")
-	Size int64  // Expected size in bytes (for version checking)
-}
-
-// RequiredDLLs lists the Mesa DLLs needed for software rendering
-var RequiredDLLs = []DLLInfo{
-	{Name: "opengl32.dll", Size: 137216},        // Mesa OpenGL frontend
-	{Name: "libgallium_wgl.dll", Size: 53364736}, // Gallium llvmpipe backend
-}
-
-// dllNeedsUpdate checks if a DLL needs to be extracted/updated.
-// Returns true if the file doesn't exist or has wrong size.
-func dllNeedsUpdate(dir string, info DLLInfo) bool {
-	path := filepath.Join(dir, info.Name)
-	stat, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return true
-	}
-	if err != nil {
-		return true // Can't stat, assume needs update
-	}
-	// Check size matches expected (simple version check)
-	return stat.Size() != info.Size
-}
-
-// AllDLLsCurrent checks if all required DLLs exist with correct sizes
-func AllDLLsCurrent(dir string) bool {
-	for _, info := range RequiredDLLs {
-		if dllNeedsUpdate(dir, info) {
-			return false
-		}
-	}
-	return true
 }
