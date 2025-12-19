@@ -42,8 +42,9 @@ type JobsTab struct {
 	statsLabel  *widget.Label
 
 	// Data
-	loadedJobs []JobRow
-	jobsLock   sync.RWMutex
+	loadedJobs      []JobRow
+	jobIndexByName  map[string]int // PERFORMANCE: O(1) lookup of job index by name
+	jobsLock        sync.RWMutex
 
 	// Execution state
 	ctx       context.Context
@@ -83,6 +84,7 @@ func NewJobsTab(engine *core.Engine, window fyne.Window, app fyne.App) *JobsTab 
 		workflow:            NewJobsWorkflow(),
 		apiCache:            NewAPICache(),
 		loadedJobs:          []JobRow{},
+		jobIndexByName:      make(map[string]int),
 		progressBar:         widget.NewProgressBar(),
 		statsLabel:          widget.NewLabel(""),
 		doubleClickDetector: NewDoubleClickDetector(),
@@ -395,6 +397,7 @@ func (jt *JobsTab) formatStatus(status string) string {
 }
 
 // UpdateProgress updates job progress from events
+// PERFORMANCE: Uses O(1) index map lookup instead of O(n) linear search
 func (jt *JobsTab) UpdateProgress(event *events.ProgressEvent) {
 	if event.Stage == "overall" {
 		// v3.4.0 fix: All widget updates must be on main thread (Fyne 2.5+ requirement)
@@ -405,45 +408,42 @@ func (jt *JobsTab) UpdateProgress(event *events.ProgressEvent) {
 		return
 	}
 
-	// Update specific job
+	// Update specific job using O(1) index lookup
 	jt.jobsLock.Lock()
 
-	for i := range jt.loadedJobs {
-		if jt.loadedJobs[i].JobName == event.JobName {
-			jt.loadedJobs[i].Progress = event.Progress
+	if idx, ok := jt.jobIndexByName[event.JobName]; ok && idx < len(jt.loadedJobs) {
+		jt.loadedJobs[idx].Progress = event.Progress
 
-			// Update stage-specific status
-			switch event.Stage {
-			case "tar":
-				if event.Progress >= 1.0 {
-					jt.loadedJobs[i].TarStatus = "completed"
-				} else {
-					jt.loadedJobs[i].TarStatus = "in_progress"
-				}
-			case "upload":
-				if event.Progress >= 1.0 {
-					jt.loadedJobs[i].UploadStatus = "completed"
-				} else {
-					jt.loadedJobs[i].UploadStatus = "in_progress"
-				}
-			case "create":
-				if event.Progress >= 1.0 {
-					jt.loadedJobs[i].CreateStatus = "completed"
-				} else {
-					jt.loadedJobs[i].CreateStatus = "in_progress"
-				}
-			case "submit":
-				if event.Progress >= 1.0 {
-					jt.loadedJobs[i].SubmitStatus = "completed"
-				} else {
-					jt.loadedJobs[i].SubmitStatus = "in_progress"
-				}
+		// Update stage-specific status
+		switch event.Stage {
+		case "tar":
+			if event.Progress >= 1.0 {
+				jt.loadedJobs[idx].TarStatus = "completed"
+			} else {
+				jt.loadedJobs[idx].TarStatus = "in_progress"
 			}
-
-			// Update overall status
-			jt.loadedJobs[i].Status = event.Message
-			break
+		case "upload":
+			if event.Progress >= 1.0 {
+				jt.loadedJobs[idx].UploadStatus = "completed"
+			} else {
+				jt.loadedJobs[idx].UploadStatus = "in_progress"
+			}
+		case "create":
+			if event.Progress >= 1.0 {
+				jt.loadedJobs[idx].CreateStatus = "completed"
+			} else {
+				jt.loadedJobs[idx].CreateStatus = "in_progress"
+			}
+		case "submit":
+			if event.Progress >= 1.0 {
+				jt.loadedJobs[idx].SubmitStatus = "completed"
+			} else {
+				jt.loadedJobs[idx].SubmitStatus = "in_progress"
+			}
 		}
+
+		// Update overall status
+		jt.loadedJobs[idx].Status = event.Message
 	}
 
 	// CRITICAL FIX: Release lock BEFORE calling refresh to avoid deadlock
@@ -459,6 +459,7 @@ func (jt *JobsTab) UpdateProgress(event *events.ProgressEvent) {
 }
 
 // UpdateJobState updates job state from state change events
+// PERFORMANCE: Uses O(1) index map lookup instead of O(n) linear search
 func (jt *JobsTab) UpdateJobState(event *events.StateChangeEvent) {
 	debugf("UpdateJobState called: job=%s, stage=%s, status=%s, progress=%.2f\n",
 		event.JobName, event.Stage, event.NewStatus, event.UploadProgress)
@@ -468,57 +469,50 @@ func (jt *JobsTab) UpdateJobState(event *events.StateChangeEvent) {
 
 	// Debug: print loaded jobs
 	debugf("Looking for job '%s' in %d loaded jobs\n", event.JobName, len(jt.loadedJobs))
-	for idx, job := range jt.loadedJobs {
-		debugf("  Job[%d]: name='%s'\n", idx, job.JobName)
-	}
 
-	found := false
-	for i := range jt.loadedJobs {
-		if jt.loadedJobs[i].JobName == event.JobName {
-			debugf("Found job at index %d, updating status\n", i)
-			jt.loadedJobs[i].Status = event.NewStatus
-			if event.JobID != "" {
-				jt.loadedJobs[i].JobID = event.JobID
-			}
-			if event.ErrorMessage != "" {
-				jt.loadedJobs[i].Error = event.ErrorMessage
-				jt.loadedJobs[i].Status = "failed"
-			}
-
-			// Update stage status
-			if event.Stage != "" {
-				switch event.Stage {
-				case "tar":
-					jt.loadedJobs[i].TarStatus = event.NewStatus
-					debugf("Updated TarStatus to '%s'\n", event.NewStatus)
-				case "upload":
-					jt.loadedJobs[i].UploadStatus = event.NewStatus
-					jt.loadedJobs[i].UploadProgress = event.UploadProgress
-					debugf("Updated UploadStatus to '%s', progress=%.2f\n", event.NewStatus, event.UploadProgress)
-				case "create":
-					jt.loadedJobs[i].CreateStatus = event.NewStatus
-					debugf("Updated CreateStatus to '%s'\n", event.NewStatus)
-				case "submit":
-					jt.loadedJobs[i].SubmitStatus = event.NewStatus
-					debugf("Updated SubmitStatus to '%s'\n", event.NewStatus)
-				}
-			}
-
-			found = true
-			break
+	// PERFORMANCE: Use O(1) index lookup instead of linear search
+	if idx, ok := jt.jobIndexByName[event.JobName]; ok && idx < len(jt.loadedJobs) {
+		debugf("Found job at index %d, updating status\n", idx)
+		jt.loadedJobs[idx].Status = event.NewStatus
+		if event.JobID != "" {
+			jt.loadedJobs[idx].JobID = event.JobID
 		}
-	}
+		if event.ErrorMessage != "" {
+			jt.loadedJobs[idx].Error = event.ErrorMessage
+			jt.loadedJobs[idx].Status = "failed"
+		}
 
-	// If job not found, add it (from state load)
-	if !found {
+		// Update stage status
+		if event.Stage != "" {
+			switch event.Stage {
+			case "tar":
+				jt.loadedJobs[idx].TarStatus = event.NewStatus
+				debugf("Updated TarStatus to '%s'\n", event.NewStatus)
+			case "upload":
+				jt.loadedJobs[idx].UploadStatus = event.NewStatus
+				jt.loadedJobs[idx].UploadProgress = event.UploadProgress
+				debugf("Updated UploadStatus to '%s', progress=%.2f\n", event.NewStatus, event.UploadProgress)
+			case "create":
+				jt.loadedJobs[idx].CreateStatus = event.NewStatus
+				debugf("Updated CreateStatus to '%s'\n", event.NewStatus)
+			case "submit":
+				jt.loadedJobs[idx].SubmitStatus = event.NewStatus
+				debugf("Updated SubmitStatus to '%s'\n", event.NewStatus)
+			}
+		}
+	} else {
+		// Job not found, add it (from state load)
 		debugf("Job '%s' not found in loadedJobs, adding it\n", event.JobName)
+		newIdx := len(jt.loadedJobs)
 		jt.loadedJobs = append(jt.loadedJobs, JobRow{
-			Index:   len(jt.loadedJobs),
+			Index:   newIdx,
 			JobName: event.JobName,
 			Status:  event.NewStatus,
 			JobID:   event.JobID,
 			Error:   event.ErrorMessage,
 		})
+		// Update index map
+		jt.jobIndexByName[event.JobName] = newIdx
 	}
 
 	// CRITICAL FIX: Release lock BEFORE calling refresh

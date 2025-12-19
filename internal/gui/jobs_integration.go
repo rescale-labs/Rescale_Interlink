@@ -304,9 +304,11 @@ func (jt *JobsTab) stopExecution() {
 }
 
 // loadJobsFromSpecs converts JobSpecs to JobRows for display
+// PERFORMANCE: Also builds the jobIndexByName map for O(1) lookups
 func (jt *JobsTab) loadJobsFromSpecs(specs []models.JobSpec) {
 	jt.jobsLock.Lock()
 	jt.loadedJobs = make([]JobRow, len(specs))
+	jt.jobIndexByName = make(map[string]int, len(specs))
 	for i, spec := range specs {
 		jt.loadedJobs[i] = JobRow{
 			Index:        i,
@@ -321,6 +323,8 @@ func (jt *JobsTab) loadJobsFromSpecs(specs []models.JobSpec) {
 			Progress:     0,
 			Error:        "",
 		}
+		// Build index map for O(1) lookup
+		jt.jobIndexByName[spec.JobName] = i
 	}
 	jt.jobsLock.Unlock()
 

@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.4.5-green)
+![Status](https://img.shields.io/badge/status-v3.4.8-green)
 
 ---
 
@@ -67,6 +67,17 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 
 ### Recent Improvements
+
+**v3.4.8 (December 19, 2025) - Deep Performance Optimization + Windows Mesa Variants:**
+- **GUI Performance Optimizations**: Comprehensive performance improvements across all GUI components
+  - FileListWidget: Removed 4 redundant Refresh() calls, precomputed lowercase for sorting (10x fewer allocations), added O(1) ID-to-index lookups
+  - FileBrowserTab: Batched lock acquisition, removed redundant progress bar refresh calls
+  - JobsTab: Added O(1) job name index lookups for real-time updates
+  - ActivityTab: Cached formatted log entries for O(1) filtering
+- **Windows Build Variants**: Two Windows binaries now available
+  - Standard build (smaller, requires GPU): `rescale-int-windows-amd64.zip`
+  - Mesa build (larger, software rendering for VMs/RDP): `rescale-int-windows-amd64-mesa.zip`
+- Builds on v3.4.7 network filesystem fixes (using cached DirEntry metadata)
 
 **v3.4.5 (December 18, 2025) - Accelerated Scroll:**
 - **AcceleratedScroll Widget**: Custom scroll container with 3x scroll speed
@@ -200,7 +211,9 @@ Download from releases page:
 - **macOS ARM64**: `rescale-int-darwin-arm64`
 - **macOS Intel**: `rescale-int-darwin-amd64`
 - **Linux**: `rescale-int-linux-amd64`
-- **Windows**: `rescale-int-windows.exe`
+- **Windows**: Two variants available:
+  - `rescale-int-windows-amd64.zip` - Standard (smaller, requires GPU)
+  - `rescale-int-windows-amd64-mesa.zip` - Mesa (larger, software rendering for VMs/RDP)
 
 ```bash
 # macOS/Linux - make executable and move to PATH
@@ -485,7 +498,7 @@ rescale-int completion fish > ~/.config/fish/completions/rescale-int.fish
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    rescale-int v3.4.5                        │
+│                    rescale-int v3.4.8                        │
 │                  Unified CLI + GUI Binary                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                               │
@@ -746,6 +759,6 @@ Dinal P. -- early prototyping
 
 ---
 
-**Version**: 3.4.2
+**Version**: 3.4.8
 **Status**: Production Ready, FIPS 140-3 Mandatory
-**Last Updated**: December 16, 2025
+**Last Updated**: December 19, 2025

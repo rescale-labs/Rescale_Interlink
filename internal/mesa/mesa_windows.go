@@ -3,7 +3,6 @@
 package mesa
 
 import (
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,19 +10,11 @@ import (
 	"unsafe"
 )
 
-// Embedded Mesa DLLs - these are included in the Windows binary
+// embeddedDLLs is defined in either:
+// - embed_mesa_windows.go (when built with -tags mesa) - contains actual DLL data
+// - embed_nomesa_windows.go (default) - empty map for smaller binary
 //
-//go:embed dlls/opengl32.dll
-var opengl32DLL []byte
-
-//go:embed dlls/libgallium_wgl.dll
-var libgalliumDLL []byte
-
-// embeddedDLLs maps filenames to their embedded content
-var embeddedDLLs = map[string][]byte{
-	"opengl32.dll":       opengl32DLL,
-	"libgallium_wgl.dll": libgalliumDLL,
-}
+// mesaEmbedded is also defined there, indicating which build variant this is.
 
 // softwareRenderingEnabled tracks if we successfully set up Mesa
 var softwareRenderingEnabled bool
@@ -107,10 +98,21 @@ func canWriteToDir(dir string) bool {
 //
 // Returns nil on success. On error, returns the error but the caller
 // may choose to continue (the app might still work with a real GPU).
+//
+// Build variants:
+// - With "-tags mesa": Embedded DLLs, automatic software rendering
+// - Without "-tags mesa": No embedded DLLs, requires hardware GPU (smaller binary)
 func EnsureSoftwareRendering() error {
 	// Allow opt-out for users with working GPU
 	if os.Getenv("RESCALE_HARDWARE_RENDER") == "1" {
 		fmt.Println("[Mesa] Hardware rendering requested (RESCALE_HARDWARE_RENDER=1)")
+		return nil
+	}
+
+	// Check if this is a no-Mesa build
+	if !mesaEmbedded {
+		fmt.Println("[Mesa] This build does not include Mesa software rendering")
+		fmt.Println("[Mesa] Hardware GPU/OpenGL required. Use the '-mesa' build variant if software rendering is needed.")
 		return nil
 	}
 
