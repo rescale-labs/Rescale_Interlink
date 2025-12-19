@@ -1360,12 +1360,12 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v3.4.5 (December 18, 2025)
+This guide is for `rescale-int` v3.4.8 (December 19, 2025)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v3.4.5 (2025-12-18) [FIPS 140-3]
+# Output: rescale-int version v3.4.8 (2025-12-19) [FIPS 140-3]
 ```
 
 ### v3.0.1 Streaming Encryption (November 28, 2025)
