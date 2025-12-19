@@ -372,7 +372,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 			return // No transfer handle, can't scale
 		}
 
-		ticker := time.NewTicker(500 * time.Millisecond) // Check every 500ms for responsiveness
+		ticker := time.NewTicker(100 * time.Millisecond) // Check every 100ms for faster responsiveness
 		defer ticker.Stop()
 
 		for {

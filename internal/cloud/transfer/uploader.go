@@ -112,7 +112,7 @@ type PartResult struct {
 
 // PreEncryptUploader extends CloudTransfer with pre-encrypted upload support.
 // Providers that support pre-encrypted uploads implement this interface.
-// Sprint 7B: This interface allows the transfer orchestrator to handle encryption
+// This interface allows the transfer orchestrator to handle encryption
 // while delegating the actual upload to the provider.
 type PreEncryptUploader interface {
 	cloud.CloudTransfer
