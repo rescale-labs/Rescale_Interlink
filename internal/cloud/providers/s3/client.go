@@ -33,7 +33,7 @@ import (
 //
 // Thread-safe: All operations are safe for concurrent use.
 //
-// Sprint F.3: Added fileInfo and apiClient fields for cross-bucket credential refresh.
+// Added fileInfo and apiClient fields for cross-bucket credential refresh.
 // When fileInfo is set, EnsureFreshCredentials uses file-specific credentials instead
 // of the global credential manager's default storage credentials.
 type S3Client struct {
@@ -105,8 +105,8 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 		client:      client,
 		storageInfo: storageInfo,
 		credManager: credManager,
-		apiClient:   apiClient,  // Sprint F.3: Store for file-specific credential refresh
-		fileInfo:    fileInfo,   // Sprint F.3: Store for cross-bucket downloads
+		apiClient:   apiClient,  // Store for file-specific credential refresh
+		fileInfo:    fileInfo,   // Store for cross-bucket downloads
 		httpClient:  httpClient,
 	}, nil
 }

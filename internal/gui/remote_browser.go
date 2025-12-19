@@ -24,8 +24,8 @@ type BreadcrumbEntry struct {
 	Name string
 }
 
-// RemoteBrowser is a widget for browsing Rescale files
-// Sprint F.4: Uses FileListWidget pagination with multi-page API fetching
+// RemoteBrowser is a widget for browsing Rescale files.
+// Uses FileListWidget pagination with multi-page API fetching.
 type RemoteBrowser struct {
 	widget.BaseWidget
 
@@ -122,8 +122,8 @@ func (b *RemoteBrowser) CreateRenderer() fyne.WidgetRenderer {
 		NewAcceleratedHScroll(b.breadcrumbBar),
 	)
 
-	// File list widget - uses its own pagination controls
-	// Sprint F.4: We fetch multiple API pages to fill the user's desired page size
+	// File list widget - uses its own pagination controls.
+	// Fetches multiple API pages to fill the user's desired page size.
 	b.fileList = NewFileListWidget()
 	b.fileList.OnFolderOpen = func(item FileItem) {
 		b.navigateToFolder(item.ID, item.Name)
@@ -138,8 +138,8 @@ func (b *RemoteBrowser) CreateRenderer() fyne.WidgetRenderer {
 		go b.onPageChange(page, pageSize, totalItems)
 	}
 
-	// Layout - title is provided by parent container (FileBrowserTab)
-	// Sprint F.4: FileListWidget handles pagination; we fetch API pages as needed
+	// Layout - title is provided by parent container (FileBrowserTab).
+	// FileListWidget handles pagination; we fetch API pages as needed.
 	_ = title // Title managed by FileBrowserTab
 	content := container.NewBorder(
 		navBar,
@@ -211,8 +211,8 @@ func (b *RemoteBrowser) initialize() {
 	b.loadCurrentFolder()
 }
 
-// loadCurrentFolder loads folder contents, fetching enough API pages to fill user's page size
-// Sprint F.4: Fetches multiple 25-item API pages to fill user's desired page size (max 200)
+// loadCurrentFolder loads folder contents, fetching enough API pages to fill user's page size.
+// Fetches multiple 25-item API pages to fill user's desired page size (max 200).
 func (b *RemoteBrowser) loadCurrentFolder() {
 	// Reset state for new folder
 	b.mu.Lock()

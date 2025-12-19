@@ -25,7 +25,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
-	stringutil "github.com/rescale/rescale-int/internal/util/strings"
+	"github.com/rescale/rescale-int/internal/resources"
 )
 
 // Verify that Provider implements StreamingConcurrentUploader, StreamingConcurrentDownloader,
@@ -55,8 +55,10 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	objectName := fmt.Sprintf("%s-%s", filename, randomSuffix)
 	objectKey := fmt.Sprintf("%s/%s", s3Client.PathBase(), objectName)
 
-	// Calculate part size (use standard chunk size for multipart)
-	partSize := int64(constants.ChunkSize)
+	// Calculate part size dynamically based on file size and available threads
+	// This optimizes chunk size for memory constraints and throughput
+	numThreads := constants.MaxThreadsPerFile // Default thread count for large files
+	partSize := resources.CalculateDynamicChunkSize(params.FileSize, numThreads)
 
 	// Create streaming encryption state (CBC chaining)
 	encryptState, err := transfer.NewStreamingEncryptionState(partSize)
@@ -110,9 +112,6 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 		},
 	}, nil
 }
-
-// pluralize is an alias for the shared utility function
-var pluralize = stringutil.Pluralize
 
 // s3ProviderData contains S3-specific data for the upload.
 type s3ProviderData struct {
