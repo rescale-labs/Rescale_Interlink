@@ -29,7 +29,7 @@ var _ transfer.LegacyDownloader = (*Provider)(nil)
 // DownloadEncryptedFile downloads an encrypted file (legacy v0 format) to a local path.
 // This implements the LegacyDownloader interface.
 // The orchestrator handles decryption; this method just downloads the encrypted bytes.
-// Phase 7H: Uses S3Client with file-specific credentials for cross-storage downloads.
+// Uses S3Client with file-specific credentials for cross-storage downloads.
 func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.LegacyDownloadParams) error {
 	// Get or create S3 client with file-specific credentials (for cross-storage downloads)
 	s3Client, err := p.getOrCreateS3ClientForFile(ctx, params.FileInfo)
@@ -91,7 +91,7 @@ func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.Le
 }
 
 // downloadSingleWithProgress downloads a file in a single GET request with progress callback.
-// Phase 7F: Uses S3Client directly.
+// Uses S3Client directly.
 func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3Client, objectKey, localPath string, progressCallback func(float64), totalSize int64) error {
 	// Get object
 	resp, err := s3Client.GetObject(ctx, objectKey)
@@ -149,7 +149,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 }
 
 // downloadChunkedWithProgress downloads a file in chunks with progress callback.
-// Phase 7F: Uses S3Client directly.
+// Uses S3Client directly.
 func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3Client, objectKey, localPath string, totalSize int64, progressCallback func(float64)) error {
 	// Create output file
 	file, err := os.Create(localPath)
@@ -200,7 +200,7 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 }
 
 // downloadChunkedConcurrent downloads a file using concurrent range requests.
-// Phase 7F: Uses S3Client directly.
+// Uses S3Client directly.
 func (p *Provider) downloadChunkedConcurrent(
 	ctx context.Context,
 	s3Client *S3Client,

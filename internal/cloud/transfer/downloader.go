@@ -72,7 +72,7 @@ type DownloadPrep struct {
 //   - Downloads and decrypts part by part
 //   - Uses per-part key derivation from master key + file ID
 //
-// Sprint F.2: Supports cross-storage downloads via FileInfoSetter interface.
+// Supports cross-storage downloads via FileInfoSetter interface.
 func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) error {
 	// Validate required parameters
 	if params.RemotePath == "" {
@@ -88,7 +88,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		return fmt.Errorf("encryption key is required in file info")
 	}
 
-	// Sprint F.2: Set file info for cross-storage credential fetching
+	// Set file info for cross-storage credential fetching.
 	// If the provider supports FileInfoSetter, call SetFileInfo before any operations.
 	// This enables downloading files from storage different than user's default
 	// (e.g., S3 user downloading Azure-stored job outputs).
@@ -128,7 +128,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 	formatDetector, hasFormatDetection := d.provider.(StreamingConcurrentDownloader)
 	if hasFormatDetection {
 		// Detect format from cloud metadata
-		// Phase 7H: DetectFormat now returns IV for legacy format (v0)
+		// DetectFormat returns IV for legacy format (v0)
 		formatVersion, fileID, partSize, metadataIV, err := formatDetector.DetectFormat(ctx, params.RemotePath)
 		if err != nil {
 			// Fall back to using IV presence to detect format
@@ -203,7 +203,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 
 // downloadLegacy downloads using legacy (v0) format.
 // The entire file is downloaded encrypted, then decrypted.
-// Phase 7C: Orchestrator handles disk space, temp file, and decryption.
+// Orchestrator handles disk space, temp file, and decryption.
 func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) error {
 	if prep.Params.OutputWriter != nil {
 		fmt.Fprintf(prep.Params.OutputWriter, "Using legacy format (v0) download\n")
@@ -917,7 +917,7 @@ type StreamingConcurrentDownloader interface {
 	// Returns: formatVersion (0=legacy, 1=streaming), fileId (base64), partSize, iv (for legacy), error
 	// For legacy format (v0): fileId and partSize will be empty/zero, iv is populated from metadata.
 	// For streaming format (v1): fileId and partSize are populated, iv will be empty.
-	// Phase 7H: Added iv return value for legacy format support.
+	// Returns iv for legacy format support.
 	DetectFormat(ctx context.Context, remotePath string) (formatVersion int, fileId string, partSize int64, iv []byte, err error)
 
 	// DownloadStreaming downloads and decrypts a file using streaming format (v1).

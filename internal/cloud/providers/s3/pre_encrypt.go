@@ -26,6 +26,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto"        // package name is 'encryption'
+	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/util/buffers"
 )
 
@@ -35,7 +36,7 @@ var _ transfer.PreEncryptUploader = (*Provider)(nil)
 // UploadEncryptedFile uploads an already-encrypted file to S3.
 // This implements the PreEncryptUploader interface.
 // The encryption is already done by the orchestrator; this method handles the state.
-// Phase 7E: Uses S3Client directly instead of wrapping state.S3Uploader.
+// Uses S3Client directly instead of wrapping state.S3Uploader.
 func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.EncryptedFileUploadParams) (*cloud.UploadResult, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
@@ -83,7 +84,7 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 }
 
 // uploadEncryptedSingle uploads an encrypted file in a single PUT request.
-// Phase 7E: Uses S3Client directly.
+// Uses S3Client directly.
 func (p *Provider) uploadEncryptedSingle(ctx context.Context, s3Client *S3Client, filePath, objectKey string, iv []byte, progressCallback func(float64)) error {
 	// Report 0% at start
 	if progressCallback != nil {
@@ -126,7 +127,7 @@ func (p *Provider) uploadEncryptedSingle(ctx context.Context, s3Client *S3Client
 }
 
 // uploadEncryptedMultipart uploads an encrypted file using S3 multipart upload (sequential).
-// Phase 7E: Uses S3Client directly.
+// Uses S3Client directly.
 func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Client, params transfer.EncryptedFileUploadParams, objectKey string, encryptedSize int64) error {
 	file, err := os.Open(params.EncryptedPath)
 	if err != nil {
@@ -134,7 +135,9 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	}
 	defer file.Close()
 
-	partSize := int64(constants.ChunkSize)
+	// Calculate part size dynamically based on encrypted file size
+	numThreads := constants.MaxThreadsPerFile
+	partSize := resources.CalculateDynamicChunkSize(encryptedSize, numThreads)
 	totalParts := (encryptedSize + partSize - 1) / partSize
 
 	// Try to load resume state
@@ -268,7 +271,7 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 }
 
 // uploadEncryptedMultipartConcurrent uploads an encrypted file using concurrent S3 multipart state.
-// Phase 7F: Full concurrent upload implementation directly in provider, using S3Client.
+// Full concurrent upload implementation directly in provider, using S3Client.
 // This eliminates the dependency on state.NewS3Uploader().
 func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Client *S3Client, params transfer.EncryptedFileUploadParams, objectKey string, encryptedSize int64) error {
 	// If no transfer handle provided, fall back to sequential upload
@@ -283,7 +286,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	defer file.Close()
 
 	totalSize := encryptedSize
-	partSize := int64(constants.ChunkSize)
+	// Calculate part size dynamically based on file size and available threads
+	numThreads := constants.MaxThreadsPerFile
+	partSize := resources.CalculateDynamicChunkSize(totalSize, numThreads)
 	totalParts := int32((totalSize + partSize - 1) / partSize)
 	concurrency := params.TransferHandle.GetThreads()
 

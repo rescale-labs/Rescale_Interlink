@@ -21,7 +21,8 @@ var (
 )
 
 var (
-	// chunkPool provides 16MB buffers for upload/download chunks
+	// chunkPool provides buffers for upload/download chunks
+	// Size is set by constants.ChunkSize (default 32 MB)
 	// These are the large buffers used for S3 multipart/Azure block operations
 	chunkPool = &sync.Pool{
 		New: func() interface{} {
@@ -33,7 +34,7 @@ var (
 				log.Printf("Buffer pool: %d chunk allocations, %d reuses (%.1f%% reuse rate)",
 					allocs, reuses, float64(reuses)/float64(allocs+reuses)*100)
 			}
-			buf := make([]byte, constants.ChunkSize) // 16 MB
+			buf := make([]byte, constants.ChunkSize)
 			return &buf
 		},
 	}

@@ -300,8 +300,8 @@ func (c *Client) GetUserProfile(ctx context.Context) (*models.UserProfile, error
 func (c *Client) GetStorageCredentials(ctx context.Context, fileInfo *models.CloudFile) (*models.S3Credentials, *models.AzureCredentials, error) {
 	var requestBody interface{}
 
-	// If file info provided, request credentials for that specific storage
-	// Sprint F.3: This enables cross-bucket and cross-storage downloads
+	// If file info provided, request credentials for that specific storage.
+	// This enables cross-bucket and cross-storage downloads.
 	if fileInfo != nil && fileInfo.Storage != nil && fileInfo.PathParts != nil {
 		requestBody = models.CredentialsRequest{
 			Storage: models.CredentialsStorageRequest{
@@ -718,8 +718,8 @@ func (c *Client) DeleteFile(ctx context.Context, fileID string) error {
 	return nil
 }
 
-// FolderContents represents the contents of a folder
-// Sprint F.4: Returns single page with pagination metadata for server-side pagination
+// FolderContents represents the contents of a folder.
+// Returns single page with pagination metadata for server-side pagination.
 type FolderContents struct {
 	Folders []FolderInfo
 	Files   []FileInfo
@@ -776,7 +776,7 @@ func (c *Client) CreateFolder(ctx context.Context, name, parentID string) (strin
 }
 
 // ListFolderContents fetches the first page of folder contents.
-// Sprint F.4: Returns single page with pagination metadata for fast initial load.
+// Returns single page with pagination metadata for fast initial load.
 // Use the returned NextURL/PrevURL to navigate between pages.
 // For pageURL, pass "" for first page or the NextURL/PrevURL from a previous call.
 func (c *Client) ListFolderContents(ctx context.Context, folderID string) (*FolderContents, error) {
