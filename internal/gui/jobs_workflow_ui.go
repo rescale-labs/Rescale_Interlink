@@ -786,6 +786,7 @@ func (w *WorkflowUIComponents) handleReset() {
 			if confirmed {
 				w.jobsTab.workflow.Reset()
 				w.jobsTab.loadedJobs = nil
+				w.jobsTab.jobIndexByName = make(map[string]int) // Clear the index map
 				w.jobsTab.updateView()
 			}
 		},
