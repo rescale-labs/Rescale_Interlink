@@ -72,6 +72,10 @@ func preloadMesaDLL(dir string) error {
 	fmt.Printf("[Mesa] Pre-loading %s...\n", openglPath)
 	handle, err := syscall.LoadLibrary(openglPath)
 	if err != nil {
+		// Extract Windows error code for better diagnostics
+		if errno, ok := err.(syscall.Errno); ok {
+			fmt.Printf("[Mesa] Windows error code: %d (0x%x)\n", errno, errno)
+		}
 		return fmt.Errorf("failed to load Mesa opengl32.dll: %w", err)
 	}
 
