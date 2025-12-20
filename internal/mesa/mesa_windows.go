@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -20,16 +19,10 @@ import (
 // softwareRenderingEnabled tracks if we successfully set up Mesa
 var softwareRenderingEnabled bool
 
-// Windows drive type constants
-const (
-	DRIVE_REMOTE = 4 // Network drive
-)
-
-// Windows API for SetDllDirectory and GetDriveType
+// Windows API for SetDllDirectory
 var (
 	kernel32         = syscall.NewLazyDLL("kernel32.dll")
 	setDllDirectoryW = kernel32.NewProc("SetDllDirectoryW")
-	getDriveTypeW    = kernel32.NewProc("GetDriveTypeW")
 )
 
 // setDllDirectory adds a directory to the DLL search path.
@@ -48,27 +41,6 @@ func setDllDirectory(dir string) error {
 	return nil
 }
 
-// isNetworkPath checks if a path is on a network/remote drive.
-// This uses Windows GetDriveTypeW API to detect mapped network drives.
-func isNetworkPath(path string) bool {
-	// Check for UNC paths (\\server\share)
-	if len(path) >= 2 && path[0] == '\\' && path[1] == '\\' {
-		return true
-	}
-
-	// Check drive letter paths (e.g., Z:\)
-	if len(path) >= 2 && path[1] == ':' {
-		driveLetter := strings.ToUpper(string(path[0])) + ":\\"
-		drivePtr, err := syscall.UTF16PtrFromString(driveLetter)
-		if err != nil {
-			return false
-		}
-		driveType, _, _ := getDriveTypeW.Call(uintptr(unsafe.Pointer(drivePtr)))
-		return driveType == DRIVE_REMOTE
-	}
-	return false
-}
-
 // preloadMesaDLL explicitly loads Mesa's opengl32.dll with full path.
 // This registers it in Windows' "loaded-module list" which is checked
 // BEFORE the "Known DLLs" list, allowing us to override the system DLL.
@@ -76,12 +48,24 @@ func isNetworkPath(path string) bool {
 // Windows "Known DLLs" (like opengl32.dll) are normally loaded from System32
 // regardless of SetDllDirectory or app directory placement. By pre-loading
 // with a full path, we get our DLL into the loaded-module list first.
+//
+// CRITICAL: We must call SetDllDirectory BEFORE LoadLibrary because
+// opengl32.dll has an import dependency on libgallium_wgl.dll. Windows
+// needs to find libgallium_wgl.dll when loading opengl32.dll.
 func preloadMesaDLL(dir string) error {
 	openglPath := filepath.Join(dir, "opengl32.dll")
 
 	// Verify the file exists
 	if _, err := os.Stat(openglPath); os.IsNotExist(err) {
 		return fmt.Errorf("opengl32.dll not found at %s", openglPath)
+	}
+
+	// CRITICAL: Set DLL search directory BEFORE loading opengl32.dll
+	// This allows Windows to find libgallium_wgl.dll (dependency of opengl32.dll)
+	// when it loads. Without this, LoadLibrary fails with "module not found".
+	fmt.Printf("[Mesa] Setting DLL search directory: %s\n", dir)
+	if err := setDllDirectory(dir); err != nil {
+		return fmt.Errorf("failed to set DLL directory: %w", err)
 	}
 
 	// Load with full absolute path - this bypasses Known DLLs
@@ -147,12 +131,16 @@ func canWriteToDir(dir string) bool {
 // EnsureSoftwareRendering sets up Mesa software rendering for Windows.
 //
 // This function:
-// 1. Detects if running from a network drive (which has DLL loading restrictions)
-// 2. Extracts Mesa DLLs to a LOCAL directory (exe dir if local, else LOCALAPPDATA)
+// 1. Extracts Mesa DLLs to LOCALAPPDATA (always local C:\ drive)
+// 2. Sets DLL search directory so Windows can find libgallium_wgl.dll
 // 3. Pre-loads opengl32.dll with full path to bypass Windows "Known DLLs" mechanism
 // 4. Sets GALLIUM_DRIVER=llvmpipe to use software rendering
 //
 // IMPORTANT: Must be called BEFORE any Fyne/OpenGL initialization.
+//
+// Why LOCALAPPDATA? Network drives (like Z:\ on Rescale) have DLL loading
+// restrictions that prevent Mesa from working. LOCALAPPDATA is always on
+// the local C:\ drive, avoiding these issues.
 //
 // The pre-load trick is critical: opengl32.dll is a Windows "Known DLL" which
 // normally loads from System32 regardless of SetDllDirectory or app directory.
@@ -181,32 +169,14 @@ func EnsureSoftwareRendering() error {
 
 	fmt.Println("[Mesa] Setting up software rendering...")
 
-	// Determine target directory for DLLs
-	// CRITICAL: Must be a LOCAL path - network drives have DLL loading restrictions
-	var targetDir string
-	exeDir, exeErr := getExeDir()
-
-	// Strategy selection: prefer exe directory ONLY if local and writable
+	// ALWAYS use LOCALAPPDATA - guaranteed to be on local C:\ drive
 	// Network drives (like Z:\ on Rescale) have DLL loading restrictions
-	if exeErr == nil && canWriteToDir(exeDir) && !isNetworkPath(exeDir) {
-		targetDir = exeDir
-		fmt.Printf("[Mesa] Using exe directory (local): %s\n", targetDir)
-	} else {
-		// Use LOCALAPPDATA - guaranteed to be on local disk
-		targetDir = MesaDir()
-		if targetDir == "" {
-			return fmt.Errorf("could not determine Mesa directory")
-		}
-
-		if exeErr != nil {
-			fmt.Printf("[Mesa] Cannot determine exe directory, using LOCALAPPDATA\n")
-		} else if isNetworkPath(exeDir) {
-			fmt.Printf("[Mesa] Exe directory is on network drive (%s), using LOCALAPPDATA\n", exeDir)
-		} else {
-			fmt.Printf("[Mesa] Exe directory not writable, using LOCALAPPDATA\n")
-		}
-		fmt.Printf("[Mesa] Using local directory: %s\n", targetDir)
+	// that cause "module not found" errors even when DLLs are present
+	targetDir := MesaDir()
+	if targetDir == "" {
+		return fmt.Errorf("could not determine Mesa directory (LOCALAPPDATA not set?)")
 	}
+	fmt.Printf("[Mesa] Using local directory: %s\n", targetDir)
 
 	// Create directory if needed
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -222,9 +192,9 @@ func EnsureSoftwareRendering() error {
 		return fmt.Errorf("DLLs were not extracted to %s", targetDir)
 	}
 
-	// KEY FIX: Pre-load Mesa's opengl32.dll with full path
-	// This bypasses Windows "Known DLLs" mechanism by registering in loaded-module list
-	// The loaded-module list is checked BEFORE Known DLLs in Windows DLL search order
+	// Pre-load Mesa's opengl32.dll with full path
+	// This sets DLL directory (for libgallium_wgl.dll dependency) and loads the DLL
+	// to bypass Windows "Known DLLs" mechanism
 	if err := preloadMesaDLL(targetDir); err != nil {
 		return err
 	}
