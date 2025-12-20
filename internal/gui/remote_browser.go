@@ -237,17 +237,9 @@ func (b *RemoteBrowser) loadCurrentFolder() {
 // targetCount: how many items we need total (0 = use FileListWidget's page size)
 // scrollToTop: if true, scrolls to top after loading (for new folder navigation)
 func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
-	// IMPORTANT: Try to acquire lock BEFORE canceling any previous operation
-	// This prevents a race where a second call cancels the first, then fails TryLock
-	// and returns - leaving the first operation canceled but no replacement running
-	if !b.loadingMu.TryLock() {
-		b.logger.Debug().Msg("Skipping load - another operation in progress")
-		return
-	}
-	// Lock acquired - we're going to proceed, safe to cancel previous operation now
-	defer b.loadingMu.Unlock()
-
-	// Cancel any previous load operation's context
+	// Cancel any previous load operation FIRST (like LocalBrowser)
+	// This ensures stale data from previous folder doesn't get displayed
+	// even if we fail to acquire the lock below
 	b.cancelMu.Lock()
 	if b.cancelLoad != nil {
 		b.cancelLoad()
@@ -255,6 +247,13 @@ func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	b.cancelLoad = cancel
 	b.cancelMu.Unlock()
+
+	// Serialize load operations - only one at a time
+	if !b.loadingMu.TryLock() {
+		b.logger.Debug().Msg("Skipping load - another operation in progress")
+		return
+	}
+	defer b.loadingMu.Unlock()
 
 	// Get folder ID and current state
 	b.mu.RLock()
@@ -546,8 +545,10 @@ func (b *RemoteBrowser) updateBreadcrumbUI() {
 			b.breadcrumbBar.Add(widget.NewLabel(">"))
 
 			// Current (highlighted)
-			btnCurrent := widget.NewButton(breadcrumb[len(breadcrumb)-1].Name, func() {
-				b.navigateToBreadcrumb(len(breadcrumb) - 1)
+			// Pre-compute index to avoid capturing len(breadcrumb)-1 expression in closure
+			currentIdx := len(breadcrumb) - 1
+			btnCurrent := widget.NewButton(breadcrumb[currentIdx].Name, func() {
+				b.navigateToBreadcrumb(currentIdx)
 			})
 			btnCurrent.Importance = widget.HighImportance
 			b.breadcrumbBar.Add(btnCurrent)
