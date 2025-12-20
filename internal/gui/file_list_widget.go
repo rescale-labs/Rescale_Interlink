@@ -514,27 +514,31 @@ func (w *FileListWidget) SetItems(items []FileItem) {
 
 // SetItemsAndScrollToTop sets the items and resets scroll to top
 // Use this when navigating to a new directory/folder
-// PERFORMANCE: Items are displayed in filesystem order initially.
-// Sorting only happens when user explicitly requests a sort.
-// This matches Windows Explorer behavior.
+// Applies the current sort mode to maintain consistent user experience.
 func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	w.mu.Lock()
 	w.items = items
 	w.selectedItems = make(map[string]bool)
 	w.currentPage = 0 // Reset to first page when items change
 
-	// PERFORMANCE: Calculate folder/file counts, cache lowercase names, and build index map
+	// Calculate folder/file counts and cache lowercase names (needed for sorting)
 	folderCount, fileCount := 0, 0
-	w.itemIndexByID = make(map[string]int, len(w.items))
 	for i := range w.items {
 		if w.items[i].IsFolder {
 			folderCount++
 		} else {
 			fileCount++
 		}
-		// Cache lowercase name for O(1) filtering
+		// Cache lowercase name for O(1) filtering and sorting
 		w.items[i].lowerName = strings.ToLower(w.items[i].Name)
-		// Build ID-to-index map for O(1) selection lookups
+	}
+
+	// Apply current sort mode (preserves user's selected sort across navigation)
+	w.sortItemsLocked(w.items)
+
+	// Build ID-to-index map AFTER sorting (indices have changed)
+	w.itemIndexByID = make(map[string]int, len(w.items))
+	for i := range w.items {
 		w.itemIndexByID[w.items[i].ID] = i
 	}
 	w.mu.Unlock()
@@ -810,6 +814,54 @@ func (w *FileListWidget) sortAndRefresh() {
 	}
 }
 
+// sortItemsLocked sorts the given items slice according to current sort settings.
+// Must be called with w.mu held.
+// Uses the cached lowerName field for efficient name comparisons.
+func (w *FileListWidget) sortItemsLocked(items []FileItem) {
+	sortBy := w.sortBy
+	ascending := w.sortAscending
+
+	sort.Slice(items, func(i, j int) bool {
+		item1, item2 := items[i], items[j]
+
+		// For "type" sort: folders ALWAYS come first
+		if sortBy == "type" {
+			if item1.IsFolder != item2.IsFolder {
+				return item1.IsFolder
+			}
+			// Secondary sort by date (newest first by default)
+			less := item1.ModTime.After(item2.ModTime)
+			if !ascending {
+				less = !less
+			}
+			return less
+		}
+
+		// For other sorts, always put folders before files
+		if item1.IsFolder != item2.IsFolder {
+			return item1.IsFolder
+		}
+
+		var less bool
+		switch sortBy {
+		case "name", "":
+			// Use cached lowerName for O(1) comparisons
+			less = item1.lowerName < item2.lowerName
+		case "size":
+			less = item1.Size < item2.Size
+		case "date":
+			less = item1.ModTime.Before(item2.ModTime)
+		default:
+			less = item1.lowerName < item2.lowerName
+		}
+
+		if !ascending {
+			less = !less
+		}
+		return less
+	})
+}
+
 // SetHasDateInfo indicates whether items have ModTime populated (for local files)
 func (w *FileListWidget) SetHasDateInfo(hasDate bool) {
 	w.mu.Lock()
@@ -889,6 +941,8 @@ func (w *FileListWidget) applyFilter(query string) {
 				w.filteredItems = append(w.filteredItems, item)
 			}
 		}
+		// Sort filtered items according to current sort settings
+		w.sortItemsLocked(w.filteredItems)
 	}
 	w.mu.Unlock()
 
