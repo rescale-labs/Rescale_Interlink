@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -35,6 +36,10 @@ type RemoteBrowser struct {
 	currentRoot     string // "library" or "jobs"
 	rootFolders     *models.RootFolders
 	breadcrumb      []BreadcrumbEntry
+
+	// Navigation generation token - incremented on each navigation
+	// Used to detect and discard stale API responses from previous navigations
+	navGeneration uint64
 
 	// Loaded items and API pagination cursor
 	loadedItems []FileItem // All items loaded so far for current folder
@@ -237,6 +242,10 @@ func (b *RemoteBrowser) loadCurrentFolder() {
 // targetCount: how many items we need total (0 = use FileListWidget's page size)
 // scrollToTop: if true, scrolls to top after loading (for new folder navigation)
 func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
+	// Capture navigation generation FIRST - we'll check this before applying results
+	// to prevent stale API responses from overwriting newer navigation state
+	loadGen := atomic.LoadUint64(&b.navGeneration)
+
 	// Cancel any previous load operation FIRST (like LocalBrowser)
 	// This ensures stale data from previous folder doesn't get displayed
 	// even if we fail to acquire the lock below
@@ -394,6 +403,18 @@ func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
 	default:
 	}
 
+	// Check if navigation changed while we were loading
+	// This prevents stale data from being displayed after user navigated elsewhere
+	currentGen := atomic.LoadUint64(&b.navGeneration)
+	if loadGen != currentGen {
+		b.logger.Debug().
+			Uint64("load_gen", loadGen).
+			Uint64("current_gen", currentGen).
+			Str("folder_id", folderID).
+			Msg("Discarding stale load result - navigation changed")
+		return
+	}
+
 	// Update UI
 	fyne.Do(func() {
 		b.fileList.SetHasDateInfo(true) // Remote files have dateUploaded from API
@@ -449,6 +470,9 @@ func (b *RemoteBrowser) onPageChange(page, pageSize, totalItems int) {
 
 // navigateToFolder navigates to a subfolder
 func (b *RemoteBrowser) navigateToFolder(folderID, folderName string) {
+	// Increment navigation generation to invalidate any in-flight loads
+	atomic.AddUint64(&b.navGeneration, 1)
+
 	b.mu.Lock()
 	b.currentFolderID = folderID
 	b.breadcrumb = append(b.breadcrumb, BreadcrumbEntry{ID: folderID, Name: folderName})
@@ -460,6 +484,9 @@ func (b *RemoteBrowser) navigateToFolder(folderID, folderName string) {
 
 // navigateToBreadcrumb navigates to a breadcrumb entry
 func (b *RemoteBrowser) navigateToBreadcrumb(index int) {
+	// Increment navigation generation to invalidate any in-flight loads
+	atomic.AddUint64(&b.navGeneration, 1)
+
 	b.mu.Lock()
 	if index >= len(b.breadcrumb) {
 		b.mu.Unlock()
@@ -476,6 +503,9 @@ func (b *RemoteBrowser) navigateToBreadcrumb(index int) {
 
 // goUp navigates up one level (like back button)
 func (b *RemoteBrowser) goUp() {
+	// Increment navigation generation to invalidate any in-flight loads
+	atomic.AddUint64(&b.navGeneration, 1)
+
 	b.mu.Lock()
 	if len(b.breadcrumb) <= 1 {
 		b.mu.Unlock()
@@ -607,6 +637,9 @@ func (b *RemoteBrowser) updateBackButtonState() {
 
 // onRootChanged handles root toggle change
 func (b *RemoteBrowser) onRootChanged(selected string) {
+	// Increment navigation generation to invalidate any in-flight loads
+	atomic.AddUint64(&b.navGeneration, 1)
+
 	b.mu.Lock()
 	if b.rootFolders == nil {
 		b.mu.Unlock()

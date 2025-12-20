@@ -5,6 +5,7 @@ package gui
 import (
 	"fmt"
 	"image/color"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -817,24 +818,39 @@ func (w *FileListWidget) sortAndRefresh() {
 // sortItemsLocked sorts the given items slice according to current sort settings.
 // Must be called with w.mu held.
 // Uses the cached lowerName field for efficient name comparisons.
+// Uses SliceStable and proper tie-breakers for deterministic, correct ordering.
 func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 	sortBy := w.sortBy
 	ascending := w.sortAscending
 
-	sort.Slice(items, func(i, j int) bool {
+	sort.SliceStable(items, func(i, j int) bool {
 		item1, item2 := items[i], items[j]
 
-		// For "type" sort: folders ALWAYS come first
+		// For "type" sort: folders first, then sort by extension
 		if sortBy == "type" {
 			if item1.IsFolder != item2.IsFolder {
 				return item1.IsFolder
 			}
-			// Secondary sort by date (newest first by default)
-			less := item1.ModTime.After(item2.ModTime)
-			if !ascending {
-				less = !less
+			// Both are same type (folder or file)
+			// For files, sort by extension; for folders, sort by name
+			if !item1.IsFolder {
+				ext1 := filepath.Ext(item1.lowerName)
+				ext2 := filepath.Ext(item2.lowerName)
+				if ext1 != ext2 {
+					if ascending {
+						return ext1 < ext2
+					}
+					return ext1 > ext2
+				}
 			}
-			return less
+			// Same extension (or both folders): fall back to name
+			if item1.lowerName != item2.lowerName {
+				if ascending {
+					return item1.lowerName < item2.lowerName
+				}
+				return item1.lowerName > item2.lowerName
+			}
+			return false // Equal - stable sort preserves order
 		}
 
 		// For other sorts, always put folders before files
@@ -842,23 +858,48 @@ func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 			return item1.IsFolder
 		}
 
-		var less bool
+		// Primary sort comparison - use direct comparison to avoid !less bug
+		// (negating a boolean when items are equal breaks strict weak ordering)
 		switch sortBy {
 		case "name", "":
-			// Use cached lowerName for O(1) comparisons
-			less = item1.lowerName < item2.lowerName
+			if item1.lowerName != item2.lowerName {
+				if ascending {
+					return item1.lowerName < item2.lowerName
+				}
+				return item1.lowerName > item2.lowerName
+			}
 		case "size":
-			less = item1.Size < item2.Size
+			if item1.Size != item2.Size {
+				if ascending {
+					return item1.Size < item2.Size
+				}
+				return item1.Size > item2.Size
+			}
+			// Tie-breaker: sort by name for equal sizes
+			if item1.lowerName != item2.lowerName {
+				if ascending {
+					return item1.lowerName < item2.lowerName
+				}
+				return item1.lowerName > item2.lowerName
+			}
 		case "date":
-			less = item1.ModTime.Before(item2.ModTime)
-		default:
-			less = item1.lowerName < item2.lowerName
+			if !item1.ModTime.Equal(item2.ModTime) {
+				if ascending {
+					return item1.ModTime.Before(item2.ModTime)
+				}
+				return item1.ModTime.After(item2.ModTime)
+			}
+			// Tie-breaker: sort by name for equal dates
+			if item1.lowerName != item2.lowerName {
+				if ascending {
+					return item1.lowerName < item2.lowerName
+				}
+				return item1.lowerName > item2.lowerName
+			}
 		}
 
-		if !ascending {
-			less = !less
-		}
-		return less
+		// Equal on all criteria - stable sort preserves original order
+		return false
 	})
 }
 
@@ -934,6 +975,8 @@ func (w *FileListWidget) applyFilter(query string) {
 		w.filteredItems = nil
 	} else {
 		// Apply filter using cached lowercase names
+		// OPTIMIZATION: Since w.items is already sorted, iterating in order
+		// produces a filtered slice that's also sorted - no re-sort needed.
 		w.filteredItems = make([]FileItem, 0, len(w.items)/4) // Preallocate ~25% capacity
 		for _, item := range w.items {
 			// PERFORMANCE: Use cached lowerName instead of strings.ToLower()
@@ -941,8 +984,6 @@ func (w *FileListWidget) applyFilter(query string) {
 				w.filteredItems = append(w.filteredItems, item)
 			}
 		}
-		// Sort filtered items according to current sort settings
-		w.sortItemsLocked(w.filteredItems)
 	}
 	w.mu.Unlock()
 
