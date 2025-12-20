@@ -97,15 +97,11 @@ func preloadMesaDLL(dir string) error {
 	// in the same folder as opengl32.dll.
 	fmt.Printf("[Mesa] Pre-loading %s with LOAD_WITH_ALTERED_SEARCH_PATH...\n", openglPath)
 
-	pathPtr, err := syscall.UTF16PtrFromString(openglPath)
-	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
-	}
-
 	// LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
 	// When this flag is set AND lpFileName contains a path, the loader uses
 	// the directory of lpFileName as the search path for dependencies.
-	handle, err := windows.LoadLibraryEx(pathPtr, 0, windows.LOAD_WITH_ALTERED_SEARCH_PATH)
+	// Note: windows.LoadLibraryEx takes a string and handles UTF16 conversion internally
+	handle, err := windows.LoadLibraryEx(openglPath, 0, windows.LOAD_WITH_ALTERED_SEARCH_PATH)
 	if err != nil {
 		// Extract Windows error code for better diagnostics
 		fmt.Printf("[Mesa] LoadLibraryEx failed: %v\n", err)
