@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -17,6 +18,63 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
+
+// naturalLess performs natural/numeric string comparison for sorting.
+// Returns true if a < b using natural sort order.
+// "file2" < "file10" (unlike lexicographic "file10" < "file2")
+// Handles leading zeros: "file02" == "file2" for numeric value, shorter run wins.
+func naturalLess(a, b string) bool {
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		// If both positions start with digits, compare as numbers
+		if a[i] >= '0' && a[i] <= '9' && b[j] >= '0' && b[j] <= '9' {
+			// Extract number from a (skip leading zeros for value comparison)
+			numStartA := i
+			for i < len(a) && a[i] == '0' {
+				i++ // skip leading zeros
+			}
+			valStartA := i
+			for i < len(a) && a[i] >= '0' && a[i] <= '9' {
+				i++
+			}
+			numLenA := i - numStartA // total length including zeros
+			valA := a[valStartA:i]   // value part (no leading zeros)
+
+			// Extract number from b
+			numStartB := j
+			for j < len(b) && b[j] == '0' {
+				j++
+			}
+			valStartB := j
+			for j < len(b) && b[j] >= '0' && b[j] <= '9' {
+				j++
+			}
+			numLenB := j - numStartB
+			valB := b[valStartB:j]
+
+			// Compare by numeric value first (length then lexicographic)
+			if len(valA) != len(valB) {
+				return len(valA) < len(valB)
+			}
+			if valA != valB {
+				return valA < valB
+			}
+			// Equal numeric values: shorter run wins (fewer leading zeros)
+			if numLenA != numLenB {
+				return numLenA < numLenB
+			}
+			continue
+		}
+
+		// Compare as characters (case-insensitive already done via lowerName)
+		if a[i] != b[j] {
+			return a[i] < b[j]
+		}
+		i++
+		j++
+	}
+	return len(a) < len(b)
+}
 
 const (
 	// FileListFontScale reduces font size for compact display (70% = 30% reduction)
@@ -55,8 +113,10 @@ type FileListWidget struct {
 	isJobsView    bool // True when viewing jobs (limits sort options to name/date only)
 
 	// Filter state
-	filterQuery   string     // Current filter query (lowercase)
-	filteredItems []FileItem // Filtered items (nil if no filter active)
+	filterQuery       string       // Current filter query (lowercase)
+	filteredItems     []FileItem   // Filtered items (nil if no filter active)
+	filterDebounce    *time.Timer  // Debounce timer for filter input
+	filterGeneration  uint64       // Generation counter to discard stale filter results
 
 	// Pagination state
 	pageSize          int  // Items per page (default 25, max 200)
@@ -125,9 +185,24 @@ func (w *FileListWidget) CreateRenderer() fyne.WidgetRenderer {
 	w.sortBtn = widget.NewButtonWithIcon("", theme.MenuDropDownIcon(), w.showSortMenu)
 
 	// Filter entry (width constrained by fixedWidthLayout in topBar)
+	// Uses debounce to prevent UI freezes during rapid typing
 	w.filterEntry = widget.NewEntry()
 	w.filterEntry.SetPlaceHolder("Filter...")
-	w.filterEntry.OnChanged = w.applyFilter
+	w.filterEntry.OnChanged = func(query string) {
+		// Cancel any pending debounce timer
+		if w.filterDebounce != nil {
+			w.filterDebounce.Stop()
+		}
+
+		// Increment generation to mark this as the latest filter request
+		gen := atomic.AddUint64(&w.filterGeneration, 1)
+
+		// Debounce: wait 200ms before applying filter
+		// This prevents UI freezes when typing quickly with large lists
+		w.filterDebounce = time.AfterFunc(200*time.Millisecond, func() {
+			w.applyFilterWithGeneration(query, gen)
+		})
+	}
 
 	// Create the list widget with pagination support
 	w.list = widget.NewList(
@@ -743,66 +818,23 @@ func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
 	w.sortAndRefresh()
 }
 
-// sortAndRefresh sorts the items and refreshes the list
-// PERFORMANCE: For name-based sorts, precompute lowercase strings once instead of
-// calling strings.ToLower() on every comparison (O(n log n) comparisons = 2n allocations).
+// sortAndRefresh sorts the items and refreshes the list.
+// Delegates to sortItemsLocked for consistent behavior with natural sort,
+// stable sorting, and proper tie-breakers.
 func (w *FileListWidget) sortAndRefresh() {
 	w.mu.Lock()
-	sortBy := w.sortBy
-	ascending := w.sortAscending
-	n := len(w.items)
 
-	// For name-based sorts, precompute lowercase names to avoid allocations during sort
-	var lowerNames []string
-	if sortBy == "name" || sortBy == "" {
-		lowerNames = make([]string, n)
-		for i := range w.items {
-			lowerNames[i] = strings.ToLower(w.items[i].Name)
+	// Ensure all items have cached lowercase names (needed for sorting)
+	for i := range w.items {
+		if w.items[i].lowerName == "" {
+			w.items[i].lowerName = strings.ToLower(w.items[i].Name)
 		}
 	}
 
-	sort.Slice(w.items, func(i, j int) bool {
-		item1, item2 := w.items[i], w.items[j]
+	// Use the unified sorting implementation
+	w.sortItemsLocked(w.items)
 
-		// For "type" sort: folders ALWAYS come first (ascending/descending only affects secondary sort)
-		if sortBy == "type" {
-			if item1.IsFolder != item2.IsFolder {
-				return item1.IsFolder // Folders always first
-			}
-			// Secondary sort by date (newest first by default when ascending=true for "type")
-			less := item1.ModTime.After(item2.ModTime) // Newest first
-			if !ascending {
-				less = !less
-			}
-			return less
-		}
-
-		// For other sorts, always put folders before files
-		if item1.IsFolder != item2.IsFolder {
-			return item1.IsFolder
-		}
-
-		var less bool
-		switch sortBy {
-		case "name":
-			// PERFORMANCE: Use precomputed lowercase names
-			less = lowerNames[i] < lowerNames[j]
-		case "size":
-			less = item1.Size < item2.Size
-		case "date":
-			less = item1.ModTime.Before(item2.ModTime)
-		default:
-			// PERFORMANCE: Use precomputed lowercase names
-			less = lowerNames[i] < lowerNames[j]
-		}
-
-		if !ascending {
-			less = !less
-		}
-		return less
-	})
-
-	// PERFORMANCE: Rebuild index map after sorting (indices have changed)
+	// Rebuild index map after sorting (indices have changed)
 	for i := range w.items {
 		w.itemIndexByID[w.items[i].ID] = i
 	}
@@ -819,6 +851,7 @@ func (w *FileListWidget) sortAndRefresh() {
 // Must be called with w.mu held.
 // Uses the cached lowerName field for efficient name comparisons.
 // Uses SliceStable and proper tie-breakers for deterministic, correct ordering.
+// Uses naturalLess() for name comparisons to get "file1, file2, file10" order.
 func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 	sortBy := w.sortBy
 	ascending := w.sortAscending
@@ -837,18 +870,19 @@ func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 				ext1 := filepath.Ext(item1.lowerName)
 				ext2 := filepath.Ext(item2.lowerName)
 				if ext1 != ext2 {
+					// Plain lexicographic for extensions (natural sort rarely matters for extensions)
 					if ascending {
 						return ext1 < ext2
 					}
 					return ext1 > ext2
 				}
 			}
-			// Same extension (or both folders): fall back to name
+			// Same extension (or both folders): fall back to name with natural sort
 			if item1.lowerName != item2.lowerName {
 				if ascending {
-					return item1.lowerName < item2.lowerName
+					return naturalLess(item1.lowerName, item2.lowerName)
 				}
-				return item1.lowerName > item2.lowerName
+				return naturalLess(item2.lowerName, item1.lowerName)
 			}
 			return false // Equal - stable sort preserves order
 		}
@@ -862,11 +896,12 @@ func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 		// (negating a boolean when items are equal breaks strict weak ordering)
 		switch sortBy {
 		case "name", "":
+			// Use natural sort for name comparisons: file1, file2, file10
 			if item1.lowerName != item2.lowerName {
 				if ascending {
-					return item1.lowerName < item2.lowerName
+					return naturalLess(item1.lowerName, item2.lowerName)
 				}
-				return item1.lowerName > item2.lowerName
+				return naturalLess(item2.lowerName, item1.lowerName)
 			}
 		case "size":
 			if item1.Size != item2.Size {
@@ -875,12 +910,12 @@ func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 				}
 				return item1.Size > item2.Size
 			}
-			// Tie-breaker: sort by name for equal sizes
+			// Tie-breaker: sort by name (natural sort) for equal sizes
 			if item1.lowerName != item2.lowerName {
 				if ascending {
-					return item1.lowerName < item2.lowerName
+					return naturalLess(item1.lowerName, item2.lowerName)
 				}
-				return item1.lowerName > item2.lowerName
+				return naturalLess(item2.lowerName, item1.lowerName)
 			}
 		case "date":
 			if !item1.ModTime.Equal(item2.ModTime) {
@@ -889,12 +924,12 @@ func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 				}
 				return item1.ModTime.After(item2.ModTime)
 			}
-			// Tie-breaker: sort by name for equal dates
+			// Tie-breaker: sort by name (natural sort) for equal dates
 			if item1.lowerName != item2.lowerName {
 				if ascending {
-					return item1.lowerName < item2.lowerName
+					return naturalLess(item1.lowerName, item2.lowerName)
 				}
-				return item1.lowerName > item2.lowerName
+				return naturalLess(item2.lowerName, item1.lowerName)
 			}
 		}
 
@@ -927,6 +962,26 @@ func (w *FileListWidget) GetPageSize() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.pageSize
+}
+
+// SetPageSize sets the page size (clamped to MinPageSize-MaxPageSize range)
+// Use this for remote browsing where latency dominates - larger pages mean fewer round trips
+func (w *FileListWidget) SetPageSize(size int) {
+	if size < MinPageSize {
+		size = MinPageSize
+	}
+	if size > MaxPageSize {
+		size = MaxPageSize
+	}
+	w.mu.Lock()
+	w.pageSize = size
+	w.mu.Unlock()
+	// Update the page size entry if it exists
+	if w.pageSizeEntry != nil {
+		fyne.Do(func() {
+			w.pageSizeEntry.SetText(fmt.Sprintf("%d", size))
+		})
+	}
 }
 
 // SetHasMoreServerData tells the widget if more data is available on the server
@@ -964,6 +1019,24 @@ func (w *FileListWidget) SetPaginationVisible(visible bool) {
 // applyFilter filters items based on the search query
 // PERFORMANCE: Uses cached lowerName field instead of calling strings.ToLower() per item
 func (w *FileListWidget) applyFilter(query string) {
+	// Direct call without debounce - just apply immediately
+	w.applyFilterInternal(query)
+}
+
+// applyFilterWithGeneration applies a filter only if the generation matches
+// Used by debounce mechanism to discard stale filter requests
+func (w *FileListWidget) applyFilterWithGeneration(query string, gen uint64) {
+	// Check if this filter request is still the latest
+	currentGen := atomic.LoadUint64(&w.filterGeneration)
+	if gen != currentGen {
+		// Stale filter request - newer one is pending
+		return
+	}
+	w.applyFilterInternal(query)
+}
+
+// applyFilterInternal is the internal filter implementation
+func (w *FileListWidget) applyFilterInternal(query string) {
 	w.mu.Lock()
 
 	query = strings.ToLower(strings.TrimSpace(query))
@@ -1011,6 +1084,62 @@ func (w *FileListWidget) ClearFilter() {
 		w.filterEntry.SetText("")
 	}
 	w.applyFilter("")
+}
+
+// AppendItems adds items without resetting selection or scroll position.
+// Intended for remote pagination / streaming where items are loaded incrementally.
+// DOES NOT SORT - relies on server-side ordering.
+// Temporarily clears filter during streaming (will be re-applied via FinalizeAppend).
+func (w *FileListWidget) AppendItems(newItems []FileItem) {
+	w.mu.Lock()
+	start := len(w.items)
+	w.items = append(w.items, newItems...)
+
+	// Incrementally extend index map + cache lowercase names
+	for i := start; i < len(w.items); i++ {
+		w.items[i].lowerName = strings.ToLower(w.items[i].Name)
+		w.itemIndexByID[w.items[i].ID] = i
+	}
+
+	// Clear filtered items during streaming (filter becomes stale)
+	// Caller should call FinalizeAppend after all pages to re-apply filter
+	if w.filterQuery != "" {
+		w.filteredItems = nil
+	}
+	w.mu.Unlock()
+
+	fyne.Do(func() {
+		if w.list != nil {
+			w.list.Refresh()
+		}
+		w.refreshPaginationUI()
+	})
+
+	w.updateStatus()
+}
+
+// FinalizeAppend should be called after all pages are loaded.
+// Re-applies filter if active (filter was cleared during streaming).
+func (w *FileListWidget) FinalizeAppend() {
+	w.mu.Lock()
+	if w.filterQuery != "" {
+		// Re-run filter on all items
+		query := w.filterQuery
+		w.filteredItems = make([]FileItem, 0, len(w.items)/4)
+		for _, item := range w.items {
+			if strings.Contains(item.lowerName, query) {
+				w.filteredItems = append(w.filteredItems, item)
+			}
+		}
+	}
+	w.mu.Unlock()
+
+	fyne.Do(func() {
+		if w.list != nil {
+			w.list.Refresh()
+		}
+	})
+	w.updateStatus()
 }
 
 // Pagination methods
@@ -1146,8 +1275,18 @@ func (w *FileListWidget) refreshPaginationUI() {
 	}
 }
 
-// refreshPagination updates the pagination UI and list
+// refreshPagination updates the pagination UI and list without scrolling
 func (w *FileListWidget) refreshPagination() {
+	w.refreshPaginationInternal(false)
+}
+
+// refreshPaginationWithScroll updates the pagination UI and list, optionally scrolling to top
+func (w *FileListWidget) refreshPaginationWithScroll(scrollToTop bool) {
+	w.refreshPaginationInternal(scrollToTop)
+}
+
+// refreshPaginationInternal is the internal implementation of refreshPagination
+func (w *FileListWidget) refreshPaginationInternal(scrollToTop bool) {
 	w.mu.RLock()
 	displayItems := w.getDisplayItemsLocked()
 	totalItems := len(displayItems)
@@ -1155,10 +1294,6 @@ func (w *FileListWidget) refreshPagination() {
 	if totalPages == 0 {
 		totalPages = 1
 	}
-	currentPage := w.currentPage
-	pageSize := w.pageSize
-	hasMoreServer := w.hasMoreServerData
-	callback := w.OnPageChange
 	w.mu.RUnlock()
 
 	// Update pagination UI on main thread
@@ -1168,14 +1303,17 @@ func (w *FileListWidget) refreshPagination() {
 		// Refresh list
 		if w.list != nil {
 			w.list.Refresh()
-			w.list.ScrollToTop()
+			// Only scroll to top when explicitly requested (e.g., new folder navigation)
+			// Avoid scrolling during incremental updates or pagination changes
+			if scrollToTop {
+				w.list.ScrollToTop()
+			}
 		}
 	})
 
-	// If on last local page but server might have more, trigger preload
-	if currentPage >= totalPages-1 && hasMoreServer && callback != nil {
-		go callback(currentPage+1, pageSize, totalItems)
-	}
+	// NOTE: Auto-preload callback removed per plan.
+	// Remote browser explicitly controls when to prefetch.
+	// This prevents request storms and duplicate loads.
 
 	w.updateStatus()
 }

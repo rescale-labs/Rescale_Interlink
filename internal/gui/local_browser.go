@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -35,6 +36,11 @@ type LocalBrowser struct {
 	currentPath string
 	history     []string // For back navigation
 	showHidden  bool     // Whether to show hidden files (starting with .)
+
+	// Navigation tracking - prevents dropped navigation and stale results
+	navGeneration uint64     // Incremented on each navigation, checked before UI update
+	pendingPath   string     // Latest requested path (for when TryLock fails)
+	pendingMu     sync.Mutex // Protects pendingPath
 
 	// Cancellation for in-flight operations
 	cancelMu   sync.Mutex
@@ -155,6 +161,14 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 // loadDirectory loads the contents of a directory with timeout protection
 // This method properly handles cancellation, serialization, and network filesystem issues
 func (b *LocalBrowser) loadDirectory(path string) {
+	// TIMING: Track performance metrics
+	loadStart := time.Now()
+	var readDirDuration, symlinkResolveDuration time.Duration
+
+	// Capture the current navigation generation at the start
+	// This allows us to detect if another navigation happened while we were loading
+	loadGen := atomic.LoadUint64(&b.navGeneration)
+
 	// Cancel any previous load operation
 	b.cancelMu.Lock()
 	if b.cancelLoad != nil {
@@ -166,11 +180,25 @@ func (b *LocalBrowser) loadDirectory(path string) {
 
 	// Serialize load operations - only one at a time
 	// Use TryLock pattern to avoid blocking if another load is in progress
+	// NOTE: If we can't get the lock, the pendingPath mechanism ensures
+	// the current operation will load our path when it finishes
 	if !b.loadingMu.TryLock() {
-		b.logger.Debug().Str("path", path).Msg("Skipping load - another operation in progress")
+		b.logger.Debug().Str("path", path).Msg("Skipping load - another operation in progress (pending will be loaded after)")
 		return
 	}
-	defer b.loadingMu.Unlock()
+	// Deferred cleanup: unlock and check if there's a pending path to load
+	defer func() {
+		b.loadingMu.Unlock()
+		b.checkAndLoadPending(path)
+	}()
+
+	// Clear pending path if it matches what we're about to load
+	// (we're handling it now, so it's no longer pending)
+	b.pendingMu.Lock()
+	if b.pendingPath == path {
+		b.pendingPath = ""
+	}
+	b.pendingMu.Unlock()
 
 	// Check if we were cancelled before we even started
 	select {
@@ -237,6 +265,7 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		entries = result.entries
 		readErr = result.err
 	}
+	readDirDuration = time.Since(loadStart)
 	slowTimer.Stop()
 
 	// Check cancellation after I/O
@@ -269,84 +298,233 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	// os.Stat() makes a SEPARATE network call per file - catastrophically slow.
 	//
 	// Strategy:
-	// 1. Use entry.Info() for all files (uses cached data - fast)
-	// 2. Only call os.Stat() for symlinks (to resolve target type)
-	// 3. Show file with "?" size if both fail
+	// 1. Use entry.Info() for all non-symlinks (uses cached data - fast)
+	// 2. For symlinks: resolve in PARALLEL with worker pool (8 workers)
+	// 3. Show file with "?" size if stat fails
 	//
-	// OPTIMIZATION: Preallocate slice to avoid repeated reallocations
-	items := make([]FileItem, 0, len(entries))
-	var statErrorCount int
+	// PERFORMANCE: Parallel symlink resolution dramatically improves network FS performance
+
+	// First pass: filter entries and identify symlinks
+	// This is fast because it only uses cached DirEntry data
+	type entryInfo struct {
+		entry     os.DirEntry
+		fullPath  string
+		isSymlink bool
+	}
+	filteredEntries := make([]entryInfo, 0, len(entries))
 
 	for _, entry := range entries {
-		// Check cancellation periodically
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
 		// Skip hidden files unless showHidden is enabled
 		if !showHidden && strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-
 		fullPath := filepath.Join(path, entry.Name())
 		entryType := entry.Type()
 		isSymlink := entryType&os.ModeSymlink != 0
 
-		// Get file info - use cached data from ReadDir (fast!)
-		info, err := entry.Info()
+		filteredEntries = append(filteredEntries, entryInfo{
+			entry:     entry,
+			fullPath:  fullPath,
+			isSymlink: isSymlink,
+		})
+	}
 
-		// For symlinks, we need os.Stat() to follow the link and get target info
-		// This is the ONLY case where we make an extra system call
-		if err == nil && isSymlink {
-			if statInfo, statErr := os.Stat(fullPath); statErr == nil {
-				info = statInfo
-			}
-			// If stat fails for symlink, fall through to use cached info
+	// Check cancellation after first pass
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	// Preallocate items slice (one slot per filtered entry)
+	items := make([]FileItem, len(filteredEntries))
+	var statErrorCount int32 // Atomic for thread-safety
+
+	// Count symlinks to size the job channel
+	symlinkCount := 0
+	for _, e := range filteredEntries {
+		if e.isSymlink {
+			symlinkCount++
+		}
+	}
+
+	if symlinkCount > 0 {
+		// TIMING: Track symlink resolution
+		symlinkStart := time.Now()
+
+		// Parallel symlink resolution with worker pool
+		const numStatWorkers = 8
+
+		type symlinkJob struct {
+			index    int
+			fullPath string
+			entry    os.DirEntry
 		}
 
-		var item FileItem
-		if err != nil {
-			// entry.Info() failed - show file anyway with unknown metadata
-			b.logger.Debug().Err(err).Str("file", entry.Name()).Msg("Cannot access file metadata")
-			statErrorCount++
+		jobs := make(chan symlinkJob, symlinkCount)
+		results := make(chan struct {
+			index int
+			item  FileItem
+			err   bool
+		}, symlinkCount)
 
-			// For symlinks, assume folder so user can attempt navigation
-			isFolder := entryType.IsDir()
-			if isSymlink {
-				isFolder = true
-			}
+		// Start workers
+		var wg sync.WaitGroup
+		for w := 0; w < numStatWorkers && w < symlinkCount; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for job := range jobs {
+					// Check cancellation
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
 
-			item = FileItem{
-				ID:       fullPath,
-				Name:     entry.Name(),
-				IsFolder: isFolder,
-				Size:     -1,          // Unknown
-				ModTime:  time.Time{}, // Unknown
-			}
-		} else {
-			item = FileItem{
-				ID:       fullPath,
-				Name:     entry.Name(),
-				IsFolder: info.IsDir(),
-				Size:     info.Size(),
-				ModTime:  info.ModTime(),
-			}
+					// Resolve symlink with os.Stat
+					var item FileItem
+					var hasError bool
 
-			// Folders don't show size
-			if info.IsDir() {
-				item.Size = 0
-			}
+					info, err := os.Stat(job.fullPath)
+					if err != nil {
+						// Stat failed - use cached DirEntry info as fallback
+						cachedInfo, infoErr := job.entry.Info()
+						if infoErr != nil {
+							// Both failed - show with unknown metadata
+							atomic.AddInt32(&statErrorCount, 1)
+							hasError = true
+							item = FileItem{
+								ID:       job.fullPath,
+								Name:     job.entry.Name(),
+								IsFolder: true, // Assume folder for symlinks so user can try navigating
+								Size:     -1,
+								ModTime:  time.Time{},
+							}
+						} else {
+							// Use cached info
+							item = FileItem{
+								ID:       job.fullPath,
+								Name:     job.entry.Name(),
+								IsFolder: cachedInfo.IsDir(),
+								Size:     cachedInfo.Size(),
+								ModTime:  cachedInfo.ModTime(),
+							}
+							if cachedInfo.IsDir() {
+								item.Size = 0
+							}
+						}
+					} else {
+						// Stat succeeded - use resolved info
+						item = FileItem{
+							ID:       job.fullPath,
+							Name:     job.entry.Name(),
+							IsFolder: info.IsDir(),
+							Size:     info.Size(),
+							ModTime:  info.ModTime(),
+						}
+						if info.IsDir() {
+							item.Size = 0
+						}
+					}
+
+					results <- struct {
+						index int
+						item  FileItem
+						err   bool
+					}{job.index, item, hasError}
+				}
+			}()
 		}
 
-		items = append(items, item)
+		// Queue symlink jobs and process non-symlinks immediately
+		symlinkIndices := make([]int, 0, symlinkCount)
+		for i, e := range filteredEntries {
+			if e.isSymlink {
+				jobs <- symlinkJob{index: i, fullPath: e.fullPath, entry: e.entry}
+				symlinkIndices = append(symlinkIndices, i)
+			} else {
+				// Non-symlink: use cached DirEntry info (fast!)
+				info, err := e.entry.Info()
+				if err != nil {
+					atomic.AddInt32(&statErrorCount, 1)
+					b.logger.Debug().Err(err).Str("file", e.entry.Name()).Msg("Cannot access file metadata")
+					items[i] = FileItem{
+						ID:       e.fullPath,
+						Name:     e.entry.Name(),
+						IsFolder: e.entry.Type().IsDir(),
+						Size:     -1,
+						ModTime:  time.Time{},
+					}
+				} else {
+					items[i] = FileItem{
+						ID:       e.fullPath,
+						Name:     e.entry.Name(),
+						IsFolder: info.IsDir(),
+						Size:     info.Size(),
+						ModTime:  info.ModTime(),
+					}
+					if info.IsDir() {
+						items[i].Size = 0
+					}
+				}
+			}
+		}
+		close(jobs)
+
+		// Collect symlink results
+		for range symlinkIndices {
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return
+			case result := <-results:
+				items[result.index] = result.item
+			}
+		}
+		wg.Wait()
+		symlinkResolveDuration = time.Since(symlinkStart)
+	} else {
+		// No symlinks - process all entries sequentially (fast path)
+		for i, e := range filteredEntries {
+			// Check cancellation periodically
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			info, err := e.entry.Info()
+			if err != nil {
+				atomic.AddInt32(&statErrorCount, 1)
+				b.logger.Debug().Err(err).Str("file", e.entry.Name()).Msg("Cannot access file metadata")
+				items[i] = FileItem{
+					ID:       e.fullPath,
+					Name:     e.entry.Name(),
+					IsFolder: e.entry.Type().IsDir(),
+					Size:     -1,
+					ModTime:  time.Time{},
+				}
+			} else {
+				items[i] = FileItem{
+					ID:       e.fullPath,
+					Name:     e.entry.Name(),
+					IsFolder: info.IsDir(),
+					Size:     info.Size(),
+					ModTime:  info.ModTime(),
+				}
+				if info.IsDir() {
+					items[i].Size = 0
+				}
+			}
+		}
 	}
 
 	// Log summary if there were errors
-	if statErrorCount > 0 {
+	errCount := int(atomic.LoadInt32(&statErrorCount))
+	if errCount > 0 {
 		b.logger.Warn().
-			Int("count", statErrorCount).
+			Int("count", errCount).
 			Str("path", path).
 			Msg("Some files could not be fully accessed")
 	}
@@ -358,6 +536,18 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	default:
 	}
 
+	// Check if another navigation happened while we were loading
+	// If so, discard this result to prevent stale data from appearing
+	currentGen := atomic.LoadUint64(&b.navGeneration)
+	if loadGen != currentGen {
+		b.logger.Debug().
+			Uint64("load_gen", loadGen).
+			Uint64("current_gen", currentGen).
+			Str("path", path).
+			Msg("Discarding stale directory load - navigation changed")
+		return
+	}
+
 	// Update UI with results
 	fyne.Do(func() {
 		if b.fileList != nil {
@@ -365,17 +555,45 @@ func (b *LocalBrowser) loadDirectory(path string) {
 			b.fileList.SetItemsAndScrollToTop(items)
 
 			// Show warning if some files couldn't be accessed
-			if statErrorCount > 0 {
-				b.fileList.SetStatus(fmt.Sprintf("%d items (%d inaccessible)", len(items), statErrorCount))
+			if errCount > 0 {
+				b.fileList.SetStatus(fmt.Sprintf("%d items (%d inaccessible)", len(items), errCount))
 			}
 		}
 	})
 
-	b.logger.Debug().
+	// TIMING: Log performance metrics
+	totalDuration := time.Since(loadStart)
+	b.logger.Info().
 		Str("path", path).
 		Int("items", len(items)).
-		Int("inaccessible", statErrorCount).
-		Msg("Loaded directory")
+		Int("symlinks", symlinkCount).
+		Int("inaccessible", errCount).
+		Dur("total_ms", totalDuration).
+		Dur("readdir_ms", readDirDuration).
+		Dur("symlink_ms", symlinkResolveDuration).
+		Msg("Directory load complete")
+}
+
+// checkAndLoadPending checks if there's a pending path different from what was just loaded,
+// and starts loading it. This ensures navigation requests are never dropped.
+func (b *LocalBrowser) checkAndLoadPending(justLoadedPath string) {
+	b.pendingMu.Lock()
+	pending := b.pendingPath
+	// Clear it so we don't load it multiple times
+	if pending != "" && pending != justLoadedPath {
+		b.pendingPath = ""
+	} else {
+		pending = ""
+	}
+	b.pendingMu.Unlock()
+
+	if pending != "" {
+		b.logger.Debug().
+			Str("pending", pending).
+			Str("just_loaded", justLoadedPath).
+			Msg("Loading pending path after previous load completed")
+		go b.loadDirectory(pending)
+	}
 }
 
 // navigateTo navigates to a specific path
@@ -383,6 +601,15 @@ func (b *LocalBrowser) loadDirectory(path string) {
 // os.ReadDir will fail with a clear error if path is not a directory.
 // This eliminates one network round trip per navigation.
 func (b *LocalBrowser) navigateTo(path string) {
+	// Increment generation to mark this as the latest navigation request
+	atomic.AddUint64(&b.navGeneration, 1)
+
+	// Always record the pending path - this ensures the latest navigation
+	// is never dropped even if TryLock fails in loadDirectory
+	b.pendingMu.Lock()
+	b.pendingPath = path
+	b.pendingMu.Unlock()
+
 	b.saveHistory(path)
 	go b.loadDirectory(path)
 }
@@ -410,6 +637,12 @@ func (b *LocalBrowser) goBack() {
 	b.history = b.history[:len(b.history)-1]
 	b.mu.Unlock()
 
+	// Increment generation and set pending path (same as navigateTo)
+	atomic.AddUint64(&b.navGeneration, 1)
+	b.pendingMu.Lock()
+	b.pendingPath = prevPath
+	b.pendingMu.Unlock()
+
 	go b.loadDirectory(prevPath)
 }
 
@@ -427,6 +660,13 @@ func (b *LocalBrowser) refresh() {
 	b.mu.RLock()
 	path := b.currentPath
 	b.mu.RUnlock()
+
+	// Increment generation and set pending path (same as navigateTo)
+	atomic.AddUint64(&b.navGeneration, 1)
+	b.pendingMu.Lock()
+	b.pendingPath = path
+	b.pendingMu.Unlock()
+
 	go b.loadDirectory(path)
 }
 

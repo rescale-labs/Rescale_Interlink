@@ -434,11 +434,14 @@ $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";
 $7zExe = "C:\Program Files\7-Zip\7z.exe"
 $MesaArchive = Join-Path $BuildDir $Mesa7zFile
 Write-Host "Extracting Mesa DLLs..."
-& $7zExe e -y $MesaArchive "x64/opengl32.dll" "x64/libgallium_wgl.dll" "-o$MesaDllDir" | Out-Null
+& $7zExe e -y $MesaArchive "x64/opengl32.dll" "x64/libgallium_wgl.dll" "x64/libglapi.dll" "-o$MesaDllDir" | Out-Null
 
 # Verify DLLs were extracted
-if (-not (Test-Path (Join-Path $MesaDllDir "opengl32.dll"))) {
-    throw "Failed to extract Mesa DLLs"
+$requiredDlls = @("opengl32.dll", "libgallium_wgl.dll", "libglapi.dll")
+foreach ($dll in $requiredDlls) {
+    if (-not (Test-Path (Join-Path $MesaDllDir $dll))) {
+        throw "Failed to extract Mesa DLL: $dll"
+    }
 }
 Write-Host "Mesa DLLs extracted to $MesaDllDir"
 Get-ChildItem $MesaDllDir | Format-Table Name, Length
@@ -450,7 +453,7 @@ Write-Host "[5/5] Building Windows AMD64 binary with FIPS 140-3..."
 $BuildTime = Get-Date -Format "yyyy-MM-dd"
 $LdFlags = "-s -w -X main.Version=$($env:RELEASE_TAG) -X main.BuildTime=$BuildTime"
 
-Write-Host "Build flags: GOFIPS140=latest GOOS=windows GOARCH=amd64 CGO_ENABLED=1"
+Write-Host "Build flags: GOFIPS140=latest GOOS=windows GOARCH=amd64 CGO_ENABLED=1 -tags mesa"
 Write-Host "LDFLAGS: $LdFlags"
 
 # Set environment variables for FIPS build with CGO enabled
@@ -459,7 +462,7 @@ $env:GOOS = "windows"
 $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "1"  # Enable CGO for GUI support (requires MinGW)
 
-$buildArgs = "build -ldflags `"$LdFlags`" -o rescale-int.exe ./cmd/rescale-int"
+$buildArgs = "build -tags mesa -ldflags `"$LdFlags`" -o rescale-int.exe ./cmd/rescale-int"
 $GoExe = "$GoInstallDir\bin\go.exe"  # Use full path - Start-Process needs it with redirects
 Write-Host "Running: $GoExe $buildArgs"
 Invoke-ToolQuiet -FilePath $GoExe `

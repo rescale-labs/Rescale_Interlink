@@ -10,6 +10,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/gui"
+	"github.com/rescale/rescale-int/internal/mesa"
 )
 
 // Version information
@@ -53,6 +54,13 @@ func main() {
 	// Set version in CLI package
 	cli.Version = Version
 	cli.BuildTime = BuildTime
+
+	// Check for diagnostic modes before GUI/CLI
+	if contains(os.Args, "--mesa-doctor") {
+		fmt.Printf("Rescale Interlink %s\n\n", Version)
+		mesa.Doctor()
+		return
+	}
 
 	// Check for GUI mode before creating command
 	guiMode := contains(os.Args, "--gui")

@@ -15,11 +15,15 @@ var opengl32DLL []byte
 //go:embed dlls/libgallium_wgl.dll
 var libgalliumDLL []byte
 
+//go:embed dlls/libglapi.dll
+var libglapiDLL []byte
+
 // embeddedDLLs maps filenames to their embedded content
 // This map is populated with actual DLL data when built with -tags mesa
 var embeddedDLLs = map[string][]byte{
 	"opengl32.dll":       opengl32DLL,
 	"libgallium_wgl.dll": libgalliumDLL,
+	"libglapi.dll":       libglapiDLL,
 }
 
 // mesaEmbedded indicates whether Mesa DLLs are embedded in this build

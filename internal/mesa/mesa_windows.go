@@ -43,24 +43,24 @@ func setDllDirectory(dir string) error {
 	return nil
 }
 
-// preloadMesaDLL explicitly loads Mesa's opengl32.dll with full path.
-// This registers it in Windows' "loaded-module list" which is checked
-// BEFORE the "Known DLLs" list, allowing us to override the system DLL.
+// preloadMesaDLLs loads Mesa DLLs in dependency order for clear diagnostics.
+//
+// Load order (dependencies must be loaded first):
+//   1. libglapi.dll    - GL API dispatch (no Mesa dependencies)
+//   2. libgallium_wgl.dll - Gallium WGL driver (depends on libglapi)
+//   3. opengl32.dll    - Mesa frontend (depends on libgallium_wgl)
 //
 // Windows "Known DLLs" (like opengl32.dll) are normally loaded from System32
 // regardless of SetDllDirectory or app directory placement. By pre-loading
-// with a full path, we get our DLL into the loaded-module list first.
+// with a full path, we get our DLLs into the "loaded-module list" which is
+// checked BEFORE Known DLLs.
 //
 // CRITICAL: We use LoadLibraryEx with LOAD_WITH_ALTERED_SEARCH_PATH.
 // This flag tells Windows to search the DLL's directory (not the EXE's
-// directory) when resolving the DLL's dependencies. Without this flag,
-// Windows won't find libgallium_wgl.dll even if it's in the same folder
-// as opengl32.dll.
+// directory) when resolving the DLL's dependencies.
 //
 // See: https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order
-func preloadMesaDLL(dir string) error {
-	openglPath := filepath.Join(dir, "opengl32.dll")
-
+func preloadMesaDLLs(dir string) error {
 	// Log directory contents for diagnostics
 	fmt.Printf("[Mesa] Directory contents of %s:\n", dir)
 	entries, err := os.ReadDir(dir)
@@ -77,56 +77,55 @@ func preloadMesaDLL(dir string) error {
 		}
 	}
 
-	// Verify the file exists
-	if _, err := os.Stat(openglPath); os.IsNotExist(err) {
-		return fmt.Errorf("opengl32.dll not found at %s", openglPath)
-	}
-
-	// Also set DLL directory as belt-and-suspenders
-	// (LoadLibraryEx with LOAD_WITH_ALTERED_SEARCH_PATH is the primary fix)
+	// Set DLL search directory as belt-and-suspenders
 	fmt.Printf("[Mesa] Setting DLL search directory: %s\n", dir)
 	if err := setDllDirectory(dir); err != nil {
 		fmt.Printf("[Mesa] Warning: SetDllDirectory failed: %v\n", err)
 		// Continue anyway - LoadLibraryEx should handle it
 	}
 
-	// Load with full absolute path using LOAD_WITH_ALTERED_SEARCH_PATH
-	// This flag is CRITICAL: it makes Windows search the DLL's directory
-	// (not the application's directory) for the DLL's dependencies.
-	// Without this, libgallium_wgl.dll won't be found even if it's
-	// in the same folder as opengl32.dll.
-	fmt.Printf("[Mesa] Pre-loading %s with LOAD_WITH_ALTERED_SEARCH_PATH...\n", openglPath)
+	// Load DLLs in dependency order - if any fails, we know exactly which one
+	// Note: libglapi.dll was removed in Mesa 25.0.0, but we're using 24.2.x
+	dllOrder := []string{"libglapi.dll", "libgallium_wgl.dll", "opengl32.dll"}
 
-	// LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
-	// When this flag is set AND lpFileName contains a path, the loader uses
-	// the directory of lpFileName as the search path for dependencies.
-	// Note: windows.LoadLibraryEx takes a string and handles UTF16 conversion internally
-	handle, err := windows.LoadLibraryEx(openglPath, 0, windows.LOAD_WITH_ALTERED_SEARCH_PATH)
-	if err != nil {
-		// Extract Windows error code for better diagnostics
-		fmt.Printf("[Mesa] LoadLibraryEx failed: %v\n", err)
-		if errno, ok := err.(syscall.Errno); ok {
-			fmt.Printf("[Mesa] Windows error code: %d (0x%x)\n", uint32(errno), uint32(errno))
-			// Common error codes:
-			// 126 (0x7E) = ERROR_MOD_NOT_FOUND - A dependent DLL wasn't found
-			// 193 (0xC1) = ERROR_BAD_EXE_FORMAT - Wrong architecture (32/64 bit mismatch)
-			// 127 (0x7F) = ERROR_PROC_NOT_FOUND - A required function wasn't found
-			switch uint32(errno) {
-			case 126:
-				fmt.Printf("[Mesa] ERROR_MOD_NOT_FOUND: A dependent DLL is missing.\n")
-				fmt.Printf("[Mesa] Tip: Use Dependencies.exe or dumpbin /dependents to find which DLL is missing.\n")
-			case 193:
-				fmt.Printf("[Mesa] ERROR_BAD_EXE_FORMAT: Architecture mismatch (32-bit vs 64-bit).\n")
-			case 127:
-				fmt.Printf("[Mesa] ERROR_PROC_NOT_FOUND: A required function is missing from a DLL.\n")
-			}
+	for _, dll := range dllOrder {
+		dllPath := filepath.Join(dir, dll)
+
+		// Verify the file exists
+		if _, err := os.Stat(dllPath); os.IsNotExist(err) {
+			return fmt.Errorf("%s not found at %s", dll, dllPath)
 		}
-		return fmt.Errorf("failed to load Mesa opengl32.dll: %w", err)
-	}
 
-	// Keep the handle - don't call FreeLibrary
-	// The DLL must stay loaded for GLFW to find it in loaded-module list
-	fmt.Printf("[Mesa] Pre-loaded opengl32.dll successfully (handle: 0x%x)\n", handle)
+		fmt.Printf("[Mesa] Pre-loading %s...\n", dllPath)
+
+		// LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
+		// When this flag is set AND lpFileName contains a path, the loader uses
+		// the directory of lpFileName as the search path for dependencies.
+		handle, err := windows.LoadLibraryEx(dllPath, 0, windows.LOAD_WITH_ALTERED_SEARCH_PATH)
+		if err != nil {
+			fmt.Printf("[Mesa] LoadLibraryEx failed for %s: %v\n", dll, err)
+			if errno, ok := err.(syscall.Errno); ok {
+				fmt.Printf("[Mesa] Windows error code: %d (0x%x)\n", uint32(errno), uint32(errno))
+				// Common error codes:
+				// 126 (0x7E) = ERROR_MOD_NOT_FOUND - A dependent DLL wasn't found
+				// 193 (0xC1) = ERROR_BAD_EXE_FORMAT - Wrong architecture (32/64 bit mismatch)
+				// 127 (0x7F) = ERROR_PROC_NOT_FOUND - A required function wasn't found
+				switch uint32(errno) {
+				case 126:
+					fmt.Printf("[Mesa] ERROR_MOD_NOT_FOUND: A dependent DLL is missing.\n")
+				case 193:
+					fmt.Printf("[Mesa] ERROR_BAD_EXE_FORMAT: Architecture mismatch (32-bit vs 64-bit).\n")
+				case 127:
+					fmt.Printf("[Mesa] ERROR_PROC_NOT_FOUND: A required function is missing from a DLL.\n")
+				}
+			}
+			return fmt.Errorf("failed to load %s: %w", dll, err)
+		}
+
+		// Keep the handle - don't call FreeLibrary
+		// The DLL must stay loaded for GLFW to find it in loaded-module list
+		fmt.Printf("[Mesa] Loaded %s successfully (handle: 0x%x)\n", dll, handle)
+	}
 
 	return nil
 }
@@ -181,9 +180,10 @@ func canWriteToDir(dir string) bool {
 //
 // This function:
 // 1. Extracts Mesa DLLs to LOCALAPPDATA (always local C:\ drive)
-// 2. Sets DLL search directory so Windows can find libgallium_wgl.dll
-// 3. Pre-loads opengl32.dll with full path to bypass Windows "Known DLLs" mechanism
-// 4. Sets GALLIUM_DRIVER=llvmpipe to use software rendering
+// 2. Sets DLL search directory so Windows can find dependencies
+// 3. Pre-loads DLLs in dependency order (libglapi → libgallium_wgl → opengl32)
+//    to bypass Windows "Known DLLs" mechanism
+// 4. Sets GALLIUM_DRIVER=llvmpipe and LIBGL_ALWAYS_SOFTWARE=1
 //
 // IMPORTANT: Must be called BEFORE any Fyne/OpenGL initialization.
 //
@@ -241,15 +241,14 @@ func EnsureSoftwareRendering() error {
 		return fmt.Errorf("DLLs were not extracted to %s", targetDir)
 	}
 
-	// Pre-load Mesa's opengl32.dll with full path
-	// This sets DLL directory (for libgallium_wgl.dll dependency) and loads the DLL
-	// to bypass Windows "Known DLLs" mechanism
-	if err := preloadMesaDLL(targetDir); err != nil {
+	// Pre-load Mesa DLLs in dependency order to bypass Windows "Known DLLs" mechanism
+	if err := preloadMesaDLLs(targetDir); err != nil {
 		return err
 	}
 
 	// Tell Mesa to use software rendering (llvmpipe)
 	os.Setenv("GALLIUM_DRIVER", "llvmpipe")
+	os.Setenv("LIBGL_ALWAYS_SOFTWARE", "1") // Belt-and-suspenders: prevent other backends
 	softwareRenderingEnabled = true
 
 	fmt.Println("[Mesa] Software rendering ready (set RESCALE_HARDWARE_RENDER=1 for GPU)")
