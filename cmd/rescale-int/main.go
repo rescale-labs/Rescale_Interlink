@@ -15,8 +15,8 @@ import (
 
 // Version information
 var (
-	Version   = "v3.4.8"
-	BuildTime = "2025-12-19"
+	Version   = "v3.4.9"
+	BuildTime = "2025-12-21"
 )
 
 // FIPSEnabled indicates whether FIPS 140-3 mode is active
@@ -60,6 +60,11 @@ func main() {
 		fmt.Printf("Rescale Interlink %s\n\n", Version)
 		mesa.Doctor()
 		return
+	}
+
+	// Enable timing output (works with both GUI and CLI)
+	if contains(os.Args, "--timing") {
+		os.Setenv("RESCALE_TIMING", "1")
 	}
 
 	// Check for GUI mode before creating command
