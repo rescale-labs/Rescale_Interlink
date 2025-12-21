@@ -47,6 +47,9 @@ type LocalBrowser struct {
 	cancelLoad context.CancelFunc
 	loadingMu  sync.Mutex // Serializes load operations
 
+	// Loading state - prevents actions during directory load
+	isLoading atomic.Bool
+
 	// UI components
 	fileList        *FileListWidget
 	pathEntry       *widget.Entry
@@ -152,22 +155,23 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 		b.fileList,
 	)
 
-	// Load initial directory
-	go b.loadDirectory(b.currentPath)
+	// Load initial directory - use generation 0 for initial load
+	gen := atomic.AddUint64(&b.navGeneration, 1)
+	go b.loadDirectory(b.currentPath, gen)
 
 	return widget.NewSimpleRenderer(content)
 }
 
 // loadDirectory loads the contents of a directory with timeout protection
-// This method properly handles cancellation, serialization, and network filesystem issues
-func (b *LocalBrowser) loadDirectory(path string) {
+// This method properly handles cancellation, serialization, and network filesystem issues.
+// loadGen is the navigation generation token bound at navigation start - prevents generation drift.
+func (b *LocalBrowser) loadDirectory(path string, loadGen uint64) {
 	// TIMING: Track performance metrics
 	loadStart := time.Now()
 	var readDirDuration, symlinkResolveDuration time.Duration
 
-	// Capture the current navigation generation at the start
-	// This allows us to detect if another navigation happened while we were loading
-	loadGen := atomic.LoadUint64(&b.navGeneration)
+	// Set loading state
+	b.isLoading.Store(true)
 
 	// Cancel any previous load operation
 	b.cancelMu.Lock()
@@ -212,8 +216,11 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	b.currentPath = path
 	b.mu.Unlock()
 
-	// Update UI to show we're loading
+	// Update UI to show we're loading (check gen inside callback)
 	fyne.Do(func() {
+		if atomic.LoadUint64(&b.navGeneration) != loadGen {
+			return // Stale - another navigation happened
+		}
 		if b.pathEntry != nil {
 			b.pathEntry.SetText(path)
 		}
@@ -236,9 +243,12 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		resultCh <- readResult{entries: entries, err: err}
 	}()
 
-	// Start slow path warning timer
+	// Start slow path warning timer (capture loadGen for closure)
 	slowTimer := time.AfterFunc(SlowPathWarningThreshold, func() {
 		fyne.Do(func() {
+			if atomic.LoadUint64(&b.navGeneration) != loadGen {
+				return // Stale
+			}
 			if b.fileList != nil {
 				b.fileList.SetStatus("Loading... (network path may be slow)")
 			}
@@ -254,12 +264,7 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		return
 	case <-time.After(DirectoryReadTimeout):
 		b.logger.Warn().Str("path", path).Msg("Directory read timed out")
-		fyne.Do(func() {
-			if b.fileList != nil {
-				b.fileList.SetStatus("Timeout: Path may be unavailable")
-				b.fileList.SetItems(nil)
-			}
-		})
+		b.applyDirectoryLoadResult(loadGen, path, nil, 0, true, "Timeout: Path may be unavailable")
 		return
 	case result := <-resultCh:
 		entries = result.entries
@@ -277,12 +282,7 @@ func (b *LocalBrowser) loadDirectory(path string) {
 
 	if readErr != nil {
 		b.logger.Error().Err(readErr).Str("path", path).Msg("Failed to read directory")
-		fyne.Do(func() {
-			if b.fileList != nil {
-				b.fileList.SetStatus("Error: " + readErr.Error())
-				b.fileList.SetItems(nil)
-			}
-		})
+		b.applyDirectoryLoadResult(loadGen, path, nil, 0, true, "Error: "+readErr.Error())
 		return
 	}
 
@@ -536,30 +536,8 @@ func (b *LocalBrowser) loadDirectory(path string) {
 	default:
 	}
 
-	// Check if another navigation happened while we were loading
-	// If so, discard this result to prevent stale data from appearing
-	currentGen := atomic.LoadUint64(&b.navGeneration)
-	if loadGen != currentGen {
-		b.logger.Debug().
-			Uint64("load_gen", loadGen).
-			Uint64("current_gen", currentGen).
-			Str("path", path).
-			Msg("Discarding stale directory load - navigation changed")
-		return
-	}
-
-	// Update UI with results
-	fyne.Do(func() {
-		if b.fileList != nil {
-			b.fileList.SetHasDateInfo(true)
-			b.fileList.SetItemsAndScrollToTop(items)
-
-			// Show warning if some files couldn't be accessed
-			if errCount > 0 {
-				b.fileList.SetStatus(fmt.Sprintf("%d items (%d inaccessible)", len(items), errCount))
-			}
-		}
-	})
+	// Apply results to UI - generation check happens INSIDE fyne.Do() to prevent race
+	b.applyDirectoryLoadResult(loadGen, path, items, errCount, false, "")
 
 	// TIMING: Log performance metrics
 	totalDuration := time.Since(loadStart)
@@ -572,6 +550,66 @@ func (b *LocalBrowser) loadDirectory(path string) {
 		Dur("readdir_ms", readDirDuration).
 		Dur("symlink_ms", symlinkResolveDuration).
 		Msg("Directory load complete")
+
+	// TIMING: Direct stderr output (separate from logger, not filtered by log level)
+	// Enable with RESCALE_TIMING=1 or --timing flag
+	if os.Getenv("RESCALE_TIMING") == "1" {
+		fmt.Fprintf(os.Stderr, "[TIMING] %s: total=%v readdir=%v symlink=%v items=%d symlinks=%d\n",
+			path, totalDuration.Round(time.Millisecond),
+			readDirDuration.Round(time.Millisecond),
+			symlinkResolveDuration.Round(time.Millisecond),
+			len(items), symlinkCount)
+	}
+}
+
+// applyDirectoryLoadResult commits directory load results to the UI.
+// This is the ONLY place that updates path, items, and status after a load.
+// Generation is checked INSIDE fyne.Do() - this prevents the race condition where
+// the check passes but fyne.Do() executes after another navigation started.
+func (b *LocalBrowser) applyDirectoryLoadResult(
+	loadGen uint64,
+	path string,
+	items []FileItem,
+	errCount int,
+	isError bool,
+	errorMsg string,
+) {
+	fyne.Do(func() {
+		// CHECK INSIDE THE CALLBACK - atomic with UI update
+		currentGen := atomic.LoadUint64(&b.navGeneration)
+		if loadGen != currentGen {
+			b.logger.Debug().
+				Uint64("load_gen", loadGen).
+				Uint64("current_gen", currentGen).
+				Str("path", path).
+				Msg("Discarding stale load result inside fyne.Do")
+			b.isLoading.Store(false)
+			return
+		}
+
+		// Update path entry
+		if b.pathEntry != nil {
+			b.pathEntry.SetText(path)
+		}
+
+		// Update file list
+		if b.fileList != nil {
+			b.fileList.SetPath(path)
+			if isError {
+				b.fileList.SetItems(nil)
+				b.fileList.SetStatus(errorMsg)
+			} else {
+				b.fileList.SetHasDateInfo(true)
+				b.fileList.SetItemsAndScrollToTop(items)
+				if errCount > 0 {
+					b.fileList.SetStatus(fmt.Sprintf("%d items (%d inaccessible)", len(items), errCount))
+				}
+			}
+		}
+
+		// Clear loading state
+		b.isLoading.Store(false)
+	})
 }
 
 // checkAndLoadPending checks if there's a pending path different from what was just loaded,
@@ -592,7 +630,9 @@ func (b *LocalBrowser) checkAndLoadPending(justLoadedPath string) {
 			Str("pending", pending).
 			Str("just_loaded", justLoadedPath).
 			Msg("Loading pending path after previous load completed")
-		go b.loadDirectory(pending)
+		// Create new generation for pending load
+		gen := atomic.AddUint64(&b.navGeneration, 1)
+		go b.loadDirectory(pending, gen)
 	}
 }
 
@@ -601,8 +641,13 @@ func (b *LocalBrowser) checkAndLoadPending(justLoadedPath string) {
 // os.ReadDir will fail with a clear error if path is not a directory.
 // This eliminates one network round trip per navigation.
 func (b *LocalBrowser) navigateTo(path string) {
-	// Increment generation to mark this as the latest navigation request
-	atomic.AddUint64(&b.navGeneration, 1)
+	// Clear selection first - prevents stale selection from previous directory
+	if b.fileList != nil {
+		b.fileList.ClearSelection()
+	}
+
+	// Increment generation and capture it - prevents generation drift
+	gen := atomic.AddUint64(&b.navGeneration, 1)
 
 	// Always record the pending path - this ensures the latest navigation
 	// is never dropped even if TryLock fails in loadDirectory
@@ -611,7 +656,7 @@ func (b *LocalBrowser) navigateTo(path string) {
 	b.pendingMu.Unlock()
 
 	b.saveHistory(path)
-	go b.loadDirectory(path)
+	go b.loadDirectory(path, gen)
 }
 
 // saveHistory saves current path to history before navigation
@@ -637,13 +682,18 @@ func (b *LocalBrowser) goBack() {
 	b.history = b.history[:len(b.history)-1]
 	b.mu.Unlock()
 
-	// Increment generation and set pending path (same as navigateTo)
-	atomic.AddUint64(&b.navGeneration, 1)
+	// Clear selection first - prevents stale selection
+	if b.fileList != nil {
+		b.fileList.ClearSelection()
+	}
+
+	// Increment generation and capture it - prevents generation drift
+	gen := atomic.AddUint64(&b.navGeneration, 1)
 	b.pendingMu.Lock()
 	b.pendingPath = prevPath
 	b.pendingMu.Unlock()
 
-	go b.loadDirectory(prevPath)
+	go b.loadDirectory(prevPath, gen)
 }
 
 // goHome navigates to the home directory
@@ -656,18 +706,19 @@ func (b *LocalBrowser) goHome() {
 }
 
 // refresh reloads the current directory
+// Note: Does not clear selection - user may want to keep files selected during refresh
 func (b *LocalBrowser) refresh() {
 	b.mu.RLock()
 	path := b.currentPath
 	b.mu.RUnlock()
 
-	// Increment generation and set pending path (same as navigateTo)
-	atomic.AddUint64(&b.navGeneration, 1)
+	// Increment generation and capture it - prevents generation drift
+	gen := atomic.AddUint64(&b.navGeneration, 1)
 	b.pendingMu.Lock()
 	b.pendingPath = path
 	b.pendingMu.Unlock()
 
-	go b.loadDirectory(path)
+	go b.loadDirectory(path, gen)
 }
 
 // showFolderDialog shows a folder selection dialog

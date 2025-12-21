@@ -1,5 +1,53 @@
 # Release Notes - Rescale Interlink
 
+## v3.4.9 - December 21, 2025
+
+### Critical File Browser Race Condition Fix
+
+This release fixes critical bugs discovered in v3.4.8 that could cause:
+- **Path/content mismatch** - displayed path doesn't match displayed contents (data safety risk)
+- **Duplicate folder entries** appearing after rapid navigation
+- **Incorrect sorting** when page size is increased
+
+#### Root Cause
+
+The bugs were caused by a race condition in the file browser's navigation handling:
+
+1. **fyne.Do() Timing Window**: Generation check happened BEFORE `fyne.Do()`, but `fyne.Do()` is async. Between the check and callback execution, another navigation could start, allowing stale data through.
+
+2. **Generation Drift**: `loadDirectory()` read `navGeneration` after being spawned instead of receiving it as a parameter, causing slow-starting goroutines to pick up wrong generation values.
+
+#### Fix Summary
+
+**LocalBrowser (internal/gui/local_browser.go)**
+
+- Created `applyDirectoryLoadResult()` function that checks generation INSIDE `fyne.Do()` callback - atomic with UI update
+- Changed `loadDirectory()` to accept `loadGen` parameter instead of reading it internally
+- Updated all callers (`navigateTo`, `goBack`, `refresh`, `checkAndLoadPending`) to pass generation explicitly
+- Added `isLoading` atomic flag for state tracking
+- Clear selection on navigation start to prevent stale selections
+
+**RemoteBrowser (internal/gui/remote_browser.go)**
+
+- Moved generation check inside `fyne.Do()` callback in `loadMoreItems()`
+- Added selection clearing on all navigation functions (`navigateToFolder`, `navigateToBreadcrumb`, `goUp`, `onRootChanged`)
+
+#### New Features
+
+**Timing Visibility**
+
+- Added `--timing` flag and `RESCALE_TIMING=1` environment variable
+- Outputs timing metrics to stderr (independent of logger level)
+- Format: `[TIMING] path: total=Xms readdir=Xms symlink=Xms items=N`
+
+**Enhanced Mesa Diagnostics**
+
+- `--mesa-doctor` now shows LOADED MODULES before and after DLL preload
+- Identifies which opengl32.dll is actually loaded (System32 vs Mesa)
+- Warns if Windows' built-in OpenGL is active instead of Mesa
+
+---
+
 ## v3.4.8 - December 19, 2025
 
 ### Deep Performance Optimization + Windows Mesa Variants
