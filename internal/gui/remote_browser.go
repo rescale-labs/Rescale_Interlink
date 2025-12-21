@@ -4,6 +4,7 @@ package gui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,11 @@ type RemoteBrowser struct {
 	cancelMu   sync.Mutex
 	cancelLoad context.CancelFunc
 	loadingMu  sync.Mutex // Serializes load operations
+
+	// In-flight request deduplication
+	// Prevents duplicate requests for the same folder+targetCount combination
+	inFlightMu  sync.Mutex
+	inFlightKey string // Current in-flight request key (folderID:targetCount)
 
 	// UI components
 	fileList      *FileListWidget
@@ -130,6 +136,10 @@ func (b *RemoteBrowser) CreateRenderer() fyne.WidgetRenderer {
 	// File list widget - uses its own pagination controls.
 	// Fetches multiple API pages to fill the user's desired page size.
 	b.fileList = NewFileListWidget()
+	// PERFORMANCE: Use larger page size for remote browsing
+	// Network latency dominates, so fewer round trips = faster perceived performance
+	// 200 items reduces API calls by 8x compared to the default 25
+	b.fileList.SetPageSize(200)
 	b.fileList.OnFolderOpen = func(item FileItem) {
 		b.navigateToFolder(item.ID, item.Name)
 	}
@@ -242,9 +252,40 @@ func (b *RemoteBrowser) loadCurrentFolder() {
 // targetCount: how many items we need total (0 = use FileListWidget's page size)
 // scrollToTop: if true, scrolls to top after loading (for new folder navigation)
 func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
+	// TIMING: Track performance metrics
+	loadStart := time.Now()
+
 	// Capture navigation generation FIRST - we'll check this before applying results
 	// to prevent stale API responses from overwriting newer navigation state
 	loadGen := atomic.LoadUint64(&b.navGeneration)
+
+	// Get folder ID early for in-flight check
+	b.mu.RLock()
+	folderID := b.currentFolderID
+	b.mu.RUnlock()
+
+	// Build request key for deduplication
+	requestKey := fmt.Sprintf("%s:%d", folderID, targetCount)
+
+	// Check if this exact request is already in-flight
+	// This prevents duplicate API calls when multiple triggers fire
+	b.inFlightMu.Lock()
+	if b.inFlightKey == requestKey {
+		b.inFlightMu.Unlock()
+		b.logger.Debug().Str("key", requestKey).Msg("Skipping duplicate in-flight request")
+		return
+	}
+	b.inFlightKey = requestKey
+	b.inFlightMu.Unlock()
+
+	// Clear in-flight key when done (success or failure)
+	defer func() {
+		b.inFlightMu.Lock()
+		if b.inFlightKey == requestKey {
+			b.inFlightKey = ""
+		}
+		b.inFlightMu.Unlock()
+	}()
 
 	// Cancel any previous load operation FIRST (like LocalBrowser)
 	// This ensures stale data from previous folder doesn't get displayed
@@ -264,9 +305,8 @@ func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
 	}
 	defer b.loadingMu.Unlock()
 
-	// Get folder ID and current state
+	// Get current state (folderID already captured above)
 	b.mu.RLock()
-	folderID := b.currentFolderID
 	currentItems := len(b.loadedItems)
 	nextURL := b.apiNextURL
 	hasMore := b.hasMoreData
@@ -379,22 +419,26 @@ func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
 		b.mu.Unlock()
 	}
 
+	// Track if this is the first load for this folder
+	isFirstLoad := currentItems == 0
+
 	// Append new items to loaded items
 	b.mu.Lock()
 	b.loadedItems = append(b.loadedItems, newItems...)
-	allItems := make([]FileItem, len(b.loadedItems))
-	copy(allItems, b.loadedItems)
 	hasMore = b.hasMoreData
 	b.mu.Unlock()
 
-	// Get path for display
-	b.mu.RLock()
-	pathParts := make([]string, len(b.breadcrumb))
-	for i, bc := range b.breadcrumb {
-		pathParts[i] = bc.Name
+	// Get path for display (only needed for first load)
+	var pathStr string
+	if isFirstLoad {
+		b.mu.RLock()
+		pathParts := make([]string, len(b.breadcrumb))
+		for i, bc := range b.breadcrumb {
+			pathParts[i] = bc.Name
+		}
+		b.mu.RUnlock()
+		pathStr = strings.Join(pathParts, " > ")
 	}
-	b.mu.RUnlock()
-	pathStr := strings.Join(pathParts, " > ")
 
 	// Final cancellation check
 	select {
@@ -416,24 +460,46 @@ func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
 	}
 
 	// Update UI
+	// Use AppendItems for incremental loading (subsequent pages)
+	// Use SetItemsAndScrollToTop for first load (new folder navigation)
 	fyne.Do(func() {
 		b.fileList.SetHasDateInfo(true) // Remote files have dateUploaded from API
 		b.fileList.SetHasMoreServerData(hasMore) // Tell FileListWidget if more data is available
-		if scrollToTop {
+
+		if isFirstLoad {
+			// First load: set all items and scroll to top, set path
+			b.mu.RLock()
+			allItems := make([]FileItem, len(b.loadedItems))
+			copy(allItems, b.loadedItems)
+			b.mu.RUnlock()
 			b.fileList.SetItemsAndScrollToTop(allItems)
-		} else {
-			b.fileList.SetItems(allItems)
+			b.fileList.SetPath(pathStr)
+		} else if len(newItems) > 0 {
+			// Subsequent load: just append new items (preserves scroll position)
+			b.fileList.AppendItems(newItems)
 		}
-		b.fileList.SetPath(pathStr)
+
+		// If no more data, finalize (re-applies filter if active)
+		if !hasMore {
+			b.fileList.FinalizeAppend()
+		}
 	})
 
-	b.logger.Debug().
+	b.mu.RLock()
+	totalLoaded := len(b.loadedItems)
+	b.mu.RUnlock()
+
+	// TIMING: Log performance metrics
+	totalDuration := time.Since(loadStart)
+	b.logger.Info().
 		Str("folder_id", folderID).
-		Int("items_loaded", len(allItems)).
+		Int("total_loaded", totalLoaded).
+		Int("new_items", len(newItems)).
 		Int("pages_fetched", pagesLoaded).
 		Int("target", targetCount).
 		Bool("has_more", hasMore).
-		Msg("Loaded folder contents")
+		Dur("total_ms", totalDuration).
+		Msg("Remote folder load complete")
 }
 
 // onPageChange is called when user navigates pages in FileListWidget
