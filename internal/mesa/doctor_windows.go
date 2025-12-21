@@ -27,17 +27,26 @@ func Doctor() {
 	// 2. Environment variables
 	printEnvironment()
 
-	// 3. Embedded DLLs
+	// 3. Check executable's static imports (critical for diagnosing opengl32 loading)
+	printExecutableImports()
+
+	// 4. Embedded DLLs
 	printEmbeddedDLLs()
 
-	// 4. Extracted DLLs on disk
+	// 5. Extracted DLLs on disk
 	printExtractedDLLs()
 
-	// 5. VC++ Runtime check
+	// 6. VC++ Runtime check
 	printVCRuntimeStatus()
 
-	// 6. DLL load test (in dependency order)
+	// 7. Check which OpenGL DLL is currently loaded (BEFORE our preload)
+	printLoadedModules("BEFORE MESA PRELOAD")
+
+	// 8. DLL load test (in dependency order)
 	printDLLLoadTest()
+
+	// 9. Check which OpenGL DLL is loaded AFTER preload
+	printLoadedModules("AFTER MESA PRELOAD")
 
 	fmt.Println()
 	fmt.Println("=" + strings.Repeat("=", 69))
@@ -71,6 +80,67 @@ func printEnvironment() {
 		} else {
 			fmt.Printf("  %s: %s\n", v, val)
 		}
+	}
+	fmt.Println()
+}
+
+// printExecutableImports analyzes the running executable's PE imports
+// This is CRITICAL for diagnosing the Mesa loading issue:
+// If opengl32.dll appears in static imports, Windows loads System32's version
+// BEFORE our code runs, and our preloading won't help.
+func printExecutableImports() {
+	fmt.Println("[EXECUTABLE STATIC IMPORTS]")
+
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("  ERROR: Could not get executable path: %v\n", err)
+		fmt.Println()
+		return
+	}
+	fmt.Printf("  Executable: %s\n", exePath)
+
+	f, err := pe.Open(exePath)
+	if err != nil {
+		fmt.Printf("  ERROR: Could not open PE file: %v\n", err)
+		fmt.Println()
+		return
+	}
+	defer f.Close()
+
+	imports, err := f.ImportedLibraries()
+	if err != nil {
+		fmt.Printf("  ERROR: Could not read imports: %v\n", err)
+		fmt.Println()
+		return
+	}
+
+	fmt.Println("  Imported DLLs:")
+	hasOpenGL := false
+	for _, imp := range imports {
+		marker := ""
+		lower := strings.ToLower(imp)
+		if lower == "opengl32.dll" {
+			hasOpenGL = true
+			marker = " <-- PROBLEM: Static import means System32 loads first!"
+		} else if strings.Contains(lower, "glfw") || strings.Contains(lower, "gl") {
+			marker = " <-- OpenGL-related"
+		}
+		fmt.Printf("    - %s%s\n", imp, marker)
+	}
+
+	fmt.Println()
+	if hasOpenGL {
+		fmt.Println("  DIAGNOSIS: opengl32.dll is STATICALLY IMPORTED")
+		fmt.Println("  This means Windows loads System32\\opengl32.dll at process start,")
+		fmt.Println("  BEFORE our Mesa preloading code runs. Mesa cannot intercept it.")
+		fmt.Println()
+		fmt.Println("  POTENTIAL SOLUTIONS:")
+		fmt.Println("    1. Rebuild GLFW/Fyne without static OpenGL import (use LoadLibrary)")
+		fmt.Println("    2. Use application manifest with DLL redirection")
+		fmt.Println("    3. Use ANGLE (OpenGL-to-DirectX translation layer)")
+	} else {
+		fmt.Println("  OK: opengl32.dll is NOT in static imports")
+		fmt.Println("  Mesa preloading should work if DLLs are properly extracted.")
 	}
 	fmt.Println()
 }
@@ -282,4 +352,48 @@ func printPEImports(dllPath string) {
 	for _, imp := range imports {
 		fmt.Printf("      - %s\n", imp)
 	}
+}
+
+// printLoadedModules shows which OpenGL-related DLLs are currently loaded in the process
+// This is critical for diagnosing whether Mesa's opengl32.dll or System32's is being used
+func printLoadedModules(when string) {
+	fmt.Printf("[LOADED MODULES - %s]\n", when)
+
+	dllsToCheck := []string{"opengl32.dll", "libgallium_wgl.dll", "libglapi.dll"}
+
+	for _, dllName := range dllsToCheck {
+		namePtr, err := syscall.UTF16PtrFromString(dllName)
+		if err != nil {
+			fmt.Printf("  %s: ERROR encoding name\n", dllName)
+			continue
+		}
+
+		handle, err := windows.GetModuleHandle(namePtr)
+		if err != nil || handle == 0 {
+			fmt.Printf("  %s: NOT LOADED in process\n", dllName)
+			continue
+		}
+
+		// Get the full path of the loaded DLL
+		var path [260]uint16
+		n, err := windows.GetModuleFileName(handle, &path[0], 260)
+		if err != nil || n == 0 {
+			fmt.Printf("  %s: LOADED (handle: 0x%x) but path unknown\n", dllName, handle)
+			continue
+		}
+
+		pathStr := syscall.UTF16ToString(path[:n])
+		fmt.Printf("  %s: LOADED from %s\n", dllName, pathStr)
+
+		// Flag if System32's opengl32.dll is loaded (this would be the problem)
+		if dllName == "opengl32.dll" {
+			lower := strings.ToLower(pathStr)
+			if strings.Contains(lower, "system32") || strings.Contains(lower, "syswow64") {
+				fmt.Printf("    WARNING: This is Windows' built-in OpenGL - Mesa not active!\n")
+			} else if strings.Contains(lower, "rescale-int") {
+				fmt.Printf("    OK: This appears to be Mesa's OpenGL\n")
+			}
+		}
+	}
+	fmt.Println()
 }

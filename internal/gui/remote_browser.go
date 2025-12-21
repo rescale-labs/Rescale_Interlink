@@ -447,22 +447,20 @@ func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
 	default:
 	}
 
-	// Check if navigation changed while we were loading
-	// This prevents stale data from being displayed after user navigated elsewhere
-	currentGen := atomic.LoadUint64(&b.navGeneration)
-	if loadGen != currentGen {
-		b.logger.Debug().
-			Uint64("load_gen", loadGen).
-			Uint64("current_gen", currentGen).
-			Str("folder_id", folderID).
-			Msg("Discarding stale load result - navigation changed")
-		return
-	}
-
-	// Update UI
-	// Use AppendItems for incremental loading (subsequent pages)
-	// Use SetItemsAndScrollToTop for first load (new folder navigation)
+	// Update UI - generation check happens INSIDE fyne.Do() to prevent race condition
+	// where the check passes but fyne.Do() executes after another navigation started
 	fyne.Do(func() {
+		// CHECK INSIDE THE CALLBACK - atomic with UI update
+		currentGen := atomic.LoadUint64(&b.navGeneration)
+		if loadGen != currentGen {
+			b.logger.Debug().
+				Uint64("load_gen", loadGen).
+				Uint64("current_gen", currentGen).
+				Str("folder_id", folderID).
+				Msg("Discarding stale load result inside fyne.Do")
+			return
+		}
+
 		b.fileList.SetHasDateInfo(true) // Remote files have dateUploaded from API
 		b.fileList.SetHasMoreServerData(hasMore) // Tell FileListWidget if more data is available
 
@@ -536,6 +534,11 @@ func (b *RemoteBrowser) onPageChange(page, pageSize, totalItems int) {
 
 // navigateToFolder navigates to a subfolder
 func (b *RemoteBrowser) navigateToFolder(folderID, folderName string) {
+	// Clear selection first - prevents stale selection from previous folder
+	if b.fileList != nil {
+		b.fileList.ClearSelection()
+	}
+
 	// Increment navigation generation to invalidate any in-flight loads
 	atomic.AddUint64(&b.navGeneration, 1)
 
@@ -550,6 +553,11 @@ func (b *RemoteBrowser) navigateToFolder(folderID, folderName string) {
 
 // navigateToBreadcrumb navigates to a breadcrumb entry
 func (b *RemoteBrowser) navigateToBreadcrumb(index int) {
+	// Clear selection first - prevents stale selection from previous folder
+	if b.fileList != nil {
+		b.fileList.ClearSelection()
+	}
+
 	// Increment navigation generation to invalidate any in-flight loads
 	atomic.AddUint64(&b.navGeneration, 1)
 
@@ -569,6 +577,11 @@ func (b *RemoteBrowser) navigateToBreadcrumb(index int) {
 
 // goUp navigates up one level (like back button)
 func (b *RemoteBrowser) goUp() {
+	// Clear selection first - prevents stale selection from previous folder
+	if b.fileList != nil {
+		b.fileList.ClearSelection()
+	}
+
 	// Increment navigation generation to invalidate any in-flight loads
 	atomic.AddUint64(&b.navGeneration, 1)
 
@@ -703,6 +716,11 @@ func (b *RemoteBrowser) updateBackButtonState() {
 
 // onRootChanged handles root toggle change
 func (b *RemoteBrowser) onRootChanged(selected string) {
+	// Clear selection first - prevents stale selection from previous root
+	if b.fileList != nil {
+		b.fileList.ClearSelection()
+	}
+
 	// Increment navigation generation to invalidate any in-flight loads
 	atomic.AddUint64(&b.navGeneration, 1)
 
