@@ -21,7 +21,7 @@ import (
 
 // Version information
 var (
-	Version   = "v3.4.11"
+	Version   = "v3.4.12"
 	BuildTime = "2025-12-22"
 )
 
