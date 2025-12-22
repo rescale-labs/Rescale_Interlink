@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -21,10 +22,20 @@ import (
 // softwareRenderingEnabled tracks if we successfully set up Mesa
 var softwareRenderingEnabled bool
 
-// Windows API for SetDllDirectory
+// Windows API procedures for DLL loading
 var (
-	kernel32         = syscall.NewLazyDLL("kernel32.dll")
-	setDllDirectoryW = kernel32.NewProc("SetDllDirectoryW")
+	kernel32              = syscall.NewLazyDLL("kernel32.dll")
+	setDllDirectoryW      = kernel32.NewProc("SetDllDirectoryW")
+	addDllDirectoryProc   = kernel32.NewProc("AddDllDirectory")
+	setDefaultDllDirsProc = kernel32.NewProc("SetDefaultDllDirectories")
+	getModuleHandleWProc  = kernel32.NewProc("GetModuleHandleW")
+)
+
+// Constants for SetDefaultDllDirectories
+const (
+	LOAD_LIBRARY_SEARCH_USER_DIRS   = 0x00000400
+	LOAD_LIBRARY_SEARCH_SYSTEM32    = 0x00000800
+	LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = 0x00001000
 )
 
 // setDllDirectory adds a directory to the DLL search path.
@@ -40,6 +51,86 @@ func setDllDirectory(dir string) error {
 	if ret == 0 {
 		return fmt.Errorf("SetDllDirectory failed: %w", err)
 	}
+	return nil
+}
+
+// addDllDirectory uses the modern AddDllDirectory API (Windows 8+).
+// This is more secure than SetDllDirectory because it adds to the search
+// path instead of replacing it, and it works with LOAD_LIBRARY_SEARCH_USER_DIRS.
+func addDllDirectory(dir string) (uintptr, error) {
+	dirPtr, err := syscall.UTF16PtrFromString(dir)
+	if err != nil {
+		return 0, fmt.Errorf("invalid directory path: %w", err)
+	}
+
+	// AddDllDirectory returns a "DLL directory cookie" on success, or NULL on failure
+	cookie, _, err := addDllDirectoryProc.Call(uintptr(unsafe.Pointer(dirPtr)))
+	if cookie == 0 {
+		return 0, fmt.Errorf("AddDllDirectory failed: %w", err)
+	}
+	return cookie, nil
+}
+
+// setDefaultDllDirectories restricts the DLL search to specific paths.
+// We use this to ensure Windows checks USER_DIRS (our Mesa directory) and SYSTEM32.
+func setDefaultDllDirectories(flags uintptr) error {
+	ret, _, err := setDefaultDllDirsProc.Call(flags)
+	if ret == 0 {
+		return fmt.Errorf("SetDefaultDllDirectories failed: %w", err)
+	}
+	return nil
+}
+
+// isDLLAlreadyLoaded checks if a DLL is already loaded in the process.
+// Returns the handle if loaded, 0 if not loaded.
+func isDLLAlreadyLoaded(dllName string) (windows.Handle, string) {
+	namePtr, err := syscall.UTF16PtrFromString(dllName)
+	if err != nil {
+		return 0, ""
+	}
+
+	ret, _, _ := getModuleHandleWProc.Call(uintptr(unsafe.Pointer(namePtr)))
+	if ret == 0 {
+		return 0, ""
+	}
+
+	handle := windows.Handle(ret)
+
+	// Get the full path of the loaded DLL
+	var path [260]uint16
+	n, _ := windows.GetModuleFileName(handle, &path[0], 260)
+	pathStr := syscall.UTF16ToString(path[:n])
+
+	return handle, pathStr
+}
+
+// configureDllSearchPath sets up the DLL search path using modern APIs if available,
+// falling back to SetDllDirectory on older Windows versions.
+func configureDllSearchPath(dir string) error {
+	// Try the modern approach first: SetDefaultDllDirectories + AddDllDirectory
+	// This gives us more control over the search order
+	err := setDefaultDllDirectories(LOAD_LIBRARY_SEARCH_USER_DIRS | LOAD_LIBRARY_SEARCH_SYSTEM32)
+	if err != nil {
+		// Fall back to SetDllDirectory on older Windows
+		fmt.Printf("[Mesa] SetDefaultDllDirectories unavailable, using SetDllDirectory\n")
+		return setDllDirectory(dir)
+	}
+
+	// Add our Mesa directory to the user DLL search path
+	cookie, err := addDllDirectory(dir)
+	if err != nil {
+		// Fall back to SetDllDirectory
+		fmt.Printf("[Mesa] AddDllDirectory failed, using SetDllDirectory: %v\n", err)
+		// Reset to default search order
+		setDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
+		return setDllDirectory(dir)
+	}
+
+	fmt.Printf("[Mesa] Configured DLL search path (cookie: 0x%x)\n", cookie)
+
+	// Also set the legacy directory for maximum compatibility
+	_ = setDllDirectory(dir)
+
 	return nil
 }
 
@@ -77,11 +168,33 @@ func preloadMesaDLLs(dir string) error {
 		}
 	}
 
-	// Set DLL search directory as belt-and-suspenders
-	fmt.Printf("[Mesa] Setting DLL search directory: %s\n", dir)
-	if err := setDllDirectory(dir); err != nil {
-		fmt.Printf("[Mesa] Warning: SetDllDirectory failed: %v\n", err)
-		// Continue anyway - LoadLibraryEx should handle it
+	// CRITICAL: Check if opengl32.dll is ALREADY loaded from System32
+	// If it is, our preloading CANNOT override it - the system version wins.
+	if handle, path := isDLLAlreadyLoaded("opengl32.dll"); handle != 0 {
+		lowerPath := strings.ToLower(path)
+		if strings.Contains(lowerPath, "system32") || strings.Contains(lowerPath, "syswow64") {
+			fmt.Printf("[Mesa] CRITICAL: opengl32.dll is ALREADY loaded from System32!\n")
+			fmt.Printf("[Mesa]   Path: %s\n", path)
+			fmt.Printf("[Mesa]   This happened before Mesa preloading could run.\n")
+			fmt.Printf("[Mesa]   Possible causes:\n")
+			fmt.Printf("[Mesa]     1. Static PE import (opengl32.dll in EXE import table)\n")
+			fmt.Printf("[Mesa]     2. A package init() loaded it before mesainit\n")
+			fmt.Printf("[Mesa]     3. CGO initialization triggered DLL load\n")
+			fmt.Printf("[Mesa]   Mesa software rendering CANNOT work in this state.\n")
+			return fmt.Errorf("opengl32.dll already loaded from System32 - Mesa cannot override")
+		}
+		// Already loaded but NOT from System32 - might be Mesa already
+		fmt.Printf("[Mesa] opengl32.dll already loaded from: %s\n", path)
+		if strings.Contains(lowerPath, "rescale") || strings.Contains(lowerPath, "mesa") || strings.Contains(lowerPath, "appdata") {
+			fmt.Printf("[Mesa] This appears to be Mesa's version - continuing.\n")
+		}
+	}
+
+	// Configure DLL search path using modern APIs when available
+	fmt.Printf("[Mesa] Configuring DLL search path: %s\n", dir)
+	if err := configureDllSearchPath(dir); err != nil {
+		fmt.Printf("[Mesa] Warning: configureDllSearchPath failed: %v\n", err)
+		// Continue anyway - LoadLibraryEx with full path should still work
 	}
 
 	// Load DLLs in dependency order - if any fails, we know exactly which one
@@ -90,6 +203,17 @@ func preloadMesaDLLs(dir string) error {
 
 	for _, dll := range dllOrder {
 		dllPath := filepath.Join(dir, dll)
+
+		// Check if this specific DLL is already loaded
+		if handle, existingPath := isDLLAlreadyLoaded(dll); handle != 0 {
+			lowerPath := strings.ToLower(existingPath)
+			if strings.Contains(lowerPath, "system32") || strings.Contains(lowerPath, "syswow64") {
+				fmt.Printf("[Mesa] CRITICAL: %s already loaded from System32: %s\n", dll, existingPath)
+				return fmt.Errorf("%s already loaded from System32 - cannot override", dll)
+			}
+			fmt.Printf("[Mesa] %s already loaded from: %s (continuing)\n", dll, existingPath)
+			continue // Already loaded, skip loading again
+		}
 
 		// Verify the file exists
 		if _, err := os.Stat(dllPath); os.IsNotExist(err) {
