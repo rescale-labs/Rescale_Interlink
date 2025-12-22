@@ -8,6 +8,12 @@ import (
 	"log"
 	"os"
 
+	// CRITICAL: mesainit MUST be imported FIRST (before any Fyne/OpenGL packages)
+	// Go runs init() functions in import order. By importing mesainit first,
+	// its init() runs before Fyne's, allowing us to preload Mesa's opengl32.dll
+	// before Windows loads System32's version.
+	_ "github.com/rescale/rescale-int/internal/mesainit"
+
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/gui"
 	"github.com/rescale/rescale-int/internal/mesa"
@@ -15,8 +21,8 @@ import (
 
 // Version information
 var (
-	Version   = "v3.4.10"
-	BuildTime = "2025-12-21"
+	Version   = "v3.4.11"
+	BuildTime = "2025-12-22"
 )
 
 // FIPSEnabled indicates whether FIPS 140-3 mode is active

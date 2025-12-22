@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows Application Manifest for Rescale Interlink
+
+  This manifest enables several important Windows features:
+  1. Common Controls v6 for modern UI appearance
+  2. Windows 10+ compatibility
+  3. DPI awareness for high-resolution displays
+
+  Combined with a .local file (rescale-int.exe.local), this enables
+  "DotLocal" DLL redirection, which allows the application to load
+  DLLs from its own directory instead of System32.
+
+  This is critical for Mesa software rendering - we need to load our
+  Mesa opengl32.dll instead of Windows' System32 version.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+    version="3.4.11.0"
+    processorArchitecture="amd64"
+    name="Rescale.Interlink"
+    type="win32"/>
+
+  <description>Rescale Interlink - Unified CLI and GUI Tool</description>
+
+  <!-- Common Controls v6 - Modern Windows UI appearance -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"/>
+    </dependentAssembly>
+  </dependency>
+
+  <!-- Windows Compatibility - Declare support for Windows 10 and later -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <!-- Windows 8 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+      <!-- Windows 7 -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
+    </application>
+  </compatibility>
+
+  <!-- DPI Awareness - Proper scaling on high-DPI displays -->
+  <asmv3:application xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+    <asmv3:windowsSettings xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
+      <dpiAware>true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+
+  <!--
+    Note on DLL Redirection:
+    The presence of a .local file (rescale-int.exe.local) next to the executable
+    enables "DotLocal" redirection. With this, Windows checks the EXE directory
+    for DLLs BEFORE System32, even for "Known DLLs" like opengl32.dll.
+
+    See: https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-redirection
+  -->
+</assembly>
