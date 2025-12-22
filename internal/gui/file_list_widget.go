@@ -593,6 +593,11 @@ func (w *FileListWidget) SetItems(items []FileItem) {
 // Applies the current sort mode to maintain consistent user experience.
 func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	w.mu.Lock()
+
+	// Clear stale filter cache from previous directory
+	// Without this, getDisplayItemsLocked() may return old filtered items
+	w.filteredItems = nil
+
 	w.items = items
 	w.selectedItems = make(map[string]bool)
 	w.currentPage = 0 // Reset to first page when items change
@@ -617,6 +622,18 @@ func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	for i := range w.items {
 		w.itemIndexByID[w.items[i].ID] = i
 	}
+
+	// Recompute filter for new items if filter is active
+	// This preserves the user's filter across navigation instead of silently clearing it
+	if w.filterQuery != "" {
+		w.filteredItems = make([]FileItem, 0, len(w.items)/4)
+		for _, item := range w.items {
+			if strings.Contains(item.lowerName, w.filterQuery) {
+				w.filteredItems = append(w.filteredItems, item)
+			}
+		}
+	}
+
 	w.mu.Unlock()
 
 	// PERFORMANCE: Batch all UI updates into a single fyne.Do call
@@ -1090,10 +1107,25 @@ func (w *FileListWidget) ClearFilter() {
 // Intended for remote pagination / streaming where items are loaded incrementally.
 // DOES NOT SORT - relies on server-side ordering.
 // Temporarily clears filter during streaming (will be re-applied via FinalizeAppend).
+// Deduplicates items by ID to prevent duplicate entries from race conditions.
 func (w *FileListWidget) AppendItems(newItems []FileItem) {
 	w.mu.Lock()
+
+	// Deduplicate: filter out items already in the list
+	// Prevents duplicate entries from navigation race conditions
+	uniqueItems := make([]FileItem, 0, len(newItems))
+	for _, item := range newItems {
+		if _, exists := w.itemIndexByID[item.ID]; !exists {
+			uniqueItems = append(uniqueItems, item)
+		}
+	}
+	if len(uniqueItems) == 0 {
+		w.mu.Unlock()
+		return
+	}
+
 	start := len(w.items)
-	w.items = append(w.items, newItems...)
+	w.items = append(w.items, uniqueItems...)
 
 	// Incrementally extend index map + cache lowercase names
 	for i := start; i < len(w.items); i++ {
