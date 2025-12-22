@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.4.8-green)
+![Status](https://img.shields.io/badge/status-v3.4.13-green)
 
 ---
 
@@ -67,6 +67,24 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 
 ### Recent Improvements
+
+**v3.4.13 (December 22, 2025) - Windows Mesa Auto-Extract:**
+- **App-Local Mesa Deployment**: Mesa DLLs bundled alongside EXE for automatic software rendering
+  - Windows loads DLLs from EXE directory before System32 (when not in KnownDLLs)
+  - No configuration needed - "just works" on Windows VMs/RDP sessions
+- **Self-Extract + Re-Exec**: If user only copies EXE (forgetting DLLs), app auto-extracts and restarts
+  - Embedded DLLs extract to EXE directory on first run
+  - Process re-execs so new DLLs load correctly
+  - Works transparently - user sees brief restart at most
+- **Clear Error Messages**: If extraction fails (read-only location), actionable error with fix instructions
+- **Simplified Mesa Code**: Removed complex preload logic that couldn't work after System32 loaded
+
+**v3.4.12 (December 22, 2025) - File Browser Self-Healing Architecture:**
+- **Self-Healing View State**: File browser uses `viewDirty` flag pattern for robust state management
+  - Filter/sort operations set `viewDirty = true`, recompute happens lazily on next read
+  - Missing invalidation = performance issue, not bug (self-healing)
+  - `filterQuery` is source of truth for filter state (not `filteredItems != nil`)
+- **Debug Logging**: Set `RESCALE_GUI_DEBUG=1` to trace file browser state changes
 
 **v3.4.8 (December 19, 2025) - Deep Performance Optimization + Windows Mesa Variants:**
 - **GUI Performance Optimizations**: Comprehensive performance improvements across all GUI components
@@ -498,7 +516,7 @@ rescale-int completion fish > ~/.config/fish/completions/rescale-int.fish
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    rescale-int v3.4.8                        │
+│                    rescale-int v3.4.13                       │
 │                  Unified CLI + GUI Binary                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                               │
@@ -759,6 +777,6 @@ Dinal P. -- early prototyping
 
 ---
 
-**Version**: 3.4.8
+**Version**: 3.4.13
 **Status**: Production Ready, FIPS 140-3 Mandatory
-**Last Updated**: December 19, 2025
+**Last Updated**: December 22, 2025
