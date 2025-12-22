@@ -355,11 +355,8 @@ func printPEImports(dllPath string) {
 	}
 }
 
-// Windows API for GetModuleHandleW
-var (
-	kernel32           = syscall.NewLazyDLL("kernel32.dll")
-	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
-)
+// Windows API for GetModuleHandleW (kernel32 is declared in mesa_windows.go)
+var procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
 
 // printLoadedModules shows which OpenGL-related DLLs are currently loaded in the process
 // This is critical for diagnosing whether Mesa's opengl32.dll or System32's is being used
