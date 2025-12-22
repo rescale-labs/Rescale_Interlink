@@ -14,7 +14,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -56,7 +55,6 @@ type LocalBrowser struct {
 	backBtn         *widget.Button
 	homeBtn         *widget.Button
 	refreshBtn      *widget.Button
-	browseBtn       *widget.Button
 	showHiddenCheck *widget.Check // UI toggle for hidden files
 
 	// Callbacks
@@ -104,7 +102,6 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 	b.backBtn = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), b.goBack)
 	b.homeBtn = widget.NewButtonWithIcon("", theme.HomeIcon(), b.goHome)
 	b.refreshBtn = widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), b.refresh)
-	b.browseBtn = widget.NewButtonWithIcon("", theme.FolderOpenIcon(), b.showFolderDialog)
 	b.showHiddenCheck = widget.NewCheck("Hidden", func(checked bool) {
 		b.mu.Lock()
 		b.showHidden = checked
@@ -120,11 +117,10 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 		b.homeBtn,
 		HorizontalSpacer(8), // Buffer between buttons and path entry
 	)
-	// Right side: hidden toggle + browse + refresh buttons with spacing
+	// Right side: hidden toggle + refresh buttons with spacing
 	rightButtons := container.NewHBox(
 		HorizontalSpacer(8), // Buffer between path entry and buttons
 		b.showHiddenCheck,
-		b.browseBtn,
 		b.refreshBtn,
 		HorizontalSpacer(4), // Buffer from right edge
 	)
@@ -719,20 +715,6 @@ func (b *LocalBrowser) refresh() {
 	b.pendingMu.Unlock()
 
 	go b.loadDirectory(path, gen)
-}
-
-// showFolderDialog shows a folder selection dialog
-func (b *LocalBrowser) showFolderDialog() {
-	dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
-		if err != nil {
-			dialog.ShowError(err, b.window)
-			return
-		}
-		if uri == nil {
-			return // User cancelled
-		}
-		b.navigateTo(uri.Path())
-	}, b.window)
 }
 
 // GetCurrentPath returns the current directory path
