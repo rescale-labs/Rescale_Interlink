@@ -527,7 +527,7 @@ rescale-int completion fish > ~/.config/fish/completions/rescale-int.fish
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    rescale-int v3.4.13                       │
+│                     rescale-int v3.5.0                        │
 │                  Unified CLI + GUI Binary                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                               │
@@ -788,6 +788,6 @@ Dinal P. -- early prototyping
 
 ---
 
-**Version**: 3.4.13
+**Version**: 3.5.0
 **Status**: Production Ready, FIPS 140-3 Mandatory
 **Last Updated**: December 22, 2025
