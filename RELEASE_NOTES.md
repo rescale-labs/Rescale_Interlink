@@ -1,5 +1,60 @@
 # Release Notes - Rescale Interlink
 
+## v3.5.0 - December 22, 2025
+
+### File Browser Robustness - Definitive Fix for Leftover Entries Bug
+
+This release comprehensively addresses the "leftover folder entries" bug in the GUI file browser, where old entries from the previous directory could remain visible alongside new content when navigating.
+
+#### Root Cause Analysis
+
+Multiple failure modes in Fyne's `widget.List` contributed to the bug:
+1. **Recycled row objects not fully overwritten** - Fyne pools/reuses list item objects; partial updates left stale data
+2. **canvas.Text mutations without Refresh()** - Mutating text fields doesn't trigger repaint automatically
+3. **Selection state persistence** - Selection highlight could persist across dataset swaps
+4. **Race conditions in UpdateItem** - Async scroll/refresh ordering caused stale indices to render
+
+#### Solution: Multi-Layered Defense
+
+**Typed Row Template** (`fileRowTemplate` struct)
+- Eliminates brittle `row.Objects[...]` indexing with type-safe field access
+- Stored via `sync.Map` for safe concurrent access
+- Compile-time safety instead of runtime panics
+
+**Total Overwrite + Refresh Pattern**
+- `updateListItem()` now sets EVERY visible field in ALL code branches
+- Explicit `.Refresh()` calls on every `canvas.Text` and `widget.RichText` after mutation
+- `blankListItem()` properly clears recycled rows AND refreshes all mutated objects
+
+**Generation Gating** (`viewGeneration` counter)
+- Incremented on ANY change that invalidates in-flight row updates
+- `updateListItem()` captures generation before accessing items, validates after unlock
+- Stale callbacks detect mismatch and blank the row instead of showing wrong data
+
+**UnselectAll on Navigation**
+- `SetItemsAndScrollToTop()` calls `list.UnselectAll()` before data swap
+- Prevents selection highlight from persisting between folders
+
+**Double Refresh Pattern**
+- First refresh updates `Length` and triggers `UpdateItem` for visible rows
+- Second refresh scheduled "next tick" handles scroll/length edge cases in Fyne
+
+**Safety Guard in Open Handler**
+- `onItemTapped()` validates item ID exists in index before taking action
+- Prevents stale visual from triggering wrong folder open
+
+#### Other Changes
+
+- **Local Delete Button Removed** - Simplified UI; local file deletion managed by OS file manager
+- **Debug Mode Enhancement** - Set `RESCALE_GUI_DEBUG=1` for detailed file browser state logging
+
+#### Files Modified
+
+- `internal/gui/file_list_widget.go` - Core robustness fixes
+- `internal/gui/file_browser_tab.go` - Removed local delete functionality
+
+---
+
 ## v3.4.10 - December 21, 2025
 
 ### File Browser Deep Fix
