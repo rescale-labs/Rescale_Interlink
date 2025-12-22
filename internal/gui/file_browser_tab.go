@@ -58,8 +58,7 @@ type FileBrowserTab struct {
 	uploadBtn   *widget.Button
 	downloadBtn *widget.Button
 
-	// Delete buttons
-	deleteLocalBtn  *widget.Button
+	// Delete button (remote only - local delete removed in v3.5.0)
 	deleteRemoteBtn *widget.Button
 
 	// Progress tracking
@@ -128,21 +127,14 @@ func (fbt *FileBrowserTab) Build() fyne.CanvasObject {
 	fbt.downloadBtn.Importance = widget.HighImportance
 	fbt.downloadBtn.Disable()
 
-	// Delete buttons (danger styling)
-	fbt.deleteLocalBtn = widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), fbt.onDeleteLocal)
-	fbt.deleteLocalBtn.Importance = widget.DangerImportance
-	fbt.deleteLocalBtn.Disable()
-
+	// Delete button for remote files (local delete removed in v3.5.0)
 	fbt.deleteRemoteBtn = widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), fbt.onDeleteRemote)
 	fbt.deleteRemoteBtn.Importance = widget.DangerImportance
 	fbt.deleteRemoteBtn.Disable()
 
-	// Left pane: Title + Upload/Delete buttons at top, then LocalBrowser
+	// Left pane: Title + Upload button at top, then LocalBrowser (local delete removed in v3.5.0)
 	localTitle := widget.NewLabelWithStyle("Local Files", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	// Add spacing between buttons and from edge
 	localButtons := container.NewHBox(
-		fbt.deleteLocalBtn,
-		HorizontalSpacer(8), // Buffer between delete and upload
 		fbt.uploadBtn,
 		HorizontalSpacer(4), // Buffer from right edge
 	)
@@ -277,12 +269,11 @@ func (fbt *FileBrowserTab) updateTransferButtonsInternal() {
 	if isTransferring {
 		fbt.uploadBtn.Disable()
 		fbt.downloadBtn.Disable()
-		fbt.deleteLocalBtn.Disable()
 		fbt.deleteRemoteBtn.Disable()
 		return
 	}
 
-	// Upload and local delete buttons
+	// Upload button
 	// v3.4.0: Disable upload when viewing My Jobs (can only upload to My Library)
 	if localCount > 0 && !isJobsView {
 		fbt.uploadBtn.Enable()
@@ -294,13 +285,6 @@ func (fbt *FileBrowserTab) updateTransferButtonsInternal() {
 		} else {
 			fbt.uploadBtn.SetText("Upload →")
 		}
-	}
-
-	// Local delete button (independent of Jobs view)
-	if localCount > 0 {
-		fbt.deleteLocalBtn.Enable()
-	} else {
-		fbt.deleteLocalBtn.Disable()
 	}
 
 	// Download and remote delete buttons
@@ -365,22 +349,6 @@ func (fbt *FileBrowserTab) onDownload() {
 	}, fbt.window)
 }
 
-// onDeleteLocal handles the local delete button click
-func (fbt *FileBrowserTab) onDeleteLocal() {
-	selected := fbt.localBrowser.GetSelectedItems()
-	if len(selected) == 0 {
-		return
-	}
-
-	message := fmt.Sprintf("Delete %d local item(s)?\n\nThis cannot be undone.", len(selected))
-	dialog.ShowConfirm("Confirm Delete", message, func(confirmed bool) {
-		if !confirmed {
-			return
-		}
-		go fbt.executeDeleteLocal(selected)
-	}, fbt.window)
-}
-
 // onDeleteRemote handles the remote delete button click
 func (fbt *FileBrowserTab) onDeleteRemote() {
 	selected := fbt.remoteBrowser.GetSelectedItems()
@@ -395,61 +363,6 @@ func (fbt *FileBrowserTab) onDeleteRemote() {
 		}
 		go fbt.executeDeleteRemote(selected)
 	}, fbt.window)
-}
-
-// executeDeleteLocal deletes local files/folders with progress feedback
-func (fbt *FileBrowserTab) executeDeleteLocal(items []FileItem) {
-	total := len(items)
-	if total == 0 {
-		return
-	}
-
-	// Create progress dialog
-	progressLabel := widget.NewLabel(fmt.Sprintf("Deleting 0 of %d items...", total))
-	progressBar := widget.NewProgressBar()
-	progressBar.Min = 0
-	progressBar.Max = float64(total)
-
-	content := container.NewVBox(progressLabel, progressBar)
-	progressDialog := dialog.NewCustomWithoutButtons("Deleting Files", content, fbt.window)
-	progressDialog.Show()
-
-	var deleted, failed int
-	for i, item := range items {
-		// Update progress on main thread
-		current := i + 1
-		fyne.Do(func() {
-			progressLabel.SetText(fmt.Sprintf("Deleting %d of %d items...", current, total))
-			progressBar.SetValue(float64(current))
-		})
-
-		var err error
-		if item.IsFolder {
-			err = os.RemoveAll(item.ID) // ID is path for local
-		} else {
-			err = os.Remove(item.ID)
-		}
-		if err != nil {
-			failed++
-			fbt.logger.Error().Err(err).Str("path", item.ID).Msg("Delete failed")
-		} else {
-			deleted++
-		}
-	}
-
-	// Close dialog and refresh
-	fyne.Do(func() {
-		progressDialog.Hide()
-	})
-
-	fbt.localBrowser.Refresh()
-	fbt.localBrowser.ClearSelection()
-
-	if failed > 0 {
-		fbt.setStatus(fmt.Sprintf("Deleted %d item(s), %d failed", deleted, failed))
-	} else {
-		fbt.setStatus(fmt.Sprintf("Deleted %d item(s)", deleted))
-	}
 }
 
 // executeDeleteRemote deletes remote files/folders via API with progress feedback

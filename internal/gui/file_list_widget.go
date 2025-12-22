@@ -98,6 +98,18 @@ type FileItem struct {
 	lowerName string    // PERFORMANCE: Cached lowercase name for filtering (internal use)
 }
 
+// fileRowTemplate holds typed references to all row components (v3.5.0)
+// This eliminates brittle row.Objects[...] indexing and provides compile-time safety.
+// Stored in FileListWidget.rowTemplates sync.Map, keyed by row container pointer.
+type fileRowTemplate struct {
+	check *widget.Check
+	icon  *widget.Icon
+	name  *widget.RichText
+	size  *canvas.Text
+	typ   *canvas.Text
+	date  *canvas.Text
+}
+
 // FileListWidget is a reusable widget for displaying a list of files and folders
 type FileListWidget struct {
 	widget.BaseWidget
@@ -153,6 +165,16 @@ type FileListWidget struct {
 	// When viewDirty is true, ensureViewLocked() will recompute sort, index, and filter
 	// before any UI read. This provides self-healing: missing invalidation = perf issue, not bug.
 	viewDirty bool
+
+	// View generation counter (v3.5.0)
+	// Incremented on ANY change that can invalidate in-flight row updates:
+	// SetItems, SetItemsAndScrollToTop, AppendItems, filter/sort/page changes.
+	// Used to detect and blank stale updateListItem calls from recycled renderers.
+	viewGeneration uint64
+
+	// rowTemplates stores typed references to row components for safe access
+	// Key is the row container pointer, value is the template with component references
+	rowTemplates sync.Map // map[*fyne.Container]*fileRowTemplate
 }
 
 // debugLog logs debug messages when RESCALE_GUI_DEBUG is set.
@@ -251,12 +273,12 @@ func (w *FileListWidget) CreateRenderer() fyne.WidgetRenderer {
 			name.Truncation = fyne.TextTruncateEllipsis
 
 			// Use canvas.Text for size, type, and date (fixed width, no truncation needed)
-			size := createSizedText("999.9 MB", fyne.TextAlignTrailing)
+			sizeText := createSizedText("999.9 MB", fyne.TextAlignTrailing)
 			typeText := createSizedText("Folder", fyne.TextAlignCenter)
 			dateText := createSizedText("2025-01-01", fyne.TextAlignCenter)
 
 			// Add padding around size, type, and date for better spacing
-			sizeContainer := container.NewPadded(container.NewStack(size))
+			sizeContainer := container.NewPadded(container.NewStack(sizeText))
 			typeStack := container.NewStack(typeText)
 			typeContainer := container.NewPadded(typeStack)
 			// Date column needs extra right padding to avoid touching the edge/divider
@@ -271,6 +293,17 @@ func (w *FileListWidget) CreateRenderer() fyne.WidgetRenderer {
 				container.NewHBox(sizeContainer, typeContainer, dateContainer),
 				name, // RichText in center - will truncate to fit
 			)
+
+			// Store typed template for safe access in updateListItem (v3.5.0)
+			w.rowTemplates.Store(row, &fileRowTemplate{
+				check: check,
+				icon:  icon,
+				name:  name,
+				size:  sizeText,
+				typ:   typeText,
+				date:  dateText,
+			})
+
 			return row
 		},
 		func(i widget.ListItemID, obj fyne.CanvasObject) {
@@ -352,115 +385,166 @@ func (w *FileListWidget) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(content)
 }
 
-// updateListItem updates a single list item with data
-// This is called from the main thread during list rendering
+// updateListItem updates a single list item with data (v3.5.0 rewrite)
+// This is called from the main thread during list rendering.
+// Key fixes:
+//   - Uses typed fileRowTemplate for safe field access (eliminates brittle indexing)
+//   - Captures viewGeneration BEFORE getting items to detect stale renders
+//   - Total overwrite: sets EVERY field in ALL branches
+//   - Calls Refresh() on every canvas.Text and widget.RichText after mutation
+//   - Falls back to blankListItem on out-of-bounds or generation mismatch
 func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
-	// Copy item data with lock, then release before UI updates
-	w.mu.Lock()
-	displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
-	// Map page-relative index to actual index
-	actualIndex := w.currentPage*w.pageSize + index
-	if actualIndex >= len(displayItems) {
-		w.mu.Unlock()
+	row := obj.(*fyne.Container)
+
+	// Get typed template for safe field access (v3.5.0)
+	tplVal, ok := w.rowTemplates.Load(row)
+	if !ok {
+		// Template not found - should never happen, but blank defensively
+		w.debugLog("updateListItem: template not found for row, blanking")
 		return
 	}
+	tpl := tplVal.(*fileRowTemplate)
+
+	// Capture generation BEFORE getting items (for stale detection)
+	w.mu.Lock()
+	gen := w.viewGeneration
+	displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
+	actualIndex := w.currentPage*w.pageSize + index
+
+	// Bounds check - blank if out of range (NO EARLY RETURN without blanking)
+	if actualIndex >= len(displayItems) {
+		w.mu.Unlock()
+		w.blankListItem(tpl)
+		return
+	}
+
 	item := displayItems[actualIndex]
 	w.mu.Unlock()
 
-	// All UI updates happen on main thread (this function is called by Fyne during rendering)
-	// No need for fyne.Do() here, but we released the lock first to minimize contention
-	row := obj.(*fyne.Container)
+	// GENERATION CHECK after unlock - detect stale renders from recycled rows
+	w.mu.RLock()
+	currentGen := w.viewGeneration
+	w.mu.RUnlock()
 
-	// Get components from the Border layout
-	// Structure: row.Objects[0]=center(nameRichText), [1]=left(HBox), [2]=right(HBox)
-	leftBox := row.Objects[1].(*fyne.Container)
-	rightBox := row.Objects[2].(*fyne.Container)
-	nameRichText := row.Objects[0].(*widget.RichText) // RichText for smaller font
+	if gen != currentGen {
+		w.debugLog("updateListItem: generation mismatch (got=%d, current=%d), blanking", gen, currentGen)
+		w.blankListItem(tpl)
+		return
+	}
 
-	check := leftBox.Objects[0].(*widget.Check)
-	icon := leftBox.Objects[1].(*widget.Icon)
+	// === TOTAL OVERWRITE: Set EVERY field, refresh EVERY mutable object ===
 
-	// Navigate through padded containers to get canvas.Text objects
-	// rightBox is HBox containing [sizeContainer (Padded), typeContainer (Padded), dateContainer (Padded)]
-	sizePadded := rightBox.Objects[0].(*fyne.Container)    // Padded container
-	typePadded := rightBox.Objects[1].(*fyne.Container)    // Padded container
-	datePadded := rightBox.Objects[2].(*fyne.Container)    // Padded container
-	sizeStack := sizePadded.Objects[0].(*fyne.Container)   // Stack inside Padded
-	// Type column: Padded -> Stack -> Text
-	typeStack := typePadded.Objects[0].(*fyne.Container)   // Stack inside Padded
-	// Date column: Padded -> HBox -> Stack -> Text
-	dateHBox := datePadded.Objects[0].(*fyne.Container)    // HBox inside Padded
-	dateStack := dateHBox.Objects[0].(*fyne.Container)     // Stack inside HBox
-	sizeText := sizeStack.Objects[0].(*canvas.Text)
-	typeText := typeStack.Objects[0].(*canvas.Text)
-	dateText := dateStack.Objects[0].(*canvas.Text)
-
-	// CRITICAL FIX: Capture item ID (immutable) instead of index (which changes on scroll)
-	// This prevents selection state corruption when scrolling causes list item recycling
+	// Capture item ID for callback closure (immutable, safe from index changes)
 	itemID := item.ID
 
-	// Disable callback before setting checked state to prevent spurious triggers during recycling
-	check.OnChanged = nil
-	check.SetChecked(item.Selected)
-	check.OnChanged = func(checked bool) {
+	// 1. Checkbox - disable callback before setting, then re-enable
+	tpl.check.OnChanged = nil
+	tpl.check.Enable() // Re-enable in case it was disabled by blankListItem
+	tpl.check.SetChecked(item.Selected)
+	tpl.check.OnChanged = func(checked bool) {
 		w.setItemSelectedByID(itemID, checked)
 	}
 
-	// Update icon
+	// 2. Icon - ALWAYS set (folder or file)
 	if item.IsFolder {
-		icon.SetResource(theme.FolderIcon())
+		tpl.icon.SetResource(theme.FolderIcon())
 	} else {
-		icon.SetResource(theme.FileIcon())
+		tpl.icon.SetResource(theme.FileIcon())
 	}
 
-	// Update name (RichText with smaller font, handles truncation)
-	// PERFORMANCE: Don't call Refresh() on individual elements - parent list handles refresh
-	nameRichText.Segments = []widget.RichTextSegment{
+	// 3. Name - set AND refresh RichText (CRITICAL: Refresh required after Segments change)
+	tpl.name.Segments = []widget.RichTextSegment{
 		&widget.TextSegment{
 			Text: item.Name,
 			Style: widget.RichTextStyle{
 				TextStyle: fyne.TextStyle{},
-				SizeName:  theme.SizeNameCaptionText, // Smaller text size
+				SizeName:  theme.SizeNameCaptionText,
 			},
 		},
 	}
+	tpl.name.Refresh() // CRITICAL: Must refresh after Segments change
 
+	// 4. Size - ALWAYS set + refresh canvas.Text
 	if item.IsFolder {
-		sizeText.Text = "--"
+		tpl.size.Text = "--"
 	} else if item.Size < 0 {
-		sizeText.Text = "?" // Unknown size (stat failed)
+		tpl.size.Text = "?"
 	} else {
-		sizeText.Text = FormatFileSize(item.Size)
+		tpl.size.Text = FormatFileSize(item.Size)
 	}
-	sizeText.Color = theme.ForegroundColor()
+	tpl.size.Color = theme.ForegroundColor()
+	tpl.size.Refresh() // CRITICAL
 
+	// 5. Type - ALWAYS set + refresh canvas.Text
 	if item.IsFolder {
-		typeText.Text = "Folder"
+		tpl.typ.Text = "Folder"
 	} else {
-		typeText.Text = "File"
+		tpl.typ.Text = "File"
 	}
-	typeText.Color = theme.ForegroundColor()
+	tpl.typ.Color = theme.ForegroundColor()
+	tpl.typ.Refresh() // CRITICAL
 
-	// Format date as YYYY-MM-DD, or "--" if no date
+	// 6. Date - ALWAYS set + refresh canvas.Text
 	if item.ModTime.IsZero() {
-		dateText.Text = "--"
+		tpl.date.Text = "--"
 	} else {
-		dateText.Text = item.ModTime.Format("2006-01-02")
+		tpl.date.Text = item.ModTime.Format("2006-01-02")
 	}
-	dateText.Color = theme.ForegroundColor()
+	tpl.date.Color = theme.ForegroundColor()
+	tpl.date.Refresh() // CRITICAL
 }
 
-// onItemTapped handles when an item is tapped
+// blankListItem clears a recycled list item AND refreshes all mutated objects (v3.5.0)
+// Called when index is out of bounds or generation mismatch detected.
+// Uses typed template for safe field access.
+func (w *FileListWidget) blankListItem(tpl *fileRowTemplate) {
+	// Blank AND disable interaction to prevent stale clicks
+	tpl.check.OnChanged = nil
+	tpl.check.SetChecked(false)
+	tpl.check.Disable()
+
+	tpl.icon.SetResource(theme.FileIcon())
+
+	tpl.name.Segments = []widget.RichTextSegment{
+		&widget.TextSegment{Text: "", Style: widget.RichTextStyle{}},
+	}
+	tpl.name.Refresh() // CRITICAL
+
+	tpl.size.Text = ""
+	tpl.size.Refresh() // CRITICAL
+
+	tpl.typ.Text = ""
+	tpl.typ.Refresh() // CRITICAL
+
+	tpl.date.Text = ""
+	tpl.date.Refresh() // CRITICAL
+}
+
+// onItemTapped handles when an item is tapped (v3.5.0 enhanced with safety guards)
+// Prevents stale clicks from causing wrong actions (e.g., opening wrong folder).
 func (w *FileListWidget) onItemTapped(index int) {
 	w.mu.Lock()
 	displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
 	// Map page-relative index to actual index
 	actualIndex := w.currentPage*w.pageSize + index
+
+	// Bounds check
 	if actualIndex >= len(displayItems) {
 		w.mu.Unlock()
+		w.debugLog("onItemTapped: index %d out of range (len=%d), ignoring", actualIndex, len(displayItems))
 		return
 	}
+
 	item := displayItems[actualIndex]
+
+	// SAFETY GUARD (v3.5.0): Verify item ID exists in index
+	// This catches stale clicks where the visual row shows old data but the data model has changed
+	if _, exists := w.itemIndexByID[item.ID]; !exists {
+		w.mu.Unlock()
+		w.debugLog("onItemTapped: item ID %s not in index, ignoring stale click", item.ID)
+		return
+	}
+
 	w.mu.Unlock()
 
 	if item.IsFolder {
@@ -581,6 +665,9 @@ func (w *FileListWidget) SetItems(items []FileItem) {
 	w.mu.Lock()
 	oldCount := len(w.items)
 
+	// INCREMENT GENERATION FIRST (v3.5.0) - invalidates in-flight row updates
+	w.viewGeneration++
+
 	// Full derived-state reset (v3.4.12 self-healing architecture)
 	w.items = items
 	w.filteredItems = nil                        // Clear stale filtered cache
@@ -607,9 +694,13 @@ func (w *FileListWidget) SetItems(items []FileItem) {
 	w.updateSelectAllState()
 }
 
-// SetItemsAndScrollToTop sets the items and resets scroll to top
-// Use this when navigating to a new directory/folder
-// Uses viewDirty for self-healing sort/filter recompute (v3.4.12).
+// SetItemsAndScrollToTop sets the items and resets scroll to top (v3.5.0 enhanced)
+// Use this when navigating to a new directory/folder.
+// Key fixes:
+//   - Increments viewGeneration FIRST to invalidate in-flight row updates
+//   - Calls UnselectAll() to clear selection highlight persistence
+//   - Uses double-refresh pattern to handle scroll/length edge cases
+//   - Clears filter entry text on navigation
 func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	w.mu.Lock()
 
@@ -619,9 +710,13 @@ func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	}
 	w.debugLog("SetItemsAndScrollToTop: nav to new folder (items=%d, first=%q)", len(items), firstName)
 
-	// Full derived-state reset (v3.4.12 self-healing architecture)
+	// INCREMENT GENERATION FIRST - invalidates any in-flight row updates (v3.5.0)
+	w.viewGeneration++
+
+	// Full derived-state reset
 	w.items = items
 	w.filteredItems = nil                   // Clear stale filtered cache
+	w.filterQuery = ""                      // Clear filter on navigation (v3.5.0)
 	w.selectedItems = make(map[string]bool) // Clear selections
 	w.itemIndexByID = make(map[string]int)  // Will be rebuilt in ensureViewLocked
 	w.viewDirty = true                      // Mark for recompute (sort + filter)
@@ -640,18 +735,38 @@ func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	w.mu.Unlock()
 
 	// Batch all UI updates into a single fyne.Do call
-	// ensureViewLocked will run lazily when list reads during Refresh
 	fyne.Do(func() {
+		// Clear filter entry text (v3.5.0)
+		if w.filterEntry != nil && w.filterEntry.Text != "" {
+			w.filterEntry.SetText("")
+		}
+
 		if w.list != nil {
+			// === DETERMINISTIC RESET SEQUENCE (v3.5.0) ===
+			// 1. Clear selection state (fixes selection persistence bug)
+			w.list.UnselectAll()
+
+			// 2. Scroll to top
 			w.list.ScrollToTop()
+
+			// 3. First refresh (updates Length, triggers UpdateItem for visible rows)
 			w.list.Refresh()
 		}
+
 		// Update status with pre-calculated counts
 		if w.statusLabel != nil {
 			w.statusLabel.SetText(fmt.Sprintf("%d folders, %d files", folderCount, fileCount))
 		}
+
 		// Update pagination
 		w.refreshPaginationUI()
+
+		// 4. Schedule second refresh "next tick" to handle scroll/length edge cases (v3.5.0)
+		fyne.Do(func() {
+			if w.list != nil {
+				w.list.Refresh()
+			}
+		})
 	})
 
 	w.updateSelectAllState()
@@ -837,6 +952,7 @@ func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
 		w.mu.Unlock()
 		return // No change
 	}
+	w.viewGeneration++ // (v3.5.0) Invalidate in-flight row updates
 	w.sortBy = sortBy
 	w.sortAscending = ascending
 	w.viewDirty = true // Mark for recompute
@@ -1119,6 +1235,7 @@ func (w *FileListWidget) applyFilterInternal(query string) {
 		return // No change
 	}
 
+	w.viewGeneration++ // (v3.5.0) Invalidate in-flight row updates
 	w.filterQuery = query
 	w.viewDirty = true  // Recompute will happen in ensureViewLocked
 	w.currentPage = 0   // Reset to first page when filter changes
@@ -1180,6 +1297,9 @@ func (w *FileListWidget) AppendItems(newItems []FileItem) {
 		return
 	}
 
+	// INCREMENT GENERATION (v3.5.0) - invalidates in-flight row updates
+	w.viewGeneration++
+
 	// Add new items and mark view as dirty
 	w.items = append(w.items, uniqueItems...)
 	w.viewDirty = true // Will re-sort and re-filter on next UI read
@@ -1201,6 +1321,7 @@ func (w *FileListWidget) AppendItems(newItems []FileItem) {
 // Triggers refresh which will recompute sort/filter via ensureViewLocked (v3.4.12).
 func (w *FileListWidget) FinalizeAppend() {
 	w.mu.Lock()
+	w.viewGeneration++ // (v3.5.0) Invalidate in-flight row updates
 	w.viewDirty = true // Ensure recompute happens
 	w.mu.Unlock()
 
@@ -1219,6 +1340,7 @@ func (w *FileListWidget) FinalizeAppend() {
 func (w *FileListWidget) previousPage() {
 	w.mu.Lock()
 	if w.currentPage > 0 {
+		w.viewGeneration++ // (v3.5.0) Invalidate in-flight row updates
 		w.currentPage--
 	}
 	page := w.currentPage
@@ -1250,6 +1372,7 @@ func (w *FileListWidget) nextPage() {
 		return
 	}
 
+	w.viewGeneration++ // (v3.5.0) Invalidate in-flight row updates
 	w.currentPage++
 	page := w.currentPage
 	pageSize := w.pageSize
@@ -1278,6 +1401,7 @@ func (w *FileListWidget) onPageSizeChanged(value string) {
 	}
 
 	w.mu.Lock()
+	w.viewGeneration++ // (v3.5.0) Invalidate in-flight row updates
 	w.pageSize = newSize
 	w.currentPage = 0 // Reset to first page
 	// Clear hasMoreServerData until callback confirms there's actually more data
