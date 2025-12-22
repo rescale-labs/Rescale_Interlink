@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.4.13-green)
+![Status](https://img.shields.io/badge/status-v3.5.0-green)
 
 ---
 
@@ -57,8 +57,8 @@ A unified tool combining comprehensive command-line interface and graphical inte
 - **Real-time Logging**: Live log display with filtering and search
 - **Event System**: Professional pub/sub architecture for UI updates
 - **Pipeline Execution**: Full integration with job submission
-- **File Browser** (v2.6.0): Two-pane local/remote file browser with:
-  - Delete functionality for local and remote files/folders
+- **File Browser** (v2.6.0, enhanced v3.5.0): Two-pane local/remote file browser with:
+  - Delete functionality for remote files/folders (local delete via OS file manager)
   - Search/filter by filename
   - Pagination support (default 40 items/page, configurable 20-200)
   - Transfer rate display for uploads/downloads (e.g., "2.5 MB/s")
@@ -67,6 +67,17 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 
 ### Recent Improvements
+
+**v3.5.0 (December 22, 2025) - File Browser Robustness:**
+- **Definitive Fix for Leftover Entries Bug**: Comprehensive rewrite of list rendering
+  - **Typed Row Template**: `fileRowTemplate` struct eliminates brittle `Objects[...]` indexing
+  - **Total Overwrite + Refresh**: All fields set in all branches, explicit `.Refresh()` on every `canvas.Text` and `widget.RichText`
+  - **Generation Gating**: `viewGeneration` counter detects and blanks stale recycled rows
+  - **UnselectAll on Navigation**: Clears selection highlight persistence between folders
+  - **Double Refresh Pattern**: Handles scroll/length edge cases in Fyne's widget.List
+  - **Safety Guard**: `onItemTapped` validates item ID exists before taking action
+- **Local Delete Button Removed**: Simplified UI - local file deletion managed by OS file manager
+- **Debug Mode**: Set `RESCALE_GUI_DEBUG=1` for detailed file browser state logging
 
 **v3.4.13 (December 22, 2025) - Windows Mesa Auto-Extract:**
 - **App-Local Mesa Deployment**: Mesa DLLs bundled alongside EXE for automatic software rendering
