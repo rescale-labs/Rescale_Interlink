@@ -2,7 +2,7 @@
 # Build and package cross-platform FIPS 140-3 compliant binaries
 
 # Variables
-VERSION := v3.4.10
+VERSION := v3.4.11
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
 LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
@@ -66,11 +66,15 @@ build-windows-amd64:
 	@echo "✅ Built: $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe [FIPS 140-3] (requires GPU)"
 
 # Build Windows binary with Mesa (larger, software rendering for VMs/RDP)
+# Also copies manifest and .local file for DLL redirection
 .PHONY: build-windows-amd64-mesa
 build-windows-amd64-mesa:
 	@echo "Building Windows AMD64 binary [FIPS 140-3] (with Mesa software rendering)..."
 	@mkdir -p $(WINDOWS_AMD64_MESA_DIR)
 	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -tags mesa $(LDFLAGS) -o $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@echo "Copying manifest and .local file for DLL redirection..."
+	@cp cmd/rescale-int/rescale-int.manifest $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.manifest 2>/dev/null || true
+	@cp cmd/rescale-int/rescale-int.exe.local $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.local 2>/dev/null || true
 	@echo "✅ Built: $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe [FIPS 140-3] (Mesa software rendering)"
 
 # Build all Windows variants
