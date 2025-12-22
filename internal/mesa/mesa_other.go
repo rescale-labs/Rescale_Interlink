@@ -13,3 +13,24 @@ func EnsureSoftwareRendering() error {
 func IsSoftwareRenderingEnabled() bool {
 	return false
 }
+
+// GetExeDir returns the directory containing the running executable.
+// Stub for non-Windows platforms.
+func GetExeDir() (string, error) {
+	return "", nil
+}
+
+// DLLsExistInDir always returns true on non-Windows platforms (no DLLs needed).
+func DLLsExistInDir(dir string) bool {
+	return true
+}
+
+// ExtractDLLsToDir is a no-op on non-Windows platforms.
+func ExtractDLLsToDir(dir string) error {
+	return nil
+}
+
+// HasEmbeddedDLLs always returns false on non-Windows platforms.
+func HasEmbeddedDLLs() bool {
+	return false
+}

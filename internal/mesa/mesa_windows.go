@@ -302,29 +302,22 @@ func canWriteToDir(dir string) bool {
 
 // EnsureSoftwareRendering sets up Mesa software rendering for Windows.
 //
+// As of v3.4.13, the recommended deployment is "app-local": bundle Mesa DLLs
+// alongside the EXE. Windows loads DLLs from the EXE directory before System32
+// (when the DLL is not in KnownDLLs), so this works automatically.
+//
 // This function:
-// 1. Extracts Mesa DLLs to LOCALAPPDATA (always local C:\ drive)
-// 2. Sets DLL search directory so Windows can find dependencies
-// 3. Pre-loads DLLs in dependency order (libglapi → libgallium_wgl → opengl32)
-//    to bypass Windows "Known DLLs" mechanism
-// 4. Sets GALLIUM_DRIVER=llvmpipe and LIBGL_ALWAYS_SOFTWARE=1
+// 1. Sets GALLIUM_DRIVER=llvmpipe and LIBGL_ALWAYS_SOFTWARE=1
+// 2. Checks which opengl32.dll was loaded and verifies it's Mesa
+// 3. Extracts DLLs to LOCALAPPDATA (for --mesa-doctor diagnostics)
 //
-// IMPORTANT: Must be called BEFORE any Fyne/OpenGL initialization.
+// The DLL loading happens at process start (CGO/GLFW init), before any Go code
+// runs. By the time this function executes, we can only verify what happened.
 //
-// Why LOCALAPPDATA? Network drives (like Z:\ on Rescale) have DLL loading
-// restrictions that prevent Mesa from working. LOCALAPPDATA is always on
-// the local C:\ drive, avoiding these issues.
-//
-// The pre-load trick is critical: opengl32.dll is a Windows "Known DLL" which
-// normally loads from System32 regardless of SetDllDirectory or app directory.
-// By explicitly loading our Mesa DLL first, it gets registered in the
-// "loaded-module list" which is checked BEFORE Known DLLs.
-//
-// Returns nil on success. On error, returns the error but the caller
-// may choose to continue (the app might still work with a real GPU).
+// Returns nil on success. On error, returns actionable error message.
 //
 // Build variants:
-// - With "-tags mesa": Embedded DLLs, automatic software rendering
+// - With "-tags mesa": Embedded DLLs for app-local deployment
 // - Without "-tags mesa": No embedded DLLs, requires hardware GPU (smaller binary)
 func EnsureSoftwareRendering() error {
 	// Allow opt-out for users with working GPU
@@ -342,40 +335,75 @@ func EnsureSoftwareRendering() error {
 
 	fmt.Println("[Mesa] Setting up software rendering...")
 
-	// ALWAYS use LOCALAPPDATA - guaranteed to be on local C:\ drive
-	// Network drives (like Z:\ on Rescale) have DLL loading restrictions
-	// that cause "module not found" errors even when DLLs are present
-	targetDir := MesaDir()
-	if targetDir == "" {
-		return fmt.Errorf("could not determine Mesa directory (LOCALAPPDATA not set?)")
-	}
-	fmt.Printf("[Mesa] Using local directory: %s\n", targetDir)
-
-	// Create directory if needed
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", targetDir, err)
-	}
-
-	// Extract DLLs
-	if err := extractDLLsIfNeeded(targetDir); err != nil {
-		return err
-	}
-
-	if !dllsExistIn(targetDir) {
-		return fmt.Errorf("DLLs were not extracted to %s", targetDir)
-	}
-
-	// Pre-load Mesa DLLs in dependency order to bypass Windows "Known DLLs" mechanism
-	if err := preloadMesaDLLs(targetDir); err != nil {
-		return err
-	}
-
 	// Tell Mesa to use software rendering (llvmpipe)
+	// These env vars must be set for Mesa to use software renderer
 	os.Setenv("GALLIUM_DRIVER", "llvmpipe")
-	os.Setenv("LIBGL_ALWAYS_SOFTWARE", "1") // Belt-and-suspenders: prevent other backends
-	softwareRenderingEnabled = true
+	os.Setenv("LIBGL_ALWAYS_SOFTWARE", "1")
 
+	// Check which opengl32.dll was loaded
+	// By now, CGO/GLFW initialization has already loaded it
+	if err := verifyMesaDLLLoaded(); err != nil {
+		return err
+	}
+
+	// Extract DLLs to LOCALAPPDATA for --mesa-doctor diagnostics
+	// This is a secondary/fallback location - app-local (EXE directory) is preferred
+	targetDir := MesaDir()
+	if targetDir != "" {
+		if err := os.MkdirAll(targetDir, 0755); err == nil {
+			// Best effort extraction - don't fail if it doesn't work
+			_ = extractDLLsIfNeeded(targetDir)
+		}
+		fmt.Printf("[Mesa] Using local directory: %s\n", targetDir)
+	}
+
+	softwareRenderingEnabled = true
 	fmt.Println("[Mesa] Software rendering ready (set RESCALE_HARDWARE_RENDER=1 for GPU)")
+	return nil
+}
+
+// verifyMesaDLLLoaded checks if opengl32.dll was loaded from the correct location.
+// Returns nil if Mesa is loaded, error with actionable message if System32's version was loaded.
+func verifyMesaDLLLoaded() error {
+	handle, loadedPath := isDLLAlreadyLoaded("opengl32.dll")
+	if handle == 0 {
+		// Not loaded yet - shouldn't happen in normal flow, but not an error
+		return nil
+	}
+
+	lowerPath := strings.ToLower(loadedPath)
+
+	// Check if loaded from System32 - this is the failure case
+	if strings.Contains(lowerPath, "system32") || strings.Contains(lowerPath, "syswow64") {
+		exeDir, _ := getExeDir()
+		return fmt.Errorf(`Mesa software rendering is not available.
+
+System32's opengl32.dll was loaded: %s
+
+This happened because Mesa DLLs were not found in the EXE directory at process start.
+Windows checked the EXE directory first, found no opengl32.dll, and fell back to System32.
+
+To fix this, ensure these files are in the same directory as rescale-int.exe:
+  - opengl32.dll
+  - libgallium_wgl.dll
+  - libglapi.dll
+
+Your EXE directory: %s
+
+If you're using the pre-built release, download the '-mesa.zip' package which includes these DLLs.
+Run 'rescale-int --mesa-doctor' for detailed diagnostics.`, loadedPath, exeDir)
+	}
+
+	// Loaded from somewhere else (EXE directory, LOCALAPPDATA, etc.) - this is success
+	fmt.Printf("[Mesa] opengl32.dll already loaded from: %s\n", loadedPath)
+
+	// Also verify the supporting DLLs are loaded
+	for _, dll := range []string{"libgallium_wgl.dll", "libglapi.dll"} {
+		if h, path := isDLLAlreadyLoaded(dll); h != 0 {
+			fmt.Printf("[Mesa] %s already loaded from: %s (continuing)\n", dll, path)
+		}
+	}
+
 	return nil
 }
 
@@ -417,4 +445,32 @@ func dllsExistIn(dir string) bool {
 // IsSoftwareRenderingEnabled returns true if Mesa software rendering is active
 func IsSoftwareRenderingEnabled() bool {
 	return softwareRenderingEnabled
+}
+
+// GetExeDir returns the directory containing the running executable.
+// Exported for use by mesainit.
+func GetExeDir() (string, error) {
+	return getExeDir()
+}
+
+// DLLsExistInDir checks if all required Mesa DLLs exist in the given directory.
+// Exported for use by mesainit.
+func DLLsExistInDir(dir string) bool {
+	return dllsExistIn(dir)
+}
+
+// ExtractDLLsToDir extracts embedded Mesa DLLs to the specified directory.
+// Only extracts DLLs that are missing or have wrong size.
+// Exported for use by mesainit.
+func ExtractDLLsToDir(dir string) error {
+	if !mesaEmbedded {
+		return fmt.Errorf("this build does not include Mesa DLLs")
+	}
+	return extractDLLsIfNeeded(dir)
+}
+
+// HasEmbeddedDLLs returns true if this build includes embedded Mesa DLLs.
+// Exported for use by mesainit.
+func HasEmbeddedDLLs() bool {
+	return mesaEmbedded
 }
