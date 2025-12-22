@@ -1,5 +1,46 @@
 # Release Notes - Rescale Interlink
 
+## v3.4.10 - December 21, 2025
+
+### File Browser Deep Fix
+
+This release fixes remaining file browser issues discovered during testing of v3.4.9. User testing revealed:
+- **Stale content mixing** - navigating to new folder showed contents of previous folder
+- **Duplicate folder entries** appearing in listings
+- **Missing folders** - wrong folders displayed
+- **Browse button lockup** - folder icon button caused "Not Responding" on network drives
+
+#### Root Cause
+
+**Primary Bug**: `SetItemsAndScrollToTop()` never cleared `w.filteredItems`. When user navigated with a filter active, old filtered items persisted and `getDisplayItemsLocked()` returned them instead of the new directory's contents.
+
+#### Fixes
+
+**FileListWidget (internal/gui/file_list_widget.go)**
+
+- Clear `w.filteredItems = nil` at start of `SetItemsAndScrollToTop()`
+- Recompute filter for new items if `filterQuery != ""` (preserves user's filter)
+- Added deduplication in `AppendItems()` - checks `itemIndexByID` before appending to prevent duplicate entries
+
+**LocalBrowser (internal/gui/local_browser.go)**
+
+- Removed `browseBtn` (folder open button) - caused Windows lockups with network drives due to native folder picker blocking UI during enumeration
+- Removed `showFolderDialog()` function
+- Removed unused `dialog` import
+
+**RemoteBrowser (internal/gui/remote_browser.go)**
+
+- Session binding already in place (generation check inside `fyne.Do()` before `AppendItems`)
+
+#### Verification
+
+All fixes are O(n) or better, with no performance impact on local filesystem browsing:
+- Filter recompute: O(n) but only when filter is active
+- Existing sort: O(n log n) - dominates navigation time
+- Deduplication: O(1) per item via `itemIndexByID` map lookup
+
+---
+
 ## v3.4.9 - December 21, 2025
 
 ### Critical File Browser Race Condition Fix
