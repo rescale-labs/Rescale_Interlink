@@ -476,9 +476,46 @@ Write-Host "Binary built successfully. Version info:"
 $versionOutput = cmd /c ".\rescale-int.exe --version 2>&1"
 Write-Host $versionOutput
 
-# Package as zip and copy to work directory
-$BinaryName = "rescale-int-$($env:RELEASE_TAG)-windows-amd64.zip"
-Compress-Archive -Path "rescale-int.exe" -DestinationPath $BinaryName -Force
+# =============================================================================
+# Bundle Mesa DLLs alongside EXE for app-local deployment
+# =============================================================================
+# Windows loads DLLs from the EXE directory before System32 (when not in KnownDLLs).
+# By placing Mesa DLLs next to the EXE, users get software rendering automatically.
+
+Write-Host ""
+Write-Host "[5b/5] Bundling Mesa DLLs for app-local deployment..."
+
+# Copy Mesa DLLs to output directory (same location as EXE)
+Copy-Item "$MesaDllDir\opengl32.dll" -Destination "."
+Copy-Item "$MesaDllDir\libgallium_wgl.dll" -Destination "."
+Copy-Item "$MesaDllDir\libglapi.dll" -Destination "."
+
+# Create Mesa license file for compliance
+$MesaLicense = @"
+Mesa 3D Graphics Library
+========================
+Copyright (C) 1999-2024 Mesa Authors
+
+This distribution includes Mesa3D software rendering DLLs (llvmpipe driver)
+for systems without GPU/OpenGL support.
+
+Mesa is licensed under the MIT license.
+See: https://mesa3d.org/license.html
+"@
+$MesaLicense | Out-File -FilePath "MESA_LICENSE.txt" -Encoding UTF8
+
+Write-Host "Mesa DLLs bundled:"
+Get-ChildItem -Name "*.dll"
+
+# Package ALL files together (EXE + DLLs + license)
+$BinaryName = "rescale-int-$($env:RELEASE_TAG)-windows-amd64-mesa.zip"
+Compress-Archive -Path @(
+    "rescale-int.exe",
+    "opengl32.dll",
+    "libgallium_wgl.dll",
+    "libglapi.dll",
+    "MESA_LICENSE.txt"
+) -DestinationPath $BinaryName -Force
 
 Write-Host "Packaged as: $BinaryName"
 Get-Item $BinaryName | Format-List Name, Length
@@ -487,9 +524,12 @@ Get-Item $BinaryName | Format-List Name, Length
 Copy-Item $BinaryName -Destination $WorkDir
 Write-Host "Binary copied to: $WorkDir\$BinaryName"
 
-# Also copy the raw .exe for convenience
+# Also copy the raw files for convenience
 Copy-Item "rescale-int.exe" -Destination $WorkDir
-Write-Host "Executable copied to: $WorkDir\rescale-int.exe"
+Copy-Item "opengl32.dll" -Destination $WorkDir
+Copy-Item "libgallium_wgl.dll" -Destination $WorkDir
+Copy-Item "libglapi.dll" -Destination $WorkDir
+Write-Host "All files copied to: $WorkDir"
 
 # =============================================================================
 # Done - Binary is ready in work directory for download
