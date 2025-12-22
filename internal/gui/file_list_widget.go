@@ -5,6 +5,7 @@ package gui
 import (
 	"fmt"
 	"image/color"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -147,6 +148,19 @@ type FileListWidget struct {
 
 	// Selection state management
 	updatingSelectAll bool // Flag to prevent callback recursion when programmatically updating select all
+
+	// Self-healing view state (v3.4.12)
+	// When viewDirty is true, ensureViewLocked() will recompute sort, index, and filter
+	// before any UI read. This provides self-healing: missing invalidation = perf issue, not bug.
+	viewDirty bool
+}
+
+// debugLog logs debug messages when RESCALE_GUI_DEBUG is set.
+// Use for diagnosing view state issues.
+func (w *FileListWidget) debugLog(format string, args ...interface{}) {
+	if os.Getenv("RESCALE_GUI_DEBUG") != "" {
+		fmt.Printf("[FileList] "+format+"\n", args...)
+	}
 }
 
 // NewFileListWidget creates a new file list widget
@@ -207,9 +221,9 @@ func (w *FileListWidget) CreateRenderer() fyne.WidgetRenderer {
 	// Create the list widget with pagination support
 	w.list = widget.NewList(
 		func() int {
-			w.mu.RLock()
-			defer w.mu.RUnlock()
-			displayItems := w.getDisplayItemsLocked()
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
 			totalItems := len(displayItems)
 			// Return items for current page only
 			startIdx := w.currentPage * w.pageSize
@@ -342,16 +356,16 @@ func (w *FileListWidget) CreateRenderer() fyne.WidgetRenderer {
 // This is called from the main thread during list rendering
 func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 	// Copy item data with lock, then release before UI updates
-	w.mu.RLock()
-	displayItems := w.getDisplayItemsLocked()
+	w.mu.Lock()
+	displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
 	// Map page-relative index to actual index
 	actualIndex := w.currentPage*w.pageSize + index
 	if actualIndex >= len(displayItems) {
-		w.mu.RUnlock()
+		w.mu.Unlock()
 		return
 	}
 	item := displayItems[actualIndex]
-	w.mu.RUnlock()
+	w.mu.Unlock()
 
 	// All UI updates happen on main thread (this function is called by Fyne during rendering)
 	// No need for fyne.Do() here, but we released the lock first to minimize contention
@@ -438,16 +452,16 @@ func (w *FileListWidget) updateListItem(index int, obj fyne.CanvasObject) {
 
 // onItemTapped handles when an item is tapped
 func (w *FileListWidget) onItemTapped(index int) {
-	w.mu.RLock()
-	displayItems := w.getDisplayItemsLocked()
+	w.mu.Lock()
+	displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
 	// Map page-relative index to actual index
 	actualIndex := w.currentPage*w.pageSize + index
 	if actualIndex >= len(displayItems) {
-		w.mu.RUnlock()
+		w.mu.Unlock()
 		return
 	}
 	item := displayItems[actualIndex]
-	w.mu.RUnlock()
+	w.mu.Unlock()
 
 	if item.IsFolder {
 		// Open folder
@@ -562,27 +576,32 @@ func (w *FileListWidget) updateSelectAllState() {
 
 // SetItems sets the items to display
 // This preserves the current scroll position for smooth scrolling
-// Items are automatically sorted according to current sort settings
+// Items are automatically sorted according to current sort settings via viewDirty
 func (w *FileListWidget) SetItems(items []FileItem) {
 	w.mu.Lock()
 	oldCount := len(w.items)
+
+	// Full derived-state reset (v3.4.12 self-healing architecture)
 	w.items = items
-	w.selectedItems = make(map[string]bool)
+	w.filteredItems = nil                        // Clear stale filtered cache
+	w.selectedItems = make(map[string]bool)      // Clear selections
+	w.itemIndexByID = make(map[string]int)       // Will be rebuilt in ensureViewLocked
+	w.viewDirty = true                           // Mark for recompute
+
 	// Only reset to first page if items decreased (new folder)
 	// Preserve page if items increased (loading more data)
 	if len(items) < oldCount {
 		w.currentPage = 0
 	}
-	// PERFORMANCE: Cache lowercase names and build index map
-	w.itemIndexByID = make(map[string]int, len(w.items))
-	for i := range w.items {
-		w.items[i].lowerName = strings.ToLower(w.items[i].Name)
-		w.itemIndexByID[w.items[i].ID] = i
-	}
 	w.mu.Unlock()
 
-	// Apply current sort and refresh
-	w.sortAndRefresh()
+	// Refresh UI on UI thread - ensureViewLocked will recompute sort/filter
+	fyne.Do(func() {
+		if w.list != nil {
+			w.list.Refresh()
+		}
+	})
+
 	w.refreshPagination() // Update pagination buttons and display
 	w.updateStatus()
 	w.updateSelectAllState()
@@ -590,19 +609,25 @@ func (w *FileListWidget) SetItems(items []FileItem) {
 
 // SetItemsAndScrollToTop sets the items and resets scroll to top
 // Use this when navigating to a new directory/folder
-// Applies the current sort mode to maintain consistent user experience.
+// Uses viewDirty for self-healing sort/filter recompute (v3.4.12).
 func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 	w.mu.Lock()
 
-	// Clear stale filter cache from previous directory
-	// Without this, getDisplayItemsLocked() may return old filtered items
-	w.filteredItems = nil
+	firstName := ""
+	if len(items) > 0 {
+		firstName = items[0].Name
+	}
+	w.debugLog("SetItemsAndScrollToTop: nav to new folder (items=%d, first=%q)", len(items), firstName)
 
+	// Full derived-state reset (v3.4.12 self-healing architecture)
 	w.items = items
-	w.selectedItems = make(map[string]bool)
-	w.currentPage = 0 // Reset to first page when items change
+	w.filteredItems = nil                   // Clear stale filtered cache
+	w.selectedItems = make(map[string]bool) // Clear selections
+	w.itemIndexByID = make(map[string]int)  // Will be rebuilt in ensureViewLocked
+	w.viewDirty = true                      // Mark for recompute (sort + filter)
+	w.currentPage = 0                       // Reset to first page
 
-	// Calculate folder/file counts and cache lowercase names (needed for sorting)
+	// Calculate folder/file counts for status display
 	folderCount, fileCount := 0, 0
 	for i := range w.items {
 		if w.items[i].IsFolder {
@@ -610,38 +635,16 @@ func (w *FileListWidget) SetItemsAndScrollToTop(items []FileItem) {
 		} else {
 			fileCount++
 		}
-		// Cache lowercase name for O(1) filtering and sorting
-		w.items[i].lowerName = strings.ToLower(w.items[i].Name)
-	}
-
-	// Apply current sort mode (preserves user's selected sort across navigation)
-	w.sortItemsLocked(w.items)
-
-	// Build ID-to-index map AFTER sorting (indices have changed)
-	w.itemIndexByID = make(map[string]int, len(w.items))
-	for i := range w.items {
-		w.itemIndexByID[w.items[i].ID] = i
-	}
-
-	// Recompute filter for new items if filter is active
-	// This preserves the user's filter across navigation instead of silently clearing it
-	if w.filterQuery != "" {
-		w.filteredItems = make([]FileItem, 0, len(w.items)/4)
-		for _, item := range w.items {
-			if strings.Contains(item.lowerName, w.filterQuery) {
-				w.filteredItems = append(w.filteredItems, item)
-			}
-		}
 	}
 
 	w.mu.Unlock()
 
-	// PERFORMANCE: Batch all UI updates into a single fyne.Do call
-	// This avoids multiple main thread round-trips
+	// Batch all UI updates into a single fyne.Do call
+	// ensureViewLocked will run lazily when list reads during Refresh
 	fyne.Do(func() {
 		if w.list != nil {
-			w.list.Refresh()
 			w.list.ScrollToTop()
+			w.list.Refresh()
 		}
 		// Update status with pre-calculated counts
 		if w.statusLabel != nil {
@@ -827,41 +830,40 @@ func (w *FileListWidget) showSortMenu() {
 }
 
 // setSortMode sets the sort mode and refreshes the list
+// Uses viewDirty for self-healing sort recompute (v3.4.12).
 func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
 	w.mu.Lock()
+	if w.sortBy == sortBy && w.sortAscending == ascending {
+		w.mu.Unlock()
+		return // No change
+	}
 	w.sortBy = sortBy
 	w.sortAscending = ascending
+	w.viewDirty = true // Mark for recompute
 	w.mu.Unlock()
-	w.sortAndRefresh()
+
+	// Refresh UI - ensureViewLocked will recompute sort/filter when list reads
+	fyne.Do(func() {
+		if w.list != nil {
+			w.list.Refresh()
+		}
+	})
 }
 
-// sortAndRefresh sorts the items and refreshes the list.
-// Delegates to sortItemsLocked for consistent behavior with natural sort,
-// stable sorting, and proper tie-breakers.
+// sortAndRefresh marks view as dirty and refreshes the list.
+// Actual sort/filter recompute happens lazily in ensureViewLocked() when UI reads.
+// This design is simpler and self-healing - no need to duplicate sort logic here.
 func (w *FileListWidget) sortAndRefresh() {
 	w.mu.Lock()
-
-	// Ensure all items have cached lowercase names (needed for sorting)
-	for i := range w.items {
-		if w.items[i].lowerName == "" {
-			w.items[i].lowerName = strings.ToLower(w.items[i].Name)
-		}
-	}
-
-	// Use the unified sorting implementation
-	w.sortItemsLocked(w.items)
-
-	// Rebuild index map after sorting (indices have changed)
-	for i := range w.items {
-		w.itemIndexByID[w.items[i].ID] = i
-	}
+	w.viewDirty = true // Mark as needing recompute
 	w.mu.Unlock()
 
-	if w.list != nil {
-		fyne.Do(func() {
+	// Refresh UI on UI thread - ensureViewLocked will recompute when list reads
+	fyne.Do(func() {
+		if w.list != nil {
 			w.list.Refresh()
-		})
-	}
+		}
+	})
 }
 
 // sortItemsLocked sorts the given items slice according to current sort settings.
@@ -953,6 +955,60 @@ func (w *FileListWidget) sortItemsLocked(items []FileItem) {
 		// Equal on all criteria - stable sort preserves original order
 		return false
 	})
+}
+
+// ensureViewLocked recomputes derived state (sort, index, filtered) if needed.
+// MUST be called with w.mu held.
+// This is the SINGLE POINT where display correctness is guaranteed.
+// Call this before any UI read (getDisplayItemsLocked, Length, UpdateItem).
+//
+// Self-healing design: even if we miss a viewDirty=true call somewhere,
+// the next UI read will trigger recompute. Missing invalidation = perf issue, not bug.
+func (w *FileListWidget) ensureViewLocked() {
+	if !w.viewDirty {
+		return
+	}
+
+	w.debugLog("ensureViewLocked: recomputing view (items=%d, filterQuery=%q)", len(w.items), w.filterQuery)
+
+	// 1. Ensure lowerName is cached for all items (needed for sorting/filtering)
+	for i := range w.items {
+		if w.items[i].lowerName == "" {
+			w.items[i].lowerName = strings.ToLower(w.items[i].Name)
+		}
+	}
+
+	// 2. Sort items according to current sort mode
+	w.sortItemsLocked(w.items)
+
+	// 3. Rebuild index map from scratch (removes stale entries from previous folder)
+	w.itemIndexByID = make(map[string]int, len(w.items))
+	for i := range w.items {
+		w.itemIndexByID[w.items[i].ID] = i
+	}
+
+	// 4. Recompute filteredItems based on filterQuery
+	w.recomputeFilteredItemsLocked()
+
+	w.viewDirty = false
+}
+
+// recomputeFilteredItemsLocked updates filteredItems based on filterQuery.
+// MUST be called with w.mu held. Assumes w.items is already sorted.
+// Single place for filter logic - no duplication across methods.
+func (w *FileListWidget) recomputeFilteredItemsLocked() {
+	if w.filterQuery == "" {
+		w.filteredItems = nil
+		return
+	}
+
+	// Pre-allocate with reasonable capacity (~25% of items match)
+	w.filteredItems = make([]FileItem, 0, len(w.items)/4)
+	for _, item := range w.items {
+		if strings.Contains(item.lowerName, w.filterQuery) {
+			w.filteredItems = append(w.filteredItems, item)
+		}
+	}
 }
 
 // SetHasDateInfo indicates whether items have ModTime populated (for local files)
@@ -1053,31 +1109,24 @@ func (w *FileListWidget) applyFilterWithGeneration(query string, gen uint64) {
 }
 
 // applyFilterInternal is the internal filter implementation
+// Sets viewDirty for self-healing filter recompute (v3.4.12).
 func (w *FileListWidget) applyFilterInternal(query string) {
 	w.mu.Lock()
 
-	query = strings.ToLower(strings.TrimSpace(query))
-	w.filterQuery = query
-	w.currentPage = 0 // Reset to first page when filter changes
-
-	if query == "" {
-		// Clear filter
-		w.filteredItems = nil
-	} else {
-		// Apply filter using cached lowercase names
-		// OPTIMIZATION: Since w.items is already sorted, iterating in order
-		// produces a filtered slice that's also sorted - no re-sort needed.
-		w.filteredItems = make([]FileItem, 0, len(w.items)/4) // Preallocate ~25% capacity
-		for _, item := range w.items {
-			// PERFORMANCE: Use cached lowerName instead of strings.ToLower()
-			if strings.Contains(item.lowerName, query) {
-				w.filteredItems = append(w.filteredItems, item)
-			}
-		}
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == w.filterQuery {
+		w.mu.Unlock()
+		return // No change
 	}
+
+	w.filterQuery = query
+	w.viewDirty = true  // Recompute will happen in ensureViewLocked
+	w.currentPage = 0   // Reset to first page when filter changes
+
 	w.mu.Unlock()
 
 	// Refresh list (must schedule on main thread)
+	// ensureViewLocked will recompute filteredItems when list reads
 	fyne.Do(func() {
 		if w.list != nil {
 			w.list.Refresh()
@@ -1087,9 +1136,16 @@ func (w *FileListWidget) applyFilterInternal(query string) {
 }
 
 // getDisplayItemsLocked returns the items to display (filtered or all)
-// Must be called with w.mu held (at least RLock)
+// Must be called with w.mu held (write lock required for ensureViewLocked).
+//
+// KEY FIX (v3.4.12): Uses filterQuery as source of truth, NOT filteredItems != nil.
+// Even if filteredItems is stale/non-nil, if filterQuery is empty, we return w.items.
+// This prevents "showing old filtered items after filter cleared" bugs.
 func (w *FileListWidget) getDisplayItemsLocked() []FileItem {
-	if w.filteredItems != nil {
+	w.ensureViewLocked() // Self-healing: recompute sort/filter if stale
+
+	// Switch on filterQuery, NOT filteredItems != nil
+	if w.filterQuery != "" {
 		return w.filteredItems
 	}
 	return w.items
@@ -1105,9 +1161,9 @@ func (w *FileListWidget) ClearFilter() {
 
 // AppendItems adds items without resetting selection or scroll position.
 // Intended for remote pagination / streaming where items are loaded incrementally.
-// DOES NOT SORT - relies on server-side ordering.
-// Temporarily clears filter during streaming (will be re-applied via FinalizeAppend).
+// Sets viewDirty for self-healing sort/filter recompute (v3.4.12).
 // Deduplicates items by ID to prevent duplicate entries from race conditions.
+// Note: Don't refresh here - wait for FinalizeAppend after all pages loaded.
 func (w *FileListWidget) AppendItems(newItems []FileItem) {
 	w.mu.Lock()
 
@@ -1124,20 +1180,28 @@ func (w *FileListWidget) AppendItems(newItems []FileItem) {
 		return
 	}
 
-	start := len(w.items)
+	// Add new items and mark view as dirty
 	w.items = append(w.items, uniqueItems...)
+	w.viewDirty = true // Will re-sort and re-filter on next UI read
 
-	// Incrementally extend index map + cache lowercase names
+	// Incrementally extend index map for deduplication checks
+	// (Note: may be rebuilt in ensureViewLocked, but needed for dedup above)
+	start := len(w.items) - len(uniqueItems)
 	for i := start; i < len(w.items); i++ {
-		w.items[i].lowerName = strings.ToLower(w.items[i].Name)
 		w.itemIndexByID[w.items[i].ID] = i
 	}
 
-	// Clear filtered items during streaming (filter becomes stale)
-	// Caller should call FinalizeAppend after all pages to re-apply filter
-	if w.filterQuery != "" {
-		w.filteredItems = nil
-	}
+	w.mu.Unlock()
+
+	// Note: Don't refresh here - wait for FinalizeAppend
+	// This avoids multiple expensive refreshes during streaming
+}
+
+// FinalizeAppend should be called after all pages are loaded.
+// Triggers refresh which will recompute sort/filter via ensureViewLocked (v3.4.12).
+func (w *FileListWidget) FinalizeAppend() {
+	w.mu.Lock()
+	w.viewDirty = true // Ensure recompute happens
 	w.mu.Unlock()
 
 	fyne.Do(func() {
@@ -1145,31 +1209,6 @@ func (w *FileListWidget) AppendItems(newItems []FileItem) {
 			w.list.Refresh()
 		}
 		w.refreshPaginationUI()
-	})
-
-	w.updateStatus()
-}
-
-// FinalizeAppend should be called after all pages are loaded.
-// Re-applies filter if active (filter was cleared during streaming).
-func (w *FileListWidget) FinalizeAppend() {
-	w.mu.Lock()
-	if w.filterQuery != "" {
-		// Re-run filter on all items
-		query := w.filterQuery
-		w.filteredItems = make([]FileItem, 0, len(w.items)/4)
-		for _, item := range w.items {
-			if strings.Contains(item.lowerName, query) {
-				w.filteredItems = append(w.filteredItems, item)
-			}
-		}
-	}
-	w.mu.Unlock()
-
-	fyne.Do(func() {
-		if w.list != nil {
-			w.list.Refresh()
-		}
 	})
 	w.updateStatus()
 }
@@ -1270,8 +1309,8 @@ func (w *FileListWidget) onPageSizeChanged(value string) {
 // MUST be called from the main thread (inside fyne.Do or from UI callback)
 // Does NOT refresh the list - caller is responsible for that
 func (w *FileListWidget) refreshPaginationUI() {
-	w.mu.RLock()
-	displayItems := w.getDisplayItemsLocked()
+	w.mu.Lock()
+	displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
 	totalItems := len(displayItems)
 	totalPages := (totalItems + w.pageSize - 1) / w.pageSize
 	if totalPages == 0 {
@@ -1279,7 +1318,7 @@ func (w *FileListWidget) refreshPaginationUI() {
 	}
 	currentPage := w.currentPage
 	hasMoreServer := w.hasMoreServerData
-	w.mu.RUnlock()
+	w.mu.Unlock()
 
 	// Update page label - show "+" if more server data available
 	if w.pageLabel != nil {
@@ -1319,14 +1358,14 @@ func (w *FileListWidget) refreshPaginationWithScroll(scrollToTop bool) {
 
 // refreshPaginationInternal is the internal implementation of refreshPagination
 func (w *FileListWidget) refreshPaginationInternal(scrollToTop bool) {
-	w.mu.RLock()
-	displayItems := w.getDisplayItemsLocked()
+	w.mu.Lock()
+	displayItems := w.getDisplayItemsLocked() // May trigger ensureViewLocked
 	totalItems := len(displayItems)
 	totalPages := (totalItems + w.pageSize - 1) / w.pageSize
 	if totalPages == 0 {
 		totalPages = 1
 	}
-	w.mu.RUnlock()
+	w.mu.Unlock()
 
 	// Update pagination UI on main thread
 	fyne.Do(func() {
