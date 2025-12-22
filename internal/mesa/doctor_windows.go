@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -354,6 +355,12 @@ func printPEImports(dllPath string) {
 	}
 }
 
+// Windows API for GetModuleHandleW
+var (
+	kernel32           = syscall.NewLazyDLL("kernel32.dll")
+	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
+)
+
 // printLoadedModules shows which OpenGL-related DLLs are currently loaded in the process
 // This is critical for diagnosing whether Mesa's opengl32.dll or System32's is being used
 func printLoadedModules(when string) {
@@ -368,8 +375,10 @@ func printLoadedModules(when string) {
 			continue
 		}
 
-		handle, err := windows.GetModuleHandle(namePtr)
-		if err != nil || handle == 0 {
+		// Call GetModuleHandleW directly
+		ret, _, _ := procGetModuleHandleW.Call(uintptr(unsafe.Pointer(namePtr)))
+		handle := windows.Handle(ret)
+		if handle == 0 {
 			fmt.Printf("  %s: NOT LOADED in process\n", dllName)
 			continue
 		}
