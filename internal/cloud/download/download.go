@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -128,11 +129,27 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		OutputWriter:     params.OutputWriter,
 	}
 
+	// TIMING: Enable with RESCALE_TIMING=1 to diagnose Windows download slowness
+	timing := os.Getenv("RESCALE_TIMING") == "1"
+	var downloadStart time.Time
+	if timing {
+		downloadStart = time.Now()
+	}
+
 	if err := downloader.Download(ctx, downloadParams); err != nil {
 		return fmt.Errorf("%s download failed: %w", storageInfo.StorageType, err)
 	}
 
+	if timing {
+		fmt.Fprintf(os.Stderr, "[TIMING] Download transfer complete: %v\n", time.Since(downloadStart).Round(time.Millisecond))
+	}
+
 	// Verify checksum if available
+	var checksumStart time.Time
+	if timing {
+		checksumStart = time.Now()
+	}
+
 	if err := verifyChecksum(params.LocalPath, fileInfo.FileChecksums); err != nil {
 		if params.SkipChecksum {
 			// Skip mode: warn but don't fail
@@ -142,6 +159,10 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 			// Strict mode (default): fail on checksum mismatch
 			return fmt.Errorf("checksum verification failed for %s: %w\n\nTo download despite checksum mismatch, use --skip-checksum flag (not recommended)", params.LocalPath, err)
 		}
+	}
+
+	if timing {
+		fmt.Fprintf(os.Stderr, "[TIMING] Checksum verification: %v\n", time.Since(checksumStart).Round(time.Millisecond))
 	}
 
 	return nil

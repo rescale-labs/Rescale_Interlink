@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -58,16 +57,10 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := GetContext()
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			// Fetch core types (by default active only, --all includes inactive)

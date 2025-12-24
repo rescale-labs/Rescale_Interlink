@@ -64,16 +64,10 @@ Example:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -143,16 +137,10 @@ Example:
 				return fmt.Errorf("--job-id is required")
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -241,16 +229,10 @@ Example:
 				}
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -301,6 +283,7 @@ func newJobsSubmitCmd() *cobra.Command {
 	var scriptFile string
 	var jobID string
 	var inputFiles []string
+	var automations []string // v3.6.1: Automation IDs to attach
 	var createOnly bool
 	var submitMode bool
 	var endToEnd bool
@@ -424,16 +407,10 @@ Examples:
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -501,6 +478,16 @@ Examples:
 				}
 			}
 
+			// v3.6.1: Add CLI-specified automations to job request
+			if len(automations) > 0 {
+				for _, autoID := range automations {
+					jobReq.JobAutomations = append(jobReq.JobAutomations, models.JobAutomationRequest{
+						AutomationID: autoID,
+					})
+				}
+				logger.Info().Strs("automations", automations).Msg("Attaching automations to job")
+			}
+
 			// Route to appropriate workflow
 			if endToEnd {
 				return runEndToEndJobWorkflow(ctx, jobReq, inputFiles, autoDownload, noTar, maxConcurrent, apiClient, logger)
@@ -524,6 +511,7 @@ Examples:
 	cmd.Flags().BoolVar(&noTar, "no-tar", false, "Skip tarball creation for single file uploads")
 	cmd.Flags().IntVarP(&maxConcurrent, "max-concurrent", "m", constants.DefaultMaxConcurrent,
 		fmt.Sprintf("Maximum concurrent file uploads (%d-%d)", constants.MinMaxConcurrent, constants.MaxMaxConcurrent))
+	cmd.Flags().StringSliceVar(&automations, "automation", nil, "Automation ID(s) to attach (can specify multiple)")
 
 	return cmd
 }
@@ -561,16 +549,10 @@ Example:
 				}
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -619,16 +601,10 @@ Example:
 				return fmt.Errorf("--job-id is required")
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -719,16 +695,10 @@ Example:
 				return fmt.Errorf("--job-id is required")
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -838,16 +808,10 @@ Examples:
 				return fmt.Errorf("--job-id is required")
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()

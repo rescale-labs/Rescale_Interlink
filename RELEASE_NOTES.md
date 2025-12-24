@@ -1,5 +1,70 @@
 # Release Notes - Rescale Interlink
 
+## v3.6.0 - December 23, 2025
+
+### Architectural Foundation - Local Filesystem Abstraction
+
+This release addresses P0 architectural debt by consolidating duplicated local filesystem operations into a unified `internal/localfs/` package.
+
+#### New Package: `internal/localfs/`
+
+Created a unified local filesystem abstraction that eliminates code duplication across CLI, GUI, and core packages:
+
+**Files Created:**
+- `internal/localfs/hidden.go` - `IsHidden()`, `IsHiddenName()` functions
+- `internal/localfs/options.go` - `ListOptions`, `WalkOptions` structs
+- `internal/localfs/browser.go` - `ListDirectory()`, `Walk()`, `WalkFiles()` functions
+- `internal/localfs/localfs_test.go` - Comprehensive unit tests
+
+**Functions:**
+```go
+func IsHidden(path string) bool         // Check if path is hidden (starts with .)
+func IsHiddenName(name string) bool     // Check if filename is hidden
+func ListDirectory(path string, opts ListOptions) ([]FileEntry, error)
+func Walk(root string, opts WalkOptions, fn WalkFunc) error
+func WalkFiles(root string, opts WalkOptions, fn WalkFunc) error
+```
+
+#### Hidden File Detection Consolidation
+
+Migrated 9 duplicate `strings.HasPrefix(name, ".")` checks to use the unified `localfs.IsHidden()`:
+
+| File | Change |
+|------|--------|
+| `internal/util/multipart/multipart.go` | Uses `localfs.IsHidden()` |
+| `internal/cli/folder_upload_helper.go` | Uses `localfs.IsHidden()` |
+| `internal/core/engine.go` | Uses `localfs.IsHidden()` (4 locations) |
+| `internal/gui/scan_preview.go` | Uses `localfs.IsHiddenName()` |
+| `internal/gui/local_browser.go` | Uses `localfs.IsHiddenName()` |
+
+#### GUI Page Size Consistency
+
+- Removed `SetPageSize(200)` override in `remote_browser.go`
+- Remote browser now uses default page size (25) for consistency with local browser
+
+#### Windows Download Timing Instrumentation
+
+Added timing instrumentation to diagnose end-of-download slowness on Windows:
+
+- Enable with `RESCALE_TIMING=1` environment variable
+- Outputs:
+  - `[TIMING] Download transfer complete: Xms`
+  - `[TIMING] Checksum verification: Xms`
+
+**Root Cause Hypothesis:** The `verifyChecksum()` function reads the entire file after download to compute SHA-512. For large files, this causes the "slow at end" behavior users reported.
+
+#### Files Modified
+
+- `internal/cloud/download/download.go` - Added timing instrumentation
+- `internal/gui/remote_browser.go` - Removed page size override
+- `internal/gui/local_browser.go` - Uses localfs package
+- `internal/gui/scan_preview.go` - Uses localfs package
+- `internal/core/engine.go` - Uses localfs package
+- `internal/cli/folder_upload_helper.go` - Uses localfs package
+- `internal/util/multipart/multipart.go` - Uses localfs package
+
+---
+
 ## v3.5.0 - December 22, 2025
 
 ### File Browser Robustness - Definitive Fix for Leftover Entries Bug
