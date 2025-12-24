@@ -472,6 +472,11 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 	// This prevents GUI locking from concurrent container modifications
 	fbt.initProgressUIWithFiles(total, "upload", allFiles)
 
+	// v3.6.1: Update status bar to reflect upload phase (fixes stale "Scanning..." message)
+	fyne.Do(func() {
+		fbt.statusBar.SetProgress(fmt.Sprintf("Uploading %d file(s)...", total))
+	})
+
 	// Create resource manager and transfer manager (like CLI)
 	// Use default config with auto-scaling enabled
 	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
@@ -761,6 +766,11 @@ func (fbt *FileBrowserTab) executeDownloadConcurrent(items []FileItem, destPath 
 	// Initialize progress UI and PRE-CREATE all progress bars on main thread
 	// This prevents GUI locking from concurrent container modifications
 	fbt.initProgressUIForDownloads(total, allFiles)
+
+	// v3.6.1: Update status bar to reflect download phase (fixes stale "Scanning..." message)
+	fyne.Do(func() {
+		fbt.statusBar.SetProgress(fmt.Sprintf("Downloading %d file(s)...", total))
+	})
 
 	// Create resource manager and transfer manager (like CLI)
 	// Use default config with auto-scaling enabled

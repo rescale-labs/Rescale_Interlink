@@ -285,6 +285,7 @@ func AddCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(newJobsCmd())
 	rootCmd.AddCommand(newHardwareCmd())
 	rootCmd.AddCommand(newSoftwareCmd())
+	rootCmd.AddCommand(newAutomationsCmd()) // v3.6.1: Automation discovery
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newDaemonCmd()) // v3.4.0: Background service for auto-downloading completed jobs
 

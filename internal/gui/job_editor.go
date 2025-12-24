@@ -40,8 +40,10 @@ type JobEditorDialog struct {
 	walltimeEntry     *widget.Entry
 
 	// Project Configuration
-	projectIDEntry *widget.Entry
-	tagsEntry      *widget.Entry
+	projectIDEntry    *widget.Entry
+	tagsEntry         *widget.Entry
+	automationsCheck  *widget.CheckGroup // v3.6.1: Automation IDs (multi-select)
+	automationsIDMap  map[string]string  // v3.6.1: Display name → ID mapping
 
 	// License Configuration
 	licenseTypeSelect *widget.Select
@@ -143,6 +145,37 @@ func (je *JobEditorDialog) buildUI() {
 		je.tagsEntry.SetText(strings.Join(job.Tags, ", "))
 	}
 
+	// v3.6.1: Automations (multi-select checkgroup)
+	cachedAutomations := je.apiCache.GetAutomations()
+	je.automationsIDMap = make(map[string]string)
+	var automationOptions []string
+
+	if len(cachedAutomations) > 0 {
+		// Use cached automations
+		for _, auto := range cachedAutomations {
+			displayName := fmt.Sprintf("%s (%s)", auto.Name, auto.ID)
+			automationOptions = append(automationOptions, displayName)
+			je.automationsIDMap[displayName] = auto.ID
+		}
+	}
+
+	je.automationsCheck = widget.NewCheckGroup(automationOptions, nil)
+
+	// Pre-select any automations that are already set on the job
+	if len(job.Automations) > 0 {
+		var selected []string
+		for _, autoID := range job.Automations {
+			// Find display name for this ID
+			for displayName, id := range je.automationsIDMap {
+				if id == autoID {
+					selected = append(selected, displayName)
+					break
+				}
+			}
+		}
+		je.automationsCheck.SetSelected(selected)
+	}
+
 	// License Configuration Section
 	licenseTypes := GetCommonLicenseTypes()
 	var licenseTypeNames []string
@@ -225,6 +258,7 @@ func (je *JobEditorDialog) buildUI() {
 			{Text: "Project", Widget: widget.NewLabel("")},
 			{Text: "Project ID", Widget: je.projectIDEntry},
 			{Text: "Tags (comma-separated)", Widget: je.tagsEntry},
+			{Text: "Automations", Widget: je.automationsCheck}, // v3.6.1
 
 			// License
 			{Text: "License Settings", Widget: widget.NewLabel("")},
@@ -307,6 +341,19 @@ func (je *JobEditorDialog) handleSave() {
 		}
 	} else {
 		updatedJob.Tags = nil
+	}
+
+	// v3.6.1: Get selected automations from CheckGroup
+	selectedAutomations := je.automationsCheck.Selected
+	if len(selectedAutomations) > 0 {
+		updatedJob.Automations = nil // Reset
+		for _, displayName := range selectedAutomations {
+			if autoID, ok := je.automationsIDMap[displayName]; ok {
+				updatedJob.Automations = append(updatedJob.Automations, autoID)
+			}
+		}
+	} else {
+		updatedJob.Automations = nil
 	}
 
 	// Build license JSON (optional)

@@ -22,6 +22,7 @@ type JobSpec struct {
 	OnDemandLicenseSeller string
 	Tags                  []string // Job tags (added in v1.0.0)
 	ProjectID             string   // Project ID to assign job to (added in v1.0.0)
+	Automations           []string // Automation IDs to attach (added in v3.6.1)
 }
 
 // JobState represents the state of a job in the pipeline
@@ -42,11 +43,12 @@ type JobState struct {
 
 // JobRequest represents a Rescale API v3 job creation request
 type JobRequest struct {
-	Name          string               `json:"name"`
-	JobAnalyses   []JobAnalysisRequest `json:"jobanalyses"`
-	IsLowPriority bool                 `json:"isLowPriority"`
-	Tags          []string             `json:"tags,omitempty"`
-	ProjectID     string               `json:"projectId,omitempty"`
+	Name           string                 `json:"name"`
+	JobAnalyses    []JobAnalysisRequest   `json:"jobanalyses"`
+	IsLowPriority  bool                   `json:"isLowPriority"`
+	Tags           []string               `json:"tags,omitempty"`
+	ProjectID      string                 `json:"projectId,omitempty"`
+	JobAutomations []JobAutomationRequest `json:"jobAutomations,omitempty"` // v3.6.1
 }
 
 // JobAnalysisRequest represents an analysis within a job
@@ -179,4 +181,34 @@ func (jf *JobFile) ToCloudFile() *CloudFile {
 		FileChecksums:        jf.FileChecksums,
 		IsUploaded:           true, // Job output files are always uploaded
 	}
+}
+
+// Automation represents a Rescale automation entity.
+// Automations are pre-configured scripts that can be attached to jobs
+// to run before (pre) or after (post) job execution.
+// Added in v3.6.1.
+type Automation struct {
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	ExecuteOn            string   `json:"executeOn"` // "pre" or "post"
+	ScriptName           string   `json:"scriptName"`
+	ExecutionFrequency   int      `json:"executionFrequency"`
+	EnvironmentVariables []string `json:"environmentVariables,omitempty"`
+	Description          string   `json:"description,omitempty"`
+	ThumbnailURL         string   `json:"thumbnailUrl,omitempty"`
+	OSFamily             string   `json:"osFamily,omitempty"`
+	AnalysisDependencies []string `json:"analysisDependencies,omitempty"`
+	Command              string   `json:"command,omitempty"`
+}
+
+// JobAutomation represents an automation attached to a job (from API response).
+type JobAutomation struct {
+	Automation           Automation        `json:"automation"`
+	EnvironmentVariables map[string]string `json:"environmentVariables,omitempty"`
+}
+
+// JobAutomationRequest is used when creating/updating a job with automations.
+type JobAutomationRequest struct {
+	AutomationID         string            `json:"automation"` // Just the automation ID
+	EnvironmentVariables map[string]string `json:"environmentVariables,omitempty"`
 }

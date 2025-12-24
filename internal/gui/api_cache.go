@@ -10,6 +10,7 @@ import (
 type APICache struct {
 	coreTypes     []models.CoreType
 	analysisCodes []string
+	automations   []models.Automation // v3.6.1
 	isLoading     bool
 	loadError     error
 	mu            sync.RWMutex
@@ -43,6 +44,20 @@ func (c *APICache) GetAnalysisCodes() []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.analysisCodes
+}
+
+// GetAutomations returns cached automations (v3.6.1)
+func (c *APICache) GetAutomations() []models.Automation {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.automations
+}
+
+// SetAutomations sets the cached automations (v3.6.1)
+func (c *APICache) SetAutomations(automations []models.Automation) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.automations = automations
 }
 
 // getDefaultCoreTypes returns fallback core types

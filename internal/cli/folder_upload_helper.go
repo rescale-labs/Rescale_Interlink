@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/diskspace"
+	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/progress"
 )
@@ -120,8 +121,7 @@ func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string
 		}
 
 		// Check if hidden
-		baseName := filepath.Base(path)
-		if !includeHidden && strings.HasPrefix(baseName, ".") {
+		if !includeHidden && localfs.IsHidden(path) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

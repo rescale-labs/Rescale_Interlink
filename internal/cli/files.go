@@ -9,7 +9,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/util/filter"
 )
@@ -134,16 +133,10 @@ Examples:
 				}
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			// Use helper function with duplicate mode
@@ -200,16 +193,10 @@ Examples:
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			// Validate conflict flags (only one can be set)
@@ -279,16 +266,10 @@ Examples:
 
 			logger.Info().Msg("Listing files")
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -475,16 +456,10 @@ Example:
 				Int("count", len(fileIDs)).
 				Msg("Deleting files")
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()

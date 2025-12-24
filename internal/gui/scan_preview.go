@@ -12,6 +12,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+
+	"github.com/rescale/rescale-int/internal/localfs"
 )
 
 // Global variable to track if a scan preview dialog is already showing
@@ -154,7 +156,7 @@ func (sp *ScanPreviewDialog) scanDirectories() ScanPreviewResult {
 		}
 
 		// Skip hidden directories
-		if strings.HasPrefix(entry.Name(), ".") {
+		if localfs.IsHiddenName(entry.Name()) {
 			continue
 		}
 
