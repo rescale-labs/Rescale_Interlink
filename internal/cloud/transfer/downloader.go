@@ -111,18 +111,24 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		}
 	}
 
+	// v3.6.2: Log thread allocation
+	threads := 1
+	if params.TransferHandle != nil {
+		threads = params.TransferHandle.GetThreads()
+	}
+	cloud.TimingLog(params.OutputWriter, "Download threads: %d", threads)
+
 	// Log download start if output writer is provided
 	if params.OutputWriter != nil {
 		filename := filepath.Base(params.LocalPath)
-		threads := 1
-		if params.TransferHandle != nil {
-			threads = params.TransferHandle.GetThreads()
-		}
 		if threads > 1 {
 			fmt.Fprintf(params.OutputWriter, "Starting download of %s with %d concurrent threads\n",
 				filename, threads)
 		}
 	}
+
+	// v3.6.2: Track format detection
+	formatTimer := cloud.StartTimer(params.OutputWriter, "Format detection")
 
 	// Check if provider supports format detection
 	formatDetector, hasFormatDetection := d.provider.(StreamingConcurrentDownloader)
@@ -141,9 +147,13 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 			if params.OutputWriter != nil {
 				fmt.Fprintf(params.OutputWriter, "Note: Format detection failed (%v), inferred format version %d\n", err, formatVersion)
 			}
-		} else if params.OutputWriter != nil {
+			formatTimer.StopWithMessage("fallback version=%d", formatVersion)
+		} else {
 			// v3.4.0: Show successful format detection result
-			fmt.Fprintf(params.OutputWriter, "Format detection successful: version=%d\n", formatVersion)
+			if params.OutputWriter != nil {
+				fmt.Fprintf(params.OutputWriter, "Format detection successful: version=%d\n", formatVersion)
+			}
+			formatTimer.StopWithMessage("version=%d part_size=%s", formatVersion, cloud.FormatBytes(partSize))
 		}
 
 		// Use IV from metadata if available (for legacy format), otherwise use from FileInfo
@@ -183,6 +193,8 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 
 	// Provider doesn't support format detection - fall back to legacy behavior
 	// Use IV presence to determine format
+	formatTimer.StopWithMessage("no format detection support, using IV presence")
+
 	prep := &DownloadPrep{
 		Params:         params,
 		TransferHandle: params.TransferHandle,

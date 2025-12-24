@@ -959,6 +959,112 @@ func (c *Client) MoveFileToFolder(ctx context.Context, fileID, folderID string) 
 	return nil
 }
 
+// FileTag represents a tag on a file
+// v3.6.2: File tag management
+type FileTag struct {
+	Name           string `json:"name"`
+	NormalizedName string `json:"normalizedName"`
+}
+
+// GetFileTags retrieves all tags for a file
+// v3.6.2: File tag management - uses dedicated /tags/ endpoint
+func (c *Client) GetFileTags(ctx context.Context, fileID string) ([]string, error) {
+	path := fmt.Sprintf("/api/v3/files/%s/tags/", fileID)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file tags: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, body)
+	}
+
+	var tags []FileTag
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, fmt.Errorf("failed to decode tags response: %w", err)
+	}
+
+	// Extract just the names
+	result := make([]string, len(tags))
+	for i, t := range tags {
+		result[i] = t.Name
+	}
+	return result, nil
+}
+
+// AddFileTags adds tags to a file (one POST per tag)
+// v3.6.2: File tag management - uses dedicated /tags/ endpoint
+func (c *Client) AddFileTags(ctx context.Context, fileID string, tagsToAdd []string) error {
+	path := fmt.Sprintf("/api/v3/files/%s/tags/", fileID)
+
+	for _, tag := range tagsToAdd {
+		requestBody := map[string]string{"name": tag}
+		resp, err := c.doRequest(ctx, "POST", path, requestBody)
+		if err != nil {
+			return fmt.Errorf("failed to add tag %q: %w", tag, err)
+		}
+		resp.Body.Close()
+
+		// Accept 200, 201, 202 (Accepted), or 204 as success
+		if resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusCreated &&
+			resp.StatusCode != nethttp.StatusAccepted && resp.StatusCode != nethttp.StatusNoContent {
+			return fmt.Errorf("failed to add tag %q: status %d", tag, resp.StatusCode)
+		}
+	}
+	return nil
+}
+
+// RemoveFileTags removes specific tags from a file (one DELETE per tag)
+// v3.6.2: File tag management - uses dedicated /tags/ endpoint
+func (c *Client) RemoveFileTags(ctx context.Context, fileID string, tagsToRemove []string) error {
+	path := fmt.Sprintf("/api/v3/files/%s/tags/", fileID)
+
+	for _, tag := range tagsToRemove {
+		requestBody := map[string]string{"name": tag}
+		resp, err := c.doRequest(ctx, "DELETE", path, requestBody)
+		if err != nil {
+			return fmt.Errorf("failed to remove tag %q: %w", tag, err)
+		}
+		resp.Body.Close()
+
+		// Accept 200, 202 (Accepted), or 204 as success
+		if resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusAccepted &&
+			resp.StatusCode != nethttp.StatusNoContent {
+			return fmt.Errorf("failed to remove tag %q: status %d", tag, resp.StatusCode)
+		}
+	}
+	return nil
+}
+
+// UpdateFileTags replaces all tags on a file with the given tags
+// v3.6.2: File tag management - clears existing tags and adds new ones
+func (c *Client) UpdateFileTags(ctx context.Context, fileID string, newTags []string) error {
+	// Get current tags
+	currentTags, err := c.GetFileTags(ctx, fileID)
+	if err != nil {
+		return fmt.Errorf("failed to get current tags: %w", err)
+	}
+
+	// Remove all existing tags
+	if len(currentTags) > 0 {
+		if err := c.RemoveFileTags(ctx, fileID, currentTags); err != nil {
+			return fmt.Errorf("failed to clear existing tags: %w", err)
+		}
+	}
+
+	// Add new tags
+	if len(newTags) > 0 {
+		if err := c.AddFileTags(ctx, fileID, newTags); err != nil {
+			return fmt.Errorf("failed to add new tags: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // DeleteFolder deletes a folder
 func (c *Client) DeleteFolder(ctx context.Context, folderID string) error {
 	path := fmt.Sprintf("/api/v3/folders/%s/", folderID)

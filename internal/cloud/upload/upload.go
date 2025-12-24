@@ -66,6 +66,9 @@ type UploadParams struct {
 //
 // Returns the registered CloudFile on success, or an error on failure.
 func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, error) {
+	// v3.6.2: Track overall upload timing
+	overallTimer := cloud.StartTimer(params.OutputWriter, "Upload total")
+
 	// Validate required parameters
 	if params.LocalPath == "" {
 		return nil, fmt.Errorf("local path is required")
@@ -83,6 +86,9 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		return nil, fmt.Errorf("cannot upload a directory: %s", params.LocalPath)
 	}
 
+	// v3.6.2: Log file info
+	cloud.TimingLog(params.OutputWriter, "File: %s (%s)", filepath.Base(params.LocalPath), cloud.FormatBytes(fileInfo.Size()))
+
 	// Start SHA-512 hash calculation concurrently - it runs in parallel with
 	// credential fetching, provider creation, and the upload itself.
 	// The hash is only needed for file registration AFTER upload completes.
@@ -96,6 +102,9 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		hash, err := encryption.CalculateSHA512(params.LocalPath)
 		hashChan <- hashResult{hash: hash, err: err}
 	}()
+
+	// v3.6.2: Track initialization phase
+	initTimer := cloud.StartTimer(params.OutputWriter, "Upload initialization")
 
 	// Get the global credential manager (caches user profile, credentials, and folders)
 	credManager := credentials.GetManager(params.APIClient)
@@ -119,20 +128,32 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
 
+	initTimer.StopWithMessage("backend=%s", profile.DefaultStorage.StorageType)
+
 	var result *cloud.UploadResult
+
+	// v3.6.2: Track upload transfer phase
+	uploadTimer := cloud.StartTimer(params.OutputWriter, "Upload transfer")
 
 	// Upload based on encryption mode
 	if params.PreEncrypt {
 		// Pre-encrypt mode: use PreEncryptUploader interface
+		cloud.TimingLog(params.OutputWriter, "Mode: pre-encrypt (legacy compatible)")
 		result, err = uploadPreEncrypt(ctx, provider, params, fileInfo.Size())
 	} else {
 		// Streaming mode: use StreamingConcurrentUploader interface
+		cloud.TimingLog(params.OutputWriter, "Mode: streaming (concurrent)")
 		result, err = uploadStreaming(ctx, provider, params, fileInfo.Size())
 	}
 
 	if err != nil {
 		return nil, fmt.Errorf("%s upload failed: %w", profile.DefaultStorage.StorageType, err)
 	}
+
+	uploadTimer.StopWithThroughput(fileInfo.Size())
+
+	// v3.6.2: Track hash wait time
+	hashWaitTimer := cloud.StartTimer(params.OutputWriter, "Hash wait")
 
 	// Wait for hash calculation to complete (started at beginning of function)
 	// For large files, the hash calculation runs in parallel with the entire upload,
@@ -142,6 +163,8 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		return nil, fmt.Errorf("failed to calculate file hash: %w", hashRes.err)
 	}
 	fileHash := hashRes.hash
+
+	hashWaitTimer.Stop()
 
 	// Determine target folder
 	targetFolder := folders.MyLibrary
@@ -175,6 +198,9 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		},
 	}
 
+	// v3.6.2: Track file registration
+	regTimer := cloud.StartTimer(params.OutputWriter, "File registration")
+
 	// Register file with Rescale
 	cloudFile, err := params.APIClient.RegisterFile(ctx, fileReq)
 	if err != nil {
@@ -194,6 +220,11 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		}
 		return nil, fmt.Errorf("failed to register file %s: %w", fileName, err)
 	}
+
+	regTimer.StopWithMessage("file_id=%s", cloudFile.ID)
+
+	// v3.6.2: Log overall upload completion
+	overallTimer.StopWithThroughput(fileInfo.Size())
 
 	return cloudFile, nil
 }
@@ -226,6 +257,9 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		return nil, fmt.Errorf("provider does not support streaming upload")
 	}
 
+	// v3.6.2: Track streaming upload init
+	streamInitTimer := cloud.StartTimer(params.OutputWriter, "Streaming upload init")
+
 	// Initialize streaming upload
 	initParams := transfer.StreamingUploadInitParams{
 		LocalPath:    params.LocalPath,
@@ -237,6 +271,8 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize streaming upload: %w", err)
 	}
+
+	streamInitTimer.StopWithMessage("parts=%d part_size=%s", uploadState.TotalParts, cloud.FormatBytes(int64(uploadState.PartSize)))
 
 	// Open file
 	file, err := os.Open(params.LocalPath)
@@ -251,6 +287,9 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
 		concurrency = params.TransferHandle.GetThreads()
 	}
+
+	// v3.6.2: Log concurrency
+	cloud.TimingLog(params.OutputWriter, "Upload workers: %d threads", concurrency)
 
 	// v3.4.1: Larger buffer to feed parallel uploaders (concurrency * 3 parts)
 	// This allows encryption to run ahead and keep all upload workers busy
@@ -437,11 +476,16 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		parts[idx] = part
 	}
 
+	// v3.6.2: Track completion phase
+	completeTimer := cloud.StartTimer(params.OutputWriter, "Streaming upload complete")
+
 	// Complete upload
 	result, err := streamingUploader.CompleteStreamingUpload(ctx, uploadState, parts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete streaming upload: %w", err)
 	}
+
+	completeTimer.StopWithMessage("parts=%d", len(parts))
 
 	return result, nil
 }
@@ -467,6 +511,9 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 	}
 	defer os.Remove(encryptedPath)
 
+	// v3.6.2: Track encryption phase
+	encryptTimer := cloud.StartTimer(params.OutputWriter, "Pre-encryption")
+
 	// Encrypt file
 	if params.OutputWriter != nil {
 		fmt.Fprintf(params.OutputWriter, "Encrypting file (%s)...\n", filepath.Base(params.LocalPath))
@@ -474,6 +521,8 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 	if err := encryption.EncryptFile(params.LocalPath, encryptedPath, encryptionKey, iv); err != nil {
 		return nil, fmt.Errorf("failed to encrypt file: %w", err)
 	}
+
+	encryptTimer.StopWithThroughput(fileSize)
 
 	// Build upload params (providers stat the encrypted file themselves)
 	uploadParams := transfer.EncryptedFileUploadParams{
@@ -488,11 +537,16 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		OutputWriter:     params.OutputWriter,
 	}
 
+	// v3.6.2: Track upload phase
+	uploadTimer := cloud.StartTimer(params.OutputWriter, "Pre-encrypt upload")
+
 	// Upload encrypted file
 	result, err := preEncryptUploader.UploadEncryptedFile(ctx, uploadParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload encrypted file: %w", err)
 	}
+
+	uploadTimer.StopWithThroughput(fileSize)
 
 	// Clean up resume state
 	state.DeleteUploadState(params.LocalPath)
