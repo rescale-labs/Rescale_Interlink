@@ -17,7 +17,7 @@ import (
 func newFilesCmd() *cobra.Command {
 	filesCmd := &cobra.Command{
 		Use:   "files",
-		Short: "File operations (upload, download, list, delete)",
+		Short: "File operations (upload, download, list, delete, tags)",
 		Long:  `Commands for managing files on the Rescale platform.`,
 	}
 
@@ -26,6 +26,7 @@ func newFilesCmd() *cobra.Command {
 	filesCmd.AddCommand(newFilesDownloadCmd())
 	filesCmd.AddCommand(newFilesListCmd())
 	filesCmd.AddCommand(newFilesDeleteCmd())
+	filesCmd.AddCommand(newFilesTagsCmd()) // v3.6.2
 
 	return filesCmd
 }
@@ -487,4 +488,151 @@ Example:
 	cmd.Flags().BoolVarP(&confirm, "confirm", "y", false, "Skip confirmation prompt")
 
 	return cmd
+}
+
+// newFilesTagsCmd creates the 'files tags' command group for managing file tags.
+// v3.6.2: File tag management
+func newFilesTagsCmd() *cobra.Command {
+	tagsCmd := &cobra.Command{
+		Use:   "tags",
+		Short: "Manage file tags",
+		Long: `Commands for managing tags on Rescale files.
+
+Tags help organize and categorize files for easier discovery.
+
+Examples:
+  rescale-int files tags list BZRKLj
+  rescale-int files tags add BZRKLj simulation cfd v2
+  rescale-int files tags remove BZRKLj draft
+  rescale-int files tags set BZRKLj final production`,
+	}
+
+	tagsCmd.AddCommand(newFilesTagsListCmd())
+	tagsCmd.AddCommand(newFilesTagsAddCmd())
+	tagsCmd.AddCommand(newFilesTagsRemoveCmd())
+	tagsCmd.AddCommand(newFilesTagsSetCmd())
+
+	return tagsCmd
+}
+
+// newFilesTagsListCmd creates the 'files tags list' command.
+func newFilesTagsListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list <file-id>",
+		Short: "List tags for a file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fileID := args[0]
+
+			apiClient, err := getAPIClient()
+			if err != nil {
+				return err
+			}
+
+			ctx := GetContext()
+
+			// Get tags via dedicated /tags/ endpoint
+			tags, err := apiClient.GetFileTags(ctx, fileID)
+			if err != nil {
+				return fmt.Errorf("failed to get file tags: %w", err)
+			}
+
+			if len(tags) == 0 {
+				fmt.Println("No tags")
+				return nil
+			}
+
+			fmt.Printf("Tags for file %s:\n", fileID)
+			for _, tag := range tags {
+				fmt.Printf("  - %s\n", tag)
+			}
+
+			return nil
+		},
+	}
+}
+
+// newFilesTagsAddCmd creates the 'files tags add' command.
+func newFilesTagsAddCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add <file-id> <tag> [tag...]",
+		Short: "Add tags to a file (preserves existing tags)",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fileID := args[0]
+			tagsToAdd := args[1:]
+
+			apiClient, err := getAPIClient()
+			if err != nil {
+				return err
+			}
+
+			ctx := GetContext()
+
+			if err := apiClient.AddFileTags(ctx, fileID, tagsToAdd); err != nil {
+				return fmt.Errorf("failed to add tags: %w", err)
+			}
+
+			fmt.Printf("✓ Added %d tag(s) to file %s\n", len(tagsToAdd), fileID)
+			return nil
+		},
+	}
+}
+
+// newFilesTagsRemoveCmd creates the 'files tags remove' command.
+func newFilesTagsRemoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <file-id> <tag> [tag...]",
+		Short: "Remove tags from a file",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fileID := args[0]
+			tagsToRemove := args[1:]
+
+			apiClient, err := getAPIClient()
+			if err != nil {
+				return err
+			}
+
+			ctx := GetContext()
+
+			if err := apiClient.RemoveFileTags(ctx, fileID, tagsToRemove); err != nil {
+				return fmt.Errorf("failed to remove tags: %w", err)
+			}
+
+			fmt.Printf("✓ Removed %d tag(s) from file %s\n", len(tagsToRemove), fileID)
+			return nil
+		},
+	}
+}
+
+// newFilesTagsSetCmd creates the 'files tags set' command.
+func newFilesTagsSetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set <file-id> [tag...]",
+		Short: "Replace all tags on a file (no tags = clear all)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fileID := args[0]
+			tags := args[1:] // May be empty, which clears all tags
+
+			apiClient, err := getAPIClient()
+			if err != nil {
+				return err
+			}
+
+			ctx := GetContext()
+
+			if err := apiClient.UpdateFileTags(ctx, fileID, tags); err != nil {
+				return fmt.Errorf("failed to set tags: %w", err)
+			}
+
+			if len(tags) == 0 {
+				fmt.Printf("✓ Cleared all tags from file %s\n", fileID)
+			} else {
+				fmt.Printf("✓ Set %d tag(s) on file %s\n", len(tags), fileID)
+			}
+			return nil
+		},
+	}
 }

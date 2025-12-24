@@ -14,6 +14,7 @@ type CloudFile struct {
 	Storage              *CloudFileStorage   `json:"storage,omitempty"`
 	DecryptedSize        int64               `json:"decryptedSize,omitempty"`
 	FileChecksums        []FileChecksum      `json:"fileChecksums,omitempty"`
+	Tags                 []string            `json:"userTags,omitempty"` // v3.6.2: User-defined tags
 }
 
 // CloudFilePathParts represents the storage path for a file

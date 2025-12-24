@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -64,6 +63,9 @@ type DownloadParams struct {
 //
 // Returns nil on success, or an error on failure.
 func DownloadFile(ctx context.Context, params DownloadParams) error {
+	// v3.6.2: Track overall download timing
+	overallTimer := cloud.StartTimer(params.OutputWriter, "Download total")
+
 	// Validate required parameters
 	if params.LocalPath == "" {
 		return fmt.Errorf("local path is required")
@@ -75,6 +77,9 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		return fmt.Errorf("either FileID or FileInfo is required")
 	}
 
+	// v3.6.2: Track initialization phase
+	initTimer := cloud.StartTimer(params.OutputWriter, "Download initialization")
+
 	// Get file metadata (if not already provided)
 	fileInfo := params.FileInfo
 	if fileInfo == nil {
@@ -84,6 +89,9 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 			return fmt.Errorf("failed to get file info: %w", err)
 		}
 	}
+
+	// v3.6.2: Log file info
+	cloud.TimingLog(params.OutputWriter, "File: %s (%s)", fileInfo.Name, cloud.FormatBytes(fileInfo.DecryptedSize))
 
 	// Get the global credential manager (caches user profile and credentials)
 	credManager := credentials.GetManager(params.APIClient)
@@ -104,6 +112,8 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
+
+	initTimer.StopWithMessage("backend=%s", storageInfo.StorageType)
 
 	// Determine the remote path for download
 	remotePath := fileInfo.Path
@@ -129,26 +139,17 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		OutputWriter:     params.OutputWriter,
 	}
 
-	// TIMING: Enable with RESCALE_TIMING=1 to diagnose Windows download slowness
-	timing := os.Getenv("RESCALE_TIMING") == "1"
-	var downloadStart time.Time
-	if timing {
-		downloadStart = time.Now()
-	}
+	// v3.6.2: Track download transfer phase
+	transferTimer := cloud.StartTimer(params.OutputWriter, "Download transfer")
 
 	if err := downloader.Download(ctx, downloadParams); err != nil {
 		return fmt.Errorf("%s download failed: %w", storageInfo.StorageType, err)
 	}
 
-	if timing {
-		fmt.Fprintf(os.Stderr, "[TIMING] Download transfer complete: %v\n", time.Since(downloadStart).Round(time.Millisecond))
-	}
+	transferTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
-	// Verify checksum if available
-	var checksumStart time.Time
-	if timing {
-		checksumStart = time.Now()
-	}
+	// v3.6.2: Track checksum verification phase
+	checksumTimer := cloud.StartTimer(params.OutputWriter, "Checksum verification")
 
 	if err := verifyChecksum(params.LocalPath, fileInfo.FileChecksums); err != nil {
 		if params.SkipChecksum {
@@ -161,9 +162,10 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		}
 	}
 
-	if timing {
-		fmt.Fprintf(os.Stderr, "[TIMING] Checksum verification: %v\n", time.Since(checksumStart).Round(time.Millisecond))
-	}
+	checksumTimer.StopWithThroughput(fileInfo.DecryptedSize)
+
+	// v3.6.2: Log overall completion
+	overallTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
 	return nil
 }
