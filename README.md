@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v3.5.0-green)
+![Status](https://img.shields.io/badge/status-v3.6.0-green)
 
 ---
 
@@ -57,7 +57,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 - **Real-time Logging**: Live log display with filtering and search
 - **Event System**: Professional pub/sub architecture for UI updates
 - **Pipeline Execution**: Full integration with job submission
-- **File Browser** (v2.6.0, enhanced v3.5.0): Two-pane local/remote file browser with:
+- **File Browser** (v2.6.0, enhanced v3.6.0): Two-pane local/remote file browser with:
   - Delete functionality for remote files/folders (local delete via OS file manager)
   - Search/filter by filename
   - Pagination support (default 40 items/page, configurable 20-200)
@@ -67,6 +67,15 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 
 ### Recent Improvements
+
+**v3.6.0 (December 23, 2025) - Architectural Foundation:**
+- **New `internal/localfs/` Package**: Unified local filesystem abstraction
+  - `IsHidden()`, `IsHiddenName()` - consolidated hidden file detection (was duplicated 9 times)
+  - `ListDirectory()`, `Walk()`, `WalkFiles()` - unified directory operations
+- **Hidden File Detection Consolidation**: Migrated all `strings.HasPrefix(name, ".")` patterns to `localfs.IsHidden()`
+- **GUI Page Size Consistency**: Remote browser now uses default page size (25) for consistency
+- **Windows Download Timing**: Added `RESCALE_TIMING=1` instrumentation to diagnose end-of-download slowness
+  - Hypothesis: `verifyChecksum()` reads entire file after download for SHA-512
 
 **v3.5.0 (December 22, 2025) - File Browser Robustness:**
 - **Definitive Fix for Leftover Entries Bug**: Comprehensive rewrite of list rendering
@@ -527,7 +536,7 @@ rescale-int completion fish > ~/.config/fish/completions/rescale-int.fish
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                     rescale-int v3.5.0                        │
+│                     rescale-int v3.6.0                        │
 │                  Unified CLI + GUI Binary                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                               │
@@ -788,6 +797,6 @@ Dinal P. -- early prototyping
 
 ---
 
-**Version**: 3.5.0
+**Version**: 3.6.0
 **Status**: Production Ready, FIPS 140-3 Mandatory
-**Last Updated**: December 22, 2025
+**Last Updated**: December 23, 2025

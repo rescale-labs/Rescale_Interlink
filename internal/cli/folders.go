@@ -59,16 +59,10 @@ Example:
 
 			logger.Info().Str("name", name).Str("parent", parentID).Msg("Creating folder")
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -124,16 +118,10 @@ Example:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -592,16 +580,10 @@ Example:
 
 			logger.Info().Str("folder_id", folderID).Msg("Deleting folder")
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()
@@ -702,16 +684,10 @@ Examples:
 				return fmt.Errorf("only one of --overwrite, --skip, or --merge can be specified")
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()

@@ -27,6 +27,9 @@ type SGEMetadata struct {
 	Tags      []string
 	ProjectID string
 
+	// Automations (v3.6.1)
+	Automations []string // Automation IDs to attach to the job
+
 	// Advanced settings
 	InboundSSHCIDR             string
 	PublicKey                  string
@@ -62,6 +65,7 @@ func NewSGEParser() *SGEParser {
 			"license":               regexp.MustCompile(`^#USE_RESCALE_LICENSE\s+(true|false)`),
 			"env":                   regexp.MustCompile(`^#RESCALE_ENV_(\w+)\s+(.+)`),
 			"user_license_settings": regexp.MustCompile(`^#RESCALE_USER_DEFINED_LICENSE_SETTINGS\s+(.+)`),
+			"automation":            regexp.MustCompile(`^#RESCALE_AUTOMATION\s+(\S+)`), // v3.6.1
 		},
 	}
 }
@@ -78,6 +82,7 @@ func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
 		EnvVariables: make(map[string]string),
 		InputFiles:   []string{},
 		Tags:         []string{},
+		Automations:  []string{}, // v3.6.1
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -137,6 +142,12 @@ func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
 			metadata.EnvVariables[envName] = envValue
 		} else if matches := p.patterns["user_license_settings"].FindStringSubmatch(line); matches != nil {
 			metadata.UserDefinedLicenseSettings = strings.TrimSpace(matches[1])
+		} else if matches := p.patterns["automation"].FindStringSubmatch(line); matches != nil {
+			// v3.6.1: Support multiple automation IDs
+			automationID := strings.TrimSpace(matches[1])
+			if automationID != "" {
+				metadata.Automations = append(metadata.Automations, automationID)
+			}
 		}
 	}
 
@@ -213,6 +224,16 @@ func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
 		jobReq.JobAnalyses[0].UserDefinedLicenseSettings = &m.UserDefinedLicenseSettings
 	}
 
+	// v3.6.1: Add automations if specified
+	if len(m.Automations) > 0 {
+		jobReq.JobAutomations = make([]models.JobAutomationRequest, len(m.Automations))
+		for i, autoID := range m.Automations {
+			jobReq.JobAutomations[i] = models.JobAutomationRequest{
+				AutomationID: autoID,
+			}
+		}
+	}
+
 	return jobReq
 }
 
@@ -234,6 +255,9 @@ func (m *SGEMetadata) String() string {
 	}
 	if m.ProjectID != "" {
 		sb.WriteString(fmt.Sprintf("Project ID: %s\n", m.ProjectID))
+	}
+	if len(m.Automations) > 0 {
+		sb.WriteString(fmt.Sprintf("Automations: %s\n", strings.Join(m.Automations, ", ")))
 	}
 	if len(m.EnvVariables) > 0 {
 		sb.WriteString("Environment Variables:\n")
@@ -289,6 +313,11 @@ func (m *SGEMetadata) ToSGEScript() string {
 		sb.WriteString(fmt.Sprintf("#RESCALE_USER_DEFINED_LICENSE_SETTINGS %s\n", m.UserDefinedLicenseSettings))
 	}
 
+	// Automations (v3.6.1)
+	for _, autoID := range m.Automations {
+		sb.WriteString(fmt.Sprintf("#RESCALE_AUTOMATION %s\n", autoID))
+	}
+
 	// Environment variables
 	for name, value := range m.EnvVariables {
 		sb.WriteString(fmt.Sprintf("#RESCALE_ENV_%s %s\n", name, value))
@@ -331,6 +360,7 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		Walltime:        walltimeSeconds,
 		Tags:            job.Tags,
 		ProjectID:       job.ProjectID,
+		Automations:     job.Automations, // v3.6.1
 		// Note: LicenseSettings JSON from CSV doesn't map directly to SGE fields
 		// UseLicense could be derived from LicenseSettings if needed
 		EnvVariables: make(map[string]string),
@@ -363,6 +393,7 @@ func SGEMetadataToJobSpec(m *SGEMetadata) models.JobSpec {
 		WalltimeHours:   walltimeHours,
 		Tags:            m.Tags,
 		ProjectID:       m.ProjectID,
+		Automations:     m.Automations, // v3.6.1
 		// Note: InputFiles from script are stored in SGEMetadata.InputFiles
 		// and should be handled separately by the caller
 	}

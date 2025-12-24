@@ -136,10 +136,7 @@ func (b *RemoteBrowser) CreateRenderer() fyne.WidgetRenderer {
 	// File list widget - uses its own pagination controls.
 	// Fetches multiple API pages to fill the user's desired page size.
 	b.fileList = NewFileListWidget()
-	// PERFORMANCE: Use larger page size for remote browsing
-	// Network latency dominates, so fewer round trips = faster perceived performance
-	// 200 items reduces API calls by 8x compared to the default 25
-	b.fileList.SetPageSize(200)
+	// Uses DefaultPageSize (25) for consistency with local browser
 	b.fileList.OnFolderOpen = func(item FileItem) {
 		b.navigateToFolder(item.ID, item.Name)
 	}

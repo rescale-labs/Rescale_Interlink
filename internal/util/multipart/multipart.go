@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/rescale/rescale-int/internal/localfs"
 )
 
 // RunDirectoryEntry represents a run directory from a specific project
@@ -71,10 +72,10 @@ func CollectAllRunDirectories(partDirs []string, runSubpath, subdirPattern strin
 			if !info.IsDir() {
 				continue
 			}
-			baseName := filepath.Base(match)
-			if strings.HasPrefix(baseName, ".") {
+			if localfs.IsHidden(match) {
 				continue
 			}
+			baseName := filepath.Base(match)
 
 			allRuns = append(allRuns, RunDirectoryEntry{
 				ProjectName: projectName,
