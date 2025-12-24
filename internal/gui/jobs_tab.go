@@ -95,6 +95,9 @@ func NewJobsTab(engine *core.Engine, window fyne.Window, app fyne.App) *JobsTab 
 	// Start fetching core types in background
 	go jt.fetchCoreTypes()
 
+	// v3.6.1: Fetch automations in background
+	go jt.fetchAutomations()
+
 	return jt
 }
 
@@ -593,6 +596,38 @@ func (jt *JobsTab) fetchCoreTypes() {
 
 	// Note: CoreTypes are fetched from the API cache which is populated
 	// during initialization. No additional fetch is needed here.
+}
+
+// fetchAutomations fetches automations from API in background (v3.6.1)
+func (jt *JobsTab) fetchAutomations() {
+	defer func() {
+		if r := recover(); r != nil {
+			guiLogger.Error().Msgf("PANIC in fetchAutomations: %v", r)
+		}
+	}()
+
+	// Only fetch if not already cached
+	if len(jt.apiCache.GetAutomations()) > 0 {
+		return
+	}
+
+	apiClient := jt.engine.API()
+	if apiClient == nil {
+		guiLogger.Debug().Msg("fetchAutomations: API client not available")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	automations, err := apiClient.ListAutomations(ctx)
+	if err != nil {
+		guiLogger.Debug().Err(err).Msg("Failed to fetch automations")
+		return
+	}
+
+	jt.apiCache.SetAutomations(automations)
+	guiLogger.Debug().Int("count", len(automations)).Msg("Cached automations")
 }
 
 // editJob opens the job editor dialog for the specified job index

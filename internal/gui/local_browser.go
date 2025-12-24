@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
@@ -311,7 +311,7 @@ func (b *LocalBrowser) loadDirectory(path string, loadGen uint64) {
 
 	for _, entry := range entries {
 		// Skip hidden files unless showHidden is enabled
-		if !showHidden && strings.HasPrefix(entry.Name(), ".") {
+		if !showHidden && localfs.IsHiddenName(entry.Name()) {
 			continue
 		}
 		fullPath := filepath.Join(path, entry.Name())

@@ -643,6 +643,16 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string) (*models.JobRequest,
 		jobReq.JobAnalyses[0].OnDemandLicenseSeller = &spec.OnDemandLicenseSeller
 	}
 
+	// v3.6.1: Add automations from JobSpec
+	if len(spec.Automations) > 0 {
+		jobReq.JobAutomations = make([]models.JobAutomationRequest, len(spec.Automations))
+		for i, autoID := range spec.Automations {
+			jobReq.JobAutomations[i] = models.JobAutomationRequest{
+				AutomationID: autoID,
+			}
+		}
+	}
+
 	return jobReq, nil
 }
 

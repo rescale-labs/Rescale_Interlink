@@ -4,7 +4,6 @@ package cli
 import (
 	"fmt"
 
-	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/spf13/cobra"
 )
@@ -50,16 +49,10 @@ Examples:
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			// Use shared helper function
@@ -101,16 +94,10 @@ Examples:
 				return fmt.Errorf("--max-concurrent must be between 1 and 10, got %d", maxConcurrent)
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			// Use shared helper function (no conflict flags for shortcut)
@@ -146,16 +133,10 @@ Examples:
 			// Directly call the jobs list logic instead of delegating to a new command
 			logger := GetLogger()
 
-			// Load config
-			cfg, err := loadConfig()
+			// Get API client
+			apiClient, err := getAPIClient()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
+				return err
 			}
 
 			ctx := GetContext()

@@ -17,12 +17,13 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/models"
-	"github.com/rescale/rescale-int/internal/util/multipart"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/util/multipart"
 )
 
 // Engine is the main orchestrator for PUR operations with GUI support
@@ -295,7 +296,7 @@ func (e *Engine) Scan(opts ScanOptions) error {
 				}
 				if info.IsDir() {
 					// Skip hidden directories unless specified
-					if !opts.IncludeHidden && strings.HasPrefix(filepath.Base(path), ".") && path != scanRoot {
+					if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
 						return filepath.SkipDir
 					}
 					// Check if this directory matches the pattern
@@ -321,7 +322,7 @@ func (e *Engine) Scan(opts ScanOptions) error {
 			for _, match := range matches {
 				info, err := os.Stat(match)
 				if err == nil && info.IsDir() {
-					if !opts.IncludeHidden && strings.HasPrefix(filepath.Base(match), ".") {
+					if !opts.IncludeHidden && localfs.IsHidden(match) {
 						continue
 					}
 					dirs = append(dirs, match)
@@ -564,7 +565,7 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 				}
 				if info.IsDir() {
 					// Skip hidden directories unless specified
-					if !opts.IncludeHidden && strings.HasPrefix(filepath.Base(path), ".") && path != scanRoot {
+					if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
 						return filepath.SkipDir
 					}
 					// Check if this directory matches the pattern
@@ -590,7 +591,7 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 			for _, match := range matches {
 				info, err := os.Stat(match)
 				if err == nil && info.IsDir() {
-					if !opts.IncludeHidden && strings.HasPrefix(filepath.Base(match), ".") {
+					if !opts.IncludeHidden && localfs.IsHidden(match) {
 						continue
 					}
 					dirs = append(dirs, match)
