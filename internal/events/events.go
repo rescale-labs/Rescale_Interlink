@@ -17,6 +17,18 @@ const (
 	EventStateChange EventType = "state_change"
 	EventError       EventType = "error"
 	EventComplete    EventType = "complete"
+
+	// v3.6.3: Transfer queue events
+	EventTransferQueued       EventType = "transfer_queued"       // Task added to queue
+	EventTransferInitializing EventType = "transfer_initializing" // Acquired slot, initializing
+	EventTransferStarted      EventType = "transfer_started"      // Actual transfer began (bytes moving)
+	EventTransferProgress     EventType = "transfer_progress"     // Progress update
+	EventTransferCompleted    EventType = "transfer_completed"    // Successfully completed
+	EventTransferFailed       EventType = "transfer_failed"       // Failed with error
+	EventTransferCancelled    EventType = "transfer_cancelled"    // Cancelled by user
+
+	// v3.6.3: Configuration change events
+	EventConfigChanged EventType = "config_changed" // API key or config changed, caches should be invalidated
 )
 
 // LogLevel defines log severity levels
@@ -110,6 +122,27 @@ type CompleteEvent struct {
 	SuccessJobs int
 	FailedJobs  int
 	Duration    time.Duration
+}
+
+// TransferEvent represents transfer queue events (v3.6.3)
+type TransferEvent struct {
+	BaseEvent
+	TaskID   string  // Unique task ID
+	TaskType string  // "upload" or "download"
+	Name     string  // Display name (filename)
+	Size     int64   // File size in bytes
+	Progress float64 // 0.0 to 1.0
+	Speed    float64 // bytes/sec
+	Error    error   // Error if failed
+}
+
+// ConfigChangedEvent represents configuration changes (v3.6.3)
+// Published when API key or other identity-related config changes.
+// Subscribers should invalidate caches and re-authenticate.
+type ConfigChangedEvent struct {
+	BaseEvent
+	Source string // "direct_input", "env_var", "token_file"
+	Email  string // User email after successful auth (empty if auth failed)
 }
 
 // EventBus manages event subscriptions and publishing

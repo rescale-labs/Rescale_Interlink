@@ -24,6 +24,7 @@ import (
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/mesa"
+	"github.com/rescale/rescale-int/internal/transfer"
 )
 
 var (
@@ -204,7 +205,10 @@ type UI struct {
 	singleJobTab   *SingleJobTab   // Single job submission (v2.7.1)
 	jobsTab        *JobsTab
 	fileBrowserTab *FileBrowserTab
+	transfersTab   *TransfersTab   // v3.6.3: Transfer queue tab
 	activityTab    *ActivityTab
+	transferQueue  *transfer.Queue // v3.6.3: Shared transfer queue
+	tabs           *container.AppTabs // v3.6.3: Tab container for programmatic switching
 	ctx            context.Context
 	cancel         context.CancelFunc
 }
@@ -226,31 +230,56 @@ func NewUI(engine *core.Engine, window fyne.Window, app fyne.App) *UI {
 	// Single Job tab shares APICache with Jobs tab for efficiency
 	ui.singleJobTab = NewSingleJobTab(engine, window, app, ui.jobsTab.apiCache)
 	ui.fileBrowserTab = NewFileBrowserTab(engine, window)
+
+	// v3.6.3: Transfer queue enabled - observer pattern (tracks transfers, doesn't execute them)
+	ui.transferQueue = transfer.NewQueue(engine.Events())
+	ui.transfersTab = NewTransfersTab(ui.transferQueue, engine.Events(), window)
+
 	ui.activityTab = NewActivityTab(engine, window)
 
 	return ui
 }
 
+// Tab indices for programmatic switching
+const (
+	tabIndexSetup      = 0
+	tabIndexSingleJob  = 1
+	tabIndexPUR        = 2
+	tabIndexFileBrowser = 3
+	tabIndexTransfers  = 4
+	tabIndexActivity   = 5
+)
+
 // Build creates the UI layout
 func (ui *UI) Build() fyne.CanvasObject {
 	// Use tabs with icons for better visual identification
-	// Tab order: Setup | Single Job | PUR | File Browser | Activity
+	// Tab order: Setup | Single Job | PUR | File Browser | Transfers | Activity
 	// Note: Extra spaces in names provide visual separation between tabs (Fyne limitation)
-	tabs := container.NewAppTabs(
+	ui.tabs = container.NewAppTabs(
 		container.NewTabItemWithIcon("    Setup    ", theme.SettingsIcon(), ui.setupTab.Build()),
 		container.NewTabItemWithIcon("    Single Job    ", theme.ComputerIcon(), ui.singleJobTab.Build()),
 		container.NewTabItemWithIcon("    PUR (Multiple Jobs)    ", theme.ComputerIcon(), ui.jobsTab.Build()),
 		container.NewTabItemWithIcon("    File Browser    ", theme.DocumentIcon(), ui.fileBrowserTab.Build()),
+		container.NewTabItemWithIcon("    Transfers    ", theme.DownloadIcon(), ui.transfersTab.Build()),
 		container.NewTabItemWithIcon("    Activity    ", theme.InfoIcon(), ui.activityTab.Build()),
 	)
+
+	// v3.6.3: Wire up transfer queue to file browser
+	ui.fileBrowserTab.SetTransferQueue(ui.transferQueue)
+	// Auto-switch to Transfers tab when a transfer starts
+	ui.fileBrowserTab.SetOnTransferQueued(func() {
+		fyne.Do(func() {
+			ui.tabs.SelectIndex(tabIndexTransfers)
+		})
+	})
 
 	// Track previous tab to detect when leaving Setup tab
 	var previousTabIndex int
 
 	// Auto-apply config when navigating away from Setup tab (index 0)
 	// Also force refresh on Linux to work around rendering issues (RHEL/CentOS 8+)
-	tabs.OnSelected = func(tab *container.TabItem) {
-		currentIndex := tabs.SelectedIndex()
+	ui.tabs.OnSelected = func(tab *container.TabItem) {
+		currentIndex := ui.tabs.SelectedIndex()
 		if previousTabIndex == 0 && currentIndex != 0 {
 			// Leaving Setup tab - auto-apply configuration
 			// v3.4.0: Run in background goroutine to prevent GUI freeze during proxy warmup
@@ -273,15 +302,15 @@ func (ui *UI) Build() fyne.CanvasObject {
 		// Linux workaround: force refresh on tab change to fix rendering issues
 		// Some Linux systems (RHEL/CentOS 8+) don't properly redraw tabs
 		if runtime.GOOS == "linux" {
-			tabs.Refresh()
+			ui.tabs.Refresh()
 		}
 	}
 
 	// Select Setup tab by default (index 0)
-	tabs.SelectIndex(0)
+	ui.tabs.SelectIndex(0)
 
 	// Create header bar with logos on sides and tabs in center
-	headerWithTabs := ui.buildHeaderWithTabs(tabs)
+	headerWithTabs := ui.buildHeaderWithTabs(ui.tabs)
 
 	return headerWithTabs
 }
@@ -326,11 +355,36 @@ func (ui *UI) Start() {
 	go ui.monitorProgress()
 	go ui.monitorLogs()
 	go ui.monitorStateChanges()
+
+	// v3.6.3: Start transfer queue observer (tracks transfers, doesn't execute them)
+	ui.setupQueueObserver()
+	if ui.transfersTab != nil {
+		ui.transfersTab.Start()
+	}
+}
+
+// setupQueueObserver configures the observer queue for transfer tracking.
+// v3.6.3: Queue is now an OBSERVER that tracks transfers, not an executor.
+// The actual transfer execution happens in executeUploadConcurrent/executeDownloadConcurrent.
+// This function will be called when queue integration is enabled.
+func (ui *UI) setupQueueObserver() {
+	if ui.transferQueue == nil {
+		return
+	}
+	// Queue is ready to track transfers - no handlers needed
+	// FileBrowserTab will register as RetryExecutor when queue integration is enabled
+	guiLogger.Debug().Msg("Transfer queue observer configured")
 }
 
 // Stop stops event monitoring
 func (ui *UI) Stop() {
 	ui.cancel()
+
+	// v3.6.3: Stop transfers tab event subscription
+	if ui.transfersTab != nil {
+		ui.transfersTab.Stop()
+	}
+
 	ui.engine.Stop()
 }
 

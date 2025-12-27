@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,19 +90,14 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	// v3.6.2: Log file info
 	cloud.TimingLog(params.OutputWriter, "File: %s (%s)", filepath.Base(params.LocalPath), cloud.FormatBytes(fileInfo.Size()))
 
-	// Start SHA-512 hash calculation concurrently - it runs in parallel with
-	// credential fetching, provider creation, and the upload itself.
-	// The hash is only needed for file registration AFTER upload completes.
-	// For large files (58GB), this avoids a 20-30 second blocking delay at startup.
-	type hashResult struct {
-		hash string
-		err  error
-	}
-	hashChan := make(chan hashResult, 1)
-	go func() {
-		hash, err := encryption.CalculateSHA512(params.LocalPath)
-		hashChan <- hashResult{hash: hash, err: err}
-	}()
+	// v3.6.3: Hash calculation is DEFERRED until after upload completes.
+	// Previously, hash ran concurrently with upload, causing disk I/O contention
+	// that made "Preparing" phase take 60+ seconds for large files.
+	// Now hash runs after upload when file is in disk cache -> much faster.
+
+	// v3.6.3: Debug timing for upload initialization
+	debugStart := time.Now()
+	fileName := filepath.Base(params.LocalPath)
 
 	// v3.6.2: Track initialization phase
 	initTimer := cloud.StartTimer(params.OutputWriter, "Upload initialization")
@@ -110,23 +106,30 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	credManager := credentials.GetManager(params.APIClient)
 
 	// Get user profile to determine storage type (cached for 5 minutes)
+	t1 := time.Now()
 	profile, err := credManager.GetUserProfile(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user profile: %w", err)
 	}
+	log.Printf("[DEBUG] %s: GetUserProfile took %v", fileName, time.Since(t1))
 
 	// Get root folders (for currentFolderId in file registration) (cached for 5 minutes)
+	t2 := time.Now()
 	folders, err := credManager.GetRootFolders(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get root folders: %w", err)
 	}
+	log.Printf("[DEBUG] %s: GetRootFolders took %v", fileName, time.Since(t2))
 
 	// Create provider using factory
+	t3 := time.Now()
 	factory := providers.NewFactory()
 	provider, err := factory.NewTransferFromStorageInfo(ctx, &profile.DefaultStorage, params.APIClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
+	log.Printf("[DEBUG] %s: CreateProvider took %v", fileName, time.Since(t3))
+	log.Printf("[DEBUG] %s: Total init took %v", fileName, time.Since(debugStart))
 
 	initTimer.StopWithMessage("backend=%s", profile.DefaultStorage.StorageType)
 
@@ -152,19 +155,15 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 
 	uploadTimer.StopWithThroughput(fileInfo.Size())
 
-	// v3.6.2: Track hash wait time
-	hashWaitTimer := cloud.StartTimer(params.OutputWriter, "Hash wait")
-
-	// Wait for hash calculation to complete (started at beginning of function)
-	// For large files, the hash calculation runs in parallel with the entire upload,
-	// so this wait should be minimal or zero.
-	hashRes := <-hashChan
-	if hashRes.err != nil {
-		return nil, fmt.Errorf("failed to calculate file hash: %w", hashRes.err)
+	// v3.6.3: Calculate hash AFTER upload completes.
+	// The file is now in disk cache, so hashing is fast (no disk I/O contention).
+	// This fixes the 60+ second "Preparing" delay for large files.
+	hashTimer := cloud.StartTimer(params.OutputWriter, "Hash calculation")
+	fileHash, err := encryption.CalculateSHA512(params.LocalPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate file hash: %w", err)
 	}
-	fileHash := hashRes.hash
-
-	hashWaitTimer.Stop()
+	hashTimer.StopWithThroughput(fileInfo.Size())
 
 	// Determine target folder
 	targetFolder := folders.MyLibrary
@@ -229,6 +228,143 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	return cloudFile, nil
 }
 
+// progressInterpolator provides smooth progress updates at regular intervals (500ms),
+// tracking real-time upload progress. This ensures the UI always shows responsive
+// progress even when individual parts take seconds to upload.
+// v3.6.3: Now tracks in-flight bytes for real-time progress (not just part completions).
+type progressInterpolator struct {
+	mu             sync.RWMutex
+	callback       cloud.ProgressCallback
+	totalBytes     int64
+	confirmedBytes int64         // Bytes from completed parts
+	inflightBytes  int64         // Bytes currently being uploaded (atomic)
+	startTime      time.Time     // When transfer started
+	lastConfirmAt  time.Time     // When last part completed
+	speed          float64       // Estimated speed (bytes/sec), EMA
+	done           chan struct{} // Signal to stop the interpolator
+	stopped        bool          // Prevent double-close
+}
+
+// newProgressInterpolator creates a progress interpolator that calls the callback
+// at least every 500ms with estimated progress.
+func newProgressInterpolator(callback cloud.ProgressCallback, totalBytes int64) *progressInterpolator {
+	return &progressInterpolator{
+		callback:      callback,
+		totalBytes:    totalBytes,
+		startTime:     time.Now(),
+		lastConfirmAt: time.Now(),
+		done:          make(chan struct{}),
+	}
+}
+
+// Start begins the interpolation goroutine. Call Stop() when done.
+func (pi *progressInterpolator) Start() {
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-pi.done:
+				return
+			case <-ticker.C:
+				pi.emitInterpolated()
+			}
+		}
+	}()
+}
+
+// emitInterpolated calculates and emits progress using real-time byte tracking.
+// This is called by the ticker every 500ms.
+// v3.6.3: Now uses inflightBytes for immediate progress feedback.
+func (pi *progressInterpolator) emitInterpolated() {
+	pi.mu.RLock()
+	defer pi.mu.RUnlock()
+
+	if pi.callback == nil {
+		return
+	}
+
+	// v3.6.3: Use real-time tracking: confirmed bytes + in-flight bytes
+	// This gives immediate progress feedback during uploads, not just at part completions.
+	currentBytes := pi.confirmedBytes + pi.inflightBytes
+
+	progress := float64(currentBytes) / float64(pi.totalBytes)
+	if progress > 1.0 {
+		progress = 1.0
+	}
+	if progress < 0.0 {
+		progress = 0.0
+	}
+
+	pi.callback(progress)
+}
+
+// AddInflight adds bytes to the in-flight counter.
+// This is called as bytes are being uploaded in real-time.
+// v3.6.3: Enables immediate progress feedback during part uploads.
+func (pi *progressInterpolator) AddInflight(bytes int64) {
+	pi.mu.Lock()
+	pi.inflightBytes += bytes
+	pi.mu.Unlock()
+}
+
+// ConfirmBytes records completed bytes and clears corresponding in-flight bytes.
+// This is called when a part upload completes.
+// v3.6.3: Now also clears inflightBytes for the completed part.
+func (pi *progressInterpolator) ConfirmBytes(partSize int64) {
+	pi.mu.Lock()
+	defer pi.mu.Unlock()
+
+	elapsed := time.Since(pi.lastConfirmAt)
+
+	// v3.6.3: Move bytes from inflight to confirmed
+	// Clear inflightBytes for this part (it was tracked during upload)
+	if pi.inflightBytes >= partSize {
+		pi.inflightBytes -= partSize
+	} else {
+		pi.inflightBytes = 0 // Safety: don't go negative
+	}
+	pi.confirmedBytes += partSize
+	pi.lastConfirmAt = time.Now()
+
+	// Update speed estimate using exponential moving average (alpha = 0.3)
+	// This gives more weight to recent measurements for responsiveness
+	if elapsed.Seconds() > 0.01 { // Avoid division by near-zero
+		instantSpeed := float64(partSize) / elapsed.Seconds()
+		if pi.speed == 0 {
+			pi.speed = instantSpeed
+		} else {
+			// EMA: new = alpha * current + (1-alpha) * old
+			pi.speed = 0.3*instantSpeed + 0.7*pi.speed
+		}
+	}
+
+	// v3.6.3: Removed immediate callback from ConfirmBytes.
+	// The ticker (emitInterpolated) handles all progress emission.
+	// This prevents progress jumping backwards because:
+	// - emitInterpolated uses (confirmedBytes + inflightBytes)
+	// - ConfirmBytes was using just confirmedBytes (lower value!)
+	// Let the ticker provide consistent progress values every 500ms.
+}
+
+// GetSpeed returns the current estimated speed in bytes/second.
+func (pi *progressInterpolator) GetSpeed() float64 {
+	pi.mu.RLock()
+	defer pi.mu.RUnlock()
+	return pi.speed
+}
+
+// Stop stops the interpolation goroutine.
+func (pi *progressInterpolator) Stop() {
+	pi.mu.Lock()
+	defer pi.mu.Unlock()
+	if !pi.stopped {
+		pi.stopped = true
+		close(pi.done)
+	}
+}
+
 // encryptedPart holds an encrypted part ready for upload (used for pipelining).
 // v3.4.0: Enables encryption to run ahead of uploads.
 type encryptedPart struct {
@@ -251,6 +387,9 @@ type uploadResult struct {
 // v3.4.1: Parallel upload architecture - encryption is sequential (CBC constraint),
 // but uploads happen in parallel for 2-4x throughput improvement.
 func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params UploadParams, fileSize int64) (*cloud.UploadResult, error) {
+	fileName := filepath.Base(params.LocalPath)
+	streamStart := time.Now()
+
 	// Cast to StreamingConcurrentUploader
 	streamingUploader, ok := provider.(transfer.StreamingConcurrentUploader)
 	if !ok {
@@ -267,12 +406,38 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		OutputWriter: params.OutputWriter,
 	}
 
+	log.Printf("[DEBUG] %s: Starting InitStreamingUpload", fileName)
+	t1 := time.Now()
 	uploadState, err := streamingUploader.InitStreamingUpload(ctx, initParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize streaming upload: %w", err)
 	}
+	log.Printf("[DEBUG] %s: InitStreamingUpload took %v", fileName, time.Since(t1))
 
 	streamInitTimer.StopWithMessage("parts=%d part_size=%s", uploadState.TotalParts, cloud.FormatBytes(int64(uploadState.PartSize)))
+	log.Printf("[DEBUG] %s: Streaming init complete, starting transfer at %v since start", fileName, time.Since(streamStart))
+
+	// v3.6.3: Create progress interpolator for smooth updates every 500ms.
+	// This provides responsive progress feedback even when individual parts
+	// take seconds to upload (e.g., on slow networks or large part sizes).
+	var progressInterp *progressInterpolator
+	if params.ProgressCallback != nil {
+		progressInterp = newProgressInterpolator(params.ProgressCallback, fileSize)
+		progressInterp.Start()
+		defer progressInterp.Stop()
+
+		// v3.6.3: Wire up real-time byte tracking from S3 uploads.
+		// The progressReader in S3 provider calls this as bytes are sent.
+		// This enables progress updates DURING part uploads, not just at completion.
+		uploadState.ByteProgressCallback = func(bytesUploaded int64) {
+			progressInterp.AddInflight(bytesUploaded)
+		}
+
+		// Report 0% progress immediately after init completes.
+		// This changes GUI status from "Preparing" to "0.00%" so users know
+		// the transfer has started, even before the first part completes.
+		params.ProgressCallback(0.0)
+	}
 
 	// Open file
 	file, err := os.Open(params.LocalPath)
@@ -312,6 +477,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		defer close(encryptedChan)
 		buffer := make([]byte, uploadState.PartSize)
 		var partIndex int64 = 0
+		encryptFirstLogged := false
 
 		for {
 			// Check for context cancellation
@@ -333,6 +499,12 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 					errOnce.Do(func() { firstErr = encErr })
 					cancelUpload()
 					return
+				}
+
+				if !encryptFirstLogged {
+					log.Printf("[DEBUG] %s: First encrypted part ready at %v since stream start (part 0, %d bytes)",
+						fileName, time.Since(streamStart), len(ciphertext))
+					encryptFirstLogged = true
 				}
 
 				// Send encrypted part to upload workers
@@ -361,6 +533,8 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 
 	// v3.4.2: Track worker count for dynamic scaling
 	var workerCount int32 = int32(concurrency)
+	var firstUploadStartLogged int32 = 0
+	var firstUploadDoneLogged int32 = 0
 
 	// Upload worker function - shared by initial workers and dynamically spawned workers
 	uploadWorker := func(workerID int) {
@@ -372,6 +546,12 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 			default:
 			}
 
+			// Log first upload start
+			if atomic.CompareAndSwapInt32(&firstUploadStartLogged, 0, 1) {
+				log.Printf("[DEBUG] %s: First upload STARTING at %v since stream start (part %d)",
+					fileName, time.Since(streamStart), enc.partIndex)
+			}
+
 			// Upload this encrypted part
 			partResult, uploadErr := streamingUploader.UploadCiphertext(uploadCtx, uploadState, enc.partIndex, enc.ciphertext)
 
@@ -380,6 +560,12 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 				cancelUpload()
 				resultChan <- uploadResult{partIndex: enc.partIndex, err: uploadErr}
 				return
+			}
+
+			// Log first upload complete
+			if atomic.CompareAndSwapInt32(&firstUploadDoneLogged, 0, 1) {
+				log.Printf("[DEBUG] %s: First upload COMPLETE at %v since stream start (part %d)",
+					fileName, time.Since(streamStart), enc.partIndex)
 			}
 
 			// Send success result
@@ -446,6 +632,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	partsMap := make(map[int64]*transfer.PartResult)
 	completedCount := 0
 
+	firstProgressLogged := false
 	for res := range resultChan {
 		if res.err != nil {
 			// Error already recorded in firstErr, just continue draining
@@ -457,10 +644,16 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		partsMap[res.partIndex] = res.result
 		completedCount++
 
-		// Report progress
-		if params.ProgressCallback != nil {
-			progress := float64(completedCount) / float64(uploadState.TotalParts)
-			params.ProgressCallback(progress)
+		// v3.6.3: Use progress interpolator for confirmed bytes.
+		// This updates speed estimate and emits immediate progress callback.
+		// The interpolator also provides updates every 500ms between confirmations.
+		if progressInterp != nil {
+			if !firstProgressLogged {
+				log.Printf("[DEBUG] %s: FIRST part complete at %v since stream start (part %d/%d)",
+					fileName, time.Since(streamStart), completedCount, uploadState.TotalParts)
+				firstProgressLogged = true
+			}
+			progressInterp.ConfirmBytes(res.plainSize)
 		}
 	}
 

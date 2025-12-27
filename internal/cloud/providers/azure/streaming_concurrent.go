@@ -194,6 +194,7 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 // UploadCiphertext uploads already-encrypted data to cloud storage.
 // Can be called concurrently with EncryptStreamingPart (pipelining).
 // Separated from encryption to enable pipelining.
+// v3.6.3: Now uses progressReadSeekCloser to track bytes in real-time via ByteProgressCallback.
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*azureProviderData)
 	if !ok {
@@ -212,7 +213,19 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	err := providerData.azureClient.RetryWithBackoff(partCtx, fmt.Sprintf("StageBlock %d", partIndex), func() error {
 		client := providerData.azureClient.Client()
 		blockBlobClient := client.ServiceClient().NewContainerClient(providerData.container).NewBlockBlobClient(providerData.blobPath)
-		reader := &readSeekCloser{Reader: bytes.NewReader(ciphertext)}
+
+		// v3.6.3: Use progress-tracking reader if callback is set
+		var reader io.ReadSeekCloser
+		if uploadState.ByteProgressCallback != nil {
+			reader = &progressReadSeekCloser{
+				Reader:    bytes.NewReader(ciphertext),
+				callback:  uploadState.ByteProgressCallback,
+				threshold: progressReaderThreshold,
+			}
+		} else {
+			reader = &readSeekCloser{Reader: bytes.NewReader(ciphertext)}
+		}
+
 		_, err := blockBlobClient.StageBlock(partCtx, blockID, reader, nil)
 		return err
 	})
@@ -375,6 +388,37 @@ type readSeekCloser struct {
 }
 
 func (rsc *readSeekCloser) Close() error {
+	return nil
+}
+
+// progressReadSeekCloser wraps readSeekCloser with progress callback.
+// v3.6.3: Enables real-time progress tracking during Azure uploads.
+// Uses threshold-based reporting to avoid jumpy progress from many small reads.
+type progressReadSeekCloser struct {
+	*bytes.Reader
+	callback    func(bytesRead int64)
+	accumulated int64 // Bytes accumulated since last callback
+	threshold   int64 // Report every N bytes (1MB default)
+}
+
+// progressReaderThreshold is the minimum bytes to accumulate before reporting.
+// 1MB provides smooth progress without excessive updates.
+const progressReaderThreshold = 1 * 1024 * 1024 // 1MB
+
+func (prsc *progressReadSeekCloser) Read(p []byte) (n int, err error) {
+	n, err = prsc.Reader.Read(p)
+	if n > 0 && prsc.callback != nil {
+		prsc.accumulated += int64(n)
+		// Report when threshold reached OR on EOF (to flush remaining)
+		if prsc.accumulated >= prsc.threshold || err == io.EOF {
+			prsc.callback(prsc.accumulated)
+			prsc.accumulated = 0
+		}
+	}
+	return n, err
+}
+
+func (prsc *progressReadSeekCloser) Close() error {
 	return nil
 }
 

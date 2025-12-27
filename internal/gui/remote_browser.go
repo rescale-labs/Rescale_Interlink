@@ -20,6 +20,16 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
+// BrowseMode represents the current browsing mode for remote files.
+// v3.6.3: Added Legacy mode for flat file listing.
+type BrowseMode string
+
+const (
+	BrowseModeLibrary BrowseMode = "library" // My Library (folder-based)
+	BrowseModeJobs    BrowseMode = "jobs"    // My Jobs (folder-based)
+	BrowseModeLegacy  BrowseMode = "legacy"  // Legacy (flat file list)
+)
+
 // BreadcrumbEntry represents a folder in the navigation path
 type BreadcrumbEntry struct {
 	ID   string
@@ -34,9 +44,10 @@ type RemoteBrowser struct {
 	mu              sync.RWMutex
 	engine          *core.Engine
 	currentFolderID string
-	currentRoot     string // "library" or "jobs"
+	currentMode     BrowseMode // v3.6.3: "library", "jobs", or "legacy"
 	rootFolders     *models.RootFolders
 	breadcrumb      []BreadcrumbEntry
+	lastAPIKey      string // v3.6.3: Track API key to avoid unnecessary reloads
 
 	// Navigation generation token - incremented on each navigation
 	// Used to detect and discard stale API responses from previous navigations
@@ -82,7 +93,7 @@ func NewRemoteBrowser(engine *core.Engine, window fyne.Window) *RemoteBrowser {
 	b := &RemoteBrowser{
 		engine:      engine,
 		window:      window,
-		currentRoot: "library",
+		currentMode: BrowseModeLibrary,
 		loadedItems: make([]FileItem, 0),
 		logger:      logging.NewLogger("remote-browser", nil),
 	}
@@ -100,8 +111,9 @@ func (b *RemoteBrowser) CreateRenderer() fyne.WidgetRenderer {
 	b.backBtn = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), b.goUp)
 	b.backBtn.Disable() // Disabled at root
 
-	// Root toggle (My Library / My Jobs)
-	b.rootToggle = widget.NewRadioGroup([]string{"My Library", "My Jobs"}, b.onRootChanged)
+	// Root toggle (My Library / My Jobs / Legacy)
+	// v3.6.3: Added Legacy mode for flat file listing
+	b.rootToggle = widget.NewRadioGroup([]string{"My Library", "My Jobs", "Legacy"}, b.onRootChanged)
 	b.rootToggle.Horizontal = true
 	b.rootToggle.SetSelected("My Library")
 
@@ -210,27 +222,62 @@ func (b *RemoteBrowser) initialize() {
 
 	b.mu.Lock()
 	b.rootFolders = roots
-	if b.currentRoot == "library" {
+	b.lastAPIKey = cfg.APIKey // v3.6.3: Track current API key for change detection
+	switch b.currentMode {
+	case BrowseModeLibrary:
 		b.currentFolderID = roots.MyLibrary
 		b.breadcrumb = []BreadcrumbEntry{{ID: roots.MyLibrary, Name: "My Library"}}
-	} else {
+	case BrowseModeJobs:
 		b.currentFolderID = roots.MyJobs
 		b.breadcrumb = []BreadcrumbEntry{{ID: roots.MyJobs, Name: "My Jobs"}}
+	case BrowseModeLegacy:
+		b.currentFolderID = "" // No folder ID for legacy mode
+		b.breadcrumb = []BreadcrumbEntry{{ID: "", Name: "Legacy Files"}}
 	}
 	b.mu.Unlock()
 
 	b.updateBreadcrumbUI()
 	b.loadCurrentFolder()
+
+	// v3.6.3: Pre-warm the Legacy files cache in the background.
+	// The /api/v3/files/ endpoint has ~9s cold-cache latency on first call,
+	// but subsequent calls are ~2s due to server-side caching.
+	// By pre-fetching now, we ensure Legacy mode loads quickly when the user clicks it.
+	go b.prewarmLegacyCache()
+}
+
+// prewarmLegacyCache makes a background request to warm the server's file list cache.
+// This reduces latency when the user switches to Legacy mode.
+func (b *RemoteBrowser) prewarmLegacyCache() {
+	apiClient := b.engine.API()
+	if apiClient == nil {
+		return
+	}
+
+	// Use a generous timeout - this is background work and we don't want to fail
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Fetch first page of files - this warms the server cache
+	_, err := apiClient.ListFilesPage(ctx, "")
+	if err != nil {
+		// Silently ignore errors - this is just cache warming
+		b.logger.Debug().Err(err).Msg("Legacy cache prewarm failed (non-critical)")
+		return
+	}
+	b.logger.Debug().Msg("Legacy files cache pre-warmed successfully")
 }
 
 // loadCurrentFolder loads folder contents, fetching enough API pages to fill user's page size.
 // Fetches multiple 25-item API pages to fill user's desired page size (max 200).
+// v3.6.3: Also handles Legacy mode (flat file list).
 func (b *RemoteBrowser) loadCurrentFolder() {
 	// Reset state for new folder
 	b.mu.Lock()
 	b.loadedItems = make([]FileItem, 0)
 	b.apiNextURL = ""
 	b.hasMoreData = false
+	isLegacy := b.currentMode == BrowseModeLegacy
 	b.mu.Unlock()
 
 	// Clear hasMoreServerData in FileListWidget to prevent stale state from previous folder
@@ -241,8 +288,12 @@ func (b *RemoteBrowser) loadCurrentFolder() {
 		})
 	}
 
-	// Load initial data (0 = use FileListWidget's page size)
-	b.loadMoreItems(0, true) // 0 = use page size, true = scroll to top
+	// v3.6.3: Use different loading method for Legacy mode
+	if isLegacy {
+		b.loadLegacyItems(0, true) // 0 = use page size, true = scroll to top
+	} else {
+		b.loadMoreItems(0, true) // 0 = use page size, true = scroll to top
+	}
 }
 
 // loadMoreItems fetches API pages to fill the current display page
@@ -497,8 +548,203 @@ func (b *RemoteBrowser) loadMoreItems(targetCount int, scrollToTop bool) {
 		Msg("Remote folder load complete")
 }
 
+// loadLegacyItems fetches pages from the flat files API (Legacy mode).
+// v3.6.3: Similar to loadMoreItems but uses ListFilesPage instead of ListFolderContentsPage.
+func (b *RemoteBrowser) loadLegacyItems(targetCount int, scrollToTop bool) {
+	loadStart := time.Now()
+	loadGen := atomic.LoadUint64(&b.navGeneration)
+
+	// Build request key for deduplication
+	requestKey := fmt.Sprintf("legacy:%d", targetCount)
+
+	b.inFlightMu.Lock()
+	if b.inFlightKey == requestKey {
+		b.inFlightMu.Unlock()
+		b.logger.Debug().Str("key", requestKey).Msg("Skipping duplicate in-flight legacy request")
+		return
+	}
+	b.inFlightKey = requestKey
+	b.inFlightMu.Unlock()
+
+	defer func() {
+		b.inFlightMu.Lock()
+		if b.inFlightKey == requestKey {
+			b.inFlightKey = ""
+		}
+		b.inFlightMu.Unlock()
+	}()
+
+	// Cancel any previous load operation
+	b.cancelMu.Lock()
+	if b.cancelLoad != nil {
+		b.cancelLoad()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	b.cancelLoad = cancel
+	b.cancelMu.Unlock()
+
+	// Serialize load operations
+	if !b.loadingMu.TryLock() {
+		b.logger.Debug().Msg("Skipping legacy load - another operation in progress")
+		return
+	}
+	defer b.loadingMu.Unlock()
+
+	// Get current state
+	b.mu.RLock()
+	currentItems := len(b.loadedItems)
+	nextURL := b.apiNextURL
+	hasMore := b.hasMoreData
+	b.mu.RUnlock()
+
+	// If no more data available, just return
+	if currentItems > 0 && !hasMore {
+		return
+	}
+
+	// Determine target
+	if targetCount <= 0 {
+		targetCount = b.fileList.GetPageSize()
+	}
+	if targetCount > 200 {
+		targetCount = 200
+	}
+
+	// If we already have enough items, no need to fetch
+	if currentItems >= targetCount {
+		return
+	}
+
+	b.setLoading(true)
+	defer b.setLoading(false)
+
+	// v3.6.3: Show informative loading message for legacy mode
+	// The /api/v3/files/ endpoint is slow (~10s) due to querying all files
+	fyne.Do(func() {
+		b.fileList.SetStatus("Loading legacy files (this may take a moment)...")
+	})
+
+	apiClient := b.engine.API()
+	if apiClient == nil {
+		fyne.Do(func() {
+			b.fileList.SetStatus("Not connected. Configure API key in Setup tab.")
+		})
+		return
+	}
+
+	// Fetch pages from flat files API
+	var newItems []FileItem
+	pageURL := nextURL
+	pagesLoaded := 0
+
+	for currentItems+len(newItems) < targetCount {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		page, err := apiClient.ListFilesPage(ctx, pageURL)
+		if err != nil {
+			b.logger.Error().Err(err).Msg("Failed to load legacy files")
+			if len(newItems) == 0 && currentItems == 0 {
+				fyne.Do(func() {
+					b.fileList.SetStatus("Error: " + err.Error())
+				})
+			}
+			break
+		}
+
+		pagesLoaded++
+
+		// Convert API files to FileItems
+		for _, f := range page.Files {
+			newItems = append(newItems, FileItem{
+				ID:      f.ID,
+				Name:    f.Name,
+				Size:    f.DecryptedSize,
+				ModTime: f.DateUploaded,
+				// IsFolder: false (files only in legacy mode)
+			})
+		}
+
+		pageURL = page.NextURL
+		if pageURL == "" {
+			b.mu.Lock()
+			b.hasMoreData = false
+			b.apiNextURL = ""
+			b.mu.Unlock()
+			break
+		}
+
+		b.mu.Lock()
+		b.hasMoreData = true
+		b.apiNextURL = pageURL
+		b.mu.Unlock()
+	}
+
+	isFirstLoad := currentItems == 0
+
+	b.mu.Lock()
+	b.loadedItems = append(b.loadedItems, newItems...)
+	hasMore = b.hasMoreData
+	b.mu.Unlock()
+
+	// Final cancellation check
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	// Update UI
+	fyne.Do(func() {
+		currentGen := atomic.LoadUint64(&b.navGeneration)
+		if loadGen != currentGen {
+			b.logger.Debug().
+				Uint64("load_gen", loadGen).
+				Uint64("current_gen", currentGen).
+				Msg("Discarding stale legacy load result inside fyne.Do")
+			return
+		}
+
+		b.fileList.SetHasDateInfo(true)
+		b.fileList.SetHasMoreServerData(hasMore)
+
+		if isFirstLoad {
+			b.mu.RLock()
+			allItems := make([]FileItem, len(b.loadedItems))
+			copy(allItems, b.loadedItems)
+			b.mu.RUnlock()
+			b.fileList.SetItemsAndScrollToTop(allItems)
+			b.fileList.SetPath("Legacy Files")
+		} else if len(newItems) > 0 {
+			b.fileList.AppendItems(newItems)
+		}
+
+		if !hasMore {
+			b.fileList.FinalizeAppend()
+		}
+	})
+
+	b.mu.RLock()
+	totalLoaded := len(b.loadedItems)
+	b.mu.RUnlock()
+
+	totalDuration := time.Since(loadStart)
+	b.logger.Info().
+		Int("total_loaded", totalLoaded).
+		Int("new_items", len(newItems)).
+		Int("pages_fetched", pagesLoaded).
+		Int("target", targetCount).
+		Bool("has_more", hasMore).
+		Dur("total_ms", totalDuration).
+		Msg("Legacy files load complete")
+}
+
 // onPageChange is called when user navigates pages in FileListWidget
 // Loads more data if user needs items beyond what's loaded
+// v3.6.3: Updated to support Legacy mode.
 func (b *RemoteBrowser) onPageChange(page, pageSize, totalItems int) {
 	// Calculate how many items we need for the requested page
 	// page is 0-indexed, so page 1 needs items 0 to pageSize-1
@@ -508,6 +754,7 @@ func (b *RemoteBrowser) onPageChange(page, pageSize, totalItems int) {
 	b.mu.RLock()
 	loadedCount := len(b.loadedItems)
 	hasMore := b.hasMoreData
+	isLegacy := b.currentMode == BrowseModeLegacy
 	b.mu.RUnlock()
 
 	// Load more if we need items beyond what's loaded
@@ -517,8 +764,13 @@ func (b *RemoteBrowser) onPageChange(page, pageSize, totalItems int) {
 			Int("pageSize", pageSize).
 			Int("itemsNeeded", itemsNeeded).
 			Int("loadedCount", loadedCount).
+			Bool("isLegacy", isLegacy).
 			Msg("Loading more items for pagination")
-		go b.loadMoreItems(itemsNeeded, false)
+		if isLegacy {
+			go b.loadLegacyItems(itemsNeeded, false)
+		} else {
+			go b.loadMoreItems(itemsNeeded, false)
+		}
 	} else {
 		// Even if we're not loading more, update hasMoreServerData
 		// This prevents stale state when navigating within already-loaded data
@@ -712,6 +964,7 @@ func (b *RemoteBrowser) updateBackButtonState() {
 }
 
 // onRootChanged handles root toggle change
+// v3.6.3: Updated to support Legacy mode.
 func (b *RemoteBrowser) onRootChanged(selected string) {
 	// Clear selection first - prevents stale selection from previous root
 	if b.fileList != nil {
@@ -722,21 +975,27 @@ func (b *RemoteBrowser) onRootChanged(selected string) {
 	atomic.AddUint64(&b.navGeneration, 1)
 
 	b.mu.Lock()
-	if b.rootFolders == nil {
+	// For Legacy mode, we don't need rootFolders
+	if b.rootFolders == nil && selected != "Legacy" {
 		b.mu.Unlock()
 		return
 	}
 
 	isJobs := false
-	if selected == "My Library" {
-		b.currentRoot = "library"
+	switch selected {
+	case "My Library":
+		b.currentMode = BrowseModeLibrary
 		b.currentFolderID = b.rootFolders.MyLibrary
 		b.breadcrumb = []BreadcrumbEntry{{ID: b.rootFolders.MyLibrary, Name: "My Library"}}
-	} else {
-		b.currentRoot = "jobs"
+	case "My Jobs":
+		b.currentMode = BrowseModeJobs
 		b.currentFolderID = b.rootFolders.MyJobs
 		b.breadcrumb = []BreadcrumbEntry{{ID: b.rootFolders.MyJobs, Name: "My Jobs"}}
 		isJobs = true
+	case "Legacy":
+		b.currentMode = BrowseModeLegacy
+		b.currentFolderID = "" // No folder ID for legacy mode
+		b.breadcrumb = []BreadcrumbEntry{{ID: "", Name: "Legacy Files"}}
 	}
 	b.mu.Unlock()
 
@@ -844,6 +1103,64 @@ func (b *RemoteBrowser) ClearCache() {
 	b.mu.Unlock()
 }
 
+// OnConfigChanged handles API key/config changes (v3.6.3)
+// Called when Engine publishes EventConfigChanged.
+// Only clears caches and re-initializes if the API key actually changed.
+func (b *RemoteBrowser) OnConfigChanged() {
+	// Check if API key actually changed
+	cfg := b.engine.GetConfig()
+	newAPIKey := ""
+	if cfg != nil {
+		newAPIKey = cfg.APIKey
+	}
+
+	b.mu.RLock()
+	lastKey := b.lastAPIKey
+	b.mu.RUnlock()
+
+	// If API key hasn't changed, skip the reload
+	if newAPIKey == lastKey && lastKey != "" {
+		b.logger.Debug().Msg("Config changed but API key unchanged - skipping reload")
+		return
+	}
+
+	b.logger.Info().Msg("API key changed - clearing caches and re-initializing")
+
+	// Increment navigation generation to invalidate any in-flight loads
+	atomic.AddUint64(&b.navGeneration, 1)
+
+	// Clear all cached state
+	b.mu.Lock()
+	b.rootFolders = nil
+	b.loadedItems = make([]FileItem, 0)
+	b.apiNextURL = ""
+	b.hasMoreData = false
+	b.currentFolderID = ""
+	b.currentMode = BrowseModeLibrary // Reset to default
+	b.breadcrumb = nil
+	b.lastAPIKey = newAPIKey // Track new key
+	b.mu.Unlock()
+
+	// Clear file list
+	if b.fileList != nil {
+		fyne.Do(func() {
+			b.fileList.SetItems(nil)
+			b.fileList.SetStatus("Re-authenticating...")
+			b.fileList.SetPath("")
+		})
+	}
+
+	// Reset root toggle to default
+	if b.rootToggle != nil {
+		fyne.Do(func() {
+			b.rootToggle.SetSelected("My Library")
+		})
+	}
+
+	// Re-initialize with new credentials
+	go b.initialize()
+}
+
 // Refresh reloads the current folder
 func (b *RemoteBrowser) Refresh() {
 	b.refresh()
@@ -881,5 +1198,27 @@ func (b *RemoteBrowser) GetBreadcrumbPath() string {
 func (b *RemoteBrowser) IsJobsView() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.currentRoot == "jobs"
+	return b.currentMode == BrowseModeJobs
+}
+
+// IsLegacyView returns true if currently viewing Legacy Files (upload not allowed).
+// v3.6.3: Used to disable upload button when in Legacy view.
+func (b *RemoteBrowser) IsLegacyView() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.currentMode == BrowseModeLegacy
+}
+
+// IsUploadAllowed returns true if uploads are allowed in the current view.
+// v3.6.3: Uploads are only allowed in My Library mode.
+func (b *RemoteBrowser) IsUploadAllowed() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.currentMode == BrowseModeLibrary
+}
+
+// GetFileList returns the file list widget for configuration.
+// v3.6.3: Used to set up sort persistence callback.
+func (b *RemoteBrowser) GetFileList() *FileListWidget {
+	return b.fileList
 }

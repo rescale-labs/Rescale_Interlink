@@ -100,6 +100,11 @@ type StreamingUpload struct {
 
 	// Provider-specific data (for S3 bucket, Azure container, etc.)
 	ProviderData interface{}
+
+	// v3.6.3: Progress callback for real-time byte tracking during uploads.
+	// Called with bytes sent so far for each part being uploaded.
+	// This enables progress updates during part uploads, not just at completion.
+	ByteProgressCallback func(bytesUploaded int64)
 }
 
 // PartResult contains the result of uploading a single part.
