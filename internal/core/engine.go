@@ -23,6 +23,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
 
@@ -36,6 +37,10 @@ type Engine struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
+
+	// v3.6.4: Service layer for frontend-agnostic business logic
+	transferService *services.TransferService
+	fileService     *services.FileService
 
 	// Job monitoring
 	monitorTicker *time.Ticker
@@ -64,12 +69,21 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		return nil, fmt.Errorf("failed to create API client: %w", err)
 	}
 
+	// Create event bus
+	eventBus := events.NewEventBus(10000) // Increased buffer for rapid events
+
+	// v3.6.4: Create service layer
+	transferService := services.NewTransferService(apiClient, eventBus, services.TransferServiceConfig{})
+	fileService := services.NewFileService(apiClient, eventBus)
+
 	return &Engine{
-		config:        cfg,
-		eventBus:      events.NewEventBus(10000), // Increased buffer for rapid events
-		apiClient:     apiClient,
-		monitorStop:   make(chan struct{}),
-		publishEvents: true, // Enable by default
+		config:          cfg,
+		eventBus:        eventBus,
+		apiClient:       apiClient,
+		transferService: transferService,
+		fileService:     fileService,
+		monitorStop:     make(chan struct{}),
+		publishEvents:   true, // Enable by default
 	}, nil
 }
 
@@ -98,6 +112,13 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 	e.mu.Lock()
 	e.config = cfg
 	e.apiClient = apiClient
+	// v3.6.4: Update services with new API client
+	if e.transferService != nil {
+		e.transferService.SetAPIClient(apiClient)
+	}
+	if e.fileService != nil {
+		e.fileService.SetAPIClient(apiClient)
+	}
 	e.mu.Unlock()
 
 	e.publishLog(events.InfoLevel, "Configuration updated", "", "")
@@ -134,6 +155,22 @@ func (e *Engine) API() *api.Client {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.apiClient
+}
+
+// TransferService returns the transfer service for upload/download operations.
+// v3.6.4: Added as part of service layer refactoring.
+func (e *Engine) TransferService() *services.TransferService {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.transferService
+}
+
+// FileService returns the file service for file/folder operations.
+// v3.6.4: Added as part of service layer refactoring.
+func (e *Engine) FileService() *services.FileService {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.fileService
 }
 
 // TestConnection verifies API connectivity
