@@ -133,6 +133,7 @@ func (b *LocalBrowser) CreateRenderer() fyne.WidgetRenderer {
 
 	// File list widget
 	b.fileList = NewFileListWidget()
+	b.fileList.ConfigureForLocalBrowser() // v3.6.3: Use larger page sizes (200 default, 1000 max)
 	b.fileList.OnFolderOpen = func(item FileItem) {
 		b.navigateTo(item.ID) // ID is the full path for local files
 	}
@@ -754,4 +755,10 @@ func (b *LocalBrowser) Refresh() {
 	fyne.Do(func() {
 		b.BaseWidget.Refresh()
 	})
+}
+
+// GetFileList returns the file list widget for configuration.
+// v3.6.3: Used to set up sort persistence callback.
+func (b *LocalBrowser) GetFileList() *FileListWidget {
+	return b.fileList
 }

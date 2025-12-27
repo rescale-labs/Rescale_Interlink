@@ -62,6 +62,10 @@ type Config struct {
 	//   - Slower: ~2.3-4.6 hours for 13,440 files depending on folder structure
 	//   - More predictable: user sees all conflicts upfront
 	CheckConflictsBeforeUpload bool
+
+	// v3.6.3: File browser sort preferences (persisted across sessions)
+	SortField     string // "name", "size", "modified" (default: "name")
+	SortAscending bool   // true = ascending, false = descending (default: true)
 }
 
 // LoadConfigCSV loads configuration from a CSV file
@@ -76,6 +80,8 @@ func LoadConfigCSV(path string) (*Config, error) {
 		ValidationPattern: "", // validation is opt-in, disabled by default
 		TarCompression:    "none",
 		MaxRetries:        1,
+		SortField:         "name",  // v3.6.3: default sort by name
+		SortAscending:     true,    // v3.6.3: default ascending
 	}
 
 	if path == "" {
@@ -187,6 +193,10 @@ func LoadConfigCSV(path string) (*Config, error) {
 			if v, err := strconv.Atoi(value); err == nil {
 				cfg.MaxRetries = v
 			}
+		case "sort_field": // v3.6.3
+			cfg.SortField = value
+		case "sort_ascending": // v3.6.3
+			cfg.SortAscending = strings.ToLower(value) == "true" || value == "1"
 		}
 	}
 
@@ -240,6 +250,8 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"validation_pattern", cfg.ValidationPattern},
 		{"tar_compression", cfg.TarCompression},
 		{"max_retries", strconv.Itoa(cfg.MaxRetries)},
+		{"sort_field", cfg.SortField},                       // v3.6.3
+		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)}, // v3.6.3
 	}
 
 	for _, record := range records {

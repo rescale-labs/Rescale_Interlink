@@ -85,6 +85,7 @@ func (e *Engine) GetConfig() *config.Config {
 // Previously, the lock was held during api.NewClient() which can take 15+ seconds
 // for proxy warmup. This caused GUI freezes when other code tried to call
 // GetConfig() or API() while UpdateConfig was in progress.
+// v3.6.3: Now publishes EventConfigChanged to notify subscribers (e.g., File Browser)
 func (e *Engine) UpdateConfig(cfg *config.Config) error {
 	// Create new API client FIRST (this can be slow due to proxy warmup)
 	// Do NOT hold the mutex during this operation
@@ -100,6 +101,25 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 	e.mu.Unlock()
 
 	e.publishLog(events.InfoLevel, "Configuration updated", "", "")
+
+	// v3.6.3: Publish config changed event so File Browser can refresh
+	// Try to get user email for the event (non-blocking, best effort)
+	var email string
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if profile, err := apiClient.GetUserProfile(ctx); err == nil {
+		email = profile.Email
+	}
+
+	e.eventBus.Publish(&events.ConfigChangedEvent{
+		BaseEvent: events.BaseEvent{
+			EventType: events.EventConfigChanged,
+			Time:      time.Now(),
+		},
+		Source: "config_update",
+		Email:  email,
+	})
+
 	return nil
 }
 

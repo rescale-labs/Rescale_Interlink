@@ -495,9 +495,41 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	var bufferMu sync.Mutex
 
 	// Track progress
-	var downloadedBytes int64
+	var downloadedBytes int64  // Bytes downloaded from cloud (may be ahead of decryption)
+	var decryptedBytes int64   // v3.6.3: Bytes actually written to disk (accurate progress)
 	decryptedParts := int64(0)
 	nextPartToDecrypt := int64(0)
+
+	// v3.6.3: Progress ticker for smooth updates every 500ms.
+	// Uses decryptedBytes (not downloadedBytes) for accurate, non-jumpy progress.
+	// This prevents progress from racing ahead then jumping backwards.
+	progressTicker := time.NewTicker(500 * time.Millisecond)
+	progressDone := make(chan struct{})
+	decryptedSize := int64(0)
+	if prep.Params.FileInfo != nil {
+		decryptedSize = prep.Params.FileInfo.DecryptedSize
+	}
+	go func() {
+		defer progressTicker.Stop()
+		for {
+			select {
+			case <-progressTicker.C:
+				if prep.Params.ProgressCallback != nil && decryptedSize > 0 {
+					// Use decrypted bytes for accurate progress (not downloaded bytes!)
+					// Downloaded bytes can race ahead causing jumpy progress.
+					currentBytes := atomic.LoadInt64(&decryptedBytes)
+					progress := float64(currentBytes) / float64(decryptedSize)
+					if progress > 1.0 {
+						progress = 1.0
+					}
+					prep.Params.ProgressCallback(progress)
+				}
+			case <-progressDone:
+				return
+			}
+		}
+	}()
+	defer close(progressDone)
 
 	// Process downloaded parts - decrypt in order
 	for result := range resultChan {
@@ -509,7 +541,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		// Buffer this part
 		bufferMu.Lock()
 		partBuffer[result.partIndex] = result.ciphertext
-		downloadedBytes += int64(len(result.ciphertext))
+		atomic.AddInt64(&downloadedBytes, int64(len(result.ciphertext)))
 
 		// Decrypt all consecutive parts starting from nextPartToDecrypt
 		for {
@@ -535,19 +567,21 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			}
 
 			// Write plaintext directly to output file
-			if _, writeErr := outFile.Write(plaintext); writeErr != nil {
+			bytesWritten, writeErr := outFile.Write(plaintext)
+			if writeErr != nil {
 				errOnce.Do(func() { firstErr = fmt.Errorf("failed to write part %d: %w", nextPartToDecrypt, writeErr) })
 				cancelDownload()
 				break
 			}
 
+			// v3.6.3: Track actual bytes written for smooth progress
+			atomic.AddInt64(&decryptedBytes, int64(bytesWritten))
 			decryptedParts++
 			nextPartToDecrypt++
 
-			// Report progress based on decrypted parts (more accurate)
-			if prep.Params.ProgressCallback != nil && numParts > 0 {
-				prep.Params.ProgressCallback(float64(decryptedParts) / float64(numParts))
-			}
+			// v3.6.3: Removed per-part progress callback that caused jumpy progress.
+			// Progress is now reported only by the ticker using decryptedBytes.
+			// This prevents conflicts between two progress sources.
 
 			bufferMu.Lock()
 		}
@@ -745,19 +779,25 @@ func (d *Downloader) downloadStreamingConcurrent(
 		})
 	}
 
-	// Progress tracking
-	var downloadedBytes int64
+	// Progress tracking - v3.6.3: Track decrypted bytes for accurate progress
+	var decryptedBytes int64
 	progressTicker := time.NewTicker(300 * time.Millisecond)
 	defer progressTicker.Stop()
+
+	decryptedSize := int64(0)
+	if prep.Params.FileInfo != nil {
+		decryptedSize = prep.Params.FileInfo.DecryptedSize
+	}
 
 	progressDone := make(chan struct{})
 	go func() {
 		for {
 			select {
 			case <-progressTicker.C:
-				if prep.Params.ProgressCallback != nil && encryptedSize > 0 {
-					currentBytes := atomic.LoadInt64(&downloadedBytes)
-					prep.Params.ProgressCallback(float64(currentBytes) / float64(encryptedSize))
+				if prep.Params.ProgressCallback != nil && decryptedSize > 0 {
+					// v3.6.3: Use decrypted bytes for accurate progress
+					currentBytes := atomic.LoadInt64(&decryptedBytes)
+					prep.Params.ProgressCallback(float64(currentBytes) / float64(decryptedSize))
 				}
 			case <-progressDone:
 				return
@@ -815,8 +855,8 @@ func (d *Downloader) downloadStreamingConcurrent(
 					return
 				}
 
-				// Update progress
-				atomic.AddInt64(&downloadedBytes, int64(len(ciphertext)))
+				// v3.6.3: Update progress using decrypted (plaintext) bytes for accuracy
+				atomic.AddInt64(&decryptedBytes, int64(len(plaintext)))
 
 				// Record throughput if transfer handle available
 				if prep.TransferHandle != nil {

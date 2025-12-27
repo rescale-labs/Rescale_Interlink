@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -45,9 +46,10 @@ type SetupTab struct {
 	validationPatternEntry *widget.Entry
 
 	// Status
-	statusLabel      *widget.Label
-	connectionStatus *widget.Label
-	configFilePath   string
+	statusLabel         *widget.Label
+	connectionStatus    *widget.Label
+	credentialSourceLbl *widget.Label // v3.6.3: Shows effective credential source
+	configFilePath      string
 
 	// Connection state (persisted)
 	lastConnectionTest   time.Time
@@ -118,12 +120,20 @@ func (st *SetupTab) Build() fyne.CanvasObject {
 	testButton := widget.NewButton("Test Connection", st.testConnection)
 	testButton.Importance = widget.HighImportance
 
+	// v3.6.3: Credential source indicator with precedence info
+	st.credentialSourceLbl = widget.NewLabel("Not connected")
+	st.credentialSourceLbl.Wrapping = fyne.TextWrapWord
+	credentialHelpLbl := widget.NewLabel("Precedence: --api-key flag > RESCALE_API_KEY env > Token File > Direct Input")
+	credentialHelpLbl.Importance = widget.LowImportance
+
 	apiSection := widget.NewForm(
 		widget.NewFormItem("Platform URL", st.tenantURLEntry),
 		widget.NewFormItem("Token Source", st.tokenSourceRadio),
 		widget.NewFormItem("Token File", st.tokenFileButton),
 		widget.NewFormItem("API Key", apiKeyRow), // Use row with paste button
 		widget.NewFormItem("", container.NewHBox(testButton, st.connectionStatus)),
+		widget.NewFormItem("Active Source", st.credentialSourceLbl),
+		widget.NewFormItem("", credentialHelpLbl),
 	)
 
 	// Proxy Configuration Section
@@ -784,17 +794,56 @@ func (st *SetupTab) applyConfigAsync(onSuccess func(), onError func(error)) {
 			progress.Hide()
 			if err != nil {
 				st.statusLabel.SetText("Configuration failed")
+				st.updateCredentialSourceLabel("", "")
 				if onError != nil {
 					onError(err)
 				}
 			} else {
 				st.statusLabel.SetText("Configuration applied")
+				// v3.6.3: Update credential source label with new identity
+				go st.updateCredentialSourceAsync()
 				if onSuccess != nil {
 					onSuccess()
 				}
 			}
 		})
 	}()
+}
+
+// updateCredentialSourceLabel updates the credential source label with the current state.
+// v3.6.3: Shows the effective credential source and user identity.
+func (st *SetupTab) updateCredentialSourceLabel(source, email string) {
+	if st.credentialSourceLbl == nil {
+		return
+	}
+	if source == "" && email == "" {
+		st.credentialSourceLbl.SetText("Not connected")
+		return
+	}
+	if email != "" {
+		st.credentialSourceLbl.SetText(fmt.Sprintf("✓ %s (%s)", source, email))
+	} else {
+		st.credentialSourceLbl.SetText(source)
+	}
+}
+
+// updateCredentialSourceAsync fetches user profile and updates the credential source label.
+// v3.6.3: Called after successful config apply to show new identity.
+func (st *SetupTab) updateCredentialSourceAsync() {
+	source := st.tokenSourceRadio.Selected
+	var email string
+
+	// Try to get user email
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if profile, err := st.engine.API().GetUserProfile(ctx); err == nil {
+		email = profile.Email
+	}
+
+	fyne.Do(func() {
+		st.updateCredentialSourceLabel(source, email)
+	})
 }
 
 func (st *SetupTab) refreshFromEngine() {

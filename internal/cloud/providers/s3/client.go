@@ -60,6 +60,7 @@ type S3Client struct {
 //   - apiClient: Rescale API client for credential refresh
 //   - fileInfo: Optional file info for cross-storage downloads (nil for uploads)
 func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile) (*S3Client, error) {
+	clientStart := time.Now()
 	if storageInfo == nil {
 		return nil, fmt.Errorf("storageInfo is required")
 	}
@@ -69,11 +70,13 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 
 	// Create shared optimized HTTP client with proxy support
 	// IMPORTANT: Reuse this client across credential refreshes to maintain connection pool
+	t1 := time.Now()
 	purCfg := apiClient.GetConfig()
 	httpClient, err := http.CreateOptimizedClient(purCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP client: %w", err)
 	}
+	log.Printf("[DEBUG] NewS3Client: CreateOptimizedClient took %v", time.Since(t1))
 
 	// Create auto-refreshing credential provider
 	// For uploads: fileInfo is nil, so uses user's default storage
@@ -87,6 +90,7 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 	})
 
 	// Load AWS config with custom HTTP client and auto-refreshing credentials
+	t2 := time.Now()
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(storageInfo.ConnectionSettings.Region),
 		config.WithHTTPClient(httpClient),
@@ -95,11 +99,13 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
+	log.Printf("[DEBUG] NewS3Client: LoadDefaultConfig took %v", time.Since(t2))
 
 	client := s3.NewFromConfig(cfg)
 
 	// Get the global credential manager
 	credManager := credentials.GetManager(apiClient)
+	log.Printf("[DEBUG] NewS3Client: total took %v", time.Since(clientStart))
 
 	return &S3Client{
 		client:      client,
