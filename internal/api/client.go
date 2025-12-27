@@ -214,6 +214,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	req.Header.Set("Authorization", "Token "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	// Note: Go's http.Transport automatically handles Accept-Encoding: gzip
+	// and transparently decompresses responses. Do NOT set this header manually
+	// as it disables automatic decompression (causing JSON decode errors).
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -698,6 +701,75 @@ func (c *Client) ListFiles(ctx context.Context, limit int) ([]interface{}, error
 	}
 
 	return result.Results, nil
+}
+
+// LegacyFilesPage represents a page of legacy files listing.
+// v3.6.3: Used for flat file list view (Legacy mode in File Browser).
+type LegacyFilesPage struct {
+	Files   []FileInfo
+	NextURL string // URL to fetch next page (empty if no more)
+	HasMore bool   // True if there are more pages
+}
+
+// ListFilesPage retrieves a page of files from the user's library (flat list).
+// v3.6.3: Used for Legacy mode in File Browser.
+// pageURL: pass "" for first page, or NextURL from previous response.
+// Orders by most recent first (-dateUploaded) to show newest files at top.
+func (c *Client) ListFilesPage(ctx context.Context, pageURL string) (*LegacyFilesPage, error) {
+	url := pageURL
+	if url == "" {
+		// Order by most recent first for better UX
+		url = "/api/v3/files/?page_size=25&ordering=-dateUploaded"
+	}
+
+	resp, err := c.doRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		Count    int    `json:"count"`
+		Next     string `json:"next"`
+		Previous string `json:"previous"`
+		Results  []struct {
+			ID            string    `json:"id"`
+			Name          string    `json:"name"`
+			DecryptedSize int64     `json:"decryptedSize"`
+			DateUploaded  time.Time `json:"dateUploaded"`
+			IsUploaded    bool      `json:"isUploaded"`
+			IsDeleted     bool      `json:"isDeleted"`
+		} `json:"results"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	page := &LegacyFilesPage{
+		Files:   make([]FileInfo, 0, len(result.Results)),
+		NextURL: result.Next,
+		HasMore: result.Next != "",
+	}
+
+	// Filter to only include uploaded, non-deleted files
+	for _, f := range result.Results {
+		if f.IsUploaded && !f.IsDeleted {
+			page.Files = append(page.Files, FileInfo{
+				ID:            f.ID,
+				Name:          f.Name,
+				DecryptedSize: f.DecryptedSize,
+				DateUploaded:  f.DateUploaded,
+			})
+		}
+	}
+
+	return page, nil
 }
 
 // DeleteFile deletes a file from the user's library

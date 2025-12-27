@@ -2,7 +2,7 @@
 # Build and package cross-platform FIPS 140-3 compliant binaries
 
 # Variables
-VERSION := v3.6.2
+VERSION := v3.6.3
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
 LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"

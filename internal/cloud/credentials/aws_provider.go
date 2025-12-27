@@ -3,6 +3,7 @@ package credentials
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -68,6 +69,7 @@ func NewRescaleCredentialProvider(apiClient *api.Client, fileInfo *models.CloudF
 // If fileInfo was provided during construction, requests cached credentials for that file's storage.
 // Otherwise, requests cached credentials for user's default storage.
 func (p *RescaleCredentialProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	retrieveStart := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -86,6 +88,12 @@ func (p *RescaleCredentialProvider) Retrieve(ctx context.Context) (aws.Credentia
 
 	if s3Creds == nil {
 		return aws.Credentials{}, fmt.Errorf("received nil S3 credentials")
+	}
+
+	// Log if credential fetch took significant time (indicates cache miss or API call)
+	elapsed := time.Since(retrieveStart)
+	if elapsed > 100*time.Millisecond {
+		log.Printf("[DEBUG] RescaleCredentialProvider.Retrieve took %v (possible cache miss)", elapsed)
 	}
 
 	// Assume 15-minute expiry (conservative, safe assumption)

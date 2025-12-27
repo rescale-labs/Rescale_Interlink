@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,15 +35,48 @@ var _ transfer.StreamingConcurrentUploader = (*Provider)(nil)
 var _ transfer.StreamingConcurrentDownloader = (*Provider)(nil)
 var _ transfer.StreamingPartDownloader = (*Provider)(nil)
 
+// progressReader wraps an io.Reader and reports bytes read to a callback.
+// v3.6.3: Enables real-time progress tracking during S3 uploads.
+// Uses threshold-based reporting to avoid jumpy progress from many small reads.
+type progressReader struct {
+	reader      io.Reader
+	callback    func(bytesRead int64)
+	accumulated int64 // Bytes accumulated since last callback
+	threshold   int64 // Report every N bytes (1MB default)
+}
+
+// progressReaderThreshold is the minimum bytes to accumulate before reporting.
+// 1MB provides smooth progress without excessive updates.
+const progressReaderThreshold = 1 * 1024 * 1024 // 1MB
+
+func (pr *progressReader) Read(p []byte) (n int, err error) {
+	n, err = pr.reader.Read(p)
+	if n > 0 && pr.callback != nil {
+		pr.accumulated += int64(n)
+		// Report when threshold reached OR on EOF (to flush remaining)
+		if pr.accumulated >= pr.threshold || err == io.EOF {
+			pr.callback(pr.accumulated)
+			pr.accumulated = 0
+		}
+	}
+	return n, err
+}
+
 // InitStreamingUpload initializes a multipart upload with streaming encryption.
 // Uses CBC chaining format compatible with Rescale platform.
 // Metadata stores `iv` (base64) for Rescale decryption compatibility.
 func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.StreamingUploadInitParams) (*transfer.StreamingUpload, error) {
+	fileName := filepath.Base(params.LocalPath)
+	initStart := time.Now()
+
 	// Get or create S3 client
+	t1 := time.Now()
 	s3Client, err := p.getOrCreateS3Client(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get S3 client: %w", err)
 	}
+	log.Printf("[DEBUG] %s: getOrCreateS3Client took %v", fileName, time.Since(t1))
+	_ = initStart // use later
 
 	// Generate random suffix for object key
 	randomSuffix, err := encryption.GenerateSecureRandomString(22)
@@ -69,6 +103,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	// Create multipart upload on S3 with retry.
 	// Metadata uses `iv` field for Rescale compatibility.
 	// `streamingformat: cbc` enables streaming download (no temp file).
+	t2 := time.Now()
 	var createResp *s3.CreateMultipartUploadOutput
 	err = s3Client.RetryWithBackoff(ctx, "CreateMultipartUpload", func() error {
 		var err error
@@ -85,6 +120,8 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	if err != nil {
 		return nil, fmt.Errorf("failed to create multipart upload: %w", err)
 	}
+	log.Printf("[DEBUG] %s: CreateMultipartUpload took %v", fileName, time.Since(t2))
+	log.Printf("[DEBUG] %s: InitStreamingUpload total took %v", fileName, time.Since(initStart))
 
 	// Calculate total parts
 	totalParts := transfer.CalculateTotalParts(params.FileSize, partSize)
@@ -199,6 +236,7 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 // UploadCiphertext uploads already-encrypted data to cloud storage.
 // Can be called concurrently with EncryptStreamingPart (pipelining).
 // Separated from encryption to enable pipelining.
+// v3.6.3: Now uses progressReader to track bytes in real-time via ByteProgressCallback.
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
 	if !ok {
@@ -207,6 +245,8 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 
 	// S3 uses 1-based part numbers
 	partNumber := int32(partIndex + 1)
+	uploadStart := time.Now()
+	fileName := filepath.Base(uploadState.LocalPath)
 
 	// Create context with timeout
 	partCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
@@ -214,6 +254,17 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 
 	// Add HTTP tracing if DEBUG_HTTP is enabled
 	partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d", partNumber))
+
+	// v3.6.3: Create body reader with progress tracking if callback is set.
+	// This enables real-time progress updates during the S3 upload, not just at completion.
+	var bodyReader io.Reader = bytes.NewReader(ciphertext)
+	if uploadState.ByteProgressCallback != nil {
+		bodyReader = &progressReader{
+			reader:    bytes.NewReader(ciphertext),
+			callback:  uploadState.ByteProgressCallback,
+			threshold: progressReaderThreshold,
+		}
+	}
 
 	// Upload the part using S3Client
 	var uploadResp *s3.UploadPartOutput
@@ -224,7 +275,7 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 			Key:           aws.String(uploadState.StoragePath),
 			PartNumber:    aws.Int32(partNumber),
 			UploadId:      aws.String(uploadState.UploadID),
-			Body:          bytes.NewReader(ciphertext),
+			Body:          bodyReader,
 			ContentLength: aws.Int64(int64(len(ciphertext))),
 		})
 		return err
@@ -232,6 +283,15 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload part %d: %w", partNumber, err)
+	}
+
+	// Log part upload timing for first few parts to diagnose slowness
+	if partNumber <= 3 {
+		elapsed := time.Since(uploadStart)
+		sizeMB := float64(len(ciphertext)) / (1024 * 1024)
+		speedMBps := sizeMB / elapsed.Seconds()
+		log.Printf("[DEBUG] %s: UploadPart %d completed in %v (%.1f MB at %.1f MB/s)",
+			fileName, partNumber, elapsed, sizeMB, speedMBps)
 	}
 
 	return &transfer.PartResult{
