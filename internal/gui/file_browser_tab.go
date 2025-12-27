@@ -5,6 +5,7 @@ package gui
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,10 +20,13 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cli"
+	"github.com/rescale/rescale-int/internal/cloud/credentials"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
+	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -61,12 +65,18 @@ type FileBrowserTab struct {
 	// Delete button (remote only - local delete removed in v3.5.0)
 	deleteRemoteBtn *widget.Button
 
-	// Progress tracking
+	// v3.6.3: Transfer queue integration
+	transferQueue       *transfer.Queue       // Shared transfer queue
+	onTransferQueued    func()                // Callback to switch to Transfers tab
+	transferSemaphore   chan struct{}         // Shared semaphore for global 5-transfer limit
+	activeSlots         int32                 // Atomic counter: currently held slots (for logging)
+
+	// Progress tracking (kept for legacy support, will be removed in future)
 	mu             sync.RWMutex
 	isTransferring bool
 	cancelFunc     context.CancelFunc
 
-	// Progress UI components
+	// Progress UI components (v3.6.3: hidden, transfers shown in Transfers tab)
 	progressPanel        *fyne.Container
 	overallProgressBar   *widget.ProgressBar
 	overallProgressLabel *widget.Label
@@ -94,13 +104,27 @@ type FileBrowserTab struct {
 // NewFileBrowserTab creates a new file browser tab
 func NewFileBrowserTab(engine *core.Engine, window fyne.Window) *FileBrowserTab {
 	return &FileBrowserTab{
-		engine:           engine,
-		window:           window,
-		logger:           logging.NewLogger("file-browser", nil),
-		fileProgressBars:  make(map[string]*widget.ProgressBar),
+		engine:             engine,
+		window:             window,
+		logger:             logging.NewLogger("file-browser", nil),
+		fileProgressBars:   make(map[string]*widget.ProgressBar),
 		fileProgressLabels: make(map[string]*widget.Label),
-		activeTransfers:   make(map[string]*FileTransferProgress),
+		activeTransfers:    make(map[string]*FileTransferProgress),
+		// v3.6.3: Shared semaphore enforces global 5-transfer limit across all batches
+		transferSemaphore:  make(chan struct{}, constants.DefaultMaxConcurrent),
 	}
+}
+
+// SetTransferQueue sets the transfer queue for queue-based transfers.
+// v3.6.3: Called by UI after construction.
+func (fbt *FileBrowserTab) SetTransferQueue(queue *transfer.Queue) {
+	fbt.transferQueue = queue
+}
+
+// SetOnTransferQueued sets the callback invoked when transfers are queued.
+// v3.6.3: Used to switch to Transfers tab after enqueueing.
+func (fbt *FileBrowserTab) SetOnTransferQueued(callback func()) {
+	fbt.onTransferQueued = callback
 }
 
 // Build creates the file browser tab UI
@@ -116,6 +140,12 @@ func (fbt *FileBrowserTab) Build() fyne.CanvasObject {
 	fbt.remoteBrowser.OnSelectionChanged = func(selected []FileItem) {
 		fbt.updateTransferButtons()
 	}
+
+	// v3.6.3: Subscribe to config changes to refresh remote browser when API key changes
+	go fbt.subscribeToConfigChanges()
+
+	// v3.6.3: Set up sort persistence
+	fbt.setupSortPersistence()
 
 	// Upload button (in left pane header)
 	fbt.uploadBtn = widget.NewButtonWithIcon("Upload →", theme.UploadIcon(), fbt.onUpload)
@@ -263,8 +293,11 @@ func (fbt *FileBrowserTab) updateTransferButtonsInternal() {
 	isTransferring := fbt.isTransferring
 	fbt.mu.RUnlock()
 
-	// v3.4.0: Check if viewing Jobs (upload not allowed to Jobs)
+	// v3.6.3: Check if upload is allowed in current view
+	// Uploads are only allowed in My Library mode (not Jobs or Legacy)
+	uploadAllowed := fbt.remoteBrowser.IsUploadAllowed()
 	isJobsView := fbt.remoteBrowser.IsJobsView()
+	isLegacyView := fbt.remoteBrowser.IsLegacyView()
 
 	if isTransferring {
 		fbt.uploadBtn.Disable()
@@ -274,14 +307,18 @@ func (fbt *FileBrowserTab) updateTransferButtonsInternal() {
 	}
 
 	// Upload button
-	// v3.4.0: Disable upload when viewing My Jobs (can only upload to My Library)
-	if localCount > 0 && !isJobsView {
+	// v3.6.3: Disable upload when viewing My Jobs or Legacy (can only upload to My Library)
+	if localCount > 0 && uploadAllowed {
 		fbt.uploadBtn.Enable()
 		fbt.uploadBtn.SetText(fmt.Sprintf("Upload %d →", localCount))
 	} else {
 		fbt.uploadBtn.Disable()
-		if isJobsView && localCount > 0 {
-			fbt.uploadBtn.SetText("Upload (N/A in Jobs)")
+		if localCount > 0 && !uploadAllowed {
+			if isJobsView {
+				fbt.uploadBtn.SetText("Upload (N/A in Jobs)")
+			} else if isLegacyView {
+				fbt.uploadBtn.SetText("Upload (N/A in Legacy)")
+			}
 		} else {
 			fbt.uploadBtn.SetText("Upload →")
 		}
@@ -300,6 +337,7 @@ func (fbt *FileBrowserTab) updateTransferButtonsInternal() {
 }
 
 // onUpload handles the upload button click
+// v3.6.3: Uses transfer queue instead of direct execution
 func (fbt *FileBrowserTab) onUpload() {
 	selected := fbt.localBrowser.GetSelectedItems()
 	if len(selected) == 0 {
@@ -321,11 +359,20 @@ func (fbt *FileBrowserTab) onUpload() {
 		if !confirmed {
 			return
 		}
+
+		// Use the proven executeUploadConcurrent implementation
+		// The queue-based approach had serious issues and needs redesign
 		go fbt.executeUploadConcurrent(selected, destFolderID)
 	}, fbt.window)
 }
 
+// enqueueUploads is reserved for future queue integration.
+// v3.6.3: Queue redesigned to OBSERVE transfers, not execute them.
+// For now, onUpload() calls executeUploadConcurrent() directly.
+// This function will be updated to integrate with the observer queue.
+
 // onDownload handles the download button click
+// v3.6.3: Uses transfer queue instead of direct execution
 func (fbt *FileBrowserTab) onDownload() {
 	selected := fbt.remoteBrowser.GetSelectedItems()
 	if len(selected) == 0 {
@@ -345,9 +392,17 @@ func (fbt *FileBrowserTab) onDownload() {
 		if !confirmed {
 			return
 		}
+
+		// Use the proven executeDownloadConcurrent implementation
+		// The queue-based approach had serious issues and needs redesign
 		go fbt.executeDownloadConcurrent(selected, destPath)
 	}, fbt.window)
 }
+
+// enqueueDownloads is reserved for future queue integration.
+// v3.6.3: Queue redesigned to OBSERVE transfers, not execute them.
+// For now, onDownload() calls executeDownloadConcurrent() directly.
+// This function will be updated to integrate with the observer queue.
 
 // onDeleteRemote handles the remote delete button click
 func (fbt *FileBrowserTab) onDeleteRemote() {
@@ -434,8 +489,13 @@ func (fbt *FileBrowserTab) executeDeleteRemote(items []FileItem) {
 
 // executeUploadConcurrent uploads files concurrently using CLI patterns
 func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderID string) {
-	fbt.setTransferring(true)
-	defer fbt.setTransferring(false)
+	// v3.6.3: When queue is active, do NOT block UI with setTransferring
+	// This allows users to add more files to the queue while transfers are ongoing
+	useQueue := fbt.transferQueue != nil
+	if !useQueue {
+		fbt.setTransferring(true)
+		defer fbt.setTransferring(false)
+	}
 
 	apiClient := fbt.engine.API()
 	if apiClient == nil {
@@ -468,9 +528,17 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 	atomic.StoreInt32(&fbt.totalFiles, int32(total))
 	atomic.StoreInt32(&fbt.completedFiles, 0)
 
-	// Initialize progress UI and PRE-CREATE all progress bars on main thread
-	// This prevents GUI locking from concurrent container modifications
-	fbt.initProgressUIWithFiles(total, "upload", allFiles)
+	// v3.6.3: Skip inline progress UI when queue is active - Transfers tab shows progress instead
+	if !useQueue {
+		// Initialize progress UI and PRE-CREATE all progress bars on main thread
+		// This prevents GUI locking from concurrent container modifications
+		fbt.initProgressUIWithFiles(total, "upload", allFiles)
+	} else {
+		// Auto-switch to Transfers tab
+		if fbt.onTransferQueued != nil {
+			fbt.onTransferQueued()
+		}
+	}
 
 	// v3.6.1: Update status bar to reflect upload phase (fixes stale "Scanning..." message)
 	fyne.Do(func() {
@@ -482,39 +550,92 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// Use semaphore for concurrent uploads (like CLI)
-	semaphore := make(chan struct{}, constants.DefaultMaxConcurrent)
+	// v3.6.3: Pre-warm credential cache BEFORE spawning goroutines
+	// This ensures credentials are fetched ONCE and shared by all uploads,
+	// avoiding lock contention when multiple goroutines try to fetch simultaneously.
+	// Saves ~1-2 seconds of startup time.
+	credManager := credentials.GetManager(apiClient)
+	_, _ = credManager.GetUserProfile(ctx)  // Warm cache (ignore errors, uploads will retry if needed)
+	_, _ = credManager.GetRootFolders(ctx)  // Warm cache
+
+	// v3.6.3: Use shared semaphore for global 5-transfer limit across all batches
+	// This ensures that multiple upload/download batches don't exceed the limit
+	semaphore := fbt.transferSemaphore
 	var wg sync.WaitGroup
 	errChan := make(chan error, total)
 
 	successCount := int32(0)
 	errorCount := int32(0)
 
+	// v3.6.3: Batch start logging - uses log.Printf for guaranteed visibility
+	currentSlots := atomic.LoadInt32(&fbt.activeSlots)
+	log.Printf("[BATCH] Starting UPLOAD batch: %d files (active=%d/%d)", total, currentSlots, cap(semaphore))
+
 	for _, file := range allFiles {
 		wg.Add(1)
 		go func(f uploadFileInfo) {
 			defer wg.Done()
 
+			// v3.6.3: Track this upload in the queue (starts as Queued)
+			var taskID string
+			if useQueue {
+				task := fbt.transferQueue.TrackTransfer(
+					filepath.Base(f.LocalPath),
+					f.Size,
+					transfer.TaskTypeUpload,
+					f.LocalPath,
+					f.DestFolderID,
+				)
+				taskID = task.ID
+			}
+
 			// v3.4.0: Panic recovery to prevent GUI crashes from upload failures
 			defer func() {
 				if r := recover(); r != nil {
 					fbt.logger.Error().Msgf("PANIC in upload goroutine for %s: %v", f.LocalPath, r)
-					fyne.Do(func() {
-						fbt.updateFileProgress(f.LocalPath, 1.0, "error", fmt.Errorf("panic: %v", r))
-					})
+					if !useQueue {
+						fyne.Do(func() {
+							fbt.updateFileProgress(f.LocalPath, 1.0, "error", fmt.Errorf("panic: %v", r))
+						})
+					}
+					if useQueue && taskID != "" {
+						fbt.transferQueue.Fail(taskID, fmt.Errorf("panic: %v", r))
+					}
 					atomic.AddInt32(&errorCount, 1)
 					atomic.AddInt32(&fbt.completedFiles, 1)
-					fbt.updateOverallProgress()
+					if !useQueue {
+						fbt.updateOverallProgress()
+					}
 				}
 			}()
 
-			// Acquire semaphore
+			// v3.6.3: Semaphore slot tracking - uses log.Printf for guaranteed visibility
+			fileName := filepath.Base(f.LocalPath)
+			slotsBefore := atomic.LoadInt32(&fbt.activeSlots)
+			log.Printf("[SLOT] UPLOAD %s: waiting (active=%d/%d)", fileName, slotsBefore, cap(semaphore))
+
+			// Acquire semaphore - BLOCKS until a slot is available
 			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
+			slotsNow := atomic.AddInt32(&fbt.activeSlots, 1)
+			log.Printf("[SLOT] UPLOAD %s: ACQUIRED (active=%d/%d)", fileName, slotsNow, cap(semaphore))
+
+			defer func() {
+				<-semaphore
+				slotsAfter := atomic.AddInt32(&fbt.activeSlots, -1)
+				log.Printf("[SLOT] UPLOAD %s: RELEASED (active=%d/%d)", fileName, slotsAfter, cap(semaphore))
+			}()
+
+			// v3.6.3: Activate task now that we have a semaphore slot
+			if useQueue && taskID != "" {
+				fbt.transferQueue.Activate(taskID)
+			}
 
 			// Check for cancellation
 			select {
 			case <-ctx.Done():
+				if useQueue && taskID != "" {
+					fbt.transferQueue.Fail(taskID, ctx.Err())
+				}
 				return
 			default:
 			}
@@ -522,11 +643,18 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 			// Get file info for transfer allocation
 			fileInfo, err := os.Stat(f.LocalPath)
 			if err != nil {
-				fbt.updateFileProgress(f.LocalPath, 1.0, "error", err)
+				if !useQueue {
+					fbt.updateFileProgress(f.LocalPath, 1.0, "error", err)
+				}
+				if useQueue && taskID != "" {
+					fbt.transferQueue.Fail(taskID, err)
+				}
 				atomic.AddInt32(&errorCount, 1)
 				errChan <- fmt.Errorf("failed to stat %s: %w", f.LocalPath, err)
 				atomic.AddInt32(&fbt.completedFiles, 1)
-				fbt.updateOverallProgress()
+				if !useQueue {
+					fbt.updateOverallProgress()
+				}
 				return
 			}
 
@@ -534,7 +662,9 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 			transferHandle := transferMgr.AllocateTransfer(fileInfo.Size(), total)
 
 			// Show "preparing" status immediately so user sees feedback
-			fbt.updateFileProgress(f.LocalPath, 0, "preparing", nil)
+			if !useQueue {
+				fbt.updateFileProgress(f.LocalPath, 0, "preparing", nil)
+			}
 
 			// Upload with progress callback using new canonical API (Sprint 6)
 			_, err = upload.UploadFile(ctx, upload.UploadParams{
@@ -542,25 +672,47 @@ func (fbt *FileBrowserTab) executeUploadConcurrent(items []FileItem, destFolderI
 				FolderID:  f.DestFolderID,
 				APIClient: apiClient,
 				ProgressCallback: func(progress float64) {
-					fbt.updateFileProgress(f.LocalPath, progress, "transferring", nil)
-					fbt.updateOverallProgress()
+					// v3.6.3: Only update File Browser progress if queue is not active
+					if !useQueue {
+						fbt.updateFileProgress(f.LocalPath, progress, "transferring", nil)
+						fbt.updateOverallProgress()
+					}
+					// v3.6.3: Update queue progress and transition from Initializing to Active
+					if useQueue && taskID != "" {
+						// StartTransfer is idempotent - only transitions if state is TaskInitializing
+						// This marks the task as "Active" (actually transferring) vs "Initializing"
+						fbt.transferQueue.StartTransfer(taskID)
+						fbt.transferQueue.UpdateProgress(taskID, progress)
+					}
 				},
 				TransferHandle: transferHandle,
 			})
 
 			if err != nil {
-				fbt.updateFileProgress(f.LocalPath, 1.0, "error", err)
+				if !useQueue {
+					fbt.updateFileProgress(f.LocalPath, 1.0, "error", err)
+				}
+				if useQueue && taskID != "" {
+					fbt.transferQueue.Fail(taskID, err)
+				}
 				atomic.AddInt32(&errorCount, 1)
 				errChan <- fmt.Errorf("failed to upload %s: %w", filepath.Base(f.LocalPath), err)
 				fbt.logger.Error().Err(err).Str("path", f.LocalPath).Msg("Upload failed")
 			} else {
-				fbt.updateFileProgress(f.LocalPath, 1.0, "complete", nil)
+				if !useQueue {
+					fbt.updateFileProgress(f.LocalPath, 1.0, "complete", nil)
+				}
+				if useQueue && taskID != "" {
+					fbt.transferQueue.Complete(taskID)
+				}
 				atomic.AddInt32(&successCount, 1)
 				fbt.logger.Info().Str("path", f.LocalPath).Msg("File uploaded")
 			}
 
 			atomic.AddInt32(&fbt.completedFiles, 1)
-			fbt.updateOverallProgress()
+			if !useQueue {
+				fbt.updateOverallProgress()
+			}
 		}(file)
 	}
 
@@ -723,8 +875,13 @@ func (fbt *FileBrowserTab) uploadFolderWithCLILogic(
 
 // executeDownloadConcurrent downloads files concurrently using CLI patterns
 func (fbt *FileBrowserTab) executeDownloadConcurrent(items []FileItem, destPath string) {
-	fbt.setTransferring(true)
-	defer fbt.setTransferring(false)
+	// v3.6.3: When queue is active, do NOT block UI with setTransferring
+	// This allows users to add more files to the queue while transfers are ongoing
+	useQueue := fbt.transferQueue != nil
+	if !useQueue {
+		fbt.setTransferring(true)
+		defer fbt.setTransferring(false)
+	}
 
 	apiClient := fbt.engine.API()
 	if apiClient == nil {
@@ -763,9 +920,17 @@ func (fbt *FileBrowserTab) executeDownloadConcurrent(items []FileItem, destPath 
 	atomic.StoreInt32(&fbt.totalFiles, int32(total))
 	atomic.StoreInt32(&fbt.completedFiles, 0)
 
-	// Initialize progress UI and PRE-CREATE all progress bars on main thread
-	// This prevents GUI locking from concurrent container modifications
-	fbt.initProgressUIForDownloads(total, allFiles)
+	// v3.6.3: Skip inline progress UI when queue is active - Transfers tab shows progress instead
+	if !useQueue {
+		// Initialize progress UI and PRE-CREATE all progress bars on main thread
+		// This prevents GUI locking from concurrent container modifications
+		fbt.initProgressUIForDownloads(total, allFiles)
+	} else {
+		// Auto-switch to Transfers tab
+		if fbt.onTransferQueued != nil {
+			fbt.onTransferQueued()
+		}
+	}
 
 	// v3.6.1: Update status bar to reflect download phase (fixes stale "Scanning..." message)
 	fyne.Do(func() {
@@ -777,39 +942,92 @@ func (fbt *FileBrowserTab) executeDownloadConcurrent(items []FileItem, destPath 
 	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// Use semaphore for concurrent downloads (like CLI)
-	semaphore := make(chan struct{}, constants.DefaultMaxConcurrent)
+	// v3.6.3: Pre-warm credential cache BEFORE spawning goroutines
+	// This ensures credentials are fetched ONCE and shared by all downloads,
+	// avoiding lock contention when multiple goroutines try to fetch simultaneously.
+	// Saves ~1-2 seconds of startup time.
+	credManager := credentials.GetManager(apiClient)
+	_, _ = credManager.GetUserProfile(ctx)  // Warm cache (ignore errors, downloads will retry if needed)
+
+	// v3.6.3: Use shared semaphore for global 5-transfer limit across all batches
+	// This ensures that multiple upload/download batches don't exceed the limit
+	semaphore := fbt.transferSemaphore
 	var wg sync.WaitGroup
 	errChan := make(chan error, total)
 
 	successCount := int32(0)
 	errorCount := int32(0)
 
+	// v3.6.3: Batch start logging - uses log.Printf for guaranteed visibility
+	currentSlots := atomic.LoadInt32(&fbt.activeSlots)
+	log.Printf("[BATCH] Starting DOWNLOAD batch: %d files (active=%d/%d)", total, currentSlots, cap(semaphore))
+
 	for _, file := range allFiles {
 		wg.Add(1)
 		go func(f downloadFileInfo) {
 			defer wg.Done()
 
+			// v3.6.3: Track this download in the queue (starts as Queued)
+			var taskID string
+			if useQueue {
+				task := fbt.transferQueue.TrackTransfer(
+					f.Name,
+					f.Size,
+					transfer.TaskTypeDownload,
+					f.FileID,    // source: remote file ID
+					f.LocalPath, // dest: local path
+				)
+				taskID = task.ID
+			}
+
 			// v3.4.0: Panic recovery to prevent GUI crashes from download failures
 			defer func() {
 				if r := recover(); r != nil {
 					fbt.logger.Error().Msgf("PANIC in download goroutine for %s: %v", f.Name, r)
-					fyne.Do(func() {
-						fbt.updateFileProgress(f.FileID, 1.0, "error", fmt.Errorf("panic: %v", r))
-					})
+					if !useQueue {
+						fyne.Do(func() {
+							fbt.updateFileProgress(f.FileID, 1.0, "error", fmt.Errorf("panic: %v", r))
+						})
+					}
+					// v3.6.3: Mark as failed in queue
+					if useQueue && taskID != "" {
+						fbt.transferQueue.Fail(taskID, fmt.Errorf("panic: %v", r))
+					}
 					atomic.AddInt32(&errorCount, 1)
 					atomic.AddInt32(&fbt.completedFiles, 1)
-					fbt.updateOverallProgress()
+					if !useQueue {
+						fbt.updateOverallProgress()
+					}
 				}
 			}()
 
-			// Acquire semaphore
+			// v3.6.3: Semaphore slot tracking - uses log.Printf for guaranteed visibility
+			slotsBefore := atomic.LoadInt32(&fbt.activeSlots)
+			log.Printf("[SLOT] DOWNLOAD %s: waiting (active=%d/%d)", f.Name, slotsBefore, cap(semaphore))
+
+			// Acquire semaphore - BLOCKS until a slot is available
 			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
+			slotsNow := atomic.AddInt32(&fbt.activeSlots, 1)
+			log.Printf("[SLOT] DOWNLOAD %s: ACQUIRED (active=%d/%d)", f.Name, slotsNow, cap(semaphore))
+
+			defer func() {
+				<-semaphore
+				slotsAfter := atomic.AddInt32(&fbt.activeSlots, -1)
+				log.Printf("[SLOT] DOWNLOAD %s: RELEASED (active=%d/%d)", f.Name, slotsAfter, cap(semaphore))
+			}()
+
+			// v3.6.3: Activate task now that we have a semaphore slot
+			if useQueue && taskID != "" {
+				fbt.transferQueue.Activate(taskID)
+			}
 
 			// Check for cancellation
 			select {
 			case <-ctx.Done():
+				// v3.6.3: Mark task as failed in queue on cancellation
+				if useQueue && taskID != "" {
+					fbt.transferQueue.Fail(taskID, ctx.Err())
+				}
 				return
 			default:
 			}
@@ -823,25 +1041,49 @@ func (fbt *FileBrowserTab) executeDownloadConcurrent(items []FileItem, destPath 
 				LocalPath: f.LocalPath,
 				APIClient: apiClient,
 				ProgressCallback: func(progress float64) {
-					fbt.updateFileProgress(f.FileID, progress, "transferring", nil)
-					fbt.updateOverallProgress()
+					// v3.6.3: Only update File Browser progress if queue is not active
+					if !useQueue {
+						fbt.updateFileProgress(f.FileID, progress, "transferring", nil)
+						fbt.updateOverallProgress()
+					}
+					// v3.6.3: Update queue progress and transition from Initializing to Active
+					if useQueue && taskID != "" {
+						// StartTransfer is idempotent - only transitions if state is TaskInitializing
+						// This marks the task as "Active" (actually transferring) vs "Initializing"
+						fbt.transferQueue.StartTransfer(taskID)
+						fbt.transferQueue.UpdateProgress(taskID, progress)
+					}
 				},
 				TransferHandle: transferHandle,
 			})
 
 			if err != nil {
-				fbt.updateFileProgress(f.FileID, 1.0, "error", err)
+				if !useQueue {
+					fbt.updateFileProgress(f.FileID, 1.0, "error", err)
+				}
 				atomic.AddInt32(&errorCount, 1)
 				errChan <- fmt.Errorf("failed to download %s: %w", f.Name, err)
 				fbt.logger.Error().Err(err).Str("file_id", f.FileID).Str("name", f.Name).Msg("Download failed")
+				// v3.6.3: Mark as failed in queue
+				if useQueue && taskID != "" {
+					fbt.transferQueue.Fail(taskID, err)
+				}
 			} else {
-				fbt.updateFileProgress(f.FileID, 1.0, "complete", nil)
+				if !useQueue {
+					fbt.updateFileProgress(f.FileID, 1.0, "complete", nil)
+				}
 				atomic.AddInt32(&successCount, 1)
 				fbt.logger.Info().Str("file_id", f.FileID).Str("local_path", f.LocalPath).Msg("File downloaded")
+				// v3.6.3: Mark as complete in queue
+				if useQueue && taskID != "" {
+					fbt.transferQueue.Complete(taskID)
+				}
 			}
 
 			atomic.AddInt32(&fbt.completedFiles, 1)
-			fbt.updateOverallProgress()
+			if !useQueue {
+				fbt.updateOverallProgress()
+			}
 		}(file)
 	}
 
@@ -1505,4 +1747,88 @@ func (fbt *FileBrowserTab) setStatus(status string) {
 // showError shows an error dialog
 func (fbt *FileBrowserTab) showError(message string) {
 	dialog.ShowError(fmt.Errorf("%s", message), fbt.window)
+}
+
+// setupSortPersistence loads sort preferences from config and sets up callbacks to save changes.
+// v3.6.3: Sort preferences are persisted across sessions.
+func (fbt *FileBrowserTab) setupSortPersistence() {
+	if fbt.engine == nil {
+		return
+	}
+
+	// Load sort preferences from config
+	cfg := fbt.engine.GetConfig()
+	sortField := cfg.SortField
+	sortAscending := cfg.SortAscending
+
+	// Apply to local browser
+	if fbt.localBrowser != nil {
+		if fileList := fbt.localBrowser.GetFileList(); fileList != nil {
+			fileList.SetSort(sortField, sortAscending)
+			fileList.OnSortChanged = fbt.onSortChanged
+		}
+	}
+
+	// Apply to remote browser
+	if fbt.remoteBrowser != nil {
+		if fileList := fbt.remoteBrowser.GetFileList(); fileList != nil {
+			fileList.SetSort(sortField, sortAscending)
+			fileList.OnSortChanged = fbt.onSortChanged
+		}
+	}
+
+	fbt.logger.Info().
+		Str("sort_field", sortField).
+		Bool("sort_ascending", sortAscending).
+		Msg("Loaded sort preferences from config")
+}
+
+// onSortChanged is called when the user changes the sort order.
+// v3.6.3: Saves the preference to config for persistence.
+func (fbt *FileBrowserTab) onSortChanged(sortBy string, ascending bool) {
+	if fbt.engine == nil {
+		return
+	}
+
+	// Update config
+	cfg := fbt.engine.GetConfig()
+	cfg.SortField = sortBy
+	cfg.SortAscending = ascending
+
+	// Save to config file (non-blocking)
+	go func() {
+		configPath := config.GetDefaultConfigPath()
+		if err := config.SaveConfigCSV(cfg, configPath); err != nil {
+			fbt.logger.Error().Err(err).Msg("Failed to save sort preferences")
+		} else {
+			fbt.logger.Debug().
+				Str("sort_field", sortBy).
+				Bool("sort_ascending", ascending).
+				Msg("Saved sort preferences")
+		}
+	}()
+}
+
+// subscribeToConfigChanges listens for config change events and refreshes the remote browser.
+// v3.6.3: Enables hot-reload of API key without restarting the application.
+func (fbt *FileBrowserTab) subscribeToConfigChanges() {
+	if fbt.engine == nil || fbt.engine.Events() == nil {
+		fbt.logger.Warn().Msg("Cannot subscribe to config changes - event bus not available")
+		return
+	}
+
+	ch := fbt.engine.Events().Subscribe(events.EventConfigChanged)
+	for event := range ch {
+		if configEvent, ok := event.(*events.ConfigChangedEvent); ok {
+			fbt.logger.Info().
+				Str("source", configEvent.Source).
+				Str("email", configEvent.Email).
+				Msg("Config changed - refreshing remote browser")
+
+			// Refresh remote browser with new credentials
+			if fbt.remoteBrowser != nil {
+				fbt.remoteBrowser.OnConfigChanged()
+			}
+		}
+	}
 }

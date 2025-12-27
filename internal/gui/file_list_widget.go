@@ -81,10 +81,14 @@ const (
 	// FileListFontScale reduces font size for compact display (70% = 30% reduction)
 	FileListFontScale = 0.70
 
-	// Pagination defaults
+	// Pagination defaults (for remote browser - matches API page size)
 	DefaultPageSize = 25  // Default items per page (matches API page size)
 	MinPageSize     = 10  // Minimum items per page
 	MaxPageSize     = 200 // Maximum items per page
+
+	// Local browser pagination (v3.6.3: separate settings for local files)
+	LocalDefaultPageSize = 200  // Default items per page for local files
+	LocalMaxPageSize     = 1000 // Maximum items per page for local files
 )
 
 // FileItem represents a file or folder in the list
@@ -132,7 +136,8 @@ type FileListWidget struct {
 	filterGeneration  uint64       // Generation counter to discard stale filter results
 
 	// Pagination state
-	pageSize          int  // Items per page (default 25, max 200)
+	pageSize          int  // Items per page (default 25 for remote, 200 for local)
+	maxPageSize       int  // Maximum page size (200 for remote, 1000 for local)
 	currentPage       int  // Current page (0-indexed)
 	hasMoreServerData bool // True if more data available on server (for lazy loading)
 
@@ -140,6 +145,7 @@ type FileListWidget struct {
 	OnFolderOpen       func(item FileItem)                  // Called when folder is double-clicked/entered
 	OnSelectionChanged func(selected []FileItem)            // Called when selection changes
 	OnPageChange       func(page, pageSize, totalItems int) // Called when page changes (for lazy loading)
+	OnSortChanged      func(sortBy string, ascending bool)  // v3.6.3: Called when sort changes (for persistence)
 
 	// UI components
 	list           *widget.List
@@ -195,10 +201,20 @@ func NewFileListWidget() *FileListWidget {
 		sortAscending: true,
 		hasDateInfo:   false,
 		pageSize:      DefaultPageSize,
+		maxPageSize:   MaxPageSize, // Default for remote browser
 		currentPage:   0,
 	}
 	w.ExtendBaseWidget(w)
 	return w
+}
+
+// ConfigureForLocalBrowser configures the widget for local file browsing.
+// v3.6.3: Uses larger page sizes for local files (200 default, 1000 max).
+func (w *FileListWidget) ConfigureForLocalBrowser() {
+	w.mu.Lock()
+	w.pageSize = LocalDefaultPageSize
+	w.maxPageSize = LocalMaxPageSize
+	w.mu.Unlock()
 }
 
 // createSizedText creates a canvas.Text with scaled font size for compact display
@@ -946,6 +962,7 @@ func (w *FileListWidget) showSortMenu() {
 
 // setSortMode sets the sort mode and refreshes the list
 // Uses viewDirty for self-healing sort recompute (v3.4.12).
+// v3.6.3: Calls OnSortChanged callback for persistence.
 func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
 	w.mu.Lock()
 	if w.sortBy == sortBy && w.sortAscending == ascending {
@@ -956,7 +973,13 @@ func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
 	w.sortBy = sortBy
 	w.sortAscending = ascending
 	w.viewDirty = true // Mark for recompute
+	callback := w.OnSortChanged // Capture under lock
 	w.mu.Unlock()
+
+	// v3.6.3: Notify callback for persistence
+	if callback != nil {
+		callback(sortBy, ascending)
+	}
 
 	// Refresh UI - ensureViewLocked will recompute sort/filter when list reads
 	fyne.Do(func() {
@@ -964,6 +987,24 @@ func (w *FileListWidget) setSortMode(sortBy string, ascending bool) {
 			w.list.Refresh()
 		}
 	})
+}
+
+// SetSort sets the initial sort mode without triggering the OnSortChanged callback.
+// v3.6.3: Used for loading sort preferences from config.
+func (w *FileListWidget) SetSort(sortBy string, ascending bool) {
+	w.mu.Lock()
+	w.sortBy = sortBy
+	w.sortAscending = ascending
+	w.viewDirty = true // Mark for recompute on next refresh
+	w.mu.Unlock()
+}
+
+// GetSort returns the current sort settings.
+// v3.6.3: Used for saving sort preferences to config.
+func (w *FileListWidget) GetSort() (sortBy string, ascending bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.sortBy, w.sortAscending
 }
 
 // sortAndRefresh marks view as dirty and refreshes the list.
@@ -1153,14 +1194,21 @@ func (w *FileListWidget) GetPageSize() int {
 	return w.pageSize
 }
 
-// SetPageSize sets the page size (clamped to MinPageSize-MaxPageSize range)
+// SetPageSize sets the page size (clamped to MinPageSize-maxPageSize range)
 // Use this for remote browsing where latency dominates - larger pages mean fewer round trips
+// v3.6.3: Uses instance's maxPageSize (200 for remote, 1000 for local)
 func (w *FileListWidget) SetPageSize(size int) {
 	if size < MinPageSize {
 		size = MinPageSize
 	}
-	if size > MaxPageSize {
-		size = MaxPageSize
+	w.mu.RLock()
+	maxSize := w.maxPageSize
+	if maxSize == 0 {
+		maxSize = MaxPageSize // Fallback for uninitialized
+	}
+	w.mu.RUnlock()
+	if size > maxSize {
+		size = maxSize
 	}
 	w.mu.Lock()
 	w.pageSize = size
@@ -1389,18 +1437,23 @@ func (w *FileListWidget) nextPage() {
 }
 
 // onPageSizeChanged handles changes to the page size entry
+// v3.6.3: Uses instance's maxPageSize (200 for remote, 1000 for local)
 func (w *FileListWidget) onPageSizeChanged(value string) {
 	newSize := 0
 	fmt.Sscanf(value, "%d", &newSize)
 
-	// Clamp to valid range
+	// Clamp to valid range using instance's maxPageSize
+	w.mu.Lock()
+	maxSize := w.maxPageSize
+	if maxSize == 0 {
+		maxSize = MaxPageSize // Fallback for uninitialized
+	}
 	if newSize < MinPageSize {
 		newSize = MinPageSize
-	} else if newSize > MaxPageSize {
-		newSize = MaxPageSize
+	} else if newSize > maxSize {
+		newSize = maxSize
 	}
 
-	w.mu.Lock()
 	w.viewGeneration++ // (v3.5.0) Invalidate in-flight row updates
 	w.pageSize = newSize
 	w.currentPage = 0 // Reset to first page
@@ -1527,7 +1580,8 @@ func FormatFileSize(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// FormatTransferRate formats a transfer rate (bytes per second) to human-readable format
+// FormatTransferRate formats a transfer rate (bytes per second) to human-readable format.
+// Uses 2 decimal places for consistent, precise display.
 func FormatTransferRate(bytesPerSec float64) string {
 	const unit = 1024
 	if bytesPerSec < unit {
@@ -1538,7 +1592,7 @@ func FormatTransferRate(bytesPerSec float64) string {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB/s", bytesPerSec/div, "KMGTPE"[exp])
+	return fmt.Sprintf("%.2f %cB/s", bytesPerSec/div, "KMGTPE"[exp])
 }
 
 // fixedWidthLayout is a custom layout that constrains width to a fixed value
