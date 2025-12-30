@@ -93,26 +93,6 @@ func (s *FileListState) IsLoading() bool {
 	return s.loading
 }
 
-// SetError sets the last error and publishes an error event.
-func (s *FileListState) SetError(err error) {
-	s.mu.Lock()
-	s.lastError = err
-	s.loading = false
-	folderID := s.folderID
-	s.mu.Unlock()
-
-	if s.eventBus != nil && err != nil {
-		s.eventBus.Publish(NewFileListErrorEvent(s.source, folderID, err))
-	}
-}
-
-// GetError returns the last error.
-func (s *FileListState) GetError() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.lastError
-}
-
 // SetCurrentFolder updates the current folder and publishes an event.
 func (s *FileListState) SetCurrentFolder(folderID, folderPath string) {
 	s.mu.Lock()
@@ -203,13 +183,6 @@ func (s *FileListState) IsSelected(id string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.selected[id]
-}
-
-// GetSelectedIDs returns the IDs of selected items.
-func (s *FileListState) GetSelectedIDs() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.getSelectedIDsLocked()
 }
 
 // getSelectedIDsLocked returns selected IDs (must hold lock).

@@ -289,8 +289,20 @@ func DownloadFolderRecursive(
 
 			localPath := filepath.Join(rootOutputDir, task.RelativePath)
 
+			// Check if path exists as a directory (name collision with folder)
+			// This happens when the remote has both a folder and a file with the same name
+			if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
+				// The path exists as a directory - rename file with .file suffix
+				originalPath := localPath
+				localPath = localPath + ".file"
+				logger.Warn().
+					Str("original_path", originalPath).
+					Str("renamed_to", localPath).
+					Msg("File name conflicts with existing directory, renaming file")
+			}
+
 			// Check if file exists and handle conflict
-			if _, err := os.Stat(localPath); err == nil {
+			if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
 				conflictMutex.Lock()
 				currentMode := conflictMode
 				conflictMutex.Unlock()

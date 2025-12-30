@@ -66,6 +66,9 @@ type Config struct {
 	// v3.6.3: File browser sort preferences (persisted across sessions)
 	SortField     string // "name", "size", "modified" (default: "name")
 	SortAscending bool   // true = ascending, false = descending (default: true)
+
+	// v4.0.0: Detailed logging toggle for timing/metrics in Activity tab
+	DetailedLogging bool
 }
 
 // LoadConfigCSV loads configuration from a CSV file
@@ -197,6 +200,8 @@ func LoadConfigCSV(path string) (*Config, error) {
 			cfg.SortField = value
 		case "sort_ascending": // v3.6.3
 			cfg.SortAscending = strings.ToLower(value) == "true" || value == "1"
+		case "detailed_logging": // v4.0.0
+			cfg.DetailedLogging = strings.ToLower(value) == "true" || value == "1"
 		}
 	}
 
@@ -250,8 +255,9 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"validation_pattern", cfg.ValidationPattern},
 		{"tar_compression", cfg.TarCompression},
 		{"max_retries", strconv.Itoa(cfg.MaxRetries)},
-		{"sort_field", cfg.SortField},                       // v3.6.3
-		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)}, // v3.6.3
+		{"sort_field", cfg.SortField},                              // v3.6.3
+		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)},  // v3.6.3
+		{"detailed_logging", strconv.FormatBool(cfg.DetailedLogging)}, // v4.0.0
 	}
 
 	for _, record := range records {
@@ -462,29 +468,6 @@ func GetDefaultTokenPath() string {
 	}
 	// Neither exists - return new path (for new installations)
 	return newPath
-}
-
-// GetConfigDir returns the configuration directory path
-// Standard location: ~/.config/rescale/
-// Falls back to old location ~/.config/rescale-int/ if new location doesn't exist
-func GetConfigDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	newDir := filepath.Join(home, ".config", ConfigDir)
-	oldDir := filepath.Join(home, ".config", OldConfigDir)
-
-	// Check if new directory exists
-	if _, err := os.Stat(newDir); err == nil {
-		return newDir
-	}
-	// Check if old directory exists (migration case)
-	if _, err := os.Stat(oldDir); err == nil {
-		return oldDir
-	}
-	// Neither exists - return new path (for new installations)
-	return newDir
 }
 
 // EnsureConfigDir creates the config directory if it doesn't exist

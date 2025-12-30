@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 3.5.0
-**Last Updated**: December 22, 2025
+**Version**: 4.0.0-dev
+**Last Updated**: December 27, 2025
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -12,6 +12,7 @@ For verified feature details and source code references, see [FEATURE_SUMMARY.md
 - [System Overview](#system-overview)
 - [Package Structure](#package-structure)
 - [Key Components](#key-components)
+- [GUI Architecture (Wails)](#gui-architecture-wails)
 - [Encryption & Security](#encryption--security)
 - [Storage Backends](#storage-backends)
 - [Performance Optimizations](#performance-optimizations)
@@ -24,49 +25,49 @@ For verified feature details and source code references, see [FEATURE_SUMMARY.md
 
 ## System Overview
 
-Rescale Interlink is a unified CLI and GUI application for managing Rescale computational jobs. The architecture follows a layered design with clear separation of concerns:
+Rescale Interlink is a unified CLI and GUI application for managing Rescale computational jobs. The architecture follows a layered design with clear separation of concerns.
+
+**v4.0.0 Note**: The GUI has been completely rewritten using Wails with a React/TypeScript frontend, replacing the previous Fyne-based implementation. The backend (CLI, cloud, API, core) remains unchanged.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                 Rescale Interlink v3.5.0                 │
-│              Unified CLI + GUI Architecture              │
-├─────────────────────────────────────────────────────────┤
-│                                                          │
-│  ┌──────────────────┐         ┌──────────────────┐     │
-│  │   CLI Mode       │         │   GUI Mode       │     │
-│  │   (default)      │         │   (--gui flag)   │     │
-│  ├──────────────────┤         ├──────────────────┤     │
-│  │ • Commands       │         │ • Setup Tab      │     │
-│  │ • Flags          │         │ • Jobs Tab       │     │
-│  │ • Progress Bars  │         │ • Activity Tab   │     │
-│  │ • Shell Output   │         │ • Event Display  │     │
-│  └────────┬─────────┘         └─────────┬────────┘     │
-│           │                             │              │
-│           └──────────┬──────────────────┘              │
-│                      │                                  │
-│               ┌──────▼───────┐                          │
-│               │  Core Engine │                          │
-│               │  (Shared)    │                          │
-│               ├──────────────┤                          │
-│               │ • Config     │                          │
-│               │ • State      │                          │
-│               │ • Pipeline   │                          │
-│               └──────┬───────┘                          │
-│                      │                                  │
-│        ┌─────────────┼─────────────┐                   │
-│        │             │             │                    │
-│   ┌────▼────┐   ┌───▼────┐   ┌───▼────┐               │
-│   │ API     │   │ Events │   │ Cache  │               │
-│   │ Client  │   │ Bus    │   │ Layer  │               │
-│   └─────────┘   └────────┘   └────────┘               │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
-          │                    │                    │
-          ▼                    ▼                    ▼
-    ┌─────────┐          ┌─────────┐        ┌──────────┐
-    │ Rescale │          │ Local   │        │ User     │
-    │ API     │          │ Files   │        │ Terminal │
-    └─────────┘          └─────────┘        └──────────┘
++-------------------------------------------------------------+
+|                 Rescale Interlink v4.0.0                 |
+|              Unified CLI + GUI Architecture                  |
++-------------------------------------------------------------+
+|                                                              |
+|  +------------------+             +----------------------+   |
+|  |   CLI Mode       |             |   GUI Mode (Wails)   |   |
+|  |   (default)      |             |   (--gui flag)       |   |
+|  +------------------+             +----------------------+   |
+|  | * Cobra commands |             | * React/TS Frontend  |   |
+|  | * mpb progress   |             | * Wails Go Bindings  |   |
+|  | * Shell output   |             | * Event Bridge       |   |
+|  +--------+---------+             +----------+-----------+   |
+|           |                                  |               |
+|           +---------------+------------------+               |
+|                           |                                  |
+|                  +--------v--------+                         |
+|                  |  Services Layer |                         |
+|                  +-----------------+                         |
+|                  | * TransferSvc   |                         |
+|                  | * FileService   |                         |
+|                  | * EventBus      |                         |
+|                  +--------+--------+                         |
+|                           |                                  |
+|                  +--------v--------+                         |
+|                  |  Core Engine    |                         |
+|                  +-----------------+                         |
+|                  | * Config        |                         |
+|                  | * API Client    |                         |
+|                  | * Cloud I/O     |                         |
+|                  +-----------------+                         |
++-------------------------------------------------------------+
+          |                    |                    |
+          v                    v                    v
+    +---------+          +---------+        +----------+
+    | Rescale |          | Local   |        | User     |
+    | API     |          | Files   |        | Terminal |
+    +---------+          +---------+        +----------+
 ```
 
 ---
@@ -81,9 +82,29 @@ rescale-int/
 │   └── rescale-int/           # Main entry point
 │       └── main.go            # CLI/GUI router
 │
+├── frontend/                  # Wails React frontend (v4.0.0)
+│   ├── src/
+│   │   ├── App.tsx            # Main app with tab navigation
+│   │   ├── components/
+│   │   │   ├── tabs/          # 6 tab implementations
+│   │   │   └── widgets/       # Reusable UI components
+│   │   └── stores/            # Zustand state management
+│   ├── wailsjs/               # Auto-generated Go bindings
+│   └── package.json           # Node.js dependencies
+│
 ├── internal/
 │   ├── api/                   # Rescale API client
 │   ├── cli/                   # CLI commands and helpers
+│   ├── wailsapp/              # Wails Go bindings (v4.0.0)
+│   │   ├── app.go             # Main Wails application
+│   │   ├── config_bindings.go # Configuration methods
+│   │   ├── transfer_bindings.go # Upload/download methods
+│   │   ├── file_bindings.go   # File browser methods
+│   │   ├── job_bindings.go    # Job submission methods
+│   │   └── event_bridge.go    # EventBus to Wails events
+│   ├── services/              # GUI-agnostic services
+│   │   ├── transfer_service.go
+│   │   └── file_service.go
 │   ├── cloud/                 # Cloud storage (unified backend)
 │   │   ├── interfaces.go      # CloudTransfer, UploadParams, DownloadParams
 │   │   ├── state/             # Resume state management
@@ -101,7 +122,6 @@ rescale-int/
 │   ├── core/                  # Core engine
 │   ├── crypto/                # AES-256-CBC encryption
 │   ├── events/                # Event bus system
-│   ├── gui/                   # GUI implementation (Fyne)
 │   ├── http/                  # HTTP client, proxy, retry logic
 │   ├── models/                # Data models (jobs, files, credentials)
 │   ├── progress/              # Progress bar UI (mpb wrapper)
@@ -126,7 +146,9 @@ rescale-int/
 │   ├── trace/                 # Tracing
 │   └── validation/            # Path validation
 │
+├── _archive_fyne_gui/         # Archived Fyne code (reference only)
 ├── bin/                       # Pre-built binaries (organized by version/platform)
+├── build/                     # Wails build assets (icons, manifests)
 ├── testdata/                  # Test fixtures
 └── assets/                    # Application assets
 ```
@@ -136,7 +158,7 @@ rescale-int/
 ```
 cmd/rescale-int
     ├─→ internal/cli
-    ├─→ internal/gui
+    ├─→ internal/wailsapp  # Wails GUI (v4.0.0)
     ├─→ internal/core
     └─→ internal/events
 
@@ -146,10 +168,17 @@ internal/cli
     ├─→ internal/api
     └─→ internal/models
 
-internal/gui
+internal/wailsapp (v4.0.0)
+    ├─→ internal/core
+    ├─→ internal/services
+    ├─→ internal/events
+    ├─→ internal/api
+    └─→ internal/models
+
+internal/services (GUI-agnostic)
     ├─→ internal/core
     ├─→ internal/events
-    └─→ fyne.io/fyne/v2
+    └─→ internal/cloud
 
 internal/core
     ├─→ internal/events
@@ -753,93 +782,115 @@ wg.Wait()
 - Mutexes for shared state (minimal)
 - Channels for coordination
 
-### GUI Mode
+### GUI Mode (Wails v2 - v4.0.0+)
 
-**Main Thread** (Fyne Requirement):
-- All UI operations MUST run on main thread
-- Widget creation and updates
-- Event loop
+**Architecture**: Wails v2 with React/TypeScript frontend
+
+- **Main Process** (Go): Runs the Wails app, handles API calls, file I/O
+- **Renderer Process** (Chromium): Runs the React UI
+- **IPC**: Automatic method binding via Wails runtime
 
 **Background Goroutines**:
 - API calls
 - File I/O operations
 - Job status polling (every 30 seconds)
-- Event emission
+- Event emission via EventBus
 
-**UI Updates from Goroutines**:
+**UI Updates from Go**:
 ```go
-// WRONG: Direct UI update from goroutine
-func (jt *JobsTab) updateFromBackground() {
-    jt.table.Refresh()  // CRASHES: not on main thread
+// Event Bridge Pattern - internal/wailsapp/event_bridge.go
+type EventBridge struct {
+    ctx           context.Context
+    eventBus      *events.EventBus
+    subscription  <-chan events.Event
 }
 
-// CORRECT: Use fyne.Do() to queue on main thread
-func (jt *JobsTab) updateFromBackground() {
-    fyne.Do(func() {
-        jt.table.Refresh()  // Safe: runs on main thread
-    })
+// Forward internal events to Wails runtime
+func (eb *EventBridge) handleEvent(e events.Event) {
+    switch e.Type() {
+    case events.EventTransferProgress:
+        dto := ProgressEventDTO{...}
+        runtime.EventsEmit(eb.ctx, "transfer:progress", dto)
+    case events.EventTransferCompleted:
+        dto := CompleteEventDTO{...}
+        runtime.EventsEmit(eb.ctx, "transfer:complete", dto)
+    }
 }
 ```
 
-### Deadlock Prevention
+**Frontend Event Handling** (React):
+```typescript
+// Frontend subscribes to Wails events
+EventsOn("transfer:progress", (event: ProgressEvent) => {
+    useTransferStore.getState().updateProgress(event);
+});
+```
 
-**Problem**: Holding write lock during UI refresh causes deadlocks
+### Thread Safety (Wails)
 
-**Pattern**:
+**Pattern**: Goroutines can call methods that emit Wails events safely.
+
 ```go
-// WRONG: Deadlock-prone
-func update() {
-    mu.Lock()
-    defer mu.Unlock()
-    data = newData
-    table.Refresh()  // DEADLOCK: Refresh acquires another lock
-}
-
-// CORRECT: Release before refresh
-func update() {
-    mu.Lock()
-    data = newData
-    mu.Unlock()  // ✓ Released BEFORE refresh
-
-    table.Refresh()  // ✓ Safe: no locks held
+// Go methods bound to frontend are automatically thread-safe
+func (a *App) StartTransfers(reqs []TransferRequestDTO) error {
+    // Run transfer in background
+    go func() {
+        // Event bridge handles thread-safe emission
+        a.eventBus.PublishProgress(taskID, percent, speed)
+    }()
+    return nil
 }
 ```
 
-**Validation**: Static analysis + unit tests confirm all code follows safe pattern
+**Event Throttling**: Progress events are throttled to 100ms intervals to prevent UI flooding:
+```go
+progressInterval: 100 * time.Millisecond
+if time.Since(eb.lastProgress[taskID]) < eb.progressInterval {
+    return // Skip this update
+}
+```
 
 **Resume Capabilities**: Both upload and download resume are fully implemented. Download resume uses byte-offset HTTP Range requests to continue interrupted downloads from exact positions.
 
-### GUI Components
+### GUI Components (v4.0.0+ Wails)
 
-**Key Components** (`internal/gui/`):
+**Backend Bindings** (`internal/wailsapp/`):
 
-1. **StatusBar** (`status_bar.go`):
-   - Unified status display component
-   - Level-based icons (info, success, warning, error, progress)
-   - Activity spinner for operations in progress
-   - Thread-safe updates via Fyne's main thread
+1. **App** (`app.go`):
+   - Main Wails application struct
+   - Lifecycle hooks: startup, domReady, beforeClose, shutdown
+   - Service injection via Engine
 
-2. **Dialog Helpers** (`dialogs.go`):
-   - `ShowErrorWithDetails()` - Error dialogs with expandable technical details
-   - `ShowOperationResult()` - Summary dialogs for batch operations
-   - `GetUserFriendlyError()` - Maps technical errors to user-friendly messages
-   - `ShowUserFriendlyError()` - Automatic friendly error display
+2. **Transfer Bindings** (`transfer_bindings.go`):
+   - `StartTransfers()` - Initiate upload/download batch
+   - `CancelTransfer()` - Cancel single transfer
+   - `GetTransferStats()` - Current stats
+   - DTOs for cross-boundary data
 
-3. **File Browser Tab** (`file_browser_tab.go`):
-   - Two-pane design: local files (left) / remote Rescale files (right)
-   - Delete functionality for both local and remote files/folders
-   - Search/filter by filename (case-insensitive, real-time filtering)
-   - Confirmation dialogs before delete operations
-   - Transfer rate display for uploads/downloads (e.g., "2.5 MB/s")
-   - Proper button spacing/padding around navigation and action buttons
+3. **File Bindings** (`file_bindings.go`):
+   - `ListLocalDirectory()` - Browse local filesystem
+   - `ListRemoteFolder()` - Browse Rescale files
+   - `StartFolderDownload()` - Recursive download
 
-4. **FileListWidget** (`file_list_widget.go`):
-   - Reusable file list component with selection support
-   - Filter entry for search functionality
-   - Filter state maintained during selection operations
-   - Pagination support (default 40 items/page, range 20-200)
-   - Filename truncation with ellipsis for long names
-   - White background for list panes
+4. **Job Bindings** (`job_bindings.go`):
+   - `ScanDirectory()` - Pattern-based job discovery
+   - `StartBulkRun()` - PUR batch submission
+   - `StartSingleJob()` - Single job workflow
+   - `GetCoreTypes()`, `GetAnalysisCodes()` - Metadata
+
+5. **Event Bridge** (`event_bridge.go`):
+   - Forwards EventBus events to Wails runtime
+   - Handles Progress, Log, StateChange, Error, Complete events
+   - Throttles progress updates (100ms interval)
+
+**Frontend Components** (`frontend/src/components/tabs/`):
+
+1. **FileBrowserTab** - Two-pane local/remote file browser
+2. **TransfersTab** - Active upload/download progress tracking
+3. **SingleJobTab** - Job template builder and submission
+4. **PURTab** - Batch job pipeline
+5. **SetupTab** - Configuration and API settings
+6. **ActivityTab** - Logs and event monitoring
 
 ---
 
@@ -1050,6 +1101,6 @@ if fileSize > constants.MultipartThreshold {
 
 ---
 
-**Last Updated**: December 22, 2025
-**Version**: 3.5.0
-**Status**: Production ready, FIPS 140-3 mandatory
+**Last Updated**: December 27, 2025
+**Version**: 4.0.0-dev
+**Status**: Development (Wails GUI Migration), FIPS 140-3 mandatory

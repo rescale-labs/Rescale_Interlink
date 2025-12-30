@@ -379,3 +379,141 @@ func TestEngine_JobMonitoring(t *testing.T) {
 
 	// Should be able to stop without errors
 }
+
+// v4.0.0: Tests for Run Context Management
+
+func TestEngine_RunContext_StartRun(t *testing.T) {
+	engine, _ := NewEngine(nil)
+
+	// Initially no run should be active
+	if engine.IsRunActive() {
+		t.Error("No run should be active initially")
+	}
+
+	// Start a run
+	err := engine.StartRun("test_run_1", "/tmp/state.csv", 5)
+	if err != nil {
+		t.Fatalf("StartRun failed: %v", err)
+	}
+
+	// Run should now be active
+	if !engine.IsRunActive() {
+		t.Error("Run should be active after StartRun")
+	}
+
+	// Get run context
+	ctx := engine.GetRunContext()
+	if ctx == nil {
+		t.Fatal("GetRunContext should return non-nil when run is active")
+	}
+	if ctx.RunID != "test_run_1" {
+		t.Errorf("Expected RunID 'test_run_1', got '%s'", ctx.RunID)
+	}
+	if ctx.StateFile != "/tmp/state.csv" {
+		t.Errorf("Expected StateFile '/tmp/state.csv', got '%s'", ctx.StateFile)
+	}
+	if ctx.TotalJobs != 5 {
+		t.Errorf("Expected TotalJobs 5, got %d", ctx.TotalJobs)
+	}
+
+	// Clean up
+	engine.EndRun()
+}
+
+func TestEngine_RunContext_PreventDoubleStart(t *testing.T) {
+	engine, _ := NewEngine(nil)
+
+	// Start first run
+	err := engine.StartRun("run_1", "/tmp/state1.csv", 3)
+	if err != nil {
+		t.Fatalf("First StartRun failed: %v", err)
+	}
+
+	// Second start should fail
+	err = engine.StartRun("run_2", "/tmp/state2.csv", 2)
+	if err == nil {
+		t.Error("Second StartRun should fail while first run is active")
+	}
+
+	// Clean up
+	engine.EndRun()
+
+	// Now should be able to start again
+	err = engine.StartRun("run_3", "/tmp/state3.csv", 1)
+	if err != nil {
+		t.Errorf("StartRun after EndRun should succeed: %v", err)
+	}
+
+	engine.EndRun()
+}
+
+func TestEngine_RunContext_EndRun(t *testing.T) {
+	engine, _ := NewEngine(nil)
+
+	// Start a run
+	engine.StartRun("test_run", "/tmp/state.csv", 5)
+
+	// End the run
+	engine.EndRun()
+
+	// Run should no longer be active
+	if engine.IsRunActive() {
+		t.Error("Run should not be active after EndRun")
+	}
+
+	// GetRunContext should return nil
+	if ctx := engine.GetRunContext(); ctx != nil {
+		t.Error("GetRunContext should return nil after EndRun")
+	}
+}
+
+func TestEngine_RunContext_ResetRun(t *testing.T) {
+	engine, _ := NewEngine(nil)
+
+	// Start a run
+	engine.StartRun("test_run", "/tmp/state.csv", 5)
+
+	// Reset should clear everything
+	engine.ResetRun()
+
+	// Run should not be active
+	if engine.IsRunActive() {
+		t.Error("Run should not be active after ResetRun")
+	}
+
+	// State should be nil
+	if engine.GetState() != nil {
+		t.Error("State should be nil after ResetRun")
+	}
+}
+
+func TestEngine_RunContext_GetRunStats_NoRun(t *testing.T) {
+	engine, _ := NewEngine(nil)
+
+	// With no run, stats should be all zeros
+	total, completed, failed, pending := engine.GetRunStats()
+	if total != 0 || completed != 0 || failed != 0 || pending != 0 {
+		t.Errorf("Expected all zeros, got total=%d, completed=%d, failed=%d, pending=%d",
+			total, completed, failed, pending)
+	}
+}
+
+func TestEngine_RunContext_GetRunContextCopy(t *testing.T) {
+	engine, _ := NewEngine(nil)
+
+	engine.StartRun("test_run", "/tmp/state.csv", 5)
+
+	// Get context
+	ctx1 := engine.GetRunContext()
+
+	// Modify the returned context
+	ctx1.RunID = "modified"
+
+	// Get context again - should be unchanged
+	ctx2 := engine.GetRunContext()
+	if ctx2.RunID != "test_run" {
+		t.Error("GetRunContext should return a copy, not allow external modification")
+	}
+
+	engine.EndRun()
+}

@@ -86,6 +86,18 @@ func (l *Logger) With() zerolog.Context {
 	return l.zlog.With()
 }
 
+// WithStr creates a new Logger with an additional string field.
+// This returns a new *Logger instance, useful for creating per-user loggers.
+func (l *Logger) WithStr(key, value string) *Logger {
+	childZlog := l.zlog.With().Str(key, value).Logger()
+	return &Logger{
+		zlog:     childZlog,
+		mode:     l.mode,
+		eventBus: l.eventBus,
+		output:   l.output,
+	}
+}
+
 // SetOutput changes the output writer for the logger.
 // This is useful for redirecting logs through progress bars.
 func (l *Logger) SetOutput(w io.Writer) {
