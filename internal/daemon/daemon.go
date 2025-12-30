@@ -43,6 +43,10 @@ type Config struct {
 
 	// Verbose enables debug logging
 	Verbose bool
+
+	// v4.0.0: Eligibility configuration for auto-download feature
+	// When set, jobs must pass eligibility checks to be downloaded
+	Eligibility *EligibilityConfig
 }
 
 // DefaultConfig returns a daemon configuration with sensible defaults.
@@ -89,8 +93,13 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 		return nil, fmt.Errorf("failed to load state: %w", err)
 	}
 
-	// Create monitor
-	monitor := NewMonitor(apiClient, state, daemonCfg.Filter, logger)
+	// Create monitor with eligibility checking if configured (v4.0.0)
+	var monitor *Monitor
+	if daemonCfg.Eligibility != nil {
+		monitor = NewMonitorWithEligibility(apiClient, state, daemonCfg.Filter, daemonCfg.Eligibility, logger)
+	} else {
+		monitor = NewMonitor(apiClient, state, daemonCfg.Filter, logger)
+	}
 
 	return &Daemon{
 		cfg:       daemonCfg,
@@ -199,6 +208,22 @@ func (d *Daemon) poll(ctx context.Context) {
 			d.logger.Info().Msg("Download interrupted by stop signal")
 			return
 		default:
+			// v4.0.0: Check eligibility before downloading if enabled
+			if d.cfg.Eligibility != nil {
+				eligible, reason := d.monitor.CheckEligibility(ctx, job.ID)
+				if !eligible {
+					d.logger.Debug().
+						Str("job_id", job.ID).
+						Str("job_name", job.Name).
+						Str("reason", reason).
+						Msg("Job not eligible for auto-download")
+					continue
+				}
+				d.logger.Debug().
+					Str("job_id", job.ID).
+					Str("reason", reason).
+					Msg("Job eligible for auto-download")
+			}
 			d.downloadJob(ctx, job)
 		}
 	}
@@ -216,9 +241,21 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		Str("job_name", job.Name).
 		Msg("Downloading job")
 
+	// v4.0.0 (D2.4): Check for custom download path from eligibility config
+	baseDir := d.cfg.DownloadDir
+	if d.cfg.Eligibility != nil {
+		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
+			d.logger.Debug().
+				Str("job_id", job.ID).
+				Str("custom_path", customPath).
+				Msg("Using custom download path from job")
+			baseDir = customPath
+		}
+	}
+
 	// Compute output directory - always include job ID suffix to avoid collisions
 	// from jobs with the same name
-	outputDir := ComputeOutputDir(d.cfg.DownloadDir, job.ID, job.Name, d.cfg.UseJobNameDir)
+	outputDir := ComputeOutputDir(baseDir, job.ID, job.Name, d.cfg.UseJobNameDir)
 
 	// Create output directory
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -353,8 +390,26 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		return
 	}
 
-	// Mark as downloaded
+	// Mark as downloaded in local state
 	d.state.MarkDownloaded(job.ID, job.Name, outputDir, downloadedCount, totalSize)
+
+	// v4.0.0: Tag the job as downloaded (D2.3)
+	// This prevents the job from being downloaded again via eligibility checking
+	if d.cfg.Eligibility != nil && d.cfg.Eligibility.DownloadedTag != "" {
+		if err := d.apiClient.AddJobTag(ctx, job.ID, d.cfg.Eligibility.DownloadedTag); err != nil {
+			// Log but don't fail - job is already downloaded locally
+			d.logger.Warn().
+				Err(err).
+				Str("job_id", job.ID).
+				Str("tag", d.cfg.Eligibility.DownloadedTag).
+				Msg("Failed to tag job as downloaded (will retry on next poll)")
+		} else {
+			d.logger.Debug().
+				Str("job_id", job.ID).
+				Str("tag", d.cfg.Eligibility.DownloadedTag).
+				Msg("Tagged job as downloaded")
+		}
+	}
 
 	d.logger.Info().
 		Str("job_id", job.ID).

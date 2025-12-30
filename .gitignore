@@ -28,6 +28,10 @@ bin/
 dist/
 build/
 
+# Node.js dependencies (install with npm install)
+node_modules/
+frontend/node_modules/
+
 # Test data (user-specific)
 *.csv
 *.state

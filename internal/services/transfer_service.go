@@ -114,9 +114,10 @@ func (ts *TransferService) StartTransfers(ctx context.Context, requests []Transf
 		return fmt.Errorf("API client not configured")
 	}
 
-	// Pre-warm credential cache before spawning goroutines
-	// This ensures credentials are fetched ONCE and shared by all transfers
-	ts.warmCredentialCache(ctx)
+	// v4.0.0: Warm credential cache in background to avoid blocking downloads.
+	// Credentials are cached after first fetch; downloads can proceed immediately.
+	// This fixes the 60+ second delay users experienced before downloads started.
+	go ts.warmCredentialCache(ctx)
 
 	// Separate uploads and downloads
 	var uploads, downloads []TransferRequest
@@ -347,10 +348,21 @@ func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequ
 	// Allocate transfer handle
 	transferHandle := ts.transferMgr.AllocateTransfer(req.Size, 1)
 
+	// Ensure dest is a file path, not a directory
+	// If dest is a directory, append the filename
+	localPath := req.Dest
+	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+		localPath = filepath.Join(localPath, fileName)
+		ts.logger.Debug().
+			Str("original_dest", req.Dest).
+			Str("corrected_path", localPath).
+			Msg("Dest was a directory, appending filename")
+	}
+
 	// Execute download with progress callback
 	err := download.DownloadFile(ctx, download.DownloadParams{
 		FileID:    req.Source, // For downloads, Source is the file ID
-		LocalPath: req.Dest,   // For downloads, Dest is the local path
+		LocalPath: localPath,  // For downloads, the full local file path
 		APIClient: apiClient,
 		ProgressCallback: func(progress float64) {
 			ts.queue.StartTransfer(taskID) // Idempotent transition to Active
@@ -538,7 +550,9 @@ func (ts *TransferService) GetStats() TransferStats {
 func (ts *TransferService) GetTasks() []TransferTask {
 	qTasks := ts.queue.GetTasks()
 	tasks := make([]TransferTask, len(qTasks))
-	for i, qt := range qTasks {
+	// v4.0.0: Use index-based access to avoid copying mutex in range variable
+	for i := range qTasks {
+		qt := &qTasks[i]
 		tasks[i] = TransferTask{
 			ID:          qt.ID,
 			Type:        TransferType(qt.Type),

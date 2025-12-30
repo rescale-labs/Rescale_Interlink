@@ -101,19 +101,6 @@ func NewFileListLoadingEvent(source, folderID string, loading bool) *FileListLoa
 	}
 }
 
-// NewFileListErrorEvent creates a new FileListErrorEvent.
-func NewFileListErrorEvent(source, folderID string, err error) *FileListErrorEvent {
-	return &FileListErrorEvent{
-		BaseEvent: events.BaseEvent{
-			EventType: EventFileListError,
-			Time:      time.Now(),
-		},
-		FolderID: folderID,
-		Source:   source,
-		Error:    err,
-	}
-}
-
 // NewSelectionChangedEvent creates a new SelectionChangedEvent.
 func NewSelectionChangedEvent(source string, selectedIDs []string) *SelectionChangedEvent {
 	return &SelectionChangedEvent{

@@ -192,8 +192,18 @@ func executeFileDownload(
 			meta := fileIDToMeta[fileDownload.FileID]
 			outputPath := fileDownload.LocalPath
 
+			// Check if path exists as a directory (name collision with folder)
+			// This happens when the remote has both a folder and a file with the same name
+			if info, statErr := os.Stat(outputPath); statErr == nil && info.IsDir() {
+				// The path exists as a directory - rename file with .file suffix
+				originalPath := outputPath
+				outputPath = outputPath + ".file"
+				fmt.Fprintf(downloadUI.Writer(), "⚠️  File '%s' conflicts with directory, downloading as '%s'\n",
+					filepath.Base(originalPath), filepath.Base(outputPath))
+			}
+
 			// Check if file exists and handle conflict
-			if _, err := os.Stat(outputPath); err == nil {
+			if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
 				conflictMutex.Lock()
 				currentMode := conflictMode
 				conflictMutex.Unlock()
@@ -576,8 +586,18 @@ func executeJobDownload(
 				return
 			}
 
+			// Check if path exists as a directory (name collision with folder)
+			// This happens when the remote has both a folder and a file with the same name
+			if info, statErr := os.Stat(outputPath); statErr == nil && info.IsDir() {
+				// The path exists as a directory - rename file with .file suffix
+				originalPath := outputPath
+				outputPath = outputPath + ".file"
+				fmt.Fprintf(downloadUI.Writer(), "⚠️  File '%s' conflicts with directory, downloading as '%s'\n",
+					filepath.Base(originalPath), filepath.Base(outputPath))
+			}
+
 			// Check if file already exists
-			if _, err := os.Stat(outputPath); err == nil {
+			if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
 				// File exists, handle conflict
 				conflictMutex.Lock()
 				currentMode := conflictMode

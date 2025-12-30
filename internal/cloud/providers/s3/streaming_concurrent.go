@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -112,7 +113,8 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 			Key:    aws.String(objectKey),
 			Metadata: map[string]string{
 				"iv":              encryption.EncodeBase64(encryptState.GetInitialIV()),
-				"streamingformat": "cbc", // Marks file as CBC-chained streaming
+				"streamingformat": "cbc",                       // Marks file as CBC-chained streaming
+				"partsize":        fmt.Sprintf("%d", partSize), // v4.0.0: Store part size for correct download decryption
 			},
 		})
 		return err
@@ -513,7 +515,15 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 	if sf, ok := headResp.Metadata["streamingformat"]; ok && sf == "cbc" {
 		// CBC streaming format - uploaded by rescale-int v3.2.4+
 		// Can use streaming download (no temp file) with sequential part decryption
-		return 2, "", 0, iv, nil
+		// v4.0.0: Read partSize from metadata. Return 0 if not present so downloader
+		// can calculate the correct size from file size (backward compatibility).
+		var partSize int64 = 0 // 0 means "calculate from file size"
+		if ps, ok := headResp.Metadata["partsize"]; ok && ps != "" {
+			if parsed, parseErr := strconv.ParseInt(ps, 10, 64); parseErr == nil && parsed > 0 {
+				partSize = parsed
+			}
+		}
+		return 2, "", partSize, iv, nil
 	}
 
 	// Legacy format - file uploaded by Rescale platform or older rescale-int
@@ -667,7 +677,8 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // DownloadEncryptedRange downloads a specific byte range of the encrypted file from S3.
 // This is used by the concurrent download orchestrator to download individual parts.
 // The range is inclusive: [offset, offset+length).
-func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64) ([]byte, error) {
+// v4.0.0: progressCallback (optional) is called with bytes downloaded for smooth progress.
+func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
 	if err != nil {
@@ -681,8 +692,19 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 	}
 	defer resp.Body.Close()
 
-	// Read the data
-	data, err := io.ReadAll(resp.Body)
+	// v4.0.0: Wrap response body with progress tracking for smooth download progress.
+	// This matches upload behavior where progressReader reports bytes as they stream.
+	var reader io.Reader = resp.Body
+	if progressCallback != nil {
+		reader = &progressReader{
+			reader:    resp.Body,
+			callback:  progressCallback,
+			threshold: progressReaderThreshold,
+		}
+	}
+
+	// Read the data (progress reported during read if callback provided)
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read range data: %w", err)
 	}

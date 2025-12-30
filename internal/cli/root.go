@@ -41,8 +41,8 @@ var (
 // 1. Makefile (source of truth for releases, injected via LDFLAGS)
 // 2. cmd/rescale-int/main.go (fallback for non-Makefile builds)
 var (
-	Version   = "dev"
-	BuildTime = "unknown"
+	Version   = "v4.0.0-dev"
+	BuildTime = "2025-12-27"
 )
 
 // FIPSStatus returns FIPS 140-3 compliance status string
@@ -254,14 +254,16 @@ func Execute() error {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Start goroutine to handle signals
+	// v4.0.0: Loop to handle multiple signals (e.g., user pressing Ctrl+C multiple times)
 	go func() {
-		sig := <-sigChan
-		// Only print cancellation message if we received an actual signal
-		// (when channel is closed, sig will be nil)
-		if sig != nil {
-			fmt.Fprintf(os.Stderr, "\n\n🛑 Received signal %v, cancelling operations...\n", sig)
-			fmt.Fprintf(os.Stderr, "   Please wait for cleanup to complete.\n\n")
-			cancelFunc()
+		for sig := range sigChan {
+			// Only print cancellation message if we received an actual signal
+			// (when channel is closed, sig will be nil and the loop exits)
+			if sig != nil {
+				fmt.Fprintf(os.Stderr, "\n\n🛑 Received signal %v, cancelling operations...\n", sig)
+				fmt.Fprintf(os.Stderr, "   Please wait for cleanup to complete.\n\n")
+				cancelFunc()
+			}
 		}
 	}()
 
@@ -287,7 +289,8 @@ func AddCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(newSoftwareCmd())
 	rootCmd.AddCommand(newAutomationsCmd()) // v3.6.1: Automation discovery
 	rootCmd.AddCommand(newConfigCmd())
-	rootCmd.AddCommand(newDaemonCmd()) // v3.4.0: Background service for auto-downloading completed jobs
+	rootCmd.AddCommand(newDaemonCmd())  // v3.4.0: Background service for auto-downloading completed jobs
+	rootCmd.AddCommand(newServiceCmd()) // v4.0.0: Windows service management
 
 	// Add shortcuts for convenience
 	AddShortcuts(rootCmd)

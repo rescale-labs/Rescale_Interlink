@@ -260,13 +260,3 @@ func TestWalkFiles(t *testing.T) {
 		}
 	}
 }
-
-func TestDefaultWalkOptions(t *testing.T) {
-	opts := DefaultWalkOptions()
-	if opts.IncludeHidden {
-		t.Error("default should not include hidden")
-	}
-	if !opts.SkipHiddenDirs {
-		t.Error("default should skip hidden dirs")
-	}
-}

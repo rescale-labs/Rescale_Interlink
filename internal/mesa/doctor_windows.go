@@ -32,7 +32,7 @@ import (
 // 11. Final diagnosis and recommendations
 func Doctor() {
 	fmt.Println("=" + strings.Repeat("=", 79))
-	fmt.Println("                 MESA SOFTWARE RENDERING DIAGNOSTICS v3.4.11")
+	fmt.Println("                 MESA SOFTWARE RENDERING DIAGNOSTICS v4.0.0")
 	fmt.Println("=" + strings.Repeat("=", 79))
 	fmt.Println()
 	fmt.Println("This comprehensive diagnostic reveals WHY Mesa may not be working on Windows.")

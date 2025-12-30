@@ -206,21 +206,6 @@ type DownloadFileSpec struct {
 	Size      int64
 }
 
-// ServiceError wraps errors with additional context.
-type ServiceError struct {
-	Operation string // e.g., "upload", "download", "delete"
-	Resource  string // e.g., file path or ID
-	Err       error
-}
-
-func (e *ServiceError) Error() string {
-	return e.Operation + " " + e.Resource + ": " + e.Err.Error()
-}
-
-func (e *ServiceError) Unwrap() error {
-	return e.Err
-}
-
 // TransferServiceInterface defines the transfer service API.
 // Implementations handle upload/download orchestration without framework dependencies.
 type TransferServiceInterface interface {

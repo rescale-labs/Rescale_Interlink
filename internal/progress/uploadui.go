@@ -266,6 +266,28 @@ func (u *UploadUI) Wait() {
 	}
 }
 
+// WaitWithTimeout blocks until all progress bars complete or timeout expires.
+// Returns true if Wait completed normally, false if timeout occurred.
+// v4.0.0: Added to prevent indefinite blocking if a goroutine stalls.
+func (u *UploadUI) WaitWithTimeout(timeout time.Duration) bool {
+	if u.progress == nil {
+		return true
+	}
+
+	done := make(chan struct{})
+	go func() {
+		u.progress.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // LogWriter returns an io.Writer that safely prints above the progress bars
 func (u *UploadUI) LogWriter() io.Writer {
 	if u.progress != nil && u.isTerminal {

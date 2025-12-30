@@ -27,6 +27,15 @@ import (
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
 
+// RunContext tracks metadata about an active pipeline run.
+// v4.0.0: Added for GUI job state synchronization.
+type RunContext struct {
+	RunID     string    // Unique identifier for this run
+	StartTime time.Time // When the run started
+	StateFile string    // Path to state CSV file for persistence
+	TotalJobs int       // Number of jobs in this run
+}
+
 // Engine is the main orchestrator for PUR operations with GUI support
 type Engine struct {
 	config    *config.Config
@@ -37,6 +46,10 @@ type Engine struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
+
+	// v4.0.0: Run context for GUI state synchronization
+	runCtx   *RunContext
+	runCtxMu sync.RWMutex
 
 	// v3.6.4: Service layer for frontend-agnostic business logic
 	transferService *services.TransferService
@@ -1200,6 +1213,119 @@ func (e *Engine) LoadState(stateFile string) ([]*models.JobState, error) {
 	}
 
 	return jobs, nil
+}
+
+// ============================================================================
+// Run Context Management (v4.0.0)
+// These methods provide GUI state synchronization for pipeline runs.
+// ============================================================================
+
+// StartRun initializes a new run context. Returns error if a run is already active.
+// The caller is responsible for starting the actual pipeline execution.
+func (e *Engine) StartRun(runID, stateFile string, totalJobs int) error {
+	e.runCtxMu.Lock()
+	defer e.runCtxMu.Unlock()
+
+	if e.runCtx != nil {
+		return fmt.Errorf("a run is already in progress (ID: %s)", e.runCtx.RunID)
+	}
+
+	e.runCtx = &RunContext{
+		RunID:     runID,
+		StartTime: time.Now(),
+		StateFile: stateFile,
+		TotalJobs: totalJobs,
+	}
+
+	e.publishLog(events.InfoLevel, fmt.Sprintf("Started run %s with %d jobs", runID, totalJobs), "run", "")
+	return nil
+}
+
+// GetRunContext returns a copy of the current run context, or nil if no run is active.
+func (e *Engine) GetRunContext() *RunContext {
+	e.runCtxMu.RLock()
+	defer e.runCtxMu.RUnlock()
+
+	if e.runCtx == nil {
+		return nil
+	}
+
+	// Return a copy to prevent external modification
+	return &RunContext{
+		RunID:     e.runCtx.RunID,
+		StartTime: e.runCtx.StartTime,
+		StateFile: e.runCtx.StateFile,
+		TotalJobs: e.runCtx.TotalJobs,
+	}
+}
+
+// IsRunActive returns true if a pipeline run is currently active.
+func (e *Engine) IsRunActive() bool {
+	e.runCtxMu.RLock()
+	defer e.runCtxMu.RUnlock()
+	return e.runCtx != nil
+}
+
+// EndRun clears the run context. Called when a run completes or is cancelled.
+func (e *Engine) EndRun() {
+	e.runCtxMu.Lock()
+	defer e.runCtxMu.Unlock()
+
+	if e.runCtx != nil {
+		e.publishLog(events.InfoLevel, fmt.Sprintf("Ended run %s", e.runCtx.RunID), "run", "")
+		e.runCtx = nil
+	}
+}
+
+// ResetRun cancels any active run and clears all run state.
+func (e *Engine) ResetRun() {
+	// Cancel any running context first
+	e.mu.RLock()
+	cancel := e.cancel
+	e.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+
+	// Clear run context
+	e.runCtxMu.Lock()
+	e.runCtx = nil
+	e.runCtxMu.Unlock()
+
+	// Clear state manager
+	e.mu.Lock()
+	e.state = nil
+	e.mu.Unlock()
+
+	e.publishLog(events.InfoLevel, "Run state reset", "run", "")
+}
+
+// GetRunStats returns current job statistics for the active run.
+// Returns zeros if no run is active.
+func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
+	e.mu.RLock()
+	st := e.state
+	e.mu.RUnlock()
+
+	if st == nil {
+		return 0, 0, 0, 0
+	}
+
+	jobs := st.GetAllStates()
+	total = len(jobs)
+
+	for _, job := range jobs {
+		switch job.SubmitStatus {
+		case "success", "completed":
+			completed++
+		case "failed":
+			failed++
+		default:
+			pending++
+		}
+	}
+
+	return total, completed, failed, pending
 }
 
 // Private helper methods

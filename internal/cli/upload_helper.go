@@ -412,9 +412,18 @@ func UploadFilesWithIDs(
 	wg.Wait()
 	close(errChan)
 
-	// Check for errors
-	if len(errChan) > 0 {
-		return nil, <-errChan // Return first error
+	// Collect all errors (drain channel to prevent leaks and report all failures)
+	var errors []error
+	for err := range errChan {
+		errors = append(errors, err)
+	}
+
+	// Return first error but report count of all failures
+	if len(errors) > 0 {
+		if len(errors) == 1 {
+			return nil, errors[0]
+		}
+		return nil, fmt.Errorf("upload failed: %d file(s) failed (first error: %v)", len(errors), errors[0])
 	}
 
 	// Summary
