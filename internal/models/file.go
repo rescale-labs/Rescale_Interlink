@@ -85,8 +85,16 @@ type RootFolders struct {
 
 // UserProfile represents a user's profile
 type UserProfile struct {
-	Email          string      `json:"email"`
-	DefaultStorage StorageInfo `json:"defaultStorage"`
+	Email          string        `json:"email"`
+	FullName       string        `json:"fullName"`
+	Workspace      WorkspaceInfo `json:"workspace"`
+	DefaultStorage StorageInfo   `json:"defaultStorage"`
+}
+
+// WorkspaceInfo represents workspace/organization details
+type WorkspaceInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // StorageInfo represents storage configuration

@@ -348,13 +348,6 @@ func (pi *progressInterpolator) ConfirmBytes(partSize int64) {
 	// Let the ticker provide consistent progress values every 500ms.
 }
 
-// GetSpeed returns the current estimated speed in bytes/second.
-func (pi *progressInterpolator) GetSpeed() float64 {
-	pi.mu.RLock()
-	defer pi.mu.RUnlock()
-	return pi.speed
-}
-
 // Stop stops the interpolation goroutine.
 func (pi *progressInterpolator) Stop() {
 	pi.mu.Lock()
@@ -464,8 +457,8 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	resultChan := make(chan uploadResult, concurrency*2)
 
 	// Context with cancellation for error propagation
+	// Note: cancelUpload is called explicitly in cleanup defer after scaler goroutine is started
 	uploadCtx, cancelUpload := context.WithCancel(ctx)
-	defer cancelUpload()
 
 	// Track first error for clean shutdown
 	var firstErr error
@@ -622,6 +615,14 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		}
 	}()
 
+	// v4.0.0: Ensure scaler goroutine is properly cleaned up on function exit.
+	// Cancel the context first (signals scaler to stop), then wait for it to finish.
+	// This prevents goroutine leaks.
+	defer func() {
+		cancelUpload()  // Cancel context to signal scaler and other goroutines to stop
+		<-scalerDone    // Wait for scaler goroutine to finish
+	}()
+
 	// Close result channel when all workers finish
 	go func() {
 		uploadWg.Wait()
@@ -661,6 +662,26 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	if firstErr != nil {
 		_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
 		return nil, firstErr
+	}
+
+	// v4.0.0: Also check for context cancellation which may have occurred without setting firstErr.
+	// This can happen if the user cancels the upload or a timeout occurs.
+	select {
+	case <-ctx.Done():
+		_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
+		return nil, fmt.Errorf("upload cancelled: %w", ctx.Err())
+	default:
+	}
+
+	// v4.0.0 CRITICAL: Verify we received ALL expected parts before completing.
+	// This prevents truncated uploads from being registered as complete files.
+	// If any parts are missing (due to context cancellation, network issues, etc.),
+	// we must abort to avoid creating corrupted files in cloud storage.
+	expectedParts := int(uploadState.TotalParts)
+	if len(partsMap) != expectedParts {
+		_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
+		return nil, fmt.Errorf("upload incomplete: received %d of %d parts (upload was interrupted or cancelled)",
+			len(partsMap), expectedParts)
 	}
 
 	// Convert map to ordered slice for completion

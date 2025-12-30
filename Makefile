@@ -2,7 +2,7 @@
 # Build and package cross-platform FIPS 140-3 compliant binaries
 
 # Variables
-VERSION := v3.6.4
+VERSION := v4.0.0
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
 LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
@@ -11,7 +11,7 @@ LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_
 # See: https://go.dev/doc/security/fips140
 GOFIPS := GOFIPS140=latest
 
-# Suppress macOS linker warning about duplicate libraries (from fyne GUI)
+# Suppress macOS linker warning about duplicate libraries
 CGO_LDFLAGS_MACOS := CGO_LDFLAGS="-Wl,-no_warn_duplicate_libraries"
 
 # Directories

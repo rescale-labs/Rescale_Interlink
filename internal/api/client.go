@@ -1272,3 +1272,144 @@ func (c *Client) DeleteJob(ctx context.Context, jobID string) error {
 
 	return nil
 }
+
+// =============================================================================
+// Job Tags API (v4.0.0 - Auto-Download Eligibility Engine)
+// =============================================================================
+
+// JobTag represents a tag on a job
+type JobTag struct {
+	Name           string `json:"name"`
+	NormalizedName string `json:"normalizedName"`
+}
+
+// GetJobTags retrieves all tags for a job.
+// Used by auto-download eligibility engine to check correctness tags.
+func (c *Client) GetJobTags(ctx context.Context, jobID string) ([]string, error) {
+	path := fmt.Sprintf("/api/v3/jobs/%s/tags/", jobID)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job tags: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("get job tags failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var tags []JobTag
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, fmt.Errorf("failed to decode job tags response: %w", err)
+	}
+
+	// Extract just the names
+	result := make([]string, len(tags))
+	for i, t := range tags {
+		result[i] = t.Name
+	}
+	return result, nil
+}
+
+// AddJobTag adds a tag to a job.
+// Used by auto-download to mark jobs as downloaded (autoDownloaded:true).
+func (c *Client) AddJobTag(ctx context.Context, jobID, tag string) error {
+	path := fmt.Sprintf("/api/v3/jobs/%s/tags/", jobID)
+
+	requestBody := map[string]string{"name": tag}
+	resp, err := c.doRequest(ctx, "POST", path, requestBody)
+	if err != nil {
+		return fmt.Errorf("failed to add job tag: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Accept 200, 201, 202 (Accepted), or 204 as success
+	if resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusCreated &&
+		resp.StatusCode != nethttp.StatusAccepted && resp.StatusCode != nethttp.StatusNoContent {
+		body := readResponseBody(resp.Body)
+		return fmt.Errorf("add job tag failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	return nil
+}
+
+// HasJobTag checks if a job has a specific tag.
+// Convenience method for eligibility checking.
+func (c *Client) HasJobTag(ctx context.Context, jobID, tagName string) (bool, error) {
+	tags, err := c.GetJobTags(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range tags {
+		if t == tagName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// =============================================================================
+// Job Custom Fields API (v4.0.0 - Auto-Download Eligibility Engine)
+// =============================================================================
+
+// JobCustomField represents a custom field on a job
+type JobCustomField struct {
+	FieldID string      `json:"fieldId"`
+	Name    string      `json:"name"`
+	Value   interface{} `json:"value"`
+}
+
+// GetJobCustomFields retrieves all custom fields for a job.
+// Used by auto-download eligibility engine to check "Auto Download" field.
+func (c *Client) GetJobCustomFields(ctx context.Context, jobID string) ([]JobCustomField, error) {
+	path := fmt.Sprintf("/api/v3/jobs/%s/custom-fields/", jobID)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job custom fields: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("get job custom fields failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var fields []JobCustomField
+	if err := json.NewDecoder(resp.Body).Decode(&fields); err != nil {
+		return nil, fmt.Errorf("failed to decode job custom fields response: %w", err)
+	}
+
+	return fields, nil
+}
+
+// GetJobCustomFieldValue retrieves a specific custom field value by name.
+// Returns the value as a string, or empty string if not found.
+func (c *Client) GetJobCustomFieldValue(ctx context.Context, jobID, fieldName string) (string, error) {
+	fields, err := c.GetJobCustomFields(ctx, jobID)
+	if err != nil {
+		return "", err
+	}
+
+	for _, f := range fields {
+		if f.Name == fieldName {
+			// Convert value to string
+			switch v := f.Value.(type) {
+			case string:
+				return v, nil
+			case bool:
+				if v {
+					return "true", nil
+				}
+				return "false", nil
+			case float64:
+				return fmt.Sprintf("%v", v), nil
+			default:
+				return fmt.Sprintf("%v", v), nil
+			}
+		}
+	}
+
+	return "", nil // Field not found
+}

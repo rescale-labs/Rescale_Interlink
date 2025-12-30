@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Rescale Interlink Windows Installer
+  WiX v4 Configuration
+
+  Build requirements:
+  * WiX Toolset v4+ (dotnet tool install global wix)
+  * Windows SDK (for signtool)
+
+  Build command:
+    wix build installer\rescale-interlink.wxs -o bin\RescaleInterlink.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!-- Product definition -->
+  <Package Name="Rescale Interlink"
+           Manufacturer="Rescale, Inc."
+           Version="4.0.0.0"
+           UpgradeCode="8B7E9C4A-3F2D-4E1A-B5C6-7D8E9F0A1B2C"
+           Scope="perMachine"
+           Language="1033"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="Rescale Interlink - Unified CLI and GUI for Rescale HPC platform"
+                        Manufacturer="Rescale, Inc." />
+
+    <!-- Upgrade handling -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+                  AllowSameVersionUpgrades="yes" />
+
+    <!-- Media definition -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Features -->
+    <Feature Id="MainFeature" Title="Rescale Interlink" Level="1">
+      <ComponentGroupRef Id="MainComponents" />
+      <ComponentGroupRef Id="StartMenuShortcuts" />
+    </Feature>
+
+    <Feature Id="ServiceFeature" Title="Auto-Download Service" Level="1">
+      <ComponentGroupRef Id="ServiceComponents" />
+    </Feature>
+
+    <Feature Id="TrayFeature" Title="System Tray Companion" Level="1">
+      <ComponentGroupRef Id="TrayComponents" />
+    </Feature>
+
+    <!-- Custom actions -->
+    <CustomAction Id="InstallService"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[INSTALLFOLDER]rescale-int.exe service install"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="UninstallService"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[INSTALLFOLDER]rescale-int.exe service uninstall"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="StartService"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[INSTALLFOLDER]rescale-int.exe service start"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Install sequence -->
+    <InstallExecuteSequence>
+      <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="InstallService" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="StartService" After="InstallService" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <!-- UI reference (basic) -->
+    <UI>
+      <UIRef Id="WixUI_FeatureTree" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">
+        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed
+      </Publish>
+    </UI>
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Rescale Interlink" />
+
+    <CustomAction Id="LaunchApplication"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[INSTALLFOLDER]rescale-int.exe --gui"
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
+  </Package>
+
+  <!-- Directory structure -->
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="MANUFACTURERFOLDER" Name="Rescale">
+        <Directory Id="INSTALLFOLDER" Name="Interlink" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Rescale Interlink" />
+    </StandardDirectory>
+  </Fragment>
+
+  <!-- Main application components -->
+  <Fragment>
+    <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="1A2B3C4D-5E6F-7A8B-9C0D-E1F2A3B4C5D6">
+        <File Id="RescaleIntExe" Source="$(var.BuildDir)\rescale-int.exe" KeyPath="yes">
+          <Shortcut Id="DesktopShortcut"
+                    Directory="DesktopFolder"
+                    Name="Rescale Interlink"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Advertise="yes" />
+        </File>
+      </Component>
+
+      <Component Id="ReadmeFile" Guid="2B3C4D5E-6F7A-8B9C-0D1E-F2A3B4C5D6E7">
+        <File Id="ReadmeTxt" Source="$(var.SourceDir)\README.txt" KeyPath="yes" />
+      </Component>
+
+      <Component Id="LicenseFile" Guid="3C4D5E6F-7A8B-9C0D-1E2F-A3B4C5D6E7F8">
+        <File Id="LicenseTxt" Source="$(var.SourceDir)\LICENSE.txt" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- Service components -->
+  <Fragment>
+    <ComponentGroup Id="ServiceComponents" Directory="INSTALLFOLDER">
+      <Component Id="ServiceConfig" Guid="4D5E6F7A-8B9C-0D1E-2F3A-B4C5D6E7F8A9">
+        <!-- Service is registered via custom action using CLI -->
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Rescale\Interlink">
+          <RegistryValue Name="ServiceInstalled" Type="integer" Value="1" KeyPath="yes" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- Tray companion components -->
+  <Fragment>
+    <ComponentGroup Id="TrayComponents" Directory="INSTALLFOLDER">
+      <Component Id="TrayExecutable" Guid="5E6F7A8B-9C0D-1E2F-3A4B-C5D6E7F8A9B0">
+        <File Id="TrayExe" Source="$(var.BuildDir)\rescale-int-tray.exe" KeyPath="yes" />
+
+        <!-- Create scheduled task for tray auto-start -->
+        <RegistryKey Root="HKCU" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run">
+          <RegistryValue Name="RescaleInterlinkTray"
+                         Type="string"
+                         Value="[INSTALLFOLDER]rescale-int-tray.exe" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- Start menu shortcuts -->
+  <Fragment>
+    <ComponentGroup Id="StartMenuShortcuts" Directory="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="6F7A8B9C-0D1E-2F3A-4B5C-D6E7F8A9B0C1">
+        <Shortcut Id="ApplicationStartMenuShortcut"
+                  Name="Rescale Interlink"
+                  Description="Unified CLI and GUI for Rescale HPC platform"
+                  Target="[INSTALLFOLDER]rescale-int.exe"
+                  Arguments="--gui"
+                  WorkingDirectory="INSTALLFOLDER" />
+
+        <Shortcut Id="CLIStartMenuShortcut"
+                  Name="Rescale Interlink (Command Line)"
+                  Description="Open command prompt with Rescale Interlink"
+                  Target="[SystemFolder]cmd.exe"
+                  Arguments="/k &quot;cd /d [INSTALLFOLDER] &amp;&amp; rescale-int.exe --help&quot;"
+                  WorkingDirectory="INSTALLFOLDER" />
+
+        <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="SOFTWARE\Rescale\Interlink" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <StandardDirectory Id="DesktopFolder" />
+  </Fragment>
+
+</Wix>

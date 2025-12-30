@@ -8,21 +8,21 @@ import (
 	"log"
 	"os"
 
-	// CRITICAL: mesainit MUST be imported FIRST (before any Fyne/OpenGL packages)
+	// CRITICAL: mesainit MUST be imported FIRST (before any OpenGL packages)
 	// Go runs init() functions in import order. By importing mesainit first,
-	// its init() runs before Fyne's, allowing us to preload Mesa's opengl32.dll
-	// before Windows loads System32's version.
+	// its init() runs before any OpenGL usage, allowing us to preload Mesa's
+	// opengl32.dll before Windows loads System32's version.
 	_ "github.com/rescale/rescale-int/internal/mesainit"
 
 	"github.com/rescale/rescale-int/internal/cli"
-	"github.com/rescale/rescale-int/internal/gui"
 	"github.com/rescale/rescale-int/internal/mesa"
+	"github.com/rescale/rescale-int/internal/wailsapp"
 )
 
 // Version information
 var (
-	Version   = "v3.6.4"
-	BuildTime = "2025-12-27"
+	Version   = "v4.0.0"
+	BuildTime = "2025-12-29"
 )
 
 // FIPSEnabled indicates whether FIPS 140-3 mode is active
@@ -74,11 +74,12 @@ func main() {
 	}
 
 	// Check for GUI mode before creating command
-	guiMode := contains(os.Args, "--gui")
-
-	if guiMode {
-		// Launch GUI mode directly
-		if err := gui.Run(os.Args); err != nil {
+	// --gui launches the Wails GUI (v4.0.0+)
+	if contains(os.Args, "--gui") {
+		// Launch Wails GUI (v4.0.0 - web-based frontend)
+		// Assets are embedded from the project root (see assets.go)
+		wailsapp.Assets = Assets
+		if err := wailsapp.Run(os.Args); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

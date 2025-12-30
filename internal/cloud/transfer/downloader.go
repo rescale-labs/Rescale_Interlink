@@ -13,16 +13,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/storage"
-	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
@@ -183,7 +184,51 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		}
 		switch formatVersion {
 		case 2:
-			return d.downloadCBCStreaming(ctx, prep)
+			// v4.0.0: CBC streaming download with fast verification.
+			// 1. Quick 32-byte probe verifies key/IV work BEFORE full download
+			// 2. If probe fails, return clear error immediately (no wasted bandwidth)
+			// 3. If probe passes, proceed with streaming download
+			// 4. On chunk size errors, use probe to find correct size (fast)
+			// 5. Fall back to legacy only if streaming isn't supported
+
+			// Check if provider supports part downloads (needed for verification)
+			partDownloader, hasPartDownload := d.provider.(StreamingPartDownloader)
+			if hasPartDownload {
+				// Get encrypted size for verification probe
+				encryptedSize, sizeErr := partDownloader.GetEncryptedSize(ctx, params.RemotePath)
+				if sizeErr == nil && encryptedSize > 0 {
+					// Run quick 32-byte verification probe
+					verifyErr := d.verifyDecryptionQuick(ctx, partDownloader, params.RemotePath, encryptedSize, effectiveIV, encryptionKey)
+					if verifyErr != nil {
+						// Verification failed - file cannot be decrypted with this key/IV
+						// Return early with clear error message
+						return verifyErr
+					}
+				}
+			}
+
+			// Verification passed (or skipped) - proceed with download
+			err := d.downloadCBCStreaming(ctx, prep)
+			if err != nil {
+				errStr := err.Error()
+				isDecryptionError := strings.Contains(errStr, "padding") ||
+					strings.Contains(errStr, "decrypt") ||
+					strings.Contains(errStr, "chunk size")
+
+				if isDecryptionError {
+					// CBC streaming failed - try legacy as fallback
+					// (CBC streaming produces identical ciphertext to legacy)
+					if params.OutputWriter != nil {
+						fmt.Fprintf(params.OutputWriter, "CBC streaming failed, falling back to legacy download...\n")
+					}
+					if outFile, openErr := os.Create(params.LocalPath); openErr == nil {
+						outFile.Close()
+					}
+					return d.downloadLegacy(ctx, prep)
+				}
+				return err
+			}
+			return nil
 		case 1:
 			return d.downloadStreaming(ctx, prep, formatDetector)
 		default:
@@ -263,6 +308,12 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		}
 	}()
 
+	// v4.0.0: Report 0% progress immediately before download starts.
+	// This matches upload behavior and shows users the transfer has started.
+	if prep.Params.ProgressCallback != nil {
+		prep.Params.ProgressCallback(0.0)
+	}
+
 	// Download encrypted file via provider
 	// FileSize set to 0 so provider fetches actual encrypted blob size from storage
 	downloadParams := LegacyDownloadParams{
@@ -328,6 +379,240 @@ type downloadResult struct {
 	err        error
 }
 
+// standardChunkSizes are all valid chunk sizes used by rescale-int uploads.
+// When a CBC streaming file lacks partsize metadata, we try these sizes in order.
+// The order matters: start with smaller sizes (more likely for memory-constrained uploads).
+var standardChunkSizes = []int64{
+	16 * 1024 * 1024, // 16 MB - minimum, for low-memory uploads
+	32 * 1024 * 1024, // 32 MB - standard default
+	48 * 1024 * 1024, // 48 MB - 1-5 GB files
+	64 * 1024 * 1024, // 64 MB - large files
+}
+
+// probeChunkSize attempts to detect the correct chunk size for a CBC-encrypted file
+// by downloading the last portion and trying different chunk sizes until one produces
+// valid PKCS7 padding.
+//
+// This is needed for files uploaded before v4.0.0 which don't have partsize metadata.
+//
+// v4.0.0 FIX: The function now uses decryptedSize (not encryptedSize) to calculate
+// the number of parts, because parts are defined by plaintext chunk size.
+func (d *Downloader) probeChunkSize(
+	ctx context.Context,
+	partDownloader StreamingPartDownloader,
+	remotePath string,
+	encryptedSize int64,
+	decryptedSize int64,
+	initialIV []byte,
+	encryptionKey []byte,
+	outputWriter io.Writer,
+) (int64, error) {
+	// Download the last 64 MB + 16 bytes to cover all possible chunk sizes
+	// The +16 is for the IV (last 16 bytes of previous part's ciphertext)
+	probeSize := int64(64*1024*1024 + 16)
+	if probeSize > encryptedSize {
+		probeSize = encryptedSize
+	}
+
+	probeStart := encryptedSize - probeSize
+	if probeStart < 0 {
+		probeStart = 0
+	}
+
+	if outputWriter != nil {
+		fmt.Fprintf(outputWriter, "Probing chunk size (file missing partsize metadata)...\n")
+	}
+
+	// Download the probe region (nil progress callback - probing doesn't need progress)
+	probeData, err := partDownloader.DownloadEncryptedRange(ctx, remotePath, probeStart, probeSize, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to download probe data: %w", err)
+	}
+
+	// v4.0.0: Build candidate list starting with the expected chunk size
+	// ChunkSizeFromFileSize gives the deterministic size based on file size thresholds.
+	// This should match what was used during upload (before memory constraints were applied).
+	expectedSize := resources.ChunkSizeFromFileSize(decryptedSize)
+
+	// Build candidate list: expected size first, then fallbacks (avoiding duplicates)
+	candidates := []int64{expectedSize}
+	for _, size := range standardChunkSizes {
+		if size != expectedSize {
+			candidates = append(candidates, size)
+		}
+	}
+
+	if outputWriter != nil {
+		fmt.Fprintf(outputWriter, "Trying chunk sizes: expected=%s, fallbacks=%v\n",
+			cloud.FormatBytes(expectedSize), formatSizeList(candidates[1:]))
+	}
+
+	// Try each candidate chunk size
+	for _, chunkSize := range candidates {
+		// v4.0.0 FIX: Use decryptedSize (not encryptedSize) for numParts calculation!
+		// Parts are based on plaintext chunk size, so numParts = ceil(decryptedSize / chunkSize)
+		numParts := (decryptedSize + chunkSize - 1) / chunkSize
+		if numParts < 1 {
+			numParts = 1
+		}
+
+		// Calculate where last part starts in the encrypted file
+		// For CBC streaming, parts 0 to numParts-2 have size = chunkSize (no padding)
+		// Only the last part has PKCS7 padding (1-16 bytes)
+		lastPartStart := (numParts - 1) * chunkSize
+
+		// Calculate where last part starts in our probe buffer
+		lastPartOffsetInProbe := lastPartStart - probeStart
+
+		// v4.0.0 FIX: Only check for IV bytes if this is a multi-part file.
+		// Single-part files use initialIV from metadata, so no extra bytes needed.
+		if numParts > 1 && lastPartOffsetInProbe < 16 {
+			// Multi-part file: need 16 bytes before last part for IV
+			// This chunk size requires data we didn't download
+			continue
+		}
+
+		// Bounds check: make sure lastPartOffsetInProbe is within our buffer
+		if lastPartOffsetInProbe < 0 || lastPartOffsetInProbe >= int64(len(probeData)) {
+			continue
+		}
+
+		// Extract IV (16 bytes before last part, or initialIV for single-part)
+		var iv []byte
+		if numParts == 1 {
+			// Only one part - use the initial IV from metadata
+			iv = initialIV
+		} else {
+			// IV is last 16 bytes of previous part's ciphertext
+			ivOffset := lastPartOffsetInProbe - 16
+			if ivOffset < 0 || ivOffset+16 > int64(len(probeData)) {
+				continue
+			}
+			iv = probeData[ivOffset : ivOffset+16]
+		}
+
+		// Extract last part ciphertext
+		lastPartCiphertext := probeData[lastPartOffsetInProbe:]
+		if len(lastPartCiphertext) == 0 {
+			continue
+		}
+
+		// Try to decrypt with this chunk size
+		decryptor, err := encryption.NewCBCStreamingDecryptor(encryptionKey, iv)
+		if err != nil {
+			continue
+		}
+
+		// Decrypt as final part (will check PKCS7 padding)
+		_, err = decryptor.DecryptPart(lastPartCiphertext, true)
+		if err == nil {
+			// Success! This is the correct chunk size
+			if outputWriter != nil {
+				fmt.Fprintf(outputWriter, "Detected chunk size: %s\n", cloud.FormatBytes(chunkSize))
+			}
+			return chunkSize, nil
+		}
+
+		// Padding error - try next chunk size
+	}
+
+	return 0, fmt.Errorf("could not detect chunk size: tried %v, all failed padding validation. "+
+		"The file may be corrupted or use an unsupported encryption format", candidates)
+}
+
+// formatSizeList formats a slice of sizes as human-readable strings
+func formatSizeList(sizes []int64) string {
+	if len(sizes) == 0 {
+		return "none"
+	}
+	result := "["
+	for i, size := range sizes {
+		if i > 0 {
+			result += ", "
+		}
+		result += cloud.FormatBytes(size)
+	}
+	return result + "]"
+}
+
+// verifyDecryptionQuick performs a fast 32-byte probe to verify the key/IV will produce
+// valid decrypted output. This catches wrong keys, corrupted files, or incompatible
+// encryption BEFORE downloading the full file.
+//
+// v4.0.0: Added to fail fast on undecryptable files without wasting bandwidth.
+//
+// Returns nil if decryption verification passes, error otherwise.
+func (d *Downloader) verifyDecryptionQuick(
+	ctx context.Context,
+	partDownloader StreamingPartDownloader,
+	remotePath string,
+	encryptedSize int64,
+	initialIV []byte,
+	encryptionKey []byte,
+) error {
+	// We need the last 32 bytes: 16 bytes IV + 16 bytes last block
+	// For files < 32 bytes, use initial IV
+	var probeStart int64
+	var probeSize int64
+
+	if encryptedSize <= 16 {
+		// Very small file (empty or near-empty after encryption)
+		// Just download all and verify
+		probeStart = 0
+		probeSize = encryptedSize
+	} else if encryptedSize < 32 {
+		// Small file - download all, use initial IV
+		probeStart = 0
+		probeSize = encryptedSize
+	} else {
+		// Normal case - download last 32 bytes
+		probeStart = encryptedSize - 32
+		probeSize = 32
+	}
+
+	// Download probe bytes
+	probeData, err := partDownloader.DownloadEncryptedRange(ctx, remotePath, probeStart, probeSize, nil)
+	if err != nil {
+		return fmt.Errorf("verification probe failed: %w", err)
+	}
+
+	// Extract IV and last block
+	var iv, lastBlock []byte
+	if len(probeData) < 16 {
+		return fmt.Errorf("encrypted file too small: %d bytes", len(probeData))
+	}
+
+	if len(probeData) == 16 {
+		// Only one block - use initial IV
+		iv = initialIV
+		lastBlock = probeData
+	} else if len(probeData) < 32 {
+		// Use initial IV, last block is the last 16 bytes
+		iv = initialIV
+		lastBlock = probeData[len(probeData)-16:]
+	} else {
+		// Normal case: IV is bytes 0-15, last block is bytes 16-31
+		iv = probeData[0:16]
+		lastBlock = probeData[16:32]
+	}
+
+	// Try to decrypt last block
+	decryptor, err := encryption.NewCBCStreamingDecryptor(encryptionKey, iv)
+	if err != nil {
+		return fmt.Errorf("failed to create decryptor for verification: %w", err)
+	}
+
+	// Decrypt as final part (will validate PKCS7 padding)
+	_, err = decryptor.DecryptPart(lastBlock, true)
+	if err != nil {
+		return fmt.Errorf("decryption verification failed - the file cannot be decrypted with the provided key. "+
+			"This may indicate: (1) the file was uploaded by a different tool, (2) the encryption metadata is incorrect, "+
+			"(3) the file is corrupted, or (4) the file upload was incomplete. Original error: %w", err)
+	}
+
+	return nil
+}
+
 // downloadCBCStreaming downloads using CBC chaining format (v2) with parallel fetch.
 // v3.4.1: Parallel download architecture - downloads happen in parallel, but decryption
 // is sequential (CBC constraint) for 2-4x throughput improvement.
@@ -369,11 +654,36 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		return fmt.Errorf("failed to create CBC decryptor: %w", err)
 	}
 
-	// Use standard chunk size for part boundaries
-	partSize := int64(constants.ChunkSize) // 16MB
+	// v4.0.0: Use part size from metadata, or probe to detect correct size for old files.
+	// Files uploaded before v4.0.0 don't have partsize metadata, and the chunk size used
+	// during upload may vary based on file size and memory constraints at upload time.
+	// Wrong chunk size = wrong part boundaries = CBC decryption failure.
+	decryptedSize := int64(0)
+	if prep.Params.FileInfo != nil {
+		decryptedSize = prep.Params.FileInfo.DecryptedSize
+	}
 
-	// Calculate number of parts
+	partSize := prep.PartSize
+	if partSize == 0 {
+		// v4.0.0: No partsize in metadata - use calculated size based on file size.
+		// This is FAST (no probe download needed) and works for 99%+ of files.
+		// The probe approach was slow (downloaded 64MB before starting) and unreliable
+		// (couldn't handle memory-constrained uploads with non-standard chunk sizes).
+		partSize = resources.ChunkSizeFromFileSize(decryptedSize)
+		if prep.Params.OutputWriter != nil {
+			fmt.Fprintf(prep.Params.OutputWriter, "Using calculated chunk size: %s (file missing partsize metadata)\n",
+				cloud.FormatBytes(partSize))
+		}
+	}
+
+	// v4.0.0 FIX: Calculate number of parts using encryptedSize (from S3), NOT decryptedSize!
+	// The API's decryptedSize may not match the actual encrypted data size (e.g., 832 MiB vs 800 MiB),
+	// especially if the file was compressed or if the metadata is stale.
+	// We must download what's actually IN S3, not what the API says "should" be there.
 	numParts := (encryptedSize + partSize - 1) / partSize
+	if numParts < 1 {
+		numParts = 1
+	}
 
 	// v3.4.1: Get download concurrency from TransferHandle (default to 4)
 	concurrency := 4
@@ -409,6 +719,9 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	// v3.4.2: Track worker count for dynamic scaling
 	var workerCount int32 = int32(concurrency)
 
+	// v4.0.0: Track download progress - declared before worker so closure can capture it
+	var downloadedBytes int64 // Bytes downloaded from cloud (updated via streaming callback)
+
 	// Download worker function - shared by initial workers and dynamically spawned workers
 	downloadWorker := func(workerID int) {
 		for job := range jobChan {
@@ -419,9 +732,16 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			default:
 			}
 
-			// Download this part
+			// v4.0.0: Progress callback updates downloadedBytes atomically during the download.
+			// This provides smooth, byte-level progress (like uploads) instead of jumpy
+			// per-part progress updates.
+			progressCallback := func(bytesRead int64) {
+				atomic.AddInt64(&downloadedBytes, bytesRead)
+			}
+
+			// Download this part (with streaming progress callback)
 			ciphertext, downloadErr := partDownloader.DownloadEncryptedRange(
-				downloadCtx, prep.Params.RemotePath, job.startByte, job.length)
+				downloadCtx, prep.Params.RemotePath, job.startByte, job.length, progressCallback)
 
 			if downloadErr != nil {
 				errOnce.Do(func() { firstErr = fmt.Errorf("failed to download part %d: %w", job.partIndex, downloadErr) })
@@ -495,30 +815,27 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	var bufferMu sync.Mutex
 
 	// Track progress
-	var downloadedBytes int64  // Bytes downloaded from cloud (may be ahead of decryption)
-	var decryptedBytes int64   // v3.6.3: Bytes actually written to disk (accurate progress)
+	// Note: downloadedBytes is declared earlier (before worker function) for closure capture
+	var decryptedBytes int64 // Bytes actually written to disk
 	decryptedParts := int64(0)
 	nextPartToDecrypt := int64(0)
 
-	// v3.6.3: Progress ticker for smooth updates every 500ms.
-	// Uses decryptedBytes (not downloadedBytes) for accurate, non-jumpy progress.
-	// This prevents progress from racing ahead then jumping backwards.
+	// v4.0.0: Progress ticker for smooth updates every 500ms.
+	// Uses downloadedBytes (encrypted bytes downloaded) for smooth, byte-level progress.
+	// This matches upload behavior where progress reflects actual network I/O.
 	progressTicker := time.NewTicker(500 * time.Millisecond)
 	progressDone := make(chan struct{})
-	decryptedSize := int64(0)
-	if prep.Params.FileInfo != nil {
-		decryptedSize = prep.Params.FileInfo.DecryptedSize
-	}
 	go func() {
 		defer progressTicker.Stop()
 		for {
 			select {
 			case <-progressTicker.C:
-				if prep.Params.ProgressCallback != nil && decryptedSize > 0 {
-					// Use decrypted bytes for accurate progress (not downloaded bytes!)
-					// Downloaded bytes can race ahead causing jumpy progress.
-					currentBytes := atomic.LoadInt64(&decryptedBytes)
-					progress := float64(currentBytes) / float64(decryptedSize)
+				if prep.Params.ProgressCallback != nil && encryptedSize > 0 {
+					// v4.0.0: Progress = bytes downloaded / total encrypted bytes
+					// downloadedBytes is updated in real-time via streaming callback,
+					// providing smooth progress like uploads.
+					currentBytes := atomic.LoadInt64(&downloadedBytes)
+					progress := float64(currentBytes) / float64(encryptedSize)
 					if progress > 1.0 {
 						progress = 1.0
 					}
@@ -531,6 +848,13 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	}()
 	defer close(progressDone)
 
+	// v4.0.0: Report 0% progress immediately after init completes.
+	// This matches upload behavior and shows users the transfer has started,
+	// even before the first part is downloaded and decrypted.
+	if prep.Params.ProgressCallback != nil {
+		prep.Params.ProgressCallback(0.0)
+	}
+
 	// Process downloaded parts - decrypt in order
 	for result := range resultChan {
 		if result.err != nil {
@@ -539,9 +863,10 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 
 		// Buffer this part
+		// v4.0.0: downloadedBytes is now updated via streaming progress callback,
+		// so we don't add here (would double-count).
 		bufferMu.Lock()
 		partBuffer[result.partIndex] = result.ciphertext
-		atomic.AddInt64(&downloadedBytes, int64(len(result.ciphertext)))
 
 		// Decrypt all consecutive parts starting from nextPartToDecrypt
 		for {
@@ -806,6 +1131,13 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}()
 	defer close(progressDone)
 
+	// v4.0.0: Report 0% progress immediately after init completes.
+	// This matches upload behavior and shows users the transfer has started,
+	// even before the first part is downloaded and decrypted.
+	if prep.Params.ProgressCallback != nil {
+		prep.Params.ProgressCallback(0.0)
+	}
+
 	// File write mutex (for WriteAt operations)
 	var fileMu sync.Mutex
 
@@ -824,11 +1156,14 @@ func (d *Downloader) downloadStreamingConcurrent(
 				}
 
 				// Download encrypted part bytes
+				// Note: For HKDF format, progress callback is nil since this legacy format
+				// uses decryptedBytes for progress. CBC format (v2) uses streaming progress.
 				ciphertext, err := partDownloader.DownloadEncryptedRange(
 					opCtx,
 					prep.Params.RemotePath,
 					job.encryptedStart,
 					job.encryptedEnd-job.encryptedStart,
+					nil, // v4.0.0: Progress callback - nil for legacy HKDF format
 				)
 				if err != nil {
 					setError(fmt.Errorf("failed to download part %d: %w", job.partIndex, err))
@@ -991,7 +1326,9 @@ type StreamingPartDownloader interface {
 	// DownloadEncryptedRange downloads a specific byte range of the encrypted file.
 	// Used by the concurrent download orchestrator to download individual parts.
 	// Returns the raw encrypted bytes for the specified range.
-	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64) ([]byte, error)
+	// v4.0.0: progressCallback (optional) is called with bytes downloaded for smooth progress.
+	// Pass nil if progress tracking is not needed (e.g., during chunk size probing).
+	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error)
 }
 
 // StreamingDownloadInitParams contains parameters for initializing a streaming download.

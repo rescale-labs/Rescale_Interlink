@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "rescale-int",
+  "outputfilename": "rescale-int",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Rescale",
+    "email": "support@rescale.com"
+  },
+  "info": {
+    "companyName": "Rescale, Inc.",
+    "productName": "Rescale Interlink",
+    "productVersion": "4.0.0",
+    "copyright": "Copyright 2025 Rescale, Inc.",
+    "comments": "Unified CLI and GUI for Rescale HPC platform"
+  },
+  "nsisType": "multiple",
+  "obfuscated": false,
+  "garbleargs": ""
+}

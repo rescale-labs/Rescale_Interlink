@@ -18,12 +18,3 @@ type WalkOptions struct {
 	// Default is true (hidden directories are skipped).
 	SkipHiddenDirs bool
 }
-
-// DefaultWalkOptions returns sensible defaults for walking directories.
-// Hidden files and directories are excluded by default.
-func DefaultWalkOptions() WalkOptions {
-	return WalkOptions{
-		IncludeHidden:  false,
-		SkipHiddenDirs: true,
-	}
-}

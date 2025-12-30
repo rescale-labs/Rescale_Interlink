@@ -437,6 +437,33 @@ func (tm *ThroughputMonitor) Cleanup(transferID string) {
 // Dynamic Chunk Sizing
 // =============================================================================
 
+// ChunkSizeFromFileSize returns the expected chunk size for a file of given plaintext size.
+// This is a deterministic calculation based purely on file size - no memory or thread
+// constraints are applied.
+//
+// v4.0.0: This function is used during download to infer the chunk size for files
+// uploaded before v4.0.0 (which didn't store partsize in metadata). Since we can't know
+// the uploader's memory constraints, we use the file-size-based defaults which work
+// for the vast majority of cases (machines with 1GB+ available memory).
+//
+// The returned values match the CalculateDynamicChunkSize defaults:
+//   - <100 MB files: 16 MB chunks
+//   - 100 MB - 1 GB files: 32 MB chunks
+//   - 1 GB - 5 GB files: 48 MB chunks
+//   - >=5 GB files: 64 MB chunks
+func ChunkSizeFromFileSize(plaintextSize int64) int64 {
+	switch {
+	case plaintextSize < constants.SmallFileThreshold: // < 100 MB
+		return constants.MinChunkSize // 16 MB
+	case plaintextSize < constants.LargeFile1GB: // 100 MB - 1 GB
+		return constants.ChunkSize // 32 MB
+	case plaintextSize < constants.LargeFile5GB: // 1 GB - 5 GB
+		return 48 * 1024 * 1024 // 48 MB
+	default: // >= 5 GB
+		return constants.MaxChunkSize // 64 MB
+	}
+}
+
 // CalculateDynamicChunkSize returns the optimal chunk size for a transfer.
 // Takes into account:
 //   - File size (larger files benefit from larger chunks)

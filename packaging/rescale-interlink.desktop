@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Rescale Interlink
+Comment=Unified CLI and GUI for Rescale HPC platform
+Exec=rescale-int
+Icon=rescale-interlink
+Categories=Development;Science;
+Terminal=false
+StartupNotify=true
+Keywords=HPC;Cloud;Simulation;Engineering;
