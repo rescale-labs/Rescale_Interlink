@@ -1,7 +1,10 @@
 // Package cloud provides cloud storage transfer functionality.
-// timing.go - Transfer timing instrumentation for diagnostics (v3.6.2)
+// timing.go - Transfer timing instrumentation for diagnostics (v3.6.2, v4.0.0)
 //
-// Enable timing output by setting RESCALE_TIMING=1 environment variable.
+// Enable timing output by:
+//   - Setting RESCALE_TIMING=1 environment variable, OR
+//   - Enabling "Detailed Logging" in GUI Settings tab (v4.0.0)
+//
 // Output format: [TIMING] phase_name: duration (optional_details)
 //
 // Example output:
@@ -14,30 +17,62 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/events"
 )
 
-// TimingEnabled returns true if RESCALE_TIMING=1 environment variable is set.
-// When enabled, detailed timing information is logged during transfers.
-// This is useful for diagnosing performance issues, especially on Windows.
-func TimingEnabled() bool {
-	return os.Getenv("RESCALE_TIMING") == "1"
+// Global state for GUI-mode detailed logging (v4.0.0)
+var (
+	detailedLoggingEnabled int32           // atomic: 1 = enabled, 0 = disabled
+	globalEventBus         *events.EventBus // set by wailsapp for GUI mode
+)
+
+// SetDetailedLogging enables or disables detailed logging globally.
+// Called from GUI when the checkbox is toggled.
+func SetDetailedLogging(enabled bool) {
+	if enabled {
+		atomic.StoreInt32(&detailedLoggingEnabled, 1)
+	} else {
+		atomic.StoreInt32(&detailedLoggingEnabled, 0)
+	}
 }
 
-// TimingLog writes a timing message to the writer if RESCALE_TIMING=1.
+// SetEventBus sets the global event bus for emitting timing logs to GUI.
+// Called from wailsapp during startup.
+func SetEventBus(eb *events.EventBus) {
+	globalEventBus = eb
+}
+
+// TimingEnabled returns true if detailed logging is enabled.
+// This can be via RESCALE_TIMING=1 environment variable OR
+// via the GUI DetailedLogging checkbox.
+func TimingEnabled() bool {
+	return os.Getenv("RESCALE_TIMING") == "1" || atomic.LoadInt32(&detailedLoggingEnabled) == 1
+}
+
+// TimingLog writes a timing message to the writer if detailed logging is enabled.
 // If writer is nil, os.Stderr is used.
+// v4.0.0: Also emits to EventBus for GUI Activity tab when available.
 // Format: [TIMING] message
 func TimingLog(w io.Writer, format string, args ...interface{}) {
 	if !TimingEnabled() {
 		return
 	}
+	msg := fmt.Sprintf(format, args...)
+	formattedMsg := fmt.Sprintf("[TIMING] %s", msg)
+
+	// Write to provided writer (or stderr)
 	if w == nil {
 		w = os.Stderr
 	}
-	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(w, "[TIMING] %s\n", msg)
+	fmt.Fprintf(w, "%s\n", formattedMsg)
+
+	// v4.0.0: Also emit to EventBus for GUI Activity tab
+	if globalEventBus != nil {
+		globalEventBus.PublishLog(events.DebugLevel, formattedMsg, "timing", "", nil)
+	}
 }
 
 // Timer tracks elapsed time for a named phase.
@@ -108,113 +143,6 @@ func (t *Timer) StopWithMessage(format string, args ...interface{}) time.Duratio
 		}
 	}
 	return elapsed
-}
-
-// PartTimer tracks timing for individual parts in a multipart transfer.
-// It provides aggregate statistics and per-part timing when enabled.
-type PartTimer struct {
-	name       string
-	w          io.Writer
-	totalParts int
-	mu         sync.Mutex
-
-	// Per-part tracking
-	completedParts int
-	totalBytes     int64
-	totalDuration  time.Duration
-
-	// Rolling average for throughput
-	recentSpeeds []float64
-	maxRecent    int
-}
-
-// NewPartTimer creates a new part timer for tracking multipart operations.
-func NewPartTimer(w io.Writer, name string, totalParts int) *PartTimer {
-	if w == nil {
-		w = os.Stderr
-	}
-	return &PartTimer{
-		name:       name,
-		w:          w,
-		totalParts: totalParts,
-		maxRecent:  10, // Rolling window for speed average
-	}
-}
-
-// RecordPart logs timing for a completed part and updates aggregate stats.
-// encryptDuration and transferDuration are the times spent in each phase.
-// bytesTransferred is the size of the part.
-func (pt *PartTimer) RecordPart(partNum int, encryptDuration, transferDuration time.Duration, bytesTransferred int64) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	pt.completedParts++
-	pt.totalBytes += bytesTransferred
-	pt.totalDuration += transferDuration
-
-	// Calculate speed for this part
-	if transferDuration > 0 {
-		speed := float64(bytesTransferred) / transferDuration.Seconds()
-		pt.recentSpeeds = append(pt.recentSpeeds, speed)
-		if len(pt.recentSpeeds) > pt.maxRecent {
-			pt.recentSpeeds = pt.recentSpeeds[1:]
-		}
-	}
-
-	if !TimingEnabled() {
-		return
-	}
-
-	// Log part timing
-	fmt.Fprintf(pt.w, "[TIMING] Part %d/%d: encrypted=%v transferred=%v size=%s\n",
-		partNum, pt.totalParts, encryptDuration, transferDuration, FormatBytes(bytesTransferred))
-}
-
-// RecordPartSimple logs timing for operations that don't have separate encrypt/transfer phases.
-func (pt *PartTimer) RecordPartSimple(partNum int, duration time.Duration, bytesTransferred int64) {
-	pt.RecordPart(partNum, 0, duration, bytesTransferred)
-}
-
-// Summary logs aggregate statistics for all parts.
-func (pt *PartTimer) Summary() {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	if !TimingEnabled() || pt.completedParts == 0 {
-		return
-	}
-
-	avgSpeed := float64(0)
-	if pt.totalDuration > 0 {
-		avgSpeed = float64(pt.totalBytes) / pt.totalDuration.Seconds()
-	}
-
-	// Calculate rolling average speed
-	rollingAvg := float64(0)
-	if len(pt.recentSpeeds) > 0 {
-		sum := float64(0)
-		for _, s := range pt.recentSpeeds {
-			sum += s
-		}
-		rollingAvg = sum / float64(len(pt.recentSpeeds))
-	}
-
-	fmt.Fprintf(pt.w, "[TIMING] %s summary: %d parts, %s total, avg=%s rolling=%s\n",
-		pt.name, pt.completedParts, FormatBytes(pt.totalBytes),
-		FormatSpeed(avgSpeed), FormatSpeed(rollingAvg))
-}
-
-// GetStats returns current statistics without logging.
-func (pt *PartTimer) GetStats() (completedParts int, totalBytes int64, avgSpeed float64) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	completedParts = pt.completedParts
-	totalBytes = pt.totalBytes
-	if pt.totalDuration > 0 {
-		avgSpeed = float64(pt.totalBytes) / pt.totalDuration.Seconds()
-	}
-	return
 }
 
 // FormatBytes returns a human-readable byte count.

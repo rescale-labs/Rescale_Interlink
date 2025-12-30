@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: December 22, 2025
-**Version**: 3.5.0
+**Last Updated**: December 27, 2025
+**Version**: 4.0.0-dev
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -85,12 +85,12 @@ go test -v ./internal/pur/...
 
 ### GUI Testing
 
-**Status**: Manual testing only (Fyne widget tests complex)
+**Status**: Manual testing only (Wails v2 with React frontend)
 
 **Validation Points**:
-- GUI launches without errors
-- All tabs render correctly
-- Table updates in real-time
+- GUI launches without errors (`open build/bin/rescale-int.app` on macOS)
+- All tabs render correctly (Setup, SingleJob, PUR, FileBrowser, Transfers, Activity)
+- Real-time event updates via event bridge
 - No UI freezes or deadlocks
 - Clean shutdown
 
@@ -752,6 +752,6 @@ rm -rf /tmp/test
 
 ---
 
-**Last Updated**: December 10, 2025
-**Version**: 3.2.4
-**Status**: All tests passing, production ready
+**Last Updated**: December 27, 2025
+**Version**: 4.0.0-dev
+**Status**: All tests passing, pre-release (Wails migration)

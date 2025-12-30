@@ -139,4 +139,5 @@ func ExampleCheckAvailableSpace() {
 	} else {
 		fmt.Println("Sufficient space available")
 	}
+	// Output: Sufficient space available
 }

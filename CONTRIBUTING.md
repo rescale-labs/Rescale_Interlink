@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 3.5.0
-**Last Updated**: December 22, 2025
+**Version**: 4.0.0-dev
+**Last Updated**: December 27, 2025
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -13,6 +13,8 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 ### Prerequisites
 
 - Go 1.24 or later (minimum required)
+- Node.js 18+ (for GUI development)
+- Wails v2 CLI (for GUI builds)
 - macOS, Linux, or Windows development environment
 - Git
 
@@ -23,14 +25,30 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 git clone https://github.com/rescale/rescale-int.git
 cd rescale-int
 
-# Install dependencies
+# Install Go dependencies
 go mod download
 
-# Build
-go build -o rescale-int ./cmd/rescale-int
+# Build CLI only (use Makefile for proper output location)
+make build-darwin-arm64  # or make build for current platform
 
 # Run tests
 go test ./...
+```
+
+### GUI Development (Wails)
+
+```bash
+# Install Wails CLI (if not already installed)
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+# Install frontend dependencies
+cd frontend && npm install && cd ..
+
+# Development mode (hot reload)
+wails dev
+
+# Production build
+CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
 ```
 
 ## Build Requirements (CRITICAL)
@@ -40,15 +58,23 @@ go test ./...
 All production builds MUST be compiled with FIPS 140-3 support for FedRAMP compliance:
 
 ```bash
-# Required build command (production)
-GOFIPS140=latest go build -o rescale-int ./cmd/rescale-int
+# REQUIRED: Use the Makefile for all builds (enforces FIPS and correct output path)
+make build                    # Build for current platform
+make build-darwin-arm64       # Build for macOS ARM64
+make build-all                # Build for all platforms
 
-# Or use the Makefile (recommended - includes all necessary flags)
-make build
+# Output goes to: bin/{VERSION}/{PLATFORM}/rescale-int
+# Example: bin/v4.0.0/darwin-arm64/rescale-int
+
+# Production GUI build
+GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -platform darwin/arm64
 
 # Development only (not for production releases)
-RESCALE_ALLOW_NON_FIPS=true go build -o rescale-int ./cmd/rescale-int
+# Note: Output to bin/dev/ to avoid polluting project root
+RESCALE_ALLOW_NON_FIPS=true go build -o bin/dev/rescale-int ./cmd/rescale-int
 ```
+
+**IMPORTANT:** Never output binaries to the project root directory. The `bin/` directory is gitignored; the root is not.
 
 Non-FIPS builds will refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. This environment variable is for development purposes only and must not be used in production.
 
@@ -131,9 +157,16 @@ Types:
 rescale-int/
 ├── cmd/rescale-int/    # Entry point
 │   └── main.go         # Application bootstrap
+├── frontend/           # Wails GUI (React/TypeScript)
+│   ├── src/
+│   │   ├── components/ # React components
+│   │   ├── stores/     # Zustand state stores
+│   │   └── types/      # TypeScript type definitions
+│   ├── package.json    # Node.js dependencies
+│   └── wailsjs/        # Generated Wails bindings
 ├── internal/
 │   ├── api/            # Rescale API client
-│   ├── cli/            # CLI commands
+│   ├── cli/            # CLI commands (Cobra)
 │   ├── cloud/          # Cloud storage operations
 │   │   ├── credentials/  # Credential management
 │   │   ├── download/     # Download entry point
@@ -143,9 +176,6 @@ rescale-int/
 │   │   ├── state/        # Resume state management
 │   │   ├── storage/      # Common interfaces
 │   │   ├── transfer/     # Unified transfer orchestration
-│   │   │   ├── downloader.go   # Download orchestrator
-│   │   │   ├── uploader.go     # Upload orchestrator
-│   │   │   └── streaming.go    # Streaming encryption
 │   │   ├── upload/       # Upload entry point
 │   │   └── interfaces.go # CloudTransfer interface
 │   ├── config/         # Configuration management
@@ -153,11 +183,14 @@ rescale-int/
 │   ├── core/           # Core engine
 │   ├── crypto/         # Encryption (HKDF, AES-256-CBC)
 │   ├── events/         # Event bus system
-│   ├── gui/            # Fyne GUI components
-│   │   ├── setup_tab.go        # Configuration UI
-│   │   ├── jobs_tab.go         # Jobs management
-│   │   ├── file_browser_tab.go # File browser
-│   │   └── activity_tab.go     # Activity log
+│   ├── _archive_fyne_gui/  # Legacy Fyne GUI components (archived, reference only)
+│   ├── wailsapp/       # Wails v2 Go bindings
+│   │   ├── app.go            # Main Wails app struct
+│   │   ├── config_bindings.go    # Config methods
+│   │   ├── transfer_bindings.go  # Transfer methods
+│   │   ├── file_bindings.go      # File operations
+│   │   ├── job_bindings.go       # Job operations
+│   │   └── event_bridge.go       # EventBus to Wails events
 │   ├── http/           # HTTP client and retry logic
 │   ├── pur/            # PUR pipeline integration
 │   ├── trace/          # Debugging/tracing
@@ -183,13 +216,29 @@ ch := eventBus.Subscribe(events.EventStateChange)
 
 - UI updates must be thread-safe
 - Use mutexes appropriately but avoid deadlocks
+- In Wails, use the event bridge to communicate with frontend
 - Release locks before calling widget refresh methods
 
-### Fyne GUI
+### Wails GUI
 
-- Keep UI code in `internal/gui/`
-- Don't call `table.Refresh()` while holding locks
-- Use proper error dialogs for user feedback
+- Go bindings in `internal/wailsapp/`
+- Frontend React code in `frontend/src/`
+- State management via Zustand stores
+- Event bridge connects Go EventBus → Wails events → React stores
+- Build with: `wails build -platform <target>`
+
+### Frontend Development
+
+```bash
+# Start development server with hot reload
+wails dev
+
+# Lint frontend code
+cd frontend && npm run lint
+
+# Build frontend only
+cd frontend && npm run build
+```
 
 ## Debugging
 

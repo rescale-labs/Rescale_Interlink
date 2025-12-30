@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -263,7 +264,8 @@ func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *tra
 	// `streamingformat: cbc` enables streaming download (no temp file).
 	metadata := map[string]*string{
 		"iv":              to.Ptr(encryption.EncodeBase64(uploadState.InitialIV)),
-		"streamingformat": to.Ptr("cbc"), // Marks file as CBC-chained streaming
+		"streamingformat": to.Ptr("cbc"),                                      // Marks file as CBC-chained streaming
+		"partsize":        to.Ptr(fmt.Sprintf("%d", uploadState.PartSize)),    // v4.0.0: Store part size for correct download decryption
 	}
 
 	// Commit block list using AzureClient
@@ -422,6 +424,29 @@ func (prsc *progressReadSeekCloser) Close() error {
 	return nil
 }
 
+// progressReader wraps an io.Reader and reports bytes read to a callback.
+// v4.0.0: Enables real-time progress tracking during Azure downloads.
+// Uses threshold-based reporting to avoid jumpy progress from many small reads.
+type progressReader struct {
+	reader      io.Reader
+	callback    func(bytesRead int64)
+	accumulated int64 // Bytes accumulated since last callback
+	threshold   int64 // Report every N bytes (1MB default)
+}
+
+func (pr *progressReader) Read(p []byte) (n int, err error) {
+	n, err = pr.reader.Read(p)
+	if n > 0 && pr.callback != nil {
+		pr.accumulated += int64(n)
+		// Report when threshold reached OR on EOF (to flush remaining)
+		if pr.accumulated >= pr.threshold || err == io.EOF {
+			pr.callback(pr.accumulated)
+			pr.accumulated = 0
+		}
+	}
+	return n, err
+}
+
 // =============================================================================
 // StreamingConcurrentDownloader Interface Implementation
 // Supports both legacy (IV in metadata) and HKDF (formatVersion/fileId/partSize) formats.
@@ -517,7 +542,18 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		if v, ok := metadata[key]; ok && v != nil && *v == "cbc" {
 			// CBC streaming format - uploaded by rescale-int v3.2.4+
 			// Can use streaming download (no temp file) with sequential part decryption
-			return 2, "", 0, iv, nil
+			// v4.0.0: Read partSize from metadata. Return 0 if not present so downloader
+			// can calculate the correct size from file size (backward compatibility).
+			var partSize int64 = 0 // 0 means "calculate from file size"
+			for _, psKey := range []string{"partsize", "partSize", "PartSize", "Partsize"} {
+				if ps, psOk := metadata[psKey]; psOk && ps != nil && *ps != "" {
+					if parsed, parseErr := strconv.ParseInt(*ps, 10, 64); parseErr == nil && parsed > 0 {
+						partSize = parsed
+					}
+					break
+				}
+			}
+			return 2, "", partSize, iv, nil
 		}
 	}
 
@@ -708,7 +744,8 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // DownloadEncryptedRange downloads a specific byte range of the encrypted blob from Azure.
 // This is used by the concurrent download orchestrator to download individual parts.
 // The range is: [offset, offset+length).
-func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64) ([]byte, error) {
+// v4.0.0: progressCallback (optional) is called with bytes downloaded for smooth progress.
+func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
 	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
 	if err != nil {
@@ -727,8 +764,19 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 	}
 	defer resp.Body.Close()
 
-	// Read the data
-	data, err := io.ReadAll(resp.Body)
+	// v4.0.0: Wrap response body with progress tracking for smooth download progress.
+	// This matches upload behavior where progressReader reports bytes as they stream.
+	var reader io.Reader = resp.Body
+	if progressCallback != nil {
+		reader = &progressReader{
+			reader:    resp.Body,
+			callback:  progressCallback,
+			threshold: progressReaderThreshold,
+		}
+	}
+
+	// Read the data (progress reported during read if callback provided)
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read range data: %w", err)
 	}

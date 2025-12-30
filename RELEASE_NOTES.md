@@ -1,5 +1,148 @@
 # Release Notes - Rescale Interlink
 
+## v4.0.0-dev - December 27, 2025
+
+### Complete GUI Rewrite: Fyne to Wails Migration
+
+This major release completely rewrites the graphical user interface using [Wails](https://wails.io/) with a React/TypeScript frontend, replacing the previous Fyne-based GUI.
+
+#### Why Wails?
+
+- **Modern UI**: React enables a polished, responsive interface with Tailwind CSS
+- **Better Performance**: Virtual scrolling for large file lists (TanStack Table)
+- **Smaller Binary**: 20MB macOS arm64 (down from 29MB with Fyne)
+- **Web Technologies**: Easier to style, test, and maintain
+- **Cross-Platform**: WebView2 (Windows), WebKitGTK (Linux), WKWebView (macOS)
+
+#### GUI Architecture
+
+**Frontend (React/TypeScript):**
+- `frontend/src/App.tsx` - Main application with tab navigation
+- `frontend/src/components/tabs/` - Six tab implementations:
+  - SetupTab - Configuration and API key management
+  - SingleJobTab - Single job configuration and submission
+  - PURTab - Parallel Upload Run batch pipeline
+  - FileBrowserTab - Two-pane file browser (local/remote)
+  - TransfersTab - Active transfer queue with progress
+  - ActivityTab - Real-time logs with filtering
+- `frontend/src/stores/` - Zustand state management
+- `frontend/wailsjs/` - Auto-generated Go bindings
+
+**Backend (Go Bindings):**
+- `internal/wailsapp/app.go` - Main Wails application
+- `internal/wailsapp/config_bindings.go` - Configuration methods
+- `internal/wailsapp/transfer_bindings.go` - Upload/download methods
+- `internal/wailsapp/file_bindings.go` - File browser methods
+- `internal/wailsapp/job_bindings.go` - Job submission methods
+- `internal/wailsapp/event_bridge.go` - EventBus to Wails events
+
+#### Features Preserved
+
+All functionality from the Fyne GUI has been ported:
+- Configuration management with test connection
+- Job template builder with searchable software/hardware
+- CSV/JSON/SGE job file load/save
+- Two-pane file browser with My Library/My Jobs/Legacy modes
+- Multi-file selection with upload/download
+- Transfer queue with progress, cancel, retry
+- Real-time activity logging with filtering
+- Directory scanning for PUR batch jobs
+
+#### CLI Unchanged
+
+All command-line functionality remains exactly the same:
+- `rescale-int config`, `files`, `folders`, `jobs`, `pur` commands
+- Progress bars, shell completion, all flags
+
+#### Breaking Changes
+
+- **Build Process**: Now requires Node.js 18+ for frontend build
+- **Dependencies**: Fyne dependencies removed, Wails dependencies added
+- **Binary Name**: Still `rescale-int`, but includes WebView runtime
+
+#### Build Instructions
+
+```bash
+# Install Wails CLI
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+# Install frontend dependencies
+cd frontend && npm install && cd ..
+
+# Build with FIPS 140-3 compliance
+GOFIPS140=latest wails build -platform darwin/arm64
+```
+
+#### Migration Notes
+
+- Old Fyne code archived in `_archive_fyne_gui/` for reference
+- Configuration files and API tokens unchanged - no user action needed
+- All CLI scripts and workflows continue to work
+
+#### E2E Testing Results
+
+All CLI and core functionality tested on both S3 and Azure backends:
+- File uploads/downloads (small, medium, large, multi-part)
+- Folder uploads with concurrent transfers
+- Job output downloads
+- Streaming encryption verified
+- Rate limiters verified
+- GUI launch and basic operation verified
+
+---
+
+### v4.0.0-dev Bug Fixes (December 27, 2025)
+
+Following the Wails migration, these bugs were discovered and fixed:
+
+#### Critical Bug Fixes
+
+1. **Download "is a directory" Error**
+   - **Problem**: Downloads failed with "is a directory" when a remote folder contained both a file and subdirectory with the same name
+   - **Root Cause**: After creating a subdirectory `layer3_dir3/`, attempting to download file `layer3_dir3` failed because the path existed as a directory
+   - **Fix**: Added directory conflict detection before download; files are automatically renamed with `.file` suffix when conflicting with existing directories
+   - **Files Modified**: `internal/cli/folder_download_helper.go:290-302`, `internal/cli/download_helper.go:195-203, 589-597`
+
+2. **Download Path Missing Filename (GUI)**
+   - **Problem**: GUI file browser passed only the directory path to downloads, not the full file path
+   - **Fix**: `FileBrowserTab.tsx` now constructs full path with filename; `transfer_service.go` adds safety check
+   - **Files Modified**: `frontend/src/components/tabs/FileBrowserTab.tsx:253-263`, `internal/services/transfer_service.go:350-359`
+
+#### GUI Improvements
+
+3. **Checkboxes Added to File Browser**
+   - **Problem**: File selection only indicated by subtle background color change
+   - **Fix**: Added explicit checkbox column to FileList component for clear selection indication
+   - **File Modified**: `frontend/src/components/widgets/FileList.tsx:195-196, 245-262`
+
+4. **Version Display Fixed**
+   - **Problem**: Version showed "dev" instead of "v4.0.0-dev"
+   - **Fix**: Changed default Version in cli/root.go from "dev" to "v4.0.0-dev"
+   - **File Modified**: `internal/cli/root.go:44`
+
+5. **Workspace Info in Header**
+   - **Feature**: Display connected workspace name and ID in header after successful API connection
+   - **Files Modified**: `internal/models/file.go:86-98`, `internal/wailsapp/config_bindings.go:140-178`, `frontend/src/App.tsx`, `frontend/src/stores/configStore.ts`, `frontend/src/types/events.ts`
+
+6. **Auto-switch to Transfers Tab**
+   - **Feature**: After starting upload or download, automatically switch to Transfers tab to show progress
+   - **Implementation**: Added `TabNavigationContext` in `App.tsx`, consumed in `FileBrowserTab.tsx`
+   - **Files Modified**: `frontend/src/App.tsx:26-31, 52-58`, `frontend/src/components/tabs/FileBrowserTab.tsx:12, 86-87, 210-211, 277-278`
+
+#### Dead Code Removal
+
+7. **PartTimer Class Removed**
+   - Removed unused `PartTimer` struct and all its methods from `internal/cloud/timing.go`
+   - Removed corresponding tests from `timing_test.go`
+   - Verified not called anywhere in codebase outside its own definition
+
+8. **DefaultWalkOptions Function Removed**
+   - Removed unused `DefaultWalkOptions()` from `internal/localfs/options.go`
+   - Removed corresponding test from `localfs_test.go`
+   - Verified only called in test file
+
+---
+
 ## v3.6.0 - December 23, 2025
 
 ### Architectural Foundation - Local Filesystem Abstraction

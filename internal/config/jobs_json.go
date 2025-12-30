@@ -88,15 +88,3 @@ func DetectJobFileFormat(path string) string {
 	return "unknown"
 }
 
-// LoadJobs loads jobs from a file, auto-detecting format based on extension.
-func LoadJobs(path string) ([]models.JobSpec, error) {
-	format := DetectJobFileFormat(path)
-	switch format {
-	case "csv":
-		return LoadJobsCSV(path)
-	case "json":
-		return LoadJobsJSON(path)
-	default:
-		return nil, fmt.Errorf("unknown file format (use .csv or .json extension): %s", path)
-	}
-}
