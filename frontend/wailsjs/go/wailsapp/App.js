@@ -198,8 +198,8 @@ export function StartBulkRun(arg1) {
   return window['go']['wailsapp']['App']['StartBulkRun'](arg1);
 }
 
-export function StartFolderDownload(arg1, arg2) {
-  return window['go']['wailsapp']['App']['StartFolderDownload'](arg1, arg2);
+export function StartFolderDownload(arg1, arg2, arg3) {
+  return window['go']['wailsapp']['App']['StartFolderDownload'](arg1, arg2, arg3);
 }
 
 export function StartFolderUpload(arg1, arg2) {

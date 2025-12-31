@@ -3,13 +3,14 @@ package wailsapp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cli"
-	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/services"
 )
@@ -267,65 +268,119 @@ type FolderDownloadResultDTO struct {
 }
 
 // StartFolderDownload downloads a remote folder recursively to the local filesystem.
-// v4.0.0: Implements folder download in GUI by reusing CLI infrastructure.
-// Uses merge mode (skip existing files) and continues on error.
-func (a *App) StartFolderDownload(folderID string, destPath string) FolderDownloadResultDTO {
+// v4.0.0: Implements folder download in GUI using TransferService for progress tracking.
+// Scans remote folder, creates local structure, queues files to TransferService.
+// folderName: the display name for the folder (used as the local folder name)
+func (a *App) StartFolderDownload(folderID string, folderName string, destPath string) FolderDownloadResultDTO {
+	// Helper to emit log events to Activity tab
+	displayName := folderName
+	if displayName == "" {
+		displayName = folderID
+	}
+	emitLog := func(level events.LogLevel, msg string) {
+		if a.engine != nil && a.engine.Events() != nil {
+			a.engine.Events().Publish(&events.LogEvent{
+				BaseEvent: events.BaseEvent{EventType: events.EventLog, Time: time.Now()},
+				Level:     level,
+				Message:   msg,
+				Stage:     "folder-download",
+				JobName:   displayName,
+			})
+		}
+	}
+
+	emitLog(events.InfoLevel, fmt.Sprintf("Starting folder download: %s to %s", displayName, destPath))
+
 	if a.engine == nil {
+		emitLog(events.ErrorLevel, "Engine not initialized")
 		return FolderDownloadResultDTO{Error: ErrNoEngine.Error()}
 	}
 
 	// Get API client from engine
 	apiClient := a.engine.API()
 	if apiClient == nil {
+		emitLog(events.ErrorLevel, "API client not configured")
 		return FolderDownloadResultDTO{Error: "API client not configured"}
 	}
 
-	// Create logger for this download
-	logger := logging.NewLogger("folder-download", nil)
+	// Get TransferService for queueing file downloads
+	ts := a.engine.TransferService()
+	if ts == nil {
+		emitLog(events.ErrorLevel, "TransferService not available")
+		return FolderDownloadResultDTO{Error: ErrNoTransferService.Error()}
+	}
 
-	// Use CLI's DownloadFolderRecursive with GUI-friendly defaults:
-	// - mergeAll=true: skip existing files, merge into existing folders
-	// - continueOnError=true: don't stop on individual file failures
-	// - skipChecksum=false: verify checksums
-	// - dryRun=false: actually download
 	ctx := context.Background()
-	result, err := cli.DownloadFolderRecursive(
-		ctx,
-		folderID,
-		destPath,
-		false,                            // overwriteAll
-		false,                            // skipAll
-		true,                             // mergeAll - GUI default: merge into existing folders
-		true,                             // continueOnError - GUI default: don't abort on failures
-		constants.DefaultMaxConcurrent,   // maxConcurrent
-		false,                            // skipChecksum
-		false,                            // dryRun
-		apiClient,
-		logger,
-	)
 
+	// Scan remote folder structure using shared CLI function
+	emitLog(events.DebugLevel, "Scanning remote folder structure...")
+	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, folderID, "")
 	if err != nil {
-		return FolderDownloadResultDTO{Error: err.Error()}
+		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to scan folder: %s", err.Error()))
+		return FolderDownloadResultDTO{Error: "Failed to scan remote folder: " + err.Error()}
 	}
 
-	// Convert result to DTO
-	dto := FolderDownloadResultDTO{
-		FoldersCreated:  result.FoldersCreated,
-		FilesDownloaded: result.FilesDownloaded,
-		FilesSkipped:    result.FilesSkipped,
-		FilesFailed:     result.FilesFailed,
-		TotalBytes:      result.TotalBytes,
+	emitLog(events.InfoLevel, fmt.Sprintf("Found %d folders, %d files", len(allFolders), len(allFiles)))
+
+	// Determine root folder name
+	rootFolderName := folderName
+	if rootFolderName == "" {
+		rootFolderName = folderID
+	}
+	rootOutputDir := filepath.Join(destPath, rootFolderName)
+
+	// Create root folder
+	if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
+		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to create root folder: %s", err.Error()))
+		return FolderDownloadResultDTO{Error: "Failed to create root folder: " + err.Error()}
+	}
+	foldersCreated := 1
+
+	// Create local directory structure
+	for _, folder := range allFolders {
+		localPath := filepath.Join(rootOutputDir, folder.RelativePath)
+		if err := os.MkdirAll(localPath, 0755); err != nil {
+			emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
+			continue
+		}
+		foldersCreated++
+	}
+	emitLog(events.DebugLevel, fmt.Sprintf("Created %d local directories", foldersCreated))
+
+	// Build TransferRequests for each file
+	var totalBytes int64
+	var transferRequests []services.TransferRequest
+
+	for _, file := range allFiles {
+		localPath := filepath.Join(rootOutputDir, file.RelativePath)
+		transferRequests = append(transferRequests, services.TransferRequest{
+			Type:   services.TransferTypeDownload,
+			Source: file.FileID,    // Remote file ID
+			Dest:   localPath,      // Local file path
+			Name:   file.Name,
+			Size:   file.Size,
+		})
+		totalBytes += file.Size
 	}
 
-	// Summarize errors if any
-	if len(result.Errors) > 0 {
-		dto.Error = result.Errors[0].Error.Error()
-		if len(result.Errors) > 1 {
-			dto.Error += " (and more errors)"
+	// Queue downloads through TransferService
+	if len(transferRequests) > 0 {
+		if err := ts.StartTransfers(ctx, transferRequests); err != nil {
+			emitLog(events.ErrorLevel, fmt.Sprintf("Failed to queue downloads: %s", err.Error()))
+			return FolderDownloadResultDTO{
+				FoldersCreated: foldersCreated,
+				Error:          "Failed to queue file downloads: " + err.Error(),
+			}
 		}
 	}
 
-	return dto
+	emitLog(events.InfoLevel, fmt.Sprintf("Queued %d files for download (%.2f MB)", len(transferRequests), float64(totalBytes)/(1024*1024)))
+
+	return FolderDownloadResultDTO{
+		FoldersCreated:  foldersCreated,
+		FilesDownloaded: len(transferRequests), // FilesQueued, will update as they complete
+		TotalBytes:      totalBytes,
+	}
 }
 
 // FolderUploadResultDTO is the JSON-safe version of cli.UploadResult.

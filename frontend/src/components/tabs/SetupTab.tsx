@@ -6,6 +6,8 @@ import {
   ArrowPathIcon,
   ClipboardDocumentIcon,
   FolderOpenIcon,
+  EyeIcon,
+  EyeSlashIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { ClipboardGetText, EventsOn, EventsOff } from '../../../wailsjs/runtime/runtime';
@@ -45,6 +47,7 @@ export function SetupTab() {
   const [tokenSource, setTokenSource] = useState<TokenSource>('direct');
   const [validationEnabled, setValidationEnabled] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Ready');
+  const [showApiKey, setShowApiKey] = useState(false); // v4.0.1: API key visibility toggle
 
   // Auto-download state
   const [autoDownloadConfig, setAutoDownloadConfig] = useState<wailsapp.AutoDownloadConfigDTO>({
@@ -320,13 +323,24 @@ export function SetupTab() {
               <label className="label">API Key</label>
               <div className="flex gap-2">
                 <input
-                  type="password"
+                  type={showApiKey ? 'text' : 'password'}
                   className="input flex-1"
                   placeholder="API Key"
                   value={config?.apiKey || ''}
                   onChange={(e) => updateConfig({ apiKey: e.target.value })}
                   disabled={tokenSource !== 'direct'}
                 />
+                <button
+                  onClick={() => setShowApiKey(!showApiKey)}
+                  className="btn-secondary p-2"
+                  title={showApiKey ? 'Hide API key' : 'Show API key'}
+                >
+                  {showApiKey ? (
+                    <EyeSlashIcon className="w-5 h-5" />
+                  ) : (
+                    <EyeIcon className="w-5 h-5" />
+                  )}
+                </button>
                 <button
                   onClick={handlePasteApiKey}
                   className="btn-secondary p-2"

@@ -100,7 +100,7 @@ export function SelectMultipleFiles(arg1:string):Promise<Array<string>>;
 
 export function StartBulkRun(arg1:Array<wailsapp.JobSpecDTO>):Promise<string>;
 
-export function StartFolderDownload(arg1:string,arg2:string):Promise<wailsapp.FolderDownloadResultDTO>;
+export function StartFolderDownload(arg1:string,arg2:string,arg3:string):Promise<wailsapp.FolderDownloadResultDTO>;
 
 export function StartFolderUpload(arg1:string,arg2:string):Promise<wailsapp.FolderUploadResultDTO>;
 

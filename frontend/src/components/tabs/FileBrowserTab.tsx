@@ -283,7 +283,7 @@ export function FileBrowserTab() {
       // Download folders first using recursive folder download
       for (const folder of folders) {
         setStatus(`Downloading folder: ${folder.name}...`)
-        const result = await App.StartFolderDownload(folder.id, local.currentPath)
+        const result = await App.StartFolderDownload(folder.id, folder.name, local.currentPath)
         if (result.error) {
           console.error(`Folder download error for ${folder.name}:`, result.error)
           // Continue with other items
@@ -317,8 +317,8 @@ export function FileBrowserTab() {
       }
       setStatus(`Download started: ${statusParts.join(' and ')}.`)
 
-      // Switch to Transfers tab to show progress (only if files were queued)
-      if (files.length > 0) {
+      // Switch to Transfers tab to show progress
+      if (files.length > 0 || folders.length > 0) {
         switchToTab('Transfers')
       }
 
