@@ -693,8 +693,10 @@ Examples:
 			ctx := GetContext()
 
 			// Use helper function for recursive download
+			// Note: folderName is empty, so it will use folderID as the folder name
+			// TODO: Add --name flag or fetch folder name from API
 			result, err := DownloadFolderRecursive(
-				ctx, folderID, outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger)
+				ctx, folderID, "", outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger)
 			if err != nil {
 				return err
 			}
