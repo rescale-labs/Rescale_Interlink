@@ -34,6 +34,7 @@
     <!-- Features -->
     <Feature Id="MainFeature" Title="Rescale Interlink" Level="1">
       <ComponentGroupRef Id="MainComponents" />
+      <ComponentGroupRef Id="WebView2Components" />
       <ComponentGroupRef Id="StartMenuShortcuts" />
     </Feature>
 
@@ -98,7 +99,9 @@
   <Fragment>
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="MANUFACTURERFOLDER" Name="Rescale">
-        <Directory Id="INSTALLFOLDER" Name="Interlink" />
+        <Directory Id="INSTALLFOLDER" Name="Interlink">
+          <Directory Id="WEBVIEW2FOLDER" Name="webview2" />
+        </Directory>
       </Directory>
     </StandardDirectory>
 
@@ -127,6 +130,17 @@
       <Component Id="LicenseFile" Guid="3C4D5E6F-7A8B-9C0D-1E2F-A3B4C5D6E7F8">
         <File Id="LicenseTxt" Source="$(var.SourceDir)\LICENSE.txt" KeyPath="yes" />
       </Component>
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- WebView2 Fixed Version Runtime components -->
+  <!-- Bundled runtime enables GUI on Windows Server 2019 without system-wide installation -->
+  <Fragment>
+    <ComponentGroup Id="WebView2Components" Directory="WEBVIEW2FOLDER">
+      <!-- Use Files element for dynamic harvesting of webview2 folder contents -->
+      <Files Include="$(var.BuildDir)\webview2\**">
+        <Exclude Files="$(var.BuildDir)\webview2\**\.gitkeep" />
+      </Files>
     </ComponentGroup>
   </Fragment>
 
