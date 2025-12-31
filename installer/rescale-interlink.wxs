@@ -10,7 +10,8 @@
   Build command:
     wix build installer\rescale-interlink.wxs -o bin\RescaleInterlink.msi
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <!-- Product definition -->
   <Package Name="Rescale Interlink"
@@ -75,23 +76,8 @@
       <Custom Action="StartService" After="InstallService" Condition="NOT REMOVE" />
     </InstallExecuteSequence>
 
-    <!-- UI reference (basic) -->
-    <UI>
-      <UIRef Id="WixUI_FeatureTree" />
-      <!-- WiX v4 requires Condition attribute instead of inner text -->
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication"
-               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
-    </UI>
-
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Rescale Interlink" />
-
-    <CustomAction Id="LaunchApplication"
-                  Directory="INSTALLFOLDER"
-                  ExeCommand="[INSTALLFOLDER]rescale-int.exe --gui"
-                  Execute="immediate"
-                  Impersonate="yes"
-                  Return="asyncNoWait" />
+    <!-- UI reference - WiX v4 uses ui:WixUI from UI extension -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
 
   </Package>
 
