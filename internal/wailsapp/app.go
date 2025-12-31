@@ -247,6 +247,15 @@ func loadConfiguration(configFile string) (*config.Config, error) {
 		}
 	}
 
+	// v4.0.1: Also check RESCALE_API_KEY environment variable
+	// This enables Linux AppDir and other environments where env vars are the primary config method
+	if cfg.APIKey == "" {
+		if envKey := os.Getenv("RESCALE_API_KEY"); envKey != "" {
+			cfg.APIKey = envKey
+			wailsLogger.Info().Msg("Loaded API key from RESCALE_API_KEY environment variable")
+		}
+	}
+
 	return cfg, nil
 }
 

@@ -36,9 +36,11 @@ type DownloadError struct {
 
 // DownloadFolderRecursive recursively downloads a folder and all its contents
 // Exported for GUI reuse
+// folderName: optional name for the downloaded folder. If empty, uses folderID.
 func DownloadFolderRecursive(
 	ctx context.Context,
 	folderID string,
+	folderName string,
 	outputDir string,
 	overwriteAll bool,
 	skipAll bool,
@@ -54,8 +56,11 @@ func DownloadFolderRecursive(
 		Errors: make([]DownloadError, 0),
 	}
 
-	// Use folder ID as the root folder name (user can rename after download)
-	rootFolderName := folderID
+	// Use provided folder name, or fall back to folder ID
+	rootFolderName := folderName
+	if rootFolderName == "" {
+		rootFolderName = folderID
+	}
 	rootOutputDir := filepath.Join(outputDir, rootFolderName)
 
 	logger.Info().
@@ -178,6 +183,13 @@ func DownloadFolderRecursive(
 			fmt.Printf("⊕ Merging into existing folder: %s\n", rootOutputDir)
 			// Continue with download, existing folder will be used
 		}
+	} else {
+		// Root folder doesn't exist - create it
+		if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create root directory %s: %w", rootOutputDir, err)
+		}
+		fmt.Printf("✓ Created root folder: %s\n", rootOutputDir)
+		result.FoldersCreated++
 	}
 
 	// Create local directory structure
