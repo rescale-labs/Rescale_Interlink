@@ -88,10 +88,23 @@ func (a *App) GetConfig() ConfigDTO {
 }
 
 // UpdateConfig applies a complete configuration update.
+// v4.0.1: Now properly updates the engine's API client when API-related settings change.
 func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	if a.config == nil {
 		return nil
 	}
+
+	// v4.0.1: Track if API-related settings changed
+	// These affect the API client and require engine update
+	apiSettingsChanged := a.config.APIKey != cfg.APIKey ||
+		a.config.APIBaseURL != cfg.APIBaseURL ||
+		a.config.TenantURL != cfg.TenantURL ||
+		a.config.ProxyMode != cfg.ProxyMode ||
+		a.config.ProxyHost != cfg.ProxyHost ||
+		a.config.ProxyPort != cfg.ProxyPort ||
+		a.config.ProxyUser != cfg.ProxyUser ||
+		a.config.ProxyPassword != cfg.ProxyPassword
+
 	a.config.APIBaseURL = cfg.APIBaseURL
 	a.config.TenantURL = cfg.TenantURL
 	a.config.APIKey = cfg.APIKey
@@ -124,6 +137,18 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 
 	// v4.0.0: Update timing system when DetailedLogging changes
 	cloud.SetDetailedLogging(cfg.DetailedLogging)
+
+	// v4.0.1: Update engine's API client when API-related settings change
+	// This fixes the bug where typing a new API key and clicking "Test Connection"
+	// would fail because the engine still had the old API client from startup.
+	if apiSettingsChanged && a.engine != nil {
+		// Run in background to avoid blocking UI during proxy warmup
+		go func() {
+			if err := a.engine.UpdateConfig(a.config); err != nil {
+				wailsLogger.Error().Err(err).Msg("Failed to update engine config")
+			}
+		}()
+	}
 
 	return nil
 }
