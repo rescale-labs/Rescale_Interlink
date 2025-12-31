@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 // ServiceIPCHandler adapts the MultiUserService to the IPC ServiceHandler interface.
@@ -51,7 +51,7 @@ func (h *ServiceIPCHandler) GetStatus() *ipc.StatusData {
 
 	return &ipc.StatusData{
 		ServiceState:    "running",
-		Version:         cli.Version,
+		Version:         version.Version,
 		LastScanTime:    lastScanTime,
 		ActiveDownloads: activeDownloads,
 		ActiveUsers:     activeUsers,
