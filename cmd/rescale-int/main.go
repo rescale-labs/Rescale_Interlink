@@ -16,6 +16,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/mesa"
+	"github.com/rescale/rescale-int/internal/version"
 	"github.com/rescale/rescale-int/internal/wailsapp"
 )
 
@@ -57,7 +58,10 @@ func init() {
 }
 
 func main() {
-	// Set version in CLI package
+	// Set version in version package (canonical source for all packages)
+	// and CLI package (for backwards compatibility)
+	version.Version = Version
+	version.BuildTime = BuildTime
 	cli.Version = Version
 	cli.BuildTime = BuildTime
 

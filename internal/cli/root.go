@@ -13,6 +13,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/resources"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 var (
@@ -36,13 +37,12 @@ var (
 	cancelFunc  context.CancelFunc
 )
 
-// Version information - set by main package at startup
-// The actual version is defined in:
-// 1. Makefile (source of truth for releases, injected via LDFLAGS)
-// 2. cmd/rescale-int/main.go (fallback for non-Makefile builds)
+// Version and BuildTime are re-exported from the version package
+// for backwards compatibility. The actual version is set via LDFLAGS
+// targeting the internal/version package.
 var (
-	Version   = "v4.0.0-dev"
-	BuildTime = "2025-12-27"
+	Version   = version.Version
+	BuildTime = version.BuildTime
 )
 
 // FIPSStatus returns FIPS 140-3 compliance status string
