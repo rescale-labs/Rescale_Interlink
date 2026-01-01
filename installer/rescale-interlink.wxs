@@ -16,7 +16,7 @@
   <!-- Product definition -->
   <Package Name="Rescale Interlink"
            Manufacturer="Rescale, Inc."
-           Version="4.0.0.0"
+           Version="4.0.2.0"
            UpgradeCode="8B7E9C4A-3F2D-4E1A-B5C6-7D8E9F0A1B2C"
            Scope="perMachine"
            Language="1033"
@@ -99,14 +99,20 @@
   <!-- Main application components -->
   <Fragment>
     <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
-      <Component Id="MainExecutable" Guid="1A2B3C4D-5E6F-7A8B-9C0D-E1F2A3B4C5D6">
-        <File Id="RescaleIntExe" Source="$(var.BuildDir)\rescale-int.exe" KeyPath="yes">
+      <!-- v4.0.2: GUI application (Wails-based, with embedded frontend) -->
+      <Component Id="GuiExecutable" Guid="1A2B3C4D-5E6F-7A8B-9C0D-E1F2A3B4C5D6">
+        <File Id="RescaleIntGuiExe" Source="$(var.BuildDir)\rescale-int-gui.exe" KeyPath="yes">
           <Shortcut Id="DesktopShortcut"
                     Directory="DesktopFolder"
                     Name="Rescale Interlink"
                     WorkingDirectory="INSTALLFOLDER"
                     Advertise="yes" />
         </File>
+      </Component>
+
+      <!-- v4.0.2: CLI tool (standalone Go binary) -->
+      <Component Id="CliExecutable" Guid="1A2B3C4D-5E6F-7A8B-9C0D-E1F2A3B4C5D7">
+        <File Id="RescaleIntExe" Source="$(var.BuildDir)\rescale-int.exe" KeyPath="yes" />
       </Component>
 
       <Component Id="ReadmeFile" Guid="2B3C4D5E-6F7A-8B9C-0D1E-F2A3B4C5D6E7">
@@ -162,16 +168,16 @@
   <Fragment>
     <ComponentGroup Id="StartMenuShortcuts" Directory="ApplicationProgramsFolder">
       <Component Id="ApplicationShortcut" Guid="6F7A8B9C-0D1E-2F3A-4B5C-D6E7F8A9B0C1">
+        <!-- v4.0.2: Updated to use rescale-int-gui.exe for GUI, rescale-int.exe for CLI -->
         <Shortcut Id="ApplicationStartMenuShortcut"
                   Name="Rescale Interlink"
                   Description="Unified CLI and GUI for Rescale HPC platform"
-                  Target="[INSTALLFOLDER]rescale-int.exe"
-                  Arguments="--gui"
+                  Target="[INSTALLFOLDER]rescale-int-gui.exe"
                   WorkingDirectory="INSTALLFOLDER" />
 
         <Shortcut Id="CLIStartMenuShortcut"
                   Name="Rescale Interlink (Command Line)"
-                  Description="Open command prompt with Rescale Interlink"
+                  Description="Open command prompt with Rescale Interlink CLI"
                   Target="[SystemFolder]cmd.exe"
                   Arguments="/k &quot;cd /d [INSTALLFOLDER] &amp;&amp; rescale-int.exe --help&quot;"
                   WorkingDirectory="INSTALLFOLDER" />

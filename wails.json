@@ -13,8 +13,8 @@
   "info": {
     "companyName": "Rescale, Inc.",
     "productName": "Rescale Interlink",
-    "productVersion": "4.0.1",
-    "copyright": "Copyright 2025 Rescale, Inc.",
+    "productVersion": "4.0.2",
+    "copyright": "Copyright 2026 Rescale, Inc.",
     "comments": "Unified CLI and GUI for Rescale HPC platform"
   },
   "nsisType": "multiple",
