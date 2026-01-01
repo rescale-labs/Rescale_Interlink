@@ -1,7 +1,7 @@
 // Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
 // FIPS 140-3 Compliant Build Required
 //
-// v4.0.2: Server-side pagination for file browser, Linux AppImage packaging.
+// v4.0.3: True server-side pagination with page caching, status message fix.
 // - No args + display available → GUI mode
 // - No args + no display → CLI help
 // - --gui → GUI mode

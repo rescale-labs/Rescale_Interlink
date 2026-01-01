@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.0.0--dev-green)
+![Status](https://img.shields.io/badge/status-v4.0.3-green)
 
 ---
 
@@ -548,6 +548,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.0.0-dev
-**Status**: Pre-release (Wails Migration)
-**Last Updated**: December 27, 2025
+**Version**: 4.0.3
+**Status**: Production Ready
+**Last Updated**: January 1, 2026

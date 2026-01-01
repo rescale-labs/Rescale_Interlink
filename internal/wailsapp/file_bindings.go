@@ -7,10 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cli"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/services"
 )
@@ -27,12 +30,15 @@ type FileItemDTO struct {
 }
 
 // FolderContentsDTO is the JSON-safe version of services.FolderContents.
+// v4.0.3: Added IsSlowPath and Warning fields for robustness feedback.
 type FolderContentsDTO struct {
 	FolderID   string        `json:"folderId"`
 	FolderPath string        `json:"folderPath"`
 	Items      []FileItemDTO `json:"items"`
 	HasMore    bool          `json:"hasMore"`
 	NextCursor string        `json:"nextCursor,omitempty"`
+	IsSlowPath bool          `json:"isSlowPath,omitempty"` // v4.0.3: True if directory took >5s to read
+	Warning    string        `json:"warning,omitempty"`    // v4.0.3: Timeout or error message
 }
 
 // DeleteResultDTO contains the result of a delete operation.
@@ -42,8 +48,38 @@ type DeleteResultDTO struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// localDirCancelMu protects localDirCancelFunc and localDirGeneration for concurrent access.
+var localDirCancelMu sync.Mutex
+
+// localDirCancelFunc stores the cancel function for the current local directory operation.
+var localDirCancelFunc context.CancelFunc
+
+// localDirGeneration tracks the generation of the current directory operation.
+// Used to avoid clearing a newer operation's cancel function.
+var localDirGeneration int64
+
+// localEntryInfo holds information about a local directory entry.
+// Used during directory listing with symlink resolution.
+type localEntryInfo struct {
+	entry    os.DirEntry
+	fullPath string
+	info     os.FileInfo
+	isLink   bool
+}
+
 // ListLocalDirectory returns the contents of a local directory.
+// v4.0.3: Now calls ListLocalDirectoryEx with default options (includeHidden=false).
 func (a *App) ListLocalDirectory(path string) FolderContentsDTO {
+	return a.ListLocalDirectoryEx(path, false)
+}
+
+// ListLocalDirectoryEx returns the contents of a local directory with options.
+// v4.0.3: Added robustness features:
+//   - Timeout protection: 30 second timeout prevents UI freeze on hung mounts
+//   - Hidden file filtering: Pass includeHidden=false to filter dot files (server-side)
+//   - Cancellation support: Previous operation is cancelled when new one starts
+//   - Parallel symlink resolution: Symlinks are resolved in parallel (8 workers)
+func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderContentsDTO {
 	// Default to home directory if path is empty
 	if path == "" {
 		home, err := os.UserHomeDir()
@@ -53,29 +89,137 @@ func (a *App) ListLocalDirectory(path string) FolderContentsDTO {
 		path = home
 	}
 
-	entries, err := os.ReadDir(path)
-	if err != nil {
+	// Cancel any previous directory operation
+	localDirCancelMu.Lock()
+	if localDirCancelFunc != nil {
+		localDirCancelFunc()
+	}
+	// Create new context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), constants.DirectoryReadTimeout)
+	localDirCancelFunc = cancel
+	localDirGeneration++
+	myGeneration := localDirGeneration
+	localDirCancelMu.Unlock()
+
+	defer func() {
+		localDirCancelMu.Lock()
+		// Only clear if we're still the current operation
+		if localDirGeneration == myGeneration {
+			localDirCancelFunc = nil
+		}
+		localDirCancelMu.Unlock()
+		cancel()
+	}()
+
+	// Track start time for slow path detection
+	startTime := time.Now()
+
+	// Read directory in goroutine for timeout protection
+	type readResult struct {
+		entries []os.DirEntry
+		err     error
+	}
+	resultChan := make(chan readResult, 1)
+
+	go func() {
+		entries, err := os.ReadDir(path)
+		resultChan <- readResult{entries: entries, err: err}
+	}()
+
+	// Wait for result or timeout/cancellation
+	var entries []os.DirEntry
+	var readErr error
+	select {
+	case result := <-resultChan:
+		entries = result.entries
+		readErr = result.err
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			return FolderContentsDTO{
+				FolderPath: path,
+				Items:      []FileItemDTO{},
+				Warning:    fmt.Sprintf("Timeout reading directory after %v", constants.DirectoryReadTimeout),
+				IsSlowPath: true,
+			}
+		}
+		// Context was cancelled (user navigated away)
 		return FolderContentsDTO{
 			FolderPath: path,
 			Items:      []FileItemDTO{},
+			Warning:    "Operation cancelled",
 		}
 	}
 
-	items := make([]FileItemDTO, 0, len(entries))
+	if readErr != nil {
+		return FolderContentsDTO{
+			FolderPath: path,
+			Items:      []FileItemDTO{},
+			Warning:    readErr.Error(),
+		}
+	}
+
+	// First pass: filter entries and identify symlinks
+	var filteredEntries []localEntryInfo
+	var symlinks []int // Indices of symlinks that need resolution
+
 	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
+		// Hidden file filtering (server-side)
+		if !includeHidden && localfs.IsHiddenName(entry.Name()) {
 			continue
 		}
 
 		fullPath := filepath.Join(path, entry.Name())
+		ei := localEntryInfo{
+			entry:    entry,
+			fullPath: fullPath,
+			isLink:   entry.Type()&os.ModeSymlink != 0,
+		}
+
+		// Get cached info from DirEntry (fast, no syscall)
+		info, err := entry.Info()
+		if err != nil {
+			// Skip entries we can't stat
+			continue
+		}
+		ei.info = info
+
+		if ei.isLink {
+			symlinks = append(symlinks, len(filteredEntries))
+		}
+
+		filteredEntries = append(filteredEntries, ei)
+	}
+
+	// Second pass: parallel symlink resolution if we have symlinks
+	if len(symlinks) > 0 {
+		resolveSymlinks(ctx, filteredEntries, symlinks)
+	}
+
+	// Check for slow path (>5s)
+	elapsed := time.Since(startTime)
+	isSlowPath := elapsed > constants.SlowPathWarningThreshold
+
+	// Build result items
+	items := make([]FileItemDTO, 0, len(filteredEntries))
+	for _, ei := range filteredEntries {
+		isDir := ei.entry.IsDir()
+		size := ei.info.Size()
+		modTime := ei.info.ModTime()
+
+		// For resolved symlinks, use the target info
+		if ei.isLink && ei.info != nil {
+			isDir = ei.info.IsDir()
+			size = ei.info.Size()
+			modTime = ei.info.ModTime()
+		}
+
 		items = append(items, FileItemDTO{
-			ID:       fullPath,
-			Name:     entry.Name(),
-			IsFolder: entry.IsDir(),
-			Size:     info.Size(),
-			ModTime:  info.ModTime().Format(time.RFC3339),
-			Path:     fullPath,
+			ID:       ei.fullPath,
+			Name:     ei.entry.Name(),
+			IsFolder: isDir,
+			Size:     size,
+			ModTime:  modTime.Format(time.RFC3339),
+			Path:     ei.fullPath,
 		})
 	}
 
@@ -87,11 +231,78 @@ func (a *App) ListLocalDirectory(path string) FolderContentsDTO {
 		return items[i].Name < items[j].Name
 	})
 
-	return FolderContentsDTO{
+	result := FolderContentsDTO{
 		FolderID:   path,
 		FolderPath: path,
 		Items:      items,
 		HasMore:    false,
+		IsSlowPath: isSlowPath,
+	}
+
+	if isSlowPath {
+		result.Warning = fmt.Sprintf("Directory listing took %.1fs", elapsed.Seconds())
+	}
+
+	return result
+}
+
+// resolveSymlinks resolves symlinks in parallel using a worker pool.
+// Updates the info field of localEntryInfo in-place for symlinks.
+func resolveSymlinks(ctx context.Context, entries []localEntryInfo, symlinkIndices []int) {
+	if len(symlinkIndices) == 0 {
+		return
+	}
+
+	// Determine worker count
+	workerCount := constants.SymlinkWorkerCount
+	if len(symlinkIndices) < workerCount {
+		workerCount = len(symlinkIndices)
+	}
+
+	// Create job channel
+	jobs := make(chan int, len(symlinkIndices))
+	for _, idx := range symlinkIndices {
+		jobs <- idx
+	}
+	close(jobs)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case idx, ok := <-jobs:
+					if !ok {
+						return
+					}
+					// Resolve symlink target with os.Stat (follows symlinks)
+					info, err := os.Stat(entries[idx].fullPath)
+					if err == nil {
+						entries[idx].info = info
+					}
+					// On error, keep original cached info (shows as broken symlink)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+
+// CancelLocalDirectoryRead cancels the current local directory read operation.
+// Call this when the user navigates away before the directory listing completes.
+// v4.0.3: Exposed for frontend cancellation support.
+func (a *App) CancelLocalDirectoryRead() {
+	localDirCancelMu.Lock()
+	defer localDirCancelMu.Unlock()
+	if localDirCancelFunc != nil {
+		localDirCancelFunc()
+		localDirCancelFunc = nil
 	}
 }
 
@@ -107,13 +318,14 @@ func (a *App) GetHomeDirectory() string {
 // ListRemoteFolder returns the contents of a remote folder (first page only).
 // Deprecated: Use ListRemoteFolderPage for paginated access.
 func (a *App) ListRemoteFolder(folderID string) FolderContentsDTO {
-	return a.ListRemoteFolderPage(folderID, "")
+	return a.ListRemoteFolderPage(folderID, "", 0)
 }
 
 // ListRemoteFolderPage returns a single page of remote folder contents.
 // Pass empty cursor for first page, or use nextCursor from previous response.
 // v4.0.2: Added for proper server-side pagination in File Browser.
-func (a *App) ListRemoteFolderPage(folderID string, cursor string) FolderContentsDTO {
+// v4.0.3: Added pageSize parameter - pass 0 for API default.
+func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int) FolderContentsDTO {
 	if a.engine == nil {
 		return FolderContentsDTO{}
 	}
@@ -124,7 +336,7 @@ func (a *App) ListRemoteFolderPage(folderID string, cursor string) FolderContent
 	}
 
 	ctx := context.Background()
-	contents, err := fs.ListFolderPage(ctx, folderID, cursor)
+	contents, err := fs.ListFolderPage(ctx, folderID, cursor, pageSize)
 	if err != nil {
 		return FolderContentsDTO{
 			FolderID: folderID,
@@ -136,7 +348,8 @@ func (a *App) ListRemoteFolderPage(folderID string, cursor string) FolderContent
 }
 
 // ListRemoteLegacy returns a flat list of all files (legacy mode).
-func (a *App) ListRemoteLegacy(cursor string) FolderContentsDTO {
+// v4.0.3: Added pageSize parameter - pass 0 for API default.
+func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 	if a.engine == nil {
 		return FolderContentsDTO{}
 	}
@@ -147,7 +360,7 @@ func (a *App) ListRemoteLegacy(cursor string) FolderContentsDTO {
 	}
 
 	ctx := context.Background()
-	contents, err := fs.ListLegacyFiles(ctx, cursor)
+	contents, err := fs.ListLegacyFiles(ctx, cursor, pageSize)
 	if err != nil {
 		return FolderContentsDTO{
 			FolderPath: "Legacy Files",
