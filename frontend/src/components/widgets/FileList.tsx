@@ -27,8 +27,15 @@ interface FileListProps {
   loadingMessage?: string // Custom loading message (e.g., for Legacy mode)
   showPath?: boolean // Show full path instead of just name
   isLocal?: boolean // v4.0.0: Local browser uses different pagination defaults
-  hasMore?: boolean // v4.0.2: Server has more items to fetch
-  onLoadMore?: () => Promise<void> // v4.0.2: Callback to fetch next page from server
+  // v4.0.3: Server-side pagination props (for remote browser)
+  useServerPagination?: boolean  // When true, items are already one page from server
+  serverCurrentPage?: number     // Current page (0-indexed)
+  serverKnownTotalPages?: number // Known total pages
+  serverHasMore?: boolean        // Server has more pages
+  serverItemsPerPage?: number    // Current items per page setting
+  onServerNextPage?: () => void  // Navigate to next page
+  onServerPrevPage?: () => void  // Navigate to previous page
+  onServerItemsPerPageChange?: (size: number) => void  // Change items per page
 }
 
 // Format file size for display
@@ -76,8 +83,15 @@ export function FileList({
   loadingMessage = 'Loading...',
   showPath = false,
   isLocal = false,
-  hasMore = false,
-  onLoadMore,
+  // v4.0.3: Server-side pagination props
+  useServerPagination = false,
+  serverCurrentPage = 0,
+  serverKnownTotalPages = 1,
+  serverHasMore = false,
+  serverItemsPerPage = REMOTE_DEFAULT_PAGE_SIZE,
+  onServerNextPage,
+  onServerPrevPage,
+  onServerItemsPerPageChange,
 }: FileListProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -96,31 +110,48 @@ export function FileList({
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
 
   // v4.0.0: Pagination state (matching Fyne GUI behavior)
+  // v4.0.3: For server pagination, use server state; for local, use local state
   const maxPageSize = isLocal ? LOCAL_MAX_PAGE_SIZE : REMOTE_MAX_PAGE_SIZE
 
   // v4.0.0: Use functional initializer to capture isLocal at mount time
-  const [itemsPerPage, setItemsPerPage] = useState(() =>
-    isLocal ? LOCAL_DEFAULT_PAGE_SIZE : REMOTE_DEFAULT_PAGE_SIZE
+  // v4.0.3: For server pagination, initialize from server state
+  const [localItemsPerPage, setLocalItemsPerPage] = useState(() =>
+    useServerPagination ? serverItemsPerPage : (isLocal ? LOCAL_DEFAULT_PAGE_SIZE : REMOTE_DEFAULT_PAGE_SIZE)
   )
-  const [currentPage, setCurrentPage] = useState(0)
+  const [localCurrentPage, setLocalCurrentPage] = useState(0)
   // Local state for page size input - allows free typing before applying
   const [pageSizeInput, setPageSizeInput] = useState(() =>
-    String(isLocal ? LOCAL_DEFAULT_PAGE_SIZE : REMOTE_DEFAULT_PAGE_SIZE)
+    String(useServerPagination ? serverItemsPerPage : (isLocal ? LOCAL_DEFAULT_PAGE_SIZE : REMOTE_DEFAULT_PAGE_SIZE))
   )
+
+  // v4.0.3: Effective values depend on pagination mode
+  const currentPage = useServerPagination ? serverCurrentPage : localCurrentPage
+  const itemsPerPage = useServerPagination ? serverItemsPerPage : localItemsPerPage
 
   // Reset pagination when isLocal changes (e.g., switching between browsers)
   // v4.0.0: This effect ensures state updates if isLocal changes after mount
   useEffect(() => {
-    const newDefault = isLocal ? LOCAL_DEFAULT_PAGE_SIZE : REMOTE_DEFAULT_PAGE_SIZE
-    setItemsPerPage(newDefault)
-    setPageSizeInput(String(newDefault))
-    setCurrentPage(0)
-  }, [isLocal])
+    if (!useServerPagination) {
+      const newDefault = isLocal ? LOCAL_DEFAULT_PAGE_SIZE : REMOTE_DEFAULT_PAGE_SIZE
+      setLocalItemsPerPage(newDefault)
+      setPageSizeInput(String(newDefault))
+      setLocalCurrentPage(0)
+    }
+  }, [isLocal, useServerPagination])
+
+  // v4.0.3: Sync pageSizeInput when server items per page changes
+  useEffect(() => {
+    if (useServerPagination) {
+      setPageSizeInput(String(serverItemsPerPage))
+    }
+  }, [useServerPagination, serverItemsPerPage])
 
   // Keep pageSizeInput in sync when itemsPerPage changes programmatically
   useEffect(() => {
-    setPageSizeInput(String(itemsPerPage))
-  }, [itemsPerPage])
+    if (!useServerPagination) {
+      setPageSizeInput(String(localItemsPerPage))
+    }
+  }, [localItemsPerPage, useServerPagination])
 
   // Sort items: folders first, then by sort field
   const sortedItems = useMemo(() => {
@@ -150,24 +181,37 @@ export function FileList({
   }, [items, sortField, sortDirection])
 
   // v4.0.0: Paginated items (matching Fyne GUI behavior)
-  const totalPages = Math.max(1, Math.ceil(sortedItems.length / itemsPerPage))
+  // v4.0.3: For server pagination, items are already one page; for local, slice
+  const totalPages = useServerPagination
+    ? serverKnownTotalPages
+    : Math.max(1, Math.ceil(sortedItems.length / itemsPerPage))
+
   const paginatedItems = useMemo(() => {
+    if (useServerPagination) {
+      // v4.0.3: Server already sent one page worth of items
+      return sortedItems
+    }
+    // Local pagination: slice the items
     const startIdx = currentPage * itemsPerPage
     const endIdx = Math.min(startIdx + itemsPerPage, sortedItems.length)
     return sortedItems.slice(startIdx, endIdx)
-  }, [sortedItems, currentPage, itemsPerPage])
+  }, [sortedItems, currentPage, itemsPerPage, useServerPagination])
 
   // Reset to first page when items change (e.g., folder navigation)
+  // v4.0.3: Only for local pagination
   useEffect(() => {
-    setCurrentPage(0)
-  }, [items])
+    if (!useServerPagination) {
+      setLocalCurrentPage(0)
+    }
+  }, [items, useServerPagination])
 
   // Ensure currentPage is valid when totalPages changes
+  // v4.0.3: Only for local pagination
   useEffect(() => {
-    if (currentPage >= totalPages) {
-      setCurrentPage(Math.max(0, totalPages - 1))
+    if (!useServerPagination && localCurrentPage >= totalPages) {
+      setLocalCurrentPage(Math.max(0, totalPages - 1))
     }
-  }, [totalPages, currentPage])
+  }, [totalPages, localCurrentPage, useServerPagination])
 
   // Virtual scrolling (now uses paginated items)
   const rowVirtualizer = useVirtualizer({
@@ -254,20 +298,28 @@ export function FileList({
   }, [onFolderOpen])
 
   // Apply page size from input (on blur or Enter)
+  // v4.0.3: For server pagination, call the callback; for local, update local state
   const applyPageSize = useCallback(() => {
     const parsed = parseInt(pageSizeInput, 10)
+    let clampedSize: number
     if (isNaN(parsed) || parsed < MIN_PAGE_SIZE) {
-      setItemsPerPage(MIN_PAGE_SIZE)
-      setPageSizeInput(String(MIN_PAGE_SIZE))
+      clampedSize = MIN_PAGE_SIZE
     } else if (parsed > maxPageSize) {
-      setItemsPerPage(maxPageSize)
-      setPageSizeInput(String(maxPageSize))
+      clampedSize = maxPageSize
     } else {
-      setItemsPerPage(parsed)
-      setPageSizeInput(String(parsed))
+      clampedSize = parsed
     }
-    setCurrentPage(0)
-  }, [pageSizeInput, maxPageSize])
+    setPageSizeInput(String(clampedSize))
+
+    if (useServerPagination && onServerItemsPerPageChange) {
+      // v4.0.3: Server pagination - notify parent
+      onServerItemsPerPageChange(clampedSize)
+    } else {
+      // Local pagination
+      setLocalItemsPerPage(clampedSize)
+      setLocalCurrentPage(0)
+    }
+  }, [pageSizeInput, maxPageSize, useServerPagination, onServerItemsPerPageChange])
 
   // Handle page size input key press
   const handlePageSizeKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -278,13 +330,22 @@ export function FileList({
   }, [applyPageSize])
 
   // Handle page navigation
+  // v4.0.3: For server pagination, call callbacks; for local, update local state
   const goToPrevPage = useCallback(() => {
-    setCurrentPage(p => Math.max(0, p - 1))
-  }, [])
+    if (useServerPagination && onServerPrevPage) {
+      onServerPrevPage()
+    } else {
+      setLocalCurrentPage(p => Math.max(0, p - 1))
+    }
+  }, [useServerPagination, onServerPrevPage])
 
   const goToNextPage = useCallback(() => {
-    setCurrentPage(p => Math.min(totalPages - 1, p + 1))
-  }, [totalPages])
+    if (useServerPagination && onServerNextPage) {
+      onServerNextPage()
+    } else {
+      setLocalCurrentPage(p => Math.min(totalPages - 1, p + 1))
+    }
+  }, [useServerPagination, onServerNextPage, totalPages])
 
   // Sort indicator
   const SortIndicator = ({ field }: { field: SortField }) => {
@@ -419,10 +480,10 @@ export function FileList({
       </div>
 
       {/* Footer with pagination and selection count - v4.0.0: Added pagination controls */}
+      {/* v4.0.3: Updated for server-side pagination with "Page X of Y+" indicator */}
       <div className="flex items-center justify-between bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 px-2 py-1 text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
         <span>
           {sortedItems.length} item{sortedItems.length !== 1 ? 's' : ''}
-          {hasMore && ' (more available)'}
         </span>
 
         {/* Pagination controls */}
@@ -431,33 +492,29 @@ export function FileList({
             type="button"
             className="px-2 py-0.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
             onClick={goToPrevPage}
-            disabled={currentPage === 0}
+            disabled={currentPage === 0 || isLoading}
             title="Previous page"
           >
             ◀
           </button>
-          <span className="min-w-[3rem] text-center">{currentPage + 1}/{totalPages}</span>
+          {/* v4.0.3: Show "Page X of Y+" where + indicates more pages may exist */}
+          <span className="min-w-[5rem] text-center">
+            Page {currentPage + 1} of {totalPages}{useServerPagination && serverHasMore ? '+' : ''}
+          </span>
           <button
             type="button"
             className="px-2 py-0.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
             onClick={goToNextPage}
-            disabled={currentPage >= totalPages - 1}
+            disabled={
+              isLoading ||
+              (useServerPagination
+                ? !serverHasMore  // v4.0.3: Server pagination - disabled when no more pages
+                : currentPage >= totalPages - 1)  // Local pagination
+            }
             title="Next page"
           >
             ▶
           </button>
-          {/* v4.0.2: Load More button for server-side pagination */}
-          {hasMore && onLoadMore && (
-            <button
-              type="button"
-              className="px-2 py-0.5 bg-rescale-blue text-white hover:bg-blue-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-              onClick={onLoadMore}
-              disabled={isLoading}
-              title="Load more items from server"
-            >
-              {isLoading ? 'Loading...' : 'Load More'}
-            </button>
-          )}
           <input
             type="text"
             inputMode="numeric"

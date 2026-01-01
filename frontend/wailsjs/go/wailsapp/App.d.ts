@@ -52,9 +52,9 @@ export function ListLocalDirectory(arg1:string):Promise<wailsapp.FolderContentsD
 
 export function ListRemoteFolder(arg1:string):Promise<wailsapp.FolderContentsDTO>;
 
-export function ListRemoteFolderPage(arg1:string,arg2:string):Promise<wailsapp.FolderContentsDTO>;
+export function ListRemoteFolderPage(arg1:string,arg2:string,arg3:number):Promise<wailsapp.FolderContentsDTO>;
 
-export function ListRemoteLegacy(arg1:string):Promise<wailsapp.FolderContentsDTO>;
+export function ListRemoteLegacy(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
 
 export function ListSavedTemplates():Promise<Array<wailsapp.TemplateInfoDTO>>;
 

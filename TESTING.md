@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: December 27, 2025
-**Version**: 4.0.0-dev
+**Last Updated**: January 1, 2026
+**Version**: 4.0.3
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -752,6 +752,6 @@ rm -rf /tmp/test
 
 ---
 
-**Last Updated**: December 27, 2025
-**Version**: 4.0.0-dev
+**Last Updated**: January 1, 2026
+**Version**: 4.0.3
 **Status**: All tests passing, pre-release (Wails migration)

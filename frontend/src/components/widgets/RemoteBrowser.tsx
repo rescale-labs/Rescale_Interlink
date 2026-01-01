@@ -19,7 +19,11 @@ export function RemoteBrowser() {
       selection,
       myLibraryId,
       myJobsId,
-      hasMore,  // v4.0.2: Server-side pagination
+      hasMore,
+      // v4.0.3: Server-side pagination state
+      currentPage,
+      itemsPerPage,
+      knownTotalPages,
     },
     initRemote,
     setRemoteMode,
@@ -29,7 +33,10 @@ export function RemoteBrowser() {
     refreshRemote,
     setRemoteSelection,
     createRemoteFolder,
-    loadNextRemotePage,  // v4.0.2: Server-side pagination
+    // v4.0.3: Server-side pagination actions
+    setRemoteItemsPerPage,
+    goToNextRemotePage,
+    goToPreviousRemotePage,
   } = useFileBrowserStore()
 
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false)
@@ -184,8 +191,15 @@ export function RemoteBrowser() {
               ? 'Loading legacy files (this may take a moment)...'
               : 'Loading...'
           }
-          hasMore={hasMore}
-          onLoadMore={loadNextRemotePage}
+          // v4.0.3: Server-side pagination
+          useServerPagination={true}
+          serverCurrentPage={currentPage}
+          serverKnownTotalPages={knownTotalPages}
+          serverHasMore={hasMore}
+          serverItemsPerPage={itemsPerPage}
+          onServerNextPage={goToNextRemotePage}
+          onServerPrevPage={goToPreviousRemotePage}
+          onServerItemsPerPageChange={setRemoteItemsPerPage}
         />
       </div>
 
