@@ -440,3 +440,61 @@ func (fs *FileService) GetMyJobsFolderID(ctx context.Context) (string, error) {
 
 	return roots.MyJobs, nil
 }
+
+// ListFolderPage returns a single page of folder contents with pagination support.
+// Pass empty cursor for first page, or use NextCursor from previous response.
+// v4.0.2: Added for server-side pagination in File Browser.
+func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, cursor string) (*FolderContents, error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return nil, fmt.Errorf("API client not configured")
+	}
+
+	if folderID == "" {
+		// For root, get MyLibrary folder first
+		roots, err := apiClient.GetRootFolders(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get root folders: %w", err)
+		}
+		folderID = roots.MyLibrary
+	}
+
+	// Use the paginated API method
+	contents, err := apiClient.ListFolderContentsPage(ctx, folderID, cursor)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list folder contents: %w", err)
+	}
+
+	items := make([]FileItem, 0, len(contents.Folders)+len(contents.Files))
+
+	// Add folders first
+	for _, f := range contents.Folders {
+		items = append(items, FileItem{
+			ID:       f.ID,
+			Name:     f.Name,
+			IsFolder: true,
+			ModTime:  f.DateUploaded,
+		})
+	}
+
+	// Add files
+	for _, f := range contents.Files {
+		items = append(items, FileItem{
+			ID:       f.ID,
+			Name:     f.Name,
+			IsFolder: false,
+			Size:     f.DecryptedSize,
+			ModTime:  f.DateUploaded,
+		})
+	}
+
+	return &FolderContents{
+		FolderID:   folderID,
+		Items:      items,
+		HasMore:    contents.HasMore,
+		NextCursor: contents.NextURL,
+	}, nil
+}

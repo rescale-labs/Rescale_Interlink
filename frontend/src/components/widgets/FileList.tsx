@@ -27,6 +27,8 @@ interface FileListProps {
   loadingMessage?: string // Custom loading message (e.g., for Legacy mode)
   showPath?: boolean // Show full path instead of just name
   isLocal?: boolean // v4.0.0: Local browser uses different pagination defaults
+  hasMore?: boolean // v4.0.2: Server has more items to fetch
+  onLoadMore?: () => Promise<void> // v4.0.2: Callback to fetch next page from server
 }
 
 // Format file size for display
@@ -74,6 +76,8 @@ export function FileList({
   loadingMessage = 'Loading...',
   showPath = false,
   isLocal = false,
+  hasMore = false,
+  onLoadMore,
 }: FileListProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -416,7 +420,10 @@ export function FileList({
 
       {/* Footer with pagination and selection count - v4.0.0: Added pagination controls */}
       <div className="flex items-center justify-between bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 px-2 py-1 text-xs text-gray-500 dark:text-gray-400 flex-shrink-0">
-        <span>{sortedItems.length} item{sortedItems.length !== 1 ? 's' : ''}</span>
+        <span>
+          {sortedItems.length} item{sortedItems.length !== 1 ? 's' : ''}
+          {hasMore && ' (more available)'}
+        </span>
 
         {/* Pagination controls */}
         <div className="flex items-center gap-2">
@@ -439,6 +446,18 @@ export function FileList({
           >
             ▶
           </button>
+          {/* v4.0.2: Load More button for server-side pagination */}
+          {hasMore && onLoadMore && (
+            <button
+              type="button"
+              className="px-2 py-0.5 bg-rescale-blue text-white hover:bg-blue-600 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={onLoadMore}
+              disabled={isLoading}
+              title="Load more items from server"
+            >
+              {isLoading ? 'Loading...' : 'Load More'}
+            </button>
+          )}
           <input
             type="text"
             inputMode="numeric"
