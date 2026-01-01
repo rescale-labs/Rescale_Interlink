@@ -19,6 +19,7 @@ export function RemoteBrowser() {
       selection,
       myLibraryId,
       myJobsId,
+      hasMore,  // v4.0.2: Server-side pagination
     },
     initRemote,
     setRemoteMode,
@@ -28,6 +29,7 @@ export function RemoteBrowser() {
     refreshRemote,
     setRemoteSelection,
     createRemoteFolder,
+    loadNextRemotePage,  // v4.0.2: Server-side pagination
   } = useFileBrowserStore()
 
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false)
@@ -182,6 +184,8 @@ export function RemoteBrowser() {
               ? 'Loading legacy files (this may take a moment)...'
               : 'Loading...'
           }
+          hasMore={hasMore}
+          onLoadMore={loadNextRemotePage}
         />
       </div>
 

@@ -104,8 +104,16 @@ func (a *App) GetHomeDirectory() string {
 	return home
 }
 
-// ListRemoteFolder returns the contents of a remote folder.
+// ListRemoteFolder returns the contents of a remote folder (first page only).
+// Deprecated: Use ListRemoteFolderPage for paginated access.
 func (a *App) ListRemoteFolder(folderID string) FolderContentsDTO {
+	return a.ListRemoteFolderPage(folderID, "")
+}
+
+// ListRemoteFolderPage returns a single page of remote folder contents.
+// Pass empty cursor for first page, or use nextCursor from previous response.
+// v4.0.2: Added for proper server-side pagination in File Browser.
+func (a *App) ListRemoteFolderPage(folderID string, cursor string) FolderContentsDTO {
 	if a.engine == nil {
 		return FolderContentsDTO{}
 	}
@@ -116,7 +124,7 @@ func (a *App) ListRemoteFolder(folderID string) FolderContentsDTO {
 	}
 
 	ctx := context.Background()
-	contents, err := fs.ListFolder(ctx, folderID)
+	contents, err := fs.ListFolderPage(ctx, folderID, cursor)
 	if err != nil {
 		return FolderContentsDTO{
 			FolderID: folderID,

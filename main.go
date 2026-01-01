@@ -1,7 +1,7 @@
 // Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
 // FIPS 140-3 Compliant Build Required
 //
-// v4.0.1: Unified entry point for both CLI and GUI modes.
+// v4.0.2: Server-side pagination for file browser, Linux AppImage packaging.
 // - No args + display available → GUI mode
 // - No args + no display → CLI help
 // - --gui → GUI mode
@@ -34,8 +34,8 @@ import (
 
 // Version information
 var (
-	Version   = "v4.0.1"
-	BuildTime = "2025-12-31"
+	Version   = "v4.0.2"
+	BuildTime = "2026-01-01"
 )
 
 // FIPSEnabled indicates whether FIPS 140-3 mode is active

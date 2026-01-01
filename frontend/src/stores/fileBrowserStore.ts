@@ -63,8 +63,9 @@ interface FileBrowserStore {
   // Remote browser actions
   initRemote: () => Promise<void>
   setRemoteMode: (mode: BrowseMode) => void
-  loadRemoteFolder: (folderId?: string, folderName?: string) => Promise<void>
+  loadRemoteFolder: (folderId?: string, folderName?: string, cursor?: string) => Promise<void>
   loadRemoteLegacy: (cursor?: string) => Promise<void>
+  loadNextRemotePage: () => Promise<void>  // v4.0.2: Load next page using cursor
   navigateRemoteTo: (folderId: string, folderName: string) => void
   navigateRemoteToBreadcrumb: (index: number) => void
   goRemoteBack: () => void
@@ -283,7 +284,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }
   },
 
-  loadRemoteFolder: async (folderId?: string, folderName?: string) => {
+  loadRemoteFolder: async (folderId?: string, folderName?: string, cursor?: string) => {
     const targetId = folderId ?? get().remote.currentFolderId
     if (!targetId) return
 
@@ -292,11 +293,15 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }))
 
     try {
-      const contents = await App.ListRemoteFolder(targetId)
+      // v4.0.2: Use paginated API - pass cursor for next page
+      const contents = await App.ListRemoteFolderPage(targetId, cursor ?? '')
 
-      // Update breadcrumb if folder name provided (new navigation)
+      // Get existing items if appending (pagination)
+      const existingItems = cursor ? get().remote.items : []
+
+      // Update breadcrumb if folder name provided (new navigation, not pagination)
       let breadcrumb = get().remote.breadcrumb
-      if (folderName !== undefined) {
+      if (folderName !== undefined && !cursor) {
         // Check if navigating to a new folder or within existing breadcrumb
         const existingIndex = breadcrumb.findIndex(b => b.id === targetId)
         if (existingIndex >= 0) {
@@ -312,7 +317,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         remote: {
           ...state.remote,
           currentFolderId: targetId,
-          items: contents.items,
+          items: [...existingItems, ...contents.items],  // Append for pagination
           isLoading: false,
           error: null,
           hasMore: contents.hasMore,
@@ -361,6 +366,18 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
           error: error instanceof Error ? error.message : String(error),
         }
       }))
+    }
+  },
+
+  // v4.0.2: Load next page of remote files using stored cursor
+  loadNextRemotePage: async () => {
+    const { mode, nextCursor, currentFolderId, hasMore } = get().remote
+    if (!hasMore || !nextCursor) return
+
+    if (mode === 'legacy') {
+      await get().loadRemoteLegacy(nextCursor)
+    } else {
+      await get().loadRemoteFolder(currentFolderId, undefined, nextCursor)
     }
   },
 
