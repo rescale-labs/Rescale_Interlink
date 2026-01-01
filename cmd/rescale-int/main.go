@@ -8,16 +8,8 @@ import (
 	"log"
 	"os"
 
-	// CRITICAL: mesainit MUST be imported FIRST (before any OpenGL packages)
-	// Go runs init() functions in import order. By importing mesainit first,
-	// its init() runs before any OpenGL usage, allowing us to preload Mesa's
-	// opengl32.dll before Windows loads System32's version.
-	_ "github.com/rescale/rescale-int/internal/mesainit"
-
 	"github.com/rescale/rescale-int/internal/cli"
-	"github.com/rescale/rescale-int/internal/mesa"
 	"github.com/rescale/rescale-int/internal/version"
-	"github.com/rescale/rescale-int/internal/wailsapp"
 )
 
 // Version information
@@ -65,29 +57,17 @@ func main() {
 	cli.Version = Version
 	cli.BuildTime = BuildTime
 
-	// Check for diagnostic modes before GUI/CLI
-	if contains(os.Args, "--mesa-doctor") {
-		fmt.Printf("Rescale Interlink %s\n\n", Version)
-		mesa.Doctor()
-		return
-	}
-
-	// Enable timing output (works with both GUI and CLI)
+	// Enable timing output
 	if contains(os.Args, "--timing") {
 		os.Setenv("RESCALE_TIMING", "1")
 	}
 
-	// Check for GUI mode before creating command
-	// --gui launches the Wails GUI (v4.0.0+)
+	// v4.0.2: This is the standalone CLI binary.
+	// For GUI, use rescale-int-gui (or rescale-int-gui.AppImage on Linux).
 	if contains(os.Args, "--gui") {
-		// Launch Wails GUI (v4.0.0 - web-based frontend)
-		// Assets are embedded from the project root (see assets.go)
-		wailsapp.Assets = Assets
-		if err := wailsapp.Run(os.Args); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		return
+		fmt.Fprintf(os.Stderr, "Error: --gui is not available in the CLI-only binary.\n")
+		fmt.Fprintf(os.Stderr, "Use rescale-int-gui for the graphical interface.\n")
+		os.Exit(1)
 	}
 
 	// CLI mode - use the proper CLI root command with all persistent flags
