@@ -715,11 +715,16 @@ type LegacyFilesPage struct {
 // v3.6.3: Used for Legacy mode in File Browser.
 // pageURL: pass "" for first page, or NextURL from previous response.
 // Orders by most recent first (-dateUploaded) to show newest files at top.
-func (c *Client) ListFilesPage(ctx context.Context, pageURL string) (*LegacyFilesPage, error) {
+// v4.0.3: Added pageSize parameter - pass 0 for default (25), or specify items per page.
+func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int) (*LegacyFilesPage, error) {
 	url := pageURL
 	if url == "" {
-		// Order by most recent first for better UX
-		url = "/api/v3/files/?page_size=25&ordering=-dateUploaded"
+		// v4.0.3: Use specified page size or default to 25
+		ps := 25
+		if pageSize > 0 {
+			ps = pageSize
+		}
+		url = fmt.Sprintf("/api/v3/files/?page_size=%d&ordering=-dateUploaded", ps)
 	}
 
 	resp, err := c.doRequest(ctx, "GET", url, nil)
@@ -852,12 +857,13 @@ func (c *Client) CreateFolder(ctx context.Context, name, parentID string) (strin
 // Use the returned NextURL/PrevURL to navigate between pages.
 // For pageURL, pass "" for first page or the NextURL/PrevURL from a previous call.
 func (c *Client) ListFolderContents(ctx context.Context, folderID string) (*FolderContents, error) {
-	return c.ListFolderContentsPage(ctx, folderID, "")
+	return c.ListFolderContentsPage(ctx, folderID, "", 0)
 }
 
 // ListFolderContentsPage fetches a specific page of folder contents.
 // Pass pageURL="" for the first page, or use NextURL/PrevURL from previous response.
-func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL string) (*FolderContents, error) {
+// v4.0.3: Added pageSize parameter - pass 0 for API default, or specify items per page.
+func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL string, pageSize int) (*FolderContents, error) {
 	contents := &FolderContents{
 		Folders: make([]FolderInfo, 0),
 		Files:   make([]FileInfo, 0),
@@ -866,7 +872,12 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 	// Determine URL for this request
 	url := pageURL
 	if url == "" {
-		url = fmt.Sprintf("/api/v3/folders/%s/contents/", folderID)
+		// v4.0.3: Include page_size in first page request if specified
+		if pageSize > 0 {
+			url = fmt.Sprintf("/api/v3/folders/%s/contents/?page_size=%d", folderID, pageSize)
+		} else {
+			url = fmt.Sprintf("/api/v3/folders/%s/contents/", folderID)
+		}
 	}
 
 	resp, err := c.doRequest(ctx, "GET", url, nil)
@@ -996,7 +1007,7 @@ func (c *Client) ListFolderContentsAll(ctx context.Context, folderID string) (*F
 			break
 		}
 
-		page, err := c.ListFolderContentsPage(ctx, folderID, nextURL)
+		page, err := c.ListFolderContentsPage(ctx, folderID, nextURL, 0)
 		if err != nil {
 			return nil, err
 		}

@@ -102,12 +102,12 @@ export function ListRemoteFolder(arg1) {
   return window['go']['wailsapp']['App']['ListRemoteFolder'](arg1);
 }
 
-export function ListRemoteFolderPage(arg1, arg2) {
-  return window['go']['wailsapp']['App']['ListRemoteFolderPage'](arg1, arg2);
+export function ListRemoteFolderPage(arg1, arg2, arg3) {
+  return window['go']['wailsapp']['App']['ListRemoteFolderPage'](arg1, arg2, arg3);
 }
 
-export function ListRemoteLegacy(arg1) {
-  return window['go']['wailsapp']['App']['ListRemoteLegacy'](arg1);
+export function ListRemoteLegacy(arg1, arg2) {
+  return window['go']['wailsapp']['App']['ListRemoteLegacy'](arg1, arg2);
 }
 
 export function ListSavedTemplates() {

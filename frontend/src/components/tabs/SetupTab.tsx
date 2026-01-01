@@ -121,6 +121,17 @@ export function SetupTab() {
     }
   }, [config]);
 
+  // v4.0.3: Sync statusMessage with connection test results
+  useEffect(() => {
+    if (connectionStatus === 'connected' && connectionEmail) {
+      setStatusMessage(`Connected as ${connectionEmail}`);
+    } else if (connectionStatus === 'failed' && connectionError) {
+      setStatusMessage(`Connection failed: ${connectionError}`);
+    } else if (connectionStatus === 'testing') {
+      setStatusMessage('Testing connection...');
+    }
+  }, [connectionStatus, connectionEmail, connectionError]);
+
   const handlePasteApiKey = async () => {
     try {
       const text = await ClipboardGetText();

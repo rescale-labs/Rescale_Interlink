@@ -344,3 +344,18 @@ const (
 	// PaginationWarningThreshold - log warning when approaching limit (90% of max)
 	PaginationWarningThreshold = 900
 )
+
+// Local File Browser (v4.0.3)
+const (
+	// DirectoryReadTimeout - timeout for reading a local directory (30 seconds)
+	// Prevents UI freeze on hung network mounts (NFS/SMB)
+	DirectoryReadTimeout = 30 * time.Second
+
+	// SlowPathWarningThreshold - threshold for showing "slow path" warning (5 seconds)
+	// If directory listing takes longer than this, we warn the user
+	SlowPathWarningThreshold = 5 * time.Second
+
+	// SymlinkWorkerCount - number of parallel workers for symlink resolution (8)
+	// Used when a directory contains many symlinks that need os.Stat() calls
+	SymlinkWorkerCount = 8
+)

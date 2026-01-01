@@ -179,7 +179,7 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 	var offset int64 = 0
 
 	for offset < totalSize {
-		// Calculate chunk size for this iteration (64MB chunks)
+		// Calculate chunk size for this iteration (32MB chunks, see constants.ChunkSize)
 		chunkSize := int64(constants.ChunkSize)
 		if offset+chunkSize > totalSize {
 			chunkSize = totalSize - offset

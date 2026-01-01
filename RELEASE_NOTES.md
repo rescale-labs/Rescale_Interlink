@@ -1,6 +1,70 @@
 # Release Notes - Rescale Interlink
 
-## v4.0.0-dev - December 27, 2025
+## v4.0.3 - January 1, 2026
+
+### Code Cleanup & Robustness Improvements
+
+This release focuses on code quality, documentation accuracy, and robustness improvements for the local file browser.
+
+#### Dead Code Removal
+- Removed unused `internal/notify/` package
+- Removed unused `internal/state/file_list_state.go`
+
+#### Race Condition Fix
+- Fixed race condition in `transfer/queue.go:UpdateProgress()` where task fields (Progress, Speed, lastUpdateTime) were written without proper synchronization
+- Lock is now held for entire update sequence with event publishing outside the lock
+
+#### Local File Browser Robustness (v4.0.3)
+
+Four new robustness features for the local file browser:
+
+1. **Timeout Protection**: 30-second timeout prevents UI freeze on hung NFS/SMB mounts
+2. **Hidden File Filtering**: Server-side filtering using `localfs.IsHiddenName()` - reduces data transfer
+3. **Cancellation Support**: Previous directory operation is automatically cancelled when new navigation starts
+4. **Parallel Symlink Resolution**: 8-worker pool for `os.Stat()` calls on symlinks
+
+**New API:**
+- `ListLocalDirectoryEx(path, includeHidden)` - new method with hidden file control
+- `CancelLocalDirectoryRead()` - explicit cancellation for frontend
+- `FolderContentsDTO` now includes `isSlowPath` and `warning` fields
+
+**New Constants:**
+- `DirectoryReadTimeout = 30s`
+- `SlowPathWarningThreshold = 5s`
+- `SymlinkWorkerCount = 8`
+
+#### Documentation Fixes
+- Fixed incorrect chunk size comment in Azure download (64MB → 32MB)
+- Updated ARCHITECTURE.md ChunkSize documentation (16MB → 32MB)
+- Updated all version strings to v4.0.3
+
+---
+
+## v4.0.2 - December 30, 2025
+
+### Server-Side Pagination for File Browser
+
+Added proper server-side pagination to the File Browser remote panel, fixing performance issues with large folders.
+
+#### Changes
+- New `ListRemoteFolderPage()` method with cursor-based pagination
+- Frontend "Load More" button for incremental loading
+- Configurable page size (default: API default, typically 100)
+- Fixed My Jobs folder listing
+
+---
+
+## v4.0.1 - December 28, 2025
+
+### Bug Fixes and Polish
+
+- Fixed version display (was showing "dev" instead of "v4.0.1")
+- Workspace name and ID displayed in GUI header after connecting
+- Auto-switch to Transfers tab after starting upload/download
+
+---
+
+## v4.0.0 - December 27, 2025
 
 ### Complete GUI Rewrite: Fyne to Wails Migration
 

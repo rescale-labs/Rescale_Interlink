@@ -154,12 +154,14 @@ func (q *Queue) SetCancel(taskID string, cancelFn context.CancelFunc) {
 // UpdateProgress updates a task's progress.
 // Progress should be 0.0 to 1.0.
 // Speed is calculated automatically using smoothed EMA.
+//
+// v4.0.3: Fixed race condition - lock is now held for entire operation to protect
+// all task field updates (Progress, Speed, lastUpdateTime) from concurrent access.
 func (q *Queue) UpdateProgress(taskID string, progress float64) {
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
-	q.mu.Unlock()
-
 	if !exists || task == nil {
+		q.mu.Unlock()
 		return
 	}
 
@@ -195,8 +197,9 @@ func (q *Queue) UpdateProgress(taskID string, progress float64) {
 
 	task.Progress = progress
 	task.lastUpdateTime = now
+	q.mu.Unlock()
 
-	// Publish progress event
+	// Publish progress event (outside lock to avoid holding lock during event dispatch)
 	q.publishTransferEvent(events.EventTransferProgress, task)
 }
 
