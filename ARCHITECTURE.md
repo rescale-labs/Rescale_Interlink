@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.0.0-dev
-**Last Updated**: December 27, 2025
+**Version**: 4.0.3
+**Last Updated**: January 1, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -1036,7 +1036,7 @@ All configuration constants centralized in one file with:
 
 1. **Storage Operations** (`lines 6-22`)
    - `MultipartThreshold = 100MB` - When to use multipart/block upload
-   - `ChunkSize = 16MB` - Part size for S3, block size for Azure, range size for downloads
+   - `ChunkSize = 32MB` - Part size for S3, block size for Azure, range size for downloads
    - `MinPartSize = 5MB` - AWS S3 minimum (Azure has no minimum)
 
 2. **Credential Refresh** (`lines 24-39`)
@@ -1101,6 +1101,6 @@ if fileSize > constants.MultipartThreshold {
 
 ---
 
-**Last Updated**: December 27, 2025
-**Version**: 4.0.0-dev
-**Status**: Development (Wails GUI Migration), FIPS 140-3 mandatory
+**Last Updated**: January 1, 2026
+**Version**: 4.0.3
+**Status**: Production Ready, FIPS 140-3 mandatory

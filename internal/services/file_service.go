@@ -114,7 +114,8 @@ func (fs *FileService) listFolderContents(ctx context.Context, apiClient *api.Cl
 }
 
 // ListLegacyFiles returns a flat list of all files (legacy mode).
-func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string) (*FolderContents, error) {
+// v4.0.3: Added pageSize parameter - pass 0 for API default.
+func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageSize int) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
 	fs.mu.RUnlock()
@@ -123,7 +124,7 @@ func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string) (*Fol
 		return nil, fmt.Errorf("API client not configured")
 	}
 
-	page, err := apiClient.ListFilesPage(ctx, cursor)
+	page, err := apiClient.ListFilesPage(ctx, cursor, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
@@ -444,7 +445,8 @@ func (fs *FileService) GetMyJobsFolderID(ctx context.Context) (string, error) {
 // ListFolderPage returns a single page of folder contents with pagination support.
 // Pass empty cursor for first page, or use NextCursor from previous response.
 // v4.0.2: Added for server-side pagination in File Browser.
-func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, cursor string) (*FolderContents, error) {
+// v4.0.3: Added pageSize parameter - pass 0 for API default.
+func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, cursor string, pageSize int) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
 	fs.mu.RUnlock()
@@ -463,7 +465,7 @@ func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, curs
 	}
 
 	// Use the paginated API method
-	contents, err := apiClient.ListFolderContentsPage(ctx, folderID, cursor)
+	contents, err := apiClient.ListFolderContentsPage(ctx, folderID, cursor, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list folder contents: %w", err)
 	}
