@@ -356,7 +356,7 @@ if (-not (Test-Path $WailsExePath)) { throw "Wails build failed - EXE not create
 
 # v4.0.2: Rename Wails output to rescale-int-gui.exe
 $GuiExePath = "build\bin\rescale-int-gui.exe"
-Rename-Item $WailsExePath $GuiExePath
+Rename-Item -Path $WailsExePath -NewName "rescale-int-gui.exe"
 Write-Host "GUI binary built: rescale-int-gui.exe"
 
 # =============================================================================
