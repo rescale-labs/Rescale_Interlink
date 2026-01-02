@@ -151,20 +151,7 @@ func TestTimerConcurrentStop(t *testing.T) {
 	}
 }
 
-func TestTimerElapsed(t *testing.T) {
-	var buf bytes.Buffer
-	timer := StartTimer(&buf, "elapsed test")
-	time.Sleep(10 * time.Millisecond)
-
-	// Elapsed should work without stopping
-	elapsed := timer.Elapsed()
-	if elapsed < 10*time.Millisecond {
-		t.Error("Timer.Elapsed() should return at least 10ms")
-	}
-
-	// Timer should still be able to stop
-	timer.Stop()
-}
+// v4.0.4: TestTimerElapsed removed - Timer.Elapsed() method was removed as dead code.
 
 func TestTimerStopWithThroughput(t *testing.T) {
 	original := os.Getenv("RESCALE_TIMING")

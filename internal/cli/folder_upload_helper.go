@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -103,55 +102,39 @@ func (fc *FolderCache) Get(ctx context.Context, apiClient *api.Client, folderID 
 	return contents, nil
 }
 
-// BuildDirectoryTree walks a local directory and returns lists of directories, files, and symlinks
-// This function is exported for use by the GUI
+// BuildDirectoryTree walks a local directory and returns lists of directories, files, and symlinks.
+// This function is exported for use by the GUI.
+//
+// v4.0.4: Refactored to use localfs.WalkCollect() for North Star alignment
+// (shared code between CLI and GUI for local filesystem operations).
+// Returns string slices for backward compatibility with existing callers.
 func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string, []string, error) {
-	var directories []string
-	var files []string
-	var symlinks []string
-
-	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip root itself
-		if path == rootPath {
-			return nil
-		}
-
-		// Check if hidden
-		if !includeHidden && localfs.IsHidden(path) {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Check if symlink
-		fileInfo, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		if fileInfo.Mode()&os.ModeSymlink != 0 {
-			symlinks = append(symlinks, path)
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Add to appropriate list
-		if d.IsDir() {
-			directories = append(directories, path)
-		} else {
-			files = append(files, path)
-		}
-
-		return nil
+	// Use shared localfs.WalkCollect() for core directory walking
+	result, err := localfs.WalkCollect(rootPath, localfs.WalkOptions{
+		IncludeHidden:  includeHidden,
+		SkipHiddenDirs: true, // Skip hidden directories entirely
 	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
-	return directories, files, symlinks, err
+	// Convert FileEntry slices to string slices for backward compatibility
+	directories := make([]string, len(result.Directories))
+	for i, entry := range result.Directories {
+		directories[i] = entry.Path
+	}
+
+	files := make([]string, len(result.Files))
+	for i, entry := range result.Files {
+		files[i] = entry.Path
+	}
+
+	symlinks := make([]string, len(result.Symlinks))
+	for i, entry := range result.Symlinks {
+		symlinks[i] = entry.Path
+	}
+
+	return directories, files, symlinks, nil
 }
 
 // CheckFolderExists checks if a folder with the given name exists in the parent folder

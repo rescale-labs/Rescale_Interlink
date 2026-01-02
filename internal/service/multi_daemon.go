@@ -180,15 +180,20 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		return fmt.Errorf("failed to load config for %s: %w", profile.Username, err)
 	}
 
-	// Validate config
-	if err := apiCfg.Validate(); err != nil {
-		return fmt.Errorf("invalid config for %s: %w", profile.Username, err)
-	}
-
-	// Check if auto-download is enabled
-	if !apiCfg.AutoDownload.Enabled {
-		m.logger.Debug().Str("user", profile.Username).
-			Msg("Auto-download disabled for user, skipping")
+	// v4.0.4: Use IsAutoDownloadEnabled() which checks both the enabled flag
+	// and validates the config (connection settings + auto-download paths).
+	if !apiCfg.IsAutoDownloadEnabled() {
+		// Log different messages based on why it's not enabled
+		if !apiCfg.AutoDownload.Enabled {
+			m.logger.Debug().Str("user", profile.Username).
+				Msg("Auto-download disabled for user, skipping")
+		} else if err := apiCfg.ValidateForConnection(); err != nil {
+			m.logger.Debug().Str("user", profile.Username).Err(err).
+				Msg("Auto-download config has connection errors, skipping")
+		} else {
+			m.logger.Debug().Str("user", profile.Username).
+				Msg("Auto-download config invalid, skipping")
+		}
 		return nil
 	}
 
