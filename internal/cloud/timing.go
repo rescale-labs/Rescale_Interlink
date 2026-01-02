@@ -114,10 +114,7 @@ func (t *Timer) Stop() time.Duration {
 	return elapsed
 }
 
-// Elapsed returns the current elapsed time without stopping the timer.
-func (t *Timer) Elapsed() time.Duration {
-	return time.Since(t.start)
-}
+// v4.0.4: Removed Timer.Elapsed() - was never used in production code.
 
 // StopWithThroughput logs elapsed time with throughput information.
 // Useful for transfer operations where bytes processed is known.
