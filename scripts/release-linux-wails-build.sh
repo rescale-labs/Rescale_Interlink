@@ -19,8 +19,8 @@
 # Usage:
 #   ./release-linux-wails-build.sh
 #
-# Version: 4.0.2
-# Date: 2026-01-01
+# Version: 4.0.5
+# Date: 2026-01-02
 
 set -euo pipefail
 

@@ -565,8 +565,10 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 		foldersCreated++
 	}
 
-	// Populate cache for root folder
-	_, _ = cache.Get(ctx, apiClient, rootFolderID)
+	// Populate cache for root folder (v4.0.4: log warning if cache warming fails)
+	if _, err := cache.Get(ctx, apiClient, rootFolderID); err != nil {
+		logger.Warn().Err(err).Str("folderID", rootFolderID).Msg("Failed to warm cache for root folder")
+	}
 
 	// Create folder structure with merge mode (skip existing folders)
 	folderConflictMode := cli.ConflictMergeAll
@@ -708,7 +710,7 @@ func (a *App) SelectDirectoryAndListFiles(title string) ([]string, error) {
 	}
 
 	// List all files in the directory (non-recursive for now)
-	var files []string
+	files := []string{}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -733,7 +735,7 @@ func (a *App) SelectDirectoryRecursive(title string) ([]string, error) {
 	}
 
 	// List all files recursively
-	var files []string
+	files := []string{}
 	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Continue on error

@@ -142,14 +142,15 @@ func (a *App) GetTransferStats() TransferStatsDTO {
 }
 
 // GetTransferTasks returns all tracked transfers.
+// v4.0.4: Returns empty slice instead of nil to prevent frontend null errors.
 func (a *App) GetTransferTasks() []TransferTaskDTO {
 	if a.engine == nil {
-		return nil
+		return []TransferTaskDTO{}
 	}
 
 	ts := a.engine.TransferService()
 	if ts == nil {
-		return nil
+		return []TransferTaskDTO{}
 	}
 
 	tasks := ts.GetTasks()

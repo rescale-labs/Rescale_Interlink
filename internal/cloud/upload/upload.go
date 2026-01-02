@@ -19,6 +19,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/providers"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto"
 	"github.com/rescale/rescale-int/internal/models"
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
@@ -260,7 +261,7 @@ func newProgressInterpolator(callback cloud.ProgressCallback, totalBytes int64) 
 // Start begins the interpolation goroutine. Call Stop() when done.
 func (pi *progressInterpolator) Start() {
 	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
+		ticker := time.NewTicker(constants.ProgressUpdateInterval) // v4.0.4: use centralized constant
 		defer ticker.Stop()
 
 		for {

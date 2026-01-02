@@ -1,5 +1,61 @@
 # Release Notes - Rescale Interlink
 
+## v4.0.5 - January 2, 2026
+
+### Bug Fixes
+- Fixed nil slice crash in GUI when no templates exist (job_bindings.go)
+- Fixed nil slice crash for empty directory operations (file_bindings.go)
+- Fixed nil slice crash in transfer task listing (transfer_bindings.go)
+- Fixed silent error discarding in file cache operations
+
+### Improvements
+- Centralized timeout constants (PartOperationTimeout, ProgressUpdateInterval)
+- Removed dead legacy localfs functions (ListDirectory, Walk, WalkFiles)
+- Updated 9 files to use centralized constants
+
+### Documentation
+- Fixed chunk size documentation (16MB → 32MB)
+- Version consistency across all documentation files
+
+---
+
+## v4.0.4 - January 2, 2026
+
+### Bug Fixes & Code Quality
+
+This release fixes critical nil slice bugs that could cause GUI crashes, improves error handling, and centralizes previously hardcoded constants.
+
+#### Critical Bug Fixes
+
+- **Nil slice crash fix (4 locations)**: Fixed Go functions returning `nil` slices to JavaScript frontend, which caused "null is not an object" crashes when accessing `.length`:
+  - `job_bindings.go:ListSavedTemplates()` - crashed when no templates existed
+  - `file_bindings.go:SelectDirectoryFiles()` - crashed on empty directories
+  - `file_bindings.go:SelectDirectoryRecursive()` - crashed when no files found
+  - `transfer_bindings.go:GetTransferTasks()` - crashed when engine not initialized
+
+- **Silent error handling**: `file_bindings.go:UploadFolderWithProgress()` now logs cache warming failures instead of silently discarding errors
+
+#### Version Consistency
+
+- Fixed `tray_windows.go` version (was "4.0.0", now "4.0.4")
+- Updated all documentation files to v4.0.4
+- Fixed `main.go` version typo (was "v4.0.3")
+
+#### Constants Centralization
+
+- Added `PartOperationTimeout = 10 * time.Minute` to `constants/app.go`
+- Added `ProgressUpdateInterval = 500 * time.Millisecond` to `constants/app.go`
+- Replaced 9 hardcoded values across S3/Azure providers and transfer code
+
+#### Code Cleanup
+
+- Removed dead legacy functions from `localfs/browser.go`:
+  - `ListDirectory()` → replaced by `ListDirectoryEx()`
+  - `Walk()` → replaced by `WalkCollect()`
+  - `WalkFiles()` → replaced by `WalkCollect()`
+
+---
+
 ## v4.0.3 - January 1, 2026
 
 ### Code Cleanup & Robustness Improvements

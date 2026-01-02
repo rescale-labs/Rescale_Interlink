@@ -20,6 +20,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/storage"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/models"
@@ -626,7 +627,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			return // No transfer handle, can't scale
 		}
 
-		ticker := time.NewTicker(500 * time.Millisecond) // Check every 500ms for responsiveness
+		ticker := time.NewTicker(constants.ProgressUpdateInterval) // v4.0.4: use centralized constant
 		defer ticker.Stop()
 
 		for {
@@ -667,10 +668,10 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	decryptedParts := int64(0)
 	nextPartToDecrypt := int64(0)
 
-	// v4.0.0: Progress ticker for smooth updates every 500ms.
+	// v4.0.0: Progress ticker for smooth updates (v4.0.4: use centralized constant).
 	// Uses downloadedBytes (encrypted bytes downloaded) for smooth, byte-level progress.
 	// This matches upload behavior where progress reflects actual network I/O.
-	progressTicker := time.NewTicker(500 * time.Millisecond)
+	progressTicker := time.NewTicker(constants.ProgressUpdateInterval)
 	progressDone := make(chan struct{})
 	go func() {
 		defer progressTicker.Stop()
