@@ -479,8 +479,8 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				partDataToUpload := job.data
 				currentPartNum := job.partNumber
 
-				// Create context with timeout for this specific part (10 minutes)
-				partCtx, cancel := context.WithTimeout(opCtx, 10*time.Minute)
+				// Create context with timeout for this specific part (v4.0.4: use centralized constant)
+				partCtx, cancel := context.WithTimeout(opCtx, constants.PartOperationTimeout)
 
 				// Add HTTP tracing if DEBUG_HTTP is enabled
 				partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d/%d (worker %d)", job.partNumber, totalParts, workerID))

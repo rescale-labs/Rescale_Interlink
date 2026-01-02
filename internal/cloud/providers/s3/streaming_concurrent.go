@@ -180,8 +180,8 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 	// S3 uses 1-based part numbers
 	partNumber := int32(partIndex + 1)
 
-	// Create context with timeout
-	partCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	// Create context with timeout (v4.0.4: use centralized constant)
+	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
 	// Add HTTP tracing if DEBUG_HTTP is enabled
@@ -250,8 +250,8 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	uploadStart := time.Now()
 	fileName := filepath.Base(uploadState.LocalPath)
 
-	// Create context with timeout
-	partCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	// Create context with timeout (v4.0.4: use centralized constant)
+	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
 	// Add HTTP tracing if DEBUG_HTTP is enabled
