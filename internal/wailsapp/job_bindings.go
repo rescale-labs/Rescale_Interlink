@@ -92,6 +92,26 @@ type AutomationDTO struct {
 	ScriptName  string `json:"scriptName"`
 }
 
+// v4.0.6: Result DTOs with error propagation to fix silent API failures
+
+// CoreTypesResultDTO wraps core type results with optional error.
+type CoreTypesResultDTO struct {
+	CoreTypes []CoreTypeDTO `json:"coreTypes"`
+	Error     string        `json:"error,omitempty"`
+}
+
+// AnalysisCodesResultDTO wraps analysis code results with optional error.
+type AnalysisCodesResultDTO struct {
+	Codes []AnalysisCodeDTO `json:"codes"`
+	Error string            `json:"error,omitempty"`
+}
+
+// AutomationsResultDTO wraps automation results with optional error.
+type AutomationsResultDTO struct {
+	Automations []AutomationDTO `json:"automations"`
+	Error       string          `json:"error,omitempty"`
+}
+
 // RunStatusDTO represents the status of a pipeline run.
 type RunStatusDTO struct {
 	State       string `json:"state"` // "idle", "running", "completed", "failed", "cancelled"
@@ -176,9 +196,10 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 }
 
 // GetCoreTypes returns available hardware core types.
-func (a *App) GetCoreTypes() []CoreTypeDTO {
+// v4.0.6: Changed to return CoreTypesResultDTO with error propagation.
+func (a *App) GetCoreTypes() CoreTypesResultDTO {
 	if a.engine == nil || a.engine.API() == nil {
-		return []CoreTypeDTO{}
+		return CoreTypesResultDTO{Error: "engine not initialized"}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -186,7 +207,7 @@ func (a *App) GetCoreTypes() []CoreTypeDTO {
 
 	coreTypes, err := a.engine.API().GetCoreTypes(ctx, true)
 	if err != nil {
-		return []CoreTypeDTO{}
+		return CoreTypesResultDTO{Error: fmt.Sprintf("failed to fetch core types: %v", err)}
 	}
 
 	dtos := make([]CoreTypeDTO, len(coreTypes))
@@ -199,13 +220,14 @@ func (a *App) GetCoreTypes() []CoreTypeDTO {
 			Cores:        ct.Cores,
 		}
 	}
-	return dtos
+	return CoreTypesResultDTO{CoreTypes: dtos}
 }
 
 // GetAnalysisCodes returns available software analysis codes.
-func (a *App) GetAnalysisCodes(search string) []AnalysisCodeDTO {
+// v4.0.6: Changed to return AnalysisCodesResultDTO with error propagation.
+func (a *App) GetAnalysisCodes(search string) AnalysisCodesResultDTO {
 	if a.engine == nil {
-		return []AnalysisCodeDTO{}
+		return AnalysisCodesResultDTO{Error: "engine not initialized"}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -213,7 +235,7 @@ func (a *App) GetAnalysisCodes(search string) []AnalysisCodeDTO {
 
 	analyses, err := a.engine.GetAnalyses(ctx)
 	if err != nil {
-		return []AnalysisCodeDTO{}
+		return AnalysisCodesResultDTO{Error: fmt.Sprintf("failed to fetch analysis codes: %v", err)}
 	}
 
 	dtos := make([]AnalysisCodeDTO, 0, len(analyses))
@@ -248,13 +270,14 @@ func (a *App) GetAnalysisCodes(search string) []AnalysisCodeDTO {
 			Versions:    versions,
 		})
 	}
-	return dtos
+	return AnalysisCodesResultDTO{Codes: dtos}
 }
 
 // GetAutomations returns available automations.
-func (a *App) GetAutomations() []AutomationDTO {
+// v4.0.6: Changed to return AutomationsResultDTO with error propagation.
+func (a *App) GetAutomations() AutomationsResultDTO {
 	if a.engine == nil || a.engine.API() == nil {
-		return []AutomationDTO{}
+		return AutomationsResultDTO{Error: "engine not initialized"}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -262,7 +285,7 @@ func (a *App) GetAutomations() []AutomationDTO {
 
 	automations, err := a.engine.API().ListAutomations(ctx)
 	if err != nil {
-		return []AutomationDTO{}
+		return AutomationsResultDTO{Error: fmt.Sprintf("failed to fetch automations: %v", err)}
 	}
 
 	dtos := make([]AutomationDTO, len(automations))
@@ -275,7 +298,7 @@ func (a *App) GetAutomations() []AutomationDTO {
 			ScriptName:  auto.ScriptName,
 		}
 	}
-	return dtos
+	return AutomationsResultDTO{Automations: dtos}
 }
 
 // StartBulkRun starts a bulk job run (PUR pipeline).
@@ -310,8 +333,11 @@ func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 	}
 
 	// Create cancellable context
+	// v4.0.5: Protected by runMu to prevent race conditions
 	ctx, cancel := context.WithCancel(context.Background())
+	a.runMu.Lock()
 	a.runCancel = cancel
+	a.runMu.Unlock()
 
 	// Start the pipeline in background
 	go func() {
@@ -377,8 +403,11 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	}
 
 	// Create cancellable context
+	// v4.0.5: Protected by runMu to prevent race conditions
 	ctx, cancel := context.WithCancel(context.Background())
+	a.runMu.Lock()
 	a.runCancel = cancel
+	a.runMu.Unlock()
 
 	// Start the job in background
 	go func() {
@@ -396,6 +425,7 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 
 // CancelRun cancels the current run.
 // v4.0.0: Refactored to use Engine's run context.
+// v4.0.5: Protected by runMu to prevent race conditions.
 func (a *App) CancelRun() error {
 	if a.engine == nil {
 		return ErrNoEngine
@@ -405,11 +435,13 @@ func (a *App) CancelRun() error {
 		return fmt.Errorf("no run in progress")
 	}
 
-	// Cancel the context
+	// Cancel the context (v4.0.5: protected by mutex)
+	a.runMu.Lock()
 	if a.runCancel != nil {
 		a.runCancel()
 		a.runCancel = nil
 	}
+	a.runMu.Unlock()
 
 	// Stop the engine
 	a.engine.Stop()
@@ -457,6 +489,7 @@ func (a *App) GetRunStatus() RunStatusDTO {
 
 // GetJobRows returns the current job rows for the jobs table.
 // v4.0.0: Refactored to read from Engine's state manager.
+// v4.0.6: Now returns actual UploadProgress from state instead of 0.
 func (a *App) GetJobRows() []JobRowDTO {
 	if a.engine == nil {
 		return []JobRowDTO{}
@@ -476,7 +509,7 @@ func (a *App) GetJobRows() []JobRowDTO {
 			JobName:        state.JobName,
 			TarStatus:      state.TarStatus,
 			UploadStatus:   state.UploadStatus,
-			UploadProgress: 0, // Transient - provided via events
+			UploadProgress: state.UploadProgress, // v4.0.6: Use actual progress from state
 			CreateStatus:   "",
 			SubmitStatus:   state.SubmitStatus,
 			Status:         state.SubmitStatus, // Use submit status as overall status
@@ -498,16 +531,19 @@ func (a *App) UpdateJobRow(index int, job JobSpecDTO) error {
 
 // ResetRun clears the current run state.
 // v4.0.0: Refactored to use Engine's ResetRun.
+// v4.0.5: Protected by runMu to prevent race conditions.
 func (a *App) ResetRun() {
 	if a.engine != nil {
 		a.engine.ResetRun()
 	}
 
-	// Clear local cancel function
+	// Clear local cancel function (v4.0.5: protected by mutex)
+	a.runMu.Lock()
 	if a.runCancel != nil {
 		a.runCancel()
 		a.runCancel = nil
 	}
+	a.runMu.Unlock()
 }
 
 // ValidateJobSpec validates a job specification.

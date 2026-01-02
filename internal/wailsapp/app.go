@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"github.com/rs/zerolog"
 	"github.com/wailsapp/wails/v2"
@@ -44,6 +45,8 @@ type App struct {
 	eventBridge *EventBridge
 
 	// v4.0.0: Run cancellation function for active pipeline runs
+	// v4.0.5: Protected by runMu to prevent race conditions
+	runMu     sync.Mutex
 	runCancel context.CancelFunc
 }
 

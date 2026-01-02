@@ -130,6 +130,10 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     isLoadingCoreTypes,
     isLoadingAnalysisCodes,
     isLoadingAutomations,
+    // v4.0.6: API error states
+    coreTypesError,
+    analysisCodesError,
+    automationsError,
     fetchCoreTypes,
     fetchAnalysisCodes,
     fetchAutomations,
@@ -469,6 +473,10 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                   placeholder={analysisCodes.length === 0 ? 'Click "Scan Software" to load' : 'Search software...'}
                   disabled={isLoadingAnalysisCodes || analysisCodes.length === 0}
                 />
+                {/* v4.0.6: Display API error */}
+                {analysisCodesError && (
+                  <p className="mt-1 text-xs text-red-500">{analysisCodesError}</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Version</label>
@@ -508,16 +516,20 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     disabled={isLoadingCoreTypes}
                     className="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400 disabled:cursor-not-allowed"
                   >
-                    {isLoadingCoreTypes ? 'Scanning...' : 'Scan Hardware'}
+                    {isLoadingCoreTypes ? 'Scanning...' : 'Scan Coretypes'}
                   </button>
                 </div>
                 <SearchableSelect
                   options={coreTypeOptions}
                   value={template.coreType}
                   onChange={handleCoreTypeChange}
-                  placeholder={coreTypes.length === 0 ? 'Click "Scan Hardware" to load' : 'Search hardware...'}
+                  placeholder={coreTypes.length === 0 ? 'Click "Scan Coretypes" to load' : 'Search coretypes...'}
                   disabled={isLoadingCoreTypes || coreTypes.length === 0}
                 />
+                {/* v4.0.6: Display API error */}
+                {coreTypesError && (
+                  <p className="mt-1 text-xs text-red-500">{coreTypesError}</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Cores Per Slot</label>
@@ -603,6 +615,10 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                   {automations.length > 0 && `${automations.length} available`}
                 </span>
               </div>
+              {/* v4.0.6: Display API error */}
+              {automationsError && (
+                <p className="mb-2 text-xs text-red-500">{automationsError}</p>
+              )}
               {automations.length > 0 && (
                 <div className="border border-gray-300 dark:border-gray-600 rounded max-h-32 overflow-y-auto">
                   {automations.map((auto) => (

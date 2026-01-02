@@ -5,7 +5,6 @@ package service
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -125,20 +124,28 @@ func (h *ServiceIPCHandler) TriggerScan(userID string) error {
 	return nil
 }
 
-// OpenLogs opens the log location for the user or service.
+// OpenLogs returns the log location path for the user or service.
+// v4.0.7 H3: This method should NOT try to open explorer.exe from SYSTEM context,
+// as it will silently fail (GUI apps don't display when run as SYSTEM).
+// The tray app handles "View Logs" locally via viewLogs() which runs in user context.
+// This IPC method is kept for potential future use (e.g., returning the path to the caller).
 func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 	var logsDir string
 
 	if userID == "service" {
 		// Service logs are in the system-wide location or program data
+		// v4.0.7 M1: Use environment variable, with standard Windows fallback
 		programData := os.Getenv("ProgramData")
 		if programData == "" {
-			programData = `C:\ProgramData`
+			// Standard Windows location if env var not set
+			programData = filepath.Join(os.Getenv("SystemDrive"), "ProgramData")
+			if programData == "ProgramData" {
+				programData = `C:\ProgramData` // Final fallback
+			}
 		}
 		logsDir = filepath.Join(programData, "Rescale", "Interlink", "logs")
 	} else {
 		// User logs are in their profile
-		// For "current", resolve to the calling user
 		if userID == "current" {
 			homeDir, err := os.UserHomeDir()
 			if err != nil {
@@ -146,22 +153,38 @@ func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 			}
 			logsDir = filepath.Join(homeDir, ".config", "rescale", "logs")
 		} else {
-			// Resolve user's home directory from their profile
-			// This is a simplification - in practice we'd look up their profile path
-			logsDir = filepath.Join(`C:\Users`, userID, ".config", "rescale", "logs")
+			// v4.0.7 M1: Use USERPROFILE pattern instead of hardcoded C:\Users
+			// Look up user's profile path from registry or use standard pattern
+			profileRoot := os.Getenv("PUBLIC")
+			if profileRoot != "" {
+				// PUBLIC is like C:\Users\Public, so parent is C:\Users
+				profileRoot = filepath.Dir(profileRoot)
+			} else {
+				// Fallback to standard Windows users directory
+				profileRoot = filepath.Join(os.Getenv("SystemDrive"), "Users")
+				if profileRoot == "Users" {
+					profileRoot = `C:\Users` // Final fallback
+				}
+			}
+			logsDir = filepath.Join(profileRoot, userID, ".config", "rescale", "logs")
 		}
 	}
 
-	// Create directory if it doesn't exist
+	// Log the path for debugging
+	h.logger.Debug().
+		Str("userID", userID).
+		Str("logsDir", logsDir).
+		Msg("OpenLogs request received")
+
+	// v4.0.7 H3: Do NOT try to run explorer.exe from SYSTEM context.
+	// It won't show on the user's desktop. The tray app handles this locally.
+	// Just ensure the directory exists and return success.
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		h.logger.Warn().Err(err).Str("dir", logsDir).Msg("Failed to create logs directory")
+		return fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
-	// Open in Explorer
-	// Note: This runs from the service context, so may not show on user's desktop
-	// The tray app should handle this locally instead
-	cmd := exec.Command("explorer.exe", logsDir)
-	return cmd.Start()
+	return nil
 }
 
 // Ensure ServiceIPCHandler implements ipc.ServiceHandler

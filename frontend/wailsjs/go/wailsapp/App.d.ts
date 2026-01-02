@@ -4,6 +4,8 @@ import {wailsapp} from '../models';
 
 export function CancelAllTransfers():Promise<void>;
 
+export function CancelLocalDirectoryRead():Promise<void>;
+
 export function CancelRun():Promise<void>;
 
 export function CancelTransfer(arg1:string):Promise<void>;
@@ -16,7 +18,7 @@ export function DeleteRemoteItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wail
 
 export function DeleteTemplate(arg1:string):Promise<void>;
 
-export function GetAnalysisCodes(arg1:string):Promise<Array<wailsapp.AnalysisCodeDTO>>;
+export function GetAnalysisCodes(arg1:string):Promise<wailsapp.AnalysisCodesResultDTO>;
 
 export function GetAppInfo():Promise<wailsapp.AppInfoDTO>;
 
@@ -24,11 +26,11 @@ export function GetAutoDownloadConfig():Promise<wailsapp.AutoDownloadConfigDTO>;
 
 export function GetAutoDownloadStatus():Promise<wailsapp.AutoDownloadStatusDTO>;
 
-export function GetAutomations():Promise<Array<wailsapp.AutomationDTO>>;
+export function GetAutomations():Promise<wailsapp.AutomationsResultDTO>;
 
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
 
-export function GetCoreTypes():Promise<Array<wailsapp.CoreTypeDTO>>;
+export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
 
 export function GetHomeDirectory():Promise<string>;
 
@@ -49,6 +51,8 @@ export function GetTransferStats():Promise<wailsapp.TransferStatsDTO>;
 export function GetTransferTasks():Promise<Array<wailsapp.TransferTaskDTO>>;
 
 export function ListLocalDirectory(arg1:string):Promise<wailsapp.FolderContentsDTO>;
+
+export function ListLocalDirectoryEx(arg1:string,arg2:boolean):Promise<wailsapp.FolderContentsDTO>;
 
 export function ListRemoteFolder(arg1:string):Promise<wailsapp.FolderContentsDTO>;
 

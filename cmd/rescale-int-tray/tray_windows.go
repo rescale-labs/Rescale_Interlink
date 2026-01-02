@@ -20,7 +20,7 @@ const (
 	refreshInterval = 5 * time.Second
 
 	// Version displayed in tooltip
-	trayVersion = "4.0.5"
+	trayVersion = "4.0.7"
 )
 
 // trayApp manages the system tray application state.
@@ -222,24 +222,38 @@ func (a *trayApp) handleMenuClicks() {
 
 // openGUI launches the main Rescale Interlink GUI.
 func (a *trayApp) openGUI() {
-	// Find rescale-int.exe in the same directory as the tray app
+	// Find rescale-int-gui.exe in the same directory as the tray app (v4.0.2+)
 	exePath, err := os.Executable()
 	if err != nil {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Failed to find executable path: %v", err)
+		a.mu.Unlock()
 		return
 	}
 
 	dir := filepath.Dir(exePath)
-	guiPath := filepath.Join(dir, "rescale-int.exe")
+
+	// v4.0.2+: GUI is a separate binary (Wails-based with embedded frontend)
+	guiPath := filepath.Join(dir, "rescale-int-gui.exe")
 
 	// Check if it exists
 	if _, err := os.Stat(guiPath); os.IsNotExist(err) {
-		// Try just "rescale-int" (might be in PATH)
-		guiPath = "rescale-int"
+		// Fallback: Try without -gui suffix (older installations)
+		guiPath = filepath.Join(dir, "rescale-int.exe")
+		if _, err := os.Stat(guiPath); os.IsNotExist(err) {
+			// Try just "rescale-int-gui" (might be in PATH)
+			guiPath = "rescale-int-gui"
+		}
 	}
 
-	// Launch with --gui flag
-	cmd := exec.Command(guiPath, "--gui")
-	cmd.Start() // Don't wait
+	// Launch GUI
+	cmd := exec.Command(guiPath)
+	// v4.0.7 M5: Check for launch errors
+	if err := cmd.Start(); err != nil {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Failed to launch GUI: %v", err)
+		a.mu.Unlock()
+	}
 }
 
 // triggerScan triggers an immediate job scan via IPC.
@@ -295,20 +309,33 @@ func (a *trayApp) resumeAutoDownload() {
 }
 
 // viewLogs opens the logs directory in Explorer.
+// v4.0.7: This runs locally in user context (not via IPC to service).
 func (a *trayApp) viewLogs() {
 	// Get user's config directory
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Failed to get home directory: %v", err)
+		a.mu.Unlock()
 		return
 	}
 
 	logsDir := filepath.Join(homeDir, ".config", "rescale", "logs")
 
 	// Create if doesn't exist
-	os.MkdirAll(logsDir, 0755)
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Failed to create logs directory: %v", err)
+		a.mu.Unlock()
+		// Continue anyway - directory might already exist
+	}
 
-	// Open in Explorer
-	exec.Command("explorer.exe", logsDir).Start()
+	// v4.0.7 M5: Check for launch errors
+	if err := exec.Command("explorer.exe", logsDir).Start(); err != nil {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Failed to open logs directory: %v", err)
+		a.mu.Unlock()
+	}
 }
 
 // truncate shortens a string to maxLen, adding "..." if truncated.

@@ -170,6 +170,10 @@ interface JobStore {
   isLoadingCoreTypes: boolean
   isLoadingAnalysisCodes: boolean
   isLoadingAutomations: boolean
+  // v4.0.6: Error states for API calls
+  coreTypesError: string | null
+  analysisCodesError: string | null
+  automationsError: string | null
 
   // Scan state
   scanOptions: ScanOptions
@@ -279,6 +283,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
   isLoadingCoreTypes: false,
   isLoadingAnalysisCodes: false,
   isLoadingAutomations: false,
+  // v4.0.6: Error states
+  coreTypesError: null,
+  analysisCodesError: null,
+  automationsError: null,
 
   scanOptions: {
     rootDir: '',
@@ -741,32 +749,48 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
 
   // API Cache Actions
+  // v4.0.6: Updated to handle new result DTOs with error propagation
   fetchCoreTypes: async () => {
-    set({ isLoadingCoreTypes: true })
+    set({ isLoadingCoreTypes: true, coreTypesError: null })
     try {
-      const coreTypes = await App.GetCoreTypes()
+      const result = await App.GetCoreTypes()
+      // v4.0.6: Check for error in result DTO
+      if (result.error) {
+        console.error('Failed to fetch core types:', result.error)
+        set({ coreTypesError: result.error })
+        return
+      }
       // Map DTO to our local type
-      const mapped: CoreType[] = (coreTypes || []).map((ct) => ({
+      const mapped: CoreType[] = (result.coreTypes || []).map((ct) => ({
         code: ct.code,
         name: ct.name,
         displayOrder: ct.displayOrder,
         isActive: ct.isActive,
         cores: ct.cores || [],
       }))
-      set({ coreTypes: mapped })
+      set({ coreTypes: mapped, coreTypesError: null })
     } catch (error) {
-      console.error('Failed to fetch core types:', error)
+      const errMsg = error instanceof Error ? error.message : String(error)
+      console.error('Failed to fetch core types:', errMsg)
+      set({ coreTypesError: errMsg })
     } finally {
       set({ isLoadingCoreTypes: false })
     }
   },
 
+  // v4.0.6: Updated to handle new result DTOs with error propagation
   fetchAnalysisCodes: async (search = '') => {
-    set({ isLoadingAnalysisCodes: true })
+    set({ isLoadingAnalysisCodes: true, analysisCodesError: null })
     try {
-      const codes = await App.GetAnalysisCodes(search)
+      const result = await App.GetAnalysisCodes(search)
+      // v4.0.6: Check for error in result DTO
+      if (result.error) {
+        console.error('Failed to fetch analysis codes:', result.error)
+        set({ analysisCodesError: result.error })
+        return
+      }
       // Map DTO to our local type
-      const mapped: AnalysisCode[] = (codes || []).map((ac) => ({
+      const mapped: AnalysisCode[] = (result.codes || []).map((ac) => ({
         code: ac.code,
         name: ac.name,
         description: ac.description || '',
@@ -778,29 +802,40 @@ export const useJobStore = create<JobStore>((set, get) => ({
           allowedCoreTypes: v.allowedCoreTypes || [],
         })),
       }))
-      set({ analysisCodes: mapped })
+      set({ analysisCodes: mapped, analysisCodesError: null })
     } catch (error) {
-      console.error('Failed to fetch analysis codes:', error)
+      const errMsg = error instanceof Error ? error.message : String(error)
+      console.error('Failed to fetch analysis codes:', errMsg)
+      set({ analysisCodesError: errMsg })
     } finally {
       set({ isLoadingAnalysisCodes: false })
     }
   },
 
+  // v4.0.6: Updated to handle new result DTOs with error propagation
   fetchAutomations: async () => {
-    set({ isLoadingAutomations: true })
+    set({ isLoadingAutomations: true, automationsError: null })
     try {
-      const automations = await App.GetAutomations()
+      const result = await App.GetAutomations()
+      // v4.0.6: Check for error in result DTO
+      if (result.error) {
+        console.error('Failed to fetch automations:', result.error)
+        set({ automationsError: result.error })
+        return
+      }
       // Map DTO to our local type
-      const mapped: Automation[] = (automations || []).map((a) => ({
+      const mapped: Automation[] = (result.automations || []).map((a) => ({
         id: a.id,
         name: a.name,
         description: a.description || '',
         executeOn: a.executeOn,
         scriptName: a.scriptName,
       }))
-      set({ automations: mapped })
+      set({ automations: mapped, automationsError: null })
     } catch (error) {
-      console.error('Failed to fetch automations:', error)
+      const errMsg = error instanceof Error ? error.message : String(error)
+      console.error('Failed to fetch automations:', errMsg)
+      set({ automationsError: errMsg })
     } finally {
       set({ isLoadingAutomations: false })
     }
