@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -143,8 +142,8 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 	blockIDStr := fmt.Sprintf("block-%010d", partIndex)
 	blockID := base64.StdEncoding.EncodeToString([]byte(blockIDStr))
 
-	// Create context with timeout
-	partCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	// Create context with timeout (v4.0.4: use centralized constant)
+	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
 	// Stage the block using AzureClient
@@ -206,8 +205,8 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	blockIDStr := fmt.Sprintf("block-%010d", partIndex)
 	blockID := base64.StdEncoding.EncodeToString([]byte(blockIDStr))
 
-	// Create context with timeout
-	partCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	// Create context with timeout (v4.0.4: use centralized constant)
+	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
 	// Stage the block using AzureClient

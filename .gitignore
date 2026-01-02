@@ -80,3 +80,7 @@ CHECKPOINT_*.md
 # Root binary (wrong location)
 rescale-int
 CONTINUATION_PLAN*.md
+
+# Local Claude development files (never commit)
+scripts/CLAUDE_BUILD_INSTRUCTIONS.md
+**/CLAUDE_BUILD*.md

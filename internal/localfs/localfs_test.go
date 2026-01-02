@@ -1,6 +1,7 @@
 package localfs
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,7 +57,9 @@ func TestIsHiddenName(t *testing.T) {
 	}
 }
 
-func TestListDirectory(t *testing.T) {
+// TestListDirectoryEx tests the v4.0.4 ListDirectoryEx function
+// (replaces legacy ListDirectory tests)
+func TestListDirectoryEx(t *testing.T) {
 	// Create temp directory with test files
 	tmpDir, err := os.MkdirTemp("", "localfs_test")
 	if err != nil {
@@ -81,7 +84,7 @@ func TestListDirectory(t *testing.T) {
 	}
 
 	t.Run("exclude hidden", func(t *testing.T) {
-		entries, err := ListDirectory(tmpDir, ListOptions{IncludeHidden: false})
+		entries, err := ListDirectoryEx(context.Background(), tmpDir, ListDirectoryExOptions{IncludeHidden: false})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +103,7 @@ func TestListDirectory(t *testing.T) {
 	})
 
 	t.Run("include hidden", func(t *testing.T) {
-		entries, err := ListDirectory(tmpDir, ListOptions{IncludeHidden: true})
+		entries, err := ListDirectoryEx(context.Background(), tmpDir, ListDirectoryExOptions{IncludeHidden: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,7 +127,7 @@ func TestListDirectory(t *testing.T) {
 	})
 
 	t.Run("entry properties", func(t *testing.T) {
-		entries, err := ListDirectory(tmpDir, ListOptions{IncludeHidden: true})
+		entries, err := ListDirectoryEx(context.Background(), tmpDir, ListDirectoryExOptions{IncludeHidden: true})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,14 +153,16 @@ func TestListDirectory(t *testing.T) {
 	})
 
 	t.Run("nonexistent directory", func(t *testing.T) {
-		_, err := ListDirectory("/nonexistent/path", ListOptions{})
+		_, err := ListDirectoryEx(context.Background(), "/nonexistent/path", ListDirectoryExOptions{})
 		if err == nil {
 			t.Error("expected error for nonexistent directory")
 		}
 	})
 }
 
-func TestWalk(t *testing.T) {
+// TestWalkCollect tests the v4.0.4 WalkCollect function
+// (replaces legacy Walk and WalkFiles tests)
+func TestWalkCollect(t *testing.T) {
 	// Create temp directory structure
 	tmpDir, err := os.MkdirTemp("", "localfs_walk_test")
 	if err != nil {
@@ -181,82 +186,46 @@ func TestWalk(t *testing.T) {
 	os.MkdirAll(filepath.Join(tmpDir, ".hidden_dir"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, ".hidden_dir", "file3.txt"), []byte("3"), 0644)
 
-	t.Run("exclude hidden", func(t *testing.T) {
-		var files []string
-		err := Walk(tmpDir, WalkOptions{IncludeHidden: false, SkipHiddenDirs: true}, func(e FileEntry) error {
-			files = append(files, e.Name)
-			return nil
-		})
+	t.Run("exclude hidden files only", func(t *testing.T) {
+		result, err := WalkCollect(tmpDir, WalkOptions{IncludeHidden: false, SkipHiddenDirs: true})
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		// Should have: tmpDir (root), file1.txt, subdir, file2.txt
-		// Should NOT have: .hidden_file, .hidden_dir, file3.txt
-		expected := map[string]bool{
-			filepath.Base(tmpDir): true,
-			"file1.txt":           true,
-			"subdir":              true,
-			"file2.txt":           true,
+		// Should have: file1.txt, file2.txt (files only, no hidden)
+		// Should NOT have: .hidden_file, file3.txt (in hidden dir)
+		if len(result.Files) != 2 {
+			t.Errorf("got %d files, want 2 (file1.txt, file2.txt)", len(result.Files))
 		}
 
-		if len(files) != len(expected) {
-			t.Errorf("got %d files %v, want %d", len(files), files, len(expected))
-		}
-
-		for _, f := range files {
-			if f == ".hidden_file" || f == ".hidden_dir" || f == "file3.txt" {
-				t.Errorf("found hidden or nested-in-hidden file %q", f)
+		for _, e := range result.Files {
+			if IsHiddenName(e.Name) {
+				t.Errorf("found hidden file %q when IncludeHidden=false", e.Name)
 			}
 		}
 	})
 
-	t.Run("include hidden", func(t *testing.T) {
-		var files []string
-		err := Walk(tmpDir, WalkOptions{IncludeHidden: true}, func(e FileEntry) error {
-			files = append(files, e.Name)
-			return nil
-		})
+	t.Run("include hidden files", func(t *testing.T) {
+		result, err := WalkCollect(tmpDir, WalkOptions{IncludeHidden: true})
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		// Should have all 7 entries
-		if len(files) != 7 {
-			t.Errorf("got %d files %v, want 7", len(files), files)
+		// Should have all 4 files: file1.txt, .hidden_file, file2.txt, file3.txt
+		if len(result.Files) != 4 {
+			t.Errorf("got %d files, want 4", len(result.Files))
 		}
 	})
-}
 
-func TestWalkFiles(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "localfs_walkfiles_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create files and dirs
-	os.WriteFile(filepath.Join(tmpDir, "file1.txt"), []byte("1"), 0644)
-	os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "subdir", "file2.txt"), []byte("2"), 0644)
-
-	var files []string
-	err = WalkFiles(tmpDir, WalkOptions{}, func(e FileEntry) error {
-		files = append(files, e.Name)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Should only have files, not directories
-	if len(files) != 2 {
-		t.Errorf("got %d files %v, want 2", len(files), files)
-	}
-
-	for _, f := range files {
-		if f == "subdir" || f == filepath.Base(tmpDir) {
-			t.Errorf("WalkFiles should not return directories, got %q", f)
+	t.Run("directories collected separately", func(t *testing.T) {
+		result, err := WalkCollect(tmpDir, WalkOptions{IncludeHidden: true})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
+
+		// Should have directories: subdir, .hidden_dir
+		if len(result.Directories) < 2 {
+			t.Errorf("got %d directories, want at least 2", len(result.Directories))
+		}
+	})
 }

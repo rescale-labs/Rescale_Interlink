@@ -801,7 +801,7 @@ func (a *App) ListSavedTemplates() []TemplateInfoDTO {
 		return []TemplateInfoDTO{}
 	}
 
-	var templates []TemplateInfoDTO
+	templates := []TemplateInfoDTO{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue

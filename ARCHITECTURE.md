@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.0.3
-**Last Updated**: January 1, 2026
+**Version**: 4.0.5
+**Last Updated**: January 2, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -632,7 +632,7 @@ provider := providers.NewFactory().NewTransferFromStorageInfo(storageType, creds
 
 **Features**:
 - Multi-part upload API for files ≥100MB
-- Part size: 16MB chunks
+- Part size: 32MB chunks
 - Concurrent part uploads (configurable threads)
 - Credential caching via `EnsureFreshCredentials()`
 - Automatic retry with exponential backoff (`RetryWithBackoff`)
@@ -650,14 +650,14 @@ provider := providers.NewFactory().NewTransferFromStorageInfo(storageType, creds
 
 **Features**:
 - Block blob API
-- Block size: 16MB
+- Block size: 32MB
 - Concurrent block upload
 - Automatic credential refresh via `EnsureFreshCredentials()`
 - Same interface as S3 for consistency
 
 **Storage Backend Parity**:
 - Both S3 and Azure implement identical 6 interfaces
-- Same chunk/part size (16MB via `constants.ChunkSize`)
+- Same chunk/part size (32MB via `constants.ChunkSize`)
 - Same concurrency model via orchestration layer
 - Same resume capability via `state/` package
 - Same progress tracking
@@ -1100,7 +1100,3 @@ if fileSize > constants.MultipartThreshold {
 4. Group with related constants
 
 ---
-
-**Last Updated**: January 1, 2026
-**Version**: 4.0.3
-**Status**: Production Ready, FIPS 140-3 mandatory
