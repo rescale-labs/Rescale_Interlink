@@ -2,7 +2,7 @@ import { useState, useEffect, createContext, useContext } from 'react'
 import { Tab } from '@headlessui/react'
 import {
   Cog6ToothIcon,
-  BriefcaseIcon,
+  Square3Stack3DIcon,
   FolderOpenIcon,
   ArrowsRightLeftIcon,
   DocumentTextIcon,
@@ -19,6 +19,7 @@ import {
   SingleJobTab,
   PURTab,
 } from './components/tabs'
+import { ErrorBoundary } from './components/common'
 import * as App from '../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../wailsjs/go/models'
 import { useConfigStore } from './stores/configStore'
@@ -35,16 +36,24 @@ export const useTabNavigation = () => useContext(TabNavigationContext);
 const tabs = [
   { name: 'Setup', icon: Cog6ToothIcon, component: SetupTab },
   { name: 'Single Job', icon: PlayIcon, component: SingleJobTab },
-  { name: 'PUR (Multiple Jobs)', icon: BriefcaseIcon, component: PURTab },
+  { name: 'PUR (Multiple Jobs)', icon: Square3Stack3DIcon, component: PURTab },
   { name: 'File Browser', icon: FolderOpenIcon, component: FileBrowserTab },
   { name: 'Transfers', icon: ArrowsRightLeftIcon, component: TransfersTab },
-  { name: 'Activity', icon: DocumentTextIcon, component: ActivityTab },
+  { name: 'Activity Logs', icon: DocumentTextIcon, component: ActivityTab },
 ]
 
 function AppComponent() {
   const [appInfo, setAppInfo] = useState<wailsapp.AppInfoDTO | null>(null)
   const [selectedTabIndex, setSelectedTabIndex] = useState(0)
-  const { workspaceName, workspaceId, connectionStatus } = useConfigStore()
+  const {
+    workspaceName,
+    workspaceId,
+    connectionStatus,
+    config,
+    testConnection,
+    setupEventListeners: setupConfigEventListeners,
+    fetchConfig,
+  } = useConfigStore()
   const { overallMessage, overallProgress } = useLogStore()
   const { stats: transferStats } = useTransferStore()
 
@@ -56,6 +65,26 @@ function AppComponent() {
     const cleanup = setupEventListeners()
     return cleanup
   }, [setupEventListeners])
+
+  // v4.0.4: Set up config event listeners and fetch config on mount
+  useEffect(() => {
+    const cleanup = setupConfigEventListeners()
+    fetchConfig()
+    return cleanup
+  }, [setupConfigEventListeners, fetchConfig])
+
+  // v4.0.4: Auto-trigger workspace fetch when API key is present but workspace is null.
+  // This fixes the bug where env var API key users never see workspace info because
+  // TestConnection() was only called when clicking the "Test Connection" button.
+  useEffect(() => {
+    // Only trigger if:
+    // 1. Config is loaded and has an API key
+    // 2. Workspace is not yet fetched
+    // 3. Not currently testing connection
+    if (config?.apiKey && !workspaceId && connectionStatus !== 'testing') {
+      testConnection()
+    }
+  }, [config?.apiKey, workspaceId, connectionStatus, testConnection])
 
   useEffect(() => {
     // Fetch app info from Go backend
@@ -137,11 +166,13 @@ function AppComponent() {
           ))}
         </Tab.List>
 
-        {/* Tab panels */}
+        {/* Tab panels - wrapped in ErrorBoundary to catch rendering errors (v4.0.4) */}
         <Tab.Panels className="flex-1 overflow-hidden">
           {tabs.map((tab) => (
             <Tab.Panel key={tab.name} className="h-full">
-              <tab.component />
+              <ErrorBoundary>
+                <tab.component />
+              </ErrorBoundary>
             </Tab.Panel>
           ))}
         </Tab.Panels>

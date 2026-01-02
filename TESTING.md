@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
 **Last Updated**: January 1, 2026
-**Version**: 4.0.3
+**Version**: 4.0.4
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -83,15 +83,83 @@ go test -v ./internal/pur/...
 | `internal/pur/sanitize` | 4 (16 sub-tests) | ~90% | Excellent |
 | **Total** | **60+** | **~80%** | **Good** |
 
-### GUI Testing
+### GUI Testing (Wails v2 + React/TypeScript)
 
-**Status**: Manual testing only (Wails v2 with React frontend)
+**Status**: Manual testing with development mode hot-reload
+
+**v4.0.4 Note**: GUI uses Wails v2 framework with React/TypeScript frontend.
+The Go backend (`internal/wailsapp/`) exposes bindings that are auto-generated
+into `frontend/wailsjs/go/` for TypeScript consumption.
+
+#### Development Mode Testing
+
+```bash
+# Install Wails CLI (one-time setup)
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+# Install frontend dependencies
+cd frontend && npm install && cd ..
+
+# Run in development mode with hot-reload
+wails dev
+
+# This provides:
+# - Hot-reload for frontend changes
+# - Automatic Go rebuilds on backend changes
+# - DevTools access (F12)
+# - Console logging visible in terminal
+```
+
+#### Production Build Testing
+
+```bash
+# macOS (Apple Silicon)
+CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
+
+# FIPS-compliant production build
+GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
+
+# Test production build
+open build/bin/rescale-int.app
+
+# Or via CLI
+./build/bin/rescale-int.app/Contents/MacOS/rescale-int
+```
+
+#### Frontend Unit Tests
+
+```bash
+cd frontend
+
+# Run React component tests (if present)
+npm test
+
+# Build verification
+npm run build
+
+# Type checking
+npm run type-check  # or: npx tsc --noEmit
+```
+
+#### Backend Binding Tests
+
+```bash
+# Test wailsapp bindings compile correctly
+go build ./internal/wailsapp/...
+
+# Test event system
+go test -v ./internal/events/...
+
+# After changing Go bindings, regenerate TypeScript
+wails generate module
+```
 
 **Validation Points**:
-- GUI launches without errors (`open build/bin/rescale-int.app` on macOS)
-- All tabs render correctly (Setup, SingleJob, PUR, FileBrowser, Transfers, Activity)
+- GUI launches without errors
+- All tabs render correctly (Setup, SingleJob, PUR, FileBrowser, Transfers, Activity Logs)
 - Real-time event updates via event bridge
 - No UI freezes or deadlocks
+- Error boundaries catch and display component errors (v4.0.4)
 - Clean shutdown
 
 ### Coverage Goals
@@ -753,5 +821,5 @@ rm -rf /tmp/test
 ---
 
 **Last Updated**: January 1, 2026
-**Version**: 4.0.3
-**Status**: All tests passing, pre-release (Wails migration)
+**Version**: 4.0.4
+**Status**: All tests passing, code quality improvements (North Star alignment)

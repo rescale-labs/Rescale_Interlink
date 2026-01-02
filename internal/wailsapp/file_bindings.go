@@ -58,14 +58,8 @@ var localDirCancelFunc context.CancelFunc
 // Used to avoid clearing a newer operation's cancel function.
 var localDirGeneration int64
 
-// localEntryInfo holds information about a local directory entry.
-// Used during directory listing with symlink resolution.
-type localEntryInfo struct {
-	entry    os.DirEntry
-	fullPath string
-	info     os.FileInfo
-	isLink   bool
-}
+// v4.0.4: localEntryInfo and resolveSymlinks were moved to internal/localfs/browser.go
+// for North Star alignment (shared code between CLI and GUI).
 
 // ListLocalDirectory returns the contents of a local directory.
 // v4.0.3: Now calls ListLocalDirectoryEx with default options (includeHidden=false).
@@ -79,6 +73,9 @@ func (a *App) ListLocalDirectory(path string) FolderContentsDTO {
 //   - Hidden file filtering: Pass includeHidden=false to filter dot files (server-side)
 //   - Cancellation support: Previous operation is cancelled when new one starts
 //   - Parallel symlink resolution: Symlinks are resolved in parallel (8 workers)
+//
+// v4.0.4: Refactored to use localfs.ListDirectoryEx() for North Star alignment
+// (shared code between CLI and GUI for local filesystem operations).
 func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderContentsDTO {
 	// Default to home directory if path is empty
 	if path == "" {
@@ -89,13 +86,13 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 		path = home
 	}
 
-	// Cancel any previous directory operation
+	// Cancel any previous directory operation (GUI-specific)
 	localDirCancelMu.Lock()
 	if localDirCancelFunc != nil {
 		localDirCancelFunc()
 	}
-	// Create new context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), constants.DirectoryReadTimeout)
+	// Create new context for this operation
+	ctx, cancel := context.WithCancel(context.Background())
 	localDirCancelFunc = cancel
 	localDirGeneration++
 	myGeneration := localDirGeneration
@@ -111,119 +108,54 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 		cancel()
 	}()
 
-	// Track start time for slow path detection
+	// Track start time for slow path detection (GUI-specific)
 	startTime := time.Now()
 
-	// Read directory in goroutine for timeout protection
-	type readResult struct {
-		entries []os.DirEntry
-		err     error
-	}
-	resultChan := make(chan readResult, 1)
+	// v4.0.4: Use shared localfs.ListDirectoryEx() for core directory reading
+	// This handles timeout, hidden filtering, and parallel symlink resolution
+	entries, err := localfs.ListDirectoryEx(ctx, path, localfs.ListDirectoryExOptions{
+		IncludeHidden:   includeHidden,
+		ResolveSymlinks: true,
+		SymlinkWorkers:  constants.SymlinkWorkerCount,
+		Timeout:         constants.DirectoryReadTimeout,
+	})
 
-	go func() {
-		entries, err := os.ReadDir(path)
-		resultChan <- readResult{entries: entries, err: err}
-	}()
-
-	// Wait for result or timeout/cancellation
-	var entries []os.DirEntry
-	var readErr error
-	select {
-	case result := <-resultChan:
-		entries = result.entries
-		readErr = result.err
-	case <-ctx.Done():
-		if ctx.Err() == context.DeadlineExceeded {
-			return FolderContentsDTO{
-				FolderPath: path,
-				Items:      []FileItemDTO{},
-				Warning:    fmt.Sprintf("Timeout reading directory after %v", constants.DirectoryReadTimeout),
-				IsSlowPath: true,
-			}
+	// Handle errors
+	if err != nil {
+		warning := err.Error()
+		isSlowPath := false
+		if err == context.DeadlineExceeded {
+			warning = fmt.Sprintf("Timeout reading directory after %v", constants.DirectoryReadTimeout)
+			isSlowPath = true
+		} else if err == context.Canceled {
+			warning = "Operation cancelled"
 		}
-		// Context was cancelled (user navigated away)
 		return FolderContentsDTO{
 			FolderPath: path,
 			Items:      []FileItemDTO{},
-			Warning:    "Operation cancelled",
+			Warning:    warning,
+			IsSlowPath: isSlowPath,
 		}
 	}
 
-	if readErr != nil {
-		return FolderContentsDTO{
-			FolderPath: path,
-			Items:      []FileItemDTO{},
-			Warning:    readErr.Error(),
-		}
-	}
-
-	// First pass: filter entries and identify symlinks
-	var filteredEntries []localEntryInfo
-	var symlinks []int // Indices of symlinks that need resolution
-
-	for _, entry := range entries {
-		// Hidden file filtering (server-side)
-		if !includeHidden && localfs.IsHiddenName(entry.Name()) {
-			continue
-		}
-
-		fullPath := filepath.Join(path, entry.Name())
-		ei := localEntryInfo{
-			entry:    entry,
-			fullPath: fullPath,
-			isLink:   entry.Type()&os.ModeSymlink != 0,
-		}
-
-		// Get cached info from DirEntry (fast, no syscall)
-		info, err := entry.Info()
-		if err != nil {
-			// Skip entries we can't stat
-			continue
-		}
-		ei.info = info
-
-		if ei.isLink {
-			symlinks = append(symlinks, len(filteredEntries))
-		}
-
-		filteredEntries = append(filteredEntries, ei)
-	}
-
-	// Second pass: parallel symlink resolution if we have symlinks
-	if len(symlinks) > 0 {
-		resolveSymlinks(ctx, filteredEntries, symlinks)
-	}
-
-	// Check for slow path (>5s)
+	// Check for slow path (>5s) (GUI-specific warning)
 	elapsed := time.Since(startTime)
 	isSlowPath := elapsed > constants.SlowPathWarningThreshold
 
-	// Build result items
-	items := make([]FileItemDTO, 0, len(filteredEntries))
-	for _, ei := range filteredEntries {
-		isDir := ei.entry.IsDir()
-		size := ei.info.Size()
-		modTime := ei.info.ModTime()
-
-		// For resolved symlinks, use the target info
-		if ei.isLink && ei.info != nil {
-			isDir = ei.info.IsDir()
-			size = ei.info.Size()
-			modTime = ei.info.ModTime()
-		}
-
+	// Convert localfs.FileEntry to FileItemDTO
+	items := make([]FileItemDTO, 0, len(entries))
+	for _, entry := range entries {
 		items = append(items, FileItemDTO{
-			ID:       ei.fullPath,
-			Name:     ei.entry.Name(),
-			IsFolder: isDir,
-			Size:     size,
-			ModTime:  modTime.Format(time.RFC3339),
-			Path:     ei.fullPath,
+			ID:       entry.Path,
+			Name:     entry.Name,
+			IsFolder: entry.IsDir,
+			Size:     entry.Size,
+			ModTime:  entry.ModTime.Format(time.RFC3339),
+			Path:     entry.Path,
 		})
 	}
 
-	// Sort: folders first, then by name
+	// Sort: folders first, then by name (GUI-specific ordering)
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].IsFolder != items[j].IsFolder {
 			return items[i].IsFolder
@@ -244,54 +176,6 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 	}
 
 	return result
-}
-
-// resolveSymlinks resolves symlinks in parallel using a worker pool.
-// Updates the info field of localEntryInfo in-place for symlinks.
-func resolveSymlinks(ctx context.Context, entries []localEntryInfo, symlinkIndices []int) {
-	if len(symlinkIndices) == 0 {
-		return
-	}
-
-	// Determine worker count
-	workerCount := constants.SymlinkWorkerCount
-	if len(symlinkIndices) < workerCount {
-		workerCount = len(symlinkIndices)
-	}
-
-	// Create job channel
-	jobs := make(chan int, len(symlinkIndices))
-	for _, idx := range symlinkIndices {
-		jobs <- idx
-	}
-	close(jobs)
-
-	// Start workers
-	var wg sync.WaitGroup
-	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case idx, ok := <-jobs:
-					if !ok {
-						return
-					}
-					// Resolve symlink target with os.Stat (follows symlinks)
-					info, err := os.Stat(entries[idx].fullPath)
-					if err == nil {
-						entries[idx].info = info
-					}
-					// On error, keep original cached info (shows as broken symlink)
-				}
-			}
-		}()
-	}
-
-	wg.Wait()
 }
 
 // CancelLocalDirectoryRead cancels the current local directory read operation.
