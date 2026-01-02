@@ -300,6 +300,7 @@ func (cfg *APIConfig) Validate() error {
 
 // ValidateForConnection checks only the connection settings (platform_url and api_key).
 // This is useful for validating before API calls, regardless of auto-download settings.
+// v4.0.4: Used by internal/service/multi_daemon.go for diagnostic logging.
 func (cfg *APIConfig) ValidateForConnection() error {
 	if strings.TrimSpace(cfg.PlatformURL) == "" {
 		return ErrMissingPlatformURL
@@ -311,11 +312,14 @@ func (cfg *APIConfig) ValidateForConnection() error {
 }
 
 // IsAutoDownloadEnabled returns true if auto-download is enabled and properly configured.
+// v4.0.4: Used by internal/service/multi_daemon.go to determine if a user daemon should start.
 func (cfg *APIConfig) IsAutoDownloadEnabled() bool {
 	return cfg.AutoDownload.Enabled && cfg.Validate() == nil
 }
 
-// GetScanInterval returns the scan interval as a duration string (e.g., "10m").
+// GetScanIntervalDuration returns the scan interval as a duration string (e.g., "10m").
+// Available for logging/display purposes; use AutoDownload.ScanIntervalMinutes directly
+// when constructing time.Duration values.
 func (cfg *APIConfig) GetScanIntervalDuration() string {
 	return fmt.Sprintf("%dm", cfg.AutoDownload.ScanIntervalMinutes)
 }
