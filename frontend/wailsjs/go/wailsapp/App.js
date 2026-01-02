@@ -6,6 +6,10 @@ export function CancelAllTransfers() {
   return window['go']['wailsapp']['App']['CancelAllTransfers']();
 }
 
+export function CancelLocalDirectoryRead() {
+  return window['go']['wailsapp']['App']['CancelLocalDirectoryRead']();
+}
+
 export function CancelRun() {
   return window['go']['wailsapp']['App']['CancelRun']();
 }
@@ -96,6 +100,10 @@ export function GetTransferTasks() {
 
 export function ListLocalDirectory(arg1) {
   return window['go']['wailsapp']['App']['ListLocalDirectory'](arg1);
+}
+
+export function ListLocalDirectoryEx(arg1, arg2) {
+  return window['go']['wailsapp']['App']['ListLocalDirectoryEx'](arg1, arg2);
 }
 
 export function ListRemoteFolder(arg1) {

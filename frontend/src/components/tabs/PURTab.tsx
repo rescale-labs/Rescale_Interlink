@@ -179,9 +179,7 @@ function JobsTable({ jobs }: { jobs: JobRow[] }) {
             <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
               Upload
             </th>
-            <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
-              Create
-            </th>
+            {/* v4.0.7 L2: Removed unused "Create" column - PUR workflow is Tar→Upload→Submit */}
             <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
               Submit
             </th>
@@ -213,9 +211,7 @@ function JobsTable({ jobs }: { jobs: JobRow[] }) {
                   <StatusBadge status={job.uploadStatus} />
                 )}
               </td>
-              <td className="px-4 py-2 text-center">
-                <StatusBadge status={job.createStatus} />
-              </td>
+              {/* v4.0.7 L2: Removed unused createStatus column */}
               <td className="px-4 py-2 text-center">
                 <StatusBadge status={job.submitStatus} />
               </td>

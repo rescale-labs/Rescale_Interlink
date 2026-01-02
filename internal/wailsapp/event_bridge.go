@@ -41,24 +41,22 @@ func NewEventBridge(ctx context.Context, eventBus *events.EventBus) *EventBridge
 
 // Start begins forwarding events.
 // v4.0.0: Added protection against double-start and nil subscription.
+// v4.0.5: Fixed race condition by holding lock during subscription.
 func (eb *EventBridge) Start() error {
 	eb.mu.Lock()
+	defer eb.mu.Unlock()
+
 	if eb.started {
-		eb.mu.Unlock()
 		wailsLogger.Warn().Msg("Event bridge already started, ignoring duplicate Start()")
 		return nil
 	}
-	eb.started = true
-	eb.mu.Unlock()
 
 	eb.subscription = eb.eventBus.SubscribeAll()
 	if eb.subscription == nil {
-		eb.mu.Lock()
-		eb.started = false
-		eb.mu.Unlock()
 		return fmt.Errorf("event bridge: failed to subscribe to event bus")
 	}
 
+	eb.started = true
 	eb.wg.Add(1)
 	go eb.forwardLoop()
 
@@ -68,6 +66,7 @@ func (eb *EventBridge) Start() error {
 
 // Stop stops forwarding events.
 // v4.0.0: Added protection against double-stop.
+// v4.0.5: Added cleanup of lastProgress map to prevent memory leak.
 func (eb *EventBridge) Stop() {
 	eb.mu.Lock()
 	if !eb.started {
@@ -76,11 +75,14 @@ func (eb *EventBridge) Stop() {
 		return
 	}
 	eb.started = false
+	// v4.0.5: Clear lastProgress map to free memory
+	eb.lastProgress = make(map[string]time.Time)
+	sub := eb.subscription // Capture subscription under lock
 	eb.mu.Unlock()
 
 	close(eb.stopC)
 	eb.wg.Wait()
-	eb.eventBus.UnsubscribeAll(eb.subscription)
+	eb.eventBus.UnsubscribeAll(sub)
 
 	wailsLogger.Debug().Msg("Event bridge stopped")
 }

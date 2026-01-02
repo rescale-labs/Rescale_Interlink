@@ -242,3 +242,29 @@ func (m *Manager) CountByStatus(statusField string, status string) int {
 	}
 	return count
 }
+
+// UpdateUploadProgress updates the upload progress for a job by index.
+// v4.0.6: Added to support real-time upload progress display in GUI.
+// This is a transient update - progress is not persisted to CSV (only status is).
+func (m *Manager) UpdateUploadProgress(index int, progress float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if state, ok := m.states[index]; ok {
+		state.UploadProgress = progress
+	}
+}
+
+// UpdateUploadProgressByName updates the upload progress for a job by name.
+// v4.0.6: Added to support looking up jobs by name when index is not available.
+func (m *Manager) UpdateUploadProgressByName(jobName string, progress float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, state := range m.states {
+		if state.JobName == jobName {
+			state.UploadProgress = progress
+			return
+		}
+	}
+}

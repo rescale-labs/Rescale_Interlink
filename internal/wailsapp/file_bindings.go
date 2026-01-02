@@ -418,7 +418,8 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	ctx := context.Background()
 
 	// Scan remote folder structure using shared CLI function
-	emitLog(events.DebugLevel, "Scanning remote folder structure...")
+	// v4.0.5: Changed to InfoLevel so users see scanning progress (issue #19)
+	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
 	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, folderID, "")
 	if err != nil {
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to scan folder: %s", err.Error()))

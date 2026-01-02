@@ -39,7 +39,10 @@ interface FileListProps {
 }
 
 // Format file size for display
+// v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
 function formatSize(bytes: number): string {
+  // Handle undefined, NaN, or non-finite values
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return '?'
   if (bytes < 0) return '?'
   if (bytes === 0) return '-'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']

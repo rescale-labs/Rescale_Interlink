@@ -66,7 +66,23 @@ func NewServer(handler ServiceHandler, logger *logging.Logger) *Server {
 // Start begins listening for IPC connections.
 func (s *Server) Start() error {
 	// Create named pipe listener with security descriptor
-	// Allow authenticated users to connect
+	//
+	// v4.0.7 H4 SECURITY NOTE:
+	// Current descriptor "D:P(A;;GA;;;AU)" allows ANY authenticated user to connect.
+	// This is intentional because the service manages auto-downloads for multiple users,
+	// and each user's tray app needs to pause/resume their own downloads.
+	//
+	// Security implications:
+	// - User A could theoretically pause/resume User B's downloads via IPC
+	// - For stricter security, implement per-user authorization in handler methods
+	//   by checking the caller's SID against the target userID
+	//
+	// Alternative descriptors (for reference):
+	// - "D:P(A;;GA;;;BA)(A;;GA;;;SY)" - Allow only Administrators and SYSTEM
+	// - "D:P(A;;GA;;;BA)(A;;GA;;;AU)" - Allow Admins full control, Authenticated Users connect
+	//
+	// The current design prioritizes usability over strict isolation. Individual users
+	// can control their own downloads without requiring admin privileges.
 	cfg := &winio.PipeConfig{
 		SecurityDescriptor: "D:P(A;;GA;;;AU)", // DACL: Allow Generic All for Authenticated Users
 		MessageMode:        true,
