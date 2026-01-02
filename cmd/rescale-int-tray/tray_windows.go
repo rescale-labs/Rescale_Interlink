@@ -20,7 +20,7 @@ const (
 	refreshInterval = 5 * time.Second
 
 	// Version displayed in tooltip
-	trayVersion = "4.0.0"
+	trayVersion = "4.0.5"
 )
 
 // trayApp manages the system tray application state.

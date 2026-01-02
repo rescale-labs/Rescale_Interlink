@@ -77,6 +77,17 @@ const (
 	RetryMaxDelay = 15 * time.Second
 )
 
+// Transfer operation timeouts
+const (
+	// PartOperationTimeout - timeout for individual part uploads/downloads (10 minutes)
+	// v4.0.4: Centralized from hardcoded values in S3/Azure providers
+	PartOperationTimeout = 10 * time.Minute
+
+	// ProgressUpdateInterval - how often progress updates are checked/emitted (500ms)
+	// v4.0.4: Centralized from hardcoded values in transfer code
+	ProgressUpdateInterval = 500 * time.Millisecond
+)
+
 // Disk space safety margin
 const (
 	// DiskSpaceBufferPercent - additional space to require beyond file size (15%)
@@ -114,10 +125,6 @@ const (
 	// TableRefreshBatchInterval - interval for batched table updates (1 second)
 	// Used during bulk operations to improve performance
 	TableRefreshBatchInterval = 1 * time.Second
-
-	// ProgressUpdateInterval - interval for progress bar updates (250ms)
-	// Balances responsiveness with performance
-	ProgressUpdateInterval = 250 * time.Millisecond
 )
 
 // Activity Log

@@ -398,8 +398,8 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				blockDataToUpload := job.data
 				currentBlockID := job.blockID
 
-				// Create context with timeout for this specific block (10 minutes)
-				blockCtx, cancel := context.WithTimeout(opCtx, 10*time.Minute)
+				// Create context with timeout for this specific block (v4.0.4: use centralized constant)
+				blockCtx, cancel := context.WithTimeout(opCtx, constants.PartOperationTimeout)
 
 				stageErr := azureClient.RetryWithBackoff(blockCtx, fmt.Sprintf("StageBlock %d/%d", job.blockIndex+1, totalBlocks), func() error {
 					client := azureClient.Client()
