@@ -9,6 +9,7 @@ import (
 	"log"
 	nethttp "net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -939,8 +940,22 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 			id := getStringField(itemData, "id", "file")
 			name := getStringField(itemData, "name", "file")
 			size := int64(0)
-			if s, ok := itemData["decryptedSize"].(float64); ok {
-				size = int64(s)
+			// v4.0.6: Handle multiple JSON number representations for large file sizes
+			// JSON numbers are float64 by default, which can lose precision for files > 2^53 bytes
+			// Also handle string representations and json.Number for robustness
+			if rawSize, ok := itemData["decryptedSize"]; ok {
+				switch v := rawSize.(type) {
+				case float64:
+					size = int64(v)
+				case string:
+					if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+						size = parsed
+					}
+				case json.Number:
+					if parsed, err := v.Int64(); err == nil {
+						size = parsed
+					}
+				}
 			}
 			file := FileInfo{
 				ID:            id,

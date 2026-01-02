@@ -16,7 +16,7 @@
   <!-- Product definition -->
   <Package Name="Rescale Interlink"
            Manufacturer="Rescale, Inc."
-           Version="4.0.3.0"
+           Version="4.0.7.0"
            UpgradeCode="8B7E9C4A-3F2D-4E1A-B5C6-7D8E9F0A1B2C"
            Scope="perMachine"
            Language="1033"
@@ -48,12 +48,15 @@
     </Feature>
 
     <!-- Custom actions -->
+    <!-- v4.0.7 M6: Changed Return from "check" to "ignore" to prevent service install
+         failure from blocking entire application installation. The service is optional
+         and the GUI/CLI work independently without it. -->
     <CustomAction Id="InstallService"
                   Directory="INSTALLFOLDER"
                   ExeCommand="[INSTALLFOLDER]rescale-int.exe service install"
                   Execute="deferred"
                   Impersonate="no"
-                  Return="check" />
+                  Return="ignore" />
 
     <CustomAction Id="UninstallService"
                   Directory="INSTALLFOLDER"

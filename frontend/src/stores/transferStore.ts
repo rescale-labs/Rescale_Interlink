@@ -48,8 +48,10 @@ interface TransferStore {
 }
 
 // Format speed in bytes/sec to human readable
+// v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
 function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec <= 0) return ''
+  // Handle undefined, NaN, or non-finite values
+  if (typeof bytesPerSec !== 'number' || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return ''
   const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']
   const exp = Math.min(Math.floor(Math.log(bytesPerSec) / Math.log(1024)), units.length - 1)
   const speed = bytesPerSec / Math.pow(1024, exp)
@@ -57,8 +59,10 @@ function formatSpeed(bytesPerSec: number): string {
 }
 
 // Format ETA in milliseconds to human readable
+// v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
 function formatETA(etaMs: number): string {
-  if (etaMs <= 0) return ''
+  // Handle undefined, NaN, or non-finite values
+  if (typeof etaMs !== 'number' || !Number.isFinite(etaMs) || etaMs <= 0) return ''
   const seconds = Math.floor(etaMs / 1000)
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)

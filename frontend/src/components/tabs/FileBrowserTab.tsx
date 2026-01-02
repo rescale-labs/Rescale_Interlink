@@ -280,13 +280,22 @@ export function FileBrowserTab() {
     setStatus(`Downloading ${totalItems} item(s)...`)
 
     try {
+      // v4.0.5: Switch to Transfers tab early so users can see Activity log (issue #19)
+      // This shows the scanning progress as log events in the Activity tab
+      if (folders.length > 0) {
+        switchToTab('Transfers')
+      }
+
       // Download folders first using recursive folder download
       for (const folder of folders) {
-        setStatus(`Downloading folder: ${folder.name}...`)
+        // v4.0.5: Show "Scanning" status since that's what happens first (issue #19)
+        setStatus(`Scanning folder: ${folder.name}...`)
         const result = await App.StartFolderDownload(folder.id, folder.name, local.currentPath)
         if (result.error) {
           console.error(`Folder download error for ${folder.name}:`, result.error)
           // Continue with other items
+        } else {
+          setStatus(`Folder '${folder.name}': ${result.filesDownloaded} files queued for download`)
         }
       }
 

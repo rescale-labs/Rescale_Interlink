@@ -13,8 +13,10 @@ import clsx from 'clsx'
 import { useTransferStore, TransferTask } from '../../stores'
 
 // Format file size
+// v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
 function formatSize(bytes: number): string {
-  if (bytes <= 0) return '0 B'
+  // Handle undefined, NaN, or non-finite values
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
   const size = bytes / Math.pow(1024, exp)
