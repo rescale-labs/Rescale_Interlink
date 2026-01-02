@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import {
   FolderIcon,
   DocumentIcon,
@@ -85,10 +85,25 @@ export function SingleJobTab() {
   // v4.0.0 G1: File info cache for displaying sizes
   const [fileInfoMap, setFileInfoMap] = useState<Record<string, FileInfo>>({})
 
+  // v4.0.7 C1: Refs for polling state to avoid stale closure bugs
+  const isPollingRef = useRef(false)
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   // Load memory on mount
   useEffect(() => {
     loadMemory()
   }, [loadMemory])
+
+  // v4.0.7 C1: Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      isPollingRef.current = false
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current)
+        pollTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   // Get current step index
   const getCurrentStep = () => {
@@ -300,7 +315,18 @@ export function SingleJobTab() {
 
   // Remove a single file from the list
   const handleRemoveFile = useCallback((index: number) => {
-    setLocalFiles((prev) => prev.filter((_, i) => i !== index))
+    // v4.0.7 L1: Get path before removal to clean up cache
+    setLocalFiles((prev) => {
+      const pathToRemove = prev[index]
+      // Clean up file info cache entry
+      if (pathToRemove) {
+        setFileInfoMap((infoMap) => {
+          const { [pathToRemove]: _, ...rest } = infoMap
+          return rest
+        })
+      }
+      return prev.filter((_, i) => i !== index)
+    })
   }, [])
 
   // Handle input mode change
@@ -377,20 +403,36 @@ export function SingleJobTab() {
       const runId = await App.StartSingleJob(input)
 
       if (runId) {
-        // Start polling for status
+        // v4.0.7 C1: Start polling with proper ref-based tracking to avoid stale closure
+        isPollingRef.current = true
+
         const pollStatus = async () => {
-          const status = await App.GetRunStatus()
-          if (status.state === 'completed') {
-            setState('completed')
-            const rows = await App.GetJobRows()
-            if (rows && rows.length > 0) {
-              setSubmittedJobId(rows[0].jobId)
+          // Check ref instead of state to avoid stale closure
+          if (!isPollingRef.current) return
+
+          try {
+            const status = await App.GetRunStatus()
+            if (status.state === 'completed') {
+              isPollingRef.current = false
+              // v4.0.7 H2: Get job ID BEFORE state transition to ensure it displays
+              const rows = await App.GetJobRows()
+              if (rows && rows.length > 0) {
+                setSubmittedJobId(rows[0].jobId)
+              }
+              setState('completed')
+            } else if (status.state === 'failed') {
+              isPollingRef.current = false
+              setError('Job submission failed')
+              setState('failed')
+            } else if (isPollingRef.current) {
+              // Continue polling using ref check, not state
+              pollTimeoutRef.current = setTimeout(pollStatus, 1000)
             }
-          } else if (status.state === 'failed') {
+          } catch (pollErr) {
+            // v4.0.7: Handle polling errors gracefully
+            isPollingRef.current = false
+            setError(pollErr instanceof Error ? pollErr.message : String(pollErr))
             setState('failed')
-            setError('Job submission failed')
-          } else if (state === 'executing') {
-            setTimeout(pollStatus, 1000)
           }
         }
         pollStatus()
@@ -399,10 +441,16 @@ export function SingleJobTab() {
       setError(err instanceof Error ? err.message : String(err))
       setState('failed')
     }
-  }, [job, inputMode, directory, localFiles, remoteFileIds, isInputsValid, state])
+  }, [job, inputMode, directory, localFiles, remoteFileIds, isInputsValid])
 
   // Handle cancel
   const handleCancel = useCallback(async () => {
+    // v4.0.7 C1: Stop polling immediately on cancel
+    isPollingRef.current = false
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current)
+      pollTimeoutRef.current = null
+    }
     try {
       await App.CancelRun()
       setState('failed')
@@ -414,6 +462,12 @@ export function SingleJobTab() {
 
   // Handle start over
   const handleStartOver = useCallback(() => {
+    // v4.0.7 C1: Stop any active polling
+    isPollingRef.current = false
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current)
+      pollTimeoutRef.current = null
+    }
     setState('initial')
     setJob({ ...DEFAULT_JOB_TEMPLATE })
     setInputMode('directory')

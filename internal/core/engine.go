@@ -918,6 +918,12 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 	pip.SetStateChangeCallback(func(jobName, stage, newStatus, jobID, errorMessage string, uploadProgress float64) {
 		e.publishLog(events.DebugLevel, fmt.Sprintf("[DEBUG] StateChangeCallback: job=%s, stage=%s, status=%s, progress=%.2f",
 			jobName, stage, newStatus, uploadProgress), "engine", "")
+
+		// v4.0.6: Update state manager with upload progress for GetJobRows to return
+		if stage == "upload" && uploadProgress > 0 {
+			e.state.UpdateUploadProgressByName(jobName, uploadProgress)
+		}
+
 		e.eventBus.Publish(&events.StateChangeEvent{
 			BaseEvent: events.BaseEvent{
 				EventType: events.EventStateChange,
@@ -1054,6 +1060,12 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 	pip.SetStateChangeCallback(func(jobName, stage, newStatus, jobID, errorMessage string, uploadProgress float64) {
 		e.publishLog(events.DebugLevel, fmt.Sprintf("[DEBUG] StateChangeCallback: job=%s, stage=%s, status=%s, progress=%.2f",
 			jobName, stage, newStatus, uploadProgress), "engine", "")
+
+		// v4.0.6: Update state manager with upload progress for GetJobRows to return
+		if stage == "upload" && uploadProgress > 0 {
+			e.state.UpdateUploadProgressByName(jobName, uploadProgress)
+		}
+
 		e.eventBus.Publish(&events.StateChangeEvent{
 			BaseEvent: events.BaseEvent{
 				EventType: events.EventStateChange,

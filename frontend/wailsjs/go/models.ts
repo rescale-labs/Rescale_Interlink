@@ -56,6 +56,38 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	export class AnalysisCodesResultDTO {
+	    codes: AnalysisCodeDTO[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AnalysisCodesResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.codes = this.convertValues(source["codes"], AnalysisCodeDTO);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	
 	export class AppInfoDTO {
 	    version: string;
@@ -137,6 +169,38 @@ export namespace wailsapp {
 	        this.scriptName = source["scriptName"];
 	    }
 	}
+	export class AutomationsResultDTO {
+	    automations: AutomationDTO[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AutomationsResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.automations = this.convertValues(source["automations"], AutomationDTO);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ConfigDTO {
 	    apiBaseUrl: string;
 	    tenantUrl: string;
@@ -209,6 +273,38 @@ export namespace wailsapp {
 	        this.cores = source["cores"];
 	    }
 	}
+	export class CoreTypesResultDTO {
+	    coreTypes: CoreTypeDTO[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CoreTypesResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.coreTypes = this.convertValues(source["coreTypes"], CoreTypeDTO);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class DeleteResultDTO {
 	    deleted: number;
 	    failed: number;
@@ -255,6 +351,8 @@ export namespace wailsapp {
 	    items: FileItemDTO[];
 	    hasMore: boolean;
 	    nextCursor?: string;
+	    isSlowPath?: boolean;
+	    warning?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new FolderContentsDTO(source);
@@ -267,6 +365,8 @@ export namespace wailsapp {
 	        this.items = this.convertValues(source["items"], FileItemDTO);
 	        this.hasMore = source["hasMore"];
 	        this.nextCursor = source["nextCursor"];
+	        this.isSlowPath = source["isSlowPath"];
+	        this.warning = source["warning"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

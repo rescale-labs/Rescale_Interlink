@@ -27,18 +27,19 @@ type JobSpec struct {
 
 // JobState represents the state of a job in the pipeline
 type JobState struct {
-	Index        int
-	JobName      string
-	Directory    string
-	TarPath      string
-	TarStatus    string // "pending", "success", "failed"
-	FileID       string
-	UploadStatus string // "pending", "success", "failed"
-	JobID        string
-	SubmitStatus string // "pending", "success", "failed", "skipped"
-	ExtraFileIDs string
-	ErrorMessage string
-	LastUpdated  time.Time
+	Index          int
+	JobName        string
+	Directory      string
+	TarPath        string
+	TarStatus      string // "pending", "success", "failed"
+	FileID         string
+	UploadStatus   string  // "pending", "success", "failed"
+	UploadProgress float64 // v4.0.6: 0.0-100.0 upload percentage (transient, not persisted)
+	JobID          string
+	SubmitStatus   string // "pending", "success", "failed", "skipped"
+	ExtraFileIDs   string
+	ErrorMessage   string
+	LastUpdated    time.Time
 }
 
 // JobRequest represents a Rescale API v3 job creation request
