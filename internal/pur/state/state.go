@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -126,25 +127,31 @@ func (m *Manager) saveUnlocked() error {
 	}
 
 	// Write data rows (sorted by index)
-	for i := 1; i <= len(m.states); i++ {
-		if state, ok := m.states[i]; ok {
-			record := []string{
-				fmt.Sprintf("%d", state.Index),
-				state.JobName,
-				state.Directory,
-				state.TarPath,
-				state.TarStatus,
-				state.FileID,
-				state.UploadStatus,
-				state.JobID,
-				state.SubmitStatus,
-				state.ExtraFileIDs,
-				state.ErrorMessage,
-				state.LastUpdated.Format(time.RFC3339),
-			}
-			if err := writer.Write(record); err != nil {
-				return fmt.Errorf("failed to write state record: %w", err)
-			}
+	// v4.0.8: Iterate over map keys properly to handle non-consecutive indices
+	indices := make([]int, 0, len(m.states))
+	for idx := range m.states {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+
+	for _, idx := range indices {
+		state := m.states[idx]
+		record := []string{
+			fmt.Sprintf("%d", state.Index),
+			state.JobName,
+			state.Directory,
+			state.TarPath,
+			state.TarStatus,
+			state.FileID,
+			state.UploadStatus,
+			state.JobID,
+			state.SubmitStatus,
+			state.ExtraFileIDs,
+			state.ErrorMessage,
+			state.LastUpdated.Format(time.RFC3339),
+		}
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("failed to write state record: %w", err)
 		}
 	}
 
@@ -205,15 +212,21 @@ func (m *Manager) InitializeState(index int, jobName, directory string) *models.
 }
 
 // GetAllStates returns all job states
+// v4.0.8: Fixed iteration to handle non-consecutive indices
 func (m *Manager) GetAllStates() []*models.JobState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// Collect and sort indices for deterministic ordering
+	indices := make([]int, 0, len(m.states))
+	for idx := range m.states {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+
 	states := make([]*models.JobState, 0, len(m.states))
-	for i := 1; i <= len(m.states); i++ {
-		if state, ok := m.states[i]; ok {
-			states = append(states, state)
-		}
+	for _, idx := range indices {
+		states = append(states, m.states[idx])
 	}
 	return states
 }

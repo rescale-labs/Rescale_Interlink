@@ -11,10 +11,32 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
+	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/parser"
 )
+
+// emitScanProgress publishes a scan progress event for software/hardware catalog scanning.
+// v4.0.8: Added to provide feedback during potentially long API scans.
+func (a *App) emitScanProgress(scanType string, page int, itemsFound int, isComplete bool, isCached bool, errMsg string) {
+	if a.engine == nil || a.engine.Events() == nil {
+		return
+	}
+	a.engine.Events().Publish(&events.ScanProgressEvent{
+		BaseEvent: events.BaseEvent{
+			EventType: events.EventScanProgress,
+			Time:      time.Now(),
+		},
+		ScanType:   scanType,
+		Page:       page,
+		ItemsFound: itemsFound,
+		IsComplete: isComplete,
+		IsCached:   isCached,
+		Error:      errMsg,
+	})
+}
 
 // JobSpecDTO is the JSON-safe version of models.JobSpec.
 type JobSpecDTO struct {
@@ -36,6 +58,17 @@ type JobSpecDTO struct {
 	Tags                  []string `json:"tags"`
 	ProjectID             string   `json:"projectId"`
 	Automations           []string `json:"automations"`
+
+	// v4.0.8: File-based job inputs (for file scanning mode)
+	// When InputFiles is non-empty, these files are uploaded instead of tarring Directory
+	InputFiles []string `json:"inputFiles,omitempty"`
+}
+
+// SecondaryPatternDTO represents a secondary file pattern for file-based scanning.
+// v4.0.8: Added for PUR file scanning mode.
+type SecondaryPatternDTO struct {
+	Pattern  string `json:"pattern"`  // Glob pattern, may include subpath (e.g., "*.mesh", "../meshes/*.cfg")
+	Required bool   `json:"required"` // If true, skip job when file missing; if false, warn and continue
 }
 
 // ScanOptionsDTO is the JSON-safe version of core.ScanOptions.
@@ -46,6 +79,11 @@ type ScanOptionsDTO struct {
 	RunSubpath        string `json:"runSubpath"`
 	Recursive         bool   `json:"recursive"`
 	IncludeHidden     bool   `json:"includeHidden"`
+
+	// v4.0.8: File scanning mode fields
+	ScanMode          string                `json:"scanMode"`          // "folders" (default) or "files"
+	PrimaryPattern    string                `json:"primaryPattern"`    // For file mode: e.g., "*.inp", "inputs/*.inp"
+	SecondaryPatterns []SecondaryPatternDTO `json:"secondaryPatterns"` // For file mode: secondary files to attach
 }
 
 // ScanResultDTO is the result of a directory scan.
@@ -55,6 +93,10 @@ type ScanResultDTO struct {
 	MatchCount  int          `json:"matchCount"`
 	InvalidDirs []string     `json:"invalidDirs"`
 	Error       string       `json:"error,omitempty"`
+
+	// v4.0.8: File scanning mode results
+	SkippedFiles []string `json:"skippedFiles,omitempty"` // Primary files skipped due to missing required secondaries
+	Warnings     []string `json:"warnings,omitempty"`     // Warnings for missing optional secondaries
 }
 
 // CoreTypeDTO represents a hardware core type.
@@ -150,7 +192,8 @@ type SingleJobInputDTO struct {
 // v4.0.0: Removed runState package variable. Run state is now managed by Engine.
 // See core.RunContext for run metadata and state.Manager for job state.
 
-// ScanDirectory scans a directory for matching subdirectories.
+// ScanDirectory scans a directory for matching subdirectories or files.
+// v4.0.8: Added file scanning mode with secondary file support.
 func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResultDTO {
 	if a.engine == nil {
 		return ScanResultDTO{Error: ErrNoEngine.Error()}
@@ -165,7 +208,12 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: fmt.Sprintf("directory does not exist: %s", opts.RootDir)}
 	}
 
-	// Convert DTO to internal types
+	// v4.0.8: Handle file scanning mode
+	if opts.ScanMode == "files" {
+		return a.scanFilesMode(opts, template)
+	}
+
+	// Default: folder scanning mode
 	scanOpts := core.ScanOptions{
 		Pattern:           opts.Pattern,
 		ValidationPattern: opts.ValidationPattern,
@@ -195,19 +243,158 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 	}
 }
 
+// scanFilesMode handles file-based scanning for PUR.
+// v4.0.8: New function to scan for primary files and attach secondary files.
+func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResultDTO {
+	if opts.PrimaryPattern == "" {
+		return ScanResultDTO{Error: "primary file pattern is required for file scanning mode"}
+	}
+
+	// Build the glob pattern
+	pattern := filepath.Join(opts.RootDir, opts.PrimaryPattern)
+
+	// Find all primary files matching the pattern
+	primaryFiles, err := filepath.Glob(pattern)
+	if err != nil {
+		return ScanResultDTO{Error: fmt.Sprintf("invalid primary pattern: %v", err)}
+	}
+
+	if len(primaryFiles) == 0 {
+		return ScanResultDTO{
+			Error: fmt.Sprintf("no files found matching pattern: %s", opts.PrimaryPattern),
+		}
+	}
+
+	var jobs []JobSpecDTO
+	var skippedFiles []string
+	var warnings []string
+	jobIndex := 1
+
+	for _, primaryFile := range primaryFiles {
+		primaryDir := filepath.Dir(primaryFile)
+		primaryBase := strings.TrimSuffix(filepath.Base(primaryFile), filepath.Ext(primaryFile))
+
+		// Collect all input files for this job
+		inputFiles := []string{primaryFile}
+		skipJob := false
+
+		// Process secondary patterns
+		for _, secPattern := range opts.SecondaryPatterns {
+			secondaryFiles, warning, skipReason := a.resolveSecondaryPattern(
+				primaryDir, primaryBase, primaryFile, secPattern,
+			)
+
+			if skipReason != "" {
+				skippedFiles = append(skippedFiles, fmt.Sprintf("%s: %s", filepath.Base(primaryFile), skipReason))
+				skipJob = true
+				break
+			}
+
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+
+			inputFiles = append(inputFiles, secondaryFiles...)
+		}
+
+		if skipJob {
+			continue
+		}
+
+		// Create job spec from template
+		job := template
+		job.InputFiles = inputFiles
+
+		// Generate job name
+		if template.JobName != "" {
+			job.JobName = fmt.Sprintf("%s_%d", template.JobName, jobIndex)
+		} else {
+			job.JobName = fmt.Sprintf("Job_%d", jobIndex)
+		}
+
+		// Set directory to primary file's directory (for reference)
+		job.Directory = primaryDir
+
+		jobs = append(jobs, job)
+		jobIndex++
+	}
+
+	return ScanResultDTO{
+		Jobs:         jobs,
+		TotalCount:   len(primaryFiles),
+		MatchCount:   len(jobs),
+		SkippedFiles: skippedFiles,
+		Warnings:     warnings,
+	}
+}
+
+// resolveSecondaryPattern resolves a secondary file pattern relative to the primary file.
+// Returns: (matched files, warning message, skip reason)
+// If skip reason is non-empty, the job should be skipped.
+func (a *App) resolveSecondaryPattern(
+	primaryDir, primaryBase, primaryFile string,
+	pattern SecondaryPatternDTO,
+) ([]string, string, string) {
+	// Determine if pattern is a wildcard or literal
+	hasWildcard := strings.Contains(pattern.Pattern, "*")
+
+	var resolvedPattern string
+	if hasWildcard {
+		// Replace * with primary file's base name
+		resolvedPattern = strings.ReplaceAll(pattern.Pattern, "*", primaryBase)
+	} else {
+		// Literal pattern - use as-is
+		resolvedPattern = pattern.Pattern
+	}
+
+	// Resolve path relative to primary file's directory
+	fullPath := filepath.Join(primaryDir, resolvedPattern)
+
+	// Clean the path (handles ../ etc.)
+	fullPath = filepath.Clean(fullPath)
+
+	// Check if file exists
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		if pattern.Required {
+			return nil, "", fmt.Sprintf("required secondary file not found: %s", resolvedPattern)
+		}
+		// Optional file missing - warn and continue
+		return nil, fmt.Sprintf("%s: optional file not found: %s", filepath.Base(primaryFile), resolvedPattern), ""
+	}
+
+	return []string{fullPath}, "", ""
+}
+
 // GetCoreTypes returns available hardware core types.
 // v4.0.6: Changed to return CoreTypesResultDTO with error propagation.
+// v4.0.8: Added caching and scan progress events for better UX during slow scans.
 func (a *App) GetCoreTypes() CoreTypesResultDTO {
 	if a.engine == nil || a.engine.API() == nil {
 		return CoreTypesResultDTO{Error: "engine not initialized"}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// v4.0.8: Check cache first
+	a.catalogCacheMu.RLock()
+	if len(a.cachedCoreTypes) > 0 {
+		cached := a.cachedCoreTypes
+		a.catalogCacheMu.RUnlock()
+		// Emit cached completion event
+		a.emitScanProgress("hardware", 0, len(cached), true, true, "")
+		return CoreTypesResultDTO{CoreTypes: cached}
+	}
+	a.catalogCacheMu.RUnlock()
+
+	// Emit scan start event
+	a.emitScanProgress("hardware", 0, 0, false, false, "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), constants.PaginatedAPITimeout)
 	defer cancel()
 
 	coreTypes, err := a.engine.API().GetCoreTypes(ctx, true)
 	if err != nil {
-		return CoreTypesResultDTO{Error: fmt.Sprintf("failed to fetch core types: %v", err)}
+		errMsg := fmt.Sprintf("failed to fetch core types: %v", err)
+		a.emitScanProgress("hardware", 0, 0, true, false, errMsg)
+		return CoreTypesResultDTO{Error: errMsg}
 	}
 
 	dtos := make([]CoreTypeDTO, len(coreTypes))
@@ -220,67 +407,116 @@ func (a *App) GetCoreTypes() CoreTypesResultDTO {
 			Cores:        ct.Cores,
 		}
 	}
+
+	// v4.0.8: Cache results
+	a.catalogCacheMu.Lock()
+	a.cachedCoreTypes = dtos
+	a.catalogCacheMu.Unlock()
+
+	// Emit scan complete event
+	a.emitScanProgress("hardware", 0, len(dtos), true, false, "")
+
 	return CoreTypesResultDTO{CoreTypes: dtos}
 }
 
 // GetAnalysisCodes returns available software analysis codes.
 // v4.0.6: Changed to return AnalysisCodesResultDTO with error propagation.
+// v4.0.8: Added caching and scan progress events for better UX during slow scans.
 func (a *App) GetAnalysisCodes(search string) AnalysisCodesResultDTO {
 	if a.engine == nil {
 		return AnalysisCodesResultDTO{Error: "engine not initialized"}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// v4.0.8: Check cache first (only if no search filter)
+	// When search is empty, we can use the full cached list
+	a.catalogCacheMu.RLock()
+	hasCached := len(a.cachedAnalyses) > 0
+	cached := a.cachedAnalyses
+	a.catalogCacheMu.RUnlock()
+
+	if hasCached {
+		// Filter from cache
+		dtos := filterAnalysisCodes(cached, search)
+		// Emit cached completion event
+		a.emitScanProgress("software", 0, len(cached), true, true, "")
+		return AnalysisCodesResultDTO{Codes: dtos}
+	}
+
+	// Emit scan start event
+	a.emitScanProgress("software", 0, 0, false, false, "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), constants.PaginatedAPITimeout)
 	defer cancel()
 
 	analyses, err := a.engine.GetAnalyses(ctx)
 	if err != nil {
-		return AnalysisCodesResultDTO{Error: fmt.Sprintf("failed to fetch analysis codes: %v", err)}
+		errMsg := fmt.Sprintf("failed to fetch analysis codes: %v", err)
+		a.emitScanProgress("software", 0, 0, true, false, errMsg)
+		return AnalysisCodesResultDTO{Error: errMsg}
 	}
 
-	dtos := make([]AnalysisCodeDTO, 0, len(analyses))
-	searchLower := strings.ToLower(search)
-
-	for _, an := range analyses {
-		// Filter by search string if provided
-		if search != "" {
-			nameLower := strings.ToLower(an.Name)
-			codeLower := strings.ToLower(an.Code)
-			if !strings.Contains(nameLower, searchLower) && !strings.Contains(codeLower, searchLower) {
-				continue
-			}
-		}
-
+	// Convert all analyses to DTOs for caching
+	allDtos := make([]AnalysisCodeDTO, len(analyses))
+	for i, an := range analyses {
 		// Convert versions
 		versions := make([]AnalysisVersionDTO, len(an.Versions))
-		for i, v := range an.Versions {
-			versions[i] = AnalysisVersionDTO{
+		for j, v := range an.Versions {
+			versions[j] = AnalysisVersionDTO{
 				ID:               v.ID,
 				Version:          v.Version,
 				VersionCode:      v.VersionCode,
 				AllowedCoreTypes: v.AllowedCoreTypes,
 			}
 		}
-
-		dtos = append(dtos, AnalysisCodeDTO{
+		allDtos[i] = AnalysisCodeDTO{
 			Code:        an.Code,
 			Name:        an.Name,
 			Description: an.Description,
 			VendorName:  an.VendorName,
 			Versions:    versions,
-		})
+		}
 	}
-	return AnalysisCodesResultDTO{Codes: dtos}
+
+	// v4.0.8: Cache results
+	a.catalogCacheMu.Lock()
+	a.cachedAnalyses = allDtos
+	a.catalogCacheMu.Unlock()
+
+	// Emit scan complete event
+	a.emitScanProgress("software", 0, len(allDtos), true, false, "")
+
+	// Apply search filter if provided
+	return AnalysisCodesResultDTO{Codes: filterAnalysisCodes(allDtos, search)}
+}
+
+// filterAnalysisCodes filters analysis codes by search string.
+func filterAnalysisCodes(codes []AnalysisCodeDTO, search string) []AnalysisCodeDTO {
+	if search == "" {
+		return codes
+	}
+
+	searchLower := strings.ToLower(search)
+	filtered := make([]AnalysisCodeDTO, 0, len(codes))
+
+	for _, an := range codes {
+		nameLower := strings.ToLower(an.Name)
+		codeLower := strings.ToLower(an.Code)
+		if strings.Contains(nameLower, searchLower) || strings.Contains(codeLower, searchLower) {
+			filtered = append(filtered, an)
+		}
+	}
+	return filtered
 }
 
 // GetAutomations returns available automations.
 // v4.0.6: Changed to return AutomationsResultDTO with error propagation.
+// v4.0.8: Increased timeout to handle paginated API calls with rate limiting.
 func (a *App) GetAutomations() AutomationsResultDTO {
 	if a.engine == nil || a.engine.API() == nil {
 		return AutomationsResultDTO{Error: "engine not initialized"}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), constants.PaginatedAPITimeout)
 	defer cancel()
 
 	automations, err := a.engine.API().ListAutomations(ctx)
@@ -355,6 +591,7 @@ func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 
 // StartSingleJob starts a single job submission.
 // v4.0.0: Refactored to use Engine's run context for state synchronization.
+// v4.0.8: Added directory existence check to fail early with clear error.
 func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	if a.engine == nil {
 		return "", ErrNoEngine
@@ -365,6 +602,10 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	case "directory":
 		if input.Directory == "" {
 			return "", fmt.Errorf("directory is required for directory input mode")
+		}
+		// v4.0.8: Verify directory exists before starting job
+		if _, err := os.Stat(input.Directory); os.IsNotExist(err) {
+			return "", fmt.Errorf("directory does not exist: %s", input.Directory)
 		}
 	case "localFiles":
 		if len(input.LocalFiles) == 0 {
@@ -547,6 +788,7 @@ func (a *App) ResetRun() {
 }
 
 // ValidateJobSpec validates a job specification.
+// v4.0.8: Added Slots validation (was missing, caused runtime failures).
 func (a *App) ValidateJobSpec(job JobSpecDTO) []string {
 	var errors []string
 
@@ -564,6 +806,9 @@ func (a *App) ValidateJobSpec(job JobSpecDTO) []string {
 	}
 	if job.CoresPerSlot <= 0 {
 		errors = append(errors, "Cores per slot must be positive")
+	}
+	if job.Slots <= 0 {
+		errors = append(errors, "Slots must be positive")
 	}
 	if job.WalltimeHours <= 0 {
 		errors = append(errors, "Walltime must be positive")
@@ -595,6 +840,7 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
 		Automations:           j.Automations,
+		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
 	}
 }
 
@@ -619,6 +865,7 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
 		Automations:           j.Automations,
+		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
 	}
 }
 

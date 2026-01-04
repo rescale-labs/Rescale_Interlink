@@ -250,12 +250,14 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return selectedAnalysis.versions.map((v) => v.version || v.versionCode)
   }, [selectedAnalysis])
 
-  const coresPerSlotOptions = useMemo(() => {
+  // v4.0.8: Calculate base unit for cores (max cores per node for selected hardware)
+  // Users can enter multiples of this value (64, 128, 192, etc.)
+  const coresBaseUnit = useMemo(() => {
     const ct = coreTypes.find((c) => c.code === template.coreType)
     if (ct && ct.cores.length > 0) {
-      return ct.cores.map(String)
+      return Math.max(...ct.cores)
     }
-    return ['1', '2', '4', '8', '16', '32', '64', '128']
+    return 64 // Default to 64 if no core type selected
   }, [coreTypes, template.coreType])
 
   // Handle analysis code change
@@ -278,10 +280,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   )
 
   // Handle core type change
+  // v4.0.8: Default to max cores (full node) instead of minimum
   const handleCoreTypeChange = useCallback(
     (coreType: string) => {
       const ct = coreTypes.find((c) => c.code === coreType)
-      const defaultCores = ct?.cores[0] || 4
+      // Default to max cores (base unit for multiples)
+      const defaultCores = ct && ct.cores.length > 0 ? Math.max(...ct.cores) : 64
 
       setTemplate((t) => ({
         ...t,
@@ -297,7 +301,22 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     setTemplate((t) => ({ ...t, [key]: value }))
   }, [])
 
+  // v4.0.8: Validate and round cores to nearest valid multiple
+  const handleCoresChange = useCallback(
+    (value: number) => {
+      if (value <= 0) {
+        updateField('coresPerSlot', coresBaseUnit)
+        return
+      }
+      // Round to nearest multiple of baseUnit
+      const rounded = Math.max(coresBaseUnit, Math.round(value / coresBaseUnit) * coresBaseUnit)
+      updateField('coresPerSlot', rounded)
+    },
+    [coresBaseUnit, updateField]
+  )
+
   // Validate template
+  // v4.0.8: Added coresBaseUnit validation
   const validate = useCallback((): string[] => {
     const errs: string[] = []
 
@@ -314,14 +333,16 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
       errs.push('Command is required')
     }
     if (template.coresPerSlot <= 0) {
-      errs.push('Cores per slot must be positive')
+      errs.push('Cores must be positive')
+    } else if (template.coresPerSlot % coresBaseUnit !== 0) {
+      errs.push(`Cores must be a multiple of ${coresBaseUnit}`)
     }
     if (template.walltimeHours <= 0) {
       errs.push('Walltime must be positive')
     }
 
     return errs
-  }, [template])
+  }, [template, coresBaseUnit])
 
   // Handle save
   const handleSave = useCallback(() => {
@@ -462,6 +483,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     {isLoadingAnalysisCodes ? 'Scanning...' : 'Scan Software'}
                   </button>
                 </div>
+                {/* v4.0.8: Show hint that first scan may take a while */}
+                {isLoadingAnalysisCodes && analysisCodes.length === 0 && (
+                  <p className="mb-1 text-xs text-gray-500 italic">
+                    First scan may take up to a minute...
+                  </p>
+                )}
                 <SearchableSelect
                   options={analysisOptions}
                   value={
@@ -519,6 +546,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     {isLoadingCoreTypes ? 'Scanning...' : 'Scan Coretypes'}
                   </button>
                 </div>
+                {/* v4.0.8: Show hint that first scan may take a while */}
+                {isLoadingCoreTypes && coreTypes.length === 0 && (
+                  <p className="mb-1 text-xs text-gray-500 italic">
+                    First scan may take up to a minute...
+                  </p>
+                )}
                 <SearchableSelect
                   options={coreTypeOptions}
                   value={template.coreType}
@@ -532,27 +565,30 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Cores Per Slot</label>
-                <select
-                  value={template.coresPerSlot}
-                  onChange={(e) => updateField('coresPerSlot', Number(e.target.value))}
-                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {coresPerSlotOptions.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+                <label className="block text-sm font-medium mb-1">Cores</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min={coresBaseUnit}
+                    step={coresBaseUnit}
+                    value={template.coresPerSlot}
+                    onChange={(e) => handleCoresChange(Number(e.target.value))}
+                    onBlur={(e) => handleCoresChange(Number(e.target.value))}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Multiples of {coresBaseUnit} ({coresBaseUnit}, {coresBaseUnit * 2}, {coresBaseUnit * 3}...)
+                  </p>
+                </div>
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Walltime (hours)</label>
                 <input
                   type="number"
-                  step="0.1"
-                  min="0.1"
-                  value={template.walltimeHours}
-                  onChange={(e) => updateField('walltimeHours', Number(e.target.value))}
+                  step="1"
+                  min="1"
+                  value={Math.round(template.walltimeHours)}
+                  onChange={(e) => updateField('walltimeHours', Math.max(1, Math.round(Number(e.target.value))))}
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>

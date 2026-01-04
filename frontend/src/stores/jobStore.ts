@@ -98,6 +98,12 @@ export interface Automation {
   scriptName: string
 }
 
+// Secondary pattern for file scanning mode (v4.0.8)
+export interface SecondaryPattern {
+  pattern: string   // Glob pattern, may include subpath (e.g., "*.mesh", "../meshes/*.cfg")
+  required: boolean // If true, skip job when file missing; if false, warn and continue
+}
+
 // Scan options
 export interface ScanOptions {
   rootDir: string
@@ -106,6 +112,11 @@ export interface ScanOptions {
   runSubpath: string
   recursive: boolean
   includeHidden: boolean
+
+  // v4.0.8: File scanning mode fields
+  scanMode: 'folders' | 'files'
+  primaryPattern: string           // For file mode: e.g., "*.inp", "inputs/*.inp"
+  secondaryPatterns: SecondaryPattern[]
 }
 
 // Default job template
@@ -295,6 +306,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
     runSubpath: '',
     recursive: false,
     includeHidden: false,
+    // v4.0.8: File scanning mode defaults
+    scanMode: 'folders' as const,
+    primaryPattern: '*.inp',
+    secondaryPatterns: [],
   },
   isScanning: false,
   scanError: null,
@@ -426,6 +441,12 @@ export const useJobStore = create<JobStore>((set, get) => ({
     set({ isScanning: true, scanError: null })
 
     try {
+      // v4.0.8: Convert secondary patterns to DTO format
+      const secondaryPatternsDTO = scanOptions.secondaryPatterns.map((sp) => ({
+        pattern: sp.pattern,
+        required: sp.required,
+      }))
+
       const result = await App.ScanDirectory(
         {
           rootDir: scanOptions.rootDir,
@@ -434,6 +455,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
           runSubpath: scanOptions.runSubpath,
           recursive: scanOptions.recursive,
           includeHidden: scanOptions.includeHidden,
+          // v4.0.8: File scanning mode fields
+          scanMode: scanOptions.scanMode,
+          primaryPattern: scanOptions.primaryPattern,
+          secondaryPatterns: secondaryPatternsDTO,
         } as wailsapp.ScanOptionsDTO,
         template as wailsapp.JobSpecDTO
       )

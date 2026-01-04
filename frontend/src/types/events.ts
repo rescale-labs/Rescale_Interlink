@@ -58,6 +58,30 @@ export interface TransferEventDTO {
   error?: string;
 }
 
+// v4.0.8: Enumeration event for folder scan progress
+export interface EnumerationEventDTO {
+  timestamp: string;
+  id: string;
+  folderName: string;
+  direction: 'upload' | 'download';
+  foldersFound: number;
+  filesFound: number;
+  bytesFound: number;
+  isComplete: boolean;
+  error?: string;
+}
+
+// v4.0.8: Scan progress event for software/hardware catalog scanning
+export interface ScanProgressEventDTO {
+  timestamp: string;
+  scanType: 'software' | 'hardware';
+  page: number;
+  itemsFound: number;
+  isComplete: boolean;
+  isCached: boolean;
+  error?: string;
+}
+
 export interface ConnectionResultDTO {
   success: boolean;
   email?: string;
@@ -76,6 +100,8 @@ export const EVENT_NAMES = {
   COMPLETE: 'interlink:complete',
   CONNECTION_RESULT: 'interlink:connection_result',
   TRANSFER: 'interlink:transfer',
+  ENUMERATION: 'interlink:enumeration', // v4.0.8: folder scan progress
+  SCAN_PROGRESS: 'interlink:scan_progress', // v4.0.8: software/hardware catalog scan
 } as const;
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';

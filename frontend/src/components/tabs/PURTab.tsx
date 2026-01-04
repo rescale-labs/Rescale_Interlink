@@ -532,7 +532,35 @@ export function PURTab() {
     if (workflowState === 'templateReady') {
       return (
         <div className="p-6">
-          <h3 className="text-lg font-semibold mb-4">Scan for Job Directories</h3>
+          <h3 className="text-lg font-semibold mb-4">Scan for Jobs</h3>
+
+          {/* v4.0.8: Scan Mode Toggle */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium mb-2">Scan Mode</label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="scanMode"
+                  checked={scanOptions.scanMode === 'folders'}
+                  onChange={() => setScanOptions({ scanMode: 'folders' })}
+                  className="w-4 h-4 text-blue-500"
+                />
+                <span className="text-sm">Folders (each folder = 1 job)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="scanMode"
+                  checked={scanOptions.scanMode === 'files'}
+                  onChange={() => setScanOptions({ scanMode: 'files' })}
+                  className="w-4 h-4 text-blue-500"
+                />
+                <span className="text-sm">Files (each file = 1 job)</span>
+              </label>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-6 mb-6">
             <div>
               <label className="block text-sm font-medium mb-1">Root Directory</label>
@@ -552,41 +580,126 @@ export function PURTab() {
                 </button>
               </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Pattern</label>
-              <input
-                type="text"
-                value={scanOptions.pattern}
-                onChange={(e) => setScanOptions({ pattern: e.target.value })}
-                placeholder="Run_*"
-                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Validation Pattern (optional)
-              </label>
-              <input
-                type="text"
-                value={scanOptions.validationPattern}
-                onChange={(e) => setScanOptions({ validationPattern: e.target.value })}
-                placeholder="*.fnc"
-                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Run Subpath (optional)
-              </label>
-              <input
-                type="text"
-                value={scanOptions.runSubpath}
-                onChange={(e) => setScanOptions({ runSubpath: e.target.value })}
-                placeholder="Simcodes/Powerflow"
-                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
+
+            {/* Folder mode: Pattern field */}
+            {scanOptions.scanMode === 'folders' && (
+              <div>
+                <label className="block text-sm font-medium mb-1">Folder Pattern</label>
+                <input
+                  type="text"
+                  value={scanOptions.pattern}
+                  onChange={(e) => setScanOptions({ pattern: e.target.value })}
+                  placeholder="Run_*"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            )}
+
+            {/* File mode: Primary Pattern field */}
+            {scanOptions.scanMode === 'files' && (
+              <div>
+                <label className="block text-sm font-medium mb-1">Primary File Pattern</label>
+                <input
+                  type="text"
+                  value={scanOptions.primaryPattern}
+                  onChange={(e) => setScanOptions({ primaryPattern: e.target.value })}
+                  placeholder="*.inp"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">Each matching file creates one job</p>
+              </div>
+            )}
+
+            {/* Folder mode only: Validation Pattern and Run Subpath */}
+            {scanOptions.scanMode === 'folders' && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium mb-1">
+                    Validation Pattern (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={scanOptions.validationPattern}
+                    onChange={(e) => setScanOptions({ validationPattern: e.target.value })}
+                    placeholder="*.fnc"
+                    className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">
+                    Run Subpath (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={scanOptions.runSubpath}
+                    onChange={(e) => setScanOptions({ runSubpath: e.target.value })}
+                    placeholder="Simcodes/Powerflow"
+                    className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </>
+            )}
           </div>
+
+          {/* v4.0.8: Secondary Patterns (File mode only) */}
+          {scanOptions.scanMode === 'files' && (
+            <div className="mb-6">
+              <label className="block text-sm font-medium mb-2">
+                Secondary File Patterns (attached to each job)
+              </label>
+              <div className="space-y-2">
+                {scanOptions.secondaryPatterns.map((sp, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={sp.pattern}
+                      onChange={(e) => {
+                        const updated = [...scanOptions.secondaryPatterns]
+                        updated[index] = { ...updated[index], pattern: e.target.value }
+                        setScanOptions({ secondaryPatterns: updated })
+                      }}
+                      placeholder="*.mesh or ../meshes/*.cfg"
+                      className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <select
+                      value={sp.required ? 'required' : 'optional'}
+                      onChange={(e) => {
+                        const updated = [...scanOptions.secondaryPatterns]
+                        updated[index] = { ...updated[index], required: e.target.value === 'required' }
+                        setScanOptions({ secondaryPatterns: updated })
+                      }}
+                      className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+                    >
+                      <option value="required">Required</option>
+                      <option value="optional">Optional</option>
+                    </select>
+                    <button
+                      onClick={() => {
+                        const updated = scanOptions.secondaryPatterns.filter((_, i) => i !== index)
+                        setScanOptions({ secondaryPatterns: updated })
+                      }}
+                      className="px-2 py-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
+                    >
+                      <XCircleIcon className="w-5 h-5" />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  onClick={() => {
+                    setScanOptions({
+                      secondaryPatterns: [...scanOptions.secondaryPatterns, { pattern: '', required: true }],
+                    })
+                  }}
+                  className="text-sm text-blue-500 hover:text-blue-600"
+                >
+                  + Add Secondary Pattern
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">
+                Use * to match primary file&apos;s base name (e.g., *.mesh matches case1.mesh for case1.inp)
+              </p>
+            </div>
+          )}
 
           <div className="flex items-center gap-4 mb-6">
             <label className="flex items-center gap-2 cursor-pointer">
@@ -598,15 +711,17 @@ export function PURTab() {
               />
               <span className="text-sm">Recursive scan</span>
             </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={scanOptions.includeHidden}
-                onChange={(e) => setScanOptions({ includeHidden: e.target.checked })}
-                className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
-              />
-              <span className="text-sm">Include hidden directories</span>
-            </label>
+            {scanOptions.scanMode === 'folders' && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={scanOptions.includeHidden}
+                  onChange={(e) => setScanOptions({ includeHidden: e.target.checked })}
+                  className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
+                />
+                <span className="text-sm">Include hidden directories</span>
+              </label>
+            )}
           </div>
 
           {scanError && (
