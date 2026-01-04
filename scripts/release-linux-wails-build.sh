@@ -285,7 +285,7 @@ cd ..
 # Build with Wails
 GOFIPS140=latest wails build -platform linux/amd64 -ldflags "$LDFLAGS"
 
-BINARY="build/bin/rescale-int"
+BINARY="build/bin/rescale-int-gui"
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Wails build failed - binary not created"
     exit 1
@@ -392,7 +392,7 @@ fi
 echo "Running extracted linuxdeploy..."
 "$LINUXDEPLOY_BIN" \
     --appdir "$APPDIR" \
-    --executable "$REPO_DIR/build/bin/rescale-int" \
+    --executable "$REPO_DIR/build/bin/rescale-int-gui" \
     --desktop-file "$DESKTOP_FILE" \
     --icon-file "$ICON_FILE" \
     --plugin gtk
