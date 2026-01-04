@@ -10,6 +10,8 @@ export function CancelRun():Promise<void>;
 
 export function CancelTransfer(arg1:string):Promise<void>;
 
+export function CheckFolderExistsForUpload(arg1:string,arg2:string):Promise<wailsapp.FolderExistsCheckDTO>;
+
 export function ClearCatalogCache():Promise<void>;
 
 export function ClearCompletedTransfers():Promise<void>;

@@ -149,6 +149,16 @@ export function FileBrowserTab() {
   // v4.0.8: Error dialog for critical errors
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null)
 
+  // v4.0.8: Merge confirmation dialog for existing folders
+  const [mergeConfirm, setMergeConfirm] = useState<{
+    existingFolders: string[]
+    uploadData: {
+      files: wailsapp.FileItemDTO[]
+      folders: wailsapp.FileItemDTO[]
+      destFolderId: string
+    }
+  } | null>(null)
+
   // Status message
   const [status, setStatus] = useState('Select files, then use Upload/Download')
 
@@ -214,33 +224,23 @@ export function FileBrowserTab() {
     })
   }, [uploadState.allowed, getLocalSelectedItems, remote.breadcrumb])
 
-  // Confirm upload
-  const confirmUpload = useCallback(async () => {
-    if (!uploadConfirm) return
-
-    setUploadConfirm(null)
+  // v4.0.8: Helper function that performs the actual upload (called after merge confirmation if needed)
+  const proceedWithUpload = useCallback(async (
+    files: wailsapp.FileItemDTO[],
+    folders: wailsapp.FileItemDTO[],
+    destFolderId: string
+  ) => {
     setIsUploading(true)
-
-    // Separate files and folders
-    const files = uploadConfirm.items.filter(item => !item.isFolder)
-    const folders = uploadConfirm.items.filter(item => item.isFolder)
-
     const totalItems = files.length + folders.length
     setStatus(`Uploading ${totalItems} item(s)...`)
 
     try {
-      // For Legacy mode, uploads go to My Library root folder
-      const destFolderId = remote.mode === 'legacy'
-        ? (remote.myLibraryId || remote.currentFolderId)
-        : remote.currentFolderId
-
-      // v4.0.8: Switch to Transfers tab early for folder uploads (matches download behavior)
-      // This shows the folder creation progress in the Activity log
+      // Switch to Transfers tab early for folder uploads
       if (folders.length > 0) {
         switchToTab('Transfers')
       }
 
-      // v4.0.0: Upload folders first using StartFolderUpload
+      // Upload folders first using StartFolderUpload
       for (const folder of folders) {
         setStatus(`Uploading folder: ${folder.name}...`)
         console.log(`[FileBrowserTab] Starting folder upload: ${folder.name} (id: ${folder.id}) to ${destFolderId}`)
@@ -248,16 +248,13 @@ export function FileBrowserTab() {
         console.log(`[FileBrowserTab] Folder upload result:`, result)
         if (result.error) {
           console.error(`Folder upload error for ${folder.name}:`, result.error)
-          // v4.0.8: Show critical errors in a dialog so user definitely sees them
           setErrorDialog({
             title: `Upload Failed: ${folder.name}`,
             message: result.error
           })
           setStatus(`Error uploading ${folder.name}`)
-          // Don't continue - let user dismiss the dialog first
           return
         } else if (result.mergedInto) {
-          // v4.0.8: Inform user that we merged into an existing folder
           console.log(`[FileBrowserTab] Merged into existing folder: ${result.mergedInto}`)
           setStatus(`Merged ${result.filesQueued} files into existing folder "${result.mergedInto}"`)
         } else {
@@ -269,43 +266,95 @@ export function FileBrowserTab() {
       if (files.length > 0) {
         const requests = files.map(item => ({
           type: 'upload',
-          source: item.id, // Local path
+          source: item.id,
           dest: destFolderId,
           name: item.name,
           size: item.size ?? 0,
         }))
-
         await App.StartTransfers(requests)
       }
 
       clearLocalSelection()
 
-      // Build status message
       const statusParts = []
-      if (folders.length > 0) {
-        statusParts.push(`${folders.length} folder(s)`)
-      }
-      if (files.length > 0) {
-        statusParts.push(`${files.length} file(s)`)
-      }
+      if (folders.length > 0) statusParts.push(`${folders.length} folder(s)`)
+      if (files.length > 0) statusParts.push(`${files.length} file(s)`)
       setStatus(`Upload started: ${statusParts.join(' and ')}.`)
 
-      // v4.0.8: Switch to Transfers tab for any upload (files or folders)
       if (files.length > 0 || folders.length > 0) {
         switchToTab('Transfers')
       }
 
-      // Refresh remote after a delay to show uploaded items
-      setTimeout(() => {
-        refreshRemote()
-      }, 2000)
+      setTimeout(() => refreshRemote(), 2000)
     } catch (error) {
       console.error('Upload failed:', error)
       setStatus(`Upload failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setIsUploading(false)
     }
-  }, [uploadConfirm, remote.currentFolderId, remote.myLibraryId, remote.mode, clearLocalSelection, refreshRemote, switchToTab])
+  }, [clearLocalSelection, switchToTab, refreshRemote])
+
+  // Confirm upload - v4.0.8: Now checks for existing folders first
+  const confirmUpload = useCallback(async () => {
+    if (!uploadConfirm) return
+
+    setUploadConfirm(null)
+
+    // Separate files and folders
+    const files = uploadConfirm.items.filter(item => !item.isFolder)
+    const folders = uploadConfirm.items.filter(item => item.isFolder)
+
+    // For Legacy mode, uploads go to My Library root folder
+    const destFolderId = remote.mode === 'legacy'
+      ? (remote.myLibraryId || remote.currentFolderId)
+      : remote.currentFolderId
+
+    // v4.0.8: Check if any folders already exist before uploading
+    if (folders.length > 0) {
+      setStatus('Checking for existing folders...')
+      const existingFolders: string[] = []
+
+      for (const folder of folders) {
+        try {
+          const check = await App.CheckFolderExistsForUpload(folder.name, destFolderId)
+          if (check.error) {
+            console.warn(`Error checking folder ${folder.name}:`, check.error)
+          } else if (check.exists) {
+            existingFolders.push(folder.name)
+          }
+        } catch (err) {
+          console.warn(`Error checking folder ${folder.name}:`, err)
+        }
+      }
+
+      // If any folders exist, show merge confirmation dialog
+      if (existingFolders.length > 0) {
+        setMergeConfirm({
+          existingFolders,
+          uploadData: { files, folders, destFolderId }
+        })
+        setStatus('Waiting for merge confirmation...')
+        return
+      }
+    }
+
+    // No existing folders - proceed directly
+    await proceedWithUpload(files, folders, destFolderId)
+  }, [uploadConfirm, remote.mode, remote.myLibraryId, remote.currentFolderId, proceedWithUpload])
+
+  // v4.0.8: Confirm merge and proceed with upload
+  const confirmMerge = useCallback(async () => {
+    if (!mergeConfirm) return
+    const { files, folders, destFolderId } = mergeConfirm.uploadData
+    setMergeConfirm(null)
+    await proceedWithUpload(files, folders, destFolderId)
+  }, [mergeConfirm, proceedWithUpload])
+
+  // v4.0.8: Cancel merge (cancel upload)
+  const cancelMerge = useCallback(() => {
+    setMergeConfirm(null)
+    setStatus('Upload cancelled.')
+  }, [])
 
   // Handle download button click
   const handleDownload = useCallback(() => {
@@ -582,6 +631,21 @@ export function FileBrowserTab() {
         isDanger
         onConfirm={confirmDelete}
         onCancel={() => setDeleteConfirm(null)}
+      />
+
+      {/* v4.0.8: Merge confirmation dialog for existing folders */}
+      <ConfirmDialog
+        isOpen={mergeConfirm !== null}
+        title="Folder Already Exists"
+        message={
+          mergeConfirm
+            ? `The following folder${mergeConfirm.existingFolders.length > 1 ? 's' : ''} already exist${mergeConfirm.existingFolders.length === 1 ? 's' : ''} on Rescale:\n\n${mergeConfirm.existingFolders.map(f => `• ${f}`).join('\n')}\n\nMerge files into the existing folder${mergeConfirm.existingFolders.length > 1 ? 's' : ''}?`
+            : ''
+        }
+        confirmText="Merge"
+        warning="Files with the same name will be uploaded as new versions."
+        onConfirm={confirmMerge}
+        onCancel={cancelMerge}
       />
 
       {/* v4.0.8: Error dialog for critical errors */}
