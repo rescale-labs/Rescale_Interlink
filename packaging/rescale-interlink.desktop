@@ -2,7 +2,7 @@
 Type=Application
 Name=Rescale Interlink
 Comment=Unified CLI and GUI for Rescale HPC platform
-Exec=rescale-int
+Exec=rescale-int-gui
 Icon=rescale-interlink
 Categories=Development;Science;
 Terminal=false
