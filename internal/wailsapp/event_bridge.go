@@ -134,6 +134,16 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 			return
 		}
 		runtime.EventsEmit(eb.ctx, "interlink:transfer", transferEventToDTO(e))
+
+	case *events.EnumerationEvent:
+		// v4.0.8: Enumeration events for folder scan progress
+		// Don't throttle these - they're infrequent and important for UX
+		runtime.EventsEmit(eb.ctx, "interlink:enumeration", enumerationEventToDTO(e))
+
+	case *events.ScanProgressEvent:
+		// v4.0.8: Scan progress events for software/hardware catalog scanning
+		// Don't throttle - these are infrequent and important for UX
+		runtime.EventsEmit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
 	}
 }
 
@@ -295,4 +305,54 @@ func transferEventToDTO(e *events.TransferEvent) TransferEventDTO {
 		dto.Error = e.Error.Error()
 	}
 	return dto
+}
+
+// EnumerationEventDTO is the JSON-safe version of events.EnumerationEvent (v4.0.8).
+type EnumerationEventDTO struct {
+	Timestamp    string `json:"timestamp"`
+	ID           string `json:"id"`
+	FolderName   string `json:"folderName"`
+	Direction    string `json:"direction"` // "upload" or "download"
+	FoldersFound int    `json:"foldersFound"`
+	FilesFound   int    `json:"filesFound"`
+	BytesFound   int64  `json:"bytesFound"`
+	IsComplete   bool   `json:"isComplete"`
+	Error        string `json:"error,omitempty"`
+}
+
+func enumerationEventToDTO(e *events.EnumerationEvent) EnumerationEventDTO {
+	return EnumerationEventDTO{
+		Timestamp:    e.Timestamp().Format(time.RFC3339Nano),
+		ID:           e.ID,
+		FolderName:   e.FolderName,
+		Direction:    e.Direction,
+		FoldersFound: e.FoldersFound,
+		FilesFound:   e.FilesFound,
+		BytesFound:   e.BytesFound,
+		IsComplete:   e.IsComplete,
+		Error:        e.Error,
+	}
+}
+
+// ScanProgressEventDTO is the JSON-safe version of events.ScanProgressEvent (v4.0.8).
+type ScanProgressEventDTO struct {
+	Timestamp  string `json:"timestamp"`
+	ScanType   string `json:"scanType"`   // "software" or "hardware"
+	Page       int    `json:"page"`       // Current page number
+	ItemsFound int    `json:"itemsFound"` // Items discovered so far
+	IsComplete bool   `json:"isComplete"` // True when scan finished
+	IsCached   bool   `json:"isCached"`   // True if result came from cache
+	Error      string `json:"error,omitempty"`
+}
+
+func scanProgressEventToDTO(e *events.ScanProgressEvent) ScanProgressEventDTO {
+	return ScanProgressEventDTO{
+		Timestamp:  e.Timestamp().Format(time.RFC3339Nano),
+		ScanType:   e.ScanType,
+		Page:       e.Page,
+		ItemsFound: e.ItemsFound,
+		IsComplete: e.IsComplete,
+		IsCached:   e.IsCached,
+		Error:      e.Error,
+	}
 }

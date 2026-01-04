@@ -10,6 +10,8 @@ export function CancelRun():Promise<void>;
 
 export function CancelTransfer(arg1:string):Promise<void>;
 
+export function ClearCatalogCache():Promise<void>;
+
 export function ClearCompletedTransfers():Promise<void>;
 
 export function CreateRemoteFolder(arg1:string,arg2:string):Promise<string>;
@@ -31,6 +33,8 @@ export function GetAutomations():Promise<wailsapp.AutomationsResultDTO>;
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
 
 export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
+
+export function GetDefaultConfigPath():Promise<string>;
 
 export function GetHomeDirectory():Promise<string>;
 
@@ -82,6 +86,8 @@ export function SaveAutoDownloadConfig(arg1:wailsapp.AutoDownloadConfigDTO):Prom
 
 export function SaveConfig():Promise<void>;
 
+export function SaveConfigAs(arg1:string):Promise<void>;
+
 export function SaveFile(arg1:string):Promise<string>;
 
 export function SaveJobToJSON(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>;
@@ -116,7 +122,7 @@ export function StartTransfers(arg1:Array<wailsapp.TransferRequestDTO>):Promise<
 
 export function TestAutoDownloadConnection(arg1:wailsapp.AutoDownloadConfigDTO):Promise<void>;
 
-export function TestConnection():Promise<void>;
+export function TestConnection():Promise<wailsapp.ConnectionResultDTO>;
 
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
 

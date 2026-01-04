@@ -131,8 +131,31 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (config) {
         await App.UpdateConfig(config);
       }
-      // Then trigger the async test - result comes via event
-      await App.TestConnection();
+
+      // v4.0.8: TestConnection now returns result directly (synchronous call)
+      const result = await App.TestConnection();
+
+      if (result.success) {
+        set({
+          connectionStatus: 'connected',
+          connectionEmail: result.email || null,
+          connectionFullName: result.fullName || null,
+          workspaceId: result.workspaceId || null,
+          workspaceName: result.workspaceName || null,
+          connectionError: null,
+          lastConnectionTest: new Date(),
+        });
+      } else {
+        set({
+          connectionStatus: 'failed',
+          connectionEmail: null,
+          connectionFullName: null,
+          workspaceId: null,
+          workspaceName: null,
+          connectionError: result.error || 'Connection failed',
+          lastConnectionTest: new Date(),
+        });
+      }
     } catch (err) {
       set({
         connectionStatus: 'failed',

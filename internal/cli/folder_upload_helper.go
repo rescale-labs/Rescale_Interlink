@@ -102,6 +102,14 @@ func (fc *FolderCache) Get(ctx context.Context, apiClient *api.Client, folderID 
 	return contents, nil
 }
 
+// Invalidate removes a folder from the cache, forcing a fresh fetch on next Get.
+// v4.0.8: Used to handle stale cache when folder creation fails with "already exists".
+func (fc *FolderCache) Invalidate(folderID string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	delete(fc.cache, folderID)
+}
+
 // BuildDirectoryTree walks a local directory and returns lists of directories, files, and symlinks.
 // This function is exported for use by the GUI.
 //

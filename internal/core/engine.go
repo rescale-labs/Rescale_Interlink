@@ -1471,7 +1471,8 @@ func (e *Engine) getJobStats() jobStats {
 	stats.Total = len(jobs)
 
 	for _, job := range jobs {
-		if job.SubmitStatus == "completed" {
+		// v4.0.8: Check both "success" and "completed" for consistency with GetRunStats()
+		if job.SubmitStatus == "success" || job.SubmitStatus == "completed" {
 			stats.Completed++
 		} else if job.ErrorMessage != "" {
 			stats.Failed++

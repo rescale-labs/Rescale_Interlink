@@ -3,12 +3,15 @@ package wailsapp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/config"
@@ -90,7 +93,9 @@ func (a *App) GetConfig() ConfigDTO {
 // UpdateConfig applies a complete configuration update.
 // v4.0.1: Now properly updates the engine's API client when API-related settings change.
 func (a *App) UpdateConfig(cfg ConfigDTO) error {
+	wailsLogger.Info().Msg("UpdateConfig: ENTER")
 	if a.config == nil {
+		wailsLogger.Warn().Msg("UpdateConfig: config is nil, returning")
 		return nil
 	}
 
@@ -142,23 +147,68 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	// This fixes the bug where typing a new API key and clicking "Test Connection"
 	// would fail because the engine still had the old API client from startup.
 	if apiSettingsChanged && a.engine != nil {
+		wailsLogger.Info().Msg("UpdateConfig: API settings changed, starting background engine update")
 		// Run in background to avoid blocking UI during proxy warmup
 		go func() {
 			if err := a.engine.UpdateConfig(a.config); err != nil {
 				wailsLogger.Error().Err(err).Msg("Failed to update engine config")
 			}
+			wailsLogger.Info().Msg("UpdateConfig: background engine update completed")
 		}()
 	}
 
+	wailsLogger.Info().Msg("UpdateConfig: EXIT")
 	return nil
 }
 
 // SaveConfig saves to the default location.
+// v4.0.8: Also saves API key to token file for persistence.
+// The API key is saved separately from config.csv for security (0600 permissions on token file).
 func (a *App) SaveConfig() error {
 	if a.config == nil {
 		return nil
 	}
-	return config.SaveConfigCSV(a.config, config.GetDefaultConfigPath())
+
+	// Save config.csv (everything except api_key and proxy_password for security)
+	configPath := config.GetDefaultConfigPath()
+	a.logInfo("config", fmt.Sprintf("Saving config to %s", configPath))
+	if err := config.SaveConfigCSV(a.config, configPath); err != nil {
+		a.logError("config", fmt.Sprintf("Failed to save config.csv: %v", err))
+		return err
+	}
+
+	// v4.0.8: Also save API key to token file if set
+	// This ensures the API key persists across restarts when user saves from GUI
+	if a.config.APIKey != "" {
+		tokenPath := config.GetDefaultTokenPath()
+		a.logDebug("config", fmt.Sprintf("Saving API key to token file %s", tokenPath))
+		if err := config.WriteTokenFile(tokenPath, a.config.APIKey); err != nil {
+			a.logError("config", fmt.Sprintf("Failed to save token file: %v", err))
+			return fmt.Errorf("failed to save API key: %w", err)
+		}
+		a.logInfo("config", "API key saved successfully")
+	}
+
+	a.logInfo("config", "Config saved successfully")
+	return nil
+}
+
+// SaveConfigAs saves to a user-specified location (export).
+// v4.0.8: Added for exporting config to custom locations.
+func (a *App) SaveConfigAs(path string) error {
+	if a.config == nil {
+		return nil
+	}
+	if path == "" {
+		return nil
+	}
+	return config.SaveConfigCSV(a.config, path)
+}
+
+// GetDefaultConfigPath returns the default config file location.
+// v4.0.8: Exposed so UI can show where config will be saved.
+func (a *App) GetDefaultConfigPath() string {
+	return config.GetDefaultConfigPath()
 }
 
 // LoadConfigFromPath loads configuration from a specific path.
@@ -181,37 +231,126 @@ type ConnectionResultDTO struct {
 	Error         string `json:"error,omitempty"`
 }
 
-// TestConnection tests API connectivity asynchronously.
-func (a *App) TestConnection() {
+// testConnectionMu prevents concurrent TestConnection calls
+var testConnectionMu sync.Mutex
+var testConnectionInProgress bool
+
+// TestConnection tests API connectivity with a guaranteed 7-second timeout.
+// v4.0.8: Uses goroutine with hard select/time.After timeout to guarantee return.
+// Also prevents concurrent calls which can cause UI confusion.
+func (a *App) TestConnection() ConnectionResultDTO {
+	a.logInfo("connection", "Testing API connection...")
+
+	// Prevent concurrent calls
+	testConnectionMu.Lock()
+	if testConnectionInProgress {
+		testConnectionMu.Unlock()
+		a.logWarn("connection", "Connection test already in progress")
+		return ConnectionResultDTO{
+			Success: false,
+			Error:   "Connection test already in progress",
+		}
+	}
+	testConnectionInProgress = true
+	testConnectionMu.Unlock()
+
+	// Ensure we clear the flag when done
+	defer func() {
+		testConnectionMu.Lock()
+		testConnectionInProgress = false
+		testConnectionMu.Unlock()
+	}()
+
+	// Quick validation checks - these don't block, do them first
+	if a.config == nil {
+		a.logError("connection", "No configuration loaded")
+		return ConnectionResultDTO{
+			Success: false,
+			Error:   "No configuration loaded",
+		}
+	}
+
+	if a.config.APIKey == "" {
+		a.logWarn("connection", "API key is empty")
+		return ConnectionResultDTO{
+			Success: false,
+			Error:   "API key is empty - please enter an API key",
+		}
+	}
+
+	a.logDebug("connection", fmt.Sprintf("Testing API key %s...", a.config.APIKey[:min(8, len(a.config.APIKey))]))
+
+	// Copy config values we need - avoid race conditions with concurrent config updates
+	configCopy := &config.Config{
+		APIBaseURL:    a.config.APIBaseURL,
+		APIKey:        a.config.APIKey,
+		ProxyMode:     a.config.ProxyMode,
+		ProxyHost:     a.config.ProxyHost,
+		ProxyPort:     a.config.ProxyPort,
+		ProxyUser:     a.config.ProxyUser,
+		ProxyPassword: a.config.ProxyPassword,
+		ProxyWarmup:   false, // CRITICAL: Disable proxy warmup for connection test to avoid blocking
+	}
+
+	// Channel to receive result from worker goroutine
+	resultChan := make(chan ConnectionResultDTO, 1)
+
+	// Run all potentially blocking work in a goroutine
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
 
-		if a.engine == nil || a.engine.API() == nil {
-			runtime.EventsEmit(a.ctx, "interlink:connection_result", ConnectionResultDTO{
-				Success: false,
-				Error:   "No API client configured",
-			})
-			return
-		}
-
-		profile, err := a.engine.API().GetUserProfile(ctx)
+		apiClient, err := api.NewClient(configCopy)
 		if err != nil {
-			runtime.EventsEmit(a.ctx, "interlink:connection_result", ConnectionResultDTO{
+			resultChan <- ConnectionResultDTO{
 				Success: false,
-				Error:   err.Error(),
-			})
+				Error:   "Failed to create API client: " + err.Error(),
+			}
 			return
 		}
 
-		runtime.EventsEmit(a.ctx, "interlink:connection_result", ConnectionResultDTO{
+		profile, err := apiClient.GetUserProfile(ctx)
+		if err != nil {
+			errMsg := err.Error()
+			if ctx.Err() == context.DeadlineExceeded {
+				errMsg = "Connection timed out - check your network and API key"
+			} else if strings.Contains(errMsg, "401") || strings.Contains(errMsg, "Unauthorized") || strings.Contains(errMsg, "Invalid token") {
+				errMsg = "Invalid API key - please check your API key"
+			}
+			resultChan <- ConnectionResultDTO{
+				Success: false,
+				Error:   errMsg,
+			}
+			return
+		}
+
+		resultChan <- ConnectionResultDTO{
 			Success:       true,
 			Email:         profile.Email,
 			FullName:      profile.FullName,
 			WorkspaceID:   profile.Workspace.ID,
 			WorkspaceName: profile.Workspace.Name,
-		})
+		}
 	}()
+
+	// CRITICAL: Hard timeout guarantee - function WILL return within 7 seconds
+	select {
+	case result := <-resultChan:
+		if result.Success {
+			a.logInfo("connection", fmt.Sprintf("Connected successfully - %s (%s)", result.Email, result.WorkspaceName))
+			// v4.0.8: Clear catalog cache when connection succeeds - user may have switched accounts
+			a.ClearCatalogCache()
+		} else {
+			a.logError("connection", fmt.Sprintf("Connection failed: %s", result.Error))
+		}
+		return result
+	case <-time.After(7 * time.Second):
+		a.logError("connection", "Connection timed out after 7 seconds")
+		return ConnectionResultDTO{
+			Success: false,
+			Error:   "Connection timed out after 7 seconds",
+		}
+	}
 }
 
 // SelectDirectory opens a directory dialog.

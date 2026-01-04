@@ -293,6 +293,11 @@ const (
 	// APIConnectionTestTimeout - timeout for testing API connectivity (10 seconds)
 	APIConnectionTestTimeout = 10 * time.Second
 
+	// PaginatedAPITimeout - timeout for paginated API operations (5 minutes)
+	// Software/hardware scans can fetch 100+ pages with rate limiting at 0.5s/request.
+	// v4.0.8: Increased from 30s which caused "context deadline exceeded" on page 5+.
+	PaginatedAPITimeout = 5 * time.Minute
+
 	// ValidationCacheTTL - time-to-live for cached validation results (5 minutes)
 	ValidationCacheTTL = 5 * time.Minute
 )

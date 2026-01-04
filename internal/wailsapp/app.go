@@ -23,6 +23,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/core"
+	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
@@ -48,11 +49,88 @@ type App struct {
 	// v4.0.5: Protected by runMu to prevent race conditions
 	runMu     sync.Mutex
 	runCancel context.CancelFunc
+
+	// v4.0.8: Caching for software/hardware catalogs to avoid repeated slow scans
+	catalogCacheMu    sync.RWMutex
+	cachedCoreTypes   []CoreTypeDTO
+	cachedAnalyses    []AnalysisCodeDTO
+	cachedAutomations []AutomationDTO
 }
 
 // NewApp creates a new Wails application instance.
 func NewApp() *App {
 	return &App{}
+}
+
+// v4.0.8: Unified logging helper that logs to BOTH terminal AND Activity Logs tab.
+// This ensures users don't need to run from terminal to see detailed logs.
+// Levels: "DEBUG", "INFO", "WARN", "ERROR"
+// Messages are truncated to 1000 chars to prevent unbounded log growth.
+const maxLogMessageLen = 1000
+
+func (a *App) log(level string, stage string, message string) {
+	// Truncate very long messages to prevent memory issues
+	if len(message) > maxLogMessageLen {
+		message = message[:maxLogMessageLen] + "... (truncated)"
+	}
+
+	// Always log to terminal for debugging
+	fmt.Printf("[%s] %s: %s\n", level, stage, message)
+
+	// Also emit to EventBus if available (appears in Activity Logs tab)
+	if a.engine == nil {
+		fmt.Println("  [log] WARNING: engine is nil, cannot emit to Activity Logs")
+		return
+	}
+	if a.engine.Events() == nil {
+		fmt.Println("  [log] WARNING: engine.Events() is nil, cannot emit to Activity Logs")
+		return
+	}
+
+	var logLevel events.LogLevel
+	switch level {
+	case "DEBUG":
+		logLevel = events.DebugLevel
+	case "INFO":
+		logLevel = events.InfoLevel
+	case "WARN":
+		logLevel = events.WarnLevel
+	case "ERROR":
+		logLevel = events.ErrorLevel
+	default:
+		logLevel = events.InfoLevel
+	}
+	a.engine.Events().PublishLog(logLevel, message, stage, "", nil)
+}
+
+// logDebug logs a debug-level message to terminal and Activity Log.
+func (a *App) logDebug(stage, message string) {
+	a.log("DEBUG", stage, message)
+}
+
+// logInfo logs an info-level message to terminal and Activity Log.
+func (a *App) logInfo(stage, message string) {
+	a.log("INFO", stage, message)
+}
+
+// logWarn logs a warning-level message to terminal and Activity Log.
+func (a *App) logWarn(stage, message string) {
+	a.log("WARN", stage, message)
+}
+
+// logError logs an error-level message to terminal and Activity Log.
+func (a *App) logError(stage, message string) {
+	a.log("ERROR", stage, message)
+}
+
+// ClearCatalogCache clears the cached software/hardware catalogs.
+// v4.0.8: Called when API key changes to ensure fresh data from new account.
+func (a *App) ClearCatalogCache() {
+	a.catalogCacheMu.Lock()
+	defer a.catalogCacheMu.Unlock()
+	a.cachedCoreTypes = nil
+	a.cachedAnalyses = nil
+	a.cachedAutomations = nil
 }
 
 // startup is called when the app starts. The context is saved
