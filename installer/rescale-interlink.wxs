@@ -72,14 +72,24 @@
                   Impersonate="no"
                   Return="ignore" />
 
+    <!-- v4.0.8: Launch tray icon immediately after install (so user doesn't need to log out/in) -->
+    <CustomAction Id="LaunchTray"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[INSTALLFOLDER]rescale-int-tray.exe"
+                  Execute="commit"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
     <!-- Install sequence -->
     <InstallExecuteSequence>
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="InstallService" After="InstallFiles" Condition="NOT REMOVE" />
       <Custom Action="StartService" After="InstallService" Condition="NOT REMOVE" />
+      <Custom Action="LaunchTray" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE" />
     </InstallExecuteSequence>
 
     <!-- UI reference - WiX v4 uses ui:WixUI from UI extension -->
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <ui:WixUI Id="WixUI_FeatureTree" />
 
   </Package>

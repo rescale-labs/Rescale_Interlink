@@ -15,6 +15,7 @@ import (
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/pur/filescan"
 	"github.com/rescale/rescale-int/internal/pur/parser"
 )
 
@@ -244,125 +245,52 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 }
 
 // scanFilesMode handles file-based scanning for PUR.
-// v4.0.8: New function to scan for primary files and attach secondary files.
+// v4.0.8: Now uses unified filescan package shared with CLI.
 func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResultDTO {
-	if opts.PrimaryPattern == "" {
-		return ScanResultDTO{Error: "primary file pattern is required for file scanning mode"}
-	}
-
-	// Build the glob pattern
-	pattern := filepath.Join(opts.RootDir, opts.PrimaryPattern)
-
-	// Find all primary files matching the pattern
-	primaryFiles, err := filepath.Glob(pattern)
-	if err != nil {
-		return ScanResultDTO{Error: fmt.Sprintf("invalid primary pattern: %v", err)}
-	}
-
-	if len(primaryFiles) == 0 {
-		return ScanResultDTO{
-			Error: fmt.Sprintf("no files found matching pattern: %s", opts.PrimaryPattern),
+	// Convert DTO patterns to filescan patterns
+	patterns := make([]filescan.SecondaryPattern, len(opts.SecondaryPatterns))
+	for i, p := range opts.SecondaryPatterns {
+		patterns[i] = filescan.SecondaryPattern{
+			Pattern:  p.Pattern,
+			Required: p.Required,
 		}
 	}
 
+	// Use shared filescan package
+	result := filescan.ScanFiles(filescan.ScanOptions{
+		RootDir:           opts.RootDir,
+		PrimaryPattern:    opts.PrimaryPattern,
+		SecondaryPatterns: patterns,
+	})
+
+	if result.Error != "" {
+		return ScanResultDTO{Error: result.Error}
+	}
+
+	// Convert filescan results to JobSpecDTO
 	var jobs []JobSpecDTO
-	var skippedFiles []string
-	var warnings []string
-	jobIndex := 1
-
-	for _, primaryFile := range primaryFiles {
-		primaryDir := filepath.Dir(primaryFile)
-		primaryBase := strings.TrimSuffix(filepath.Base(primaryFile), filepath.Ext(primaryFile))
-
-		// Collect all input files for this job
-		inputFiles := []string{primaryFile}
-		skipJob := false
-
-		// Process secondary patterns
-		for _, secPattern := range opts.SecondaryPatterns {
-			secondaryFiles, warning, skipReason := a.resolveSecondaryPattern(
-				primaryDir, primaryBase, primaryFile, secPattern,
-			)
-
-			if skipReason != "" {
-				skippedFiles = append(skippedFiles, fmt.Sprintf("%s: %s", filepath.Base(primaryFile), skipReason))
-				skipJob = true
-				break
-			}
-
-			if warning != "" {
-				warnings = append(warnings, warning)
-			}
-
-			inputFiles = append(inputFiles, secondaryFiles...)
-		}
-
-		if skipJob {
-			continue
-		}
-
-		// Create job spec from template
+	for i, jobFiles := range result.Jobs {
 		job := template
-		job.InputFiles = inputFiles
+		job.InputFiles = jobFiles.InputFiles
+		job.Directory = jobFiles.PrimaryDir
 
 		// Generate job name
 		if template.JobName != "" {
-			job.JobName = fmt.Sprintf("%s_%d", template.JobName, jobIndex)
+			job.JobName = fmt.Sprintf("%s_%d", template.JobName, i+1)
 		} else {
-			job.JobName = fmt.Sprintf("Job_%d", jobIndex)
+			job.JobName = fmt.Sprintf("Job_%d", i+1)
 		}
 
-		// Set directory to primary file's directory (for reference)
-		job.Directory = primaryDir
-
 		jobs = append(jobs, job)
-		jobIndex++
 	}
 
 	return ScanResultDTO{
 		Jobs:         jobs,
-		TotalCount:   len(primaryFiles),
-		MatchCount:   len(jobs),
-		SkippedFiles: skippedFiles,
-		Warnings:     warnings,
+		TotalCount:   result.TotalCount,
+		MatchCount:   result.MatchCount,
+		SkippedFiles: result.SkippedFiles,
+		Warnings:     result.Warnings,
 	}
-}
-
-// resolveSecondaryPattern resolves a secondary file pattern relative to the primary file.
-// Returns: (matched files, warning message, skip reason)
-// If skip reason is non-empty, the job should be skipped.
-func (a *App) resolveSecondaryPattern(
-	primaryDir, primaryBase, primaryFile string,
-	pattern SecondaryPatternDTO,
-) ([]string, string, string) {
-	// Determine if pattern is a wildcard or literal
-	hasWildcard := strings.Contains(pattern.Pattern, "*")
-
-	var resolvedPattern string
-	if hasWildcard {
-		// Replace * with primary file's base name
-		resolvedPattern = strings.ReplaceAll(pattern.Pattern, "*", primaryBase)
-	} else {
-		// Literal pattern - use as-is
-		resolvedPattern = pattern.Pattern
-	}
-
-	// Resolve path relative to primary file's directory
-	fullPath := filepath.Join(primaryDir, resolvedPattern)
-
-	// Clean the path (handles ../ etc.)
-	fullPath = filepath.Clean(fullPath)
-
-	// Check if file exists
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		if pattern.Required {
-			return nil, "", fmt.Sprintf("required secondary file not found: %s", resolvedPattern)
-		}
-		// Optional file missing - warn and continue
-		return nil, fmt.Sprintf("%s: optional file not found: %s", filepath.Base(primaryFile), resolvedPattern), ""
-	}
-
-	return []string{fullPath}, "", ""
 }
 
 // GetCoreTypes returns available hardware core types.
