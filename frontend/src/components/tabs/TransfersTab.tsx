@@ -8,9 +8,10 @@ import {
   CheckCircleIcon,
   ExclamationCircleIcon,
   ClockIcon,
+  FolderOpenIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useTransferStore, TransferTask } from '../../stores'
+import { useTransferStore, TransferTask, Enumeration } from '../../stores'
 
 // Format file size
 // v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
@@ -43,6 +44,80 @@ function getStatusInfo(state: string): { icon: typeof CheckCircleIcon; color: st
     default:
       return { icon: ClockIcon, color: 'text-gray-500', label: state }
   }
+}
+
+// v4.0.8: Enumeration row for folder scan progress
+interface EnumerationRowProps {
+  enumeration: Enumeration
+}
+
+function EnumerationRow({ enumeration }: EnumerationRowProps) {
+  const isComplete = enumeration.isComplete
+  const hasError = !!enumeration.error
+
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20">
+      {/* Direction icon */}
+      <div className="flex-shrink-0 w-6">
+        {enumeration.direction === 'upload' ? (
+          <ArrowUpIcon className="w-5 h-5 text-blue-500" />
+        ) : (
+          <ArrowDownIcon className="w-5 h-5 text-green-500" />
+        )}
+      </div>
+
+      {/* Folder icon and name */}
+      <div className="flex items-center gap-2 flex-shrink-0 w-48">
+        <FolderOpenIcon className="w-5 h-5 text-yellow-500" />
+        <div>
+          <div className="text-sm font-medium truncate" title={enumeration.folderName}>
+            {enumeration.folderName.length > 25
+              ? enumeration.folderName.slice(0, 22) + '...'
+              : enumeration.folderName}
+          </div>
+          <div className="text-xs text-gray-500">
+            Scanning folder...
+          </div>
+        </div>
+      </div>
+
+      {/* Scanning indicator */}
+      <div className="flex-1 min-w-0 flex items-center gap-3">
+        {!isComplete && !hasError && (
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-sm text-blue-600">Scanning...</span>
+          </div>
+        )}
+        {isComplete && !hasError && (
+          <div className="flex items-center gap-2">
+            <CheckCircleIcon className="w-4 h-4 text-green-500" />
+            <span className="text-sm text-green-600">Scan complete</span>
+          </div>
+        )}
+        {hasError && (
+          <div className="flex items-center gap-2">
+            <ExclamationCircleIcon className="w-4 h-4 text-red-500" />
+            <span className="text-sm text-red-600">{enumeration.error}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Counts */}
+      <div className="flex-shrink-0 w-40 text-right text-sm text-gray-600">
+        <span className="font-medium">{enumeration.filesFound}</span> files,
+        <span className="font-medium ml-1">{enumeration.foldersFound}</span> folders
+        {enumeration.bytesFound > 0 && (
+          <div className="text-xs text-gray-500">
+            {formatSize(enumeration.bytesFound)}
+          </div>
+        )}
+      </div>
+
+      {/* Spacer for action button area */}
+      <div className="flex-shrink-0 w-20" />
+    </div>
+  )
 }
 
 interface TransferRowProps {
@@ -137,6 +212,7 @@ export function TransfersTab() {
   const {
     tasks,
     stats,
+    enumerations, // v4.0.8: folder scan progress
     startPolling,
     stopPolling,
     cancelTransfer,
@@ -178,8 +254,8 @@ export function TransfersTab() {
     return stats.completed + stats.failed + stats.cancelled
   }, [stats])
 
-  // Empty state
-  const isEmpty = tasks.length === 0
+  // Empty state - v4.0.8: also check enumerations
+  const isEmpty = tasks.length === 0 && enumerations.length === 0
 
   return (
     <div className="flex flex-col h-full">
@@ -231,6 +307,14 @@ export function TransfersTab() {
           </div>
         ) : (
           <div>
+            {/* v4.0.8: Show enumeration rows at top */}
+            {enumerations.map((enumeration) => (
+              <EnumerationRow
+                key={enumeration.id}
+                enumeration={enumeration}
+              />
+            ))}
+            {/* Transfer rows */}
             {tasks.map((task) => (
               <TransferRow
                 key={task.id}

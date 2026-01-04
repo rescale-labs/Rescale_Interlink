@@ -1,5 +1,72 @@
 # Release Notes - Rescale Interlink
 
+## v4.0.8 - January 3, 2026
+
+### Critical Bug Fixes
+
+- **Software Scan Timeout**: Fixed "context deadline exceeded" error when scanning software/hardware in job template configuration. Paginated API calls now use 5-minute timeout instead of 30 seconds to handle rate limiting.
+
+### Bug Fixes
+
+- **Folder Transfer UX**: Added enumeration events showing real-time scan progress (files/folders/bytes found) in Transfers tab during folder upload/download
+- **Windows ZIP Compatibility**: Fixed 7-Zip extraction errors by using 7-Zip (instead of PowerShell's Compress-Archive) to create portable distribution ZIPs
+- **Missing Slots Validation**: Added validation for `Slots > 0` in job spec - previously would fail at runtime
+- **Directory Existence Check**: Single job submission now verifies directory exists before starting
+- **Status Value Inconsistency**: Fixed `getJobStats()` to recognize both "success" and "completed" status values
+- **State Manager Iteration**: Fixed PUR state file save/load to handle non-consecutive job indices during resume
+
+### Files Modified
+
+- `internal/constants/app.go` - Added `PaginatedAPITimeout`
+- `internal/wailsapp/job_bindings.go` - Updated timeouts, added validations
+- `internal/events/events.go` - Added `EnumerationEvent` type
+- `internal/wailsapp/event_bridge.go` - Forward enumeration events
+- `internal/wailsapp/file_bindings.go` - Emit enumeration events during folder scan
+- `internal/core/engine.go` - Fixed status value check
+- `internal/pur/state/state.go` - Fixed map iteration
+- `frontend/src/stores/transferStore.ts` - Handle enumeration events
+- `frontend/src/components/tabs/TransfersTab.tsx` - Display scan progress
+- `scripts/release-windows-wails-build.sh` - Use 7-Zip for packaging
+
+---
+
+## v4.0.7 - January 2, 2026
+
+### Critical Bug Fixes
+
+- **Infinite Polling Loop**: Fixed memory leak in SingleJobTab caused by polling loop not being properly cancelled
+- **Job ID Race Condition**: Fixed race where job ID was set after state transition, causing missed updates
+
+### High Priority Fixes
+
+- Removed broken `explorer.exe` call from SYSTEM service context (Windows service)
+- Documented IPC security descriptor implications
+- Updated all documentation versions to v4.0.7
+
+### Medium Priority Fixes
+
+- Fixed hardcoded Windows paths in `ipc_handler.go`
+- Added error checking to tray app `cmd.Start()` calls
+- Changed WiX service install to `Return="ignore"` to not block installation
+
+### Low Priority Fixes
+
+- Clean up `fileInfoMap` cache on file removal
+- Removed unused `CreateStatus` column from PUR table
+
+---
+
+## v4.0.6 - January 2, 2026
+
+### Bug Fixes
+
+- **Large File Size Precision**: Fixed precision loss for files >16TB by changing `float64` to `int64` for file sizes
+- **API Error Propagation**: Errors from API calls now properly propagate to frontend with error DTOs
+- **PUR Upload Progress**: Added progress display during PUR job uploads
+- **UI Label Fix**: Changed "Scan Hardware" button label to "Scan Coretypes" for accuracy
+
+---
+
 ## v4.0.5 - January 2, 2026
 
 ### Bug Fixes

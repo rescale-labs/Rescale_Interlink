@@ -401,12 +401,12 @@ cmd /c $wailsBuildCmd 2>&1 | Out-Host
 $wailsBuildExitCode = $LASTEXITCODE
 $ErrorActionPreference = $prevErrorAction
 
-$WailsOutputExe = "build\bin\rescale-int.exe"
+# Wails now outputs rescale-int-gui.exe directly (configured in wails.json)
+$WailsOutputExe = "build\bin\rescale-int-gui.exe"
 if ($wailsBuildExitCode -ne 0 -or -not (Test-Path $WailsOutputExe)) {
     throw "Wails build failed (exit code: $wailsBuildExitCode)"
 }
 
-# v4.0.2: Rename Wails output to rescale-int-gui.exe
 Copy-Item $WailsOutputExe -Destination "$BinDir\rescale-int-gui.exe"
 Write-Host "GUI binary built: rescale-int-gui.exe"
 

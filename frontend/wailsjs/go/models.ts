@@ -253,6 +253,28 @@ export namespace wailsapp {
 	        this.detailedLogging = source["detailedLogging"];
 	    }
 	}
+	export class ConnectionResultDTO {
+	    success: boolean;
+	    email?: string;
+	    fullName?: string;
+	    workspaceId?: string;
+	    workspaceName?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConnectionResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.email = source["email"];
+	        this.fullName = source["fullName"];
+	        this.workspaceId = source["workspaceId"];
+	        this.workspaceName = source["workspaceName"];
+	        this.error = source["error"];
+	    }
+	}
 	export class CoreTypeDTO {
 	    code: string;
 	    name: string;
@@ -413,6 +435,7 @@ export namespace wailsapp {
 	    foldersCreated: number;
 	    filesQueued: number;
 	    totalBytes: number;
+	    mergedInto?: string;
 	    error?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -424,6 +447,7 @@ export namespace wailsapp {
 	        this.foldersCreated = source["foldersCreated"];
 	        this.filesQueued = source["filesQueued"];
 	        this.totalBytes = source["totalBytes"];
+	        this.mergedInto = source["mergedInto"];
 	        this.error = source["error"];
 	    }
 	}
@@ -480,6 +504,7 @@ export namespace wailsapp {
 	    tags: string[];
 	    projectId: string;
 	    automations: string[];
+	    inputFiles?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new JobSpecDTO(source);
@@ -505,6 +530,7 @@ export namespace wailsapp {
 	        this.tags = source["tags"];
 	        this.projectId = source["projectId"];
 	        this.automations = source["automations"];
+	        this.inputFiles = source["inputFiles"];
 	    }
 	}
 	export class JobsStatsDTO {
@@ -573,6 +599,20 @@ export namespace wailsapp {
 	        this.error = source["error"];
 	    }
 	}
+	export class SecondaryPatternDTO {
+	    pattern: string;
+	    required: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SecondaryPatternDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pattern = source["pattern"];
+	        this.required = source["required"];
+	    }
+	}
 	export class ScanOptionsDTO {
 	    rootDir: string;
 	    pattern: string;
@@ -580,6 +620,9 @@ export namespace wailsapp {
 	    runSubpath: string;
 	    recursive: boolean;
 	    includeHidden: boolean;
+	    scanMode: string;
+	    primaryPattern: string;
+	    secondaryPatterns: SecondaryPatternDTO[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ScanOptionsDTO(source);
@@ -593,26 +636,9 @@ export namespace wailsapp {
 	        this.runSubpath = source["runSubpath"];
 	        this.recursive = source["recursive"];
 	        this.includeHidden = source["includeHidden"];
-	    }
-	}
-	export class ScanResultDTO {
-	    jobs: JobSpecDTO[];
-	    totalCount: number;
-	    matchCount: number;
-	    invalidDirs: string[];
-	    error?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ScanResultDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.jobs = this.convertValues(source["jobs"], JobSpecDTO);
-	        this.totalCount = source["totalCount"];
-	        this.matchCount = source["matchCount"];
-	        this.invalidDirs = source["invalidDirs"];
-	        this.error = source["error"];
+	        this.scanMode = source["scanMode"];
+	        this.primaryPattern = source["primaryPattern"];
+	        this.secondaryPatterns = this.convertValues(source["secondaryPatterns"], SecondaryPatternDTO);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -633,6 +659,49 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	export class ScanResultDTO {
+	    jobs: JobSpecDTO[];
+	    totalCount: number;
+	    matchCount: number;
+	    invalidDirs: string[];
+	    error?: string;
+	    skippedFiles?: string[];
+	    warnings?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ScanResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.jobs = this.convertValues(source["jobs"], JobSpecDTO);
+	        this.totalCount = source["totalCount"];
+	        this.matchCount = source["matchCount"];
+	        this.invalidDirs = source["invalidDirs"];
+	        this.error = source["error"];
+	        this.skippedFiles = source["skippedFiles"];
+	        this.warnings = source["warnings"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class SingleJobInputDTO {
 	    job: JobSpecDTO;
 	    inputMode: string;

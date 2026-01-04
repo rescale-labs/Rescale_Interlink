@@ -17,6 +17,9 @@ import {
   GetAutoDownloadStatus,
   TestAutoDownloadConnection,
   SelectDirectory,
+  SaveConfigAs,
+  GetDefaultConfigPath,
+  SaveFile,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 
@@ -48,6 +51,7 @@ export function SetupTab() {
   const [validationEnabled, setValidationEnabled] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Ready');
   const [showApiKey, setShowApiKey] = useState(false); // v4.0.1: API key visibility toggle
+  const [defaultConfigPath, setDefaultConfigPath] = useState<string>(''); // v4.0.8: Show config location
 
   // Auto-download state
   const [autoDownloadConfig, setAutoDownloadConfig] = useState<wailsapp.AutoDownloadConfigDTO>({
@@ -75,6 +79,8 @@ export function SetupTab() {
     const cleanup = setupEventListeners();
     fetchConfig();
     fetchAppInfo();
+    // v4.0.8: Fetch default config path to show in UI
+    GetDefaultConfigPath().then(setDefaultConfigPath).catch(console.error);
     return cleanup;
   }, []);
 
@@ -164,9 +170,22 @@ export function SetupTab() {
     try {
       setStatusMessage('Saving configuration...');
       await saveConfig();
-      setStatusMessage('Configuration saved successfully');
+      setStatusMessage(`Configuration saved to ${defaultConfigPath}`);
     } catch (err) {
       setStatusMessage(`Failed to save: ${err}`);
+    }
+  };
+
+  // v4.0.8: Export config to custom location
+  const handleExportConfig = async () => {
+    try {
+      const path = await SaveFile('Export Configuration');
+      if (path) {
+        await SaveConfigAs(path);
+        setStatusMessage(`Configuration exported to ${path}`);
+      }
+    } catch (err) {
+      setStatusMessage(`Failed to export: ${err}`);
     }
   };
 
@@ -260,16 +279,16 @@ export function SetupTab() {
           onClick={handleSaveConfig}
           disabled={isSaving}
           className="btn-primary"
+          title={`Save to ${defaultConfigPath}`}
         >
-          {isSaving ? 'Saving...' : 'Save Config'}
+          {isSaving ? 'Saving...' : 'Save Default Config'}
         </button>
         <button
-          onClick={() => {
-            setStatusMessage('Applied configuration');
-          }}
+          onClick={handleExportConfig}
           className="btn-secondary"
+          title="Export configuration to a custom location"
         >
-          Apply Changes
+          Export Config
         </button>
         <div className="flex-1" />
         <span className="text-sm text-gray-500">{statusMessage}</span>

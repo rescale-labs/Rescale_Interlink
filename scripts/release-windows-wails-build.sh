@@ -22,8 +22,8 @@
 # Usage:
 #   ./release-windows-wails-build.sh
 #
-# Version: 4.0.5
-# Date: 2026-01-02
+# Version: 4.0.8
+# Date: 2026-01-03
 
 set -euo pipefail
 
@@ -351,12 +351,10 @@ Invoke-ToolQuiet -FilePath "cmd.exe" `
                  -Arguments "/c $wailsBuildCmd" `
                  -LogName "wails-build"
 
-$WailsExePath = "build\bin\rescale-int.exe"
-if (-not (Test-Path $WailsExePath)) { throw "Wails build failed - EXE not created" }
-
-# v4.0.2: Rename Wails output to rescale-int-gui.exe
+# Wails now outputs rescale-int-gui.exe directly (configured in wails.json)
 $GuiExePath = "build\bin\rescale-int-gui.exe"
-Rename-Item -Path $WailsExePath -NewName "rescale-int-gui.exe"
+if (-not (Test-Path $GuiExePath)) { throw "Wails build failed - EXE not created" }
+
 Write-Host "GUI binary built: rescale-int-gui.exe"
 
 # =============================================================================
@@ -568,11 +566,33 @@ Copyright (c) 2026 Rescale, Inc.
 $ReadmeContent | Out-File -FilePath (Join-Path $OutputDir "README.txt") -Encoding UTF8
 
 # Create ZIP
+# v4.0.8: Use 7-Zip if available for better compatibility (PowerShell's Compress-Archive
+# uses backslash path separators which can cause extraction issues in some tools)
 $ZipName = "rescale-interlink-$($env:RELEASE_TAG)-windows-amd64.zip"
 $ZipPath = Join-Path $BuildDir $ZipName
 
 Write-Host "Creating ZIP package..."
-Compress-Archive -Path (Join-Path $OutputDir "*") -DestinationPath $ZipPath -Force
+
+# Try to use 7-Zip first (creates more compatible archives)
+$7zPath = "C:\Program Files\7-Zip\7z.exe"
+if (-not (Test-Path $7zPath)) {
+    # Try installing via Chocolatey
+    Write-Host "Installing 7-Zip for better ZIP compatibility..."
+    choco install 7zip -y --no-progress --limit-output 2>&1 | Out-Null
+}
+
+if (Test-Path $7zPath) {
+    Write-Host "Using 7-Zip for archive creation..."
+    Push-Location $OutputDir
+    & $7zPath a -tzip -mx=5 $ZipPath * 2>&1 | Out-Null
+    Pop-Location
+    if (-not (Test-Path $ZipPath)) {
+        throw "7-Zip failed to create archive"
+    }
+} else {
+    Write-Host "Falling back to Compress-Archive..."
+    Compress-Archive -Path (Join-Path $OutputDir "*") -DestinationPath $ZipPath -Force
+}
 
 Write-Host "Packaged as: $ZipName"
 Get-Item $ZipPath | Format-List Name, Length

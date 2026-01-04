@@ -55,7 +55,7 @@ function AppComponent() {
     fetchConfig,
   } = useConfigStore()
   const { overallMessage, overallProgress } = useLogStore()
-  const { stats: transferStats } = useTransferStore()
+  const { stats: transferStats, setupEventListeners: setupTransferEventListeners } = useTransferStore()
 
   // v4.0.0: Set up log event listeners at app level so they're always active.
   // Previously these were set up in ActivityTab, which meant events were missed
@@ -65,6 +65,13 @@ function AppComponent() {
     const cleanup = setupEventListeners()
     return cleanup
   }, [setupEventListeners])
+
+  // v4.0.8: Set up transfer event listeners at app level so enumeration events
+  // persist when navigating away from the Transfers tab during a folder scan.
+  useEffect(() => {
+    const cleanup = setupTransferEventListeners()
+    return cleanup
+  }, [setupTransferEventListeners])
 
   // v4.0.4: Set up config event listeners and fetch config on mount
   useEffect(() => {
@@ -76,12 +83,15 @@ function AppComponent() {
   // v4.0.4: Auto-trigger workspace fetch when API key is present but workspace is null.
   // This fixes the bug where env var API key users never see workspace info because
   // TestConnection() was only called when clicking the "Test Connection" button.
+  // v4.0.8: Fixed infinite loop - must also skip if connection already failed or succeeded.
+  // Previously, when test failed (workspaceId stays null), this would re-trigger endlessly.
   useEffect(() => {
     // Only trigger if:
     // 1. Config is loaded and has an API key
     // 2. Workspace is not yet fetched
-    // 3. Not currently testing connection
-    if (config?.apiKey && !workspaceId && connectionStatus !== 'testing') {
+    // 3. Connection status is 'unknown' (never tested yet)
+    // CRITICAL: Do NOT re-trigger if status is 'testing', 'failed', or 'connected'
+    if (config?.apiKey && !workspaceId && connectionStatus === 'unknown') {
       testConnection()
     }
   }, [config?.apiKey, workspaceId, connectionStatus, testConnection])

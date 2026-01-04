@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
@@ -17,6 +19,40 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/services"
 )
+
+// translateAPIError converts common API errors to user-friendly messages.
+// v4.0.8: Unified error translation for better UX across CLI and GUI.
+func translateAPIError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	errStr := err.Error()
+	errLower := strings.ToLower(errStr)
+
+	// Common error patterns and their user-friendly messages
+	switch {
+	case strings.Contains(errLower, "duplicate") || strings.Contains(errLower, "already exists"):
+		return "Item already exists with that name"
+	case strings.Contains(errLower, "401") || strings.Contains(errLower, "unauthorized"):
+		return "API key is invalid or expired - please update your API key"
+	case strings.Contains(errLower, "403") || strings.Contains(errLower, "forbidden"):
+		return "Access denied - you don't have permission for this operation"
+	case strings.Contains(errLower, "404") || strings.Contains(errLower, "not found"):
+		return "Item not found - it may have been deleted or moved"
+	case strings.Contains(errLower, "429") || strings.Contains(errLower, "rate limit"):
+		return "Rate limit exceeded - please wait a moment and try again"
+	case strings.Contains(errLower, "500") || strings.Contains(errLower, "internal server"):
+		return "Server error - please try again later"
+	case strings.Contains(errLower, "timeout") || strings.Contains(errLower, "deadline exceeded"):
+		return "Request timed out - check your network connection"
+	case strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "no such host"):
+		return "Cannot connect to server - check your network connection"
+	default:
+		// Pass through the original error for uncommon errors
+		return errStr
+	}
+}
 
 // FileItemDTO is the JSON-safe version of services.FileItem.
 type FileItemDTO struct {
@@ -375,6 +411,7 @@ type FolderDownloadResultDTO struct {
 // StartFolderDownload downloads a remote folder recursively to the local filesystem.
 // v4.0.0: Implements folder download in GUI using TransferService for progress tracking.
 // Scans remote folder, creates local structure, queues files to TransferService.
+// v4.0.8: Added enumeration events for real-time scanning progress in Transfers tab.
 // folderName: the display name for the folder (used as the local folder name)
 func (a *App) StartFolderDownload(folderID string, folderName string, destPath string) FolderDownloadResultDTO {
 	// Helper to emit log events to Activity tab
@@ -390,6 +427,24 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				Message:   msg,
 				Stage:     "folder-download",
 				JobName:   displayName,
+			})
+		}
+	}
+
+	// v4.0.8: Helper to emit enumeration events
+	enumID := fmt.Sprintf("enum_dl_%d", time.Now().UnixNano())
+	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string) {
+		if a.engine != nil && a.engine.Events() != nil {
+			a.engine.Events().Publish(&events.EnumerationEvent{
+				BaseEvent:    events.BaseEvent{EventType: eventType, Time: time.Now()},
+				ID:           enumID,
+				FolderName:   displayName,
+				Direction:    "download",
+				FoldersFound: foldersFound,
+				FilesFound:   filesFound,
+				BytesFound:   bytesFound,
+				IsComplete:   isComplete,
+				Error:        errMsg,
 			})
 		}
 	}
@@ -417,14 +472,25 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 
 	ctx := context.Background()
 
+	// v4.0.8: Emit enumeration started event
+	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "")
+
 	// Scan remote folder structure using shared CLI function
 	// v4.0.5: Changed to InfoLevel so users see scanning progress (issue #19)
 	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
 	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, folderID, "")
 	if err != nil {
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to scan folder: %s", err.Error()))
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error())
 		return FolderDownloadResultDTO{Error: "Failed to scan remote folder: " + err.Error()}
 	}
+
+	// v4.0.8: Calculate total bytes and emit enumeration completed event
+	var scanTotalBytes int64
+	for _, file := range allFiles {
+		scanTotalBytes += file.Size
+	}
+	emitEnumeration(events.EventEnumerationCompleted, len(allFolders), len(allFiles), scanTotalBytes, true, "")
 
 	emitLog(events.InfoLevel, fmt.Sprintf("Found %d folders, %d files", len(allFolders), len(allFiles)))
 
@@ -494,15 +560,39 @@ type FolderUploadResultDTO struct {
 	FoldersCreated int    `json:"foldersCreated"`
 	FilesQueued    int    `json:"filesQueued"`
 	TotalBytes     int64  `json:"totalBytes"`
+	MergedInto     string `json:"mergedInto,omitempty"` // v4.0.8: Name of existing folder we merged into (empty if new folder created)
 	Error          string `json:"error,omitempty"`
 }
 
 // StartFolderUpload uploads a local folder recursively to the Rescale platform.
 // v4.0.0: Implements folder upload in GUI by creating folder structure and
 // queueing files to the TransferService for upload with progress events.
+// v4.0.8: Added enumeration events for real-time scanning progress in Transfers tab.
 // Uses merge mode (reuse existing folders) and queues all files for upload.
 func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUploadResultDTO {
+	displayName := filepath.Base(localPath)
+	a.logInfo("folder-upload", fmt.Sprintf("Starting folder upload: %s", displayName))
+
+	// v4.0.8: Helper to emit enumeration events
+	enumID := fmt.Sprintf("enum_ul_%d", time.Now().UnixNano())
+	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string) {
+		if a.engine != nil && a.engine.Events() != nil {
+			a.engine.Events().Publish(&events.EnumerationEvent{
+				BaseEvent:    events.BaseEvent{EventType: eventType, Time: time.Now()},
+				ID:           enumID,
+				FolderName:   displayName,
+				Direction:    "upload",
+				FoldersFound: foldersFound,
+				FilesFound:   filesFound,
+				BytesFound:   bytesFound,
+				IsComplete:   isComplete,
+				Error:        errMsg,
+			})
+		}
+	}
+
 	if a.engine == nil {
+		a.logError("folder-upload", "Engine not initialized")
 		return FolderUploadResultDTO{Error: ErrNoEngine.Error()}
 	}
 
@@ -531,11 +621,15 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 	logger := logging.NewLogger("folder-upload", nil)
 	ctx := context.Background()
 
+	// v4.0.8: Emit enumeration started event
+	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "")
+
 	// Get parent folder ID (default to My Library if empty)
 	parentID := destFolderID
 	if parentID == "" {
 		folders, err := apiClient.GetRootFolders(ctx)
 		if err != nil {
+			emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error())
 			return FolderUploadResultDTO{Error: "Failed to get root folders: " + err.Error()}
 		}
 		parentID = folders.MyLibrary
@@ -544,26 +638,71 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 	// Build directory tree (include hidden files for completeness)
 	directories, files, _, err := cli.BuildDirectoryTree(localPath, true)
 	if err != nil {
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error())
 		return FolderUploadResultDTO{Error: "Failed to scan directory: " + err.Error()}
 	}
+
+	// v4.0.8: Calculate total bytes from scanned files for enumeration event
+	var scanTotalBytes int64
+	for _, filePath := range files {
+		if info, err := os.Stat(filePath); err == nil {
+			scanTotalBytes += info.Size()
+		}
+	}
+	emitEnumeration(events.EventEnumerationCompleted, len(directories), len(files), scanTotalBytes, true, "")
+	a.logInfo("folder-upload", fmt.Sprintf("Scan complete: %d folders, %d files", len(directories), len(files)))
 
 	// Initialize folder cache for API call optimization
 	cache := cli.NewFolderCache()
 
 	// Create or get root folder (merge mode: use existing if it exists)
 	rootFolderName := filepath.Base(localPath)
+	a.logInfo("folder-upload", fmt.Sprintf("Checking if folder '%s' exists in parent %s...", rootFolderName, parentID))
 	rootFolderID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
 	if err != nil {
+		a.logError("folder-upload", fmt.Sprintf("Failed to check root folder: %v", err))
 		return FolderUploadResultDTO{Error: "Failed to check root folder: " + err.Error()}
 	}
+	a.logInfo("folder-upload", fmt.Sprintf("Folder check complete: exists=%v, id=%s", exists, rootFolderID))
 
 	foldersCreated := 0
+	mergedIntoFolder := "" // v4.0.8: Track if we merged into existing folder
 	if !exists {
+		a.logInfo("folder-upload", fmt.Sprintf("Creating root folder '%s'...", rootFolderName))
 		rootFolderID, err = apiClient.CreateFolder(ctx, rootFolderName, parentID)
 		if err != nil {
-			return FolderUploadResultDTO{Error: "Failed to create root folder: " + err.Error()}
+			// v4.0.8: Handle "folder already exists" error with clear user guidance
+			if api.IsFileExistsError(err) {
+				a.logWarn("folder-upload", fmt.Sprintf("Folder '%s' already exists, checking if visible...", rootFolderName))
+				// Invalidate cache and re-check to see if we can find it
+				cache.Invalidate(parentID)
+				existingID, found, findErr := cli.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
+				if findErr != nil {
+					a.logError("folder-upload", fmt.Sprintf("Failed to find existing folder: %v", findErr))
+					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but couldn't be accessed. Please check your Rescale Trash and permanently delete it, then try again."}
+				}
+				if found {
+					// Folder exists and is visible - use it (merge mode)
+					rootFolderID = existingID
+					mergedIntoFolder = rootFolderName
+					a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
+				} else {
+					// Folder exists (duplicate error) but not visible - likely in Trash
+					a.logError("folder-upload", fmt.Sprintf("Folder '%s' exists but is not visible - may be in Trash", rootFolderName))
+					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but is not visible. Please check your Rescale Trash and permanently delete it, then try again."}
+				}
+			} else {
+				a.logError("folder-upload", fmt.Sprintf("Failed to create root folder: %v", err))
+				return FolderUploadResultDTO{Error: "Failed to create folder: " + translateAPIError(err)}
+			}
+		} else {
+			a.logInfo("folder-upload", fmt.Sprintf("Created root folder with ID: %s", rootFolderID))
+			foldersCreated++
 		}
-		foldersCreated++
+	} else {
+		// Folder already exists and was found - use it (merge mode)
+		mergedIntoFolder = rootFolderName
+		a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
 	}
 
 	// Populate cache for root folder (v4.0.4: log warning if cache warming fails)
@@ -573,14 +712,17 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 
 	// Create folder structure with merge mode (skip existing folders)
 	folderConflictMode := cli.ConflictMergeAll
+	a.logInfo("folder-upload", "Creating folder structure on remote...")
 	mapping, created, err := cli.CreateFolderStructure(
 		ctx, apiClient, cache, localPath, directories, rootFolderID,
 		&folderConflictMode, 3, logger, nil, nil, // 3 = default folder concurrency
 	)
 	if err != nil {
+		a.logError("folder-upload", fmt.Sprintf("Failed to create folders: %v", err))
 		return FolderUploadResultDTO{Error: "Failed to create folder structure: " + err.Error()}
 	}
 	foldersCreated += created
+	a.logInfo("folder-upload", fmt.Sprintf("Created %d folders on remote", foldersCreated))
 
 	// Queue files for upload using TransferService
 	var totalBytes int64
@@ -617,18 +759,24 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 
 	// Start transfers
 	if len(transferRequests) > 0 {
+		a.logInfo("folder-upload", fmt.Sprintf("Queueing %d files for upload...", len(transferRequests)))
 		if err := ts.StartTransfers(ctx, transferRequests); err != nil {
+			a.logError("folder-upload", fmt.Sprintf("Failed to queue uploads: %v", err))
 			return FolderUploadResultDTO{
 				FoldersCreated: foldersCreated,
 				Error:          "Failed to queue file uploads: " + err.Error(),
 			}
 		}
+		a.logInfo("folder-upload", fmt.Sprintf("Queued %d files (%.2f MB) for upload", len(transferRequests), float64(totalBytes)/(1024*1024)))
+	} else {
+		a.logWarn("folder-upload", "No files to upload in folder")
 	}
 
 	return FolderUploadResultDTO{
 		FoldersCreated: foldersCreated,
 		FilesQueued:    len(transferRequests),
 		TotalBytes:     totalBytes,
+		MergedInto:     mergedIntoFolder,
 	}
 }
 

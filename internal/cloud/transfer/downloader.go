@@ -540,8 +540,9 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	}
 
 	// Context with cancellation for error propagation
+	// Note: cancelDownload is deferred AFTER scaler goroutine is created (see below)
+	// to ensure proper cleanup order: cancel context, then wait for scaler to finish.
 	downloadCtx, cancelDownload := context.WithCancel(ctx)
-	defer cancelDownload()
 
 	// Track first error for clean shutdown
 	var firstErr error
@@ -650,6 +651,14 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 				}
 			}
 		}
+	}()
+
+	// v4.0.8: Ensure scaler goroutine is properly cleaned up on function exit.
+	// Cancel the context first (signals scaler to stop), then wait for it to finish.
+	// This prevents goroutine leaks, matching the upload pattern in upload.go.
+	defer func() {
+		cancelDownload()
+		<-scalerDone
 	}()
 
 	// Close result channel when all workers finish

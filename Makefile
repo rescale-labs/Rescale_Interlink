@@ -2,7 +2,7 @@
 # Build and package cross-platform FIPS 140-3 compliant binaries
 
 # Variables
-VERSION := v4.0.7
+VERSION := v4.0.8
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
 LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
@@ -139,6 +139,14 @@ test-coverage:
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "✅ Coverage report: coverage.html"
 
+# Quick compile check (no binary output - prevents stray binaries in project root)
+# Use this instead of 'go build ./cmd/rescale-int' for verification
+.PHONY: check
+check:
+	@echo "Checking build [FIPS 140-3]..."
+	@$(GOFIPS) go build -o /dev/null ./cmd/rescale-int
+	@echo "✅ Build OK"
+
 # Format code
 .PHONY: fmt
 fmt:
@@ -190,6 +198,7 @@ help:
 	@echo "  package                 Create release archives in dist/"
 	@echo ""
 	@echo "Development Targets:"
+	@echo "  check                   Quick compile check (no binary output)"
 	@echo "  test                    Run all tests (FIPS mode)"
 	@echo "  test-coverage           Run tests with coverage report"
 	@echo "  fmt                     Format code with go fmt"

@@ -18,6 +18,10 @@ export function CancelTransfer(arg1) {
   return window['go']['wailsapp']['App']['CancelTransfer'](arg1);
 }
 
+export function ClearCatalogCache() {
+  return window['go']['wailsapp']['App']['ClearCatalogCache']();
+}
+
 export function ClearCompletedTransfers() {
   return window['go']['wailsapp']['App']['ClearCompletedTransfers']();
 }
@@ -60,6 +64,10 @@ export function GetConfig() {
 
 export function GetCoreTypes() {
   return window['go']['wailsapp']['App']['GetCoreTypes']();
+}
+
+export function GetDefaultConfigPath() {
+  return window['go']['wailsapp']['App']['GetDefaultConfigPath']();
 }
 
 export function GetHomeDirectory() {
@@ -160,6 +168,10 @@ export function SaveAutoDownloadConfig(arg1) {
 
 export function SaveConfig() {
   return window['go']['wailsapp']['App']['SaveConfig']();
+}
+
+export function SaveConfigAs(arg1) {
+  return window['go']['wailsapp']['App']['SaveConfigAs'](arg1);
 }
 
 export function SaveFile(arg1) {

@@ -70,6 +70,44 @@ function ConfirmDialog({
   )
 }
 
+// v4.0.8: Error dialog for critical errors that need user attention
+interface ErrorDialogProps {
+  isOpen: boolean
+  title: string
+  message: string
+  onClose: () => void
+}
+
+function ErrorDialog({ isOpen, title, message, onClose }: ErrorDialogProps) {
+  if (!isOpen) return null
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4 w-[450px] max-w-[90vw]">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="p-2 bg-red-100 dark:bg-red-900/30 rounded-full">
+            <ExclamationTriangleIcon className="w-6 h-6 text-red-600 dark:text-red-400" />
+          </div>
+          <div>
+            <h3 className="text-lg font-medium text-red-600 dark:text-red-400">{title}</h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mt-2 whitespace-pre-line">
+              {message}
+            </p>
+          </div>
+        </div>
+        <div className="flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm text-white bg-red-500 hover:bg-red-600 rounded"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function FileBrowserTab() {
   const {
     local,
@@ -107,6 +145,9 @@ export function FileBrowserTab() {
     folderCount: number
   } | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
+
+  // v4.0.8: Error dialog for critical errors
+  const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null)
 
   // Status message
   const [status, setStatus] = useState('Select files, then use Upload/Download')
@@ -193,13 +234,34 @@ export function FileBrowserTab() {
         ? (remote.myLibraryId || remote.currentFolderId)
         : remote.currentFolderId
 
+      // v4.0.8: Switch to Transfers tab early for folder uploads (matches download behavior)
+      // This shows the folder creation progress in the Activity log
+      if (folders.length > 0) {
+        switchToTab('Transfers')
+      }
+
       // v4.0.0: Upload folders first using StartFolderUpload
       for (const folder of folders) {
         setStatus(`Uploading folder: ${folder.name}...`)
+        console.log(`[FileBrowserTab] Starting folder upload: ${folder.name} (id: ${folder.id}) to ${destFolderId}`)
         const result = await App.StartFolderUpload(folder.id, destFolderId)
+        console.log(`[FileBrowserTab] Folder upload result:`, result)
         if (result.error) {
           console.error(`Folder upload error for ${folder.name}:`, result.error)
-          // Continue with other items
+          // v4.0.8: Show critical errors in a dialog so user definitely sees them
+          setErrorDialog({
+            title: `Upload Failed: ${folder.name}`,
+            message: result.error
+          })
+          setStatus(`Error uploading ${folder.name}`)
+          // Don't continue - let user dismiss the dialog first
+          return
+        } else if (result.mergedInto) {
+          // v4.0.8: Inform user that we merged into an existing folder
+          console.log(`[FileBrowserTab] Merged into existing folder: ${result.mergedInto}`)
+          setStatus(`Merged ${result.filesQueued} files into existing folder "${result.mergedInto}"`)
+        } else {
+          console.log(`[FileBrowserTab] Folder upload success: ${result.foldersCreated} folders, ${result.filesQueued} files queued`)
         }
       }
 
@@ -228,8 +290,8 @@ export function FileBrowserTab() {
       }
       setStatus(`Upload started: ${statusParts.join(' and ')}.`)
 
-      // Switch to Transfers tab to show progress (if files were queued)
-      if (files.length > 0) {
+      // v4.0.8: Switch to Transfers tab for any upload (files or folders)
+      if (files.length > 0 || folders.length > 0) {
         switchToTab('Transfers')
       }
 
@@ -520,6 +582,14 @@ export function FileBrowserTab() {
         isDanger
         onConfirm={confirmDelete}
         onCancel={() => setDeleteConfirm(null)}
+      />
+
+      {/* v4.0.8: Error dialog for critical errors */}
+      <ErrorDialog
+        isOpen={errorDialog !== null}
+        title={errorDialog?.title ?? 'Error'}
+        message={errorDialog?.message ?? ''}
+        onClose={() => setErrorDialog(null)}
       />
     </div>
   )
