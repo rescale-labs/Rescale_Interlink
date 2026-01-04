@@ -564,6 +564,40 @@ type FolderUploadResultDTO struct {
 	Error          string `json:"error,omitempty"`
 }
 
+// FolderExistsCheckDTO returns info about whether a folder with the given name exists.
+// v4.0.8: Used for pre-upload check to prompt user about merge behavior.
+type FolderExistsCheckDTO struct {
+	Exists   bool   `json:"exists"`            // True if a visible folder with this name exists
+	FolderID string `json:"folderId,omitempty"` // ID of existing folder (if found)
+	Error    string `json:"error,omitempty"`   // Error message if check failed
+}
+
+// CheckFolderExistsForUpload checks if a folder with the given name already exists
+// in the destination folder. v4.0.8: Used to show merge confirmation dialog before upload.
+func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID string) FolderExistsCheckDTO {
+	ctx := context.Background()
+
+	if a.engine == nil {
+		return FolderExistsCheckDTO{Error: ErrNoEngine.Error()}
+	}
+
+	apiClient := a.engine.API()
+	if apiClient == nil {
+		return FolderExistsCheckDTO{Error: "API client not configured"}
+	}
+
+	cache := cli.NewFolderCache()
+	folderID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, parentFolderID, folderName)
+	if err != nil {
+		return FolderExistsCheckDTO{Error: "Failed to check folder: " + err.Error()}
+	}
+
+	return FolderExistsCheckDTO{
+		Exists:   exists,
+		FolderID: folderID,
+	}
+}
+
 // StartFolderUpload uploads a local folder recursively to the Rescale platform.
 // v4.0.0: Implements folder upload in GUI by creating folder structure and
 // queueing files to the TransferService for upload with progress events.
