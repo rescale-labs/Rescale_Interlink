@@ -431,6 +431,22 @@ export namespace wailsapp {
 	        this.error = source["error"];
 	    }
 	}
+	export class FolderExistsCheckDTO {
+	    exists: boolean;
+	    folderId?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FolderExistsCheckDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.exists = source["exists"];
+	        this.folderId = source["folderId"];
+	        this.error = source["error"];
+	    }
+	}
 	export class FolderUploadResultDTO {
 	    foldersCreated: number;
 	    filesQueued: number;

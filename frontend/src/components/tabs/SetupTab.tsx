@@ -294,7 +294,7 @@ export function SetupTab() {
         <span className="text-sm text-gray-500">{statusMessage}</span>
       </div>
 
-      <div className="space-y-6 overflow-y-auto max-h-[calc(100vh-200px)]">
+      <div className="space-y-6 overflow-y-auto flex-1">
         {/* API Configuration Section */}
         <div className="card">
           <h3 className="text-base font-semibold text-gray-900 mb-4">API Configuration</h3>
