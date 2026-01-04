@@ -2,10 +2,22 @@ import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../wailsjs/go/models'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { ProgressEventDTO, TransferEventDTO, EVENT_NAMES } from '../types/events'
+import { ProgressEventDTO, TransferEventDTO, EnumerationEventDTO, EVENT_NAMES } from '../types/events'
 
 // Transfer task state
 export type TransferState = 'queued' | 'initializing' | 'active' | 'completed' | 'failed' | 'cancelled' | 'paused'
+
+// v4.0.8: Enumeration state for folder scan progress
+export interface Enumeration {
+  id: string
+  folderName: string
+  direction: 'upload' | 'download'
+  foldersFound: number
+  filesFound: number
+  bytesFound: number
+  isComplete: boolean
+  error?: string
+}
 
 // Extended transfer task with UI state
 export interface TransferTask extends wailsapp.TransferTaskDTO {
@@ -24,6 +36,7 @@ interface TransferStore {
   // State
   tasks: TransferTask[]
   stats: TransferStats
+  enumerations: Enumeration[] // v4.0.8: Active folder scans
   isLoading: boolean
   error: string | null
   isPolling: boolean
@@ -40,11 +53,17 @@ interface TransferStore {
   clearCompletedTransfers: () => void
   handleProgressEvent: (event: ProgressEventDTO) => void
   handleTransferEvent: (event: TransferEventDTO) => void
+  handleEnumerationEvent: (event: EnumerationEventDTO) => void // v4.0.8
+
+  // v4.0.8: App-level event listeners (always active, unlike polling which is tab-specific)
+  setupEventListeners: () => () => void
 
   // Internal
   _pollInterval: ReturnType<typeof setInterval> | null
   _unsubscribeProgress: (() => void) | null
   _unsubscribeTransfer: (() => void) | null
+  _unsubscribeEnumeration: (() => void) | null // v4.0.8
+  _appEventListenersSetup: boolean // v4.0.8: Track if app-level listeners are set up
 }
 
 // Format speed in bytes/sec to human readable
@@ -100,6 +119,7 @@ const initialStats: TransferStats = {
 export const useTransferStore = create<TransferStore>((set, get) => ({
   tasks: [],
   stats: initialStats,
+  enumerations: [], // v4.0.8: Active folder scans
   isLoading: false,
   error: null,
   isPolling: false,
@@ -107,6 +127,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   _pollInterval: null,
   _unsubscribeProgress: null,
   _unsubscribeTransfer: null,
+  _unsubscribeEnumeration: null,
+  _appEventListenersSetup: false,
 
   fetchTasks: async () => {
     try {
@@ -153,10 +175,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       get().handleProgressEvent(event)
     })
 
-    // Subscribe to transfer events for real-time updates (file uploads/downloads)
-    const unsubscribeTransfer = EventsOn(EVENT_NAMES.TRANSFER, (event: TransferEventDTO) => {
-      get().handleTransferEvent(event)
-    })
+    // v4.0.8: Transfer and enumeration events are now subscribed at app level
+    // via setupEventListeners() so they persist when navigating away
 
     // Initial fetch
     get().fetchTasks()
@@ -166,30 +186,27 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       isPolling: true,
       _pollInterval: pollInterval,
       _unsubscribeProgress: unsubscribeProgress,
-      _unsubscribeTransfer: unsubscribeTransfer,
     })
   },
 
   stopPolling: () => {
-    const { _pollInterval, _unsubscribeProgress, _unsubscribeTransfer } = get()
+    const { _pollInterval, _unsubscribeProgress } = get()
 
     if (_pollInterval) {
       clearInterval(_pollInterval)
     }
 
+    // v4.0.8: Only unsubscribe from progress events (legacy PUR)
+    // Transfer and enumeration events are now handled at app level
     if (_unsubscribeProgress) {
       _unsubscribeProgress()
-    }
-
-    if (_unsubscribeTransfer) {
-      _unsubscribeTransfer()
     }
 
     set({
       isPolling: false,
       _pollInterval: null,
       _unsubscribeProgress: null,
-      _unsubscribeTransfer: null,
+      // v4.0.8: Don't clear enumerations - they persist while scanning
     })
   },
 
@@ -282,5 +299,90 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       updatedTasks[taskIndex] = task
       return { tasks: updatedTasks, lastUpdate: Date.now() }
     })
+  },
+
+  // v4.0.8: Handle enumeration events for folder scan progress
+  handleEnumerationEvent: (event: EnumerationEventDTO) => {
+    set(state => {
+      const existingIndex = state.enumerations.findIndex(e => e.id === event.id)
+
+      if (event.isComplete) {
+        // Remove completed enumeration after a short delay (let user see final count)
+        if (existingIndex !== -1) {
+          const updated = [...state.enumerations]
+          updated[existingIndex] = {
+            ...updated[existingIndex],
+            foldersFound: event.foldersFound,
+            filesFound: event.filesFound,
+            bytesFound: event.bytesFound,
+            isComplete: true,
+            error: event.error,
+          }
+          // Remove after 2 seconds
+          setTimeout(() => {
+            set(s => ({
+              enumerations: s.enumerations.filter(e => e.id !== event.id)
+            }))
+          }, 2000)
+          return { enumerations: updated }
+        }
+        return state
+      }
+
+      if (existingIndex === -1) {
+        // New enumeration - add it
+        return {
+          enumerations: [...state.enumerations, {
+            id: event.id,
+            folderName: event.folderName,
+            direction: event.direction,
+            foldersFound: event.foldersFound,
+            filesFound: event.filesFound,
+            bytesFound: event.bytesFound,
+            isComplete: event.isComplete,
+            error: event.error,
+          }]
+        }
+      } else {
+        // Update existing enumeration
+        const updated = [...state.enumerations]
+        updated[existingIndex] = {
+          ...updated[existingIndex],
+          foldersFound: event.foldersFound,
+          filesFound: event.filesFound,
+          bytesFound: event.bytesFound,
+        }
+        return { enumerations: updated }
+      }
+    })
+  },
+
+  // v4.0.8: Set up event listeners at app level (always active)
+  // This ensures enumeration and transfer events are captured even when not on Transfers tab
+  setupEventListeners: () => {
+    const state = get()
+    if (state._appEventListenersSetup) {
+      // Already set up, return no-op cleanup
+      return () => {}
+    }
+
+    // Subscribe to transfer events
+    const unsubscribeTransfer = EventsOn(EVENT_NAMES.TRANSFER, (event: TransferEventDTO) => {
+      get().handleTransferEvent(event)
+    })
+
+    // Subscribe to enumeration events
+    const unsubscribeEnumeration = EventsOn(EVENT_NAMES.ENUMERATION, (event: EnumerationEventDTO) => {
+      get().handleEnumerationEvent(event)
+    })
+
+    set({ _appEventListenersSetup: true })
+
+    // Return cleanup function
+    return () => {
+      unsubscribeTransfer()
+      unsubscribeEnumeration()
+      set({ _appEventListenersSetup: false })
+    }
   },
 }))

@@ -23,6 +23,10 @@ type JobSpec struct {
 	Tags                  []string // Job tags (added in v1.0.0)
 	ProjectID             string   // Project ID to assign job to (added in v1.0.0)
 	Automations           []string // Automation IDs to attach (added in v3.6.1)
+
+	// v4.0.8: File-based job inputs (for file scanning mode in PUR)
+	// When InputFiles is non-empty, these files are uploaded individually instead of tarring Directory
+	InputFiles []string
 }
 
 // JobState represents the state of a job in the pipeline

@@ -29,6 +29,14 @@ const (
 
 	// v3.6.3: Configuration change events
 	EventConfigChanged EventType = "config_changed" // API key or config changed, caches should be invalidated
+
+	// v4.0.8: Enumeration events for folder download/upload progress
+	EventEnumerationStarted   EventType = "enumeration_started"   // Folder scan began
+	EventEnumerationProgress  EventType = "enumeration_progress"  // Folder scan progress
+	EventEnumerationCompleted EventType = "enumeration_completed" // Folder scan completed
+
+	// v4.0.8: Scan progress events for software/hardware catalog scanning
+	EventScanProgress EventType = "scan_progress" // Catalog scan progress
 )
 
 // LogLevel defines log severity levels
@@ -143,6 +151,32 @@ type ConfigChangedEvent struct {
 	BaseEvent
 	Source string // "direct_input", "env_var", "token_file"
 	Email  string // User email after successful auth (empty if auth failed)
+}
+
+// EnumerationEvent represents folder enumeration progress (v4.0.8)
+// Published during folder download/upload to show scanning progress before transfers start.
+type EnumerationEvent struct {
+	BaseEvent
+	ID           string `json:"id"`           // Unique enumeration ID
+	FolderName   string `json:"folderName"`   // Folder being scanned
+	Direction    string `json:"direction"`    // "upload" or "download"
+	FoldersFound int    `json:"foldersFound"` // Folders discovered so far
+	FilesFound   int    `json:"filesFound"`   // Files discovered so far
+	BytesFound   int64  `json:"bytesFound"`   // Total bytes discovered
+	IsComplete   bool   `json:"isComplete"`   // True when enumeration finished
+	Error        string `json:"error"`        // Error if enumeration failed
+}
+
+// ScanProgressEvent represents catalog scan progress (v4.0.8)
+// Published during software/hardware catalog fetching to show progress.
+type ScanProgressEvent struct {
+	BaseEvent
+	ScanType   string `json:"scanType"`   // "software" or "hardware"
+	Page       int    `json:"page"`       // Current page number
+	ItemsFound int    `json:"itemsFound"` // Items discovered so far
+	IsComplete bool   `json:"isComplete"` // True when scan finished
+	IsCached   bool   `json:"isCached"`   // True if result came from cache
+	Error      string `json:"error"`      // Error if scan failed
 }
 
 // EventBus manages event subscriptions and publishing

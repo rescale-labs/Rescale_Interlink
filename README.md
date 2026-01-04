@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.0.7-green)
+![Status](https://img.shields.io/badge/status-v4.0.8-green)
 
 ---
 
@@ -312,7 +312,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +-------------------------------------------------------------+
-|                   rescale-int v4.0.0                     |
+|                   rescale-int v4.0.8                     |
 |                  Unified CLI + GUI Binary                    |
 +-------------------------------------------------------------+
 |                                                              |
@@ -548,6 +548,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.0.7
+**Version**: 4.0.8
 **Status**: Production Ready
-**Last Updated**: January 2, 2026
+**Last Updated**: January 3, 2026
