@@ -84,3 +84,6 @@ CONTINUATION_PLAN*.md
 # Local Claude development files (never commit)
 scripts/CLAUDE_BUILD_INSTRUCTIONS.md
 **/CLAUDE_BUILD*.md
+
+# Terminal session logs (may contain secrets)
+Terminal_*.txt
