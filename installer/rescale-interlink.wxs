@@ -72,12 +72,14 @@
                   Impersonate="no"
                   Return="ignore" />
 
-    <!-- v4.0.8: Launch tray icon immediately after install (so user doesn't need to log out/in) -->
+    <!-- v4.0.8: Launch tray icon immediately after install using WixShellExec -->
+    <!-- Set target executable - [#FileId] resolves to installed path -->
+    <SetProperty Id="WixShellExecTarget" Value="[#TrayExe]" After="CostFinalize" Sequence="execute" />
+
     <CustomAction Id="LaunchTray"
-                  Directory="INSTALLFOLDER"
-                  ExeCommand="[INSTALLFOLDER]rescale-int-tray.exe"
-                  Execute="commit"
-                  Impersonate="yes"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixShellExec"
+                  Execute="immediate"
                   Return="asyncNoWait" />
 
     <!-- Install sequence -->
