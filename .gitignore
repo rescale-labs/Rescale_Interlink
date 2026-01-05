@@ -87,3 +87,19 @@ scripts/CLAUDE_BUILD_INSTRUCTIONS.md
 
 # Terminal session logs (may contain secrets)
 Terminal_*.txt
+*_transcript*.txt
+*_session*.txt
+*_log*.txt
+
+# Any file that might contain credentials
+*token*
+*secret*
+*credential*
+*password*
+*.key
+!*.tsx
+!*.ts
+
+# Claude Code artifacts that may contain sensitive data
+*.compact
+conversation_*.json
