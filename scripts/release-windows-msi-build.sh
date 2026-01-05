@@ -309,6 +309,11 @@ $wixExtResult = cmd /c "wix extension add WixToolset.UI.wixext -g 2>&1"
 Write-Host $wixExtResult
 # Note: wix extension add may return non-zero if already installed - that's OK
 
+# v4.0.8: Install WiX Util extension for WixShellExec (LaunchTray custom action)
+Write-Host "Installing WiX Util extension..."
+$wixUtilExtResult = cmd /c "wix extension add WixToolset.Util.wixext -g 2>&1"
+Write-Host $wixUtilExtResult
+
 Write-Host "WiX version:"
 # Use cmd /c wrapper to avoid PowerShell transcript console buffer conflicts
 $wixVersionResult = cmd /c "wix --version 2>&1"
