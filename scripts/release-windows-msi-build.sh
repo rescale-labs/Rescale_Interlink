@@ -619,14 +619,11 @@ $MsiPath = Join-Path $WorkDir $MsiName
 
 Write-Host "Building MSI: $MsiPath"
 
-# v4.0.8: Copy License.rtf to build directory for WiX to find
-Copy-Item "$InstallerDir\License.rtf" "$BinDir\License.rtf" -Force
-Write-Host "Copied License.rtf to build directory"
-
 # Build the wix command string and execute via cmd /c to avoid transcript console buffer conflicts
 $VersionNum = $env:RELEASE_TAG -replace '^v', ''
 $WxsFile = "$InstallerDir\rescale-interlink.wxs"
-$wixBuildCmd = "wix build `"$WxsFile`" -d BuildDir=`"$BinDir`" -d SourceDir=`"$BinDir`" -d Version=`"$VersionNum`" -ext WixToolset.UI.wixext -o `"$MsiPath`""
+# v4.0.8: Add -bindpath to tell WiX where to find License.rtf
+$wixBuildCmd = "wix build `"$WxsFile`" -d BuildDir=`"$BinDir`" -d SourceDir=`"$BinDir`" -d Version=`"$VersionNum`" -ext WixToolset.UI.wixext -bindpath `"$InstallerDir`" -o `"$MsiPath`""
 
 Write-Host "Running: $wixBuildCmd"
 $wixBuildResult = cmd /c "$wixBuildCmd 2>&1"
