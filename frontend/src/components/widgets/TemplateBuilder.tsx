@@ -301,22 +301,21 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     setTemplate((t) => ({ ...t, [key]: value }))
   }, [])
 
-  // v4.0.8: Validate and round cores to nearest valid multiple
+  // v4.0.8: Handle cores change - allow any positive value, validation happens on save
   const handleCoresChange = useCallback(
     (value: number) => {
       if (value <= 0) {
         updateField('coresPerSlot', coresBaseUnit)
         return
       }
-      // Round to nearest multiple of baseUnit
-      const rounded = Math.max(coresBaseUnit, Math.round(value / coresBaseUnit) * coresBaseUnit)
-      updateField('coresPerSlot', rounded)
+      // Allow user to enter any value - validation will check if it's valid
+      updateField('coresPerSlot', value)
     },
     [coresBaseUnit, updateField]
   )
 
   // Validate template
-  // v4.0.8: Added coresBaseUnit validation
+  // v4.0.8: Updated cores validation to allow fractional nodes OR multi-node (multiples of max)
   const validate = useCallback((): string[] => {
     const errs: string[] = []
 
@@ -334,15 +333,24 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
     if (template.coresPerSlot <= 0) {
       errs.push('Cores must be positive')
-    } else if (template.coresPerSlot % coresBaseUnit !== 0) {
-      errs.push(`Cores must be a multiple of ${coresBaseUnit}`)
+    } else {
+      // v4.0.8: Allow values in ct.cores array (fractional nodes) OR multiples of max (multi-node)
+      const ct = coreTypes.find((c) => c.code === template.coreType)
+      const maxCores = ct && ct.cores.length > 0 ? Math.max(...ct.cores) : 64
+      const isValidFractional = ct?.cores.includes(template.coresPerSlot) ?? false
+      const isValidMultiNode = template.coresPerSlot % maxCores === 0
+
+      if (!isValidFractional && !isValidMultiNode) {
+        const validOptions = ct?.cores.length ? ct.cores.join(', ') : coresBaseUnit.toString()
+        errs.push(`Cores must be ${validOptions} or a multiple of ${maxCores}`)
+      }
     }
     if (template.walltimeHours <= 0) {
       errs.push('Walltime must be positive')
     }
 
     return errs
-  }, [template, coresBaseUnit])
+  }, [template, coresBaseUnit, coreTypes])
 
   // Handle save
   const handleSave = useCallback(() => {
@@ -486,7 +494,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 {/* v4.0.8: Show hint that first scan may take a while */}
                 {isLoadingAnalysisCodes && analysisCodes.length === 0 && (
                   <p className="mb-1 text-xs text-gray-500 italic">
-                    First scan may take up to a minute...
+                    First scan may take up to several minutes...
                   </p>
                 )}
                 <SearchableSelect
@@ -549,7 +557,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 {/* v4.0.8: Show hint that first scan may take a while */}
                 {isLoadingCoreTypes && coreTypes.length === 0 && (
                   <p className="mb-1 text-xs text-gray-500 italic">
-                    First scan may take up to a minute...
+                    First scan may take up to several minutes...
                   </p>
                 )}
                 <SearchableSelect
@@ -756,7 +764,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     onChange={(e) => updateField('isLowPriority', e.target.checked)}
                     className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
                   />
-                  <span className="text-sm">Low Priority (use preemptible instances)</span>
+                  <span className="text-sm">Use ODE (instead of default ODP - warning, ODE jobs may be interrupted)</span>
                 </label>
               </div>
             </div>
