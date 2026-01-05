@@ -103,3 +103,10 @@ Terminal_*.txt
 # Claude Code artifacts that may contain sensitive data
 *.compact
 conversation_*.json
+
+# Archived/internal code (not for GitHub)
+_archive_*/
+*_archive/
+
+# Internal security audits (not for GitHub)
+SECURITY_AUDIT*.md
