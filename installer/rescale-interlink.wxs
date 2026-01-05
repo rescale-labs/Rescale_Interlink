@@ -80,7 +80,7 @@
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixShellExec"
                   Execute="immediate"
-                  Return="asyncNoWait" />
+                  Return="ignore" />
 
     <!-- Install sequence -->
     <InstallExecuteSequence>
