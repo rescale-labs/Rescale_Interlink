@@ -1,3 +1,23 @@
+# ═══════════════════════════════════════════════════════════════════
+# WHITELIST-BASED APPROACH
+# See .github/commit-whitelist.md for the definitive list of allowed files
+# ═══════════════════════════════════════════════════════════════════
+#
+# Philosophy: This is a PUBLIC repository
+# - Production code and public docs: ALLOWED
+# - Internal dev files, scripts, logs: BLOCKED
+#
+# ALLOWED directories:
+#   cmd/, internal/, frontend/, installer/, .github/
+# ALLOWED config files:
+#   go.mod, go.sum, Makefile, wails.json, .gitignore
+# ALLOWED docs:
+#   README.md, LICENSE, CLI_GUIDE.md, ARCHITECTURE.md, CONTRIBUTING.md,
+#   TESTING.md, RELEASE_NOTES.md, FEATURE_SUMMARY.md
+#
+# Everything else is BLOCKED by default
+# ═══════════════════════════════════════════════════════════════════
+
 # Binaries (in project root, not in bin/)
 /rescale-int
 /rescale-int-*
@@ -110,3 +130,27 @@ _archive_*/
 
 # Internal security audits (not for GitHub)
 SECURITY_AUDIT*.md
+
+# Block internal docs/ folder (internal documentation)
+docs/
+
+# Block testdata/ folder (test fixtures - internal only)
+testdata/
+
+# Catch-all: Block any .md or .txt NOT in whitelist
+# (Whitelist: README.md, LICENSE, CLI_GUIDE.md, ARCHITECTURE.md,
+#  CONTRIBUTING.md, TESTING.md, RELEASE_NOTES.md, FEATURE_SUMMARY.md)
+# All other .md/.txt files are internal and should stay local
+*.md
+!README.md
+!LICENSE
+!CLI_GUIDE.md
+!ARCHITECTURE.md
+!CONTRIBUTING.md
+!TESTING.md
+!RELEASE_NOTES.md
+!FEATURE_SUMMARY.md
+!.github/**/*.md
+
+*.txt
+# No .txt files are whitelisted - all are blocked
