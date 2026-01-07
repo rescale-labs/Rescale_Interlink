@@ -36,6 +36,8 @@ export function GetConfig():Promise<wailsapp.ConfigDTO>;
 
 export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
 
+export function GetDaemonStatus():Promise<wailsapp.DaemonStatusDTO>;
+
 export function GetDefaultConfigPath():Promise<string>;
 
 export function GetHomeDirectory():Promise<string>;
@@ -80,7 +82,11 @@ export function LoadJobsFromJSON(arg1:string):Promise<Array<wailsapp.JobSpecDTO>
 
 export function LoadTemplate(arg1:string):Promise<wailsapp.JobSpecDTO>;
 
+export function PauseDaemon():Promise<void>;
+
 export function ResetRun():Promise<void>;
+
+export function ResumeDaemon():Promise<void>;
 
 export function RetryTransfer(arg1:string):Promise<string>;
 
@@ -114,6 +120,8 @@ export function SelectMultipleFiles(arg1:string):Promise<Array<string>>;
 
 export function StartBulkRun(arg1:Array<wailsapp.JobSpecDTO>):Promise<string>;
 
+export function StartDaemon():Promise<void>;
+
 export function StartFolderDownload(arg1:string,arg2:string,arg3:string):Promise<wailsapp.FolderDownloadResultDTO>;
 
 export function StartFolderUpload(arg1:string,arg2:string):Promise<wailsapp.FolderUploadResultDTO>;
@@ -122,9 +130,13 @@ export function StartSingleJob(arg1:wailsapp.SingleJobInputDTO):Promise<string>;
 
 export function StartTransfers(arg1:Array<wailsapp.TransferRequestDTO>):Promise<void>;
 
+export function StopDaemon():Promise<void>;
+
 export function TestAutoDownloadConnection(arg1:wailsapp.AutoDownloadConfigDTO):Promise<void>;
 
 export function TestConnection():Promise<wailsapp.ConnectionResultDTO>;
+
+export function TriggerDaemonScan():Promise<void>;
 
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
 

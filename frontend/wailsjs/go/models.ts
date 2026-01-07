@@ -323,6 +323,40 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	export class DaemonStatusDTO {
+	    running: boolean;
+	    pid: number;
+	    ipcConnected: boolean;
+	    state: string;
+	    version: string;
+	    uptime: string;
+	    lastScan: string;
+	    activeDownloads: number;
+	    jobsDownloaded: number;
+	    downloadFolder: string;
+	    error?: string;
+	    managedBy?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonStatusDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.running = source["running"];
+	        this.pid = source["pid"];
+	        this.ipcConnected = source["ipcConnected"];
+	        this.state = source["state"];
+	        this.version = source["version"];
+	        this.uptime = source["uptime"];
+	        this.lastScan = source["lastScan"];
+	        this.activeDownloads = source["activeDownloads"];
+	        this.jobsDownloaded = source["jobsDownloaded"];
+	        this.downloadFolder = source["downloadFolder"];
+	        this.error = source["error"];
+	        this.managedBy = source["managedBy"];
+	    }
+	}
 	export class DeleteResultDTO {
 	    deleted: number;
 	    failed: number;

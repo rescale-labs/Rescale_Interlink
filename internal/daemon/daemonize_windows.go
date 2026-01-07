@@ -1,0 +1,94 @@
+//go:build windows
+
+// Package daemon provides background service functionality for auto-downloading completed jobs.
+package daemon
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+)
+
+// PIDFilePath returns the path to the daemon PID file.
+// On Windows, this is in the user's AppData directory.
+func PIDFilePath() string {
+	appData := os.Getenv("APPDATA")
+	if appData == "" {
+		return filepath.Join(os.TempDir(), "rescale-daemon.pid")
+	}
+	return filepath.Join(appData, "Rescale", "daemon.pid")
+}
+
+// WritePIDFile writes the current process's PID to the PID file.
+func WritePIDFile() error {
+	pidPath := PIDFilePath()
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0700); err != nil {
+		return fmt.Errorf("failed to create PID file directory: %w", err)
+	}
+
+	// Write PID
+	pid := os.Getpid()
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0600); err != nil {
+		return fmt.Errorf("failed to write PID file: %w", err)
+	}
+
+	return nil
+}
+
+// RemovePIDFile removes the PID file.
+func RemovePIDFile() {
+	os.Remove(PIDFilePath())
+}
+
+// ReadPIDFile reads the PID from the PID file.
+// Returns 0 if the file doesn't exist or is invalid.
+func ReadPIDFile() int {
+	data, err := os.ReadFile(PIDFilePath())
+	if err != nil {
+		return 0
+	}
+
+	pid, err := strconv.Atoi(string(data))
+	if err != nil {
+		return 0
+	}
+
+	return pid
+}
+
+// IsDaemonRunning checks if a daemon process is already running.
+// Returns the PID if running, 0 if not.
+func IsDaemonRunning() int {
+	pid := ReadPIDFile()
+	if pid == 0 {
+		return 0
+	}
+
+	// On Windows, check if process exists using OpenProcess
+	// For now, just return the PID if the file exists
+	// The Windows service manager handles this differently
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return 0
+	}
+
+	// On Windows, FindProcess always succeeds. We can't easily check if running.
+	// Just return the PID and let the caller handle it.
+	_ = process
+	return pid
+}
+
+// Daemonize on Windows is not supported for direct daemon mode.
+// Windows uses the Windows Service Manager instead.
+func Daemonize(args []string) error {
+	return fmt.Errorf("daemonization not supported on Windows - use Windows Service instead")
+}
+
+// IsDaemonChild returns true if we're running as the daemon child process.
+// On Windows, this is always false (no forking support).
+func IsDaemonChild() bool {
+	return false
+}

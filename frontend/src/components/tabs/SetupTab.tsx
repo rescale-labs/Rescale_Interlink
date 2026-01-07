@@ -20,6 +20,12 @@ import {
   SaveConfigAs,
   GetDefaultConfigPath,
   SaveFile,
+  GetDaemonStatus,
+  StartDaemon,
+  StopDaemon,
+  TriggerDaemonScan,
+  PauseDaemon,
+  ResumeDaemon,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 
@@ -73,6 +79,10 @@ export function SetupTab() {
   } | null>(null);
   const [isAutoDownloadSaving, setIsAutoDownloadSaving] = useState(false);
 
+  // Daemon control state (v4.1.0)
+  const [daemonStatus, setDaemonStatus] = useState<wailsapp.DaemonStatusDTO | null>(null);
+  const [isDaemonLoading, setIsDaemonLoading] = useState(false);
+
   // Setup event listeners and fetch initial data
   useEffect(() => {
     const cleanup = setupEventListeners();
@@ -114,6 +124,25 @@ export function SetupTab() {
     return () => {
       EventsOff('interlink:autodownload_test_result');
     };
+  }, []);
+
+  // Fetch daemon status on mount and periodically (v4.1.0)
+  useEffect(() => {
+    const fetchDaemonStatus = async () => {
+      try {
+        const status = await GetDaemonStatus();
+        setDaemonStatus(status);
+      } catch (err) {
+        console.error('Failed to fetch daemon status:', err);
+      }
+    };
+
+    fetchDaemonStatus();
+
+    // Poll every 5 seconds when tab is visible
+    const interval = setInterval(fetchDaemonStatus, 5000);
+
+    return () => clearInterval(interval);
   }, []);
 
   // Initialize local state from config
@@ -223,6 +252,80 @@ export function SetupTab() {
     setAutoDownloadTestStatus('testing');
     setAutoDownloadTestResult(null);
     await TestAutoDownloadConnection(autoDownloadConfig);
+  };
+
+  // Daemon control handlers (v4.1.0)
+  const refreshDaemonStatus = async () => {
+    try {
+      const status = await GetDaemonStatus();
+      setDaemonStatus(status);
+    } catch (err) {
+      console.error('Failed to refresh daemon status:', err);
+    }
+  };
+
+  const handleStartDaemon = async () => {
+    try {
+      setIsDaemonLoading(true);
+      setStatusMessage('Starting daemon...');
+      await StartDaemon();
+      setStatusMessage('Daemon started successfully');
+      await refreshDaemonStatus();
+    } catch (err) {
+      setStatusMessage(`Failed to start daemon: ${err}`);
+    } finally {
+      setIsDaemonLoading(false);
+    }
+  };
+
+  const handleStopDaemon = async () => {
+    try {
+      setIsDaemonLoading(true);
+      setStatusMessage('Stopping daemon...');
+      await StopDaemon();
+      setStatusMessage('Daemon stopped');
+      await refreshDaemonStatus();
+    } catch (err) {
+      setStatusMessage(`Failed to stop daemon: ${err}`);
+    } finally {
+      setIsDaemonLoading(false);
+    }
+  };
+
+  const handleTriggerScan = async () => {
+    try {
+      setStatusMessage('Triggering scan...');
+      await TriggerDaemonScan();
+      setStatusMessage('Scan triggered');
+    } catch (err) {
+      setStatusMessage(`Failed to trigger scan: ${err}`);
+    }
+  };
+
+  const handlePauseDaemon = async () => {
+    try {
+      setIsDaemonLoading(true);
+      await PauseDaemon();
+      setStatusMessage('Daemon paused');
+      await refreshDaemonStatus();
+    } catch (err) {
+      setStatusMessage(`Failed to pause daemon: ${err}`);
+    } finally {
+      setIsDaemonLoading(false);
+    }
+  };
+
+  const handleResumeDaemon = async () => {
+    try {
+      setIsDaemonLoading(true);
+      await ResumeDaemon();
+      setStatusMessage('Daemon resumed');
+      await refreshDaemonStatus();
+    } catch (err) {
+      setStatusMessage(`Failed to resume daemon: ${err}`);
+    } finally {
+      setIsDaemonLoading(false);
+    }
   };
 
   const getConnectionStatusIcon = () => {
@@ -816,6 +919,149 @@ export function SetupTab() {
             <p className="text-xs text-gray-500">
               Auto-download automatically downloads outputs from completed jobs that have the correctness tag
               and the "Auto Download" custom field set to "Enable" in Rescale.
+            </p>
+          </div>
+        </div>
+
+        {/* Auto-Download Service Control (v4.1.0) */}
+        <div className="card">
+          <h3 className="text-base font-semibold text-gray-900 mb-4">Auto-Download Service</h3>
+          <div className="space-y-4">
+            {/* Service Status */}
+            <div className={clsx(
+              'p-4 rounded-lg',
+              daemonStatus?.running && daemonStatus?.ipcConnected ? 'bg-green-50' :
+              daemonStatus?.running && !daemonStatus?.ipcConnected ? 'bg-yellow-50' :
+              'bg-gray-50'
+            )}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className={clsx(
+                    'w-3 h-3 rounded-full',
+                    daemonStatus?.state === 'running' ? 'bg-green-500' :
+                    daemonStatus?.state === 'paused' ? 'bg-yellow-500' :
+                    'bg-gray-400'
+                  )} />
+                  <div>
+                    <div className="font-medium text-gray-900">
+                      {daemonStatus?.state === 'running' ? 'Running' :
+                       daemonStatus?.state === 'paused' ? 'Paused' :
+                       daemonStatus?.running ? 'Running (IPC unavailable)' :
+                       'Stopped'}
+                    </div>
+                    {daemonStatus?.running && daemonStatus?.pid > 0 && (
+                      <div className="text-xs text-gray-500">PID: {daemonStatus.pid}</div>
+                    )}
+                    {daemonStatus?.managedBy && (
+                      <div className="text-xs text-gray-500">Managed by: {daemonStatus.managedBy}</div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!daemonStatus?.running ? (
+                    <button
+                      onClick={handleStartDaemon}
+                      disabled={isDaemonLoading || !autoDownloadConfig.enabled}
+                      className="btn-primary text-sm"
+                      title={!autoDownloadConfig.enabled ? 'Enable auto-download settings first' : 'Start auto-download service'}
+                    >
+                      {isDaemonLoading ? 'Starting...' : 'Start Service'}
+                    </button>
+                  ) : daemonStatus?.managedBy ? (
+                    <span className="text-sm text-gray-500">
+                      Use {daemonStatus.managedBy} to control
+                    </span>
+                  ) : (
+                    <>
+                      {daemonStatus?.state === 'paused' ? (
+                        <button
+                          onClick={handleResumeDaemon}
+                          disabled={isDaemonLoading}
+                          className="btn-secondary text-sm"
+                        >
+                          Resume
+                        </button>
+                      ) : (
+                        <button
+                          onClick={handlePauseDaemon}
+                          disabled={isDaemonLoading}
+                          className="btn-secondary text-sm"
+                        >
+                          Pause
+                        </button>
+                      )}
+                      <button
+                        onClick={handleStopDaemon}
+                        disabled={isDaemonLoading}
+                        className="btn-secondary text-sm text-red-600 hover:text-red-700"
+                      >
+                        {isDaemonLoading ? 'Stopping...' : 'Stop'}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Service Details (when running) */}
+              {daemonStatus?.running && daemonStatus?.ipcConnected && (
+                <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-gray-500">Uptime:</span>
+                    <span className="ml-2 text-gray-900">{daemonStatus.uptime || 'N/A'}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Version:</span>
+                    <span className="ml-2 text-gray-900">{daemonStatus.version || 'N/A'}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Jobs Downloaded:</span>
+                    <span className="ml-2 text-gray-900">{daemonStatus.jobsDownloaded}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Active Downloads:</span>
+                    <span className="ml-2 text-gray-900">{daemonStatus.activeDownloads}</span>
+                  </div>
+                  <div className="col-span-2">
+                    <span className="text-gray-500">Last Scan:</span>
+                    <span className="ml-2 text-gray-900">
+                      {daemonStatus.lastScan ? new Date(daemonStatus.lastScan).toLocaleString() : 'Never'}
+                    </span>
+                  </div>
+                  {daemonStatus.downloadFolder && (
+                    <div className="col-span-2">
+                      <span className="text-gray-500">Download Folder:</span>
+                      <span className="ml-2 text-gray-900 break-all">{daemonStatus.downloadFolder}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Error message */}
+              {daemonStatus?.error && (
+                <div className="mt-3 text-sm text-yellow-700">
+                  <span className="font-medium">Note:</span> {daemonStatus.error}
+                </div>
+              )}
+            </div>
+
+            {/* Scan Now Button */}
+            {daemonStatus?.running && daemonStatus?.ipcConnected && daemonStatus?.state !== 'paused' && (
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={handleTriggerScan}
+                  className="btn-secondary"
+                >
+                  Scan Now
+                </button>
+                <span className="text-xs text-gray-500">
+                  Force an immediate check for completed jobs
+                </span>
+              </div>
+            )}
+
+            <p className="text-xs text-gray-500">
+              The auto-download service runs in the background and automatically downloads completed jobs
+              that match your settings. The service continues running even after closing the GUI.
             </p>
           </div>
         </div>
