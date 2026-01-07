@@ -94,6 +94,8 @@ type AutoDownloadConfig struct {
 
 // Validation errors
 var (
+	ErrMissingPlatformURL    = errors.New("platform_url is required")
+	ErrMissingAPIKey         = errors.New("api_key is required")
 	ErrMissingDownloadFolder = errors.New("default_download_folder is required when auto-download is enabled")
 	ErrMissingCorrectnessTag = errors.New("correctness_tag is required when auto-download is enabled")
 	ErrInvalidScanInterval   = errors.New("scan_interval_minutes must be between 1 and 1440")

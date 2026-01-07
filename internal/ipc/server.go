@@ -264,3 +264,9 @@ func (s *Server) sendResponse(conn net.Conn, resp *Response) {
 		s.logger.Warn().Err(err).Msg("Failed to send IPC response")
 	}
 }
+
+// GetSocketPath returns the named pipe path (for API compatibility with Unix).
+// On Windows, this returns the named pipe path rather than a socket path.
+func (s *Server) GetSocketPath() string {
+	return PipeName
+}

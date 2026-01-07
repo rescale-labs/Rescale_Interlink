@@ -70,6 +70,10 @@ export function GetCoreTypes() {
   return window['go']['wailsapp']['App']['GetCoreTypes']();
 }
 
+export function GetDaemonStatus() {
+  return window['go']['wailsapp']['App']['GetDaemonStatus']();
+}
+
 export function GetDefaultConfigPath() {
   return window['go']['wailsapp']['App']['GetDefaultConfigPath']();
 }
@@ -158,8 +162,16 @@ export function LoadTemplate(arg1) {
   return window['go']['wailsapp']['App']['LoadTemplate'](arg1);
 }
 
+export function PauseDaemon() {
+  return window['go']['wailsapp']['App']['PauseDaemon']();
+}
+
 export function ResetRun() {
   return window['go']['wailsapp']['App']['ResetRun']();
+}
+
+export function ResumeDaemon() {
+  return window['go']['wailsapp']['App']['ResumeDaemon']();
 }
 
 export function RetryTransfer(arg1) {
@@ -226,6 +238,10 @@ export function StartBulkRun(arg1) {
   return window['go']['wailsapp']['App']['StartBulkRun'](arg1);
 }
 
+export function StartDaemon() {
+  return window['go']['wailsapp']['App']['StartDaemon']();
+}
+
 export function StartFolderDownload(arg1, arg2, arg3) {
   return window['go']['wailsapp']['App']['StartFolderDownload'](arg1, arg2, arg3);
 }
@@ -242,12 +258,20 @@ export function StartTransfers(arg1) {
   return window['go']['wailsapp']['App']['StartTransfers'](arg1);
 }
 
+export function StopDaemon() {
+  return window['go']['wailsapp']['App']['StopDaemon']();
+}
+
 export function TestAutoDownloadConnection(arg1) {
   return window['go']['wailsapp']['App']['TestAutoDownloadConnection'](arg1);
 }
 
 export function TestConnection() {
   return window['go']['wailsapp']['App']['TestConnection']();
+}
+
+export function TriggerDaemonScan() {
+  return window['go']['wailsapp']['App']['TriggerDaemonScan']();
 }
 
 export function UpdateConfig(arg1) {

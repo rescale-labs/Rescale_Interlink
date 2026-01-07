@@ -187,3 +187,26 @@ func (c *Client) Ping(ctx context.Context) error {
 	_, err := c.GetStatus(ctx)
 	return err
 }
+
+// Shutdown sends a shutdown command to the daemon.
+// Note: On Windows, service shutdown is typically handled via SCM,
+// but this method is provided for API parity with Unix.
+func (c *Client) Shutdown(ctx context.Context) error {
+	req := NewRequest(MsgShutdown)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		// Connection closed is expected after shutdown
+		return nil
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
+}
+
+// GetSocketPath returns the named pipe path (for API compatibility with Unix).
+// On Windows, this returns the named pipe path rather than a socket path.
+func GetSocketPath() string {
+	return PipeName
+}

@@ -10,6 +10,10 @@ import (
 // PipeName is the Windows named pipe path for IPC.
 const PipeName = `\\.\pipe\rescale-interlink`
 
+// UnixSocketPath is the default Unix socket path for IPC.
+// On Unix systems, the actual path is user-specific (~/.config/rescale/interlink.sock).
+const UnixSocketPath = "/tmp/rescale-interlink.sock"
+
 // MessageType identifies the type of IPC message.
 type MessageType string
 

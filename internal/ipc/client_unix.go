@@ -1,60 +1,228 @@
 //go:build !windows
 
-// Package ipc provides inter-process communication stubs for non-Windows platforms.
+// Package ipc provides inter-process communication between the daemon
+// and the GUI application using Unix domain sockets.
 package ipc
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
 	"time"
 )
 
-// Client is a stub for non-Windows platforms.
-type Client struct{}
+// GetSocketPath returns the path to the Unix domain socket.
+// On Mac/Linux: ~/.config/rescale/interlink.sock
+func GetSocketPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "/tmp/rescale-interlink.sock"
+	}
+	return filepath.Join(home, ".config", "rescale", "interlink.sock")
+}
 
-// NewClient creates a new IPC client stub.
+// Client connects to the IPC server via Unix domain socket.
+type Client struct {
+	timeout    time.Duration
+	socketPath string
+}
+
+// NewClient creates a new IPC client.
 func NewClient() *Client {
-	return &Client{}
+	return &Client{
+		timeout:    5 * time.Second,
+		socketPath: GetSocketPath(),
+	}
 }
 
-// SetTimeout is a no-op on non-Windows platforms.
-func (c *Client) SetTimeout(timeout time.Duration) {}
+// NewClientWithPath creates a new IPC client with a custom socket path.
+func NewClientWithPath(socketPath string) *Client {
+	return &Client{
+		timeout:    5 * time.Second,
+		socketPath: socketPath,
+	}
+}
 
-// GetStatus returns an error on non-Windows platforms.
+// SetTimeout sets the connection timeout.
+func (c *Client) SetTimeout(timeout time.Duration) {
+	c.timeout = timeout
+}
+
+// connect establishes a connection to the Unix socket.
+func (c *Client) connect(ctx context.Context) (net.Conn, error) {
+	// Create a dialer with timeout
+	dialer := net.Dialer{
+		Timeout: c.timeout,
+	}
+
+	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to IPC server at %s: %w", c.socketPath, err)
+	}
+
+	return conn, nil
+}
+
+// sendRequest sends a request and receives a response.
+func (c *Client) sendRequest(ctx context.Context, req *Request) (*Response, error) {
+	conn, err := c.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// Set deadline for the entire operation
+	conn.SetDeadline(time.Now().Add(c.timeout))
+
+	// Encode and send request
+	data, err := req.Encode()
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode request: %w", err)
+	}
+	data = append(data, '\n')
+
+	_, err = conn.Write(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	// Read response
+	reader := bufio.NewReader(conn)
+	respData, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Decode response
+	resp, err := DecodeResponse(respData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return resp, nil
+}
+
+// GetStatus retrieves the current daemon status.
 func (c *Client) GetStatus(ctx context.Context) (*StatusData, error) {
-	return nil, ErrNotSupported
+	req := NewRequest(MsgGetStatus)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("server error: %s", resp.Error)
+	}
+
+	return resp.GetStatusData(), nil
 }
 
-// GetUserList returns an error on non-Windows platforms.
+// GetUserList retrieves the list of user daemon statuses.
+// On Unix, this typically returns a single user (the current user).
 func (c *Client) GetUserList(ctx context.Context) ([]UserStatus, error) {
-	return nil, ErrNotSupported
+	req := NewRequest(MsgGetUserList)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("server error: %s", resp.Error)
+	}
+
+	data := resp.GetUserListData()
+	if data == nil {
+		return []UserStatus{}, nil
+	}
+	return data.Users, nil
 }
 
-// PauseUser returns an error on non-Windows platforms.
+// PauseUser pauses auto-download.
+// On Unix single-user mode, userID is ignored.
 func (c *Client) PauseUser(ctx context.Context, userID string) error {
-	return ErrNotSupported
+	req := NewRequestWithUser(MsgPauseUser, userID)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
 }
 
-// ResumeUser returns an error on non-Windows platforms.
+// ResumeUser resumes auto-download.
+// On Unix single-user mode, userID is ignored.
 func (c *Client) ResumeUser(ctx context.Context, userID string) error {
-	return ErrNotSupported
+	req := NewRequestWithUser(MsgResumeUser, userID)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
 }
 
-// TriggerScan returns an error on non-Windows platforms.
+// TriggerScan triggers an immediate job scan.
 func (c *Client) TriggerScan(ctx context.Context, userID string) error {
-	return ErrNotSupported
+	req := NewRequestWithUser(MsgTriggerScan, userID)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
 }
 
-// OpenLogs returns an error on non-Windows platforms.
+// OpenLogs opens the log viewer.
 func (c *Client) OpenLogs(ctx context.Context, userID string) error {
-	return ErrNotSupported
+	req := NewRequestWithUser(MsgOpenLogs, userID)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
 }
 
-// IsServiceRunning always returns false on non-Windows platforms.
+// Shutdown sends a shutdown command to the daemon.
+// Unlike Windows (where service manager handles shutdown),
+// Unix daemons can be shutdown via IPC.
+func (c *Client) Shutdown(ctx context.Context) error {
+	req := NewRequest(MsgShutdown)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		// Connection closed is expected after shutdown
+		return nil
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
+}
+
+// IsServiceRunning checks if the IPC server (and thus the daemon) is running.
 func (c *Client) IsServiceRunning(ctx context.Context) bool {
-	return false
+	_, err := c.GetStatus(ctx)
+	return err == nil
 }
 
-// Ping returns an error on non-Windows platforms.
+// Ping checks if the server is reachable.
 func (c *Client) Ping(ctx context.Context) error {
-	return ErrNotSupported
+	_, err := c.GetStatus(ctx)
+	return err
 }
