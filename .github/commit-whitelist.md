@@ -25,6 +25,7 @@ Internal development files (scripts, planning docs, logs) stay LOCAL only.
 | `go.mod`, `go.sum` | Go dependencies | Initial |
 | `Makefile` | Build automation | Initial |
 | `wails.json` | Wails configuration | v4.0.0 |
+| `main.go` | Wails GUI entry point | v4.0.8 |
 | `.gitignore` | Git ignore rules | Initial |
 
 ## ALLOWED: Public Documentation

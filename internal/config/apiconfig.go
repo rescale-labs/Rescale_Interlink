@@ -12,19 +12,14 @@ import (
 	"gopkg.in/ini.v1"
 )
 
-// APIConfig represents the configuration contract between the GUI/CLI and the
-// Windows Service auto-downloader. This is the sole configuration source for
-// the auto-download service (clean break from legacy config.csv/token files).
+// APIConfig represents the auto-download service configuration.
+// v4.0.8: Unified configuration - API key comes from ResolveAPIKey(), not stored here.
 //
 // Config file location:
-//   - Windows: %USERPROFILE%\.config\rescale\apiconfig
+//   - Windows: %APPDATA%\Rescale\Interlink\apiconfig
 //   - Unix: ~/.config/rescale/apiconfig
 //
 // INI format:
-//
-//	[rescale]
-//	platform_url = https://platform.rescale.com
-//	api_key = <token-or-api-key>
 //
 //	[interlink.autoDownload]
 //	enabled = true
@@ -37,10 +32,20 @@ import (
 //	enabled = true
 //	show_download_complete = true
 //	show_download_failed = true
+//
+// NOTE: API key is NOT stored here. Use config.ResolveAPIKey() to get the API key
+// from the unified source (token file or environment variable).
+// Platform URL comes from the main config.csv or defaults to https://platform.rescale.com
 type APIConfig struct {
-	// Rescale connection settings
+	// PlatformURL is kept for backwards compatibility with existing apiconfig files.
+	// New code should use the main config's APIBaseURL instead.
+	// v4.0.8: Deprecated - will be removed in future version.
 	PlatformURL string `ini:"platform_url"`
-	APIKey      string `ini:"api_key"`
+
+	// APIKey is kept for backwards compatibility with existing apiconfig files.
+	// New code should use config.ResolveAPIKey() instead.
+	// v4.0.8: Deprecated - will be removed in future version.
+	APIKey string `ini:"api_key"`
 
 	// Auto-download settings
 	AutoDownload AutoDownloadConfig
@@ -89,12 +94,10 @@ type AutoDownloadConfig struct {
 
 // Validation errors
 var (
-	ErrMissingPlatformURL      = errors.New("platform_url is required")
-	ErrMissingAPIKey           = errors.New("api_key is required")
-	ErrMissingDownloadFolder   = errors.New("default_download_folder is required when auto-download is enabled")
-	ErrMissingCorrectnessTag   = errors.New("correctness_tag is required when auto-download is enabled")
-	ErrInvalidScanInterval     = errors.New("scan_interval_minutes must be between 1 and 1440")
-	ErrInvalidLookbackDays     = errors.New("lookback_days must be between 1 and 365")
+	ErrMissingDownloadFolder = errors.New("default_download_folder is required when auto-download is enabled")
+	ErrMissingCorrectnessTag = errors.New("correctness_tag is required when auto-download is enabled")
+	ErrInvalidScanInterval   = errors.New("scan_interval_minutes must be between 1 and 1440")
+	ErrInvalidLookbackDays   = errors.New("lookback_days must be between 1 and 365")
 )
 
 // DefaultAPIConfigPath returns the default path for the apiconfig file.
@@ -280,17 +283,10 @@ func SaveAPIConfig(cfg *APIConfig, path string) error {
 	return nil
 }
 
-// Validate checks if the configuration is valid for the auto-download service.
+// Validate checks if the auto-download configuration is valid.
+// v4.0.8: No longer validates API key - use ResolveAPIKey() separately.
 // Returns nil if valid, or an error describing what's wrong.
 func (cfg *APIConfig) Validate() error {
-	// Always validate connection settings
-	if strings.TrimSpace(cfg.PlatformURL) == "" {
-		return ErrMissingPlatformURL
-	}
-	if strings.TrimSpace(cfg.APIKey) == "" {
-		return ErrMissingAPIKey
-	}
-
 	// Only validate auto-download settings if enabled
 	if cfg.AutoDownload.Enabled {
 		if strings.TrimSpace(cfg.AutoDownload.CorrectnessTag) == "" {
@@ -310,16 +306,10 @@ func (cfg *APIConfig) Validate() error {
 	return nil
 }
 
-// ValidateForConnection checks only the connection settings (platform_url and api_key).
-// This is useful for validating before API calls, regardless of auto-download settings.
-// v4.0.4: Used by internal/service/multi_daemon.go for diagnostic logging.
+// ValidateForConnection is deprecated.
+// v4.0.8: API key now comes from ResolveAPIKey(), not from this config.
+// This function is kept for backwards compatibility but always returns nil.
 func (cfg *APIConfig) ValidateForConnection() error {
-	if strings.TrimSpace(cfg.PlatformURL) == "" {
-		return ErrMissingPlatformURL
-	}
-	if strings.TrimSpace(cfg.APIKey) == "" {
-		return ErrMissingAPIKey
-	}
 	return nil
 }
 
