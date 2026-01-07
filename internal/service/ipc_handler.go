@@ -36,12 +36,21 @@ func (h *ServiceIPCHandler) GetStatus() *ipc.StatusData {
 
 	// Count active users and downloads
 	activeUsers := 0
-	activeDownloads := 0 // TODO: Add download tracking to daemon
+	activeDownloads := 0
 	var lastScanTime *time.Time
 
 	for _, s := range statuses {
 		if s.Running {
 			activeUsers++
+			activeDownloads += s.ActiveDownloads // v4.0.8: Aggregate from daemon stats
+
+			// v4.0.8: Track most recent scan time across all users
+			if !s.LastScanTime.IsZero() {
+				if lastScanTime == nil || s.LastScanTime.After(*lastScanTime) {
+					scanTime := s.LastScanTime
+					lastScanTime = &scanTime
+				}
+			}
 		}
 	}
 
@@ -72,13 +81,20 @@ func (h *ServiceIPCHandler) GetUserList() []ipc.UserStatus {
 			state = "disabled"
 		}
 
+		// v4.0.8: Populate all fields from daemon stats
+		var lastScanTime *time.Time
+		if !s.LastScanTime.IsZero() {
+			t := s.LastScanTime
+			lastScanTime = &t
+		}
+
 		users = append(users, ipc.UserStatus{
 			Username:       s.Username,
-			SID:            "", // TODO: Add SID to UserDaemonStatus
+			SID:            s.SID,            // v4.0.8: Now populated
 			State:          state,
 			DownloadFolder: s.DownloadFolder,
-			LastScanTime:   nil, // TODO: Add last scan time tracking
-			JobsDownloaded: 0,   // TODO: Add download counter
+			LastScanTime:   lastScanTime,     // v4.0.8: Now populated
+			JobsDownloaded: s.JobsDownloaded, // v4.0.8: Now populated
 			LastError:      "",
 		})
 	}

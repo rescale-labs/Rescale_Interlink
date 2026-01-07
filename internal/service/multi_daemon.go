@@ -206,10 +206,25 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Create user-specific logger
 	userLogger := m.logger.WithStr("user", profile.Username)
 
+	// v4.0.8: Use unified API key resolution with fallback chain
+	// Priority: apiconfig API key -> token file -> environment variable
+	apiKey, apiKeySource := config.ResolveAPIKeySource(apiCfg.APIKey, profile.ProfilePath)
+	if apiKey == "" {
+		m.logger.Debug().Str("user", profile.Username).
+			Msg("No API key found (checked apiconfig, token file, env var), skipping")
+		return nil
+	}
+
+	// Log which source the API key came from (helpful for debugging)
+	m.logger.Info().
+		Str("user", profile.Username).
+		Str("api_key_source", apiKeySource).
+		Msg("API key resolved for user daemon")
+
 	// Create app config for API client
 	appCfg := &config.Config{
 		APIBaseURL: apiCfg.PlatformURL,
-		APIKey:     apiCfg.APIKey,
+		APIKey:     apiKey,
 	}
 
 	// Create eligibility config from apiconfig
@@ -325,13 +340,23 @@ func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 
 	var statuses []UserDaemonStatus
 	for _, entry := range m.daemons {
-		statuses = append(statuses, UserDaemonStatus{
+		status := UserDaemonStatus{
 			Username:       entry.profile.Username,
 			ProfilePath:    entry.profile.ProfilePath,
 			DownloadFolder: entry.config.AutoDownload.DefaultDownloadFolder,
 			Running:        entry.running,
 			Enabled:        entry.config.AutoDownload.Enabled,
-		})
+			SID:            entry.profile.SID, // v4.0.8
+		}
+
+		// v4.0.8: Get stats from daemon if running
+		if entry.running && entry.daemon != nil {
+			status.LastScanTime = entry.daemon.GetLastPollTime()
+			status.JobsDownloaded = entry.daemon.GetDownloadedCount()
+			status.ActiveDownloads = entry.daemon.GetActiveDownloads()
+		}
+
+		statuses = append(statuses, status)
 	}
 
 	return statuses
@@ -339,11 +364,15 @@ func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 
 // UserDaemonStatus represents the status of a single user's daemon.
 type UserDaemonStatus struct {
-	Username       string
-	ProfilePath    string
-	DownloadFolder string
-	Running        bool
-	Enabled        bool
+	Username        string
+	ProfilePath     string
+	DownloadFolder  string
+	Running         bool
+	Enabled         bool
+	SID             string    // v4.0.8: Windows Security Identifier
+	LastScanTime    time.Time // v4.0.8: Last poll/scan time
+	JobsDownloaded  int       // v4.0.8: Total jobs downloaded
+	ActiveDownloads int       // v4.0.8: Currently active downloads
 }
 
 // RunningCount returns the number of currently running user daemons.
@@ -403,6 +432,39 @@ func (m *MultiUserDaemon) ResumeUser(identifier string) error {
 				return m.startUserDaemon(entry.profile)
 			}
 			return fmt.Errorf("daemon for %s is already running", identifier)
+		}
+	}
+
+	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+}
+
+// v4.0.8: GetTotalActiveDownloads returns the total number of active downloads across all users.
+func (m *MultiUserDaemon) GetTotalActiveDownloads() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	total := 0
+	for _, entry := range m.daemons {
+		if entry.running && entry.daemon != nil {
+			total += entry.daemon.GetActiveDownloads()
+		}
+	}
+	return total
+}
+
+// v4.0.8: TriggerUserScan triggers a scan for a specific user (by SID or username).
+func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, entry := range m.daemons {
+		if entry.profile.SID == identifier || entry.profile.Username == identifier {
+			if entry.running && entry.daemon != nil {
+				m.logger.Info().Str("user", entry.profile.Username).Msg("Triggering scan for user")
+				entry.daemon.TriggerPoll()
+				return nil
+			}
+			return fmt.Errorf("daemon for %s is not running", identifier)
 		}
 	}
 

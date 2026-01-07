@@ -1,12 +1,39 @@
 # Release Notes - Rescale Interlink
 
-## v4.0.8 - January 3, 2026
+## v4.0.8 - January 6, 2026
 
-### Critical Bug Fixes
+### Windows Service/Tray Improvements
+
+This release includes comprehensive fixes for the Windows Service and System Tray functionality.
+
+#### Critical Fixes
+
+- **Windows Config Save**: Fixed "path not found" error when saving config on fresh Windows install - now creates parent directory (`%APPDATA%\Rescale\Interlink\`) automatically
+- **Unified API Key Resolution**: New `config.ResolveAPIKey()` function provides consistent API key handling across CLI, GUI, and auto-download service with priority: explicit flag → apiconfig → token file → environment variable
+- **Tray User Resolution**: Fixed tray app pause/resume failing when service runs as SYSTEM - now resolves username on client side before IPC call
+
+#### Windows-Specific
+
+- **Standard Config Paths**: Changed Windows config location from `%USERPROFILE%\.config\rescale\` to standard `%APPDATA%\Rescale\Interlink\`
+- **Multi-Resolution Icons**: Regenerated `build/windows/icon.ico` with 7 resolutions (16-256px) - was only 16px causing blank icon display
+- **Tray Icon**: Upgraded `cmd/rescale-int-tray/assets/icon.png` to 128x128 for better high-DPI display
+- **MSI Installer Icons**: Added explicit icon declarations for all shortcuts (Desktop, Start Menu GUI/CLI, Add/Remove Programs)
+- **Version Update**: Installer version updated to 4.0.8.0
+
+#### Service Improvements
+
+- **Daemon Stats**: Added `GetLastPollTime()`, `GetDownloadedCount()`, `GetActiveDownloads()` methods
+- **IPC Status**: Wired up SID, LastScanTime, JobsDownloaded, ActiveDownloads to IPC responses
+- **Per-User Scan**: Added `TriggerUserScan()` for triggering individual user daemon scans
+- **Activity Logging**: Auto-download config save now logs to GUI Activity tab
+
+### Previous v4.0.8 Changes (January 3, 2026)
+
+#### Critical Bug Fixes
 
 - **Software Scan Timeout**: Fixed "context deadline exceeded" error when scanning software/hardware in job template configuration. Paginated API calls now use 5-minute timeout instead of 30 seconds to handle rate limiting.
 
-### Bug Fixes
+#### Bug Fixes
 
 - **Folder Transfer UX**: Added enumeration events showing real-time scan progress (files/folders/bytes found) in Transfers tab during folder upload/download
 - **Windows ZIP Compatibility**: Fixed 7-Zip extraction errors by using 7-Zip (instead of PowerShell's Compress-Archive) to create portable distribution ZIPs
@@ -17,6 +44,18 @@
 
 ### Files Modified
 
+- `internal/config/apikey.go` - NEW: Unified API key resolution
+- `internal/config/csv_config.go` - Added `os.MkdirAll`, Windows %APPDATA% paths
+- `internal/config/apiconfig.go` - Windows %APPDATA% paths
+- `internal/service/multi_daemon.go` - Use unified API key, added stats methods
+- `internal/daemon/daemon.go` - Added stats methods, activeDownloads counter
+- `internal/service/ipc_handler.go` - Wired up all stats fields
+- `cmd/rescale-int-tray/tray_windows.go` - Added `getCurrentUsername()`, updated IPC calls
+- `internal/wailsapp/config_bindings.go` - Added Activity tab logging
+- `installer/rescale-interlink.wxs` - Version 4.0.8.0, icon declarations
+- `installer/rescale-interlink.ico` - NEW: Icon file for MSI shortcuts
+- `build/windows/icon.ico` - Regenerated multi-resolution
+- `cmd/rescale-int-tray/assets/icon.png` - Regenerated 128x128
 - `internal/constants/app.go` - Added `PaginatedAPITimeout`
 - `internal/wailsapp/job_bindings.go` - Updated timeouts, added validations
 - `internal/events/events.go` - Added `EnumerationEvent` type

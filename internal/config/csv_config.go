@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -216,6 +217,12 @@ func LoadConfigCSV(path string) (*Config, error) {
 // SaveConfigCSV saves configuration to a CSV file
 // CSV format: key,value pairs
 func SaveConfigCSV(cfg *Config, path string) error {
+	// Ensure parent directory exists (fixes Windows issue where directory may not exist)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
@@ -419,68 +426,104 @@ const ConfigDir = "rescale"
 // OldConfigDir is the previous directory name (for migration)
 const OldConfigDir = "rescale-int"
 
+// getConfigDir returns the platform-appropriate config directory.
+// - Windows: %APPDATA%\Rescale\Interlink (standard Windows location)
+// - Unix: ~/.config/rescale (XDG standard)
+func getConfigDir() string {
+	if runtime.GOOS == "windows" {
+		// v4.0.8: Use standard Windows %APPDATA% location
+		appData := os.Getenv("APPDATA")
+		if appData != "" {
+			return filepath.Join(appData, "Rescale", "Interlink")
+		}
+		// Fallback to USERPROFILE if APPDATA not set
+		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
+			return filepath.Join(userProfile, "AppData", "Roaming", "Rescale", "Interlink")
+		}
+	}
+	// Unix: use XDG standard ~/.config/rescale
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", ConfigDir)
+	}
+	return ""
+}
+
+// getOldConfigDir returns legacy config directory for migration checking.
+func getOldConfigDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", OldConfigDir)
+	}
+	return ""
+}
+
 // GetDefaultConfigPath returns the default config file path
-// Standard location: ~/.config/rescale/config.csv
+// - Windows: %APPDATA%\Rescale\Interlink\config.csv (v4.0.8: standard Windows location)
+// - Unix: ~/.config/rescale/config.csv (XDG standard)
 // Falls back to old location ~/.config/rescale-int/config.csv if new location doesn't exist
 func GetDefaultConfigPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	configDir := getConfigDir()
+	if configDir == "" {
 		return "config.csv"
 	}
-	newPath := filepath.Join(home, ".config", ConfigDir, "config.csv")
-	oldPath := filepath.Join(home, ".config", OldConfigDir, "config.csv")
+	newPath := filepath.Join(configDir, "config.csv")
 
 	// Check if new location exists
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath
 	}
-	// Check if old location exists (migration case)
-	if _, err := os.Stat(oldPath); err == nil {
-		// Warn user about migration
-		log.Printf("[INFO] Config found at old location: %s", oldPath)
-		log.Printf("[INFO] Consider migrating to new location: %s", newPath)
-		log.Printf("[INFO] Run: mkdir -p %s && mv %s/* %s/", filepath.Dir(newPath), filepath.Dir(oldPath), filepath.Dir(newPath))
-		return oldPath
+
+	// Check if old location exists (migration case - Unix only)
+	if oldDir := getOldConfigDir(); oldDir != "" {
+		oldPath := filepath.Join(oldDir, "config.csv")
+		if _, err := os.Stat(oldPath); err == nil {
+			log.Printf("[INFO] Config found at old location: %s", oldPath)
+			log.Printf("[INFO] Consider migrating to new location: %s", newPath)
+			return oldPath
+		}
 	}
+
 	// Neither exists - return new path (for new installations)
 	return newPath
 }
 
 // GetDefaultTokenPath returns the default token file path
-// Standard location: ~/.config/rescale/token
+// - Windows: %APPDATA%\Rescale\Interlink\token (v4.0.8: standard Windows location)
+// - Unix: ~/.config/rescale/token (XDG standard)
 // Falls back to old location ~/.config/rescale-int/token if new location doesn't exist
 // This is where 'config init' saves the API key
 func GetDefaultTokenPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	configDir := getConfigDir()
+	if configDir == "" {
 		return ""
 	}
-	newPath := filepath.Join(home, ".config", ConfigDir, "token")
-	oldPath := filepath.Join(home, ".config", OldConfigDir, "token")
+	newPath := filepath.Join(configDir, "token")
 
 	// Check if new location exists
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath
 	}
-	// Check if old location exists (migration case)
-	if _, err := os.Stat(oldPath); err == nil {
-		return oldPath
+
+	// Check if old location exists (migration case - Unix only)
+	if oldDir := getOldConfigDir(); oldDir != "" {
+		oldPath := filepath.Join(oldDir, "token")
+		if _, err := os.Stat(oldPath); err == nil {
+			return oldPath
+		}
 	}
+
 	// Neither exists - return new path (for new installations)
 	return newPath
 }
 
 // EnsureConfigDir creates the config directory if it doesn't exist
-// For new installations, this creates the new location (~/.config/rescale/)
-// For existing installations, GetConfigDir() returns the old location if it exists
+// - Windows: Creates %APPDATA%\Rescale\Interlink (v4.0.8: standard Windows location)
+// - Unix: Creates ~/.config/rescale/ (XDG standard)
 func EnsureConfigDir() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("could not determine home directory")
+	configDir := getConfigDir()
+	if configDir == "" {
+		return fmt.Errorf("could not determine config directory")
 	}
-	// Always create in the new location
-	newDir := filepath.Join(home, ".config", ConfigDir)
-	return os.MkdirAll(newDir, 0700)
+	return os.MkdirAll(configDir, 0700)
 }
 
 // ReadTokenFile reads an API token from a file

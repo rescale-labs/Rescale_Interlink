@@ -98,20 +98,26 @@ var (
 )
 
 // DefaultAPIConfigPath returns the default path for the apiconfig file.
-// - Windows: %USERPROFILE%\.config\rescale\apiconfig
-// - Unix: ~/.config/rescale/apiconfig
+// - Windows: %APPDATA%\Rescale\Interlink\apiconfig (standard Windows location)
+// - Unix: ~/.config/rescale/apiconfig (XDG standard)
 func DefaultAPIConfigPath() (string, error) {
 	var configDir string
 
 	if runtime.GOOS == "windows" {
-		// On Windows, use %USERPROFILE%\.config\rescale
-		userProfile := os.Getenv("USERPROFILE")
-		if userProfile == "" {
-			return "", errors.New("USERPROFILE environment variable not set")
+		// v4.0.8: Use standard Windows %APPDATA% location
+		// This is C:\Users\<user>\AppData\Roaming\Rescale\Interlink
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			// Fallback to USERPROFILE if APPDATA not set (unusual)
+			userProfile := os.Getenv("USERPROFILE")
+			if userProfile == "" {
+				return "", errors.New("neither APPDATA nor USERPROFILE environment variable set")
+			}
+			appData = filepath.Join(userProfile, "AppData", "Roaming")
 		}
-		configDir = filepath.Join(userProfile, ".config", "rescale")
+		configDir = filepath.Join(appData, "Rescale", "Interlink")
 	} else {
-		// On Unix, use ~/.config/rescale
+		// On Unix, use ~/.config/rescale (XDG standard)
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("failed to get home directory: %w", err)
@@ -124,7 +130,13 @@ func DefaultAPIConfigPath() (string, error) {
 
 // APIConfigPathForUser returns the apiconfig path for a specific user profile directory.
 // This is used by the Windows service to enumerate per-user configs.
+// - Windows: <userProfileDir>\AppData\Roaming\Rescale\Interlink\apiconfig
+// - Unix: <userProfileDir>/.config/rescale/apiconfig
 func APIConfigPathForUser(userProfileDir string) string {
+	if runtime.GOOS == "windows" {
+		// v4.0.8: Use standard Windows AppData location
+		return filepath.Join(userProfileDir, "AppData", "Roaming", "Rescale", "Interlink", "apiconfig")
+	}
 	return filepath.Join(userProfileDir, ".config", "rescale", "apiconfig")
 }
 
