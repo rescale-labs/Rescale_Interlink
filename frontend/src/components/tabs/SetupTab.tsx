@@ -54,9 +54,8 @@ export function SetupTab() {
   const [defaultConfigPath, setDefaultConfigPath] = useState<string>(''); // v4.0.8: Show config location
 
   // Auto-download state
+  // v4.0.8: API key removed - uses unified source from Setup tab config
   const [autoDownloadConfig, setAutoDownloadConfig] = useState<wailsapp.AutoDownloadConfigDTO>({
-    platformUrl: 'https://platform.rescale.com',
-    apiKey: '',
     enabled: false,
     correctnessTag: 'isCorrect:true',
     defaultDownloadFolder: '',

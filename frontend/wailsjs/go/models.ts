@@ -108,8 +108,6 @@ export namespace wailsapp {
 	    }
 	}
 	export class AutoDownloadConfigDTO {
-	    platformUrl: string;
-	    apiKey: string;
 	    enabled: boolean;
 	    correctnessTag: string;
 	    defaultDownloadFolder: string;
@@ -122,8 +120,6 @@ export namespace wailsapp {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.platformUrl = source["platformUrl"];
-	        this.apiKey = source["apiKey"];
 	        this.enabled = source["enabled"];
 	        this.correctnessTag = source["correctnessTag"];
 	        this.defaultDownloadFolder = source["defaultDownloadFolder"];

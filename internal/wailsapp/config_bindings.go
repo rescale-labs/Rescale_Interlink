@@ -378,13 +378,10 @@ func (a *App) SaveFile(title string) (string, error) {
 // =============================================================================
 
 // AutoDownloadConfigDTO is the JSON-safe structure for auto-download settings.
-// This represents the configuration contract between GUI and the Windows Service.
+// v4.0.8: API key is NOT included - it comes from the unified source (Setup tab config).
+// The auto-download service uses config.ResolveAPIKey() to get the API key.
 type AutoDownloadConfigDTO struct {
-	// Rescale connection settings
-	PlatformURL string `json:"platformUrl"`
-	APIKey      string `json:"apiKey"`
-
-	// Auto-download settings
+	// Auto-download settings only - no API key (use Setup tab for that)
 	Enabled               bool   `json:"enabled"`
 	CorrectnessTag        string `json:"correctnessTag"`
 	DefaultDownloadFolder string `json:"defaultDownloadFolder"`
@@ -401,12 +398,14 @@ type AutoDownloadStatusDTO struct {
 }
 
 // GetAutoDownloadConfig loads the current auto-download configuration.
+// v4.0.8: API key is NOT returned - it comes from unified source (Setup tab).
+// The auto-download service uses config.ResolveAPIKey() to get the API key.
 func (a *App) GetAutoDownloadConfig() AutoDownloadConfigDTO {
 	cfg, err := config.LoadAPIConfig("")
+
 	if err != nil || cfg == nil {
-		// Return empty defaults
+		// Return defaults
 		return AutoDownloadConfigDTO{
-			PlatformURL:         "https://platform.rescale.com",
 			CorrectnessTag:      "isCorrect:true",
 			ScanIntervalMinutes: 10,
 			LookbackDays:        7,
@@ -414,8 +413,6 @@ func (a *App) GetAutoDownloadConfig() AutoDownloadConfigDTO {
 	}
 
 	return AutoDownloadConfigDTO{
-		PlatformURL:           cfg.PlatformURL,
-		APIKey:                cfg.APIKey,
 		Enabled:               cfg.AutoDownload.Enabled,
 		CorrectnessTag:        cfg.AutoDownload.CorrectnessTag,
 		DefaultDownloadFolder: cfg.AutoDownload.DefaultDownloadFolder,
@@ -425,14 +422,16 @@ func (a *App) GetAutoDownloadConfig() AutoDownloadConfigDTO {
 }
 
 // SaveAutoDownloadConfig saves the auto-download configuration.
-// Returns an error if validation fails or save fails.
-// v4.0.8: Now logs to Activity tab for user visibility.
+// v4.0.8: API key is NOT saved here - it comes from unified source (Setup tab).
+// The auto-download service uses config.ResolveAPIKey() to get the API key.
 func (a *App) SaveAutoDownloadConfig(dto AutoDownloadConfigDTO) error {
 	a.logInfo("auto-download", "Saving auto-download configuration...")
 
+	// v4.0.8: Only save auto-download settings, NOT API key
+	// API key comes from unified source (token file or env var)
 	cfg := &config.APIConfig{
-		PlatformURL: dto.PlatformURL,
-		APIKey:      dto.APIKey,
+		// PlatformURL and APIKey are intentionally left empty
+		// The service uses ResolveAPIKey() and main config's APIBaseURL
 		AutoDownload: config.AutoDownloadConfig{
 			Enabled:               dto.Enabled,
 			CorrectnessTag:        dto.CorrectnessTag,
@@ -442,7 +441,7 @@ func (a *App) SaveAutoDownloadConfig(dto AutoDownloadConfigDTO) error {
 		},
 	}
 
-	// Validate before saving
+	// Validate auto-download settings (not API key - that's handled separately)
 	if err := cfg.Validate(); err != nil {
 		a.logError("auto-download", fmt.Sprintf("Validation failed: %v", err))
 		return err
@@ -515,8 +514,8 @@ func (a *App) GetAutoDownloadStatus() AutoDownloadStatusDTO {
 	}
 }
 
-// TestAutoDownloadConnection tests the connection and folder access for auto-download.
-// This validates that the configured API key works and the download folder is accessible.
+// TestAutoDownloadConnection tests the folder access for auto-download.
+// v4.0.8: API key test uses the main config (Setup tab) - no separate API key for auto-download.
 func (a *App) TestAutoDownloadConnection(dto AutoDownloadConfigDTO) {
 	go func() {
 		result := struct {
@@ -527,18 +526,11 @@ func (a *App) TestAutoDownloadConnection(dto AutoDownloadConfigDTO) {
 			Error        string `json:"error,omitempty"`
 		}{}
 
-		// Test API connection
-		if dto.APIKey == "" {
-			result.Error = "API key is required"
-			runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
-			return
-		}
-
-		// Create temporary API client to test connection
+		// v4.0.8: Test API connection using the main config's API client
+		// (API key comes from Setup tab, not auto-download settings)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Use the engine's API if available and same URL, otherwise create new client
 		if a.engine != nil && a.engine.API() != nil {
 			profile, err := a.engine.API().GetUserProfile(ctx)
 			if err != nil {
@@ -549,7 +541,7 @@ func (a *App) TestAutoDownloadConnection(dto AutoDownloadConfigDTO) {
 			result.Success = true
 			result.Email = profile.Email
 		} else {
-			result.Error = "No API client available for testing"
+			result.Error = "No API client configured - please test connection in Setup tab first"
 			runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
 			return
 		}
@@ -564,7 +556,6 @@ func (a *App) TestAutoDownloadConnection(dto AutoDownloadConfigDTO) {
 					result.FolderError = "Cannot create folder: " + err.Error()
 				} else {
 					result.FolderOK = true
-					// Clean up if we just created it and it's empty
 				}
 			} else if err != nil {
 				result.FolderError = "Cannot access folder: " + err.Error()
