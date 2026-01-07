@@ -426,7 +426,10 @@ func (a *App) GetAutoDownloadConfig() AutoDownloadConfigDTO {
 
 // SaveAutoDownloadConfig saves the auto-download configuration.
 // Returns an error if validation fails or save fails.
+// v4.0.8: Now logs to Activity tab for user visibility.
 func (a *App) SaveAutoDownloadConfig(dto AutoDownloadConfigDTO) error {
+	a.logInfo("auto-download", "Saving auto-download configuration...")
+
 	cfg := &config.APIConfig{
 		PlatformURL: dto.PlatformURL,
 		APIKey:      dto.APIKey,
@@ -441,11 +444,29 @@ func (a *App) SaveAutoDownloadConfig(dto AutoDownloadConfigDTO) error {
 
 	// Validate before saving
 	if err := cfg.Validate(); err != nil {
+		a.logError("auto-download", fmt.Sprintf("Validation failed: %v", err))
 		return err
 	}
 
+	// Get the config path for logging
+	configPath, _ := config.DefaultAPIConfigPath()
+	a.logDebug("auto-download", fmt.Sprintf("Saving to: %s", configPath))
+
 	// Save to default location
-	return config.SaveAPIConfig(cfg, "")
+	if err := config.SaveAPIConfig(cfg, ""); err != nil {
+		a.logError("auto-download", fmt.Sprintf("Failed to save: %v", err))
+		return err
+	}
+
+	// Log success with status
+	if dto.Enabled {
+		a.logInfo("auto-download", fmt.Sprintf("Auto-download enabled - scanning every %d minutes, downloading to: %s",
+			dto.ScanIntervalMinutes, dto.DefaultDownloadFolder))
+	} else {
+		a.logInfo("auto-download", "Auto-download disabled")
+	}
+
+	return nil
 }
 
 // GetAutoDownloadStatus returns the current status of the auto-download configuration.

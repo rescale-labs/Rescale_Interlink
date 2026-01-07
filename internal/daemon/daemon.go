@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -73,6 +74,9 @@ type Daemon struct {
 	wg       sync.WaitGroup
 	running  bool
 	mu       sync.RWMutex
+
+	// v4.0.8: Active download tracking for IPC status reporting
+	activeDownloads int32
 }
 
 // New creates a new daemon instance.
@@ -236,6 +240,10 @@ func (d *Daemon) poll(ctx context.Context) {
 
 // downloadJob downloads all files from a completed job.
 func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
+	// v4.0.8: Track active downloads for IPC status
+	atomic.AddInt32(&d.activeDownloads, 1)
+	defer atomic.AddInt32(&d.activeDownloads, -1)
+
 	d.logger.Info().
 		Str("job_id", job.ID).
 		Str("job_name", job.Name).
@@ -429,5 +437,37 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("failed to save state: %w", err)
 	}
 	return nil
+}
+
+// v4.0.8: Stats methods for IPC status reporting
+
+// GetLastPollTime returns the time of the last successful poll cycle.
+func (d *Daemon) GetLastPollTime() time.Time {
+	return d.state.GetLastPoll()
+}
+
+// GetDownloadedCount returns the total number of successfully downloaded jobs.
+func (d *Daemon) GetDownloadedCount() int {
+	return d.state.GetDownloadedCount()
+}
+
+// GetActiveDownloads returns the number of downloads currently in progress.
+func (d *Daemon) GetActiveDownloads() int {
+	return int(atomic.LoadInt32(&d.activeDownloads))
+}
+
+// TriggerPoll manually triggers a poll cycle outside the normal schedule.
+// This is used by the tray app's "Trigger Scan Now" feature.
+func (d *Daemon) TriggerPoll() {
+	d.mu.RLock()
+	running := d.running
+	d.mu.RUnlock()
+
+	if !running {
+		return
+	}
+
+	// Run poll in background to not block caller
+	go d.poll(context.Background())
 }
 

@@ -261,8 +261,9 @@ func (a *trayApp) triggerScan() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Trigger scan for current user (use "all" for all users)
-	err := a.client.TriggerScan(ctx, "current")
+	// v4.0.8: Resolve username on client side before sending to service
+	username := getCurrentUsername()
+	err := a.client.TriggerScan(ctx, username)
 	if err != nil {
 		a.mu.Lock()
 		a.lastError = fmt.Sprintf("Scan failed: %v", err)
@@ -279,7 +280,9 @@ func (a *trayApp) pauseAutoDownload() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := a.client.PauseUser(ctx, "current")
+	// v4.0.8: Resolve username on client side before sending to service
+	username := getCurrentUsername()
+	err := a.client.PauseUser(ctx, username)
 	if err != nil {
 		a.mu.Lock()
 		a.lastError = fmt.Sprintf("Pause failed: %v", err)
@@ -296,7 +299,9 @@ func (a *trayApp) resumeAutoDownload() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := a.client.ResumeUser(ctx, "current")
+	// v4.0.8: Resolve username on client side before sending to service
+	username := getCurrentUsername()
+	err := a.client.ResumeUser(ctx, username)
 	if err != nil {
 		a.mu.Lock()
 		a.lastError = fmt.Sprintf("Resume failed: %v", err)
@@ -344,4 +349,25 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// getCurrentUsername returns the current Windows username for IPC calls.
+// v4.0.8: This resolves the username on the client side (tray app) before sending
+// to the service. This is critical because when the service runs as SYSTEM,
+// os.Getenv("USERNAME") returns "SYSTEM" instead of the actual user.
+//
+// The tray app always runs in user context, so we can reliably get the username here.
+func getCurrentUsername() string {
+	// Try USERNAME environment variable first (most common on Windows)
+	if username := os.Getenv("USERNAME"); username != "" {
+		return username
+	}
+
+	// Fallback: extract from user's home directory
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Base(home)
+	}
+
+	// Last resort: return "current" and let the service try to resolve
+	return "current"
 }

@@ -15,6 +15,7 @@ Internal development files (scripts, planning docs, logs) stay LOCAL only.
 | `internal/` | Core library code | Initial |
 | `frontend/` | React/TypeScript GUI | Initial |
 | `installer/` | Cross-platform packaging | v4.0.0 |
+| `build/windows/icon.ico` | Windows application icon | v4.0.8 |
 | `.github/` | CI/CD workflows and repo metadata | v4.0.8 |
 
 ## ALLOWED: Configuration
