@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.0.8-green)
+![Status](https://img.shields.io/badge/status-v4.1.0-green)
 
 ---
 
@@ -31,9 +31,9 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ### Dual-Mode Architecture
 
-- **CLI Mode** (default): Full-featured command-line interface
-- **GUI Mode** (`--gui` flag): Interactive graphical interface built with Wails (React/TypeScript)
-- **Single Binary**: One executable for both modes on all platforms
+- **CLI Binary** (`rescale-int`): Full-featured command-line interface
+- **GUI Binary** (`rescale-int-gui`): Interactive graphical application built with Wails (React/TypeScript)
+- **Platform Packages**: Each platform has both binaries packaged together (AppImage, zip, or MSI)
 
 ### CLI Features
 
@@ -87,6 +87,19 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
+**v4.1.0 (January 7, 2026) - Cross-Platform Daemon Control:**
+- **GUI Daemon Control**: Start, stop, pause, resume, and monitor the auto-download daemon from the GUI
+- **Unix IPC**: Domain socket communication (`~/.config/rescale/interlink.sock`) for Mac/Linux
+- **Daemon Background Mode**: New `--background` and `--ipc` flags for daemon command
+- **Windows Service Detection**: GUI shows "Managed by Windows Service" when applicable
+- **Setup Tab Enhancements**: Status indicators, control buttons, and "Scan Now" functionality
+- **New Files**: `daemon_bindings.go`, `ipc_handler.go`, `daemonize_unix.go`
+
+**v4.0.8 (January 6, 2026) - Unified API Key Handling:**
+- Unified API key handling for auto-download feature
+- Windows Service/Tray fixes
+- Improved credential management
+
 **v4.0.0 (December 27, 2025) - Wails Migration + Bug Fixes:**
 - **Complete GUI Rewrite**: Migrated from Fyne to Wails framework
   - React + TypeScript frontend with Vite build
@@ -129,23 +142,48 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
 ### Installation
 
-#### Option 1: Use Pre-built Binary
+#### Option 1: Use Pre-built Packages
 
-Download from releases page:
-- **macOS ARM64**: `rescale-int-darwin-arm64`
-- **macOS Intel**: `rescale-int-darwin-amd64`
-- **Linux**: `rescale-int-linux-amd64`
-- **Windows**: `rescale-int-windows-amd64.zip`
+Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlink/releases):
 
+| Platform | Package | Contents |
+|----------|---------|----------|
+| macOS (Apple Silicon) | `rescale-interlink-v4.1.0-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.1.0-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.1.0-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.1.0.msi` | Full installer with Start Menu integration |
+
+**macOS:**
 ```bash
-# macOS/Linux - make executable and move to PATH
-chmod +x rescale-int
-sudo mv rescale-int /usr/local/bin/
+# Unzip and move app to Applications
+unzip rescale-interlink-v4.1.0-darwin-arm64.zip
+mv rescale-int-gui.app /Applications/
+
+# First run: allow in System Settings > Privacy & Security
+# Or remove quarantine:
+xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 ```
 
-**Note**: On macOS, you may need to allow the app in System Settings > Privacy & Security, or run:
+**Linux:**
 ```bash
-xattr -d com.apple.quarantine rescale-int
+# Extract and make executable
+tar -xzf rescale-interlink-v4.1.0-linux-amd64.tar.gz
+chmod +x rescale-int-gui.AppImage rescale-int
+
+# Run GUI (double-click or):
+./rescale-int-gui.AppImage
+
+# Use CLI:
+./rescale-int --help
+```
+
+**Windows:**
+```powershell
+# Unzip and run GUI:
+Expand-Archive rescale-interlink-v4.1.0-windows-amd64.zip
+.\rescale-int-gui.exe
+
+# Or install MSI for Start Menu integration
 ```
 
 #### Option 2: Build from Source
@@ -197,8 +235,14 @@ rescale-int ls
 ### First Run (GUI Mode)
 
 ```bash
-# Launch GUI
-rescale-int --gui
+# macOS - double-click the app or:
+open /Applications/rescale-int-gui.app
+
+# Linux - double-click AppImage or:
+./rescale-int-gui.AppImage
+
+# Windows - double-click exe or:
+.\rescale-int-gui.exe
 ```
 
 1. Go to **Setup** tab
@@ -207,7 +251,8 @@ rescale-int --gui
    - API Key (environment variable, file, or direct input)
 3. Click **Test Connection**
 4. Click **Apply Changes**
-5. Ready to submit jobs!
+5. (Optional) Start the auto-download daemon from Setup tab
+6. Ready to submit jobs!
 
 ---
 
@@ -261,18 +306,47 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv
 ### GUI Mode
 
 ```bash
-# Start GUI
-rescale-int --gui
+# Launch GUI application
+# macOS:
+open /Applications/rescale-int-gui.app
+
+# Linux:
+./rescale-int-gui.AppImage
+
+# Windows:
+.\rescale-int-gui.exe
 ```
 
 The GUI provides six tabs:
 
-1. **Setup**: Configure API credentials, proxy settings, transfer options
+1. **Setup**: Configure API credentials, proxy settings, transfer options, **daemon control**
 2. **Single Job**: Create and submit individual jobs with the template builder
 3. **PUR**: Parallel Upload Run - batch job pipeline for multiple directories
 4. **File Browser**: Two-pane file manager for local and remote files
 5. **Transfers**: Monitor active transfers with progress and controls
 6. **Activity**: View real-time logs with filtering and search
+
+### Daemon Control (v4.1.0)
+
+The auto-download daemon automatically downloads completed jobs. Control it via CLI or GUI:
+
+**CLI:**
+```bash
+# Start daemon in background with IPC control
+rescale-int daemon run --background --ipc --download-dir ./results
+
+# Query running daemon status
+rescale-int daemon status
+
+# Stop running daemon
+rescale-int daemon stop
+```
+
+**GUI (Setup Tab):**
+- Status indicator: green (running), yellow (paused), gray (stopped)
+- Start/Stop/Pause/Resume buttons
+- "Scan Now" button for immediate job check
+- Shows uptime, version, jobs downloaded when running
 
 ### Configuration
 
@@ -311,35 +385,44 @@ rescale-int --token-file ~/.config/rescale/token <command>
 ### High-Level Overview
 
 ```
-+-------------------------------------------------------------+
-|                   rescale-int v4.0.8                     |
-|                  Unified CLI + GUI Binary                    |
-+-------------------------------------------------------------+
-|                                                              |
-|  +------------------+             +------------------+       |
-|  |    CLI Mode      |             |    GUI Mode      |       |
-|  |    (default)     |             |   (--gui flag)   |       |
-|  +------------------+             +------------------+       |
-|  |                  |             |                  |       |
-|  | * config cmds    |             | * Wails Runtime  |       |
-|  | * files cmds     |             | * React Frontend |       |
-|  | * folders cmds   |             | * 6 Tabs         |       |
-|  | * jobs cmds      |             | * Event Bridge   |       |
-|  | * pur cmds       |             |                  |       |
-|  +--------+---------+             +--------+---------+       |
-|           |                                |                 |
-|           +---------------+----------------+                 |
-|                           |                                  |
-|                  +--------v--------+                         |
-|                  |  Shared Core    |                         |
-|                  +-----------------+                         |
-|                  | * Config        |                         |
-|                  | * API Client    |                         |
-|                  | * Engine        |                         |
-|                  | * Services      |                         |
-|                  | * Cloud I/O     |                         |
-|                  +-----------------+                         |
-+-------------------------------------------------------------+
++------------------------------------------------------------------+
+|                    Rescale Interlink v4.1.0                       |
++------------------------------------------------------------------+
+|                                                                   |
+|  +--------------------+               +--------------------+      |
+|  |   CLI Binary       |               |   GUI Binary       |      |
+|  |   (rescale-int)    |               |   (rescale-int-gui)|      |
+|  +--------------------+               +--------------------+      |
+|  |                    |               |                    |      |
+|  | * config cmds      |               | * Wails Runtime    |      |
+|  | * files cmds       |               | * React Frontend   |      |
+|  | * folders cmds     |               | * 6 Tabs           |      |
+|  | * jobs cmds        |               | * Event Bridge     |      |
+|  | * pur cmds         |               | * Daemon Control   |      |
+|  | * daemon cmds      |               |                    |      |
+|  +--------+-----------+               +--------+-----------+      |
+|           |                                    |                  |
+|           +----------------+-------------------+                  |
+|                            |                                      |
+|                   +--------v--------+                             |
+|                   |  Shared Core    |                             |
+|                   +-----------------+                             |
+|                   | * Config        |                             |
+|                   | * API Client    |                             |
+|                   | * Engine        |                             |
+|                   | * Services      |                             |
+|                   | * Cloud I/O     |                             |
+|                   | * IPC Layer     |                             |
+|                   +-----------------+                             |
+|                            |                                      |
+|                   +--------v--------+                             |
+|                   | Daemon Process  |  (separate process)         |
+|                   +-----------------+                             |
+|                   | * Auto-download |                             |
+|                   | * IPC Server    |                             |
+|                   | * Job polling   |                             |
+|                   +-----------------+                             |
++------------------------------------------------------------------+
 ```
 
 ### Key Components
@@ -371,6 +454,16 @@ rescale-int --token-file ~/.config/rescale/token <command>
 - Configuration management
 - API client with rate limiting
 - Job validation and state management
+
+**Daemon** (`internal/daemon/`)
+- Auto-download background service
+- IPC handler for control commands
+- Unix daemonization (fork, setsid, PID file)
+
+**IPC Layer** (`internal/ipc/`)
+- Unix domain sockets (Mac/Linux): `~/.config/rescale/interlink.sock`
+- Named pipes (Windows): `\\.\pipe\rescale-interlink`
+- JSON protocol for status, pause, resume, scan, shutdown commands
 
 ### Project Structure
 
@@ -413,6 +506,16 @@ rescale-int/
 │   │   ├── upload/           # S3/Azure uploaders
 │   │   ├── download/         # S3/Azure downloaders
 │   │   └── providers/        # Provider implementations
+│   │
+│   ├── daemon/               # Auto-download daemon (v4.1.0)
+│   │   ├── daemon.go         # Main daemon logic
+│   │   ├── daemonize_unix.go # Unix fork/setsid
+│   │   └── ipc_handler.go    # IPC command handler
+│   │
+│   ├── ipc/                  # Inter-process communication
+│   │   ├── client_unix.go    # Unix domain socket client
+│   │   ├── server_unix.go    # Unix domain socket server
+│   │   └── messages.go       # IPC protocol messages
 │   │
 │   ├── api/                  # Rescale API client
 │   ├── events/               # Event bus system
@@ -548,6 +651,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.0.8
+**Version**: 4.1.0
 **Status**: Production Ready
-**Last Updated**: January 6, 2026
+**Last Updated**: January 7, 2026
