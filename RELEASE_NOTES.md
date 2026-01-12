@@ -1,5 +1,94 @@
 # Release Notes - Rescale Interlink
 
+## v4.2.1 - January 9, 2026
+
+### Enhanced Eligibility Configuration
+
+This release adds configurable eligibility settings for auto-download and workspace validation.
+
+#### New Features
+
+- **Configurable eligibility settings**: New config keys in `daemon.conf`
+  - `eligibility.auto_download_value` - Required value for "Auto Download" field (default: "Enable")
+  - `eligibility.downloaded_tag` - Tag added after download (default: "autoDownloaded:true")
+  - The field NAME ("Auto Download") remains hardcoded and must be created in workspace
+
+- **Workspace validation**: New `daemon config validate` command
+  - Checks if required "Auto Download" custom field exists in workspace
+  - Reports field type, section, and available values
+  - Provides setup instructions if field is missing
+
+- **API validation method**: New `ValidateAutoDownloadSetup()` API method
+  - Used by GUI and CLI to validate workspace configuration
+  - Returns detailed information about custom field setup
+  - Also available as GUI binding `ValidateAutoDownloadSetup()`
+
+#### Files Modified
+
+- `internal/config/daemonconfig.go` - Add AutoDownloadValue, DownloadedTag to EligibilityConfig
+- `internal/daemon/monitor.go` - Uses config values (structure unchanged)
+- `internal/service/multi_daemon.go` - Pass new config values through
+- `internal/api/client.go` - Add GetWorkspaceCustomFields(), ValidateAutoDownloadSetup()
+- `internal/models/file.go` - Add CompanyInfo to UserProfile
+- `internal/cli/daemon.go` - Add validate command, update config set/show
+- `internal/wailsapp/daemon_bindings.go` - Update DTO, add ValidateAutoDownloadSetup()
+- `internal/wailsapp/daemon_bindings_windows.go` - Same updates
+- Documentation updates: CLI_GUIDE.md, etc.
+
+---
+
+## v4.2.0 - January 8, 2026
+
+### Unified Daemon Configuration
+
+This release introduces a unified configuration system for the auto-download daemon, replacing scattered settings with a single `daemon.conf` file.
+
+#### New Features
+
+- **Unified `daemon.conf` file**: Single INI config file for all daemon settings
+  - Location: `~/.config/rescale/daemon.conf` (Unix) or `%APPDATA%\Rescale\Interlink\daemon.conf` (Windows)
+  - Replaces scattered apiconfig settings
+  - Organized sections: `[daemon]`, `[filters]`, `[eligibility]`, `[notifications]`
+
+- **CLI config commands**: New `daemon config` subcommand group
+  - `daemon config show` - Display current configuration
+  - `daemon config path` - Show config file location
+  - `daemon config edit` - Open in default editor ($EDITOR)
+  - `daemon config set <key> <value>` - Set individual values
+  - `daemon config init` - Interactive setup wizard
+
+- **Config file + CLI flags**: Flexible configuration model
+  - Daemon reads from config file by default
+  - CLI flags override config file values
+  - Allows testing without modifying config
+
+- **Windows tray improvements**
+  - "Configure..." menu opens GUI to daemon settings
+  - "Start Service" reads from daemon.conf
+
+#### v4.1.1 Fixes (included)
+
+- **Tray icon fix**: Changed from PNG to ICO format for proper display on Windows
+- **Start Service button**: Tray now has "Start Service" option when daemon is stopped
+- **Version fix**: Tray now uses shared version package (no more hardcoded version)
+- **Auto-start docs**: Added macOS launchd and Linux systemd configuration examples
+
+### Files Modified
+
+- `internal/config/daemonconfig.go` - NEW: DaemonConfig struct and I/O
+- `internal/config/daemonconfig_test.go` - NEW: Unit tests
+- `internal/cli/daemon.go` - Load from daemon.conf, add config subcommands
+- `internal/wailsapp/daemon_bindings.go` - GetDaemonConfig, SaveDaemonConfig (Unix)
+- `internal/wailsapp/daemon_bindings_windows.go` - GetDaemonConfig, SaveDaemonConfig (Windows)
+- `cmd/rescale-int-tray/tray_windows.go` - Configure menu, startService uses daemon.conf
+- `internal/service/multi_daemon.go` - Use DaemonConfig instead of APIConfig
+- `internal/service/multiuser_windows.go` - ConfigPath uses daemon.conf
+- `internal/service/multiuser_unix.go` - ConfigPath uses daemon.conf
+- Version updates: `main.go`, `internal/version/version.go`, `Makefile`, `wails.json`
+- Documentation: `README.md`, `CLI_GUIDE.md`, `RELEASE_NOTES.md`, `FEATURE_SUMMARY.md`
+
+---
+
 ## v4.0.8 - January 6, 2026
 
 ### Windows Service/Tray Improvements

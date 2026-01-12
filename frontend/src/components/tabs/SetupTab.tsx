@@ -26,6 +26,9 @@ import {
   TriggerDaemonScan,
   PauseDaemon,
   ResumeDaemon,
+  GetDaemonConfig,
+  SaveDaemonConfig,
+  ValidateAutoDownloadSetup,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 
@@ -82,6 +85,14 @@ export function SetupTab() {
   // Daemon control state (v4.1.0)
   const [daemonStatus, setDaemonStatus] = useState<wailsapp.DaemonStatusDTO | null>(null);
   const [isDaemonLoading, setIsDaemonLoading] = useState(false);
+
+  // Daemon config state (v4.2.0)
+  const [daemonConfig, setDaemonConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
+  const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
+
+  // Workspace validation state (v4.2.1)
+  const [workspaceValidation, setWorkspaceValidation] = useState<wailsapp.AutoDownloadValidationDTO | null>(null);
+  const [isValidating, setIsValidating] = useState(false);
 
   // Setup event listeners and fetch initial data
   useEffect(() => {
@@ -143,6 +154,19 @@ export function SetupTab() {
     const interval = setInterval(fetchDaemonStatus, 5000);
 
     return () => clearInterval(interval);
+  }, []);
+
+  // Fetch daemon config on mount (v4.2.0)
+  useEffect(() => {
+    const fetchDaemonConfig = async () => {
+      try {
+        const cfg = await GetDaemonConfig();
+        setDaemonConfig(cfg);
+      } catch (err) {
+        console.error('Failed to fetch daemon config:', err);
+      }
+    };
+    fetchDaemonConfig();
   }, []);
 
   // Initialize local state from config
@@ -325,6 +349,48 @@ export function SetupTab() {
       setStatusMessage(`Failed to resume daemon: ${err}`);
     } finally {
       setIsDaemonLoading(false);
+    }
+  };
+
+  // Daemon config handlers (v4.2.0)
+  const handleDaemonConfigChange = (field: keyof wailsapp.DaemonConfigDTO, value: string | number | boolean) => {
+    if (daemonConfig) {
+      setDaemonConfig({ ...daemonConfig, [field]: value });
+    }
+  };
+
+  const handleSaveDaemonConfig = async () => {
+    if (!daemonConfig) return;
+    try {
+      setIsDaemonConfigSaving(true);
+      setStatusMessage('Saving daemon configuration...');
+      await SaveDaemonConfig(daemonConfig);
+      setStatusMessage('Daemon configuration saved successfully');
+    } catch (err) {
+      setStatusMessage(`Failed to save daemon config: ${err}`);
+    } finally {
+      setIsDaemonConfigSaving(false);
+    }
+  };
+
+  // Workspace validation handler (v4.2.1)
+  const handleValidateWorkspace = async () => {
+    try {
+      setIsValidating(true);
+      setStatusMessage('Validating workspace configuration...');
+      const result = await ValidateAutoDownloadSetup();
+      setWorkspaceValidation(result);
+      if (result.hasAutoDownloadField) {
+        setStatusMessage('Workspace validation successful');
+      } else if (result.errors && result.errors.length > 0) {
+        setStatusMessage(`Validation error: ${result.errors[0]}`);
+      } else {
+        setStatusMessage('Auto Download custom field not found in workspace');
+      }
+    } catch (err) {
+      setStatusMessage(`Validation failed: ${err}`);
+    } finally {
+      setIsValidating(false);
     }
   };
 
@@ -919,6 +985,158 @@ export function SetupTab() {
             <p className="text-xs text-gray-500">
               Auto-download automatically downloads outputs from completed jobs that have the correctness tag
               and the "Auto Download" custom field set to "Enable" in Rescale.
+            </p>
+          </div>
+        </div>
+
+        {/* Eligibility Settings Section (v4.2.1) */}
+        <div className="card">
+          <h3 className="text-base font-semibold text-gray-900 mb-4">Eligibility Settings</h3>
+          <div className="space-y-4">
+            {/* Info Banner */}
+            <div className="p-3 rounded-md bg-blue-50 text-blue-800 text-sm">
+              <p className="font-medium">Workspace Requirement</p>
+              <p className="mt-1">
+                Auto-download requires a custom field named <strong>"Auto Download"</strong> to be configured
+                in your Rescale workspace. The field name is hardcoded; only the expected value is configurable.
+              </p>
+            </div>
+
+            {/* Workspace Validation Status */}
+            {workspaceValidation && (
+              <div className={clsx(
+                'p-3 rounded-md text-sm',
+                workspaceValidation.hasAutoDownloadField ? 'bg-green-50 text-green-700' :
+                workspaceValidation.errors && workspaceValidation.errors.length > 0 ? 'bg-red-50 text-red-700' :
+                'bg-yellow-50 text-yellow-700'
+              )}>
+                <div className="flex items-center gap-2">
+                  {workspaceValidation.hasAutoDownloadField ? (
+                    <CheckCircleIcon className="w-5 h-5 text-green-500" />
+                  ) : (
+                    <XCircleIcon className="w-5 h-5 text-yellow-500" />
+                  )}
+                  <span className="font-medium">
+                    {workspaceValidation.hasAutoDownloadField
+                      ? 'Auto Download custom field found'
+                      : 'Auto Download custom field not found'}
+                  </span>
+                </div>
+                {workspaceValidation.hasAutoDownloadField && (
+                  <div className="mt-2 text-xs space-y-1">
+                    <p>Type: {workspaceValidation.autoDownloadFieldType || 'text'}</p>
+                    <p>Section: {workspaceValidation.autoDownloadFieldSection || 'N/A'}</p>
+                    {workspaceValidation.availableValues && workspaceValidation.availableValues.length > 0 && (
+                      <p>Available values: {workspaceValidation.availableValues.join(', ')}</p>
+                    )}
+                  </div>
+                )}
+                {workspaceValidation.warnings && workspaceValidation.warnings.length > 0 && (
+                  <div className="mt-2">
+                    {workspaceValidation.warnings.map((w, i) => (
+                      <p key={i} className="text-xs text-yellow-600">⚠️ {w}</p>
+                    ))}
+                  </div>
+                )}
+                {workspaceValidation.errors && workspaceValidation.errors.length > 0 && (
+                  <div className="mt-2">
+                    {workspaceValidation.errors.map((e, i) => (
+                      <p key={i} className="text-xs text-red-600">❌ {e}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Validation Button */}
+            <div className="flex items-center gap-4">
+              <button
+                onClick={handleValidateWorkspace}
+                disabled={isValidating || connectionStatus !== 'connected'}
+                className="btn-secondary"
+                title={connectionStatus !== 'connected' ? 'Connect to API first' : 'Check workspace custom fields'}
+              >
+                {isValidating ? (
+                  <span className="flex items-center gap-2">
+                    <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                    Validating...
+                  </span>
+                ) : 'Validate Workspace Setup'}
+              </button>
+              <span className="text-xs text-gray-500">
+                Check if your workspace has the required custom field
+              </span>
+            </div>
+
+            {/* Eligibility Config Fields */}
+            {daemonConfig && (
+              <>
+                <div>
+                  <label className="label">Auto Download Value</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="Enable"
+                    value={daemonConfig.autoDownloadValue || ''}
+                    onChange={(e) => handleDaemonConfigChange('autoDownloadValue', e.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Jobs must have their "Auto Download" field set to this value to be eligible.
+                    Default: "Enable"
+                  </p>
+                </div>
+
+                <div>
+                  <label className="label">Downloaded Tag</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="autoDownloaded:true"
+                    value={daemonConfig.downloadedTag || ''}
+                    onChange={(e) => handleDaemonConfigChange('downloadedTag', e.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Tag added to jobs after successful download to prevent re-downloading.
+                    Default: "autoDownloaded:true"
+                  </p>
+                </div>
+
+                <div>
+                  <label className="label">Correctness Tag</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="isCorrect:true"
+                    value={daemonConfig.correctnessTag || ''}
+                    onChange={(e) => handleDaemonConfigChange('correctnessTag', e.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-gray-500">
+                    Jobs must have this tag to be eligible for auto-download.
+                    Default: "isCorrect:true"
+                  </p>
+                </div>
+
+                {/* Save Button */}
+                <div className="flex items-center gap-4 pt-2">
+                  <button
+                    onClick={handleSaveDaemonConfig}
+                    disabled={isDaemonConfigSaving}
+                    className="btn-primary"
+                  >
+                    {isDaemonConfigSaving ? 'Saving...' : 'Save Eligibility Settings'}
+                  </button>
+                  {daemonConfig.configPath && (
+                    <span className="text-xs text-gray-500">
+                      Saved to: {daemonConfig.configPath}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+
+            <p className="text-xs text-gray-500">
+              These settings are saved to <code>daemon.conf</code> and used by the auto-download service
+              to determine which jobs are eligible for automatic download.
             </p>
           </div>
         </div>

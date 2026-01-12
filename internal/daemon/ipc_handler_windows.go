@@ -25,7 +25,7 @@ func NewIPCHandler(daemon *Daemon, shutdownFunc func()) *IPCHandler {
 func (h *IPCHandler) GetStatus() *ipc.StatusData {
 	return &ipc.StatusData{
 		ServiceState: "windows-service",
-		Version:      "4.1.0",
+		Version:      "4.2.0",
 	}
 }
 

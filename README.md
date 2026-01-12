@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.1.0-green)
+![Status](https://img.shields.io/badge/status-v4.2.1-green)
 
 ---
 
@@ -87,6 +87,19 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
+**v4.2.0 (January 8, 2026) - Unified Daemon Configuration:**
+- **New `daemon.conf` file**: Single INI file for all daemon settings (replaces scattered config)
+- **CLI config commands**: `daemon config show|path|edit|set|init` for managing daemon settings
+- **Config file + CLI flags**: Daemon reads from config file, CLI flags override config values
+- **Windows tray "Configure..."**: Opens GUI directly to daemon configuration
+- **Cross-platform consistency**: Same config format and behavior on Mac, Linux, and Windows
+
+**v4.1.1 (January 8, 2026) - Tray Fixes:**
+- **Tray icon fix**: Changed from PNG to ICO format for proper display on Windows
+- **Start Service button**: Tray now has "Start Service" option when daemon is stopped
+- **Version fix**: Tray now uses shared version package (no more hardcoded version)
+- **Auto-start docs**: Added macOS launchd and Linux systemd configuration examples
+
 **v4.1.0 (January 7, 2026) - Cross-Platform Daemon Control:**
 - **GUI Daemon Control**: Start, stop, pause, resume, and monitor the auto-download daemon from the GUI
 - **Unix IPC**: Domain socket communication (`~/.config/rescale/interlink.sock`) for Mac/Linux
@@ -148,15 +161,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.1.0-darwin-arm64.zip` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.1.0-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.1.0-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `RescaleInterlink-v4.1.0.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.2.0-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.2.0-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.2.0-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.2.0.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Unzip and move app to Applications
-unzip rescale-interlink-v4.1.0-darwin-arm64.zip
+unzip rescale-interlink-v4.2.0-darwin-arm64.zip
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -167,7 +180,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.1.0-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.2.0-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -180,7 +193,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.1.0-windows-amd64.zip
+Expand-Archive rescale-interlink-v4.2.0-windows-amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -348,6 +361,105 @@ rescale-int daemon stop
 - "Scan Now" button for immediate job check
 - Shows uptime, version, jobs downloaded when running
 
+**Windows Tray (MSI only):**
+- Right-click tray icon for menu
+- Start Service / Pause / Resume / Trigger Scan
+- Open Interlink to launch GUI
+
+### Auto-Start on Login (Mac/Linux)
+
+On **Windows with MSI installer**, the daemon starts automatically as a Windows Service.
+
+On **Mac and Linux**, you can configure auto-start manually using the system's init system:
+
+<details>
+<summary><b>macOS (launchd)</b></summary>
+
+Create `~/Library/LaunchAgents/com.rescale.interlink.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rescale.interlink.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/rescale-int</string>
+        <string>daemon</string>
+        <string>run</string>
+        <string>--download-dir</string>
+        <string>/Users/USERNAME/Downloads/rescale-jobs</string>
+        <string>--background</string>
+        <string>--ipc</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/Library/Logs/rescale-interlink.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/Library/Logs/rescale-interlink.error.log</string>
+</dict>
+</plist>
+```
+
+**Commands:**
+```bash
+# Replace USERNAME with your actual username in the plist file
+
+# Install (enable auto-start)
+launchctl load ~/Library/LaunchAgents/com.rescale.interlink.daemon.plist
+
+# Uninstall (disable auto-start)
+launchctl unload ~/Library/LaunchAgents/com.rescale.interlink.daemon.plist
+
+# Check status
+launchctl list | grep rescale
+```
+</details>
+
+<details>
+<summary><b>Linux (systemd)</b></summary>
+
+Create `~/.config/systemd/user/rescale-interlink.service`:
+
+```ini
+[Unit]
+Description=Rescale Interlink Auto-Download Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rescale-int daemon run --download-dir %h/Downloads/rescale-jobs --background --ipc
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+**Commands:**
+```bash
+# Install (enable auto-start)
+systemctl --user daemon-reload
+systemctl --user enable rescale-interlink
+systemctl --user start rescale-interlink
+
+# Check status
+systemctl --user status rescale-interlink
+
+# View logs
+journalctl --user -u rescale-interlink -f
+
+# Disable auto-start
+systemctl --user disable rescale-interlink
+```
+</details>
+
 ### Configuration
 
 **CLI:**
@@ -386,7 +498,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.1.0                       |
+|                    Rescale Interlink v4.2.0                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -651,6 +763,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.1.0
+**Version**: 4.2.0
 **Status**: Production Ready
-**Last Updated**: January 7, 2026
+**Last Updated**: January 8, 2026

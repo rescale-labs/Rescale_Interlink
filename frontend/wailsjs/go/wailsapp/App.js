@@ -70,12 +70,20 @@ export function GetCoreTypes() {
   return window['go']['wailsapp']['App']['GetCoreTypes']();
 }
 
+export function GetDaemonConfig() {
+  return window['go']['wailsapp']['App']['GetDaemonConfig']();
+}
+
 export function GetDaemonStatus() {
   return window['go']['wailsapp']['App']['GetDaemonStatus']();
 }
 
 export function GetDefaultConfigPath() {
   return window['go']['wailsapp']['App']['GetDefaultConfigPath']();
+}
+
+export function GetDefaultDownloadFolder() {
+  return window['go']['wailsapp']['App']['GetDefaultDownloadFolder']();
 }
 
 export function GetHomeDirectory() {
@@ -190,6 +198,10 @@ export function SaveConfigAs(arg1) {
   return window['go']['wailsapp']['App']['SaveConfigAs'](arg1);
 }
 
+export function SaveDaemonConfig(arg1) {
+  return window['go']['wailsapp']['App']['SaveDaemonConfig'](arg1);
+}
+
 export function SaveFile(arg1) {
   return window['go']['wailsapp']['App']['SaveFile'](arg1);
 }
@@ -280,6 +292,10 @@ export function UpdateConfig(arg1) {
 
 export function UpdateJobRow(arg1, arg2) {
   return window['go']['wailsapp']['App']['UpdateJobRow'](arg1, arg2);
+}
+
+export function ValidateAutoDownloadSetup() {
+  return window['go']['wailsapp']['App']['ValidateAutoDownloadSetup']();
 }
 
 export function ValidateJobSpec(arg1) {

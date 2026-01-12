@@ -145,6 +145,32 @@ export namespace wailsapp {
 	        this.validationMsg = source["validationMsg"];
 	    }
 	}
+	export class AutoDownloadValidationDTO {
+	    customFieldsEnabled: boolean;
+	    hasAutoDownloadField: boolean;
+	    autoDownloadFieldType: string;
+	    autoDownloadFieldSection: string;
+	    availableValues: string[];
+	    hasAutoDownloadPathField: boolean;
+	    warnings: string[];
+	    errors: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new AutoDownloadValidationDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.customFieldsEnabled = source["customFieldsEnabled"];
+	        this.hasAutoDownloadField = source["hasAutoDownloadField"];
+	        this.autoDownloadFieldType = source["autoDownloadFieldType"];
+	        this.autoDownloadFieldSection = source["autoDownloadFieldSection"];
+	        this.availableValues = source["availableValues"];
+	        this.hasAutoDownloadPathField = source["hasAutoDownloadPathField"];
+	        this.warnings = source["warnings"];
+	        this.errors = source["errors"];
+	    }
+	}
 	export class AutomationDTO {
 	    id: string;
 	    name: string;
@@ -322,6 +348,48 @@ export namespace wailsapp {
 		    }
 		    return a;
 		}
+	}
+	export class DaemonConfigDTO {
+	    enabled: boolean;
+	    downloadFolder: string;
+	    pollIntervalMinutes: number;
+	    useJobNameDir: boolean;
+	    maxConcurrent: number;
+	    lookbackDays: number;
+	    namePrefix: string;
+	    nameContains: string;
+	    exclude: string;
+	    correctnessTag: string;
+	    autoDownloadValue: string;
+	    downloadedTag: string;
+	    notificationsEnabled: boolean;
+	    showDownloadComplete: boolean;
+	    showDownloadFailed: boolean;
+	    configPath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonConfigDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.downloadFolder = source["downloadFolder"];
+	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	        this.useJobNameDir = source["useJobNameDir"];
+	        this.maxConcurrent = source["maxConcurrent"];
+	        this.lookbackDays = source["lookbackDays"];
+	        this.namePrefix = source["namePrefix"];
+	        this.nameContains = source["nameContains"];
+	        this.exclude = source["exclude"];
+	        this.correctnessTag = source["correctnessTag"];
+	        this.autoDownloadValue = source["autoDownloadValue"];
+	        this.downloadedTag = source["downloadedTag"];
+	        this.notificationsEnabled = source["notificationsEnabled"];
+	        this.showDownloadComplete = source["showDownloadComplete"];
+	        this.showDownloadFailed = source["showDownloadFailed"];
+	        this.configPath = source["configPath"];
+	    }
 	}
 	export class DaemonStatusDTO {
 	    running: boolean;

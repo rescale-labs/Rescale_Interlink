@@ -35,7 +35,7 @@ type MultiUserDaemon struct {
 type userDaemonEntry struct {
 	profile UserProfile
 	daemon  *daemon.Daemon
-	config  *config.APIConfig
+	config  *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
 	cancel  context.CancelFunc
 	running bool
 }
@@ -173,23 +173,23 @@ func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 
 // startUserDaemon starts a daemon for a specific user profile.
 // Must be called with m.mu held.
+// v4.2.0: Updated to use DaemonConfig (daemon.conf) instead of APIConfig.
 func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
-	// Load user's apiconfig
-	apiCfg, err := config.LoadAPIConfig(profile.ConfigPath)
+	// Load user's daemon.conf
+	daemonConf, err := config.LoadDaemonConfig(profile.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config for %s: %w", profile.Username, err)
 	}
 
-	// v4.0.4: Use IsAutoDownloadEnabled() which checks both the enabled flag
-	// and validates the config (connection settings + auto-download paths).
-	if !apiCfg.IsAutoDownloadEnabled() {
+	// Check if daemon is enabled and valid
+	if !daemonConf.IsEnabled() {
 		// Log different messages based on why it's not enabled
-		if !apiCfg.AutoDownload.Enabled {
+		if !daemonConf.Daemon.Enabled {
 			m.logger.Debug().Str("user", profile.Username).
 				Msg("Auto-download disabled for user, skipping")
-		} else if err := apiCfg.ValidateForConnection(); err != nil {
+		} else if err := daemonConf.Validate(); err != nil {
 			m.logger.Debug().Str("user", profile.Username).Err(err).
-				Msg("Auto-download config has connection errors, skipping")
+				Msg("Auto-download config has validation errors, skipping")
 		} else {
 			m.logger.Debug().Str("user", profile.Username).
 				Msg("Auto-download config invalid, skipping")
@@ -199,19 +199,19 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 
 	m.logger.Info().
 		Str("user", profile.Username).
-		Str("download_folder", apiCfg.AutoDownload.DefaultDownloadFolder).
-		Int("scan_interval_min", apiCfg.AutoDownload.ScanIntervalMinutes).
+		Str("download_folder", daemonConf.Daemon.DownloadFolder).
+		Int("poll_interval_min", daemonConf.Daemon.PollIntervalMinutes).
 		Msg("Starting auto-download daemon for user")
 
 	// Create user-specific logger
 	userLogger := m.logger.WithStr("user", profile.Username)
 
 	// v4.0.8: Use unified API key resolution with fallback chain
-	// Priority: apiconfig API key -> token file -> environment variable
-	apiKey, apiKeySource := config.ResolveAPIKeySource(apiCfg.APIKey, profile.ProfilePath)
+	// Priority: token file -> environment variable
+	apiKey, apiKeySource := config.ResolveAPIKeySource("", profile.ProfilePath)
 	if apiKey == "" {
 		m.logger.Debug().Str("user", profile.Username).
-			Msg("No API key found (checked apiconfig, token file, env var), skipping")
+			Msg("No API key found (checked token file, env var), skipping")
 		return nil
 	}
 
@@ -223,28 +223,40 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 
 	// Create app config for API client
 	appCfg := &config.Config{
-		APIBaseURL: apiCfg.PlatformURL,
+		APIBaseURL: "https://platform.rescale.com", // Default URL, could be configurable
 		APIKey:     apiKey,
 	}
 
-	// Create eligibility config from apiconfig
+	// Create eligibility config from daemon.conf
+	// v4.2.1: AutoDownloadValue and DownloadedTag are now configurable
 	eligibility := &daemon.EligibilityConfig{
-		CorrectnessTag:        apiCfg.AutoDownload.CorrectnessTag,
-		AutoDownloadField:     "Auto Download",
-		AutoDownloadValue:     "Enable",
-		DownloadedTag:         "autoDownloaded:true",
-		AutoDownloadPathField: "Auto Download Path",
-		LookbackDays:          apiCfg.AutoDownload.LookbackDays,
+		CorrectnessTag:        daemonConf.Eligibility.CorrectnessTag,
+		AutoDownloadField:     "Auto Download",                        // Hardcoded - must match workspace custom field
+		AutoDownloadValue:     daemonConf.Eligibility.AutoDownloadValue, // Configurable (default: "Enable")
+		DownloadedTag:         daemonConf.Eligibility.DownloadedTag,     // Configurable (default: "autoDownloaded:true")
+		AutoDownloadPathField: "Auto Download Path",                   // Hardcoded - optional workspace custom field
+		LookbackDays:          daemonConf.Daemon.LookbackDays,
+	}
+
+	// Create job filter from daemon.conf
+	var filter *daemon.JobFilter
+	if daemonConf.Filters.NamePrefix != "" || daemonConf.Filters.NameContains != "" || daemonConf.Filters.Exclude != "" {
+		filter = &daemon.JobFilter{
+			NamePrefix:   daemonConf.Filters.NamePrefix,
+			NameContains: daemonConf.Filters.NameContains,
+			ExcludeNames: daemonConf.GetExcludePatterns(),
+		}
 	}
 
 	// Create daemon config
 	daemonCfg := &daemon.Config{
-		PollInterval:  time.Duration(apiCfg.AutoDownload.ScanIntervalMinutes) * time.Minute,
-		DownloadDir:   apiCfg.AutoDownload.DefaultDownloadFolder,
-		UseJobNameDir: true,
-		MaxConcurrent: 5,
+		PollInterval:  time.Duration(daemonConf.Daemon.PollIntervalMinutes) * time.Minute,
+		DownloadDir:   daemonConf.Daemon.DownloadFolder,
+		UseJobNameDir: daemonConf.Daemon.UseJobNameDir,
+		MaxConcurrent: daemonConf.Daemon.MaxConcurrent,
 		StateFile:     profile.StateFilePath,
 		Eligibility:   eligibility,
+		Filter:        filter,
 	}
 
 	// Create the daemon
@@ -266,7 +278,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	m.daemons[profile.ProfilePath] = &userDaemonEntry{
 		profile: profile,
 		daemon:  d,
-		config:  apiCfg,
+		config:  daemonConf,
 		cancel:  cancel,
 		running: true,
 	}
@@ -294,9 +306,10 @@ func (m *MultiUserDaemon) stopUserDaemon(entry *userDaemonEntry) {
 }
 
 // configChanged checks if the user's config has changed since we last loaded it.
+// v4.2.0: Updated to use DaemonConfig (daemon.conf) instead of APIConfig.
 func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProfile) bool {
 	// Reload config from disk
-	newCfg, err := config.LoadAPIConfig(profile.ConfigPath)
+	newCfg, err := config.LoadDaemonConfig(profile.ConfigPath)
 	if err != nil {
 		// Error loading - assume changed to trigger restart
 		return true
@@ -308,25 +321,41 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 	}
 
 	oldCfg := entry.config
-	if oldCfg.PlatformURL != newCfg.PlatformURL {
+	if oldCfg.Daemon.Enabled != newCfg.Daemon.Enabled {
 		return true
 	}
-	if oldCfg.APIKey != newCfg.APIKey {
+	if oldCfg.Daemon.DownloadFolder != newCfg.Daemon.DownloadFolder {
 		return true
 	}
-	if oldCfg.AutoDownload.Enabled != newCfg.AutoDownload.Enabled {
+	if oldCfg.Daemon.PollIntervalMinutes != newCfg.Daemon.PollIntervalMinutes {
 		return true
 	}
-	if oldCfg.AutoDownload.DefaultDownloadFolder != newCfg.AutoDownload.DefaultDownloadFolder {
+	if oldCfg.Daemon.UseJobNameDir != newCfg.Daemon.UseJobNameDir {
 		return true
 	}
-	if oldCfg.AutoDownload.ScanIntervalMinutes != newCfg.AutoDownload.ScanIntervalMinutes {
+	if oldCfg.Daemon.MaxConcurrent != newCfg.Daemon.MaxConcurrent {
 		return true
 	}
-	if oldCfg.AutoDownload.CorrectnessTag != newCfg.AutoDownload.CorrectnessTag {
+	if oldCfg.Daemon.LookbackDays != newCfg.Daemon.LookbackDays {
 		return true
 	}
-	if oldCfg.AutoDownload.LookbackDays != newCfg.AutoDownload.LookbackDays {
+	if oldCfg.Eligibility.CorrectnessTag != newCfg.Eligibility.CorrectnessTag {
+		return true
+	}
+	// v4.2.1: Check new eligibility fields
+	if oldCfg.Eligibility.AutoDownloadValue != newCfg.Eligibility.AutoDownloadValue {
+		return true
+	}
+	if oldCfg.Eligibility.DownloadedTag != newCfg.Eligibility.DownloadedTag {
+		return true
+	}
+	if oldCfg.Filters.NamePrefix != newCfg.Filters.NamePrefix {
+		return true
+	}
+	if oldCfg.Filters.NameContains != newCfg.Filters.NameContains {
+		return true
+	}
+	if oldCfg.Filters.Exclude != newCfg.Filters.Exclude {
 		return true
 	}
 
@@ -334,6 +363,7 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 }
 
 // GetStatus returns the current status of all user daemons.
+// v4.2.0: Updated to use DaemonConfig fields.
 func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -343,9 +373,9 @@ func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 		status := UserDaemonStatus{
 			Username:       entry.profile.Username,
 			ProfilePath:    entry.profile.ProfilePath,
-			DownloadFolder: entry.config.AutoDownload.DefaultDownloadFolder,
+			DownloadFolder: entry.config.Daemon.DownloadFolder,
 			Running:        entry.running,
-			Enabled:        entry.config.AutoDownload.Enabled,
+			Enabled:        entry.config.Daemon.Enabled,
 			SID:            entry.profile.SID, // v4.0.8
 		}
 

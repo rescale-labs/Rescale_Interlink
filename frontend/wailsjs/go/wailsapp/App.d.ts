@@ -36,9 +36,13 @@ export function GetConfig():Promise<wailsapp.ConfigDTO>;
 
 export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
 
+export function GetDaemonConfig():Promise<wailsapp.DaemonConfigDTO>;
+
 export function GetDaemonStatus():Promise<wailsapp.DaemonStatusDTO>;
 
 export function GetDefaultConfigPath():Promise<string>;
+
+export function GetDefaultDownloadFolder():Promise<string>;
 
 export function GetHomeDirectory():Promise<string>;
 
@@ -96,6 +100,8 @@ export function SaveConfig():Promise<void>;
 
 export function SaveConfigAs(arg1:string):Promise<void>;
 
+export function SaveDaemonConfig(arg1:wailsapp.DaemonConfigDTO):Promise<void>;
+
 export function SaveFile(arg1:string):Promise<string>;
 
 export function SaveJobToJSON(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>;
@@ -141,5 +147,7 @@ export function TriggerDaemonScan():Promise<void>;
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
 
 export function UpdateJobRow(arg1:number,arg2:wailsapp.JobSpecDTO):Promise<void>;
+
+export function ValidateAutoDownloadSetup():Promise<wailsapp.AutoDownloadValidationDTO>;
 
 export function ValidateJobSpec(arg1:wailsapp.JobSpecDTO):Promise<Array<string>>;

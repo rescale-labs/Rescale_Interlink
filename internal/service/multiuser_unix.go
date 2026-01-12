@@ -20,7 +20,7 @@ type UserProfile struct {
 	// ProfilePath is the full path to the user's home directory
 	ProfilePath string
 
-	// ConfigPath is the path to the user's apiconfig file
+	// ConfigPath is the path to the user's daemon.conf file (v4.2.0+)
 	ConfigPath string
 
 	// StateFilePath is the path to the user's autodownload state file
@@ -74,7 +74,7 @@ func GetCurrentUserProfile() (*UserProfile, error) {
 		SID:           uid,
 		Username:      username,
 		ProfilePath:   home,
-		ConfigPath:    filepath.Join(home, ".config", "rescale", "apiconfig"),
+		ConfigPath:    filepath.Join(home, ".config", "rescale", "daemon.conf"), // v4.2.0: daemon.conf instead of apiconfig
 		StateFilePath: filepath.Join(home, ".config", "rescale", "autodownload_state.json"),
 	}, nil
 }

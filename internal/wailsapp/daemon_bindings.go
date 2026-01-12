@@ -99,6 +99,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 
 // StartDaemon starts the daemon process in background mode with IPC enabled.
 // This spawns a new process that survives the GUI closing.
+// v4.2.0: Reads settings from daemon.conf instead of apiconfig.
 func (a *App) StartDaemon() error {
 	// Check if already running
 	if pid := daemon.IsDaemonRunning(); pid != 0 {
@@ -111,19 +112,20 @@ func (a *App) StartDaemon() error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Get download directory and poll interval from auto-download config (APIConfig)
-	downloadDir := "."
-	pollInterval := "5m"
-
-	// Load auto-download config from APIConfig (separate from main config.Config)
-	if apiCfg, err := config.LoadAPIConfig(""); err == nil && apiCfg != nil {
-		if apiCfg.AutoDownload.DefaultDownloadFolder != "" {
-			downloadDir = apiCfg.AutoDownload.DefaultDownloadFolder
-		}
-		if apiCfg.AutoDownload.ScanIntervalMinutes > 0 {
-			pollInterval = fmt.Sprintf("%dm", apiCfg.AutoDownload.ScanIntervalMinutes)
-		}
+	// v4.2.0: Load daemon config from daemon.conf
+	// The daemon run command will also read this file, but we pass explicit
+	// flags so they're visible in the logs
+	daemonCfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf, using defaults: %v", err))
+		daemonCfg = config.NewDaemonConfig()
 	}
+
+	downloadDir := daemonCfg.Daemon.DownloadFolder
+	if downloadDir == "" {
+		downloadDir = config.DefaultDownloadFolder()
+	}
+	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
 	// Build command arguments
 	args := []string{
@@ -132,6 +134,20 @@ func (a *App) StartDaemon() error {
 		"--ipc",
 		"--download-dir", downloadDir,
 		"--poll-interval", pollInterval,
+	}
+
+	// Add filter flags if configured
+	if daemonCfg.Filters.NamePrefix != "" {
+		args = append(args, "--name-prefix", daemonCfg.Filters.NamePrefix)
+	}
+	if daemonCfg.Filters.NameContains != "" {
+		args = append(args, "--name-contains", daemonCfg.Filters.NameContains)
+	}
+	for _, ex := range daemonCfg.GetExcludePatterns() {
+		args = append(args, "--exclude", ex)
+	}
+	if daemonCfg.Daemon.MaxConcurrent > 0 {
+		args = append(args, "--max-concurrent", fmt.Sprintf("%d", daemonCfg.Daemon.MaxConcurrent))
 	}
 
 	a.logInfo("Daemon", fmt.Sprintf("Starting daemon: %s %v", exePath, args))
@@ -252,5 +268,184 @@ func (a *App) ResumeDaemon() error {
 
 	a.logInfo("Daemon", "Daemon resumed")
 	return nil
+}
+
+// DaemonConfigDTO represents the daemon configuration for the frontend.
+// v4.2.0: Used for reading/writing daemon.conf from the GUI.
+type DaemonConfigDTO struct {
+	// Daemon core settings
+	Enabled             bool   `json:"enabled"`
+	DownloadFolder      string `json:"downloadFolder"`
+	PollIntervalMinutes int    `json:"pollIntervalMinutes"`
+	UseJobNameDir       bool   `json:"useJobNameDir"`
+	MaxConcurrent       int    `json:"maxConcurrent"`
+	LookbackDays        int    `json:"lookbackDays"`
+
+	// Filter settings
+	NamePrefix   string `json:"namePrefix"`
+	NameContains string `json:"nameContains"`
+	Exclude      string `json:"exclude"` // Comma-separated
+
+	// Eligibility
+	CorrectnessTag    string `json:"correctnessTag"`
+	AutoDownloadValue string `json:"autoDownloadValue"` // v4.2.1: Configurable (default: "Enable")
+	DownloadedTag     string `json:"downloadedTag"`     // v4.2.1: Configurable (default: "autoDownloaded:true")
+
+	// Notifications
+	NotificationsEnabled   bool `json:"notificationsEnabled"`
+	ShowDownloadComplete   bool `json:"showDownloadComplete"`
+	ShowDownloadFailed     bool `json:"showDownloadFailed"`
+
+	// Config file path (read-only)
+	ConfigPath string `json:"configPath"`
+}
+
+// GetDaemonConfig returns the current daemon configuration.
+// v4.2.0: Reads from daemon.conf instead of apiconfig.
+func (a *App) GetDaemonConfig() DaemonConfigDTO {
+	result := DaemonConfigDTO{}
+
+	// Get config file path
+	path, _ := config.DefaultDaemonConfigPath()
+	result.ConfigPath = path
+
+	// Load config
+	cfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf: %v", err))
+		cfg = config.NewDaemonConfig()
+	}
+
+	// Map to DTO
+	result.Enabled = cfg.Daemon.Enabled
+	result.DownloadFolder = cfg.Daemon.DownloadFolder
+	result.PollIntervalMinutes = cfg.Daemon.PollIntervalMinutes
+	result.UseJobNameDir = cfg.Daemon.UseJobNameDir
+	result.MaxConcurrent = cfg.Daemon.MaxConcurrent
+	result.LookbackDays = cfg.Daemon.LookbackDays
+
+	result.NamePrefix = cfg.Filters.NamePrefix
+	result.NameContains = cfg.Filters.NameContains
+	result.Exclude = cfg.Filters.Exclude
+
+	result.CorrectnessTag = cfg.Eligibility.CorrectnessTag
+	result.AutoDownloadValue = cfg.Eligibility.AutoDownloadValue
+	result.DownloadedTag = cfg.Eligibility.DownloadedTag
+
+	result.NotificationsEnabled = cfg.Notifications.Enabled
+	result.ShowDownloadComplete = cfg.Notifications.ShowDownloadComplete
+	result.ShowDownloadFailed = cfg.Notifications.ShowDownloadFailed
+
+	return result
+}
+
+// SaveDaemonConfig saves daemon configuration to daemon.conf.
+// v4.2.0: Writes to daemon.conf.
+func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
+	// Load existing config to preserve any fields not in DTO
+	cfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		cfg = config.NewDaemonConfig()
+	}
+
+	// Map DTO to config
+	cfg.Daemon.Enabled = dto.Enabled
+	cfg.Daemon.DownloadFolder = dto.DownloadFolder
+	cfg.Daemon.PollIntervalMinutes = dto.PollIntervalMinutes
+	cfg.Daemon.UseJobNameDir = dto.UseJobNameDir
+	cfg.Daemon.MaxConcurrent = dto.MaxConcurrent
+	cfg.Daemon.LookbackDays = dto.LookbackDays
+
+	cfg.Filters.NamePrefix = dto.NamePrefix
+	cfg.Filters.NameContains = dto.NameContains
+	cfg.Filters.Exclude = dto.Exclude
+
+	cfg.Eligibility.CorrectnessTag = dto.CorrectnessTag
+	cfg.Eligibility.AutoDownloadValue = dto.AutoDownloadValue
+	cfg.Eligibility.DownloadedTag = dto.DownloadedTag
+
+	cfg.Notifications.Enabled = dto.NotificationsEnabled
+	cfg.Notifications.ShowDownloadComplete = dto.ShowDownloadComplete
+	cfg.Notifications.ShowDownloadFailed = dto.ShowDownloadFailed
+
+	// Validate before saving
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Save
+	if err := config.SaveDaemonConfig(cfg, ""); err != nil {
+		return fmt.Errorf("failed to save daemon.conf: %w", err)
+	}
+
+	a.logInfo("Daemon", "Configuration saved to daemon.conf")
+	return nil
+}
+
+// GetDefaultDownloadFolder returns the platform-specific default download folder.
+func (a *App) GetDefaultDownloadFolder() string {
+	return config.DefaultDownloadFolder()
+}
+
+// AutoDownloadValidationDTO represents the result of validating auto-download setup.
+// v4.2.1: Added for workspace custom fields validation
+type AutoDownloadValidationDTO struct {
+	CustomFieldsEnabled      bool     `json:"customFieldsEnabled"`
+	HasAutoDownloadField     bool     `json:"hasAutoDownloadField"`
+	AutoDownloadFieldType    string   `json:"autoDownloadFieldType"`
+	AutoDownloadFieldSection string   `json:"autoDownloadFieldSection"`
+	AvailableValues          []string `json:"availableValues"`
+	HasAutoDownloadPathField bool     `json:"hasAutoDownloadPathField"`
+	Warnings                 []string `json:"warnings"`
+	Errors                   []string `json:"errors"`
+}
+
+// ValidateAutoDownloadSetup checks if the workspace has the required custom fields.
+// v4.2.1: Added for GUI auto-download setup validation
+func (a *App) ValidateAutoDownloadSetup() AutoDownloadValidationDTO {
+	result := AutoDownloadValidationDTO{
+		AvailableValues: []string{},
+		Warnings:        []string{},
+		Errors:          []string{},
+	}
+
+	// Check if we have an engine with API client
+	if a.engine == nil {
+		result.Errors = append(result.Errors, "Engine not initialized")
+		return result
+	}
+
+	apiClient := a.engine.API()
+	if apiClient == nil {
+		result.Errors = append(result.Errors, "API client not available - check API key configuration")
+		return result
+	}
+
+	// Run validation
+	ctx := context.Background()
+	validation, err := apiClient.ValidateAutoDownloadSetup(ctx)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Validation failed: %v", err))
+		return result
+	}
+
+	// Map to DTO
+	result.CustomFieldsEnabled = validation.CustomFieldsEnabled
+	result.HasAutoDownloadField = validation.HasAutoDownloadField
+	result.AutoDownloadFieldType = validation.AutoDownloadFieldType
+	result.AutoDownloadFieldSection = validation.AutoDownloadFieldSection
+	result.HasAutoDownloadPathField = validation.HasAutoDownloadPathField
+
+	if validation.AvailableValues != nil {
+		result.AvailableValues = validation.AvailableValues
+	}
+	if validation.Warnings != nil {
+		result.Warnings = validation.Warnings
+	}
+	if validation.Errors != nil {
+		result.Errors = validation.Errors
+	}
+
+	return result
 }
 

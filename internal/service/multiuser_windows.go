@@ -23,7 +23,7 @@ type UserProfile struct {
 	// ProfilePath is the full path to the user's profile directory (e.g., C:\Users\john)
 	ProfilePath string
 
-	// ConfigPath is the path to the user's apiconfig file
+	// ConfigPath is the path to the user's daemon.conf file (v4.2.0+)
 	ConfigPath string
 
 	// StateFilePath is the path to the user's autodownload state file
@@ -48,15 +48,16 @@ var SystemProfiles = []string{
 	".NET v4.5 Classic",    // .NET profile
 }
 
-// EnumerateUserProfiles scans the system for user profiles with valid apiconfig files.
+// EnumerateUserProfiles scans the system for user profiles with valid daemon.conf files.
 // It returns profiles for users who have auto-download enabled and properly configured.
 //
 // The function:
 // 1. Reads the ProfileList from the Windows registry
 // 2. Filters out system accounts (Public, Default, service accounts, etc.)
-// 3. Checks each profile for a valid apiconfig file with auto-download enabled
+// 3. Checks each profile for a valid daemon.conf file with auto-download enabled
 //
 // This is used by the Windows service to process downloads for all users on the machine.
+// v4.2.0: Updated to use daemon.conf instead of apiconfig.
 func EnumerateUserProfiles() ([]UserProfile, error) {
 	profiles, err := enumerateFromRegistry()
 	if err != nil {
@@ -67,13 +68,13 @@ func EnumerateUserProfiles() ([]UserProfile, error) {
 		}
 	}
 
-	// Filter for profiles with valid apiconfig
+	// Filter for profiles with valid daemon.conf
 	var validProfiles []UserProfile
 	for _, profile := range profiles {
 		if profile.ConfigPath == "" {
 			continue
 		}
-		// Check if apiconfig file exists
+		// Check if daemon.conf file exists
 		if _, err := os.Stat(profile.ConfigPath); err == nil {
 			validProfiles = append(validProfiles, profile)
 		}
@@ -136,11 +137,12 @@ func enumerateFromRegistry() ([]UserProfile, error) {
 		}
 
 		// Build the profile entry
+		// v4.2.0: Use daemon.conf instead of apiconfig
 		profile := UserProfile{
 			SID:           sid,
 			Username:      profileName,
 			ProfilePath:   profilePath,
-			ConfigPath:    filepath.Join(profilePath, ".config", "rescale", "apiconfig"),
+			ConfigPath:    filepath.Join(profilePath, ".config", "rescale", "daemon.conf"),
 			StateFilePath: filepath.Join(profilePath, ".config", "rescale", "autodownload_state.json"),
 		}
 
@@ -182,11 +184,12 @@ func enumerateFromFilesystem() ([]UserProfile, error) {
 		profilePath := filepath.Join(usersDir, name)
 
 		// Build profile entry (SID unknown in filesystem mode)
+		// v4.2.0: Use daemon.conf instead of apiconfig
 		profile := UserProfile{
 			SID:           "",
 			Username:      name,
 			ProfilePath:   profilePath,
-			ConfigPath:    filepath.Join(profilePath, ".config", "rescale", "apiconfig"),
+			ConfigPath:    filepath.Join(profilePath, ".config", "rescale", "daemon.conf"),
 			StateFilePath: filepath.Join(profilePath, ".config", "rescale", "autodownload_state.json"),
 		}
 
@@ -223,11 +226,12 @@ func GetCurrentUserProfile() (*UserProfile, error) {
 		return nil, fmt.Errorf("USERPROFILE environment variable not set")
 	}
 
+	// v4.2.0: Use daemon.conf instead of apiconfig
 	return &UserProfile{
 		SID:           "", // Could use syscall to get, but not necessary
 		Username:      filepath.Base(userProfile),
 		ProfilePath:   userProfile,
-		ConfigPath:    filepath.Join(userProfile, ".config", "rescale", "apiconfig"),
+		ConfigPath:    filepath.Join(userProfile, ".config", "rescale", "daemon.conf"),
 		StateFilePath: filepath.Join(userProfile, ".config", "rescale", "autodownload_state.json"),
 	}, nil
 }
