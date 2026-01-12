@@ -87,7 +87,7 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
-**v4.2.0 (January 8, 2026) - Unified Daemon Configuration:**
+**v4.2.1 (January 9, 2026) - Enhanced Eligibility Configuration:**
 - **New `daemon.conf` file**: Single INI file for all daemon settings (replaces scattered config)
 - **CLI config commands**: `daemon config show|path|edit|set|init` for managing daemon settings
 - **Config file + CLI flags**: Daemon reads from config file, CLI flags override config values
@@ -161,15 +161,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.2.0-darwin-arm64.zip` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.2.0-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.2.0-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `RescaleInterlink-v4.2.0.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.2.1-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.2.1-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.2.1-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.2.1.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Unzip and move app to Applications
-unzip rescale-interlink-v4.2.0-darwin-arm64.zip
+unzip rescale-interlink-v4.2.1-darwin-arm64.zip
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -180,7 +180,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.2.0-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.2.1-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -193,7 +193,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.2.0-windows-amd64.zip
+Expand-Archive rescale-interlink-v4.2.1-windows-amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -498,7 +498,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.2.0                       |
+|                    Rescale Interlink v4.2.1                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
