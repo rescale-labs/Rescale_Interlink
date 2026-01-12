@@ -87,8 +87,15 @@ type RootFolders struct {
 type UserProfile struct {
 	Email          string        `json:"email"`
 	FullName       string        `json:"fullName"`
+	Company        CompanyInfo   `json:"company"`   // v4.2.1: Added for workspace custom fields API
 	Workspace      WorkspaceInfo `json:"workspace"`
 	DefaultStorage StorageInfo   `json:"defaultStorage"`
+}
+
+// CompanyInfo represents organization/company details
+// v4.2.1: Added for workspace custom fields validation
+type CompanyInfo struct {
+	Code string `json:"code"` // Organization code used in API paths (e.g., "rescale")
 }
 
 // WorkspaceInfo represents workspace/organization details

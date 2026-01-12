@@ -7,9 +7,9 @@ import (
 )
 
 // iconData contains the Rescale brand icon for the system tray.
-// v4.0.8: Replaced placeholder with actual Rescale brand icon (64x64 PNG).
-// The fyne.io/systray library handles PNG format on Windows.
-// This icon is derived from build/appicon.png (the main Wails app icon).
+// v4.1.1: Changed from PNG to ICO format with multiple resolutions
+// for proper display at various DPI settings. ICO file contains
+// 16x16, 24x24, 32x32, 48x48, and 256x256 sizes.
 //
-//go:embed assets/icon.png
+//go:embed assets/icon.ico
 var iconData []byte

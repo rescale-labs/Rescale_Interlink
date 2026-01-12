@@ -12,15 +12,14 @@ import (
 	"time"
 
 	"fyne.io/systray"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 const (
 	// Status refresh interval
 	refreshInterval = 5 * time.Second
-
-	// Version displayed in tooltip
-	trayVersion = "4.0.8"
 )
 
 // trayApp manages the system tray application state.
@@ -34,13 +33,15 @@ type trayApp struct {
 	lastError      string
 
 	// Menu items (for dynamic updates)
-	mStatus      *systray.MenuItem
-	mPause       *systray.MenuItem
-	mResume      *systray.MenuItem
-	mTriggerScan *systray.MenuItem
-	mOpenGUI     *systray.MenuItem
-	mViewLogs    *systray.MenuItem
-	mQuit        *systray.MenuItem
+	mStatus       *systray.MenuItem
+	mStartService *systray.MenuItem
+	mPause        *systray.MenuItem
+	mResume       *systray.MenuItem
+	mTriggerScan  *systray.MenuItem
+	mConfigure    *systray.MenuItem // v4.2.0: Opens GUI for configuration
+	mOpenGUI      *systray.MenuItem
+	mViewLogs     *systray.MenuItem
+	mQuit         *systray.MenuItem
 
 	// Control channels
 	done chan struct{}
@@ -71,13 +72,15 @@ func onReady() {
 
 	systray.AddSeparator()
 
-	app.mOpenGUI = systray.AddMenuItem("Open Interlink", "Open the main GUI application")
+	app.mStartService = systray.AddMenuItem("Start Service", "Start the auto-download daemon")
+	app.mPause = systray.AddMenuItem("Pause Auto-Download", "Pause auto-download for current user")
+	app.mResume = systray.AddMenuItem("Resume Auto-Download", "Resume auto-download for current user")
 	app.mTriggerScan = systray.AddMenuItem("Trigger Scan Now", "Trigger an immediate job scan")
 
 	systray.AddSeparator()
 
-	app.mPause = systray.AddMenuItem("Pause Auto-Download", "Pause auto-download for current user")
-	app.mResume = systray.AddMenuItem("Resume Auto-Download", "Resume auto-download for current user")
+	app.mConfigure = systray.AddMenuItem("Configure...", "Open GUI to edit daemon settings")
+	app.mOpenGUI = systray.AddMenuItem("Open Interlink", "Open the main GUI application")
 
 	systray.AddSeparator()
 
@@ -146,18 +149,24 @@ func (a *trayApp) refreshStatus() {
 // Must be called with a.mu held.
 func (a *trayApp) updateUI() {
 	if !a.serviceRunning {
-		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running", trayVersion))
+		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running", version.Version))
 		a.mStatus.SetTitle("Status: Service Not Running")
+		a.mStartService.Enable()
+		a.mStartService.Show()
 		a.mPause.Disable()
 		a.mResume.Disable()
 		a.mTriggerScan.Disable()
 		return
 	}
 
+	// Service is running - hide Start Service button
+	a.mStartService.Disable()
+	a.mStartService.Hide()
+
 	// Service is running
 	if a.lastStatus != nil {
 		tooltip := fmt.Sprintf("Rescale Interlink v%s\nService: %s\nActive Users: %d\nActive Downloads: %d",
-			trayVersion,
+			version.Version,
 			a.lastStatus.ServiceState,
 			a.lastStatus.ActiveUsers,
 			a.lastStatus.ActiveDownloads,
@@ -183,7 +192,7 @@ func (a *trayApp) updateUI() {
 		a.mResume.Enable()
 		a.mTriggerScan.Enable()
 	} else {
-		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running", trayVersion))
+		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running", version.Version))
 		a.mStatus.SetTitle("Status: Running")
 		a.mPause.Enable()
 		a.mResume.Enable()
@@ -195,6 +204,12 @@ func (a *trayApp) updateUI() {
 func (a *trayApp) handleMenuClicks() {
 	for {
 		select {
+		case <-a.mStartService.ClickedCh:
+			a.startService()
+
+		case <-a.mConfigure.ClickedCh:
+			a.openGUI() // v4.2.0: Configure opens GUI (same action, just more discoverable)
+
 		case <-a.mOpenGUI.ClickedCh:
 			a.openGUI()
 
@@ -218,6 +233,91 @@ func (a *trayApp) handleMenuClicks() {
 			return
 		}
 	}
+}
+
+// startService starts the auto-download daemon if not already running.
+// v4.1.1: Added to allow users to start the daemon from the tray without
+// opening the GUI or using the command line.
+// v4.2.0: Reads settings from daemon.conf.
+func (a *trayApp) startService() {
+	// Find rescale-int.exe in the same directory as the tray app
+	exePath, err := os.Executable()
+	if err != nil {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Failed to find executable path: %v", err)
+		a.mu.Unlock()
+		return
+	}
+
+	dir := filepath.Dir(exePath)
+	cliPath := filepath.Join(dir, "rescale-int.exe")
+
+	// Check if CLI exists
+	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
+		a.mu.Lock()
+		a.lastError = "CLI not found: rescale-int.exe"
+		a.mu.Unlock()
+		return
+	}
+
+	// v4.2.0: Load settings from daemon.conf
+	daemonCfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		// Log but continue with defaults
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Warning: failed to load daemon.conf: %v", err)
+		a.mu.Unlock()
+		daemonCfg = config.NewDaemonConfig()
+	}
+
+	downloadDir := daemonCfg.Daemon.DownloadFolder
+	if downloadDir == "" {
+		downloadDir = config.DefaultDownloadFolder()
+	}
+	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
+
+	// Build command arguments
+	args := []string{"daemon", "run", "--ipc",
+		"--download-dir", downloadDir,
+		"--poll-interval", pollInterval,
+	}
+
+	// Add filter flags if configured
+	if daemonCfg.Filters.NamePrefix != "" {
+		args = append(args, "--name-prefix", daemonCfg.Filters.NamePrefix)
+	}
+	if daemonCfg.Filters.NameContains != "" {
+		args = append(args, "--name-contains", daemonCfg.Filters.NameContains)
+	}
+	for _, ex := range daemonCfg.GetExcludePatterns() {
+		args = append(args, "--exclude", ex)
+	}
+	if daemonCfg.Daemon.MaxConcurrent > 0 {
+		args = append(args, "--max-concurrent", fmt.Sprintf("%d", daemonCfg.Daemon.MaxConcurrent))
+	}
+
+	// Start daemon with IPC enabled
+	// Note: On Windows, --background is not supported, but the daemon will
+	// run detached because we use cmd.Start() without waiting
+	cmd := exec.Command(cliPath, args...)
+
+	// Detach from tray process
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Failed to start service: %v", err)
+		a.mu.Unlock()
+		return
+	}
+
+	// Wait for IPC to come up, then refresh status
+	go func() {
+		time.Sleep(2 * time.Second)
+		a.refreshStatus()
+	}()
 }
 
 // openGUI launches the main Rescale Interlink GUI.

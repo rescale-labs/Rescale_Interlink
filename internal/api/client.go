@@ -1439,3 +1439,149 @@ func (c *Client) GetJobCustomFieldValue(ctx context.Context, jobID, fieldName st
 
 	return "", nil // Field not found
 }
+
+// WorkspaceCustomFieldsResponse represents the API response for workspace custom fields.
+// Endpoint: GET /api/v2/organizations/{company_code}/workspaces/{workspace_id}/custom-fields/
+// v4.2.1: Added for auto-download setup validation
+type WorkspaceCustomFieldsResponse struct {
+	// Fields is a map of jobType -> section -> list of fields
+	// Example: {"compute": {"Context": [{name: "Auto Download", ...}]}, "workstation": {}}
+	Fields    map[string]map[string][]WorkspaceCustomField `json:"fields"`
+	IsEnabled bool                                          `json:"isEnabled"`
+}
+
+// WorkspaceCustomField represents a custom field definition in a workspace.
+// v4.2.1: Used for validating auto-download setup
+type WorkspaceCustomField struct {
+	Name                 string   `json:"name"`
+	ValueType            string   `json:"valueType"`            // "text", "select", "number", "date", "file", "user"
+	EnumOptions          []string `json:"enumOptions"`          // For select fields
+	Placeholder          string   `json:"placeholder"`
+	HelpText             string   `json:"helpText"`
+	IsMultiple           bool     `json:"isMultiple"`
+	IsRequired           bool     `json:"isRequired"`
+	AllowOther           bool     `json:"allowOther"`
+	Section              string   `json:"section"`              // "Context", "Inputs", "Findings"
+	OriginatingWorkspace string   `json:"originatingWorkspace"`
+}
+
+// AutoDownloadValidation contains the results of validating auto-download setup.
+// v4.2.1: Used by GUI and CLI to check workspace configuration
+type AutoDownloadValidation struct {
+	CustomFieldsEnabled      bool     `json:"customFieldsEnabled"`      // Is custom field collection active?
+	HasAutoDownloadField     bool     `json:"hasAutoDownloadField"`     // Is "Auto Download" field defined?
+	AutoDownloadFieldType    string   `json:"autoDownloadFieldType"`    // "select", "text", etc.
+	AutoDownloadFieldSection string   `json:"autoDownloadFieldSection"` // Which section it's in
+	AvailableValues          []string `json:"availableValues"`          // If select field, what are the options?
+	HasAutoDownloadPathField bool     `json:"hasAutoDownloadPathField"` // Is "Auto Download Path" field defined? (optional)
+	Warnings                 []string `json:"warnings"`
+	Errors                   []string `json:"errors"`
+}
+
+// GetWorkspaceCustomFields retrieves the list of custom fields defined for jobs in the workspace.
+// This requires the user's company code and workspace ID, which are obtained from GetUserProfile().
+// Endpoint: GET /api/v2/organizations/{company_code}/workspaces/{workspace_id}/custom-fields/
+// v4.2.1: Added for auto-download setup validation
+func (c *Client) GetWorkspaceCustomFields(ctx context.Context) (*WorkspaceCustomFieldsResponse, error) {
+	// First, get user profile to extract company code and workspace ID
+	profile, err := c.GetUserProfile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user profile: %w", err)
+	}
+
+	if profile.Company.Code == "" {
+		return nil, fmt.Errorf("user profile does not contain company code")
+	}
+	if profile.Workspace.ID == "" {
+		return nil, fmt.Errorf("user profile does not contain workspace ID")
+	}
+
+	// Build the API path
+	path := fmt.Sprintf("/api/v2/organizations/%s/workspaces/%s/custom-fields/",
+		profile.Company.Code, profile.Workspace.ID)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("get workspace custom fields failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var result WorkspaceCustomFieldsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode workspace custom fields: %w", err)
+	}
+
+	return &result, nil
+}
+
+// ValidateAutoDownloadSetup checks if the workspace has the required custom fields for auto-download.
+// Returns validation results including whether the "Auto Download" field exists and its configuration.
+// v4.2.1: Added for GUI/CLI auto-download setup validation
+func (c *Client) ValidateAutoDownloadSetup(ctx context.Context) (*AutoDownloadValidation, error) {
+	result := &AutoDownloadValidation{
+		Warnings: []string{},
+		Errors:   []string{},
+	}
+
+	// Get workspace custom fields
+	fields, err := c.GetWorkspaceCustomFields(ctx)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to retrieve workspace custom fields: %v", err))
+		return result, nil // Return result with error, don't fail the call
+	}
+
+	result.CustomFieldsEnabled = fields.IsEnabled
+
+	if !fields.IsEnabled {
+		result.Warnings = append(result.Warnings, "Custom fields are not enabled for this workspace")
+		return result, nil
+	}
+
+	// Search for "Auto Download" field in all job types and sections
+	autoDownloadFieldName := "Auto Download"
+	autoDownloadPathFieldName := "Auto Download Path"
+
+	for jobType, sections := range fields.Fields {
+		for section, fieldList := range sections {
+			for _, field := range fieldList {
+				if field.Name == autoDownloadFieldName {
+					result.HasAutoDownloadField = true
+					result.AutoDownloadFieldType = field.ValueType
+					result.AutoDownloadFieldSection = section
+					result.AvailableValues = field.EnumOptions
+
+					// Log which job type has the field
+					if jobType != "compute" {
+						result.Warnings = append(result.Warnings,
+							fmt.Sprintf("'%s' field found in '%s' job type (expected 'compute')",
+								autoDownloadFieldName, jobType))
+					}
+				}
+
+				if field.Name == autoDownloadPathFieldName {
+					result.HasAutoDownloadPathField = true
+				}
+			}
+		}
+	}
+
+	// Build validation messages
+	if !result.HasAutoDownloadField {
+		result.Errors = append(result.Errors,
+			fmt.Sprintf("Required custom field '%s' not found in workspace. Please create it in Workspace Settings > Custom Fields.",
+				autoDownloadFieldName))
+	} else {
+		// Field exists - check if it's a sensible configuration
+		if result.AutoDownloadFieldType == "select" && len(result.AvailableValues) == 0 {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("'%s' field is a select field but has no options defined", autoDownloadFieldName))
+		}
+	}
+
+	return result, nil
+}

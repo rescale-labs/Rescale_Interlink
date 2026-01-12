@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/service"
 )
@@ -226,5 +227,206 @@ func (a *App) ResumeDaemon() error {
 	}
 
 	a.logInfo("Daemon", "Daemon resumed")
+	return nil
+}
+
+// DaemonConfigDTO represents the daemon configuration for the frontend.
+// v4.2.0: Used for reading/writing daemon.conf from the GUI.
+type DaemonConfigDTO struct {
+	// Daemon core settings
+	Enabled             bool   `json:"enabled"`
+	DownloadFolder      string `json:"downloadFolder"`
+	PollIntervalMinutes int    `json:"pollIntervalMinutes"`
+	UseJobNameDir       bool   `json:"useJobNameDir"`
+	MaxConcurrent       int    `json:"maxConcurrent"`
+	LookbackDays        int    `json:"lookbackDays"`
+
+	// Filter settings
+	NamePrefix   string `json:"namePrefix"`
+	NameContains string `json:"nameContains"`
+	Exclude      string `json:"exclude"` // Comma-separated
+
+	// Eligibility
+	CorrectnessTag    string `json:"correctnessTag"`
+	AutoDownloadValue string `json:"autoDownloadValue"` // v4.2.1: Configurable (default: "Enable")
+	DownloadedTag     string `json:"downloadedTag"`     // v4.2.1: Configurable (default: "autoDownloaded:true")
+
+	// Notifications
+	NotificationsEnabled bool `json:"notificationsEnabled"`
+	ShowDownloadComplete bool `json:"showDownloadComplete"`
+	ShowDownloadFailed   bool `json:"showDownloadFailed"`
+
+	// Config file path (read-only)
+	ConfigPath string `json:"configPath"`
+}
+
+// GetDaemonConfig returns the current daemon configuration.
+// v4.2.0: Reads from daemon.conf instead of apiconfig.
+func (a *App) GetDaemonConfig() DaemonConfigDTO {
+	result := DaemonConfigDTO{}
+
+	// Get config file path
+	path, _ := config.DefaultDaemonConfigPath()
+	result.ConfigPath = path
+
+	// Load config
+	cfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf: %v", err))
+		cfg = config.NewDaemonConfig()
+	}
+
+	// Map to DTO
+	result.Enabled = cfg.Daemon.Enabled
+	result.DownloadFolder = cfg.Daemon.DownloadFolder
+	result.PollIntervalMinutes = cfg.Daemon.PollIntervalMinutes
+	result.UseJobNameDir = cfg.Daemon.UseJobNameDir
+	result.MaxConcurrent = cfg.Daemon.MaxConcurrent
+	result.LookbackDays = cfg.Daemon.LookbackDays
+
+	result.NamePrefix = cfg.Filters.NamePrefix
+	result.NameContains = cfg.Filters.NameContains
+	result.Exclude = cfg.Filters.Exclude
+
+	result.CorrectnessTag = cfg.Eligibility.CorrectnessTag
+	result.AutoDownloadValue = cfg.Eligibility.AutoDownloadValue
+	result.DownloadedTag = cfg.Eligibility.DownloadedTag
+
+	result.NotificationsEnabled = cfg.Notifications.Enabled
+	result.ShowDownloadComplete = cfg.Notifications.ShowDownloadComplete
+	result.ShowDownloadFailed = cfg.Notifications.ShowDownloadFailed
+
+	return result
+}
+
+// SaveDaemonConfig saves daemon configuration to daemon.conf.
+// v4.2.0: Writes to daemon.conf.
+func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
+	// Load existing config to preserve any fields not in DTO
+	cfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		cfg = config.NewDaemonConfig()
+	}
+
+	// Map DTO to config
+	cfg.Daemon.Enabled = dto.Enabled
+	cfg.Daemon.DownloadFolder = dto.DownloadFolder
+	cfg.Daemon.PollIntervalMinutes = dto.PollIntervalMinutes
+	cfg.Daemon.UseJobNameDir = dto.UseJobNameDir
+	cfg.Daemon.MaxConcurrent = dto.MaxConcurrent
+	cfg.Daemon.LookbackDays = dto.LookbackDays
+
+	cfg.Filters.NamePrefix = dto.NamePrefix
+	cfg.Filters.NameContains = dto.NameContains
+	cfg.Filters.Exclude = dto.Exclude
+
+	cfg.Eligibility.CorrectnessTag = dto.CorrectnessTag
+	cfg.Eligibility.AutoDownloadValue = dto.AutoDownloadValue
+	cfg.Eligibility.DownloadedTag = dto.DownloadedTag
+
+	cfg.Notifications.Enabled = dto.NotificationsEnabled
+	cfg.Notifications.ShowDownloadComplete = dto.ShowDownloadComplete
+	cfg.Notifications.ShowDownloadFailed = dto.ShowDownloadFailed
+
+	// Validate before saving
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Save
+	if err := config.SaveDaemonConfig(cfg, ""); err != nil {
+		return fmt.Errorf("failed to save daemon.conf: %w", err)
+	}
+
+	a.logInfo("Daemon", "Configuration saved to daemon.conf")
+	return nil
+}
+
+// GetDefaultDownloadFolder returns the platform-specific default download folder.
+func (a *App) GetDefaultDownloadFolder() string {
+	return config.DefaultDownloadFolder()
+}
+
+// AutoDownloadValidationDTO represents the result of validating auto-download setup.
+// v4.2.1: Added for workspace custom fields validation
+type AutoDownloadValidationDTO struct {
+	CustomFieldsEnabled      bool     `json:"customFieldsEnabled"`
+	HasAutoDownloadField     bool     `json:"hasAutoDownloadField"`
+	AutoDownloadFieldType    string   `json:"autoDownloadFieldType"`
+	AutoDownloadFieldSection string   `json:"autoDownloadFieldSection"`
+	AvailableValues          []string `json:"availableValues"`
+	HasAutoDownloadPathField bool     `json:"hasAutoDownloadPathField"`
+	Warnings                 []string `json:"warnings"`
+	Errors                   []string `json:"errors"`
+}
+
+// ValidateAutoDownloadSetup checks if the workspace has the required custom fields.
+// v4.2.1: Added for GUI auto-download setup validation
+func (a *App) ValidateAutoDownloadSetup() AutoDownloadValidationDTO {
+	result := AutoDownloadValidationDTO{
+		AvailableValues: []string{},
+		Warnings:        []string{},
+		Errors:          []string{},
+	}
+
+	// Check if we have an engine with API client
+	if a.engine == nil {
+		result.Errors = append(result.Errors, "Engine not initialized")
+		return result
+	}
+
+	apiClient := a.engine.API()
+	if apiClient == nil {
+		result.Errors = append(result.Errors, "API client not available - check API key configuration")
+		return result
+	}
+
+	// Run validation
+	ctx := context.Background()
+	validation, err := apiClient.ValidateAutoDownloadSetup(ctx)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Validation failed: %v", err))
+		return result
+	}
+
+	// Map to DTO
+	result.CustomFieldsEnabled = validation.CustomFieldsEnabled
+	result.HasAutoDownloadField = validation.HasAutoDownloadField
+	result.AutoDownloadFieldType = validation.AutoDownloadFieldType
+	result.AutoDownloadFieldSection = validation.AutoDownloadFieldSection
+	result.HasAutoDownloadPathField = validation.HasAutoDownloadPathField
+
+	if validation.AvailableValues != nil {
+		result.AvailableValues = validation.AvailableValues
+	}
+	if validation.Warnings != nil {
+		result.Warnings = validation.Warnings
+	}
+	if validation.Errors != nil {
+		result.Errors = validation.Errors
+	}
+
+	return result
+}
+
+// IsServiceInstalled returns whether the Windows Service is installed.
+func (a *App) IsServiceInstalled() bool {
+	return service.IsInstalled()
+}
+
+// InstallService attempts to install the Windows Service.
+// This typically requires Administrator privileges.
+func (a *App) InstallService() error {
+	if service.IsInstalled() {
+		return fmt.Errorf("service is already installed")
+	}
+
+	a.logInfo("Daemon", "Installing Windows Service...")
+
+	if err := service.Install(); err != nil {
+		return fmt.Errorf("failed to install service (Administrator privileges required): %w", err)
+	}
+
+	a.logInfo("Daemon", "Windows Service installed successfully")
 	return nil
 }

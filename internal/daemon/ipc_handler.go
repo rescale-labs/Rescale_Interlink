@@ -53,7 +53,7 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 
 	return &ipc.StatusData{
 		ServiceState:    state,
-		Version:         "4.1.0", // Updated for v4.1.0
+		Version:         "4.2.0", // Updated for v4.2.0
 		LastScanTime:    lastPollPtr,
 		ActiveDownloads: h.daemon.GetActiveDownloads(),
 		ActiveUsers:     1, // Single-user mode on Unix
