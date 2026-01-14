@@ -46,7 +46,7 @@ Thumbs.db
 # Build artifacts (binaries distributed via GitHub Releases)
 bin/
 dist/
-build/
+_build/
 
 # Node.js dependencies (install with npm install)
 node_modules/
