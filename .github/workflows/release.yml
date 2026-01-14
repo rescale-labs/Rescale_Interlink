@@ -22,20 +22,19 @@ jobs:
         shell: pwsh
 
       - name: Sign executable using Azure Trusted Signing
-        if: false
         uses: Azure/trusted-signing-action@v0.3.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
-          files-folder: ${{ github.workspace }}\_build\package
+          files-folder: ${{ github.workspace }}\_build\bin
           files-folder-filter: exe
           files-folder-recurse: false
           files-folder-depth: 1
 
       - name: Zip portable release
-        run: Compress-Archive -Path ${{ github.workspace }}\_build\package\* -DestinationPath rescale-interlink-${{ github.ref_name }}-win_amd64.zip
+        run: Compress-Archive -Path ${{ github.workspace }}\_build\bin\* -DestinationPath rescale-interlink-${{ github.ref_name }}-win_amd64.zip
         shell: pwsh
 
       - name: Create installer
