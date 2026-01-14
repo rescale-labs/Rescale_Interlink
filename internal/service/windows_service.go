@@ -225,6 +225,23 @@ func IsWindowsService() (bool, error) {
 	return svc.IsWindowsService()
 }
 
+// IsInstalled returns true if the service is installed in the Service Control Manager.
+// v4.3.6: Added for GUI to check service installation status.
+func IsInstalled() bool {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(ServiceName)
+	if err != nil {
+		return false
+	}
+	s.Close()
+	return true
+}
+
 // Install installs the service with the Service Control Manager.
 func Install(execPath string, configPath string) error {
 	// Open service manager
