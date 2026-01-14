@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.2.0                 |
+|                 Rescale Interlink v4.3.6                 |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |

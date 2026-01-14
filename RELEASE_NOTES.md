@@ -1,5 +1,50 @@
 # Release Notes - Rescale Interlink
 
+## v4.3.6 - January 14, 2026
+
+### Daemon Logging Improvements
+
+This release significantly improves the auto-download daemon's logging behavior, reducing log noise and API call overhead.
+
+#### Problem Solved
+
+- Jobs with "Auto Download = not set" were flooding logs with ~300 useless SKIP entries per scan
+- Scans were taking 10+ minutes due to excessive API calls (2+ per job at 1.6 req/sec rate limit)
+
+#### New Behavior
+
+- **Silent filtering**: Jobs with "Auto Download = not set" or "disabled" are now filtered silently - no log entry
+- **Check field FIRST**: The "Auto Download" custom field is checked BEFORE the downloaded tag, saving API calls for ~95% of jobs
+- **Improved summary**: Scan completion now shows `filtered` count separately from `skipped` count:
+  ```
+  === SCAN COMPLETE === Scanned 304, filtered 298, downloaded 1, skipped 2 (took 3m35s)
+  ```
+- **Cleaner logs**: Only real candidates (Enabled/Conditional jobs) appear in logs:
+  - `DOWNLOAD: Job Name [id] - Auto Download is Enabled`
+  - `SKIP: Job Name [id] - already has 'autoDownloaded:true' tag`
+  - `SKIP: Job Name [id] - Auto Download is Conditional but missing tag 'xyz'`
+
+#### API Call Optimization
+
+- Before: 304 jobs × 2 API calls = 608 calls (~6.3 minutes at 1.6 req/sec)
+- After: 304 jobs × 1 API call + ~10 additional tag checks = ~314 calls (~3.3 minutes)
+- **~50% reduction in API calls**
+
+#### Technical Changes
+
+- Added `CheckEligibilityResult` struct with `ShouldLog` flag
+- Refactored `CheckEligibility()` in `internal/daemon/monitor.go`
+- Updated `poll()` in `internal/daemon/daemon.go` to track `filteredCount`
+
+#### Files Modified
+
+- `internal/daemon/monitor.go` - New CheckEligibilityResult, check field first
+- `internal/daemon/daemon.go` - Silent filtering, filteredCount tracking
+- `internal/daemon/monitor_test.go` - Updated tests for new return type
+- Version updates in main.go, internal/version/version.go
+
+---
+
 ## v4.2.1 - January 9, 2026
 
 ### Enhanced Eligibility Configuration
