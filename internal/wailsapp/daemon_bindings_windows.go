@@ -488,7 +488,14 @@ func (a *App) InstallService() error {
 
 	a.logInfo("Daemon", "Installing Windows Service...")
 
-	if err := service.Install(); err != nil {
+	// Get executable path and config path
+	execPath, err := service.GetExecutablePath()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Config path is optional - empty string means use defaults
+	if err := service.Install(execPath, ""); err != nil {
 		return fmt.Errorf("failed to install service (Administrator privileges required): %w", err)
 	}
 
