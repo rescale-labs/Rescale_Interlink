@@ -1,0 +1,80 @@
+name: Release Rescale Interlink
+run-name: ${{ github.actor }} is releasing Rescale Interlink
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write # Required for OIDC
+  contents: read
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run build script
+        run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}"
+        shell: pwsh
+
+      - name: Sign executable using Azure Trusted Signing
+        if: false
+        uses: Azure/trusted-signing-action@v0.3.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\_build\package
+          files-folder-filter: exe
+          files-folder-recurse: false
+          files-folder-depth: 1
+
+      - name: Zip portable release
+        run: Compress-Archive -Path ${{ github.workspace }}\_build\package\* -DestinationPath rescale-interlink-${{ github.ref_name }}-win_amd64.zip
+        shell: pwsh
+
+      - name: Create installer
+        run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}" -MsiName "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
+        shell: pwsh
+
+      - name: Upload Portable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescale-interlink-${{ github.ref_name }}-win_amd64.zip
+          path: rescale-interlink-${{ github.ref_name }}-win_amd64.zip
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescale-interlink-${{ github.ref_name }}-win_amd64.msi
+          path: rescale-interlink-${{ github.ref_name }}-win_amd64.msi
+
+  release:
+    name: Create Release
+    needs: windows-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: rescale-interlink-${{ github.ref_name }}-* # Downloads only artifacts for this version
+          merge-multiple: true # Flattens the folder structure for easier uploading
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # This will automatically pick up all files in the directory
+          files: ./artifacts/*
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
