@@ -8,17 +8,16 @@ import {
   FolderOpenIcon,
   EyeIcon,
   EyeSlashIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { ClipboardGetText, EventsOn, EventsOff } from '../../../wailsjs/runtime/runtime';
 import {
-  GetAutoDownloadConfig,
-  SaveAutoDownloadConfig,
-  GetAutoDownloadStatus,
-  TestAutoDownloadConnection,
   SelectDirectory,
   SaveConfigAs,
   GetDefaultConfigPath,
+  GetDefaultDownloadFolder,
   SaveFile,
   GetDaemonStatus,
   StartDaemon,
@@ -29,6 +28,9 @@ import {
   GetDaemonConfig,
   SaveDaemonConfig,
   ValidateAutoDownloadSetup,
+  TestAutoDownloadConnection,
+  GetFileLoggingSettings,
+  SetFileLoggingEnabled,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 
@@ -37,6 +39,16 @@ type TokenSource = 'environment' | 'file' | 'direct';
 
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
 const COMPRESSION_OPTIONS = ['gzip', 'none'] as const;
+
+// v4.3.0: Platform URL options for dropdown
+const PLATFORM_URLS = [
+  { value: 'https://platform.rescale.com', label: 'North America (platform.rescale.com)' },
+  { value: 'https://kr.rescale.com', label: 'Korea (kr.rescale.com)' },
+  { value: 'https://platform.rescale.jp', label: 'Japan (platform.rescale.jp)' },
+  { value: 'https://eu.rescale.com', label: 'Europe (eu.rescale.com)' },
+  { value: 'https://itar.rescale.com', label: 'US ITAR (itar.rescale.com)' },
+  { value: 'https://itar.rescale-gov.com', label: 'US ITAR FRM (itar.rescale-gov.com)' },
+] as const;
 
 export function SetupTab() {
   const {
@@ -61,17 +73,10 @@ export function SetupTab() {
   const [statusMessage, setStatusMessage] = useState('Ready');
   const [showApiKey, setShowApiKey] = useState(false); // v4.0.1: API key visibility toggle
   const [defaultConfigPath, setDefaultConfigPath] = useState<string>(''); // v4.0.8: Show config location
+  const [advancedExpanded, setAdvancedExpanded] = useState(false); // v4.3.0: Collapsible advanced settings
 
-  // Auto-download state
-  // v4.0.8: API key removed - uses unified source from Setup tab config
-  const [autoDownloadConfig, setAutoDownloadConfig] = useState<wailsapp.AutoDownloadConfigDTO>({
-    enabled: false,
-    correctnessTag: 'isCorrect:true',
-    defaultDownloadFolder: '',
-    scanIntervalMinutes: 10,
-    lookbackDays: 7,
-  });
-  const [autoDownloadStatus, setAutoDownloadStatus] = useState<wailsapp.AutoDownloadStatusDTO | null>(null);
+  // v4.3.1: Auto-download state unified with daemon config
+  // Old autoDownloadConfig removed - now use daemonConfig for all settings
   const [autoDownloadTestStatus, setAutoDownloadTestStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
   const [autoDownloadTestResult, setAutoDownloadTestResult] = useState<{
     success: boolean;
@@ -80,7 +85,6 @@ export function SetupTab() {
     folderError?: string;
     error?: string;
   } | null>(null);
-  const [isAutoDownloadSaving, setIsAutoDownloadSaving] = useState(false);
 
   // Daemon control state (v4.1.0)
   const [daemonStatus, setDaemonStatus] = useState<wailsapp.DaemonStatusDTO | null>(null);
@@ -88,11 +92,14 @@ export function SetupTab() {
 
   // Daemon config state (v4.2.0)
   const [daemonConfig, setDaemonConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
-  const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
 
   // Workspace validation state (v4.2.1)
   const [workspaceValidation, setWorkspaceValidation] = useState<wailsapp.AutoDownloadValidationDTO | null>(null);
   const [isValidating, setIsValidating] = useState(false);
+
+  // v4.3.2: File logging state
+  const [fileLoggingEnabled, setFileLoggingEnabled] = useState(false);
+  const [logFilePath, setLogFilePath] = useState('');
 
   // Setup event listeners and fetch initial data
   useEffect(() => {
@@ -104,21 +111,8 @@ export function SetupTab() {
     return cleanup;
   }, []);
 
-  // Fetch auto-download config and status on mount
+  // v4.3.1: Listen for test connection result
   useEffect(() => {
-    const fetchAutoDownload = async () => {
-      try {
-        const cfg = await GetAutoDownloadConfig();
-        setAutoDownloadConfig(cfg);
-        const status = await GetAutoDownloadStatus();
-        setAutoDownloadStatus(status);
-      } catch (err) {
-        console.error('Failed to fetch auto-download config:', err);
-      }
-    };
-    fetchAutoDownload();
-
-    // Listen for test connection result
     const handleTestResult = (result: {
       success: boolean;
       email?: string;
@@ -157,16 +151,38 @@ export function SetupTab() {
   }, []);
 
   // Fetch daemon config on mount (v4.2.0)
+  // v4.3.1: Pre-populate default download folder if empty
   useEffect(() => {
     const fetchDaemonConfig = async () => {
       try {
         const cfg = await GetDaemonConfig();
+        // Pre-populate default download folder if empty
+        if (!cfg.downloadFolder) {
+          const defaultFolder = await GetDefaultDownloadFolder();
+          if (defaultFolder) {
+            cfg.downloadFolder = defaultFolder;
+          }
+        }
         setDaemonConfig(cfg);
       } catch (err) {
         console.error('Failed to fetch daemon config:', err);
       }
     };
     fetchDaemonConfig();
+  }, []);
+
+  // v4.3.2: Fetch file logging settings on mount
+  useEffect(() => {
+    const fetchFileLoggingSettings = async () => {
+      try {
+        const settings = await GetFileLoggingSettings();
+        setFileLoggingEnabled(settings.enabled);
+        setLogFilePath(settings.filePath);
+      } catch (err) {
+        console.error('Failed to fetch file logging settings:', err);
+      }
+    };
+    fetchFileLoggingSettings();
   }, []);
 
   // Initialize local state from config
@@ -218,13 +234,28 @@ export function SetupTab() {
     await testConnection();
   };
 
-  const handleSaveConfig = async () => {
+  // v4.3.0: Unified save handler - saves all config sections at once
+  const [isUnifiedSaving, setIsUnifiedSaving] = useState(false);
+
+  // v4.3.1: Unified save handler - saves main config and daemon config
+  const handleSaveAllSettings = async () => {
     try {
-      setStatusMessage('Saving configuration...');
+      setIsUnifiedSaving(true);
+      setStatusMessage('Saving all settings...');
+
+      // Save main config
       await saveConfig();
-      setStatusMessage(`Configuration saved to ${defaultConfigPath}`);
+
+      // Save daemon config (includes all auto-download settings)
+      if (daemonConfig) {
+        await SaveDaemonConfig(daemonConfig);
+      }
+
+      setStatusMessage(`All settings saved${defaultConfigPath ? ` to ${defaultConfigPath}` : ''}`);
     } catch (err) {
-      setStatusMessage(`Failed to save: ${err}`);
+      setStatusMessage(`Failed to save settings: ${err}`);
+    } finally {
+      setIsUnifiedSaving(false);
     }
   };
 
@@ -241,41 +272,23 @@ export function SetupTab() {
     }
   };
 
-  // Auto-download handlers
-  const handleAutoDownloadConfigChange = (field: keyof wailsapp.AutoDownloadConfigDTO, value: string | number | boolean) => {
-    setAutoDownloadConfig(prev => ({ ...prev, [field]: value }));
-  };
-
+  // v4.3.1: Select download folder handler (uses daemon config)
   const handleSelectDownloadFolder = async () => {
     try {
       const path = await SelectDirectory('Select Download Folder');
-      if (path) {
-        handleAutoDownloadConfigChange('defaultDownloadFolder', path);
+      if (path && daemonConfig) {
+        setDaemonConfig({ ...daemonConfig, downloadFolder: path });
       }
     } catch (err) {
       console.error('Failed to select folder:', err);
     }
   };
 
-  const handleSaveAutoDownloadConfig = async () => {
-    try {
-      setIsAutoDownloadSaving(true);
-      setStatusMessage('Saving auto-download settings...');
-      await SaveAutoDownloadConfig(autoDownloadConfig);
-      const status = await GetAutoDownloadStatus();
-      setAutoDownloadStatus(status);
-      setStatusMessage('Auto-download settings saved successfully');
-    } catch (err) {
-      setStatusMessage(`Failed to save auto-download settings: ${err}`);
-    } finally {
-      setIsAutoDownloadSaving(false);
-    }
-  };
-
+  // v4.3.1: Test connection handler (now takes folder from daemon config)
   const handleTestAutoDownloadConnection = async () => {
     setAutoDownloadTestStatus('testing');
     setAutoDownloadTestResult(null);
-    await TestAutoDownloadConnection(autoDownloadConfig);
+    await TestAutoDownloadConnection(daemonConfig?.downloadFolder || '');
   };
 
   // Daemon control handlers (v4.1.0)
@@ -288,9 +301,17 @@ export function SetupTab() {
     }
   };
 
+  // v4.3.2: Auto-save daemon config before starting to prevent stale settings
   const handleStartDaemon = async () => {
     try {
       setIsDaemonLoading(true);
+
+      // Auto-save current settings before starting daemon
+      if (daemonConfig) {
+        setStatusMessage('Saving settings...');
+        await SaveDaemonConfig(daemonConfig);
+      }
+
       setStatusMessage('Starting daemon...');
       await StartDaemon();
       setStatusMessage('Daemon started successfully');
@@ -352,26 +373,8 @@ export function SetupTab() {
     }
   };
 
-  // Daemon config handlers (v4.2.0)
-  const handleDaemonConfigChange = (field: keyof wailsapp.DaemonConfigDTO, value: string | number | boolean) => {
-    if (daemonConfig) {
-      setDaemonConfig({ ...daemonConfig, [field]: value });
-    }
-  };
-
-  const handleSaveDaemonConfig = async () => {
-    if (!daemonConfig) return;
-    try {
-      setIsDaemonConfigSaving(true);
-      setStatusMessage('Saving daemon configuration...');
-      await SaveDaemonConfig(daemonConfig);
-      setStatusMessage('Daemon configuration saved successfully');
-    } catch (err) {
-      setStatusMessage(`Failed to save daemon config: ${err}`);
-    } finally {
-      setIsDaemonConfigSaving(false);
-    }
-  };
+  // v4.3.1: Daemon config changes now inline with setDaemonConfig
+  // handleDaemonConfigChange removed as unused after UI refactor
 
   // Workspace validation handler (v4.2.1)
   const handleValidateWorkspace = async () => {
@@ -391,6 +394,23 @@ export function SetupTab() {
       setStatusMessage(`Validation failed: ${err}`);
     } finally {
       setIsValidating(false);
+    }
+  };
+
+  // v4.3.2: Toggle file logging
+  const handleToggleFileLogging = async (enabled: boolean) => {
+    try {
+      await SetFileLoggingEnabled(enabled);
+      setFileLoggingEnabled(enabled);
+      if (enabled) {
+        const settings = await GetFileLoggingSettings();
+        setLogFilePath(settings.filePath);
+        setStatusMessage(`File logging enabled: ${settings.filePath}`);
+      } else {
+        setStatusMessage('File logging disabled');
+      }
+    } catch (err) {
+      setStatusMessage(`Failed to toggle file logging: ${err}`);
     }
   };
 
@@ -440,16 +460,16 @@ export function SetupTab() {
   const basicAuthEnabled = config?.proxyMode === 'basic';
 
   return (
-    <div className="tab-panel">
-      {/* Action Buttons - pinned at top */}
-      <div className="flex items-center gap-2 mb-4 pb-4 border-b border-gray-200">
+    <div className="tab-panel flex flex-col h-full">
+      {/* v4.3.0: Unified Action Bar - sticky at top */}
+      <div className="sticky top-0 z-10 bg-white flex items-center gap-2 mb-4 pb-4 border-b border-gray-200">
         <button
-          onClick={handleSaveConfig}
-          disabled={isSaving}
+          onClick={handleSaveAllSettings}
+          disabled={isUnifiedSaving || isSaving}
           className="btn-primary"
-          title={`Save to ${defaultConfigPath}`}
+          title="Save all settings (API, Auto-Download, Daemon)"
         >
-          {isSaving ? 'Saving...' : 'Save Default Config'}
+          {isUnifiedSaving ? 'Saving...' : 'Save All Settings'}
         </button>
         <button
           onClick={handleExportConfig}
@@ -467,16 +487,18 @@ export function SetupTab() {
         <div className="card">
           <h3 className="text-base font-semibold text-gray-900 mb-4">API Configuration</h3>
           <div className="space-y-4">
-            {/* Platform URL */}
+            {/* Platform URL - v4.3.0: Changed to dropdown */}
             <div>
-              <label className="label">Platform URL</label>
-              <input
-                type="text"
+              <label className="label">Platform Region</label>
+              <select
                 className="input"
-                placeholder="https://platform.rescale.com"
-                value={config?.apiBaseUrl || ''}
+                value={config?.apiBaseUrl || 'https://platform.rescale.com'}
                 onChange={(e) => updateConfig({ apiBaseUrl: e.target.value })}
-              />
+              >
+                {PLATFORM_URLS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
             </div>
 
             {/* Token Source */}
@@ -581,6 +603,23 @@ export function SetupTab() {
             )}
           </div>
         </div>
+
+        {/* v4.3.0: Collapsible Advanced Settings Section */}
+        <div className="border border-gray-200 rounded-lg overflow-hidden">
+          <button
+            onClick={() => setAdvancedExpanded(!advancedExpanded)}
+            className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+          >
+            <span className="text-base font-semibold text-gray-900">Advanced Settings</span>
+            {advancedExpanded ? (
+              <ChevronDownIcon className="w-5 h-5 text-gray-500" />
+            ) : (
+              <ChevronRightIcon className="w-5 h-5 text-gray-500" />
+            )}
+          </button>
+
+          {advancedExpanded && (
+          <div className="p-4 space-y-6">
 
         {/* Run Folders Subpath and Validation Configuration */}
         <div className="card">
@@ -745,6 +784,28 @@ export function SetupTab() {
               When enabled, detailed timing and performance metrics will appear in the Activity tab.
               Useful for diagnosing slow transfers or troubleshooting issues.
             </p>
+
+            {/* v4.3.2: File Logging */}
+            <div className="flex items-center">
+              <input
+                type="checkbox"
+                id="fileLoggingEnabled"
+                checked={fileLoggingEnabled}
+                onChange={(e) => handleToggleFileLogging(e.target.checked)}
+                className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
+              />
+              <label htmlFor="fileLoggingEnabled" className="ml-2 text-sm text-gray-700 cursor-pointer">
+                Save logs to file
+              </label>
+            </div>
+            {fileLoggingEnabled && logFilePath && (
+              <p className="text-xs text-gray-500 ml-6">
+                Logs saved to: {logFilePath}
+              </p>
+            )}
+            <p className="text-xs text-gray-500">
+              When enabled, all activity logs are also saved to a rotating log file for troubleshooting.
+            </p>
           </div>
         </div>
 
@@ -815,17 +876,32 @@ export function SetupTab() {
           </div>
         </div>
 
-        {/* Auto-Download Settings Section (v4.0.0) */}
+        {/* v4.3.1: Unified Auto-Download Section - merged settings, eligibility, and service */}
         <div className="card">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Auto-Download Settings</h3>
+          <h3 className="text-base font-semibold text-gray-900 mb-4">Auto-Download</h3>
           <div className="space-y-4">
+            {/* Info Banner explaining per-job mode - evergreen, no version refs */}
+            <div className="p-3 rounded-md bg-blue-50 text-blue-800 text-sm">
+              <p>
+                Jobs are downloaded based on the <strong>"Auto Download"</strong> custom field in your Rescale workspace:
+              </p>
+              <ul className="mt-2 ml-4 list-disc text-xs space-y-1">
+                <li><strong>Enabled</strong> - Job is always downloaded</li>
+                <li><strong>Conditional</strong> - Job is downloaded only if it has the configured tag</li>
+                <li><strong>Disabled</strong> - Job is never auto-downloaded</li>
+              </ul>
+              <p className="mt-2 text-xs text-blue-600">
+                Required field: "Auto Download" (select type). Optional: "Auto Download Path" (per-job download location).
+              </p>
+            </div>
+
             {/* Enable Auto-Download */}
             <div className="flex items-center">
               <input
                 type="checkbox"
                 id="autoDownloadEnabled"
-                checked={autoDownloadConfig.enabled}
-                onChange={(e) => handleAutoDownloadConfigChange('enabled', e.target.checked)}
+                checked={daemonConfig?.enabled || false}
+                onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, enabled: e.target.checked })}
                 className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
               />
               <label htmlFor="autoDownloadEnabled" className="ml-2 text-sm text-gray-700 cursor-pointer">
@@ -833,46 +909,27 @@ export function SetupTab() {
               </label>
             </div>
 
-            {/* Correctness Tag */}
-            <div>
-              <label className="label">Correctness Tag</label>
-              <input
-                type="text"
-                className="input"
-                placeholder="isCorrect:true"
-                value={autoDownloadConfig.correctnessTag}
-                onChange={(e) => handleAutoDownloadConfigChange('correctnessTag', e.target.value)}
-                disabled={!autoDownloadConfig.enabled}
-              />
-              <p className="mt-1 text-xs text-gray-500">
-                Jobs must have this tag to be eligible for auto-download.
-              </p>
-            </div>
-
             {/* Download Folder */}
             <div>
-              <label className="label">Default Download Folder</label>
+              <label className="label">Download Folder</label>
               <div className="flex gap-2">
                 <input
                   type="text"
                   className="input flex-1"
                   placeholder="/path/to/downloads"
-                  value={autoDownloadConfig.defaultDownloadFolder}
-                  onChange={(e) => handleAutoDownloadConfigChange('defaultDownloadFolder', e.target.value)}
-                  disabled={!autoDownloadConfig.enabled}
+                  value={daemonConfig?.downloadFolder || ''}
+                  onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, downloadFolder: e.target.value })}
+                  disabled={!daemonConfig?.enabled}
                 />
                 <button
                   onClick={handleSelectDownloadFolder}
-                  disabled={!autoDownloadConfig.enabled}
+                  disabled={!daemonConfig?.enabled}
                   className="btn-secondary p-2"
                   title="Browse for folder"
                 >
                   <FolderOpenIcon className="w-5 h-5" />
                 </button>
               </div>
-              <p className="mt-1 text-xs text-gray-500">
-                Base directory for downloaded job outputs. Can be overridden per-job.
-              </p>
             </div>
 
             {/* Scan Interval and Lookback Days */}
@@ -884,11 +941,10 @@ export function SetupTab() {
                   min="1"
                   max="1440"
                   className="input"
-                  value={autoDownloadConfig.scanIntervalMinutes}
-                  onChange={(e) => handleAutoDownloadConfigChange('scanIntervalMinutes', parseInt(e.target.value) || 10)}
-                  disabled={!autoDownloadConfig.enabled}
+                  value={daemonConfig?.pollIntervalMinutes || 5}
+                  onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, pollIntervalMinutes: parseInt(e.target.value) || 5 })}
+                  disabled={!daemonConfig?.enabled}
                 />
-                <p className="mt-1 text-xs text-gray-500">1-1440 minutes</p>
               </div>
               <div>
                 <label className="label">Lookback Days</label>
@@ -897,37 +953,28 @@ export function SetupTab() {
                   min="1"
                   max="365"
                   className="input"
-                  value={autoDownloadConfig.lookbackDays}
-                  onChange={(e) => handleAutoDownloadConfigChange('lookbackDays', parseInt(e.target.value) || 7)}
-                  disabled={!autoDownloadConfig.enabled}
+                  value={daemonConfig?.lookbackDays || 7}
+                  onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, lookbackDays: parseInt(e.target.value) || 7 })}
+                  disabled={!daemonConfig?.enabled}
                 />
-                <p className="mt-1 text-xs text-gray-500">1-365 days</p>
               </div>
             </div>
 
-            {/* Status Display */}
-            {autoDownloadStatus && (
-              <div className={clsx(
-                'p-3 rounded-md text-sm',
-                autoDownloadStatus.isValid && autoDownloadStatus.enabled ? 'bg-green-50 text-green-700' :
-                autoDownloadStatus.isValid && !autoDownloadStatus.enabled ? 'bg-gray-50 text-gray-700' :
-                'bg-yellow-50 text-yellow-700'
-              )}>
-                <div className="flex items-center gap-2">
-                  {autoDownloadStatus.enabled && autoDownloadStatus.isValid ? (
-                    <CheckCircleIcon className="w-5 h-5 text-green-500" />
-                  ) : autoDownloadStatus.enabled && !autoDownloadStatus.isValid ? (
-                    <XCircleIcon className="w-5 h-5 text-yellow-500" />
-                  ) : (
-                    <span className="w-5 h-5 rounded-full bg-gray-300" />
-                  )}
-                  <span>{autoDownloadStatus.validationMsg || 'Status unknown'}</span>
-                </div>
-                {!autoDownloadStatus.configExists && (
-                  <p className="mt-1 text-xs">No saved configuration found. Save settings to create one.</p>
-                )}
-              </div>
-            )}
+            {/* Tag for Conditional Jobs - SINGLE tag field */}
+            <div>
+              <label className="label">Tag for Conditional Jobs</label>
+              <input
+                type="text"
+                className="input"
+                placeholder="autoDownload"
+                value={daemonConfig?.autoDownloadTag || ''}
+                onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, autoDownloadTag: e.target.value })}
+                disabled={!daemonConfig?.enabled}
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                Jobs with "Auto Download" set to "Conditional" must have this tag to be downloaded.
+              </p>
+            </div>
 
             {/* Test Result Display */}
             {autoDownloadTestResult && (
@@ -959,15 +1006,8 @@ export function SetupTab() {
               </div>
             )}
 
-            {/* Action Buttons */}
+            {/* Buttons row */}
             <div className="flex items-center gap-4 pt-2">
-              <button
-                onClick={handleSaveAutoDownloadConfig}
-                disabled={isAutoDownloadSaving}
-                className="btn-primary"
-              >
-                {isAutoDownloadSaving ? 'Saving...' : 'Save Settings'}
-              </button>
               <button
                 onClick={handleTestAutoDownloadConnection}
                 disabled={autoDownloadTestStatus === 'testing'}
@@ -980,26 +1020,6 @@ export function SetupTab() {
                   </span>
                 ) : 'Test Connection'}
               </button>
-            </div>
-
-            <p className="text-xs text-gray-500">
-              Auto-download automatically downloads outputs from completed jobs that have the correctness tag
-              and the "Auto Download" custom field set to "Enable" in Rescale.
-            </p>
-          </div>
-        </div>
-
-        {/* Eligibility Settings Section (v4.2.1) */}
-        <div className="card">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Eligibility Settings</h3>
-          <div className="space-y-4">
-            {/* Info Banner */}
-            <div className="p-3 rounded-md bg-blue-50 text-blue-800 text-sm">
-              <p className="font-medium">Workspace Requirement</p>
-              <p className="mt-1">
-                Auto-download requires a custom field named <strong>"Auto Download"</strong> to be configured
-                in your Rescale workspace. The field name is hardcoded; only the expected value is configurable.
-              </p>
             </div>
 
             {/* Workspace Validation Status */}
@@ -1068,83 +1088,9 @@ export function SetupTab() {
               </span>
             </div>
 
-            {/* Eligibility Config Fields */}
-            {daemonConfig && (
-              <>
-                <div>
-                  <label className="label">Auto Download Value</label>
-                  <input
-                    type="text"
-                    className="input"
-                    placeholder="Enable"
-                    value={daemonConfig.autoDownloadValue || ''}
-                    onChange={(e) => handleDaemonConfigChange('autoDownloadValue', e.target.value)}
-                  />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Jobs must have their "Auto Download" field set to this value to be eligible.
-                    Default: "Enable"
-                  </p>
-                </div>
-
-                <div>
-                  <label className="label">Downloaded Tag</label>
-                  <input
-                    type="text"
-                    className="input"
-                    placeholder="autoDownloaded:true"
-                    value={daemonConfig.downloadedTag || ''}
-                    onChange={(e) => handleDaemonConfigChange('downloadedTag', e.target.value)}
-                  />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Tag added to jobs after successful download to prevent re-downloading.
-                    Default: "autoDownloaded:true"
-                  </p>
-                </div>
-
-                <div>
-                  <label className="label">Correctness Tag</label>
-                  <input
-                    type="text"
-                    className="input"
-                    placeholder="isCorrect:true"
-                    value={daemonConfig.correctnessTag || ''}
-                    onChange={(e) => handleDaemonConfigChange('correctnessTag', e.target.value)}
-                  />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Jobs must have this tag to be eligible for auto-download.
-                    Default: "isCorrect:true"
-                  </p>
-                </div>
-
-                {/* Save Button */}
-                <div className="flex items-center gap-4 pt-2">
-                  <button
-                    onClick={handleSaveDaemonConfig}
-                    disabled={isDaemonConfigSaving}
-                    className="btn-primary"
-                  >
-                    {isDaemonConfigSaving ? 'Saving...' : 'Save Eligibility Settings'}
-                  </button>
-                  {daemonConfig.configPath && (
-                    <span className="text-xs text-gray-500">
-                      Saved to: {daemonConfig.configPath}
-                    </span>
-                  )}
-                </div>
-              </>
-            )}
-
-            <p className="text-xs text-gray-500">
-              These settings are saved to <code>daemon.conf</code> and used by the auto-download service
-              to determine which jobs are eligible for automatic download.
-            </p>
-          </div>
-        </div>
-
-        {/* Auto-Download Service Control (v4.1.0) */}
-        <div className="card">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Auto-Download Service</h3>
-          <div className="space-y-4">
+            {/* Service Control (integrated into unified card) */}
+            <div className="border-t border-gray-200 pt-4 mt-4">
+              <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
             {/* Service Status */}
             <div className={clsx(
               'p-4 rounded-lg',
@@ -1179,9 +1125,9 @@ export function SetupTab() {
                   {!daemonStatus?.running ? (
                     <button
                       onClick={handleStartDaemon}
-                      disabled={isDaemonLoading || !autoDownloadConfig.enabled}
+                      disabled={isDaemonLoading || !daemonConfig?.enabled}
                       className="btn-primary text-sm"
-                      title={!autoDownloadConfig.enabled ? 'Enable auto-download settings first' : 'Start auto-download service'}
+                      title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download service'}
                     >
                       {isDaemonLoading ? 'Starting...' : 'Start Service'}
                     </button>
@@ -1281,8 +1227,13 @@ export function SetupTab() {
               The auto-download service runs in the background and automatically downloads completed jobs
               that match your settings. The service continues running even after closing the GUI.
             </p>
+            </div> {/* End Service Control section */}
           </div>
-        </div>
+        </div> {/* End unified Auto-Download card */}
+
+          </div>
+          )} {/* End advancedExpanded conditional and inner div */}
+        </div> {/* End collapsible container */}
       </div>
     </div>
   );

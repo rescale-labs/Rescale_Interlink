@@ -7,6 +7,7 @@ package ipc
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -209,4 +210,42 @@ func (c *Client) Shutdown(ctx context.Context) error {
 // On Windows, this returns the named pipe path rather than a socket path.
 func GetSocketPath() string {
 	return PipeName
+}
+
+// GetRecentLogs retrieves recent log entries from the daemon.
+// v4.3.2: Used for GUI to display daemon activity.
+func (c *Client) GetRecentLogs(ctx context.Context, count int) ([]LogEntryData, error) {
+	req := NewRequest(MsgGetRecentLogs)
+	// Note: count is not sent in current protocol - server uses default
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("server error: %s", resp.Error)
+	}
+
+	// Extract log entries from response
+	if resp.Data == nil {
+		return []LogEntryData{}, nil
+	}
+
+	// Handle the data extraction
+	switch v := resp.Data.(type) {
+	case *RecentLogsData:
+		return v.Entries, nil
+	case map[string]interface{}:
+		// Re-marshal and unmarshal to convert
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		var logs RecentLogsData
+		if err := json.Unmarshal(data, &logs); err != nil {
+			return nil, err
+		}
+		return logs.Entries, nil
+	}
+	return []LogEntryData{}, nil
 }

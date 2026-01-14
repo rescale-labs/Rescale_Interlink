@@ -26,10 +26,6 @@ export function GetAnalysisCodes(arg1:string):Promise<wailsapp.AnalysisCodesResu
 
 export function GetAppInfo():Promise<wailsapp.AppInfoDTO>;
 
-export function GetAutoDownloadConfig():Promise<wailsapp.AutoDownloadConfigDTO>;
-
-export function GetAutoDownloadStatus():Promise<wailsapp.AutoDownloadStatusDTO>;
-
 export function GetAutomations():Promise<wailsapp.AutomationsResultDTO>;
 
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
@@ -38,11 +34,15 @@ export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
 
 export function GetDaemonConfig():Promise<wailsapp.DaemonConfigDTO>;
 
+export function GetDaemonLogs(arg1:number):Promise<Array<wailsapp.DaemonLogEntryDTO>>;
+
 export function GetDaemonStatus():Promise<wailsapp.DaemonStatusDTO>;
 
 export function GetDefaultConfigPath():Promise<string>;
 
 export function GetDefaultDownloadFolder():Promise<string>;
+
+export function GetFileLoggingSettings():Promise<wailsapp.FileLoggingSettingsDTO>;
 
 export function GetHomeDirectory():Promise<string>;
 
@@ -51,6 +51,8 @@ export function GetJobRows():Promise<Array<wailsapp.JobRowDTO>>;
 export function GetJobsStats():Promise<wailsapp.JobsStatsDTO>;
 
 export function GetLocalFilesInfo(arg1:Array<string>):Promise<Array<wailsapp.LocalFileInfoDTO>>;
+
+export function GetLogFileLocation():Promise<string>;
 
 export function GetMyJobsFolderID():Promise<string>;
 
@@ -94,8 +96,6 @@ export function ResumeDaemon():Promise<void>;
 
 export function RetryTransfer(arg1:string):Promise<string>;
 
-export function SaveAutoDownloadConfig(arg1:wailsapp.AutoDownloadConfigDTO):Promise<void>;
-
 export function SaveConfig():Promise<void>;
 
 export function SaveConfigAs(arg1:string):Promise<void>;
@@ -124,6 +124,8 @@ export function SelectFile(arg1:string):Promise<string>;
 
 export function SelectMultipleFiles(arg1:string):Promise<Array<string>>;
 
+export function SetFileLoggingEnabled(arg1:boolean):Promise<void>;
+
 export function StartBulkRun(arg1:Array<wailsapp.JobSpecDTO>):Promise<string>;
 
 export function StartDaemon():Promise<void>;
@@ -138,7 +140,7 @@ export function StartTransfers(arg1:Array<wailsapp.TransferRequestDTO>):Promise<
 
 export function StopDaemon():Promise<void>;
 
-export function TestAutoDownloadConnection(arg1:wailsapp.AutoDownloadConfigDTO):Promise<void>;
+export function TestAutoDownloadConnection(arg1:string):Promise<void>;
 
 export function TestConnection():Promise<wailsapp.ConnectionResultDTO>;
 

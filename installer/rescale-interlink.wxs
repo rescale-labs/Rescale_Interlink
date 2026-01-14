@@ -14,11 +14,12 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <!-- Product definition -->
+  <!-- v4.3.0: Changed to perUser for no-admin installation -->
   <Package Name="Rescale Interlink"
            Manufacturer="Rescale, Inc."
-           Version="4.0.8.0"
+           Version="4.3.2.0"
            UpgradeCode="8B7E9C4A-3F2D-4E1A-B5C6-7D8E9F0A1B2C"
-           Scope="perMachine"
+           Scope="perUser"
            Language="1033"
            InstallerVersion="500">
 
@@ -39,7 +40,9 @@
       <ComponentGroupRef Id="StartMenuShortcuts" />
     </Feature>
 
-    <Feature Id="ServiceFeature" Title="Auto-Download Service" Level="1">
+    <!-- v4.3.0: Service feature unchecked by default (Level=2), requires elevation -->
+    <Feature Id="ServiceFeature" Title="Auto-Download Service (requires Admin)" Level="2"
+             Description="Install as Windows service for background auto-download. Requires administrator privileges.">
       <ComponentGroupRef Id="ServiceComponents" />
     </Feature>
 
@@ -101,8 +104,9 @@
   </Package>
 
   <!-- Directory structure -->
+  <!-- v4.3.0: Changed to LocalAppDataFolder for per-user install (no admin required) -->
   <Fragment>
-    <StandardDirectory Id="ProgramFiles64Folder">
+    <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="MANUFACTURERFOLDER" Name="Rescale">
         <Directory Id="INSTALLFOLDER" Name="Interlink">
           <Directory Id="WEBVIEW2FOLDER" Name="webview2" />
@@ -163,11 +167,12 @@
   </Fragment>
 
   <!-- Service components -->
+  <!-- v4.3.0: Note - Service still requires elevation when selected (custom action runs elevated) -->
   <Fragment>
     <ComponentGroup Id="ServiceComponents" Directory="INSTALLFOLDER">
       <Component Id="ServiceConfig" Guid="4D5E6F7A-8B9C-0D1E-2F3A-B4C5D6E7F8A9">
         <!-- Service is registered via custom action using CLI -->
-        <RegistryKey Root="HKLM" Key="SOFTWARE\Rescale\Interlink">
+        <RegistryKey Root="HKCU" Key="SOFTWARE\Rescale\Interlink">
           <RegistryValue Name="ServiceInstalled" Type="integer" Value="1" KeyPath="yes" />
         </RegistryKey>
       </Component>

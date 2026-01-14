@@ -107,44 +107,6 @@ export namespace wailsapp {
 	        this.fipsStatus = source["fipsStatus"];
 	    }
 	}
-	export class AutoDownloadConfigDTO {
-	    enabled: boolean;
-	    correctnessTag: string;
-	    defaultDownloadFolder: string;
-	    scanIntervalMinutes: number;
-	    lookbackDays: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new AutoDownloadConfigDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.correctnessTag = source["correctnessTag"];
-	        this.defaultDownloadFolder = source["defaultDownloadFolder"];
-	        this.scanIntervalMinutes = source["scanIntervalMinutes"];
-	        this.lookbackDays = source["lookbackDays"];
-	    }
-	}
-	export class AutoDownloadStatusDTO {
-	    configExists: boolean;
-	    enabled: boolean;
-	    isValid: boolean;
-	    validationMsg?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new AutoDownloadStatusDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.configExists = source["configExists"];
-	        this.enabled = source["enabled"];
-	        this.isValid = source["isValid"];
-	        this.validationMsg = source["validationMsg"];
-	    }
-	}
 	export class AutoDownloadValidationDTO {
 	    customFieldsEnabled: boolean;
 	    hasAutoDownloadField: boolean;
@@ -359,9 +321,7 @@ export namespace wailsapp {
 	    namePrefix: string;
 	    nameContains: string;
 	    exclude: string;
-	    correctnessTag: string;
-	    autoDownloadValue: string;
-	    downloadedTag: string;
+	    autoDownloadTag: string;
 	    notificationsEnabled: boolean;
 	    showDownloadComplete: boolean;
 	    showDownloadFailed: boolean;
@@ -382,13 +342,31 @@ export namespace wailsapp {
 	        this.namePrefix = source["namePrefix"];
 	        this.nameContains = source["nameContains"];
 	        this.exclude = source["exclude"];
-	        this.correctnessTag = source["correctnessTag"];
-	        this.autoDownloadValue = source["autoDownloadValue"];
-	        this.downloadedTag = source["downloadedTag"];
+	        this.autoDownloadTag = source["autoDownloadTag"];
 	        this.notificationsEnabled = source["notificationsEnabled"];
 	        this.showDownloadComplete = source["showDownloadComplete"];
 	        this.showDownloadFailed = source["showDownloadFailed"];
 	        this.configPath = source["configPath"];
+	    }
+	}
+	export class DaemonLogEntryDTO {
+	    timestamp: string;
+	    level: string;
+	    stage: string;
+	    message: string;
+	    fields?: Record<string, any>;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonLogEntryDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.timestamp = source["timestamp"];
+	        this.level = source["level"];
+	        this.stage = source["stage"];
+	        this.message = source["message"];
+	        this.fields = source["fields"];
 	    }
 	}
 	export class DaemonStatusDTO {
@@ -463,6 +441,20 @@ export namespace wailsapp {
 	        this.modTime = source["modTime"];
 	        this.path = source["path"];
 	        this.parentId = source["parentId"];
+	    }
+	}
+	export class FileLoggingSettingsDTO {
+	    enabled: boolean;
+	    filePath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FileLoggingSettingsDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.filePath = source["filePath"];
 	    }
 	}
 	export class FolderContentsDTO {

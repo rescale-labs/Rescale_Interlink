@@ -19,20 +19,24 @@ type MessageType string
 
 const (
 	// Request types (client -> server)
-	MsgGetStatus    MessageType = "GetStatus"
-	MsgPauseUser    MessageType = "PauseUser"
-	MsgResumeUser   MessageType = "ResumeUser"
-	MsgTriggerScan  MessageType = "TriggerScan"
-	MsgOpenLogs     MessageType = "OpenLogs"
-	MsgOpenGUI      MessageType = "OpenGUI"
-	MsgGetUserList  MessageType = "GetUserList"
-	MsgShutdown     MessageType = "Shutdown"
+	MsgGetStatus      MessageType = "GetStatus"
+	MsgPauseUser      MessageType = "PauseUser"
+	MsgResumeUser     MessageType = "ResumeUser"
+	MsgTriggerScan    MessageType = "TriggerScan"
+	MsgOpenLogs       MessageType = "OpenLogs"
+	MsgOpenGUI        MessageType = "OpenGUI"
+	MsgGetUserList    MessageType = "GetUserList"
+	MsgShutdown       MessageType = "Shutdown"
+	MsgSubscribeLogs  MessageType = "SubscribeLogs"  // v4.3.2: Subscribe to log stream
+	MsgGetRecentLogs  MessageType = "GetRecentLogs"  // v4.3.2: Get recent log entries
 
 	// Response types (server -> client)
 	MsgStatusResponse   MessageType = "StatusResponse"
 	MsgUserListResponse MessageType = "UserListResponse"
 	MsgOK               MessageType = "OK"
 	MsgError            MessageType = "Error"
+	MsgLogEntry         MessageType = "LogEntry"       // v4.3.2: Log entry push
+	MsgRecentLogs       MessageType = "RecentLogs"     // v4.3.2: Recent logs response
 )
 
 // Request represents an IPC request from client to server.
@@ -104,6 +108,30 @@ type UserListData struct {
 	Users []UserStatus `json:"users"`
 }
 
+// LogEntryData represents a single log entry for IPC streaming.
+// v4.3.2: Used for streaming logs from daemon to GUI.
+type LogEntryData struct {
+	// Timestamp is the log entry time in RFC3339 format
+	Timestamp string `json:"timestamp"`
+
+	// Level is the log level (DEBUG, INFO, WARN, ERROR)
+	Level string `json:"level"`
+
+	// Stage identifies the component (Daemon, Monitor, Download, etc.)
+	Stage string `json:"stage"`
+
+	// Message is the log message text
+	Message string `json:"message"`
+
+	// Fields contains additional structured data
+	Fields map[string]interface{} `json:"fields,omitempty"`
+}
+
+// RecentLogsData contains a batch of recent log entries.
+type RecentLogsData struct {
+	Entries []LogEntryData `json:"entries"`
+}
+
 // NewRequest creates a new IPC request.
 func NewRequest(msgType MessageType) *Request {
 	return &Request{Type: msgType}
@@ -132,6 +160,18 @@ func NewStatusResponse(status *StatusData) *Response {
 // NewUserListResponse creates a user list response.
 func NewUserListResponse(users []UserStatus) *Response {
 	return &Response{Type: MsgUserListResponse, Success: true, Data: &UserListData{Users: users}}
+}
+
+// NewLogEntryResponse creates a log entry push response.
+// v4.3.2: Used for streaming logs from daemon to GUI.
+func NewLogEntryResponse(entry *LogEntryData) *Response {
+	return &Response{Type: MsgLogEntry, Success: true, Data: entry}
+}
+
+// NewRecentLogsResponse creates a recent logs response.
+// v4.3.2: Returns a batch of recent log entries.
+func NewRecentLogsResponse(entries []LogEntryData) *Response {
+	return &Response{Type: MsgRecentLogs, Success: true, Data: &RecentLogsData{Entries: entries}}
 }
 
 // Encode serializes a request to JSON.

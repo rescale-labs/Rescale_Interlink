@@ -50,14 +50,6 @@ export function GetAppInfo() {
   return window['go']['wailsapp']['App']['GetAppInfo']();
 }
 
-export function GetAutoDownloadConfig() {
-  return window['go']['wailsapp']['App']['GetAutoDownloadConfig']();
-}
-
-export function GetAutoDownloadStatus() {
-  return window['go']['wailsapp']['App']['GetAutoDownloadStatus']();
-}
-
 export function GetAutomations() {
   return window['go']['wailsapp']['App']['GetAutomations']();
 }
@@ -74,6 +66,10 @@ export function GetDaemonConfig() {
   return window['go']['wailsapp']['App']['GetDaemonConfig']();
 }
 
+export function GetDaemonLogs(arg1) {
+  return window['go']['wailsapp']['App']['GetDaemonLogs'](arg1);
+}
+
 export function GetDaemonStatus() {
   return window['go']['wailsapp']['App']['GetDaemonStatus']();
 }
@@ -84,6 +80,10 @@ export function GetDefaultConfigPath() {
 
 export function GetDefaultDownloadFolder() {
   return window['go']['wailsapp']['App']['GetDefaultDownloadFolder']();
+}
+
+export function GetFileLoggingSettings() {
+  return window['go']['wailsapp']['App']['GetFileLoggingSettings']();
 }
 
 export function GetHomeDirectory() {
@@ -100,6 +100,10 @@ export function GetJobsStats() {
 
 export function GetLocalFilesInfo(arg1) {
   return window['go']['wailsapp']['App']['GetLocalFilesInfo'](arg1);
+}
+
+export function GetLogFileLocation() {
+  return window['go']['wailsapp']['App']['GetLogFileLocation']();
 }
 
 export function GetMyJobsFolderID() {
@@ -186,10 +190,6 @@ export function RetryTransfer(arg1) {
   return window['go']['wailsapp']['App']['RetryTransfer'](arg1);
 }
 
-export function SaveAutoDownloadConfig(arg1) {
-  return window['go']['wailsapp']['App']['SaveAutoDownloadConfig'](arg1);
-}
-
 export function SaveConfig() {
   return window['go']['wailsapp']['App']['SaveConfig']();
 }
@@ -244,6 +244,10 @@ export function SelectFile(arg1) {
 
 export function SelectMultipleFiles(arg1) {
   return window['go']['wailsapp']['App']['SelectMultipleFiles'](arg1);
+}
+
+export function SetFileLoggingEnabled(arg1) {
+  return window['go']['wailsapp']['App']['SetFileLoggingEnabled'](arg1);
 }
 
 export function StartBulkRun(arg1) {

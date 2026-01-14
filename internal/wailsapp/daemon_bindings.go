@@ -10,9 +10,12 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 // DaemonStatusDTO represents the daemon status for the frontend.
@@ -57,9 +60,11 @@ type DaemonStatusDTO struct {
 // GetDaemonStatus returns the current daemon status.
 // This is the primary method for the frontend to check if the daemon is running
 // and get its current state.
+// v4.3.1: Version always uses version.Version for consistency.
 func (a *App) GetDaemonStatus() DaemonStatusDTO {
 	result := DaemonStatusDTO{
-		State: "stopped",
+		State:   "stopped",
+		Version: version.Version, // v4.3.1: Always show current version
 	}
 
 	// Check if daemon process is running via PID file
@@ -75,7 +80,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 	if status, err := client.GetStatus(ctx); err == nil {
 		result.IPCConnected = true
 		result.State = status.ServiceState
-		result.Version = status.Version
+		// v4.3.1: Keep showing version.Version, not IPC version (which may be stale)
 		result.Uptime = status.Uptime
 		result.ActiveDownloads = status.ActiveDownloads
 
@@ -272,6 +277,7 @@ func (a *App) ResumeDaemon() error {
 
 // DaemonConfigDTO represents the daemon configuration for the frontend.
 // v4.2.0: Used for reading/writing daemon.conf from the GUI.
+// v4.3.0: Simplified - mode is per-job, only AutoDownloadTag configurable.
 type DaemonConfigDTO struct {
 	// Daemon core settings
 	Enabled             bool   `json:"enabled"`
@@ -287,14 +293,13 @@ type DaemonConfigDTO struct {
 	Exclude      string `json:"exclude"` // Comma-separated
 
 	// Eligibility
-	CorrectnessTag    string `json:"correctnessTag"`
-	AutoDownloadValue string `json:"autoDownloadValue"` // v4.2.1: Configurable (default: "Enable")
-	DownloadedTag     string `json:"downloadedTag"`     // v4.2.1: Configurable (default: "autoDownloaded:true")
+	// v4.3.0: Simplified - mode is now per-job via custom field, not global
+	AutoDownloadTag string `json:"autoDownloadTag"` // Tag for "Conditional" jobs
 
 	// Notifications
-	NotificationsEnabled   bool `json:"notificationsEnabled"`
-	ShowDownloadComplete   bool `json:"showDownloadComplete"`
-	ShowDownloadFailed     bool `json:"showDownloadFailed"`
+	NotificationsEnabled bool `json:"notificationsEnabled"`
+	ShowDownloadComplete bool `json:"showDownloadComplete"`
+	ShowDownloadFailed   bool `json:"showDownloadFailed"`
 
 	// Config file path (read-only)
 	ConfigPath string `json:"configPath"`
@@ -328,9 +333,8 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	result.NameContains = cfg.Filters.NameContains
 	result.Exclude = cfg.Filters.Exclude
 
-	result.CorrectnessTag = cfg.Eligibility.CorrectnessTag
-	result.AutoDownloadValue = cfg.Eligibility.AutoDownloadValue
-	result.DownloadedTag = cfg.Eligibility.DownloadedTag
+	// v4.3.0: Simplified - only AutoDownloadTag is configurable
+	result.AutoDownloadTag = cfg.Eligibility.AutoDownloadTag
 
 	result.NotificationsEnabled = cfg.Notifications.Enabled
 	result.ShowDownloadComplete = cfg.Notifications.ShowDownloadComplete
@@ -360,9 +364,8 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	cfg.Filters.NameContains = dto.NameContains
 	cfg.Filters.Exclude = dto.Exclude
 
-	cfg.Eligibility.CorrectnessTag = dto.CorrectnessTag
-	cfg.Eligibility.AutoDownloadValue = dto.AutoDownloadValue
-	cfg.Eligibility.DownloadedTag = dto.DownloadedTag
+	// v4.3.0: Simplified - only AutoDownloadTag is configurable
+	cfg.Eligibility.AutoDownloadTag = dto.AutoDownloadTag
 
 	cfg.Notifications.Enabled = dto.NotificationsEnabled
 	cfg.Notifications.ShowDownloadComplete = dto.ShowDownloadComplete
@@ -385,6 +388,67 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 // GetDefaultDownloadFolder returns the platform-specific default download folder.
 func (a *App) GetDefaultDownloadFolder() string {
 	return config.DefaultDownloadFolder()
+}
+
+// TestAutoDownloadConnection tests API connectivity and folder access for auto-download.
+// v4.3.1: Moved from config_bindings.go as part of config unification.
+func (a *App) TestAutoDownloadConnection(downloadFolder string) {
+	go func() {
+		result := struct {
+			Success     bool   `json:"success"`
+			Email       string `json:"email,omitempty"`
+			FolderOK    bool   `json:"folderOk"`
+			FolderError string `json:"folderError,omitempty"`
+			Error       string `json:"error,omitempty"`
+		}{}
+
+		// Test API connection using the main config's API client
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if a.engine != nil && a.engine.API() != nil {
+			profile, err := a.engine.API().GetUserProfile(ctx)
+			if err != nil {
+				result.Error = "API connection failed: " + err.Error()
+				runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
+				return
+			}
+			result.Success = true
+			result.Email = profile.Email
+		} else {
+			result.Error = "No API client configured - please test connection in Setup tab first"
+			runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
+			return
+		}
+
+		// Test folder access
+		if downloadFolder != "" {
+			info, err := os.Stat(downloadFolder)
+			if os.IsNotExist(err) {
+				if err := os.MkdirAll(downloadFolder, 0755); err != nil {
+					result.FolderError = "Cannot create folder: " + err.Error()
+				} else {
+					result.FolderOK = true
+				}
+			} else if err != nil {
+				result.FolderError = "Cannot access folder: " + err.Error()
+			} else if !info.IsDir() {
+				result.FolderError = "Path exists but is not a directory"
+			} else {
+				testFile := downloadFolder + "/.interlink_test"
+				f, err := os.Create(testFile)
+				if err != nil {
+					result.FolderError = "Cannot write to folder: " + err.Error()
+				} else {
+					f.Close()
+					os.Remove(testFile)
+					result.FolderOK = true
+				}
+			}
+		}
+
+		runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
+	}()
 }
 
 // AutoDownloadValidationDTO represents the result of validating auto-download setup.
@@ -444,6 +508,90 @@ func (a *App) ValidateAutoDownloadSetup() AutoDownloadValidationDTO {
 	}
 	if validation.Errors != nil {
 		result.Errors = validation.Errors
+	}
+
+	return result
+}
+
+// =============================================================================
+// File Logging Settings (v4.3.2)
+// =============================================================================
+
+// FileLoggingSettingsDTO represents file logging configuration.
+type FileLoggingSettingsDTO struct {
+	Enabled  bool   `json:"enabled"`
+	FilePath string `json:"filePath"`
+}
+
+// GetFileLoggingSettings returns the current file logging configuration.
+// v4.3.2: Cross-platform file logging support.
+func (a *App) GetFileLoggingSettings() FileLoggingSettingsDTO {
+	return FileLoggingSettingsDTO{
+		Enabled:  IsFileLoggingEnabled(),
+		FilePath: GetLogFilePath(),
+	}
+}
+
+// SetFileLoggingEnabled enables or disables file logging.
+// v4.3.2: User can toggle file logging from GUI settings.
+func (a *App) SetFileLoggingEnabled(enabled bool) error {
+	if err := EnableFileLogging(enabled); err != nil {
+		return fmt.Errorf("failed to set file logging: %w", err)
+	}
+	if enabled {
+		a.logInfo("Logging", fmt.Sprintf("File logging enabled: %s", GetLogFilePath()))
+	} else {
+		a.logInfo("Logging", "File logging disabled")
+	}
+	return nil
+}
+
+// GetLogFileLocation returns the current log file path (if logging to file).
+// v4.3.2: For displaying log file location in UI.
+func (a *App) GetLogFileLocation() string {
+	return GetLogFilePath()
+}
+
+// =============================================================================
+// Daemon Log Retrieval (v4.3.2)
+// =============================================================================
+
+// DaemonLogEntryDTO represents a log entry from the daemon.
+type DaemonLogEntryDTO struct {
+	Timestamp string                 `json:"timestamp"`
+	Level     string                 `json:"level"`
+	Stage     string                 `json:"stage"`
+	Message   string                 `json:"message"`
+	Fields    map[string]interface{} `json:"fields,omitempty"`
+}
+
+// GetDaemonLogs retrieves recent log entries from the running daemon.
+// v4.3.2: Fetches logs via IPC for display in Activity tab.
+func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
+	if daemon.IsDaemonRunning() == 0 {
+		return nil
+	}
+
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+
+	ctx := context.Background()
+	logs, err := client.GetRecentLogs(ctx, count)
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Failed to get daemon logs: %v", err))
+		return nil
+	}
+
+	// Convert to DTO
+	result := make([]DaemonLogEntryDTO, len(logs))
+	for i, log := range logs {
+		result[i] = DaemonLogEntryDTO{
+			Timestamp: log.Timestamp,
+			Level:     log.Level,
+			Stage:     log.Stage,
+			Message:   log.Message,
+			Fields:    log.Fields,
+		}
 	}
 
 	return result

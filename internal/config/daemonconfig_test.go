@@ -25,8 +25,8 @@ func TestNewDaemonConfig(t *testing.T) {
 	if cfg.Daemon.UseJobNameDir != true {
 		t.Errorf("Expected UseJobNameDir=true, got %v", cfg.Daemon.UseJobNameDir)
 	}
-	if cfg.Eligibility.CorrectnessTag != "isCorrect:true" {
-		t.Errorf("Expected CorrectnessTag=isCorrect:true, got %s", cfg.Eligibility.CorrectnessTag)
+	if cfg.Eligibility.AutoDownloadTag != "autoDownload" {
+		t.Errorf("Expected AutoDownloadTag=autoDownload, got %s", cfg.Eligibility.AutoDownloadTag)
 	}
 	if cfg.Notifications.Enabled != true {
 		t.Errorf("Expected Notifications.Enabled=true, got %v", cfg.Notifications.Enabled)
@@ -54,7 +54,7 @@ func TestDaemonConfigLoadSave(t *testing.T) {
 	cfg.Filters.NamePrefix = "TestPrefix"
 	cfg.Filters.NameContains = "Contains"
 	cfg.Filters.Exclude = "test,debug,scratch"
-	cfg.Eligibility.CorrectnessTag = "custom:tag"
+	cfg.Eligibility.AutoDownloadTag = "custom:tag"
 	cfg.Notifications.Enabled = false
 	cfg.Notifications.ShowDownloadComplete = false
 	cfg.Notifications.ShowDownloadFailed = true
@@ -103,8 +103,8 @@ func TestDaemonConfigLoadSave(t *testing.T) {
 	if loaded.Filters.Exclude != cfg.Filters.Exclude {
 		t.Errorf("Exclude mismatch: expected %s, got %s", cfg.Filters.Exclude, loaded.Filters.Exclude)
 	}
-	if loaded.Eligibility.CorrectnessTag != cfg.Eligibility.CorrectnessTag {
-		t.Errorf("CorrectnessTag mismatch: expected %s, got %s", cfg.Eligibility.CorrectnessTag, loaded.Eligibility.CorrectnessTag)
+	if loaded.Eligibility.AutoDownloadTag != cfg.Eligibility.AutoDownloadTag {
+		t.Errorf("AutoDownloadTag mismatch: expected %s, got %s", cfg.Eligibility.AutoDownloadTag, loaded.Eligibility.AutoDownloadTag)
 	}
 	if loaded.Notifications.Enabled != cfg.Notifications.Enabled {
 		t.Errorf("Notifications.Enabled mismatch: expected %v, got %v", cfg.Notifications.Enabled, loaded.Notifications.Enabled)
