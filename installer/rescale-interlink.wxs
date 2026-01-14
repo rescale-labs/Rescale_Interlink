@@ -17,7 +17,7 @@
   <!-- v4.3.0: Changed to perUser for no-admin installation -->
   <Package Name="Rescale Interlink"
            Manufacturer="Rescale, Inc."
-           Version="4.3.2.0"
+           Version="4.3.6.0"
            UpgradeCode="8B7E9C4A-3F2D-4E1A-B5C6-7D8E9F0A1B2C"
            Scope="perUser"
            Language="1033"

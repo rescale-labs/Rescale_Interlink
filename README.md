@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.2.1-green)
+![Status](https://img.shields.io/badge/status-v4.3.6-green)
 
 ---
 
@@ -87,18 +87,18 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
+**v4.3.6 (January 14, 2026) - Daemon Logging Improvements:**
+- **Silent filtering for Auto Download**: Jobs with "Auto Download = not set" or "disabled" are now filtered silently instead of flooding logs with SKIP messages
+- **Optimized API calls**: Custom field is checked FIRST, before checking downloaded tag - reduces API calls by ~50%
+- **Improved scan summary**: Shows `filtered` count separately from `skipped` count in scan completion message
+- **Cleaner logs**: Only jobs that are real candidates (Enabled/Conditional) appear in logs
+
 **v4.2.1 (January 9, 2026) - Enhanced Eligibility Configuration:**
 - **New `daemon.conf` file**: Single INI file for all daemon settings (replaces scattered config)
 - **CLI config commands**: `daemon config show|path|edit|set|init` for managing daemon settings
 - **Config file + CLI flags**: Daemon reads from config file, CLI flags override config values
 - **Windows tray "Configure..."**: Opens GUI directly to daemon configuration
 - **Cross-platform consistency**: Same config format and behavior on Mac, Linux, and Windows
-
-**v4.1.1 (January 8, 2026) - Tray Fixes:**
-- **Tray icon fix**: Changed from PNG to ICO format for proper display on Windows
-- **Start Service button**: Tray now has "Start Service" option when daemon is stopped
-- **Version fix**: Tray now uses shared version package (no more hardcoded version)
-- **Auto-start docs**: Added macOS launchd and Linux systemd configuration examples
 
 **v4.1.0 (January 7, 2026) - Cross-Platform Daemon Control:**
 - **GUI Daemon Control**: Start, stop, pause, resume, and monitor the auto-download daemon from the GUI
@@ -161,15 +161,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.2.1-darwin-arm64.zip` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.2.1-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.2.1-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `RescaleInterlink-v4.2.1.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.3.6-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.3.6-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.3.6-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.3.6.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Unzip and move app to Applications
-unzip rescale-interlink-v4.2.1-darwin-arm64.zip
+unzip rescale-interlink-v4.3.6-darwin-arm64.zip
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -180,7 +180,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.2.1-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.3.6-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -193,7 +193,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.2.1-windows-amd64.zip
+Expand-Archive rescale-interlink-v4.3.6-windows-amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -498,7 +498,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.2.1                       |
+|                    Rescale Interlink v4.3.6                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -763,6 +763,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.2.0
+**Version**: 4.3.6
 **Status**: Production Ready
-**Last Updated**: January 8, 2026
+**Last Updated**: January 14, 2026
