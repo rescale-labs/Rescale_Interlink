@@ -60,3 +60,21 @@ func (h *IPCHandler) IsPaused() bool {
 func (h *IPCHandler) ShouldPoll() bool {
 	return true
 }
+
+// SetLogBuffer is a no-op on Windows.
+// v4.3.6: Added for compile-time compatibility with internal/cli/daemon.go:301
+func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
+	// No-op on Windows
+}
+
+// GetRecentLogs is a no-op on Windows.
+// v4.3.6: Added for compile-time compatibility
+func (h *IPCHandler) GetRecentLogs(count int) []ipc.LogEntryData {
+	return nil
+}
+
+// GetLogBuffer is a no-op on Windows.
+// v4.3.6: Added for compile-time compatibility
+func (h *IPCHandler) GetLogBuffer() *LogBuffer {
+	return nil
+}
