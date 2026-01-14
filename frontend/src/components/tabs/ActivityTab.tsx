@@ -1,6 +1,7 @@
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useRef, useMemo, useState } from 'react';
 import { useLogStore } from '../../stores';
 import type { LogLevel } from '../../types';
+import { GetDaemonStatus, GetDaemonLogs } from '../../../wailsjs/go/wailsapp/App';
 import {
   MagnifyingGlassIcon,
   ArrowDownTrayIcon,
@@ -39,6 +40,19 @@ function formatUptime(ms: number): string {
   }
 }
 
+// LogEntry interface for local state (matching logStore's LogEntry)
+interface LogEntry {
+  id: number;
+  timestamp: Date;
+  level: LogLevel;
+  message: string;
+  stage: string;
+  jobName: string;
+  error?: string;
+  formattedText: string;
+  lowerText: string;
+}
+
 export function ActivityTab() {
   const {
     logs,
@@ -58,8 +72,29 @@ export function ActivityTab() {
     // v4.0.0: setupEventListeners moved to App.tsx for global event listening
   } = useLogStore();
 
+  // v4.3.2: Daemon log state for IPC-based log streaming
+  const [daemonLogs, setDaemonLogs] = useState<LogEntry[]>([]);
+  const [daemonRunning, setDaemonRunning] = useState(false);
+
   const logContainerRef = useRef<HTMLDivElement>(null);
-  const filteredLogs = useMemo(() => getFilteredLogs(), [logs, levelFilter, searchTerm]);
+
+  // v4.3.2: Merge GUI logs and daemon logs with filtering
+  const filteredLogs = useMemo(() => {
+    const guiFiltered = getFilteredLogs();
+    const lowerSearch = searchTerm.toLowerCase();
+
+    // Filter daemon logs with same criteria
+    const daemonFiltered = daemonLogs.filter((log) => {
+      if (levelFilter && log.level !== levelFilter) return false;
+      if (searchTerm && !log.lowerText.includes(lowerSearch)) return false;
+      return true;
+    });
+
+    // Merge and sort by timestamp
+    return [...guiFiltered, ...daemonFiltered].sort(
+      (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
+    );
+  }, [logs, daemonLogs, levelFilter, searchTerm, getFilteredLogs]);
 
   // Virtual scrolling for performance with large log counts
   const rowVirtualizer = useVirtualizer({
@@ -92,6 +127,42 @@ export function ActivityTab() {
       }));
     }, 1000);
 
+    return () => clearInterval(interval);
+  }, []);
+
+  // v4.3.2: Poll daemon logs when daemon is running
+  useEffect(() => {
+    const pollDaemonLogs = async () => {
+      try {
+        const status = await GetDaemonStatus();
+        const isConnected = status.running && status.ipcConnected;
+        setDaemonRunning(isConnected);
+
+        if (isConnected) {
+          const daemonLogEntries = await GetDaemonLogs(100);
+          if (daemonLogEntries && daemonLogEntries.length > 0) {
+            const entries: LogEntry[] = daemonLogEntries.map((log, i) => ({
+              id: -1000000 - i, // Negative IDs to avoid collision with GUI logs
+              timestamp: new Date(log.timestamp),
+              level: log.level.toUpperCase() as LogLevel,
+              message: log.message,
+              stage: `Daemon/${log.stage}`,
+              jobName: '',
+              formattedText: `[${log.timestamp}] ${log.level} [Daemon/${log.stage}] ${log.message}`,
+              lowerText: `${log.level} daemon ${log.stage} ${log.message}`.toLowerCase(),
+            }));
+            setDaemonLogs(entries);
+          }
+        } else {
+          setDaemonLogs([]);
+        }
+      } catch (err) {
+        console.error('Failed to poll daemon logs:', err);
+      }
+    };
+
+    pollDaemonLogs();
+    const interval = setInterval(pollDaemonLogs, 5000);
     return () => clearInterval(interval);
   }, []);
 
@@ -202,6 +273,13 @@ export function ActivityTab() {
             {formatUptime(stats.uptime)}
           </span>
         </div>
+        {/* v4.3.2: Daemon connection status indicator */}
+        {daemonRunning && (
+          <div className="flex flex-col">
+            <span className="text-xs font-medium text-gray-500 uppercase">Daemon</span>
+            <span className="text-lg font-semibold text-green-600">Connected</span>
+          </div>
+        )}
       </div>
 
       {/* Log List - Virtualized */}

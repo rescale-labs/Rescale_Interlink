@@ -12,8 +12,31 @@ import (
 	"gopkg.in/ini.v1"
 )
 
+// Hardcoded auto-download constants (not user-configurable).
+// v4.3.0: Mode is now per-job via the "Auto Download" custom field, not global in Interlink.
+const (
+	// AutoDownloadFieldName is the custom field name that controls per-job auto-download.
+	// Must exist in the Rescale workspace as an Option List field.
+	AutoDownloadFieldName = "Auto Download"
+
+	// AutoDownloadValueEnabled means download the job regardless of tag.
+	AutoDownloadValueEnabled = "Enabled"
+
+	// AutoDownloadValueConditional means download only if job has the configured tag.
+	AutoDownloadValueConditional = "Conditional"
+
+	// AutoDownloadValueDisabled means never auto-download this job.
+	AutoDownloadValueDisabled = "Disabled"
+
+	// DownloadedTag is added to jobs after successful download to prevent re-downloading.
+	DownloadedTag = "autoDownloaded:true"
+
+	// AutoDownloadPathFieldName is the optional custom field for per-job download path override.
+	AutoDownloadPathFieldName = "Auto Download Path"
+)
+
 // DaemonConfig represents the unified daemon configuration.
-// This is the v4.2.1+ configuration format, replacing the older apiconfig format.
+// This is the v4.3.0+ configuration format.
 //
 // Config file location:
 //   - Windows: %APPDATA%\Rescale\Interlink\daemon.conf
@@ -35,14 +58,15 @@ import (
 //	exclude = test,debug,scratch
 //
 //	[eligibility]
-//	correctness_tag = isCorrect:true
-//	auto_download_value = Enable
-//	downloaded_tag = autoDownloaded:true
+//	auto_download_tag = autoDownload  # Tag to check for "Conditional" jobs
 //
 //	[notifications]
 //	enabled = true
 //	show_download_complete = true
 //	show_download_failed = true
+//
+// Note: Mode (Enabled/Conditional/Disabled) is now set per-job via the
+// "Auto Download" custom field in the Rescale workspace, not in this config.
 type DaemonConfig struct {
 	// Daemon core settings
 	Daemon DaemonCoreConfig
@@ -100,22 +124,12 @@ type FilterConfig struct {
 }
 
 // EligibilityConfig contains job eligibility requirements.
+// v4.3.0: Simplified - mode is now per-job, not global. Only AutoDownloadTag is configurable.
 type EligibilityConfig struct {
-	// CorrectnessTag is the job tag required for download eligibility.
-	// Jobs must have this tag to be auto-downloaded.
-	// Default: "isCorrect:true"
-	CorrectnessTag string `ini:"correctness_tag"`
-
-	// AutoDownloadValue is the required value for the "Auto Download" custom field.
-	// Jobs must have this exact value (case-insensitive) in the custom field.
-	// The field NAME is hardcoded as "Auto Download" and must be created in the Rescale workspace.
-	// Default: "Enable"
-	AutoDownloadValue string `ini:"auto_download_value"`
-
-	// DownloadedTag is the tag added to jobs after successful download.
-	// This prevents jobs from being re-downloaded.
-	// Default: "autoDownloaded:true"
-	DownloadedTag string `ini:"downloaded_tag"`
+	// AutoDownloadTag is the job tag to check when a job's "Auto Download" field is "Conditional".
+	// Jobs with "Conditional" mode must have this tag to be auto-downloaded.
+	// Default: "autoDownload"
+	AutoDownloadTag string `ini:"auto_download_tag"`
 }
 
 // DaemonConfig validation errors
@@ -177,6 +191,7 @@ func DefaultDownloadFolder() string {
 }
 
 // NewDaemonConfig creates a new DaemonConfig with default values.
+// v4.3.0: Simplified eligibility - mode is now per-job via custom field.
 func NewDaemonConfig() *DaemonConfig {
 	return &DaemonConfig{
 		Daemon: DaemonCoreConfig{
@@ -193,9 +208,7 @@ func NewDaemonConfig() *DaemonConfig {
 			Exclude:      "",
 		},
 		Eligibility: EligibilityConfig{
-			CorrectnessTag:    "isCorrect:true",
-			AutoDownloadValue: "Enable",
-			DownloadedTag:     "autoDownloaded:true",
+			AutoDownloadTag: "autoDownload", // Tag to check for "Conditional" jobs
 		},
 		Notifications: NotificationConfig{
 			Enabled:              true,
@@ -248,10 +261,14 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 	cfg.Filters.Exclude = filtersSection.Key("exclude").String()
 
 	// Parse [eligibility] section
+	// v4.3.0: Simplified - only auto_download_tag is configurable. Mode is per-job.
 	eligSection := iniFile.Section("eligibility")
-	cfg.Eligibility.CorrectnessTag = eligSection.Key("correctness_tag").MustString("isCorrect:true")
-	cfg.Eligibility.AutoDownloadValue = eligSection.Key("auto_download_value").MustString("Enable")
-	cfg.Eligibility.DownloadedTag = eligSection.Key("downloaded_tag").MustString("autoDownloaded:true")
+	// Support both old "correctness_tag" and new "auto_download_tag" keys for migration
+	cfg.Eligibility.AutoDownloadTag = eligSection.Key("auto_download_tag").MustString("")
+	if cfg.Eligibility.AutoDownloadTag == "" {
+		// Fall back to old key name for backwards compatibility
+		cfg.Eligibility.AutoDownloadTag = eligSection.Key("correctness_tag").MustString("autoDownload")
+	}
 
 	// Parse [notifications] section
 	notifySection := iniFile.Section("notifications")
@@ -306,13 +323,12 @@ func SaveDaemonConfig(cfg *DaemonConfig, path string) error {
 	filtersSection.Key("exclude").SetValue(cfg.Filters.Exclude)
 
 	// Write [eligibility] section
+	// v4.3.0: Simplified - only auto_download_tag is configurable
 	eligSection, err := iniFile.NewSection("eligibility")
 	if err != nil {
 		return fmt.Errorf("failed to create eligibility section: %w", err)
 	}
-	eligSection.Key("correctness_tag").SetValue(cfg.Eligibility.CorrectnessTag)
-	eligSection.Key("auto_download_value").SetValue(cfg.Eligibility.AutoDownloadValue)
-	eligSection.Key("downloaded_tag").SetValue(cfg.Eligibility.DownloadedTag)
+	eligSection.Key("auto_download_tag").SetValue(cfg.Eligibility.AutoDownloadTag)
 
 	// Write [notifications] section
 	notifySection, err := iniFile.NewSection("notifications")

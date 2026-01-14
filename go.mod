@@ -21,6 +21,7 @@ require (
 	golang.org/x/sys v0.39.0
 	golang.org/x/term v0.37.0
 	gopkg.in/ini.v1 v1.67.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
 require (

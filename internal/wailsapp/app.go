@@ -62,7 +62,8 @@ func NewApp() *App {
 	return &App{}
 }
 
-// v4.0.8: Unified logging helper that logs to BOTH terminal AND Activity Logs tab.
+// v4.0.8: Unified logging helper that logs to terminal AND Activity Logs tab.
+// v4.3.0: Also logs to file on Windows (%LOCALAPPDATA%\Rescale\Interlink\logs)
 // This ensures users don't need to run from terminal to see detailed logs.
 // Levels: "DEBUG", "INFO", "WARN", "ERROR"
 // Messages are truncated to 1000 chars to prevent unbounded log growth.
@@ -76,6 +77,9 @@ func (a *App) log(level string, stage string, message string) {
 
 	// Always log to terminal for debugging
 	fmt.Printf("[%s] %s: %s\n", level, stage, message)
+
+	// v4.3.0: Also log to file (Windows only, additive)
+	WriteToLogFile(level, stage, message)
 
 	// Also emit to EventBus if available (appears in Activity Logs tab)
 	if a.engine == nil {
@@ -184,6 +188,20 @@ func (a *App) shutdown(ctx context.Context) {
 
 // Run launches the Wails GUI application.
 func Run(args []string) error {
+	// v4.3.0: Single-instance enforcement (Windows only)
+	// Prevents multiple GUI instances from running simultaneously
+	if !EnsureSingleInstance() {
+		// Another instance is running - exit silently (it was brought to foreground)
+		return nil
+	}
+
+	// v4.3.0: Initialize file logging (Windows only, additive to Activity tab)
+	if err := InitFileLogger(); err != nil {
+		// Non-fatal - just log to console
+		fmt.Printf("[WARN] Failed to initialize file logging: %v\n", err)
+	}
+	defer CloseFileLogger()
+
 	// Initialize Wails logger
 	wailsLogger = logging.NewLogger("wails", nil)
 

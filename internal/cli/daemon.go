@@ -18,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/logging"
 )
 
 // newDaemonCmd creates the 'daemon' command group.
@@ -124,7 +125,13 @@ Examples:
   # Run once and exit (useful for cron jobs)
   rescale-int daemon run --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logger := GetLogger()
+			// v4.3.2: Create daemon-specific logger with log buffer for IPC streaming
+			// The logWriter captures logs for both console output and IPC retrieval
+			logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
+				Console:    !daemon.IsDaemonChild(), // Console output only in foreground
+				BufferSize: 1000,                    // Keep 1000 log entries for IPC
+			})
+			logger := logging.NewLoggerWithWriter(logWriter)
 
 			// Load daemon config file (v4.2.0+)
 			daemonConf, err := config.LoadDaemonConfig("")
@@ -249,6 +256,12 @@ Examples:
 				}
 			}
 
+			// v4.3.0: Simplified eligibility - mode is per-job, only tag and lookback configurable
+			daemonCfg.Eligibility = &daemon.EligibilityConfig{
+				AutoDownloadTag: daemonConf.Eligibility.AutoDownloadTag,
+				LookbackDays:    daemonConf.Daemon.LookbackDays,
+			}
+
 			// Load app config
 			cfg, err := loadConfig()
 			if err != nil {
@@ -284,6 +297,8 @@ Examples:
 			var ipcServer *ipc.Server
 			if enableIPC && runtime.GOOS != "windows" {
 				ipcHandler := daemon.NewIPCHandler(d, shutdownFunc)
+				// v4.3.2: Connect log buffer for IPC log streaming
+				ipcHandler.SetLogBuffer(logWriter.GetBuffer())
 				ipcServer = ipc.NewServer(ipcHandler, logger)
 				if err := ipcServer.Start(); err != nil {
 					return fmt.Errorf("failed to start IPC server: %w", err)
@@ -798,9 +813,11 @@ Shows all settings from daemon.conf, or defaults if the file doesn't exist.`,
 			fmt.Println()
 
 			fmt.Println("[eligibility]")
-			fmt.Printf("correctness_tag = %s\n", cfg.Eligibility.CorrectnessTag)
-			fmt.Printf("auto_download_value = %s\n", cfg.Eligibility.AutoDownloadValue)
-			fmt.Printf("downloaded_tag = %s\n", cfg.Eligibility.DownloadedTag)
+			fmt.Printf("auto_download_tag = %s\n", cfg.Eligibility.AutoDownloadTag)
+			fmt.Println()
+			fmt.Println("# Note: Mode (Enabled/Conditional/Disabled) is set per-job via the")
+			fmt.Println("# 'Auto Download' custom field in Rescale workspace, not here.")
+			fmt.Printf("# Downloaded tag (hardcoded): %s\n", config.DownloadedTag)
 			fmt.Println()
 
 			fmt.Println("[notifications]")
@@ -906,19 +923,20 @@ Available keys:
     exclude                  - comma-separated exclude patterns
 
   [eligibility]
-    correctness_tag          - job tag for eligibility
-    auto_download_value      - required value for "Auto Download" field (default: Enable)
-    downloaded_tag           - tag added after download (default: autoDownloaded:true)
+    auto_download_tag        - tag to check for jobs with "Conditional" mode
 
   [notifications]
-    notifications_enabled            - true/false
+    notifications_enabled    - true/false
     show_download_complete   - true/false
     show_download_failed     - true/false
+
+Note (v4.3.0): Mode (Enabled/Conditional/Disabled) is now set per-job via the
+"Auto Download" custom field in your Rescale workspace, not in this config.
 
 Examples:
   rescale-int daemon config set download_folder /path/to/downloads
   rescale-int daemon config set poll_interval_minutes 10
-  rescale-int daemon config set enabled true
+  rescale-int daemon config set auto_download_tag autoDownload
   rescale-int daemon config set exclude "test,debug,scratch"`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -981,12 +999,16 @@ Examples:
 				cfg.Filters.Exclude = value
 
 			// [eligibility] section
-			case "correctness_tag":
-				cfg.Eligibility.CorrectnessTag = value
-			case "auto_download_value":
-				cfg.Eligibility.AutoDownloadValue = value
-			case "downloaded_tag":
-				cfg.Eligibility.DownloadedTag = value
+			// v4.3.0: Simplified - only auto_download_tag is configurable
+			case "auto_download_tag":
+				cfg.Eligibility.AutoDownloadTag = value
+			case "correctness_tag": // backwards compatibility alias
+				cfg.Eligibility.AutoDownloadTag = value
+				fmt.Println("Note: 'correctness_tag' is deprecated, use 'auto_download_tag' instead")
+			case "mode", "auto_download_value", "downloaded_tag":
+				fmt.Println("Note: This setting is no longer configurable in v4.3.0+")
+				fmt.Println("Mode is now set per-job via the 'Auto Download' custom field in Rescale workspace.")
+				return nil
 
 			// [notifications] section
 			case "notifications_enabled":

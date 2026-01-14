@@ -227,15 +227,10 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		APIKey:     apiKey,
 	}
 
-	// Create eligibility config from daemon.conf
-	// v4.2.1: AutoDownloadValue and DownloadedTag are now configurable
+	// v4.3.0: Simplified - mode is now per-job, only tag and lookback are configurable
 	eligibility := &daemon.EligibilityConfig{
-		CorrectnessTag:        daemonConf.Eligibility.CorrectnessTag,
-		AutoDownloadField:     "Auto Download",                        // Hardcoded - must match workspace custom field
-		AutoDownloadValue:     daemonConf.Eligibility.AutoDownloadValue, // Configurable (default: "Enable")
-		DownloadedTag:         daemonConf.Eligibility.DownloadedTag,     // Configurable (default: "autoDownloaded:true")
-		AutoDownloadPathField: "Auto Download Path",                   // Hardcoded - optional workspace custom field
-		LookbackDays:          daemonConf.Daemon.LookbackDays,
+		AutoDownloadTag: daemonConf.Eligibility.AutoDownloadTag,
+		LookbackDays:    daemonConf.Daemon.LookbackDays,
 	}
 
 	// Create job filter from daemon.conf
@@ -339,14 +334,8 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 	if oldCfg.Daemon.LookbackDays != newCfg.Daemon.LookbackDays {
 		return true
 	}
-	if oldCfg.Eligibility.CorrectnessTag != newCfg.Eligibility.CorrectnessTag {
-		return true
-	}
-	// v4.2.1: Check new eligibility fields
-	if oldCfg.Eligibility.AutoDownloadValue != newCfg.Eligibility.AutoDownloadValue {
-		return true
-	}
-	if oldCfg.Eligibility.DownloadedTag != newCfg.Eligibility.DownloadedTag {
+	// v4.3.0: Simplified eligibility - only AutoDownloadTag is configurable
+	if oldCfg.Eligibility.AutoDownloadTag != newCfg.Eligibility.AutoDownloadTag {
 		return true
 	}
 	if oldCfg.Filters.NamePrefix != newCfg.Filters.NamePrefix {
