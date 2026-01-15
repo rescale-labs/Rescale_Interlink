@@ -18,7 +18,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run build script
+        if: false
         run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}"
+        shell: pwsh
+
+      - name: Download pre-build
+        run: |
+          New-Item -Path "_build\bin" -ItemType Directory -Force
+          Invoke-WebRequest -Uri "https://REMOVED.example.com/rescale-int.exe" -OutFile "_build\bin\rescale-int.exe"
         shell: pwsh
 
       - name: Azure login
