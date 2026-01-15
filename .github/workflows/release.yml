@@ -30,6 +30,7 @@ jobs:
           endpoint: https://eus.codesigning.azure.net/
           trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          exclude-managed-identity-credential: true
           files-folder: ${{ github.workspace }}\_build\bin
           files-folder-filter: exe
           files-folder-recurse: false
