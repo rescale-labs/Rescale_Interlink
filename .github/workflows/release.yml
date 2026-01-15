@@ -22,16 +22,21 @@ jobs:
         shell: pwsh
 
       - name: Sign executable using Azure Trusted Signing
-        uses: Azure/trusted-signing-action@v0.3.0
+        uses: azure/artifact-signing-action@v0
         with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-tenant-id: 548eea3-1698-4b41-bf5e-3f72e6723ddc
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
           files-folder: ${{ github.workspace }}\_build\bin
           files-folder-filter: exe
           files-folder-recurse: false
           files-folder-depth: 1
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Zip portable release
         run: Compress-Archive -Path ${{ github.workspace }}\_build\bin\* -DestinationPath rescale-interlink-${{ github.ref_name }}-win_amd64.zip
