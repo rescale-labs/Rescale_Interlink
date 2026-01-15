@@ -294,8 +294,11 @@ Examples:
 			}
 
 			// Start IPC server if enabled
+			// v4.3.7: Enable IPC on Windows (previously excluded with runtime.GOOS != "windows")
+			// Windows IPC uses named pipes (\\.\pipe\rescale-interlink) which work without admin.
+			// This allows GUI/tray to communicate with daemon running as subprocess.
 			var ipcServer *ipc.Server
-			if enableIPC && runtime.GOOS != "windows" {
+			if enableIPC {
 				ipcHandler := daemon.NewIPCHandler(d, shutdownFunc)
 				// v4.3.2: Connect log buffer for IPC log streaming
 				ipcHandler.SetLogBuffer(logWriter.GetBuffer())

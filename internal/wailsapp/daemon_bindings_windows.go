@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -57,7 +59,8 @@ type DaemonStatusDTO struct {
 }
 
 // GetDaemonStatus returns the current daemon status.
-// On Windows, this checks both the Windows Service status and IPC connection.
+// v4.3.7: Primary check is IPC (works for both subprocess and service modes).
+// SCM queries are skipped by default since they require admin privileges.
 // v4.3.1: Version always uses version.Version for consistency.
 func (a *App) GetDaemonStatus() DaemonStatusDTO {
 	result := DaemonStatusDTO{
@@ -65,37 +68,15 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		Version: version.Version, // v4.3.1: Always show current version
 	}
 
-	// Check Windows Service status
-	svcStatus, err := service.QueryStatus()
-	if err == nil {
-		switch svcStatus {
-		case service.StatusRunning:
-			result.Running = true
-			result.State = "running"
-			result.ManagedBy = "Windows Service"
-		case service.StatusPaused:
-			result.Running = true
-			result.State = "paused"
-			result.ManagedBy = "Windows Service"
-		case service.StatusStartPending, service.StatusContinuePending:
-			result.Running = true
-			result.State = "starting"
-			result.ManagedBy = "Windows Service"
-		case service.StatusStopPending, service.StatusPausePending:
-			result.Running = true
-			result.State = "stopping"
-			result.ManagedBy = "Windows Service"
-		}
-	}
-
-	// Try to connect via IPC for live status (works for both service and standalone daemon)
+	// v4.3.7: Primary method - check via IPC (works without admin)
+	// If daemon is running (as subprocess or service), IPC will respond
 	client := ipc.NewClient()
 	client.SetTimeout(2 * time.Second)
 
 	ctx := context.Background()
 	if status, err := client.GetStatus(ctx); err == nil {
 		result.IPCConnected = true
-		result.Running = true // If IPC responds, daemon is running
+		result.Running = true
 		result.State = status.ServiceState
 		// v4.3.1: Keep showing version.Version, not IPC version (which may be stale)
 		result.Uptime = status.Uptime
@@ -110,73 +91,173 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 			result.JobsDownloaded = users[0].JobsDownloaded
 			result.DownloadFolder = users[0].DownloadFolder
 		}
-	} else if result.Running {
-		// Service is running but IPC not responding
-		result.Error = "Service is running but IPC not responding"
+
+		// v4.3.7: Check if running as Windows Service (optional, for display only)
+		// This may fail with "Access is denied" for non-admin users, but that's OK
+		if svcStatus, err := service.QueryStatus(); err == nil && svcStatus == service.StatusRunning {
+			result.ManagedBy = "Windows Service"
+		} else {
+			result.ManagedBy = "Subprocess"
+		}
+
+		return result
 	}
+
+	// v4.3.7: IPC not responding - try Windows Service status as fallback (may fail without admin)
+	// This is just informational - we don't error if it fails
+	if svcStatus, err := service.QueryStatus(); err == nil {
+		switch svcStatus {
+		case service.StatusRunning:
+			result.Running = true
+			result.State = "running"
+			result.ManagedBy = "Windows Service"
+			result.Error = "Service is running but IPC not responding"
+		case service.StatusPaused:
+			result.Running = true
+			result.State = "paused"
+			result.ManagedBy = "Windows Service"
+		case service.StatusStartPending, service.StatusContinuePending:
+			result.Running = true
+			result.State = "starting"
+			result.ManagedBy = "Windows Service"
+		case service.StatusStopPending, service.StatusPausePending:
+			result.Running = true
+			result.State = "stopping"
+			result.ManagedBy = "Windows Service"
+		}
+	}
+	// Note: If SCM query fails (no admin), result stays "stopped" which is correct for subprocess mode
 
 	return result
 }
 
-// StartDaemon starts the daemon via Windows Service.
+// StartDaemon starts the daemon as a subprocess (no admin required).
+// v4.3.7: Uses subprocess mode by default instead of Windows Service (which requires admin).
+// Similar to tray's startService() in tray_windows.go.
 func (a *App) StartDaemon() error {
-	// Check current status
-	status, err := service.QueryStatus()
-	if err != nil {
-		return fmt.Errorf("failed to query service status: %w", err)
+	// Check if already running via IPC
+	client := ipc.NewClient()
+	client.SetTimeout(2 * time.Second)
+	ctx := context.Background()
+
+	if client.IsServiceRunning(ctx) {
+		return fmt.Errorf("daemon is already running")
 	}
 
-	if status == service.StatusRunning {
-		return fmt.Errorf("service is already running")
+	a.logInfo("Daemon", "Starting daemon subprocess...")
+
+	// Start daemon as subprocess
+	if err := a.startDaemonSubprocess(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	a.logInfo("Daemon", "Starting Windows Service...")
-
-	if err := service.StartService(); err != nil {
-		return fmt.Errorf("failed to start service: %w", err)
-	}
-
-	// Wait for service to start
+	// Wait for IPC to come up
 	for i := 0; i < 10; i++ {
 		time.Sleep(500 * time.Millisecond)
-		status, _ := service.QueryStatus()
-		if status == service.StatusRunning {
-			a.logInfo("Daemon", "Windows Service started successfully")
+		if client.IsServiceRunning(ctx) {
+			a.logInfo("Daemon", "Daemon started successfully")
 			return nil
 		}
 	}
 
-	return fmt.Errorf("service start timeout; check Windows Event Log for details")
+	return fmt.Errorf("daemon start timeout; check log files for details")
 }
 
-// StopDaemon stops the daemon via Windows Service.
-func (a *App) StopDaemon() error {
-	status, err := service.QueryStatus()
+// startDaemonSubprocess launches the daemon as a detached subprocess.
+// v4.3.7: Based on tray's startService() in tray_windows.go:242-321.
+func (a *App) startDaemonSubprocess() error {
+	// Find rescale-int.exe in the same directory as the GUI
+	exePath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("failed to query service status: %w", err)
+		return fmt.Errorf("failed to find executable path: %w", err)
 	}
 
-	if status == service.StatusStopped {
+	dir := filepath.Dir(exePath)
+	cliPath := filepath.Join(dir, "rescale-int.exe")
+
+	// Check if CLI exists
+	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
+		return fmt.Errorf("CLI not found: %s", cliPath)
+	}
+
+	// Load settings from daemon.conf
+	daemonCfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Warning: failed to load daemon.conf: %v (using defaults)", err))
+		daemonCfg = config.NewDaemonConfig()
+	}
+
+	downloadDir := daemonCfg.Daemon.DownloadFolder
+	if downloadDir == "" {
+		downloadDir = config.DefaultDownloadFolder()
+	}
+	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
+
+	// Build command arguments
+	args := []string{"daemon", "run", "--ipc",
+		"--download-dir", downloadDir,
+		"--poll-interval", pollInterval,
+	}
+
+	// Add filter flags if configured
+	if daemonCfg.Filters.NamePrefix != "" {
+		args = append(args, "--name-prefix", daemonCfg.Filters.NamePrefix)
+	}
+	if daemonCfg.Filters.NameContains != "" {
+		args = append(args, "--name-contains", daemonCfg.Filters.NameContains)
+	}
+	for _, ex := range daemonCfg.GetExcludePatterns() {
+		args = append(args, "--exclude", ex)
+	}
+	if daemonCfg.Daemon.MaxConcurrent > 0 {
+		args = append(args, "--max-concurrent", fmt.Sprintf("%d", daemonCfg.Daemon.MaxConcurrent))
+	}
+
+	// Start daemon with IPC enabled
+	cmd := exec.Command(cliPath, args...)
+
+	// Detach from GUI process
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start daemon process: %w", err)
+	}
+
+	a.logInfo("Daemon", fmt.Sprintf("Started daemon subprocess (PID: %d)", cmd.Process.Pid))
+	return nil
+}
+
+// StopDaemon stops the daemon via IPC shutdown command.
+// v4.3.7: Uses IPC to stop daemon (works for both subprocess and service modes, no admin required).
+func (a *App) StopDaemon() error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+
+	// Check if daemon is running
+	if !client.IsServiceRunning(ctx) {
 		return nil // Already stopped
 	}
 
-	a.logInfo("Daemon", "Stopping Windows Service...")
+	a.logInfo("Daemon", "Stopping daemon via IPC...")
 
-	if err := service.StopService(); err != nil {
-		return fmt.Errorf("failed to stop service: %w", err)
+	// Send shutdown command via IPC
+	if err := client.Shutdown(ctx); err != nil {
+		return fmt.Errorf("failed to send shutdown command: %w", err)
 	}
 
-	// Wait for service to stop
+	// Wait for daemon to stop
 	for i := 0; i < 10; i++ {
 		time.Sleep(500 * time.Millisecond)
-		status, _ := service.QueryStatus()
-		if status == service.StatusStopped {
-			a.logInfo("Daemon", "Windows Service stopped")
+		if !client.IsServiceRunning(ctx) {
+			a.logInfo("Daemon", "Daemon stopped successfully")
 			return nil
 		}
 	}
 
-	return fmt.Errorf("service stop timeout")
+	return fmt.Errorf("daemon stop timeout")
 }
 
 // TriggerDaemonScan triggers an immediate job scan via IPC.
