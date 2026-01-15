@@ -1,5 +1,54 @@
 # Release Notes - Rescale Interlink
 
+## v4.3.7 - January 14, 2026
+
+### Critical Bug Fixes
+
+This release fixes two critical issues discovered during v4.3.6 testing.
+
+#### Fix #1: Sporadic Checksum Verification Failures (CRITICAL)
+
+**Problem**: Random checksum mismatches during downloads (Windows & Linux), non-reproducible on retry.
+
+**Root Cause**: Race condition - download functions used `defer outFile.Close()` without explicit `Sync()`. Checksum verification opened the file immediately after download returned, but OS buffers hadn't flushed to disk. Files were sometimes read as empty (SHA-512 of empty string in error logs).
+
+**Fix**: Added `outFile.Sync()` before returning from all download functions:
+- `internal/cloud/transfer/downloader.go` - CBC streaming and concurrent streaming downloads
+- `internal/cloud/providers/s3/download.go` - All S3 download methods
+- `internal/cloud/providers/azure/download.go` - All Azure download methods
+
+#### Fix #2: Windows Daemon Communication Broken (CRITICAL)
+
+**Problem**:
+- GUI showed "Access is denied" when trying to start daemon
+- Tray "Start Service" appeared to do nothing
+- Neither GUI nor tray could communicate with daemon
+
+**Root Causes**:
+1. IPC was **explicitly disabled on Windows** in `daemon.go:298` (the daemon couldn't communicate with GUI/tray even when running)
+2. GUI tried to use Windows Service Control Manager (SCM) which requires Administrator privileges
+3. Tray stored errors but never displayed them to user
+
+**Fix**:
+- Enabled IPC on Windows by removing the `runtime.GOOS != "windows"` exclusion in `internal/cli/daemon.go`
+- Refactored `internal/wailsapp/daemon_bindings_windows.go`:
+  - `StartDaemon()` now launches daemon as subprocess (no admin required)
+  - `StopDaemon()` sends shutdown via IPC (no admin required)
+  - `GetDaemonStatus()` checks IPC first, with optional SCM query for display
+
+**Result**: Daemon now works on Windows without Administrator privileges by using subprocess mode + named pipe IPC.
+
+#### Files Modified
+
+- `internal/cloud/transfer/downloader.go` - Add Sync() calls
+- `internal/cloud/providers/s3/download.go` - Add Sync() calls
+- `internal/cloud/providers/azure/download.go` - Add Sync() calls
+- `internal/cli/daemon.go` - Enable IPC on Windows
+- `internal/wailsapp/daemon_bindings_windows.go` - Use subprocess + IPC instead of SCM
+- Version updates in main.go, internal/version/version.go, Makefile
+
+---
+
 ## v4.3.6 - January 14, 2026
 
 ### Daemon Logging Improvements

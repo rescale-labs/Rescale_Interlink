@@ -794,6 +794,13 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		prep.TransferHandle.Complete()
 	}
 
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := outFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
 	return nil
 }
 
@@ -1142,6 +1149,13 @@ func (d *Downloader) downloadStreamingConcurrent(
 	// Truncate file to exact size
 	if err := outFile.Truncate(finalFileSize); err != nil {
 		return fmt.Errorf("failed to truncate file to final size: %w", err)
+	}
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := outFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
 	// Report 100% progress

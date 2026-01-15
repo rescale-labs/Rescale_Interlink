@@ -145,6 +145,14 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 	}
 
 	progressCallback(1.0)
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
 	return nil
 }
 
@@ -194,6 +202,13 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 		if progressCallback != nil && totalSize > 0 {
 			progressCallback(float64(offset) / float64(totalSize))
 		}
+	}
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
 	return nil
@@ -483,6 +498,13 @@ func (p *Provider) downloadChunkedConcurrent(
 		if _, err := file.Write(result.data); err != nil {
 			return fmt.Errorf("failed to write chunk at offset %d: %w", result.offset, err)
 		}
+	}
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
 	// Download complete - clean up resume state

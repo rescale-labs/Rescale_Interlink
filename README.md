@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.3.6-green)
+![Status](https://img.shields.io/badge/status-v4.3.7-green)
 
 ---
 
@@ -87,7 +87,7 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
-**v4.3.6 (January 14, 2026) - Daemon Logging Improvements:**
+**v4.3.7 (January 14, 2026) - Daemon Logging Improvements:**
 - **Silent filtering for Auto Download**: Jobs with "Auto Download = not set" or "disabled" are now filtered silently instead of flooding logs with SKIP messages
 - **Optimized API calls**: Custom field is checked FIRST, before checking downloaded tag - reduces API calls by ~50%
 - **Improved scan summary**: Shows `filtered` count separately from `skipped` count in scan completion message
@@ -161,15 +161,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.3.6-darwin-arm64.zip` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.3.6-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.3.6-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `RescaleInterlink-v4.3.6.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.3.7-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.3.7-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.3.7-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.3.7.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Unzip and move app to Applications
-unzip rescale-interlink-v4.3.6-darwin-arm64.zip
+unzip rescale-interlink-v4.3.7-darwin-arm64.zip
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -180,7 +180,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.3.6-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.3.7-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -193,7 +193,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.3.6-windows-amd64.zip
+Expand-Archive rescale-interlink-v4.3.7-windows-amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -498,7 +498,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.3.6                       |
+|                    Rescale Interlink v4.3.7                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
