@@ -33,8 +33,6 @@ jobs:
           exclude-managed-identity-credential: true
           files-folder: ${{ github.workspace }}\_build\bin
           files-folder-filter: exe
-          files-folder-recurse: false
-          files-folder-depth: 1
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
