@@ -9,10 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"fyne.io/systray"
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/version"
 )
@@ -149,8 +151,14 @@ func (a *trayApp) refreshStatus() {
 // Must be called with a.mu held.
 func (a *trayApp) updateUI() {
 	if !a.serviceRunning {
-		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running", version.Version))
-		a.mStatus.SetTitle("Status: Service Not Running")
+		// v4.3.8: Show last error if available (errors were previously stored but never displayed)
+		if a.lastError != "" {
+			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running\nError: %s", version.Version, a.lastError))
+			a.mStatus.SetTitle(fmt.Sprintf("Error: %s", truncate(a.lastError, 40)))
+		} else {
+			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running", version.Version))
+			a.mStatus.SetTitle("Status: Service Not Running")
+		}
 		a.mStartService.Enable()
 		a.mStartService.Show()
 		a.mPause.Disable()
@@ -296,21 +304,59 @@ func (a *trayApp) startService() {
 		args = append(args, "--max-concurrent", fmt.Sprintf("%d", daemonCfg.Daemon.MaxConcurrent))
 	}
 
+	// v4.3.8: Log startup attempt to help diagnose launch failures
+	daemon.WriteStartupLog("=== TRAY STARTUP ATTEMPT ===")
+	daemon.WriteStartupLog("CLI path: %s", cliPath)
+	daemon.WriteStartupLog("Arguments: %v", args)
+
+	// v4.3.8: Create stderr capture file for subprocess diagnostics
+	logsDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Rescale", "Interlink", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
+	}
+	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
+	stderrFile, stderrErr := os.Create(stderrPath)
+	if stderrErr != nil {
+		daemon.WriteStartupLog("WARNING: Could not create stderr capture file: %v", stderrErr)
+	}
+
 	// Start daemon with IPC enabled
-	// Note: On Windows, --background is not supported, but the daemon will
-	// run detached because we use cmd.Start() without waiting
 	cmd := exec.Command(cliPath, args...)
 
-	// Detach from tray process
+	// v4.3.8: Windows process flags for proper subprocess detachment
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+
+	// Detach stdin/stdout, but capture stderr for debugging
 	cmd.Stdin = nil
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	if stderrFile != nil {
+		cmd.Stderr = stderrFile
+	}
+
+	daemon.WriteStartupLog("Calling cmd.Start()...")
 
 	if err := cmd.Start(); err != nil {
+		errMsg := fmt.Sprintf("Failed to start service: %v", err)
+		daemon.WriteStartupLog("ERROR: %s", errMsg)
+		if stderrFile != nil {
+			stderrFile.Close()
+		}
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Failed to start service: %v", err)
+		a.lastError = errMsg
 		a.mu.Unlock()
 		return
+	}
+
+	daemon.WriteStartupLog("SUCCESS: Started daemon subprocess with PID %d", cmd.Process.Pid)
+
+	// Close stderr file after a delay to capture any immediate errors
+	if stderrFile != nil {
+		go func() {
+			time.Sleep(3 * time.Second)
+			stderrFile.Close()
+		}()
 	}
 
 	// Wait for IPC to come up, then refresh status

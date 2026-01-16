@@ -4,7 +4,7 @@ package version
 
 // Version is the build version string, set by ldflags during build.
 // Format: vX.Y.Z or vX.Y.Z-dev for development builds.
-var Version = "v4.3.7"
+var Version = "v4.3.8"
 
 // BuildTime is the build timestamp, set by ldflags during build.
 var BuildTime = "unknown"

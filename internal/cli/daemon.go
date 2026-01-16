@@ -125,6 +125,17 @@ Examples:
   # Run once and exit (useful for cron jobs)
   rescale-int daemon run --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// v4.3.8: Early startup logging for debugging Windows subprocess launch issues
+			// This writes to a file BEFORE the logger is fully initialized
+			if runtime.GOOS == "windows" {
+				daemon.WriteStartupLog("=== DAEMON CLI STARTING ===")
+				daemon.WriteStartupLog("PID: %d", os.Getpid())
+				daemon.WriteStartupLog("Args: %v", os.Args)
+				if wd, err := os.Getwd(); err == nil {
+					daemon.WriteStartupLog("Working directory: %s", wd)
+				}
+			}
+
 			// v4.3.2: Create daemon-specific logger with log buffer for IPC streaming
 			// The logWriter captures logs for both console output and IPC retrieval
 			logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
@@ -299,15 +310,27 @@ Examples:
 			// This allows GUI/tray to communicate with daemon running as subprocess.
 			var ipcServer *ipc.Server
 			if enableIPC {
+				if runtime.GOOS == "windows" {
+					daemon.WriteStartupLog("Starting IPC server...")
+				}
 				ipcHandler := daemon.NewIPCHandler(d, shutdownFunc)
 				// v4.3.2: Connect log buffer for IPC log streaming
 				ipcHandler.SetLogBuffer(logWriter.GetBuffer())
 				ipcServer = ipc.NewServer(ipcHandler, logger)
 				if err := ipcServer.Start(); err != nil {
+					if runtime.GOOS == "windows" {
+						daemon.WriteStartupLog("ERROR: IPC server failed to start: %v", err)
+					}
 					return fmt.Errorf("failed to start IPC server: %w", err)
 				}
 				defer ipcServer.Stop()
 				logger.Info().Str("socket", ipcServer.GetSocketPath()).Msg("IPC server listening")
+
+				// v4.3.8: Clear startup log on successful IPC start (daemon is now running)
+				if runtime.GOOS == "windows" {
+					daemon.WriteStartupLog("SUCCESS: IPC server started at %s", ipcServer.GetSocketPath())
+					daemon.ClearStartupLog()
+				}
 			}
 
 			go func() {

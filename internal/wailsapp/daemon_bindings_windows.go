@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/service"
 	"github.com/rescale/rescale-int/internal/version"
@@ -133,6 +135,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 
 // StartDaemon starts the daemon as a subprocess (no admin required).
 // v4.3.7: Uses subprocess mode by default instead of Windows Service (which requires admin).
+// v4.3.8: Added startup logging with clear log path in error messages.
 // Similar to tray's startService() in tray_windows.go.
 func (a *App) StartDaemon() error {
 	// Check if already running via IPC
@@ -144,31 +147,43 @@ func (a *App) StartDaemon() error {
 		return fmt.Errorf("daemon is already running")
 	}
 
-	a.logInfo("Daemon", "Starting daemon subprocess...")
+	// v4.3.8: Log startup log path for user reference
+	logsDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Rescale", "Interlink", "logs")
+	a.logInfo("Daemon", fmt.Sprintf("Starting daemon subprocess (logs: %s)", logsDir))
 
 	// Start daemon as subprocess
 	if err := a.startDaemonSubprocess(); err != nil {
+		a.logError("Daemon", fmt.Sprintf("Subprocess launch failed: %v", err))
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// Wait for IPC to come up
+	// Wait for IPC to come up with progress logging
+	a.logInfo("Daemon", "Waiting for daemon IPC to become available...")
 	for i := 0; i < 10; i++ {
 		time.Sleep(500 * time.Millisecond)
 		if client.IsServiceRunning(ctx) {
-			a.logInfo("Daemon", "Daemon started successfully")
+			a.logInfo("Daemon", "Daemon started successfully and IPC connected")
 			return nil
+		}
+		if i == 4 {
+			a.logInfo("Daemon", "Still waiting for daemon IPC (2.5s elapsed)...")
 		}
 	}
 
-	return fmt.Errorf("daemon start timeout; check log files for details")
+	// v4.3.8: Include log path in timeout error
+	errMsg := fmt.Sprintf("daemon start timeout - IPC not available after 5s; check logs at: %s", logsDir)
+	a.logError("Daemon", errMsg)
+	return fmt.Errorf(errMsg)
 }
 
 // startDaemonSubprocess launches the daemon as a detached subprocess.
 // v4.3.7: Based on tray's startService() in tray_windows.go:242-321.
+// v4.3.8: Added startup logging, stderr capture, and SysProcAttr for proper detachment.
 func (a *App) startDaemonSubprocess() error {
 	// Find rescale-int.exe in the same directory as the GUI
 	exePath, err := os.Executable()
 	if err != nil {
+		daemon.WriteStartupLog("ERROR: Failed to find executable path: %v", err)
 		return fmt.Errorf("failed to find executable path: %w", err)
 	}
 
@@ -177,6 +192,7 @@ func (a *App) startDaemonSubprocess() error {
 
 	// Check if CLI exists
 	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
+		daemon.WriteStartupLog("ERROR: CLI not found: %s", cliPath)
 		return fmt.Errorf("CLI not found: %s", cliPath)
 	}
 
@@ -213,19 +229,59 @@ func (a *App) startDaemonSubprocess() error {
 		args = append(args, "--max-concurrent", fmt.Sprintf("%d", daemonCfg.Daemon.MaxConcurrent))
 	}
 
+	// v4.3.8: Log startup attempt to help diagnose launch failures
+	daemon.WriteStartupLog("=== GUI STARTUP ATTEMPT ===")
+	daemon.WriteStartupLog("CLI path: %s", cliPath)
+	daemon.WriteStartupLog("Arguments: %v", args)
+
+	// v4.3.8: Create stderr capture file for subprocess diagnostics
+	logsDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Rescale", "Interlink", "logs")
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
+	}
+	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
+	stderrFile, stderrErr := os.Create(stderrPath)
+	if stderrErr != nil {
+		daemon.WriteStartupLog("WARNING: Could not create stderr capture file: %v", stderrErr)
+	}
+
 	// Start daemon with IPC enabled
 	cmd := exec.Command(cliPath, args...)
 
-	// Detach from GUI process
+	// v4.3.8: Windows process flags for proper subprocess detachment
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+
+	// Detach stdin/stdout, but capture stderr for debugging
 	cmd.Stdin = nil
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	if stderrFile != nil {
+		cmd.Stderr = stderrFile
+	}
+
+	daemon.WriteStartupLog("Calling cmd.Start()...")
 
 	if err := cmd.Start(); err != nil {
+		daemon.WriteStartupLog("ERROR: cmd.Start() failed: %v", err)
+		if stderrFile != nil {
+			stderrFile.Close()
+		}
 		return fmt.Errorf("failed to start daemon process: %w", err)
 	}
 
-	a.logInfo("Daemon", fmt.Sprintf("Started daemon subprocess (PID: %d)", cmd.Process.Pid))
+	pid := cmd.Process.Pid
+	daemon.WriteStartupLog("SUCCESS: Started daemon subprocess with PID %d", pid)
+	a.logInfo("Daemon", fmt.Sprintf("Started daemon subprocess (PID: %d)", pid))
+
+	// Close stderr file after a delay to capture any immediate errors
+	if stderrFile != nil {
+		go func() {
+			time.Sleep(3 * time.Second)
+			stderrFile.Close()
+		}()
+	}
+
 	return nil
 }
 
