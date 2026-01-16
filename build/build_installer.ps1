@@ -1,5 +1,5 @@
 param (
-    [string]$ReleaseTag = $env:RELEASE_TAG
+    [string]$ReleaseTag = $env:RELEASE_TAG,
     [string]$MsiName = $env:MSI_NAME
 )
 
