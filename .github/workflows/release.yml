@@ -14,6 +14,7 @@ jobs:
   windows-build:
     runs-on: windows-latest
     environment: production
+    if: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -59,7 +60,58 @@ jobs:
         run: ./build/build_installer.ps1 -ReleaseTag "${{ github.ref_name }}" -MsiName "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
         shell: pwsh
 
-      - name: Upload Portable Artifact
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescale-interlink-win_amd64
+          path: rescale-interlink-${{ github.ref_name }}-win_amd64.*
+
+  macos-build:
+    runs-on: macos-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Apple Certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_P12_B64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: "temporary-keychain-password"
+        run: |
+          # Create temporary keychain
+          CERT_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          # Import certificate from secrets
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
+
+          # Setup keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate to keychain
+          security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Build Executable
+        run: |
+          curl -O https://REMOVED.example.com/rescale-int
+
+      - name: Sign Executable
+        env:
+          # This should match the "Common Name" of your certificate (e.g., "Developer ID Application: Name (ID)")
+          IDENTITY: "Rescale, Inc"
+        run: |
+          codesign --force --options runtime --sign "$IDENTITY" rescale-int
+
+      - name: Create Zip Archive
+        run: |
+          zip rescale-interlink-${{ github.ref_name }}-macos_amd64.zip rescale-int
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: rescale-interlink-win_amd64
