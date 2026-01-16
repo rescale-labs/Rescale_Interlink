@@ -139,7 +139,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: macos-build
+    needs: [macos-build, windows-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
