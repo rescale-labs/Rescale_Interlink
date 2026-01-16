@@ -31,7 +31,7 @@ Write-Host ""
 Write-Host "[7/7] Building MSI installer..."
 
 $InstallerDir = Join-Path $WorkDir "installer"
-$MsiPath = Join-Path $BuildDir $MsiName
+$MsiPath = Join-Path $WorkDir $MsiName
 
 Write-Host "Building MSI: $MsiPath"
 
