@@ -109,17 +109,17 @@ jobs:
 
       - name: Create Zip Archive
         run: |
-          zip rescale-interlink-${{ github.ref_name }}-macos_amd64.zip rescale-int
+          zip rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip rescale-int
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rescale-interlink-win_amd64
-          path: rescale-interlink-${{ github.ref_name }}-win_amd64.*
+          name: rescale-interlink-macos_aarch64
+          path: rescale-interlink-${{ github.ref_name }}-macos_aarch64.*
 
   release:
     name: Create Release
-    needs: windows-build
+    needs: macos-build
     runs-on: ubuntu-latest
     permissions:
       contents: write
