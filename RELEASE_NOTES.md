@@ -1,5 +1,56 @@
 # Release Notes - Rescale Interlink
 
+## v4.3.8 - January 16, 2026
+
+### Windows Daemon Subprocess Launch Fix
+
+This release fixes a critical bug where the Windows daemon subprocess never started when clicking "Start Service" in the GUI or tray.
+
+#### Problem
+
+Despite v4.3.7 enabling IPC on Windows, clicking "Start Service" did nothing:
+- No daemon process was spawned
+- No error messages were displayed
+- Status remained "Not Running" with no explanation
+
+Testing confirmed the daemon works perfectly when started manually from command line, but subprocess launch from GUI/tray was silently failing.
+
+#### Root Causes
+
+1. **Missing Windows process flags**: `exec.Command().Start()` was not using `SysProcAttr` with `CREATE_NEW_PROCESS_GROUP` for proper subprocess detachment
+2. **Errors never displayed**: Tray stored errors in `lastError` but `updateUI()` never showed them to the user
+3. **No diagnostic logging**: No way to trace where subprocess launch was failing
+
+#### Fixes
+
+1. **Added `SysProcAttr` configuration** for proper Windows subprocess detachment:
+   ```go
+   cmd.SysProcAttr = &syscall.SysProcAttr{
+       CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+   }
+   ```
+
+2. **Made errors visible**: Tray's `updateUI()` now displays `lastError` when service is not running
+
+3. **Added startup logging infrastructure**:
+   - New `internal/daemon/startup_log_windows.go` - writes to `%LOCALAPPDATA%\Rescale\Interlink\logs\daemon-startup.log`
+   - Logs each step of subprocess launch for diagnosis
+   - Captures subprocess stderr to `daemon-stderr.log`
+   - Log is cleared on successful daemon startup
+
+4. **Early daemon logging**: The daemon CLI now writes startup checkpoints immediately, before IPC initialization
+
+#### Files Modified
+
+- `internal/daemon/startup_log_windows.go` - NEW: Startup log infrastructure
+- `internal/daemon/startup_log.go` - NEW: Non-Windows stub
+- `cmd/rescale-int-tray/tray_windows.go` - Display errors, add SysProcAttr, startup logging
+- `internal/wailsapp/daemon_bindings_windows.go` - Add SysProcAttr, startup logging, stderr capture
+- `internal/cli/daemon.go` - Early startup checkpoints
+- Version updates in all relevant files
+
+---
+
 ## v4.3.7 - January 14, 2026
 
 ### Critical Bug Fixes
