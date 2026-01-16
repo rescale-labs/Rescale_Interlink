@@ -56,7 +56,7 @@ jobs:
         shell: pwsh
 
       - name: Create installer
-        run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}" -MsiName "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
+        run: ./build/build_installer.ps1 -ReleaseTag "${{ github.ref_name }}" -MsiName "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
         shell: pwsh
 
       - name: Upload Portable Artifact
