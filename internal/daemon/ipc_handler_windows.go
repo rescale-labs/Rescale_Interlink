@@ -4,77 +4,226 @@
 package daemon
 
 import (
+	"os/user"
+	"sync"
+	"time"
+
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
-// IPCHandler is a stub on Windows.
-// On Windows, the service uses the Windows Service Manager for daemon control,
-// and the IPC is handled by the service package, not the daemon package.
-type IPCHandler struct{}
+// IPCHandler implements ipc.ServiceHandler for the Windows daemon subprocess.
+// v4.4.0: Fully implemented (was previously a stub).
+// This provides the bridge between IPC requests and daemon operations,
+// matching the Unix implementation for feature parity.
+type IPCHandler struct {
+	daemon    *Daemon
+	startTime time.Time
 
-// NewIPCHandler is a stub on Windows.
-// This function exists for API compatibility but should never be called.
-// On Windows, use the service.ServiceIPCHandler instead.
-func NewIPCHandler(daemon *Daemon, shutdownFunc func()) *IPCHandler {
-	return &IPCHandler{}
+	// Pause/resume state
+	mu     sync.RWMutex
+	paused bool
+
+	// Shutdown callback
+	shutdownFunc func()
+
+	// v4.4.0: Log buffer for IPC streaming
+	logBuffer *LogBuffer
 }
 
-// The IPCHandler implements ipc.ServiceHandler but all methods are no-ops on Windows.
-// This satisfies the compiler but shouldn't actually be used.
-
-func (h *IPCHandler) GetStatus() *ipc.StatusData {
-	return &ipc.StatusData{
-		ServiceState: "windows-service",
-		Version:      "4.2.0",
+// NewIPCHandler creates a new IPC handler for the daemon.
+// v4.4.0: Now stores daemon reference for full functionality.
+func NewIPCHandler(daemon *Daemon, shutdownFunc func()) *IPCHandler {
+	return &IPCHandler{
+		daemon:       daemon,
+		startTime:    time.Now(),
+		shutdownFunc: shutdownFunc,
 	}
 }
 
-func (h *IPCHandler) GetUserList() []ipc.UserStatus {
-	return nil
-}
-
-func (h *IPCHandler) PauseUser(userID string) error {
-	return nil
-}
-
-func (h *IPCHandler) ResumeUser(userID string) error {
-	return nil
-}
-
-func (h *IPCHandler) TriggerScan(userID string) error {
-	return nil
-}
-
-func (h *IPCHandler) OpenLogs(userID string) error {
-	return nil
-}
-
-func (h *IPCHandler) Shutdown() error {
-	return nil
-}
-
-func (h *IPCHandler) IsPaused() bool {
-	return false
-}
-
-func (h *IPCHandler) ShouldPoll() bool {
-	return true
-}
-
-// SetLogBuffer is a no-op on Windows.
-// v4.3.6: Added for compile-time compatibility with internal/cli/daemon.go:301
+// SetLogBuffer sets the log buffer for IPC log streaming.
+// v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
-	// No-op on Windows
+	h.logBuffer = buf
 }
 
-// GetRecentLogs is a no-op on Windows.
-// v4.3.6: Added for compile-time compatibility
+// GetStatus returns the current daemon status.
+// v4.4.0: Now returns real data (was previously hardcoded stub).
+func (h *IPCHandler) GetStatus() *ipc.StatusData {
+	h.mu.RLock()
+	state := "running"
+	if h.paused {
+		state = "paused"
+	}
+	h.mu.RUnlock()
+
+	var lastPollPtr *time.Time
+	if h.daemon != nil {
+		lastPoll := h.daemon.GetLastPollTime()
+		if !lastPoll.IsZero() {
+			lastPollPtr = &lastPoll
+		}
+	}
+
+	uptime := time.Since(h.startTime).Round(time.Second).String()
+
+	activeDownloads := 0
+	if h.daemon != nil {
+		activeDownloads = h.daemon.GetActiveDownloads()
+	}
+
+	return &ipc.StatusData{
+		ServiceState:    state,
+		Version:         version.Version,
+		LastScanTime:    lastPollPtr,
+		ActiveDownloads: activeDownloads,
+		ActiveUsers:     1, // Single-user subprocess mode
+		Uptime:          uptime,
+	}
+}
+
+// GetUserList returns the list of user daemon statuses.
+// On Windows subprocess mode, returns a single user (the current user).
+// v4.4.0: Now returns real data (was previously nil).
+func (h *IPCHandler) GetUserList() []ipc.UserStatus {
+	h.mu.RLock()
+	state := "running"
+	if h.paused {
+		state = "paused"
+	}
+	h.mu.RUnlock()
+
+	// Get current user
+	username := "unknown"
+	if u, err := user.Current(); err == nil {
+		username = u.Username
+	}
+
+	var lastPollPtr *time.Time
+	downloadFolder := ""
+	jobsDownloaded := 0
+
+	if h.daemon != nil {
+		lastPoll := h.daemon.GetLastPollTime()
+		if !lastPoll.IsZero() {
+			lastPollPtr = &lastPoll
+		}
+		if h.daemon.cfg != nil {
+			downloadFolder = h.daemon.cfg.DownloadDir
+		}
+		jobsDownloaded = h.daemon.GetDownloadedCount()
+	}
+
+	return []ipc.UserStatus{
+		{
+			Username:       username,
+			State:          state,
+			DownloadFolder: downloadFolder,
+			LastScanTime:   lastPollPtr,
+			JobsDownloaded: jobsDownloaded,
+		},
+	}
+}
+
+// PauseUser pauses auto-download.
+// On Windows subprocess mode, userID is ignored.
+// v4.4.0: Now functional (was previously a no-op).
+func (h *IPCHandler) PauseUser(userID string) error {
+	h.mu.Lock()
+	h.paused = true
+	h.mu.Unlock()
+	if h.daemon != nil && h.daemon.logger != nil {
+		h.daemon.logger.Info().Msg("Daemon paused via IPC")
+	}
+	return nil
+}
+
+// ResumeUser resumes auto-download.
+// On Windows subprocess mode, userID is ignored.
+// v4.4.0: Now functional (was previously a no-op).
+func (h *IPCHandler) ResumeUser(userID string) error {
+	h.mu.Lock()
+	h.paused = false
+	h.mu.Unlock()
+	if h.daemon != nil && h.daemon.logger != nil {
+		h.daemon.logger.Info().Msg("Daemon resumed via IPC")
+	}
+	return nil
+}
+
+// TriggerScan triggers an immediate job scan.
+// v4.4.0: Now functional (was previously a no-op).
+func (h *IPCHandler) TriggerScan(userID string) error {
+	h.mu.RLock()
+	paused := h.paused
+	h.mu.RUnlock()
+
+	if paused {
+		if h.daemon != nil && h.daemon.logger != nil {
+			h.daemon.logger.Warn().Msg("Scan requested but daemon is paused")
+		}
+		return nil
+	}
+
+	if h.daemon != nil {
+		if h.daemon.logger != nil {
+			h.daemon.logger.Info().Msg("Scan triggered via IPC")
+		}
+		h.daemon.TriggerPoll()
+	}
+	return nil
+}
+
+// OpenLogs opens the log viewer.
+// On Windows subprocess mode, this is a no-op (logs go to log file).
+func (h *IPCHandler) OpenLogs(userID string) error {
+	if h.daemon != nil && h.daemon.logger != nil {
+		h.daemon.logger.Debug().Msg("OpenLogs called (no-op in subprocess mode)")
+	}
+	return nil
+}
+
+// GetRecentLogs returns recent log entries from the buffer.
+// v4.4.0: Now functional (was previously returning nil).
 func (h *IPCHandler) GetRecentLogs(count int) []ipc.LogEntryData {
+	if h.logBuffer == nil {
+		return nil
+	}
+	if count <= 0 {
+		count = 100 // Default to 100 entries
+	}
+	return h.logBuffer.GetRecent(count)
+}
+
+// GetLogBuffer returns the log buffer for subscription.
+// v4.4.0: Now functional (was previously returning nil).
+func (h *IPCHandler) GetLogBuffer() *LogBuffer {
+	return h.logBuffer
+}
+
+// Shutdown gracefully stops the daemon.
+// v4.4.0: Now functional (was previously a no-op).
+func (h *IPCHandler) Shutdown() error {
+	if h.daemon != nil && h.daemon.logger != nil {
+		h.daemon.logger.Info().Msg("Shutdown requested via IPC")
+	}
+	if h.shutdownFunc != nil {
+		go h.shutdownFunc()
+	}
 	return nil
 }
 
-// GetLogBuffer is a no-op on Windows.
-// v4.3.6: Added for compile-time compatibility
-func (h *IPCHandler) GetLogBuffer() *LogBuffer {
-	return nil
+// IsPaused returns whether the daemon is currently paused.
+// v4.4.0: Now functional (was previously always returning false).
+func (h *IPCHandler) IsPaused() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.paused
+}
+
+// ShouldPoll returns whether the daemon should perform polling.
+// Returns false if paused.
+// v4.4.0: Now functional (was previously always returning true).
+func (h *IPCHandler) ShouldPoll() bool {
+	return !h.IsPaused()
 }

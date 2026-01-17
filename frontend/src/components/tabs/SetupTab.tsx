@@ -1131,9 +1131,9 @@ export function SetupTab() {
                     >
                       {isDaemonLoading ? 'Starting...' : 'Start Service'}
                     </button>
-                  ) : daemonStatus?.managedBy ? (
+                  ) : daemonStatus?.managedBy === "Windows Service" ? (
                     <span className="text-sm text-gray-500">
-                      Use {daemonStatus.managedBy} to control
+                      Use Windows Service Manager to control
                     </span>
                   ) : (
                     <>

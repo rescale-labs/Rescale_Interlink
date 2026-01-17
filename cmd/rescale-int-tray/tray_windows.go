@@ -19,6 +19,10 @@ import (
 	"github.com/rescale/rescale-int/internal/version"
 )
 
+// Windows process creation flag to hide console window.
+// v4.3.9: Required for subprocess mode to not show a blank console.
+const createNoWindow = 0x08000000
+
 const (
 	// Status refresh interval
 	refreshInterval = 5 * time.Second
@@ -323,9 +327,9 @@ func (a *trayApp) startService() {
 	// Start daemon with IPC enabled
 	cmd := exec.Command(cliPath, args...)
 
-	// v4.3.8: Windows process flags for proper subprocess detachment
+	// v4.3.9: Windows process flags for proper subprocess detachment + hidden console
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | createNoWindow,
 	}
 
 	// Detach stdin/stdout, but capture stderr for debugging

@@ -326,10 +326,11 @@ Examples:
 				defer ipcServer.Stop()
 				logger.Info().Str("socket", ipcServer.GetSocketPath()).Msg("IPC server listening")
 
-				// v4.3.8: Clear startup log on successful IPC start (daemon is now running)
+				// v4.3.9: Log successful IPC start but DON'T clear startup log
+				// Keeping the log aids debugging - users can see the full startup sequence
 				if runtime.GOOS == "windows" {
 					daemon.WriteStartupLog("SUCCESS: IPC server started at %s", ipcServer.GetSocketPath())
-					daemon.ClearStartupLog()
+					// Note: Previously called ClearStartupLog() here, removed in v4.3.9 for better diagnostics
 				}
 			}
 

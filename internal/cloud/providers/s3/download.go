@@ -105,7 +105,13 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer file.Close()
+	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			file.Close()
+		}
+	}()
 
 	// If no progress callback or no total size, just copy directly
 	if progressCallback == nil || totalSize <= 0 {
@@ -113,6 +119,14 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 		if err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
 		}
+		// v4.4.0: Sync and close before returning
+		if err := file.Sync(); err != nil {
+			return fmt.Errorf("failed to sync file to disk: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("failed to close file: %w", err)
+		}
+		fileClosed = true
 		return nil
 	}
 
@@ -153,6 +167,12 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
+	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
+
 	return nil
 }
 
@@ -164,7 +184,13 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer file.Close()
+	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			file.Close()
+		}
+	}()
 
 	chunkSize := int64(constants.ChunkSize)
 	var offset int64 = 0
@@ -210,6 +236,12 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
+
+	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
 
 	return nil
 }
@@ -305,7 +337,13 @@ func (p *Provider) downloadChunkedConcurrent(
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
+	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			file.Close()
+		}
+	}()
 
 	// Concurrent download implementation
 	type chunkJob struct {
@@ -506,6 +544,12 @@ func (p *Provider) downloadChunkedConcurrent(
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
+
+	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
 
 	// Download complete - clean up resume state
 	state.DeleteDownloadState(localPath)

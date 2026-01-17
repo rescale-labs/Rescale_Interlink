@@ -39,6 +39,14 @@ type ServiceHandler interface {
 	// OpenLogs opens the log viewer for a user or the service.
 	// If userID is "service", opens service logs; otherwise opens user logs.
 	OpenLogs(userID string) error
+
+	// Shutdown gracefully stops the daemon.
+	// v4.3.9: Added to allow stopping daemon via IPC (for parity with Unix).
+	Shutdown() error
+
+	// GetRecentLogs returns recent log entries from the daemon.
+	// v4.3.9: Added to Windows for parity with Unix.
+	GetRecentLogs(count int) []LogEntryData
 }
 
 // Server handles IPC requests from clients via named pipe.
@@ -240,8 +248,27 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return NewOKResponse()
 
 	case MsgShutdown:
-		// Shutdown is handled by SCM, not IPC
-		return NewErrorResponse("shutdown via IPC not supported; use service manager")
+		// v4.3.9: Allow shutdown via IPC (for parity with Unix, enables GUI Stop button)
+		if err := s.handler.Shutdown(); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		// Schedule server stop after response is sent to client
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			time.Sleep(100 * time.Millisecond)
+			s.Stop()
+		}()
+		return NewOKResponse()
+
+	case MsgGetRecentLogs:
+		// v4.3.9: Added to Windows for parity with Unix
+		logs := s.handler.GetRecentLogs(100) // Default to 100 entries
+		resp := NewOKResponse()
+		resp.Data = LogsResponseData{
+			Logs: logs,
+		}
+		return resp
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))

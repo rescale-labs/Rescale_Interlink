@@ -1,5 +1,113 @@
 # Release Notes - Rescale Interlink
 
+## v4.4.2 - January 17, 2026
+
+### Checksum Verification Race Condition - Final Fix
+
+This release eliminates the remaining transient checksum verification failures by removing the "double verification" race condition.
+
+#### Problem
+
+Despite v4.4.1 adding checksum-during-write for CBC streaming, sporadic failures (1 in 265) still occurred:
+- Error: `checksum mismatch... (after 3 attempts)`
+- Manual retry always succeeds
+
+#### Root Cause: Double Verification
+
+The issue was "double verification":
+1. CBC streaming computes hash during write → PASS ✓
+2. Post-download `verifyChecksum()` re-reads file from disk → may get stale cache → FAIL ✗
+
+Even with 3 retries (100ms delay each), filesystem cache may not be coherent.
+
+#### Solution
+
+Return computed hash from `Download()` instead of re-reading file:
+
+1. **CBC streaming (v2)**: Already computed hash during write - now returns it
+2. **HKDF streaming (v1)**: Reads file after all parts written (same file handle) to compute hash
+3. **Legacy (v0)**: New `DecryptFileWithHash()` computes hash during decryption
+
+The caller uses the returned hash for verification - **no file re-read needed**.
+
+#### Files Modified
+
+- `internal/cloud/transfer/downloader.go` - Return computed hash from Download()
+- `internal/crypto/encryption.go` - Add DecryptFileWithHash() for legacy format
+- `internal/cloud/download/download.go` - Use returned hash, skip re-verification
+- Version updates in all relevant files
+
+#### Testing
+
+- Download 300+ files concurrently
+- Verify ZERO checksum failures
+
+---
+
+## v4.4.1 - January 16, 2026
+
+### Checksum Verification Improvements
+
+This release added checksum-during-write for CBC streaming downloads and retry logic.
+
+#### Changes
+
+1. **Checksum-during-write** (CBC streaming): Calculate SHA-512 hash as bytes are written, eliminating post-download race condition
+2. **Retry safety net**: Post-download verification retries up to 3 times with 100ms delay
+
+#### Note
+
+v4.4.2 supersedes this with a complete fix that eliminates the race condition entirely.
+
+---
+
+## v4.4.0 - January 16, 2026
+
+### Windows Daemon Fixes & Download Reliability
+
+This release combines Windows daemon fixes with critical download reliability improvements.
+
+#### Fix A: Checksum Race Condition (9 files)
+
+**Problem**: ~1 in 50-100 downloads failed checksum with empty file hash. Failed more at START of batch transfers.
+
+**Root Cause**: `defer file.Close()` executes AFTER the function returns, but `verifyChecksum()` is called IMMEDIATELY after. On Windows, deferred Close() was still pending when verification tried to read the file.
+
+**Fix**: Removed `defer file.Close()` and added explicit `Close()` AFTER `Sync()` but BEFORE returning.
+
+**Files Modified**: 9 locations across downloader.go, s3/download.go, azure/download.go, download.go
+
+#### Fix B: Real Windows IPCHandler Implementation
+
+**Problem**: Windows daemon subprocess used a stub IPCHandler that returned nil for all methods:
+- Activity tab showed no logs
+- Pause/Resume didn't work
+- TriggerScan didn't work
+
+**Fix**: Fully implemented `internal/daemon/ipc_handler_windows.go`:
+- SetLogBuffer/GetRecentLogs actually work
+- GetStatus returns real data (uptime, active downloads)
+- PauseUser/ResumeUser track state properly
+- TriggerScan calls daemon.TriggerPoll()
+- Shutdown calls shutdownFunc
+
+#### Fix C: Retry Reuses Same Entry
+
+**Problem**: Clicking retry created a NEW transfer entry instead of updating the failed one.
+
+**Fix**: Modified `internal/transfer/queue.go:Retry()` to reset the existing task.
+
+#### v4.3.9 Changes (Included)
+
+1. CREATE_NO_WINDOW flag - Hides console window on subprocess launch
+2. managedBy logic - Shows Stop/Pause/Resume buttons for subprocess mode
+3. IPC Shutdown handler - Enables Stop button on Windows
+4. GetRecentLogs handler - Fixes "unknown message type" error
+5. False "Running" state fix - Trust IPC as source of truth
+6. Frontend button logic - Only hide buttons for "Windows Service"
+
+---
+
 ## v4.3.8 - January 16, 2026
 
 ### Windows Daemon Subprocess Launch Fix
