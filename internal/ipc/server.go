@@ -264,11 +264,7 @@ func (s *Server) handleRequest(req *Request) *Response {
 	case MsgGetRecentLogs:
 		// v4.3.9: Added to Windows for parity with Unix
 		logs := s.handler.GetRecentLogs(100) // Default to 100 entries
-		resp := NewOKResponse()
-		resp.Data = LogsResponseData{
-			Logs: logs,
-		}
-		return resp
+		return NewRecentLogsResponse(logs)
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))
