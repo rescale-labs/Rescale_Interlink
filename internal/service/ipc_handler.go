@@ -203,5 +203,23 @@ func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 	return nil
 }
 
+// Shutdown gracefully stops the multi-user daemon service.
+// v4.3.9: Added to allow stopping daemon via IPC (enables GUI Stop button on Windows).
+func (h *ServiceIPCHandler) Shutdown() error {
+	h.logger.Info().Msg("IPC shutdown requested")
+	h.service.Stop()
+	return nil
+}
+
+// GetRecentLogs returns recent log entries from the daemon.
+// v4.3.9: Added to Windows for parity with Unix. Currently returns empty slice
+// since multi-user daemon doesn't have a centralized log buffer.
+func (h *ServiceIPCHandler) GetRecentLogs(count int) []ipc.LogEntryData {
+	// The multi-user daemon doesn't maintain a centralized log buffer
+	// like the single-user daemon does. Logs are per-user.
+	// Return empty slice for now - users can check log files directly.
+	return []ipc.LogEntryData{}
+}
+
 // Ensure ServiceIPCHandler implements ipc.ServiceHandler
 var _ ipc.ServiceHandler = (*ServiceIPCHandler)(nil)

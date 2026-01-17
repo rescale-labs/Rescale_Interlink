@@ -21,6 +21,10 @@ import (
 	"github.com/rescale/rescale-int/internal/version"
 )
 
+// Windows process creation flag to hide console window.
+// v4.3.9: Required for subprocess mode to not show a blank console.
+const createNoWindow = 0x08000000
+
 // DaemonStatusDTO represents the daemon status for the frontend.
 type DaemonStatusDTO struct {
 	// Running indicates if the daemon process is running
@@ -94,41 +98,29 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 			result.DownloadFolder = users[0].DownloadFolder
 		}
 
-		// v4.3.7: Check if running as Windows Service (optional, for display only)
-		// This may fail with "Access is denied" for non-admin users, but that's OK
+		// v4.3.9: Only set ManagedBy for actual Windows Service mode
+		// Leave empty for subprocess mode so GUI shows control buttons (Stop/Pause/Resume)
 		if svcStatus, err := service.QueryStatus(); err == nil && svcStatus == service.StatusRunning {
 			result.ManagedBy = "Windows Service"
-		} else {
-			result.ManagedBy = "Subprocess"
 		}
+		// Otherwise leave ManagedBy empty - subprocess mode allows GUI control
 
 		return result
 	}
 
-	// v4.3.7: IPC not responding - try Windows Service status as fallback (may fail without admin)
-	// This is just informational - we don't error if it fails
-	if svcStatus, err := service.QueryStatus(); err == nil {
-		switch svcStatus {
-		case service.StatusRunning:
-			result.Running = true
-			result.State = "running"
+	// v4.3.9: IPC not responding - check if Windows Service is installed/running
+	// IMPORTANT: Don't set result.Running=true based on SCM alone!
+	// IPC is the source of truth for subprocess mode.
+	// Only show informational message if Windows Service is detected but IPC fails.
+	if service.IsInstalled() {
+		if svcStatus, err := service.QueryStatus(); err == nil && svcStatus == service.StatusRunning {
+			// Windows Service registered as running but IPC not responding = problem state
 			result.ManagedBy = "Windows Service"
-			result.Error = "Service is running but IPC not responding"
-		case service.StatusPaused:
-			result.Running = true
-			result.State = "paused"
-			result.ManagedBy = "Windows Service"
-		case service.StatusStartPending, service.StatusContinuePending:
-			result.Running = true
-			result.State = "starting"
-			result.ManagedBy = "Windows Service"
-		case service.StatusStopPending, service.StatusPausePending:
-			result.Running = true
-			result.State = "stopping"
-			result.ManagedBy = "Windows Service"
+			result.Error = "Windows Service running but IPC not responding - try restarting service"
+			// Note: result.Running stays false - IPC is the authoritative source
 		}
 	}
-	// Note: If SCM query fails (no admin), result stays "stopped" which is correct for subprocess mode
+	// For subprocess mode: if IPC fails, daemon is NOT running (default state is correct)
 
 	return result
 }
@@ -248,9 +240,9 @@ func (a *App) startDaemonSubprocess() error {
 	// Start daemon with IPC enabled
 	cmd := exec.Command(cliPath, args...)
 
-	// v4.3.8: Windows process flags for proper subprocess detachment
+	// v4.3.9: Windows process flags for proper subprocess detachment + hidden console
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | createNoWindow,
 	}
 
 	// Detach stdin/stdout, but capture stderr for debugging

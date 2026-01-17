@@ -305,14 +305,14 @@ func (q *Queue) CancelAll() {
 	}
 }
 
-// Retry creates a new task to retry a failed or cancelled task.
-// The new task is passed to the RetryExecutor for execution.
-// Returns the new task ID.
+// Retry resets a failed or cancelled task and re-queues it for execution.
+// v4.4.0: Now reuses the same task entry instead of creating a duplicate.
+// Returns the same task ID (not a new one).
 func (q *Queue) Retry(taskID string) (string, error) {
-	q.mu.RLock()
+	q.mu.Lock()
 	originalTask, exists := q.tasksByID[taskID]
 	executor := q.retryExecutor
-	q.mu.RUnlock()
+	q.mu.Unlock()
 
 	if !exists || originalTask == nil {
 		return "", errors.New("task not found")
@@ -326,21 +326,26 @@ func (q *Queue) Retry(taskID string) (string, error) {
 		return "", errors.New("no retry executor configured")
 	}
 
-	// Create a new task with same parameters
-	newTask := NewTransferTask(originalTask.Type, originalTask.Name, originalTask.Source, originalTask.Dest, originalTask.Size)
-	newTask.State = TaskQueued
+	// v4.4.0: Reset the existing task instead of creating a new one.
+	// This keeps a single entry in the queue instead of duplicates.
+	originalTask.mu.Lock()
+	originalTask.State = TaskQueued
+	originalTask.Progress = 0.0
+	originalTask.Speed = 0.0
+	originalTask.Error = nil
+	originalTask.StartedAt = time.Time{}
+	originalTask.CompletedAt = time.Time{}
+	originalTask.lastBytes = 0
+	originalTask.lastUpdateTime = time.Time{}
+	// Note: Keep ID, Type, Name, Source, Dest, Size, CreatedAt unchanged
+	originalTask.mu.Unlock()
 
-	q.mu.Lock()
-	q.tasks = append(q.tasks, newTask)
-	q.tasksByID[newTask.ID] = newTask
-	q.mu.Unlock()
-
-	q.publishTransferEvent(events.EventTransferQueued, newTask)
+	q.publishTransferEvent(events.EventTransferQueued, originalTask)
 
 	// Execute retry via executor (in goroutine to not block)
-	go executor.ExecuteRetry(newTask)
+	go executor.ExecuteRetry(originalTask)
 
-	return newTask.ID, nil
+	return taskID, nil // v4.4.0: Return same ID, not a new one
 }
 
 // ClearCompleted removes all completed/failed/cancelled tasks from the queue.

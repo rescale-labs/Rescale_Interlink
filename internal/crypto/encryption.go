@@ -291,6 +291,119 @@ func DecryptFile(inputPath, outputPath string, key, iv []byte) error {
 	return nil
 }
 
+// DecryptFileWithHash decrypts a file using AES-256-CBC with PKCS7 padding and returns the SHA-512 hash.
+// v4.4.2: Computes hash during decryption to avoid re-reading file for verification.
+// This eliminates the race condition where post-download verification could read stale cache data.
+func DecryptFileWithHash(inputPath, outputPath string, key, iv []byte) (string, error) {
+	if len(key) != KeySize {
+		return "", fmt.Errorf("key must be %d bytes", KeySize)
+	}
+	if len(iv) != IVSize {
+		return "", fmt.Errorf("IV must be %d bytes", IVSize)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer inputFile.Close()
+
+	// Get file size to know when we're at the last block (for unpadding)
+	fileInfo, err := inputFile.Stat()
+	if err != nil {
+		return "", fmt.Errorf("failed to stat input file: %w", err)
+	}
+	fileSize := fileInfo.Size()
+
+	// Validate that encrypted file size is a multiple of AES block size
+	if fileSize%int64(aes.BlockSize) != 0 {
+		return "", fmt.Errorf("encrypted file size (%d bytes) is not a multiple of AES block size (%d) - file may be corrupted or download was interrupted", fileSize, aes.BlockSize)
+	}
+
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	mode := cipher.NewCBCDecrypter(block, iv)
+	hasher := sha512.New() // v4.4.2: Compute hash during write
+
+	// Use pooled buffer to reduce allocations
+	bufferPtr := buffers.GetSmallBuffer()
+	defer buffers.PutSmallBuffer(bufferPtr)
+	buffer := *bufferPtr
+	var pendingData []byte
+	var totalRead int64
+
+	for {
+		n, err := inputFile.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to read input file: %w", err)
+		}
+
+		totalRead += int64(n)
+		pendingData = append(pendingData, buffer[:n]...)
+
+		// Process complete blocks, but save the last block for special handling (unpadding)
+		isLastChunk := (totalRead == fileSize)
+
+		var toProcess []byte
+		if isLastChunk {
+			// Last chunk - process everything (will unpad below)
+			toProcess = pendingData
+			pendingData = nil
+		} else {
+			// Not last chunk - process all complete blocks, keep partial block for next iteration
+			completeBlocks := (len(pendingData) / aes.BlockSize) * aes.BlockSize
+			if completeBlocks > 0 {
+				toProcess = pendingData[:completeBlocks]
+				pendingData = pendingData[completeBlocks:]
+			}
+		}
+
+		if len(toProcess) > 0 {
+			// Defensive check: ensure data is block-aligned before decryption
+			if len(toProcess)%aes.BlockSize != 0 {
+				return "", fmt.Errorf("internal error: data not block-aligned (%d bytes)", len(toProcess))
+			}
+
+			// Decrypt the blocks
+			decrypted := make([]byte, len(toProcess))
+			mode.CryptBlocks(decrypted, toProcess)
+
+			// If this is the last chunk, remove padding
+			if isLastChunk {
+				decrypted, err = pkcs7Unpad(decrypted)
+				if err != nil {
+					return "", fmt.Errorf("failed to unpad data: %w", err)
+				}
+			}
+
+			// v4.4.2: Write to both file and hasher
+			if _, err := outputFile.Write(decrypted); err != nil {
+				return "", fmt.Errorf("failed to write decrypted data: %w", err)
+			}
+			hasher.Write(decrypted)
+		}
+	}
+
+	// v4.4.2: Sync and close explicitly before returning
+	if err := outputFile.Sync(); err != nil {
+		return "", fmt.Errorf("failed to sync file: %w", err)
+	}
+
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
 // EncodeBase64 encodes bytes to base64 string
 func EncodeBase64(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
