@@ -111,25 +111,23 @@ jobs:
         run: |
           zip rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip rescale-int
 
-      - name: Notarize and Staple
-        if: false
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Write App Store Connect API key to disk
+        shell: bash
         run: |
-          # Zip the app for notarization
-          zip rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip rescale-int
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notary"
+          echo "${{ secrets.ASC_API_KEY_P8_B64 }}" | base64 --decode > "$RUNNER_TEMP/notary/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
 
-          # Submit for notarization
-          xcrun notarytool submit rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$TEAM_ID" \
+      - name: Notarize
+        if: false
+        shell: bash
+        run: |
+          xcrun notarytool submit "MyApp.zip" \
+            --key "$RUNNER_TEMP/notary/AuthKey.p8" \
+            --key-id "${{ secrets.ASC_KEY_ID }}" \
+            --issuer "${{ secrets.ASC_ISSUER_ID }}" \
             --wait
-
-          # Staple the ticket to the binary
-          xcrun stapler staple rescale-int
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
