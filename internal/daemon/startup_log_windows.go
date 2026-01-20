@@ -8,17 +8,16 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 // StartupLogPath returns the path to the daemon startup log.
 // v4.3.8: This log captures early startup errors BEFORE IPC is available,
 // allowing diagnosis of subprocess launch failures from GUI/tray.
+// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 func StartupLogPath() string {
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if localAppData == "" {
-		return filepath.Join(os.TempDir(), "rescale-daemon-startup.log")
-	}
-	return filepath.Join(localAppData, "Rescale", "Interlink", "logs", "daemon-startup.log")
+	return filepath.Join(config.LogDirectory(), "daemon-startup.log")
 }
 
 // WriteStartupLog appends a message to the startup log.

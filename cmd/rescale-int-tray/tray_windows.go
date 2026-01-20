@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -139,7 +140,7 @@ func (a *trayApp) refreshStatus() {
 
 	if err != nil {
 		a.serviceRunning = false
-		a.lastError = err.Error()
+		a.lastError = translateError(err)
 		a.lastStatus = nil
 		a.updateUI()
 		return
@@ -155,6 +156,19 @@ func (a *trayApp) refreshStatus() {
 // Must be called with a.mu held.
 func (a *trayApp) updateUI() {
 	if !a.serviceRunning {
+		// v4.4.2: Check if this is first-time setup (no daemon.conf exists)
+		configPath, _ := config.DefaultDaemonConfigPath()
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nFirst-time setup: Click 'Configure...' to set download folder", version.Version))
+			a.mStatus.SetTitle("Status: Not Configured")
+			a.mStartService.Enable()
+			a.mStartService.Show()
+			a.mPause.Disable()
+			a.mResume.Disable()
+			a.mTriggerScan.Disable()
+			return
+		}
+
 		// v4.3.8: Show last error if available (errors were previously stored but never displayed)
 		if a.lastError != "" {
 			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running\nError: %s", version.Version, a.lastError))
@@ -256,7 +270,7 @@ func (a *trayApp) startService() {
 	exePath, err := os.Executable()
 	if err != nil {
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Failed to find executable path: %v", err)
+		a.lastError = translateError(fmt.Errorf("executable path: %w", err))
 		a.mu.Unlock()
 		return
 	}
@@ -267,25 +281,42 @@ func (a *trayApp) startService() {
 	// Check if CLI exists
 	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
 		a.mu.Lock()
-		a.lastError = "CLI not found: rescale-int.exe"
+		a.lastError = translateError(fmt.Errorf("CLI not found: rescale-int.exe"))
 		a.mu.Unlock()
 		return
 	}
 
 	// v4.2.0: Load settings from daemon.conf
+	// v4.4.2: Pre-flight validation before starting daemon
 	daemonCfg, err := config.LoadDaemonConfig("")
 	if err != nil {
-		// Log but continue with defaults
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Warning: failed to load daemon.conf: %v", err)
+		a.lastError = "Configuration error. Open Interlink to configure."
 		a.mu.Unlock()
-		daemonCfg = config.NewDaemonConfig()
+		return
 	}
 
 	downloadDir := daemonCfg.Daemon.DownloadFolder
 	if downloadDir == "" {
 		downloadDir = config.DefaultDownloadFolder()
 	}
+
+	// v4.4.2: Validate download folder parent exists or can be created
+	parent := filepath.Dir(downloadDir)
+	if _, err := os.Stat(parent); os.IsNotExist(err) {
+		a.mu.Lock()
+		a.lastError = fmt.Sprintf("Download folder parent doesn't exist: %s", parent)
+		a.mu.Unlock()
+		return
+	}
+
+	// v4.4.2: Resolve junctions/symlinks to physical paths before passing to daemon
+	// This helps when Downloads is a junction to a network drive (e.g., Z:\Downloads on Rescale VMs)
+	// The subprocess may not have the same drive mappings as the tray app's session
+	if resolved, err := filepath.EvalSymlinks(downloadDir); err == nil {
+		downloadDir = resolved
+	}
+
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
 	// Build command arguments
@@ -314,7 +345,8 @@ func (a *trayApp) startService() {
 	daemon.WriteStartupLog("Arguments: %v", args)
 
 	// v4.3.8: Create stderr capture file for subprocess diagnostics
-	logsDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Rescale", "Interlink", "logs")
+	// v4.4.2: Use centralized log directory
+	logsDir := config.LogDirectory()
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
 	}
@@ -342,13 +374,12 @@ func (a *trayApp) startService() {
 	daemon.WriteStartupLog("Calling cmd.Start()...")
 
 	if err := cmd.Start(); err != nil {
-		errMsg := fmt.Sprintf("Failed to start service: %v", err)
-		daemon.WriteStartupLog("ERROR: %s", errMsg)
+		daemon.WriteStartupLog("ERROR: Failed to start service: %v", err)
 		if stderrFile != nil {
 			stderrFile.Close()
 		}
 		a.mu.Lock()
-		a.lastError = errMsg
+		a.lastError = translateError(err)
 		a.mu.Unlock()
 		return
 	}
@@ -416,7 +447,7 @@ func (a *trayApp) triggerScan() {
 	err := a.client.TriggerScan(ctx, username)
 	if err != nil {
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Scan failed: %v", err)
+		a.lastError = translateError(err)
 		a.mu.Unlock()
 	}
 
@@ -435,7 +466,7 @@ func (a *trayApp) pauseAutoDownload() {
 	err := a.client.PauseUser(ctx, username)
 	if err != nil {
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Pause failed: %v", err)
+		a.lastError = translateError(err)
 		a.mu.Unlock()
 	}
 
@@ -454,7 +485,7 @@ func (a *trayApp) resumeAutoDownload() {
 	err := a.client.ResumeUser(ctx, username)
 	if err != nil {
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Resume failed: %v", err)
+		a.lastError = translateError(err)
 		a.mu.Unlock()
 	}
 
@@ -465,22 +496,15 @@ func (a *trayApp) resumeAutoDownload() {
 
 // viewLogs opens the logs directory in Explorer.
 // v4.0.7: This runs locally in user context (not via IPC to service).
+// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 func (a *trayApp) viewLogs() {
-	// Get user's config directory
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Failed to get home directory: %v", err)
-		a.mu.Unlock()
-		return
-	}
-
-	logsDir := filepath.Join(homeDir, ".config", "rescale", "logs")
+	// v4.4.2: Use centralized log directory path
+	logsDir := config.LogDirectory()
 
 	// Create if doesn't exist
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Failed to create logs directory: %v", err)
+		a.lastError = "Failed to create logs directory"
 		a.mu.Unlock()
 		// Continue anyway - directory might already exist
 	}
@@ -488,7 +512,7 @@ func (a *trayApp) viewLogs() {
 	// v4.0.7 M5: Check for launch errors
 	if err := exec.Command("explorer.exe", logsDir).Start(); err != nil {
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Failed to open logs directory: %v", err)
+		a.lastError = "Failed to open logs directory"
 		a.mu.Unlock()
 	}
 }
@@ -499,6 +523,40 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// translateError converts technical errors to user-friendly messages.
+// v4.4.2: Improves UX by showing actionable messages instead of raw Go errors.
+func translateError(err error) string {
+	if err == nil {
+		return ""
+	}
+	errStr := err.Error()
+
+	switch {
+	case strings.Contains(errStr, "pipe\\rescale-interlink") ||
+		strings.Contains(errStr, "The system cannot find the file specified"):
+		return "Service not running. Click 'Start Service' to begin."
+	case strings.Contains(errStr, "CLI not found"):
+		return "Interlink CLI not found. Please reinstall."
+	case strings.Contains(errStr, "failed to load daemon.conf"):
+		return "Configuration not found. Using defaults."
+	case strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded"):
+		return "Service not responding. Try restarting."
+	case strings.Contains(errStr, "access denied") || strings.Contains(errStr, "Access is denied") ||
+		strings.Contains(errStr, "permission"):
+		return "Permission denied. Run as administrator."
+	case strings.Contains(errStr, "already running"):
+		return "Service is already running."
+	case strings.Contains(errStr, "executable path"):
+		return "Cannot find Interlink executable."
+	default:
+		// Keep short errors, truncate long ones intelligently
+		if len(errStr) > 60 {
+			return errStr[:57] + "..."
+		}
+		return errStr
+	}
 }
 
 // getCurrentUsername returns the current Windows username for IPC calls.

@@ -2,6 +2,7 @@
 
 // Package wailsapp provides the Wails-based GUI for Rescale Interlink.
 // v4.3.2: Cross-platform file logging with rotation.
+// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 package wailsapp
 
 import (
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/config"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -26,6 +28,7 @@ var (
 
 // InitFileLogger initializes file-based logging with rotation.
 // v4.3.2: Now works on all platforms (macOS, Linux, Windows).
+// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 // Location: %LOCALAPPDATA%\Rescale\Interlink\logs
 func InitFileLogger() error {
 	fileLoggerMu.Lock()
@@ -35,15 +38,8 @@ func InitFileLogger() error {
 		return nil // Already initialized
 	}
 
-	// Get %LOCALAPPDATA%
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if localAppData == "" {
-		fileLoggerMu.Unlock()
-		return fmt.Errorf("LOCALAPPDATA environment variable not set")
-	}
-
-	// Create log directory
-	logDir := filepath.Join(localAppData, "Rescale", "Interlink", "logs")
+	// v4.4.2: Use centralized log directory
+	logDir := config.LogDirectory()
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		fileLoggerMu.Unlock()
 		return fmt.Errorf("failed to create log directory: %w", err)

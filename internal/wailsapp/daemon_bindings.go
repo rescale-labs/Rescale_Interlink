@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -130,6 +131,12 @@ func (a *App) StartDaemon() error {
 	if downloadDir == "" {
 		downloadDir = config.DefaultDownloadFolder()
 	}
+
+	// v4.4.2: Resolve symlinks to physical paths for consistency
+	if resolved, err := filepath.EvalSymlinks(downloadDir); err == nil {
+		downloadDir = resolved
+	}
+
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
 	// Build command arguments
@@ -595,5 +602,43 @@ func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 	}
 
 	return result
+}
+
+// =============================================================================
+// Logs Directory Access (v4.4.2)
+// =============================================================================
+
+// OpenLogsDirectory opens the logs folder in the system file explorer.
+// v4.4.2: Added for GUI access to unified log directory.
+func (a *App) OpenLogsDirectory() error {
+	logsDir := config.LogDirectory()
+
+	// Ensure directory exists
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create logs directory: %w", err)
+	}
+
+	// Open in system file browser
+	// macOS uses "open", Linux uses "xdg-open"
+	var cmd *exec.Cmd
+	if _, err := exec.LookPath("open"); err == nil {
+		// macOS
+		cmd = exec.Command("open", logsDir)
+	} else {
+		// Linux
+		cmd = exec.Command("xdg-open", logsDir)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to open logs directory: %w", err)
+	}
+
+	return nil
+}
+
+// GetLogsDirectory returns the unified logs directory path.
+// v4.4.2: For displaying log location in UI.
+func (a *App) GetLogsDirectory() string {
+	return config.LogDirectory()
 }
 
