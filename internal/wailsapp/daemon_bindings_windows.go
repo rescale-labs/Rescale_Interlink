@@ -128,6 +128,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 // StartDaemon starts the daemon as a subprocess (no admin required).
 // v4.3.7: Uses subprocess mode by default instead of Windows Service (which requires admin).
 // v4.3.8: Added startup logging with clear log path in error messages.
+// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 // Similar to tray's startService() in tray_windows.go.
 func (a *App) StartDaemon() error {
 	// Check if already running via IPC
@@ -140,7 +141,8 @@ func (a *App) StartDaemon() error {
 	}
 
 	// v4.3.8: Log startup log path for user reference
-	logsDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Rescale", "Interlink", "logs")
+	// v4.4.2: Use centralized log directory
+	logsDir := config.LogDirectory()
 	a.logInfo("Daemon", fmt.Sprintf("Starting daemon subprocess (logs: %s)", logsDir))
 
 	// Start daemon as subprocess
@@ -199,6 +201,14 @@ func (a *App) startDaemonSubprocess() error {
 	if downloadDir == "" {
 		downloadDir = config.DefaultDownloadFolder()
 	}
+
+	// v4.4.2: Resolve junctions/symlinks to physical paths
+	// This handles Windows junction points (e.g., Downloads -> Z:\Downloads on Rescale VMs)
+	// The subprocess may not have access to the same drive mappings
+	if resolved, err := filepath.EvalSymlinks(downloadDir); err == nil {
+		downloadDir = resolved
+	}
+
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
 	// Build command arguments
@@ -227,7 +237,8 @@ func (a *App) startDaemonSubprocess() error {
 	daemon.WriteStartupLog("Arguments: %v", args)
 
 	// v4.3.8: Create stderr capture file for subprocess diagnostics
-	logsDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Rescale", "Interlink", "logs")
+	// v4.4.2: Use centralized log directory
+	logsDir := config.LogDirectory()
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
 	}
@@ -718,4 +729,32 @@ func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 	}
 
 	return result
+}
+
+// =============================================================================
+// Logs Directory Access (v4.4.2)
+// =============================================================================
+
+// OpenLogsDirectory opens the logs folder in the system file explorer.
+// v4.4.2: Added for GUI access to unified log directory.
+func (a *App) OpenLogsDirectory() error {
+	logsDir := config.LogDirectory()
+
+	// Ensure directory exists
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create logs directory: %w", err)
+	}
+
+	// Open in Explorer on Windows
+	if err := exec.Command("explorer.exe", logsDir).Start(); err != nil {
+		return fmt.Errorf("failed to open logs directory: %w", err)
+	}
+
+	return nil
+}
+
+// GetLogsDirectory returns the unified logs directory path.
+// v4.4.2: For displaying log location in UI.
+func (a *App) GetLogsDirectory() string {
+	return config.LogDirectory()
 }
