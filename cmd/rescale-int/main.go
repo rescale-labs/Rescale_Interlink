@@ -14,8 +14,8 @@ import (
 
 // Version information
 var (
-	Version   = "v4.4.2"
-	BuildTime = "2026-01-16"
+	Version   = "v4.4.3"
+	BuildTime = "2026-01-25"
 )
 
 // FIPSEnabled indicates whether FIPS 140-3 mode is active

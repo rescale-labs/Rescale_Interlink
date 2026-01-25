@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.2.1
-**Last Updated**: January 8, 2026
+**Version**: 4.4.2
+**Last Updated**: January 19, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -508,6 +508,35 @@ func DecryptFileStreaming(src, dst string, key, iv []byte) error {
 - Streaming encryption/decryption using 16KB chunks
 - Prevents memory exhaustion on large files (60GB+)
 - Constant ~16KB memory footprint regardless of file size
+
+### File Permissions Security (v4.4.2)
+
+**State files** containing sensitive data (encryption keys, IVs, master keys) are created with secure permissions:
+
+| File Type | Location | Permissions | Contains |
+|-----------|----------|-------------|----------|
+| Upload resume | `<file>.upload.resume` | 0600 | EncryptionKey, IV, MasterKey |
+| Upload lock | `<file>.upload.lock` | 0600 | Process metadata |
+| Download resume | `<file>.download.resume` | 0600 | MasterKey, StreamingFileId |
+| Daemon state | `~/.config/rescale-int/daemon-state.json` | 0600 | Job metadata |
+| Token file | `~/.config/rescale-int/token` | 0600 | API key |
+
+**Implementation**: All `os.WriteFile()` calls for sensitive data use mode `0600`.
+
+### Windows IPC Security (v4.4.2)
+
+**Named Pipe Authorization**: The Windows IPC server (`internal/ipc/server.go`) implements per-user authorization:
+
+1. **Owner SID Capture**: Daemon captures current user's SID at startup
+2. **Caller SID Extraction**: Each connection extracts caller's SID via `GetNamedPipeClientProcessId`
+3. **Authorization Check**: Modify operations require SID match
+
+| Operation | Authorization |
+|-----------|---------------|
+| GetStatus, GetUserList, GetRecentLogs, OpenLogs | Open (read-only) |
+| PauseUser, ResumeUser, TriggerScan, Shutdown | Owner SID required |
+
+**Rationale**: Prevents User A from controlling User B's daemon on multi-user Windows systems.
 
 ---
 

@@ -54,6 +54,8 @@ export function GetLocalFilesInfo(arg1:Array<string>):Promise<Array<wailsapp.Loc
 
 export function GetLogFileLocation():Promise<string>;
 
+export function GetLogsDirectory():Promise<string>;
+
 export function GetMyJobsFolderID():Promise<string>;
 
 export function GetMyLibraryFolderID():Promise<string>;
@@ -87,6 +89,8 @@ export function LoadJobsFromCSV(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>
 export function LoadJobsFromJSON(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>;
 
 export function LoadTemplate(arg1:string):Promise<wailsapp.JobSpecDTO>;
+
+export function OpenLogsDirectory():Promise<void>;
 
 export function PauseDaemon():Promise<void>;
 

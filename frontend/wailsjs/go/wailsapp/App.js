@@ -106,6 +106,10 @@ export function GetLogFileLocation() {
   return window['go']['wailsapp']['App']['GetLogFileLocation']();
 }
 
+export function GetLogsDirectory() {
+  return window['go']['wailsapp']['App']['GetLogsDirectory']();
+}
+
 export function GetMyJobsFolderID() {
   return window['go']['wailsapp']['App']['GetMyJobsFolderID']();
 }
@@ -172,6 +176,10 @@ export function LoadJobsFromJSON(arg1) {
 
 export function LoadTemplate(arg1) {
   return window['go']['wailsapp']['App']['LoadTemplate'](arg1);
+}
+
+export function OpenLogsDirectory() {
+  return window['go']['wailsapp']['App']['OpenLogsDirectory']();
 }
 
 export function PauseDaemon() {

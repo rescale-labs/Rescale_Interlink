@@ -178,6 +178,14 @@ func DaemonConfigPathForUser(userProfileDir string) string {
 	return filepath.Join(userProfileDir, ".config", "rescale", "daemon.conf")
 }
 
+// StateFilePathForUser returns the autodownload state file path for a user.
+// v4.4.3: Uses the same path structure as daemon.DefaultStateFilePath() for consistency.
+//   - Windows: <userProfileDir>\.config\rescale-int\daemon-state.json
+//   - Unix: <userProfileDir>/.config/rescale-int/daemon-state.json
+func StateFilePathForUser(userProfileDir string) string {
+	return filepath.Join(userProfileDir, ".config", "rescale-int", "daemon-state.json")
+}
+
 // DefaultDownloadFolder returns the platform-specific default download folder.
 func DefaultDownloadFolder() string {
 	home, err := os.UserHomeDir()

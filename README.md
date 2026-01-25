@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.3.7-green)
+![Status](https://img.shields.io/badge/status-v4.4.3-green)
 
 ---
 
@@ -87,11 +87,23 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
+**v4.4.3 (January 25, 2026) - Daemon Startup UX + Service Mode Fixes:**
+- **P0 Critical Fixes:**
+  - **Windows Service Entrypoint**: `daemon run` now properly detects Windows Service context and delegates to `RunAsMultiUserService()` - fixes Error 1053 on service start
+  - **Windows Per-User Config Paths**: Multi-user service now correctly finds `daemon.conf` at `AppData\Roaming\Rescale\Interlink\daemon.conf`
+  - **Windows Stale PID Handling**: `IsDaemonRunning()` now validates PID using `windows.OpenProcess()` - stale PID files are cleaned up automatically
+- **P1 UX Improvements:**
+  - **Tray Immediate Error Feedback**: Errors now update UI immediately (not on 5-second poll cycle)
+  - **GUI Inline Guidance**: Visible amber message when auto-download is disabled explains how to enable
+- **P2 Polish:**
+  - **Unified Path Resolution**: New `internal/pathutil` package with shared `ResolveAbsolutePath()` function used by CLI, GUI, and Tray
+  - **Relaxed Tray Preflight**: Replaced strict parent directory check with `os.MkdirAll()` - supports new paths
+  - **macOS/Linux Auto-Start Docs**: Removed `--background` flag from launchd/systemd examples (conflicts with process managers)
+
 **v4.3.7 (January 14, 2026) - Daemon Logging Improvements:**
-- **Silent filtering for Auto Download**: Jobs with "Auto Download = not set" or "disabled" are now filtered silently instead of flooding logs with SKIP messages
-- **Optimized API calls**: Custom field is checked FIRST, before checking downloaded tag - reduces API calls by ~50%
-- **Improved scan summary**: Shows `filtered` count separately from `skipped` count in scan completion message
-- **Cleaner logs**: Only jobs that are real candidates (Enabled/Conditional) appear in logs
+- **Silent filtering for Auto Download**: Jobs with "Auto Download = not set" or "disabled" are now filtered silently
+- **Optimized API calls**: Custom field is checked FIRST, before checking downloaded tag
+- **Improved scan summary**: Shows `filtered` count separately from `skipped` count
 
 **v4.2.1 (January 9, 2026) - Enhanced Eligibility Configuration:**
 - **New `daemon.conf` file**: Single INI file for all daemon settings (replaces scattered config)
@@ -161,15 +173,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.3.7-darwin-arm64.zip` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.3.7-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.3.7-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `RescaleInterlink-v4.3.7.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.4.3-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.4.3-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.4.3-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.4.3.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Unzip and move app to Applications
-unzip rescale-interlink-v4.3.7-darwin-arm64.zip
+unzip rescale-interlink-v4.4.3-darwin-arm64.zip
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -180,7 +192,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.3.7-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.4.3-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -193,7 +205,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.3.7-windows-amd64.zip
+Expand-Archive rescale-interlink-v4.4.3-windows-amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -391,7 +403,6 @@ Create `~/Library/LaunchAgents/com.rescale.interlink.daemon.plist`:
         <string>run</string>
         <string>--download-dir</string>
         <string>/Users/USERNAME/Downloads/rescale-jobs</string>
-        <string>--background</string>
         <string>--ipc</string>
     </array>
     <key>RunAtLoad</key>
@@ -405,6 +416,9 @@ Create `~/Library/LaunchAgents/com.rescale.interlink.daemon.plist`:
 </dict>
 </plist>
 ```
+
+**Note:** Do NOT use `--background` with launchd. Launchd expects the process to stay in the foreground;
+`--background` forks and exits, causing launchd to think the daemon crashed.
 
 **Commands:**
 ```bash
@@ -434,13 +448,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/rescale-int daemon run --download-dir %h/Downloads/rescale-jobs --background --ipc
+ExecStart=/usr/local/bin/rescale-int daemon run --download-dir %h/Downloads/rescale-jobs --ipc
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=default.target
 ```
+
+**Note:** Do NOT use `--background` with systemd. Systemd expects `Type=simple` services to stay in the foreground;
+`--background` forks and exits, causing systemd to think the daemon crashed.
 
 **Commands:**
 ```bash
@@ -498,7 +515,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.3.7                       |
+|                    Rescale Interlink v4.4.3                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -763,6 +780,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.3.6
+**Version**: 4.4.3
 **Status**: Production Ready
-**Last Updated**: January 14, 2026
+**Last Updated**: January 25, 2026

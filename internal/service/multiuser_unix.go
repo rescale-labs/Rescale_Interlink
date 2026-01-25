@@ -6,6 +6,8 @@ package service
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 // UserProfile represents a user profile for multi-user auto-download.
@@ -70,11 +72,12 @@ func GetCurrentUserProfile() (*UserProfile, error) {
 		uid = ""
 	}
 
+	// v4.4.3: Use config helpers for consistent paths across platforms
 	return &UserProfile{
 		SID:           uid,
 		Username:      username,
 		ProfilePath:   home,
 		ConfigPath:    filepath.Join(home, ".config", "rescale", "daemon.conf"), // v4.2.0: daemon.conf instead of apiconfig
-		StateFilePath: filepath.Join(home, ".config", "rescale", "autodownload_state.json"),
+		StateFilePath: config.StateFilePathForUser(home),
 	}, nil
 }

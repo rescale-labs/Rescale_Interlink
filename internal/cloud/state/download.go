@@ -57,7 +57,7 @@ func SaveDownloadState(state *DownloadResumeState, localPath string) error {
 		return fmt.Errorf("failed to marshal download state: %w", err)
 	}
 
-	if err := os.WriteFile(tmpFilePath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpFilePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temp state file: %w", err)
 	}
 

@@ -10,11 +10,19 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/rescale/rescale-int/internal/logging"
+	"golang.org/x/sys/windows"
+)
+
+var (
+	modkernel32                   = windows.NewLazySystemDLL("kernel32.dll")
+	procGetNamedPipeClientProcessId = modkernel32.NewProc("GetNamedPipeClientProcessId")
 )
 
 // ServiceHandler defines the interface for service operations.
@@ -58,39 +66,68 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// ownerSID is the SID of the user who started the daemon.
+	// v4.4.2: Used for per-user authorization to prevent cross-user daemon control.
+	ownerSID string
 }
 
 // NewServer creates a new IPC server.
+// v4.4.2: Captures the current user's SID for per-user authorization.
 func NewServer(handler ServiceHandler, logger *logging.Logger) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Server{
+	s := &Server{
 		handler: handler,
 		logger:  logger,
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+
+	// Capture the owner's SID for authorization checks
+	if sid, err := getCurrentUserSID(); err == nil {
+		s.ownerSID = sid
+		logger.Debug().Str("owner_sid", sid).Msg("IPC server owner SID captured")
+	} else {
+		logger.Warn().Err(err).Msg("Failed to get owner SID; cross-user authorization disabled")
+	}
+
+	return s
+}
+
+// getCurrentUserSID returns the SID of the current process owner.
+func getCurrentUserSID() (string, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return "", fmt.Errorf("failed to open process token: %w", err)
+	}
+	defer token.Close()
+
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("failed to get token user: %w", err)
+	}
+
+	return user.User.Sid.String(), nil
 }
 
 // Start begins listening for IPC connections.
 func (s *Server) Start() error {
 	// Create named pipe listener with security descriptor
 	//
-	// v4.0.7 H4 SECURITY NOTE:
-	// Current descriptor "D:P(A;;GA;;;AU)" allows ANY authenticated user to connect.
-	// This is intentional because the service manages auto-downloads for multiple users,
-	// and each user's tray app needs to pause/resume their own downloads.
+	// v4.4.2 SECURITY NOTE:
+	// The descriptor "D:P(A;;GA;;;AU)" allows any authenticated user to connect.
+	// However, modify operations (Pause, Resume, TriggerScan, Shutdown) are now
+	// protected by per-user authorization in authorizeModifyRequest().
 	//
-	// Security implications:
-	// - User A could theoretically pause/resume User B's downloads via IPC
-	// - For stricter security, implement per-user authorization in handler methods
-	//   by checking the caller's SID against the target userID
+	// Security model:
+	// - Any authenticated user can connect and perform read-only operations
+	//   (GetStatus, GetUserList, GetRecentLogs, OpenLogs)
+	// - Only the daemon owner (matched by SID) can perform modify operations
+	// - This prevents User A from controlling User B's daemon
 	//
 	// Alternative descriptors (for reference):
 	// - "D:P(A;;GA;;;BA)(A;;GA;;;SY)" - Allow only Administrators and SYSTEM
 	// - "D:P(A;;GA;;;BA)(A;;GA;;;AU)" - Allow Admins full control, Authenticated Users connect
-	//
-	// The current design prioritizes usability over strict isolation. Individual users
-	// can control their own downloads without requiring admin privileges.
 	cfg := &winio.PipeConfig{
 		SecurityDescriptor: "D:P(A;;GA;;;AU)", // DACL: Allow Generic All for Authenticated Users
 		MessageMode:        true,
@@ -156,12 +193,21 @@ func (s *Server) acceptLoop() {
 }
 
 // handleConnection processes a single client connection.
+// v4.4.2: Extracts caller SID for authorization checks.
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
 
 	// Set read/write deadlines
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	// v4.4.2: Extract caller's SID from the named pipe connection for authorization
+	callerSID := ""
+	if pid, err := getNamedPipeClientPID(conn); err == nil && pid > 0 {
+		if sid, err := getProcessOwnerSID(pid); err == nil {
+			callerSID = sid
+		}
+	}
 
 	reader := bufio.NewReader(conn)
 
@@ -185,29 +231,103 @@ func (s *Server) handleConnection(conn net.Conn) {
 	s.logger.Debug().
 		Str("type", string(req.Type)).
 		Str("user_id", req.UserID).
+		Str("caller_sid", callerSID).
 		Msg("Received IPC request")
 
-	// Handle request
-	resp := s.handleRequest(req)
+	// Handle request with caller SID for authorization
+	resp := s.handleRequest(req, callerSID)
 
 	// Send response
 	s.sendResponse(conn, resp)
 }
 
+// getNamedPipeClientPID extracts the client process ID from a named pipe connection.
+// Uses the Windows GetNamedPipeClientProcessId API via reflection to access the underlying handle.
+func getNamedPipeClientPID(conn net.Conn) (uint32, error) {
+	// Use reflection to get the underlying file handle from the winio pipe connection.
+	// The structure is: conn -> win32Pipe -> win32File -> handle
+	v := reflect.ValueOf(conn)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	// Try to find the handle field
+	var handle windows.Handle
+	found := false
+
+	// Navigate through embedded structs to find win32File.handle
+	for i := 0; i < v.NumField() && !found; i++ {
+		field := v.Field(i)
+		if field.Kind() == reflect.Ptr && !field.IsNil() {
+			elem := field.Elem()
+			// Look for handle field
+			if handleField := elem.FieldByName("handle"); handleField.IsValid() {
+				handle = windows.Handle(handleField.Uint())
+				found = true
+			}
+		}
+	}
+
+	if !found {
+		return 0, fmt.Errorf("could not extract handle from connection")
+	}
+
+	var clientPID uint32
+	r1, _, err := procGetNamedPipeClientProcessId.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&clientPID)),
+	)
+	if r1 == 0 {
+		return 0, fmt.Errorf("GetNamedPipeClientProcessId failed: %w", err)
+	}
+
+	return clientPID, nil
+}
+
+// getProcessOwnerSID returns the SID of the owner of a process by PID.
+func getProcessOwnerSID(pid uint32) (string, error) {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return "", fmt.Errorf("failed to open process %d: %w", pid, err)
+	}
+	defer windows.CloseHandle(handle)
+
+	var token windows.Token
+	err = windows.OpenProcessToken(handle, windows.TOKEN_QUERY, &token)
+	if err != nil {
+		return "", fmt.Errorf("failed to open process token: %w", err)
+	}
+	defer token.Close()
+
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("failed to get token user: %w", err)
+	}
+
+	return user.User.Sid.String(), nil
+}
+
 // handleRequest processes a request and returns a response.
-func (s *Server) handleRequest(req *Request) *Response {
+// v4.4.2: Added callerSID parameter for per-user authorization.
+func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 	switch req.Type {
 	case MsgGetStatus:
+		// Read-only: no authorization required
 		status := s.handler.GetStatus()
 		return NewStatusResponse(status)
 
 	case MsgGetUserList:
+		// Read-only: no authorization required
 		users := s.handler.GetUserList()
 		return NewUserListResponse(users)
 
 	case MsgPauseUser:
 		if req.UserID == "" {
 			return NewErrorResponse("user_id required for PauseUser")
+		}
+		// v4.4.2: Authorization check - only owner can pause
+		if err := s.authorizeModifyRequest(callerSID, "PauseUser"); err != nil {
+			return NewErrorResponse(err.Error())
 		}
 		if err := s.handler.PauseUser(req.UserID); err != nil {
 			return NewErrorResponse(err.Error())
@@ -217,6 +337,10 @@ func (s *Server) handleRequest(req *Request) *Response {
 	case MsgResumeUser:
 		if req.UserID == "" {
 			return NewErrorResponse("user_id required for ResumeUser")
+		}
+		// v4.4.2: Authorization check - only owner can resume
+		if err := s.authorizeModifyRequest(callerSID, "ResumeUser"); err != nil {
+			return NewErrorResponse(err.Error())
 		}
 		if err := s.handler.ResumeUser(req.UserID); err != nil {
 			return NewErrorResponse(err.Error())
@@ -228,12 +352,17 @@ func (s *Server) handleRequest(req *Request) *Response {
 		if userID == "" {
 			userID = "all"
 		}
+		// v4.4.2: Authorization check - only owner can trigger scan
+		if err := s.authorizeModifyRequest(callerSID, "TriggerScan"); err != nil {
+			return NewErrorResponse(err.Error())
+		}
 		if err := s.handler.TriggerScan(userID); err != nil {
 			return NewErrorResponse(err.Error())
 		}
 		return NewOKResponse()
 
 	case MsgOpenLogs:
+		// Read-only: no authorization required
 		userID := req.UserID
 		if userID == "" {
 			userID = "service"
@@ -248,6 +377,10 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return NewOKResponse()
 
 	case MsgShutdown:
+		// v4.4.2: Authorization check - only owner can shutdown
+		if err := s.authorizeModifyRequest(callerSID, "Shutdown"); err != nil {
+			return NewErrorResponse(err.Error())
+		}
 		// v4.3.9: Allow shutdown via IPC (for parity with Unix, enables GUI Stop button)
 		if err := s.handler.Shutdown(); err != nil {
 			return NewErrorResponse(err.Error())
@@ -262,6 +395,7 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return NewOKResponse()
 
 	case MsgGetRecentLogs:
+		// Read-only: no authorization required
 		// v4.3.9: Added to Windows for parity with Unix
 		logs := s.handler.GetRecentLogs(100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
@@ -269,6 +403,36 @@ func (s *Server) handleRequest(req *Request) *Response {
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))
 	}
+}
+
+// authorizeModifyRequest checks if the caller is authorized to perform a modify operation.
+// v4.4.2: Only the daemon owner can execute commands that modify daemon state.
+// This prevents User A from controlling User B's daemon on multi-user Windows systems.
+func (s *Server) authorizeModifyRequest(callerSID, operation string) error {
+	// If we couldn't capture owner SID, skip authorization (fail-open for compatibility)
+	if s.ownerSID == "" {
+		return nil
+	}
+
+	// If we couldn't get caller SID, deny access (fail-closed for security)
+	if callerSID == "" {
+		s.logger.Warn().
+			Str("operation", operation).
+			Msg("IPC request denied: could not identify caller")
+		return fmt.Errorf("unauthorized: could not identify caller")
+	}
+
+	// Check if caller matches owner
+	if callerSID != s.ownerSID {
+		s.logger.Warn().
+			Str("operation", operation).
+			Str("caller_sid", callerSID).
+			Str("owner_sid", s.ownerSID).
+			Msg("IPC request denied: cross-user access attempt")
+		return fmt.Errorf("unauthorized: only the daemon owner can perform this operation")
+	}
+
+	return nil
 }
 
 // sendResponse sends a response to the client.
