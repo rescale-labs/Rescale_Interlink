@@ -72,7 +72,7 @@ func SaveUploadState(state *UploadResumeState, localPath string) error {
 		return fmt.Errorf("failed to marshal upload state: %w", err)
 	}
 
-	if err := os.WriteFile(tmpFilePath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpFilePath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temp state file: %w", err)
 	}
 
@@ -223,7 +223,7 @@ func AcquireUploadLock(localPath string) (*UploadLock, error) {
 
 	data, _ := json.MarshalIndent(newLock, "", "  ")
 	tmpFilePath := lockFilePath + ".tmp"
-	if err := os.WriteFile(tmpFilePath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpFilePath, data, 0600); err != nil {
 		return nil, fmt.Errorf("failed to write lock file: %w", err)
 	}
 

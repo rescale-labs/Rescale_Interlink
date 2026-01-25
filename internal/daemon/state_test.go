@@ -208,3 +208,38 @@ func TestState_LastPoll(t *testing.T) {
 		t.Error("LastPoll should be very recent")
 	}
 }
+
+// TestState_FilePermissions verifies that state files are created with secure permissions (0600).
+// v4.4.2: Security fix - state files should be owner-readable only to prevent information disclosure.
+func TestState_FilePermissions(t *testing.T) {
+	// Create temp directory
+	tmpDir, err := os.MkdirTemp("", "daemon-test-perms-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	stateFile := filepath.Join(tmpDir, "state.json")
+
+	// Create and save state
+	state := NewState(stateFile)
+	state.MarkDownloaded("job1", "Test Job", "/output", 1, 100)
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Check file permissions
+	info, err := os.Stat(stateFile)
+	if err != nil {
+		t.Fatalf("Failed to stat state file: %v", err)
+	}
+
+	// On Unix, permissions should be 0600 (owner read/write only)
+	// On Windows, this test is less meaningful but should still pass
+	perm := info.Mode().Perm()
+	expectedPerm := os.FileMode(0600)
+
+	if perm != expectedPerm {
+		t.Errorf("State file permissions should be %o, got %o", expectedPerm, perm)
+	}
+}

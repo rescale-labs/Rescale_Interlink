@@ -1123,14 +1123,25 @@ export function SetupTab() {
                 </div>
                 <div className="flex items-center gap-2">
                   {!daemonStatus?.running ? (
-                    <button
-                      onClick={handleStartDaemon}
-                      disabled={isDaemonLoading || !daemonConfig?.enabled}
-                      className="btn-primary text-sm"
-                      title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download service'}
-                    >
-                      {isDaemonLoading ? 'Starting...' : 'Start Service'}
-                    </button>
+                    <>
+                      {/* v4.4.3: Inline guidance when auto-download is disabled */}
+                      {!daemonConfig?.enabled && (
+                        <div className="text-sm text-amber-600 bg-amber-50 px-3 py-1 rounded-md mr-2">
+                          Enable "Auto-Download" above to start the service.
+                        </div>
+                      )}
+                      <button
+                        onClick={handleStartDaemon}
+                        disabled={isDaemonLoading || !daemonConfig?.enabled}
+                        className={clsx(
+                          "btn-primary text-sm",
+                          !daemonConfig?.enabled && "opacity-50 cursor-not-allowed"
+                        )}
+                        title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download service'}
+                      >
+                        {isDaemonLoading ? 'Starting...' : 'Start Service'}
+                      </button>
+                    </>
                   ) : daemonStatus?.managedBy === "Windows Service" ? (
                     <span className="text-sm text-gray-500">
                       Use Windows Service Manager to control

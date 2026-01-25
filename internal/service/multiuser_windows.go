@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 // UserProfile represents a Windows user profile for multi-user auto-download.
@@ -138,12 +140,13 @@ func enumerateFromRegistry() ([]UserProfile, error) {
 
 		// Build the profile entry
 		// v4.2.0: Use daemon.conf instead of apiconfig
+		// v4.4.3: Use config.DaemonConfigPathForUser and config.StateFilePathForUser for correct paths
 		profile := UserProfile{
 			SID:           sid,
 			Username:      profileName,
 			ProfilePath:   profilePath,
-			ConfigPath:    filepath.Join(profilePath, ".config", "rescale", "daemon.conf"),
-			StateFilePath: filepath.Join(profilePath, ".config", "rescale", "autodownload_state.json"),
+			ConfigPath:    config.DaemonConfigPathForUser(profilePath),
+			StateFilePath: config.StateFilePathForUser(profilePath),
 		}
 
 		profiles = append(profiles, profile)
@@ -185,12 +188,13 @@ func enumerateFromFilesystem() ([]UserProfile, error) {
 
 		// Build profile entry (SID unknown in filesystem mode)
 		// v4.2.0: Use daemon.conf instead of apiconfig
+		// v4.4.3: Use config.DaemonConfigPathForUser and config.StateFilePathForUser for correct paths
 		profile := UserProfile{
 			SID:           "",
 			Username:      name,
 			ProfilePath:   profilePath,
-			ConfigPath:    filepath.Join(profilePath, ".config", "rescale", "daemon.conf"),
-			StateFilePath: filepath.Join(profilePath, ".config", "rescale", "autodownload_state.json"),
+			ConfigPath:    config.DaemonConfigPathForUser(profilePath),
+			StateFilePath: config.StateFilePathForUser(profilePath),
 		}
 
 		profiles = append(profiles, profile)
@@ -227,11 +231,12 @@ func GetCurrentUserProfile() (*UserProfile, error) {
 	}
 
 	// v4.2.0: Use daemon.conf instead of apiconfig
+	// v4.4.3: Use config.DaemonConfigPathForUser and config.StateFilePathForUser for correct paths
 	return &UserProfile{
 		SID:           "", // Could use syscall to get, but not necessary
 		Username:      filepath.Base(userProfile),
 		ProfilePath:   userProfile,
-		ConfigPath:    filepath.Join(userProfile, ".config", "rescale", "daemon.conf"),
-		StateFilePath: filepath.Join(userProfile, ".config", "rescale", "autodownload_state.json"),
+		ConfigPath:    config.DaemonConfigPathForUser(userProfile),
+		StateFilePath: config.StateFilePathForUser(userProfile),
 	}, nil
 }

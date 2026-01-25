@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/service"
 	"github.com/rescale/rescale-int/internal/version"
 )
@@ -202,10 +203,10 @@ func (a *App) startDaemonSubprocess() error {
 		downloadDir = config.DefaultDownloadFolder()
 	}
 
-	// v4.4.2: Resolve junctions/symlinks to physical paths
+	// v4.4.3: Use shared path resolution logic for consistent behavior
 	// This handles Windows junction points (e.g., Downloads -> Z:\Downloads on Rescale VMs)
 	// The subprocess may not have access to the same drive mappings
-	if resolved, err := filepath.EvalSymlinks(downloadDir); err == nil {
+	if resolved, err := pathutil.ResolveAbsolutePath(downloadDir); err == nil {
 		downloadDir = resolved
 	}
 

@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/version"
 )
 
@@ -271,6 +272,8 @@ func (a *trayApp) startService() {
 	if err != nil {
 		a.mu.Lock()
 		a.lastError = translateError(fmt.Errorf("executable path: %w", err))
+		a.serviceRunning = false // v4.4.3: Ensure UI reflects failed start
+		a.updateUI()             // v4.4.3: Force immediate UI update while holding lock
 		a.mu.Unlock()
 		return
 	}
@@ -282,6 +285,8 @@ func (a *trayApp) startService() {
 	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
 		a.mu.Lock()
 		a.lastError = translateError(fmt.Errorf("CLI not found: rescale-int.exe"))
+		a.serviceRunning = false // v4.4.3: Ensure UI reflects failed start
+		a.updateUI()             // v4.4.3: Force immediate UI update while holding lock
 		a.mu.Unlock()
 		return
 	}
@@ -292,6 +297,8 @@ func (a *trayApp) startService() {
 	if err != nil {
 		a.mu.Lock()
 		a.lastError = "Configuration error. Open Interlink to configure."
+		a.serviceRunning = false // v4.4.3: Ensure UI reflects failed start
+		a.updateUI()             // v4.4.3: Force immediate UI update while holding lock
 		a.mu.Unlock()
 		return
 	}
@@ -301,19 +308,21 @@ func (a *trayApp) startService() {
 		downloadDir = config.DefaultDownloadFolder()
 	}
 
-	// v4.4.2: Validate download folder parent exists or can be created
-	parent := filepath.Dir(downloadDir)
-	if _, err := os.Stat(parent); os.IsNotExist(err) {
+	// v4.4.3: Create download folder if it doesn't exist (replaced strict parent check)
+	// The daemon also does MkdirAll, but pre-creating here gives better error messages
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
 		a.mu.Lock()
-		a.lastError = fmt.Sprintf("Download folder parent doesn't exist: %s", parent)
+		a.lastError = fmt.Sprintf("Cannot create download folder: %s", err)
+		a.serviceRunning = false // v4.4.3: Ensure UI reflects failed start
+		a.updateUI()             // v4.4.3: Force immediate UI update while holding lock
 		a.mu.Unlock()
 		return
 	}
 
-	// v4.4.2: Resolve junctions/symlinks to physical paths before passing to daemon
+	// v4.4.3: Use shared path resolution logic for consistent behavior
 	// This helps when Downloads is a junction to a network drive (e.g., Z:\Downloads on Rescale VMs)
 	// The subprocess may not have the same drive mappings as the tray app's session
-	if resolved, err := filepath.EvalSymlinks(downloadDir); err == nil {
+	if resolved, err := pathutil.ResolveAbsolutePath(downloadDir); err == nil {
 		downloadDir = resolved
 	}
 
@@ -380,6 +389,8 @@ func (a *trayApp) startService() {
 		}
 		a.mu.Lock()
 		a.lastError = translateError(err)
+		a.serviceRunning = false // v4.4.3: Ensure UI reflects failed start
+		a.updateUI()             // v4.4.3: Force immediate UI update while holding lock
 		a.mu.Unlock()
 		return
 	}

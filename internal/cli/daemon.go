@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -19,6 +18,8 @@ import (
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/pathutil"
+	"github.com/rescale/rescale-int/internal/service"
 )
 
 // newDaemonCmd creates the 'daemon' command group.
@@ -134,6 +135,14 @@ Examples:
 				if wd, err := os.Getwd(); err == nil {
 					daemon.WriteStartupLog("Working directory: %s", wd)
 				}
+
+				// v4.4.3: Detect Windows service context and delegate to service handler
+				// When SCM starts `daemon run`, we need to register with SCM properly
+				if isService, err := service.IsWindowsService(); err == nil && isService {
+					daemon.WriteStartupLog("Detected Windows service context, starting multi-user service")
+					svcLogger := logging.NewLogger("service", nil)
+					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
+				}
 			}
 
 			// v4.3.2: Create daemon-specific logger with log buffer for IPC streaming
@@ -238,7 +247,7 @@ Examples:
 			if downloadDir == "" {
 				downloadDir = config.DefaultDownloadFolder()
 			}
-			absDownloadDir, err := resolveAbsolutePath(downloadDir)
+			absDownloadDir, err := pathutil.ResolveAbsolutePath(downloadDir)
 			if err != nil {
 				return fmt.Errorf("invalid download directory: %w", err)
 			}
@@ -743,24 +752,6 @@ Examples:
 	return cmd
 }
 
-// resolveAbsolutePath converts a relative path to an absolute path.
-func resolveAbsolutePath(path string) (string, error) {
-	if path == "" {
-		return os.Getwd()
-	}
-
-	// Expand ~ to home directory
-	if len(path) > 0 && path[0] == '~' {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		path = home + path[1:]
-	}
-
-	return filepath.Abs(path)
-}
-
 // newDaemonConfigCmd creates the 'daemon config' command group.
 func newDaemonConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -982,7 +973,7 @@ Examples:
 			case "enabled":
 				cfg.Daemon.Enabled = value == "true" || value == "1" || value == "yes"
 			case "download_folder":
-				absPath, err := resolveAbsolutePath(value)
+				absPath, err := pathutil.ResolveAbsolutePath(value)
 				if err != nil {
 					return fmt.Errorf("invalid path: %w", err)
 				}

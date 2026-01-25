@@ -94,7 +94,7 @@ func (s *State) Save() error {
 
 	// Write to temp file first, then rename for atomicity
 	tmpFile := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 

@@ -1,8 +1,120 @@
 # Release Notes - Rescale Interlink
 
-## v4.4.2 - January 17, 2026
+## v4.4.3 - January 25, 2026
 
-### Checksum Verification Race Condition - Final Fix
+### Daemon Startup UX + Service Mode Fixes
+
+This release comprehensively fixes daemon startup reliability issues that have been affecting Windows service mode, tray app, and GUI daemon control.
+
+#### P0 Critical Fixes
+
+**Fix 1: Windows Service Entrypoint NOT Wired**
+
+The Windows Service was configured to run `daemon run`, but the command never detected service context:
+- **Problem**: SCM started `daemon run` but it never called `IsWindowsService()` or `RunAsMultiUserService()`, causing Error 1053
+- **Solution**: Added service context detection at start of `daemon run` that delegates to `RunAsMultiUserService()` when running under SCM
+- **File**: `internal/cli/daemon.go`
+
+**Fix 2: Windows Per-User Config Path Mismatch**
+
+Multi-user service was looking for config files in the wrong location:
+- **Problem**: `multiuser_windows.go` used `.config/rescale/daemon.conf` but config is actually at `AppData\Roaming\Rescale\Interlink\daemon.conf`
+- **Solution**: Updated 3 locations to use `config.DaemonConfigPathForUser()` and new `config.StateFilePathForUser()`
+- **Files**: `internal/service/multiuser_windows.go`, `internal/config/daemonconfig.go`
+
+**Fix 3: Windows Stale PID Blocks Daemon Startup**
+
+Stale PID files prevented daemon startup:
+- **Problem**: `IsDaemonRunning()` didn't validate if PID was alive; `os.FindProcess` always succeeds on Windows
+- **Solution**: Use `windows.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` to validate PID; clean up stale PID file if process doesn't exist
+- **File**: `internal/daemon/daemonize_windows.go`
+
+#### P1 UX Improvements
+
+**Fix 4: Tray Immediate Error Feedback**
+
+Errors weren't visible immediately:
+- **Problem**: Errors stored in `lastError` but no immediate UI update; user only saw error on next 5-second refresh
+- **Solution**: Call `updateUI()` immediately after setting error while holding lock; set `serviceRunning = false` to ensure UI reflects failed state
+- **File**: `cmd/rescale-int-tray/tray_windows.go` (5 error paths updated)
+
+**Fix 5: GUI Inline Guidance**
+
+Users didn't understand why Start Service button was disabled:
+- **Problem**: Tooltip existed but no visible inline message when auto-download was disabled
+- **Solution**: Added visible amber message "Enable 'Auto-Download' above to start the service" and opacity styling on disabled button
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+#### P2 Polish
+
+**Fix 6: Unified Path Resolution**
+
+Path resolution was inconsistent across entrypoints:
+- **Problem**: CLI had robust `resolveAbsolutePath()` with ancestor fallback; GUI/Tray used naive `filepath.EvalSymlinks()`
+- **Solution**: Created `internal/pathutil/resolve.go` with shared logic used by CLI, GUI, and Tray
+- **Files**: New `internal/pathutil/resolve.go`, updated `internal/cli/daemon.go`, `internal/wailsapp/daemon_bindings_windows.go`, `cmd/rescale-int-tray/tray_windows.go`
+
+**Fix 7: Relaxed Tray Parent Preflight**
+
+Tray blocked legitimate new paths:
+- **Problem**: Strict "parent exists" check blocked paths where user wanted to create new directories
+- **Solution**: Replaced with `os.MkdirAll()` which creates full path - daemon already does this, now tray matches
+- **File**: `cmd/rescale-int-tray/tray_windows.go`
+
+**Fix 8: macOS/Linux Auto-Start Docs**
+
+Auto-start examples had incorrect flags:
+- **Problem**: Examples used `--background` which forks and exits, conflicting with launchd/systemd expectations
+- **Solution**: Removed `--background` from launchd plist and systemd service file; added notes explaining why
+- **File**: `README.md`
+
+---
+
+## v4.4.2 - January 17-19, 2026
+
+### Security Hardening (January 19, 2026)
+
+This release includes critical security hardening based on comprehensive security audits.
+
+#### Security Fix 1: State File Permissions (Critical)
+
+**Problem**: Resume state files were created with 0644 permissions, allowing any user on the system to read sensitive data including:
+- AES-256 encryption keys
+- Initialization vectors (IVs)
+- Master keys for streaming encryption
+- File metadata and transfer state
+
+**Solution**: All state files are now created with 0600 permissions (owner-readable only):
+- Upload resume state files (`*.upload.resume`)
+- Upload lock files (`*.upload.lock`)
+- Download resume state files (`*.download.resume`)
+- Daemon state files (`daemon-state.json`)
+
+**Files Modified**:
+- `internal/cloud/state/upload.go` (lines 75, 226)
+- `internal/cloud/state/download.go` (line 60)
+- `internal/daemon/state.go` (line 97)
+
+#### Security Fix 2: Windows IPC Authorization (High)
+
+**Problem**: The Windows named pipe IPC allowed any authenticated user to control another user's daemon. User A could shut down User B's daemon, pause downloads, or trigger scans.
+
+**Solution**: Added per-user SID verification:
+- Daemon captures owner's SID at startup
+- Each IPC connection extracts caller's SID via `GetNamedPipeClientProcessId`
+- Modify operations (Pause, Resume, TriggerScan, Shutdown) require SID match
+- Read-only operations (GetStatus, GetUserList, GetRecentLogs) remain open
+
+**Files Modified**:
+- `internal/ipc/server.go` - Added SID capture and verification
+
+#### New Tests
+
+Added comprehensive tests for security fixes:
+- `internal/cloud/state/state_test.go` - File permission tests for upload/download state
+- `internal/daemon/state_test.go` - File permission test for daemon state
+
+### Checksum Verification Race Condition - Final Fix (January 17, 2026)
 
 This release eliminates the remaining transient checksum verification failures by removing the "double verification" race condition.
 
