@@ -143,6 +143,17 @@ Examples:
 					svcLogger := logging.NewLogger("service", nil)
 					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
 				}
+
+				// v4.5.0: If Windows Service is installed but we're NOT running as service,
+				// prevent subprocess spawn to avoid split-brain (two daemons running)
+				if service.IsInstalled() {
+					daemon.WriteStartupLog("Windows Service is installed - blocking subprocess mode")
+					fmt.Println("Windows Service is installed. Use one of:")
+					fmt.Println("  - Run as admin: rescale-int service start")
+					fmt.Println("  - Or: net start \"Rescale Interlink Auto-Download\"")
+					fmt.Println("  - Or: Services.msc → Rescale Interlink Auto-Download → Start")
+					return fmt.Errorf("cannot run subprocess when Windows Service is installed")
+				}
 			}
 
 			// v4.3.2: Create daemon-specific logger with log buffer for IPC streaming
@@ -442,46 +453,55 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
-			// First try to query running daemon via IPC
-			if runtime.GOOS != "windows" {
-				client := ipc.NewClient()
-				client.SetTimeout(2 * time.Second)
+			// v4.5.0: Query running daemon via IPC on all platforms
+			// Previously gated on runtime.GOOS != "windows", now enabled everywhere
+			client := ipc.NewClient()
+			client.SetTimeout(2 * time.Second)
 
-				if status, err := client.GetStatus(ctx); err == nil {
-					// Daemon is running - show live status
-					fmt.Println("======================================================================")
-					fmt.Println("  DAEMON STATUS (Live)")
-					fmt.Println("======================================================================")
-					fmt.Printf("Status: %s\n", status.ServiceState)
-					fmt.Printf("Version: %s\n", status.Version)
-					fmt.Printf("Uptime: %s\n", status.Uptime)
-					fmt.Printf("Active Downloads: %d\n", status.ActiveDownloads)
-					if status.LastScanTime != nil {
-						fmt.Printf("Last Scan: %s (%s ago)\n",
-							status.LastScanTime.Format(time.RFC3339),
-							time.Since(*status.LastScanTime).Round(time.Second))
-					} else {
-						fmt.Println("Last Scan: Never")
-					}
-					if status.LastError != "" {
-						fmt.Printf("Last Error: %s\n", status.LastError)
-					}
+			if status, err := client.GetStatus(ctx); err == nil {
+				// Daemon is running - show live status
+				fmt.Println("======================================================================")
+				fmt.Println("  DAEMON STATUS (Live)")
+				fmt.Println("======================================================================")
+				fmt.Printf("Status: %s\n", status.ServiceState)
+				fmt.Printf("Version: %s\n", status.Version)
+				fmt.Printf("Uptime: %s\n", status.Uptime)
+				fmt.Printf("Active Downloads: %d\n", status.ActiveDownloads)
+				if status.LastScanTime != nil {
+					fmt.Printf("Last Scan: %s (%s ago)\n",
+						status.LastScanTime.Format(time.RFC3339),
+						time.Since(*status.LastScanTime).Round(time.Second))
+				} else {
+					fmt.Println("Last Scan: Never")
+				}
+				if status.LastError != "" {
+					fmt.Printf("Last Error: %s\n", status.LastError)
+				}
 
-					// Also show user list
-					if users, err := client.GetUserList(ctx); err == nil && len(users) > 0 {
-						fmt.Println("----------------------------------------------------------------------")
-						fmt.Println("User Status:")
-						for _, user := range users {
-							fmt.Printf("  %s: %s\n", user.Username, user.State)
-							fmt.Printf("    Download Folder: %s\n", user.DownloadFolder)
-							fmt.Printf("    Jobs Downloaded: %d\n", user.JobsDownloaded)
-						}
+				// Also show user list
+				if users, err := client.GetUserList(ctx); err == nil && len(users) > 0 {
+					fmt.Println("----------------------------------------------------------------------")
+					fmt.Println("User Status:")
+					for _, user := range users {
+						fmt.Printf("  %s: %s\n", user.Username, user.State)
+						fmt.Printf("    Download Folder: %s\n", user.DownloadFolder)
+						fmt.Printf("    Jobs Downloaded: %d\n", user.JobsDownloaded)
 					}
+				}
 
-					fmt.Println("======================================================================")
-					fmt.Println()
-					fmt.Println("Use 'rescale-int daemon stop' to stop the daemon.")
-					return nil
+				fmt.Println("======================================================================")
+				fmt.Println()
+				fmt.Println("Use 'rescale-int daemon stop' to stop the daemon.")
+				return nil
+			} else {
+				// v4.5.0: Warn if IPC unavailable
+				// On Windows, check if service is running but IPC not responding
+				if runtime.GOOS == "windows" && service.IsInstalled() {
+					if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
+						fmt.Println("Note: Windows Service is running but IPC not responding.")
+						fmt.Println("The service may be initializing or have an IPC issue.")
+						fmt.Println()
+					}
 				}
 			}
 
@@ -564,33 +584,59 @@ func newDaemonStopCmd() *cobra.Command {
 This sends a shutdown command via IPC to gracefully stop the daemon.
 The daemon must have been started with --ipc flag for this to work.
 
-On Windows, use the Windows Service Manager to stop the service instead.`,
+v4.5.0: On Windows, behavior depends on mode:
+  - Subprocess mode: Shuts down the daemon via IPC (like macOS/Linux)
+  - Service mode: Pauses your user daemon via IPC (service stop requires admin)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if runtime.GOOS == "windows" {
-				return fmt.Errorf("use Windows Service Manager to stop the daemon on Windows")
-			}
-
-			// Check if daemon is running
-			pid := daemon.IsDaemonRunning()
-			if pid == 0 {
-				fmt.Println("No running daemon detected.")
-				return nil
-			}
-
-			// Try to stop via IPC
 			ctx := context.Background()
 			client := ipc.NewClient()
 			client.SetTimeout(5 * time.Second)
 
+			// v4.5.0: Windows subprocess uses IPC shutdown; service mode pauses user
+			if runtime.GOOS == "windows" && service.IsInstalled() {
+				if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
+					fmt.Println("Windows Service detected. Pausing your daemon...")
+					// v4.5.0: Pass empty userID - server infers caller SID
+					if err := client.PauseUser(ctx, ""); err != nil {
+						return fmt.Errorf("failed to pause: %w", err)
+					}
+					fmt.Println("Your daemon paused. To stop the entire service:")
+					fmt.Println("  - Run as admin: rescale-int service stop")
+					fmt.Println("  - Or: net stop \"Rescale Interlink Auto-Download\"")
+					fmt.Println("  - Or: Services.msc → Rescale Interlink Auto-Download → Stop")
+					return nil
+				}
+			}
+
+			// Check if daemon is running (subprocess mode)
+			pid := daemon.IsDaemonRunning()
+			if pid == 0 {
+				// v4.5.0: Also check via IPC in case PID file is missing
+				if !client.IsServiceRunning(ctx) {
+					fmt.Println("No running daemon detected.")
+					return nil
+				}
+			}
+
 			// First check if IPC is responding
 			if !client.IsServiceRunning(ctx) {
-				fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
-				fmt.Println("The daemon may not have been started with --ipc flag.")
-				fmt.Printf("Use 'kill %d' to forcefully terminate it.\n", pid)
+				if pid != 0 {
+					fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
+					fmt.Println("The daemon may not have been started with --ipc flag.")
+					if runtime.GOOS == "windows" {
+						fmt.Println("Use Task Manager to terminate the process.")
+					} else {
+						fmt.Printf("Use 'kill %d' to forcefully terminate it.\n", pid)
+					}
+				}
 				return nil
 			}
 
-			fmt.Printf("Stopping daemon (PID %d)...\n", pid)
+			if pid != 0 {
+				fmt.Printf("Stopping daemon (PID %d)...\n", pid)
+			} else {
+				fmt.Println("Stopping daemon...")
+			}
 
 			if err := client.Shutdown(ctx); err != nil {
 				return fmt.Errorf("failed to send shutdown command: %w", err)
@@ -599,7 +645,7 @@ On Windows, use the Windows Service Manager to stop the service instead.`,
 			// Wait for daemon to exit
 			for i := 0; i < 10; i++ {
 				time.Sleep(500 * time.Millisecond)
-				if daemon.IsDaemonRunning() == 0 {
+				if !client.IsServiceRunning(ctx) {
 					fmt.Println("Daemon stopped successfully.")
 					return nil
 				}
