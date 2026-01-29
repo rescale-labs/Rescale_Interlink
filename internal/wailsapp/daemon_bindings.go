@@ -610,11 +610,12 @@ func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 
 // OpenLogsDirectory opens the logs folder in the system file explorer.
 // v4.4.2: Added for GUI access to unified log directory.
+// v4.5.1: Uses 0700 permissions to restrict log access to owner only.
 func (a *App) OpenLogsDirectory() error {
 	logsDir := config.LogDirectory()
 
 	// Ensure directory exists
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
@@ -640,5 +641,52 @@ func (a *App) OpenLogsDirectory() error {
 // v4.4.2: For displaying log location in UI.
 func (a *App) GetLogsDirectory() string {
 	return config.LogDirectory()
+}
+
+// =============================================================================
+// Service Control Stubs for non-Windows (v4.5.1)
+// =============================================================================
+
+// ElevatedServiceResultDTO represents the result of an elevated service operation.
+// v4.5.1: Windows-only feature, stub returns "not supported" on other platforms.
+type ElevatedServiceResultDTO struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ServiceStatusDTO represents detailed Windows Service status.
+// v4.5.1: Windows-only feature, stub returns "not installed" on other platforms.
+type ServiceStatusDTO struct {
+	Installed bool   `json:"installed"`
+	Running   bool   `json:"running"`
+	Status    string `json:"status"`
+}
+
+// GetServiceStatus returns detailed Windows Service status.
+// v4.5.1: On non-Windows platforms, always returns "not installed".
+func (a *App) GetServiceStatus() ServiceStatusDTO {
+	return ServiceStatusDTO{
+		Installed: false,
+		Running:   false,
+		Status:    "Not Available (Windows only)",
+	}
+}
+
+// StartServiceElevated triggers UAC prompt to start Windows Service.
+// v4.5.1: On non-Windows platforms, returns error.
+func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
+	return ElevatedServiceResultDTO{
+		Success: false,
+		Error:   "Windows Service control is only available on Windows",
+	}
+}
+
+// StopServiceElevated triggers UAC prompt to stop Windows Service.
+// v4.5.1: On non-Windows platforms, returns error.
+func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
+	return ElevatedServiceResultDTO{
+		Success: false,
+		Error:   "Windows Service control is only available on Windows",
+	}
 }
 

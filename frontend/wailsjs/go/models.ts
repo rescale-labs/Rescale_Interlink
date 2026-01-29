@@ -419,6 +419,20 @@ export namespace wailsapp {
 	        this.error = source["error"];
 	    }
 	}
+	export class ElevatedServiceResultDTO {
+	    success: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ElevatedServiceResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.error = source["error"];
+	    }
+	}
 	export class FileItemDTO {
 	    id: string;
 	    name: string;
@@ -808,6 +822,22 @@ export namespace wailsapp {
 		}
 	}
 	
+	export class ServiceStatusDTO {
+	    installed: boolean;
+	    running: boolean;
+	    status: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceStatusDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.installed = source["installed"];
+	        this.running = source["running"];
+	        this.status = source["status"];
+	    }
+	}
 	export class SingleJobInputDTO {
 	    job: JobSpecDTO;
 	    inputMode: string;

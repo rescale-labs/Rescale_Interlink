@@ -10,6 +10,7 @@ import {
   EyeSlashIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  ShieldCheckIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { ClipboardGetText, EventsOn, EventsOff } from '../../../wailsjs/runtime/runtime';
@@ -31,6 +32,9 @@ import {
   TestAutoDownloadConnection,
   GetFileLoggingSettings,
   SetFileLoggingEnabled,
+  GetServiceStatus,
+  StartServiceElevated,
+  StopServiceElevated,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 
@@ -39,6 +43,12 @@ type TokenSource = 'environment' | 'file' | 'direct';
 
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
 const COMPRESSION_OPTIONS = ['gzip', 'none'] as const;
+
+// v4.5.1: Check if URL is a FedRAMP platform (requires FIPS compliance)
+// NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms
+const isFRMPlatform = (url: string): boolean => {
+  return url.includes('rescale-gov.com');
+};
 
 // v4.3.0: Platform URL options for dropdown
 const PLATFORM_URLS = [
@@ -101,6 +111,11 @@ export function SetupTab() {
   const [fileLoggingEnabled, setFileLoggingEnabled] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
 
+  // v4.5.1: Service status state (Windows SCM, separate from IPC-based daemon status)
+  const [serviceStatus, setServiceStatus] = useState<wailsapp.ServiceStatusDTO | null>(null);
+  const [isServiceLoading, setIsServiceLoading] = useState(false);
+  const [showUACConfirmDialog, setShowUACConfirmDialog] = useState<'start' | 'stop' | null>(null);
+
   // Setup event listeners and fetch initial data
   useEffect(() => {
     const cleanup = setupEventListeners();
@@ -150,6 +165,25 @@ export function SetupTab() {
     return () => clearInterval(interval);
   }, []);
 
+  // v4.5.1: Fetch service status (Windows SCM) on mount and periodically
+  useEffect(() => {
+    const fetchServiceStatus = async () => {
+      try {
+        const status = await GetServiceStatus();
+        setServiceStatus(status);
+      } catch (err) {
+        console.error('Failed to fetch service status:', err);
+      }
+    };
+
+    fetchServiceStatus();
+
+    // Poll every 5 seconds (same interval as daemon status)
+    const interval = setInterval(fetchServiceStatus, 5000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   // Fetch daemon config on mount (v4.2.0)
   // v4.3.1: Pre-populate default download folder if empty
   useEffect(() => {
@@ -194,6 +228,15 @@ export function SetupTab() {
       }
     }
   }, [config]);
+
+  // v4.5.1: Auto-switch proxy mode when selecting FRM platform with NTLM
+  useEffect(() => {
+    if (config && config.proxyMode === 'ntlm' && isFRMPlatform(config.apiBaseUrl || '')) {
+      // NTLM is not allowed for FRM platforms - switch to basic
+      updateConfig({ proxyMode: 'basic' });
+      setStatusMessage('Proxy mode switched to "basic": NTLM uses non-FIPS algorithms not allowed for FedRAMP');
+    }
+  }, [config?.apiBaseUrl]);
 
   // v4.0.3: Sync statusMessage with connection test results
   useEffect(() => {
@@ -376,6 +419,83 @@ export function SetupTab() {
   // v4.3.1: Daemon config changes now inline with setDaemonConfig
   // handleDaemonConfigChange removed as unused after UI refactor
 
+  // v4.5.1: Elevated service control handlers
+  const handleStartServiceElevated = async () => {
+    try {
+      setIsServiceLoading(true);
+      setShowUACConfirmDialog(null);
+      setStatusMessage('Starting Windows Service (UAC prompt will appear)...');
+
+      const result = await StartServiceElevated();
+      if (result.success) {
+        setStatusMessage('Service start command executed. Waiting for service to start...');
+        // Poll for status change
+        let attempts = 0;
+        const maxAttempts = 20; // 10 seconds at 500ms intervals
+        const pollInterval = setInterval(async () => {
+          attempts++;
+          const status = await GetServiceStatus();
+          setServiceStatus(status);
+          if (status.running) {
+            clearInterval(pollInterval);
+            setStatusMessage('Windows Service started successfully');
+            setIsServiceLoading(false);
+            // Also refresh daemon status as it will now report Windows Service mode
+            await refreshDaemonStatus();
+          } else if (attempts >= maxAttempts) {
+            clearInterval(pollInterval);
+            setStatusMessage('Service may still be starting. Check status in a moment.');
+            setIsServiceLoading(false);
+          }
+        }, 500);
+      } else {
+        setStatusMessage(`Failed to start service: ${result.error}`);
+        setIsServiceLoading(false);
+      }
+    } catch (err) {
+      setStatusMessage(`Failed to start service: ${err}`);
+      setIsServiceLoading(false);
+    }
+  };
+
+  const handleStopServiceElevated = async () => {
+    try {
+      setIsServiceLoading(true);
+      setShowUACConfirmDialog(null);
+      setStatusMessage('Stopping Windows Service (UAC prompt will appear)...');
+
+      const result = await StopServiceElevated();
+      if (result.success) {
+        setStatusMessage('Service stop command executed. Waiting for service to stop...');
+        // Poll for status change
+        let attempts = 0;
+        const maxAttempts = 20; // 10 seconds at 500ms intervals
+        const pollInterval = setInterval(async () => {
+          attempts++;
+          const status = await GetServiceStatus();
+          setServiceStatus(status);
+          if (!status.running) {
+            clearInterval(pollInterval);
+            setStatusMessage('Windows Service stopped successfully');
+            setIsServiceLoading(false);
+            // Also refresh daemon status
+            await refreshDaemonStatus();
+          } else if (attempts >= maxAttempts) {
+            clearInterval(pollInterval);
+            setStatusMessage('Service may still be stopping. Check status in a moment.');
+            setIsServiceLoading(false);
+          }
+        }, 500);
+      } else {
+        setStatusMessage(`Failed to stop service: ${result.error}`);
+        setIsServiceLoading(false);
+      }
+    } catch (err) {
+      setStatusMessage(`Failed to stop service: ${err}`);
+      setIsServiceLoading(false);
+    }
+  };
+
   // Workspace validation handler (v4.2.1)
   const handleValidateWorkspace = async () => {
     try {
@@ -458,6 +578,8 @@ export function SetupTab() {
 
   const proxyEnabled = config?.proxyMode !== 'no-proxy' && config?.proxyMode !== 'system';
   const basicAuthEnabled = config?.proxyMode === 'basic';
+  // v4.5.1: Check if current platform is FRM (NTLM not allowed for FIPS compliance)
+  const isFRM = isFRMPlatform(config?.apiBaseUrl || '');
 
   return (
     <div className="tab-panel flex flex-col h-full">
@@ -818,12 +940,32 @@ export function SetupTab() {
               <select
                 className="input"
                 value={config?.proxyMode || 'no-proxy'}
-                onChange={(e) => updateConfig({ proxyMode: e.target.value })}
+                onChange={(e) => {
+                  // v4.5.1: Prevent selecting NTLM for FRM platforms
+                  if (e.target.value === 'ntlm' && isFRM) {
+                    setStatusMessage('NTLM is not available for FedRAMP platforms (non-FIPS algorithms)');
+                    return;
+                  }
+                  updateConfig({ proxyMode: e.target.value });
+                }}
               >
                 {PROXY_MODES.map((mode) => (
-                  <option key={mode} value={mode}>{mode}</option>
+                  <option
+                    key={mode}
+                    value={mode}
+                    disabled={mode === 'ntlm' && isFRM}
+                  >
+                    {mode}{mode === 'ntlm' && isFRM ? ' (unavailable for FRM)' : ''}
+                  </option>
                 ))}
               </select>
+              {/* v4.5.1: Warning when NTLM is disabled for FRM */}
+              {isFRM && (
+                <p className="mt-1 text-xs text-amber-600">
+                  NTLM proxy mode is unavailable for FedRAMP platforms (uses non-FIPS MD4/MD5 algorithms).
+                  Use 'basic' proxy mode over TLS instead.
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -1088,46 +1230,178 @@ export function SetupTab() {
               </span>
             </div>
 
-            {/* Service Control (integrated into unified card) */}
-            <div className="border-t border-gray-200 pt-4 mt-4">
-              <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
-            {/* Service Status */}
-            <div className={clsx(
-              'p-4 rounded-lg',
-              daemonStatus?.running && daemonStatus?.ipcConnected ? 'bg-green-50' :
-              daemonStatus?.running && !daemonStatus?.ipcConnected ? 'bg-yellow-50' :
-              'bg-gray-50'
-            )}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className={clsx(
-                    'w-3 h-3 rounded-full',
-                    daemonStatus?.state === 'running' ? 'bg-green-500' :
-                    daemonStatus?.state === 'paused' ? 'bg-yellow-500' :
-                    'bg-gray-400'
-                  )} />
-                  <div>
-                    <div className="font-medium text-gray-900">
-                      {daemonStatus?.state === 'running' ? 'Running' :
-                       daemonStatus?.state === 'paused' ? 'Paused' :
-                       daemonStatus?.running ? 'Running (IPC unavailable)' :
-                       'Stopped'}
+            {/* v4.5.1: Service Control Section - Windows Service lifecycle (SCM-based, requires UAC) */}
+            {/* Show when Windows Service is installed - visible even when IPC is down */}
+            {serviceStatus?.installed && (
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <h4 className="text-sm font-medium text-gray-700">Service Control</h4>
+                  <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded flex items-center gap-1">
+                    <ShieldCheckIcon className="w-3 h-3" />
+                    Admin
+                  </span>
+                </div>
+                <div className={clsx(
+                  'p-4 rounded-lg',
+                  serviceStatus?.running ? 'bg-green-50' : 'bg-gray-50'
+                )}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={clsx(
+                        'w-3 h-3 rounded-full',
+                        serviceStatus?.running ? 'bg-green-500' : 'bg-gray-400'
+                      )} />
+                      <div>
+                        <div className="font-medium text-gray-900">
+                          Status: {serviceStatus?.status || 'Unknown'}
+                        </div>
+                      </div>
                     </div>
-                    {daemonStatus?.running && daemonStatus?.pid > 0 && (
-                      <div className="text-xs text-gray-500">PID: {daemonStatus.pid}</div>
-                    )}
-                    {daemonStatus?.managedBy && (
-                      <div className="text-xs text-gray-500">Managed by: {daemonStatus.managedBy}</div>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {!serviceStatus?.running ? (
+                        <button
+                          onClick={() => setShowUACConfirmDialog('start')}
+                          disabled={isServiceLoading}
+                          className="btn-primary text-sm flex items-center gap-1"
+                          title="Start Windows Service (requires administrator privileges)"
+                        >
+                          <ShieldCheckIcon className="w-4 h-4" />
+                          {isServiceLoading ? 'Starting...' : 'Start Service'}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setShowUACConfirmDialog('stop')}
+                          disabled={isServiceLoading}
+                          className="btn-secondary text-sm text-red-600 hover:text-red-700 flex items-center gap-1"
+                          title="Stop Windows Service (requires administrator privileges)"
+                        >
+                          <ShieldCheckIcon className="w-4 h-4" />
+                          {isServiceLoading ? 'Stopping...' : 'Stop Service'}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  {!daemonStatus?.running ? (
-                    <>
-                      {/* v4.4.3: Inline guidance when auto-download is disabled */}
+                <p className="mt-2 text-xs text-gray-500">
+                  These actions require administrator privileges. A Windows security prompt (UAC) will appear.
+                </p>
+              </div>
+            )}
+
+            {/* v4.5.1: My Downloads Section - User-scoped controls (IPC-gated) */}
+            {/* Only show when IPC is connected - controls only affect current user */}
+            {daemonStatus?.ipcConnected && (
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">My Downloads</h4>
+                <div className={clsx(
+                  'p-4 rounded-lg',
+                  daemonStatus?.state === 'running' ? 'bg-green-50' :
+                  daemonStatus?.state === 'paused' ? 'bg-yellow-50' :
+                  'bg-gray-50'
+                )}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={clsx(
+                        'w-3 h-3 rounded-full',
+                        daemonStatus?.state === 'running' ? 'bg-green-500' :
+                        daemonStatus?.state === 'paused' ? 'bg-yellow-500' :
+                        'bg-gray-400'
+                      )} />
+                      <div>
+                        <div className="font-medium text-gray-900">
+                          {daemonStatus?.state === 'running' ? 'Running' :
+                           daemonStatus?.state === 'paused' ? 'Paused' :
+                           'Unknown'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {daemonStatus?.state === 'paused' ? (
+                        <button
+                          onClick={handleResumeDaemon}
+                          disabled={isDaemonLoading}
+                          className="btn-secondary text-sm"
+                        >
+                          {isDaemonLoading ? 'Resuming...' : 'Resume Downloads'}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={handlePauseDaemon}
+                          disabled={isDaemonLoading}
+                          className="btn-secondary text-sm"
+                        >
+                          {isDaemonLoading ? 'Pausing...' : 'Pause Downloads'}
+                        </button>
+                      )}
+                      <button
+                        onClick={handleTriggerScan}
+                        disabled={isDaemonLoading || daemonStatus?.state === 'paused'}
+                        className="btn-outline text-sm"
+                      >
+                        Scan Now
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Service Details */}
+                  <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <span className="text-gray-500">Uptime:</span>
+                      <span className="ml-2 text-gray-900">{daemonStatus.uptime || 'N/A'}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Version:</span>
+                      <span className="ml-2 text-gray-900">{daemonStatus.version || 'N/A'}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Jobs Downloaded:</span>
+                      <span className="ml-2 text-gray-900">{daemonStatus.jobsDownloaded}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Active Downloads:</span>
+                      <span className="ml-2 text-gray-900">{daemonStatus.activeDownloads}</span>
+                    </div>
+                    <div className="col-span-2">
+                      <span className="text-gray-500">Last Scan:</span>
+                      <span className="ml-2 text-gray-900">
+                        {daemonStatus.lastScan ? new Date(daemonStatus.lastScan).toLocaleString() : 'Never'}
+                      </span>
+                    </div>
+                    {daemonStatus.downloadFolder && (
+                      <div className="col-span-2">
+                        <span className="text-gray-500">Download Folder:</span>
+                        <span className="ml-2 text-gray-900 break-all">{daemonStatus.downloadFolder}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Error message */}
+                  {daemonStatus?.error && (
+                    <div className="mt-3 text-sm text-yellow-700">
+                      <span className="font-medium">Note:</span> {daemonStatus.error}
+                    </div>
+                  )}
+                </div>
+                <p className="mt-2 text-xs text-gray-500">
+                  These controls only affect your downloads. The service continues running for other users.
+                </p>
+              </div>
+            )}
+
+            {/* Subprocess mode: Show start button when service not installed and not running */}
+            {!serviceStatus?.installed && !daemonStatus?.running && (
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
+                <div className="p-4 rounded-lg bg-gray-50">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-3 h-3 rounded-full bg-gray-400" />
+                      <div className="font-medium text-gray-900">Stopped</div>
+                    </div>
+                    <div className="flex items-center gap-2">
                       {!daemonConfig?.enabled && (
                         <div className="text-sm text-amber-600 bg-amber-50 px-3 py-1 rounded-md mr-2">
-                          Enable "Auto-Download" above to start the service.
+                          Enable "Auto-Download" above to start.
                         </div>
                       )}
                       <button
@@ -1141,104 +1415,148 @@ export function SetupTab() {
                       >
                         {isDaemonLoading ? 'Starting...' : 'Start Service'}
                       </button>
-                    </>
-                  ) : daemonStatus?.managedBy === "Windows Service" ? (
-                    <span className="text-sm text-gray-500">
-                      Use Windows Service Manager to control
-                    </span>
-                  ) : (
-                    <>
-                      {daemonStatus?.state === 'paused' ? (
-                        <button
-                          onClick={handleResumeDaemon}
-                          disabled={isDaemonLoading}
-                          className="btn-secondary text-sm"
-                        >
-                          Resume
-                        </button>
-                      ) : (
-                        <button
-                          onClick={handlePauseDaemon}
-                          disabled={isDaemonLoading}
-                          className="btn-secondary text-sm"
-                        >
-                          Pause
-                        </button>
-                      )}
-                      <button
-                        onClick={handleStopDaemon}
-                        disabled={isDaemonLoading}
-                        className="btn-secondary text-sm text-red-600 hover:text-red-700"
-                      >
-                        {isDaemonLoading ? 'Stopping...' : 'Stop'}
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              {/* Service Details (when running) */}
-              {daemonStatus?.running && daemonStatus?.ipcConnected && (
-                <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <span className="text-gray-500">Uptime:</span>
-                    <span className="ml-2 text-gray-900">{daemonStatus.uptime || 'N/A'}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Version:</span>
-                    <span className="ml-2 text-gray-900">{daemonStatus.version || 'N/A'}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Jobs Downloaded:</span>
-                    <span className="ml-2 text-gray-900">{daemonStatus.jobsDownloaded}</span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Active Downloads:</span>
-                    <span className="ml-2 text-gray-900">{daemonStatus.activeDownloads}</span>
-                  </div>
-                  <div className="col-span-2">
-                    <span className="text-gray-500">Last Scan:</span>
-                    <span className="ml-2 text-gray-900">
-                      {daemonStatus.lastScan ? new Date(daemonStatus.lastScan).toLocaleString() : 'Never'}
-                    </span>
-                  </div>
-                  {daemonStatus.downloadFolder && (
-                    <div className="col-span-2">
-                      <span className="text-gray-500">Download Folder:</span>
-                      <span className="ml-2 text-gray-900 break-all">{daemonStatus.downloadFolder}</span>
                     </div>
-                  )}
+                  </div>
                 </div>
-              )}
-
-              {/* Error message */}
-              {daemonStatus?.error && (
-                <div className="mt-3 text-sm text-yellow-700">
-                  <span className="font-medium">Note:</span> {daemonStatus.error}
-                </div>
-              )}
-            </div>
-
-            {/* Scan Now Button */}
-            {daemonStatus?.running && daemonStatus?.ipcConnected && daemonStatus?.state !== 'paused' && (
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={handleTriggerScan}
-                  className="btn-secondary"
-                >
-                  Scan Now
-                </button>
-                <span className="text-xs text-gray-500">
-                  Force an immediate check for completed jobs
-                </span>
+                <p className="mt-2 text-xs text-gray-500">
+                  The auto-download service runs in the background and automatically downloads completed jobs.
+                </p>
               </div>
             )}
 
-            <p className="text-xs text-gray-500">
-              The auto-download service runs in the background and automatically downloads completed jobs
-              that match your settings. The service continues running even after closing the GUI.
-            </p>
-            </div> {/* End Service Control section */}
+            {/* Subprocess mode: Show controls when running in subprocess mode (no Windows Service) */}
+            {!serviceStatus?.installed && daemonStatus?.running && (
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
+                <div className={clsx(
+                  'p-4 rounded-lg',
+                  daemonStatus?.ipcConnected ? 'bg-green-50' : 'bg-yellow-50'
+                )}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={clsx(
+                        'w-3 h-3 rounded-full',
+                        daemonStatus?.state === 'running' ? 'bg-green-500' :
+                        daemonStatus?.state === 'paused' ? 'bg-yellow-500' :
+                        'bg-gray-400'
+                      )} />
+                      <div>
+                        <div className="font-medium text-gray-900">
+                          {daemonStatus?.state === 'running' ? 'Running' :
+                           daemonStatus?.state === 'paused' ? 'Paused' :
+                           daemonStatus?.ipcConnected ? 'Running' : 'Running (IPC unavailable)'}
+                        </div>
+                        {daemonStatus?.pid > 0 && (
+                          <div className="text-xs text-gray-500">PID: {daemonStatus.pid}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {daemonStatus?.ipcConnected ? (
+                        <>
+                          {daemonStatus?.state === 'paused' ? (
+                            <button
+                              onClick={handleResumeDaemon}
+                              disabled={isDaemonLoading}
+                              className="btn-secondary text-sm"
+                            >
+                              Resume
+                            </button>
+                          ) : (
+                            <button
+                              onClick={handlePauseDaemon}
+                              disabled={isDaemonLoading}
+                              className="btn-secondary text-sm"
+                            >
+                              Pause
+                            </button>
+                          )}
+                          <button
+                            onClick={handleTriggerScan}
+                            disabled={isDaemonLoading || daemonStatus?.state === 'paused'}
+                            className="btn-outline text-sm"
+                          >
+                            Scan Now
+                          </button>
+                          <button
+                            onClick={handleStopDaemon}
+                            disabled={isDaemonLoading}
+                            className="btn-secondary text-sm text-red-600 hover:text-red-700"
+                          >
+                            {isDaemonLoading ? 'Stopping...' : 'Stop'}
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-sm text-amber-600">
+                          IPC unavailable - controls disabled
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Service Details (when IPC available) */}
+                  {daemonStatus?.ipcConnected && (
+                    <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <span className="text-gray-500">Uptime:</span>
+                        <span className="ml-2 text-gray-900">{daemonStatus.uptime || 'N/A'}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Version:</span>
+                        <span className="ml-2 text-gray-900">{daemonStatus.version || 'N/A'}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Jobs Downloaded:</span>
+                        <span className="ml-2 text-gray-900">{daemonStatus.jobsDownloaded}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Active Downloads:</span>
+                        <span className="ml-2 text-gray-900">{daemonStatus.activeDownloads}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Error message */}
+                  {daemonStatus?.error && (
+                    <div className="mt-3 text-sm text-yellow-700">
+                      <span className="font-medium">Note:</span> {daemonStatus.error}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* v4.5.1: UAC Confirmation Dialog */}
+            {showUACConfirmDialog && (
+              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                <div className="bg-white rounded-lg shadow-xl p-6 max-w-md mx-4">
+                  <div className="flex items-center gap-3 mb-4">
+                    <ShieldCheckIcon className="w-8 h-8 text-amber-500" />
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      {showUACConfirmDialog === 'start' ? 'Start Service?' : 'Stop Service?'}
+                    </h3>
+                  </div>
+                  <p className="text-gray-600 mb-6">
+                    This will show a Windows security prompt (UAC) asking for administrator permission.
+                  </p>
+                  <div className="flex justify-end gap-3">
+                    <button
+                      onClick={() => setShowUACConfirmDialog(null)}
+                      className="btn-secondary"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={showUACConfirmDialog === 'start' ? handleStartServiceElevated : handleStopServiceElevated}
+                      className="btn-primary flex items-center gap-2"
+                    >
+                      <ShieldCheckIcon className="w-4 h-4" />
+                      Continue
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div> {/* End unified Auto-Download card */}
 

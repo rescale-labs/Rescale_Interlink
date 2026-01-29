@@ -1,7 +1,7 @@
 # Commit Whitelist Manifest
 **Purpose:** Single source of truth for what can be committed to this repository.
 **Audience:** Developers and Claude Code
-**Last Updated:** 2026-01-05
+**Last Updated:** 2026-01-28
 
 ## Philosophy
 This is a PUBLIC repository. Only production code and public documentation belong here.
@@ -40,6 +40,7 @@ Internal development files (scripts, planning docs, logs) stay LOCAL only.
 | `TESTING.md` | Test strategy | v3.0.0 |
 | `RELEASE_NOTES.md` | Version history | Initial |
 | `FEATURE_SUMMARY.md` | Public feature list | v3.0.0 |
+| `SECURITY.md` | Security documentation (FIPS, proxy, IPC) | v4.5.1 |
 
 ## BLOCKED: Internal/Development (NEVER COMMIT)
 

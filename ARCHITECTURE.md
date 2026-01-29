@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.4.2
-**Last Updated**: January 19, 2026
+**Version**: 4.5.1
+**Last Updated**: January 28, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.3.7                 |
+|                 Rescale Interlink v4.5.1                 |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |

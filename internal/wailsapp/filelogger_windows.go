@@ -39,8 +39,9 @@ func InitFileLogger() error {
 	}
 
 	// v4.4.2: Use centralized log directory
+	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
 	logDir := config.LogDirectory()
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := os.MkdirAll(logDir, 0700); err != nil {
 		fileLoggerMu.Unlock()
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}

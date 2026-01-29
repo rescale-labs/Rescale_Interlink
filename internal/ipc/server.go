@@ -53,8 +53,9 @@ type ServiceHandler interface {
 	Shutdown() error
 
 	// GetRecentLogs returns recent log entries from the daemon.
-	// v4.3.9: Added to Windows for parity with Unix.
-	GetRecentLogs(count int) []LogEntryData
+	// v4.5.0: Added userID parameter for per-user routing in service mode.
+	// In subprocess mode, userID is ignored (only one user).
+	GetRecentLogs(userID string, count int) []LogEntryData
 }
 
 // Server handles IPC requests from clients via named pipe.
@@ -70,6 +71,11 @@ type Server struct {
 	// ownerSID is the SID of the user who started the daemon.
 	// v4.4.2: Used for per-user authorization to prevent cross-user daemon control.
 	ownerSID string
+
+	// serviceMode indicates multi-user Windows Service mode.
+	// v4.5.0: In service mode, owner-based auth is relaxed because user-scoped
+	// routing handles isolation (each user can only affect their own daemon).
+	serviceMode bool
 }
 
 // NewServer creates a new IPC server.
@@ -91,6 +97,17 @@ func NewServer(handler ServiceHandler, logger *logging.Logger) *Server {
 		logger.Warn().Err(err).Msg("Failed to get owner SID; cross-user authorization disabled")
 	}
 
+	return s
+}
+
+// NewServiceModeServer creates a new IPC server for multi-user Windows Service mode.
+// v4.5.0: In service mode, authorization is relaxed because user-scoped routing
+// handles isolation. Any authenticated user is allowed to connect and control
+// their own daemon via the handler's user-scoped operations.
+func NewServiceModeServer(handler ServiceHandler, logger *logging.Logger) *Server {
+	s := NewServer(handler, logger)
+	s.serviceMode = true
+	logger.Info().Msg("IPC server configured for multi-user service mode")
 	return s
 }
 
@@ -322,34 +339,47 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewUserListResponse(users)
 
 	case MsgPauseUser:
-		if req.UserID == "" {
+		// v4.5.0: In service mode, infer caller SID when userID is empty
+		userID := req.UserID
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's daemon
+		}
+		if userID == "" {
 			return NewErrorResponse("user_id required for PauseUser")
 		}
 		// v4.4.2: Authorization check - only owner can pause
 		if err := s.authorizeModifyRequest(callerSID, "PauseUser"); err != nil {
 			return NewErrorResponse(err.Error())
 		}
-		if err := s.handler.PauseUser(req.UserID); err != nil {
+		if err := s.handler.PauseUser(userID); err != nil {
 			return NewErrorResponse(err.Error())
 		}
 		return NewOKResponse()
 
 	case MsgResumeUser:
-		if req.UserID == "" {
+		// v4.5.0: In service mode, infer caller SID when userID is empty
+		userID := req.UserID
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's daemon
+		}
+		if userID == "" {
 			return NewErrorResponse("user_id required for ResumeUser")
 		}
 		// v4.4.2: Authorization check - only owner can resume
 		if err := s.authorizeModifyRequest(callerSID, "ResumeUser"); err != nil {
 			return NewErrorResponse(err.Error())
 		}
-		if err := s.handler.ResumeUser(req.UserID); err != nil {
+		if err := s.handler.ResumeUser(userID); err != nil {
 			return NewErrorResponse(err.Error())
 		}
 		return NewOKResponse()
 
 	case MsgTriggerScan:
 		userID := req.UserID
-		if userID == "" {
+		// v4.5.0: In service mode, infer caller SID when userID is empty
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's daemon
+		} else if userID == "" {
 			userID = "all"
 		}
 		// v4.4.2: Authorization check - only owner can trigger scan
@@ -396,8 +426,12 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 
 	case MsgGetRecentLogs:
 		// Read-only: no authorization required
-		// v4.3.9: Added to Windows for parity with Unix
-		logs := s.handler.GetRecentLogs(100) // Default to 100 entries
+		// v4.5.0: Route to calling user's logs in service mode
+		userID := req.UserID
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's logs
+		}
+		logs := s.handler.GetRecentLogs(userID, 100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
 
 	default:
@@ -407,11 +441,30 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 
 // authorizeModifyRequest checks if the caller is authorized to perform a modify operation.
 // v4.4.2: Only the daemon owner can execute commands that modify daemon state.
-// This prevents User A from controlling User B's daemon on multi-user Windows systems.
+// v4.5.0: In service mode, authorization is relaxed - any authenticated user is allowed
+// because user-scoped routing in the handler ensures isolation.
 func (s *Server) authorizeModifyRequest(callerSID, operation string) error {
-	// If we couldn't capture owner SID, skip authorization (fail-open for compatibility)
-	if s.ownerSID == "" {
+	// v4.5.0: In service mode, any authenticated user is allowed
+	// User-scoped routing in the handler handles isolation
+	if s.serviceMode {
+		if callerSID == "" {
+			s.logger.Warn().
+				Str("operation", operation).
+				Msg("IPC request denied: could not identify caller")
+			return fmt.Errorf("unauthorized: could not identify caller")
+		}
+		// Allow - routing will scope to caller's daemon
 		return nil
+	}
+
+	// Subprocess mode: owner-based authorization
+	// v4.5.1: Changed to fail-closed for security - if owner SID not captured at startup,
+	// deny modify operations rather than allowing all requests
+	if s.ownerSID == "" {
+		s.logger.Error().
+			Str("operation", operation).
+			Msg("Authorization unavailable: owner SID not captured at daemon startup")
+		return fmt.Errorf("authorization unavailable: daemon startup failed to capture owner identity")
 	}
 
 	// If we couldn't get caller SID, deny access (fail-closed for security)

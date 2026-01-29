@@ -139,7 +139,7 @@ testdata/
 
 # Catch-all: Block any .md or .txt NOT in whitelist
 # (Whitelist: README.md, LICENSE, CLI_GUIDE.md, ARCHITECTURE.md,
-#  CONTRIBUTING.md, TESTING.md, RELEASE_NOTES.md, FEATURE_SUMMARY.md)
+#  CONTRIBUTING.md, TESTING.md, RELEASE_NOTES.md, FEATURE_SUMMARY.md, SECURITY.md)
 # All other .md/.txt files are internal and should stay local
 *.md
 !README.md
@@ -150,6 +150,7 @@ testdata/
 !TESTING.md
 !RELEASE_NOTES.md
 !FEATURE_SUMMARY.md
+!SECURITY.md
 !.github/**/*.md
 
 *.txt
