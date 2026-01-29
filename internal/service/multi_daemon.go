@@ -4,11 +4,14 @@ package service
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
+	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
@@ -33,11 +36,12 @@ type MultiUserDaemon struct {
 
 // userDaemonEntry tracks a daemon for a specific user.
 type userDaemonEntry struct {
-	profile UserProfile
-	daemon  *daemon.Daemon
-	config  *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
-	cancel  context.CancelFunc
-	running bool
+	profile   UserProfile
+	daemon    *daemon.Daemon
+	config    *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
+	cancel    context.CancelFunc
+	running   bool
+	logBuffer *daemon.LogBuffer // v4.5.0: Per-user log buffer for IPC GetRecentLogs
 }
 
 // NewMultiUserDaemon creates a new multi-user daemon orchestrator.
@@ -203,8 +207,15 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		Int("poll_interval_min", daemonConf.Daemon.PollIntervalMinutes).
 		Msg("Starting auto-download daemon for user")
 
-	// Create user-specific logger
-	userLogger := m.logger.WithStr("user", profile.Username)
+	// v4.5.0: Create per-user log writer with buffer for IPC GetRecentLogs
+	// The log writer captures logs for both file output and IPC retrieval
+	logDir := config.LogDirectoryForUser(profile.ProfilePath)
+	logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
+		Console:    false, // Service mode - no console
+		LogFile:    filepath.Join(logDir, "daemon.log"),
+		BufferSize: 1000,
+	})
+	userLogger := logging.NewLoggerWithWriter(logWriter)
 
 	// v4.0.8: Use unified API key resolution with fallback chain
 	// Priority: token file -> environment variable
@@ -260,6 +271,9 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		return fmt.Errorf("failed to create daemon for %s: %w", profile.Username, err)
 	}
 
+	// v4.5.0: Get log buffer from the log writer for IPC GetRecentLogs
+	logBuffer := logWriter.GetBuffer()
+
 	// Create cancellable context for this user's daemon
 	ctx, cancel := context.WithCancel(m.ctx)
 
@@ -271,11 +285,12 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 
 	// Track the daemon
 	m.daemons[profile.ProfilePath] = &userDaemonEntry{
-		profile: profile,
-		daemon:  d,
-		config:  daemonConf,
-		cancel:  cancel,
-		running: true,
+		profile:   profile,
+		daemon:    d,
+		config:    daemonConf,
+		cancel:    cancel,
+		running:   true,
+		logBuffer: logBuffer,
 	}
 
 	m.logger.Info().Str("user", profile.Username).Msg("User daemon started successfully")
@@ -488,4 +503,23 @@ func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
 	}
 
 	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+}
+
+// GetUserLogs returns recent log entries for a specific user (by SID or username).
+// v4.5.0: Added to support per-user log retrieval via IPC.
+func (m *MultiUserDaemon) GetUserLogs(identifier string, count int) []ipc.LogEntryData {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, entry := range m.daemons {
+		// Match by SID (preferred) or username
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
+			if entry.logBuffer != nil {
+				return entry.logBuffer.GetRecent(count)
+			}
+			return nil
+		}
+	}
+	return nil
 }

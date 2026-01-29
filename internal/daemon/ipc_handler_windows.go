@@ -184,8 +184,10 @@ func (h *IPCHandler) OpenLogs(userID string) error {
 }
 
 // GetRecentLogs returns recent log entries from the buffer.
-// v4.4.0: Now functional (was previously returning nil).
-func (h *IPCHandler) GetRecentLogs(count int) []ipc.LogEntryData {
+// v4.5.0: Added userID parameter for interface compatibility.
+// In subprocess mode, userID is ignored (only one user).
+func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {
+	// userID ignored in subprocess mode - only one user
 	if h.logBuffer == nil {
 		return nil
 	}

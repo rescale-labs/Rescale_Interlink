@@ -199,8 +199,10 @@ func RunAsMultiUserService(s *MultiUserService) error {
 	elog.Info(1, "Starting service (multi-user mode)")
 
 	// Create IPC handler and server
+	// v4.5.0: Use service mode server for multi-user mode
+	// This relaxes owner-based auth since user-scoped routing handles isolation
 	ipcHandler := NewServiceIPCHandler(s, logger)
-	ipcServer := ipc.NewServer(ipcHandler, logger)
+	ipcServer := ipc.NewServiceModeServer(ipcHandler, logger)
 
 	ws := &multiUserWindowsService{
 		service:    s,

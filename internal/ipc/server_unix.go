@@ -45,8 +45,9 @@ type ServiceHandler interface {
 	Shutdown() error
 
 	// GetRecentLogs returns recent log entries from the daemon.
-	// v4.3.2: For GUI to display daemon activity.
-	GetRecentLogs(count int) []LogEntryData
+	// v4.5.0: Added userID parameter for per-user routing in service mode.
+	// In subprocess mode, userID is ignored (only one user).
+	GetRecentLogs(userID string, count int) []LogEntryData
 }
 
 // Server handles IPC requests from clients via Unix domain socket.
@@ -258,8 +259,9 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return NewOKResponse()
 
 	case MsgGetRecentLogs:
-		// v4.3.2: Return recent log entries for GUI display
-		logs := s.handler.GetRecentLogs(100) // Default to 100 entries
+		// v4.5.0: Return recent log entries for GUI display
+		// In subprocess mode, userID is ignored; in service mode, routes to calling user
+		logs := s.handler.GetRecentLogs(req.UserID, 100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
 
 	case MsgShutdown:
