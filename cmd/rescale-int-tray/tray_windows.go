@@ -16,8 +16,10 @@ import (
 	"fyne.io/systray"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
+	"github.com/rescale/rescale-int/internal/elevation"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/pathutil"
+	"github.com/rescale/rescale-int/internal/service"
 	"github.com/rescale/rescale-int/internal/version"
 )
 
@@ -36,20 +38,24 @@ type trayApp struct {
 	mu     sync.RWMutex
 
 	// Current status
-	serviceRunning bool
-	lastStatus     *ipc.StatusData
-	lastError      string
+	serviceRunning   bool
+	lastStatus       *ipc.StatusData
+	lastError        string
+	ipcConnected     bool // v4.5.0: Track IPC availability separately from service running
+	serviceInstalled bool // v4.5.1: Track Windows Service installation status
 
 	// Menu items (for dynamic updates)
-	mStatus       *systray.MenuItem
-	mStartService *systray.MenuItem
-	mPause        *systray.MenuItem
-	mResume       *systray.MenuItem
-	mTriggerScan  *systray.MenuItem
-	mConfigure    *systray.MenuItem // v4.2.0: Opens GUI for configuration
-	mOpenGUI      *systray.MenuItem
-	mViewLogs     *systray.MenuItem
-	mQuit         *systray.MenuItem
+	mStatus            *systray.MenuItem
+	mStartService      *systray.MenuItem
+	mStartServiceAdmin *systray.MenuItem // v4.5.1: Start Windows Service (Admin)
+	mStopServiceAdmin  *systray.MenuItem // v4.5.1: Stop Windows Service (Admin)
+	mPause             *systray.MenuItem
+	mResume            *systray.MenuItem
+	mTriggerScan       *systray.MenuItem
+	mConfigure         *systray.MenuItem // v4.2.0: Opens GUI for configuration
+	mOpenGUI           *systray.MenuItem
+	mViewLogs          *systray.MenuItem
+	mQuit              *systray.MenuItem
 
 	// Control channels
 	done chan struct{}
@@ -80,6 +86,13 @@ func onReady() {
 
 	systray.AddSeparator()
 
+	// v4.5.1: Elevated service controls (when Windows Service installed)
+	app.mStartServiceAdmin = systray.AddMenuItem("Start Service (Admin)", "Start Windows Service (requires administrator)")
+	app.mStopServiceAdmin = systray.AddMenuItem("Stop Service (Admin)", "Stop Windows Service (requires administrator)")
+	app.mStartServiceAdmin.Hide()
+	app.mStopServiceAdmin.Hide()
+
+	// Subprocess mode control (when no Windows Service)
 	app.mStartService = systray.AddMenuItem("Start Service", "Start the auto-download daemon")
 	app.mPause = systray.AddMenuItem("Pause Auto-Download", "Pause auto-download for current user")
 	app.mResume = systray.AddMenuItem("Resume Auto-Download", "Resume auto-download for current user")
@@ -139,10 +152,22 @@ func (a *trayApp) refreshStatus() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// v4.5.1: Always check service installation status
+	a.serviceInstalled = service.IsInstalled()
+
 	if err != nil {
 		a.serviceRunning = false
 		a.lastError = translateError(err)
 		a.lastStatus = nil
+		a.ipcConnected = false // v4.5.0: Track IPC state separately
+
+		// v4.5.0: Check Windows Service as fallback
+		if a.serviceInstalled {
+			if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
+				a.serviceRunning = true
+				a.lastError = "Service running but IPC not responding"
+			}
+		}
 		a.updateUI()
 		return
 	}
@@ -150,20 +175,45 @@ func (a *trayApp) refreshStatus() {
 	a.serviceRunning = true
 	a.lastStatus = status
 	a.lastError = ""
+	a.ipcConnected = true // v4.5.0: IPC succeeded
 	a.updateUI()
 }
 
 // updateUI updates the tray icon, tooltip, and menu items based on current state.
 // Must be called with a.mu held.
 func (a *trayApp) updateUI() {
+	// v4.5.1: Handle Windows Service mode vs subprocess mode menu visibility
+	if a.serviceInstalled {
+		// Windows Service installed - show admin controls, hide subprocess controls
+		a.mStartService.Hide()
+
+		if a.serviceRunning {
+			// Service running - show stop option
+			a.mStartServiceAdmin.Hide()
+			a.mStopServiceAdmin.Show()
+			a.mStopServiceAdmin.Enable()
+		} else {
+			// Service stopped - show start option
+			a.mStartServiceAdmin.Show()
+			a.mStartServiceAdmin.Enable()
+			a.mStopServiceAdmin.Hide()
+		}
+	} else {
+		// No Windows Service - hide admin controls, show subprocess controls
+		a.mStartServiceAdmin.Hide()
+		a.mStopServiceAdmin.Hide()
+	}
+
 	if !a.serviceRunning {
 		// v4.4.2: Check if this is first-time setup (no daemon.conf exists)
 		configPath, _ := config.DefaultDaemonConfigPath()
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nFirst-time setup: Click 'Configure...' to set download folder", version.Version))
 			a.mStatus.SetTitle("Status: Not Configured")
-			a.mStartService.Enable()
-			a.mStartService.Show()
+			if !a.serviceInstalled {
+				a.mStartService.Enable()
+				a.mStartService.Show()
+			}
 			a.mPause.Disable()
 			a.mResume.Disable()
 			a.mTriggerScan.Disable()
@@ -178,19 +228,32 @@ func (a *trayApp) updateUI() {
 			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running", version.Version))
 			a.mStatus.SetTitle("Status: Service Not Running")
 		}
-		a.mStartService.Enable()
-		a.mStartService.Show()
+		if !a.serviceInstalled {
+			a.mStartService.Enable()
+			a.mStartService.Show()
+		}
 		a.mPause.Disable()
 		a.mResume.Disable()
 		a.mTriggerScan.Disable()
 		return
 	}
 
-	// Service is running - hide Start Service button
+	// Service is running - hide Start Service button (subprocess mode)
 	a.mStartService.Disable()
 	a.mStartService.Hide()
 
-	// Service is running
+	// v4.5.0: Check IPC availability for controls
+	if !a.ipcConnected {
+		// Service running but IPC unavailable - disable controls
+		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running (IPC unavailable)", version.Version))
+		a.mStatus.SetTitle("Status: Running (IPC unavailable)")
+		a.mPause.Disable()
+		a.mResume.Disable()
+		a.mTriggerScan.Disable()
+		return
+	}
+
+	// Service is running with IPC available
 	if a.lastStatus != nil {
 		tooltip := fmt.Sprintf("Rescale Interlink v%s\nService: %s\nActive Users: %d\nActive Downloads: %d",
 			version.Version,
@@ -234,6 +297,12 @@ func (a *trayApp) handleMenuClicks() {
 		case <-a.mStartService.ClickedCh:
 			a.startService()
 
+		case <-a.mStartServiceAdmin.ClickedCh:
+			a.startServiceElevated() // v4.5.1: UAC elevation
+
+		case <-a.mStopServiceAdmin.ClickedCh:
+			a.stopServiceElevated() // v4.5.1: UAC elevation
+
 		case <-a.mConfigure.ClickedCh:
 			a.openGUI() // v4.2.0: Configure opens GUI (same action, just more discoverable)
 
@@ -266,7 +335,17 @@ func (a *trayApp) handleMenuClicks() {
 // v4.1.1: Added to allow users to start the daemon from the tray without
 // opening the GUI or using the command line.
 // v4.2.0: Reads settings from daemon.conf.
+// v4.5.0: Blocks subprocess when Windows Service installed.
 func (a *trayApp) startService() {
+	// v4.5.0: If Windows Service installed, don't spawn subprocess
+	if service.IsInstalled() {
+		a.mu.Lock()
+		a.lastError = "Windows Service installed. Start via Services.msc or run as admin: net start \"Rescale Interlink Auto-Download\""
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
 	// Find rescale-int.exe in the same directory as the tray app
 	exePath, err := os.Executable()
 	if err != nil {
@@ -355,8 +434,9 @@ func (a *trayApp) startService() {
 
 	// v4.3.8: Create stderr capture file for subprocess diagnostics
 	// v4.4.2: Use centralized log directory
+	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
 	logsDir := config.LogDirectory()
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
 	}
 	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
@@ -510,10 +590,11 @@ func (a *trayApp) resumeAutoDownload() {
 // v4.4.2: Uses centralized LogDirectory() for consistent log location.
 func (a *trayApp) viewLogs() {
 	// v4.4.2: Use centralized log directory path
+	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
 	logsDir := config.LogDirectory()
 
 	// Create if doesn't exist
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		a.mu.Lock()
 		a.lastError = "Failed to create logs directory"
 		a.mu.Unlock()
@@ -526,6 +607,90 @@ func (a *trayApp) viewLogs() {
 		a.lastError = "Failed to open logs directory"
 		a.mu.Unlock()
 	}
+}
+
+// startServiceElevated triggers UAC to start the Windows Service.
+// v4.5.1: Uses elevation.StartServiceElevated() which calls "rescale-int service start".
+func (a *trayApp) startServiceElevated() {
+	// Pre-check: service must be installed
+	if !service.IsInstalled() {
+		a.mu.Lock()
+		a.lastError = "Windows Service is not installed"
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	// Pre-check: service should not already be running
+	status, _ := service.QueryStatus()
+	if status == service.StatusRunning {
+		a.mu.Lock()
+		a.lastError = "Service is already running"
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	daemon.WriteStartupLog("=== TRAY ELEVATED START SERVICE ===")
+
+	if err := elevation.StartServiceElevated(); err != nil {
+		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
+		a.mu.Lock()
+		a.lastError = translateError(err)
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	daemon.WriteStartupLog("SUCCESS: UAC approved, service start command executed")
+
+	// Wait for service to start, then refresh status
+	go func() {
+		time.Sleep(2 * time.Second)
+		a.refreshStatus()
+	}()
+}
+
+// stopServiceElevated triggers UAC to stop the Windows Service.
+// v4.5.1: Uses elevation.StopServiceElevated() which calls "rescale-int service stop".
+func (a *trayApp) stopServiceElevated() {
+	// Pre-check: service must be installed
+	if !service.IsInstalled() {
+		a.mu.Lock()
+		a.lastError = "Windows Service is not installed"
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	// Pre-check: service should be running
+	status, _ := service.QueryStatus()
+	if status == service.StatusStopped {
+		a.mu.Lock()
+		a.lastError = "Service is already stopped"
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	daemon.WriteStartupLog("=== TRAY ELEVATED STOP SERVICE ===")
+
+	if err := elevation.StopServiceElevated(); err != nil {
+		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
+		a.mu.Lock()
+		a.lastError = translateError(err)
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	daemon.WriteStartupLog("SUCCESS: UAC approved, service stop command executed")
+
+	// Wait for service to stop, then refresh status
+	go func() {
+		time.Sleep(2 * time.Second)
+		a.refreshStatus()
+	}()
 }
 
 // truncate shortens a string to maxLen, adding "..." if truncated.

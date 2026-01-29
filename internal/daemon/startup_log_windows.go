@@ -27,7 +27,8 @@ func WriteStartupLog(format string, args ...interface{}) {
 	logPath := StartupLogPath()
 
 	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(logPath), 0755); err != nil {
+	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
+	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
 		return
 	}
 

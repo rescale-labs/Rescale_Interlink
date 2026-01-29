@@ -122,6 +122,10 @@ export function GetRunStatus() {
   return window['go']['wailsapp']['App']['GetRunStatus']();
 }
 
+export function GetServiceStatus() {
+  return window['go']['wailsapp']['App']['GetServiceStatus']();
+}
+
 export function GetTransferStats() {
   return window['go']['wailsapp']['App']['GetTransferStats']();
 }
@@ -274,6 +278,10 @@ export function StartFolderUpload(arg1, arg2) {
   return window['go']['wailsapp']['App']['StartFolderUpload'](arg1, arg2);
 }
 
+export function StartServiceElevated() {
+  return window['go']['wailsapp']['App']['StartServiceElevated']();
+}
+
 export function StartSingleJob(arg1) {
   return window['go']['wailsapp']['App']['StartSingleJob'](arg1);
 }
@@ -284,6 +292,10 @@ export function StartTransfers(arg1) {
 
 export function StopDaemon() {
   return window['go']['wailsapp']['App']['StopDaemon']();
+}
+
+export function StopServiceElevated() {
+  return window['go']['wailsapp']['App']['StopServiceElevated']();
 }
 
 export function TestAutoDownloadConnection(arg1) {

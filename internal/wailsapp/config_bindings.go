@@ -277,7 +277,8 @@ func (a *App) TestConnection() ConnectionResultDTO {
 		}
 	}
 
-	a.logDebug("connection", fmt.Sprintf("Testing API key %s...", a.config.APIKey[:min(8, len(a.config.APIKey))]))
+	// v4.5.1: Removed API key fragment from log for security (no value in logging partial keys)
+	a.logDebug("connection", "Testing API connection...")
 
 	// Copy config values we need - avoid race conditions with concurrent config updates
 	configCopy := &config.Config{

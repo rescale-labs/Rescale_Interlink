@@ -1,5 +1,63 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.1 - January 28, 2026
+
+### Security Hardening & FIPS Compliance Improvements
+
+This release implements security hardening based on comprehensive security audit findings, with particular focus on log directory permissions, IPC authorization, and NTLM/FIPS compliance for FedRAMP environments.
+
+#### Security Improvements
+
+**Log Directory Permissions Hardened**
+
+Log directories are now created with 0700 permissions (owner-only access) instead of 0755:
+- Prevents other users on multi-user systems from reading log files
+- Applied across all 10 locations that create log directories
+- **Files**: `internal/config/paths.go`, `internal/wailsapp/filelogger_*.go`, `internal/daemon/startup_log_windows.go`, `cmd/rescale-int-tray/tray_windows.go`, `internal/wailsapp/daemon_bindings*.go`, `internal/service/ipc_handler.go`
+
+**Windows IPC Authorization Changed to Fail-Closed**
+
+The Windows daemon IPC authorization now fails closed if owner SID cannot be captured:
+- Previously: If SID capture failed at startup, all modify operations were allowed (fail-open)
+- Now: If SID capture fails, modify operations are denied with clear error message
+- Prevents potential authorization bypass on multi-user Windows systems
+- **File**: `internal/ipc/server.go`
+
+**API Key Fragment Removed from Debug Logs**
+
+Debug logs no longer include partial API key information:
+- Previously logged "Testing API key XXXXXXXX..." (8 characters)
+- Now logs "Testing API connection..." with no key information
+- While 8 characters are not cryptographically useful, removing them follows security best practices
+- **File**: `internal/wailsapp/config_bindings.go`
+
+#### NTLM/FIPS Compliance Safeguards
+
+**Auto-Disable NTLM for FedRAMP Platforms**
+
+NTLM proxy mode uses MD4/MD5 algorithms which are not FIPS 140-3 approved. New safeguards prevent using NTLM with FedRAMP platforms:
+
+- **Backend**: `IsFRMPlatform()` helper detects FedRAMP URLs (`rescale-gov.com`)
+- **Backend**: `ValidateNTLMForFIPS()` returns warning when NTLM + FRM detected
+- **Frontend**: NTLM option disabled and marked "(unavailable for FRM)" when FRM platform selected
+- **Frontend**: Auto-switches from NTLM to `basic` when user selects FRM platform with NTLM configured
+- **Startup**: Warning logged if NTLM proxy is configured in FIPS mode
+- **Files**: `internal/config/csv_config.go`, `main.go`, `frontend/src/components/tabs/SetupTab.tsx`
+
+#### New Documentation
+
+**SECURITY.md Added**
+
+Comprehensive security documentation covering:
+- FIPS 140-3 compliance requirements and build instructions
+- Proxy authentication modes and FIPS compatibility
+- Log security best practices
+- API key storage recommendations
+- Windows IPC security model
+- Encryption details
+
+---
+
 ## v4.4.3 - January 25, 2026
 
 ### Daemon Startup UX + Service Mode Fixes

@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: January 1, 2026
-**Version**: 4.0.4
+**Last Updated**: January 28, 2026
+**Version**: 4.5.1
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 

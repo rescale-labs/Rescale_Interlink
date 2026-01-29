@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.4.3-green)
+![Status](https://img.shields.io/badge/status-v4.5.1-green)
 
 ---
 
@@ -87,7 +87,19 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
-**v4.4.3 (January 25, 2026) - Daemon Startup UX + Service Mode Fixes:**
+**v4.5.1 (January 28, 2026) - Security Hardening & FIPS Compliance:**
+- **Security Improvements:**
+  - **Log Directory Permissions**: All log directories now created with 0700 (owner-only) instead of 0755
+  - **Windows IPC Fail-Closed**: If owner SID capture fails, modify operations are denied (was fail-open)
+  - **API Key Fragment Removed**: Debug logs no longer include partial API key information
+- **NTLM/FIPS Safeguards:**
+  - **FedRAMP Platform Detection**: Auto-disables NTLM proxy for `rescale-gov.com` platforms
+  - **Frontend Enforcement**: NTLM option disabled in GUI when FRM platform selected
+  - **Startup Warning**: Logs warning if NTLM proxy configured in FIPS mode
+- **New Documentation:**
+  - **SECURITY.md**: Comprehensive security documentation covering FIPS, proxy, logging, and IPC security
+
+**v4.5.1 (January 25, 2026) - Daemon Startup UX + Service Mode Fixes:**
 - **P0 Critical Fixes:**
   - **Windows Service Entrypoint**: `daemon run` now properly detects Windows Service context and delegates to `RunAsMultiUserService()` - fixes Error 1053 on service start
   - **Windows Per-User Config Paths**: Multi-user service now correctly finds `daemon.conf` at `AppData\Roaming\Rescale\Interlink\daemon.conf`
@@ -173,15 +185,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.4.3-darwin-arm64.zip` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.4.3-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.4.3-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `RescaleInterlink-v4.4.3.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.5.1-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.5.1-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.5.1-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.5.1.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Unzip and move app to Applications
-unzip rescale-interlink-v4.4.3-darwin-arm64.zip
+unzip rescale-interlink-v4.5.1-darwin-arm64.zip
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -192,7 +204,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.4.3-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.5.1-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -205,7 +217,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.4.3-windows-amd64.zip
+Expand-Archive rescale-interlink-v4.5.1-windows-amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -515,7 +527,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.4.3                       |
+|                    Rescale Interlink v4.5.1                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -773,6 +785,7 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 - **[CLI_GUIDE.md](CLI_GUIDE.md)** - Complete command-line reference with examples
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design and code organization
+- **[SECURITY.md](SECURITY.md)** - Security documentation (FIPS, proxy, logging, IPC)
 - **[TESTING.md](TESTING.md)** - Test strategy and procedures
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Developer onboarding guide
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Version history and release details
@@ -780,6 +793,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.4.3
+**Version**: 4.5.1
 **Status**: Production Ready
-**Last Updated**: January 25, 2026
+**Last Updated**: January 28, 2026

@@ -16,6 +16,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
+	"github.com/rescale/rescale-int/internal/elevation"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/service"
@@ -109,16 +110,24 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		return result
 	}
 
-	// v4.3.9: IPC not responding - check if Windows Service is installed/running
-	// IMPORTANT: Don't set result.Running=true based on SCM alone!
-	// IPC is the source of truth for subprocess mode.
-	// Only show informational message if Windows Service is detected but IPC fails.
+	// v4.5.0: Better status when service running but IPC fails
+	// Check Windows Service status for better error messaging
 	if service.IsInstalled() {
-		if svcStatus, err := service.QueryStatus(); err == nil && svcStatus == service.StatusRunning {
-			// Windows Service registered as running but IPC not responding = problem state
-			result.ManagedBy = "Windows Service"
-			result.Error = "Windows Service running but IPC not responding - try restarting service"
-			// Note: result.Running stays false - IPC is the authoritative source
+		if svcStatus, err := service.QueryStatus(); err == nil {
+			if svcStatus == service.StatusRunning {
+				// Windows Service is running but IPC not responding
+				result.ManagedBy = "Windows Service"
+				result.Running = true         // Service IS running
+				result.State = "running"
+				result.IPCConnected = false   // v4.5.0: Explicit IPC status
+				result.Error = "Service running but IPC not responding - may be initializing"
+			} else if svcStatus == service.StatusStopped {
+				// Windows Service installed but stopped
+				result.ManagedBy = "Windows Service"
+				result.Running = false
+				result.State = "stopped"
+				result.Error = "Windows Service installed but stopped. Start via Services.msc."
+			}
 		}
 	}
 	// For subprocess mode: if IPC fails, daemon is NOT running (default state is correct)
@@ -130,8 +139,14 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 // v4.3.7: Uses subprocess mode by default instead of Windows Service (which requires admin).
 // v4.3.8: Added startup logging with clear log path in error messages.
 // v4.4.2: Uses centralized LogDirectory() for consistent log location.
+// v4.5.0: Blocks subprocess spawn if Windows Service is installed.
 // Similar to tray's startService() in tray_windows.go.
 func (a *App) StartDaemon() error {
+	// v4.5.0: If Windows Service installed, don't spawn subprocess
+	if service.IsInstalled() {
+		return fmt.Errorf("Windows Service installed. Start via Services.msc or run as admin: rescale-int service start")
+	}
+
 	// Check if already running via IPC
 	client := ipc.NewClient()
 	client.SetTimeout(2 * time.Second)
@@ -239,8 +254,9 @@ func (a *App) startDaemonSubprocess() error {
 
 	// v4.3.8: Create stderr capture file for subprocess diagnostics
 	// v4.4.2: Use centralized log directory
+	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
 	logsDir := config.LogDirectory()
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
 	}
 	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
@@ -738,11 +754,12 @@ func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 
 // OpenLogsDirectory opens the logs folder in the system file explorer.
 // v4.4.2: Added for GUI access to unified log directory.
+// v4.5.1: Uses 0700 permissions to restrict log access to owner only.
 func (a *App) OpenLogsDirectory() error {
 	logsDir := config.LogDirectory()
 
 	// Ensure directory exists
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		return fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
@@ -758,4 +775,125 @@ func (a *App) OpenLogsDirectory() error {
 // v4.4.2: For displaying log location in UI.
 func (a *App) GetLogsDirectory() string {
 	return config.LogDirectory()
+}
+
+// =============================================================================
+// UAC-Elevated Service Control (v4.5.1)
+// =============================================================================
+
+// ElevatedServiceResultDTO represents the result of an elevated service operation.
+// v4.5.1: Used for GUI to communicate UAC elevation results.
+type ElevatedServiceResultDTO struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ServiceStatusDTO represents detailed Windows Service status.
+// v4.5.1: Used for GUI to show service status independently of IPC.
+type ServiceStatusDTO struct {
+	Installed bool   `json:"installed"`
+	Running   bool   `json:"running"`
+	Status    string `json:"status"` // "Stopped", "Running", "Start Pending", etc.
+}
+
+// GetServiceStatus returns detailed Windows Service status.
+// v4.5.1: Always derives Installed explicitly from service.IsInstalled().
+// NOTE: Do NOT infer installed from QueryStatus() because it returns "Stopped"
+// even when the service is not installed.
+func (a *App) GetServiceStatus() ServiceStatusDTO {
+	installed := service.IsInstalled()
+	if !installed {
+		return ServiceStatusDTO{
+			Installed: false,
+			Running:   false,
+			Status:    "Not Installed",
+		}
+	}
+
+	status, err := service.QueryStatus()
+	if err != nil {
+		return ServiceStatusDTO{
+			Installed: true,
+			Running:   false,
+			Status:    "Unknown",
+		}
+	}
+
+	return ServiceStatusDTO{
+		Installed: true,
+		Running:   status == service.StatusRunning,
+		Status:    status.String(),
+	}
+}
+
+// StartServiceElevated triggers UAC prompt to start Windows Service.
+// v4.5.1: Returns immediately after UAC approved (poll GetServiceStatus to confirm).
+// Uses elevation.StartServiceElevated() which calls "rescale-int service start".
+func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
+	// Pre-check: service must be installed
+	if !service.IsInstalled() {
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   "Windows Service is not installed. Install via 'rescale-int service install' as administrator.",
+		}
+	}
+
+	// Pre-check: service should not already be running
+	status, _ := service.QueryStatus()
+	if status == service.StatusRunning {
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   "Service is already running.",
+		}
+	}
+
+	a.logInfo("Service", "Starting Windows Service with UAC elevation...")
+
+	// Trigger UAC elevation
+	if err := elevation.StartServiceElevated(); err != nil {
+		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to start service: %v", err),
+		}
+	}
+
+	a.logInfo("Service", "UAC approved, service start command executed")
+	return ElevatedServiceResultDTO{Success: true}
+}
+
+// StopServiceElevated triggers UAC prompt to stop Windows Service.
+// v4.5.1: Returns immediately after UAC approved (poll GetServiceStatus to confirm).
+// Uses elevation.StopServiceElevated() which calls "rescale-int service stop".
+func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
+	// Pre-check: service must be installed
+	if !service.IsInstalled() {
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   "Windows Service is not installed.",
+		}
+	}
+
+	// Pre-check: service should be running
+	status, _ := service.QueryStatus()
+	if status == service.StatusStopped {
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   "Service is already stopped.",
+		}
+	}
+
+	a.logInfo("Service", "Stopping Windows Service with UAC elevation...")
+
+	// Trigger UAC elevation
+	if err := elevation.StopServiceElevated(); err != nil {
+		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to stop service: %v", err),
+		}
+	}
+
+	a.logInfo("Service", "UAC approved, service stop command executed")
+	return ElevatedServiceResultDTO{Success: true}
 }

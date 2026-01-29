@@ -4,7 +4,8 @@ package version
 
 // Version is the build version string, set by ldflags during build.
 // Format: vX.Y.Z or vX.Y.Z-dev for development builds.
-var Version = "v4.4.2"
+// v4.5.1: UAC-prompted Windows Service control via GUI/tray.
+var Version = "v4.5.1"
 
 // BuildTime is the build timestamp, set by ldflags during build.
 var BuildTime = "unknown"

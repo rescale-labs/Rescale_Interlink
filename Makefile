@@ -1,11 +1,21 @@
 # Makefile for Rescale Interlink
 # Build and package cross-platform FIPS 140-3 compliant binaries
 
-# Variables
-VERSION := v4.4.3
+# =============================================================================
+# VERSION: Single Source of Truth
+# =============================================================================
+# The authoritative version is in: internal/version/version.go
+# We extract it dynamically to ensure all builds use the same version.
+# To change the version, edit internal/version/version.go and run: make sync-version
+# =============================================================================
+
+# Extract version from Go source (single source of truth)
+VERSION := $(shell grep 'var Version' internal/version/version.go | sed 's/.*"\(.*\)"/\1/')
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
-LDFLAGS := -ldflags "-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
+
+# ldflags target the version package for consistency across all binaries
+LDFLAGS := -ldflags "-s -w -X github.com/rescale/rescale-int/internal/version.Version=$(VERSION) -X github.com/rescale/rescale-int/internal/version.BuildTime=$(BUILD_TIME)"
 
 # FIPS 140-3 compliance: Use Go's native FIPS crypto module
 # See: https://go.dev/doc/security/fips140
@@ -173,6 +183,87 @@ version:
 	@echo "Version: $(VERSION)"
 	@echo "Build Time: $(BUILD_TIME)"
 
+# Sync version from Go source to all config files (wails.json, package.json)
+# Run this after changing internal/version/version.go
+.PHONY: sync-version
+sync-version:
+	@echo "Syncing version $(VERSION) to all config files..."
+	@# Update wails.json productVersion (strip 'v' prefix for semver format)
+	@sed -i '' 's/"productVersion": "[^"]*"/"productVersion": "$(shell echo $(VERSION) | sed 's/^v//')"/' wails.json
+	@# Update frontend/package.json version (strip 'v' prefix for semver format)
+	@sed -i '' 's/"version": "[^"]*"/"version": "$(shell echo $(VERSION) | sed 's/^v//')"/' frontend/package.json
+	@echo "✅ Version synced to:"
+	@echo "   - internal/version/version.go: $(VERSION) (source of truth)"
+	@echo "   - wails.json: $(shell echo $(VERSION) | sed 's/^v//')"
+	@echo "   - frontend/package.json: $(shell echo $(VERSION) | sed 's/^v//')"
+
+# =============================================================================
+# STRAY BINARY PREVENTION
+# =============================================================================
+# Binaries should ONLY go in bin/{VERSION}/{PLATFORM}/ directories.
+# These targets help detect and prevent stray binaries in the project root.
+# =============================================================================
+
+# List of binary names that should NEVER be in project root
+STRAY_BINARIES := rescale-int rescale-int-tray rescale-int-gui rescale-int.exe rescale-int-tray.exe rescale-int-gui.exe
+
+# Check for stray binaries in project root (fails if any found)
+.PHONY: check-stray
+check-stray:
+	@echo "Checking for stray binaries in project root..."
+	@FOUND=""; \
+	for bin in $(STRAY_BINARIES); do \
+		if [ -f "$$bin" ]; then \
+			FOUND="$$FOUND $$bin"; \
+		fi; \
+	done; \
+	if [ -n "$$FOUND" ]; then \
+		echo "❌ STRAY BINARIES FOUND IN PROJECT ROOT:$$FOUND"; \
+		echo ""; \
+		echo "Binaries should ONLY be in bin/{VERSION}/{PLATFORM}/ directories."; \
+		echo "Run 'make clean-stray' to remove them, or use 'make build-*' targets."; \
+		exit 1; \
+	else \
+		echo "✅ No stray binaries found"; \
+	fi
+
+# Remove stray binaries from project root
+.PHONY: clean-stray
+clean-stray:
+	@echo "Removing stray binaries from project root..."
+	@for bin in $(STRAY_BINARIES); do \
+		if [ -f "$$bin" ]; then \
+			rm -f "$$bin"; \
+			echo "  Removed: $$bin"; \
+		fi; \
+	done
+	@echo "✅ Done"
+
+# Combined preflight check (version sync + no stray binaries)
+# Run before commits or releases
+.PHONY: preflight
+preflight: check-version check-stray
+	@echo ""
+	@echo "✅ All preflight checks passed!"
+
+# Check if versions are in sync
+.PHONY: check-version
+check-version:
+	@echo "Checking version consistency..."
+	@GO_VERSION=$(VERSION); \
+	WAILS_VERSION=$$(grep '"productVersion"' wails.json | sed 's/.*: *"\([^"]*\)".*/\1/'); \
+	PKG_VERSION=$$(grep '"version"' frontend/package.json | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/'); \
+	GO_VERSION_CLEAN=$$(echo $$GO_VERSION | sed 's/^v//'); \
+	echo "  Go source:     $$GO_VERSION"; \
+	echo "  wails.json:    $$WAILS_VERSION"; \
+	echo "  package.json:  $$PKG_VERSION"; \
+	if [ "$$GO_VERSION_CLEAN" = "$$WAILS_VERSION" ] && [ "$$GO_VERSION_CLEAN" = "$$PKG_VERSION" ]; then \
+		echo "✅ All versions in sync!"; \
+	else \
+		echo "❌ Version mismatch! Run 'make sync-version' to fix."; \
+		exit 1; \
+	fi
+
 # Help
 .PHONY: help
 help:
@@ -208,7 +299,12 @@ help:
 	@echo "Utility Targets:"
 	@echo "  clean                   Remove build artifacts"
 	@echo "  clean-version           Remove $(VERSION) binaries"
+	@echo "  clean-stray             Remove stray binaries from project root"
 	@echo "  version                 Show version information"
+	@echo "  sync-version            Sync version from Go source to wails.json/package.json"
+	@echo "  check-version           Verify all version numbers are in sync"
+	@echo "  check-stray             Check for stray binaries in project root"
+	@echo "  preflight               Run all checks (version + stray binaries)"
 	@echo "  help                    Show this help message"
 	@echo ""
 	@echo "Examples:"
