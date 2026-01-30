@@ -662,10 +662,13 @@ type ElevatedServiceResultDTO struct {
 
 // ServiceStatusDTO represents detailed Windows Service status.
 // v4.5.1: Windows-only feature, stub returns "not installed" on other platforms.
+// v4.5.2: Added SCMBlocked/SCMError for IPC fallback when SCM access denied.
 type ServiceStatusDTO struct {
-	Installed bool   `json:"installed"`
-	Running   bool   `json:"running"`
-	Status    string `json:"status"`
+	Installed  bool   `json:"installed"`
+	Running    bool   `json:"running"`
+	Status     string `json:"status"`
+	SCMBlocked bool   `json:"scmBlocked"` // v4.5.2: True if SCM access denied
+	SCMError   string `json:"scmError"`   // v4.5.2: Error message for debugging
 }
 
 // GetServiceStatus returns detailed Windows Service status.
