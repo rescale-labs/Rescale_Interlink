@@ -144,15 +144,12 @@ Examples:
 					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
 				}
 
-				// v4.5.0: If Windows Service is installed but we're NOT running as service,
-				// prevent subprocess spawn to avoid split-brain (two daemons running)
-				if service.IsInstalled() {
-					daemon.WriteStartupLog("Windows Service is installed - blocking subprocess mode")
-					fmt.Println("Windows Service is installed. Use one of:")
-					fmt.Println("  - Run as admin: rescale-int service start")
-					fmt.Println("  - Or: net start \"Rescale Interlink Auto-Download\"")
-					fmt.Println("  - Or: Services.msc → Rescale Interlink Auto-Download → Start")
-					return fmt.Errorf("cannot run subprocess when Windows Service is installed")
+				// v4.5.5: Use unified detection instead of raw IsInstalled()
+				// Only blocks when service is RUNNING (not just installed)
+				if blocked, reason := service.ShouldBlockSubprocess(); blocked {
+					daemon.WriteStartupLog("Blocking subprocess: %s", reason)
+					fmt.Println(reason)
+					return fmt.Errorf("cannot start daemon: %s", reason)
 				}
 			}
 

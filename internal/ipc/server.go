@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -129,6 +130,11 @@ func getCurrentUserSID() (string, error) {
 
 // Start begins listening for IPC connections.
 func (s *Server) Start() error {
+	// v4.5.5: Check if pipe already exists BEFORE trying to create
+	if IsPipeInUse() {
+		return fmt.Errorf("failed to create named pipe: pipe already exists (another daemon is running). Stop the existing daemon first")
+	}
+
 	// Create named pipe listener with security descriptor
 	//
 	// v4.4.2 SECURITY NOTE:
@@ -154,6 +160,10 @@ func (s *Server) Start() error {
 
 	listener, err := winio.ListenPipe(PipeName, cfg)
 	if err != nil {
+		// v4.5.5: Enhanced error message
+		if strings.Contains(err.Error(), "Access is denied") {
+			return fmt.Errorf("failed to create named pipe: another daemon is running or pipe is stale. Error: %w", err)
+		}
 		return fmt.Errorf("failed to create named pipe: %w", err)
 	}
 	s.listener = listener
