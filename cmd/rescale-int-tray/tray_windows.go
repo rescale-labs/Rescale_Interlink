@@ -143,25 +143,28 @@ func (a *trayApp) refreshLoop() {
 }
 
 // refreshStatus fetches current status from the service via IPC.
+// v4.5.5: Uses unified DetectDaemon() for consistent service detection.
 func (a *trayApp) refreshStatus() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	// v4.5.5: Try IPC first (remains source of truth when available)
 	status, err := a.client.GetStatus(ctx)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// v4.5.1: Always check service installation status
-	a.serviceInstalled = service.IsInstalled()
-
 	if err != nil {
-		a.serviceRunning = false
+		// IPC failed - use unified detection as fallback
+		// v4.5.5: This handles SCM-denied scenarios where IPC may also be slow
+		detection := service.DetectDaemon()
+		a.serviceInstalled = detection.ServiceMode || service.IsInstalled()
+		a.serviceRunning = detection.ServiceMode || detection.SubprocessPID > 0 || detection.PipeInUse
 		a.lastError = translateError(err)
 		a.lastStatus = nil
-		a.ipcConnected = false // v4.5.0: Track IPC state separately
+		a.ipcConnected = false
 
-		// v4.5.0: Check Windows Service as fallback
+		// v4.5.0: Existing fallback to SCM when IPC fails (keep existing logic)
 		if a.serviceInstalled {
 			if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
 				a.serviceRunning = true
@@ -172,10 +175,13 @@ func (a *trayApp) refreshStatus() {
 		return
 	}
 
+	// IPC succeeded - use IPC data (source of truth)
 	a.serviceRunning = true
 	a.lastStatus = status
 	a.lastError = ""
-	a.ipcConnected = true // v4.5.0: IPC succeeded
+	a.ipcConnected = true
+	// v4.5.5: Use unified detection for serviceInstalled when IPC works too
+	a.serviceInstalled = status.ServiceMode || service.IsInstalled()
 	a.updateUI()
 }
 
@@ -336,11 +342,12 @@ func (a *trayApp) handleMenuClicks() {
 // opening the GUI or using the command line.
 // v4.2.0: Reads settings from daemon.conf.
 // v4.5.0: Blocks subprocess when Windows Service installed.
+// v4.5.5: Uses unified detection - only blocks when service is RUNNING.
 func (a *trayApp) startService() {
-	// v4.5.0: If Windows Service installed, don't spawn subprocess
-	if service.IsInstalled() {
+	// v4.5.5: Use unified detection instead of raw IsInstalled()
+	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
 		a.mu.Lock()
-		a.lastError = "Windows Service installed. Start via Services.msc or run as admin: net start \"Rescale Interlink Auto-Download\""
+		a.lastError = reason
 		a.updateUI()
 		a.mu.Unlock()
 		return

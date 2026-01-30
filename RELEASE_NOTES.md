@@ -1,5 +1,68 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.5 - January 30, 2026
+
+### Windows Auto-Download Daemon Fixes
+
+This release fixes critical bugs in Windows daemon startup and detection that caused "Access is denied" errors when the GUI/CLI/Tray tried to spawn subprocess daemons while the Windows Service was already running.
+
+#### Root Cause
+
+The core issue was that `service.IsInstalled()` requires admin privileges to query the Windows Service Control Manager (SCM). When run as a standard user, it returns `false` (access denied) even when the service IS installed and running. This caused all three entry points (GUI, CLI, Tray) to incorrectly spawn subprocess daemons, which then failed with "Access is denied" when trying to create the named pipe that the Windows Service already owned.
+
+#### Fixes
+
+**Unified Service Detection (NEW)**
+- Created `ShouldBlockSubprocess()` function that performs multi-layer detection:
+  1. First tries SCM query (may fail without admin)
+  2. Falls back to IPC check if SCM access denied (detects ServiceMode flag)
+  3. Falls back to PID file check for subprocess detection
+  4. Falls back to pipe existence check as last resort
+- Only blocks subprocess when service is RUNNING (not just installed) - allows subprocess mode when service is stopped
+- Logs warning when service is installed-but-stopped to inform user of potential conflicts
+- **Files**: `internal/service/detection_windows.go` (NEW), `internal/service/detection_other.go` (NEW stub for non-Windows)
+
+**Robust Named Pipe Detection (NEW)**
+- Created `IsPipeInUse()` function with proper Windows error code handling
+- Uses `errors.As()` to unwrap go-winio's wrapped errors
+- Returns `false` only for `ERROR_FILE_NOT_FOUND` (pipe doesn't exist)
+- Returns `true` for `ERROR_PIPE_BUSY`, `ERROR_ACCESS_DENIED`, or any other error (conservative approach)
+- **File**: `internal/ipc/pipe_windows.go` (NEW)
+
+**Updated All Entry Points**
+- GUI `StartDaemon()` now uses `ShouldBlockSubprocess()` instead of raw `IsInstalled()`
+- CLI `daemon run` now uses `ShouldBlockSubprocess()` with clear error messages
+- Tray `startService()` and `refreshStatus()` now use unified detection
+- **Files**: `internal/wailsapp/daemon_bindings_windows.go`, `internal/cli/daemon.go`, `cmd/rescale-int-tray/tray_windows.go`
+
+**Per-User Status Display**
+- `GetDaemonStatus()` now returns CURRENT user's status by matching SID/username
+- Previously returned first user's status regardless of who was logged in
+- Added `getCurrentUserSID()` helper using Windows token API
+- **File**: `internal/wailsapp/daemon_bindings_windows.go`
+
+**IPC Routing for Current User**
+- `TriggerDaemonScan()`, `PauseDaemon()`, `ResumeDaemon()` now use "current" user ID
+- Previously used empty string which triggered operations for ALL users
+- Server infers caller's SID from pipe connection when "current" is specified
+- **File**: `internal/wailsapp/daemon_bindings_windows.go`
+
+**Scan Timeout**
+- Added 10-minute timeout to poll() to prevent indefinite hangs
+- Logs timeout-specific error when scan exceeds limit
+- **File**: `internal/daemon/daemon.go`
+
+**Pre-Check Pipe Existence**
+- IPC server now checks if pipe exists BEFORE trying to create it
+- Provides clear error message: "pipe already exists (another daemon is running)"
+- **File**: `internal/ipc/server.go`
+
+#### Behavior Change
+
+**Subprocess Allowed When Service Stopped**: Previously, subprocess spawn was blocked whenever the Windows Service was installed (even if stopped). Now it's only blocked when the service is RUNNING. A warning is logged when service is installed-but-stopped to inform users that the service may start later and cause conflicts.
+
+---
+
 ## v4.5.4 - January 30, 2026
 
 ### Proxy Resilience for Large File Transfers

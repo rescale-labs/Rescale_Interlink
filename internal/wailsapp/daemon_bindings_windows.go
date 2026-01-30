@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"golang.org/x/sys/windows"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
@@ -100,10 +101,23 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 			result.LastScan = status.LastScanTime.Format(time.RFC3339)
 		}
 
-		// Get user-specific info
-		if users, err := client.GetUserList(ctx); err == nil && len(users) > 0 {
-			result.JobsDownloaded = users[0].JobsDownloaded
-			result.DownloadFolder = users[0].DownloadFolder
+		// v4.5.5: Get CURRENT user's status, not first user
+		currentSID := getCurrentUserSID()
+		currentUsername := os.Getenv("USERNAME")
+		if users, err := client.GetUserList(ctx); err == nil {
+			for _, user := range users {
+				if user.SID == currentSID || user.Username == currentUsername {
+					result.JobsDownloaded = user.JobsDownloaded
+					result.DownloadFolder = user.DownloadFolder
+					result.State = user.State // v4.5.5: Use USER's state, not service state
+					break
+				}
+			}
+			// Fallback to first user if current user not found
+			if result.DownloadFolder == "" && len(users) > 0 {
+				result.JobsDownloaded = users[0].JobsDownloaded
+				result.DownloadFolder = users[0].DownloadFolder
+			}
 		}
 
 		// v4.3.9: Only set ManagedBy for actual Windows Service mode
@@ -146,11 +160,12 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 // v4.3.8: Added startup logging with clear log path in error messages.
 // v4.4.2: Uses centralized LogDirectory() for consistent log location.
 // v4.5.0: Blocks subprocess spawn if Windows Service is installed.
+// v4.5.5: Uses unified detection instead of raw IsInstalled() - only blocks when running.
 // Similar to tray's startService() in tray_windows.go.
 func (a *App) StartDaemon() error {
-	// v4.5.0: If Windows Service installed, don't spawn subprocess
-	if service.IsInstalled() {
-		return fmt.Errorf("Windows Service installed. Start via Services.msc or run as admin: rescale-int service start")
+	// v4.5.5: Use unified detection instead of raw IsInstalled()
+	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
+		return fmt.Errorf(reason)
 	}
 
 	// Check if already running via IPC
@@ -343,6 +358,7 @@ func (a *App) StopDaemon() error {
 }
 
 // TriggerDaemonScan triggers an immediate job scan via IPC.
+// v4.5.5: Uses "current" user ID to route to current user in service mode.
 func (a *App) TriggerDaemonScan() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -353,7 +369,8 @@ func (a *App) TriggerDaemonScan() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	if err := client.TriggerScan(ctx, ""); err != nil {
+	// v4.5.5: Use "current" to route to current user (server infers from caller SID)
+	if err := client.TriggerScan(ctx, "current"); err != nil {
 		return fmt.Errorf("failed to trigger scan: %w", err)
 	}
 
@@ -362,6 +379,7 @@ func (a *App) TriggerDaemonScan() error {
 }
 
 // PauseDaemon pauses the daemon's auto-download polling via IPC.
+// v4.5.5: Uses "current" user ID to route to current user in service mode.
 func (a *App) PauseDaemon() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -372,7 +390,8 @@ func (a *App) PauseDaemon() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	if err := client.PauseUser(ctx, ""); err != nil {
+	// v4.5.5: Use "current" to route to current user (server infers from caller SID)
+	if err := client.PauseUser(ctx, "current"); err != nil {
 		return fmt.Errorf("failed to pause daemon: %w", err)
 	}
 
@@ -381,6 +400,7 @@ func (a *App) PauseDaemon() error {
 }
 
 // ResumeDaemon resumes the daemon's auto-download polling via IPC.
+// v4.5.5: Uses "current" user ID to route to current user in service mode.
 func (a *App) ResumeDaemon() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -391,7 +411,8 @@ func (a *App) ResumeDaemon() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	if err := client.ResumeUser(ctx, ""); err != nil {
+	// v4.5.5: Use "current" to route to current user (server infers from caller SID)
+	if err := client.ResumeUser(ctx, "current"); err != nil {
 		return fmt.Errorf("failed to resume daemon: %w", err)
 	}
 
@@ -934,4 +955,19 @@ func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
 
 	a.logInfo("Service", "UAC approved, service stop command executed")
 	return ElevatedServiceResultDTO{Success: true}
+}
+
+// getCurrentUserSID returns the SID of the current process owner.
+// v4.5.5: Used for per-user status routing in service mode.
+func getCurrentUserSID() string {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return ""
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return ""
+	}
+	return user.User.Sid.String()
 }

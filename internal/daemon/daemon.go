@@ -187,14 +187,25 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 // v4.3.4: Improved step-by-step logging for visibility
 // v4.3.5: Embed key info in message text (structured fields don't show in GUI)
 // v4.3.6: Silent filtering - only log jobs with Auto Download = Enabled/Conditional
+// v4.5.5: Added 10-minute scan timeout to prevent indefinite hangs
 func (d *Daemon) poll(ctx context.Context) {
+	// v4.5.5: Add timeout to entire scan operation (10 minutes max)
+	// Must be longer than HTTP client timeout (300s) to allow retries
+	scanCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
 	scanStart := time.Now()
 	d.logger.Info().Msg("=== SCAN STARTED ===")
 
 	// Find completed jobs that need downloading
-	result, err := d.monitor.FindCompletedJobs(ctx)
+	result, err := d.monitor.FindCompletedJobs(scanCtx)
 	if err != nil {
-		d.logger.Error().Err(err).Msg("Failed to find completed jobs")
+		// v4.5.5: Add timeout-specific error handling
+		if scanCtx.Err() == context.DeadlineExceeded {
+			d.logger.Error().Dur("duration", time.Since(scanStart)).Msg("Scan timed out after 10 minutes")
+		} else {
+			d.logger.Error().Err(err).Msg("Failed to find completed jobs")
+		}
 		d.logger.Info().Msgf("=== SCAN COMPLETE === Error (took %.1fs)", time.Since(scanStart).Seconds())
 		return
 	}
