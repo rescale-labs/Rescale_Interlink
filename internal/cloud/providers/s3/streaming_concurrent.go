@@ -607,17 +607,28 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 			endByte = encryptedSize - 1
 		}
 
-		// Download this part's ciphertext
-		resp, err := s3Client.GetObjectRange(ctx, remotePath, startByte, endByte)
+		// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+		// Uses GetObjectRangeOnce to avoid nested retries
+		var ciphertext []byte
+		err := s3Client.RetryWithBackoff(ctx, fmt.Sprintf("DownloadPart %d", partIndex), func() error {
+			// Per-attempt timeout to prevent stalled reads from hanging
+			attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
+			defer cancel()
+
+			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, startByte, endByte)
+			if err != nil {
+				return err
+			}
+			data, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close() // Always close, even on read error
+			if readErr != nil {
+				return readErr
+			}
+			ciphertext = data
+			return nil
+		})
 		if err != nil {
 			return fmt.Errorf("failed to download part %d: %w", partIndex, err)
-		}
-
-		// Read encrypted part data
-		ciphertext, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return fmt.Errorf("failed to read part %d: %w", partIndex, err)
 		}
 
 		// Decrypt this part (HKDF format - each part has own key/IV)
@@ -626,7 +637,7 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 			return fmt.Errorf("failed to decrypt part %d: %w", partIndex, err)
 		}
 
-		// Write plaintext to output file
+		// Write plaintext to output file (OUTSIDE retry - disk errors are not retryable)
 		if _, err := outFile.Write(plaintext); err != nil {
 			return fmt.Errorf("failed to write part %d: %w", partIndex, err)
 		}
@@ -678,6 +689,7 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // This is used by the concurrent download orchestrator to download individual parts.
 // The range is inclusive: [offset, offset+length).
 // v4.0.0: progressCallback (optional) is called with bytes downloaded for smooth progress.
+// v4.5.4: Wraps request+read+close in single retry with progress rollback on failure.
 func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
@@ -685,28 +697,52 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 		return nil, fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// Download the specified range
-	resp, err := s3Client.GetObjectRange(ctx, remotePath, offset, offset+length-1)
+	// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+	// Uses GetObjectRangeOnce to avoid nested retries. Progress is tracked per-attempt
+	// with rollback on failure to maintain accurate progress tracking.
+	var data []byte
+	var attemptBytes int64 // Track bytes reported in current attempt
+	err = s3Client.RetryWithBackoff(ctx, fmt.Sprintf("DownloadRange [%d-%d]", offset, offset+length), func() error {
+		// Per-attempt timeout to prevent stalled reads from hanging
+		attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
+		defer cancel()
+
+		// Reset attempt byte counter at start of each attempt
+		attemptBytes = 0
+
+		resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, offset, offset+length-1)
+		if err != nil {
+			return err
+		}
+
+		// Wrap response body with progress tracking for smooth download progress
+		var reader io.Reader = resp.Body
+		if progressCallback != nil {
+			reader = &progressReader{
+				reader: resp.Body,
+				callback: func(n int64) {
+					attemptBytes += n
+					progressCallback(n)
+				},
+				threshold: progressReaderThreshold,
+			}
+		}
+
+		readData, readErr := io.ReadAll(reader)
+		resp.Body.Close() // Always close, even on read error
+		if readErr != nil {
+			// Roll back progress on failure (negative delta)
+			// This corrects the progress counter and allows retry to re-report
+			if progressCallback != nil && attemptBytes > 0 {
+				progressCallback(-attemptBytes)
+			}
+			return readErr
+		}
+		data = readData
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to download range [%d-%d]: %w", offset, offset+length-1, err)
-	}
-	defer resp.Body.Close()
-
-	// v4.0.0: Wrap response body with progress tracking for smooth download progress.
-	// This matches upload behavior where progressReader reports bytes as they stream.
-	var reader io.Reader = resp.Body
-	if progressCallback != nil {
-		reader = &progressReader{
-			reader:    resp.Body,
-			callback:  progressCallback,
-			threshold: progressReaderThreshold,
-		}
-	}
-
-	// Read the data (progress reported during read if callback provided)
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read range data: %w", err)
 	}
 
 	return data, nil

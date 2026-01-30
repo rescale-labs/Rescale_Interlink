@@ -45,8 +45,15 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 
 	case "ntlm":
 		// NTLM authentication
+		// v4.5.3: Fall back to no-proxy if host is missing (incomplete saved config)
+		// This allows GUI to start so user can reconfigure proxy settings
 		if cfg.ProxyHost == "" {
-			return nil, fmt.Errorf("proxy host required for NTLM mode")
+			fmt.Printf("[WARN] Proxy mode is NTLM but host is missing - falling back to no-proxy mode\n")
+			transport.Proxy = nil
+			return &nethttp.Client{
+				Transport: transport,
+				Timeout:   300 * time.Second,
+			}, nil
 		}
 
 		proxyURL := buildProxyURL(cfg)
@@ -72,16 +79,24 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 
 	case "basic":
 		// Basic authentication
+		// v4.5.3: Fall back to no-proxy if host is missing (incomplete saved config)
+		// This allows GUI to start so user can reconfigure proxy settings
 		if cfg.ProxyHost == "" {
-			return nil, fmt.Errorf("proxy host required for basic auth mode")
+			fmt.Printf("[WARN] Proxy mode is basic but host is missing - falling back to no-proxy mode\n")
+			transport.Proxy = nil
+			return &nethttp.Client{
+				Transport: transport,
+				Timeout:   300 * time.Second,
+			}, nil
 		}
 
 		proxyURL := buildProxyURL(cfg)
 		transport.Proxy = nethttp.ProxyURL(proxyURL)
 
-		// Add basic auth credentials
-		if cfg.ProxyUser != "" {
-			proxyURL.User = url.UserPassword(cfg.ProxyUser, cfg.ProxyPassword)
+		// v4.5.3: Log warning when credentials incomplete (user set but password missing)
+		// This typically happens on startup when password wasn't saved for security
+		if cfg.ProxyUser != "" && cfg.ProxyPassword == "" {
+			fmt.Printf("[WARN] Proxy user configured but password missing - proxy auth disabled until password is set\n")
 		}
 
 		client := &nethttp.Client{
@@ -134,7 +149,9 @@ func buildProxyURL(cfg *config.Config) *url.URL {
 		Host:   fmt.Sprintf("%s:%d", host, port),
 	}
 
-	if cfg.ProxyUser != "" {
+	// v4.5.3: Only embed credentials if both user AND password are provided
+	// Empty password in URL can cause auth failures with some proxies
+	if cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
 		proxyURL.User = url.UserPassword(cfg.ProxyUser, cfg.ProxyPassword)
 	}
 

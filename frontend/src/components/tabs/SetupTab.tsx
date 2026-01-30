@@ -1283,7 +1283,7 @@ export function SetupTab() {
                           title="Stop Windows Service (requires administrator privileges)"
                         >
                           <ShieldCheckIcon className="w-4 h-4" />
-                          {isServiceLoading ? 'Stopping...' : 'Stop Service'}
+                          {isServiceLoading ? 'Stopping...' : 'Stop Service (Admin)'}
                         </button>
                       )}
                     </div>
@@ -1337,7 +1337,7 @@ export function SetupTab() {
                           disabled={isDaemonLoading}
                           className="btn-secondary text-sm"
                         >
-                          {isDaemonLoading ? 'Pausing...' : 'Pause Downloads'}
+                          {isDaemonLoading ? 'Pausing...' : 'Pause My Downloads'}
                         </button>
                       )}
                       <button
@@ -1345,7 +1345,7 @@ export function SetupTab() {
                         disabled={isDaemonLoading || daemonStatus?.state === 'paused'}
                         className="btn-outline text-sm"
                       >
-                        Scan Now
+                        Scan My Downloads
                       </button>
                     </div>
                   </div>
@@ -1475,7 +1475,7 @@ export function SetupTab() {
                               disabled={isDaemonLoading}
                               className="btn-secondary text-sm"
                             >
-                              Pause
+                              Pause My Downloads
                             </button>
                           )}
                           <button
@@ -1483,7 +1483,7 @@ export function SetupTab() {
                             disabled={isDaemonLoading || daemonStatus?.state === 'paused'}
                             className="btn-outline text-sm"
                           >
-                            Scan Now
+                            Scan My Downloads
                           </button>
                           <button
                             onClick={handleStopDaemon}

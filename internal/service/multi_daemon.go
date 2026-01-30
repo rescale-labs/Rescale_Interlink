@@ -122,13 +122,17 @@ func (m *MultiUserDaemon) rescanLoop() {
 }
 
 // scanAndUpdateProfiles enumerates user profiles and updates the daemon list.
+// v4.5.3: Enhanced logging for profile discovery debugging.
 func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 	profiles, err := EnumerateUserProfiles()
 	if err != nil {
 		return fmt.Errorf("failed to enumerate profiles: %w", err)
 	}
 
-	m.logger.Debug().Int("profile_count", len(profiles)).Msg("Enumerated user profiles")
+	// v4.5.3: Log enumeration results at Info level for visibility
+	m.logger.Info().
+		Int("found_profiles", len(profiles)).
+		Msg("Profile rescan complete")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -202,8 +206,11 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		return nil
 	}
 
+	// v4.5.3: Enhanced logging with SID and profile path for debugging daemon lookup issues
 	m.logger.Info().
 		Str("user", profile.Username).
+		Str("sid", profile.SID).
+		Str("profile_path", profile.ProfilePath).
 		Str("download_folder", daemonConf.Daemon.DownloadFolder).
 		Int("poll_interval_min", daemonConf.Daemon.PollIntervalMinutes).
 		Msg("Starting auto-download daemon for user")
@@ -440,12 +447,21 @@ func (m *MultiUserDaemon) TriggerRescan() {
 }
 
 // pauseUser pauses auto-download for a specific user (by SID or username).
+// v4.5.3: Added SID-to-username fallback and diagnostic logging.
 func (m *MultiUserDaemon) PauseUser(identifier string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// v4.5.3: Log what we're looking for
+	m.logger.Info().
+		Str("looking_for", identifier).
+		Int("daemon_count", len(m.daemons)).
+		Msg("PauseUser: searching for daemon")
+
+	// First pass: try exact SID or username match
 	for _, entry := range m.daemons {
-		if entry.profile.SID == identifier || entry.profile.Username == identifier {
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
 			if entry.running {
 				m.logger.Info().Str("user", entry.profile.Username).Msg("Pausing user daemon")
 				m.stopUserDaemon(entry)
@@ -455,16 +471,52 @@ func (m *MultiUserDaemon) PauseUser(identifier string) error {
 		}
 	}
 
-	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+	// v4.5.3: Second pass - if identifier looks like a SID, resolve to username
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		resolvedUsername := ResolveSIDToUsername(identifier)
+		if resolvedUsername != "" {
+			m.logger.Debug().
+				Str("sid", identifier).
+				Str("resolved_username", resolvedUsername).
+				Msg("PauseUser: resolved SID to username, retrying match")
+
+			for _, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolvedUsername) {
+					if entry.running {
+						m.logger.Info().Str("user", entry.profile.Username).Msg("Pausing user daemon (matched via SID resolution)")
+						m.stopUserDaemon(entry)
+						return nil
+					}
+					return fmt.Errorf("daemon for %s is not running", identifier)
+				}
+			}
+		}
+	}
+
+	// v4.5.3: Enhanced error message with diagnostic info
+	var registeredUsers []string
+	for _, entry := range m.daemons {
+		registeredUsers = append(registeredUsers, fmt.Sprintf("%s(sid=%s)", entry.profile.Username, entry.profile.SID))
+	}
+	return fmt.Errorf("no daemon found for identifier: %s (registered: %v)", identifier, registeredUsers)
 }
 
 // ResumeUser resumes auto-download for a specific user (by SID or username).
+// v4.5.3: Added SID-to-username fallback and diagnostic logging.
 func (m *MultiUserDaemon) ResumeUser(identifier string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// v4.5.3: Log what we're looking for
+	m.logger.Info().
+		Str("looking_for", identifier).
+		Int("daemon_count", len(m.daemons)).
+		Msg("ResumeUser: searching for daemon")
+
+	// First pass: try exact SID or username match
 	for path, entry := range m.daemons {
-		if entry.profile.SID == identifier || entry.profile.Username == identifier {
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
 			if !entry.running {
 				m.logger.Info().Str("user", entry.profile.Username).Msg("Resuming user daemon")
 				// Remove old entry and restart
@@ -475,7 +527,35 @@ func (m *MultiUserDaemon) ResumeUser(identifier string) error {
 		}
 	}
 
-	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+	// v4.5.3: Second pass - if identifier looks like a SID, resolve to username
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		resolvedUsername := ResolveSIDToUsername(identifier)
+		if resolvedUsername != "" {
+			m.logger.Debug().
+				Str("sid", identifier).
+				Str("resolved_username", resolvedUsername).
+				Msg("ResumeUser: resolved SID to username, retrying match")
+
+			for path, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolvedUsername) {
+					if !entry.running {
+						m.logger.Info().Str("user", entry.profile.Username).Msg("Resuming user daemon (matched via SID resolution)")
+						// Remove old entry and restart
+						delete(m.daemons, path)
+						return m.startUserDaemon(entry.profile)
+					}
+					return fmt.Errorf("daemon for %s is already running", identifier)
+				}
+			}
+		}
+	}
+
+	// v4.5.3: Enhanced error message with diagnostic info
+	var registeredUsers []string
+	for _, entry := range m.daemons {
+		registeredUsers = append(registeredUsers, fmt.Sprintf("%s(sid=%s)", entry.profile.Username, entry.profile.SID))
+	}
+	return fmt.Errorf("no daemon found for identifier: %s (registered: %v)", identifier, registeredUsers)
 }
 
 // v4.0.8: GetTotalActiveDownloads returns the total number of active downloads across all users.
@@ -493,12 +573,29 @@ func (m *MultiUserDaemon) GetTotalActiveDownloads() int {
 }
 
 // v4.0.8: TriggerUserScan triggers a scan for a specific user (by SID or username).
+// v4.5.3: Added SID-to-username fallback and diagnostic logging.
 func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// v4.5.3: Log what we're looking for and what's available
+	m.logger.Info().
+		Str("looking_for", identifier).
+		Int("daemon_count", len(m.daemons)).
+		Msg("TriggerUserScan: searching for daemon")
+
+	// First pass: try exact SID or username match
 	for _, entry := range m.daemons {
-		if entry.profile.SID == identifier || entry.profile.Username == identifier {
+		// v4.5.3: Log each daemon's identifiers for debugging
+		m.logger.Debug().
+			Str("entry_sid", entry.profile.SID).
+			Str("entry_username", entry.profile.Username).
+			Str("entry_path", entry.profile.ProfilePath).
+			Bool("running", entry.running).
+			Msg("TriggerUserScan: checking daemon entry")
+
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
 			if entry.running && entry.daemon != nil {
 				m.logger.Info().Str("user", entry.profile.Username).Msg("Triggering scan for user")
 				entry.daemon.TriggerPoll()
@@ -508,7 +605,34 @@ func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
 		}
 	}
 
-	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+	// v4.5.3: Second pass - if identifier looks like a SID, resolve to username
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		resolvedUsername := ResolveSIDToUsername(identifier)
+		if resolvedUsername != "" {
+			m.logger.Debug().
+				Str("sid", identifier).
+				Str("resolved_username", resolvedUsername).
+				Msg("TriggerUserScan: resolved SID to username, retrying match")
+
+			for _, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolvedUsername) {
+					if entry.running && entry.daemon != nil {
+						m.logger.Info().Str("user", entry.profile.Username).Msg("Triggering scan for user (matched via SID resolution)")
+						entry.daemon.TriggerPoll()
+						return nil
+					}
+					return fmt.Errorf("daemon for %s is not running", identifier)
+				}
+			}
+		}
+	}
+
+	// v4.5.3: Enhanced error message with diagnostic info
+	var registeredUsers []string
+	for _, entry := range m.daemons {
+		registeredUsers = append(registeredUsers, fmt.Sprintf("%s(sid=%s)", entry.profile.Username, entry.profile.SID))
+	}
+	return fmt.Errorf("no daemon found for identifier: %s (registered: %v)", identifier, registeredUsers)
 }
 
 // GetUserLogs returns recent log entries for a specific user (by SID or username).

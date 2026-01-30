@@ -1,15 +1,15 @@
 export namespace wailsapp {
-
+	
 	export class AnalysisVersionDTO {
 	    id: string;
 	    version: string;
 	    versionCode: string;
 	    allowedCoreTypes: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AnalysisVersionDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -24,11 +24,11 @@ export namespace wailsapp {
 	    description: string;
 	    vendorName: string;
 	    versions: AnalysisVersionDTO[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AnalysisCodeDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.code = source["code"];
@@ -37,7 +37,7 @@ export namespace wailsapp {
 	        this.vendorName = source["vendorName"];
 	        this.versions = this.convertValues(source["versions"], AnalysisVersionDTO);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -59,17 +59,17 @@ export namespace wailsapp {
 	export class AnalysisCodesResultDTO {
 	    codes: AnalysisCodeDTO[];
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AnalysisCodesResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.codes = this.convertValues(source["codes"], AnalysisCodeDTO);
 	        this.error = source["error"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -88,17 +88,17 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
-
+	
 	export class AppInfoDTO {
 	    version: string;
 	    buildTime: string;
 	    fipsEnabled: boolean;
 	    fipsStatus: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AppInfoDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.version = source["version"];
@@ -116,11 +116,11 @@ export namespace wailsapp {
 	    hasAutoDownloadPathField: boolean;
 	    warnings: string[];
 	    errors: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AutoDownloadValidationDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.customFieldsEnabled = source["customFieldsEnabled"];
@@ -139,11 +139,11 @@ export namespace wailsapp {
 	    description: string;
 	    executeOn: string;
 	    scriptName: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AutomationDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -156,17 +156,17 @@ export namespace wailsapp {
 	export class AutomationsResultDTO {
 	    automations: AutomationDTO[];
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AutomationsResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.automations = this.convertValues(source["automations"], AutomationDTO);
 	        this.error = source["error"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -207,11 +207,11 @@ export namespace wailsapp {
 	    runSubpath: string;
 	    maxRetries: number;
 	    detailedLogging: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ConfigDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.apiBaseUrl = source["apiBaseUrl"];
@@ -244,11 +244,11 @@ export namespace wailsapp {
 	    workspaceId?: string;
 	    workspaceName?: string;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ConnectionResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.success = source["success"];
@@ -265,11 +265,11 @@ export namespace wailsapp {
 	    displayOrder: number;
 	    isActive: boolean;
 	    cores: number[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new CoreTypeDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.code = source["code"];
@@ -282,17 +282,17 @@ export namespace wailsapp {
 	export class CoreTypesResultDTO {
 	    coreTypes: CoreTypeDTO[];
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new CoreTypesResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.coreTypes = this.convertValues(source["coreTypes"], CoreTypeDTO);
 	        this.error = source["error"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -326,11 +326,11 @@ export namespace wailsapp {
 	    showDownloadComplete: boolean;
 	    showDownloadFailed: boolean;
 	    configPath: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DaemonConfigDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.enabled = source["enabled"];
@@ -355,11 +355,11 @@ export namespace wailsapp {
 	    stage: string;
 	    message: string;
 	    fields?: Record<string, any>;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DaemonLogEntryDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.timestamp = source["timestamp"];
@@ -383,11 +383,11 @@ export namespace wailsapp {
 	    error?: string;
 	    managedBy?: string;
 	    serviceMode: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DaemonStatusDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.running = source["running"];
@@ -409,11 +409,11 @@ export namespace wailsapp {
 	    deleted: number;
 	    failed: number;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DeleteResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.deleted = source["deleted"];
@@ -424,11 +424,11 @@ export namespace wailsapp {
 	export class ElevatedServiceResultDTO {
 	    success: boolean;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ElevatedServiceResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.success = source["success"];
@@ -443,11 +443,11 @@ export namespace wailsapp {
 	    modTime: string;
 	    path?: string;
 	    parentId?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new FileItemDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -462,11 +462,11 @@ export namespace wailsapp {
 	export class FileLoggingSettingsDTO {
 	    enabled: boolean;
 	    filePath: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new FileLoggingSettingsDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.enabled = source["enabled"];
@@ -481,11 +481,11 @@ export namespace wailsapp {
 	    nextCursor?: string;
 	    isSlowPath?: boolean;
 	    warning?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new FolderContentsDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.folderId = source["folderId"];
@@ -496,7 +496,7 @@ export namespace wailsapp {
 	        this.isSlowPath = source["isSlowPath"];
 	        this.warning = source["warning"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -522,11 +522,11 @@ export namespace wailsapp {
 	    filesFailed: number;
 	    totalBytes: number;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new FolderDownloadResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.foldersCreated = source["foldersCreated"];
@@ -541,11 +541,11 @@ export namespace wailsapp {
 	    exists: boolean;
 	    folderId?: string;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new FolderExistsCheckDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.exists = source["exists"];
@@ -559,11 +559,11 @@ export namespace wailsapp {
 	    totalBytes: number;
 	    mergedInto?: string;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new FolderUploadResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.foldersCreated = source["foldersCreated"];
@@ -586,11 +586,11 @@ export namespace wailsapp {
 	    jobId: string;
 	    progress: number;
 	    error: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new JobRowDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.index = source["index"];
@@ -627,11 +627,11 @@ export namespace wailsapp {
 	    projectId: string;
 	    automations: string[];
 	    inputFiles?: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new JobSpecDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.directory = source["directory"];
@@ -661,11 +661,11 @@ export namespace wailsapp {
 	    inProgress: number;
 	    pending: number;
 	    failed: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new JobsStatsDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.total = source["total"];
@@ -683,11 +683,11 @@ export namespace wailsapp {
 	    fileCount: number;
 	    modTime: string;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new LocalFileInfoDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.path = source["path"];
@@ -706,11 +706,11 @@ export namespace wailsapp {
 	    failedJobs: number;
 	    durationMs: number;
 	    error?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new RunStatusDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.state = source["state"];
@@ -724,11 +724,11 @@ export namespace wailsapp {
 	export class SecondaryPatternDTO {
 	    pattern: string;
 	    required: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SecondaryPatternDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.pattern = source["pattern"];
@@ -745,11 +745,11 @@ export namespace wailsapp {
 	    scanMode: string;
 	    primaryPattern: string;
 	    secondaryPatterns: SecondaryPatternDTO[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ScanOptionsDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.rootDir = source["rootDir"];
@@ -762,7 +762,7 @@ export namespace wailsapp {
 	        this.primaryPattern = source["primaryPattern"];
 	        this.secondaryPatterns = this.convertValues(source["secondaryPatterns"], SecondaryPatternDTO);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -789,11 +789,11 @@ export namespace wailsapp {
 	    error?: string;
 	    skippedFiles?: string[];
 	    warnings?: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ScanResultDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.jobs = this.convertValues(source["jobs"], JobSpecDTO);
@@ -804,7 +804,7 @@ export namespace wailsapp {
 	        this.skippedFiles = source["skippedFiles"];
 	        this.warnings = source["warnings"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -823,19 +823,18 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
-
-	// v4.5.2: Added scmBlocked and scmError for IPC fallback when SCM access is denied
+	
 	export class ServiceStatusDTO {
 	    installed: boolean;
 	    running: boolean;
 	    status: string;
-	    scmBlocked?: boolean;  // v4.5.2: True if SCM access denied (Windows only)
-	    scmError?: string;     // v4.5.2: Error message for debugging (Windows only)
-
+	    scmBlocked: boolean;
+	    scmError: string;
+	
 	    static createFrom(source: any = {}) {
 	        return new ServiceStatusDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.installed = source["installed"];
@@ -851,11 +850,11 @@ export namespace wailsapp {
 	    directory?: string;
 	    localFiles?: string[];
 	    remoteFileIds?: string[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new SingleJobInputDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.job = this.convertValues(source["job"], JobSpecDTO);
@@ -864,7 +863,7 @@ export namespace wailsapp {
 	        this.localFiles = source["localFiles"];
 	        this.remoteFileIds = source["remoteFileIds"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -891,11 +890,11 @@ export namespace wailsapp {
 	    hardware: string;
 	    modTime: string;
 	    job?: JobSpecDTO;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new TemplateInfoDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
@@ -906,7 +905,7 @@ export namespace wailsapp {
 	        this.modTime = source["modTime"];
 	        this.job = this.convertValues(source["job"], JobSpecDTO);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -931,11 +930,11 @@ export namespace wailsapp {
 	    dest: string;
 	    name: string;
 	    size: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new TransferRequestDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.type = source["type"];
@@ -954,11 +953,11 @@ export namespace wailsapp {
 	    failed: number;
 	    cancelled: number;
 	    total: number;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new TransferStatsDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.queued = source["queued"];
@@ -985,11 +984,11 @@ export namespace wailsapp {
 	    createdAt: string;
 	    startedAt?: string;
 	    completedAt?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new TransferTaskDTO(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];

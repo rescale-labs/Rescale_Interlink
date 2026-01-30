@@ -291,3 +291,15 @@ func (c *S3Client) GetObjectRange(ctx context.Context, objectKey string, startBy
 	})
 	return resp, err
 }
+
+// GetObjectRangeOnce downloads a range of bytes WITHOUT retry (for use in provider-level retry).
+// v4.5.4: This method allows the provider to wrap the full request+read+close cycle in a single
+// retry loop, avoiding nested retries that would occur if using GetObjectRange within RetryWithBackoff.
+func (c *S3Client) GetObjectRangeOnce(ctx context.Context, objectKey string, startByte, endByte int64) (*s3.GetObjectOutput, error) {
+	rangeHeader := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
+	return c.Client().GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.Bucket()),
+		Key:    aws.String(objectKey),
+		Range:  aws.String(rangeHeader),
+	})
+}
