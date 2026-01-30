@@ -81,3 +81,17 @@ func GetCurrentUserProfile() (*UserProfile, error) {
 		StateFilePath: config.StateFilePathForUser(home),
 	}, nil
 }
+
+// ResolveSIDToUsername is a no-op on Unix platforms.
+// Windows SIDs don't exist on Unix, so this always returns empty string.
+// v4.5.3: Added stub for cross-platform compatibility.
+func ResolveSIDToUsername(_ string) string {
+	return ""
+}
+
+// ResolveUsernameToSID is a no-op on Unix platforms.
+// Windows SIDs don't exist on Unix, so this always returns empty string.
+// v4.5.3: Added stub for cross-platform compatibility.
+func ResolveUsernameToSID(_ string) string {
+	return ""
+}

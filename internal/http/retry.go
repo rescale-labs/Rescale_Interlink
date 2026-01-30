@@ -2,9 +2,11 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"strings"
 	"time"
 )
@@ -46,7 +48,28 @@ func ClassifyError(err error) ErrorType {
 		return ErrorTypeSuccess
 	}
 
+	// v4.5.4: Type-based checks for common error types (more robust than string matching)
+	// User cancellation should NOT be retried (avoids wasted backoff delay)
+	if errors.Is(err, context.Canceled) {
+		return ErrorTypeFatal
+	}
+	// Timeouts ARE retryable
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrorTypeNetwork
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return ErrorTypeNetwork
+	}
+
 	errStr := strings.ToLower(err.Error())
+
+	// v4.5.4: Proxy authentication failures - don't retry (must check before generic network errors)
+	if strings.Contains(errStr, "407") ||
+		strings.Contains(errStr, "proxy authentication required") ||
+		strings.Contains(errStr, "proxyauthenticationrequired") {
+		return ErrorTypeFatal
+	}
 
 	// Credential-related errors - need token/credential refresh
 	// Includes both AWS (expired token) and Azure (authentication failed, invalid SAS) errors
@@ -65,13 +88,19 @@ func ClassifyError(err error) ErrorType {
 	}
 
 	// Network errors - retryable with backoff
+	// v4.5.4: Added proxy/connection errors that occur mid-transfer
 	if strings.Contains(errStr, "tls handshake timeout") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "i/o timeout") ||
 		strings.Contains(errStr, "eof") ||
 		strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "timeout") {
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "server closed idle connection") ||
+		strings.Contains(errStr, "proxyconnect tcp") ||
+		strings.Contains(errStr, "stream error") ||
+		strings.Contains(errStr, "http2: server sent goaway") {
 		return ErrorTypeNetwork
 	}
 

@@ -49,6 +49,9 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 		// If transport is not *nethttp.Transport (e.g., wrapped by NTLM negotiator),
 		// we can't apply optimizations, so return the base client as-is
 		// This happens with NTLM proxy mode which uses ntlmssp.Negotiator wrapper
+		// v4.5.4: Clear the 300s timeout to allow long transfers
+		// Per-operation timeouts should be used via context instead
+		baseClient.Timeout = 0
 		return baseClient, nil
 	}
 
@@ -75,6 +78,34 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 	// Runtime toggle for HTTP/2 (useful for debugging or compatibility issues)
 	// Set DISABLE_HTTP2=true environment variable to force HTTP/1.1
 	if os.Getenv("DISABLE_HTTP2") == "true" {
+		tr.ForceAttemptHTTP2 = false
+		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) nethttp.RoundTripper)
+	}
+
+	// v4.5.4: Disable HTTP/2 when proxy is active to avoid stream errors
+	// Proxies often have issues with HTTP/2 multiplexing, causing mid-transfer failures.
+	// Trust config proxy mode first; only check env vars for "system" mode or when no config.
+	var proxyActive bool
+	if cfg != nil {
+		switch cfg.ProxyMode {
+		case "no-proxy", "":
+			proxyActive = false
+		case "system":
+			// System mode: check env vars
+			proxyActive = os.Getenv("HTTP_PROXY") != "" || os.Getenv("HTTPS_PROXY") != "" ||
+				os.Getenv("http_proxy") != "" || os.Getenv("https_proxy") != ""
+		default:
+			// ntlm, basic, etc. - proxy is definitely active
+			proxyActive = true
+		}
+	} else {
+		// No config: check env vars
+		proxyActive = os.Getenv("HTTP_PROXY") != "" || os.Getenv("HTTPS_PROXY") != "" ||
+			os.Getenv("http_proxy") != "" || os.Getenv("https_proxy") != ""
+	}
+
+	// Allow power users to force HTTP/2 even through proxy with FORCE_HTTP2=true
+	if proxyActive && os.Getenv("FORCE_HTTP2") != "true" {
 		tr.ForceAttemptHTTP2 = false
 		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) nethttp.RoundTripper)
 	}

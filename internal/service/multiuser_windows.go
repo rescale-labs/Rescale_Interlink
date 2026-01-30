@@ -5,9 +5,11 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/windows/registry"
 
@@ -60,14 +62,21 @@ var SystemProfiles = []string{
 //
 // This is used by the Windows service to process downloads for all users on the machine.
 // v4.2.0: Updated to use daemon.conf instead of apiconfig.
+// v4.5.3: Added logging for profile discovery debugging.
 func EnumerateUserProfiles() ([]UserProfile, error) {
 	profiles, err := enumerateFromRegistry()
 	if err != nil {
-		// Fall back to filesystem enumeration if registry fails
+		// v4.5.3: Log the fallback
+		log.Printf("[WARN] Registry enumeration failed: %v, falling back to filesystem", err)
 		profiles, err = enumerateFromFilesystem()
 		if err != nil {
 			return nil, fmt.Errorf("failed to enumerate user profiles: %w", err)
 		}
+	}
+
+	// v4.5.3: Log discovered profiles
+	for _, p := range profiles {
+		log.Printf("[INFO] Found profile: user=%s sid=%s path=%s", p.Username, p.SID, p.ProfilePath)
 	}
 
 	// Filter for profiles with valid daemon.conf
@@ -157,6 +166,7 @@ func enumerateFromRegistry() ([]UserProfile, error) {
 
 // enumerateFromFilesystem scans C:\Users for user profiles.
 // This is a fallback if registry access fails.
+// v4.5.3: Now resolves username to SID to enable SID-based daemon lookups.
 func enumerateFromFilesystem() ([]UserProfile, error) {
 	usersDir := os.Getenv("PUBLIC")
 	if usersDir == "" {
@@ -186,11 +196,14 @@ func enumerateFromFilesystem() ([]UserProfile, error) {
 
 		profilePath := filepath.Join(usersDir, name)
 
-		// Build profile entry (SID unknown in filesystem mode)
+		// v4.5.3: Try to resolve username to SID for daemon lookups
+		sid := ResolveUsernameToSID(name)
+
+		// Build profile entry
 		// v4.2.0: Use daemon.conf instead of apiconfig
 		// v4.4.3: Use config.DaemonConfigPathForUser and config.StateFilePathForUser for correct paths
 		profile := UserProfile{
-			SID:           "",
+			SID:           sid, // v4.5.3: May still be empty if resolution fails
 			Username:      name,
 			ProfilePath:   profilePath,
 			ConfigPath:    config.DaemonConfigPathForUser(profilePath),
@@ -239,4 +252,44 @@ func GetCurrentUserProfile() (*UserProfile, error) {
 		ConfigPath:    config.DaemonConfigPathForUser(userProfile),
 		StateFilePath: config.StateFilePathForUser(userProfile),
 	}, nil
+}
+
+// ResolveSIDToUsername converts a SID string to a username.
+// Returns empty string if resolution fails.
+// v4.5.3: Added for daemon lookup fallback when SID doesn't match directly.
+func ResolveSIDToUsername(sidString string) string {
+	// Convert string SID to binary SID
+	sid, err := syscall.StringToSid(sidString)
+	if err != nil {
+		return ""
+	}
+
+	// Look up account name
+	nameLen := uint32(256)
+	domainLen := uint32(256)
+	name := make([]uint16, nameLen)
+	domain := make([]uint16, domainLen)
+	var accountType uint32
+
+	err = syscall.LookupAccountSid(nil, sid, &name[0], &nameLen, &domain[0], &domainLen, &accountType)
+	if err != nil {
+		return ""
+	}
+
+	return syscall.UTF16ToString(name[:nameLen])
+}
+
+// ResolveUsernameToSID converts a username to SID string.
+// Returns empty string if resolution fails.
+// v4.5.3: Added to populate SID during filesystem enumeration.
+func ResolveUsernameToSID(username string) string {
+	sid, _, _, err := syscall.LookupSID("", username)
+	if err != nil {
+		return ""
+	}
+	sidString, err := sid.String()
+	if err != nil {
+		return ""
+	}
+	return sidString
 }

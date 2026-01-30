@@ -178,6 +178,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 
 // downloadChunkedWithProgress downloads a file in chunks with progress callback.
 // Uses S3Client directly.
+// v4.5.4: Wraps request+read+close in single retry to handle mid-transfer proxy failures.
 func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3Client, objectKey, localPath string, totalSize int64, progressCallback func(float64)) error {
 	// Create output file
 	file, err := os.Create(localPath)
@@ -202,21 +203,31 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 			currentChunkSize = totalSize - offset
 		}
 
-		// Download this chunk using Range header
-		resp, err := s3Client.GetObjectRange(ctx, objectKey, offset, offset+currentChunkSize-1)
+		// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+		// Uses GetObjectRangeOnce to avoid nested retries (GetObjectRange already retries internally)
+		var chunkData []byte
+		err := s3Client.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk offset=%d", offset), func() error {
+			// Per-attempt timeout to prevent stalled reads from hanging
+			attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
+			defer cancel()
+
+			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, objectKey, offset, offset+currentChunkSize-1)
+			if err != nil {
+				return err
+			}
+			data, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close() // Always close, even on read error
+			if readErr != nil {
+				return readErr
+			}
+			chunkData = data
+			return nil
+		})
 		if err != nil {
 			return fmt.Errorf("failed to download chunk at offset %d: %w", offset, err)
 		}
 
-		// Read chunk data
-		chunkData, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if err != nil {
-			return fmt.Errorf("failed to read chunk at offset %d: %w", offset, err)
-		}
-
-		// Write chunk to file
+		// Write chunk to file (OUTSIDE retry - disk errors are not retryable)
 		_, err = file.Write(chunkData)
 		if err != nil {
 			return fmt.Errorf("failed to write chunk at offset %d: %w", offset, err)
@@ -397,20 +408,30 @@ func (p *Provider) downloadChunkedConcurrent(
 				default:
 				}
 
-				// Download this chunk
+				// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+				// Uses GetObjectRangeOnce to avoid nested retries (GetObjectRange already retries internally)
 				startTime := time.Now()
-				resp, downloadErr := s3Client.GetObjectRange(opCtx, objectKey, job.offset, job.offset+job.size-1)
+				var chunkData []byte
+				downloadErr := s3Client.RetryWithBackoff(opCtx, fmt.Sprintf("DownloadChunk %d", job.chunkIndex), func() error {
+					// Per-attempt timeout to prevent stalled reads from hanging
+					attemptCtx, cancel := context.WithTimeout(opCtx, constants.PartOperationTimeout)
+					defer cancel()
+
+					resp, err := s3Client.GetObjectRangeOnce(attemptCtx, objectKey, job.offset, job.offset+job.size-1)
+					if err != nil {
+						return err
+					}
+					data, readErr := io.ReadAll(resp.Body)
+					resp.Body.Close() // Always close, even on read error
+					if readErr != nil {
+						return readErr
+					}
+					chunkData = data
+					return nil
+				})
 
 				if downloadErr != nil {
 					setError(fmt.Errorf("failed to download chunk %d at offset %d: %w", job.chunkIndex, job.offset, downloadErr))
-					return
-				}
-
-				chunkData, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
-
-				if readErr != nil {
-					setError(fmt.Errorf("failed to read chunk %d at offset %d: %w", job.chunkIndex, job.offset, readErr))
 					return
 				}
 

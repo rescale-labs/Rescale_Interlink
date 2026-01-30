@@ -1,5 +1,46 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.4 - January 30, 2026
+
+### Proxy Resilience for Large File Transfers
+
+This release fixes mid-transfer failures when downloading large files through corporate proxies (particularly with Azure storage). The failures were caused by proxy connections closing during long-running data streams, combined with gaps in retry coverage.
+
+#### Improvements
+
+**Extended Retry Coverage to Body Reads**
+- Previously, only HTTP requests were retried; if the response body read (io.ReadAll) failed, no retry occurred
+- Now the full request+read+close cycle is wrapped in a single retry at the provider level
+- Added `DownloadRangeOnce` (Azure) and `GetObjectRangeOnce` (S3) methods that skip internal retry, preventing double-retry when used within provider-level retry
+- **Files**: `azure/client.go`, `s3/client.go`, `azure/download.go`, `s3/download.go`, `azure/streaming_concurrent.go`, `s3/streaming_concurrent.go`
+
+**Per-Attempt Timeouts**
+- Each retry attempt now uses `context.WithTimeout` with `PartOperationTimeout` (10 minutes)
+- Prevents stalled proxy connections from hanging indefinitely
+
+**Improved Error Classification**
+- Added typed error checks: `context.Canceled` (fatal), `context.DeadlineExceeded` (retryable), `net.Error` timeout (retryable)
+- Added 407 proxy authentication errors as fatal (prevents infinite retry on auth failures)
+- Added network error patterns: "use of closed network connection", "server closed idle connection", "proxyconnect tcp", "stream error", "http2: server sent goaway"
+- **File**: `internal/http/retry.go`
+
+**NTLM Client Timeout Fix**
+- Cleared the 300-second timeout on NTLM clients that was causing transfers to abort at 5 minutes
+- Per-operation timeouts via context are the correct pattern
+- **File**: `internal/http/client.go`
+
+**HTTP/2 Disabled for Proxy Mode**
+- HTTP/2 stream errors are common through corporate proxies
+- HTTP/2 is now disabled when proxy mode is active (explicit proxy config or env vars)
+- Power users can override with `FORCE_HTTP2=true` environment variable
+- **File**: `internal/http/client.go`
+
+**Progress Tracking on Retry**
+- Streaming downloads with progress callbacks now correctly handle retry by rolling back progress on failure
+- Uses negative progress delta to maintain accurate tracking while preserving smooth streaming updates
+
+---
+
 ## v4.5.1 - January 28, 2026
 
 ### Security Hardening & FIPS Compliance Improvements
