@@ -64,6 +64,10 @@ type DaemonStatusDTO struct {
 
 	// ManagedBy indicates if daemon is managed externally ("Windows Service", "", etc.)
 	ManagedBy string `json:"managedBy,omitempty"`
+
+	// ServiceMode indicates if daemon is running as Windows Service (true) or subprocess (false)
+	// v4.5.2: Added for GUI to detect mode via IPC when SCM is inaccessible
+	ServiceMode bool `json:"serviceMode"`
 }
 
 // GetDaemonStatus returns the current daemon status.
@@ -89,6 +93,8 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		// v4.3.1: Keep showing version.Version, not IPC version (which may be stale)
 		result.Uptime = status.Uptime
 		result.ActiveDownloads = status.ActiveDownloads
+		// v4.5.2: Propagate ServiceMode from IPC status
+		result.ServiceMode = status.ServiceMode
 
 		if status.LastScanTime != nil {
 			result.LastScan = status.LastScanTime.Format(time.RFC3339)
@@ -101,8 +107,8 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		}
 
 		// v4.3.9: Only set ManagedBy for actual Windows Service mode
-		// Leave empty for subprocess mode so GUI shows control buttons (Stop/Pause/Resume)
-		if svcStatus, err := service.QueryStatus(); err == nil && svcStatus == service.StatusRunning {
+		// v4.5.2: Use IPC ServiceMode flag as primary indicator
+		if status.ServiceMode {
 			result.ManagedBy = "Windows Service"
 		}
 		// Otherwise leave ManagedBy empty - subprocess mode allows GUI control
@@ -790,18 +796,50 @@ type ElevatedServiceResultDTO struct {
 
 // ServiceStatusDTO represents detailed Windows Service status.
 // v4.5.1: Used for GUI to show service status independently of IPC.
+// v4.5.2: Added SCMBlocked/SCMError for IPC fallback when SCM access is denied.
 type ServiceStatusDTO struct {
-	Installed bool   `json:"installed"`
-	Running   bool   `json:"running"`
-	Status    string `json:"status"` // "Stopped", "Running", "Start Pending", etc.
+	Installed  bool   `json:"installed"`
+	Running    bool   `json:"running"`
+	Status     string `json:"status"`     // "Stopped", "Running", "Start Pending", etc.
+	SCMBlocked bool   `json:"scmBlocked"` // v4.5.2: True if SCM access denied
+	SCMError   string `json:"scmError"`   // v4.5.2: Error message for debugging
 }
 
 // GetServiceStatus returns detailed Windows Service status.
 // v4.5.1: Always derives Installed explicitly from service.IsInstalled().
+// v4.5.2: Falls back to IPC ServiceMode when SCM access is blocked.
 // NOTE: Do NOT infer installed from QueryStatus() because it returns "Stopped"
 // even when the service is not installed.
 func (a *App) GetServiceStatus() ServiceStatusDTO {
-	installed := service.IsInstalled()
+	installed, scmError := service.IsInstalledWithReason()
+
+	if !installed && scmError != "" {
+		// SCM blocked - check if IPC says we're in service mode
+		client := ipc.NewClient()
+		client.SetTimeout(2 * time.Second)
+		ctx := context.Background()
+		if status, err := client.GetStatus(ctx); err == nil {
+			// Use ServiceMode (added in v4.5.2) to detect Windows Service
+			if status.ServiceMode {
+				return ServiceStatusDTO{
+					Installed:  true,  // Inferred from IPC ServiceMode flag
+					Running:    status.ServiceState == "running",
+					Status:     "Running (via IPC)",
+					SCMBlocked: true,
+					SCMError:   scmError,
+				}
+			}
+		}
+		// Neither SCM nor IPC worked (or IPC is subprocess mode)
+		return ServiceStatusDTO{
+			Installed:  false,
+			Running:    false,
+			Status:     "Unknown",
+			SCMBlocked: true,
+			SCMError:   scmError,
+		}
+	}
+
 	if !installed {
 		return ServiceStatusDTO{
 			Installed: false,

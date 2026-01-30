@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -210,6 +211,11 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// v4.5.0: Create per-user log writer with buffer for IPC GetRecentLogs
 	// The log writer captures logs for both file output and IPC retrieval
 	logDir := config.LogDirectoryForUser(profile.ProfilePath)
+	// v4.5.2: Ensure log directory exists before creating log writer
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		m.logger.Warn().Err(err).Str("dir", logDir).Msg("Failed to create log directory")
+		// Continue anyway - daemon can still run without file logs
+	}
 	logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
 		Console:    false, // Service mode - no console
 		LogFile:    filepath.Join(logDir, "daemon.log"),

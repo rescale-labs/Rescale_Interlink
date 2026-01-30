@@ -65,6 +65,7 @@ func (h *ServiceIPCHandler) GetStatus() *ipc.StatusData {
 		ActiveUsers:     activeUsers,
 		LastError:       "",
 		Uptime:          uptime,
+		ServiceMode:     true, // v4.5.2: Running as Windows Service (multi-user mode)
 	}
 }
 
@@ -133,14 +134,17 @@ func (h *ServiceIPCHandler) ResumeUser(userID string) error {
 
 // TriggerScan triggers an immediate job scan.
 // v4.5.0: Routes to specific user if SID/username provided.
+// v4.5.2: Added INFO logging for visibility in Activity tab.
 func (h *ServiceIPCHandler) TriggerScan(userID string) error {
 	// v4.5.0: Route to specific user if identifier provided
 	if userID == "" || userID == "all" {
 		// Trigger a full rescan of all profiles
+		h.logger.Info().Msg("Scan triggered via IPC for all users")
 		h.service.TriggerRescan()
 		return nil
 	}
 	// Trigger scan for specific user only (accepts SID or username)
+	h.logger.Info().Str("user_id", userID).Msg("Scan triggered via IPC for user")
 	return h.service.TriggerUserScan(userID)
 }
 

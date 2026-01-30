@@ -227,21 +227,28 @@ func IsWindowsService() (bool, error) {
 	return svc.IsWindowsService()
 }
 
-// IsInstalled returns true if the service is installed in the Service Control Manager.
-// v4.3.6: Added for GUI to check service installation status.
-func IsInstalled() bool {
+// IsInstalledWithReason returns (installed, errReason) for better diagnostics.
+// v4.5.2: Added for UI to show meaningful status when SCM access is blocked.
+func IsInstalledWithReason() (bool, string) {
 	m, err := mgr.Connect()
 	if err != nil {
-		return false
+		return false, fmt.Sprintf("SCM access denied: %v", err)
 	}
 	defer m.Disconnect()
 
 	s, err := m.OpenService(ServiceName)
 	if err != nil {
-		return false
+		return false, fmt.Sprintf("Service query failed: %v", err)
 	}
-	s.Close()
-	return true
+	defer s.Close()
+	return true, ""
+}
+
+// IsInstalled returns true if the service is installed in the Service Control Manager.
+// v4.3.6: Added for GUI to check service installation status.
+func IsInstalled() bool {
+	installed, _ := IsInstalledWithReason()
+	return installed
 }
 
 // Install installs the service with the Service Control Manager.

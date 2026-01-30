@@ -77,6 +77,10 @@ type StatusData struct {
 
 	// Uptime is how long the service has been running
 	Uptime string `json:"uptime,omitempty"`
+
+	// ServiceMode indicates whether the daemon is running as a Windows Service (true)
+	// or as a subprocess (false). v4.5.2: Added to allow GUI to detect mode via IPC.
+	ServiceMode bool `json:"service_mode"`
 }
 
 // UserStatus contains status information for a single user's daemon.
