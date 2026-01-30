@@ -68,6 +68,7 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 		ActiveDownloads: h.daemon.GetActiveDownloads(),
 		ActiveUsers:     1, // Single-user mode on Unix
 		Uptime:          uptime,
+		ServiceMode:     false, // v4.5.2: Running as subprocess (single-user mode)
 	}
 }
 

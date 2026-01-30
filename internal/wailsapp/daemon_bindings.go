@@ -56,6 +56,10 @@ type DaemonStatusDTO struct {
 
 	// ManagedBy indicates if daemon is managed externally ("Windows Service", "", etc.)
 	ManagedBy string `json:"managedBy,omitempty"`
+
+	// ServiceMode indicates if daemon is running as Windows Service (true) or subprocess (false)
+	// v4.5.2: Added for GUI to detect mode via IPC when SCM is inaccessible
+	ServiceMode bool `json:"serviceMode"`
 }
 
 // GetDaemonStatus returns the current daemon status.
@@ -84,6 +88,8 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		// v4.3.1: Keep showing version.Version, not IPC version (which may be stale)
 		result.Uptime = status.Uptime
 		result.ActiveDownloads = status.ActiveDownloads
+		// v4.5.2: Propagate ServiceMode from IPC status
+		result.ServiceMode = status.ServiceMode
 
 		if status.LastScanTime != nil {
 			result.LastScan = status.LastScanTime.Format(time.RFC3339)

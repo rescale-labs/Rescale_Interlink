@@ -211,6 +211,7 @@ func (s *Server) acceptLoop() {
 
 // handleConnection processes a single client connection.
 // v4.4.2: Extracts caller SID for authorization checks.
+// v4.5.2: Added detailed logging for PID/SID extraction failures.
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
@@ -219,11 +220,17 @@ func (s *Server) handleConnection(conn net.Conn) {
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// v4.4.2: Extract caller's SID from the named pipe connection for authorization
+	// v4.5.2: Added detailed logging for debugging PID extraction issues
 	callerSID := ""
 	if pid, err := getNamedPipeClientPID(conn); err == nil && pid > 0 {
+		s.logger.Debug().Uint32("caller_pid", pid).Msg("IPC client PID extracted")
 		if sid, err := getProcessOwnerSID(pid); err == nil {
 			callerSID = sid
+		} else {
+			s.logger.Debug().Err(err).Uint32("pid", pid).Msg("Failed to get SID from PID")
 		}
+	} else if err != nil {
+		s.logger.Debug().Err(err).Str("conn_type", fmt.Sprintf("%T", conn)).Msg("Failed to extract client PID from connection")
 	}
 
 	reader := bufio.NewReader(conn)
@@ -260,33 +267,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 // getNamedPipeClientPID extracts the client process ID from a named pipe connection.
 // Uses the Windows GetNamedPipeClientProcessId API via reflection to access the underlying handle.
+// v4.5.2: Fixed recursive reflection to walk embedded structs (win32Pipe → win32File → handle).
 func getNamedPipeClientPID(conn net.Conn) (uint32, error) {
-	// Use reflection to get the underlying file handle from the winio pipe connection.
-	// The structure is: conn -> win32Pipe -> win32File -> handle
 	v := reflect.ValueOf(conn)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-
-	// Try to find the handle field
-	var handle windows.Handle
-	found := false
-
-	// Navigate through embedded structs to find win32File.handle
-	for i := 0; i < v.NumField() && !found; i++ {
-		field := v.Field(i)
-		if field.Kind() == reflect.Ptr && !field.IsNil() {
-			elem := field.Elem()
-			// Look for handle field
-			if handleField := elem.FieldByName("handle"); handleField.IsValid() {
-				handle = windows.Handle(handleField.Uint())
-				found = true
-			}
-		}
-	}
-
+	handle, found := findHandleRecursive(v, 0)
 	if !found {
-		return 0, fmt.Errorf("could not extract handle from connection")
+		return 0, fmt.Errorf("could not extract handle from connection type %T", conn)
 	}
 
 	var clientPID uint32
@@ -297,8 +283,54 @@ func getNamedPipeClientPID(conn net.Conn) (uint32, error) {
 	if r1 == 0 {
 		return 0, fmt.Errorf("GetNamedPipeClientProcessId failed: %w", err)
 	}
-
 	return clientPID, nil
+}
+
+// findHandleRecursive searches for a 'handle' field through embedded structs.
+// v4.5.2: Uses unsafe to read unexported fields (go-winio's handle is unexported).
+func findHandleRecursive(v reflect.Value, depth int) (windows.Handle, bool) {
+	if depth > 5 { // Prevent infinite recursion
+		return 0, false
+	}
+
+	// Dereference pointers and interfaces
+	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return 0, false
+		}
+		v = v.Elem()
+	}
+
+	if v.Kind() != reflect.Struct {
+		return 0, false
+	}
+
+	// Look for 'handle' field directly (may be unexported)
+	if handleField := v.FieldByName("handle"); handleField.IsValid() {
+		kind := handleField.Kind()
+		if kind == reflect.Uintptr || kind == reflect.Uint || kind == reflect.Uint64 {
+			// Use unsafe access for unexported fields
+			if handleField.CanAddr() {
+				ptr := unsafe.Pointer(handleField.UnsafeAddr())
+				val := reflect.NewAt(handleField.Type(), ptr).Elem()
+				return windows.Handle(val.Uint()), true
+			}
+			// Fallback for exported fields
+			if handleField.CanUint() {
+				return windows.Handle(handleField.Uint()), true
+			}
+		}
+	}
+
+	// Recursively search all fields (including embedded)
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Field(i)
+		if handle, found := findHandleRecursive(field, depth+1); found {
+			return handle, true
+		}
+	}
+
+	return 0, false
 }
 
 // getProcessOwnerSID returns the SID of the owner of a process by PID.
@@ -443,12 +475,14 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 // v4.4.2: Only the daemon owner can execute commands that modify daemon state.
 // v4.5.0: In service mode, authorization is relaxed - any authenticated user is allowed
 // because user-scoped routing in the handler ensures isolation.
+// v4.5.2: Elevated key messages to INFO for visibility in Activity tab.
 func (s *Server) authorizeModifyRequest(callerSID, operation string) error {
 	// v4.5.0: In service mode, any authenticated user is allowed
 	// User-scoped routing in the handler handles isolation
 	if s.serviceMode {
 		if callerSID == "" {
-			s.logger.Warn().
+			// v4.5.2: Use INFO level for visibility in Activity tab
+			s.logger.Info().
 				Str("operation", operation).
 				Msg("IPC request denied: could not identify caller")
 			return fmt.Errorf("unauthorized: could not identify caller")
@@ -469,7 +503,8 @@ func (s *Server) authorizeModifyRequest(callerSID, operation string) error {
 
 	// If we couldn't get caller SID, deny access (fail-closed for security)
 	if callerSID == "" {
-		s.logger.Warn().
+		// v4.5.2: Use INFO level for visibility in Activity tab
+		s.logger.Info().
 			Str("operation", operation).
 			Msg("IPC request denied: could not identify caller")
 		return fmt.Errorf("unauthorized: could not identify caller")

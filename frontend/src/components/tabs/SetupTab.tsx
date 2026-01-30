@@ -1231,8 +1231,9 @@ export function SetupTab() {
             </div>
 
             {/* v4.5.1: Service Control Section - Windows Service lifecycle (SCM-based, requires UAC) */}
-            {/* Show when Windows Service is installed - visible even when IPC is down */}
-            {serviceStatus?.installed && (
+            {/* v4.5.2: Also show when SCM blocked but IPC indicates service mode */}
+            {/* Show when Windows Service is installed OR when SCM blocked + IPC service mode */}
+            {(serviceStatus?.installed || (serviceStatus?.scmBlocked && daemonStatus?.serviceMode)) && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <div className="flex items-center gap-2 mb-3">
                   <h4 className="text-sm font-medium text-gray-700">Service Control</h4>
@@ -1241,6 +1242,12 @@ export function SetupTab() {
                     Admin
                   </span>
                 </div>
+                {/* v4.5.2: Show SCM blocked warning when applicable */}
+                {serviceStatus?.scmBlocked && (
+                  <div className="mb-3 p-2 bg-amber-50 rounded text-xs text-amber-700">
+                    SCM status unavailable (access denied). Run as administrator for full access.
+                  </div>
+                )}
                 <div className={clsx(
                   'p-4 rounded-lg',
                   serviceStatus?.running ? 'bg-green-50' : 'bg-gray-50'
