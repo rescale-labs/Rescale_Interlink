@@ -43,9 +43,11 @@ type trayApp struct {
 	lastError        string
 	ipcConnected     bool // v4.5.0: Track IPC availability separately from service running
 	serviceInstalled bool // v4.5.1: Track Windows Service installation status
+	userConfigured   bool // v4.5.6: Track if user has daemon.conf with enabled=true
 
 	// Menu items (for dynamic updates)
 	mStatus            *systray.MenuItem
+	mSetupRequired     *systray.MenuItem // v4.5.6: Setup guidance menu item
 	mStartService      *systray.MenuItem
 	mStartServiceAdmin *systray.MenuItem // v4.5.1: Start Windows Service (Admin)
 	mStopServiceAdmin  *systray.MenuItem // v4.5.1: Stop Windows Service (Admin)
@@ -83,6 +85,10 @@ func onReady() {
 	// Build menu
 	app.mStatus = systray.AddMenuItem("Status: Checking...", "Service status")
 	app.mStatus.Disable()
+
+	// v4.5.6: Setup guidance menu item (shown when user hasn't configured auto-download)
+	app.mSetupRequired = systray.AddMenuItem("Setup Required - Click to Configure", "Open GUI to enable auto-download")
+	app.mSetupRequired.Hide() // Hidden by default, shown when needed
 
 	systray.AddSeparator()
 
@@ -144,15 +150,28 @@ func (a *trayApp) refreshLoop() {
 
 // refreshStatus fetches current status from the service via IPC.
 // v4.5.5: Uses unified DetectDaemon() for consistent service detection.
+// v4.5.6: Also tracks user configuration status for "Setup Required" indicator.
 func (a *trayApp) refreshStatus() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+
+	// v4.5.6: Check if daemon.conf exists and is enabled for current user
+	configPath, _ := config.DefaultDaemonConfigPath()
+	userConfigured := false
+	if _, err := os.Stat(configPath); err == nil {
+		if cfg, err := config.LoadDaemonConfig(""); err == nil {
+			userConfigured = cfg.Daemon.Enabled
+		}
+	}
 
 	// v4.5.5: Try IPC first (remains source of truth when available)
 	status, err := a.client.GetStatus(ctx)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	// v4.5.6: Update user configuration status
+	a.userConfigured = userConfigured
 
 	if err != nil {
 		// IPC failed - use unified detection as fallback
@@ -187,6 +206,7 @@ func (a *trayApp) refreshStatus() {
 
 // updateUI updates the tray icon, tooltip, and menu items based on current state.
 // Must be called with a.mu held.
+// v4.5.6: Added setup required indicator when user hasn't configured auto-download.
 func (a *trayApp) updateUI() {
 	// v4.5.1: Handle Windows Service mode vs subprocess mode menu visibility
 	if a.serviceInstalled {
@@ -210,12 +230,20 @@ func (a *trayApp) updateUI() {
 		a.mStopServiceAdmin.Hide()
 	}
 
+	// v4.5.6: Show/hide setup required menu item based on user configuration
+	if !a.userConfigured && a.serviceRunning {
+		a.mSetupRequired.Show()
+	} else {
+		a.mSetupRequired.Hide()
+	}
+
 	if !a.serviceRunning {
 		// v4.4.2: Check if this is first-time setup (no daemon.conf exists)
 		configPath, _ := config.DefaultDaemonConfigPath()
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nFirst-time setup: Click 'Configure...' to set download folder", version.Version))
 			a.mStatus.SetTitle("Status: Not Configured")
+			a.mSetupRequired.Show() // v4.5.6: Show setup required
 			if !a.serviceInstalled {
 				a.mStartService.Enable()
 				a.mStartService.Show()
@@ -261,9 +289,18 @@ func (a *trayApp) updateUI() {
 
 	// Service is running with IPC available
 	if a.lastStatus != nil {
-		tooltip := fmt.Sprintf("Rescale Interlink v%s\nService: %s\nActive Users: %d\nActive Downloads: %d",
+		// v4.5.6: Show user-specific status in tooltip
+		var userStatusLine string
+		if !a.userConfigured {
+			userStatusLine = "\nYour Auto-Download: Setup Required"
+		} else {
+			userStatusLine = "\nYour Auto-Download: Active"
+		}
+
+		tooltip := fmt.Sprintf("Rescale Interlink v%s\nService: %s%s\nActive Users: %d\nActive Downloads: %d",
 			version.Version,
 			a.lastStatus.ServiceState,
+			userStatusLine,
 			a.lastStatus.ActiveUsers,
 			a.lastStatus.ActiveDownloads,
 		)
@@ -275,24 +312,45 @@ func (a *trayApp) updateUI() {
 		}
 		systray.SetTooltip(tooltip)
 
-		statusText := fmt.Sprintf("Status: %s | %d users, %d downloads",
-			a.lastStatus.ServiceState,
-			a.lastStatus.ActiveUsers,
-			a.lastStatus.ActiveDownloads,
-		)
+		// v4.5.6: Show user-specific status in menu
+		var statusText string
+		if !a.userConfigured {
+			statusText = "Status: Setup Required"
+		} else {
+			statusText = fmt.Sprintf("Status: %s | %d users, %d downloads",
+				a.lastStatus.ServiceState,
+				a.lastStatus.ActiveUsers,
+				a.lastStatus.ActiveDownloads,
+			)
+		}
 		a.mStatus.SetTitle(statusText)
 
-		// Enable/disable pause/resume based on state
-		// For now, enable both and let the server handle state
-		a.mPause.Enable()
-		a.mResume.Enable()
-		a.mTriggerScan.Enable()
+		// v4.5.6: Disable controls when user is not configured
+		if !a.userConfigured {
+			a.mPause.Disable()
+			a.mResume.Disable()
+			a.mTriggerScan.Disable()
+		} else {
+			// Enable/disable pause/resume based on state
+			a.mPause.Enable()
+			a.mResume.Enable()
+			a.mTriggerScan.Enable()
+		}
 	} else {
-		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running", version.Version))
-		a.mStatus.SetTitle("Status: Running")
-		a.mPause.Enable()
-		a.mResume.Enable()
-		a.mTriggerScan.Enable()
+		// v4.5.6: Show setup required if not configured
+		if !a.userConfigured {
+			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running\nYour Auto-Download: Setup Required", version.Version))
+			a.mStatus.SetTitle("Status: Setup Required")
+			a.mPause.Disable()
+			a.mResume.Disable()
+			a.mTriggerScan.Disable()
+		} else {
+			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running", version.Version))
+			a.mStatus.SetTitle("Status: Running")
+			a.mPause.Enable()
+			a.mResume.Enable()
+			a.mTriggerScan.Enable()
+		}
 	}
 }
 
@@ -300,6 +358,9 @@ func (a *trayApp) updateUI() {
 func (a *trayApp) handleMenuClicks() {
 	for {
 		select {
+		case <-a.mSetupRequired.ClickedCh:
+			a.openGUI() // v4.5.6: Open GUI when user clicks "Setup Required"
+
 		case <-a.mStartService.ClickedCh:
 			a.startService()
 
