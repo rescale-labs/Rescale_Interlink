@@ -60,16 +60,37 @@ type DaemonStatusDTO struct {
 	// ServiceMode indicates if daemon is running as Windows Service (true) or subprocess (false)
 	// v4.5.2: Added for GUI to detect mode via IPC when SCM is inaccessible
 	ServiceMode bool `json:"serviceMode"`
+
+	// v4.5.6: User-specific status fields
+	// UserConfigured indicates if this user has daemon.conf with enabled=true
+	UserConfigured bool `json:"userConfigured"`
+
+	// UserState is the user-specific state: "not_configured", "pending", "running", "paused", "stopped"
+	UserState string `json:"userState"`
+
+	// UserRegistered indicates if service has this user registered (daemon.conf was found by service)
+	UserRegistered bool `json:"userRegistered"`
 }
 
 // GetDaemonStatus returns the current daemon status.
 // This is the primary method for the frontend to check if the daemon is running
 // and get its current state.
 // v4.3.1: Version always uses version.Version for consistency.
+// v4.5.6: Added user-specific status fields (UserConfigured, UserState, UserRegistered).
 func (a *App) GetDaemonStatus() DaemonStatusDTO {
 	result := DaemonStatusDTO{
-		State:   "stopped",
-		Version: version.Version, // v4.3.1: Always show current version
+		State:     "stopped",
+		UserState: "not_configured", // v4.5.6: Default user state
+		Version:   version.Version,  // v4.3.1: Always show current version
+	}
+
+	// v4.5.6: Check if daemon.conf exists and is enabled for current user
+	configPath, _ := config.DefaultDaemonConfigPath()
+	if _, err := os.Stat(configPath); err == nil {
+		// Config file exists - check if enabled
+		if cfg, err := config.LoadDaemonConfig(""); err == nil {
+			result.UserConfigured = cfg.Daemon.Enabled
+		}
 	}
 
 	// Check if daemon process is running via PID file
@@ -99,11 +120,25 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		if users, err := client.GetUserList(ctx); err == nil && len(users) > 0 {
 			result.JobsDownloaded = users[0].JobsDownloaded
 			result.DownloadFolder = users[0].DownloadFolder
+			result.UserRegistered = true
+			result.UserState = users[0].State
 		}
+
+		// v4.5.6: Determine user state based on configuration + registration
+		if !result.UserConfigured {
+			result.UserState = "not_configured"
+		} else if !result.UserRegistered {
+			result.UserState = "pending" // Config exists but not yet picked up by service
+		}
+		// Otherwise use the state from IPC (running/paused/stopped)
 	} else if pid != 0 {
 		// Process running but IPC not responding
 		result.State = "unknown"
 		result.Error = "Daemon process found but IPC not responding. It may not have been started with --ipc flag."
+		// v4.5.6: User state when daemon is running but IPC fails
+		if result.UserConfigured {
+			result.UserState = "pending"
+		}
 	}
 
 	return result
@@ -285,6 +320,28 @@ func (a *App) ResumeDaemon() error {
 	}
 
 	a.logInfo("Daemon", "Daemon resumed")
+	return nil
+}
+
+// TriggerProfileRescan asks the daemon to re-enumerate user profiles.
+// v4.5.6: Called after saving daemon.conf so service picks up new users.
+// Uses existing TriggerScan("all") path - no new IPC message type needed.
+func (a *App) TriggerProfileRescan() error {
+	if daemon.IsDaemonRunning() == 0 {
+		return fmt.Errorf("daemon is not running")
+	}
+
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+
+	ctx := context.Background()
+
+	// v4.5.6: Use "all" to trigger profile rescan (existing behavior)
+	if err := client.TriggerScan(ctx, "all"); err != nil {
+		return fmt.Errorf("failed to trigger profile rescan: %w", err)
+	}
+
+	a.logInfo("Daemon", "Profile rescan triggered")
 	return nil
 }
 

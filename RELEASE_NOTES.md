@@ -1,5 +1,73 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.6 - January 30, 2026
+
+### Windows Auto-Download UX Fixes
+
+This release fixes critical UX issues discovered during user testing of v4.5.5, where the "Enable Auto-Download" checkbox didn't save to disk immediately, the status display showed misleading information, and users had no clear guidance on how to complete setup.
+
+#### Root Cause Analysis
+
+The core issues were:
+1. **Checkbox didn't auto-save**: The "Enable Auto-Download" checkbox only updated React state, not the config file. Users had to click "Save All Settings" manually.
+2. **Status showed "Running" misleadingly**: The "My Downloads" section showed "Running" based on Windows Service status, even when the current user had no configuration.
+3. **No feedback on unsaved changes**: Nothing indicated that checkbox changes needed explicit saving.
+4. **Tray didn't guide users**: System tray showed daemon running but didn't indicate setup was needed.
+5. **"current" user routing returned empty**: IPC `TriggerScan("current")` returned `no daemon found` when user had no `daemon.conf`.
+
+#### Fixes
+
+**Auto-Save Checkbox with Rollback (NEW)**
+- "Enable Auto-Download" checkbox now saves configuration immediately when toggled
+- Uses optimistic UI update with automatic rollback if save fails
+- Triggers profile rescan via `TriggerScan("all")` so service picks up new users immediately
+- Shows clear status messages: "Auto-download enabled. Scanning for your jobs now..."
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Profile Rescan Binding (NEW)**
+- Added `TriggerProfileRescan()` to daemon bindings (cross-platform)
+- Reuses existing `TriggerScan("all")` IPC path - no new message type needed
+- Called after saving daemon.conf so service picks up new users within seconds
+- **Files**: `internal/wailsapp/daemon_bindings.go`, `internal/wailsapp/daemon_bindings_windows.go`
+
+**User-Specific Status Fields (NEW)**
+- Added `UserConfigured`, `UserState`, `UserRegistered` fields to `DaemonStatusDTO`
+- `GetDaemonStatus()` now checks if `daemon.conf` exists and is enabled
+- Returns user state: `not_configured`, `pending`, `running`, `paused`, `stopped`
+- Tracks whether service has registered the current user
+- **Files**: `internal/wailsapp/daemon_bindings.go`, `internal/wailsapp/daemon_bindings_windows.go`
+
+**Redesigned "My Downloads" UI (CHANGED)**
+- Separate display for Windows Service status (system-level) vs Your Auto-Download status (user-level)
+- Clear state indicators: "Setup Required", "Activating...", "Active", "Paused"
+- Contextual guidance messages based on state with step-by-step instructions
+- Service details (uptime, jobs downloaded, etc.) only shown when user is active
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Disabled Action Buttons When Not Configured (NEW)**
+- Scan/Pause/Resume buttons disabled until user is registered with service
+- Helper functions `canUserPerformActions()` and `getActionDisabledReason()`
+- Shows reason why buttons are disabled: "Enable auto-download first"
+- Prevents "no daemon found for identifier: current" errors
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Tray "Setup Required" Indicator (NEW)**
+- Tray tooltip shows "Your Auto-Download: Setup Required" when user hasn't configured
+- New menu item "Setup Required - Click to Configure" when setup needed
+- Pause/Resume/Scan controls disabled when user is not configured
+- Status line changes from "Running" to "Setup Required" when appropriate
+- Refreshes user configuration status every 5 seconds
+- **File**: `cmd/rescale-int-tray/tray_windows.go`
+
+#### Behavior Changes
+
+- **Checkbox saves immediately**: No need to click "Save All Settings" after toggling "Enable Auto-Download"
+- **Faster pickup by service**: Service rescans profiles immediately instead of waiting for 5-minute interval
+- **Clearer status display**: "My Downloads: Running" no longer appears when user has no config
+- **Tray guides setup**: First-time users see "Setup Required" in tray tooltip and menu
+
+---
+
 ## v4.5.5 - January 30, 2026
 
 ### Windows Auto-Download Daemon Fixes

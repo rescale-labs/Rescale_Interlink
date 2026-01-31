@@ -310,6 +310,10 @@ export function TriggerDaemonScan() {
   return window['go']['wailsapp']['App']['TriggerDaemonScan']();
 }
 
+export function TriggerProfileRescan() {
+  return window['go']['wailsapp']['App']['TriggerProfileRescan']();
+}
+
 export function UpdateConfig(arg1) {
   return window['go']['wailsapp']['App']['UpdateConfig'](arg1);
 }

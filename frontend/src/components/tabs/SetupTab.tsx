@@ -35,6 +35,7 @@ import {
   GetServiceStatus,
   StartServiceElevated,
   StopServiceElevated,
+  TriggerProfileRescan,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 
@@ -414,6 +415,59 @@ export function SetupTab() {
     } finally {
       setIsDaemonLoading(false);
     }
+  };
+
+  // v4.5.6: Handler for Enable Auto-Download checkbox with auto-save and rollback on failure
+  const handleAutoDownloadToggle = async (checked: boolean) => {
+    if (!daemonConfig) return;
+
+    const previousConfig = { ...daemonConfig };  // Save for rollback
+    const newConfig = { ...daemonConfig, enabled: checked };
+
+    // Optimistic update for responsive UI
+    setDaemonConfig(newConfig);
+
+    try {
+      // Immediately save config to disk
+      await SaveDaemonConfig(newConfig);
+
+      if (checked) {
+        // Notify service to rescan profiles so it picks up this user
+        try {
+          await TriggerProfileRescan();
+          setStatusMessage('Auto-download enabled. Scanning for your jobs now...');
+        } catch {
+          // Service might not support rescan - that's OK, it will pick up on next 5-min cycle
+          setStatusMessage('Auto-download enabled. Service will detect within 5 minutes.');
+        }
+      } else {
+        setStatusMessage('Auto-download disabled. You will no longer receive automatic job downloads.');
+      }
+
+      // Refresh status to show updated user state
+      await refreshDaemonStatus();
+    } catch (err) {
+      // Rollback checkbox state on failure
+      setDaemonConfig(previousConfig);
+      setStatusMessage(`Failed to save settings: ${err}. Checkbox reverted.`);
+    }
+  };
+
+  // v4.5.6: Helper to check if user can perform actions (Scan/Pause/Resume)
+  const canUserPerformActions = () => {
+    // User must be configured AND registered with service
+    return daemonStatus?.userState === 'running' || daemonStatus?.userState === 'paused';
+  };
+
+  // v4.5.6: Reason why buttons are disabled
+  const getActionDisabledReason = () => {
+    if (daemonStatus?.userState === 'not_configured') {
+      return 'Enable auto-download first';
+    }
+    if (daemonStatus?.userState === 'pending') {
+      return 'Waiting for service to detect your configuration...';
+    }
+    return '';
   };
 
   // v4.3.1: Daemon config changes now inline with setDaemonConfig
@@ -1037,13 +1091,13 @@ export function SetupTab() {
               </p>
             </div>
 
-            {/* Enable Auto-Download */}
+            {/* Enable Auto-Download - v4.5.6: Auto-save on toggle */}
             <div className="flex items-center">
               <input
                 type="checkbox"
                 id="autoDownloadEnabled"
                 checked={daemonConfig?.enabled || false}
-                onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, enabled: e.target.checked })}
+                onChange={(e) => handleAutoDownloadToggle(e.target.checked)}
                 className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
               />
               <label htmlFor="autoDownloadEnabled" className="ml-2 text-sm text-gray-700 cursor-pointer">
@@ -1295,100 +1349,171 @@ export function SetupTab() {
               </div>
             )}
 
-            {/* v4.5.1: My Downloads Section - User-scoped controls (IPC-gated) */}
-            {/* Only show when IPC is connected - controls only affect current user */}
-            {daemonStatus?.ipcConnected && (
+            {/* v4.5.6: My Downloads Section - Redesigned with separate service/user status */}
+            {/* Show when daemon is running (IPC connected or service mode) */}
+            {(daemonStatus?.ipcConnected || daemonStatus?.running) && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-3">My Downloads</h4>
+
+                {/* v4.5.6: Your Auto-Download Status (user-level) */}
                 <div className={clsx(
-                  'p-4 rounded-lg',
-                  daemonStatus?.state === 'running' ? 'bg-green-50' :
-                  daemonStatus?.state === 'paused' ? 'bg-yellow-50' :
+                  'p-4 rounded-lg mb-4',
+                  daemonStatus?.userState === 'running' ? 'bg-green-50' :
+                  daemonStatus?.userState === 'not_configured' ? 'bg-yellow-50' :
+                  daemonStatus?.userState === 'pending' ? 'bg-blue-50' :
+                  daemonStatus?.userState === 'paused' ? 'bg-orange-50' :
                   'bg-gray-50'
                 )}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className={clsx(
                         'w-3 h-3 rounded-full',
-                        daemonStatus?.state === 'running' ? 'bg-green-500' :
-                        daemonStatus?.state === 'paused' ? 'bg-yellow-500' :
+                        daemonStatus?.userState === 'running' ? 'bg-green-500' :
+                        daemonStatus?.userState === 'not_configured' ? 'bg-yellow-500' :
+                        daemonStatus?.userState === 'pending' ? 'bg-blue-500 animate-pulse' :
+                        daemonStatus?.userState === 'paused' ? 'bg-orange-500' :
                         'bg-gray-400'
                       )} />
                       <div>
                         <div className="font-medium text-gray-900">
-                          {daemonStatus?.state === 'running' ? 'Running' :
-                           daemonStatus?.state === 'paused' ? 'Paused' :
+                          {daemonStatus?.userState === 'running' ? 'Active' :
+                           daemonStatus?.userState === 'not_configured' ? 'Setup Required' :
+                           daemonStatus?.userState === 'pending' ? 'Activating...' :
+                           daemonStatus?.userState === 'paused' ? 'Paused' :
                            'Unknown'}
                         </div>
+                        {daemonStatus?.userState === 'running' && daemonStatus.jobsDownloaded > 0 && (
+                          <div className="text-xs text-gray-500">
+                            {daemonStatus.jobsDownloaded} job{daemonStatus.jobsDownloaded > 1 ? 's' : ''} downloaded
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {daemonStatus?.state === 'paused' ? (
-                        <button
-                          onClick={handleResumeDaemon}
-                          disabled={isDaemonLoading}
-                          className="btn-secondary text-sm"
-                        >
-                          {isDaemonLoading ? 'Resuming...' : 'Resume Downloads'}
-                        </button>
+                      {/* v4.5.6: Disable buttons when user is not configured/registered */}
+                      {canUserPerformActions() ? (
+                        <>
+                          {daemonStatus?.userState === 'paused' ? (
+                            <button
+                              onClick={handleResumeDaemon}
+                              disabled={isDaemonLoading}
+                              className="btn-secondary text-sm"
+                            >
+                              {isDaemonLoading ? 'Resuming...' : 'Resume'}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={handlePauseDaemon}
+                              disabled={isDaemonLoading}
+                              className="btn-secondary text-sm"
+                            >
+                              {isDaemonLoading ? 'Pausing...' : 'Pause'}
+                            </button>
+                          )}
+                          <button
+                            onClick={handleTriggerScan}
+                            disabled={isDaemonLoading || daemonStatus?.userState === 'paused'}
+                            className="btn-outline text-sm"
+                          >
+                            Scan Now
+                          </button>
+                        </>
                       ) : (
-                        <button
-                          onClick={handlePauseDaemon}
-                          disabled={isDaemonLoading}
-                          className="btn-secondary text-sm"
-                        >
-                          {isDaemonLoading ? 'Pausing...' : 'Pause My Downloads'}
-                        </button>
+                        <span className="text-xs text-gray-500">
+                          {getActionDisabledReason()}
+                        </span>
                       )}
-                      <button
-                        onClick={handleTriggerScan}
-                        disabled={isDaemonLoading || daemonStatus?.state === 'paused'}
-                        className="btn-outline text-sm"
-                      >
-                        Scan My Downloads
-                      </button>
                     </div>
                   </div>
 
-                  {/* Service Details */}
-                  <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-2 gap-4 text-sm">
+                  {/* v4.5.6: Status-specific guidance messages */}
+                  {daemonStatus?.userState === 'not_configured' && (
+                    <div className="mt-3 p-2 bg-yellow-100 rounded border border-yellow-300">
+                      <p className="text-sm font-medium text-yellow-800">
+                        Action Required
+                      </p>
+                      <p className="text-xs text-yellow-700 mt-1">
+                        To start receiving automatic job downloads:
+                      </p>
+                      <ol className="text-xs text-yellow-700 mt-1 list-decimal list-inside">
+                        <li>Check "Enable Auto-Download" above</li>
+                        <li>Set your download folder</li>
+                        <li>Your jobs will start downloading automatically</li>
+                      </ol>
+                    </div>
+                  )}
+
+                  {daemonStatus?.userState === 'pending' && (
+                    <div className="mt-3 p-2 bg-blue-100 rounded border border-blue-300">
+                      <p className="text-sm font-medium text-blue-800 flex items-center gap-2">
+                        <ArrowPathIcon className="w-4 h-4 animate-spin" /> Activating...
+                      </p>
+                      <p className="text-xs text-blue-700 mt-1">
+                        The service is detecting your configuration. This usually takes a few seconds.
+                      </p>
+                    </div>
+                  )}
+
+                  {daemonStatus?.userState === 'running' && daemonStatus.jobsDownloaded === 0 && (
+                    <div className="mt-3 p-2 bg-green-100 rounded border border-green-300">
+                      <p className="text-sm font-medium text-green-800">
+                        Auto-Download Active
+                      </p>
+                      <p className="text-xs text-green-700 mt-1">
+                        Monitoring for completed jobs. Downloads will appear in your folder automatically.
+                      </p>
+                    </div>
+                  )}
+
+                  {daemonStatus?.userState === 'paused' && (
+                    <div className="mt-3 p-2 bg-orange-100 rounded border border-orange-300">
+                      <p className="text-sm font-medium text-orange-800">
+                        Downloads Paused
+                      </p>
+                      <p className="text-xs text-orange-700 mt-1">
+                        Click "Resume" to continue automatic downloads.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Service Details - only show when running */}
+                {canUserPerformActions() && (
+                  <div className="grid grid-cols-2 gap-4 text-sm p-3 bg-gray-50 rounded-lg">
                     <div>
                       <span className="text-gray-500">Uptime:</span>
-                      <span className="ml-2 text-gray-900">{daemonStatus.uptime || 'N/A'}</span>
+                      <span className="ml-2 text-gray-900">{daemonStatus?.uptime || 'N/A'}</span>
                     </div>
                     <div>
                       <span className="text-gray-500">Version:</span>
-                      <span className="ml-2 text-gray-900">{daemonStatus.version || 'N/A'}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Jobs Downloaded:</span>
-                      <span className="ml-2 text-gray-900">{daemonStatus.jobsDownloaded}</span>
+                      <span className="ml-2 text-gray-900">{daemonStatus?.version || 'N/A'}</span>
                     </div>
                     <div>
                       <span className="text-gray-500">Active Downloads:</span>
-                      <span className="ml-2 text-gray-900">{daemonStatus.activeDownloads}</span>
+                      <span className="ml-2 text-gray-900">{daemonStatus?.activeDownloads || 0}</span>
                     </div>
-                    <div className="col-span-2">
+                    <div>
                       <span className="text-gray-500">Last Scan:</span>
                       <span className="ml-2 text-gray-900">
-                        {daemonStatus.lastScan ? new Date(daemonStatus.lastScan).toLocaleString() : 'Never'}
+                        {daemonStatus?.lastScan ? new Date(daemonStatus.lastScan).toLocaleTimeString() : 'Never'}
                       </span>
                     </div>
-                    {daemonStatus.downloadFolder && (
+                    {daemonStatus?.downloadFolder && (
                       <div className="col-span-2">
                         <span className="text-gray-500">Download Folder:</span>
                         <span className="ml-2 text-gray-900 break-all">{daemonStatus.downloadFolder}</span>
                       </div>
                     )}
                   </div>
+                )}
 
-                  {/* Error message */}
-                  {daemonStatus?.error && (
-                    <div className="mt-3 text-sm text-yellow-700">
-                      <span className="font-medium">Note:</span> {daemonStatus.error}
-                    </div>
-                  )}
-                </div>
+                {/* Error message */}
+                {daemonStatus?.error && (
+                  <div className="mt-3 text-sm text-yellow-700">
+                    <span className="font-medium">Note:</span> {daemonStatus.error}
+                  </div>
+                )}
+
                 <p className="mt-2 text-xs text-gray-500">
                   These controls only affect your downloads. The service continues running for other users.
                 </p>

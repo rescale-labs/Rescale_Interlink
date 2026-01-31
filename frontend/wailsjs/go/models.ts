@@ -383,6 +383,9 @@ export namespace wailsapp {
 	    error?: string;
 	    managedBy?: string;
 	    serviceMode: boolean;
+	    userConfigured: boolean;
+	    userState: string;
+	    userRegistered: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new DaemonStatusDTO(source);
@@ -403,6 +406,9 @@ export namespace wailsapp {
 	        this.error = source["error"];
 	        this.managedBy = source["managedBy"];
 	        this.serviceMode = source["serviceMode"];
+	        this.userConfigured = source["userConfigured"];
+	        this.userState = source["userState"];
+	        this.userRegistered = source["userRegistered"];
 	    }
 	}
 	export class DeleteResultDTO {

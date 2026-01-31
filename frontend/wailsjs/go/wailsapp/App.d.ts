@@ -156,6 +156,8 @@ export function TestConnection():Promise<wailsapp.ConnectionResultDTO>;
 
 export function TriggerDaemonScan():Promise<void>;
 
+export function TriggerProfileRescan():Promise<void>;
+
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
 
 export function UpdateJobRow(arg1:number,arg2:wailsapp.JobSpecDTO):Promise<void>;
