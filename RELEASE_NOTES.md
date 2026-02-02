@@ -1,5 +1,63 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.7 - February 1, 2026
+
+### Auto-Download Settings Auto-Save Fix
+
+This release fixes a critical bug where settings other than the checkbox (lookback days, download folder, poll interval, conditional tag) were **not saved** when users modified them after enabling auto-download. The checkbox auto-save in v4.5.6 would capture default values before users could change them.
+
+#### Root Cause
+
+v4.5.6's checkbox-first workflow created a race condition:
+1. User checks "Enable Auto-Download" → v4.5.6 saves config with **default** lookback (7 days)
+2. User changes lookback to 364 days → only updates React state, **never saved**
+3. User assumes all settings are saved, but daemon.conf still has lookback=7
+4. Jobs older than 7 days are filtered out, never downloaded
+
+#### Fixes
+
+**Debounced Auto-Save for All Daemon Config Fields (NEW)**
+- All daemon config fields now auto-save after 1 second of no changes (debounce)
+- Lookback days, download folder, poll interval, and conditional tag all auto-save
+- Shows "Saving..." indicator when auto-save is in progress
+- Checkbox still saves immediately (cancels any pending debounce first)
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Settings Fields Editable Before Checkbox (CHANGED)**
+- Download folder, poll interval, lookback days, and tag inputs are now **always enabled**
+- Users can configure all settings BEFORE checking "Enable Auto-Download"
+- This allows settings-first workflow: configure → enable (saves all at once)
+- Prevents the checkbox-first race condition that caused default values to be saved
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**"Save All Settings" Button Shows Saved State (IMPROVED)**
+- Button turns green with checkmark when all daemon config changes are saved
+- Shows "Saving..." with spinner when auto-save is in progress
+- Shows "Save All Settings" only when there are unsaved changes
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Automatic Rescan on Lookback Increase (NEW)**
+- When lookback is significantly increased (more than doubled), triggers profile rescan
+- This ensures newly-eligible older jobs are picked up immediately
+- Only triggers when auto-download is enabled
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+#### Behavior Changes
+
+- **All settings auto-save**: No need to click "Save All Settings" for daemon config changes
+- **1 second debounce**: Rapid changes only trigger one save (after typing stops)
+- **Checkbox cancels pending saves**: Checking/unchecking immediately saves and cancels any pending debounce
+- **Settings-first workflow enabled**: Users can now configure all settings before enabling auto-download
+- **Lookback increase triggers rescan**: Extending lookback beyond 2x original value triggers immediate job scan
+
+#### Migration Notes
+
+- No configuration changes required
+- Existing daemon.conf files are unaffected
+- Users who previously had incorrect lookback values should verify their settings
+
+---
+
 ## v4.5.6 - January 30, 2026
 
 ### Windows Auto-Download UX Fixes

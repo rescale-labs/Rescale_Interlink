@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useConfigStore } from '../../stores';
 import {
   CheckCircleIcon,
@@ -117,6 +117,12 @@ export function SetupTab() {
   const [isServiceLoading, setIsServiceLoading] = useState(false);
   const [showUACConfirmDialog, setShowUACConfirmDialog] = useState<'start' | 'stop' | null>(null);
 
+  // v4.5.7: Debounced auto-save state for daemon config
+  const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
+  const [lastSavedConfig, setLastSavedConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
+  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevLookbackRef = useRef<number | null>(null);
+
   // Setup event listeners and fetch initial data
   useEffect(() => {
     const cleanup = setupEventListeners();
@@ -199,11 +205,79 @@ export function SetupTab() {
           }
         }
         setDaemonConfig(cfg);
+        // v4.5.7: Initialize lastSavedConfig when config loads
+        setLastSavedConfig({ ...cfg });
+        prevLookbackRef.current = cfg.lookbackDays;
       } catch (err) {
         console.error('Failed to fetch daemon config:', err);
       }
     };
     fetchDaemonConfig();
+  }, []);
+
+  // v4.5.7: Debounced auto-save for daemon config changes
+  const debouncedSaveDaemonConfig = useCallback((config: wailsapp.DaemonConfigDTO) => {
+    // Cancel any pending debounce
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current);
+    }
+
+    debounceTimeoutRef.current = setTimeout(async () => {
+      try {
+        setIsDaemonConfigSaving(true);
+        await SaveDaemonConfig(config);
+        setLastSavedConfig({ ...config });
+        setStatusMessage('Settings saved');
+      } catch (err) {
+        setStatusMessage(`Failed to save settings: ${err}`);
+      } finally {
+        setIsDaemonConfigSaving(false);
+      }
+    }, 1000);
+  }, []);
+
+  // v4.5.7: Trigger debounced save when daemon config changes (but not on initial load)
+  useEffect(() => {
+    if (daemonConfig && lastSavedConfig) {
+      const configChanged = JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig);
+      if (configChanged) {
+        debouncedSaveDaemonConfig(daemonConfig);
+      }
+    }
+  }, [daemonConfig, lastSavedConfig, debouncedSaveDaemonConfig]);
+
+  // v4.5.7: Trigger rescan when lookback increases significantly (more than doubled)
+  useEffect(() => {
+    if (daemonConfig?.lookbackDays && prevLookbackRef.current !== null) {
+      const newLookback = daemonConfig.lookbackDays;
+      const oldLookback = prevLookbackRef.current;
+
+      // If lookback increased significantly and auto-download is enabled, trigger rescan
+      if (newLookback > oldLookback * 2 && daemonConfig.enabled) {
+        // Wait for debounced save to complete, then trigger rescan
+        const triggerRescanAfterSave = async () => {
+          try {
+            await TriggerProfileRescan();
+            setStatusMessage(`Lookback extended to ${newLookback} days. Scanning for older jobs...`);
+          } catch {
+            // Silent fail - rescan will happen on next poll
+          }
+        };
+
+        // Delay rescan to ensure save completes first
+        setTimeout(triggerRescanAfterSave, 1500);
+      }
+    }
+    prevLookbackRef.current = daemonConfig?.lookbackDays ?? null;
+  }, [daemonConfig?.lookbackDays, daemonConfig?.enabled]);
+
+  // v4.5.7: Cleanup debounce timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimeoutRef.current) {
+        clearTimeout(debounceTimeoutRef.current);
+      }
+    };
   }, []);
 
   // v4.3.2: Fetch file logging settings on mount
@@ -417,9 +491,16 @@ export function SetupTab() {
     }
   };
 
-  // v4.5.6: Handler for Enable Auto-Download checkbox with auto-save and rollback on failure
+  // v4.5.7: Handler for Enable Auto-Download checkbox with auto-save and rollback on failure
+  // Also cancels any pending debounced save to prevent race conditions
   const handleAutoDownloadToggle = async (checked: boolean) => {
     if (!daemonConfig) return;
+
+    // v4.5.7: Cancel any pending debounced save
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current);
+      debounceTimeoutRef.current = null;
+    }
 
     const previousConfig = { ...daemonConfig };  // Save for rollback
     const newConfig = { ...daemonConfig, enabled: checked };
@@ -428,8 +509,11 @@ export function SetupTab() {
     setDaemonConfig(newConfig);
 
     try {
+      setIsDaemonConfigSaving(true);
       // Immediately save config to disk
       await SaveDaemonConfig(newConfig);
+      // v4.5.7: Update lastSavedConfig to prevent debounced save from re-triggering
+      setLastSavedConfig({ ...newConfig });
 
       if (checked) {
         // Notify service to rescan profiles so it picks up this user
@@ -450,6 +534,8 @@ export function SetupTab() {
       // Rollback checkbox state on failure
       setDaemonConfig(previousConfig);
       setStatusMessage(`Failed to save settings: ${err}. Checkbox reverted.`);
+    } finally {
+      setIsDaemonConfigSaving(false);
     }
   };
 
@@ -635,17 +721,38 @@ export function SetupTab() {
   // v4.5.1: Check if current platform is FRM (NTLM not allowed for FIPS compliance)
   const isFRM = isFRMPlatform(config?.apiBaseUrl || '');
 
+  // v4.5.7: Check if there are unsaved daemon config changes
+  const hasUnsavedDaemonChanges = daemonConfig && lastSavedConfig
+    ? JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig)
+    : false;
+
   return (
     <div className="tab-panel flex flex-col h-full">
       {/* v4.3.0: Unified Action Bar - sticky at top */}
+      {/* v4.5.7: Updated save button shows saved state */}
       <div className="sticky top-0 z-10 bg-white flex items-center gap-2 mb-4 pb-4 border-b border-gray-200">
         <button
           onClick={handleSaveAllSettings}
-          disabled={isUnifiedSaving || isSaving}
-          className="btn-primary"
-          title="Save all settings (API, Auto-Download, Daemon)"
+          disabled={isUnifiedSaving || isSaving || isDaemonConfigSaving}
+          className={clsx(
+            "btn-primary",
+            !hasUnsavedDaemonChanges && !isDaemonConfigSaving && "bg-green-600 hover:bg-green-700"
+          )}
+          title={hasUnsavedDaemonChanges ? "Save all settings" : "All settings saved"}
         >
-          {isUnifiedSaving ? 'Saving...' : 'Save All Settings'}
+          {isDaemonConfigSaving ? (
+            <span className="flex items-center gap-1">
+              <ArrowPathIcon className="h-4 w-4 animate-spin" />
+              Saving...
+            </span>
+          ) : hasUnsavedDaemonChanges ? (
+            'Save All Settings'
+          ) : (
+            <span className="flex items-center gap-1">
+              <CheckCircleIcon className="h-4 w-4" />
+              Saved
+            </span>
+          )}
         </button>
         <button
           onClick={handleExportConfig}
@@ -1105,7 +1212,7 @@ export function SetupTab() {
               </label>
             </div>
 
-            {/* Download Folder */}
+            {/* Download Folder - v4.5.7: Editable before checkbox is checked */}
             <div>
               <label className="label">Download Folder</label>
               <div className="flex gap-2">
@@ -1115,11 +1222,9 @@ export function SetupTab() {
                   placeholder="/path/to/downloads"
                   value={daemonConfig?.downloadFolder || ''}
                   onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, downloadFolder: e.target.value })}
-                  disabled={!daemonConfig?.enabled}
                 />
                 <button
                   onClick={handleSelectDownloadFolder}
-                  disabled={!daemonConfig?.enabled}
                   className="btn-secondary p-2"
                   title="Browse for folder"
                 >
@@ -1128,7 +1233,7 @@ export function SetupTab() {
               </div>
             </div>
 
-            {/* Scan Interval and Lookback Days */}
+            {/* Scan Interval and Lookback Days - v4.5.7: Editable before checkbox is checked */}
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="label">Scan Interval (minutes)</label>
@@ -1139,7 +1244,6 @@ export function SetupTab() {
                   className="input"
                   value={daemonConfig?.pollIntervalMinutes || 5}
                   onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, pollIntervalMinutes: parseInt(e.target.value) || 5 })}
-                  disabled={!daemonConfig?.enabled}
                 />
               </div>
               <div>
@@ -1151,12 +1255,11 @@ export function SetupTab() {
                   className="input"
                   value={daemonConfig?.lookbackDays || 7}
                   onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, lookbackDays: parseInt(e.target.value) || 7 })}
-                  disabled={!daemonConfig?.enabled}
                 />
               </div>
             </div>
 
-            {/* Tag for Conditional Jobs - SINGLE tag field */}
+            {/* Tag for Conditional Jobs - v4.5.7: Editable before checkbox is checked */}
             <div>
               <label className="label">Tag for Conditional Jobs</label>
               <input
@@ -1165,7 +1268,6 @@ export function SetupTab() {
                 placeholder="autoDownload"
                 value={daemonConfig?.autoDownloadTag || ''}
                 onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, autoDownloadTag: e.target.value })}
-                disabled={!daemonConfig?.enabled}
               />
               <p className="mt-1 text-xs text-gray-500">
                 Jobs with "Auto Download" set to "Conditional" must have this tag to be downloaded.
@@ -1696,6 +1798,14 @@ export function SetupTab() {
           )} {/* End advancedExpanded conditional and inner div */}
         </div> {/* End collapsible container */}
       </div>
+
+      {/* v4.5.7: Floating saving indicator */}
+      {isDaemonConfigSaving && (
+        <div className="fixed bottom-4 right-4 bg-rescale-blue text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 z-50">
+          <ArrowPathIcon className="h-4 w-4 animate-spin" />
+          <span className="text-sm">Saving...</span>
+        </div>
+      )}
     </div>
   );
 }
