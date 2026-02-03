@@ -67,6 +67,7 @@ jobs:
           path: rescale-interlink-${{ github.ref_name }}-win_amd64.*
 
   macos-build:
+    if: false  # Disabled until proper build implementation
     runs-on: macos-latest
     environment: production
 
@@ -137,7 +138,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [macos-build, windows-build]
+    needs: [windows-build]  # macOS disabled for now
     runs-on: ubuntu-latest
     permissions:
       contents: write
