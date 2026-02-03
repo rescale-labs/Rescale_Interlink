@@ -12,12 +12,6 @@ import (
 	"github.com/rescale/rescale-int/internal/version"
 )
 
-// Version information
-var (
-	Version   = "v4.1.0"
-	BuildTime = "2026-01-07"
-)
-
 // FIPSEnabled indicates whether FIPS 140-3 mode is active
 var FIPSEnabled bool
 
@@ -50,12 +44,10 @@ func init() {
 }
 
 func main() {
-	// Set version in version package (canonical source for all packages)
-	// and CLI package (for backwards compatibility)
-	version.Version = Version
-	version.BuildTime = BuildTime
-	cli.Version = Version
-	cli.BuildTime = BuildTime
+	// Propagate version from the single source of truth (internal/version)
+	// to CLI package for backwards compatibility
+	cli.Version = version.Version
+	cli.BuildTime = version.BuildTime
 
 	// Enable timing output
 	if contains(os.Args, "--timing") {

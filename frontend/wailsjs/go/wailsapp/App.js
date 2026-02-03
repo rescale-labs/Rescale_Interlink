@@ -50,14 +50,6 @@ export function GetAppInfo() {
   return window['go']['wailsapp']['App']['GetAppInfo']();
 }
 
-export function GetAutoDownloadConfig() {
-  return window['go']['wailsapp']['App']['GetAutoDownloadConfig']();
-}
-
-export function GetAutoDownloadStatus() {
-  return window['go']['wailsapp']['App']['GetAutoDownloadStatus']();
-}
-
 export function GetAutomations() {
   return window['go']['wailsapp']['App']['GetAutomations']();
 }
@@ -70,12 +62,28 @@ export function GetCoreTypes() {
   return window['go']['wailsapp']['App']['GetCoreTypes']();
 }
 
+export function GetDaemonConfig() {
+  return window['go']['wailsapp']['App']['GetDaemonConfig']();
+}
+
+export function GetDaemonLogs(arg1) {
+  return window['go']['wailsapp']['App']['GetDaemonLogs'](arg1);
+}
+
 export function GetDaemonStatus() {
   return window['go']['wailsapp']['App']['GetDaemonStatus']();
 }
 
 export function GetDefaultConfigPath() {
   return window['go']['wailsapp']['App']['GetDefaultConfigPath']();
+}
+
+export function GetDefaultDownloadFolder() {
+  return window['go']['wailsapp']['App']['GetDefaultDownloadFolder']();
+}
+
+export function GetFileLoggingSettings() {
+  return window['go']['wailsapp']['App']['GetFileLoggingSettings']();
 }
 
 export function GetHomeDirectory() {
@@ -94,6 +102,14 @@ export function GetLocalFilesInfo(arg1) {
   return window['go']['wailsapp']['App']['GetLocalFilesInfo'](arg1);
 }
 
+export function GetLogFileLocation() {
+  return window['go']['wailsapp']['App']['GetLogFileLocation']();
+}
+
+export function GetLogsDirectory() {
+  return window['go']['wailsapp']['App']['GetLogsDirectory']();
+}
+
 export function GetMyJobsFolderID() {
   return window['go']['wailsapp']['App']['GetMyJobsFolderID']();
 }
@@ -104,6 +120,10 @@ export function GetMyLibraryFolderID() {
 
 export function GetRunStatus() {
   return window['go']['wailsapp']['App']['GetRunStatus']();
+}
+
+export function GetServiceStatus() {
+  return window['go']['wailsapp']['App']['GetServiceStatus']();
 }
 
 export function GetTransferStats() {
@@ -162,6 +182,10 @@ export function LoadTemplate(arg1) {
   return window['go']['wailsapp']['App']['LoadTemplate'](arg1);
 }
 
+export function OpenLogsDirectory() {
+  return window['go']['wailsapp']['App']['OpenLogsDirectory']();
+}
+
 export function PauseDaemon() {
   return window['go']['wailsapp']['App']['PauseDaemon']();
 }
@@ -178,16 +202,16 @@ export function RetryTransfer(arg1) {
   return window['go']['wailsapp']['App']['RetryTransfer'](arg1);
 }
 
-export function SaveAutoDownloadConfig(arg1) {
-  return window['go']['wailsapp']['App']['SaveAutoDownloadConfig'](arg1);
-}
-
 export function SaveConfig() {
   return window['go']['wailsapp']['App']['SaveConfig']();
 }
 
 export function SaveConfigAs(arg1) {
   return window['go']['wailsapp']['App']['SaveConfigAs'](arg1);
+}
+
+export function SaveDaemonConfig(arg1) {
+  return window['go']['wailsapp']['App']['SaveDaemonConfig'](arg1);
 }
 
 export function SaveFile(arg1) {
@@ -234,6 +258,10 @@ export function SelectMultipleFiles(arg1) {
   return window['go']['wailsapp']['App']['SelectMultipleFiles'](arg1);
 }
 
+export function SetFileLoggingEnabled(arg1) {
+  return window['go']['wailsapp']['App']['SetFileLoggingEnabled'](arg1);
+}
+
 export function StartBulkRun(arg1) {
   return window['go']['wailsapp']['App']['StartBulkRun'](arg1);
 }
@@ -250,6 +278,10 @@ export function StartFolderUpload(arg1, arg2) {
   return window['go']['wailsapp']['App']['StartFolderUpload'](arg1, arg2);
 }
 
+export function StartServiceElevated() {
+  return window['go']['wailsapp']['App']['StartServiceElevated']();
+}
+
 export function StartSingleJob(arg1) {
   return window['go']['wailsapp']['App']['StartSingleJob'](arg1);
 }
@@ -260,6 +292,10 @@ export function StartTransfers(arg1) {
 
 export function StopDaemon() {
   return window['go']['wailsapp']['App']['StopDaemon']();
+}
+
+export function StopServiceElevated() {
+  return window['go']['wailsapp']['App']['StopServiceElevated']();
 }
 
 export function TestAutoDownloadConnection(arg1) {
@@ -274,12 +310,20 @@ export function TriggerDaemonScan() {
   return window['go']['wailsapp']['App']['TriggerDaemonScan']();
 }
 
+export function TriggerProfileRescan() {
+  return window['go']['wailsapp']['App']['TriggerProfileRescan']();
+}
+
 export function UpdateConfig(arg1) {
   return window['go']['wailsapp']['App']['UpdateConfig'](arg1);
 }
 
 export function UpdateJobRow(arg1, arg2) {
   return window['go']['wailsapp']['App']['UpdateJobRow'](arg1, arg2);
+}
+
+export function ValidateAutoDownloadSetup() {
+  return window['go']['wailsapp']['App']['ValidateAutoDownloadSetup']();
 }
 
 export function ValidateJobSpec(arg1) {

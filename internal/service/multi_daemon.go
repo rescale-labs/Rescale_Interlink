@@ -4,11 +4,15 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
+	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
@@ -33,11 +37,12 @@ type MultiUserDaemon struct {
 
 // userDaemonEntry tracks a daemon for a specific user.
 type userDaemonEntry struct {
-	profile UserProfile
-	daemon  *daemon.Daemon
-	config  *config.APIConfig
-	cancel  context.CancelFunc
-	running bool
+	profile   UserProfile
+	daemon    *daemon.Daemon
+	config    *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
+	cancel    context.CancelFunc
+	running   bool
+	logBuffer *daemon.LogBuffer // v4.5.0: Per-user log buffer for IPC GetRecentLogs
 }
 
 // NewMultiUserDaemon creates a new multi-user daemon orchestrator.
@@ -117,13 +122,17 @@ func (m *MultiUserDaemon) rescanLoop() {
 }
 
 // scanAndUpdateProfiles enumerates user profiles and updates the daemon list.
+// v4.5.3: Enhanced logging for profile discovery debugging.
 func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 	profiles, err := EnumerateUserProfiles()
 	if err != nil {
 		return fmt.Errorf("failed to enumerate profiles: %w", err)
 	}
 
-	m.logger.Debug().Int("profile_count", len(profiles)).Msg("Enumerated user profiles")
+	// v4.5.3: Log enumeration results at Info level for visibility
+	m.logger.Info().
+		Int("found_profiles", len(profiles)).
+		Msg("Profile rescan complete")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -173,23 +182,23 @@ func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 
 // startUserDaemon starts a daemon for a specific user profile.
 // Must be called with m.mu held.
+// v4.2.0: Updated to use DaemonConfig (daemon.conf) instead of APIConfig.
 func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
-	// Load user's apiconfig
-	apiCfg, err := config.LoadAPIConfig(profile.ConfigPath)
+	// Load user's daemon.conf
+	daemonConf, err := config.LoadDaemonConfig(profile.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config for %s: %w", profile.Username, err)
 	}
 
-	// v4.0.4: Use IsAutoDownloadEnabled() which checks both the enabled flag
-	// and validates the config (connection settings + auto-download paths).
-	if !apiCfg.IsAutoDownloadEnabled() {
+	// Check if daemon is enabled and valid
+	if !daemonConf.IsEnabled() {
 		// Log different messages based on why it's not enabled
-		if !apiCfg.AutoDownload.Enabled {
+		if !daemonConf.Daemon.Enabled {
 			m.logger.Debug().Str("user", profile.Username).
 				Msg("Auto-download disabled for user, skipping")
-		} else if err := apiCfg.ValidateForConnection(); err != nil {
+		} else if err := daemonConf.Validate(); err != nil {
 			m.logger.Debug().Str("user", profile.Username).Err(err).
-				Msg("Auto-download config has connection errors, skipping")
+				Msg("Auto-download config has validation errors, skipping")
 		} else {
 			m.logger.Debug().Str("user", profile.Username).
 				Msg("Auto-download config invalid, skipping")
@@ -197,21 +206,36 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		return nil
 	}
 
+	// v4.5.3: Enhanced logging with SID and profile path for debugging daemon lookup issues
 	m.logger.Info().
 		Str("user", profile.Username).
-		Str("download_folder", apiCfg.AutoDownload.DefaultDownloadFolder).
-		Int("scan_interval_min", apiCfg.AutoDownload.ScanIntervalMinutes).
+		Str("sid", profile.SID).
+		Str("profile_path", profile.ProfilePath).
+		Str("download_folder", daemonConf.Daemon.DownloadFolder).
+		Int("poll_interval_min", daemonConf.Daemon.PollIntervalMinutes).
 		Msg("Starting auto-download daemon for user")
 
-	// Create user-specific logger
-	userLogger := m.logger.WithStr("user", profile.Username)
+	// v4.5.0: Create per-user log writer with buffer for IPC GetRecentLogs
+	// The log writer captures logs for both file output and IPC retrieval
+	logDir := config.LogDirectoryForUser(profile.ProfilePath)
+	// v4.5.2: Ensure log directory exists before creating log writer
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		m.logger.Warn().Err(err).Str("dir", logDir).Msg("Failed to create log directory")
+		// Continue anyway - daemon can still run without file logs
+	}
+	logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
+		Console:    false, // Service mode - no console
+		LogFile:    filepath.Join(logDir, "daemon.log"),
+		BufferSize: 1000,
+	})
+	userLogger := logging.NewLoggerWithWriter(logWriter)
 
 	// v4.0.8: Use unified API key resolution with fallback chain
-	// Priority: apiconfig API key -> token file -> environment variable
-	apiKey, apiKeySource := config.ResolveAPIKeySource(apiCfg.APIKey, profile.ProfilePath)
+	// Priority: token file -> environment variable
+	apiKey, apiKeySource := config.ResolveAPIKeySource("", profile.ProfilePath)
 	if apiKey == "" {
 		m.logger.Debug().Str("user", profile.Username).
-			Msg("No API key found (checked apiconfig, token file, env var), skipping")
+			Msg("No API key found (checked token file, env var), skipping")
 		return nil
 	}
 
@@ -223,28 +247,35 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 
 	// Create app config for API client
 	appCfg := &config.Config{
-		APIBaseURL: apiCfg.PlatformURL,
+		APIBaseURL: "https://platform.rescale.com", // Default URL, could be configurable
 		APIKey:     apiKey,
 	}
 
-	// Create eligibility config from apiconfig
+	// v4.3.0: Simplified - mode is now per-job, only tag and lookback are configurable
 	eligibility := &daemon.EligibilityConfig{
-		CorrectnessTag:        apiCfg.AutoDownload.CorrectnessTag,
-		AutoDownloadField:     "Auto Download",
-		AutoDownloadValue:     "Enable",
-		DownloadedTag:         "autoDownloaded:true",
-		AutoDownloadPathField: "Auto Download Path",
-		LookbackDays:          apiCfg.AutoDownload.LookbackDays,
+		AutoDownloadTag: daemonConf.Eligibility.AutoDownloadTag,
+		LookbackDays:    daemonConf.Daemon.LookbackDays,
+	}
+
+	// Create job filter from daemon.conf
+	var filter *daemon.JobFilter
+	if daemonConf.Filters.NamePrefix != "" || daemonConf.Filters.NameContains != "" || daemonConf.Filters.Exclude != "" {
+		filter = &daemon.JobFilter{
+			NamePrefix:   daemonConf.Filters.NamePrefix,
+			NameContains: daemonConf.Filters.NameContains,
+			ExcludeNames: daemonConf.GetExcludePatterns(),
+		}
 	}
 
 	// Create daemon config
 	daemonCfg := &daemon.Config{
-		PollInterval:  time.Duration(apiCfg.AutoDownload.ScanIntervalMinutes) * time.Minute,
-		DownloadDir:   apiCfg.AutoDownload.DefaultDownloadFolder,
-		UseJobNameDir: true,
-		MaxConcurrent: 5,
+		PollInterval:  time.Duration(daemonConf.Daemon.PollIntervalMinutes) * time.Minute,
+		DownloadDir:   daemonConf.Daemon.DownloadFolder,
+		UseJobNameDir: daemonConf.Daemon.UseJobNameDir,
+		MaxConcurrent: daemonConf.Daemon.MaxConcurrent,
 		StateFile:     profile.StateFilePath,
 		Eligibility:   eligibility,
+		Filter:        filter,
 	}
 
 	// Create the daemon
@@ -252,6 +283,9 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	if err != nil {
 		return fmt.Errorf("failed to create daemon for %s: %w", profile.Username, err)
 	}
+
+	// v4.5.0: Get log buffer from the log writer for IPC GetRecentLogs
+	logBuffer := logWriter.GetBuffer()
 
 	// Create cancellable context for this user's daemon
 	ctx, cancel := context.WithCancel(m.ctx)
@@ -264,11 +298,12 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 
 	// Track the daemon
 	m.daemons[profile.ProfilePath] = &userDaemonEntry{
-		profile: profile,
-		daemon:  d,
-		config:  apiCfg,
-		cancel:  cancel,
-		running: true,
+		profile:   profile,
+		daemon:    d,
+		config:    daemonConf,
+		cancel:    cancel,
+		running:   true,
+		logBuffer: logBuffer,
 	}
 
 	m.logger.Info().Str("user", profile.Username).Msg("User daemon started successfully")
@@ -294,9 +329,10 @@ func (m *MultiUserDaemon) stopUserDaemon(entry *userDaemonEntry) {
 }
 
 // configChanged checks if the user's config has changed since we last loaded it.
+// v4.2.0: Updated to use DaemonConfig (daemon.conf) instead of APIConfig.
 func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProfile) bool {
 	// Reload config from disk
-	newCfg, err := config.LoadAPIConfig(profile.ConfigPath)
+	newCfg, err := config.LoadDaemonConfig(profile.ConfigPath)
 	if err != nil {
 		// Error loading - assume changed to trigger restart
 		return true
@@ -308,25 +344,35 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 	}
 
 	oldCfg := entry.config
-	if oldCfg.PlatformURL != newCfg.PlatformURL {
+	if oldCfg.Daemon.Enabled != newCfg.Daemon.Enabled {
 		return true
 	}
-	if oldCfg.APIKey != newCfg.APIKey {
+	if oldCfg.Daemon.DownloadFolder != newCfg.Daemon.DownloadFolder {
 		return true
 	}
-	if oldCfg.AutoDownload.Enabled != newCfg.AutoDownload.Enabled {
+	if oldCfg.Daemon.PollIntervalMinutes != newCfg.Daemon.PollIntervalMinutes {
 		return true
 	}
-	if oldCfg.AutoDownload.DefaultDownloadFolder != newCfg.AutoDownload.DefaultDownloadFolder {
+	if oldCfg.Daemon.UseJobNameDir != newCfg.Daemon.UseJobNameDir {
 		return true
 	}
-	if oldCfg.AutoDownload.ScanIntervalMinutes != newCfg.AutoDownload.ScanIntervalMinutes {
+	if oldCfg.Daemon.MaxConcurrent != newCfg.Daemon.MaxConcurrent {
 		return true
 	}
-	if oldCfg.AutoDownload.CorrectnessTag != newCfg.AutoDownload.CorrectnessTag {
+	if oldCfg.Daemon.LookbackDays != newCfg.Daemon.LookbackDays {
 		return true
 	}
-	if oldCfg.AutoDownload.LookbackDays != newCfg.AutoDownload.LookbackDays {
+	// v4.3.0: Simplified eligibility - only AutoDownloadTag is configurable
+	if oldCfg.Eligibility.AutoDownloadTag != newCfg.Eligibility.AutoDownloadTag {
+		return true
+	}
+	if oldCfg.Filters.NamePrefix != newCfg.Filters.NamePrefix {
+		return true
+	}
+	if oldCfg.Filters.NameContains != newCfg.Filters.NameContains {
+		return true
+	}
+	if oldCfg.Filters.Exclude != newCfg.Filters.Exclude {
 		return true
 	}
 
@@ -334,6 +380,7 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 }
 
 // GetStatus returns the current status of all user daemons.
+// v4.2.0: Updated to use DaemonConfig fields.
 func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -343,9 +390,9 @@ func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 		status := UserDaemonStatus{
 			Username:       entry.profile.Username,
 			ProfilePath:    entry.profile.ProfilePath,
-			DownloadFolder: entry.config.AutoDownload.DefaultDownloadFolder,
+			DownloadFolder: entry.config.Daemon.DownloadFolder,
 			Running:        entry.running,
-			Enabled:        entry.config.AutoDownload.Enabled,
+			Enabled:        entry.config.Daemon.Enabled,
 			SID:            entry.profile.SID, // v4.0.8
 		}
 
@@ -400,12 +447,21 @@ func (m *MultiUserDaemon) TriggerRescan() {
 }
 
 // pauseUser pauses auto-download for a specific user (by SID or username).
+// v4.5.3: Added SID-to-username fallback and diagnostic logging.
 func (m *MultiUserDaemon) PauseUser(identifier string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// v4.5.3: Log what we're looking for
+	m.logger.Info().
+		Str("looking_for", identifier).
+		Int("daemon_count", len(m.daemons)).
+		Msg("PauseUser: searching for daemon")
+
+	// First pass: try exact SID or username match
 	for _, entry := range m.daemons {
-		if entry.profile.SID == identifier || entry.profile.Username == identifier {
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
 			if entry.running {
 				m.logger.Info().Str("user", entry.profile.Username).Msg("Pausing user daemon")
 				m.stopUserDaemon(entry)
@@ -415,16 +471,52 @@ func (m *MultiUserDaemon) PauseUser(identifier string) error {
 		}
 	}
 
-	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+	// v4.5.3: Second pass - if identifier looks like a SID, resolve to username
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		resolvedUsername := ResolveSIDToUsername(identifier)
+		if resolvedUsername != "" {
+			m.logger.Debug().
+				Str("sid", identifier).
+				Str("resolved_username", resolvedUsername).
+				Msg("PauseUser: resolved SID to username, retrying match")
+
+			for _, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolvedUsername) {
+					if entry.running {
+						m.logger.Info().Str("user", entry.profile.Username).Msg("Pausing user daemon (matched via SID resolution)")
+						m.stopUserDaemon(entry)
+						return nil
+					}
+					return fmt.Errorf("daemon for %s is not running", identifier)
+				}
+			}
+		}
+	}
+
+	// v4.5.3: Enhanced error message with diagnostic info
+	var registeredUsers []string
+	for _, entry := range m.daemons {
+		registeredUsers = append(registeredUsers, fmt.Sprintf("%s(sid=%s)", entry.profile.Username, entry.profile.SID))
+	}
+	return fmt.Errorf("no daemon found for identifier: %s (registered: %v)", identifier, registeredUsers)
 }
 
 // ResumeUser resumes auto-download for a specific user (by SID or username).
+// v4.5.3: Added SID-to-username fallback and diagnostic logging.
 func (m *MultiUserDaemon) ResumeUser(identifier string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// v4.5.3: Log what we're looking for
+	m.logger.Info().
+		Str("looking_for", identifier).
+		Int("daemon_count", len(m.daemons)).
+		Msg("ResumeUser: searching for daemon")
+
+	// First pass: try exact SID or username match
 	for path, entry := range m.daemons {
-		if entry.profile.SID == identifier || entry.profile.Username == identifier {
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
 			if !entry.running {
 				m.logger.Info().Str("user", entry.profile.Username).Msg("Resuming user daemon")
 				// Remove old entry and restart
@@ -435,7 +527,35 @@ func (m *MultiUserDaemon) ResumeUser(identifier string) error {
 		}
 	}
 
-	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+	// v4.5.3: Second pass - if identifier looks like a SID, resolve to username
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		resolvedUsername := ResolveSIDToUsername(identifier)
+		if resolvedUsername != "" {
+			m.logger.Debug().
+				Str("sid", identifier).
+				Str("resolved_username", resolvedUsername).
+				Msg("ResumeUser: resolved SID to username, retrying match")
+
+			for path, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolvedUsername) {
+					if !entry.running {
+						m.logger.Info().Str("user", entry.profile.Username).Msg("Resuming user daemon (matched via SID resolution)")
+						// Remove old entry and restart
+						delete(m.daemons, path)
+						return m.startUserDaemon(entry.profile)
+					}
+					return fmt.Errorf("daemon for %s is already running", identifier)
+				}
+			}
+		}
+	}
+
+	// v4.5.3: Enhanced error message with diagnostic info
+	var registeredUsers []string
+	for _, entry := range m.daemons {
+		registeredUsers = append(registeredUsers, fmt.Sprintf("%s(sid=%s)", entry.profile.Username, entry.profile.SID))
+	}
+	return fmt.Errorf("no daemon found for identifier: %s (registered: %v)", identifier, registeredUsers)
 }
 
 // v4.0.8: GetTotalActiveDownloads returns the total number of active downloads across all users.
@@ -453,12 +573,29 @@ func (m *MultiUserDaemon) GetTotalActiveDownloads() int {
 }
 
 // v4.0.8: TriggerUserScan triggers a scan for a specific user (by SID or username).
+// v4.5.3: Added SID-to-username fallback and diagnostic logging.
 func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// v4.5.3: Log what we're looking for and what's available
+	m.logger.Info().
+		Str("looking_for", identifier).
+		Int("daemon_count", len(m.daemons)).
+		Msg("TriggerUserScan: searching for daemon")
+
+	// First pass: try exact SID or username match
 	for _, entry := range m.daemons {
-		if entry.profile.SID == identifier || entry.profile.Username == identifier {
+		// v4.5.3: Log each daemon's identifiers for debugging
+		m.logger.Debug().
+			Str("entry_sid", entry.profile.SID).
+			Str("entry_username", entry.profile.Username).
+			Str("entry_path", entry.profile.ProfilePath).
+			Bool("running", entry.running).
+			Msg("TriggerUserScan: checking daemon entry")
+
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
 			if entry.running && entry.daemon != nil {
 				m.logger.Info().Str("user", entry.profile.Username).Msg("Triggering scan for user")
 				entry.daemon.TriggerPoll()
@@ -468,5 +605,51 @@ func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
 		}
 	}
 
-	return fmt.Errorf("no daemon found for identifier: %s", identifier)
+	// v4.5.3: Second pass - if identifier looks like a SID, resolve to username
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		resolvedUsername := ResolveSIDToUsername(identifier)
+		if resolvedUsername != "" {
+			m.logger.Debug().
+				Str("sid", identifier).
+				Str("resolved_username", resolvedUsername).
+				Msg("TriggerUserScan: resolved SID to username, retrying match")
+
+			for _, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolvedUsername) {
+					if entry.running && entry.daemon != nil {
+						m.logger.Info().Str("user", entry.profile.Username).Msg("Triggering scan for user (matched via SID resolution)")
+						entry.daemon.TriggerPoll()
+						return nil
+					}
+					return fmt.Errorf("daemon for %s is not running", identifier)
+				}
+			}
+		}
+	}
+
+	// v4.5.3: Enhanced error message with diagnostic info
+	var registeredUsers []string
+	for _, entry := range m.daemons {
+		registeredUsers = append(registeredUsers, fmt.Sprintf("%s(sid=%s)", entry.profile.Username, entry.profile.SID))
+	}
+	return fmt.Errorf("no daemon found for identifier: %s (registered: %v)", identifier, registeredUsers)
+}
+
+// GetUserLogs returns recent log entries for a specific user (by SID or username).
+// v4.5.0: Added to support per-user log retrieval via IPC.
+func (m *MultiUserDaemon) GetUserLogs(identifier string, count int) []ipc.LogEntryData {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, entry := range m.daemons {
+		// Match by SID (preferred) or username
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
+			if entry.logBuffer != nil {
+				return entry.logBuffer.GetRecent(count)
+			}
+			return nil
+		}
+	}
+	return nil
 }

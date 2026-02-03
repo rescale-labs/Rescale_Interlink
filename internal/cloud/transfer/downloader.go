@@ -9,6 +9,8 @@ package transfer
 
 import (
 	"context"
+	"crypto/sha512"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -56,10 +58,18 @@ type DownloadPrep struct {
 	// Encryption key and IV (decoded from file info)
 	EncryptionKey []byte
 	IV            []byte // For legacy format only
+
+	// v4.4.2: Hash computed during download to avoid re-reading file for verification
+	ComputedHash string
 }
 
 // Download downloads and decrypts a file using the configured provider.
 // The download mode (legacy vs streaming) is automatically detected from cloud metadata.
+//
+// v4.4.2: Returns the computed SHA-512 hash of the downloaded file along with any error.
+// This eliminates the race condition where post-download verification re-reads the file
+// and may get stale cache data. The caller should use this hash for verification instead
+// of re-reading the file.
 //
 // Default behavior:
 //   - Automatically detects encryption format (legacy v0 or streaming v1)
@@ -75,19 +85,19 @@ type DownloadPrep struct {
 //   - Uses per-part key derivation from master key + file ID
 //
 // Supports cross-storage downloads via FileInfoSetter interface.
-func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) error {
+func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) (string, error) {
 	// Validate required parameters
 	if params.RemotePath == "" {
-		return fmt.Errorf("remote path is required")
+		return "", fmt.Errorf("remote path is required")
 	}
 	if params.LocalPath == "" {
-		return fmt.Errorf("local path is required")
+		return "", fmt.Errorf("local path is required")
 	}
 	if params.FileInfo == nil {
-		return fmt.Errorf("file info is required")
+		return "", fmt.Errorf("file info is required")
 	}
 	if params.FileInfo.EncodedEncryptionKey == "" {
-		return fmt.Errorf("encryption key is required in file info")
+		return "", fmt.Errorf("encryption key is required in file info")
 	}
 
 	// Set file info for cross-storage credential fetching.
@@ -101,7 +111,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 	// Decode encryption key from file info
 	encryptionKey, err := encryption.DecodeBase64(params.FileInfo.EncodedEncryptionKey)
 	if err != nil {
-		return fmt.Errorf("failed to decode encryption key: %w", err)
+		return "", fmt.Errorf("failed to decode encryption key: %w", err)
 	}
 
 	// Decode IV if present (for legacy format)
@@ -109,7 +119,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 	if params.FileInfo.IV != "" {
 		iv, err = encryption.DecodeBase64(params.FileInfo.IV)
 		if err != nil {
-			return fmt.Errorf("failed to decode IV: %w", err)
+			return "", fmt.Errorf("failed to decode IV: %w", err)
 		}
 	}
 
@@ -203,7 +213,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 					if verifyErr != nil {
 						// Verification failed - file cannot be decrypted with this key/IV
 						// Return early with clear error message
-						return verifyErr
+						return "", verifyErr
 					}
 				}
 			}
@@ -225,15 +235,25 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 					if outFile, openErr := os.Create(params.LocalPath); openErr == nil {
 						outFile.Close()
 					}
-					return d.downloadLegacy(ctx, prep)
+					// v4.4.2: Return hash from legacy fallback
+					if legacyErr := d.downloadLegacy(ctx, prep); legacyErr != nil {
+						return "", legacyErr
+					}
+					return prep.ComputedHash, nil
 				}
-				return err
+				return "", err
 			}
-			return nil
+			return prep.ComputedHash, nil
 		case 1:
-			return d.downloadStreaming(ctx, prep, formatDetector)
+			if err := d.downloadStreaming(ctx, prep, formatDetector); err != nil {
+				return "", err
+			}
+			return prep.ComputedHash, nil
 		default:
-			return d.downloadLegacy(ctx, prep)
+			if err := d.downloadLegacy(ctx, prep); err != nil {
+				return "", err
+			}
+			return prep.ComputedHash, nil
 		}
 	}
 
@@ -256,7 +276,12 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 	}
 
 	// Delegate to provider's Download method
-	return d.provider.Download(ctx, params)
+	// v4.4.2: Provider's Download doesn't return hash, so return empty string
+	// (This legacy path is rarely used - most providers support format detection)
+	if err := d.provider.Download(ctx, params); err != nil {
+		return "", err
+	}
+	return "", nil // No computed hash available from legacy provider path
 }
 
 // downloadLegacy downloads using legacy (v0) format.
@@ -346,7 +371,11 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		fmt.Fprintf(prep.Params.OutputWriter, "Decrypting %s...\n", filepath.Base(localPath))
 	}
 
-	if err := encryption.DecryptFile(encryptedPath, localPath, prep.EncryptionKey, prep.IV); err != nil {
+	// v4.4.2: Use DecryptFileWithHash to compute hash during decryption.
+	// This avoids the race condition where post-download verification re-reads
+	// the file and may get stale cache data.
+	computedHash, err := encryption.DecryptFileWithHash(encryptedPath, localPath, prep.EncryptionKey, prep.IV)
+	if err != nil {
 		// Check for disk full during decryption
 		if storage.IsDiskFullError(err) {
 			return &diskspace.InsufficientSpaceError{
@@ -357,6 +386,7 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		}
 		return fmt.Errorf("decryption failed: %w", err)
 	}
+	prep.ComputedHash = computedHash
 
 	// Complete transfer handle if provided
 	if prep.TransferHandle != nil {
@@ -461,6 +491,22 @@ func (d *Downloader) verifyDecryptionQuick(
 	return nil
 }
 
+// getExpectedSHA512 extracts the expected SHA-512 hash from FileChecksums.
+// Returns empty string if no SHA-512 checksum is available.
+// v4.4.1: Helper for checksum-during-write feature.
+func getExpectedSHA512(fileInfo *models.CloudFile) string {
+	if fileInfo == nil || len(fileInfo.FileChecksums) == 0 {
+		return ""
+	}
+	for _, cs := range fileInfo.FileChecksums {
+		switch cs.HashFunction {
+		case "sha512", "SHA-512", "SHA512":
+			return cs.FileHash
+		}
+	}
+	return ""
+}
+
 // downloadCBCStreaming downloads using CBC chaining format (v2) with parallel fetch.
 // v3.4.1: Parallel download architecture - downloads happen in parallel, but decryption
 // is sequential (CBC constraint) for 2-4x throughput improvement.
@@ -494,13 +540,31 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
+	// v4.4.0: Track whether we successfully closed the file.
+	// We DON'T use defer outFile.Close() because that causes a race condition:
+	// the deferred Close() executes AFTER the function returns, but verifyChecksum()
+	// is called IMMEDIATELY after this function returns. On Windows, this can cause
+	// verification to read an empty file while Close() is still pending.
+	// Instead, we close explicitly after Sync() on success, and use this cleanup
+	// function to ensure the file is closed on error paths.
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			outFile.Close()
+		}
+	}()
 
 	// Create CBC streaming decryptor
 	decryptor, err := encryption.NewCBCStreamingDecryptor(prep.EncryptionKey, prep.IV)
 	if err != nil {
 		return fmt.Errorf("failed to create CBC decryptor: %w", err)
 	}
+
+	// v4.4.1: Create hasher to compute checksum during write.
+	// This eliminates the race condition where post-download verification
+	// could read stale data from filesystem cache.
+	hasher := sha512.New()
+	expectedHash := getExpectedSHA512(prep.Params.FileInfo)
 
 	// v4.0.0: Use part size from metadata, or probe to detect correct size for old files.
 	// Files uploaded before v4.0.0 don't have partsize metadata, and the chunk size used
@@ -748,13 +812,16 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 				break
 			}
 
-			// Write plaintext directly to output file
+			// Write plaintext directly to output file AND hasher
+			// v4.4.1: Use MultiWriter to compute checksum during write
 			bytesWritten, writeErr := outFile.Write(plaintext)
 			if writeErr != nil {
 				errOnce.Do(func() { firstErr = fmt.Errorf("failed to write part %d: %w", nextPartToDecrypt, writeErr) })
 				cancelDownload()
 				break
 			}
+			// v4.4.1: Also write to hasher for checksum-during-write
+			hasher.Write(plaintext)
 
 			// v3.6.3: Track actual bytes written for smooth progress
 			atomic.AddInt64(&decryptedBytes, int64(bytesWritten))
@@ -784,6 +851,20 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		return fmt.Errorf("incomplete download: processed %d of %d parts", decryptedParts, numParts)
 	}
 
+	// v4.4.2: Store computed hash for caller (eliminates need to re-read file).
+	// This hash was computed during write, so it's authoritative.
+	actualHash := hex.EncodeToString(hasher.Sum(nil))
+	prep.ComputedHash = actualHash
+
+	// v4.4.1: Verify checksum using hash computed during write.
+	// This eliminates the race condition where post-download verification
+	// could read stale data from filesystem cache.
+	if expectedHash != "" {
+		if !strings.EqualFold(actualHash, expectedHash) {
+			return fmt.Errorf("checksum mismatch (computed during write): expected SHA-512=%s, got %s", expectedHash, actualHash)
+		}
+	}
+
 	// Report 100% at end
 	if prep.Params.ProgressCallback != nil {
 		prep.Params.ProgressCallback(1.0)
@@ -793,6 +874,23 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	if prep.TransferHandle != nil {
 		prep.TransferHandle.Complete()
 	}
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := outFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	// v4.4.0: Explicit Close() BEFORE returning to prevent race condition.
+	// verifyChecksum() is called immediately after this function returns,
+	// so we must ensure the file handle is fully closed before returning.
+	// This fixes sporadic checksum failures on Windows where the deferred Close()
+	// was still pending when verification tried to read the file.
+	if err := outFile.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
 
 	return nil
 }
@@ -912,7 +1010,13 @@ func (d *Downloader) downloadStreamingConcurrent(
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer outFile.Close()
+	// v4.4.0: Track whether we successfully closed the file (see downloadCBCStreaming for explanation)
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			outFile.Close()
+		}
+	}()
 
 	// Pre-allocate file to maximum possible size (will truncate later)
 	maxPossibleSize := numParts * prep.PartSize
@@ -1143,6 +1247,32 @@ func (d *Downloader) downloadStreamingConcurrent(
 	if err := outFile.Truncate(finalFileSize); err != nil {
 		return fmt.Errorf("failed to truncate file to final size: %w", err)
 	}
+
+	// v4.4.2: Compute hash after all parts written (still open file handle).
+	// HKDF uses WriteAt for parallel writes, so we read sequentially to hash.
+	// This avoids the race condition where post-download verification re-reads
+	// the file and may get stale cache data.
+	if _, err := outFile.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek to beginning for hash: %w", err)
+	}
+	hasher := sha512.New()
+	if _, err := io.Copy(hasher, outFile); err != nil {
+		return fmt.Errorf("failed to compute hash: %w", err)
+	}
+	prep.ComputedHash = hex.EncodeToString(hasher.Sum(nil))
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := outFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	// v4.4.0: Explicit Close() BEFORE returning (see downloadCBCStreaming for explanation)
+	if err := outFile.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
 
 	// Report 100% progress
 	if prep.Params.ProgressCallback != nil {

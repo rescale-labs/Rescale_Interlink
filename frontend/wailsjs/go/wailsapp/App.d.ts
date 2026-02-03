@@ -26,19 +26,23 @@ export function GetAnalysisCodes(arg1:string):Promise<wailsapp.AnalysisCodesResu
 
 export function GetAppInfo():Promise<wailsapp.AppInfoDTO>;
 
-export function GetAutoDownloadConfig():Promise<wailsapp.AutoDownloadConfigDTO>;
-
-export function GetAutoDownloadStatus():Promise<wailsapp.AutoDownloadStatusDTO>;
-
 export function GetAutomations():Promise<wailsapp.AutomationsResultDTO>;
 
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
 
 export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
 
+export function GetDaemonConfig():Promise<wailsapp.DaemonConfigDTO>;
+
+export function GetDaemonLogs(arg1:number):Promise<Array<wailsapp.DaemonLogEntryDTO>>;
+
 export function GetDaemonStatus():Promise<wailsapp.DaemonStatusDTO>;
 
 export function GetDefaultConfigPath():Promise<string>;
+
+export function GetDefaultDownloadFolder():Promise<string>;
+
+export function GetFileLoggingSettings():Promise<wailsapp.FileLoggingSettingsDTO>;
 
 export function GetHomeDirectory():Promise<string>;
 
@@ -48,11 +52,17 @@ export function GetJobsStats():Promise<wailsapp.JobsStatsDTO>;
 
 export function GetLocalFilesInfo(arg1:Array<string>):Promise<Array<wailsapp.LocalFileInfoDTO>>;
 
+export function GetLogFileLocation():Promise<string>;
+
+export function GetLogsDirectory():Promise<string>;
+
 export function GetMyJobsFolderID():Promise<string>;
 
 export function GetMyLibraryFolderID():Promise<string>;
 
 export function GetRunStatus():Promise<wailsapp.RunStatusDTO>;
+
+export function GetServiceStatus():Promise<wailsapp.ServiceStatusDTO>;
 
 export function GetTransferStats():Promise<wailsapp.TransferStatsDTO>;
 
@@ -82,6 +92,8 @@ export function LoadJobsFromJSON(arg1:string):Promise<Array<wailsapp.JobSpecDTO>
 
 export function LoadTemplate(arg1:string):Promise<wailsapp.JobSpecDTO>;
 
+export function OpenLogsDirectory():Promise<void>;
+
 export function PauseDaemon():Promise<void>;
 
 export function ResetRun():Promise<void>;
@@ -90,11 +102,11 @@ export function ResumeDaemon():Promise<void>;
 
 export function RetryTransfer(arg1:string):Promise<string>;
 
-export function SaveAutoDownloadConfig(arg1:wailsapp.AutoDownloadConfigDTO):Promise<void>;
-
 export function SaveConfig():Promise<void>;
 
 export function SaveConfigAs(arg1:string):Promise<void>;
+
+export function SaveDaemonConfig(arg1:wailsapp.DaemonConfigDTO):Promise<void>;
 
 export function SaveFile(arg1:string):Promise<string>;
 
@@ -118,6 +130,8 @@ export function SelectFile(arg1:string):Promise<string>;
 
 export function SelectMultipleFiles(arg1:string):Promise<Array<string>>;
 
+export function SetFileLoggingEnabled(arg1:boolean):Promise<void>;
+
 export function StartBulkRun(arg1:Array<wailsapp.JobSpecDTO>):Promise<string>;
 
 export function StartDaemon():Promise<void>;
@@ -126,20 +140,28 @@ export function StartFolderDownload(arg1:string,arg2:string,arg3:string):Promise
 
 export function StartFolderUpload(arg1:string,arg2:string):Promise<wailsapp.FolderUploadResultDTO>;
 
+export function StartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
+
 export function StartSingleJob(arg1:wailsapp.SingleJobInputDTO):Promise<string>;
 
 export function StartTransfers(arg1:Array<wailsapp.TransferRequestDTO>):Promise<void>;
 
 export function StopDaemon():Promise<void>;
 
-export function TestAutoDownloadConnection(arg1:wailsapp.AutoDownloadConfigDTO):Promise<void>;
+export function StopServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
+
+export function TestAutoDownloadConnection(arg1:string):Promise<void>;
 
 export function TestConnection():Promise<wailsapp.ConnectionResultDTO>;
 
 export function TriggerDaemonScan():Promise<void>;
 
+export function TriggerProfileRescan():Promise<void>;
+
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
 
 export function UpdateJobRow(arg1:number,arg2:wailsapp.JobSpecDTO):Promise<void>;
+
+export function ValidateAutoDownloadSetup():Promise<wailsapp.AutoDownloadValidationDTO>;
 
 export function ValidateJobSpec(arg1:wailsapp.JobSpecDTO):Promise<Array<string>>;

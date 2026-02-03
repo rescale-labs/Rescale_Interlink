@@ -43,6 +43,11 @@ type ServiceHandler interface {
 	// Shutdown gracefully stops the daemon.
 	// This is supported on Unix (unlike Windows where SCM handles it).
 	Shutdown() error
+
+	// GetRecentLogs returns recent log entries from the daemon.
+	// v4.5.0: Added userID parameter for per-user routing in service mode.
+	// In subprocess mode, userID is ignored (only one user).
+	GetRecentLogs(userID string, count int) []LogEntryData
 }
 
 // Server handles IPC requests from clients via Unix domain socket.
@@ -252,6 +257,12 @@ func (s *Server) handleRequest(req *Request) *Response {
 	case MsgOpenGUI:
 		// GUI opening is handled by the caller, not the daemon
 		return NewOKResponse()
+
+	case MsgGetRecentLogs:
+		// v4.5.0: Return recent log entries for GUI display
+		// In subprocess mode, userID is ignored; in service mode, routes to calling user
+		logs := s.handler.GetRecentLogs(req.UserID, 100) // Default to 100 entries
+		return NewRecentLogsResponse(logs)
 
 	case MsgShutdown:
 		// On Unix, shutdown via IPC is supported

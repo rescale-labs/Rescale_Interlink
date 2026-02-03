@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.0.8.
+Complete command-line interface reference for `rescale-int` v4.5.1.
 
-**Version:** 4.0.8
-**Build Date:** January 2, 2026
+**Version:** 4.5.1
+**Build Date:** January 28, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -776,6 +776,8 @@ rescale-int jobs submit --job-file job_spec.json
 
 Background service for automatically downloading completed jobs. Added in v3.4.0.
 
+**Configuration (v4.2.0):** The daemon reads settings from `daemon.conf` by default. CLI flags override config file values. See [daemon config](#daemon-config) commands below.
+
 #### daemon run
 
 Start the daemon to poll for completed jobs and download their output files.
@@ -783,6 +785,10 @@ Start the daemon to poll for completed jobs and download their output files.
 ```bash
 rescale-int daemon run [flags]
 ```
+
+**Config File:** `~/.config/rescale/daemon.conf` (Unix) or `%APPDATA%\Rescale\Interlink\daemon.conf` (Windows)
+
+The daemon automatically loads settings from the config file. CLI flags override config file values, allowing you to test different settings without modifying the config file.
 
 **Flags:**
 - `-d, --download-dir string` - Directory to download job outputs to (default ".")
@@ -795,23 +801,192 @@ rescale-int daemon run [flags]
 - `--use-job-id` - Use job ID instead of job name for output directory names
 - `--once` - Run once and exit (useful for cron jobs)
 - `--log-file string` - Path to log file (empty = stdout)
+- `--background` - Run in background mode (Unix only)
+- `--ipc` - Enable IPC server for GUI/CLI control
 
 **Examples:**
 ```bash
-# Start daemon (foreground mode, Ctrl+C to stop)
-rescale-int daemon run --download-dir ./results
+# Start daemon using daemon.conf settings
+rescale-int daemon run
 
-# With job name filtering
-rescale-int daemon run --download-dir ./results --name-prefix "MyProject"
-rescale-int daemon run --download-dir ./results --name-contains "simulation"
-rescale-int daemon run --download-dir ./results --exclude "Debug" --exclude "Test"
+# Start daemon with IPC for GUI control
+rescale-int daemon run --background --ipc
 
-# Configure poll interval
+# Override download-dir from config file
+rescale-int daemon run --download-dir ./override
+
+# With job name filtering (overrides config)
+rescale-int daemon run --name-prefix "MyProject"
+rescale-int daemon run --name-contains "simulation"
+rescale-int daemon run --exclude "Debug" --exclude "Test"
+
+# Configure poll interval (overrides config)
 rescale-int daemon run --poll-interval 2m
 
 # Run once and exit (for cron jobs)
-rescale-int daemon run --once --download-dir ./results
+rescale-int daemon run --once
 ```
+
+#### daemon config
+
+Manage daemon configuration file (`daemon.conf`). Added in v4.2.0.
+
+##### daemon config show
+
+Display current daemon configuration.
+
+```bash
+rescale-int daemon config show
+```
+
+Shows all settings from the config file with current values.
+
+**Example output:**
+```
+Daemon Configuration (~/.config/rescale/daemon.conf)
+====================================================
+
+[daemon]
+enabled = true
+download_folder = ~/Downloads/rescale-jobs
+poll_interval_minutes = 5
+use_job_name_dir = true
+max_concurrent = 5
+lookback_days = 7
+
+[filters]
+name_prefix =
+name_contains =
+exclude = test,debug
+
+[eligibility]
+correctness_tag = isCorrect:true
+auto_download_value = Enable
+downloaded_tag = autoDownloaded:true
+
+[notifications]
+enabled = true
+show_download_complete = true
+show_download_failed = true
+```
+
+##### daemon config path
+
+Show the path to the daemon configuration file.
+
+```bash
+rescale-int daemon config path
+```
+
+**Example:**
+```bash
+rescale-int daemon config path
+# Output: ~/.config/rescale/daemon.conf
+```
+
+##### daemon config edit
+
+Open the daemon configuration file in your default editor.
+
+```bash
+rescale-int daemon config edit
+```
+
+Uses `$EDITOR` environment variable (falls back to `vi` on Unix, `notepad` on Windows).
+
+##### daemon config set
+
+Set a configuration value.
+
+```bash
+rescale-int daemon config set <key> <value>
+```
+
+**Available keys:**
+- `daemon.enabled` - Enable/disable daemon (true/false)
+- `daemon.download_folder` - Download directory path
+- `daemon.poll_interval_minutes` - Poll interval in minutes (1-60)
+- `daemon.use_job_name_dir` - Use job name for subdirectories (true/false)
+- `daemon.max_concurrent` - Max concurrent downloads (1-20)
+- `daemon.lookback_days` - How many days back to check for jobs (1-30)
+- `filters.name_prefix` - Job name prefix filter
+- `filters.name_contains` - Job name contains filter
+- `filters.exclude` - Comma-separated exclude patterns
+- `eligibility.correctness_tag` - Tag for job correctness
+- `eligibility.auto_download_value` - Required value for "Auto Download" field (default: Enable)
+- `eligibility.downloaded_tag` - Tag added after download (default: autoDownloaded:true)
+- `notifications.enabled` - Enable notifications (true/false)
+
+**Examples:**
+```bash
+# Set download folder
+rescale-int daemon config set daemon.download_folder ~/Downloads/rescale-jobs
+
+# Set poll interval to 10 minutes
+rescale-int daemon config set daemon.poll_interval_minutes 10
+
+# Set exclude patterns
+rescale-int daemon config set filters.exclude "test,debug,scratch"
+
+# Enable the daemon
+rescale-int daemon config set daemon.enabled true
+```
+
+##### daemon config init
+
+Interactive daemon configuration setup.
+
+```bash
+rescale-int daemon config init [--force]
+```
+
+**Flags:**
+- `-f, --force` - Overwrite existing configuration
+
+Prompts for common settings and creates a `daemon.conf` file.
+
+**Example:**
+```bash
+rescale-int daemon config init
+# Interactive prompts for download folder, poll interval, etc.
+```
+
+##### daemon config validate
+
+**Added in v4.2.1.** Validate that your Rescale workspace is configured for auto-download.
+
+```bash
+rescale-int daemon config validate
+```
+
+This command checks if the required "Auto Download" custom field exists in your workspace.
+
+**Example output:**
+```
+Validating auto-download workspace configuration...
+
+Custom Fields Enabled: true
+'Auto Download' Field: true
+  - Type: select
+  - Section: Context
+  - Values: [Enable Disable]
+'Auto Download Path' Field: false (optional)
+
+✓ Workspace is properly configured for auto-download.
+```
+
+**Setting up your workspace for auto-download:**
+
+1. Go to Rescale Platform → Workspace Settings → Custom Fields
+2. Create a new Job custom field:
+   - **Name**: `Auto Download` (exact spelling required)
+   - **Type**: Select (dropdown) or Text
+   - **Values** (if Select): `Enable`, `Disable` (or your preferred values)
+3. Configure the expected value in `daemon.conf`:
+   ```ini
+   [eligibility]
+   auto_download_value = Enable
+   ```
 
 #### daemon status
 
@@ -1360,13 +1535,55 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v4.0.8 (January 3, 2026)
+This guide is for `rescale-int` v4.3.7 (January 14, 2026)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v4.0.8 (2026-01-03) [FIPS 140-3]
+# Output: rescale-int version v4.3.7 (2026-01-14) [FIPS 140-3]
 ```
+
+### v4.2.1 Enhanced Eligibility Configuration (January 9, 2026)
+
+Enhanced auto-download eligibility settings and workspace validation:
+
+1. **Configurable eligibility settings** - New config keys in `daemon.conf`:
+   - `eligibility.auto_download_value` - Required value for "Auto Download" field (default: "Enable")
+   - `eligibility.downloaded_tag` - Tag added after download (default: "autoDownloaded:true")
+
+2. **Workspace validation** - New `daemon config validate` command:
+   - Checks if required "Auto Download" custom field exists in workspace
+   - Reports field type and available values
+   - Provides setup instructions if field is missing
+
+3. **API validation method** - New `ValidateAutoDownloadSetup()` API method:
+   - Used by GUI and CLI to validate workspace configuration
+   - Returns detailed information about custom field setup
+
+### v4.2.0 Unified Daemon Configuration (January 8, 2026)
+
+Unified daemon configuration with new `daemon.conf` file:
+
+1. **Unified daemon.conf** - Single INI config file for all daemon settings
+   - Location: `~/.config/rescale/daemon.conf` (Unix) or `%APPDATA%\Rescale\Interlink\daemon.conf` (Windows)
+   - Replaces scattered config settings with one organized file
+   - Includes daemon, filters, eligibility, and notification settings
+
+2. **CLI config commands** - New `daemon config` subcommands
+   - `daemon config show` - Display current configuration
+   - `daemon config path` - Show config file location
+   - `daemon config edit` - Open in default editor
+   - `daemon config set <key> <value>` - Set individual values
+   - `daemon config init` - Interactive setup wizard
+
+3. **Config file + CLI flags** - Flexible configuration model
+   - Daemon reads from config file by default
+   - CLI flags override config file values
+   - Allows testing without modifying config
+
+4. **Windows tray improvements**
+   - "Configure..." menu opens GUI to daemon settings
+   - "Start Service" reads from daemon.conf
 
 ### v3.0.1 Streaming Encryption (November 28, 2025)
 

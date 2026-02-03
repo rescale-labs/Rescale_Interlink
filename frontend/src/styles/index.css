@@ -1,3 +1,8 @@
+/* v4.5.3: Force light color scheme to prevent OS dark mode from affecting native controls */
+html {
+  color-scheme: light;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

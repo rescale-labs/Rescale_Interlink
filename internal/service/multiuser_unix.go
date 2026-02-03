@@ -6,6 +6,8 @@ package service
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 // UserProfile represents a user profile for multi-user auto-download.
@@ -20,7 +22,7 @@ type UserProfile struct {
 	// ProfilePath is the full path to the user's home directory
 	ProfilePath string
 
-	// ConfigPath is the path to the user's apiconfig file
+	// ConfigPath is the path to the user's daemon.conf file (v4.2.0+)
 	ConfigPath string
 
 	// StateFilePath is the path to the user's autodownload state file
@@ -70,11 +72,26 @@ func GetCurrentUserProfile() (*UserProfile, error) {
 		uid = ""
 	}
 
+	// v4.4.3: Use config helpers for consistent paths across platforms
 	return &UserProfile{
 		SID:           uid,
 		Username:      username,
 		ProfilePath:   home,
-		ConfigPath:    filepath.Join(home, ".config", "rescale", "apiconfig"),
-		StateFilePath: filepath.Join(home, ".config", "rescale", "autodownload_state.json"),
+		ConfigPath:    filepath.Join(home, ".config", "rescale", "daemon.conf"), // v4.2.0: daemon.conf instead of apiconfig
+		StateFilePath: config.StateFilePathForUser(home),
 	}, nil
+}
+
+// ResolveSIDToUsername is a no-op on Unix platforms.
+// Windows SIDs don't exist on Unix, so this always returns empty string.
+// v4.5.3: Added stub for cross-platform compatibility.
+func ResolveSIDToUsername(_ string) string {
+	return ""
+}
+
+// ResolveUsernameToSID is a no-op on Unix platforms.
+// Windows SIDs don't exist on Unix, so this always returns empty string.
+// v4.5.3: Added stub for cross-platform compatibility.
+func ResolveUsernameToSID(_ string) string {
+	return ""
 }

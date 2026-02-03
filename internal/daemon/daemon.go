@@ -184,53 +184,87 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 }
 
 // poll checks for completed jobs and downloads them.
+// v4.3.4: Improved step-by-step logging for visibility
+// v4.3.5: Embed key info in message text (structured fields don't show in GUI)
+// v4.3.6: Silent filtering - only log jobs with Auto Download = Enabled/Conditional
+// v4.5.5: Added 10-minute scan timeout to prevent indefinite hangs
 func (d *Daemon) poll(ctx context.Context) {
-	d.logger.Debug().Msg("Starting poll cycle")
+	// v4.5.5: Add timeout to entire scan operation (10 minutes max)
+	// Must be longer than HTTP client timeout (300s) to allow retries
+	scanCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	scanStart := time.Now()
+	d.logger.Info().Msg("=== SCAN STARTED ===")
 
 	// Find completed jobs that need downloading
-	completed, err := d.monitor.FindCompletedJobs(ctx)
+	result, err := d.monitor.FindCompletedJobs(scanCtx)
 	if err != nil {
-		d.logger.Error().Err(err).Msg("Failed to find completed jobs")
+		// v4.5.5: Add timeout-specific error handling
+		if scanCtx.Err() == context.DeadlineExceeded {
+			d.logger.Error().Dur("duration", time.Since(scanStart)).Msg("Scan timed out after 10 minutes")
+		} else {
+			d.logger.Error().Err(err).Msg("Failed to find completed jobs")
+		}
+		d.logger.Info().Msgf("=== SCAN COMPLETE === Error (took %.1fs)", time.Since(scanStart).Seconds())
 		return
 	}
 
+	completed := result.Candidates
+	totalScanned := result.TotalScanned
+
 	if len(completed) == 0 {
-		d.logger.Debug().Msg("No new completed jobs to download")
+		d.logger.Info().Msgf("=== SCAN COMPLETE === Scanned %d jobs, no candidates (took %.1fs)",
+			totalScanned, time.Since(scanStart).Seconds())
 		d.state.UpdateLastPoll()
 		return
 	}
 
-	d.logger.Info().Int("count", len(completed)).Msg("Found completed jobs to download")
+	d.logger.Info().Msgf("Checking %d potential jobs...", len(completed))
 
-	// Download each job
+	// v4.3.6: Track statistics for summary - added filteredCount for silent skips
+	var downloadedCount, skippedCount, filteredCount int
+
+	// Check eligibility and download each job
 	for _, job := range completed {
 		select {
 		case <-ctx.Done():
-			d.logger.Info().Msg("Download interrupted by context cancellation")
+			d.logger.Info().Msg("Scan interrupted by context cancellation")
 			return
 		case <-d.stopChan:
-			d.logger.Info().Msg("Download interrupted by stop signal")
+			d.logger.Info().Msg("Scan interrupted by stop signal")
 			return
 		default:
-			// v4.0.0: Check eligibility before downloading if enabled
-			if d.cfg.Eligibility != nil {
-				eligible, reason := d.monitor.CheckEligibility(ctx, job.ID)
-				if !eligible {
-					d.logger.Debug().
-						Str("job_id", job.ID).
-						Str("job_name", job.Name).
-						Str("reason", reason).
-						Msg("Job not eligible for auto-download")
-					continue
-				}
-				d.logger.Debug().
-					Str("job_id", job.ID).
-					Str("reason", reason).
-					Msg("Job eligible for auto-download")
-			}
-			d.downloadJob(ctx, job)
 		}
+
+		// v4.3.6: Check eligibility - result now includes ShouldLog flag
+		if d.cfg.Eligibility != nil {
+			eligResult := d.monitor.CheckEligibility(ctx, job.ID)
+
+			if !eligResult.ShouldLog {
+				// Not a real candidate (Auto Download not set/disabled) - skip silently
+				filteredCount++
+				continue
+			}
+
+			if !eligResult.Eligible {
+				// Real candidate but not eligible (already downloaded, missing tag, etc.) - log it
+				skippedCount++
+				d.logger.Info().Msgf("SKIP: %s [%s] - %s", job.Name, job.ID, eligResult.Reason)
+				continue
+			}
+
+			// Job is eligible - will download
+			d.logger.Info().Msgf("DOWNLOAD: %s [%s] - %s", job.Name, job.ID, eligResult.Reason)
+		}
+
+		d.downloadJob(ctx, job)
+		downloadedCount++
 	}
+
+	// v4.3.6: Log cycle summary with all counts
+	d.logger.Info().Msgf("=== SCAN COMPLETE === Scanned %d, filtered %d, downloaded %d, skipped %d (took %.1fs)",
+		totalScanned, filteredCount, downloadedCount, skippedCount, time.Since(scanStart).Seconds())
 
 	d.state.UpdateLastPoll()
 	if err := d.state.Save(); err != nil {
@@ -402,30 +436,41 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	d.state.MarkDownloaded(job.ID, job.Name, outputDir, downloadedCount, totalSize)
 
 	// v4.0.0: Tag the job as downloaded (D2.3)
+	// v4.3.0: Use hardcoded tag from config package
 	// This prevents the job from being downloaded again via eligibility checking
-	if d.cfg.Eligibility != nil && d.cfg.Eligibility.DownloadedTag != "" {
-		if err := d.apiClient.AddJobTag(ctx, job.ID, d.cfg.Eligibility.DownloadedTag); err != nil {
+	if d.cfg.Eligibility != nil {
+		if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
 			// Log but don't fail - job is already downloaded locally
 			d.logger.Warn().
 				Err(err).
 				Str("job_id", job.ID).
-				Str("tag", d.cfg.Eligibility.DownloadedTag).
+				Str("tag", config.DownloadedTag).
 				Msg("Failed to tag job as downloaded (will retry on next poll)")
 		} else {
 			d.logger.Debug().
 				Str("job_id", job.ID).
-				Str("tag", d.cfg.Eligibility.DownloadedTag).
+				Str("tag", config.DownloadedTag).
 				Msg("Tagged job as downloaded")
 		}
 	}
 
-	d.logger.Info().
-		Str("job_id", job.ID).
-		Str("job_name", job.Name).
-		Str("output_dir", outputDir).
-		Int("file_count", downloadedCount).
-		Int64("total_size", totalSize).
-		Msg("Job download complete")
+	// v4.3.5: Embed info in message text for GUI visibility
+	d.logger.Info().Msgf("COMPLETED: %s [%s] - %d files, %s",
+		job.Name, job.ID, downloadedCount, formatBytes(totalSize))
+}
+
+// formatBytes formats a byte count as a human-readable string.
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // RunOnce performs a single poll cycle and exits.

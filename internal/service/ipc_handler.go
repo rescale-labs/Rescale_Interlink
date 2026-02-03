@@ -65,6 +65,7 @@ func (h *ServiceIPCHandler) GetStatus() *ipc.StatusData {
 		ActiveUsers:     activeUsers,
 		LastError:       "",
 		Uptime:          uptime,
+		ServiceMode:     true, // v4.5.2: Running as Windows Service (multi-user mode)
 	}
 }
 
@@ -132,12 +133,19 @@ func (h *ServiceIPCHandler) ResumeUser(userID string) error {
 }
 
 // TriggerScan triggers an immediate job scan.
+// v4.5.0: Routes to specific user if SID/username provided.
+// v4.5.2: Added INFO logging for visibility in Activity tab.
 func (h *ServiceIPCHandler) TriggerScan(userID string) error {
-	// For now, trigger a full rescan of all profiles
-	// This will restart any daemons with changed configs
-	// TODO: Add per-user scan triggering to the daemon
-	h.service.TriggerRescan()
-	return nil
+	// v4.5.0: Route to specific user if identifier provided
+	if userID == "" || userID == "all" {
+		// Trigger a full rescan of all profiles
+		h.logger.Info().Msg("Scan triggered via IPC for all users")
+		h.service.TriggerRescan()
+		return nil
+	}
+	// Trigger scan for specific user only (accepts SID or username)
+	h.logger.Info().Str("user_id", userID).Msg("Scan triggered via IPC for user")
+	return h.service.TriggerUserScan(userID)
 }
 
 // OpenLogs returns the log location path for the user or service.
@@ -195,12 +203,31 @@ func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 	// v4.0.7 H3: Do NOT try to run explorer.exe from SYSTEM context.
 	// It won't show on the user's desktop. The tray app handles this locally.
 	// Just ensure the directory exists and return success.
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
+	// v4.5.1: Uses 0700 permissions to restrict log access to owner only.
+	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		h.logger.Warn().Err(err).Str("dir", logsDir).Msg("Failed to create logs directory")
 		return fmt.Errorf("failed to create logs directory: %w", err)
 	}
 
 	return nil
+}
+
+// Shutdown gracefully stops the multi-user daemon service.
+// v4.3.9: Added to allow stopping daemon via IPC (enables GUI Stop button on Windows).
+func (h *ServiceIPCHandler) Shutdown() error {
+	h.logger.Info().Msg("IPC shutdown requested")
+	h.service.Stop()
+	return nil
+}
+
+// GetRecentLogs returns recent log entries from the daemon.
+// v4.5.0: Now routes to per-user logs based on userID (SID or username).
+func (h *ServiceIPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {
+	// v4.5.0: Return logs for the specified user
+	if logs := h.service.GetUserLogs(userID, count); logs != nil {
+		return logs
+	}
+	return []ipc.LogEntryData{}
 }
 
 // Ensure ServiceIPCHandler implements ipc.ServiceHandler

@@ -1,5 +1,10 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  // v4.5.3: Disable automatic dark mode to prevent unreadable text
+  // Dark mode was partially implemented but incomplete, causing contrast issues.
+  // Setting to 'class' mode means dark variants only apply when <html class="dark">
+  // is present - since we never add this class, dark mode is effectively disabled.
+  darkMode: 'class',
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",

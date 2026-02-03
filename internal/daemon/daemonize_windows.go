@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"golang.org/x/sys/windows"
 )
 
 // PIDFilePath returns the path to the daemon PID file.
@@ -61,23 +63,24 @@ func ReadPIDFile() int {
 
 // IsDaemonRunning checks if a daemon process is already running.
 // Returns the PID if running, 0 if not.
+// v4.4.3: Properly validates PID on Windows using OpenProcess.
 func IsDaemonRunning() int {
 	pid := ReadPIDFile()
 	if pid == 0 {
 		return 0
 	}
 
-	// On Windows, check if process exists using OpenProcess
-	// For now, just return the PID if the file exists
-	// The Windows service manager handles this differently
-	process, err := os.FindProcess(pid)
+	// v4.4.3: Validate the process actually exists using Windows API
+	// os.FindProcess always succeeds on Windows even for non-existent PIDs,
+	// so we need to use Windows-specific API to verify the process is alive.
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
+		// Process doesn't exist - clean up stale PID file
+		RemovePIDFile()
 		return 0
 	}
+	windows.CloseHandle(handle)
 
-	// On Windows, FindProcess always succeeds. We can't easily check if running.
-	// Just return the PID and let the caller handle it.
-	_ = process
 	return pid
 }
 

@@ -56,6 +56,22 @@ func NewDefaultCLILogger() *Logger {
 	return NewLogger("cli", nil)
 }
 
+// NewLoggerWithWriter creates a logger that writes to the specified writer.
+// v4.3.2: Used by daemon to capture logs for IPC streaming.
+func NewLoggerWithWriter(writer io.Writer) *Logger {
+	logger := zerolog.New(writer).
+		With().
+		Timestamp().
+		Logger()
+
+	return &Logger{
+		zlog:     logger,
+		mode:     "daemon",
+		eventBus: nil,
+		output:   writer,
+	}
+}
+
 // Info returns an info level event.
 func (l *Logger) Info() *zerolog.Event {
 	return l.zlog.Info()

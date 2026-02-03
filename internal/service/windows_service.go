@@ -199,8 +199,10 @@ func RunAsMultiUserService(s *MultiUserService) error {
 	elog.Info(1, "Starting service (multi-user mode)")
 
 	// Create IPC handler and server
+	// v4.5.0: Use service mode server for multi-user mode
+	// This relaxes owner-based auth since user-scoped routing handles isolation
 	ipcHandler := NewServiceIPCHandler(s, logger)
-	ipcServer := ipc.NewServer(ipcHandler, logger)
+	ipcServer := ipc.NewServiceModeServer(ipcHandler, logger)
 
 	ws := &multiUserWindowsService{
 		service:    s,
@@ -223,6 +225,30 @@ func RunAsMultiUserService(s *MultiUserService) error {
 // IsWindowsService returns true if running as a Windows service.
 func IsWindowsService() (bool, error) {
 	return svc.IsWindowsService()
+}
+
+// IsInstalledWithReason returns (installed, errReason) for better diagnostics.
+// v4.5.2: Added for UI to show meaningful status when SCM access is blocked.
+func IsInstalledWithReason() (bool, string) {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false, fmt.Sprintf("SCM access denied: %v", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(ServiceName)
+	if err != nil {
+		return false, fmt.Sprintf("Service query failed: %v", err)
+	}
+	defer s.Close()
+	return true, ""
+}
+
+// IsInstalled returns true if the service is installed in the Service Control Manager.
+// v4.3.6: Added for GUI to check service installation status.
+func IsInstalled() bool {
+	installed, _ := IsInstalledWithReason()
+	return installed
 }
 
 // Install installs the service with the Service Control Manager.

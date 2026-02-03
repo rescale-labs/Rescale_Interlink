@@ -27,15 +27,10 @@ import (
 	_ "github.com/rescale/rescale-int/internal/mesainit"
 
 	"github.com/rescale/rescale-int/internal/cli"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/mesa"
 	"github.com/rescale/rescale-int/internal/version"
 	"github.com/rescale/rescale-int/internal/wailsapp"
-)
-
-// Version information
-var (
-	Version   = "v4.1.0"
-	BuildTime = "2026-01-07"
 )
 
 // FIPSEnabled indicates whether FIPS 140-3 mode is active
@@ -70,19 +65,29 @@ func init() {
 			os.Exit(2) // Exit with code 2 to indicate compliance failure
 		}
 	}
+
+	// v4.5.1: Warn if NTLM proxy is configured in FIPS mode
+	// NTLM uses non-FIPS algorithms (MD4/MD5) which may violate compliance for FRM platforms
+	if FIPSEnabled {
+		cfg, err := config.LoadConfigCSV(config.GetDefaultConfigPath())
+		if err == nil && cfg != nil {
+			if warning := cfg.ValidateNTLMForFIPS(); warning != "" {
+				log.Printf("[WARN] NTLM proxy mode uses non-FIPS algorithms (MD4/MD5)")
+				log.Printf("[WARN] For strict FIPS compliance, use 'basic' proxy mode over TLS")
+			}
+		}
+	}
 }
 
 func main() {
-	// Set version in version package (canonical source for all packages)
-	// and CLI package (for backwards compatibility)
-	version.Version = Version
-	version.BuildTime = BuildTime
-	cli.Version = Version
-	cli.BuildTime = BuildTime
+	// Propagate version from the single source of truth (internal/version)
+	// to CLI package for backwards compatibility
+	cli.Version = version.Version
+	cli.BuildTime = version.BuildTime
 
 	// Check for diagnostic modes before GUI/CLI
 	if contains(os.Args, "--mesa-doctor") {
-		fmt.Printf("Rescale Interlink %s\n\n", Version)
+		fmt.Printf("Rescale Interlink %s\n\n", version.Version)
 		mesa.Doctor()
 		return
 	}

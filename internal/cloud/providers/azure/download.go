@@ -16,12 +16,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
-
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
-	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
+	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
 // Verify that Provider implements LegacyDownloader
@@ -117,7 +115,13 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer file.Close()
+	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			file.Close()
+		}
+	}()
 
 	// If no progress callback or no total size, just copy directly
 	if progressCallback == nil || totalSize <= 0 {
@@ -125,6 +129,14 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 		if err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
 		}
+		// v4.4.0: Sync and close before returning
+		if err := file.Sync(); err != nil {
+			return fmt.Errorf("failed to sync file to disk: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("failed to close file: %w", err)
+		}
+		fileClosed = true
 		return nil
 	}
 
@@ -158,11 +170,26 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 
 	// Ensure 100% is reported
 	progressCallback(1.0)
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
+
 	return nil
 }
 
 // downloadChunkedWithProgress downloads a blob in chunks with progress callback.
 // Uses AzureClient directly.
+// v4.5.4: Wraps request+read+close in single retry to handle mid-transfer proxy failures.
 func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient *AzureClient, remotePath, localPath string, totalSize int64, progressCallback func(float64)) error {
 	// Report 0% at start
 	if progressCallback != nil {
@@ -174,7 +201,13 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer file.Close()
+	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			file.Close()
+		}
+	}()
 
 	var offset int64 = 0
 
@@ -185,21 +218,31 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 			chunkSize = totalSize - offset
 		}
 
-		// Download this chunk using Range
-		resp, err := azureClient.DownloadRange(ctx, remotePath, offset, chunkSize)
+		// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+		// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally)
+		var chunkData []byte
+		err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk offset=%d", offset), func() error {
+			// Per-attempt timeout to prevent stalled reads from hanging
+			attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
+			defer cancel()
+
+			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, chunkSize)
+			if err != nil {
+				return err
+			}
+			data, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close() // Always close, even on read error
+			if readErr != nil {
+				return readErr
+			}
+			chunkData = data
+			return nil
+		})
 		if err != nil {
 			return fmt.Errorf("failed to download chunk at offset %d: %w", offset, err)
 		}
 
-		// Read chunk data
-		chunkData, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if err != nil {
-			return fmt.Errorf("failed to read chunk at offset %d: %w", offset, err)
-		}
-
-		// Write chunk to file
+		// Write chunk to file (OUTSIDE retry - disk errors are not retryable)
 		_, err = file.Write(chunkData)
 		if err != nil {
 			return fmt.Errorf("failed to write chunk at offset %d: %w", offset, err)
@@ -212,6 +255,19 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 			progressCallback(float64(offset) / float64(totalSize))
 		}
 	}
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
 
 	return nil
 }
@@ -257,7 +313,13 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 	if err != nil {
 		return fmt.Errorf("failed to create/open file: %w", err)
 	}
-	defer file.Close()
+	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	fileClosed := false
+	defer func() {
+		if !fileClosed {
+			file.Close()
+		}
+	}()
 
 	// Truncate/extend file to final size for concurrent writes
 	if err := file.Truncate(totalSize); err != nil {
@@ -332,27 +394,32 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 				}
 				rangeSize := endByte - startByte
 
-				// Download chunk with retry
-				var resp azblob.DownloadStreamResponse
+				// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+				// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally)
+				var chunkData []byte
 				err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk %d", chunkIdx), func() error {
-					r, err := azureClient.DownloadRange(ctx, remotePath, startByte, rangeSize)
-					resp = r
-					return err
+					// Per-attempt timeout to prevent stalled reads from hanging
+					attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
+					defer cancel()
+
+					resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, startByte, rangeSize)
+					if err != nil {
+						return err
+					}
+					data, readErr := io.ReadAll(resp.Body)
+					resp.Body.Close() // Always close, even on read error
+					if readErr != nil {
+						return readErr
+					}
+					chunkData = data
+					return nil
 				})
 				if err != nil {
 					errChan <- fmt.Errorf("failed to download chunk %d: %w", chunkIdx, err)
 					return
 				}
 
-				// Read chunk data
-				chunkData, err := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					errChan <- fmt.Errorf("failed to read chunk %d: %w", chunkIdx, err)
-					return
-				}
-
-				// Write to file at correct offset
+				// Write to file at correct offset (OUTSIDE retry - disk errors are not retryable)
 				fileMu.Lock()
 				_, err = file.WriteAt(chunkData, startByte)
 				fileMu.Unlock()
@@ -412,6 +479,19 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
+
+	// v4.3.7: Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Fixes sporadic checksum failures where file
+	// was read as empty due to OS buffer not being flushed.
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	fileClosed = true
 
 	// Report 100% at end
 	if progressCallback != nil {

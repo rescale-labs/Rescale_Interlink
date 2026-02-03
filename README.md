@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.1.0-green)
+![Status](https://img.shields.io/badge/status-v4.5.1-green)
 
 ---
 
@@ -87,6 +87,43 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 ## Recent Changes
 
+**v4.5.1 (January 28, 2026) - Security Hardening & FIPS Compliance:**
+- **Security Improvements:**
+  - **Log Directory Permissions**: All log directories now created with 0700 (owner-only) instead of 0755
+  - **Windows IPC Fail-Closed**: If owner SID capture fails, modify operations are denied (was fail-open)
+  - **API Key Fragment Removed**: Debug logs no longer include partial API key information
+- **NTLM/FIPS Safeguards:**
+  - **FedRAMP Platform Detection**: Auto-disables NTLM proxy for `rescale-gov.com` platforms
+  - **Frontend Enforcement**: NTLM option disabled in GUI when FRM platform selected
+  - **Startup Warning**: Logs warning if NTLM proxy configured in FIPS mode
+- **New Documentation:**
+  - **SECURITY.md**: Comprehensive security documentation covering FIPS, proxy, logging, and IPC security
+
+**v4.5.1 (January 25, 2026) - Daemon Startup UX + Service Mode Fixes:**
+- **P0 Critical Fixes:**
+  - **Windows Service Entrypoint**: `daemon run` now properly detects Windows Service context and delegates to `RunAsMultiUserService()` - fixes Error 1053 on service start
+  - **Windows Per-User Config Paths**: Multi-user service now correctly finds `daemon.conf` at `AppData\Roaming\Rescale\Interlink\daemon.conf`
+  - **Windows Stale PID Handling**: `IsDaemonRunning()` now validates PID using `windows.OpenProcess()` - stale PID files are cleaned up automatically
+- **P1 UX Improvements:**
+  - **Tray Immediate Error Feedback**: Errors now update UI immediately (not on 5-second poll cycle)
+  - **GUI Inline Guidance**: Visible amber message when auto-download is disabled explains how to enable
+- **P2 Polish:**
+  - **Unified Path Resolution**: New `internal/pathutil` package with shared `ResolveAbsolutePath()` function used by CLI, GUI, and Tray
+  - **Relaxed Tray Preflight**: Replaced strict parent directory check with `os.MkdirAll()` - supports new paths
+  - **macOS/Linux Auto-Start Docs**: Removed `--background` flag from launchd/systemd examples (conflicts with process managers)
+
+**v4.3.7 (January 14, 2026) - Daemon Logging Improvements:**
+- **Silent filtering for Auto Download**: Jobs with "Auto Download = not set" or "disabled" are now filtered silently
+- **Optimized API calls**: Custom field is checked FIRST, before checking downloaded tag
+- **Improved scan summary**: Shows `filtered` count separately from `skipped` count
+
+**v4.2.1 (January 9, 2026) - Enhanced Eligibility Configuration:**
+- **New `daemon.conf` file**: Single INI file for all daemon settings (replaces scattered config)
+- **CLI config commands**: `daemon config show|path|edit|set|init` for managing daemon settings
+- **Config file + CLI flags**: Daemon reads from config file, CLI flags override config values
+- **Windows tray "Configure..."**: Opens GUI directly to daemon configuration
+- **Cross-platform consistency**: Same config format and behavior on Mac, Linux, and Windows
+
 **v4.1.0 (January 7, 2026) - Cross-Platform Daemon Control:**
 - **GUI Daemon Control**: Start, stop, pause, resume, and monitor the auto-download daemon from the GUI
 - **Unix IPC**: Domain socket communication (`~/.config/rescale/interlink.sock`) for Mac/Linux
@@ -148,15 +185,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.1.0-darwin-arm64.zip` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.1.0-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.1.0-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `RescaleInterlink-v4.1.0.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.5.1-darwin-arm64.zip` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.5.1-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.5.1-windows-amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `RescaleInterlink-v4.5.1.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Unzip and move app to Applications
-unzip rescale-interlink-v4.1.0-darwin-arm64.zip
+unzip rescale-interlink-v4.5.1-darwin-arm64.zip
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -167,7 +204,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.1.0-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.5.1-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -180,7 +217,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.1.0-windows-amd64.zip
+Expand-Archive rescale-interlink-v4.5.1-windows-amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -348,6 +385,110 @@ rescale-int daemon stop
 - "Scan Now" button for immediate job check
 - Shows uptime, version, jobs downloaded when running
 
+**Windows Tray (MSI only):**
+- Right-click tray icon for menu
+- Start Service / Pause / Resume / Trigger Scan
+- Open Interlink to launch GUI
+
+### Auto-Start on Login (Mac/Linux)
+
+On **Windows with MSI installer**, the daemon starts automatically as a Windows Service.
+
+On **Mac and Linux**, you can configure auto-start manually using the system's init system:
+
+<details>
+<summary><b>macOS (launchd)</b></summary>
+
+Create `~/Library/LaunchAgents/com.rescale.interlink.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rescale.interlink.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/rescale-int</string>
+        <string>daemon</string>
+        <string>run</string>
+        <string>--download-dir</string>
+        <string>/Users/USERNAME/Downloads/rescale-jobs</string>
+        <string>--ipc</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/Library/Logs/rescale-interlink.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/Library/Logs/rescale-interlink.error.log</string>
+</dict>
+</plist>
+```
+
+**Note:** Do NOT use `--background` with launchd. Launchd expects the process to stay in the foreground;
+`--background` forks and exits, causing launchd to think the daemon crashed.
+
+**Commands:**
+```bash
+# Replace USERNAME with your actual username in the plist file
+
+# Install (enable auto-start)
+launchctl load ~/Library/LaunchAgents/com.rescale.interlink.daemon.plist
+
+# Uninstall (disable auto-start)
+launchctl unload ~/Library/LaunchAgents/com.rescale.interlink.daemon.plist
+
+# Check status
+launchctl list | grep rescale
+```
+</details>
+
+<details>
+<summary><b>Linux (systemd)</b></summary>
+
+Create `~/.config/systemd/user/rescale-interlink.service`:
+
+```ini
+[Unit]
+Description=Rescale Interlink Auto-Download Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rescale-int daemon run --download-dir %h/Downloads/rescale-jobs --ipc
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+**Note:** Do NOT use `--background` with systemd. Systemd expects `Type=simple` services to stay in the foreground;
+`--background` forks and exits, causing systemd to think the daemon crashed.
+
+**Commands:**
+```bash
+# Install (enable auto-start)
+systemctl --user daemon-reload
+systemctl --user enable rescale-interlink
+systemctl --user start rescale-interlink
+
+# Check status
+systemctl --user status rescale-interlink
+
+# View logs
+journalctl --user -u rescale-interlink -f
+
+# Disable auto-start
+systemctl --user disable rescale-interlink
+```
+</details>
+
 ### Configuration
 
 **CLI:**
@@ -386,7 +527,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.1.0                       |
+|                    Rescale Interlink v4.5.1                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -644,6 +785,7 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 - **[CLI_GUIDE.md](CLI_GUIDE.md)** - Complete command-line reference with examples
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design and code organization
+- **[SECURITY.md](SECURITY.md)** - Security documentation (FIPS, proxy, logging, IPC)
 - **[TESTING.md](TESTING.md)** - Test strategy and procedures
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Developer onboarding guide
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Version history and release details
@@ -651,6 +793,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.1.0
+**Version**: 4.5.1
 **Status**: Production Ready
-**Last Updated**: January 7, 2026
+**Last Updated**: January 28, 2026

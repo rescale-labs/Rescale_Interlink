@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/rescale/rescale-int/internal/daemon"
+	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
@@ -134,4 +135,16 @@ func (s *MultiUserService) PauseUser(identifier string) error {
 // ResumeUser resumes auto-download for a specific user.
 func (s *MultiUserService) ResumeUser(identifier string) error {
 	return s.daemon.ResumeUser(identifier)
+}
+
+// TriggerUserScan triggers a scan for a specific user (by SID or username).
+// v4.5.0: Added to support per-user scan triggering from IPC.
+func (s *MultiUserService) TriggerUserScan(identifier string) error {
+	return s.daemon.TriggerUserScan(identifier)
+}
+
+// GetUserLogs returns recent log entries for a specific user (by SID or username).
+// v4.5.0: Added to support per-user log retrieval via IPC.
+func (s *MultiUserService) GetUserLogs(identifier string, count int) []ipc.LogEntryData {
+	return s.daemon.GetUserLogs(identifier, count)
 }

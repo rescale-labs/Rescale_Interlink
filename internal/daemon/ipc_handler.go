@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 // IPCHandler implements ipc.ServiceHandler for the Unix daemon.
@@ -23,6 +24,9 @@ type IPCHandler struct {
 
 	// Shutdown callback
 	shutdownFunc func()
+
+	// v4.3.2: Log buffer for IPC streaming
+	logBuffer *LogBuffer
 }
 
 // NewIPCHandler creates a new IPC handler for the daemon.
@@ -32,6 +36,12 @@ func NewIPCHandler(daemon *Daemon, shutdownFunc func()) *IPCHandler {
 		startTime:    time.Now(),
 		shutdownFunc: shutdownFunc,
 	}
+}
+
+// SetLogBuffer sets the log buffer for IPC log streaming.
+// v4.3.2: Called by daemon after creating the log writer.
+func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
+	h.logBuffer = buf
 }
 
 // GetStatus returns the current daemon status.
@@ -53,11 +63,12 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 
 	return &ipc.StatusData{
 		ServiceState:    state,
-		Version:         "4.1.0", // Updated for v4.1.0
+		Version:         version.Version, // v4.3.2: Use canonical version
 		LastScanTime:    lastPollPtr,
 		ActiveDownloads: h.daemon.GetActiveDownloads(),
 		ActiveUsers:     1, // Single-user mode on Unix
 		Uptime:          uptime,
+		ServiceMode:     false, // v4.5.2: Running as subprocess (single-user mode)
 	}
 }
 
@@ -135,6 +146,26 @@ func (h *IPCHandler) TriggerScan(userID string) error {
 func (h *IPCHandler) OpenLogs(userID string) error {
 	h.daemon.logger.Debug().Msg("OpenLogs called (no-op on Unix)")
 	return nil
+}
+
+// GetRecentLogs returns recent log entries from the buffer.
+// v4.5.0: Added userID parameter for interface compatibility.
+// In subprocess mode, userID is ignored (only one user).
+func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {
+	// userID ignored in subprocess mode - only one user
+	if h.logBuffer == nil {
+		return nil
+	}
+	if count <= 0 {
+		count = 100 // Default to 100 entries
+	}
+	return h.logBuffer.GetRecent(count)
+}
+
+// GetLogBuffer returns the log buffer for subscription.
+// v4.3.2: Used for real-time log streaming.
+func (h *IPCHandler) GetLogBuffer() *LogBuffer {
+	return h.logBuffer
 }
 
 // Shutdown gracefully stops the daemon.

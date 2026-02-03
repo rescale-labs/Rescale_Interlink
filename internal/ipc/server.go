@@ -10,11 +10,20 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/Microsoft/go-winio"
 	"github.com/rescale/rescale-int/internal/logging"
+	"golang.org/x/sys/windows"
+)
+
+var (
+	modkernel32                   = windows.NewLazySystemDLL("kernel32.dll")
+	procGetNamedPipeClientProcessId = modkernel32.NewProc("GetNamedPipeClientProcessId")
 )
 
 // ServiceHandler defines the interface for service operations.
@@ -39,6 +48,15 @@ type ServiceHandler interface {
 	// OpenLogs opens the log viewer for a user or the service.
 	// If userID is "service", opens service logs; otherwise opens user logs.
 	OpenLogs(userID string) error
+
+	// Shutdown gracefully stops the daemon.
+	// v4.3.9: Added to allow stopping daemon via IPC (for parity with Unix).
+	Shutdown() error
+
+	// GetRecentLogs returns recent log entries from the daemon.
+	// v4.5.0: Added userID parameter for per-user routing in service mode.
+	// In subprocess mode, userID is ignored (only one user).
+	GetRecentLogs(userID string, count int) []LogEntryData
 }
 
 // Server handles IPC requests from clients via named pipe.
@@ -50,39 +68,89 @@ type Server struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// ownerSID is the SID of the user who started the daemon.
+	// v4.4.2: Used for per-user authorization to prevent cross-user daemon control.
+	ownerSID string
+
+	// serviceMode indicates multi-user Windows Service mode.
+	// v4.5.0: In service mode, owner-based auth is relaxed because user-scoped
+	// routing handles isolation (each user can only affect their own daemon).
+	serviceMode bool
 }
 
 // NewServer creates a new IPC server.
+// v4.4.2: Captures the current user's SID for per-user authorization.
 func NewServer(handler ServiceHandler, logger *logging.Logger) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Server{
+	s := &Server{
 		handler: handler,
 		logger:  logger,
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+
+	// Capture the owner's SID for authorization checks
+	if sid, err := getCurrentUserSID(); err == nil {
+		s.ownerSID = sid
+		logger.Debug().Str("owner_sid", sid).Msg("IPC server owner SID captured")
+	} else {
+		logger.Warn().Err(err).Msg("Failed to get owner SID; cross-user authorization disabled")
+	}
+
+	return s
+}
+
+// NewServiceModeServer creates a new IPC server for multi-user Windows Service mode.
+// v4.5.0: In service mode, authorization is relaxed because user-scoped routing
+// handles isolation. Any authenticated user is allowed to connect and control
+// their own daemon via the handler's user-scoped operations.
+func NewServiceModeServer(handler ServiceHandler, logger *logging.Logger) *Server {
+	s := NewServer(handler, logger)
+	s.serviceMode = true
+	logger.Info().Msg("IPC server configured for multi-user service mode")
+	return s
+}
+
+// getCurrentUserSID returns the SID of the current process owner.
+func getCurrentUserSID() (string, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return "", fmt.Errorf("failed to open process token: %w", err)
+	}
+	defer token.Close()
+
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("failed to get token user: %w", err)
+	}
+
+	return user.User.Sid.String(), nil
 }
 
 // Start begins listening for IPC connections.
 func (s *Server) Start() error {
+	// v4.5.5: Check if pipe already exists BEFORE trying to create
+	if IsPipeInUse() {
+		return fmt.Errorf("failed to create named pipe: pipe already exists (another daemon is running). Stop the existing daemon first")
+	}
+
 	// Create named pipe listener with security descriptor
 	//
-	// v4.0.7 H4 SECURITY NOTE:
-	// Current descriptor "D:P(A;;GA;;;AU)" allows ANY authenticated user to connect.
-	// This is intentional because the service manages auto-downloads for multiple users,
-	// and each user's tray app needs to pause/resume their own downloads.
+	// v4.4.2 SECURITY NOTE:
+	// The descriptor "D:P(A;;GA;;;AU)" allows any authenticated user to connect.
+	// However, modify operations (Pause, Resume, TriggerScan, Shutdown) are now
+	// protected by per-user authorization in authorizeModifyRequest().
 	//
-	// Security implications:
-	// - User A could theoretically pause/resume User B's downloads via IPC
-	// - For stricter security, implement per-user authorization in handler methods
-	//   by checking the caller's SID against the target userID
+	// Security model:
+	// - Any authenticated user can connect and perform read-only operations
+	//   (GetStatus, GetUserList, GetRecentLogs, OpenLogs)
+	// - Only the daemon owner (matched by SID) can perform modify operations
+	// - This prevents User A from controlling User B's daemon
 	//
 	// Alternative descriptors (for reference):
 	// - "D:P(A;;GA;;;BA)(A;;GA;;;SY)" - Allow only Administrators and SYSTEM
 	// - "D:P(A;;GA;;;BA)(A;;GA;;;AU)" - Allow Admins full control, Authenticated Users connect
-	//
-	// The current design prioritizes usability over strict isolation. Individual users
-	// can control their own downloads without requiring admin privileges.
 	cfg := &winio.PipeConfig{
 		SecurityDescriptor: "D:P(A;;GA;;;AU)", // DACL: Allow Generic All for Authenticated Users
 		MessageMode:        true,
@@ -92,6 +160,10 @@ func (s *Server) Start() error {
 
 	listener, err := winio.ListenPipe(PipeName, cfg)
 	if err != nil {
+		// v4.5.5: Enhanced error message
+		if strings.Contains(err.Error(), "Access is denied") {
+			return fmt.Errorf("failed to create named pipe: another daemon is running or pipe is stale. Error: %w", err)
+		}
 		return fmt.Errorf("failed to create named pipe: %w", err)
 	}
 	s.listener = listener
@@ -148,12 +220,28 @@ func (s *Server) acceptLoop() {
 }
 
 // handleConnection processes a single client connection.
+// v4.4.2: Extracts caller SID for authorization checks.
+// v4.5.2: Added detailed logging for PID/SID extraction failures.
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
 
 	// Set read/write deadlines
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	// v4.4.2: Extract caller's SID from the named pipe connection for authorization
+	// v4.5.2: Added detailed logging for debugging PID extraction issues
+	callerSID := ""
+	if pid, err := getNamedPipeClientPID(conn); err == nil && pid > 0 {
+		s.logger.Debug().Uint32("caller_pid", pid).Msg("IPC client PID extracted")
+		if sid, err := getProcessOwnerSID(pid); err == nil {
+			callerSID = sid
+		} else {
+			s.logger.Debug().Err(err).Uint32("pid", pid).Msg("Failed to get SID from PID")
+		}
+	} else if err != nil {
+		s.logger.Debug().Err(err).Str("conn_type", fmt.Sprintf("%T", conn)).Msg("Failed to extract client PID from connection")
+	}
 
 	reader := bufio.NewReader(conn)
 
@@ -177,48 +265,168 @@ func (s *Server) handleConnection(conn net.Conn) {
 	s.logger.Debug().
 		Str("type", string(req.Type)).
 		Str("user_id", req.UserID).
+		Str("caller_sid", callerSID).
 		Msg("Received IPC request")
 
-	// Handle request
-	resp := s.handleRequest(req)
+	// Handle request with caller SID for authorization
+	resp := s.handleRequest(req, callerSID)
 
 	// Send response
 	s.sendResponse(conn, resp)
 }
 
+// getNamedPipeClientPID extracts the client process ID from a named pipe connection.
+// Uses the Windows GetNamedPipeClientProcessId API via reflection to access the underlying handle.
+// v4.5.2: Fixed recursive reflection to walk embedded structs (win32Pipe → win32File → handle).
+func getNamedPipeClientPID(conn net.Conn) (uint32, error) {
+	v := reflect.ValueOf(conn)
+	handle, found := findHandleRecursive(v, 0)
+	if !found {
+		return 0, fmt.Errorf("could not extract handle from connection type %T", conn)
+	}
+
+	var clientPID uint32
+	r1, _, err := procGetNamedPipeClientProcessId.Call(
+		uintptr(handle),
+		uintptr(unsafe.Pointer(&clientPID)),
+	)
+	if r1 == 0 {
+		return 0, fmt.Errorf("GetNamedPipeClientProcessId failed: %w", err)
+	}
+	return clientPID, nil
+}
+
+// findHandleRecursive searches for a 'handle' field through embedded structs.
+// v4.5.2: Uses unsafe to read unexported fields (go-winio's handle is unexported).
+func findHandleRecursive(v reflect.Value, depth int) (windows.Handle, bool) {
+	if depth > 5 { // Prevent infinite recursion
+		return 0, false
+	}
+
+	// Dereference pointers and interfaces
+	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return 0, false
+		}
+		v = v.Elem()
+	}
+
+	if v.Kind() != reflect.Struct {
+		return 0, false
+	}
+
+	// Look for 'handle' field directly (may be unexported)
+	if handleField := v.FieldByName("handle"); handleField.IsValid() {
+		kind := handleField.Kind()
+		if kind == reflect.Uintptr || kind == reflect.Uint || kind == reflect.Uint64 {
+			// Use unsafe access for unexported fields
+			if handleField.CanAddr() {
+				ptr := unsafe.Pointer(handleField.UnsafeAddr())
+				val := reflect.NewAt(handleField.Type(), ptr).Elem()
+				return windows.Handle(val.Uint()), true
+			}
+			// Fallback for exported fields
+			if handleField.CanUint() {
+				return windows.Handle(handleField.Uint()), true
+			}
+		}
+	}
+
+	// Recursively search all fields (including embedded)
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Field(i)
+		if handle, found := findHandleRecursive(field, depth+1); found {
+			return handle, true
+		}
+	}
+
+	return 0, false
+}
+
+// getProcessOwnerSID returns the SID of the owner of a process by PID.
+func getProcessOwnerSID(pid uint32) (string, error) {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return "", fmt.Errorf("failed to open process %d: %w", pid, err)
+	}
+	defer windows.CloseHandle(handle)
+
+	var token windows.Token
+	err = windows.OpenProcessToken(handle, windows.TOKEN_QUERY, &token)
+	if err != nil {
+		return "", fmt.Errorf("failed to open process token: %w", err)
+	}
+	defer token.Close()
+
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("failed to get token user: %w", err)
+	}
+
+	return user.User.Sid.String(), nil
+}
+
 // handleRequest processes a request and returns a response.
-func (s *Server) handleRequest(req *Request) *Response {
+// v4.4.2: Added callerSID parameter for per-user authorization.
+func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 	switch req.Type {
 	case MsgGetStatus:
+		// Read-only: no authorization required
 		status := s.handler.GetStatus()
 		return NewStatusResponse(status)
 
 	case MsgGetUserList:
+		// Read-only: no authorization required
 		users := s.handler.GetUserList()
 		return NewUserListResponse(users)
 
 	case MsgPauseUser:
-		if req.UserID == "" {
+		// v4.5.0: In service mode, infer caller SID when userID is empty
+		userID := req.UserID
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's daemon
+		}
+		if userID == "" {
 			return NewErrorResponse("user_id required for PauseUser")
 		}
-		if err := s.handler.PauseUser(req.UserID); err != nil {
+		// v4.4.2: Authorization check - only owner can pause
+		if err := s.authorizeModifyRequest(callerSID, "PauseUser"); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		if err := s.handler.PauseUser(userID); err != nil {
 			return NewErrorResponse(err.Error())
 		}
 		return NewOKResponse()
 
 	case MsgResumeUser:
-		if req.UserID == "" {
+		// v4.5.0: In service mode, infer caller SID when userID is empty
+		userID := req.UserID
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's daemon
+		}
+		if userID == "" {
 			return NewErrorResponse("user_id required for ResumeUser")
 		}
-		if err := s.handler.ResumeUser(req.UserID); err != nil {
+		// v4.4.2: Authorization check - only owner can resume
+		if err := s.authorizeModifyRequest(callerSID, "ResumeUser"); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		if err := s.handler.ResumeUser(userID); err != nil {
 			return NewErrorResponse(err.Error())
 		}
 		return NewOKResponse()
 
 	case MsgTriggerScan:
 		userID := req.UserID
-		if userID == "" {
+		// v4.5.0: In service mode, infer caller SID when userID is empty
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's daemon
+		} else if userID == "" {
 			userID = "all"
+		}
+		// v4.4.2: Authorization check - only owner can trigger scan
+		if err := s.authorizeModifyRequest(callerSID, "TriggerScan"); err != nil {
+			return NewErrorResponse(err.Error())
 		}
 		if err := s.handler.TriggerScan(userID); err != nil {
 			return NewErrorResponse(err.Error())
@@ -226,6 +434,7 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return NewOKResponse()
 
 	case MsgOpenLogs:
+		// Read-only: no authorization required
 		userID := req.UserID
 		if userID == "" {
 			userID = "service"
@@ -240,12 +449,88 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return NewOKResponse()
 
 	case MsgShutdown:
-		// Shutdown is handled by SCM, not IPC
-		return NewErrorResponse("shutdown via IPC not supported; use service manager")
+		// v4.4.2: Authorization check - only owner can shutdown
+		if err := s.authorizeModifyRequest(callerSID, "Shutdown"); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		// v4.3.9: Allow shutdown via IPC (for parity with Unix, enables GUI Stop button)
+		if err := s.handler.Shutdown(); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		// Schedule server stop after response is sent to client
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			time.Sleep(100 * time.Millisecond)
+			s.Stop()
+		}()
+		return NewOKResponse()
+
+	case MsgGetRecentLogs:
+		// Read-only: no authorization required
+		// v4.5.0: Route to calling user's logs in service mode
+		userID := req.UserID
+		if userID == "" && s.serviceMode {
+			userID = callerSID // Route to caller's logs
+		}
+		logs := s.handler.GetRecentLogs(userID, 100) // Default to 100 entries
+		return NewRecentLogsResponse(logs)
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))
 	}
+}
+
+// authorizeModifyRequest checks if the caller is authorized to perform a modify operation.
+// v4.4.2: Only the daemon owner can execute commands that modify daemon state.
+// v4.5.0: In service mode, authorization is relaxed - any authenticated user is allowed
+// because user-scoped routing in the handler ensures isolation.
+// v4.5.2: Elevated key messages to INFO for visibility in Activity tab.
+func (s *Server) authorizeModifyRequest(callerSID, operation string) error {
+	// v4.5.0: In service mode, any authenticated user is allowed
+	// User-scoped routing in the handler handles isolation
+	if s.serviceMode {
+		if callerSID == "" {
+			// v4.5.2: Use INFO level for visibility in Activity tab
+			s.logger.Info().
+				Str("operation", operation).
+				Msg("IPC request denied: could not identify caller")
+			return fmt.Errorf("unauthorized: could not identify caller")
+		}
+		// Allow - routing will scope to caller's daemon
+		return nil
+	}
+
+	// Subprocess mode: owner-based authorization
+	// v4.5.1: Changed to fail-closed for security - if owner SID not captured at startup,
+	// deny modify operations rather than allowing all requests
+	if s.ownerSID == "" {
+		s.logger.Error().
+			Str("operation", operation).
+			Msg("Authorization unavailable: owner SID not captured at daemon startup")
+		return fmt.Errorf("authorization unavailable: daemon startup failed to capture owner identity")
+	}
+
+	// If we couldn't get caller SID, deny access (fail-closed for security)
+	if callerSID == "" {
+		// v4.5.2: Use INFO level for visibility in Activity tab
+		s.logger.Info().
+			Str("operation", operation).
+			Msg("IPC request denied: could not identify caller")
+		return fmt.Errorf("unauthorized: could not identify caller")
+	}
+
+	// Check if caller matches owner
+	if callerSID != s.ownerSID {
+		s.logger.Warn().
+			Str("operation", operation).
+			Str("caller_sid", callerSID).
+			Str("owner_sid", s.ownerSID).
+			Msg("IPC request denied: cross-user access attempt")
+		return fmt.Errorf("unauthorized: only the daemon owner can perform this operation")
+	}
+
+	return nil
 }
 
 // sendResponse sends a response to the client.

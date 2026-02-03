@@ -1,5 +1,747 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.7 - February 1, 2026
+
+### Auto-Download Settings Auto-Save Fix
+
+This release fixes a critical bug where settings other than the checkbox (lookback days, download folder, poll interval, conditional tag) were **not saved** when users modified them after enabling auto-download. The checkbox auto-save in v4.5.6 would capture default values before users could change them.
+
+#### Root Cause
+
+v4.5.6's checkbox-first workflow created a race condition:
+1. User checks "Enable Auto-Download" → v4.5.6 saves config with **default** lookback (7 days)
+2. User changes lookback to 364 days → only updates React state, **never saved**
+3. User assumes all settings are saved, but daemon.conf still has lookback=7
+4. Jobs older than 7 days are filtered out, never downloaded
+
+#### Fixes
+
+**Debounced Auto-Save for All Daemon Config Fields (NEW)**
+- All daemon config fields now auto-save after 1 second of no changes (debounce)
+- Lookback days, download folder, poll interval, and conditional tag all auto-save
+- Shows "Saving..." indicator when auto-save is in progress
+- Checkbox still saves immediately (cancels any pending debounce first)
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Settings Fields Editable Before Checkbox (CHANGED)**
+- Download folder, poll interval, lookback days, and tag inputs are now **always enabled**
+- Users can configure all settings BEFORE checking "Enable Auto-Download"
+- This allows settings-first workflow: configure → enable (saves all at once)
+- Prevents the checkbox-first race condition that caused default values to be saved
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**"Save All Settings" Button Shows Saved State (IMPROVED)**
+- Button turns green with checkmark when all daemon config changes are saved
+- Shows "Saving..." with spinner when auto-save is in progress
+- Shows "Save All Settings" only when there are unsaved changes
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Automatic Rescan on Lookback Increase (NEW)**
+- When lookback is significantly increased (more than doubled), triggers profile rescan
+- This ensures newly-eligible older jobs are picked up immediately
+- Only triggers when auto-download is enabled
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+#### Behavior Changes
+
+- **All settings auto-save**: No need to click "Save All Settings" for daemon config changes
+- **1 second debounce**: Rapid changes only trigger one save (after typing stops)
+- **Checkbox cancels pending saves**: Checking/unchecking immediately saves and cancels any pending debounce
+- **Settings-first workflow enabled**: Users can now configure all settings before enabling auto-download
+- **Lookback increase triggers rescan**: Extending lookback beyond 2x original value triggers immediate job scan
+
+#### Migration Notes
+
+- No configuration changes required
+- Existing daemon.conf files are unaffected
+- Users who previously had incorrect lookback values should verify their settings
+
+---
+
+## v4.5.6 - January 30, 2026
+
+### Windows Auto-Download UX Fixes
+
+This release fixes critical UX issues discovered during user testing of v4.5.5, where the "Enable Auto-Download" checkbox didn't save to disk immediately, the status display showed misleading information, and users had no clear guidance on how to complete setup.
+
+#### Root Cause Analysis
+
+The core issues were:
+1. **Checkbox didn't auto-save**: The "Enable Auto-Download" checkbox only updated React state, not the config file. Users had to click "Save All Settings" manually.
+2. **Status showed "Running" misleadingly**: The "My Downloads" section showed "Running" based on Windows Service status, even when the current user had no configuration.
+3. **No feedback on unsaved changes**: Nothing indicated that checkbox changes needed explicit saving.
+4. **Tray didn't guide users**: System tray showed daemon running but didn't indicate setup was needed.
+5. **"current" user routing returned empty**: IPC `TriggerScan("current")` returned `no daemon found` when user had no `daemon.conf`.
+
+#### Fixes
+
+**Auto-Save Checkbox with Rollback (NEW)**
+- "Enable Auto-Download" checkbox now saves configuration immediately when toggled
+- Uses optimistic UI update with automatic rollback if save fails
+- Triggers profile rescan via `TriggerScan("all")` so service picks up new users immediately
+- Shows clear status messages: "Auto-download enabled. Scanning for your jobs now..."
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Profile Rescan Binding (NEW)**
+- Added `TriggerProfileRescan()` to daemon bindings (cross-platform)
+- Reuses existing `TriggerScan("all")` IPC path - no new message type needed
+- Called after saving daemon.conf so service picks up new users within seconds
+- **Files**: `internal/wailsapp/daemon_bindings.go`, `internal/wailsapp/daemon_bindings_windows.go`
+
+**User-Specific Status Fields (NEW)**
+- Added `UserConfigured`, `UserState`, `UserRegistered` fields to `DaemonStatusDTO`
+- `GetDaemonStatus()` now checks if `daemon.conf` exists and is enabled
+- Returns user state: `not_configured`, `pending`, `running`, `paused`, `stopped`
+- Tracks whether service has registered the current user
+- **Files**: `internal/wailsapp/daemon_bindings.go`, `internal/wailsapp/daemon_bindings_windows.go`
+
+**Redesigned "My Downloads" UI (CHANGED)**
+- Separate display for Windows Service status (system-level) vs Your Auto-Download status (user-level)
+- Clear state indicators: "Setup Required", "Activating...", "Active", "Paused"
+- Contextual guidance messages based on state with step-by-step instructions
+- Service details (uptime, jobs downloaded, etc.) only shown when user is active
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Disabled Action Buttons When Not Configured (NEW)**
+- Scan/Pause/Resume buttons disabled until user is registered with service
+- Helper functions `canUserPerformActions()` and `getActionDisabledReason()`
+- Shows reason why buttons are disabled: "Enable auto-download first"
+- Prevents "no daemon found for identifier: current" errors
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+**Tray "Setup Required" Indicator (NEW)**
+- Tray tooltip shows "Your Auto-Download: Setup Required" when user hasn't configured
+- New menu item "Setup Required - Click to Configure" when setup needed
+- Pause/Resume/Scan controls disabled when user is not configured
+- Status line changes from "Running" to "Setup Required" when appropriate
+- Refreshes user configuration status every 5 seconds
+- **File**: `cmd/rescale-int-tray/tray_windows.go`
+
+#### Behavior Changes
+
+- **Checkbox saves immediately**: No need to click "Save All Settings" after toggling "Enable Auto-Download"
+- **Faster pickup by service**: Service rescans profiles immediately instead of waiting for 5-minute interval
+- **Clearer status display**: "My Downloads: Running" no longer appears when user has no config
+- **Tray guides setup**: First-time users see "Setup Required" in tray tooltip and menu
+
+---
+
+## v4.5.5 - January 30, 2026
+
+### Windows Auto-Download Daemon Fixes
+
+This release fixes critical bugs in Windows daemon startup and detection that caused "Access is denied" errors when the GUI/CLI/Tray tried to spawn subprocess daemons while the Windows Service was already running.
+
+#### Root Cause
+
+The core issue was that `service.IsInstalled()` requires admin privileges to query the Windows Service Control Manager (SCM). When run as a standard user, it returns `false` (access denied) even when the service IS installed and running. This caused all three entry points (GUI, CLI, Tray) to incorrectly spawn subprocess daemons, which then failed with "Access is denied" when trying to create the named pipe that the Windows Service already owned.
+
+#### Fixes
+
+**Unified Service Detection (NEW)**
+- Created `ShouldBlockSubprocess()` function that performs multi-layer detection:
+  1. First tries SCM query (may fail without admin)
+  2. Falls back to IPC check if SCM access denied (detects ServiceMode flag)
+  3. Falls back to PID file check for subprocess detection
+  4. Falls back to pipe existence check as last resort
+- Only blocks subprocess when service is RUNNING (not just installed) - allows subprocess mode when service is stopped
+- Logs warning when service is installed-but-stopped to inform user of potential conflicts
+- **Files**: `internal/service/detection_windows.go` (NEW), `internal/service/detection_other.go` (NEW stub for non-Windows)
+
+**Robust Named Pipe Detection (NEW)**
+- Created `IsPipeInUse()` function with proper Windows error code handling
+- Uses `errors.As()` to unwrap go-winio's wrapped errors
+- Returns `false` only for `ERROR_FILE_NOT_FOUND` (pipe doesn't exist)
+- Returns `true` for `ERROR_PIPE_BUSY`, `ERROR_ACCESS_DENIED`, or any other error (conservative approach)
+- **File**: `internal/ipc/pipe_windows.go` (NEW)
+
+**Updated All Entry Points**
+- GUI `StartDaemon()` now uses `ShouldBlockSubprocess()` instead of raw `IsInstalled()`
+- CLI `daemon run` now uses `ShouldBlockSubprocess()` with clear error messages
+- Tray `startService()` and `refreshStatus()` now use unified detection
+- **Files**: `internal/wailsapp/daemon_bindings_windows.go`, `internal/cli/daemon.go`, `cmd/rescale-int-tray/tray_windows.go`
+
+**Per-User Status Display**
+- `GetDaemonStatus()` now returns CURRENT user's status by matching SID/username
+- Previously returned first user's status regardless of who was logged in
+- Added `getCurrentUserSID()` helper using Windows token API
+- **File**: `internal/wailsapp/daemon_bindings_windows.go`
+
+**IPC Routing for Current User**
+- `TriggerDaemonScan()`, `PauseDaemon()`, `ResumeDaemon()` now use "current" user ID
+- Previously used empty string which triggered operations for ALL users
+- Server infers caller's SID from pipe connection when "current" is specified
+- **File**: `internal/wailsapp/daemon_bindings_windows.go`
+
+**Scan Timeout**
+- Added 10-minute timeout to poll() to prevent indefinite hangs
+- Logs timeout-specific error when scan exceeds limit
+- **File**: `internal/daemon/daemon.go`
+
+**Pre-Check Pipe Existence**
+- IPC server now checks if pipe exists BEFORE trying to create it
+- Provides clear error message: "pipe already exists (another daemon is running)"
+- **File**: `internal/ipc/server.go`
+
+#### Behavior Change
+
+**Subprocess Allowed When Service Stopped**: Previously, subprocess spawn was blocked whenever the Windows Service was installed (even if stopped). Now it's only blocked when the service is RUNNING. A warning is logged when service is installed-but-stopped to inform users that the service may start later and cause conflicts.
+
+---
+
+## v4.5.4 - January 30, 2026
+
+### Proxy Resilience for Large File Transfers
+
+This release fixes mid-transfer failures when downloading large files through corporate proxies (particularly with Azure storage). The failures were caused by proxy connections closing during long-running data streams, combined with gaps in retry coverage.
+
+#### Improvements
+
+**Extended Retry Coverage to Body Reads**
+- Previously, only HTTP requests were retried; if the response body read (io.ReadAll) failed, no retry occurred
+- Now the full request+read+close cycle is wrapped in a single retry at the provider level
+- Added `DownloadRangeOnce` (Azure) and `GetObjectRangeOnce` (S3) methods that skip internal retry, preventing double-retry when used within provider-level retry
+- **Files**: `azure/client.go`, `s3/client.go`, `azure/download.go`, `s3/download.go`, `azure/streaming_concurrent.go`, `s3/streaming_concurrent.go`
+
+**Per-Attempt Timeouts**
+- Each retry attempt now uses `context.WithTimeout` with `PartOperationTimeout` (10 minutes)
+- Prevents stalled proxy connections from hanging indefinitely
+
+**Improved Error Classification**
+- Added typed error checks: `context.Canceled` (fatal), `context.DeadlineExceeded` (retryable), `net.Error` timeout (retryable)
+- Added 407 proxy authentication errors as fatal (prevents infinite retry on auth failures)
+- Added network error patterns: "use of closed network connection", "server closed idle connection", "proxyconnect tcp", "stream error", "http2: server sent goaway"
+- **File**: `internal/http/retry.go`
+
+**NTLM Client Timeout Fix**
+- Cleared the 300-second timeout on NTLM clients that was causing transfers to abort at 5 minutes
+- Per-operation timeouts via context are the correct pattern
+- **File**: `internal/http/client.go`
+
+**HTTP/2 Disabled for Proxy Mode**
+- HTTP/2 stream errors are common through corporate proxies
+- HTTP/2 is now disabled when proxy mode is active (explicit proxy config or env vars)
+- Power users can override with `FORCE_HTTP2=true` environment variable
+- **File**: `internal/http/client.go`
+
+**Progress Tracking on Retry**
+- Streaming downloads with progress callbacks now correctly handle retry by rolling back progress on failure
+- Uses negative progress delta to maintain accurate tracking while preserving smooth streaming updates
+
+---
+
+## v4.5.1 - January 28, 2026
+
+### Security Hardening & FIPS Compliance Improvements
+
+This release implements security hardening based on comprehensive security audit findings, with particular focus on log directory permissions, IPC authorization, and NTLM/FIPS compliance for FedRAMP environments.
+
+#### Security Improvements
+
+**Log Directory Permissions Hardened**
+
+Log directories are now created with 0700 permissions (owner-only access) instead of 0755:
+- Prevents other users on multi-user systems from reading log files
+- Applied across all 10 locations that create log directories
+- **Files**: `internal/config/paths.go`, `internal/wailsapp/filelogger_*.go`, `internal/daemon/startup_log_windows.go`, `cmd/rescale-int-tray/tray_windows.go`, `internal/wailsapp/daemon_bindings*.go`, `internal/service/ipc_handler.go`
+
+**Windows IPC Authorization Changed to Fail-Closed**
+
+The Windows daemon IPC authorization now fails closed if owner SID cannot be captured:
+- Previously: If SID capture failed at startup, all modify operations were allowed (fail-open)
+- Now: If SID capture fails, modify operations are denied with clear error message
+- Prevents potential authorization bypass on multi-user Windows systems
+- **File**: `internal/ipc/server.go`
+
+**API Key Fragment Removed from Debug Logs**
+
+Debug logs no longer include partial API key information:
+- Previously logged "Testing API key XXXXXXXX..." (8 characters)
+- Now logs "Testing API connection..." with no key information
+- While 8 characters are not cryptographically useful, removing them follows security best practices
+- **File**: `internal/wailsapp/config_bindings.go`
+
+#### NTLM/FIPS Compliance Safeguards
+
+**Auto-Disable NTLM for FedRAMP Platforms**
+
+NTLM proxy mode uses MD4/MD5 algorithms which are not FIPS 140-3 approved. New safeguards prevent using NTLM with FedRAMP platforms:
+
+- **Backend**: `IsFRMPlatform()` helper detects FedRAMP URLs (`rescale-gov.com`)
+- **Backend**: `ValidateNTLMForFIPS()` returns warning when NTLM + FRM detected
+- **Frontend**: NTLM option disabled and marked "(unavailable for FRM)" when FRM platform selected
+- **Frontend**: Auto-switches from NTLM to `basic` when user selects FRM platform with NTLM configured
+- **Startup**: Warning logged if NTLM proxy is configured in FIPS mode
+- **Files**: `internal/config/csv_config.go`, `main.go`, `frontend/src/components/tabs/SetupTab.tsx`
+
+#### New Documentation
+
+**SECURITY.md Added**
+
+Comprehensive security documentation covering:
+- FIPS 140-3 compliance requirements and build instructions
+- Proxy authentication modes and FIPS compatibility
+- Log security best practices
+- API key storage recommendations
+- Windows IPC security model
+- Encryption details
+
+---
+
+## v4.4.3 - January 25, 2026
+
+### Daemon Startup UX + Service Mode Fixes
+
+This release comprehensively fixes daemon startup reliability issues that have been affecting Windows service mode, tray app, and GUI daemon control.
+
+#### P0 Critical Fixes
+
+**Fix 1: Windows Service Entrypoint NOT Wired**
+
+The Windows Service was configured to run `daemon run`, but the command never detected service context:
+- **Problem**: SCM started `daemon run` but it never called `IsWindowsService()` or `RunAsMultiUserService()`, causing Error 1053
+- **Solution**: Added service context detection at start of `daemon run` that delegates to `RunAsMultiUserService()` when running under SCM
+- **File**: `internal/cli/daemon.go`
+
+**Fix 2: Windows Per-User Config Path Mismatch**
+
+Multi-user service was looking for config files in the wrong location:
+- **Problem**: `multiuser_windows.go` used `.config/rescale/daemon.conf` but config is actually at `AppData\Roaming\Rescale\Interlink\daemon.conf`
+- **Solution**: Updated 3 locations to use `config.DaemonConfigPathForUser()` and new `config.StateFilePathForUser()`
+- **Files**: `internal/service/multiuser_windows.go`, `internal/config/daemonconfig.go`
+
+**Fix 3: Windows Stale PID Blocks Daemon Startup**
+
+Stale PID files prevented daemon startup:
+- **Problem**: `IsDaemonRunning()` didn't validate if PID was alive; `os.FindProcess` always succeeds on Windows
+- **Solution**: Use `windows.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` to validate PID; clean up stale PID file if process doesn't exist
+- **File**: `internal/daemon/daemonize_windows.go`
+
+#### P1 UX Improvements
+
+**Fix 4: Tray Immediate Error Feedback**
+
+Errors weren't visible immediately:
+- **Problem**: Errors stored in `lastError` but no immediate UI update; user only saw error on next 5-second refresh
+- **Solution**: Call `updateUI()` immediately after setting error while holding lock; set `serviceRunning = false` to ensure UI reflects failed state
+- **File**: `cmd/rescale-int-tray/tray_windows.go` (5 error paths updated)
+
+**Fix 5: GUI Inline Guidance**
+
+Users didn't understand why Start Service button was disabled:
+- **Problem**: Tooltip existed but no visible inline message when auto-download was disabled
+- **Solution**: Added visible amber message "Enable 'Auto-Download' above to start the service" and opacity styling on disabled button
+- **File**: `frontend/src/components/tabs/SetupTab.tsx`
+
+#### P2 Polish
+
+**Fix 6: Unified Path Resolution**
+
+Path resolution was inconsistent across entrypoints:
+- **Problem**: CLI had robust `resolveAbsolutePath()` with ancestor fallback; GUI/Tray used naive `filepath.EvalSymlinks()`
+- **Solution**: Created `internal/pathutil/resolve.go` with shared logic used by CLI, GUI, and Tray
+- **Files**: New `internal/pathutil/resolve.go`, updated `internal/cli/daemon.go`, `internal/wailsapp/daemon_bindings_windows.go`, `cmd/rescale-int-tray/tray_windows.go`
+
+**Fix 7: Relaxed Tray Parent Preflight**
+
+Tray blocked legitimate new paths:
+- **Problem**: Strict "parent exists" check blocked paths where user wanted to create new directories
+- **Solution**: Replaced with `os.MkdirAll()` which creates full path - daemon already does this, now tray matches
+- **File**: `cmd/rescale-int-tray/tray_windows.go`
+
+**Fix 8: macOS/Linux Auto-Start Docs**
+
+Auto-start examples had incorrect flags:
+- **Problem**: Examples used `--background` which forks and exits, conflicting with launchd/systemd expectations
+- **Solution**: Removed `--background` from launchd plist and systemd service file; added notes explaining why
+- **File**: `README.md`
+
+---
+
+## v4.4.2 - January 17-19, 2026
+
+### Security Hardening (January 19, 2026)
+
+This release includes critical security hardening based on comprehensive security audits.
+
+#### Security Fix 1: State File Permissions (Critical)
+
+**Problem**: Resume state files were created with 0644 permissions, allowing any user on the system to read sensitive data including:
+- AES-256 encryption keys
+- Initialization vectors (IVs)
+- Master keys for streaming encryption
+- File metadata and transfer state
+
+**Solution**: All state files are now created with 0600 permissions (owner-readable only):
+- Upload resume state files (`*.upload.resume`)
+- Upload lock files (`*.upload.lock`)
+- Download resume state files (`*.download.resume`)
+- Daemon state files (`daemon-state.json`)
+
+**Files Modified**:
+- `internal/cloud/state/upload.go` (lines 75, 226)
+- `internal/cloud/state/download.go` (line 60)
+- `internal/daemon/state.go` (line 97)
+
+#### Security Fix 2: Windows IPC Authorization (High)
+
+**Problem**: The Windows named pipe IPC allowed any authenticated user to control another user's daemon. User A could shut down User B's daemon, pause downloads, or trigger scans.
+
+**Solution**: Added per-user SID verification:
+- Daemon captures owner's SID at startup
+- Each IPC connection extracts caller's SID via `GetNamedPipeClientProcessId`
+- Modify operations (Pause, Resume, TriggerScan, Shutdown) require SID match
+- Read-only operations (GetStatus, GetUserList, GetRecentLogs) remain open
+
+**Files Modified**:
+- `internal/ipc/server.go` - Added SID capture and verification
+
+#### New Tests
+
+Added comprehensive tests for security fixes:
+- `internal/cloud/state/state_test.go` - File permission tests for upload/download state
+- `internal/daemon/state_test.go` - File permission test for daemon state
+
+### Checksum Verification Race Condition - Final Fix (January 17, 2026)
+
+This release eliminates the remaining transient checksum verification failures by removing the "double verification" race condition.
+
+#### Problem
+
+Despite v4.4.1 adding checksum-during-write for CBC streaming, sporadic failures (1 in 265) still occurred:
+- Error: `checksum mismatch... (after 3 attempts)`
+- Manual retry always succeeds
+
+#### Root Cause: Double Verification
+
+The issue was "double verification":
+1. CBC streaming computes hash during write → PASS ✓
+2. Post-download `verifyChecksum()` re-reads file from disk → may get stale cache → FAIL ✗
+
+Even with 3 retries (100ms delay each), filesystem cache may not be coherent.
+
+#### Solution
+
+Return computed hash from `Download()` instead of re-reading file:
+
+1. **CBC streaming (v2)**: Already computed hash during write - now returns it
+2. **HKDF streaming (v1)**: Reads file after all parts written (same file handle) to compute hash
+3. **Legacy (v0)**: New `DecryptFileWithHash()` computes hash during decryption
+
+The caller uses the returned hash for verification - **no file re-read needed**.
+
+#### Files Modified
+
+- `internal/cloud/transfer/downloader.go` - Return computed hash from Download()
+- `internal/crypto/encryption.go` - Add DecryptFileWithHash() for legacy format
+- `internal/cloud/download/download.go` - Use returned hash, skip re-verification
+- Version updates in all relevant files
+
+#### Testing
+
+- Download 300+ files concurrently
+- Verify ZERO checksum failures
+
+---
+
+## v4.4.1 - January 16, 2026
+
+### Checksum Verification Improvements
+
+This release added checksum-during-write for CBC streaming downloads and retry logic.
+
+#### Changes
+
+1. **Checksum-during-write** (CBC streaming): Calculate SHA-512 hash as bytes are written, eliminating post-download race condition
+2. **Retry safety net**: Post-download verification retries up to 3 times with 100ms delay
+
+#### Note
+
+v4.4.2 supersedes this with a complete fix that eliminates the race condition entirely.
+
+---
+
+## v4.4.0 - January 16, 2026
+
+### Windows Daemon Fixes & Download Reliability
+
+This release combines Windows daemon fixes with critical download reliability improvements.
+
+#### Fix A: Checksum Race Condition (9 files)
+
+**Problem**: ~1 in 50-100 downloads failed checksum with empty file hash. Failed more at START of batch transfers.
+
+**Root Cause**: `defer file.Close()` executes AFTER the function returns, but `verifyChecksum()` is called IMMEDIATELY after. On Windows, deferred Close() was still pending when verification tried to read the file.
+
+**Fix**: Removed `defer file.Close()` and added explicit `Close()` AFTER `Sync()` but BEFORE returning.
+
+**Files Modified**: 9 locations across downloader.go, s3/download.go, azure/download.go, download.go
+
+#### Fix B: Real Windows IPCHandler Implementation
+
+**Problem**: Windows daemon subprocess used a stub IPCHandler that returned nil for all methods:
+- Activity tab showed no logs
+- Pause/Resume didn't work
+- TriggerScan didn't work
+
+**Fix**: Fully implemented `internal/daemon/ipc_handler_windows.go`:
+- SetLogBuffer/GetRecentLogs actually work
+- GetStatus returns real data (uptime, active downloads)
+- PauseUser/ResumeUser track state properly
+- TriggerScan calls daemon.TriggerPoll()
+- Shutdown calls shutdownFunc
+
+#### Fix C: Retry Reuses Same Entry
+
+**Problem**: Clicking retry created a NEW transfer entry instead of updating the failed one.
+
+**Fix**: Modified `internal/transfer/queue.go:Retry()` to reset the existing task.
+
+#### v4.3.9 Changes (Included)
+
+1. CREATE_NO_WINDOW flag - Hides console window on subprocess launch
+2. managedBy logic - Shows Stop/Pause/Resume buttons for subprocess mode
+3. IPC Shutdown handler - Enables Stop button on Windows
+4. GetRecentLogs handler - Fixes "unknown message type" error
+5. False "Running" state fix - Trust IPC as source of truth
+6. Frontend button logic - Only hide buttons for "Windows Service"
+
+---
+
+## v4.3.8 - January 16, 2026
+
+### Windows Daemon Subprocess Launch Fix
+
+This release fixes a critical bug where the Windows daemon subprocess never started when clicking "Start Service" in the GUI or tray.
+
+#### Problem
+
+Despite v4.3.7 enabling IPC on Windows, clicking "Start Service" did nothing:
+- No daemon process was spawned
+- No error messages were displayed
+- Status remained "Not Running" with no explanation
+
+Testing confirmed the daemon works perfectly when started manually from command line, but subprocess launch from GUI/tray was silently failing.
+
+#### Root Causes
+
+1. **Missing Windows process flags**: `exec.Command().Start()` was not using `SysProcAttr` with `CREATE_NEW_PROCESS_GROUP` for proper subprocess detachment
+2. **Errors never displayed**: Tray stored errors in `lastError` but `updateUI()` never showed them to the user
+3. **No diagnostic logging**: No way to trace where subprocess launch was failing
+
+#### Fixes
+
+1. **Added `SysProcAttr` configuration** for proper Windows subprocess detachment:
+   ```go
+   cmd.SysProcAttr = &syscall.SysProcAttr{
+       CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+   }
+   ```
+
+2. **Made errors visible**: Tray's `updateUI()` now displays `lastError` when service is not running
+
+3. **Added startup logging infrastructure**:
+   - New `internal/daemon/startup_log_windows.go` - writes to `%LOCALAPPDATA%\Rescale\Interlink\logs\daemon-startup.log`
+   - Logs each step of subprocess launch for diagnosis
+   - Captures subprocess stderr to `daemon-stderr.log`
+   - Log is cleared on successful daemon startup
+
+4. **Early daemon logging**: The daemon CLI now writes startup checkpoints immediately, before IPC initialization
+
+#### Files Modified
+
+- `internal/daemon/startup_log_windows.go` - NEW: Startup log infrastructure
+- `internal/daemon/startup_log.go` - NEW: Non-Windows stub
+- `cmd/rescale-int-tray/tray_windows.go` - Display errors, add SysProcAttr, startup logging
+- `internal/wailsapp/daemon_bindings_windows.go` - Add SysProcAttr, startup logging, stderr capture
+- `internal/cli/daemon.go` - Early startup checkpoints
+- Version updates in all relevant files
+
+---
+
+## v4.3.7 - January 14, 2026
+
+### Critical Bug Fixes
+
+This release fixes two critical issues discovered during v4.3.6 testing.
+
+#### Fix #1: Sporadic Checksum Verification Failures (CRITICAL)
+
+**Problem**: Random checksum mismatches during downloads (Windows & Linux), non-reproducible on retry.
+
+**Root Cause**: Race condition - download functions used `defer outFile.Close()` without explicit `Sync()`. Checksum verification opened the file immediately after download returned, but OS buffers hadn't flushed to disk. Files were sometimes read as empty (SHA-512 of empty string in error logs).
+
+**Fix**: Added `outFile.Sync()` before returning from all download functions:
+- `internal/cloud/transfer/downloader.go` - CBC streaming and concurrent streaming downloads
+- `internal/cloud/providers/s3/download.go` - All S3 download methods
+- `internal/cloud/providers/azure/download.go` - All Azure download methods
+
+#### Fix #2: Windows Daemon Communication Broken (CRITICAL)
+
+**Problem**:
+- GUI showed "Access is denied" when trying to start daemon
+- Tray "Start Service" appeared to do nothing
+- Neither GUI nor tray could communicate with daemon
+
+**Root Causes**:
+1. IPC was **explicitly disabled on Windows** in `daemon.go:298` (the daemon couldn't communicate with GUI/tray even when running)
+2. GUI tried to use Windows Service Control Manager (SCM) which requires Administrator privileges
+3. Tray stored errors but never displayed them to user
+
+**Fix**:
+- Enabled IPC on Windows by removing the `runtime.GOOS != "windows"` exclusion in `internal/cli/daemon.go`
+- Refactored `internal/wailsapp/daemon_bindings_windows.go`:
+  - `StartDaemon()` now launches daemon as subprocess (no admin required)
+  - `StopDaemon()` sends shutdown via IPC (no admin required)
+  - `GetDaemonStatus()` checks IPC first, with optional SCM query for display
+
+**Result**: Daemon now works on Windows without Administrator privileges by using subprocess mode + named pipe IPC.
+
+#### Files Modified
+
+- `internal/cloud/transfer/downloader.go` - Add Sync() calls
+- `internal/cloud/providers/s3/download.go` - Add Sync() calls
+- `internal/cloud/providers/azure/download.go` - Add Sync() calls
+- `internal/cli/daemon.go` - Enable IPC on Windows
+- `internal/wailsapp/daemon_bindings_windows.go` - Use subprocess + IPC instead of SCM
+- Version updates in main.go, internal/version/version.go, Makefile
+
+---
+
+## v4.3.6 - January 14, 2026
+
+### Daemon Logging Improvements
+
+This release significantly improves the auto-download daemon's logging behavior, reducing log noise and API call overhead.
+
+#### Problem Solved
+
+- Jobs with "Auto Download = not set" were flooding logs with ~300 useless SKIP entries per scan
+- Scans were taking 10+ minutes due to excessive API calls (2+ per job at 1.6 req/sec rate limit)
+
+#### New Behavior
+
+- **Silent filtering**: Jobs with "Auto Download = not set" or "disabled" are now filtered silently - no log entry
+- **Check field FIRST**: The "Auto Download" custom field is checked BEFORE the downloaded tag, saving API calls for ~95% of jobs
+- **Improved summary**: Scan completion now shows `filtered` count separately from `skipped` count:
+  ```
+  === SCAN COMPLETE === Scanned 304, filtered 298, downloaded 1, skipped 2 (took 3m35s)
+  ```
+- **Cleaner logs**: Only real candidates (Enabled/Conditional jobs) appear in logs:
+  - `DOWNLOAD: Job Name [id] - Auto Download is Enabled`
+  - `SKIP: Job Name [id] - already has 'autoDownloaded:true' tag`
+  - `SKIP: Job Name [id] - Auto Download is Conditional but missing tag 'xyz'`
+
+#### API Call Optimization
+
+- Before: 304 jobs × 2 API calls = 608 calls (~6.3 minutes at 1.6 req/sec)
+- After: 304 jobs × 1 API call + ~10 additional tag checks = ~314 calls (~3.3 minutes)
+- **~50% reduction in API calls**
+
+#### Technical Changes
+
+- Added `CheckEligibilityResult` struct with `ShouldLog` flag
+- Refactored `CheckEligibility()` in `internal/daemon/monitor.go`
+- Updated `poll()` in `internal/daemon/daemon.go` to track `filteredCount`
+
+#### Files Modified
+
+- `internal/daemon/monitor.go` - New CheckEligibilityResult, check field first
+- `internal/daemon/daemon.go` - Silent filtering, filteredCount tracking
+- `internal/daemon/monitor_test.go` - Updated tests for new return type
+- Version updates in main.go, internal/version/version.go
+
+---
+
+## v4.2.1 - January 9, 2026
+
+### Enhanced Eligibility Configuration
+
+This release adds configurable eligibility settings for auto-download and workspace validation.
+
+#### New Features
+
+- **Configurable eligibility settings**: New config keys in `daemon.conf`
+  - `eligibility.auto_download_value` - Required value for "Auto Download" field (default: "Enable")
+  - `eligibility.downloaded_tag` - Tag added after download (default: "autoDownloaded:true")
+  - The field NAME ("Auto Download") remains hardcoded and must be created in workspace
+
+- **Workspace validation**: New `daemon config validate` command
+  - Checks if required "Auto Download" custom field exists in workspace
+  - Reports field type, section, and available values
+  - Provides setup instructions if field is missing
+
+- **API validation method**: New `ValidateAutoDownloadSetup()` API method
+  - Used by GUI and CLI to validate workspace configuration
+  - Returns detailed information about custom field setup
+  - Also available as GUI binding `ValidateAutoDownloadSetup()`
+
+#### Files Modified
+
+- `internal/config/daemonconfig.go` - Add AutoDownloadValue, DownloadedTag to EligibilityConfig
+- `internal/daemon/monitor.go` - Uses config values (structure unchanged)
+- `internal/service/multi_daemon.go` - Pass new config values through
+- `internal/api/client.go` - Add GetWorkspaceCustomFields(), ValidateAutoDownloadSetup()
+- `internal/models/file.go` - Add CompanyInfo to UserProfile
+- `internal/cli/daemon.go` - Add validate command, update config set/show
+- `internal/wailsapp/daemon_bindings.go` - Update DTO, add ValidateAutoDownloadSetup()
+- `internal/wailsapp/daemon_bindings_windows.go` - Same updates
+- Documentation updates: CLI_GUIDE.md, etc.
+
+---
+
+## v4.2.0 - January 8, 2026
+
+### Unified Daemon Configuration
+
+This release introduces a unified configuration system for the auto-download daemon, replacing scattered settings with a single `daemon.conf` file.
+
+#### New Features
+
+- **Unified `daemon.conf` file**: Single INI config file for all daemon settings
+  - Location: `~/.config/rescale/daemon.conf` (Unix) or `%APPDATA%\Rescale\Interlink\daemon.conf` (Windows)
+  - Replaces scattered apiconfig settings
+  - Organized sections: `[daemon]`, `[filters]`, `[eligibility]`, `[notifications]`
+
+- **CLI config commands**: New `daemon config` subcommand group
+  - `daemon config show` - Display current configuration
+  - `daemon config path` - Show config file location
+  - `daemon config edit` - Open in default editor ($EDITOR)
+  - `daemon config set <key> <value>` - Set individual values
+  - `daemon config init` - Interactive setup wizard
+
+- **Config file + CLI flags**: Flexible configuration model
+  - Daemon reads from config file by default
+  - CLI flags override config file values
+  - Allows testing without modifying config
+
+- **Windows tray improvements**
+  - "Configure..." menu opens GUI to daemon settings
+  - "Start Service" reads from daemon.conf
+
+#### v4.1.1 Fixes (included)
+
+- **Tray icon fix**: Changed from PNG to ICO format for proper display on Windows
+- **Start Service button**: Tray now has "Start Service" option when daemon is stopped
+- **Version fix**: Tray now uses shared version package (no more hardcoded version)
+- **Auto-start docs**: Added macOS launchd and Linux systemd configuration examples
+
+### Files Modified
+
+- `internal/config/daemonconfig.go` - NEW: DaemonConfig struct and I/O
+- `internal/config/daemonconfig_test.go` - NEW: Unit tests
+- `internal/cli/daemon.go` - Load from daemon.conf, add config subcommands
+- `internal/wailsapp/daemon_bindings.go` - GetDaemonConfig, SaveDaemonConfig (Unix)
+- `internal/wailsapp/daemon_bindings_windows.go` - GetDaemonConfig, SaveDaemonConfig (Windows)
+- `cmd/rescale-int-tray/tray_windows.go` - Configure menu, startService uses daemon.conf
+- `internal/service/multi_daemon.go` - Use DaemonConfig instead of APIConfig
+- `internal/service/multiuser_windows.go` - ConfigPath uses daemon.conf
+- `internal/service/multiuser_unix.go` - ConfigPath uses daemon.conf
+- Version updates: `main.go`, `internal/version/version.go`, `Makefile`, `wails.json`
+- Documentation: `README.md`, `CLI_GUIDE.md`, `RELEASE_NOTES.md`, `FEATURE_SUMMARY.md`
+
+---
+
 ## v4.0.8 - January 6, 2026
 
 ### Windows Service/Tray Improvements

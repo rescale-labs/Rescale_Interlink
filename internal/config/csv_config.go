@@ -420,6 +420,22 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// IsFRMPlatform returns true if the URL is a FedRAMP-regulated platform.
+// v4.5.1: FRM platforms require strict FIPS 140-3 compliance.
+// NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms.
+func IsFRMPlatform(url string) bool {
+	return strings.Contains(url, "rescale-gov.com")
+}
+
+// ValidateNTLMForFIPS checks if NTLM proxy mode is appropriate for the current configuration.
+// v4.5.1: Returns a warning message if NTLM is used with a FRM platform.
+func (c *Config) ValidateNTLMForFIPS() string {
+	if c.ProxyMode == "ntlm" && IsFRMPlatform(c.APIBaseURL) {
+		return "NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and is not compliant with FedRAMP requirements. Consider using 'basic' proxy mode over TLS."
+	}
+	return ""
+}
+
 // ConfigDir is the standard configuration directory name
 const ConfigDir = "rescale"
 

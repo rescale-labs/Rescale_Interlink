@@ -560,6 +560,89 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 	return allJobs, nil
 }
 
+// ListJobsWithCutoff lists jobs ordered by dateInserted (newest first) and stops
+// when hitting jobs older than the cutoff. This is more efficient for daemon scans
+// that only care about recent jobs within a lookback window.
+// v4.3.4: Added for daemon scan optimization
+func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]models.JobResponse, error) {
+	var allJobs []models.JobResponse
+	// Order by dateInserted descending (newest first) for early termination
+	nextURL := "/api/v3/jobs/?ordering=-dateInserted"
+	pageCount := 0
+
+	log.Printf("Daemon scan: Fetching jobs (cutoff: %s)", cutoff.Format("2006-01-02"))
+
+	for nextURL != "" {
+		pageCount++
+		if pageCount > constants.MaxPaginationPages {
+			log.Printf("Warning: Pagination limit reached after %d pages (%d jobs fetched)", pageCount-1, len(allJobs))
+			break
+		}
+
+		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != nethttp.StatusOK {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("list jobs failed: status %d: %s", resp.StatusCode, body)
+		}
+
+		var result struct {
+			Count   int                  `json:"count"`
+			Next    *string              `json:"next"`
+			Results []models.JobResponse `json:"results"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode jobs response: %w", err)
+		}
+		resp.Body.Close()
+
+		// Check if we should stop early (all jobs on this page are older than cutoff)
+		// Safety: We only stop if ALL remaining jobs on this page are older than cutoff
+		// This ensures we don't miss any jobs that might be out of order
+		stopEarly := false
+		oldJobsOnPage := 0
+		for _, job := range result.Results {
+			// Parse job's dateInserted (CreatedAt maps to dateInserted)
+			if job.CreatedAt != "" {
+				if createdAt, err := time.Parse(time.RFC3339, job.CreatedAt); err == nil {
+					if createdAt.Before(cutoff) {
+						// This job is older than cutoff
+						oldJobsOnPage++
+						// Safety: Still add the job - let FindCompletedJobs do the filtering
+						// This ensures we don't accidentally skip a job
+					}
+				}
+			}
+			allJobs = append(allJobs, job)
+		}
+
+		// Only stop early if ALL jobs on this page are older than cutoff
+		// This is conservative - we'd rather fetch a few extra jobs than miss any
+		if oldJobsOnPage == len(result.Results) && len(result.Results) > 0 {
+			stopEarly = true
+			log.Printf("Daemon scan: Stopped at page %d - all jobs on page older than cutoff (%d jobs collected)", pageCount, len(allJobs))
+		}
+
+		if stopEarly {
+			break
+		}
+
+		if result.Next != nil && *result.Next != "" {
+			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+		} else {
+			nextURL = ""
+		}
+	}
+
+	return allJobs, nil
+}
+
 // GetCoreTypes retrieves available hardware core types from the Rescale API.
 // This is used for validation to ensure jobs use valid core types.
 // By default (includeInactive=false), only returns active core types.
@@ -1388,6 +1471,7 @@ type JobCustomField struct {
 
 // GetJobCustomFields retrieves all custom fields for a job.
 // Used by auto-download eligibility engine to check "Auto Download" field.
+// v4.3.2: Fixed to handle object format from API (not array).
 func (c *Client) GetJobCustomFields(ctx context.Context, jobID string) ([]JobCustomField, error) {
 	path := fmt.Sprintf("/api/v3/jobs/%s/custom-fields/", jobID)
 
@@ -1402,9 +1486,26 @@ func (c *Client) GetJobCustomFields(ctx context.Context, jobID string) ([]JobCus
 		return nil, fmt.Errorf("get job custom fields failed: status %d: %s", resp.StatusCode, body)
 	}
 
-	var fields []JobCustomField
-	if err := json.NewDecoder(resp.Body).Decode(&fields); err != nil {
+	// v4.3.2: API returns object format: {"fieldName": {"meta": {...}, "value": "..."}, ...}
+	// Each field has: meta (field definition), user (who set it), value (actual value)
+	type fieldData struct {
+		Meta struct {
+			Name string `json:"name"`
+		} `json:"meta"`
+		Value interface{} `json:"value"`
+	}
+	var fieldsMap map[string]fieldData
+	if err := json.NewDecoder(resp.Body).Decode(&fieldsMap); err != nil {
 		return nil, fmt.Errorf("failed to decode job custom fields response: %w", err)
+	}
+
+	// Convert map to slice
+	var fields []JobCustomField
+	for name, data := range fieldsMap {
+		fields = append(fields, JobCustomField{
+			Name:  name,
+			Value: data.Value,
+		})
 	}
 
 	return fields, nil
@@ -1420,6 +1521,10 @@ func (c *Client) GetJobCustomFieldValue(ctx context.Context, jobID, fieldName st
 
 	for _, f := range fields {
 		if f.Name == fieldName {
+			// v4.3.3: Handle nil/null values (field defined but not set)
+			if f.Value == nil {
+				return "", nil
+			}
 			// Convert value to string
 			switch v := f.Value.(type) {
 			case string:
@@ -1438,4 +1543,183 @@ func (c *Client) GetJobCustomFieldValue(ctx context.Context, jobID, fieldName st
 	}
 
 	return "", nil // Field not found
+}
+
+// WorkspaceCustomFieldsResponse represents the API response for workspace custom fields.
+// Endpoint: GET /api/v2/organizations/{company_code}/workspaces/{workspace_id}/custom-fields/
+// v4.2.1: Added for auto-download setup validation
+type WorkspaceCustomFieldsResponse struct {
+	// Fields is a map of jobType -> section -> list of fields
+	// Example: {"compute": {"Context": [{name: "Auto Download", ...}]}, "workstation": {}}
+	Fields    map[string]map[string][]WorkspaceCustomField `json:"fields"`
+	IsEnabled bool                                          `json:"isEnabled"`
+}
+
+// WorkspaceCustomField represents a custom field definition in a workspace.
+// v4.2.1: Used for validating auto-download setup
+type WorkspaceCustomField struct {
+	Name                 string   `json:"name"`
+	ValueType            string   `json:"valueType"`            // "text", "select", "number", "date", "file", "user"
+	EnumOptions          []string `json:"enumOptions"`          // For select fields
+	Placeholder          string   `json:"placeholder"`
+	HelpText             string   `json:"helpText"`
+	IsMultiple           bool     `json:"isMultiple"`
+	IsRequired           bool     `json:"isRequired"`
+	AllowOther           bool     `json:"allowOther"`
+	Section              string   `json:"section"`              // "Context", "Inputs", "Findings"
+	OriginatingWorkspace string   `json:"originatingWorkspace"`
+}
+
+// AutoDownloadValidation contains the results of validating auto-download setup.
+// v4.2.1: Used by GUI and CLI to check workspace configuration
+type AutoDownloadValidation struct {
+	CustomFieldsEnabled      bool     `json:"customFieldsEnabled"`      // Is custom field collection active?
+	HasAutoDownloadField     bool     `json:"hasAutoDownloadField"`     // Is "Auto Download" field defined?
+	AutoDownloadFieldType    string   `json:"autoDownloadFieldType"`    // "select", "text", etc.
+	AutoDownloadFieldSection string   `json:"autoDownloadFieldSection"` // Which section it's in
+	AvailableValues          []string `json:"availableValues"`          // If select field, what are the options?
+	HasAutoDownloadPathField bool     `json:"hasAutoDownloadPathField"` // Is "Auto Download Path" field defined? (optional)
+	Warnings                 []string `json:"warnings"`
+	Errors                   []string `json:"errors"`
+}
+
+// GetWorkspaceCustomFields retrieves the list of custom fields defined for jobs in the workspace.
+// This requires the user's company code and workspace ID, which are obtained from GetUserProfile().
+// Endpoint: GET /api/v2/organizations/{company_code}/workspaces/{workspace_id}/custom-fields/
+// v4.2.1: Added for auto-download setup validation
+func (c *Client) GetWorkspaceCustomFields(ctx context.Context) (*WorkspaceCustomFieldsResponse, error) {
+	// First, get user profile to extract company code and workspace ID
+	profile, err := c.GetUserProfile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user profile: %w", err)
+	}
+
+	if profile.Company.Code == "" {
+		return nil, fmt.Errorf("user profile does not contain company code")
+	}
+	if profile.Workspace.ID == "" {
+		return nil, fmt.Errorf("user profile does not contain workspace ID")
+	}
+
+	// Build the API path
+	path := fmt.Sprintf("/api/v2/organizations/%s/workspaces/%s/custom-fields/",
+		profile.Company.Code, profile.Workspace.ID)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("get workspace custom fields failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var result WorkspaceCustomFieldsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode workspace custom fields: %w", err)
+	}
+
+	return &result, nil
+}
+
+// ValidateAutoDownloadSetup checks if the workspace has the required custom fields for auto-download.
+// Returns validation results including whether the "Auto Download" field exists and its configuration.
+// v4.2.1: Added for GUI/CLI auto-download setup validation
+func (c *Client) ValidateAutoDownloadSetup(ctx context.Context) (*AutoDownloadValidation, error) {
+	result := &AutoDownloadValidation{
+		Warnings: []string{},
+		Errors:   []string{},
+	}
+
+	// Get workspace custom fields
+	fields, err := c.GetWorkspaceCustomFields(ctx)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to retrieve workspace custom fields: %v", err))
+		return result, nil // Return result with error, don't fail the call
+	}
+
+	result.CustomFieldsEnabled = fields.IsEnabled
+
+	if !fields.IsEnabled {
+		result.Warnings = append(result.Warnings, "Custom fields are not enabled for this workspace")
+		return result, nil
+	}
+
+	// Search for "Auto Download" field in all job types and sections
+	autoDownloadFieldName := "Auto Download"
+	autoDownloadPathFieldName := "Auto Download Path"
+
+	for jobType, sections := range fields.Fields {
+		for section, fieldList := range sections {
+			for _, field := range fieldList {
+				if field.Name == autoDownloadFieldName {
+					result.HasAutoDownloadField = true
+					result.AutoDownloadFieldType = field.ValueType
+					result.AutoDownloadFieldSection = section
+					result.AvailableValues = field.EnumOptions
+
+					// Log which job type has the field
+					if jobType != "compute" {
+						result.Warnings = append(result.Warnings,
+							fmt.Sprintf("'%s' field found in '%s' job type (expected 'compute')",
+								autoDownloadFieldName, jobType))
+					}
+				}
+
+				if field.Name == autoDownloadPathFieldName {
+					result.HasAutoDownloadPathField = true
+				}
+			}
+		}
+	}
+
+	// Build validation messages
+	if !result.HasAutoDownloadField {
+		result.Errors = append(result.Errors,
+			fmt.Sprintf("Required custom field '%s' not found in workspace. Please create it in Workspace Settings > Custom Fields.",
+				autoDownloadFieldName))
+	} else {
+		// v4.3.1: Enhanced validation - verify field type and required options
+		// Field type must be "select" (Option List)
+		if result.AutoDownloadFieldType != "select" {
+			result.Errors = append(result.Errors,
+				fmt.Sprintf("'%s' field must be type 'select' (Option List), but is '%s'",
+					autoDownloadFieldName, result.AutoDownloadFieldType))
+		} else {
+			// Verify required options exist
+			requiredOptions := []string{"Enabled", "Conditional", "Disabled"}
+			for _, required := range requiredOptions {
+				found := false
+				for _, actual := range result.AvailableValues {
+					if actual == required {
+						found = true
+						break
+					}
+				}
+				if !found {
+					result.Errors = append(result.Errors,
+						fmt.Sprintf("'%s' field missing required option '%s'", autoDownloadFieldName, required))
+				}
+			}
+
+			// Warn about extra/unexpected options
+			for _, actual := range result.AvailableValues {
+				isExpected := false
+				for _, required := range requiredOptions {
+					if actual == required {
+						isExpected = true
+						break
+					}
+				}
+				if !isExpected {
+					result.Warnings = append(result.Warnings,
+						fmt.Sprintf("'%s' field has unexpected option '%s'", autoDownloadFieldName, actual))
+				}
+			}
+		}
+	}
+
+	return result, nil
 }

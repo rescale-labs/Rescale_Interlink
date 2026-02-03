@@ -60,6 +60,13 @@ func (h *mockHandler) Shutdown() error {
 	return nil
 }
 
+// v4.3.2: GetRecentLogs returns mock log entries
+func (h *mockHandler) GetRecentLogs(count int) []LogEntryData {
+	return []LogEntryData{
+		{Timestamp: "2026-01-13T12:00:00Z", Level: "INFO", Stage: "test", Message: "Test log entry"},
+	}
+}
+
 func TestUnixIPCClientServer(t *testing.T) {
 	// Create temp socket path
 	tmpDir := t.TempDir()

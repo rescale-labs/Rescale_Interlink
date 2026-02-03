@@ -97,8 +97,8 @@ BINARY_SIZE_INVESTIGATION.md
 CHECKPOINT_SESSION.md
 # Session checkpoint files
 CHECKPOINT_*.md
-# Root binary (wrong location)
-rescale-int
+# Root binary (wrong location) - must have leading slash to not match cmd/rescale-int/
+/rescale-int
 CONTINUATION_PLAN*.md
 
 # Local Claude development files (never commit)
@@ -139,7 +139,7 @@ testdata/
 
 # Catch-all: Block any .md or .txt NOT in whitelist
 # (Whitelist: README.md, LICENSE, CLI_GUIDE.md, ARCHITECTURE.md,
-#  CONTRIBUTING.md, TESTING.md, RELEASE_NOTES.md, FEATURE_SUMMARY.md)
+#  CONTRIBUTING.md, TESTING.md, RELEASE_NOTES.md, FEATURE_SUMMARY.md, SECURITY.md)
 # All other .md/.txt files are internal and should stay local
 *.md
 !README.md
@@ -150,6 +150,7 @@ testdata/
 !TESTING.md
 !RELEASE_NOTES.md
 !FEATURE_SUMMARY.md
+!SECURITY.md
 !.github/**/*.md
 
 *.txt

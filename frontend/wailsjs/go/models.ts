@@ -107,42 +107,30 @@ export namespace wailsapp {
 	        this.fipsStatus = source["fipsStatus"];
 	    }
 	}
-	export class AutoDownloadConfigDTO {
-	    enabled: boolean;
-	    correctnessTag: string;
-	    defaultDownloadFolder: string;
-	    scanIntervalMinutes: number;
-	    lookbackDays: number;
+	export class AutoDownloadValidationDTO {
+	    customFieldsEnabled: boolean;
+	    hasAutoDownloadField: boolean;
+	    autoDownloadFieldType: string;
+	    autoDownloadFieldSection: string;
+	    availableValues: string[];
+	    hasAutoDownloadPathField: boolean;
+	    warnings: string[];
+	    errors: string[];
 	
 	    static createFrom(source: any = {}) {
-	        return new AutoDownloadConfigDTO(source);
+	        return new AutoDownloadValidationDTO(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.enabled = source["enabled"];
-	        this.correctnessTag = source["correctnessTag"];
-	        this.defaultDownloadFolder = source["defaultDownloadFolder"];
-	        this.scanIntervalMinutes = source["scanIntervalMinutes"];
-	        this.lookbackDays = source["lookbackDays"];
-	    }
-	}
-	export class AutoDownloadStatusDTO {
-	    configExists: boolean;
-	    enabled: boolean;
-	    isValid: boolean;
-	    validationMsg?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new AutoDownloadStatusDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.configExists = source["configExists"];
-	        this.enabled = source["enabled"];
-	        this.isValid = source["isValid"];
-	        this.validationMsg = source["validationMsg"];
+	        this.customFieldsEnabled = source["customFieldsEnabled"];
+	        this.hasAutoDownloadField = source["hasAutoDownloadField"];
+	        this.autoDownloadFieldType = source["autoDownloadFieldType"];
+	        this.autoDownloadFieldSection = source["autoDownloadFieldSection"];
+	        this.availableValues = source["availableValues"];
+	        this.hasAutoDownloadPathField = source["hasAutoDownloadPathField"];
+	        this.warnings = source["warnings"];
+	        this.errors = source["errors"];
 	    }
 	}
 	export class AutomationDTO {
@@ -323,6 +311,64 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	export class DaemonConfigDTO {
+	    enabled: boolean;
+	    downloadFolder: string;
+	    pollIntervalMinutes: number;
+	    useJobNameDir: boolean;
+	    maxConcurrent: number;
+	    lookbackDays: number;
+	    namePrefix: string;
+	    nameContains: string;
+	    exclude: string;
+	    autoDownloadTag: string;
+	    notificationsEnabled: boolean;
+	    showDownloadComplete: boolean;
+	    showDownloadFailed: boolean;
+	    configPath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonConfigDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.downloadFolder = source["downloadFolder"];
+	        this.pollIntervalMinutes = source["pollIntervalMinutes"];
+	        this.useJobNameDir = source["useJobNameDir"];
+	        this.maxConcurrent = source["maxConcurrent"];
+	        this.lookbackDays = source["lookbackDays"];
+	        this.namePrefix = source["namePrefix"];
+	        this.nameContains = source["nameContains"];
+	        this.exclude = source["exclude"];
+	        this.autoDownloadTag = source["autoDownloadTag"];
+	        this.notificationsEnabled = source["notificationsEnabled"];
+	        this.showDownloadComplete = source["showDownloadComplete"];
+	        this.showDownloadFailed = source["showDownloadFailed"];
+	        this.configPath = source["configPath"];
+	    }
+	}
+	export class DaemonLogEntryDTO {
+	    timestamp: string;
+	    level: string;
+	    stage: string;
+	    message: string;
+	    fields?: Record<string, any>;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonLogEntryDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.timestamp = source["timestamp"];
+	        this.level = source["level"];
+	        this.stage = source["stage"];
+	        this.message = source["message"];
+	        this.fields = source["fields"];
+	    }
+	}
 	export class DaemonStatusDTO {
 	    running: boolean;
 	    pid: number;
@@ -336,6 +382,10 @@ export namespace wailsapp {
 	    downloadFolder: string;
 	    error?: string;
 	    managedBy?: string;
+	    serviceMode: boolean;
+	    userConfigured: boolean;
+	    userState: string;
+	    userRegistered: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new DaemonStatusDTO(source);
@@ -355,6 +405,10 @@ export namespace wailsapp {
 	        this.downloadFolder = source["downloadFolder"];
 	        this.error = source["error"];
 	        this.managedBy = source["managedBy"];
+	        this.serviceMode = source["serviceMode"];
+	        this.userConfigured = source["userConfigured"];
+	        this.userState = source["userState"];
+	        this.userRegistered = source["userRegistered"];
 	    }
 	}
 	export class DeleteResultDTO {
@@ -370,6 +424,20 @@ export namespace wailsapp {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.deleted = source["deleted"];
 	        this.failed = source["failed"];
+	        this.error = source["error"];
+	    }
+	}
+	export class ElevatedServiceResultDTO {
+	    success: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ElevatedServiceResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
 	        this.error = source["error"];
 	    }
 	}
@@ -395,6 +463,20 @@ export namespace wailsapp {
 	        this.modTime = source["modTime"];
 	        this.path = source["path"];
 	        this.parentId = source["parentId"];
+	    }
+	}
+	export class FileLoggingSettingsDTO {
+	    enabled: boolean;
+	    filePath: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FileLoggingSettingsDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.filePath = source["filePath"];
 	    }
 	}
 	export class FolderContentsDTO {
@@ -748,6 +830,26 @@ export namespace wailsapp {
 		}
 	}
 	
+	export class ServiceStatusDTO {
+	    installed: boolean;
+	    running: boolean;
+	    status: string;
+	    scmBlocked: boolean;
+	    scmError: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ServiceStatusDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.installed = source["installed"];
+	        this.running = source["running"];
+	        this.status = source["status"];
+	        this.scmBlocked = source["scmBlocked"];
+	        this.scmError = source["scmError"];
+	    }
+	}
 	export class SingleJobInputDTO {
 	    job: JobSpecDTO;
 	    inputMode: string;
