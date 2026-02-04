@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.5.1
-**Last Updated:** 2026-01-28
+**Version:** 4.5.7
+**Last Updated:** 2026-02-03
 
 ## Overview
 
@@ -199,6 +199,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 4.5.7 | 2026-02-03 | Auto-download settings auto-save fix, debounced config save |
 | 4.5.1 | 2026-01-28 | Log permissions hardened (0700), NTLM/FIPS safeguards, fail-closed IPC auth |
 | 4.4.2 | 2025-12-XX | Centralized log directory |
 | 4.0.0 | 2025-XX-XX | Initial FIPS 140-3 compliance |
