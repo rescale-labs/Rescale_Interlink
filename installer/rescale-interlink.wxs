@@ -40,37 +40,20 @@
       <ComponentGroupRef Id="StartMenuShortcuts" />
     </Feature>
 
-    <!-- v4.3.0: Service feature unchecked by default (Level=2), requires elevation -->
-    <Feature Id="ServiceFeature" Title="Auto-Download Service (requires Admin)" Level="2"
-             Description="Install as Windows service for background auto-download. Requires administrator privileges.">
-      <ComponentGroupRef Id="ServiceComponents" />
-    </Feature>
+    <!-- v4.5.7: ServiceFeature removed - service installation is now handled post-install
+         via GUI/tray UAC elevation. This avoids silent failures in per-user MSI mode. -->
 
     <Feature Id="TrayFeature" Title="System Tray Companion" Level="1">
       <ComponentGroupRef Id="TrayComponents" />
     </Feature>
 
     <!-- Custom actions -->
-    <!-- v4.0.7 M6: Changed Return from "check" to "ignore" to prevent service install
-         failure from blocking entire application installation. The service is optional
-         and the GUI/CLI work independently without it. -->
-    <CustomAction Id="InstallService"
-                  Directory="INSTALLFOLDER"
-                  ExeCommand="[INSTALLFOLDER]rescale-int.exe service install"
-                  Execute="deferred"
-                  Impersonate="no"
-                  Return="ignore" />
-
+    <!-- v4.5.7: Service install/start custom actions removed. Service is now installed
+         post-MSI via GUI/tray UAC elevation (elevation.InstallServiceElevated).
+         Only a best-effort uninstall action remains for the uninstall flow. -->
     <CustomAction Id="UninstallService"
                   Directory="INSTALLFOLDER"
                   ExeCommand="[INSTALLFOLDER]rescale-int.exe service uninstall"
-                  Execute="deferred"
-                  Impersonate="no"
-                  Return="ignore" />
-
-    <CustomAction Id="StartService"
-                  Directory="INSTALLFOLDER"
-                  ExeCommand="[INSTALLFOLDER]rescale-int.exe service start"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />
@@ -86,10 +69,10 @@
                   Return="ignore" />
 
     <!-- Install sequence -->
+    <!-- v4.5.7: Only best-effort service uninstall on removal + tray launch on install.
+         Service install/start actions removed (handled via GUI/tray UAC post-install). -->
     <InstallExecuteSequence>
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
-      <Custom Action="InstallService" After="InstallFiles" Condition="NOT REMOVE" />
-      <Custom Action="StartService" After="InstallService" Condition="NOT REMOVE" />
       <Custom Action="LaunchTray" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE" />
     </InstallExecuteSequence>
 
@@ -166,18 +149,9 @@
     </ComponentGroup>
   </Fragment>
 
-  <!-- Service components -->
-  <!-- v4.3.0: Note - Service still requires elevation when selected (custom action runs elevated) -->
-  <Fragment>
-    <ComponentGroup Id="ServiceComponents" Directory="INSTALLFOLDER">
-      <Component Id="ServiceConfig" Guid="4D5E6F7A-8B9C-0D1E-2F3A-B4C5D6E7F8A9">
-        <!-- Service is registered via custom action using CLI -->
-        <RegistryKey Root="HKCU" Key="SOFTWARE\Rescale\Interlink">
-          <RegistryValue Name="ServiceInstalled" Type="integer" Value="1" KeyPath="yes" />
-        </RegistryKey>
-      </Component>
-    </ComponentGroup>
-  </Fragment>
+  <!-- v4.5.7: ServiceComponents fragment removed. Service installation is handled
+       post-MSI via GUI/tray UAC elevation. The HKLM ServiceInstalled registry marker
+       is set/cleared by the elevated CLI (service install/uninstall commands). -->
 
   <!-- Tray companion components -->
   <Fragment>

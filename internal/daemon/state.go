@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -49,9 +50,17 @@ func NewState(filePath string) *State {
 
 // Load reads state from the file system.
 // If the file doesn't exist, returns an empty state.
+// v4.5.8: Runs one-time migration from old Unix-style path on Windows.
 func (s *State) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// v4.5.8: Migrate state file from old path if needed (Windows only)
+	if runtime.GOOS == "windows" {
+		if oldPath := oldStateFilePath(); oldPath != "" {
+			migrateStateFile(oldPath, s.filePath)
+		}
+	}
 
 	data, err := os.ReadFile(s.filePath)
 	if err != nil {
@@ -242,10 +251,55 @@ func (s *State) GetFailedJobs() []*DownloadedJob {
 }
 
 // DefaultStateFilePath returns the default path for the daemon state file.
+// v4.5.8: On Windows, uses %LOCALAPPDATA%\Rescale\Interlink\state\ (consistent with
+// install/logs paths). Previously used Unix-style ~/.config/rescale-int/ on all platforms.
 func DefaultStateFilePath() string {
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData != "" {
+			return filepath.Join(localAppData, "Rescale", "Interlink", "state", "daemon-state.json")
+		}
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return ".rescale-daemon-state.json"
 	}
 	return filepath.Join(homeDir, ".config", "rescale-int", "daemon-state.json")
+}
+
+// oldStateFilePath returns the legacy state file path for migration (Unix-style).
+func oldStateFilePath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(homeDir, ".config", "rescale-int", "daemon-state.json")
+}
+
+// migrateStateFile moves state file from old path to new path if needed.
+// v4.5.8: One-time migration from Unix-style path to Windows-native path.
+func migrateStateFile(oldPath, newPath string) {
+	if oldPath == "" || newPath == "" || oldPath == newPath {
+		return
+	}
+	if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+		return // Nothing to migrate
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return // New path already exists, don't overwrite
+	}
+	// Ensure target directory exists
+	os.MkdirAll(filepath.Dir(newPath), 0700)
+	// Try rename first (fast path)
+	if err := os.Rename(oldPath, newPath); err != nil {
+		// Cross-volume fallback: copy + delete
+		data, err := os.ReadFile(oldPath)
+		if err != nil {
+			return
+		}
+		if err := os.WriteFile(newPath, data, 0600); err != nil {
+			return
+		}
+		os.Remove(oldPath)
+	}
 }

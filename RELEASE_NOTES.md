@@ -1,5 +1,63 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.8 - February 6, 2026
+
+### Windows Installer, Config, and Daemon Reliability Fixes
+
+This release fixes 7 bugs affecting Windows installer behavior, MSI signing, config persistence, daemon logging, file browser mount-point handling, path consistency, and UAC elevation gating.
+
+#### Bug Fixes
+
+**Bug 0: Installer Privilege Model — UAC-Elevated Install/Uninstall**
+- Removed `ServiceFeature` from WiX installer (was silently failing on restricted VMs)
+- Added UAC-elevated install/uninstall buttons in GUI Setup tab and system tray
+- Service install/uninstall now uses `ShellExecute` with `runas` verb for reliable elevation
+- **Files**: `installer/rescale-interlink.wxs`, `internal/wailsapp/daemon_bindings_windows.go`, `internal/elevation/elevation_windows.go`, `cmd/rescale-int-tray/tray_windows.go`
+
+**Bug 1: MSI Signing — Post-Build Signing Step + Checksum Regeneration**
+- Added MSI signing step in GitHub Actions workflow after `build_installer.ps1`
+- Checksums are regenerated after signing so `.sha256` matches the signed MSI
+- **Files**: `.github/workflows/release.yml`, `build/build_dist.ps1`
+
+**Bug 2: Mount-Point Handling — Junction Resolution for Cloud VM File Browser**
+- File browser now resolves Windows junction points (e.g., OneDrive, Box) before listing
+- Falls back to original path if resolved path is inaccessible
+- Auto-download validates download folder accessibility with junction-aware logic
+- **Files**: `internal/wailsapp/file_bindings.go`, `internal/wailsapp/daemon_bindings_windows.go`, `internal/service/multi_daemon.go`
+
+**Bug 3: Daemon Logging — `--log-file` Argument for Subprocess Launches**
+- GUI and tray now pass `--log-file` to daemon subprocess for persistent logging
+- Log file path uses centralized `config.LogDirectory*()` functions
+- IPC handler uses centralized log path functions instead of hand-built paths
+- **Files**: `internal/wailsapp/daemon_bindings_windows.go`, `cmd/rescale-int-tray/tray_windows.go`, `internal/cli/daemon.go`, `internal/service/ipc_handler.go`
+
+**Bug 4: Config Persistence — Removed False/0/Empty Filter, Fixed Delimiter**
+- CSV config writer no longer skips `"0"`, `"false"`, or empty string values
+- All values are written unconditionally to prevent silent data loss
+- Fixed semicolon vs comma delimiter handling in config serialization
+- **Files**: `internal/config/csv_config.go`
+
+**Bug 5: Path Consistency — Unified Windows Paths + Migration**
+- PID file, state file, and log directory now all use `%LOCALAPPDATA%\Rescale\Interlink\`
+- Centralized path functions (`StatePath()`, `RuntimePath()`, `LogDirectory*()`) prevent drift
+- One-time migration moves state files from old Unix-style paths to Windows-native paths
+- Cleans up old PID files from legacy paths
+- **Files**: `internal/config/paths.go`, `internal/config/daemonconfig.go`, `internal/daemon/daemonize_windows.go`, `internal/daemon/state.go`
+
+**Bug 6: UAC Gating — Removed IsInstalled() Pre-Checks**
+- Removed `IsInstalled()` pre-checks that blocked elevation on restricted VMs
+- Install/uninstall now always attempt elevation, letting Windows UAC handle access control
+- HKLM registry markers track service installation state for GUI/tray status display
+- **Files**: `internal/wailsapp/daemon_bindings_windows.go`, `cmd/rescale-int-tray/tray_windows.go`, `internal/service/windows_service.go`
+
+#### Migration Notes
+
+- No user action required — path migration is automatic on first run
+- Existing `daemon.conf` files are preserved; config write behavior is now more reliable
+- Windows Service installed via previous versions should be uninstalled and reinstalled using the new elevated buttons
+
+---
+
 ## v4.5.7 - February 1, 2026
 
 ### Auto-Download Settings Auto-Save Fix

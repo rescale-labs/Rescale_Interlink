@@ -5,10 +5,12 @@ package wailsapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -201,7 +203,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 func (a *App) StartDaemon() error {
 	// v4.5.5: Use unified detection instead of raw IsInstalled()
 	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
-		return fmt.Errorf(reason)
+		return errors.New(reason)
 	}
 
 	// Check if already running via IPC
@@ -240,7 +242,7 @@ func (a *App) StartDaemon() error {
 	// v4.3.8: Include log path in timeout error
 	errMsg := fmt.Sprintf("daemon start timeout - IPC not available after 5s; check logs at: %s", logsDir)
 	a.logError("Daemon", errMsg)
-	return fmt.Errorf(errMsg)
+	return errors.New(errMsg)
 }
 
 // startDaemonSubprocess launches the daemon as a detached subprocess.
@@ -284,10 +286,14 @@ func (a *App) startDaemonSubprocess() error {
 
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
+	// v4.5.8: Add persistent log file for daemon subprocess
+	daemonLogPath := filepath.Join(config.LogDirectory(), "daemon.log")
+
 	// Build command arguments
 	args := []string{"daemon", "run", "--ipc",
 		"--download-dir", downloadDir,
 		"--poll-interval", pollInterval,
+		"--log-file", daemonLogPath, // v4.5.8: persistent daemon logging
 	}
 
 	// Add filter flags if configured
@@ -625,7 +631,11 @@ func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 		}
 
 		// Test folder access
+		// v4.5.8: Resolve junction points before testing folder access
 		if downloadFolder != "" {
+			if resolvedFolder, resolveErr := pathutil.ResolveAbsolutePath(downloadFolder); resolveErr == nil && resolvedFolder != "" {
+				downloadFolder = resolvedFolder
+			}
 			info, err := os.Stat(downloadFolder)
 			if os.IsNotExist(err) {
 				if err := os.MkdirAll(downloadFolder, 0755); err != nil {
@@ -634,7 +644,14 @@ func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 					result.FolderOK = true
 				}
 			} else if err != nil {
-				result.FolderError = "Cannot access folder: " + err.Error()
+				// v4.5.8: Check if this is a mount-point / reparse-point error
+				errStr := err.Error()
+				if strings.Contains(errStr, "mount point") || strings.Contains(errStr, "reparse point") ||
+					strings.Contains(errStr, "untrusted") {
+					result.FolderError = fmt.Sprintf("Cannot access folder (may be a junction to an inaccessible drive): %v", err)
+				} else {
+					result.FolderError = "Cannot access folder: " + err.Error()
+				}
 			} else if !info.IsDir() {
 				result.FolderError = "Path exists but is not a directory"
 			} else {
@@ -721,8 +738,8 @@ func (a *App) IsServiceInstalled() bool {
 	return service.IsInstalled()
 }
 
-// InstallService attempts to install the Windows Service.
-// This typically requires Administrator privileges.
+// InstallService attempts to install the Windows Service (non-elevated, legacy).
+// Deprecated: Use InstallServiceElevated() which triggers UAC for reliable installation.
 func (a *App) InstallService() error {
 	if service.IsInstalled() {
 		return fmt.Errorf("service is already installed")
@@ -743,6 +760,42 @@ func (a *App) InstallService() error {
 
 	a.logInfo("Daemon", "Windows Service installed successfully")
 	return nil
+}
+
+// InstallServiceElevated triggers UAC prompt to install Windows Service.
+// v4.5.8: Replaces non-elevated InstallService() as the primary install path.
+// The elevated CLI process handles SCM registration and sets HKLM registry marker.
+func (a *App) InstallServiceElevated() ElevatedServiceResultDTO {
+	a.logInfo("Service", "Installing Windows Service with UAC elevation...")
+
+	if err := elevation.InstallServiceElevated(); err != nil {
+		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to install service: %v", err),
+		}
+	}
+
+	a.logInfo("Service", "UAC approved, service install command executed")
+	return ElevatedServiceResultDTO{Success: true}
+}
+
+// UninstallServiceElevated triggers UAC prompt to uninstall Windows Service.
+// v4.5.8: Added for GUI to cleanly remove the service before MSI uninstall.
+// The elevated CLI process handles SCM removal and clears HKLM registry marker.
+func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
+	a.logInfo("Service", "Uninstalling Windows Service with UAC elevation...")
+
+	if err := elevation.UninstallServiceElevated(); err != nil {
+		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
+		return ElevatedServiceResultDTO{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to uninstall service: %v", err),
+		}
+	}
+
+	a.logInfo("Service", "UAC approved, service uninstall command executed")
+	return ElevatedServiceResultDTO{Success: true}
 }
 
 // =============================================================================
@@ -945,25 +998,11 @@ func (a *App) GetServiceStatus() ServiceStatusDTO {
 
 // StartServiceElevated triggers UAC prompt to start Windows Service.
 // v4.5.1: Returns immediately after UAC approved (poll GetServiceStatus to confirm).
-// Uses elevation.StartServiceElevated() which calls "rescale-int service start".
+// v4.5.8: Removed IsInstalled() pre-check that blocked elevation on restricted VMs
+// where SCM access is denied. The elevated process reports errors properly.
 func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
-	// Pre-check: service must be installed
-	if !service.IsInstalled() {
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   "Windows Service is not installed. Install via 'rescale-int service install' as administrator.",
-		}
-	}
-
-	// Pre-check: service should not already be running
-	status, _ := service.QueryStatus()
-	if status == service.StatusRunning {
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   "Service is already running.",
-		}
-	}
-
+	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
+	// The elevated "rescale-int service start" will report errors properly.
 	a.logInfo("Service", "Starting Windows Service with UAC elevation...")
 
 	// Trigger UAC elevation
@@ -981,25 +1020,11 @@ func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
 
 // StopServiceElevated triggers UAC prompt to stop Windows Service.
 // v4.5.1: Returns immediately after UAC approved (poll GetServiceStatus to confirm).
-// Uses elevation.StopServiceElevated() which calls "rescale-int service stop".
+// v4.5.8: Removed IsInstalled() pre-check that blocked elevation on restricted VMs
+// where SCM access is denied. The elevated process reports errors properly.
 func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
-	// Pre-check: service must be installed
-	if !service.IsInstalled() {
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   "Windows Service is not installed.",
-		}
-	}
-
-	// Pre-check: service should be running
-	status, _ := service.QueryStatus()
-	if status == service.StatusStopped {
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   "Service is already stopped.",
-		}
-	}
-
+	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
+	// The elevated "rescale-int service stop" will report errors properly.
 	a.logInfo("Service", "Stopping Windows Service with UAC elevation...")
 
 	// Trigger UAC elevation

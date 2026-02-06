@@ -353,7 +353,7 @@ Rescale Interlink $($ReleaseTag)
 
 Unified CLI and GUI for Rescale HPC platform.
 
-Installation Directory: C:\Program Files\Rescale\Interlink\
+Installation Directory: %LOCALAPPDATA%\Rescale\Interlink\
 
 Components:
 - rescale-int-gui.exe  : GUI application (double-click to run)

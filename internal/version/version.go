@@ -4,8 +4,8 @@ package version
 
 // Version is the build version string, set by ldflags during build.
 // Format: vX.Y.Z or vX.Y.Z-dev for development builds.
-// v4.5.7: Auto-download settings auto-save fix (all fields debounce-save, fields editable before checkbox)
-var Version = "v4.5.7"
+// v4.5.8: Bug fixes — installer privileges, MSI signing, mount-point handling, daemon logging, config persistence, path consistency, UAC gating
+var Version = "v4.5.8"
 
 // BuildTime is the build timestamp, set by ldflags during build.
 var BuildTime = "unknown"

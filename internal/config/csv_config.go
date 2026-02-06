@@ -255,8 +255,8 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		// api_key intentionally omitted for security
 		{"api_base_url", cfg.APIBaseURL},
 		{"tenant_url", cfg.TenantURL},
-		{"exclude_pattern", strings.Join(cfg.ExcludePatterns, ",")},
-		{"include_pattern", strings.Join(cfg.IncludePatterns, ",")},
+		{"exclude_pattern", strings.Join(cfg.ExcludePatterns, ";")},
+		{"include_pattern", strings.Join(cfg.IncludePatterns, ";")},
 		{"flatten_tar", strconv.FormatBool(cfg.FlattenTar)},
 		{"run_subpath", cfg.RunSubpath},
 		{"validation_pattern", cfg.ValidationPattern},
@@ -267,12 +267,12 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"detailed_logging", strconv.FormatBool(cfg.DetailedLogging)}, // v4.0.0
 	}
 
+	// v4.5.8: Write ALL values unconditionally. The previous filter skipped "0", "false",
+	// and "" values, which silently reverted settings like sort_ascending=false,
+	// max_retries=0, and cleared proxy settings to defaults on reload.
 	for _, record := range records {
-		// Only write non-empty values to keep file clean
-		if record[1] != "" && record[1] != "0" && record[1] != "false" {
-			if err := writer.Write(record); err != nil {
-				return fmt.Errorf("failed to write record: %w", err)
-			}
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("failed to write record: %w", err)
 		}
 	}
 

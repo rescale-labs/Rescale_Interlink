@@ -58,3 +58,53 @@ func LogDirectoryForUser(profilePath string) string {
 	// Unix: Use profile-specific config directory
 	return filepath.Join(profilePath, ".config", "rescale", "logs")
 }
+
+// StateDirectory returns the directory for daemon state files (e.g., daemon-state.json).
+// v4.5.8: Centralized state path to prevent drift across the codebase.
+//
+// Locations:
+//   - Windows: %LOCALAPPDATA%\Rescale\Interlink\state
+//   - Unix: ~/.config/rescale-int
+func StateDirectory() string {
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return filepath.Join(os.TempDir(), "rescale-interlink-state")
+			}
+			localAppData = filepath.Join(homeDir, "AppData", "Local")
+		}
+		return filepath.Join(localAppData, "Rescale", "Interlink", "state")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "rescale-interlink-state")
+	}
+	return filepath.Join(homeDir, ".config", "rescale-int")
+}
+
+// RuntimeDirectory returns the directory for runtime files (PID files, sockets).
+// v4.5.8: Centralized runtime path to prevent drift.
+//
+// Locations:
+//   - Windows: %LOCALAPPDATA%\Rescale\Interlink
+//   - Unix: ~/.config/rescale-int
+func RuntimeDirectory() string {
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return os.TempDir()
+			}
+			localAppData = filepath.Join(homeDir, "AppData", "Local")
+		}
+		return filepath.Join(localAppData, "Rescale", "Interlink")
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return os.TempDir()
+	}
+	return filepath.Join(homeDir, ".config", "rescale-int")
+}

@@ -141,3 +141,27 @@ func StopServiceElevated() error {
 
 	return RunElevated(cliPath, "service stop", workDir)
 }
+
+// InstallServiceElevated triggers UAC to run "rescale-int service install".
+// v4.5.8: Added for GUI/tray to install Windows Service with elevation.
+// The elevated CLI process handles SCM registration and sets HKLM registry marker.
+func InstallServiceElevated() error {
+	cliPath, workDir, err := getCliExecutablePath()
+	if err != nil {
+		return fmt.Errorf("failed to locate CLI: %w", err)
+	}
+
+	return RunElevated(cliPath, "service install", workDir)
+}
+
+// UninstallServiceElevated triggers UAC to run "rescale-int service uninstall".
+// v4.5.8: Added for GUI/tray to uninstall Windows Service with elevation.
+// The elevated CLI process handles SCM removal and clears HKLM registry marker.
+func UninstallServiceElevated() error {
+	cliPath, workDir, err := getCliExecutablePath()
+	if err != nil {
+		return fmt.Errorf("failed to locate CLI: %w", err)
+	}
+
+	return RunElevated(cliPath, "service uninstall", workDir)
+}

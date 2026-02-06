@@ -117,7 +117,7 @@ export function SetupTab() {
   const [isServiceLoading, setIsServiceLoading] = useState(false);
   const [showUACConfirmDialog, setShowUACConfirmDialog] = useState<'start' | 'stop' | null>(null);
 
-  // v4.5.7: Debounced auto-save state for daemon config
+  // v4.5.8: Debounced auto-save state for daemon config
   const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
   const [lastSavedConfig, setLastSavedConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -205,7 +205,7 @@ export function SetupTab() {
           }
         }
         setDaemonConfig(cfg);
-        // v4.5.7: Initialize lastSavedConfig when config loads
+        // v4.5.8: Initialize lastSavedConfig when config loads
         setLastSavedConfig({ ...cfg });
         prevLookbackRef.current = cfg.lookbackDays;
       } catch (err) {
@@ -215,7 +215,7 @@ export function SetupTab() {
     fetchDaemonConfig();
   }, []);
 
-  // v4.5.7: Debounced auto-save for daemon config changes
+  // v4.5.8: Debounced auto-save for daemon config changes
   const debouncedSaveDaemonConfig = useCallback((config: wailsapp.DaemonConfigDTO) => {
     // Cancel any pending debounce
     if (debounceTimeoutRef.current) {
@@ -236,7 +236,7 @@ export function SetupTab() {
     }, 1000);
   }, []);
 
-  // v4.5.7: Trigger debounced save when daemon config changes (but not on initial load)
+  // v4.5.8: Trigger debounced save when daemon config changes (but not on initial load)
   useEffect(() => {
     if (daemonConfig && lastSavedConfig) {
       const configChanged = JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig);
@@ -246,7 +246,7 @@ export function SetupTab() {
     }
   }, [daemonConfig, lastSavedConfig, debouncedSaveDaemonConfig]);
 
-  // v4.5.7: Trigger rescan when lookback increases significantly (more than doubled)
+  // v4.5.8: Trigger rescan when lookback increases significantly (more than doubled)
   useEffect(() => {
     if (daemonConfig?.lookbackDays && prevLookbackRef.current !== null) {
       const newLookback = daemonConfig.lookbackDays;
@@ -271,7 +271,7 @@ export function SetupTab() {
     prevLookbackRef.current = daemonConfig?.lookbackDays ?? null;
   }, [daemonConfig?.lookbackDays, daemonConfig?.enabled]);
 
-  // v4.5.7: Cleanup debounce timeout on unmount
+  // v4.5.8: Cleanup debounce timeout on unmount
   useEffect(() => {
     return () => {
       if (debounceTimeoutRef.current) {
@@ -491,12 +491,12 @@ export function SetupTab() {
     }
   };
 
-  // v4.5.7: Handler for Enable Auto-Download checkbox with auto-save and rollback on failure
+  // v4.5.8: Handler for Enable Auto-Download checkbox with auto-save and rollback on failure
   // Also cancels any pending debounced save to prevent race conditions
   const handleAutoDownloadToggle = async (checked: boolean) => {
     if (!daemonConfig) return;
 
-    // v4.5.7: Cancel any pending debounced save
+    // v4.5.8: Cancel any pending debounced save
     if (debounceTimeoutRef.current) {
       clearTimeout(debounceTimeoutRef.current);
       debounceTimeoutRef.current = null;
@@ -512,7 +512,7 @@ export function SetupTab() {
       setIsDaemonConfigSaving(true);
       // Immediately save config to disk
       await SaveDaemonConfig(newConfig);
-      // v4.5.7: Update lastSavedConfig to prevent debounced save from re-triggering
+      // v4.5.8: Update lastSavedConfig to prevent debounced save from re-triggering
       setLastSavedConfig({ ...newConfig });
 
       if (checked) {
@@ -721,7 +721,7 @@ export function SetupTab() {
   // v4.5.1: Check if current platform is FRM (NTLM not allowed for FIPS compliance)
   const isFRM = isFRMPlatform(config?.apiBaseUrl || '');
 
-  // v4.5.7: Check if there are unsaved daemon config changes
+  // v4.5.8: Check if there are unsaved daemon config changes
   const hasUnsavedDaemonChanges = daemonConfig && lastSavedConfig
     ? JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig)
     : false;

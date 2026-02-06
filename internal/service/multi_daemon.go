@@ -267,6 +267,26 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		}
 	}
 
+	// v4.5.8: Validate download folder accessibility from SYSTEM context.
+	// When running as a Windows Service (SYSTEM account), mapped drives (e.g., Z:\)
+	// are not accessible because they are user-session-specific. Warn and skip if so.
+	downloadDir := daemonConf.Daemon.DownloadFolder
+	if downloadDir != "" && len(downloadDir) >= 2 && downloadDir[1] == ':' {
+		// Check if the drive letter is accessible from SYSTEM context
+		if _, err := os.Stat(downloadDir); err != nil {
+			driveLetter := string(downloadDir[0])
+			// Check if this might be a mapped drive (not C:, not common local drives)
+			if driveLetter != "C" && driveLetter != "c" {
+				m.logger.Warn().
+					Str("user", profile.Username).
+					Str("download_folder", downloadDir).
+					Str("error", err.Error()).
+					Msg("Download folder may be a mapped drive inaccessible from service context. " +
+						"Use a local path (e.g., C:\\Users\\...) or UNC path (\\\\server\\share) instead.")
+			}
+		}
+	}
+
 	// Create daemon config
 	daemonCfg := &daemon.Config{
 		PollInterval:  time.Duration(daemonConf.Daemon.PollIntervalMinutes) * time.Minute,

@@ -155,9 +155,11 @@ Examples:
 
 			// v4.3.2: Create daemon-specific logger with log buffer for IPC streaming
 			// The logWriter captures logs for both console output and IPC retrieval
+			// v4.5.8: Pass --log-file through so daemon writes persistent logs
 			logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
 				Console:    !daemon.IsDaemonChild(), // Console output only in foreground
 				BufferSize: 1000,                    // Keep 1000 log entries for IPC
+				LogFile:    logFile,                  // Persistent file logging (empty = disabled)
 			})
 			logger := logging.NewLoggerWithWriter(logWriter)
 

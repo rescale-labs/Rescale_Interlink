@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/version"
@@ -152,46 +153,36 @@ func (h *ServiceIPCHandler) TriggerScan(userID string) error {
 // v4.0.7 H3: This method should NOT try to open explorer.exe from SYSTEM context,
 // as it will silently fail (GUI apps don't display when run as SYSTEM).
 // The tray app handles "View Logs" locally via viewLogs() which runs in user context.
-// This IPC method is kept for potential future use (e.g., returning the path to the caller).
+// v4.5.8: Replaced hand-built path logic with centralized config.LogDirectory*() functions
+// to ensure path consistency across the application.
 func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 	var logsDir string
 
 	if userID == "service" {
-		// Service logs are in the system-wide location or program data
-		// v4.0.7 M1: Use environment variable, with standard Windows fallback
+		// Service logs are in the system-wide location
 		programData := os.Getenv("ProgramData")
 		if programData == "" {
-			// Standard Windows location if env var not set
 			programData = filepath.Join(os.Getenv("SystemDrive"), "ProgramData")
 			if programData == "ProgramData" {
-				programData = `C:\ProgramData` // Final fallback
+				programData = `C:\ProgramData`
 			}
 		}
 		logsDir = filepath.Join(programData, "Rescale", "Interlink", "logs")
+	} else if userID == "current" {
+		// Use centralized log directory for current user
+		logsDir = config.LogDirectory()
 	} else {
-		// User logs are in their profile
-		if userID == "current" {
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("could not determine user home: %w", err)
-			}
-			logsDir = filepath.Join(homeDir, ".config", "rescale", "logs")
+		// Per-user: use centralized path function
+		profileRoot := os.Getenv("PUBLIC")
+		if profileRoot != "" {
+			profileRoot = filepath.Dir(profileRoot)
 		} else {
-			// v4.0.7 M1: Use USERPROFILE pattern instead of hardcoded C:\Users
-			// Look up user's profile path from registry or use standard pattern
-			profileRoot := os.Getenv("PUBLIC")
-			if profileRoot != "" {
-				// PUBLIC is like C:\Users\Public, so parent is C:\Users
-				profileRoot = filepath.Dir(profileRoot)
-			} else {
-				// Fallback to standard Windows users directory
-				profileRoot = filepath.Join(os.Getenv("SystemDrive"), "Users")
-				if profileRoot == "Users" {
-					profileRoot = `C:\Users` // Final fallback
-				}
+			profileRoot = filepath.Join(os.Getenv("SystemDrive"), "Users")
+			if profileRoot == "Users" {
+				profileRoot = `C:\Users`
 			}
-			logsDir = filepath.Join(profileRoot, userID, ".config", "rescale", "logs")
 		}
+		logsDir = config.LogDirectoryForUser(filepath.Join(profileRoot, userID))
 	}
 
 	// Log the path for debugging

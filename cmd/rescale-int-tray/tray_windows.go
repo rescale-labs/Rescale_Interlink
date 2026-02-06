@@ -49,8 +49,10 @@ type trayApp struct {
 	mStatus            *systray.MenuItem
 	mSetupRequired     *systray.MenuItem // v4.5.6: Setup guidance menu item
 	mStartService      *systray.MenuItem
-	mStartServiceAdmin *systray.MenuItem // v4.5.1: Start Windows Service (Admin)
-	mStopServiceAdmin  *systray.MenuItem // v4.5.1: Stop Windows Service (Admin)
+	mStartServiceAdmin   *systray.MenuItem // v4.5.1: Start Windows Service (Admin)
+	mStopServiceAdmin    *systray.MenuItem // v4.5.1: Stop Windows Service (Admin)
+	mInstallServiceAdmin *systray.MenuItem // v4.5.8: Install Windows Service (Admin)
+	mUninstallServiceAdmin *systray.MenuItem // v4.5.8: Uninstall Windows Service (Admin)
 	mPause             *systray.MenuItem
 	mResume            *systray.MenuItem
 	mTriggerScan       *systray.MenuItem
@@ -97,6 +99,12 @@ func onReady() {
 	app.mStopServiceAdmin = systray.AddMenuItem("Stop Service (Admin)", "Stop Windows Service (requires administrator)")
 	app.mStartServiceAdmin.Hide()
 	app.mStopServiceAdmin.Hide()
+
+	// v4.5.8: Elevated install/uninstall service controls
+	app.mInstallServiceAdmin = systray.AddMenuItem("Install Service (Admin)", "Install Windows Service (requires administrator)")
+	app.mUninstallServiceAdmin = systray.AddMenuItem("Uninstall Service (Admin)", "Uninstall Windows Service (requires administrator)")
+	app.mInstallServiceAdmin.Hide()
+	app.mUninstallServiceAdmin.Hide()
 
 	// Subprocess mode control (when no Windows Service)
 	app.mStartService = systray.AddMenuItem("Start Service", "Start the auto-download daemon")
@@ -209,25 +217,33 @@ func (a *trayApp) refreshStatus() {
 // v4.5.6: Added setup required indicator when user hasn't configured auto-download.
 func (a *trayApp) updateUI() {
 	// v4.5.1: Handle Windows Service mode vs subprocess mode menu visibility
+	// v4.5.8: Added install/uninstall service buttons
 	if a.serviceInstalled {
 		// Windows Service installed - show admin controls, hide subprocess controls
 		a.mStartService.Hide()
+		a.mInstallServiceAdmin.Hide() // Already installed
 
 		if a.serviceRunning {
-			// Service running - show stop option
+			// Service running - show stop option, hide uninstall (must stop first)
 			a.mStartServiceAdmin.Hide()
 			a.mStopServiceAdmin.Show()
 			a.mStopServiceAdmin.Enable()
+			a.mUninstallServiceAdmin.Hide()
 		} else {
-			// Service stopped - show start option
+			// Service stopped - show start and uninstall options
 			a.mStartServiceAdmin.Show()
 			a.mStartServiceAdmin.Enable()
 			a.mStopServiceAdmin.Hide()
+			a.mUninstallServiceAdmin.Show()
+			a.mUninstallServiceAdmin.Enable()
 		}
 	} else {
-		// No Windows Service - hide admin controls, show subprocess controls
+		// No Windows Service - hide admin controls, show subprocess controls and install option
 		a.mStartServiceAdmin.Hide()
 		a.mStopServiceAdmin.Hide()
+		a.mUninstallServiceAdmin.Hide()
+		a.mInstallServiceAdmin.Show()
+		a.mInstallServiceAdmin.Enable()
 	}
 
 	// v4.5.6: Show/hide setup required menu item based on user configuration
@@ -385,6 +401,12 @@ func (a *trayApp) handleMenuClicks() {
 		case <-a.mResume.ClickedCh:
 			a.resumeAutoDownload()
 
+		case <-a.mInstallServiceAdmin.ClickedCh:
+			a.installServiceElevated() // v4.5.8: UAC elevation
+
+		case <-a.mUninstallServiceAdmin.ClickedCh:
+			a.uninstallServiceElevated() // v4.5.8: UAC elevation
+
 		case <-a.mViewLogs.ClickedCh:
 			a.viewLogs()
 
@@ -475,10 +497,14 @@ func (a *trayApp) startService() {
 
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
+	// v4.5.8: Add persistent log file for daemon subprocess
+	daemonLogPath := filepath.Join(config.LogDirectory(), "daemon.log")
+
 	// Build command arguments
 	args := []string{"daemon", "run", "--ipc",
 		"--download-dir", downloadDir,
 		"--poll-interval", pollInterval,
+		"--log-file", daemonLogPath, // v4.5.8: persistent daemon logging
 	}
 
 	// Add filter flags if configured
@@ -679,26 +705,11 @@ func (a *trayApp) viewLogs() {
 
 // startServiceElevated triggers UAC to start the Windows Service.
 // v4.5.1: Uses elevation.StartServiceElevated() which calls "rescale-int service start".
+// v4.5.8: Removed IsInstalled() pre-check that blocked elevation on restricted VMs
+// where SCM access is denied. The elevated process reports errors properly.
 func (a *trayApp) startServiceElevated() {
-	// Pre-check: service must be installed
-	if !service.IsInstalled() {
-		a.mu.Lock()
-		a.lastError = "Windows Service is not installed"
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
-	// Pre-check: service should not already be running
-	status, _ := service.QueryStatus()
-	if status == service.StatusRunning {
-		a.mu.Lock()
-		a.lastError = "Service is already running"
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
+	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
+	// The elevated "rescale-int service start" will report errors properly.
 	daemon.WriteStartupLog("=== TRAY ELEVATED START SERVICE ===")
 
 	if err := elevation.StartServiceElevated(); err != nil {
@@ -721,26 +732,11 @@ func (a *trayApp) startServiceElevated() {
 
 // stopServiceElevated triggers UAC to stop the Windows Service.
 // v4.5.1: Uses elevation.StopServiceElevated() which calls "rescale-int service stop".
+// v4.5.8: Removed IsInstalled() pre-check that blocked elevation on restricted VMs
+// where SCM access is denied. The elevated process reports errors properly.
 func (a *trayApp) stopServiceElevated() {
-	// Pre-check: service must be installed
-	if !service.IsInstalled() {
-		a.mu.Lock()
-		a.lastError = "Windows Service is not installed"
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
-	// Pre-check: service should be running
-	status, _ := service.QueryStatus()
-	if status == service.StatusStopped {
-		a.mu.Lock()
-		a.lastError = "Service is already stopped"
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
+	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
+	// The elevated "rescale-int service stop" will report errors properly.
 	daemon.WriteStartupLog("=== TRAY ELEVATED STOP SERVICE ===")
 
 	if err := elevation.StopServiceElevated(); err != nil {
@@ -755,6 +751,52 @@ func (a *trayApp) stopServiceElevated() {
 	daemon.WriteStartupLog("SUCCESS: UAC approved, service stop command executed")
 
 	// Wait for service to stop, then refresh status
+	go func() {
+		time.Sleep(2 * time.Second)
+		a.refreshStatus()
+	}()
+}
+
+// installServiceElevated triggers UAC to install the Windows Service.
+// v4.5.8: Added for tray parity with GUI InstallServiceElevated().
+func (a *trayApp) installServiceElevated() {
+	daemon.WriteStartupLog("=== TRAY ELEVATED INSTALL SERVICE ===")
+
+	if err := elevation.InstallServiceElevated(); err != nil {
+		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
+		a.mu.Lock()
+		a.lastError = translateError(err)
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	daemon.WriteStartupLog("SUCCESS: UAC approved, service install command executed")
+
+	// Refresh status after install
+	go func() {
+		time.Sleep(2 * time.Second)
+		a.refreshStatus()
+	}()
+}
+
+// uninstallServiceElevated triggers UAC to uninstall the Windows Service.
+// v4.5.8: Added for tray parity with GUI UninstallServiceElevated().
+func (a *trayApp) uninstallServiceElevated() {
+	daemon.WriteStartupLog("=== TRAY ELEVATED UNINSTALL SERVICE ===")
+
+	if err := elevation.UninstallServiceElevated(); err != nil {
+		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
+		a.mu.Lock()
+		a.lastError = translateError(err)
+		a.updateUI()
+		a.mu.Unlock()
+		return
+	}
+
+	daemon.WriteStartupLog("SUCCESS: UAC approved, service uninstall command executed")
+
+	// Refresh status after uninstall
 	go func() {
 		time.Sleep(2 * time.Second)
 		a.refreshStatus()

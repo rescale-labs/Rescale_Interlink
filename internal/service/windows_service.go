@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -302,6 +303,15 @@ func Install(execPath string, configPath string) error {
 		fmt.Printf("Warning: failed to install event log: %v\n", err)
 	}
 
+	// v4.5.8: Set HKLM registry marker so GUI/tray can detect service installation
+	// without needing SCM access (which may be blocked on restricted VMs).
+	// This runs in the elevated CLI process, so HKLM write is allowed.
+	if regKey, _, regErr := registry.CreateKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Rescale\Interlink`, registry.SET_VALUE); regErr == nil {
+		regKey.SetDWordValue("ServiceInstalled", 1)
+		regKey.Close()
+	}
+
 	fmt.Printf("Service %s installed successfully\n", ServiceName)
 	return nil
 }
@@ -350,6 +360,14 @@ func Uninstall() error {
 	if err != nil {
 		// Non-fatal, just log
 		fmt.Printf("Warning: failed to remove event log: %v\n", err)
+	}
+
+	// v4.5.8: Clear HKLM registry marker so GUI/tray knows service is no longer installed.
+	// This runs in the elevated CLI process, so HKLM write is allowed.
+	if regKey, regErr := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Rescale\Interlink`, registry.SET_VALUE); regErr == nil {
+		regKey.DeleteValue("ServiceInstalled")
+		regKey.Close()
 	}
 
 	fmt.Printf("Service %s uninstalled successfully\n", ServiceName)

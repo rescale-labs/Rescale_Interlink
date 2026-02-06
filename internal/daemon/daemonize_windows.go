@@ -13,17 +13,33 @@ import (
 )
 
 // PIDFilePath returns the path to the daemon PID file.
-// On Windows, this is in the user's AppData directory.
+// v4.5.8: Fixed to use %LOCALAPPDATA%\Rescale\Interlink\ (consistent with install/logs).
+// Previously used %APPDATA%\Rescale\daemon.pid (wrong parent, missing Interlink subdir).
 func PIDFilePath() string {
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		return filepath.Join(os.TempDir(), "rescale-daemon.pid")
+	}
+	return filepath.Join(localAppData, "Rescale", "Interlink", "daemon.pid")
+}
+
+// oldPIDFilePath returns the legacy PID file path for migration cleanup.
+func oldPIDFilePath() string {
 	appData := os.Getenv("APPDATA")
 	if appData == "" {
-		return filepath.Join(os.TempDir(), "rescale-daemon.pid")
+		return ""
 	}
 	return filepath.Join(appData, "Rescale", "daemon.pid")
 }
 
 // WritePIDFile writes the current process's PID to the PID file.
+// v4.5.8: Also cleans up old PID file from legacy path.
 func WritePIDFile() error {
+	// Clean up old PID file if it exists
+	if oldPath := oldPIDFilePath(); oldPath != "" {
+		os.Remove(oldPath)
+	}
+
 	pidPath := PIDFilePath()
 
 	// Ensure directory exists

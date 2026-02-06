@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/services"
 )
 
@@ -147,14 +148,32 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 	// Track start time for slow path detection (GUI-specific)
 	startTime := time.Now()
 
+	// v4.5.8: Resolve junction points before listing to handle Windows cloud VM
+	// environments where user folders are junction points to mapped network drives.
+	// If resolution fails (junction target inaccessible), fall back to the raw path.
+	resolvedPath, resolveErr := pathutil.ResolveAbsolutePath(path)
+	if resolveErr != nil {
+		resolvedPath = path // Fallback to original if resolution fails
+	}
+
 	// v4.0.4: Use shared localfs.ListDirectoryEx() for core directory reading
 	// This handles timeout, hidden filtering, and parallel symlink resolution
-	entries, err := localfs.ListDirectoryEx(ctx, path, localfs.ListDirectoryExOptions{
+	entries, err := localfs.ListDirectoryEx(ctx, resolvedPath, localfs.ListDirectoryExOptions{
 		IncludeHidden:   includeHidden,
 		ResolveSymlinks: true,
 		SymlinkWorkers:  constants.SymlinkWorkerCount,
 		Timeout:         constants.DirectoryReadTimeout,
 	})
+
+	// v4.5.8: If resolved path failed and it differs from original, try original path
+	if err != nil && resolvedPath != path {
+		entries, err = localfs.ListDirectoryEx(ctx, path, localfs.ListDirectoryExOptions{
+			IncludeHidden:   includeHidden,
+			ResolveSymlinks: true,
+			SymlinkWorkers:  constants.SymlinkWorkerCount,
+			Timeout:         constants.DirectoryReadTimeout,
+		})
+	}
 
 	// Handle errors
 	if err != nil {
@@ -165,6 +184,10 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 			isSlowPath = true
 		} else if err == context.Canceled {
 			warning = "Operation cancelled"
+		} else if strings.Contains(warning, "mount point") || strings.Contains(warning, "reparse point") ||
+			strings.Contains(warning, "untrusted") {
+			// v4.5.8: Provide user-friendly error for junction/reparse-point failures
+			warning = fmt.Sprintf("Cannot access directory (may be a junction to an inaccessible drive): %v", err)
 		}
 		return FolderContentsDTO{
 			FolderPath: path,
