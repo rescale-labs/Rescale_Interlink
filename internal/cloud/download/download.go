@@ -200,6 +200,12 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	// v3.6.2: Log overall completion
 	overallTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
+	// v4.5.9: Safety net: clean up any leftover .encrypted temp file from legacy path.
+	// Only on success — failed downloads may need the .encrypted file for resume.
+	// This covers the case where the downloader's own defer ran but failed
+	// (e.g., Windows file locking released after a delay).
+	_ = os.Remove(params.LocalPath + ".encrypted")
+
 	// v4.0.0: Clean up resume state file on successful download.
 	// This prevents stale resume state from accumulating and ensures
 	// future downloads of the same file don't erroneously attempt to resume.

@@ -13,6 +13,7 @@ import (
 	ntlmssp "github.com/Azure/go-ntlmssp"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // ConfigureHTTPClient configures an HTTP client with proxy settings
@@ -57,7 +58,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		}
 
 		proxyURL := buildProxyURL(cfg)
-		transport.Proxy = nethttp.ProxyURL(proxyURL)
+		transport.Proxy = proxyFuncWithBypass(proxyURL, cfg.NoProxy)
 
 		// Wrap transport with NTLM
 		client := &nethttp.Client{
@@ -91,7 +92,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		}
 
 		proxyURL := buildProxyURL(cfg)
-		transport.Proxy = nethttp.ProxyURL(proxyURL)
+		transport.Proxy = proxyFuncWithBypass(proxyURL, cfg.NoProxy)
 
 		// v4.5.3: Log warning when credentials incomplete (user set but password missing)
 		// This typically happens on startup when password wasn't saved for security
@@ -186,6 +187,24 @@ func warmupProxy(client *nethttp.Client, cfg *config.Config) error {
 	}
 
 	return nil
+}
+
+// proxyFuncWithBypass returns a proxy function that respects the NoProxy bypass list.
+// v4.5.9: If noProxy is empty, behaves identically to nethttp.ProxyURL.
+// When noProxy is set, uses golang.org/x/net/http/httpproxy to match hosts/CIDRs.
+func proxyFuncWithBypass(proxyURL *url.URL, noProxy string) func(*nethttp.Request) (*url.URL, error) {
+	if noProxy == "" {
+		return nethttp.ProxyURL(proxyURL)
+	}
+	cfg := httpproxy.Config{
+		HTTPProxy:  proxyURL.String(),
+		HTTPSProxy: proxyURL.String(),
+		NoProxy:    noProxy,
+	}
+	proxyFunc := cfg.ProxyFunc()
+	return func(req *nethttp.Request) (*url.URL, error) {
+		return proxyFunc(req.URL)
+	}
 }
 
 // NeedsProxyPassword returns true if the proxy configuration requires a password

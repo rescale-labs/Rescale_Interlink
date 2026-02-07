@@ -100,6 +100,7 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 
 	// v4.0.1: Track if API-related settings changed
 	// These affect the API client and require engine update
+	// v4.5.9: Added NoProxy to trigger API client refresh when bypass list changes
 	apiSettingsChanged := a.config.APIKey != cfg.APIKey ||
 		a.config.APIBaseURL != cfg.APIBaseURL ||
 		a.config.TenantURL != cfg.TenantURL ||
@@ -107,7 +108,8 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 		a.config.ProxyHost != cfg.ProxyHost ||
 		a.config.ProxyPort != cfg.ProxyPort ||
 		a.config.ProxyUser != cfg.ProxyUser ||
-		a.config.ProxyPassword != cfg.ProxyPassword
+		a.config.ProxyPassword != cfg.ProxyPassword ||
+		a.config.NoProxy != cfg.NoProxy
 
 	a.config.APIBaseURL = cfg.APIBaseURL
 	a.config.TenantURL = cfg.TenantURL
@@ -281,6 +283,7 @@ func (a *App) TestConnection() ConnectionResultDTO {
 	a.logDebug("connection", "Testing API connection...")
 
 	// Copy config values we need - avoid race conditions with concurrent config updates
+	// v4.5.9: Added NoProxy so test connection respects bypass rules
 	configCopy := &config.Config{
 		APIBaseURL:    a.config.APIBaseURL,
 		APIKey:        a.config.APIKey,
@@ -289,6 +292,7 @@ func (a *App) TestConnection() ConnectionResultDTO {
 		ProxyPort:     a.config.ProxyPort,
 		ProxyUser:     a.config.ProxyUser,
 		ProxyPassword: a.config.ProxyPassword,
+		NoProxy:       a.config.NoProxy,
 		ProxyWarmup:   false, // CRITICAL: Disable proxy warmup for connection test to avoid blocking
 	}
 

@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -325,13 +326,20 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		}
 	}
 
-	// Ensure cleanup of temp file on success or error
+	// v4.5.9: Retry cleanup of temp file with backoff for Windows file locking.
+	// Log the actual error even when OutputWriter is nil.
 	defer func() {
-		if removeErr := os.Remove(encryptedPath); removeErr != nil && !os.IsNotExist(removeErr) {
-			if prep.Params.OutputWriter != nil {
-				fmt.Fprintf(prep.Params.OutputWriter, "Warning: Failed to cleanup encrypted temp file %s: %v\n", encryptedPath, removeErr)
+		var lastErr error
+		for i := 0; i < 3; i++ {
+			if lastErr = os.Remove(encryptedPath); lastErr == nil || os.IsNotExist(lastErr) {
+				return
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
+		if prep.Params.OutputWriter != nil {
+			fmt.Fprintf(prep.Params.OutputWriter, "Warning: Failed to cleanup encrypted temp file %s after 3 attempts: %v\n", encryptedPath, lastErr)
+		}
+		log.Printf("Warning: Failed to cleanup encrypted temp file %s after 3 attempts: %v", encryptedPath, lastErr)
 	}()
 
 	// v4.0.0: Report 0% progress immediately before download starts.

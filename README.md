@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.5.7-green)
+![Status](https://img.shields.io/badge/status-v4.5.9-green)
 
 ---
 
@@ -86,6 +86,16 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 ---
 
 ## Recent Changes
+
+**v4.5.9 (February 7, 2026) - Scanner, Core Count, Proxy Bypass, Cleanup, and Retry Fixes:**
+- **Job Scanner Fix**: ScanDirectory now passes root directory and start index, returns actionable errors on zero matches
+- **Core Count Fix**: Template builder allows fractional node sizes (min=1, step=1)
+- **No-Proxy Bypass**: `no_proxy` config key now fully wired to HTTP transport and exposed in GUI Setup tab
+- **Encrypted File Cleanup**: Retry with backoff ensures `.encrypted` temp files are removed after download
+- **Retry Path Fix**: Retry-download normalizes directory destinations like the primary path
+
+**v4.5.8 (February 6, 2026) - Windows Installer, Config, and Daemon Reliability Fixes:**
+- 7 bug fixes affecting Windows installer privileges, MSI signing, config persistence, daemon logging, mount-point handling, path consistency, and UAC gating
 
 **v4.5.7 (February 3, 2026) - Auto-Download Settings Auto-Save Fix:**
 - **Debounced Auto-Save**: All daemon config fields auto-save after 1 second of no changes
@@ -191,15 +201,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.5.7-macos-arm64.tar.gz` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.5.7-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.5.7-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `rescale-interlink-v4.5.7-win_amd64.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.5.9-macos-arm64.tar.gz` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.5.9-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.5.9-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `rescale-interlink-v4.5.9-win_amd64.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Extract and move app to Applications
-tar -xzf rescale-interlink-v4.5.7-macos-arm64.tar.gz
+tar -xzf rescale-interlink-v4.5.9-macos-arm64.tar.gz
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -210,7 +220,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.5.7-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.5.9-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -223,7 +233,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.5.7-win_amd64.zip
+Expand-Archive rescale-interlink-v4.5.9-win_amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -533,7 +543,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.5.7                       |
+|                    Rescale Interlink v4.5.9                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -795,10 +805,10 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 - **[TESTING.md](TESTING.md)** - Test strategy and procedures
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Developer onboarding guide
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Version history and release details
-- **[MULTI-PLATFORM_WAILS_PACKAGING_GUIDE.md](MULTI-PLATFORM_WAILS_PACKAGING_GUIDE.md)** - Build guide for all platforms
+- **[FEATURE_SUMMARY.md](FEATURE_SUMMARY.md)** - Comprehensive feature list with source references
 
 ---
 
-**Version**: 4.5.7
+**Version**: 4.5.9
 **Status**: Production Ready
-**Last Updated**: February 3, 2026
+**Last Updated**: February 7, 2026

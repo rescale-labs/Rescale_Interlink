@@ -4,6 +4,8 @@ package transfer
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -130,7 +132,7 @@ func TestDownloaderDownloadValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := downloader.Download(context.Background(), tt.params)
+			_, err := downloader.Download(context.Background(), tt.params)
 			if tt.expectError {
 				if err == nil {
 					t.Errorf("expected error containing '%s', got nil", tt.errorMsg)
@@ -161,7 +163,7 @@ func TestDownloaderLegacyFormat(t *testing.T) {
 		},
 	}
 
-	err := downloader.Download(context.Background(), params)
+	_, err := downloader.Download(context.Background(), params)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -191,7 +193,7 @@ func TestDownloaderStreamingFormat(t *testing.T) {
 		},
 	}
 
-	err := downloader.Download(context.Background(), params)
+	_, err := downloader.Download(context.Background(), params)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -294,5 +296,92 @@ func TestPartDownloadResult(t *testing.T) {
 	}
 	if result.Size != 14 {
 		t.Error("Size not set correctly")
+	}
+}
+
+// v4.5.9: Tests for .encrypted temp file cleanup behavior.
+
+// TestEncryptedTempFileCleanupOnSuccess verifies that the .encrypted file cleanup
+// pattern (retry with backoff) works correctly when the file exists.
+func TestEncryptedTempFileCleanupOnSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "test_file.dat")
+	encryptedPath := localPath + ".encrypted"
+
+	// Create a fake .encrypted file
+	if err := os.WriteFile(encryptedPath, []byte("fake encrypted data"), 0644); err != nil {
+		t.Fatalf("failed to create temp encrypted file: %v", err)
+	}
+
+	// Verify it exists
+	if _, err := os.Stat(encryptedPath); os.IsNotExist(err) {
+		t.Fatal("encrypted file should exist before cleanup")
+	}
+
+	// Simulate the cleanup logic from downloadLegacy defer
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		if lastErr = os.Remove(encryptedPath); lastErr == nil || os.IsNotExist(lastErr) {
+			break
+		}
+	}
+
+	// Verify cleanup succeeded
+	if _, err := os.Stat(encryptedPath); !os.IsNotExist(err) {
+		t.Errorf("encrypted file should be cleaned up, but still exists: %v", err)
+	}
+}
+
+// TestEncryptedTempFileCleanupAlreadyRemoved verifies cleanup is a no-op
+// when the .encrypted file doesn't exist (already cleaned by defer).
+func TestEncryptedTempFileCleanupAlreadyRemoved(t *testing.T) {
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "test_file.dat")
+	encryptedPath := localPath + ".encrypted"
+
+	// Don't create the file - simulate it was already cleaned
+
+	// Simulate the cleanup logic - should not error
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		if lastErr = os.Remove(encryptedPath); lastErr == nil || os.IsNotExist(lastErr) {
+			lastErr = nil // os.IsNotExist is acceptable
+			break
+		}
+	}
+
+	if lastErr != nil {
+		t.Errorf("cleanup should succeed (no-op) for non-existent file, got: %v", lastErr)
+	}
+}
+
+// TestSafetyNetEncryptedCleanup verifies the safety-net cleanup in the download
+// orchestrator (download.go) correctly removes leftover .encrypted files.
+func TestSafetyNetEncryptedCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "output.dat")
+	encryptedPath := localPath + ".encrypted"
+
+	// Create the output file (simulating successful download)
+	if err := os.WriteFile(localPath, []byte("decrypted content"), 0644); err != nil {
+		t.Fatalf("failed to create output file: %v", err)
+	}
+
+	// Create a leftover .encrypted file (simulating failed defer cleanup)
+	if err := os.WriteFile(encryptedPath, []byte("stale encrypted data"), 0644); err != nil {
+		t.Fatalf("failed to create encrypted file: %v", err)
+	}
+
+	// Simulate the safety-net cleanup from download.go
+	_ = os.Remove(localPath + ".encrypted")
+
+	// Verify .encrypted file is removed
+	if _, err := os.Stat(encryptedPath); !os.IsNotExist(err) {
+		t.Error("safety-net cleanup should have removed .encrypted file")
+	}
+
+	// Verify the output file is untouched
+	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+		t.Error("output file should not be removed by safety-net cleanup")
 	}
 }

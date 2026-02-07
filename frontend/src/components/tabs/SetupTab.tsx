@@ -1176,6 +1176,24 @@ export function SetupTab() {
                 />
               </div>
             </div>
+            {/* v4.5.9: No Proxy bypass list */}
+            {proxyEnabled && (
+              <div>
+                <label className="label">No Proxy (bypass list)</label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="*.example.com, 10.0.0.0/8, internal.corp"
+                  value={config?.noProxy || ''}
+                  onChange={(e) => updateConfig({ noProxy: e.target.value })}
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Comma-separated hosts/patterns that bypass the proxy.{' '}
+                  <code>example.com</code> matches root + subdomains; <code>*.example.com</code> matches subdomains only.
+                  Also supports IPs and CIDR ranges (e.g., <code>10.0.0.0/8</code>).
+                </p>
+              </div>
+            )}
           </div>
         </div>
 

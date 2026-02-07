@@ -1,5 +1,51 @@
 # Release Notes - Rescale Interlink
 
+## v4.5.9 - February 7, 2026
+
+### Scanner, Core Count, Proxy Bypass, Encrypted File Cleanup, and Retry Path Fixes
+
+This release fixes 5 bugs found during post-v4.5.8 testing, covering GUI job scanning, core count constraints, proxy bypass wiring, encrypted file cleanup reliability, and retry download path normalization.
+
+#### Bug Fixes
+
+**Bug 7: Job Scanner Shows "Found 0 Jobs" When Directory Contains Valid Runs**
+- Root cause: `ScanDirectory` never passed `RootDir` to `ScanOptions`, so the scanner had no base directory to search
+- Fix: Pass `PartDirs` and `StartIndex` from the scan request, return an actionable error message on zero matches instead of silently returning empty results
+- **Files**: `internal/wailsapp/job_bindings.go`
+
+**Bug 8: Core Count Forced to Node-Size Multiples Instead of Allowing Fractional Nodes**
+- Root cause: HTML `<input>` had `min` and `step` set to `coresBaseUnit` (full node size), preventing fractional node values like 2 cores on a 4-core node
+- Fix: Set `min=1`, `step=1`, and updated the hint text to show the valid range of fractional values
+- **Files**: `frontend/src/components/widgets/TemplateBuilder.tsx`
+
+**Bug 9: No-Proxy Bypass List Not Wired to HTTP Client or GUI**
+- Root cause: `Config.NoProxy` field existed but was never read by the HTTP transport or exposed in the GUI
+- Fix: Implemented `proxyFuncWithBypass()` using Go's `httpproxy` package, wired it into both NTLM and Basic proxy transports, added a No Proxy input field to the GUI Setup tab, and included `NoProxy` in `apiSettingsChanged()` and `TestConnection()` config copy
+- **Files**: `internal/http/proxy.go`, `internal/wailsapp/config_bindings.go`, `frontend/src/components/tabs/SetupTab.tsx`
+
+**Bug 10: `.encrypted` File Left Over After GUI Download Completes**
+- Root cause: Deferred cleanup used a single `os.Remove` call with a warning-only fallback, which would fail silently if the file was still locked
+- Fix: Retry cleanup with 3x exponential backoff, log cleanup status even without an `OutputWriter`, and added a safety-net cleanup in `download.go`
+- **Files**: `internal/cloud/transfer/downloader.go`, `internal/cloud/download/download.go`
+
+**Bug 11: Retry-Download Missing Directory Normalization for Destination Path**
+- Root cause: The retry path passed `req.Dest` raw without the directory-to-file normalization that the primary path performs
+- Fix: Normalize dest-is-directory in the retry path (same logic as primary path), add empty-filename fallback to both paths
+- **Files**: `internal/services/transfer_service.go`
+
+#### New Tests
+
+- `internal/http/proxy_test.go`: Proxy bypass matching (wildcard, CIDR, exact domain, multi-pattern)
+- `internal/wailsapp/job_bindings_test.go`: Scan directory validation
+- `internal/cloud/transfer/downloader_test.go`: `.encrypted` cleanup (success, already-removed, safety-net)
+
+#### Migration Notes
+
+- No user action required
+- Proxy bypass rules (`no_proxy` config key) are now fully functional — existing values that were previously ignored will take effect
+
+---
+
 ## v4.5.8 - February 6, 2026
 
 ### Windows Installer, Config, and Daemon Reliability Fixes
@@ -3385,12 +3431,16 @@ This release adds full proxy support for direct S3 and Azure Blob Storage operat
 
 #### Files Modified
 
+> **Note (v4.5.9):** The paths below reflect the codebase at the time of v3.4.0. These modules
+> were later refactored into the unified provider architecture under `internal/cloud/transfer/`
+> and `internal/cloud/providers/`. See v4.0.0 release notes for the unified architecture details.
+
 - `internal/api/client.go` - Added GetConfig() method
-- `internal/pur/httpclient/client.go` - Proxy-aware HTTP client creation
-- `internal/cloud/upload/s3.go` - Proxy support for S3 uploads
-- `internal/cloud/upload/azure.go` - Proxy support for Azure uploads
-- `internal/cloud/download/s3.go` - Proxy support for S3 downloads
-- `internal/cloud/download/azure.go` - Proxy support for Azure downloads
+- `internal/pur/httpclient/client.go` - Proxy-aware HTTP client creation (now `internal/http/proxy.go`)
+- `internal/cloud/upload/s3.go` - Proxy support for S3 uploads (now `internal/cloud/providers/s3/`)
+- `internal/cloud/upload/azure.go` - Proxy support for Azure uploads (now `internal/cloud/providers/azure/`)
+- `internal/cloud/download/s3.go` - Proxy support for S3 downloads (now `internal/cloud/providers/s3/`)
+- `internal/cloud/download/azure.go` - Proxy support for Azure downloads (now `internal/cloud/providers/azure/`)
 
 #### Testing
 

@@ -577,15 +577,20 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 <div className="relative">
                   <input
                     type="number"
-                    min={coresBaseUnit}
-                    step={coresBaseUnit}
+                    min={1}
+                    step={1}
                     value={template.coresPerSlot}
                     onChange={(e) => handleCoresChange(Number(e.target.value))}
                     onBlur={(e) => handleCoresChange(Number(e.target.value))}
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <p className="mt-1 text-xs text-gray-500">
-                    Multiples of {coresBaseUnit} ({coresBaseUnit}, {coresBaseUnit * 2}, {coresBaseUnit * 3}...)
+                    {(() => {
+                      const ct = coreTypes.find((c) => c.code === template.coreType)
+                      return ct?.cores.length
+                        ? `Valid: ${ct.cores.join(', ')} or multiples of ${coresBaseUnit}`
+                        : `Multiples of ${coresBaseUnit}`
+                    })()}
                   </p>
                 </div>
               </div>

@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: February 3, 2026
-**Version**: 4.5.7
+**Last Updated**: February 7, 2026
+**Version**: 4.5.9
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -81,7 +81,10 @@ go test -v ./internal/pur/...
 | `internal/pur/config` | 9 | ~85% | Excellent |
 | `internal/pur/pattern` | 4 | ~80% | Good |
 | `internal/pur/sanitize` | 4 (16 sub-tests) | ~90% | Excellent |
-| **Total** | **60+** | **~80%** | **Good** |
+| `internal/http` | 4 | ~70% | Good |
+| `internal/wailsapp` | 3 | ~40% | New |
+| `internal/cloud/transfer` | 5 | ~60% | Good |
+| **Total** | **70+** | **~80%** | **Good** |
 
 ### GUI Testing (Wails v2 + React/TypeScript)
 

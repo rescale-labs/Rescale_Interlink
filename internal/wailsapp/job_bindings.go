@@ -215,12 +215,16 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 	}
 
 	// Default: folder scanning mode
+	// v4.5.9: Pass RootDir as PartDirs[0] so ScanToSpecs uses the GUI-selected
+	// directory instead of falling back to os.Getwd() (the app install directory).
 	scanOpts := core.ScanOptions{
 		Pattern:           opts.Pattern,
 		ValidationPattern: opts.ValidationPattern,
 		RunSubpath:        opts.RunSubpath,
 		Recursive:         opts.Recursive,
 		IncludeHidden:     opts.IncludeHidden,
+		PartDirs:          []string{opts.RootDir},
+		StartIndex:        1, // Prevent job names starting at _0
 	}
 
 	templateSpec := dtoToJobSpec(template)
@@ -229,6 +233,14 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 	jobs, err := a.engine.ScanToSpecs(templateSpec, scanOpts)
 	if err != nil {
 		return ScanResultDTO{Error: err.Error()}
+	}
+
+	// v4.5.9: Return actionable error when no directories match in folder mode.
+	// File mode has its own SkippedFiles/Warnings semantics and returns earlier.
+	if len(jobs) == 0 {
+		return ScanResultDTO{
+			Error: fmt.Sprintf("No directories matching pattern '%s' found in %s", opts.Pattern, opts.RootDir),
+		}
 	}
 
 	// Convert results to DTOs

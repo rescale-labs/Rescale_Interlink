@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.5.7
-**Build Date:** February 3, 2026
+**Version:** 4.5.9
+**Build Date:** February 7, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -521,8 +521,8 @@ rescale-int software get <code>
 
 ## Security & Encryption
 
-### Proxy Support (v2.4.2)
-**Implementation:** `internal/pur/proxy/proxy.go`, `internal/pur/httpclient/client.go`
+### Proxy Support (v2.4.2, enhanced v4.5.9)
+**Implementation:** `internal/http/proxy.go`
 
 **Enterprise-Ready Network Configuration:**
 - **All traffic** (API calls + S3/Azure storage) routes through configured proxy
@@ -538,9 +538,9 @@ rescale-int software get <code>
 **Key Features:**
 - Proxy warmup for NTLM/Basic modes to establish authentication
 - Automatic retry on proxy timeout with fresh authentication
-- NO_PROXY support for bypass rules
+- **NO_PROXY bypass rules** (v4.5.9): Fully wired to HTTP transport via `proxyFuncWithBypass()` using Go's `httpproxy` package. Supports wildcard domains, CIDR ranges, exact hostnames, and comma-separated multi-pattern lists. Configurable from the GUI Setup tab.
 - Works for all operations: file upload/download, folder operations, job submission, API calls
-- **Source:** `internal/pur/proxy/proxy.go:17-227`, `internal/pur/httpclient/client.go:30-88`
+- **Source:** `internal/http/proxy.go`
 
 **Configuration:**
 - GUI: Setup Tab → Proxy Configuration section
@@ -862,13 +862,13 @@ rescale-int folders download-dir --folder-id xyz789 --outdir ./data
 - **Source:** `internal/cloud/credentials/manager.go`, `internal/ratelimit/`
 
 ### Proxy Support
-**Source:** `internal/pur/proxy/`
+**Source:** `internal/http/proxy.go`
 
 **Features:**
 - HTTP/HTTPS proxy configuration
 - Environment variable support (HTTP_PROXY, HTTPS_PROXY)
 - Proxy authentication (Basic and NTLM)
-- NO_PROXY bypass rules
+- NO_PROXY bypass rules (fully wired to HTTP transport in v4.5.9)
 
 ### Package Structure
 ```
@@ -1104,5 +1104,5 @@ For more details, see:
 
 ---
 
-*Last Updated: February 3, 2026*
-*Version: 4.5.7*
+*Last Updated: February 7, 2026*
+*Version: 4.5.9*

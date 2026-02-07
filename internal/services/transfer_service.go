@@ -299,7 +299,14 @@ func (ts *TransferService) executeUpload(ctx context.Context, req TransferReques
 
 // executeDownload handles a single download with semaphore and progress tracking.
 func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequest, apiClient *api.Client) {
+	// v4.5.9: Consistent empty-name fallback (matches retry path)
 	fileName := req.Name
+	if fileName == "" {
+		fileName = req.Source
+		ts.logger.Warn().
+			Str("file_id", req.Source).
+			Msg("Download: req.Name is empty, using file ID as filename")
+	}
 
 	// Track in queue (starts as Queued)
 	task := ts.queue.TrackTransfer(fileName, req.Size, transfer.TaskTypeDownload, req.Source, req.Dest)
@@ -471,7 +478,14 @@ func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferR
 
 // executeDownloadRetry is like executeDownload but uses an existing task ID.
 func (ts *TransferService) executeDownloadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
+	// v4.5.9: Consistent empty-name fallback (matches first-attempt path)
 	fileName := req.Name
+	if fileName == "" {
+		fileName = req.Source
+		ts.logger.Warn().
+			Str("file_id", req.Source).
+			Msg("Retry: req.Name is empty, using file ID as filename")
+	}
 
 	// Panic recovery
 	defer func() {
@@ -499,9 +513,22 @@ func (ts *TransferService) executeDownloadRetry(ctx context.Context, req Transfe
 
 	transferHandle := ts.transferMgr.AllocateTransfer(req.Size, 1)
 
+	// v4.5.9: Normalize dest-is-directory in retry path (matching first-attempt path).
+	// Without this, retrying a download to a directory dest would create a file named
+	// after the directory itself instead of appending the filename.
+
+	localPath := req.Dest
+	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+		localPath = filepath.Join(localPath, fileName)
+		ts.logger.Debug().
+			Str("original_dest", req.Dest).
+			Str("corrected_path", localPath).
+			Msg("Retry: Dest was a directory, appending filename")
+	}
+
 	err := download.DownloadFile(ctx, download.DownloadParams{
 		FileID:    req.Source,
-		LocalPath: req.Dest,
+		LocalPath: localPath,
 		APIClient: apiClient,
 		ProgressCallback: func(progress float64) {
 			ts.queue.StartTransfer(taskID)
