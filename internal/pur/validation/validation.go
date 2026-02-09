@@ -1,16 +1,16 @@
-// Package validation provides core type validation against the Rescale API.
+// Package validation provides job spec and core type validation for the PUR pipeline.
 //
-// This package validates hardware core types by fetching available options
-// from the Rescale API and providing helpful error messages with suggestions
-// for invalid types.
+// This package provides shared validation logic used by both CLI and GUI code paths,
+// ensuring architectural consistency between modes. It validates job specifications
+// (required fields, positive values, submit mode) and hardware core types.
 //
 // Features:
-//   - Fetches available core types from /api/v3/coretypes/
-//   - Caches results (see constants.ValidationCacheTTL) to reduce API calls
-//   - Provides suggestions for typos (e.g., "emerld" → "emerald")
+//   - ValidateJobSpec: shared job validation for CLI and GUI (v4.6.0)
+//   - CoreTypeValidator: API-based hardware validation with caching
+//   - Suggestions for typos (e.g., "emerld" → "emerald")
 //   - Thread-safe with concurrent access support
 //
-// Part of PUR (Parallel Uploader and Runner) v1.0.0
+// Part of PUR (Parallel Uploader and Runner) v4.6.0
 package validation
 
 import (
@@ -24,6 +24,49 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/models"
 )
+
+// ValidateJobSpec validates a job specification, returning a list of errors.
+// v4.6.0: Shared validation used by both CLI (plan command) and GUI (ValidateJobSpec binding).
+// This ensures architectural consistency — both modes apply the same validation rules.
+func ValidateJobSpec(job models.JobSpec) []string {
+	var errors []string
+
+	if job.JobName == "" {
+		errors = append(errors, "Job name is required")
+	}
+	if job.AnalysisCode == "" {
+		errors = append(errors, "Analysis code is required")
+	}
+	if job.CoreType == "" {
+		errors = append(errors, "Core type is required")
+	}
+	if job.Command == "" {
+		errors = append(errors, "Command is required")
+	}
+	if job.CoresPerSlot <= 0 {
+		errors = append(errors, "Cores per slot must be positive")
+	}
+	if job.Slots <= 0 {
+		errors = append(errors, "Slots must be positive")
+	}
+	if job.WalltimeHours <= 0 {
+		errors = append(errors, "Walltime must be positive")
+	}
+
+	// Validate submitMode using the same logic as pipeline.NormalizeSubmitMode.
+	if job.SubmitMode != "" {
+		switch strings.ToLower(strings.TrimSpace(job.SubmitMode)) {
+		case "", "yes", "true", "submit", "create_and_submit":
+			// valid
+		case "no", "false", "create_only", "draft":
+			// valid
+		default:
+			errors = append(errors, fmt.Sprintf("Invalid submit mode: unrecognized submitMode: %q", job.SubmitMode))
+		}
+	}
+
+	return errors
+}
 
 // CoreTypeValidator validates core types against available options
 type CoreTypeValidator struct {

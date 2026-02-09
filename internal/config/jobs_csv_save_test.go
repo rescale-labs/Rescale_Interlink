@@ -147,6 +147,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		NoDecompress:          true,
 		IsLowPriority:         true,
 		SubmitMode:            "create_and_submit",
+		TarSubpath:            "output/results",
 	}
 
 	tmpDir := t.TempDir()
@@ -222,5 +223,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 				t.Errorf("Tags[%d] = %s, want %s", i, reloaded.Tags[i], originalJob.Tags[i])
 			}
 		}
+	}
+
+	// v4.6.0: TarSubpath round-trip
+	if reloaded.TarSubpath != originalJob.TarSubpath {
+		t.Errorf("TarSubpath = %s, want %s", reloaded.TarSubpath, originalJob.TarSubpath)
 	}
 }

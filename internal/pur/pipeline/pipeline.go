@@ -40,6 +40,7 @@ type Pipeline struct {
 	jobs          []models.JobSpec
 	tempDir       string
 	multiPartMode bool
+	skipTarUpload bool // true for submit-existing: skip tar/upload, go directly to job creation
 
 	// Resource and transfer management
 	resourceMgr *resources.Manager
@@ -54,6 +55,11 @@ type Pipeline struct {
 	tarQueue    chan *workItem
 	uploadQueue chan *workItem
 	jobQueue    chan *workItem
+
+	// Synchronization for safe channel close
+	feederDone      chan struct{}
+	closeUploadOnce sync.Once
+	closeJobOnce    sync.Once
 
 	// Progress tracking
 	mu            sync.Mutex
@@ -111,8 +117,12 @@ func findCommonParent(jobs []models.JobSpec) string {
 	return common
 }
 
-// NewPipeline creates a new pipeline
-func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool) (*Pipeline, error) {
+// NewPipeline creates a new pipeline.
+// v4.6.0: Added existingState parameter. When non-nil, the pipeline shares
+// the caller's state manager instead of creating a duplicate. This fixes the
+// dual-state bug where GUI and pipeline each had their own state.Manager,
+// causing the GUI to always read empty state. CLI callers pass nil.
+func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool) (*Pipeline, error) {
 	// Find common parent directory of all jobs - this is where tarballs will be created
 	commonParent := findCommonParent(jobs)
 
@@ -124,10 +134,16 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		return nil, fmt.Errorf("failed to access tarball directory: %w", err)
 	}
 
-	// Initialize state manager
-	stateMgr := state.NewManager(stateFile)
-	if err := stateMgr.Load(); err != nil {
-		return nil, fmt.Errorf("failed to load state: %w", err)
+	// Use existing state manager if provided (shared with Engine/GUI),
+	// otherwise create a new one (CLI paths).
+	var stateMgr *state.Manager
+	if existingState != nil {
+		stateMgr = existingState
+	} else {
+		stateMgr = state.NewManager(stateFile)
+		if err := stateMgr.Load(); err != nil {
+			return nil, fmt.Errorf("failed to load state: %w", err)
+		}
 	}
 
 	// Initialize resource and transfer managers for efficient upload management
@@ -144,8 +160,10 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		jobs:          jobs,
 		tempDir:       tempDir,
 		multiPartMode: multiPartMode,
+		skipTarUpload: skipTarUpload,
 		resourceMgr:   resourceMgr,
 		transferMgr:   transferMgr,
+		feederDone:    make(chan struct{}),
 		tarWorkers:    cfg.TarWorkers,
 		uploadWorkers: cfg.UploadWorkers,
 		jobWorkers:    cfg.JobWorkers,
@@ -221,8 +239,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	stopProgress := make(chan struct{})
 	go p.progressReporter(stopProgress)
 
-	// Feed work items to tar queue
+	// Feed work items to tar queue (v4.6.0: context-aware to support cancellation)
 	go func() {
+		defer close(p.tarQueue)
+		defer close(p.feederDone)
 		for i, jobSpec := range p.jobs {
 			index := i + 1
 			state := p.stateMgr.GetState(index)
@@ -239,26 +259,54 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				state:   state,
 			}
 
+			// v4.6.0: submit-existing mode — skip tar/upload, go directly to job creation
+			if p.skipTarUpload && state.TarStatus != "success" {
+				item.state.TarStatus = "skipped"
+				item.state.UploadStatus = "skipped"
+				p.stateMgr.UpdateState(item.state)
+				p.reportStateChange(item.state.JobName, "tar", "skipped", "", "", 0.0)
+				p.reportStateChange(item.state.JobName, "upload", "skipped", "", "", 0.0)
+				select {
+				case <-ctx.Done():
+					return
+				case p.jobQueue <- item:
+				}
+				continue
+			}
+
 			// Determine which queue to start in based on current state
 			if state.TarStatus == "success" && state.UploadStatus == "success" && state.JobID != "" {
 				// Already uploaded and job created, check if we need to submit
 				if state.SubmitStatus == "pending" && shouldSubmit(jobSpec.SubmitMode) {
-					p.jobQueue <- item
+					select {
+					case <-ctx.Done():
+						return
+					case p.jobQueue <- item:
+					}
 				}
 			} else if state.TarStatus == "success" && state.UploadStatus == "success" {
 				// Already uploaded, need to create job
-				p.jobQueue <- item
+				select {
+				case <-ctx.Done():
+					return
+				case p.jobQueue <- item:
+				}
 			} else if state.TarStatus == "success" {
 				// Already tarred, need to upload
-				p.uploadQueue <- item
+				select {
+				case <-ctx.Done():
+					return
+				case p.uploadQueue <- item:
+				}
 			} else {
 				// Need to tar
-				p.tarQueue <- item
+				select {
+				case <-ctx.Done():
+					return
+				case p.tarQueue <- item:
+				}
 			}
 		}
-
-		// Close tar queue once all items are queued
-		close(p.tarQueue)
 	}()
 
 	// Wait for all workers to complete
@@ -270,219 +318,261 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	return nil
 }
 
-// tarWorker processes tar operations
+// tarWorker processes tar operations.
+// v4.6.0: Rewritten with select on ctx.Done() to support cancellation.
 func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID int) {
 	defer wg.Done()
 
-	for item := range p.tarQueue {
-		p.setActiveWorker("tar", 1)
+	for {
+		select {
+		case <-ctx.Done():
+			goto shutdown
+		case item, ok := <-p.tarQueue:
+			if !ok {
+				goto shutdown
+			}
 
-		// Check if already tarred
-		if item.state.TarStatus == "success" {
-			// Verify tar file exists
-			exists, err := tar.ValidateTarExists(item.state.TarPath)
+			p.setActiveWorker("tar", 1)
+
+			// Check if already tarred
+			if item.state.TarStatus == "success" {
+				exists, err := tar.ValidateTarExists(item.state.TarPath)
+				if err != nil {
+					log.Printf("[TAR #%d] Warning: error checking existing tar file %s: %v (will recreate)",
+						item.index, item.state.TarPath, err)
+				} else if exists {
+					p.setActiveWorker("tar", -1)
+					select {
+					case <-ctx.Done():
+						goto shutdown
+					case p.uploadQueue <- item:
+					}
+					continue
+				}
+			}
+
+			// v4.6.0: Resolve tar source directory, applying TarSubpath if set
+			tarSourceDir := item.jobSpec.Directory
+			if item.jobSpec.TarSubpath != "" {
+				tarSourceDir = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
+				// Path traversal guard: prevent ../ escape outside run directory
+				absSource, errAbs := filepath.Abs(tarSourceDir)
+				absRunDir, errRun := filepath.Abs(item.jobSpec.Directory)
+				rel, errRel := filepath.Rel(absRunDir, absSource)
+				if errAbs != nil || errRun != nil || errRel != nil || strings.HasPrefix(rel, "..") {
+					log.Printf("[TAR #%d] REJECTED: tar subpath '%s' escapes run directory", item.index, item.jobSpec.TarSubpath)
+					item.state.TarStatus = "failed"
+					item.state.SubmitStatus = "failed"
+					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
+					p.stateMgr.UpdateState(item.state)
+					p.reportStateChange(item.state.JobName, "tar", "failed", "", item.state.ErrorMessage, 0.0)
+					p.setActiveWorker("tar", -1)
+					continue
+				}
+				// Verify subpath exists
+				if _, errStat := os.Stat(tarSourceDir); os.IsNotExist(errStat) {
+					log.Printf("[TAR #%d] FAILED: tar subpath '%s' does not exist", item.index, tarSourceDir)
+					item.state.TarStatus = "failed"
+					item.state.SubmitStatus = "failed"
+					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' does not exist in %s", item.jobSpec.TarSubpath, item.jobSpec.Directory)
+					p.stateMgr.UpdateState(item.state)
+					p.reportStateChange(item.state.JobName, "tar", "failed", "", item.state.ErrorMessage, 0.0)
+					p.setActiveWorker("tar", -1)
+					continue
+				}
+			}
+
+			tarPath := tar.GenerateTarPath(tarSourceDir, p.tempDir, p.cfg.TarCompression)
+			item.state.TarPath = tarPath
+
+			p.reportStateChange(item.state.JobName, "tar", "in_progress", "", "", 0.0)
+			log.Printf("[TAR #%d] Creating archive: %s -> %s", item.index, tarSourceDir, tarPath)
+
+			var err error
+			if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
+				if len(p.cfg.IncludePatterns) > 0 {
+					log.Printf("[TAR #%d] Include patterns: %v", item.index, p.cfg.IncludePatterns)
+				}
+				if len(p.cfg.ExcludePatterns) > 0 {
+					log.Printf("[TAR #%d] Exclude patterns: %v", item.index, p.cfg.ExcludePatterns)
+				}
+				if p.cfg.FlattenTar {
+					log.Printf("[TAR #%d] Flatten mode enabled", item.index)
+				}
+				err = tar.CreateTarGzWithOptions(tarSourceDir, tarPath, p.multiPartMode,
+					p.cfg.IncludePatterns, p.cfg.ExcludePatterns, p.cfg.FlattenTar, p.cfg.TarCompression)
+			} else {
+				err = tar.CreateTarGz(tarSourceDir, tarPath, p.multiPartMode, p.cfg.TarCompression)
+			}
+
 			if err != nil {
-				// Log the error but proceed with re-tarring as a safe fallback
-				log.Printf("[TAR #%d] Warning: error checking existing tar file %s: %v (will recreate)",
-					item.index, item.state.TarPath, err)
-			} else if exists {
-				// Already done, move to upload
+				log.Printf("[TAR #%d] FAILED: %v", item.index, err)
+				item.state.TarStatus = "failed"
+				item.state.SubmitStatus = "failed"
+				item.state.ErrorMessage = err.Error()
+				p.stateMgr.UpdateState(item.state)
+				p.reportStateChange(item.state.JobName, "tar", "failed", "", err.Error(), 0.0)
 				p.setActiveWorker("tar", -1)
-				p.uploadQueue <- item
 				continue
 			}
-		}
 
-		// Generate tar path
-		tarPath := tar.GenerateTarPath(item.jobSpec.Directory, p.tempDir, p.cfg.TarCompression)
-		item.state.TarPath = tarPath
-
-		// Report start of tar operation
-		p.reportStateChange(item.state.JobName, "tar", "in_progress", "", "", 0.0)
-
-		log.Printf("[TAR #%d] Creating archive: %s -> %s", item.index, item.jobSpec.Directory, tarPath)
-
-		// Create tar - use options if patterns or flatten mode are configured
-		var err error
-		if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
-			// Use CreateTarGzWithOptions for filtering/flattening
-			if len(p.cfg.IncludePatterns) > 0 {
-				log.Printf("[TAR #%d] Include patterns: %v", item.index, p.cfg.IncludePatterns)
-			}
-			if len(p.cfg.ExcludePatterns) > 0 {
-				log.Printf("[TAR #%d] Exclude patterns: %v", item.index, p.cfg.ExcludePatterns)
-			}
-			if p.cfg.FlattenTar {
-				log.Printf("[TAR #%d] Flatten mode enabled", item.index)
-			}
-			err = tar.CreateTarGzWithOptions(item.jobSpec.Directory, tarPath, p.multiPartMode,
-				p.cfg.IncludePatterns, p.cfg.ExcludePatterns, p.cfg.FlattenTar, p.cfg.TarCompression)
-		} else {
-			// Use standard tar creation (faster for simple cases)
-			err = tar.CreateTarGz(item.jobSpec.Directory, tarPath, p.multiPartMode, p.cfg.TarCompression)
-		}
-
-		if err != nil {
-			log.Printf("[TAR #%d] FAILED: %v", item.index, err)
-			item.state.TarStatus = "failed"
-			item.state.ErrorMessage = err.Error()
+			item.state.TarStatus = "success"
+			item.state.ErrorMessage = ""
 			p.stateMgr.UpdateState(item.state)
-			p.reportStateChange(item.state.JobName, "tar", "failed", "", err.Error(), 0.0)
+			p.reportStateChange(item.state.JobName, "tar", "completed", "", "", 0.0)
+			log.Printf("[TAR #%d] Success", item.index)
+
 			p.setActiveWorker("tar", -1)
-			continue
+			select {
+			case <-ctx.Done():
+				goto shutdown
+			case p.uploadQueue <- item:
+			}
 		}
-
-		// Update state
-		item.state.TarStatus = "success"
-		item.state.ErrorMessage = ""
-		p.stateMgr.UpdateState(item.state)
-		p.reportStateChange(item.state.JobName, "tar", "completed", "", "", 0.0)
-
-		log.Printf("[TAR #%d] Success", item.index)
-
-		// Move to upload queue
-		p.setActiveWorker("tar", -1)
-		p.uploadQueue <- item
 	}
 
-	// When tar queue is done, close upload queue if all tar workers are done
+shutdown:
 	p.mu.Lock()
 	p.activeWorkers["tar_finished"]++
 	if p.activeWorkers["tar_finished"] == p.tarWorkers {
-		close(p.uploadQueue)
+		go func() {
+			<-p.feederDone
+			p.closeUploadOnce.Do(func() { close(p.uploadQueue) })
+		}()
 	}
 	p.mu.Unlock()
 }
 
-// uploadWorker processes upload operations
+// uploadWorker processes upload operations.
+// v4.6.0: Rewritten with select on ctx.Done() to support cancellation.
 func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerID int) {
 	defer wg.Done()
 
-	for item := range p.uploadQueue {
-		p.setActiveWorker("upload", 1)
-
-		// Check if already uploaded
-		if item.state.UploadStatus == "success" && item.state.FileID != "" {
-			// Already done, move to job creation
-			p.setActiveWorker("upload", -1)
-			p.jobQueue <- item
-			continue
-		}
-
-		log.Printf("[UPLOAD #%d] Uploading: %s", item.index, item.state.TarPath)
-
-		// Report start of upload operation (0% progress)
-		p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", 0.0)
-
-		// Upload file with retry on proxy timeout
-		var cloudFile *models.CloudFile
-		var err error
-		maxRetries := p.cfg.MaxRetries
-		if maxRetries < 1 {
-			maxRetries = 1
-		}
-
-		// Get file size for transfer allocation
-		fileInfo, err := os.Stat(item.state.TarPath)
-		if err != nil {
-			log.Printf("[UPLOAD #%d] FAILED to stat file: %v", item.index, err)
-			item.state.UploadStatus = "failed"
-			item.state.ErrorMessage = err.Error()
-			p.stateMgr.UpdateState(item.state)
-			p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
-			p.setActiveWorker("upload", -1)
-			continue
-		}
-
-		// Allocate transfer handle for resource management
-		transferHandle := p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
-		// NOTE: Do NOT use defer here - we're inside a for loop, so defer won't run until
-		// the function exits, causing resource leaks. Call Complete() explicitly instead.
-
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			// Create progress callback that emits StateChange events
-			progressCallback := func(progress float64) {
-				p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", progress)
+	for {
+		select {
+		case <-ctx.Done():
+			goto shutdown
+		case item, ok := <-p.uploadQueue:
+			if !ok {
+				goto shutdown
 			}
 
-			// Use transfer-managed upload with new canonical API (Sprint 6)
-			cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
-				LocalPath:        item.state.TarPath,
-				FolderID:         "", // empty folder ID means root folder (MyLibrary)
-				APIClient:        p.apiClient,
-				ProgressCallback: progressCallback,
-				TransferHandle:   transferHandle,
-				OutputWriter:     io.Discard, // Pipeline is non-interactive
-			})
+			p.setActiveWorker("upload", 1)
 
-			if err == nil {
-				// Success
-				break
-			}
-
-			// Check if error is proxy timeout
-			errStr := err.Error()
-			isTimeout := strings.Contains(errStr, "timeout") ||
-				strings.Contains(errStr, "SocketTimeoutException") ||
-				strings.Contains(errStr, "connection reset") ||
-				strings.Contains(errStr, "EOF")
-
-			if isTimeout && attempt < maxRetries {
-				log.Printf("[UPLOAD #%d] [RETRY] Detected proxy timeout, forcing fresh auth and retrying...", item.index)
-
-				// Force fresh proxy authentication
-				if p.cfg.ProxyMode == "basic" || p.cfg.ProxyMode == "ntlm" {
-					// Get HTTP client from API client and force warmup
-					// Rely on automatic warmup in basic mode
-					log.Printf("[UPLOAD #%d] [RETRY] Waiting 2 seconds before retry...", item.index)
-					time.Sleep(2 * time.Second)
+			// Check if already uploaded
+			if item.state.UploadStatus == "success" && item.state.FileID != "" {
+				p.setActiveWorker("upload", -1)
+				select {
+				case <-ctx.Done():
+					goto shutdown
+				case p.jobQueue <- item:
 				}
-
-				log.Printf("[UPLOAD #%d] [RETRY] Attempt %d/%d", item.index, attempt+1, maxRetries)
 				continue
 			}
 
-			// Non-timeout error or max retries reached
-			break
-		}
+			log.Printf("[UPLOAD #%d] Uploading: %s", item.index, item.state.TarPath)
+			p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", 0.0)
 
-		if err != nil {
-			if strings.Contains(err.Error(), "timeout") {
-				log.Printf("[UPLOAD #%d] FAILED after %d retries: %v", item.index, maxRetries, err)
-			} else {
-				log.Printf("[UPLOAD #%d] FAILED: %v", item.index, err)
+			var cloudFile *models.CloudFile
+			var err error
+			maxRetries := p.cfg.MaxRetries
+			if maxRetries < 1 {
+				maxRetries = 1
 			}
-			item.state.UploadStatus = "failed"
-			item.state.ErrorMessage = err.Error()
+
+			fileInfo, err := os.Stat(item.state.TarPath)
+			if err != nil {
+				log.Printf("[UPLOAD #%d] FAILED to stat file: %v", item.index, err)
+				item.state.UploadStatus = "failed"
+				item.state.SubmitStatus = "failed"
+				item.state.ErrorMessage = err.Error()
+				p.stateMgr.UpdateState(item.state)
+				p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
+				p.setActiveWorker("upload", -1)
+				continue
+			}
+
+			transferHandle := p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+
+			for attempt := 1; attempt <= maxRetries; attempt++ {
+				progressCallback := func(progress float64) {
+					p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", progress)
+				}
+
+				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
+					LocalPath:        item.state.TarPath,
+					FolderID:         "",
+					APIClient:        p.apiClient,
+					ProgressCallback: progressCallback,
+					TransferHandle:   transferHandle,
+					OutputWriter:     io.Discard,
+				})
+
+				if err == nil {
+					break
+				}
+
+				errStr := err.Error()
+				isTimeout := strings.Contains(errStr, "timeout") ||
+					strings.Contains(errStr, "SocketTimeoutException") ||
+					strings.Contains(errStr, "connection reset") ||
+					strings.Contains(errStr, "EOF")
+
+				if isTimeout && attempt < maxRetries {
+					log.Printf("[UPLOAD #%d] [RETRY] Detected proxy timeout, forcing fresh auth and retrying...", item.index)
+					if p.cfg.ProxyMode == "basic" || p.cfg.ProxyMode == "ntlm" {
+						log.Printf("[UPLOAD #%d] [RETRY] Waiting 2 seconds before retry...", item.index)
+						time.Sleep(2 * time.Second)
+					}
+					log.Printf("[UPLOAD #%d] [RETRY] Attempt %d/%d", item.index, attempt+1, maxRetries)
+					continue
+				}
+
+				break
+			}
+
+			if err != nil {
+				if strings.Contains(err.Error(), "timeout") {
+					log.Printf("[UPLOAD #%d] FAILED after %d retries: %v", item.index, maxRetries, err)
+				} else {
+					log.Printf("[UPLOAD #%d] FAILED: %v", item.index, err)
+				}
+				item.state.UploadStatus = "failed"
+				item.state.SubmitStatus = "failed"
+				item.state.ErrorMessage = err.Error()
+				p.stateMgr.UpdateState(item.state)
+				p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
+				p.setActiveWorker("upload", -1)
+				transferHandle.Complete()
+				continue
+			}
+
+			item.state.FileID = cloudFile.ID
+			item.state.UploadStatus = "success"
+			item.state.ErrorMessage = ""
 			p.stateMgr.UpdateState(item.state)
-			p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
+			p.reportStateChange(item.state.JobName, "upload", "completed", "", "", 1.0)
+			log.Printf("[UPLOAD #%d] Success: File ID %s", item.index, cloudFile.ID)
+
+			transferHandle.Complete()
+
 			p.setActiveWorker("upload", -1)
-			transferHandle.Complete() // Release resources before continuing to next item
-			continue
+			select {
+			case <-ctx.Done():
+				goto shutdown
+			case p.jobQueue <- item:
+			}
 		}
-
-		// Update state
-		item.state.FileID = cloudFile.ID
-		item.state.UploadStatus = "success"
-		item.state.ErrorMessage = ""
-		p.stateMgr.UpdateState(item.state)
-		p.reportStateChange(item.state.JobName, "upload", "completed", "", "", 1.0)
-
-		log.Printf("[UPLOAD #%d] Success: File ID %s", item.index, cloudFile.ID)
-
-		// Release transfer resources before moving to next item
-		transferHandle.Complete()
-
-		// Move to job queue
-		p.setActiveWorker("upload", -1)
-		p.jobQueue <- item
 	}
 
-	// When upload queue is done, close job queue if all upload workers are done
+shutdown:
 	p.mu.Lock()
 	p.activeWorkers["upload_finished"]++
 	if p.activeWorkers["upload_finished"] == p.uploadWorkers {
-		close(p.jobQueue)
+		go func() {
+			<-p.feederDone
+			p.closeJobOnce.Do(func() { close(p.jobQueue) })
+		}()
 	}
 	p.mu.Unlock()
 }
@@ -491,81 +581,83 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID int) {
 	defer wg.Done()
 
-	for item := range p.jobQueue {
-		p.setActiveWorker("job", 1)
+	// v4.6.0: Rewritten with select on ctx.Done() to support cancellation.
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case item, ok := <-p.jobQueue:
+			if !ok {
+				return
+			}
 
-		// Check if job already exists
-		if item.state.JobID != "" && item.state.SubmitStatus == "success" {
-			// Already done
+			p.setActiveWorker("job", 1)
+
+			if item.state.JobID != "" && item.state.SubmitStatus == "success" {
+				p.setActiveWorker("job", -1)
+				p.incrementCompleted()
+				continue
+			}
+
+			if item.state.JobID == "" {
+				log.Printf("[JOB #%d] Creating job: %s", item.index, item.jobSpec.JobName)
+				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
+
+				jobReq, err := BuildJobRequest(item.jobSpec, []string{item.state.FileID})
+				if err != nil {
+					log.Printf("[JOB #%d] FAILED to build request: %v", item.index, err)
+					item.state.SubmitStatus = "failed"
+					item.state.ErrorMessage = err.Error()
+					p.stateMgr.UpdateState(item.state)
+					p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
+					p.setActiveWorker("job", -1)
+					continue
+				}
+
+				jobResp, err := p.apiClient.CreateJob(ctx, *jobReq)
+				if err != nil {
+					log.Printf("[JOB #%d] FAILED to create: %v", item.index, err)
+					item.state.SubmitStatus = "failed"
+					item.state.ErrorMessage = err.Error()
+					p.stateMgr.UpdateState(item.state)
+					p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
+					p.setActiveWorker("job", -1)
+					continue
+				}
+
+				item.state.JobID = jobResp.ID
+				p.stateMgr.UpdateState(item.state)
+				p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
+				log.Printf("[JOB #%d] Created: Job ID %s", item.index, jobResp.ID)
+			}
+
+			if shouldSubmit(item.jobSpec.SubmitMode) && item.state.SubmitStatus != "success" {
+				log.Printf("[JOB #%d] Submitting job %s", item.index, item.state.JobID)
+				p.reportStateChange(item.state.JobName, "submit", "in_progress", item.state.JobID, "", 0.0)
+
+				err := p.apiClient.SubmitJob(ctx, item.state.JobID)
+				if err != nil {
+					log.Printf("[JOB #%d] FAILED to submit: %v", item.index, err)
+					item.state.SubmitStatus = "failed"
+					item.state.ErrorMessage = err.Error()
+					p.stateMgr.UpdateState(item.state)
+					p.reportStateChange(item.state.JobName, "submit", "failed", item.state.JobID, err.Error(), 0.0)
+					p.setActiveWorker("job", -1)
+					continue
+				}
+
+				item.state.SubmitStatus = "success"
+				p.stateMgr.UpdateState(item.state)
+				p.reportStateChange(item.state.JobName, "submit", "completed", item.state.JobID, "", 0.0)
+				log.Printf("[JOB #%d] Submitted successfully", item.index)
+			} else if item.state.SubmitStatus != "success" && item.state.SubmitStatus != "failed" {
+				item.state.SubmitStatus = "skipped"
+				p.stateMgr.UpdateState(item.state)
+			}
+
 			p.setActiveWorker("job", -1)
 			p.incrementCompleted()
-			continue
 		}
-
-		// Create job if not exists
-		if item.state.JobID == "" {
-			log.Printf("[JOB #%d] Creating job: %s", item.index, item.jobSpec.JobName)
-
-			// Report start of create operation
-			p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
-
-			jobReq, err := BuildJobRequest(item.jobSpec, []string{item.state.FileID})
-			if err != nil {
-				log.Printf("[JOB #%d] FAILED to build request: %v", item.index, err)
-				item.state.ErrorMessage = err.Error()
-				p.stateMgr.UpdateState(item.state)
-				p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
-				p.setActiveWorker("job", -1)
-				continue
-			}
-
-			jobResp, err := p.apiClient.CreateJob(ctx, *jobReq)
-			if err != nil {
-				log.Printf("[JOB #%d] FAILED to create: %v", item.index, err)
-				item.state.ErrorMessage = err.Error()
-				p.stateMgr.UpdateState(item.state)
-				p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
-				p.setActiveWorker("job", -1)
-				continue
-			}
-
-			item.state.JobID = jobResp.ID
-			p.stateMgr.UpdateState(item.state)
-			p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
-
-			log.Printf("[JOB #%d] Created: Job ID %s", item.index, jobResp.ID)
-		}
-
-		// Submit job if requested
-		if shouldSubmit(item.jobSpec.SubmitMode) && item.state.SubmitStatus != "success" {
-			log.Printf("[JOB #%d] Submitting job %s", item.index, item.state.JobID)
-
-			// Report start of submit operation
-			p.reportStateChange(item.state.JobName, "submit", "in_progress", item.state.JobID, "", 0.0)
-
-			err := p.apiClient.SubmitJob(ctx, item.state.JobID)
-			if err != nil {
-				log.Printf("[JOB #%d] FAILED to submit: %v", item.index, err)
-				item.state.SubmitStatus = "failed"
-				item.state.ErrorMessage = err.Error()
-				p.stateMgr.UpdateState(item.state)
-				p.reportStateChange(item.state.JobName, "submit", "failed", item.state.JobID, err.Error(), 0.0)
-				p.setActiveWorker("job", -1)
-				continue
-			}
-
-			item.state.SubmitStatus = "success"
-			p.stateMgr.UpdateState(item.state)
-			p.reportStateChange(item.state.JobName, "submit", "completed", item.state.JobID, "", 0.0)
-
-			log.Printf("[JOB #%d] Submitted successfully", item.index)
-		} else {
-			item.state.SubmitStatus = "skipped"
-			p.stateMgr.UpdateState(item.state)
-		}
-
-		p.setActiveWorker("job", -1)
-		p.incrementCompleted()
 	}
 }
 
@@ -656,10 +748,28 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string) (*models.JobRequest,
 	return jobReq, nil
 }
 
+// NormalizeSubmitMode converts UI mode strings to canonical pipeline values.
+// Returns "submit", "create_only", or error for unrecognized modes.
+// v4.6.0: Single source of truth for mode normalization — used by both
+// the pipeline (shouldSubmit) and GUI validation (ValidateJobSpec).
+func NormalizeSubmitMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "yes", "true", "submit", "create_and_submit":
+		return "submit", nil
+	case "no", "false", "create_only", "draft":
+		return "create_only", nil
+	default:
+		return "", fmt.Errorf("unrecognized submitMode: %q", mode)
+	}
+}
+
 // shouldSubmit determines if a job should be submitted based on submit mode
 func shouldSubmit(submitMode string) bool {
-	mode := strings.ToLower(strings.TrimSpace(submitMode))
-	return mode == "yes" || mode == "true" || mode == "submit" || mode == ""
+	normalized, err := NormalizeSubmitMode(submitMode)
+	if err != nil {
+		return false
+	}
+	return normalized == "submit"
 }
 
 // setActiveWorker updates the active worker count

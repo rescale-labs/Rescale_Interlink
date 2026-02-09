@@ -1,5 +1,50 @@
 # Release Notes - Rescale Interlink
 
+## v4.6.0 - February 8, 2026
+
+### PUR Pipeline Bug Fixes
+
+This release fixes seven interrelated bugs that rendered the PUR (Parallel Upload and Run) pipeline non-functional in the GUI. Jobs would scan and tar/upload, but never actually create or submit on Rescale. The GUI showed no progress (0/0/0), provided almost no diagnostic information, the cancel button was unresponsive, and the "Run Subpath" field didn't match user expectations. These fixes affect all platforms.
+
+#### Bug Fixes
+
+**Fix 1: `shouldSubmit()` Rejects the GUI Default Submit Mode**
+- Root cause: `shouldSubmit()` only recognized `"yes"`, `"true"`, `"submit"`, or `""`. The GUI uses `"create_and_submit"` / `"create_only"` / `"draft"`, so jobs were never submitted.
+- Fix: Created `NormalizeSubmitMode()` as a shared helper that maps all GUI and CLI mode strings to canonical `"submit"` or `"create_only"` values. Used in both `shouldSubmit()` and `ValidateJobSpec()` for early validation.
+- **Files**: `internal/pur/pipeline/pipeline.go`, `internal/wailsapp/job_bindings.go`
+
+**Fix 2: GUI Shows "0 of 0" — Dual State Manager + Race Condition**
+- Root cause: Engine and Pipeline each created separate `state.NewManager()` instances. The Pipeline updated its copy; the GUI read from the Engine's — always empty. Also, `e.state` was set inside a goroutine, creating a race where polling started before state existed.
+- Fix: Moved state initialization into `StartRun()` (before goroutine launch). Changed `NewPipeline()` to accept an optional `*state.Manager` so the Engine can share its instance. Pre-populated all jobs as "pending" in `StartBulkRun()` so the GUI sees them immediately.
+- **Files**: `internal/core/engine.go`, `internal/pur/pipeline/pipeline.go`, `internal/wailsapp/job_bindings.go`, `internal/cli/pur.go`
+
+**Fix 3: Terminal-State Accounting — Upstream Failures Leave Jobs as "Pending" Forever**
+- Root cause: When tar/upload/create failed, `SubmitStatus` stayed "pending". `GetRunStats()` only checked `SubmitStatus`, so failed jobs counted as "pending" forever.
+- Fix: Set `SubmitStatus = "failed"` when tar, upload, or create fails. Updated both `GetRunStats()` and `getJobStats()` to use consistent logic with a belt-and-suspenders fallback that checks `TarStatus`/`UploadStatus` for upstream failures.
+- **Files**: `internal/pur/pipeline/pipeline.go`, `internal/core/engine.go`
+
+**Fix 4: Cancel Pipeline — Workers Ignore Context Cancellation**
+- Root cause: Workers used `for item := range channel` which blocks on receive, ignoring `ctx.Done()`. Sends to downstream channels could also deadlock when workers were exiting.
+- Fix: Replaced `range` loops with `select` on `ctx.Done()` in all three workers (tar, upload, job) and the feeder goroutine. All downstream channel sends are now context-aware. Frontend handles "no run in progress" error gracefully during cancel.
+- **Files**: `internal/pur/pipeline/pipeline.go`, `frontend/src/stores/jobStore.ts`
+
+**Fix 5: GUI Needs Comprehensive Pipeline Feedback and Diagnostics**
+- Root cause: The PUR GUI provided almost no diagnostic information during runs.
+- Fix: Added real-time Wails event subscriptions (`interlink:state_change`, `interlink:log`, `interlink:complete`) for live job row updates. Re-added the "Create" column to the jobs table (pipeline has distinct create and submit stages). Added per-job error display with red row highlighting. Added pipeline stage summary bar (Tar/Upload/Create/Submit breakdowns). Added expandable pipeline log panel with timestamped entries. Added error summary on completion screen. Fixed `in_progress` status matching in StatsBar (pipeline emits `in_progress`, not `running`). Reduced polling to 3-second reconciliation since events are primary.
+- **Files**: `frontend/src/stores/jobStore.ts`, `frontend/src/components/tabs/PURTab.tsx`, `frontend/src/stores/index.ts`
+
+**Fix 6: Add "Tar Subpath" Field**
+- Root cause: "Run Subpath" navigates into a subpath before scanning for Run_*. Users wanted to tar only a subdirectory within each matched Run_*.
+- Fix: Added `TarSubpath` field to `JobSpec`, DTOs, scan options, and `tarWorker()`. Includes a path traversal guard that rejects `../` escape attempts. Clarified UI labels: "Run Subpath" renamed to "Scan Prefix" for clarity; new "Tar Subpath" field added.
+- **Files**: `internal/models/job.go`, `internal/wailsapp/job_bindings.go`, `internal/core/engine.go`, `internal/pur/pipeline/pipeline.go`, `frontend/src/stores/jobStore.ts`, `frontend/src/components/tabs/PURTab.tsx`, `frontend/src/components/tabs/SetupTab.tsx`
+
+**Fix 7: Tar File Naming — Readable with Collision-Safe Suffix**
+- Root cause: `GenerateTarPath()` replaced all path separators with underscores, producing unreadable names like `Users_pklein_data_Run_1.tar.gz`.
+- Fix: Uses last 1-2 path components plus a short FNV-32a hash for collision safety. Produces: `Testing_Run_6_a1b2c3d4.tar.gz`.
+- **Files**: `internal/util/tar/tar.go`
+
+---
+
 ## v4.5.9 - February 7, 2026
 
 ### Scanner, Core Count, Proxy Bypass, Encrypted File Cleanup, and Retry Path Fixes

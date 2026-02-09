@@ -4,11 +4,11 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 // CreateTarGz creates a tar archive of a directory using system tar command
@@ -227,27 +227,36 @@ func shouldIncludeFile(fileName string, includePatterns, excludePatterns []strin
 	return true
 }
 
-// GenerateTarPath generates a path for the tar file with correct extension based on compression
+// GenerateTarPath generates a path for the tar file with correct extension based on compression.
+// v4.6.0: Produces human-readable names using last 1-2 path components with an FNV hash
+// suffix for collision safety. Example: "Testing_Run_6_a1b2c3d4.tar.gz"
 func GenerateTarPath(directory, basePath, compression string) string {
-	// Clean the directory path
-	cleanDir := filepath.Clean(directory)
-
-	// Replace path separators with underscores to create filename
-	tarName := strings.ReplaceAll(cleanDir, string(os.PathSeparator), "_")
-	tarName = strings.TrimPrefix(tarName, "_")
-
-	// Remove any leading dots
-	tarName = strings.TrimPrefix(tarName, ".")
-
-	// Add extension based on compression setting (.tar or .tar.gz)
-	if compression == "none" {
-		tarName = tarName + ".tar"
-	} else {
-		tarName = tarName + ".tar.gz"
+	absDir, err := filepath.Abs(directory)
+	if err != nil {
+		absDir = filepath.Clean(directory)
 	}
 
-	// Join with base path (typically a .pur_temp directory)
-	return filepath.Join(basePath, tarName)
+	baseName := filepath.Base(absDir)
+	parentName := filepath.Base(filepath.Dir(absDir))
+
+	var tarName string
+	if parentName != "" && parentName != "." && parentName != string(os.PathSeparator) {
+		tarName = parentName + "_" + baseName
+	} else {
+		tarName = baseName
+	}
+
+	// Append short FNV hash of the full absolute path for collision safety
+	h := fnv.New32a()
+	h.Write([]byte(absDir))
+	tarName = fmt.Sprintf("%s_%08x", tarName, h.Sum32())
+
+	ext := ".tar.gz"
+	if compression == "none" {
+		ext = ".tar"
+	}
+
+	return filepath.Join(basePath, tarName+ext)
 }
 
 // ValidateTarExists checks if a tar file exists and is valid

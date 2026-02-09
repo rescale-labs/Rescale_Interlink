@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.5.9
-**Build Date:** February 7, 2026
+**Version:** 4.6.0
+**Build Date:** February 8, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -389,7 +389,12 @@ rescale-int pur run --config <csv> --jobs-csv <csv> --state <csv>
 - Job submission with parameterization
 - State management for resume capability
 - Concurrent job processing
-- **Source:** `internal/cli/pur.go:45-230`
+- **Submit mode normalization** (v4.6.0): `NormalizeSubmitMode()` maps all GUI/CLI mode strings (`"create_and_submit"`, `"yes"`, `"true"`, `"submit"`, `"draft"`, `"create_only"`) to canonical `"submit"` or `"create_only"` values
+- **Context-aware cancellation** (v4.6.0): All pipeline workers (tar, upload, job) use `select` on `ctx.Done()` for responsive cancel
+- **Tar Subpath** (v4.6.0): Tar only a subdirectory within each matched `Run_*` directory, with path traversal guard
+- **Scan Prefix** (v4.6.0): Navigate into a subdirectory before scanning for `Run_*` patterns (renamed from "Run Subpath" for clarity)
+- **Readable tar naming** (v4.6.0): Archive filenames use last 1-2 path components plus FNV-32a hash suffix
+- **Source:** `internal/cli/pur.go:45-230`, `internal/pur/pipeline/pipeline.go`
 
 **Verified Configuration:**
 - `--config`: Pipeline configuration CSV (core types, walltime, etc.)
@@ -521,7 +526,7 @@ rescale-int software get <code>
 
 ## Security & Encryption
 
-### Proxy Support (v2.4.2, enhanced v4.5.9)
+### Proxy Support (v2.4.2, enhanced v4.5.9+)
 **Implementation:** `internal/http/proxy.go`
 
 **Enterprise-Ready Network Configuration:**
@@ -1104,5 +1109,5 @@ For more details, see:
 
 ---
 
-*Last Updated: February 7, 2026*
-*Version: 4.5.9*
+*Last Updated: February 8, 2026*
+*Version: 4.6.0*

@@ -261,6 +261,7 @@ type ScanOptions struct {
 	RunSubpath        string   // Subpath to navigate before finding runs (e.g., "Simcodes/Powerflow")
 	MultiPartMode     bool     // Enable multi-part mode (scan multiple project directories)
 	PartDirs          []string // Project directories for multi-part mode
+	TarSubpath        string   // v4.6.0: Subdirectory within each Run_* to tar (optional)
 }
 
 // Scan generates a jobs CSV from directory scan
@@ -752,6 +753,11 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 			job.Command = pattern.IterateCommandPatterns(template.Command, templateIdx, dirNum)
 		}
 
+		// v4.6.0: Set TarSubpath from scan options
+		if opts.TarSubpath != "" {
+			job.TarSubpath = opts.TarSubpath
+		}
+
 		jobs = append(jobs, job)
 	}
 
@@ -869,11 +875,14 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Loaded %d jobs from %s", len(jobs), jobsCSVPath), "run", "")
 
-	// Initialize or load state
-	e.state = state.NewManager(stateFile)
+	// v4.6.0: Safety fallback — if state wasn't already initialized by StartRun()
+	// (e.g., CLI callers that don't call StartRun), create it here.
+	if e.state == nil {
+		e.state = state.NewManager(stateFile)
+	}
 
-	// Create pipeline
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false)
+	// Create pipeline with shared state manager
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false)
 	if err != nil {
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
@@ -1011,11 +1020,14 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Starting pipeline with %d jobs (in-memory)...", len(jobs)), "run", "")
 
-	// Initialize state manager
-	e.state = state.NewManager(stateFile)
+	// v4.6.0: Safety fallback — if state wasn't already initialized by StartRun()
+	// (e.g., CLI callers that don't call StartRun), create it here.
+	if e.state == nil {
+		e.state = state.NewManager(stateFile)
+	}
 
-	// Create pipeline directly from JobSpecs (bypassing CSV loading)
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false)
+	// Create pipeline directly from JobSpecs with shared state manager
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false)
 	if err != nil {
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
@@ -1234,6 +1246,9 @@ func (e *Engine) LoadState(stateFile string) ([]*models.JobState, error) {
 
 // StartRun initializes a new run context. Returns error if a run is already active.
 // The caller is responsible for starting the actual pipeline execution.
+// v4.6.0: Also initializes the state manager here (before the goroutine) so that
+// GetState()/GetRunStats() is never nil while a run is active. This fixes the race
+// where polling started before the goroutine had set e.state.
 func (e *Engine) StartRun(runID, stateFile string, totalJobs int) error {
 	e.runCtxMu.Lock()
 	defer e.runCtxMu.Unlock()
@@ -1248,6 +1263,12 @@ func (e *Engine) StartRun(runID, stateFile string, totalJobs int) error {
 		StateFile: stateFile,
 		TotalJobs: totalJobs,
 	}
+
+	// v4.6.0: Initialize state manager in StartRun so it's available before
+	// the pipeline goroutine starts. Prevents GetState() returning nil.
+	e.mu.Lock()
+	e.state = state.NewManager(stateFile)
+	e.mu.Unlock()
 
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Started run %s with %d jobs", runID, totalJobs), "run", "")
 	return nil
@@ -1314,6 +1335,7 @@ func (e *Engine) ResetRun() {
 
 // GetRunStats returns current job statistics for the active run.
 // Returns zeros if no run is active.
+// v4.6.0: Updated to handle upstream failures (tar/upload) and skipped jobs.
 func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
 	e.mu.RLock()
 	st := e.state
@@ -1332,8 +1354,15 @@ func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
 			completed++
 		case "failed":
 			failed++
+		case "skipped":
+			completed++ // create-only mode: skipped submit counts as completed
 		default:
-			pending++
+			// Belt-and-suspenders for upstream failures that didn't set SubmitStatus
+			if job.TarStatus == "failed" || job.UploadStatus == "failed" {
+				failed++
+			} else {
+				pending++
+			}
 		}
 	}
 
@@ -1457,6 +1486,7 @@ type jobStats struct {
 	Pending   int
 }
 
+// v4.6.0: Aligned with GetRunStats() to use consistent SubmitStatus-based logic.
 func (e *Engine) getJobStats() jobStats {
 	e.mu.RLock()
 	st := e.state
@@ -1471,13 +1501,19 @@ func (e *Engine) getJobStats() jobStats {
 	stats.Total = len(jobs)
 
 	for _, job := range jobs {
-		// v4.0.8: Check both "success" and "completed" for consistency with GetRunStats()
-		if job.SubmitStatus == "success" || job.SubmitStatus == "completed" {
+		switch job.SubmitStatus {
+		case "success", "completed":
 			stats.Completed++
-		} else if job.ErrorMessage != "" {
+		case "failed":
 			stats.Failed++
-		} else {
-			stats.Pending++
+		case "skipped":
+			stats.Completed++ // create-only mode
+		default:
+			if job.TarStatus == "failed" || job.UploadStatus == "failed" {
+				stats.Failed++
+			} else {
+				stats.Pending++
+			}
 		}
 	}
 

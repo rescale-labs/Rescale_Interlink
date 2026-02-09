@@ -413,9 +413,12 @@ Example:
 				}
 			}
 
-			// Basic validation
+			// v4.6.0: Shared validation — same rules as GUI ValidateJobSpec
+			hasErrors := false
 			for i, job := range jobs {
-				// Check directory exists
+				errs := validation.ValidateJobSpec(job)
+
+				// Also check directory exists (warning, not fatal)
 				if _, err := os.Stat(job.Directory); os.IsNotExist(err) {
 					logger.Warn().
 						Str("job", job.JobName).
@@ -423,7 +426,19 @@ Example:
 						Msg("Directory does not exist")
 				}
 
-				fmt.Printf("[%d/%d] ✓ %s\n", i+1, len(jobs), job.JobName)
+				if len(errs) > 0 {
+					hasErrors = true
+					fmt.Printf("[%d/%d] ✗ %s\n", i+1, len(jobs), job.JobName)
+					for _, e := range errs {
+						fmt.Printf("        - %s\n", e)
+					}
+				} else {
+					fmt.Printf("[%d/%d] ✓ %s\n", i+1, len(jobs), job.JobName)
+				}
+			}
+
+			if hasErrors {
+				return fmt.Errorf("validation failed: one or more jobs have errors")
 			}
 
 			logger.Info().Msg("All jobs validated successfully")
@@ -486,7 +501,7 @@ Example:
 			}
 
 			// Create pipeline
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
@@ -566,7 +581,7 @@ Example:
 			}
 
 			// Create pipeline (will load existing state)
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
@@ -635,6 +650,13 @@ Example:
 
 			fmt.Printf("Loaded %d job(s) from %s\n\n", len(jobs), jobsCSV)
 
+			// Preflight validation: submit-existing requires ExtraInputFileIDs
+			for i, job := range jobs {
+				if job.ExtraInputFileIDs == "" {
+					return fmt.Errorf("job %d (%s): ExtraInputFileIDs is empty — submit-existing requires pre-uploaded file IDs", i+1, job.JobName)
+				}
+			}
+
 			// Create API client
 			apiClient, err := api.NewClient(cfg)
 			if err != nil {
@@ -644,7 +666,7 @@ Example:
 			// Create pipeline with skip-upload mode
 			// The pipeline will skip tar and upload, only create and submit jobs
 			logger.Info().Msg("Creating pipeline (submit-existing mode)")
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, false)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, false, nil, true)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}

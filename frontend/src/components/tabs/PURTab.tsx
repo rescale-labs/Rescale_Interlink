@@ -14,7 +14,7 @@ import {
   CheckIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, WorkflowState, JobRow } from '../../stores'
+import { useJobStore, WorkflowState, JobRow, PipelineLogEntry, PipelineStageStats } from '../../stores'
 import { TemplateBuilder } from '../widgets'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import * as Runtime from '../../../wailsjs/runtime/runtime'
@@ -35,6 +35,7 @@ function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
     pending: 'bg-gray-200 text-gray-700',
     running: 'bg-blue-200 text-blue-700',
+    in_progress: 'bg-blue-200 text-blue-700',
     success: 'bg-green-200 text-green-700',
     completed: 'bg-green-200 text-green-700',
     failed: 'bg-red-200 text-red-700',
@@ -116,15 +117,15 @@ function StatsBar({ jobs }: { jobs: JobRow[] }) {
   const stats = jobs.reduce(
     (acc, job) => {
       acc.total++
-      if (job.submitStatus === 'completed' || job.submitStatus === 'success') {
+      if (job.submitStatus === 'completed' || job.submitStatus === 'success' || job.submitStatus === 'skipped') {
         acc.completed++
-      } else if (job.submitStatus === 'failed') {
+      } else if (job.submitStatus === 'failed' || job.tarStatus === 'failed' || job.uploadStatus === 'failed') {
         acc.failed++
       } else if (
-        job.tarStatus === 'running' ||
-        job.uploadStatus === 'running' ||
-        job.createStatus === 'running' ||
-        job.submitStatus === 'running'
+        job.tarStatus === 'running' || job.tarStatus === 'in_progress' ||
+        job.uploadStatus === 'running' || job.uploadStatus === 'in_progress' ||
+        job.createStatus === 'running' || job.createStatus === 'in_progress' ||
+        job.submitStatus === 'running' || job.submitStatus === 'in_progress'
       ) {
         acc.inProgress++
       } else {
@@ -179,12 +180,18 @@ function JobsTable({ jobs }: { jobs: JobRow[] }) {
             <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
               Upload
             </th>
-            {/* v4.0.7 L2: Removed unused "Create" column - PUR workflow is Tar→Upload→Submit */}
+            {/* v4.6.0: Re-added Create column — pipeline has distinct create and submit stages */}
+            <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
+              Create
+            </th>
             <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
               Submit
             </th>
             <th className="px-4 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
               Job ID
+            </th>
+            <th className="px-4 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
+              Error
             </th>
           </tr>
         </thead>
@@ -192,7 +199,10 @@ function JobsTable({ jobs }: { jobs: JobRow[] }) {
           {jobs.map((job) => (
             <tr
               key={job.index}
-              className="hover:bg-gray-50 dark:hover:bg-gray-800/50"
+              className={clsx(
+                'hover:bg-gray-50 dark:hover:bg-gray-800/50',
+                job.error && 'bg-red-50 dark:bg-red-900/10'
+              )}
             >
               <td className="px-4 py-2 text-gray-600">{job.index + 1}</td>
               <td className="px-4 py-2 font-mono text-xs truncate max-w-48" title={job.directory}>
@@ -203,7 +213,7 @@ function JobsTable({ jobs }: { jobs: JobRow[] }) {
                 <StatusBadge status={job.tarStatus} />
               </td>
               <td className="px-4 py-2 text-center">
-                {job.uploadStatus === 'running' && job.uploadProgress > 0 ? (
+                {(job.uploadStatus === 'running' || job.uploadStatus === 'in_progress') && job.uploadProgress > 0 ? (
                   <span className="px-2 py-0.5 text-xs rounded-full font-medium bg-blue-200 text-blue-700">
                     {job.uploadProgress.toFixed(1)}%
                   </span>
@@ -211,17 +221,119 @@ function JobsTable({ jobs }: { jobs: JobRow[] }) {
                   <StatusBadge status={job.uploadStatus} />
                 )}
               </td>
-              {/* v4.0.7 L2: Removed unused createStatus column */}
+              {/* v4.6.0: Re-added Create column */}
+              <td className="px-4 py-2 text-center">
+                <StatusBadge status={job.createStatus} />
+              </td>
               <td className="px-4 py-2 text-center">
                 <StatusBadge status={job.submitStatus} />
               </td>
               <td className="px-4 py-2 font-mono text-xs text-gray-500">
                 {job.jobId || '-'}
               </td>
+              <td className="px-4 py-2 text-xs max-w-48 truncate" title={job.error || ''}>
+                {job.error ? (
+                  <span className="text-red-600">{job.error}</span>
+                ) : '-'}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// v4.6.0: Pipeline stage summary showing per-stage breakdown
+function PipelineStageSummary({ stats, total }: { stats: PipelineStageStats; total: number }) {
+  const stages = [
+    { label: 'Tar', data: stats.tar },
+    { label: 'Upload', data: stats.upload },
+    { label: 'Create', data: stats.create },
+    { label: 'Submit', data: stats.submit },
+  ]
+
+  return (
+    <div className="flex items-center gap-6 mb-3 p-2 bg-blue-50 dark:bg-blue-900/20 rounded text-xs">
+      {stages.map((s) => (
+        <span key={s.label}>
+          <span className="font-medium">{s.label}:</span>{' '}
+          <span className="text-green-600">{s.data.completed}</span>
+          {s.data.failed > 0 && <span className="text-red-600">/{s.data.failed}err</span>}
+          /{total}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// v4.6.0: Pipeline log panel for in-tab diagnostic output
+function PipelineLogPanel({ logs, maxHeight = 200 }: { logs: PipelineLogEntry[]; maxHeight?: number }) {
+  const [expanded, setExpanded] = useState(false)
+
+  if (logs.length === 0) return null
+
+  const displayLogs = expanded ? logs : logs.slice(-10)
+
+  return (
+    <div className="mt-4">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 mb-1"
+      >
+        {expanded ? 'Hide' : 'Show'} Pipeline Log ({logs.length} entries)
+      </button>
+      {expanded && (
+        <div
+          className="bg-gray-900 text-gray-200 rounded p-2 font-mono text-xs overflow-auto"
+          style={{ maxHeight }}
+        >
+          {displayLogs.map((log, i) => (
+            <div key={i} className={clsx(
+              'py-0.5',
+              log.level === 'error' && 'text-red-400',
+              log.level === 'warn' && 'text-yellow-400',
+            )}>
+              <span className="text-gray-500">{new Date(log.timestamp).toLocaleTimeString()}</span>
+              {' '}
+              {log.jobName && <span className="text-blue-400">[{log.jobName}]</span>}
+              {' '}
+              {log.message}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// v4.6.0: Error summary for completed view
+function ErrorSummary({ jobs }: { jobs: JobRow[] }) {
+  const failedJobs = jobs.filter((j) => j.error)
+  const [expanded, setExpanded] = useState(false)
+
+  if (failedJobs.length === 0) return null
+
+  return (
+    <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-sm font-medium text-red-700 dark:text-red-400"
+      >
+        <ExclamationTriangleIcon className="w-4 h-4" />
+        {failedJobs.length} job{failedJobs.length !== 1 ? 's' : ''} failed
+        <span className="text-xs text-red-500">({expanded ? 'hide' : 'show details'})</span>
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-1 text-xs">
+          {failedJobs.map((job) => (
+            <div key={job.index} className="flex items-start gap-2">
+              <span className="font-medium text-red-600 whitespace-nowrap">{job.jobName}:</span>
+              <span className="text-red-500">{job.error}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -252,6 +364,9 @@ export function PURTab() {
     loadMemory,
     loadJobsFromCSV,
     saveJobsToCSV,
+    pipelineLogs,
+    pipelineStageStats,
+    startTime,
   } = useJobStore()
 
   // Template builder dialog state
@@ -610,7 +725,7 @@ export function PURTab() {
               </div>
             )}
 
-            {/* Folder mode only: Validation Pattern and Run Subpath */}
+            {/* Folder mode only: Validation Pattern, Scan Prefix, and Tar Subpath */}
             {scanOptions.scanMode === 'folders' && (
               <>
                 <div>
@@ -625,9 +740,10 @@ export function PURTab() {
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
+                {/* v4.6.0: Clarified label from "Run Subpath" to "Scan Prefix" */}
                 <div>
                   <label className="block text-sm font-medium mb-1">
-                    Run Subpath (optional)
+                    Scan Prefix (optional)
                   </label>
                   <input
                     type="text"
@@ -636,6 +752,21 @@ export function PURTab() {
                     placeholder="Simcodes/Powerflow"
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
+                  <p className="mt-1 text-xs text-gray-500">Navigate into a subpath before scanning for Run_* directories</p>
+                </div>
+                {/* v4.6.0: New TarSubpath field */}
+                <div>
+                  <label className="block text-sm font-medium mb-1">
+                    Tar Subpath (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={scanOptions.tarSubpath || ''}
+                    onChange={(e) => setScanOptions({ tarSubpath: e.target.value })}
+                    placeholder="output/results"
+                    className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">Only tar this subdirectory within each matched Run_*</p>
                 </div>
               </>
             )}
@@ -842,14 +973,30 @@ export function PURTab() {
 
     // Executing - show progress
     if (workflowState === 'executing') {
+      const totalJobs = jobRows.length || runStatus.totalJobs || 1
+      const completedJobs = jobRows.filter((j) =>
+        j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
+      ).length
+      const failedJobs = jobRows.filter((j) =>
+        j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
+      ).length
+      const doneJobs = completedJobs + failedJobs
+      const elapsed = startTime ? Math.round((Date.now() - startTime) / 1000) : 0
+      const elapsedStr = elapsed > 3600
+        ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`
+        : elapsed > 60
+          ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+          : `${elapsed}s`
+
       return (
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-lg font-semibold">Pipeline Running</h3>
               <p className="text-sm text-gray-500">
-                {runStatus.successJobs} of {runStatus.totalJobs} complete
-                {runStatus.failedJobs > 0 && ` (${runStatus.failedJobs} failed)`}
+                {doneJobs} of {totalJobs} complete
+                {failedJobs > 0 && ` (${failedJobs} failed)`}
+                {' '}&middot; Elapsed: {elapsedStr}
               </p>
             </div>
             <button
@@ -866,46 +1013,78 @@ export function PURTab() {
             <div className="flex justify-between text-sm mb-1">
               <span>Progress</span>
               <span>
-                {Math.round((runStatus.successJobs / runStatus.totalJobs) * 100) || 0}%
+                {Math.round((doneJobs / totalJobs) * 100) || 0}%
               </span>
             </div>
             <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
               <div
-                className="h-full bg-blue-500 transition-all duration-500"
+                className="h-full transition-all duration-500"
                 style={{
-                  width: `${(runStatus.successJobs / runStatus.totalJobs) * 100 || 0}%`,
+                  width: `${(doneJobs / totalJobs) * 100 || 0}%`,
+                  background: failedJobs > 0
+                    ? `linear-gradient(to right, #3b82f6 ${(completedJobs / totalJobs) * 100}%, #ef4444 ${(completedJobs / totalJobs) * 100}%)`
+                    : '#3b82f6',
                 }}
               />
             </div>
           </div>
 
+          {/* v4.6.0: Per-stage breakdown */}
+          <PipelineStageSummary stats={pipelineStageStats} total={totalJobs} />
+
           <StatsBar jobs={jobRows} />
           <JobsTable jobs={jobRows} />
+
+          {/* v4.6.0: Pipeline log panel */}
+          <PipelineLogPanel logs={pipelineLogs} />
         </div>
       )
     }
 
     // Completed
     if (workflowState === 'completed') {
-      const allSuccess = runStatus.failedJobs === 0
+      // v4.6.0: Compute stats from jobRows (more reliable than runStatus which may lag)
+      const completedCount = jobRows.filter((j) =>
+        j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
+      ).length
+      const failedCount = jobRows.filter((j) =>
+        j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.error
+      ).length
+      const allSuccess = failedCount === 0
+      const wasCancelled = runStatus.state === 'cancelled'
 
       return (
         <div className="p-6">
           <div className="flex flex-col items-center justify-center mb-6">
-            {allSuccess ? (
+            {wasCancelled ? (
+              <StopIcon className="w-16 h-16 text-gray-500 mb-4" />
+            ) : allSuccess ? (
               <CheckCircleIcon className="w-16 h-16 text-green-500 mb-4" />
             ) : (
               <ExclamationTriangleIcon className="w-16 h-16 text-yellow-500 mb-4" />
             )}
             <h3 className="text-lg font-semibold mb-2">
-              {allSuccess ? 'Pipeline Complete!' : 'Pipeline Complete with Errors'}
+              {wasCancelled
+                ? 'Pipeline Cancelled'
+                : allSuccess
+                  ? 'Pipeline Complete!'
+                  : 'Pipeline Complete with Errors'}
             </h3>
             <p className="text-sm text-gray-500">
-              {runStatus.successJobs} succeeded, {runStatus.failedJobs} failed
+              {completedCount} succeeded, {failedCount} failed
+              {wasCancelled && `, ${jobRows.length - completedCount - failedCount} cancelled`}
             </p>
           </div>
 
+          {/* v4.6.0: Error summary with expandable details */}
+          <ErrorSummary jobs={jobRows} />
+
           <JobsTable jobs={jobRows} />
+
+          {/* v4.6.0: Pipeline log on completion for diagnostics */}
+          {pipelineLogs.length > 0 && (
+            <PipelineLogPanel logs={pipelineLogs} maxHeight={300} />
+          )}
 
           <div className="flex justify-center mt-6">
             <button

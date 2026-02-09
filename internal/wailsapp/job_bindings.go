@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/filescan"
 	"github.com/rescale/rescale-int/internal/pur/parser"
+	"github.com/rescale/rescale-int/internal/pur/validation"
 )
 
 // emitScanProgress publishes a scan progress event for software/hardware catalog scanning.
@@ -63,6 +64,9 @@ type JobSpecDTO struct {
 	// v4.0.8: File-based job inputs (for file scanning mode)
 	// When InputFiles is non-empty, these files are uploaded instead of tarring Directory
 	InputFiles []string `json:"inputFiles,omitempty"`
+
+	// v4.6.0: Optional subdirectory within each Run_* to tar
+	TarSubpath string `json:"tarSubpath,omitempty"`
 }
 
 // SecondaryPatternDTO represents a secondary file pattern for file-based scanning.
@@ -85,6 +89,9 @@ type ScanOptionsDTO struct {
 	ScanMode          string                `json:"scanMode"`          // "folders" (default) or "files"
 	PrimaryPattern    string                `json:"primaryPattern"`    // For file mode: e.g., "*.inp", "inputs/*.inp"
 	SecondaryPatterns []SecondaryPatternDTO `json:"secondaryPatterns"` // For file mode: secondary files to attach
+
+	// v4.6.0: Optional subdirectory within each matched Run_* to tar
+	TarSubpath string `json:"tarSubpath,omitempty"`
 }
 
 // ScanResultDTO is the result of a directory scan.
@@ -225,6 +232,7 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		IncludeHidden:     opts.IncludeHidden,
 		PartDirs:          []string{opts.RootDir},
 		StartIndex:        1, // Prevent job names starting at _0
+		TarSubpath:        opts.TarSubpath, // v4.6.0
 	}
 
 	templateSpec := dtoToJobSpec(template)
@@ -508,6 +516,15 @@ func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 		return "", err
 	}
 
+	// v4.6.0: Pre-populate all jobs as "pending" in the state manager so the GUI
+	// sees them immediately (before the pipeline goroutine starts processing).
+	if st := a.engine.GetState(); st != nil {
+		for i, job := range jobSpecs {
+			st.InitializeState(i+1, job.JobName, job.Directory)
+		}
+		st.Save()
+	}
+
 	// Create cancellable context
 	// v4.0.5: Protected by runMu to prevent race conditions
 	ctx, cancel := context.WithCancel(context.Background())
@@ -728,33 +745,9 @@ func (a *App) ResetRun() {
 }
 
 // ValidateJobSpec validates a job specification.
-// v4.0.8: Added Slots validation (was missing, caused runtime failures).
+// v4.6.0: Delegates to shared validation.ValidateJobSpec for CLI/GUI consistency.
 func (a *App) ValidateJobSpec(job JobSpecDTO) []string {
-	var errors []string
-
-	if job.JobName == "" {
-		errors = append(errors, "Job name is required")
-	}
-	if job.AnalysisCode == "" {
-		errors = append(errors, "Analysis code is required")
-	}
-	if job.CoreType == "" {
-		errors = append(errors, "Core type is required")
-	}
-	if job.Command == "" {
-		errors = append(errors, "Command is required")
-	}
-	if job.CoresPerSlot <= 0 {
-		errors = append(errors, "Cores per slot must be positive")
-	}
-	if job.Slots <= 0 {
-		errors = append(errors, "Slots must be positive")
-	}
-	if job.WalltimeHours <= 0 {
-		errors = append(errors, "Walltime must be positive")
-	}
-
-	return errors
+	return validation.ValidateJobSpec(dtoToJobSpec(job))
 }
 
 // Helper functions
@@ -781,6 +774,7 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		ProjectID:             j.ProjectID,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
+		TarSubpath:            j.TarSubpath, // v4.6.0
 	}
 }
 
@@ -806,6 +800,7 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		ProjectID:             j.ProjectID,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
+		TarSubpath:            j.TarSubpath, // v4.6.0
 	}
 }
 

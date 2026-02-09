@@ -27,6 +27,10 @@ type JobSpec struct {
 	// v4.0.8: File-based job inputs (for file scanning mode in PUR)
 	// When InputFiles is non-empty, these files are uploaded individually instead of tarring Directory
 	InputFiles []string
+
+	// v4.6.0: Optional subdirectory within each Run_* to tar instead of the full directory.
+	// When set, only the contents of Directory/TarSubpath are archived.
+	TarSubpath string `json:"tarSubpath,omitempty"`
 }
 
 // JobState represents the state of a job in the pipeline

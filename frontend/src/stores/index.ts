@@ -18,4 +18,6 @@ export type {
   Automation,
   ScanOptions,
   WorkflowMemory,
+  PipelineLogEntry,
+  PipelineStageStats,
 } from './jobStore';

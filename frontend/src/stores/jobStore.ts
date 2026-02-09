@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../wailsjs/go/models'
+import { EventsOn } from '../../wailsjs/runtime/runtime'
 
 // Workflow state enum (matches Go JobsWorkflow)
 export type WorkflowState =
@@ -117,6 +118,9 @@ export interface ScanOptions {
   scanMode: 'folders' | 'files'
   primaryPattern: string           // For file mode: e.g., "*.inp", "inputs/*.inp"
   secondaryPatterns: SecondaryPattern[]
+
+  // v4.6.0: Subdirectory within each Run_* to tar
+  tarSubpath: string
 }
 
 // Default job template
@@ -139,6 +143,23 @@ export const DEFAULT_JOB_TEMPLATE: JobSpec = {
   tags: [],
   projectId: '',
   automations: [],
+}
+
+// v4.6.0: Pipeline log entry for in-tab display
+export interface PipelineLogEntry {
+  timestamp: number
+  level: string
+  message: string
+  jobName?: string
+  stage?: string
+}
+
+// v4.6.0: Per-stage stats for pipeline summary
+export interface PipelineStageStats {
+  tar: { completed: number; total: number; failed: number }
+  upload: { completed: number; total: number; failed: number }
+  create: { completed: number; total: number; failed: number }
+  submit: { completed: number; total: number; failed: number }
 }
 
 // Workflow memory - persisted values between sessions
@@ -193,6 +214,12 @@ interface JobStore {
 
   // Workflow memory
   memory: WorkflowMemory
+
+  // v4.6.0: Pipeline diagnostics
+  pipelineLogs: PipelineLogEntry[]
+  pipelineStageStats: PipelineStageStats
+  _eventUnsubs: (() => void)[]
+  startTime: number | null
 
   // Polling
   isPolling: boolean
@@ -310,6 +337,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
     scanMode: 'folders' as const,
     primaryPattern: '*.inp',
     secondaryPatterns: [],
+    // v4.6.0
+    tarSubpath: '',
   },
   isScanning: false,
   scanError: null,
@@ -322,6 +351,17 @@ export const useJobStore = create<JobStore>((set, get) => ({
     lastAnalysisCode: '',
     lastProjectId: '',
   },
+
+  // v4.6.0: Pipeline diagnostics
+  pipelineLogs: [],
+  pipelineStageStats: {
+    tar: { completed: 0, total: 0, failed: 0 },
+    upload: { completed: 0, total: 0, failed: 0 },
+    create: { completed: 0, total: 0, failed: 0 },
+    submit: { completed: 0, total: 0, failed: 0 },
+  },
+  _eventUnsubs: [],
+  startTime: null,
 
   isPolling: false,
   _pollInterval: null,
@@ -401,6 +441,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
       },
       runId: null,
       scanError: null,
+      pipelineLogs: [],
+      startTime: null,
     })
   },
 
@@ -459,6 +501,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
           scanMode: scanOptions.scanMode,
           primaryPattern: scanOptions.primaryPattern,
           secondaryPatterns: secondaryPatternsDTO,
+          // v4.6.0
+          tarSubpath: scanOptions.tarSubpath,
         } as wailsapp.ScanOptionsDTO,
         template as wailsapp.JobSpecDTO
       )
@@ -544,13 +588,94 @@ export const useJobStore = create<JobStore>((set, get) => ({
     }
 
     try {
-      set({ workflowState: 'executing' })
+      set({
+        workflowState: 'executing',
+        pipelineLogs: [],
+        startTime: Date.now(),
+      })
 
       const runId = await App.StartBulkRun(scannedJobs as wailsapp.JobSpecDTO[])
       set({ runId })
 
-      // Start polling for status updates
-      get().startPolling()
+      // v4.6.0: Subscribe to real-time Wails events for live updates
+      const unsubs: (() => void)[] = []
+
+      // State change events: update individual job rows by jobName/stage
+      unsubs.push(EventsOn('interlink:state_change', (data: {
+        jobName: string; stage: string; newStatus: string;
+        jobId: string; errorMessage: string; uploadProgress: number
+      }) => {
+        set((state) => {
+          const jobRows = [...state.jobRows]
+          const idx = jobRows.findIndex((r) => r.jobName === data.jobName)
+          if (idx === -1) return state
+
+          const row = { ...jobRows[idx] }
+          if (data.stage === 'tar') row.tarStatus = data.newStatus
+          else if (data.stage === 'upload') {
+            row.uploadStatus = data.newStatus
+            if (data.uploadProgress > 0) row.uploadProgress = data.uploadProgress * 100
+          }
+          else if (data.stage === 'create') row.createStatus = data.newStatus
+          else if (data.stage === 'submit') row.submitStatus = data.newStatus
+
+          if (data.jobId) row.jobId = data.jobId
+          if (data.errorMessage) row.error = data.errorMessage
+          if (data.newStatus === 'failed') row.status = 'failed'
+          else if (data.newStatus === 'completed' && data.stage === 'submit') row.status = 'completed'
+
+          jobRows[idx] = row
+
+          // Recompute stage stats from job rows
+          const stageStats: PipelineStageStats = {
+            tar: { completed: 0, total: jobRows.length, failed: 0 },
+            upload: { completed: 0, total: jobRows.length, failed: 0 },
+            create: { completed: 0, total: jobRows.length, failed: 0 },
+            submit: { completed: 0, total: jobRows.length, failed: 0 },
+          }
+          for (const r of jobRows) {
+            if (r.tarStatus === 'completed' || r.tarStatus === 'success' || r.tarStatus === 'skipped') stageStats.tar.completed++
+            if (r.tarStatus === 'failed') stageStats.tar.failed++
+            if (r.uploadStatus === 'completed' || r.uploadStatus === 'success' || r.uploadStatus === 'skipped') stageStats.upload.completed++
+            if (r.uploadStatus === 'failed') stageStats.upload.failed++
+            if (r.createStatus === 'completed' || r.createStatus === 'success') stageStats.create.completed++
+            if (r.createStatus === 'failed') stageStats.create.failed++
+            if (r.submitStatus === 'completed' || r.submitStatus === 'success' || r.submitStatus === 'skipped') stageStats.submit.completed++
+            if (r.submitStatus === 'failed') stageStats.submit.failed++
+          }
+
+          return { jobRows, pipelineStageStats: stageStats }
+        })
+      }))
+
+      // Log events: collect pipeline log messages for in-tab display
+      unsubs.push(EventsOn('interlink:log', (data: {
+        level: string; message: string; category: string; detail: string
+      }) => {
+        set((state) => {
+          const entry: PipelineLogEntry = {
+            timestamp: Date.now(),
+            level: data.level,
+            message: data.message,
+            jobName: data.detail || undefined,
+            stage: data.category || undefined,
+          }
+          // Keep last 200 log entries
+          const logs = [...state.pipelineLogs, entry].slice(-200)
+          return { pipelineLogs: logs }
+        })
+      }))
+
+      // Complete event: transition to completed state
+      unsubs.push(EventsOn('interlink:complete', () => {
+        get().stopPolling()
+        set({ workflowState: 'completed' })
+      }))
+
+      set({ _eventUnsubs: unsubs })
+
+      // Start polling for reconciliation (reduced interval since events are primary)
+      get().startPolling(3000)
 
       return runId
     } catch (error) {
@@ -568,9 +693,17 @@ export const useJobStore = create<JobStore>((set, get) => ({
       get().stopPolling()
       set({
         runStatus: { ...get().runStatus, state: 'cancelled' },
+        workflowState: 'completed',
       })
     } catch (error) {
-      console.error('Failed to cancel run:', error)
+      // v4.6.0: Handle "no run in progress" gracefully (race between cancel and completion)
+      const errMsg = error instanceof Error ? error.message : String(error)
+      if (errMsg.includes('no run') || errMsg.includes('not in progress')) {
+        get().stopPolling()
+        set({ workflowState: 'completed' })
+      } else {
+        console.error('Failed to cancel run:', error)
+      }
     }
   },
 
@@ -581,13 +714,65 @@ export const useJobStore = create<JobStore>((set, get) => ({
         App.GetJobRows(),
       ])
 
-      set({
-        runStatus: status as RunStatus,
-        jobRows: (rows || []) as JobRow[],
+      set((prev) => {
+        const polledRows = (rows || []) as JobRow[]
+
+        // Guard: if poll returns empty during active run, preserve existing rows
+        if (polledRows.length === 0 && prev.jobRows.length > 0 &&
+            prev.workflowState === 'executing') {
+          return { runStatus: status as RunStatus }
+        }
+
+        const mergedRows = polledRows.map((polled) => {
+          const existing = prev.jobRows.find((r) => r.jobName === polled.jobName)
+          if (!existing) return polled
+          return {
+            ...existing,
+            // State manager is authoritative for persisted fields (non-empty wins)
+            tarStatus: polled.tarStatus || existing.tarStatus,
+            uploadStatus: polled.uploadStatus || existing.uploadStatus,
+            submitStatus: polled.submitStatus || existing.submitStatus,
+            jobId: polled.jobId || existing.jobId,
+            error: polled.error || existing.error,
+            // Preserve event-sourced transient fields (createStatus not in state mgr)
+            createStatus: existing.createStatus || polled.createStatus,
+            // Normalize: polled progress is 0.0-1.0, events store as 0-100
+            uploadProgress: polled.uploadProgress > 0
+              ? polled.uploadProgress * 100
+              : existing.uploadProgress,
+            // Preserve event-derived overall status
+            status: existing.status === 'failed' ? 'failed'
+              : (polled.submitStatus === 'success' ? 'completed' : existing.status),
+          }
+        })
+
+        // Recompute stage stats
+        const stageStats: PipelineStageStats = {
+          tar: { completed: 0, total: mergedRows.length, failed: 0 },
+          upload: { completed: 0, total: mergedRows.length, failed: 0 },
+          create: { completed: 0, total: mergedRows.length, failed: 0 },
+          submit: { completed: 0, total: mergedRows.length, failed: 0 },
+        }
+        for (const r of mergedRows) {
+          if (r.tarStatus === 'completed' || r.tarStatus === 'success' || r.tarStatus === 'skipped') stageStats.tar.completed++
+          if (r.tarStatus === 'failed') stageStats.tar.failed++
+          if (r.uploadStatus === 'completed' || r.uploadStatus === 'success' || r.uploadStatus === 'skipped') stageStats.upload.completed++
+          if (r.uploadStatus === 'failed') stageStats.upload.failed++
+          if (r.createStatus === 'completed' || r.createStatus === 'success') stageStats.create.completed++
+          if (r.createStatus === 'failed') stageStats.create.failed++
+          if (r.submitStatus === 'completed' || r.submitStatus === 'success' || r.submitStatus === 'skipped') stageStats.submit.completed++
+          if (r.submitStatus === 'failed') stageStats.submit.failed++
+        }
+
+        return {
+          runStatus: status as RunStatus,
+          jobRows: mergedRows,
+          pipelineStageStats: stageStats,
+        }
       })
 
-      // Check if run is complete
-      if (status.state === 'completed' || status.state === 'failed') {
+      const currentStatus = get().runStatus
+      if (currentStatus.state === 'completed' || currentStatus.state === 'failed') {
         get().stopPolling()
         set({ workflowState: 'completed' })
       }
@@ -614,13 +799,18 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
 
   stopPolling: () => {
-    const { _pollInterval } = get()
+    const { _pollInterval, _eventUnsubs } = get()
     if (_pollInterval) {
       clearInterval(_pollInterval)
+    }
+    // v4.6.0: Clean up event subscriptions
+    for (const unsub of _eventUnsubs) {
+      try { unsub() } catch { /* ignore */ }
     }
     set({
       isPolling: false,
       _pollInterval: null,
+      _eventUnsubs: [],
     })
   },
 

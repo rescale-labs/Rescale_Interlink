@@ -911,11 +911,12 @@ export function SetupTab() {
           </h3>
           <div className="space-y-4">
             <div>
-              <label className="label">Run Subpath</label>
+              {/* v4.6.0: Clarified label from "Run Subpath" to "Scan Prefix" */}
+              <label className="label">Scan Prefix</label>
               <input
                 type="text"
                 className="input"
-                placeholder="Optional subpath within each run directory"
+                placeholder="Navigate into subpath before scanning (e.g., Simcodes/Powerflow)"
                 value={config?.runSubpath || ''}
                 onChange={(e) => updateConfig({ runSubpath: e.target.value })}
               />

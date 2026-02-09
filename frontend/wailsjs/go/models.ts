@@ -633,6 +633,7 @@ export namespace wailsapp {
 	    projectId: string;
 	    automations: string[];
 	    inputFiles?: string[];
+	    tarSubpath?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new JobSpecDTO(source);
@@ -659,6 +660,7 @@ export namespace wailsapp {
 	        this.projectId = source["projectId"];
 	        this.automations = source["automations"];
 	        this.inputFiles = source["inputFiles"];
+	        this.tarSubpath = source["tarSubpath"];
 	    }
 	}
 	export class JobsStatsDTO {
@@ -751,6 +753,7 @@ export namespace wailsapp {
 	    scanMode: string;
 	    primaryPattern: string;
 	    secondaryPatterns: SecondaryPatternDTO[];
+	    tarSubpath?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ScanOptionsDTO(source);
@@ -767,6 +770,7 @@ export namespace wailsapp {
 	        this.scanMode = source["scanMode"];
 	        this.primaryPattern = source["primaryPattern"];
 	        this.secondaryPatterns = this.convertValues(source["secondaryPatterns"], SecondaryPatternDTO);
+	        this.tarSubpath = source["tarSubpath"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

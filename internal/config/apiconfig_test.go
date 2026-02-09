@@ -114,6 +114,8 @@ func TestLoadAPIConfig_EmptyPath(t *testing.T) {
 }
 
 func TestAPIConfig_Validate(t *testing.T) {
+	// v4.0.8: Validate() only checks auto-download settings when enabled.
+	// PlatformURL and APIKey are no longer validated here (use ResolveAPIKey() separately).
 	tests := []struct {
 		name    string
 		cfg     *APIConfig
@@ -146,20 +148,20 @@ func TestAPIConfig_Validate(t *testing.T) {
 			wantErr: nil,
 		},
 		{
-			name: "missing platform URL",
+			name: "missing platform URL — not checked by Validate",
 			cfg: &APIConfig{
 				PlatformURL: "",
 				APIKey:      "my-api-key",
 			},
-			wantErr: ErrMissingPlatformURL,
+			wantErr: nil, // v4.0.8: Validate() no longer checks PlatformURL
 		},
 		{
-			name: "missing API key",
+			name: "missing API key — not checked by Validate",
 			cfg: &APIConfig{
 				PlatformURL: "https://platform.rescale.com",
 				APIKey:      "",
 			},
-			wantErr: ErrMissingAPIKey,
+			wantErr: nil, // v4.0.8: Validate() no longer checks APIKey
 		},
 		{
 			name: "enabled but missing download folder",
@@ -263,10 +265,11 @@ func TestAPIConfig_Validate(t *testing.T) {
 }
 
 func TestAPIConfig_ValidateForConnection(t *testing.T) {
+	// v4.0.8: ValidateForConnection() is deprecated and always returns nil.
+	// API key now comes from ResolveAPIKey(), not from APIConfig.
 	tests := []struct {
-		name    string
-		cfg     *APIConfig
-		wantErr error
+		name string
+		cfg  *APIConfig
 	}{
 		{
 			name: "valid connection",
@@ -274,7 +277,6 @@ func TestAPIConfig_ValidateForConnection(t *testing.T) {
 				PlatformURL: "https://platform.rescale.com",
 				APIKey:      "my-api-key",
 			},
-			wantErr: nil,
 		},
 		{
 			name: "missing platform URL",
@@ -282,7 +284,6 @@ func TestAPIConfig_ValidateForConnection(t *testing.T) {
 				PlatformURL: "",
 				APIKey:      "my-api-key",
 			},
-			wantErr: ErrMissingPlatformURL,
 		},
 		{
 			name: "missing API key",
@@ -290,7 +291,6 @@ func TestAPIConfig_ValidateForConnection(t *testing.T) {
 				PlatformURL: "https://platform.rescale.com",
 				APIKey:      "",
 			},
-			wantErr: ErrMissingAPIKey,
 		},
 		{
 			name: "whitespace only platform URL",
@@ -298,15 +298,14 @@ func TestAPIConfig_ValidateForConnection(t *testing.T) {
 				PlatformURL: "   ",
 				APIKey:      "my-api-key",
 			},
-			wantErr: ErrMissingPlatformURL,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.cfg.ValidateForConnection()
-			if err != tt.wantErr {
-				t.Errorf("ValidateForConnection() error = %v, wantErr %v", err, tt.wantErr)
+			if err != nil {
+				t.Errorf("ValidateForConnection() error = %v, want nil (deprecated, always returns nil)", err)
 			}
 		})
 	}
