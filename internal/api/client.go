@@ -96,6 +96,10 @@ type Client struct {
 
 // NewClient creates a new API client
 func NewClient(cfg *config.Config) (*Client, error) {
+	if cfg.APIBaseURL == "" {
+		return nil, fmt.Errorf("API base URL is empty — check configuration (config.csv api_base_url)")
+	}
+
 	// Configure HTTP client with proxy support
 	httpClient, err := http.ConfigureHTTPClient(cfg)
 	if err != nil {

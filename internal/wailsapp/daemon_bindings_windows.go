@@ -130,7 +130,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		currentUsername := os.Getenv("USERNAME")
 		if users, err := client.GetUserList(ctx); err == nil {
 			for _, user := range users {
-				if user.SID == currentSID || user.Username == currentUsername {
+				if user.SID == currentSID || matchesWindowsUsername(user.Username, currentUsername) {
 					result.JobsDownloaded = user.JobsDownloaded
 					result.DownloadFolder = user.DownloadFolder
 					result.State = user.State // v4.5.5: Use USER's state, not service state
@@ -138,6 +138,16 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 					result.UserState = user.State // v4.5.6: User-specific state
 					break
 				}
+			}
+			// Subprocess hardening: in single-user mode, if exactly 1 user returned
+			// and no SID/username match was found, treat it as the current user.
+			// This prevents format drift from causing permanent "Activating..." state.
+			if !result.UserRegistered && !status.ServiceMode && len(users) == 1 {
+				result.JobsDownloaded = users[0].JobsDownloaded
+				result.DownloadFolder = users[0].DownloadFolder
+				result.State = users[0].State
+				result.UserRegistered = true
+				result.UserState = users[0].State
 			}
 			// Fallback to first user if current user not found
 			if result.DownloadFolder == "" && len(users) > 0 {
@@ -1038,6 +1048,28 @@ func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
 
 	a.logInfo("Service", "UAC approved, service stop command executed")
 	return ElevatedServiceResultDTO{Success: true}
+}
+
+// matchesWindowsUsername compares usernames handling Windows format differences.
+// user.Current().Username returns "DOMAIN\user", os.Getenv("USERNAME") returns "user".
+// Also handles user@domain (UPN) format for domain-joined machines.
+func matchesWindowsUsername(ipcUsername, guiUsername string) bool {
+	if strings.EqualFold(ipcUsername, guiUsername) {
+		return true
+	}
+	// Handle DOMAIN\user format
+	if parts := strings.SplitN(ipcUsername, `\`, 2); len(parts) == 2 {
+		if strings.EqualFold(parts[1], guiUsername) {
+			return true
+		}
+	}
+	// Handle user@domain (UPN) format
+	if parts := strings.SplitN(ipcUsername, "@", 2); len(parts) == 2 {
+		if strings.EqualFold(parts[0], guiUsername) {
+			return true
+		}
+	}
+	return false
 }
 
 // getCurrentUserSID returns the SID of the current process owner.

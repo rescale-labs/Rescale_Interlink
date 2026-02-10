@@ -125,7 +125,8 @@ if (-not $wixPath) {
 }
 
 # Install WiX UI extension if needed
-wix extension add WixToolset.UI.wixext -g 2>$null
+# Pin to 6.0.x to match WiX v6 — unpinned resolves to v7.0.0-rc.1 which is incompatible
+wix extension add WixToolset.UI.wixext/6.0.2 -g 2>$null
 
 Write-Host "  WiX Toolset ready" -ForegroundColor Green
 

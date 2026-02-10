@@ -10,7 +10,9 @@ package version
 // v4.6.1: Fix PUR jobs failing with "The specified version is not available" — resolve
 // analysis version display names to versionCodes in both frontend (TemplateBuilder) and
 // backend (pipeline resolveAnalysisVersions), with preflight validation
-var Version = "v4.6.1"
+// v4.6.2: Fix Windows auto-download daemon failures (config parsing, IPC user matching,
+// scan error visibility) and fix build scripts (WiX extension pinning, ldflags path)
+var Version = "v4.6.2"
 
 // BuildTime is the build timestamp, set by ldflags during build.
 var BuildTime = "unknown"

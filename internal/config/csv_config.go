@@ -166,9 +166,16 @@ func LoadConfigCSV(path string) (*Config, error) {
 			if value != "" {
 				log.Printf("[WARN] api_key in config file is ignored for security - use RESCALE_API_KEY env var or --token-file flag")
 			}
-		case "api_base_url", "tenant_url":
+		case "api_base_url":
 			cfg.APIBaseURL = value
+			if value != "" {
+				cfg.TenantURL = value
+			}
+		case "tenant_url":
 			cfg.TenantURL = value
+			if value != "" {
+				cfg.APIBaseURL = value
+			}
 		case "exclude_pattern":
 			// Parse semicolon-separated patterns
 			if value != "" {
@@ -206,6 +213,15 @@ func LoadConfigCSV(path string) (*Config, error) {
 		}
 	}
 
+	// Normalize: tenant_url is a legacy alias for api_base_url.
+	// Ensure they stay in sync — if one is set and the other isn't, copy.
+	if cfg.APIBaseURL == "" && cfg.TenantURL != "" {
+		cfg.APIBaseURL = cfg.TenantURL
+	}
+	if cfg.TenantURL == "" && cfg.APIBaseURL != "" {
+		cfg.TenantURL = cfg.APIBaseURL
+	}
+
 	// Validate mutual exclusivity of include/exclude patterns
 	if len(cfg.IncludePatterns) > 0 && len(cfg.ExcludePatterns) > 0 {
 		return nil, fmt.Errorf("include_pattern and exclude_pattern are mutually exclusive")
@@ -241,6 +257,17 @@ func SaveConfigCSV(cfg *Config, path string) error {
 	// SECURITY: api_key and proxy_password are intentionally NOT saved to config files
 	// API keys should be provided via RESCALE_API_KEY env var or --token-file flag
 	// Proxy passwords should be entered at runtime via secure prompt
+
+	// Symmetric sync: tenant_url is a legacy alias — keep in sync with api_base_url
+	apiBaseURL := cfg.APIBaseURL
+	tenantURL := cfg.TenantURL
+	if tenantURL == "" && apiBaseURL != "" {
+		tenantURL = apiBaseURL
+	}
+	if apiBaseURL == "" && tenantURL != "" {
+		apiBaseURL = tenantURL
+	}
+
 	records := [][]string{
 		{"tar_workers", strconv.Itoa(cfg.TarWorkers)},
 		{"upload_workers", strconv.Itoa(cfg.UploadWorkers)},
@@ -253,8 +280,8 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"no_proxy", cfg.NoProxy},
 		{"proxy_warmup", strconv.FormatBool(cfg.ProxyWarmup)},
 		// api_key intentionally omitted for security
-		{"api_base_url", cfg.APIBaseURL},
-		{"tenant_url", cfg.TenantURL},
+		{"api_base_url", apiBaseURL},
+		{"tenant_url", tenantURL},
 		{"exclude_pattern", strings.Join(cfg.ExcludePatterns, ";")},
 		{"include_pattern", strings.Join(cfg.IncludePatterns, ";")},
 		{"flatten_tar", strconv.FormatBool(cfg.FlattenTar)},

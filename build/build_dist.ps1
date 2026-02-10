@@ -105,13 +105,14 @@ if (-not $wixPath) {
 
 # Install WiX UI extension (use cmd /c to avoid transcript console buffer conflicts)
 Write-Host "Installing WiX UI extension..."
-$wixExtResult = cmd /c "wix extension add WixToolset.UI.wixext -g 2>&1"
+$wixExtResult = cmd /c "wix extension add WixToolset.UI.wixext/6.0.2 -g 2>&1"
 Write-Host $wixExtResult
 # Note: wix extension add may return non-zero if already installed - that's OK
+# Pin to 6.0.x to match WiX v6 — unpinned resolves to v7.0.0-rc.1 which is incompatible
 
 # v4.0.8: Install WiX Util extension for WixShellExec (LaunchTray custom action)
 Write-Host "Installing WiX Util extension..."
-$wixUtilExtResult = cmd /c "wix extension add WixToolset.Util.wixext -g 2>&1"
+$wixUtilExtResult = cmd /c "wix extension add WixToolset.Util.wixext/6.0.2 -g 2>&1"
 Write-Host $wixUtilExtResult
 
 Write-Host "WiX version:"
@@ -168,10 +169,14 @@ Write-Host $wailsResult
 Write-Host ""
 Write-Host "[5/7] Building Wails application with FIPS 140-3..."
 
-Set-Location $env:REPO_NAME
+# On GitHub Actions, the repo is already checked out to the workspace root.
+# On Rescale HPC, the script clones into $env:REPO_NAME and must cd into it.
+if ($env:REPO_NAME -and (Test-Path $env:REPO_NAME)) {
+    Set-Location $env:REPO_NAME
+}
 
 $BuildTime = Get-Date -Format "yyyy-MM-dd"
-$LdFlags = "-s -w -X main.Version=$($ReleaseTag) -X main.BuildTime=$BuildTime"
+$LdFlags = "-s -w -X github.com/rescale/rescale-int/internal/version.Version=$($ReleaseTag) -X github.com/rescale/rescale-int/internal/version.BuildTime=$BuildTime"
 
 Write-Host "Build flags: GOFIPS140=latest"
 Write-Host "LDFLAGS: $LdFlags"

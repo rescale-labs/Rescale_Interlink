@@ -204,7 +204,7 @@ func (d *Daemon) poll(ctx context.Context) {
 		if scanCtx.Err() == context.DeadlineExceeded {
 			d.logger.Error().Dur("duration", time.Since(scanStart)).Msg("Scan timed out after 10 minutes")
 		} else {
-			d.logger.Error().Err(err).Msg("Failed to find completed jobs")
+			d.logger.Error().Msgf("Failed to find completed jobs: %v", err)
 		}
 		d.logger.Info().Msgf("=== SCAN COMPLETE === Error (took %.1fs)", time.Since(scanStart).Seconds())
 		return

@@ -141,6 +141,14 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	a.config.MaxRetries = cfg.MaxRetries
 	a.config.DetailedLogging = cfg.DetailedLogging
 
+	// tenant_url is a legacy alias — keep in sync (both directions)
+	if a.config.TenantURL == "" && a.config.APIBaseURL != "" {
+		a.config.TenantURL = a.config.APIBaseURL
+	}
+	if a.config.APIBaseURL == "" && a.config.TenantURL != "" {
+		a.config.APIBaseURL = a.config.TenantURL
+	}
+
 	// v4.0.0: Update timing system when DetailedLogging changes
 	cloud.SetDetailedLogging(cfg.DetailedLogging)
 

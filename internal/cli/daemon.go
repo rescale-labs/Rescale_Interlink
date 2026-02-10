@@ -298,6 +298,10 @@ Examples:
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
+			if cfg.APIBaseURL == "" {
+				return fmt.Errorf("API base URL is empty — cannot start daemon. Check config.csv or set RESCALE_API_URL")
+			}
+
 			// Create daemon
 			d, err := daemon.New(cfg, daemonCfg, logger)
 			if err != nil {

@@ -368,6 +368,104 @@ func TestReadTokenFile(t *testing.T) {
 	})
 }
 
+// TestEmptyTenantURLDoesNotOverwriteAPIBaseURL is a regression test for the bug where
+// config.csv with api_base_url=https://platform.rescale.com followed by tenant_url=
+// (empty) would overwrite APIBaseURL to "".
+func TestEmptyTenantURLDoesNotOverwriteAPIBaseURL(t *testing.T) {
+	tmpDir := t.TempDir()
+	csvPath := tmpDir + "/config.csv"
+
+	// Write a config.csv that mimics SaveConfigCSV output:
+	// api_base_url has a value, tenant_url is empty
+	content := `key,value
+api_base_url,https://platform.rescale.com
+tenant_url,
+tar_workers,4
+`
+	if err := os.WriteFile(csvPath, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadConfigCSV(csvPath)
+	if err != nil {
+		t.Fatalf("LoadConfigCSV() error = %v", err)
+	}
+
+	if cfg.APIBaseURL != "https://platform.rescale.com" {
+		t.Errorf("APIBaseURL = %q, want %q (empty tenant_url must not overwrite non-empty api_base_url)",
+			cfg.APIBaseURL, "https://platform.rescale.com")
+	}
+	// Post-parse normalization should sync TenantURL from APIBaseURL
+	if cfg.TenantURL != "https://platform.rescale.com" {
+		t.Errorf("TenantURL = %q, want %q (should be synced from APIBaseURL)",
+			cfg.TenantURL, "https://platform.rescale.com")
+	}
+}
+
+// TestConfigRoundTripPreservesAPIURL tests that Save then Load preserves the API URL
+// when TenantURL is blank (legacy alias sync).
+func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
+	tmpDir := t.TempDir()
+	csvPath := tmpDir + "/config.csv"
+
+	original := &Config{
+		TarWorkers:    4,
+		UploadWorkers: 4,
+		JobWorkers:    4,
+		ProxyMode:     "no-proxy",
+		APIBaseURL:    "https://platform.rescale.com",
+		TenantURL:     "", // Intentionally blank to test sync
+		MaxRetries:    1,
+		SortField:     "name",
+		SortAscending: true,
+	}
+
+	if err := SaveConfigCSV(original, csvPath); err != nil {
+		t.Fatalf("SaveConfigCSV() error = %v", err)
+	}
+
+	loaded, err := LoadConfigCSV(csvPath)
+	if err != nil {
+		t.Fatalf("LoadConfigCSV() error = %v", err)
+	}
+
+	if loaded.APIBaseURL != "https://platform.rescale.com" {
+		t.Errorf("After round-trip: APIBaseURL = %q, want %q",
+			loaded.APIBaseURL, "https://platform.rescale.com")
+	}
+	if loaded.TenantURL != "https://platform.rescale.com" {
+		t.Errorf("After round-trip: TenantURL = %q, want %q (should be synced)",
+			loaded.TenantURL, "https://platform.rescale.com")
+	}
+}
+
+// TestEmptyAPIBaseURLWithTenantURL tests the reverse case: tenant_url set, api_base_url empty.
+func TestEmptyAPIBaseURLWithTenantURL(t *testing.T) {
+	tmpDir := t.TempDir()
+	csvPath := tmpDir + "/config.csv"
+
+	content := `key,value
+api_base_url,
+tenant_url,https://kr.rescale.com
+`
+	if err := os.WriteFile(csvPath, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadConfigCSV(csvPath)
+	if err != nil {
+		t.Fatalf("LoadConfigCSV() error = %v", err)
+	}
+
+	if cfg.TenantURL != "https://kr.rescale.com" {
+		t.Errorf("TenantURL = %q, want %q", cfg.TenantURL, "https://kr.rescale.com")
+	}
+	if cfg.APIBaseURL != "https://kr.rescale.com" {
+		t.Errorf("APIBaseURL = %q, want %q (should be synced from TenantURL)",
+			cfg.APIBaseURL, "https://kr.rescale.com")
+	}
+}
+
 func TestMergeWithFlagsAndTokenFile(t *testing.T) {
 	// Create temp token file
 	tmpDir := t.TempDir()

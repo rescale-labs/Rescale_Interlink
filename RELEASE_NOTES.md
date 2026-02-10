@@ -1,5 +1,50 @@
 # Release Notes - Rescale Interlink
 
+## v4.6.2 - February 10, 2026
+
+### Fix: Windows Auto-Download Daemon Failures and Connection Test Errors
+
+On a fresh Windows install (subprocess mode), the auto-download daemon failed silently: "My Downloads" stuck on "Activating...", daemon scans always failed with "Failed to find completed jobs", and after a GUI restart, Test Connection failed with `unsupported protocol scheme ""`. Three separate bugs combined to produce this behavior.
+
+#### Bug Fixes
+
+**Fix 1: Empty `tenant_url` overwrites `APIBaseURL` in config.csv parsing**
+- `SaveConfigCSV` wrote `tenant_url,` (empty) after `api_base_url,https://...`. On reload, the empty `tenant_url` overwrote `APIBaseURL` to `""`, breaking all API calls.
+- Split the combined case handler, added post-parse normalization, and symmetric sync in both save and update paths.
+- Added fail-fast validation in `api.NewClient` (clear error instead of cryptic "unsupported protocol scheme") and fail-hard check at daemon startup.
+- **Files**: `internal/config/csv_config.go`, `internal/api/client.go`, `internal/wailsapp/config_bindings.go`, `internal/cli/daemon.go`
+
+**Fix 2: Windows subprocess daemon doesn't set SID in UserStatus**
+- The subprocess IPC handler returned `UserStatus` without the SID field. The GUI matches by SID first, which always failed, causing permanent "Activating..." state.
+- Populated SID using `user.Current().Uid` (returns the SID string on Windows).
+- **File**: `internal/daemon/ipc_handler_windows.go`
+
+**Fix 3: Windows username format mismatch**
+- Daemon returned `"DESKTOP-PC\Peter Klein"` but GUI compared with `"Peter Klein"`. Direct equality failed.
+- Added `matchesWindowsUsername()` helper handling `DOMAIN\user`, `user@domain` (UPN), and case-insensitive comparisons.
+- Added subprocess hardening: in single-user mode, if exactly 1 user is returned and no match is found, treat it as the current user.
+- **File**: `internal/wailsapp/daemon_bindings_windows.go`
+
+**Fix 4: Scan failure hides error details**
+- Changed scan failure logging to include the error text in the message (visible in Activity tab) instead of only in structured log fields.
+- **File**: `internal/daemon/daemon.go`
+
+### Fix: Build Script Errors
+
+**Fix 5: WiX extension version incompatibility (caused v4.5.9 GitHub Actions failure)**
+- `wix extension add WixToolset.UI.wixext -g` (no version pin) pulled v7.0.0-rc.1 which is incompatible with WiX v6. Pinned to 6.0.2.
+- **Files**: `build/build_dist.ps1`, `scripts/release-windows-msi-build.sh`, `installer/build-installer.ps1`
+
+**Fix 6: Wrong ldflags package path in all build scripts**
+- All build scripts used `-X main.Version=...` but the version constant is in `internal/version`. Binaries built by CI/Rescale had the wrong version string. Fixed to use `github.com/rescale/rescale-int/internal/version.Version`.
+- **Files**: All scripts in `build/` and `scripts/`
+
+**Fix 7: Fragile `Set-Location` in GitHub Actions build script**
+- `Set-Location $env:REPO_NAME` referenced an unset env var. Made conditional.
+- **File**: `build/build_dist.ps1`
+
+---
+
 ## v4.6.1 - February 10, 2026
 
 ### Fix: PUR Jobs Fail with "The specified version is not available"
