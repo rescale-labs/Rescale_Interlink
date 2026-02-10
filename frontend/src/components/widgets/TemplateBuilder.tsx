@@ -245,10 +245,21 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return coreTypes.map((ct) => ct.code)
   }, [coreTypes])
 
-  const versionOptions = useMemo(() => {
-    if (!selectedAnalysis) return []
-    return selectedAnalysis.versions.map((v) => v.version || v.versionCode)
+  // Build version display→code mapping for the dropdown
+  const versionMap = useMemo(() => {
+    if (!selectedAnalysis) return new Map<string, string>()
+    const map = new Map<string, string>()
+    for (const v of selectedAnalysis.versions) {
+      const display = v.version || v.versionCode
+      const code = v.versionCode || v.version
+      map.set(display, code)
+    }
+    return map
   }, [selectedAnalysis])
+
+  const versionOptions = useMemo(() => {
+    return Array.from(versionMap.keys())
+  }, [versionMap])
 
   // v4.0.8: Calculate base unit for cores (max cores per node for selected hardware)
   // Users can enter multiples of this value (64, 128, 192, etc.)
@@ -273,7 +284,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
       setTemplate((t) => ({
         ...t,
         analysisCode: code,
-        analysisVersion: analysis?.versions[0]?.version || '',
+        analysisVersion: analysis?.versions[0]?.versionCode || analysis?.versions[0]?.version || '',
       }))
     },
     [analysisCodes]
@@ -517,8 +528,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 <label className="block text-sm font-medium mb-1">Version</label>
                 <SearchableSelect
                   options={versionOptions}
-                  value={template.analysisVersion}
-                  onChange={(v) => updateField('analysisVersion', v)}
+                  value={
+                    selectedAnalysis?.versions.find(
+                      (v) => v.versionCode === template.analysisVersion || v.version === template.analysisVersion
+                    )?.version || template.analysisVersion
+                  }
+                  onChange={(v) => updateField('analysisVersion', versionMap.get(v) || v)}
                   placeholder="Select version..."
                   disabled={!selectedAnalysis}
                 />

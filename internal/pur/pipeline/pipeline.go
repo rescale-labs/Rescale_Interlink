@@ -212,10 +212,81 @@ func (p *Pipeline) reportStateChange(jobName, stage, newStatus, jobID, errorMess
 	}
 }
 
+// resolveAnalysisVersions resolves display names (e.g. "CPU") to versionCodes
+// (e.g. "0") for all jobs. This catches every entry path: GUI, CLI PUR (CSV),
+// legacy saved templates, JSON/SGE imports.
+func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
+	analyses, err := p.apiClient.GetAnalyses(ctx)
+	if err != nil {
+		log.Printf("[PIPELINE] Warning: could not fetch analyses for version resolution: %v", err)
+		return // best-effort; API will reject invalid versions later
+	}
+
+	// Build lookup: analysisCode → (version display name → versionCode)
+	lookup := make(map[string]map[string]string)
+	for _, a := range analyses {
+		vmap := make(map[string]string)
+		for _, v := range a.Versions {
+			if v.Version != "" && v.VersionCode != "" {
+				vmap[v.Version] = v.VersionCode
+			}
+		}
+		lookup[a.Code] = vmap
+	}
+
+	// Resolve each job's version
+	for i := range p.jobs {
+		if vm, ok := lookup[p.jobs[i].AnalysisCode]; ok {
+			if code, found := vm[p.jobs[i].AnalysisVersion]; found {
+				log.Printf("[PIPELINE] Resolved version %q → %q for %s",
+					p.jobs[i].AnalysisVersion, code, p.jobs[i].JobName)
+				p.jobs[i].AnalysisVersion = code
+			}
+		}
+	}
+
+	// Preflight validation: check that each (analysisCode, analysisVersion) pair
+	// is recognized before tar/upload work begins.
+	var validationErrors []string
+	for _, job := range p.jobs {
+		if job.AnalysisVersion == "" {
+			continue
+		}
+		found := false
+		for _, a := range analyses {
+			if a.Code == job.AnalysisCode {
+				for _, v := range a.Versions {
+					if v.VersionCode == job.AnalysisVersion || v.Version == job.AnalysisVersion {
+						found = true
+						break
+					}
+				}
+				break
+			}
+		}
+		if !found {
+			validationErrors = append(validationErrors, fmt.Sprintf("%s: analysis %q version %q not found",
+				job.JobName, job.AnalysisCode, job.AnalysisVersion))
+		}
+	}
+	if len(validationErrors) > 0 {
+		for _, e := range validationErrors {
+			log.Printf("[PIPELINE] PREFLIGHT ERROR: %s", e)
+		}
+		// Log prominently but don't block — the API will reject invalid versions
+		// and the error messages above give users clear diagnosis.
+		log.Printf("[PIPELINE] WARNING: %d job(s) have unrecognized analysis versions — these will likely fail at job creation", len(validationErrors))
+	}
+}
+
 // Run executes the pipeline
 func (p *Pipeline) Run(ctx context.Context) error {
 	p.logf("INFO", "pipeline", "", "Starting pipeline with %d jobs", p.totalJobs)
 	p.logf("INFO", "pipeline", "", "Workers: tar=%d upload=%d job=%d", p.tarWorkers, p.uploadWorkers, p.jobWorkers)
+
+	// Resolve analysis versions: map display names to versionCodes.
+	// Must happen before feeder goroutine starts workers.
+	p.resolveAnalysisVersions(ctx)
 
 	var wg sync.WaitGroup
 

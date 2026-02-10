@@ -1,5 +1,35 @@
 # Release Notes - Rescale Interlink
 
+## v4.6.1 - February 10, 2026
+
+### Fix: PUR Jobs Fail with "The specified version is not available"
+
+All PUR pipeline jobs failed at the "create" stage with API status 400: `"The specified version is not available."` when the user selected a software version by its display name (e.g., "CPU" for user_included). The Rescale API requires the `versionCode` (e.g., `"0"`), not the display name.
+
+#### Root Cause
+
+The TemplateBuilder dropdown showed `v.version` ("CPU") and stored that same display name as `analysisVersion`. It flowed unchanged through `BuildJobRequest` to the API, which rejected it. The CLI single-job path already resolved this via `resolveAnalysisVersion()`, but the PUR pipeline, GUI single job, and all import paths bypassed it.
+
+#### Bug Fixes
+
+**Fix 1: Frontend — TemplateBuilder stores versionCode instead of display name**
+- Version dropdown now maintains a `versionMap` (display name → versionCode) and stores the versionCode internally while showing the friendly display name in the UI
+- Default version on analysis change uses `versionCode` first
+- Backward-compatible: existing templates with versionCodes still work via reverse lookup
+- **File**: `frontend/src/components/widgets/TemplateBuilder.tsx`
+
+**Fix 2: Backend — Pipeline resolves display names to versionCodes**
+- New `resolveAnalysisVersions()` method on Pipeline fetches all analyses once (single API call), builds a lookup table, and resolves every job's version before tar/upload begins
+- Catches all entry paths: GUI PUR, CLI PUR (CSV), legacy saved templates, JSON/SGE imports
+- **File**: `internal/pur/pipeline/pipeline.go`
+
+**Fix 3: Preflight validation warns about unrecognized versions**
+- After version resolution, validates that each `(analysisCode, analysisVersion)` pair is recognized
+- Logs prominent warnings before any tar/upload work begins, giving users clear diagnosis
+- **File**: `internal/pur/pipeline/pipeline.go`
+
+---
+
 ## v4.6.0 - February 8, 2026
 
 ### PUR Pipeline Bug Fixes

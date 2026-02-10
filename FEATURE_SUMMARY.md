@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.6.0
-**Build Date:** February 8, 2026
+**Version:** 4.6.1
+**Build Date:** February 10, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -1109,5 +1109,5 @@ For more details, see:
 
 ---
 
-*Last Updated: February 8, 2026*
-*Version: 4.6.0*
+*Last Updated: February 10, 2026*
+*Version: 4.6.1*

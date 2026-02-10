@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.6.0-green)
+![Status](https://img.shields.io/badge/status-v4.6.1-green)
 
 ---
 
@@ -86,6 +86,10 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 ---
 
 ## Recent Changes
+
+**v4.6.1 (February 10, 2026) - Analysis Version Resolution Fix:**
+- **Version Resolution**: PUR jobs failed with "The specified version is not available" — TemplateBuilder stored display names (e.g., "CPU") instead of versionCodes (e.g., "0"). Frontend now stores versionCode; backend pipeline resolves display names to versionCodes before job creation
+- **Preflight Validation**: Pipeline validates all (analysisCode, analysisVersion) pairs before tar/upload, giving early diagnosis for invalid versions
 
 **v4.6.0 (February 8, 2026) - PUR Pipeline Bug Fixes:**
 - **Submit Mode Fix**: `NormalizeSubmitMode()` maps GUI's `"create_and_submit"` to canonical `"submit"` — jobs now actually submit
@@ -210,15 +214,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.6.0-macos-arm64.tar.gz` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.6.0-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.6.0-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `rescale-interlink-v4.6.0-win_amd64.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.6.1-macos-arm64.tar.gz` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.6.1-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.6.1-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `rescale-interlink-v4.6.1-win_amd64.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Extract and move app to Applications
-tar -xzf rescale-interlink-v4.6.0-macos-arm64.tar.gz
+tar -xzf rescale-interlink-v4.6.1-macos-arm64.tar.gz
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -229,7 +233,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.6.0-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.6.1-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -242,7 +246,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.6.0-win_amd64.zip
+Expand-Archive rescale-interlink-v4.6.1-win_amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -552,7 +556,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.6.0                       |
+|                    Rescale Interlink v4.6.1                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -818,6 +822,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.6.0
+**Version**: 4.6.1
 **Status**: Production Ready
-**Last Updated**: February 8, 2026
+**Last Updated**: February 10, 2026
