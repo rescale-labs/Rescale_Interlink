@@ -63,6 +63,50 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
+// uploadProgressReader wraps bytes.Reader with progress tracking for S3 uploads.
+// Unlike progressReader (used for downloads), this implements io.ReadSeeker
+// so the AWS SDK can rewind the stream on retry.
+// Modeled after Azure's progressReadSeekCloser.
+// v4.6.3: Fixes "stream not seekable" failures during PUR uploads.
+type uploadProgressReader struct {
+	reader      *bytes.Reader
+	callback    func(bytesRead int64)
+	accumulated int64 // Bytes accumulated since last callback
+	threshold   int64 // Report every N bytes (1MB default)
+	reported    int64 // Total bytes reported to callback (for rollback on retry)
+}
+
+func (pr *uploadProgressReader) Read(p []byte) (n int, err error) {
+	n, err = pr.reader.Read(p)
+	if n > 0 && pr.callback != nil {
+		pr.accumulated += int64(n)
+		if pr.accumulated >= pr.threshold || err == io.EOF {
+			pr.reported += pr.accumulated
+			pr.callback(pr.accumulated)
+			pr.accumulated = 0
+		}
+	}
+	// Flush remaining accumulated bytes on EOF even when n == 0
+	// (bytes.Reader returns n=0, io.EOF after all data is consumed)
+	if err == io.EOF && pr.accumulated > 0 && pr.callback != nil {
+		pr.reported += pr.accumulated
+		pr.callback(pr.accumulated)
+		pr.accumulated = 0
+	}
+	return n, err
+}
+
+func (pr *uploadProgressReader) Seek(offset int64, whence int) (int64, error) {
+	// Roll back any progress reported during the failed attempt
+	// so the retry doesn't double-count bytes (matches download pattern at line 734)
+	if pr.reported > 0 && pr.callback != nil {
+		pr.callback(-pr.reported)
+	}
+	pr.accumulated = 0
+	pr.reported = 0
+	return pr.reader.Seek(offset, whence)
+}
+
 // InitStreamingUpload initializes a multipart upload with streaming encryption.
 // Uses CBC chaining format compatible with Rescale platform.
 // Metadata stores `iv` (base64) for Rescale decryption compatibility.
@@ -239,6 +283,8 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 // Can be called concurrently with EncryptStreamingPart (pipelining).
 // Separated from encryption to enable pipelining.
 // v3.6.3: Now uses progressReader to track bytes in real-time via ByteProgressCallback.
+// v4.6.3: Reader created inside retry closure with io.ReadSeeker support to fix
+// "stream not seekable" failures during AWS SDK retries.
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
 	if !ok {
@@ -257,20 +303,21 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	// Add HTTP tracing if DEBUG_HTTP is enabled
 	partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d", partNumber))
 
-	// v3.6.3: Create body reader with progress tracking if callback is set.
-	// This enables real-time progress updates during the S3 upload, not just at completion.
-	var bodyReader io.Reader = bytes.NewReader(ciphertext)
-	if uploadState.ByteProgressCallback != nil {
-		bodyReader = &progressReader{
-			reader:    bytes.NewReader(ciphertext),
-			callback:  uploadState.ByteProgressCallback,
-			threshold: progressReaderThreshold,
-		}
-	}
-
 	// Upload the part using S3Client
+	// v4.6.3: Reader created inside closure so each retry attempt gets a fresh reader.
+	// Uses uploadProgressReader (io.ReadSeeker) so AWS SDK can rewind on transient errors.
 	var uploadResp *s3.UploadPartOutput
 	err := providerData.s3Client.RetryWithBackoff(partCtx, fmt.Sprintf("UploadPart %d", partNumber), func() error {
+		// Create fresh reader per attempt (enables retry after partial read)
+		var bodyReader io.ReadSeeker = bytes.NewReader(ciphertext)
+		if uploadState.ByteProgressCallback != nil {
+			bodyReader = &uploadProgressReader{
+				reader:    bytes.NewReader(ciphertext),
+				callback:  uploadState.ByteProgressCallback,
+				threshold: progressReaderThreshold,
+			}
+		}
+
 		var err error
 		uploadResp, err = providerData.s3Client.Client().UploadPart(partCtx, &s3.UploadPartInput{
 			Bucket:        aws.String(providerData.bucket),

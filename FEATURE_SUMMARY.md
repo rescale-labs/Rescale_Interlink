@@ -1,6 +1,6 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.6.2
+**Version:** 4.6.3
 **Build Date:** February 10, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
@@ -62,7 +62,8 @@ rescale-int files upload <file> --pre-encrypt
 - Automatic resume on interruption (Ctrl+C)
 - Progress bars with transfer speed and ETA
 - Support for both S3 and Azure storage backends
-- **Source:** `internal/cli/files.go:45-160`, `internal/cloud/upload/`
+- **Seekable upload streams** (v4.6.3): S3 upload progress reader implements `io.ReadSeeker` so AWS SDK can rewind on transient network errors; reader created fresh per retry attempt
+- **Source:** `internal/cli/files.go:45-160`, `internal/cloud/upload/`, `internal/cloud/providers/s3/streaming_concurrent.go`
 
 **Encryption Modes (v3.0.0):**
 - **Default (streaming)**: Per-part AES-256-CBC encryption during upload
@@ -1110,4 +1111,4 @@ For more details, see:
 ---
 
 *Last Updated: February 10, 2026*
-*Version: 4.6.2*
+*Version: 4.6.3*

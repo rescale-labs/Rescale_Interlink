@@ -12,7 +12,9 @@ package version
 // backend (pipeline resolveAnalysisVersions), with preflight validation
 // v4.6.2: Fix Windows auto-download daemon failures (config parsing, IPC user matching,
 // scan error visibility) and fix build scripts (WiX extension pinning, ldflags path)
-var Version = "v4.6.2"
+// v4.6.3: Fix S3 upload "stream not seekable" failure during PUR — uploadProgressReader
+// with io.ReadSeeker support, reader creation moved inside retry closure
+var Version = "v4.6.3"
 
 // BuildTime is the build timestamp, set by ldflags during build.
 var BuildTime = "unknown"

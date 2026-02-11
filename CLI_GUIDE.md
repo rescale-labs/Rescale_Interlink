@@ -1,8 +1,8 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.6.2.
+Complete command-line interface reference for `rescale-int` v4.6.3.
 
-**Version:** 4.6.2
+**Version:** 4.6.3
 **Build Date:** February 10, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 

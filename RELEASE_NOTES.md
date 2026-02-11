@@ -1,5 +1,46 @@
 # Release Notes - Rescale Interlink
 
+## v4.6.3 - February 10, 2026
+
+### Fix: S3 Upload "Stream Not Seekable" Failure During PUR
+
+During PUR testing on Linux v4.6.2, some parallel uploads failed intermittently with:
+```
+S3Storage upload failed: failed to upload part X: operation error S3: UploadPart,
+failed to rewind transport stream for retry, request stream is not seekable
+```
+
+A transient network error triggered the AWS SDK's built-in retry, which couldn't rewind the upload stream. Some jobs in a batch succeeded while others failed.
+
+#### Root Cause
+
+Two compounding problems in `internal/cloud/providers/s3/streaming_concurrent.go`:
+
+1. **`progressReader` doesn't implement `io.Seeker`**: The existing `progressReader` wraps `bytes.NewReader` to track upload progress but only implements `Read()`, not `Seek()`. When the AWS SDK encounters a transient network error mid-upload and tries its built-in retry, it can't `Seek(0, 0)` to rewind. The same `progressReader` type is used for downloads where the inner reader is `resp.Body` (not seekable), so the existing struct couldn't be changed.
+
+2. **`bodyReader` created outside the retry closure**: The reader was created once before `RetryWithBackoff`. On application-level retry, the same consumed reader was reused with an empty body.
+
+#### Bug Fixes
+
+**Fix 1: New `uploadProgressReader` type with `io.ReadSeeker` support**
+- Added upload-specific `uploadProgressReader` that embeds `*bytes.Reader` for seek support, mirroring Azure's `progressReadSeekCloser` pattern
+- `Seek()` implementation rolls back reported progress to prevent double-counting on retry
+- Existing `progressReader` left unchanged for download use
+- **File**: `internal/cloud/providers/s3/streaming_concurrent.go`
+
+**Fix 2: Reader creation moved inside retry closure**
+- Each retry attempt now gets a fresh `bytes.NewReader` (or `uploadProgressReader`), matching the pattern already used in `UploadStreamingPart` and Azure's `UploadCiphertext`
+- **File**: `internal/cloud/providers/s3/streaming_concurrent.go`
+
+#### Tests
+
+- `TestUploadProgressReaderSeek` — Verifies `io.ReadSeeker` compliance: read, seek to 0, re-read
+- `TestUploadProgressReaderSeekRollsBackProgress` — Verifies progress rollback on seek
+- `TestUploadProgressReaderThreshold` — Verifies threshold-based callback reporting
+- **File**: `internal/cloud/providers/s3/streaming_concurrent_test.go`
+
+---
+
 ## v4.6.2 - February 10, 2026
 
 ### Fix: Windows Auto-Download Daemon Failures and Connection Test Errors
