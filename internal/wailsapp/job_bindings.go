@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/filescan"
 	"github.com/rescale/rescale-int/internal/pur/parser"
+	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/validation"
 )
 
@@ -92,6 +93,9 @@ type ScanOptionsDTO struct {
 
 	// v4.6.0: Optional subdirectory within each matched Run_* to tar
 	TarSubpath string `json:"tarSubpath,omitempty"`
+
+	// v4.6.1: Iterate numeric patterns in command across directories
+	IteratePatterns bool `json:"iteratePatterns"`
 }
 
 // ScanResultDTO is the result of a directory scan.
@@ -232,7 +236,8 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		IncludeHidden:     opts.IncludeHidden,
 		PartDirs:          []string{opts.RootDir},
 		StartIndex:        1, // Prevent job names starting at _0
-		TarSubpath:        opts.TarSubpath, // v4.6.0
+		TarSubpath:        opts.TarSubpath,        // v4.6.0
+		IteratePatterns:   opts.IteratePatterns,   // v4.6.1
 	}
 
 	templateSpec := dtoToJobSpec(template)
@@ -483,6 +488,60 @@ func (a *App) GetAutomations() AutomationsResultDTO {
 		}
 	}
 	return AutomationsResultDTO{Automations: dtos}
+}
+
+// PURRunOptionsDTO contains PUR-specific run configuration beyond the job list.
+type PURRunOptionsDTO struct {
+	ExtraInputFiles  string `json:"extraInputFiles"`  // Comma-separated paths and/or id:<fileId>
+	DecompressExtras bool   `json:"decompressExtras"` // Whether to decompress extra files on cluster
+}
+
+// StartBulkRunWithOptions starts a bulk job run with additional PUR options.
+func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) (string, error) {
+	if a.engine == nil {
+		return "", ErrNoEngine
+	}
+	if len(jobs) == 0 {
+		return "", fmt.Errorf("no jobs provided")
+	}
+	if a.engine.IsRunActive() {
+		return "", fmt.Errorf("a run is already in progress")
+	}
+
+	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
+	stateFile := generateStateFilePath(runID)
+
+	jobSpecs := make([]models.JobSpec, len(jobs))
+	for i, job := range jobs {
+		jobSpecs[i] = dtoToJobSpec(job)
+	}
+
+	if err := a.engine.StartRun(runID, stateFile, len(jobs)); err != nil {
+		return "", err
+	}
+
+	// Pre-populate state
+	if st := a.engine.GetState(); st != nil {
+		for i, job := range jobSpecs {
+			st.InitializeState(i+1, job.JobName, job.Directory)
+		}
+		st.Save()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a.runMu.Lock()
+	a.runCancel = cancel
+	a.runMu.Unlock()
+
+	go func() {
+		defer a.engine.EndRun()
+		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, opts.ExtraInputFiles, opts.DecompressExtras)
+		if err != nil && ctx.Err() == nil {
+			wailsLogger.Error().Err(err).Msg("Pipeline run failed")
+		}
+	}()
+
+	return runID, nil
 }
 
 // StartBulkRun starts a bulk job run (PUR pipeline).
@@ -750,6 +809,55 @@ func (a *App) ValidateJobSpec(job JobSpecDTO) []string {
 	return validation.ValidateJobSpec(dtoToJobSpec(job))
 }
 
+// CommandPreviewDTO shows how a command varies for a directory.
+type CommandPreviewDTO struct {
+	DirName  string           `json:"dirName"`
+	Command  string           `json:"command"`
+	Patterns []PatternInfoDTO `json:"patterns"`
+}
+
+// PatternInfoDTO represents a detected numeric pattern in a command.
+type PatternInfoDTO struct {
+	FullMatch string `json:"fullMatch"`
+	Number    string `json:"number"`
+	Prefix    string `json:"prefix"`
+	Suffix    string `json:"suffix"`
+}
+
+// PreviewCommandPatterns shows how a command varies across directories.
+// v4.6.1: Added for GUI preview of --iterate-command-patterns behaviour.
+func (a *App) PreviewCommandPatterns(command string, dirNames []string) []CommandPreviewDTO {
+	patterns := pattern.DetectNumericPatterns(command)
+
+	var previews []CommandPreviewDTO
+	for i, dirName := range dirNames {
+		dirNum := pattern.ExtractIndexFromJobName(dirName)
+		iteratedCmd := pattern.IterateCommandPatterns(command, 1, dirNum)
+
+		patternDTOs := make([]PatternInfoDTO, len(patterns))
+		for j, p := range patterns {
+			patternDTOs[j] = PatternInfoDTO{
+				FullMatch: p.FullMatch,
+				Number:    p.Number,
+				Prefix:    p.Prefix,
+				Suffix:    p.Suffix,
+			}
+		}
+
+		previews = append(previews, CommandPreviewDTO{
+			DirName:  dirName,
+			Command:  iteratedCmd,
+			Patterns: patternDTOs,
+		})
+
+		// Limit preview to 5 entries
+		if i >= 4 {
+			break
+		}
+	}
+	return previews
+}
+
 // Helper functions
 
 // jobSpecToDTO converts models.JobSpec to DTO.
@@ -1007,8 +1115,40 @@ func getTemplatesDir() (string, error) {
 	return templatesDir, nil
 }
 
+// normalizeJobSpecDTO ensures all slice fields have non-nil defaults and
+// zero-value numeric fields get sensible minimums. This prevents Wails
+// binding panics when marshaling a template loaded from JSON that has
+// null or missing fields.
+func normalizeJobSpecDTO(job *JobSpecDTO) {
+	if job.Tags == nil {
+		job.Tags = []string{}
+	}
+	if job.Automations == nil {
+		job.Automations = []string{}
+	}
+	if job.InputFiles == nil {
+		job.InputFiles = []string{}
+	}
+	if job.CoresPerSlot == 0 {
+		job.CoresPerSlot = 1
+	}
+	if job.Slots == 0 {
+		job.Slots = 1
+	}
+	if job.WalltimeHours == 0 {
+		job.WalltimeHours = 1.0
+	}
+}
+
 // ListSavedTemplates returns a list of saved templates.
-func (a *App) ListSavedTemplates() []TemplateInfoDTO {
+func (a *App) ListSavedTemplates() (result []TemplateInfoDTO) {
+	defer func() {
+		if r := recover(); r != nil {
+			wailsLogger.Error().Msgf("ListSavedTemplates panicked: %v", r)
+			result = []TemplateInfoDTO{}
+		}
+	}()
+
 	templatesDir, err := getTemplatesDir()
 	if err != nil {
 		return []TemplateInfoDTO{}
@@ -1041,6 +1181,7 @@ func (a *App) ListSavedTemplates() []TemplateInfoDTO {
 		if err := json.Unmarshal(data, &job); err != nil {
 			continue
 		}
+		normalizeJobSpecDTO(&job)
 
 		// Extract name from filename (without .json extension)
 		name := strings.TrimSuffix(entry.Name(), ".json")
@@ -1059,7 +1200,14 @@ func (a *App) ListSavedTemplates() []TemplateInfoDTO {
 }
 
 // SaveTemplate saves a job spec as a named template.
-func (a *App) SaveTemplate(name string, job JobSpecDTO) error {
+// Uses atomic write (write to .tmp then rename) to prevent corruption.
+func (a *App) SaveTemplate(name string, job JobSpecDTO) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("template save panicked: %v", r)
+		}
+	}()
+
 	templatesDir, err := getTemplatesDir()
 	if err != nil {
 		return err
@@ -1079,11 +1227,22 @@ func (a *App) SaveTemplate(name string, job JobSpecDTO) error {
 		return err
 	}
 
-	return os.WriteFile(fullPath, data, 0644)
+	// Atomic write: write to temp file then rename
+	tmpPath := fullPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, fullPath)
 }
 
 // LoadTemplate loads a template by name.
-func (a *App) LoadTemplate(name string) (JobSpecDTO, error) {
+func (a *App) LoadTemplate(name string) (result JobSpecDTO, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("template load panicked: %v", r)
+		}
+	}()
+
 	templatesDir, err := getTemplatesDir()
 	if err != nil {
 		return JobSpecDTO{}, err
@@ -1104,12 +1263,19 @@ func (a *App) LoadTemplate(name string) (JobSpecDTO, error) {
 	if err := json.Unmarshal(data, &job); err != nil {
 		return JobSpecDTO{}, err
 	}
+	normalizeJobSpecDTO(&job)
 
 	return job, nil
 }
 
 // DeleteTemplate deletes a template by name.
-func (a *App) DeleteTemplate(name string) error {
+func (a *App) DeleteTemplate(name string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("template delete panicked: %v", r)
+		}
+	}()
+
 	templatesDir, err := getTemplatesDir()
 	if err != nil {
 		return err

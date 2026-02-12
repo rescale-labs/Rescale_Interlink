@@ -42,6 +42,14 @@ type Pipeline struct {
 	multiPartMode bool
 	skipTarUpload bool // true for submit-existing: skip tar/upload, go directly to job creation
 
+	// Shared files attached to all jobs (from --extra-input-files)
+	extraInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
+	sharedFileIDs      []string // Resolved file IDs (after upload of local paths)
+	decompressExtras   bool     // Whether to decompress shared files on cluster
+
+	// Cleanup options
+	rmTarOnSuccess bool // Delete local tar file after successful upload
+
 	// Resource and transfer management
 	resourceMgr *resources.Manager
 	transferMgr *transfer.Manager
@@ -122,7 +130,7 @@ func findCommonParent(jobs []models.JobSpec) string {
 // the caller's state manager instead of creating a duplicate. This fixes the
 // dual-state bug where GUI and pipeline each had their own state.Manager,
 // causing the GUI to always read empty state. CLI callers pass nil.
-func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool) (*Pipeline, error) {
+func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, extraInputFiles string, decompressExtras bool) (*Pipeline, error) {
 	// Find common parent directory of all jobs - this is where tarballs will be created
 	commonParent := findCommonParent(jobs)
 
@@ -153,16 +161,17 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 	})
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	return &Pipeline{
-		cfg:           cfg,
-		apiClient:     apiClient,
-		stateMgr:      stateMgr,
-		jobs:          jobs,
-		tempDir:       tempDir,
-		multiPartMode: multiPartMode,
-		skipTarUpload: skipTarUpload,
-		resourceMgr:   resourceMgr,
-		transferMgr:   transferMgr,
+	p := &Pipeline{
+		cfg:              cfg,
+		apiClient:        apiClient,
+		stateMgr:         stateMgr,
+		jobs:             jobs,
+		tempDir:          tempDir,
+		multiPartMode:    multiPartMode,
+		skipTarUpload:    skipTarUpload,
+		decompressExtras: decompressExtras,
+		resourceMgr:      resourceMgr,
+		transferMgr:      transferMgr,
 		feederDone:    make(chan struct{}),
 		tarWorkers:    cfg.TarWorkers,
 		uploadWorkers: cfg.UploadWorkers,
@@ -173,7 +182,15 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		jobQueue:      make(chan *workItem, cfg.JobWorkers*constants.DefaultQueueMultiplier),
 		activeWorkers: make(map[string]int),
 		totalJobs:     len(jobs),
-	}, nil
+	}
+
+	// Parse extraInputFiles into sharedFileIDs where possible (id: refs only at construction time;
+	// local paths require ctx and are resolved in ResolveSharedFiles during Run).
+	if extraInputFiles != "" {
+		p.extraInputFilesRaw = extraInputFiles
+	}
+
+	return p, nil
 }
 
 // SetProgressCallback sets the progress callback function
@@ -189,6 +206,11 @@ func (p *Pipeline) SetLogCallback(callback LogCallback) {
 // SetStateChangeCallback sets the state change callback function
 func (p *Pipeline) SetStateChangeCallback(callback StateChangeCallback) {
 	p.onStateChange = callback
+}
+
+// SetRmTarOnSuccess configures whether to delete local tar files after successful upload.
+func (p *Pipeline) SetRmTarOnSuccess(rm bool) {
+	p.rmTarOnSuccess = rm
 }
 
 // logf logs a message, using callback if available
@@ -279,6 +301,56 @@ func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
 	}
 }
 
+// ResolveSharedFiles uploads local paths and collects file IDs from the
+// --extra-input-files flag. Called once at the start of Run() so the
+// resolved IDs are available for every job.
+func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
+	if p.extraInputFilesRaw == "" {
+		return nil
+	}
+	items := strings.Split(p.extraInputFilesRaw, ",")
+	seen := make(map[string]bool) // dedupe
+
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+
+		if strings.HasPrefix(item, "id:") {
+			// Pre-uploaded file ID
+			fileID := strings.TrimPrefix(item, "id:")
+			if !seen[fileID] {
+				p.sharedFileIDs = append(p.sharedFileIDs, fileID)
+				seen[fileID] = true
+			}
+		} else {
+			// Local path — upload it
+			absPath, err := filepath.Abs(item)
+			if err != nil {
+				return fmt.Errorf("invalid path %s: %w", item, err)
+			}
+			if seen[absPath] {
+				continue // Already uploaded
+			}
+
+			log.Printf("[PIPELINE] Uploading shared file: %s", absPath)
+			cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
+				LocalPath:    absPath,
+				APIClient:    p.apiClient,
+				OutputWriter: io.Discard,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
+			}
+			p.sharedFileIDs = append(p.sharedFileIDs, cloudFile.ID)
+			seen[absPath] = true
+			log.Printf("[PIPELINE] Shared file uploaded: %s -> %s", absPath, cloudFile.ID)
+		}
+	}
+	return nil
+}
+
 // Run executes the pipeline
 func (p *Pipeline) Run(ctx context.Context) error {
 	p.logf("INFO", "pipeline", "", "Starting pipeline with %d jobs", p.totalJobs)
@@ -287,6 +359,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// Resolve analysis versions: map display names to versionCodes.
 	// Must happen before feeder goroutine starts workers.
 	p.resolveAnalysisVersions(ctx)
+
+	// Resolve shared files (--extra-input-files): upload local paths, collect IDs.
+	if err := p.ResolveSharedFiles(ctx); err != nil {
+		return fmt.Errorf("failed to resolve shared files: %w", err)
+	}
 
 	var wg sync.WaitGroup
 
@@ -625,6 +702,15 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 			p.reportStateChange(item.state.JobName, "upload", "completed", "", "", 1.0)
 			log.Printf("[UPLOAD #%d] Success: File ID %s", item.index, cloudFile.ID)
 
+			// Clean up tar file if requested
+			if p.rmTarOnSuccess && item.state.TarPath != "" {
+				if err := os.Remove(item.state.TarPath); err != nil {
+					log.Printf("[UPLOAD #%d] Warning: failed to remove tar file %s: %v", item.index, item.state.TarPath, err)
+				} else {
+					log.Printf("[UPLOAD #%d] Removed tar file: %s", item.index, item.state.TarPath)
+				}
+			}
+
 			transferHandle.Complete()
 
 			p.setActiveWorker("upload", -1)
@@ -674,7 +760,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				log.Printf("[JOB #%d] Creating job: %s", item.index, item.jobSpec.JobName)
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
-				jobReq, err := BuildJobRequest(item.jobSpec, []string{item.state.FileID})
+				jobReq, err := BuildJobRequest(item.jobSpec, []string{item.state.FileID}, p.sharedFileIDs, p.decompressExtras)
 				if err != nil {
 					log.Printf("[JOB #%d] FAILED to build request: %v", item.index, err)
 					item.state.SubmitStatus = "failed"
@@ -733,10 +819,12 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 }
 
 // BuildJobRequest builds a job request from job spec.
-// This is the single source of truth for JobSpec → JobRequest conversion.
+// This is the single source of truth for JobSpec -> JobRequest conversion.
 // Used by both GUI (single job tab) and PUR pipeline.
 // fileIDs are the primary input files; ExtraInputFileIDs from spec are also included.
-func BuildJobRequest(spec models.JobSpec, fileIDs []string) (*models.JobRequest, error) {
+// sharedFileIDs are pipeline-level shared files (from --extra-input-files) attached to every job.
+// decompressExtras controls whether those shared files are decompressed on the cluster.
+func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []string, decompressExtras bool) (*models.JobRequest, error) {
 	// Parse license settings (optional - empty string is valid)
 	var licenseEnv map[string]string
 	if spec.LicenseSettings != "" {
@@ -758,7 +846,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string) (*models.JobRequest,
 		}
 	}
 
-	// Add extra input files if specified in spec
+	// Add extra input files if specified in spec (per-job)
 	if spec.ExtraInputFileIDs != "" {
 		extraIDs := strings.Split(spec.ExtraInputFileIDs, ",")
 		for _, id := range extraIDs {
@@ -768,6 +856,24 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string) (*models.JobRequest,
 					ID:         id,
 					Decompress: true,
 				})
+			}
+		}
+	}
+
+	// Add shared files (pipeline-level --extra-input-files), deduplicating
+	// against files already in the list.
+	if len(sharedFileIDs) > 0 {
+		seen := make(map[string]bool, len(inputFiles))
+		for _, f := range inputFiles {
+			seen[f.ID] = true
+		}
+		for _, id := range sharedFileIDs {
+			if !seen[id] {
+				inputFiles = append(inputFiles, models.InputFileRequest{
+					ID:         id,
+					Decompress: decompressExtras,
+				})
+				seen[id] = true
 			}
 		}
 	}

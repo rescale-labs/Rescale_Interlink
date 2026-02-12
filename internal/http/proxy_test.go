@@ -133,3 +133,92 @@ func TestProxyFuncWithBypass_MultiplePatterns(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyFuncWithBypass_ExactBlobHost verifies Azure blob storage host in NoProxy is bypassed.
+func TestProxyFuncWithBypass_ExactBlobHost(t *testing.T) {
+	proxyURL, _ := url.Parse("http://proxy.corp:8080")
+	proxyFunc := proxyFuncWithBypass(proxyURL, "teststorageacct.blob.core.windows.net")
+
+	req, _ := http.NewRequest("GET", "https://teststorageacct.blob.core.windows.net/container/blob", nil)
+	result, err := proxyFunc(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected bypass (nil) for exact blob host, got %v", result)
+	}
+}
+
+// TestProxyFuncWithBypass_HostWithPort verifies host:443 still matches NoProxy entry without port.
+func TestProxyFuncWithBypass_HostWithPort(t *testing.T) {
+	proxyURL, _ := url.Parse("http://proxy.corp:8080")
+	proxyFunc := proxyFuncWithBypass(proxyURL, "teststorageacct.blob.core.windows.net")
+
+	req, _ := http.NewRequest("GET", "https://teststorageacct.blob.core.windows.net:443/container/blob", nil)
+	result, err := proxyFunc(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected bypass (nil) for host with :443 port, got %v", result)
+	}
+}
+
+// TestProxyFuncWithBypass_WildcardDomainCorp verifies *.corp.example.com bypasses sub.corp.example.com.
+func TestProxyFuncWithBypass_WildcardDomainCorp(t *testing.T) {
+	proxyURL, _ := url.Parse("http://proxy.corp:8080")
+	proxyFunc := proxyFuncWithBypass(proxyURL, "*.corp.example.com")
+
+	req, _ := http.NewRequest("GET", "https://sub.corp.example.com/api", nil)
+	result, err := proxyFunc(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected bypass (nil) for sub.corp.example.com, got %v", result)
+	}
+}
+
+// TestProxyFuncWithBypass_SpacingInNoProxy verifies that spaces around NoProxy entries are handled.
+func TestProxyFuncWithBypass_SpacingInNoProxy(t *testing.T) {
+	proxyURL, _ := url.Parse("http://proxy.corp:8080")
+	proxyFunc := proxyFuncWithBypass(proxyURL, " host1.example.com , host2.example.com ")
+
+	// host1 with leading/trailing space should still bypass
+	req1, _ := http.NewRequest("GET", "https://host1.example.com/api", nil)
+	result1, err := proxyFunc(req1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result1 != nil {
+		t.Errorf("expected bypass (nil) for host1.example.com with spacing, got %v", result1)
+	}
+
+	// host2 with leading/trailing space should still bypass
+	req2, _ := http.NewRequest("GET", "https://host2.example.com/api", nil)
+	result2, err := proxyFunc(req2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result2 != nil {
+		t.Errorf("expected bypass (nil) for host2.example.com with spacing, got %v", result2)
+	}
+}
+
+// TestProxyFuncWithBypass_NonMatchingHostIsProxied verifies non-matching hosts go through proxy.
+func TestProxyFuncWithBypass_NonMatchingHostIsProxied(t *testing.T) {
+	proxyURL, _ := url.Parse("http://proxy.corp:8080")
+	proxyFunc := proxyFuncWithBypass(proxyURL, "*.internal.corp")
+
+	req, _ := http.NewRequest("GET", "https://api.external.com/data", nil)
+	result, err := proxyFunc(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected proxy URL for non-matching host, got nil (direct)")
+	}
+	if result.Host != "proxy.corp:8080" {
+		t.Errorf("expected proxy host proxy.corp:8080, got %s", result.Host)
+	}
+}

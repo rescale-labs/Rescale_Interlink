@@ -13,9 +13,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
@@ -145,6 +147,10 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
+	if deadline, ok := partCtx.Deadline(); ok {
+		log.Printf("[AZURE] Block %d: remaining deadline %v", partIndex, time.Until(deadline).Round(time.Second))
+	}
+
 	// Stage the block using AzureClient
 	err = providerData.azureClient.RetryWithBackoff(partCtx, fmt.Sprintf("StageBlock %d", partIndex), func() error {
 		client := providerData.azureClient.Client()
@@ -207,6 +213,10 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	// Create context with timeout (v4.0.4: use centralized constant)
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
+
+	if deadline, ok := partCtx.Deadline(); ok {
+		log.Printf("[AZURE] Block %d: remaining deadline %v", partIndex, time.Until(deadline).Round(time.Second))
+	}
 
 	// Stage the block using AzureClient
 	err := providerData.azureClient.RetryWithBackoff(partCtx, fmt.Sprintf("StageBlock %d", partIndex), func() error {

@@ -1,5 +1,43 @@
 # Release Notes - Rescale Interlink
 
+## v4.6.4 - February 12, 2026
+
+### PUR Feature Parity, Bug Fixes, and Enhancements
+
+Comprehensive gap analysis between old Python PUR (v0.7.6) and Interlink PUR, with fixes for blocking bugs and feature gaps.
+
+#### Bug Fixes
+
+**Pattern Regex Fix (#24):** Current regexes missed filenames like `Run_335_Fluid_Meas.avg.snc` because `\b` after `\d+` doesn't match when followed by `_` (a word character). Added Pattern 4 regex for number-followed-by-separator-text. (File: `internal/pur/pattern/pattern.go`)
+
+**GUI Template Crash Fix:** Wails app window crashed (Go panic) when saving/loading PUR templates with null or missing fields. Added `normalizeJobSpecDTO()` for nil-safe slice defaults, panic recovery on all template methods, and atomic writes via temp-file-then-rename. (File: `internal/wailsapp/job_bindings.go`)
+
+**Azure Proxy Timeout Fix:** Azure uploads failed with "context deadline exceeded" on block 0 in proxy basic mode. Replaced blocking `time.Sleep()` in `ExecuteWithRetry()` with context-aware `select`, added early deadline checks before retries, and added proxy bypass debug logging. (Files: `internal/http/retry.go`, `internal/http/proxy.go`, `internal/cloud/providers/azure/streaming_concurrent.go`)
+
+#### New Features
+
+**`--extra-input-files`:** Upload local files once, attach to every job in PUR batch. Supports comma-separated local paths and/or `id:<fileId>` references. Includes `--decompress-extras` flag (default: false). GUI support added to PUR tab with file picker and decompress checkbox. (Files: `internal/pur/pipeline/pipeline.go`, `internal/cli/pur.go`, `frontend/src/components/tabs/PURTab.tsx`)
+
+**`--iterate-command-patterns`:** Revived dead `ScanOptions.IteratePatterns` code path. Added CLI flags for `pur make-dirs-csv`: `--iterate-command-patterns` and `--command-pattern-test` (preview mode). GUI support with "Vary command across runs" toggle and pattern preview. Added `PreviewCommandPatterns()` Go binding for GUI. (Files: `internal/cli/pur.go`, `internal/wailsapp/job_bindings.go`, `frontend/src/components/tabs/PURTab.tsx`)
+
+**Missing CLI Flags:** Exposed config-level features as CLI flags on `pur run` and `pur resume`:
+- `--include-pattern` / `--exclude-pattern` — Tar file filtering
+- `--flatten-tar` — Remove subdirectory structure in tarball
+- `--tar-compression` — "none" or "gz"
+- `--tar-workers` / `--upload-workers` / `--job-workers` — Worker pool sizes
+- `--rm-tar-on-success` — Delete local tar after successful upload
+
+(Files: `internal/cli/pur.go`, `internal/pur/pipeline/pipeline.go`)
+
+#### Tests Added
+
+- 9 new pattern tests (complex filenames, multiline commands, number-followed-by-text)
+- 10 new template tests (nil fields, corrupt JSON, atomic writes, Wails roundtrip)
+- 5 new proxy bypass tests (exact blob host, host:443, wildcard domain, spacing in no_proxy)
+- 4 new retry tests (context cancellation, deadline checks, success/fatal paths)
+
+---
+
 ## v4.6.3 - February 10, 2026
 
 ### Fix: S3 Upload "Stream Not Seekable" Failure During PUR

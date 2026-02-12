@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	nethttp "net/http"
 	"net/url"
@@ -203,7 +204,13 @@ func proxyFuncWithBypass(proxyURL *url.URL, noProxy string) func(*nethttp.Reques
 	}
 	proxyFunc := cfg.ProxyFunc()
 	return func(req *nethttp.Request) (*url.URL, error) {
-		return proxyFunc(req.URL)
+		result, err := proxyFunc(req.URL)
+		if result == nil {
+			log.Printf("[PROXY] Bypass: %s (direct connection)", req.URL.Host)
+		} else {
+			log.Printf("[PROXY] Proxied: %s → %s", req.URL.Host, result.Host)
+		}
+		return result, err
 	}
 }
 

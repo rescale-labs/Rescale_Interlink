@@ -882,7 +882,7 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 	}
 
 	// Create pipeline with shared state manager
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false)
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, "", false)
 	if err != nil {
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
@@ -1027,7 +1027,7 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 	}
 
 	// Create pipeline directly from JobSpecs with shared state manager
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false)
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, "", false)
 	if err != nil {
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
@@ -1074,6 +1074,139 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 			jobName, stage, newStatus, uploadProgress), "engine", "")
 
 		// v4.0.6: Update state manager with upload progress for GetJobRows to return
+		if stage == "upload" && uploadProgress > 0 {
+			e.state.UpdateUploadProgressByName(jobName, uploadProgress)
+		}
+
+		e.eventBus.Publish(&events.StateChangeEvent{
+			BaseEvent: events.BaseEvent{
+				EventType: events.EventStateChange,
+				Time:      time.Now(),
+			},
+			JobName:        jobName,
+			Stage:          stage,
+			NewStatus:      newStatus,
+			JobID:          jobID,
+			ErrorMessage:   errorMessage,
+			UploadProgress: uploadProgress,
+		})
+	})
+
+	e.mu.Unlock()
+
+	// Run the pipeline
+	startTime := time.Now()
+	err = pip.Run(ctx)
+	duration := time.Since(startTime)
+
+	// Stop monitoring
+	e.stopMonitoring()
+
+	// Get final stats
+	stats := e.getJobStats()
+
+	// Emit completion event
+	e.eventBus.Publish(&events.CompleteEvent{
+		BaseEvent: events.BaseEvent{
+			EventType: events.EventComplete,
+			Time:      time.Now(),
+		},
+		TotalJobs:   stats.Total,
+		SuccessJobs: stats.Completed,
+		FailedJobs:  stats.Failed,
+		Duration:    duration,
+	})
+
+	if err != nil {
+		if err == context.Canceled {
+			e.publishLog(events.InfoLevel, "Pipeline stopped by user", "run", "")
+		} else {
+			e.publishLog(events.ErrorLevel, fmt.Sprintf("Pipeline error: %v", err), "run", "")
+		}
+		return err
+	}
+
+	e.publishLog(events.InfoLevel, fmt.Sprintf("Pipeline completed successfully in %s", duration.Round(time.Second)), "run", "")
+	return nil
+}
+
+// RunFromSpecsWithOptions executes the pipeline from an in-memory job list with
+// additional PUR options (extra input files, decompress flag). This is the GUI
+// entry point when extra input files are configured.
+func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobSpec, stateFile string, extraInputFiles string, decompressExtras bool) error {
+	// Check if API key is configured before starting pipeline
+	e.mu.RLock()
+	hasAPIKey := e.config.APIKey != ""
+	e.mu.RUnlock()
+
+	if !hasAPIKey {
+		return fmt.Errorf("API key not configured - please enter your API key in the Setup tab and click 'Apply Changes' before running jobs")
+	}
+
+	if len(jobs) == 0 {
+		return fmt.Errorf("no jobs provided")
+	}
+
+	e.mu.Lock()
+
+	// Create cancellable context
+	e.ctx, e.cancel = context.WithCancel(ctx)
+	ctx = e.ctx
+
+	e.publishLog(events.InfoLevel, fmt.Sprintf("Starting pipeline with %d jobs (in-memory, with options)...", len(jobs)), "run", "")
+
+	// Safety fallback — if state wasn't already initialized by StartRun()
+	if e.state == nil {
+		e.state = state.NewManager(stateFile)
+	}
+
+	// Create pipeline directly from JobSpecs with shared state manager and extra input files
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, extraInputFiles, decompressExtras)
+	if err != nil {
+		e.mu.Unlock()
+		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
+		return err
+	}
+
+	// Set up callbacks to publish to event bus (identical to RunFromSpecs)
+	pip.SetLogCallback(func(level, message, stage, jobName string) {
+		var eventLevel events.LogLevel
+		switch level {
+		case "DEBUG":
+			eventLevel = events.DebugLevel
+		case "INFO":
+			eventLevel = events.InfoLevel
+		case "WARN":
+			eventLevel = events.WarnLevel
+		case "ERROR":
+			eventLevel = events.ErrorLevel
+		default:
+			eventLevel = events.InfoLevel
+		}
+		e.publishLog(eventLevel, message, stage, jobName)
+	})
+
+	pip.SetProgressCallback(func(completed, total int, stage, jobName string) {
+		progress := 0.0
+		if total > 0 {
+			progress = float64(completed) / float64(total)
+		}
+		e.eventBus.Publish(&events.ProgressEvent{
+			BaseEvent: events.BaseEvent{
+				EventType: events.EventProgress,
+				Time:      time.Now(),
+			},
+			Progress: progress,
+			Stage:    stage,
+			JobName:  jobName,
+			Message:  fmt.Sprintf("%d/%d jobs complete", completed, total),
+		})
+	})
+
+	pip.SetStateChangeCallback(func(jobName, stage, newStatus, jobID, errorMessage string, uploadProgress float64) {
+		e.publishLog(events.DebugLevel, fmt.Sprintf("[DEBUG] StateChangeCallback: job=%s, stage=%s, status=%s, progress=%.2f",
+			jobName, stage, newStatus, uploadProgress), "engine", "")
+
 		if stage == "upload" && uploadProgress > 0 {
 			e.state.UpdateUploadProgressByName(jobName, uploadProgress)
 		}

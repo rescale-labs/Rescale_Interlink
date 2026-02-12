@@ -212,8 +212,12 @@ func ExecuteWithRetry(ctx context.Context, config Config, operation func() error
 				if config.OnRetry != nil {
 					config.OnRetry(attempt+1, err, errType)
 				}
-				// Brief pause before credential refresh (1 second)
-				time.Sleep(1 * time.Second)
+				// Brief pause before credential refresh (1 second), context-aware
+				select {
+				case <-time.After(1 * time.Second):
+				case <-ctx.Done():
+					return fmt.Errorf("context cancelled during credential retry: %w", ctx.Err())
+				}
 				continue
 			}
 			return fmt.Errorf("credential error after %d attempts: %w", config.MaxRetries, err)
@@ -225,7 +229,16 @@ func ExecuteWithRetry(ctx context.Context, config Config, operation func() error
 				if config.OnRetry != nil {
 					config.OnRetry(attempt+1, err, errType)
 				}
-				time.Sleep(backoff)
+				// Check if remaining deadline is sufficient for the backoff sleep
+				if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < backoff {
+					return fmt.Errorf("insufficient time for retry (need %v, have %v): %w", backoff, time.Until(deadline), err)
+				}
+				// Context-aware sleep: returns immediately if context is cancelled
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err())
+				}
 				continue
 			}
 		}

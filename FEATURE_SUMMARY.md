@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.6.3
-**Build Date:** February 10, 2026
+**Version:** 4.6.4
+**Build Date:** February 12, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -62,7 +62,7 @@ rescale-int files upload <file> --pre-encrypt
 - Automatic resume on interruption (Ctrl+C)
 - Progress bars with transfer speed and ETA
 - Support for both S3 and Azure storage backends
-- **Seekable upload streams** (v4.6.3): S3 upload progress reader implements `io.ReadSeeker` so AWS SDK can rewind on transient network errors; reader created fresh per retry attempt
+- **Seekable upload streams** (v4.6.4): S3 upload progress reader implements `io.ReadSeeker` so AWS SDK can rewind on transient network errors; reader created fresh per retry attempt
 - **Source:** `internal/cli/files.go:45-160`, `internal/cloud/upload/`, `internal/cloud/providers/s3/streaming_concurrent.go`
 
 **Encryption Modes (v3.0.0):**
@@ -1111,4 +1111,4 @@ For more details, see:
 ---
 
 *Last Updated: February 10, 2026*
-*Version: 4.6.3*
+*Version: 4.6.4*

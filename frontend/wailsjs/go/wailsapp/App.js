@@ -190,6 +190,10 @@ export function PauseDaemon() {
   return window['go']['wailsapp']['App']['PauseDaemon']();
 }
 
+export function PreviewCommandPatterns(arg1, arg2) {
+  return window['go']['wailsapp']['App']['PreviewCommandPatterns'](arg1, arg2);
+}
+
 export function ResetRun() {
   return window['go']['wailsapp']['App']['ResetRun']();
 }
@@ -264,6 +268,10 @@ export function SetFileLoggingEnabled(arg1) {
 
 export function StartBulkRun(arg1) {
   return window['go']['wailsapp']['App']['StartBulkRun'](arg1);
+}
+
+export function StartBulkRunWithOptions(arg1, arg2) {
+  return window['go']['wailsapp']['App']['StartBulkRunWithOptions'](arg1, arg2);
 }
 
 export function StartDaemon() {

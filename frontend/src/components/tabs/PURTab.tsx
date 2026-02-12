@@ -367,6 +367,8 @@ export function PURTab() {
     pipelineLogs,
     pipelineStageStats,
     startTime,
+    purRunOptions,
+    setPURRunOptions,
   } = useJobStore()
 
   // Template builder dialog state
@@ -853,6 +855,93 @@ export function PURTab() {
                 <span className="text-sm">Include hidden directories</span>
               </label>
             )}
+          </div>
+
+          {/* v4.6.1: Command Pattern Iteration - only in folder mode */}
+          {scanOptions.scanMode === 'folders' && (
+            <div className="mb-4">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={scanOptions.iteratePatterns}
+                  onChange={(e) =>
+                    setScanOptions({ iteratePatterns: e.target.checked })
+                  }
+                  className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
+                />
+                <span className="font-medium text-gray-700">
+                  Vary command across runs
+                </span>
+              </label>
+              <p className="text-xs text-gray-400 ml-6 mt-1">
+                When enabled, numeric patterns in the command (e.g., Run_1, data_001.csv)
+                are automatically updated to match each directory&apos;s number.
+              </p>
+              {/* Pattern preview hint */}
+              {scanOptions.iteratePatterns && template.command && template.command !== '# Enter your command here' && (
+                <div className="mt-2 ml-6 p-3 bg-blue-50 rounded-md">
+                  <h5 className="text-xs font-medium text-blue-700 mb-1">
+                    Command Pattern Preview
+                  </h5>
+                  <p className="text-xs text-blue-600">
+                    Numeric patterns in the command will be iterated to match directory numbers.
+                  </p>
+                  <code className="text-xs block mt-1 text-blue-800 bg-blue-100 p-1 rounded">
+                    {template.command.substring(0, 80)}{template.command.length > 80 ? '...' : ''}
+                  </code>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Extra Input Files Section */}
+          <div className="border-t pt-4 mt-4 mb-6">
+            <h4 className="text-sm font-medium text-gray-700 mb-2">
+              Extra Input Files (shared across all jobs)
+            </h4>
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Comma-separated local paths or id:fileId references"
+                  value={purRunOptions.extraInputFiles}
+                  onChange={(e) => setPURRunOptions({ extraInputFiles: e.target.value })}
+                />
+                <button
+                  type="button"
+                  className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm hover:bg-gray-50 dark:hover:bg-gray-700"
+                  onClick={async () => {
+                    try {
+                      const path = await App.SelectFile('Select extra input file')
+                      if (path) {
+                        const current = purRunOptions.extraInputFiles
+                        setPURRunOptions({
+                          extraInputFiles: current ? `${current},${path}` : path,
+                        })
+                      }
+                    } catch {
+                      // User cancelled
+                    }
+                  }}
+                >
+                  Browse...
+                </button>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={purRunOptions.decompressExtras}
+                  onChange={(e) => setPURRunOptions({ decompressExtras: e.target.checked })}
+                  className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
+                />
+                Decompress extra files on cluster
+              </label>
+              <p className="text-xs text-gray-400">
+                These files are uploaded once and attached to every job in the batch.
+                Use &quot;id:fileId&quot; for already-uploaded files.
+              </p>
+            </div>
           </div>
 
           {scanError && (

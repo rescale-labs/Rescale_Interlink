@@ -16,6 +16,7 @@ import (
 	"github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/filescan"
+	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/validation"
 )
@@ -43,8 +44,14 @@ func newPURCmd() *cobra.Command {
 func newMakeDirsCSVCmd() *cobra.Command {
 	var templatePath string
 	var outputPath string
-	var pattern string
+	var dirPattern string
 	var overwrite bool
+	var iteratePatterns bool
+	var commandPatternTest bool
+	var cwd string
+	var runSubpath string
+	var validationPattern string
+	var startIndex int
 
 	cmd := &cobra.Command{
 		Use:   "make-dirs-csv",
@@ -54,33 +61,24 @@ func newMakeDirsCSVCmd() *cobra.Command {
 This command scans for directories matching the pattern and creates a jobs CSV
 file with one job per directory, using the template CSV as a base.
 
-Example:
-  rescale-int pur make-dirs-csv --template template.csv --output jobs.csv --pattern "Run_*"`,
+Use --iterate-command-patterns to automatically vary numeric patterns in the
+template command across jobs (e.g., data_1.txt becomes data_2.txt for Run_2).
+
+Use --command-pattern-test to preview detected patterns without generating CSV.
+
+Examples:
+  rescale-int pur make-dirs-csv --template template.csv --output jobs.csv --pattern "Run_*"
+  rescale-int pur make-dirs-csv --template template.csv --output jobs.csv --pattern "Run_*" --iterate-command-patterns
+  rescale-int pur make-dirs-csv --template template.csv --pattern "Run_*" --command-pattern-test`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
 			if templatePath == "" {
 				return fmt.Errorf("--template is required")
 			}
-			if outputPath == "" {
-				return fmt.Errorf("--output is required")
-			}
-			if pattern == "" {
+			if dirPattern == "" {
 				return fmt.Errorf("--pattern is required")
 			}
-
-			// Check if output exists
-			if !overwrite {
-				if _, err := os.Stat(outputPath); err == nil {
-					return fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath)
-				}
-			}
-
-			logger.Info().
-				Str("template", templatePath).
-				Str("output", outputPath).
-				Str("pattern", pattern).
-				Msg("Generating jobs CSV from directories")
 
 			// Load template
 			templateJobs, err := config.LoadJobsCSV(templatePath)
@@ -93,18 +91,69 @@ Example:
 			}
 
 			// Use first row as template
-			template := templateJobs[0]
+			tmpl := templateJobs[0]
 
-			// Find matching directories
-			baseDir := filepath.Dir(pattern)
-			if baseDir == "." {
-				var err error
-				baseDir, err = os.Getwd()
-				if err != nil {
-					return fmt.Errorf("failed to get current directory: %w", err)
+			// --command-pattern-test: preview pattern detection and exit
+			if commandPatternTest {
+				patterns := pattern.DetectNumericPatterns(tmpl.Command)
+				if len(patterns) == 0 {
+					fmt.Println("No numeric patterns detected in command:")
+					fmt.Printf("  %s\n", tmpl.Command)
+					return nil
+				}
+
+				fmt.Printf("Command: %s\n\n", tmpl.Command)
+				fmt.Printf("Detected %d pattern(s):\n", len(patterns))
+				for i, p := range patterns {
+					fmt.Printf("  [%d] %q  (prefix=%q number=%q suffix=%q)\n", i+1, p.FullMatch, p.Prefix, p.Number, p.Suffix)
+				}
+
+				templateIdx := pattern.ExtractIndexFromJobName(tmpl.JobName)
+				fmt.Printf("\nTemplate index (from job name %q): %d\n", tmpl.JobName, templateIdx)
+				fmt.Println("\nPreview of iteration:")
+				for _, idx := range []int{1, 2, 3, 5, 10} {
+					iterated := pattern.IterateCommandPatterns(tmpl.Command, templateIdx, idx)
+					fmt.Printf("  index=%d: %s\n", idx, iterated)
+				}
+				return nil
+			}
+
+			if outputPath == "" {
+				return fmt.Errorf("--output is required")
+			}
+
+			// Check if output exists
+			if !overwrite {
+				if _, err := os.Stat(outputPath); err == nil {
+					return fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath)
 				}
 			}
-			patternName := filepath.Base(pattern)
+
+			logger.Info().
+				Str("template", templatePath).
+				Str("output", outputPath).
+				Str("pattern", dirPattern).
+				Bool("iteratePatterns", iteratePatterns).
+				Msg("Generating jobs CSV from directories")
+
+			// Determine base directory
+			baseDir := cwd
+			if baseDir == "" {
+				baseDir = filepath.Dir(dirPattern)
+				if baseDir == "." {
+					baseDir, err = os.Getwd()
+					if err != nil {
+						return fmt.Errorf("failed to get current directory: %w", err)
+					}
+				}
+			}
+
+			// Navigate into run subpath if specified
+			if runSubpath != "" {
+				baseDir = filepath.Join(baseDir, runSubpath)
+			}
+
+			patternName := filepath.Base(dirPattern)
 
 			entries, err := os.ReadDir(baseDir)
 			if err != nil {
@@ -112,6 +161,9 @@ Example:
 			}
 
 			var jobs []models.JobSpec
+			templateIdx := pattern.ExtractIndexFromJobName(tmpl.JobName)
+			jobNum := startIndex
+
 			for _, entry := range entries {
 				if !entry.IsDir() {
 					continue
@@ -123,18 +175,39 @@ Example:
 					continue
 				}
 
-				if matched {
-					// Create job from template
-					job := template
-					job.JobName = entry.Name()
-					job.Directory = filepath.Join(baseDir, entry.Name())
-					jobs = append(jobs, job)
-					logger.Info().Str("dir", entry.Name()).Msg("Added job")
+				if !matched {
+					continue
 				}
+
+				dirPath := filepath.Join(baseDir, entry.Name())
+
+				// Validate directory if pattern specified
+				if validationPattern != "" {
+					valMatches, _ := filepath.Glob(filepath.Join(dirPath, validationPattern))
+					if len(valMatches) == 0 {
+						logger.Warn().Str("dir", entry.Name()).Str("validationPattern", validationPattern).Msg("Directory skipped: validation pattern not found")
+						continue
+					}
+				}
+
+				// Create job from template
+				job := tmpl
+				job.JobName = entry.Name()
+				job.Directory = dirPath
+
+				// Iterate command patterns if requested
+				if iteratePatterns {
+					dirNum := pattern.ExtractIndexFromJobName(entry.Name())
+					job.Command = pattern.IterateCommandPatterns(tmpl.Command, templateIdx, dirNum)
+				}
+
+				jobs = append(jobs, job)
+				logger.Info().Str("dir", entry.Name()).Int("index", jobNum).Msg("Added job")
+				jobNum++
 			}
 
 			if len(jobs) == 0 {
-				return fmt.Errorf("no directories matched pattern: %s", pattern)
+				return fmt.Errorf("no directories matched pattern: %s", dirPattern)
 			}
 
 			// Save jobs CSV
@@ -147,18 +220,23 @@ Example:
 				Str("output", outputPath).
 				Msg("Jobs CSV generated successfully")
 
-			fmt.Printf("✓ Generated %d jobs in %s\n", len(jobs), outputPath)
+			fmt.Printf("Generated %d jobs in %s\n", len(jobs), outputPath)
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVarP(&templatePath, "template", "t", "", "Template CSV file (required)")
-	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output jobs CSV file (required)")
-	cmd.Flags().StringVarP(&pattern, "pattern", "p", "", "Directory pattern, e.g., 'Run_*' (required)")
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output jobs CSV file (required unless --command-pattern-test)")
+	cmd.Flags().StringVarP(&dirPattern, "pattern", "p", "", "Directory pattern, e.g., 'Run_*' (required)")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Overwrite existing output file")
+	cmd.Flags().BoolVar(&iteratePatterns, "iterate-command-patterns", false, "Vary command across runs by iterating numeric patterns")
+	cmd.Flags().BoolVar(&commandPatternTest, "command-pattern-test", false, "Preview pattern detection without generating CSV")
+	cmd.Flags().StringVar(&cwd, "cwd", "", "Working directory (default: current directory)")
+	cmd.Flags().StringVar(&runSubpath, "run-subpath", "", "Subdirectory path to navigate before finding runs")
+	cmd.Flags().StringVar(&validationPattern, "validation-pattern", "", "File pattern to validate directories")
+	cmd.Flags().IntVar(&startIndex, "start-index", 1, "Starting index for job numbering")
 
 	cmd.MarkFlagRequired("template")
-	cmd.MarkFlagRequired("output")
 	cmd.MarkFlagRequired("pattern")
 
 	return cmd
@@ -460,6 +538,16 @@ func newRunCmd() *cobra.Command {
 	var jobsCSV string
 	var stateFile string
 	var multiPart bool
+	var includePatterns []string
+	var excludePatterns []string
+	var flattenTar bool
+	var tarCompression string
+	var tarWorkers int
+	var uploadWorkers int
+	var jobWorkers int
+	var rmTarOnSuccess bool
+	var extraInputFiles string
+	var decompressExtras bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -486,6 +574,29 @@ Example:
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
+			// Override config values when CLI flags are explicitly set
+			if cmd.Flags().Changed("include-pattern") {
+				cfg.IncludePatterns = includePatterns
+			}
+			if cmd.Flags().Changed("exclude-pattern") {
+				cfg.ExcludePatterns = excludePatterns
+			}
+			if cmd.Flags().Changed("flatten-tar") {
+				cfg.FlattenTar = flattenTar
+			}
+			if cmd.Flags().Changed("tar-compression") {
+				cfg.TarCompression = tarCompression
+			}
+			if cmd.Flags().Changed("tar-workers") && tarWorkers > 0 {
+				cfg.TarWorkers = tarWorkers
+			}
+			if cmd.Flags().Changed("upload-workers") && uploadWorkers > 0 {
+				cfg.UploadWorkers = uploadWorkers
+			}
+			if cmd.Flags().Changed("job-workers") && jobWorkers > 0 {
+				cfg.JobWorkers = jobWorkers
+			}
+
 			// Load jobs
 			jobs, err := config.LoadJobsCSV(jobsCSV)
 			if err != nil {
@@ -501,9 +612,14 @@ Example:
 			}
 
 			// Create pipeline
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, extraInputFiles, decompressExtras)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
+			}
+
+			// Apply rm-tar-on-success if set
+			if rmTarOnSuccess {
+				pipe.SetRmTarOnSuccess(true)
 			}
 
 			// Run pipeline
@@ -521,6 +637,16 @@ Example:
 	cmd.Flags().StringVarP(&jobsCSV, "jobs-csv", "j", "", "Jobs CSV file (required)")
 	cmd.Flags().StringVarP(&stateFile, "state", "s", "", "State file for resume capability")
 	cmd.Flags().BoolVar(&multiPart, "multipart", false, "Enable multi-part mode")
+	cmd.Flags().StringArrayVar(&includePatterns, "include-pattern", nil, "Only tar files matching glob pattern (can repeat)")
+	cmd.Flags().StringArrayVar(&excludePatterns, "exclude-pattern", nil, "Exclude files matching glob from tar (can repeat)")
+	cmd.Flags().BoolVar(&flattenTar, "flatten-tar", false, "Remove subdirectory structure in tarball")
+	cmd.Flags().StringVar(&tarCompression, "tar-compression", "", "Tar compression: 'none' or 'gz' (default from config)")
+	cmd.Flags().IntVar(&tarWorkers, "tar-workers", 0, "Number of parallel tar workers (default from config)")
+	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
+	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
+	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
+	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
+	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
 
 	cmd.MarkFlagRequired("jobs-csv")
 
@@ -532,6 +658,16 @@ func newResumeCmd() *cobra.Command {
 	var jobsCSV string
 	var stateFile string
 	var multiPart bool
+	var includePatterns []string
+	var excludePatterns []string
+	var flattenTar bool
+	var tarCompression string
+	var tarWorkers int
+	var uploadWorkers int
+	var jobWorkers int
+	var rmTarOnSuccess bool
+	var extraInputFiles string
+	var decompressExtras bool
 
 	cmd := &cobra.Command{
 		Use:   "resume",
@@ -566,6 +702,29 @@ Example:
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
+			// Override config values when CLI flags are explicitly set
+			if cmd.Flags().Changed("include-pattern") {
+				cfg.IncludePatterns = includePatterns
+			}
+			if cmd.Flags().Changed("exclude-pattern") {
+				cfg.ExcludePatterns = excludePatterns
+			}
+			if cmd.Flags().Changed("flatten-tar") {
+				cfg.FlattenTar = flattenTar
+			}
+			if cmd.Flags().Changed("tar-compression") {
+				cfg.TarCompression = tarCompression
+			}
+			if cmd.Flags().Changed("tar-workers") && tarWorkers > 0 {
+				cfg.TarWorkers = tarWorkers
+			}
+			if cmd.Flags().Changed("upload-workers") && uploadWorkers > 0 {
+				cfg.UploadWorkers = uploadWorkers
+			}
+			if cmd.Flags().Changed("job-workers") && jobWorkers > 0 {
+				cfg.JobWorkers = jobWorkers
+			}
+
 			// Load jobs
 			jobs, err := config.LoadJobsCSV(jobsCSV)
 			if err != nil {
@@ -581,9 +740,14 @@ Example:
 			}
 
 			// Create pipeline (will load existing state)
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, extraInputFiles, decompressExtras)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
+			}
+
+			// Apply rm-tar-on-success if set
+			if rmTarOnSuccess {
+				pipe.SetRmTarOnSuccess(true)
 			}
 
 			// Run pipeline (will resume from state)
@@ -601,6 +765,16 @@ Example:
 	cmd.Flags().StringVarP(&jobsCSV, "jobs-csv", "j", "", "Jobs CSV file (required)")
 	cmd.Flags().StringVarP(&stateFile, "state", "s", "", "State file (required)")
 	cmd.Flags().BoolVar(&multiPart, "multipart", false, "Enable multi-part mode")
+	cmd.Flags().StringArrayVar(&includePatterns, "include-pattern", nil, "Only tar files matching glob pattern (can repeat)")
+	cmd.Flags().StringArrayVar(&excludePatterns, "exclude-pattern", nil, "Exclude files matching glob from tar (can repeat)")
+	cmd.Flags().BoolVar(&flattenTar, "flatten-tar", false, "Remove subdirectory structure in tarball")
+	cmd.Flags().StringVar(&tarCompression, "tar-compression", "", "Tar compression: 'none' or 'gz' (default from config)")
+	cmd.Flags().IntVar(&tarWorkers, "tar-workers", 0, "Number of parallel tar workers (default from config)")
+	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
+	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
+	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
+	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
+	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
 
 	cmd.MarkFlagRequired("jobs-csv")
 	cmd.MarkFlagRequired("state")
@@ -666,7 +840,7 @@ Example:
 			// Create pipeline with skip-upload mode
 			// The pipeline will skip tar and upload, only create and submit jobs
 			logger.Info().Msg("Creating pipeline (submit-existing mode)")
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, false, nil, true)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, false, nil, true, "", false)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}

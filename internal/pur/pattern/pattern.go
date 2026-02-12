@@ -55,6 +55,36 @@ func DetectNumericPatterns(command string) []PatternInfo {
 		}
 	}
 
+	// Pattern 4: word + separator + number + separator + more text (e.g., "Run_335_Fluid_Meas.avg.snc")
+	// This must come before Pattern 2 because it's more specific; the overlap filter keeps the longest match.
+	re4 := regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)([_-][a-zA-Z_][a-zA-Z0-9_.\-]+)`)
+	for _, match := range re4.FindAllStringSubmatchIndex(command, -1) {
+		fullMatch := command[match[0]:match[1]]
+		prefix := command[match[2]:match[3]] + command[match[4]:match[5]]
+		number := command[match[6]:match[7]]
+		suffix := command[match[8]:match[9]]
+		separator := command[match[4]:match[5]]
+
+		pattern := PatternInfo{
+			FullMatch: fullMatch,
+			Prefix:    prefix,
+			Number:    number,
+			Suffix:    suffix,
+			Padding:   len(number),
+			Separator: separator,
+			StartPos:  match[0],
+			EndPos:    match[1],
+		}
+
+		if validatePatternForIteration(&pattern) {
+			patternText := pattern.FullMatch
+			if _, exists := uniquePatterns[patternText]; !exists {
+				uniquePatterns[patternText] = &pattern
+			}
+			patterns = append(patterns, pattern)
+		}
+	}
+
 	// Pattern 2: word + separator + number (e.g., "run_1", "test-002")
 	re2 := regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)\b`)
 	for _, match := range re2.FindAllStringSubmatchIndex(command, -1) {

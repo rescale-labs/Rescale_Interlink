@@ -96,6 +96,8 @@ export function OpenLogsDirectory():Promise<void>;
 
 export function PauseDaemon():Promise<void>;
 
+export function PreviewCommandPatterns(arg1:string,arg2:Array<string>):Promise<Array<wailsapp.CommandPreviewDTO>>;
+
 export function ResetRun():Promise<void>;
 
 export function ResumeDaemon():Promise<void>;
@@ -133,6 +135,8 @@ export function SelectMultipleFiles(arg1:string):Promise<Array<string>>;
 export function SetFileLoggingEnabled(arg1:boolean):Promise<void>;
 
 export function StartBulkRun(arg1:Array<wailsapp.JobSpecDTO>):Promise<string>;
+
+export function StartBulkRunWithOptions(arg1:Array<wailsapp.JobSpecDTO>,arg2:wailsapp.PURRunOptionsDTO):Promise<string>;
 
 export function StartDaemon():Promise<void>;
 

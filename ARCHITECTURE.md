@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.6.3
-**Last Updated**: February 10, 2026
+**Version**: 4.6.4
+**Last Updated**: February 12, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.6.3                 |
+|                 Rescale Interlink v4.6.4                 |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -666,7 +666,7 @@ provider := providers.NewFactory().NewTransferFromStorageInfo(storageType, creds
 - Concurrent part uploads (configurable threads)
 - Credential caching via `EnsureFreshCredentials()`
 - Automatic retry with exponential backoff (`RetryWithBackoff`)
-- Seekable upload streams via `uploadProgressReader` (v4.6.3): `io.ReadSeeker` support so AWS SDK can rewind on transient errors; fresh reader per retry attempt
+- Seekable upload streams via `uploadProgressReader` (v4.6.4): `io.ReadSeeker` support so AWS SDK can rewind on transient errors; fresh reader per retry attempt
 
 ### Azure Backend (`internal/cloud/providers/azure/`)
 

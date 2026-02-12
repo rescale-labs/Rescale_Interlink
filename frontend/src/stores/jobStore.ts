@@ -105,6 +105,12 @@ export interface SecondaryPattern {
   required: boolean // If true, skip job when file missing; if false, warn and continue
 }
 
+// PUR run options (beyond job list)
+export interface PURRunOptions {
+  extraInputFiles: string   // Comma-separated paths and/or id:fileId
+  decompressExtras: boolean
+}
+
 // Scan options
 export interface ScanOptions {
   rootDir: string
@@ -121,6 +127,9 @@ export interface ScanOptions {
 
   // v4.6.0: Subdirectory within each Run_* to tar
   tarSubpath: string
+
+  // v4.6.1: Vary command across runs (iterate numeric patterns)
+  iteratePatterns: boolean
 }
 
 // Default job template
@@ -207,6 +216,9 @@ interface JobStore {
   analysisCodesError: string | null
   automationsError: string | null
 
+  // PUR run options
+  purRunOptions: PURRunOptions
+
   // Scan state
   scanOptions: ScanOptions
   isScanning: boolean
@@ -233,6 +245,9 @@ interface JobStore {
   setError: (message: string) => void
   clearError: () => void
   canGoBack: () => boolean
+
+  // Actions - PUR Run Options
+  setPURRunOptions: (opts: Partial<PURRunOptions>) => void
 
   // Actions - Scanning
   setScanOptions: (opts: Partial<ScanOptions>) => void
@@ -326,6 +341,11 @@ export const useJobStore = create<JobStore>((set, get) => ({
   analysisCodesError: null,
   automationsError: null,
 
+  purRunOptions: {
+    extraInputFiles: '',
+    decompressExtras: false,
+  },
+
   scanOptions: {
     rootDir: '',
     pattern: 'Run_*',
@@ -339,6 +359,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
     secondaryPatterns: [],
     // v4.6.0
     tarSubpath: '',
+    // v4.6.1
+    iteratePatterns: false,
   },
   isScanning: false,
   scanError: null,
@@ -465,6 +487,13 @@ export const useJobStore = create<JobStore>((set, get) => ({
     return workflowState in BACK_TARGETS
   },
 
+  // PUR Run Options Actions
+  setPURRunOptions: (opts) => {
+    set((state) => ({
+      purRunOptions: { ...state.purRunOptions, ...opts },
+    }))
+  },
+
   // Scan Actions
   setScanOptions: (opts) => {
     set((state) => ({
@@ -503,6 +532,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
           secondaryPatterns: secondaryPatternsDTO,
           // v4.6.0
           tarSubpath: scanOptions.tarSubpath,
+          // v4.6.1
+          iteratePatterns: scanOptions.iteratePatterns,
         } as wailsapp.ScanOptionsDTO,
         template as wailsapp.JobSpecDTO
       )
@@ -594,7 +625,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
         startTime: Date.now(),
       })
 
-      const runId = await App.StartBulkRun(scannedJobs as wailsapp.JobSpecDTO[])
+      const runId = await App.StartBulkRunWithOptions(
+        scannedJobs as wailsapp.JobSpecDTO[],
+        get().purRunOptions as wailsapp.PURRunOptionsDTO,
+      )
       set({ runId })
 
       // v4.6.0: Subscribe to real-time Wails events for live updates

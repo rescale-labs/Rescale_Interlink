@@ -17,6 +17,7 @@ export type {
   AnalysisVersion,
   Automation,
   ScanOptions,
+  PURRunOptions,
   WorkflowMemory,
   PipelineLogEntry,
   PipelineStageStats,

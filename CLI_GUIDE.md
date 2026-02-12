@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.6.3.
+Complete command-line interface reference for `rescale-int` v4.6.4.
 
-**Version:** 4.6.3
-**Build Date:** February 10, 2026
+**Version:** 4.6.4
+**Build Date:** February 12, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -1133,9 +1133,15 @@ rescale-int pur make-dirs-csv --template TEMPLATE --output OUTPUT --pattern PATT
 
 **Flags:**
 - `-t, --template string` - Template CSV file (required)
-- `-o, --output string` - Output jobs CSV file (required)
+- `-o, --output string` - Output jobs CSV file (required unless `--command-pattern-test`)
 - `-p, --pattern string` - Directory pattern, e.g., 'Run_*' (required)
 - `--overwrite` - Overwrite existing output file
+- `--iterate-command-patterns` - Vary command across runs by iterating numeric patterns (v4.6.4)
+- `--command-pattern-test` - Preview pattern detection without generating CSV (v4.6.4)
+- `--cwd string` - Working directory (default: current directory) (v4.6.4)
+- `--run-subpath string` - Subdirectory path to navigate before finding runs (v4.6.4)
+- `--validation-pattern string` - File pattern to validate directories (v4.6.4)
+- `--start-index int` - Starting index for job numbering (default: 1) (v4.6.4)
 
 **Example:**
 ```bash
@@ -1143,6 +1149,19 @@ rescale-int pur make-dirs-csv \
   --template template.csv \
   --output jobs.csv \
   --pattern "Run_*"
+
+# Preview how command patterns would vary:
+rescale-int pur make-dirs-csv \
+  --template template.csv \
+  --pattern "Run_*" \
+  --command-pattern-test
+
+# Generate with pattern iteration:
+rescale-int pur make-dirs-csv \
+  --template template.csv \
+  --output jobs.csv \
+  --pattern "Run_*" \
+  --iterate-command-patterns
 ```
 
 #### pur plan
@@ -1178,10 +1197,28 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file for resume capability
 - `--multipart` - Enable multi-part mode
+- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs (v4.6.4)
+- `--decompress-extras` - Decompress extra input files on cluster (default: false) (v4.6.4)
+- `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
+- `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
+- `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
+- `--tar-compression string` - Tar compression: "none" or "gz" (v4.6.4)
+- `--tar-workers int` - Parallel tar workers (default from config) (v4.6.4)
+- `--upload-workers int` - Parallel upload workers (default from config) (v4.6.4)
+- `--job-workers int` - Parallel job creation workers (default from config) (v4.6.4)
+- `--rm-tar-on-success` - Delete local tar after successful upload (v4.6.4)
 
 **Example:**
 ```bash
 rescale-int pur run --jobs-csv jobs.csv --state state.csv
+
+# With shared extra input files:
+rescale-int pur run --jobs-csv jobs.csv --state state.csv \
+  --extra-input-files "/path/to/shared_script.py,id:AbCdEf123"
+
+# With tar filtering:
+rescale-int pur run --jobs-csv jobs.csv --state state.csv \
+  --exclude-pattern "*.log" --exclude-pattern "*.tmp"
 ```
 
 #### pur resume
@@ -1195,6 +1232,16 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file (required)
 - `--multipart` - Enable multi-part mode
+- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>` (v4.6.4)
+- `--decompress-extras` - Decompress extra input files on cluster (v4.6.4)
+- `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
+- `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
+- `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
+- `--tar-compression string` - Tar compression: "none" or "gz" (v4.6.4)
+- `--tar-workers int` - Parallel tar workers (v4.6.4)
+- `--upload-workers int` - Parallel upload workers (v4.6.4)
+- `--job-workers int` - Parallel job creation workers (v4.6.4)
+- `--rm-tar-on-success` - Delete local tar after successful upload (v4.6.4)
 
 **Example:**
 ```bash
