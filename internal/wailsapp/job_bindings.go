@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
@@ -647,13 +648,19 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	// Convert DTO to job spec
 	jobSpec := dtoToJobSpec(input.Job)
 
-	// Set directory for directory mode
-	if input.InputMode == "directory" {
+	// v4.6.8: Explicitly set mode-specific fields. Clear conflicting fields to prevent
+	// loaded templates or CSV carrying stale directory/InputFiles values.
+	switch input.InputMode {
+	case "directory":
 		jobSpec.Directory = input.Directory
+		jobSpec.InputFiles = nil
+	case "remoteFiles":
+		jobSpec.Directory = ""
+		jobSpec.InputFiles = input.RemoteFileIDs
+	case "localFiles":
+		jobSpec.Directory = ""
+		jobSpec.InputFiles = nil // Will be populated after upload in goroutine
 	}
-
-	// For localFiles and remoteFiles modes, we need to handle file upload/selection
-	// This will be handled by the frontend calling StartTransfers first
 
 	// Register run with Engine (v4.0.0)
 	if err := a.engine.StartRun(runID, stateFile, 1); err != nil {
@@ -671,9 +678,25 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	go func() {
 		defer a.engine.EndRun()
 
+		// v4.6.8: For localFiles mode, upload each file first, then create the job
+		if input.InputMode == "localFiles" {
+			var fileIDs []string
+			for _, localPath := range input.LocalFiles {
+				cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
+					LocalPath: localPath,
+					APIClient: a.engine.API(),
+				})
+				if err != nil {
+					wailsLogger.Error().Err(err).Str("file", localPath).Msg("File upload failed")
+					return
+				}
+				fileIDs = append(fileIDs, cloudFile.ID)
+			}
+			jobSpec.InputFiles = fileIDs
+		}
+
 		err := a.engine.RunFromSpecs(ctx, []models.JobSpec{jobSpec}, stateFile)
 		if err != nil && ctx.Err() == nil {
-			// Real error, not cancellation - errors are already tracked in Engine's state
 			wailsLogger.Error().Err(err).Msg("Single job run failed")
 		}
 	}()
@@ -734,6 +757,16 @@ func (a *App) GetRunStatus() RunStatusDTO {
 		if pending == 0 {
 			if failed > 0 {
 				status.State = "failed"
+				// v4.6.8: Populate error from job state so GUI can display
+				// the actual API error instead of a generic message.
+				if st := a.engine.GetState(); st != nil {
+					for _, js := range st.GetAllStates() {
+						if js.ErrorMessage != "" {
+							status.Error = js.ErrorMessage
+							break
+						}
+					}
+				}
 			} else {
 				status.State = "completed"
 			}

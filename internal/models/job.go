@@ -217,8 +217,28 @@ type JobAutomation struct {
 	EnvironmentVariables map[string]string `json:"environmentVariables,omitempty"`
 }
 
+// AutomationRef wraps an automation ID for the Rescale API's nested object format.
+// The API expects {"automation": {"id": "..."}} rather than a flat string.
+type AutomationRef struct {
+	ID string `json:"id"`
+}
+
 // JobAutomationRequest is used when creating/updating a job with automations.
+// v4.6.8: Fixed to use nested AutomationRef struct matching API contract.
+// v4.6.8: Removed omitempty from EnvironmentVariables — API returns HTTP 500
+// if the "environmentVariables" key is missing from the JSON payload.
 type JobAutomationRequest struct {
-	AutomationID         string            `json:"automation"` // Just the automation ID
-	EnvironmentVariables map[string]string `json:"environmentVariables,omitempty"`
+	Automation           AutomationRef     `json:"automation"`
+	EnvironmentVariables map[string]string `json:"environmentVariables"`
+}
+
+// NormalizeAutomations ensures all automation entries have initialized
+// EnvironmentVariables maps. The Rescale API returns HTTP 500 if the
+// "environmentVariables" key is missing from the JSON payload.
+func (r *JobRequest) NormalizeAutomations() {
+	for i := range r.JobAutomations {
+		if r.JobAutomations[i].EnvironmentVariables == nil {
+			r.JobAutomations[i].EnvironmentVariables = map[string]string{}
+		}
+	}
 }

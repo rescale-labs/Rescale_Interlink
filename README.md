@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.6.7-green)
+![Status](https://img.shields.io/badge/status-v4.6.8-green)
 
 ---
 
@@ -56,7 +56,7 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 
 - **Six-Tab Interface**:
   - **Setup**: Configuration management, API key setup, proxy settings, test connection
-  - **Single Job**: Configure and submit individual jobs with template builder
+  - **Single Job**: Configure and submit individual jobs (directory, local files, or remote files)
   - **PUR (Parallel Upload Run)**: Batch job pipeline execution with directory scanning
   - **File Browser**: Two-pane local/remote file browser with upload/download
   - **Transfers**: Real-time transfer queue with progress, cancel, retry
@@ -217,15 +217,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.6.7-macos-arm64.tar.gz` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.6.7-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.6.7-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `rescale-interlink-v4.6.7-win_amd64.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.6.8-macos-arm64.tar.gz` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.6.8-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.6.8-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `rescale-interlink-v4.6.8-win_amd64.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Extract and move app to Applications
-tar -xzf rescale-interlink-v4.6.7-macos-arm64.tar.gz
+tar -xzf rescale-interlink-v4.6.8-macos-arm64.tar.gz
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -236,7 +236,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.6.7-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.6.8-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -249,7 +249,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.6.7-win_amd64.zip
+Expand-Archive rescale-interlink-v4.6.8-win_amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -389,7 +389,7 @@ open /Applications/rescale-int-gui.app
 The GUI provides six tabs:
 
 1. **Setup**: Configure API credentials, proxy settings, transfer options, **daemon control**
-2. **Single Job**: Create and submit individual jobs with the template builder
+2. **Single Job**: Create and submit individual jobs (supports directory, local file, and remote file input modes)
 3. **PUR**: Parallel Upload Run - batch job pipeline for multiple directories
 4. **File Browser**: Two-pane file manager for local and remote files
 5. **Transfers**: Monitor active transfers with progress and controls
@@ -559,7 +559,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.6.7                       |
+|                    Rescale Interlink v4.6.8                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -825,6 +825,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.6.7
+**Version**: 4.6.8
 **Status**: Production Ready
 **Last Updated**: February 17, 2026

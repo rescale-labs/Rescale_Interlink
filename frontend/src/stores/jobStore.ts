@@ -135,7 +135,7 @@ export interface ScanOptions {
 
 // Default job template
 export const DEFAULT_JOB_TEMPLATE: JobSpec = {
-  directory: './Run_${index}',
+  directory: '',
   jobName: 'Run_1',
   analysisCode: '',
   analysisVersion: '',

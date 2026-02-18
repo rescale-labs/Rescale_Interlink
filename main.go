@@ -1,6 +1,7 @@
 // Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
 // FIPS 140-3 Compliant Build Required
 //
+// v4.6.8: Fix automation JSON format, single job all input modes, GTK warnings, terminology.
 // v4.0.3: True server-side pagination with page caching, status message fix.
 // - No args + display available → GUI mode
 // - No args + no display → CLI help
@@ -82,6 +83,11 @@ func main() {
 	}
 
 	// GUI mode - launch Wails GUI
+	// v4.6.8: Suppress GTK ibus input method warnings on Linux.
+	// Wails uses its own webview input handling; ibus is unnecessary.
+	if runtime.GOOS == "linux" && os.Getenv("GTK_IM_MODULE") == "" {
+		os.Setenv("GTK_IM_MODULE", "none")
+	}
 	wailsapp.Assets = assets
 	if err := wailsapp.Run(os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

@@ -27,8 +27,8 @@ import (
 func newPURCmd() *cobra.Command {
 	purCmd := &cobra.Command{
 		Use:   "pur",
-		Short: "PUR - Parallel Uploader and Runner for Rescale",
-		Long:  `PUR (Parallel Uploader and Runner) commands for batch job submission.`,
+		Short: "PUR (Parallel Upload and Run) for Rescale",
+		Long:  `PUR (Parallel Upload and Run) commands for batch job submission.`,
 	}
 
 	// Add PUR subcommands

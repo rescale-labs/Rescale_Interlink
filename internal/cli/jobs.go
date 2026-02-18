@@ -482,7 +482,8 @@ Examples:
 			if len(automations) > 0 {
 				for _, autoID := range automations {
 					jobReq.JobAutomations = append(jobReq.JobAutomations, models.JobAutomationRequest{
-						AutomationID: autoID,
+						Automation:           models.AutomationRef{ID: autoID},
+						EnvironmentVariables: map[string]string{},
 					})
 				}
 				logger.Info().Strs("automations", automations).Msg("Attaching automations to job")

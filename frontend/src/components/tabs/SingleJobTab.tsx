@@ -423,7 +423,8 @@ export function SingleJobTab() {
               setState('completed')
             } else if (status.state === 'failed') {
               isPollingRef.current = false
-              setError('Job submission failed')
+              // v4.6.8: Display actual API error from backend instead of generic message
+              setError(status.error || 'Job submission failed')
               setState('failed')
             } else if (isPollingRef.current) {
               // Continue polling using ref check, not state

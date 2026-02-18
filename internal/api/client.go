@@ -114,6 +114,44 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	retryClient.RetryWaitMax = 30 * time.Second
 	retryClient.Logger = &retryLogger{} // Enable error/warning logging
 
+	// v4.6.8: Custom retry policy — don't retry non-idempotent job creation/submission
+	// on 5xx, and never retry 4xx (except 429 rate limiting).
+	retryClient.CheckRetry = func(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
+		// Don't retry on context cancellation
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		// Retry transport/connection errors (all methods)
+		if err != nil {
+			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+		}
+		// Never retry 4xx (client errors) — not recoverable.
+		// Return (false, nil) so the response flows through to the caller.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 429 {
+			return false, nil
+		}
+		// For job creation/submission POST specifically: don't retry 5xx.
+		// Job creation is non-idempotent — retrying could create duplicates.
+		// Return (false, nil) to let the 5xx response flow through cleanly
+		// so CreateJob can read the body and report the actual error.
+		if resp.StatusCode >= 500 && resp.Request != nil {
+			if resp.Request.Method == "POST" && (strings.Contains(resp.Request.URL.Path, "/api/v3/jobs/") ||
+				strings.Contains(resp.Request.URL.Path, "/submit/")) {
+				return false, nil
+			}
+		}
+		// Fall back to default policy for everything else
+		// (retries 5xx on GET, retries 429, etc.)
+		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+	}
+
+	// v4.6.8: Custom error handler to preserve response body on retry exhaustion.
+	// Without this, go-retryablehttp drains the body and returns a generic
+	// "giving up after N attempt(s)" message, losing the actual API error.
+	retryClient.ErrorHandler = func(resp *nethttp.Response, err error, numTries int) (*nethttp.Response, error) {
+		return resp, err
+	}
+
 	// Rate Limiter Setup
 	// All v3 API endpoints share the "user" scope (7200/hour = 2 req/sec limit).
 	// We use a single shared rate limiter instance for all v3 calls.
@@ -448,6 +486,7 @@ func (c *Client) GetFileInfo(ctx context.Context, fileID string) (*models.CloudF
 
 // CreateJob creates a new job (v3 API)
 func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*models.JobResponse, error) {
+	jobReq.NormalizeAutomations() // Ensure environmentVariables is always present
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/jobs/", jobReq)
 	if err != nil {
 		return nil, err

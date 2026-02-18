@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.6.7.
+Complete command-line interface reference for `rescale-int` v4.6.8.
 
-**Version:** 4.6.7
-**Build Date:** February 17, 2026
+**Version:** 4.6.8
+**Build Date:** February 18, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -23,7 +23,7 @@ For a comprehensive list of all features with source code references, see [FEATU
   - [Daemon Commands](#daemon-commands)
   - [Hardware Commands](#hardware-commands)
   - [Software Commands](#software-commands)
-  - [PUR Commands](#pur-commands)
+  - [PUR (Parallel Upload and Run) Commands](#pur-parallel-upload-and-run-commands)
   - [Shortcuts](#shortcuts)
 - [Shell Completion](#shell-completion)
 - [Examples](#examples)
@@ -757,19 +757,37 @@ rescale-int jobs delete --job-id WfbQa --confirm
 ```
 
 #### jobs submit
-Create and submit a job from JSON specification
+Create and/or submit jobs from JSON, SGE script, or existing job ID
 
 ```bash
-rescale-int jobs submit --job-file <file> [--no-submit]
+rescale-int jobs submit --job-file <file> [--create]
+rescale-int jobs submit --script <file> [--submit]
+rescale-int jobs submit --job-id <id>
 ```
 
 **Flags:**
-- `-f, --job-file string` - Path to job specification JSON file (required)
-- `--no-submit` - Create job but don't submit it
+- `-f, --job-file string` - Path to job specification JSON file
+- `-s, --script string` - Path to SGE-style script with `#RESCALE_*` metadata
+- `-j, --job-id string` - Existing job ID to submit (use with `--submit` only)
+- `--files strings` - Input files to upload (comma-separated, supports glob patterns)
+- `--create` - Create job only (don't submit)
+- `--submit` - Create and submit job (default behavior)
+- `-E, --end-to-end` - Full workflow: upload, create, submit, monitor, download
+- `--download` - Auto-download results after job completes (requires `--end-to-end`)
+- `--no-tar` - Skip tarball creation for single file uploads
+- `-m, --max-concurrent int` - Maximum concurrent file uploads
+- `--automation strings` - Automation ID(s) to attach (comma-separated or repeated)
 
-**Example:**
+**Examples:**
 ```bash
+# Submit job from JSON spec
 rescale-int jobs submit --job-file job_spec.json
+
+# Create job without submitting (create-only mode)
+rescale-int jobs submit --job-file job_spec.json --create
+
+# Submit job with automations attached
+rescale-int jobs submit --job-file job_spec.json --automation aB1cD2 --automation eF3gH4
 ```
 
 ### Daemon Commands
@@ -1120,9 +1138,9 @@ rescale-int software list --search openfoam
 rescale-int software list --json --versions
 ```
 
-### PUR Commands
+### PUR (Parallel Upload and Run) Commands
 
-PUR (Parallel Uploader and Runner) provides batch job submission with pipeline management.
+PUR (Parallel Upload and Run) provides batch job submission with pipeline management.
 
 #### pur make-dirs-csv
 Generate jobs CSV from directory pattern
@@ -1610,12 +1628,12 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v4.6.7 (February 17, 2026)
+This guide is for `rescale-int` v4.6.8 (February 18, 2026)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v4.6.7 (2026-02-17) [FIPS 140-3]
+# Output: rescale-int version v4.6.8 (2026-02-18) [FIPS 140-3]
 ```
 
 ### v4.2.1 Enhanced Eligibility Configuration (January 9, 2026)

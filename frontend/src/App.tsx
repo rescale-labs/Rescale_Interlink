@@ -36,7 +36,7 @@ export const useTabNavigation = () => useContext(TabNavigationContext);
 const tabs = [
   { name: 'Setup', icon: Cog6ToothIcon, component: SetupTab },
   { name: 'Single Job', icon: PlayIcon, component: SingleJobTab },
-  { name: 'PUR (Multiple Jobs)', icon: Square3Stack3DIcon, component: PURTab },
+  { name: 'PUR (Multiple Jobs)', icon: Square3Stack3DIcon, component: PURTab, title: 'PUR = Parallel Upload and Run' },
   { name: 'File Browser', icon: FolderOpenIcon, component: FileBrowserTab },
   { name: 'Transfers', icon: ArrowsRightLeftIcon, component: TransfersTab },
   { name: 'Activity Logs', icon: DocumentTextIcon, component: ActivityTab },
@@ -160,6 +160,7 @@ function AppComponent() {
           {tabs.map((tab) => (
             <Tab
               key={tab.name}
+              title={(tab as any).title}
               className={({ selected }) =>
                 clsx(
                   'flex items-center px-4 py-2.5 text-sm font-medium text-left transition-colors',

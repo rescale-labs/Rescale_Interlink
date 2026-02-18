@@ -622,9 +622,9 @@ export function PURTab() {
       // Create new path - template selection
       return (
         <div className="flex flex-col items-center justify-center h-full">
-          <h3 className="text-lg font-semibold mb-4">Configure Job Template</h3>
+          <h3 className="text-lg font-semibold mb-4">Configure Job Settings</h3>
           <p className="text-gray-600 mb-6">
-            Create or load a job template to use for scanning
+            Create or load job settings to apply to all jobs
           </p>
           <div className="flex gap-4">
             <button
@@ -632,14 +632,14 @@ export function PURTab() {
               className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
             >
               <FolderPlusIcon className="w-5 h-5" />
-              Create New Template
+              Create New Settings
             </button>
             <button
               onClick={handleLoadTemplate}
               className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
             >
               <DocumentArrowUpIcon className="w-5 h-5" />
-              Load Template
+              Load Settings
             </button>
           </div>
         </div>

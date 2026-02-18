@@ -229,7 +229,8 @@ func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
 		jobReq.JobAutomations = make([]models.JobAutomationRequest, len(m.Automations))
 		for i, autoID := range m.Automations {
 			jobReq.JobAutomations[i] = models.JobAutomationRequest{
-				AutomationID: autoID,
+				Automation:           models.AutomationRef{ID: autoID},
+				EnvironmentVariables: map[string]string{},
 			}
 		}
 	}

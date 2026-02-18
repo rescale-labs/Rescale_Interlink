@@ -423,6 +423,24 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				continue
 			}
 
+			// v4.6.8: If job has pre-specified input file IDs (single job remoteFiles/localFiles mode),
+			// skip tar/upload and go directly to job creation.
+			// Gated on Directory=="" to avoid interfering with file-scan mode where
+			// InputFiles contains local paths but Directory is also set.
+			if jobSpec.Directory == "" && len(jobSpec.InputFiles) > 0 {
+				item.state.TarStatus = "skipped"
+				item.state.UploadStatus = "skipped"
+				p.stateMgr.UpdateState(item.state)
+				p.reportStateChange(item.state.JobName, "tar", "skipped", "", "", 0.0)
+				p.reportStateChange(item.state.JobName, "upload", "skipped", "", "", 0.0)
+				select {
+				case <-ctx.Done():
+					return
+				case p.jobQueue <- item:
+				}
+				continue
+			}
+
 			// Determine which queue to start in based on current state
 			if state.TarStatus == "success" && state.UploadStatus == "success" && state.JobID != "" {
 				// Already uploaded and job created, check if we need to submit
@@ -773,7 +791,15 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				log.Printf("[JOB #%d] Creating job: %s", item.index, item.jobSpec.JobName)
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
-				jobReq, err := BuildJobRequest(item.jobSpec, []string{item.state.FileID}, p.sharedFileIDs, p.decompressExtras)
+				// v4.6.8: When InputFiles are pre-specified (single job remoteFiles/localFiles mode),
+				// use them directly instead of the FileID from upload stage.
+				var fileIDs []string
+				if item.jobSpec.Directory == "" && len(item.jobSpec.InputFiles) > 0 {
+					fileIDs = item.jobSpec.InputFiles
+				} else {
+					fileIDs = []string{item.state.FileID}
+				}
+				jobReq, err := BuildJobRequest(item.jobSpec, fileIDs, p.sharedFileIDs, p.decompressExtras)
 				if err != nil {
 					log.Printf("[JOB #%d] FAILED to build request: %v", item.index, err)
 					item.state.SubmitStatus = "failed"
@@ -951,7 +977,8 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 		jobReq.JobAutomations = make([]models.JobAutomationRequest, len(spec.Automations))
 		for i, autoID := range spec.Automations {
 			jobReq.JobAutomations[i] = models.JobAutomationRequest{
-				AutomationID: autoID,
+				Automation:           models.AutomationRef{ID: autoID},
+				EnvironmentVariables: map[string]string{},
 			}
 		}
 	}

@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.6.7
-**Build Date:** February 17, 2026
+**Version:** 4.6.8
+**Build Date:** February 18, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -15,7 +15,7 @@ This document provides a comprehensive, verified list of all features available 
 - [Folder Operations](#folder-operations)
 - [Job Operations](#job-operations)
 - [Background Service (Daemon)](#background-service-daemon)
-- [PUR - Parallel Uploader and Runner](#pur---parallel-uploader-and-runner)
+- [PUR (Parallel Upload and Run)](#pur-parallel-upload-and-run)
 - [Configuration Management](#configuration-management)
 - [Hardware & Software Discovery](#hardware--software-discovery)
 - [Security & Encryption](#security--encryption)
@@ -247,6 +247,18 @@ rescale-int jobs submit --script <path> --files <file-ids> [flags]
 - `--cores-per-slot`: Number of cores per slot
 - `--slots`: Number of slots
 - `--walltime`: Maximum runtime (hours)
+- `--automation`: Automation ID(s) to attach (can specify multiple)
+
+### GUI Single Job Tab (v4.0.0+ Wails)
+
+The GUI Single Job tab supports three input modes:
+- **Directory mode**: Tar and upload a local directory as job input
+- **Local Files mode** (v4.6.8): Upload individual local files, then create the job with those file IDs
+- **Remote Files mode** (v4.6.8): Use already-uploaded Rescale file IDs directly (skips tar/upload)
+
+All three modes support the full job configuration: software, hardware, command, walltime, automations, license settings, extra input files, and submit mode (create-only or create-and-submit).
+
+**Source:** `internal/wailsapp/job_bindings.go:612-681`, `frontend/src/components/tabs/SingleJobTab.tsx`
 
 ### Stop Job
 ```bash
@@ -372,7 +384,7 @@ Marks failed jobs for retry on the next poll cycle.
 
 ---
 
-## PUR - Parallel Uploader and Runner
+## PUR (Parallel Upload and Run)
 
 **Command:** `rescale-int pur [subcommand]`
 **Source:** `internal/cli/pur.go`, `internal/pur/pipeline/`
@@ -1042,6 +1054,20 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 
 **Source:** `internal/ratelimit/`, `internal/cli/files.go`
 
+### v4.6.8 (February 18, 2026)
+**Bug Fixes & Terminology:**
+- ✅ Fixed automation JSON format: (1) nested `{"automation": {"id": "..."}}` object, not flat string; (2) `"environmentVariables": {}` must be present (API returns HTTP 500 if omitted). Added `NormalizeAutomations()` choke point + initialized at all construction sites
+- ✅ Retry safety: job creation/submission POST no longer retries on 5xx; custom `ErrorHandler` preserves actual API error messages
+- ✅ Fixed single job submission for all three input modes (directory, localFiles, remoteFiles)
+- ✅ Added pipeline support for pre-specified InputFiles (skip tar/upload when Directory is empty)
+- ✅ Suppressed GTK ibus input method warnings on Linux GUI
+- ✅ Renamed "template" → "settings" in PUR tab headings/buttons
+- ✅ Renamed "Run Folders Subpath and Validation Configuration" → "Directory Scan Settings"
+- ✅ Updated PUR terminology: "Parallel Upload and Run" throughout CLI help and docs
+- ✅ Fixed default job template directory from `./Run_${index}` to empty string
+
+**Source:** `internal/models/job.go`, `internal/api/client.go`, `internal/wailsapp/job_bindings.go`, `internal/pur/pipeline/pipeline.go`, `main.go`, `frontend/src/`
+
 ### v4.6.7 (February 17, 2026)
 **Audit Remediation (Security, Code Quality, Dead Code, Documentation):**
 - ✅ Corrected SECURITY.md crypto claims (AES-256-GCM → AES-256-CBC with PKCS7 padding)
@@ -1155,5 +1181,5 @@ For more details, see:
 
 ---
 
-*Last Updated: February 17, 2026*
-*Version: 4.6.7*
+*Last Updated: February 18, 2026*
+*Version: 4.6.8*

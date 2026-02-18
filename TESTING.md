@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: February 17, 2026
-**Version**: 4.6.7
+**Last Updated**: February 18, 2026
+**Version**: 4.6.8
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -823,6 +823,26 @@ rm -rf /tmp/test
 
 ---
 
-**Last Updated**: February 17, 2026
-**Version**: 4.6.7
+### Automation Testing (v4.6.8)
+
+**Unit Tests** (`go test ./internal/models/...`):
+- `TestJobAutomationRequest_Serialization` — single automation normalizes and serializes `environmentVariables:{}`
+- `TestJobAutomationRequest_SerializationMultiple` — multiple automations each get `environmentVariables:{}`
+- `TestNormalizeAutomations_NilMap` — nil map becomes empty map
+- `TestNormalizeAutomations_EmptyMap` — empty map stays empty
+- `TestNormalizeAutomations_PopulatedMap` — populated map preserved
+- `TestNormalizeAutomations_NoAutomations` — no automations does not panic
+- `TestJobAutomationRequest_NilEnvVarsSerializesToNull` — raw nil without normalization produces `null`
+- `TestJobAutomationRequest_NestedAutomationFormat` — verifies nested `{"automation":{"id":"..."}}` format
+
+**E2E Testing** (requires Rescale API key):
+1. **Single automation**: Create and submit a job with 1 automation via GUI or CLI → verify HTTP 201
+2. **Multiple automations**: Create and submit a job with 2 automations → verify HTTP 201
+3. **No automations**: Create and submit a job without automations → verify still works (regression check)
+4. **Error visibility**: If job creation fails (bad analysis code, etc.), verify actual API error message is shown (not generic "giving up after N attempt(s)")
+
+---
+
+**Last Updated**: February 18, 2026
+**Version**: 4.6.8
 **Status**: All tests passing, code quality improvements (North Star alignment)

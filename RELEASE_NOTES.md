@@ -1,5 +1,28 @@
 # Release Notes - Rescale Interlink
 
+## v4.6.8 - February 18, 2026
+
+### Bug Fixes
+
+- **Automation JSON format (Critical)**: Fixed job creation with automations. Two issues: (1) API expects `{"automation": {"id": "..."}}` (nested object) but we sent `{"automation": "..."}` (flat string); (2) API requires `"environmentVariables": {}` in each automation entry — omitting it triggers HTTP 500. Added `NormalizeAutomations()` choke point in `CreateJob` and initialized `EnvironmentVariables` at all construction sites. Removed `omitempty` from the JSON tag to prevent `json.Marshal` from dropping the key.
+- **Retry safety for job creation**: Job creation and submission POST requests no longer retry on 5xx server errors (non-idempotent). Prevents 5+ minute hangs and potential duplicate jobs. Custom `ErrorHandler` preserves actual API error messages instead of generic "giving up after N attempt(s)".
+- **Single job submission (All modes)**: Fixed single job tab for `localFiles` and `remoteFiles` input modes, which were completely non-functional. `localFiles` now uploads each file via `cloud/upload.UploadFile()` before creating the job. `remoteFiles` passes file IDs directly to the pipeline, skipping tar/upload. Pipeline feeder and job worker updated to handle pre-specified `InputFiles` when `Directory` is empty.
+- **GTK ibus warnings on Linux**: Suppressed `Gtk-WARNING: im-ibus.so: cannot open shared object file` messages by setting `GTK_IM_MODULE=none` before Wails GUI launch on Linux (only if not already set by user).
+
+### Terminology & UX
+
+- Renamed "Configure Job Template" → "Configure Job Settings", "Create New Template" → "Create New Settings", "Load Template" → "Load Settings" in PUR tab
+- Renamed "Run Folders Subpath and Validation Configuration" → "Directory Scan Settings" in Setup tab
+- Added tooltip "PUR = Parallel Upload and Run" to PUR tab
+- Updated CLI help text: "PUR (Parallel Upload and Run) for Rescale"
+- Updated CLI_GUIDE.md and FEATURE_SUMMARY.md: "PUR (Parallel Upload and Run)" terminology throughout
+
+### Default Template Fix
+
+- Changed default job template `directory` from `./Run_${index}` to empty string, preventing single job submission from trying to tar the current working directory
+
+---
+
 ## v4.6.7 - February 17, 2026
 
 ### Code Quality: Audit Remediation

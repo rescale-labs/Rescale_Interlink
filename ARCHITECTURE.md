@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.6.7
-**Last Updated**: February 17, 2026
+**Version**: 4.6.8
+**Last Updated**: February 18, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.6.7                 |
+|                 Rescale Interlink v4.6.8                 |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -212,7 +212,7 @@ type Engine struct {
 **Responsibilities**:
 - Configuration validation
 - Job specification parsing
-- Pipeline execution (tar → upload → create → submit)
+- Pipeline execution (tar → upload → create → submit; or skip tar/upload when input files are pre-specified)
 - State persistence
 - Event emission for UI updates
 
