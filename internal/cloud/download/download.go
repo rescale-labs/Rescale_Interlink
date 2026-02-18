@@ -305,7 +305,7 @@ checksumLoop:
 		lastActualHash = actualHash
 
 		// Compare checksums (case-insensitive)
-		if equalIgnoreCase(actualHash, expectedHash) {
+		if strings.EqualFold(actualHash, expectedHash) {
 			return nil // Success!
 		}
 
@@ -336,25 +336,4 @@ func computeFileChecksum(localPath string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// equalIgnoreCase compares two strings case-insensitively
-func equalIgnoreCase(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca := a[i]
-		cb := b[i]
-		// Convert to lowercase if uppercase
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
-}
 

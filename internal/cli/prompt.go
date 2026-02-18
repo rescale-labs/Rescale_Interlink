@@ -86,10 +86,6 @@ const (
 	FileOverwriteOnce
 	FileOverwriteAll
 	FileAbort
-
-	// Backward compatibility aliases (deprecated - use FileSkip* instead)
-	FileIgnoreOnce = FileSkipOnce
-	FileIgnoreAll  = FileSkipAll
 )
 
 // promptFileConflict asks user what to do when file already exists
@@ -330,10 +326,6 @@ const (
 	UploadOverwriteOnce
 	UploadOverwriteAll
 	UploadAbort
-
-	// Backward compatibility aliases (deprecated - use UploadOverwrite* instead)
-	UploadAnyway    = UploadOverwriteOnce
-	UploadAnywayAll = UploadOverwriteAll
 )
 
 // promptUploadConflict asks user what to do when a file already exists in the destination

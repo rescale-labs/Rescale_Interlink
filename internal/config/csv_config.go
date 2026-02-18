@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,6 +71,9 @@ type Config struct {
 
 	// v4.0.0: Detailed logging toggle for timing/metrics in Activity tab
 	DetailedLogging bool
+
+	// v4.6.5: Organization code for org-scoped project assignment
+	OrgCode string
 }
 
 // LoadConfigCSV loads configuration from a CSV file
@@ -210,6 +214,8 @@ func LoadConfigCSV(path string) (*Config, error) {
 			cfg.SortAscending = strings.ToLower(value) == "true" || value == "1"
 		case "detailed_logging": // v4.0.0
 			cfg.DetailedLogging = strings.ToLower(value) == "true" || value == "1"
+		case "org_code": // v4.6.5
+			cfg.OrgCode = value
 		}
 	}
 
@@ -292,6 +298,7 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"sort_field", cfg.SortField},                              // v3.6.3
 		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)},  // v3.6.3
 		{"detailed_logging", strconv.FormatBool(cfg.DetailedLogging)}, // v4.0.0
+		{"org_code", cfg.OrgCode},                                     // v4.6.5
 	}
 
 	// v4.5.8: Write ALL values unconditionally. The previous filter skipped "0", "false",
@@ -450,8 +457,19 @@ func (c *Config) Validate() error {
 // IsFRMPlatform returns true if the URL is a FedRAMP-regulated platform.
 // v4.5.1: FRM platforms require strict FIPS 140-3 compliance.
 // NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms.
-func IsFRMPlatform(url string) bool {
-	return strings.Contains(url, "rescale-gov.com")
+// v4.6.6 R2: Use proper URL hostname parsing instead of substring match to prevent spoofing
+// (e.g., "evil-rescale-gov.com" or "rescale-gov.com.evil.com" must not match).
+func IsFRMPlatform(urlStr string) bool {
+	normalized := urlStr
+	if !strings.Contains(normalized, "://") {
+		normalized = "https://" + normalized
+	}
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "rescale-gov.com" || strings.HasSuffix(host, ".rescale-gov.com")
 }
 
 // ValidateNTLMForFIPS checks if NTLM proxy mode is appropriate for the current configuration.

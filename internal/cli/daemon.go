@@ -318,6 +318,7 @@ Examples:
 
 			// Set up signal handling
 			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel() // v4.6.6: Ensure context is always released on all exit paths
 			sigChan := make(chan os.Signal, 1)
 			signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 

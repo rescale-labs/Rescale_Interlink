@@ -486,6 +486,25 @@ func (c *Client) SubmitJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
+// AssignProjectToJob assigns a project to a job using the organization-scoped endpoint.
+// v4.6.5: Required by tenants that use org-scoped project assignment.
+func (c *Client) AssignProjectToJob(ctx context.Context, orgCode, jobID, projectID string) error {
+	path := fmt.Sprintf("/api/v2/organizations/%s/jobs/%s/project-assignment/", orgCode, jobID)
+	body := map[string]string{"projectId": projectID}
+	resp, err := c.doRequest(ctx, "POST", path, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyStr := readResponseBody(resp.Body)
+		return fmt.Errorf("project assignment failed: status %d: %s", resp.StatusCode, bodyStr)
+	}
+
+	return nil
+}
+
 // GetJob retrieves job details
 func (c *Client) GetJob(ctx context.Context, jobID string) (*models.JobResponse, error) {
 	path := fmt.Sprintf("/api/v3/jobs/%s/", jobID)

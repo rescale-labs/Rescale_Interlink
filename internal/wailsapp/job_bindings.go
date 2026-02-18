@@ -60,6 +60,7 @@ type JobSpecDTO struct {
 	OnDemandLicenseSeller string   `json:"onDemandLicenseSeller"`
 	Tags                  []string `json:"tags"`
 	ProjectID             string   `json:"projectId"`
+	OrgCode               string   `json:"orgCode"`
 	Automations           []string `json:"automations"`
 
 	// v4.0.8: File-based job inputs (for file scanning mode)
@@ -778,14 +779,6 @@ func (a *App) GetJobRows() []JobRowDTO {
 	return rows
 }
 
-// UpdateJobRow updates a specific job row (for editing jobs).
-// v4.0.0: This function is deprecated. Edit jobs in the frontend before submission.
-func (a *App) UpdateJobRow(index int, job JobSpecDTO) error {
-	// v4.0.0: With Engine-based state, jobs are only tracked during execution.
-	// Editing should be done in the frontend's scannedJobs before calling StartBulkRun.
-	return fmt.Errorf("UpdateJobRow is deprecated: edit jobs in the frontend before submission")
-}
-
 // ResetRun clears the current run state.
 // v4.0.0: Refactored to use Engine's ResetRun.
 // v4.0.5: Protected by runMu to prevent race conditions.
@@ -880,6 +873,7 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		OnDemandLicenseSeller: j.OnDemandLicenseSeller,
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
+		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
 		TarSubpath:            j.TarSubpath, // v4.6.0
@@ -906,6 +900,7 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		OnDemandLicenseSeller: j.OnDemandLicenseSeller,
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
+		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
 		TarSubpath:            j.TarSubpath, // v4.6.0

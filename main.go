@@ -12,12 +12,12 @@
 package main
 
 import (
-	"crypto/fips140"
 	"embed"
 	"fmt"
 	"log"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 
 	// CRITICAL: mesainit MUST be imported FIRST (before any OpenGL packages)
@@ -28,47 +28,22 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/config"
+	intfips "github.com/rescale/rescale-int/internal/fips"
 	"github.com/rescale/rescale-int/internal/mesa"
 	"github.com/rescale/rescale-int/internal/version"
 	"github.com/rescale/rescale-int/internal/wailsapp"
 )
 
-// FIPSEnabled indicates whether FIPS 140-3 mode is active
-var FIPSEnabled bool
-
 //go:embed all:frontend/dist
 var assets embed.FS
 
 func init() {
-	// Check FIPS 140-3 compliance status at startup
-	// FIPS 140-3 is REQUIRED for Rescale Interlink (FedRAMP compliance)
-	FIPSEnabled = fips140.Enabled()
-	if !FIPSEnabled {
-		// FIPS is NOT active - this is a compliance issue
-		log.Printf("[CRITICAL] FIPS 140-3 mode is NOT active")
-		log.Printf("[CRITICAL] This binary was NOT built with GOFIPS140=latest")
-		log.Printf("[CRITICAL] FedRAMP compliance REQUIRES FIPS 140-3 mode")
-
-		// Check if non-FIPS mode is explicitly allowed (for development only)
-		if os.Getenv("RESCALE_ALLOW_NON_FIPS") == "true" {
-			log.Printf("[WARN] Running without FIPS due to RESCALE_ALLOW_NON_FIPS=true (DEVELOPMENT ONLY)")
-		} else {
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "ERROR: FIPS 140-3 compliance is REQUIRED.\n")
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "This binary was NOT built with FIPS support enabled.\n")
-			fmt.Fprintf(os.Stderr, "Please rebuild using: make build\n")
-			fmt.Fprintf(os.Stderr, "Or manually: GOFIPS140=latest wails build\n")
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "For development ONLY, set RESCALE_ALLOW_NON_FIPS=true to bypass.\n")
-			fmt.Fprintf(os.Stderr, "\n")
-			os.Exit(2) // Exit with code 2 to indicate compliance failure
-		}
-	}
+	// Shared FIPS 140-3 compliance check (common to GUI and CLI binaries)
+	intfips.Init("wails")
 
 	// v4.5.1: Warn if NTLM proxy is configured in FIPS mode
 	// NTLM uses non-FIPS algorithms (MD4/MD5) which may violate compliance for FRM platforms
-	if FIPSEnabled {
+	if intfips.Enabled {
 		cfg, err := config.LoadConfigCSV(config.GetDefaultConfigPath())
 		if err == nil && cfg != nil {
 			if warning := cfg.ValidateNTLMForFIPS(); warning != "" {
@@ -86,14 +61,14 @@ func main() {
 	cli.BuildTime = version.BuildTime
 
 	// Check for diagnostic modes before GUI/CLI
-	if contains(os.Args, "--mesa-doctor") {
+	if slices.Contains(os.Args, "--mesa-doctor") {
 		fmt.Printf("Rescale Interlink %s\n\n", version.Version)
 		mesa.Doctor()
 		return
 	}
 
 	// Enable timing output (works with both GUI and CLI)
-	if contains(os.Args, "--timing") {
+	if slices.Contains(os.Args, "--timing") {
 		os.Setenv("RESCALE_TIMING", "1")
 	}
 
@@ -128,10 +103,10 @@ func main() {
 // - No arguments and display is available
 func isCLIMode() bool {
 	// Explicit flags
-	if contains(os.Args, "--cli") {
+	if slices.Contains(os.Args, "--cli") {
 		return true
 	}
-	if contains(os.Args, "--gui") {
+	if slices.Contains(os.Args, "--gui") {
 		return false
 	}
 
@@ -168,14 +143,4 @@ func isCLIMode() bool {
 	// Unknown arguments - let CLI handle (might be typos or new commands)
 	// This ensures ./AppRun somethingUnknown shows CLI help rather than opening GUI
 	return true
-}
-
-// contains checks if a string slice contains a specific value.
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }

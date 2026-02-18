@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.5.9
-**Last Updated:** 2026-02-07
+**Version:** 4.6.7
+**Last Updated:** 2026-02-17
 
 ## Overview
 
@@ -174,9 +174,9 @@ When running as a Windows Service:
 ### File Encryption
 
 Interlink uses mandatory AES-256 encryption for all file transfers:
-- AES-256-GCM for authenticated encryption
-- Keys derived using HKDF with SHA-256
-- Random IVs for each encryption operation
+- AES-256-CBC with PKCS7 padding
+- Random 256-bit keys and 128-bit IVs for each encryption operation
+- Legacy uploads (v3.1.x) used per-part keys derived via HKDF-SHA256; current uploads use CBC chaining with a single key/IV pair
 
 ### TLS
 

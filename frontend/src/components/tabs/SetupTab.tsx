@@ -45,10 +45,15 @@ type TokenSource = 'environment' | 'file' | 'direct';
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
 const COMPRESSION_OPTIONS = ['gzip', 'none'] as const;
 
-// v4.5.1: Check if URL is a FedRAMP platform (requires FIPS compliance)
+// v4.6.6: Check if URL is a FedRAMP platform (requires FIPS compliance)
 // NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms
+// R2: Use proper URL hostname parsing instead of substring match to prevent spoofing
 const isFRMPlatform = (url: string): boolean => {
-  return url.includes('rescale-gov.com');
+  try {
+    const normalized = url.includes('://') ? url : `https://${url}`;
+    const hostname = new URL(normalized).hostname.toLowerCase();
+    return hostname === 'rescale-gov.com' || hostname.endsWith('.rescale-gov.com');
+  } catch { return false; }
 };
 
 // v4.3.0: Platform URL options for dropdown

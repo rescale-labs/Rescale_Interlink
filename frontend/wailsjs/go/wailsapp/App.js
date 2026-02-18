@@ -326,10 +326,6 @@ export function UpdateConfig(arg1) {
   return window['go']['wailsapp']['App']['UpdateConfig'](arg1);
 }
 
-export function UpdateJobRow(arg1, arg2) {
-  return window['go']['wailsapp']['App']['UpdateJobRow'](arg1, arg2);
-}
-
 export function ValidateAutoDownloadSetup() {
   return window['go']['wailsapp']['App']['ValidateAutoDownloadSetup']();
 }

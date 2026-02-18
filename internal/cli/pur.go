@@ -18,7 +18,9 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/filescan"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
+	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/util/multipart"
 )
 
 // newPURCmd creates the 'pur' command group.
@@ -52,6 +54,7 @@ func newMakeDirsCSVCmd() *cobra.Command {
 	var runSubpath string
 	var validationPattern string
 	var startIndex int
+	var partDirs []string
 
 	cmd := &cobra.Command{
 		Use:   "make-dirs-csv",
@@ -61,6 +64,9 @@ func newMakeDirsCSVCmd() *cobra.Command {
 This command scans for directories matching the pattern and creates a jobs CSV
 file with one job per directory, using the template CSV as a base.
 
+Use --part-dirs for multi-part mode to scan multiple project directories
+(e.g., DOE_1 DOE_2 DOE_3). Job names will include a project suffix for uniqueness.
+
 Use --iterate-command-patterns to automatically vary numeric patterns in the
 template command across jobs (e.g., data_1.txt becomes data_2.txt for Run_2).
 
@@ -69,7 +75,9 @@ Use --command-pattern-test to preview detected patterns without generating CSV.
 Examples:
   rescale-int pur make-dirs-csv --template template.csv --output jobs.csv --pattern "Run_*"
   rescale-int pur make-dirs-csv --template template.csv --output jobs.csv --pattern "Run_*" --iterate-command-patterns
-  rescale-int pur make-dirs-csv --template template.csv --pattern "Run_*" --command-pattern-test`,
+  rescale-int pur make-dirs-csv --template template.csv --pattern "Run_*" --command-pattern-test
+  rescale-int pur make-dirs-csv --template template.csv --output jobs.csv --pattern "Run_*" \
+    --part-dirs /data/DOE_1 /data/DOE_2 /data/DOE_3 --validation-pattern "*.avg.fnc"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
@@ -136,78 +144,59 @@ Examples:
 				Bool("iteratePatterns", iteratePatterns).
 				Msg("Generating jobs CSV from directories")
 
-			// Determine base directory
-			baseDir := cwd
-			if baseDir == "" {
-				baseDir = filepath.Dir(dirPattern)
-				if baseDir == "." {
-					baseDir, err = os.Getwd()
-					if err != nil {
-						return fmt.Errorf("failed to get current directory: %w", err)
+			// v4.6.5: Use shared ScanDirectories() for both single and multi-part modes
+			baseJobName := strings.TrimSuffix(tmpl.JobName, "_1")
+			if baseJobName == "" {
+				baseJobName = "Job"
+			}
+
+			scanOpts := multipart.ScanOpts{
+				Pattern:           filepath.Base(dirPattern),
+				ValidationPattern: validationPattern,
+				BaseJobName:       baseJobName,
+				StartIndex:        startIndex,
+				RunSubpath:        runSubpath,
+			}
+
+			if len(partDirs) > 0 {
+				// Multi-part mode
+				scanOpts.PartDirs = partDirs
+				logger.Info().Int("partDirs", len(partDirs)).Msg("Multi-part mode enabled")
+			} else {
+				// Single-directory mode
+				baseDir := cwd
+				if baseDir == "" {
+					baseDir = filepath.Dir(dirPattern)
+					if baseDir == "." {
+						baseDir, err = os.Getwd()
+						if err != nil {
+							return fmt.Errorf("failed to get current directory: %w", err)
+						}
 					}
 				}
+				scanOpts.SingleDir = baseDir
 			}
 
-			// Navigate into run subpath if specified
-			if runSubpath != "" {
-				baseDir = filepath.Join(baseDir, runSubpath)
-			}
-
-			patternName := filepath.Base(dirPattern)
-
-			entries, err := os.ReadDir(baseDir)
+			results, err := multipart.ScanDirectories(scanOpts)
 			if err != nil {
-				return fmt.Errorf("failed to read directory %s: %w", baseDir, err)
+				return fmt.Errorf("directory scan failed: %w", err)
 			}
 
-			var jobs []models.JobSpec
+			// Convert ScanResults to JobSpecs
 			templateIdx := pattern.ExtractIndexFromJobName(tmpl.JobName)
-			jobNum := startIndex
-
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-
-				matched, err := filepath.Match(patternName, entry.Name())
-				if err != nil {
-					logger.Warn().Str("dir", entry.Name()).Err(err).Msg("Pattern match error")
-					continue
-				}
-
-				if !matched {
-					continue
-				}
-
-				dirPath := filepath.Join(baseDir, entry.Name())
-
-				// Validate directory if pattern specified
-				if validationPattern != "" {
-					valMatches, _ := filepath.Glob(filepath.Join(dirPath, validationPattern))
-					if len(valMatches) == 0 {
-						logger.Warn().Str("dir", entry.Name()).Str("validationPattern", validationPattern).Msg("Directory skipped: validation pattern not found")
-						continue
-					}
-				}
-
-				// Create job from template
+			var jobs []models.JobSpec
+			for _, r := range results {
 				job := tmpl
-				job.JobName = entry.Name()
-				job.Directory = dirPath
+				job.JobName = r.JobName
+				job.Directory = r.Directory
 
 				// Iterate command patterns if requested
 				if iteratePatterns {
-					dirNum := pattern.ExtractIndexFromJobName(entry.Name())
-					job.Command = pattern.IterateCommandPatterns(tmpl.Command, templateIdx, dirNum)
+					job.Command = pattern.IterateCommandPatterns(tmpl.Command, templateIdx, r.DirNumber)
 				}
 
 				jobs = append(jobs, job)
-				logger.Info().Str("dir", entry.Name()).Int("index", jobNum).Msg("Added job")
-				jobNum++
-			}
-
-			if len(jobs) == 0 {
-				return fmt.Errorf("no directories matched pattern: %s", dirPattern)
+				logger.Info().Str("dir", filepath.Base(r.Directory)).Str("job", r.JobName).Msg("Added job")
 			}
 
 			// Save jobs CSV
@@ -235,6 +224,7 @@ Examples:
 	cmd.Flags().StringVar(&runSubpath, "run-subpath", "", "Subdirectory path to navigate before finding runs")
 	cmd.Flags().StringVar(&validationPattern, "validation-pattern", "", "File pattern to validate directories")
 	cmd.Flags().IntVar(&startIndex, "start-index", 1, "Starting index for job numbering")
+	cmd.Flags().StringSliceVar(&partDirs, "part-dirs", nil, "Project directories for multi-part mode (e.g., DOE_1 DOE_2 DOE_3)")
 
 	cmd.MarkFlagRequired("template")
 	cmd.MarkFlagRequired("pattern")
@@ -548,6 +538,7 @@ func newRunCmd() *cobra.Command {
 	var rmTarOnSuccess bool
 	var extraInputFiles string
 	var decompressExtras bool
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -605,6 +596,25 @@ Example:
 
 			logger.Info().Int("count", len(jobs)).Msg("Loaded jobs")
 
+			// v4.6.5: dry-run short-circuit — show plan without executing
+			if dryRun {
+				fmt.Printf("\n=== DRY RUN: %d jobs loaded ===\n\n", len(jobs))
+				fmt.Printf("%-5s %-30s %-20s %-10s %-8s %s\n", "#", "Job Name", "Directory", "CoreType", "Hours", "Command (preview)")
+				fmt.Println(strings.Repeat("-", 110))
+				for i, job := range jobs {
+					cmdPreview := job.Command
+					if len(cmdPreview) > 40 {
+						cmdPreview = cmdPreview[:37] + "..."
+					}
+					dirPreview := filepath.Base(job.Directory)
+					fmt.Printf("%-5d %-30s %-20s %-10s %-8.1f %s\n",
+						i+1, job.JobName, dirPreview, job.CoreType, job.WalltimeHours, cmdPreview)
+				}
+				fmt.Printf("\nTotal: %d jobs\n", len(jobs))
+				fmt.Println("\n(dry-run mode: no jobs were created or submitted)")
+				return nil
+			}
+
 			// Create API client
 			apiClient, err := api.NewClient(cfg)
 			if err != nil {
@@ -647,6 +657,7 @@ Example:
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
 	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
 	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate and show plan without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")
 
@@ -668,6 +679,7 @@ func newResumeCmd() *cobra.Command {
 	var rmTarOnSuccess bool
 	var extraInputFiles string
 	var decompressExtras bool
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "resume",
@@ -733,6 +745,47 @@ Example:
 
 			logger.Info().Int("count", len(jobs)).Msg("Loaded jobs")
 
+			// v4.6.5: dry-run short-circuit — analyze state without executing
+			if dryRun {
+				// Load state file to analyze what's remaining
+				stateMgr := state.NewManager(stateFile)
+				if err := stateMgr.Load(); err != nil {
+					return fmt.Errorf("failed to load state: %w", err)
+				}
+
+				needsTar, needsUpload, needsCreate, needsSubmit, complete := 0, 0, 0, 0, 0
+				for i := range jobs {
+					idx := i + 1
+					st := stateMgr.GetState(idx)
+					if st == nil {
+						needsTar++
+						continue
+					}
+					if st.TarStatus == "success" && st.UploadStatus == "success" && st.JobID != "" && st.SubmitStatus == "success" {
+						complete++
+					} else if st.TarStatus == "success" && st.UploadStatus == "success" && st.JobID != "" {
+						needsSubmit++
+					} else if st.TarStatus == "success" && st.UploadStatus == "success" {
+						needsCreate++
+					} else if st.TarStatus == "success" {
+						needsUpload++
+					} else {
+						needsTar++
+					}
+				}
+
+				fmt.Printf("\n=== DRY RUN: Resume Analysis ===\n\n")
+				fmt.Printf("Total jobs:       %d\n", len(jobs))
+				fmt.Printf("Already complete: %d\n", complete)
+				fmt.Printf("Need tar:         %d\n", needsTar)
+				fmt.Printf("Need upload:      %d\n", needsUpload)
+				fmt.Printf("Need job create:  %d\n", needsCreate)
+				fmt.Printf("Need submit:      %d\n", needsSubmit)
+				fmt.Printf("Remaining:        %d\n", needsTar+needsUpload+needsCreate+needsSubmit)
+				fmt.Println("\n(dry-run mode: no work was performed)")
+				return nil
+			}
+
 			// Create API client
 			apiClient, err := api.NewClient(cfg)
 			if err != nil {
@@ -775,6 +828,7 @@ Example:
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
 	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
 	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be resumed without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")
 	cmd.MarkFlagRequired("state")
@@ -786,6 +840,7 @@ Example:
 func newSubmitExistingCmd() *cobra.Command {
 	var jobsCSV string
 	var stateFile string
+	var ids string
 
 	cmd := &cobra.Command{
 		Use:   "submit-existing",
@@ -799,6 +854,46 @@ Example:
   rescale-int pur submit-existing --jobs-csv jobs.csv --state state.csv`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
+
+			// v4.6.5: --ids direct submission — skip CSV/pipeline entirely
+			if ids != "" && cmd.Flags().Changed("jobs-csv") {
+				return fmt.Errorf("cannot use both --ids and --jobs-csv")
+			}
+
+			if ids != "" {
+				cfg, err := loadConfig()
+				if err != nil {
+					return fmt.Errorf("failed to load config: %w", err)
+				}
+
+				apiClient, err := api.NewClient(cfg)
+				if err != nil {
+					return fmt.Errorf("failed to create API client: %w", err)
+				}
+
+				ctx := GetContext()
+				jobIDs := strings.Split(ids, ",")
+				var failed int
+				for _, id := range jobIDs {
+					id = strings.TrimSpace(id)
+					if id == "" {
+						continue
+					}
+					err := apiClient.SubmitJob(ctx, id)
+					if err != nil {
+						fmt.Printf("[SUBMIT] %s -> FAILED: %v\n", id, err)
+						failed++
+					} else {
+						fmt.Printf("[SUBMIT] %s -> OK\n", id)
+					}
+				}
+
+				if failed > 0 {
+					return fmt.Errorf("%d of %d submissions failed", failed, len(jobIDs))
+				}
+				fmt.Printf("\nAll %d jobs submitted successfully\n", len(jobIDs))
+				return nil
+			}
 
 			logger.Info().
 				Str("jobs_csv", jobsCSV).
@@ -860,6 +955,7 @@ Example:
 
 	cmd.Flags().StringVar(&jobsCSV, "jobs-csv", "jobs.csv", "Jobs CSV file (must contain extrainputfileids column)")
 	cmd.Flags().StringVar(&stateFile, "state", "submit_existing_state.csv", "State file")
+	cmd.Flags().StringVar(&ids, "ids", "", "Comma-separated job IDs to submit directly")
 
 	return cmd
 }

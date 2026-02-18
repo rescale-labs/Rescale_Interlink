@@ -264,53 +264,6 @@ func TestAPIConfig_Validate(t *testing.T) {
 	}
 }
 
-func TestAPIConfig_ValidateForConnection(t *testing.T) {
-	// v4.0.8: ValidateForConnection() is deprecated and always returns nil.
-	// API key now comes from ResolveAPIKey(), not from APIConfig.
-	tests := []struct {
-		name string
-		cfg  *APIConfig
-	}{
-		{
-			name: "valid connection",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-			},
-		},
-		{
-			name: "missing platform URL",
-			cfg: &APIConfig{
-				PlatformURL: "",
-				APIKey:      "my-api-key",
-			},
-		},
-		{
-			name: "missing API key",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "",
-			},
-		},
-		{
-			name: "whitespace only platform URL",
-			cfg: &APIConfig{
-				PlatformURL: "   ",
-				APIKey:      "my-api-key",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.cfg.ValidateForConnection()
-			if err != nil {
-				t.Errorf("ValidateForConnection() error = %v, want nil (deprecated, always returns nil)", err)
-			}
-		})
-	}
-}
-
 func TestAPIConfig_IsAutoDownloadEnabled(t *testing.T) {
 	tests := []struct {
 		name string

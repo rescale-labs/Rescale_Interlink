@@ -927,7 +927,11 @@ Examples:
 
 			if err != nil {
 				fileBar.Complete(err)
-				return fmt.Errorf("failed to download file: %w", err)
+				storageType := "unknown"
+				if fileInfo.Storage != nil {
+					storageType = fileInfo.Storage.StorageType
+				}
+				return formatDownloadError(fileInfo.Name, fileID, jobID, storageType, err)
 			}
 
 			fileBar.Complete(nil)

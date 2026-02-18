@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 4.5.9
-**Last Updated**: February 7, 2026
+**Version**: 4.6.7
+**Last Updated**: February 17, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 

@@ -466,6 +466,35 @@ tenant_url,https://kr.rescale.com
 	}
 }
 
+// TestIsFRMPlatform validates proper hostname-based FedRAMP URL detection (v4.6.6 R2).
+// Ensures substring spoofing attacks like "evil-rescale-gov.com" are rejected.
+func TestIsFRMPlatform(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "exact match with scheme", url: "https://rescale-gov.com", want: true},
+		{name: "subdomain match", url: "https://itar.rescale-gov.com", want: true},
+		{name: "with port", url: "https://rescale-gov.com:8443", want: true},
+		{name: "no scheme", url: "rescale-gov.com", want: true},
+		{name: "uppercase", url: "HTTPS://ITAR.RESCALE-GOV.COM", want: true},
+		{name: "prefix spoof rejected", url: "https://evil-rescale-gov.com", want: false},
+		{name: "suffix spoof rejected", url: "https://rescale-gov.com.evil.com", want: false},
+		{name: "IDN spoof rejected", url: "https://xn--rescale-gov.com", want: false},
+		{name: "empty string", url: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsFRMPlatform(tt.url)
+			if got != tt.want {
+				t.Errorf("IsFRMPlatform(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMergeWithFlagsAndTokenFile(t *testing.T) {
 	// Create temp token file
 	tmpDir := t.TempDir()

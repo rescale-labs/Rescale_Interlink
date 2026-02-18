@@ -640,6 +640,16 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 />
               </div>
               <div>
+                <label className="block text-sm font-medium mb-1">Org Code</label>
+                <input
+                  type="text"
+                  value={template.orgCode || ''}
+                  onChange={(e) => updateField('orgCode', e.target.value)}
+                  placeholder="org-code (optional, for project assignment)"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
                 <label className="block text-sm font-medium mb-1">Tags</label>
                 <input
                   type="text"

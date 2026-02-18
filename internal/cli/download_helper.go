@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -17,6 +20,18 @@ import (
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/util/paths"
 	"github.com/rescale/rescale-int/internal/validation"
+)
+
+// Test seams for CLI-level integration testing.
+// These are package-level function variables that default to the real implementations
+// but can be overridden in tests.
+var (
+	listJobFilesFn = func(ctx context.Context, apiClient *api.Client, jobID string) ([]models.JobFile, error) {
+		return apiClient.ListJobFiles(ctx, jobID)
+	}
+	downloadFileFn = func(ctx context.Context, params download.DownloadParams) error {
+		return download.DownloadFile(ctx, params)
+	}
 )
 
 // executeFileDownload - Common download logic for both files download and download shortcut
@@ -321,7 +336,7 @@ func executeFileDownload(
 			var barOnce sync.Once
 
 			// Download file with progress callback and transfer handle
-			err := download.DownloadFile(ctx, download.DownloadParams{
+			err := downloadFileFn(ctx, download.DownloadParams{
 				FileID:    fileDownload.FileID,
 				LocalPath: outputPath,
 				APIClient: apiClient,
@@ -350,7 +365,12 @@ func executeFileDownload(
 					fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", meta.Name)
 				}
 
-				errChan <- fmt.Errorf("failed to download %s: %w", fileDownload.FileID, err)
+				storageType := "unknown"
+				if meta.CloudFile != nil && meta.CloudFile.Storage != nil {
+					storageType = meta.CloudFile.Storage.StorageType
+				}
+				logger.Debug().Str("error", sanitizeErrorString(err.Error())).Str("file_id", fileDownload.FileID).Str("file_name", meta.Name).Msg("download failed - full error chain for debugging")
+				errChan <- formatDownloadError(meta.Name, fileDownload.FileID, "", storageType, err)
 				return
 			}
 
@@ -444,7 +464,7 @@ func executeJobDownload(
 	fmt.Printf("Fetching output files for job %s...\n", jobID)
 	logger.Info().Str("job_id", jobID).Msg("Listing job output files")
 
-	allFiles, err := apiClient.ListJobFiles(ctx, jobID)
+	allFiles, err := listJobFilesFn(ctx, apiClient, jobID)
 	if err != nil {
 		return fmt.Errorf("failed to list job files: %w", err)
 	}
@@ -690,7 +710,7 @@ func executeJobDownload(
 			cloudFile := jobFile.ToCloudFile()
 
 			// Download file with progress callback and transfer handle using metadata
-			err = download.DownloadFile(ctx, download.DownloadParams{
+			err = downloadFileFn(ctx, download.DownloadParams{
 				FileInfo:  cloudFile,
 				LocalPath: outputPath,
 				APIClient: apiClient,
@@ -719,7 +739,12 @@ func executeJobDownload(
 					fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", jobFile.Name)
 				}
 
-				errChan <- fmt.Errorf("failed to download %s: %w", jobFile.ID, err)
+				storageType := "unknown"
+				if jobFile.Storage != nil {
+					storageType = jobFile.Storage.StorageType
+				}
+				logger.Debug().Str("error", sanitizeErrorString(err.Error())).Str("file_id", jobFile.ID).Str("file_name", jobFile.Name).Str("job_id", jobID).Msg("download failed - full error chain for debugging")
+				errChan <- formatDownloadError(jobFile.Name, jobFile.ID, jobID, storageType, err)
 				return
 			}
 
@@ -745,20 +770,20 @@ func executeJobDownload(
 	close(errChan)
 
 	// Collect all errors
-	var errors []error
+	var dlErrors []error
 	for err := range errChan {
-		errors = append(errors, err)
+		dlErrors = append(dlErrors, err)
 	}
 
 	// Print summary
-	if len(errors) > 0 {
+	if len(dlErrors) > 0 {
 		fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
 		if len(skippedFiles) > 0 {
 			fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
 		}
-		fmt.Printf("✗ Failed to download %d file(s)\n", len(errors))
+		fmt.Printf("✗ Failed to download %d file(s)\n", len(dlErrors))
 		// Return first error but continue with others (per project objectives)
-		return errors[0]
+		return dlErrors[0]
 	}
 
 	fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
@@ -766,4 +791,73 @@ func executeJobDownload(
 		fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
 	}
 	return nil
+}
+
+// sanitizeErrorString removes secrets (SAS tokens, access keys, session tokens)
+// from error messages to prevent leakage in logs and user-facing output.
+func sanitizeErrorString(s string) string {
+	// Redact SAS token query parameters (sig=..., se=..., sp=..., sv=..., sr=...)
+	// These appear in Azure SAS URLs embedded in error messages
+	sasPattern := regexp.MustCompile(`(sig|se|sp|sv|sr|spr|sip|srt|ss)=[^&\s"')]+`)
+	s = sasPattern.ReplaceAllString(s, "$1=REDACTED")
+
+	// Redact AWS-style keys
+	s = regexp.MustCompile(`(?i)(access.?key|secret.?key|session.?token)=\S+`).ReplaceAllString(s, "$1=REDACTED")
+
+	return s
+}
+
+// classifyDownloadStep inspects the error chain to identify which download step failed.
+func classifyDownloadStep(err error) string {
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "failed to list job files"):
+		return "listing job files"
+	case strings.Contains(s, "credentials") || strings.Contains(s, "credential"):
+		return "fetching storage credentials"
+	case strings.Contains(s, "failed to get Azure client") || strings.Contains(s, "failed to create"):
+		return "creating storage client"
+	case strings.Contains(s, "download failed") || strings.Contains(s, "file size"):
+		return "downloading from storage"
+	case strings.Contains(s, "checksum"):
+		return "verifying checksum"
+	case strings.Contains(s, "decrypt"):
+		return "decrypting file"
+	default:
+		return "downloading"
+	}
+}
+
+// formatDownloadError creates a user-friendly error for download failures.
+// Collapses the internal error chain to the root cause, includes context
+// (file name, IDs, storage type), classifies the failed step, and provides
+// actionable guidance. Avoids leaking Go internals or secrets.
+func formatDownloadError(fileName, fileID, jobID, storageType string, err error) error {
+	step := classifyDownloadStep(err)
+
+	// Extract root cause
+	rootCause := err
+	for {
+		unwrapped := errors.Unwrap(rootCause)
+		if unwrapped == nil {
+			break
+		}
+		rootCause = unwrapped
+	}
+
+	// Sanitize: remove Go struct/field references from root cause
+	rootMsg := rootCause.Error()
+	if strings.Contains(rootMsg, "Go struct field") || strings.Contains(rootMsg, "json:") {
+		rootMsg = "unexpected credential response format"
+	}
+	rootMsg = sanitizeErrorString(rootMsg)
+
+	// Build context string
+	errCtx := fmt.Sprintf("file %s", fileID)
+	if jobID != "" {
+		errCtx = fmt.Sprintf("file %s, job %s", fileID, jobID)
+	}
+
+	return fmt.Errorf("download failed for %q (%s, storage: %s)\n  Step: %s\n  Cause: %s\n  Try: rerun with --debug for details, or verify you have access to this job",
+		fileName, errCtx, storageType, step, rootMsg)
 }

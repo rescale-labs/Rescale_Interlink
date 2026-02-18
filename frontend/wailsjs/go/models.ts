@@ -683,6 +683,7 @@ export namespace wailsapp {
 	    onDemandLicenseSeller: string;
 	    tags: string[];
 	    projectId: string;
+	    orgCode: string;
 	    automations: string[];
 	    inputFiles?: string[];
 	    tarSubpath?: string;
@@ -710,6 +711,7 @@ export namespace wailsapp {
 	        this.onDemandLicenseSeller = source["onDemandLicenseSeller"];
 	        this.tags = source["tags"];
 	        this.projectId = source["projectId"];
+	        this.orgCode = source["orgCode"];
 	        this.automations = source["automations"];
 	        this.inputFiles = source["inputFiles"];
 	        this.tarSubpath = source["tarSubpath"];

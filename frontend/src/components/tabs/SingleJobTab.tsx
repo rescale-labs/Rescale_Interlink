@@ -160,6 +160,7 @@ export function SingleJobTab() {
           onDemandLicenseSeller: loadedJob.onDemandLicenseSeller,
           tags: loadedJob.tags || [],
           projectId: loadedJob.projectId,
+          orgCode: loadedJob.orgCode || '',
           automations: loadedJob.automations || [],
         })
         setState('jobConfigured')

@@ -1,5 +1,97 @@
 # Release Notes - Rescale Interlink
 
+## v4.6.7 - February 17, 2026
+
+### Code Quality: Audit Remediation
+
+Comprehensive audit remediation across security, code quality, dead code removal, and documentation accuracy.
+
+#### Security Fixes
+- **SECURITY.md accuracy**: Corrected crypto claims from AES-256-GCM to AES-256-CBC with PKCS7 padding; updated key derivation documentation
+- **URL sanitization (R2)**: Replaced substring-based FedRAMP URL detection with proper hostname parsing in both frontend (SetupTab.tsx) and backend (csv_config.go) to prevent URL spoofing; added 9 unit tests
+
+#### Bug Fixes
+- **Race condition fix (R3)**: Added mutex synchronization to queue retry test to eliminate data race flagged by `go test -race`
+- **Context leak fix (R4)**: Added `defer cancel()` in daemon.go to ensure context cleanup on all exit paths
+- **IPC mock fix (R9)**: Fixed mock signature to match ServiceHandler interface (added userID parameter)
+
+#### Code Quality
+- **Shared FIPS init (R10)**: Extracted duplicated FIPS 140-3 initialization from both main.go files into `internal/fips/init.go`
+- **stdlib consolidation (R11)**: Replaced local `contains()` with `slices.Contains` from Go 1.21+ stdlib
+- **Dead code removal**: Removed `ValidateForConnection` (R5), `UpdateJobRow` (R6), backward-compat aliases (R7), custom `equalIgnoreCase` (R8)
+- **version.go cleanup (R12)**: Removed redundant changelog comments from version.go
+- **Makefile fix (R17)**: Fixed `make build` to output to versioned platform directory instead of project root
+
+#### Documentation
+- Updated all .md files to v4.6.7 version consistency (R13)
+- Fixed stale 16MB → 32MB chunk size references in FEATURE_SUMMARY.md and CLI_GUIDE.md (R14)
+
+---
+
+## v4.6.6 - February 17, 2026
+
+### Fix: Shared Job Download Support (Azure)
+
+Interlink failed when downloading outputs from shared jobs stored in Azure. The root cause was a type mismatch in `AzureCredentials.Paths`: the struct defined `[]string` but the API returns `[]object` (each with `path`, `pathParts`, `sasToken`) for shared-file credential requests. This caused `json.Unmarshal` to fail with a 7-layer deep Go-internal error message.
+
+#### Bug Fix
+
+**Azure Credential Parsing:** Added `AzureCredentialPath` struct and changed `AzureCredentials.Paths` from `[]string` to `[]AzureCredentialPath`. The API has never returned string values in `paths` — it returns either an empty array or per-file credential objects. The old `Paths[0]`-as-URL branch in `buildSASURL()` was dead code and has been removed. (Files: `internal/models/credentials.go`, `internal/cloud/providers/azure/client.go`)
+
+**Per-File SAS Token Support:** Added `GetPerFileSASToken()` helper and wired per-file SAS tokens into `buildSASURL()`. For shared files, the API returns blob-scoped SAS tokens in the credential response. The service client URL now uses the per-file token (falling back to container-level when no match). The credential cache key was also updated to include the file path, preventing shared-file credentials from being incorrectly reused across different files. (Files: `internal/cloud/providers/azure/client.go`, `internal/cloud/credentials/manager.go`)
+
+#### Error Message Improvements
+
+**Structured Download Errors:** All CLI download paths (batch job download, batch file download, single-file download) now use `formatDownloadError()` which:
+- Classifies the failed step (credential fetch, client creation, download, checksum, decrypt)
+- Extracts the root cause from deep error chains
+- Sanitizes Go-internal messages (e.g., `json: cannot unmarshal...` → `unexpected credential response format`)
+- Redacts secrets (SAS tokens, AWS keys) via `sanitizeErrorString()`
+- Includes actionable guidance (`--debug`, access verification)
+
+(Files: `internal/cli/download_helper.go`, `internal/cli/jobs.go`)
+
+#### Tests Added
+
+- 5 credential struct deserialization tests (shared file, empty paths, missing paths, multiple paths, expiration)
+- 6 Azure client tests (buildSASURL with AccountName/StorageAccount/neither, GetPerFileSASToken match/no-match/empty)
+- 12 download error formatting tests (chain collapse, context inclusion, Go-internal sanitization, step classification, secret redaction, credential failure simulation)
+- 3 API client credential tests (shared-file response, permission denied, malformed JSON)
+
+#### Regression Command
+
+```bash
+rescale-int jobs download -j "BWuHag" -d "." --search "rescale-ai"
+```
+
+---
+
+## v4.6.5 - February 16, 2026
+
+### PUR Parity: Close All Gaps vs Old Python PUR
+
+Comprehensive gap analysis and parity fixes to match or exceed old Python PUR (pur.py v0.7.6) behavior. Tested against real user scenario (Linux, Basic proxy, Azure, 3 DOE directories, hundreds of runs).
+
+#### New Features
+
+**Per-Upload Proxy Warmup (P0):** Basic proxy sessions expire after 30-60 minutes, causing long batch runs to fail. Added `WarmupProxyConnection()` that creates a standalone HTTP client and GETs the tenant URL before each upload and on retry after timeout. Scoped to Basic proxy mode for v4.6.5. (Files: `internal/http/proxy.go`, `internal/pur/pipeline/pipeline.go`)
+
+**Multi-Part `make-dirs-csv` (P1):** Added `--part-dirs` flag to scan multiple project directories (e.g., DOE_1, DOE_2, DOE_3). Creates unique job names with project suffix. Uses recursive validation (Walk) instead of top-level-only Glob, matching old PUR's rglob behavior. Shared `multipart.ScanDirectories()` helper prevents CLI/GUI logic drift. (Files: `internal/util/multipart/scan.go`, `internal/cli/pur.go`)
+
+**OrgCode Project Assignment (P2):** Added `OrgCode` field to JobSpec, jobs CSV, and config CSV. New `AssignProjectToJob()` API method calls `/api/v2/organizations/{org_code}/jobs/{job_id}/project-assignment/` after job creation. Per-job OrgCode overrides config default. Non-fatal on failure. GUI fields added to PUR and SingleJob tabs. (Files: `internal/models/job.go`, `internal/config/jobs_csv.go`, `internal/config/csv_config.go`, `internal/api/client.go`, `internal/pur/pipeline/pipeline.go`)
+
+**`--dry-run` on `pur run` and `pur resume` (P2):** `pur run --dry-run` shows a summary table of all jobs without executing. `pur resume --dry-run` loads state and groups jobs by remaining stage (need tar, upload, create, submit, complete), mirroring the actual feeder routing logic. (File: `internal/cli/pur.go`)
+
+**`submit-existing --ids` (P3):** Added `--ids` flag for direct job submission by ID without CSV or pipeline. Mutually exclusive with `--jobs-csv`. Simple loop with per-ID success/failure reporting. (File: `internal/cli/pur.go`)
+
+#### Infrastructure
+
+- Exported `BuildProxyURL()` in proxy.go (renamed from unexported `buildProxyURL`)
+- Added `multipart.ScanDirectories()` shared scan helper with full test coverage (8 tests)
+- Added `multipart.ScanResult` and `ScanOpts` types for unified scan interface
+
+---
+
 ## v4.6.4 - February 12, 2026
 
 ### PUR Feature Parity, Bug Fixes, and Enhancements

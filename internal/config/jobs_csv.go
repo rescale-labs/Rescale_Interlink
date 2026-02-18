@@ -102,6 +102,7 @@ func LoadJobsCSV(path string) ([]models.JobSpec, error) {
 		job.ExtraInputFileIDs = getCol("extrainputfileids")
 		job.OnDemandLicenseSeller = getCol("ondemandlicenseseller")
 		job.ProjectID = sanitize.SanitizeField(getCol("projectid"))
+		job.OrgCode = sanitize.SanitizeField(getCol("orgcode"))
 		job.TarSubpath = getCol("tarsubpath")
 
 		// Parse tags (comma-separated)
@@ -202,7 +203,7 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 	header := []string{
 		"Directory", "JobName", "AnalysisCode", "AnalysisVersion", "Command",
 		"CoreType", "CoresPerSlot", "WalltimeHours", "Slots", "LicenseSettings",
-		"ExtraInputFileIDs", "OnDemandLicenseSeller", "ProjectID", "Tags",
+		"ExtraInputFileIDs", "OnDemandLicenseSeller", "ProjectID", "OrgCode", "Tags",
 		"NoDecompress", "IsLowPriority", "Submit", "TarSubpath",
 	}
 	if err := writer.Write(header); err != nil {
@@ -225,6 +226,7 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 			job.ExtraInputFileIDs,
 			job.OnDemandLicenseSeller,
 			job.ProjectID,
+			job.OrgCode,
 			strings.Join(job.Tags, ","),
 			strconv.FormatBool(job.NoDecompress),
 			strconv.FormatBool(job.IsLowPriority),

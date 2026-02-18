@@ -442,6 +442,7 @@ export function PURTab() {
           onDemandLicenseSeller: loadedTemplate.onDemandLicenseSeller || '',
           tags: loadedTemplate.tags || [],
           projectId: loadedTemplate.projectId || '',
+          orgCode: loadedTemplate.orgCode || '',
           automations: loadedTemplate.automations || [],
         })
       }

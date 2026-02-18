@@ -11,7 +11,6 @@ import (
 	"log"
 	nethttp "net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -111,8 +110,8 @@ func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiCli
 		return nil, fmt.Errorf("Azure credentials not available (user may have S3 storage)")
 	}
 
-	// Build SAS URL
-	sasURL, err := buildSASURL(storageInfo, creds)
+	// Build SAS URL (pass fileInfo for per-file SAS token lookup on shared files)
+	sasURL, err := buildSASURL(storageInfo, creds, fileInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -138,37 +137,41 @@ func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiCli
 }
 
 // buildSASURL constructs the Azure SAS URL from storage info and credentials.
-func buildSASURL(storageInfo *models.StorageInfo, creds *models.AzureCredentials) (string, error) {
-	// Azure credentials may provide URL in Paths array or we need to construct it
-	var sasURL string
-	if len(creds.Paths) > 0 && creds.Paths[0] != "" {
-		// Use the full URL from Paths (includes account name and container)
-		sasURL = creds.Paths[0]
-		// Ensure SAS token is appended
-		if !strings.Contains(sasURL, "?") {
-			sasURL = sasURL + "?" + creds.SASToken
-		}
-	} else {
-		// Build URL from ConnectionSettings.AccountName (as per Python reference implementation)
-		// The accountName field comes from /api/v3/users/me/ response:
-		// default_storage.connection_settings.accountName
-		accountName := storageInfo.ConnectionSettings.AccountName
-
-		if accountName == "" {
-			// Fallback to legacy field name
-			accountName = storageInfo.ConnectionSettings.StorageAccount
-		}
-
-		if accountName == "" {
-			return "", fmt.Errorf("Azure storage account name not found in ConnectionSettings.AccountName")
-		}
-
-		// Python pattern: BlobServiceClient with account URL only (no container in URL)
-		// Format: https://{account}.blob.core.windows.net?{sas_token}
-		sasURL = fmt.Sprintf("https://%s.blob.core.windows.net/?%s", accountName, creds.SASToken)
+// For shared files, the API returns per-file SAS tokens in creds.Paths. When
+// fileInfo is provided and a matching per-file token exists, that token is used
+// instead of the container-level SAS token (which may not have access to shared blobs).
+func buildSASURL(storageInfo *models.StorageInfo, creds *models.AzureCredentials, fileInfo ...*models.CloudFile) (string, error) {
+	accountName := storageInfo.ConnectionSettings.AccountName
+	if accountName == "" {
+		// Fallback to legacy field name
+		accountName = storageInfo.ConnectionSettings.StorageAccount
+	}
+	if accountName == "" {
+		return "", fmt.Errorf("Azure storage account name not found in ConnectionSettings")
 	}
 
-	return sasURL, nil
+	// Use per-file SAS token for shared files when available.
+	// The container-level SAS token may not grant access to shared blobs —
+	// the per-file token provides blob-scoped read access.
+	sasToken := creds.SASToken
+	if len(fileInfo) > 0 && fileInfo[0] != nil && fileInfo[0].PathParts != nil {
+		sasToken = GetPerFileSASToken(creds, fileInfo[0].PathParts.Path)
+	}
+
+	return fmt.Sprintf("https://%s.blob.core.windows.net/?%s", accountName, sasToken), nil
+}
+
+// GetPerFileSASToken returns the blob-level SAS token for a specific file path,
+// falling back to the container-level SAS token if no per-file match is found.
+// Per-file tokens are returned by the API for shared-file credential requests
+// and provide read-only, blob-scoped access.
+func GetPerFileSASToken(creds *models.AzureCredentials, blobPath string) string {
+	for _, p := range creds.Paths {
+		if p.PathParts != nil && p.PathParts.Path == blobPath {
+			return p.SASToken
+		}
+	}
+	return creds.SASToken
 }
 
 // Client returns the underlying Azure blob client.
@@ -221,8 +224,8 @@ func (c *AzureClient) EnsureFreshCredentials(ctx context.Context) error {
 		return fmt.Errorf("received nil Azure credentials")
 	}
 
-	// Build new SAS URL with fresh token
-	sasURL, err := buildSASURL(c.storageInfo, creds)
+	// Build new SAS URL with fresh token (pass fileInfo for per-file SAS on shared files)
+	sasURL, err := buildSASURL(c.storageInfo, creds, c.fileInfo)
 	if err != nil {
 		return err
 	}

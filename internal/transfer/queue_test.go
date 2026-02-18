@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -463,18 +464,56 @@ func TestQueueClearCompleted(t *testing.T) {
 	}
 }
 
-// mockRetryExecutor implements RetryExecutor for testing
+// mockRetryExecutor implements RetryExecutor for testing.
+// v4.6.6: Added sync.Mutex to protect m.executed from data race — ExecuteRetry
+// is called from a goroutine in Queue.Retry, while the test reads m.executed
+// from the main goroutine.
 type mockRetryExecutor struct {
+	mu       sync.Mutex
 	executed []*TransferTask
+	doneCh   chan struct{} // signals each ExecuteRetry completion
+}
+
+func newMockRetryExecutor() *mockRetryExecutor {
+	return &mockRetryExecutor{
+		doneCh: make(chan struct{}, 10),
+	}
 }
 
 func (m *mockRetryExecutor) ExecuteRetry(task *TransferTask) {
+	m.mu.Lock()
 	m.executed = append(m.executed, task)
+	m.mu.Unlock()
+	m.doneCh <- struct{}{}
+}
+
+// waitForExecutions waits for n ExecuteRetry calls with a timeout.
+// Returns true if all n calls completed, false on timeout.
+func (m *mockRetryExecutor) waitForExecutions(n int, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for i := 0; i < n; i++ {
+		select {
+		case <-m.doneCh:
+		case <-timer.C:
+			return false
+		}
+	}
+	return true
+}
+
+// getExecuted returns a snapshot of the executed slice under the lock.
+func (m *mockRetryExecutor) getExecuted() []*TransferTask {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]*TransferTask, len(m.executed))
+	copy(cp, m.executed)
+	return cp
 }
 
 func TestQueueRetry(t *testing.T) {
 	queue := NewQueue(nil)
-	executor := &mockRetryExecutor{}
+	executor := newMockRetryExecutor()
 	queue.SetRetryExecutor(executor)
 
 	task := queue.TrackTransfer("retry.dat", 100, TaskTypeUpload, "/path", "folder")
@@ -489,10 +528,14 @@ func TestQueueRetry(t *testing.T) {
 		t.Error("Retry should return new task ID")
 	}
 
-	time.Sleep(50 * time.Millisecond) // Allow goroutine to run
+	// v4.6.6: Replace time.Sleep with proper synchronization to avoid data race
+	if !executor.waitForExecutions(1, 5*time.Second) {
+		t.Fatal("Timed out waiting for retry execution")
+	}
 
-	if len(executor.executed) != 1 {
-		t.Errorf("Expected 1 retry execution, got %d", len(executor.executed))
+	executed := executor.getExecuted()
+	if len(executed) != 1 {
+		t.Errorf("Expected 1 retry execution, got %d", len(executed))
 	}
 }
 
@@ -511,7 +554,7 @@ func TestQueueRetryNoExecutor(t *testing.T) {
 
 func TestQueueRetryNonFailed(t *testing.T) {
 	queue := NewQueue(nil)
-	executor := &mockRetryExecutor{}
+	executor := newMockRetryExecutor()
 	queue.SetRetryExecutor(executor)
 
 	task := queue.TrackTransfer("active.dat", 100, TaskTypeUpload, "/path", "folder")

@@ -36,6 +36,7 @@ export interface JobSpec {
   onDemandLicenseSeller: string
   tags: string[]
   projectId: string
+  orgCode: string
   automations: string[]
 }
 
@@ -151,6 +152,7 @@ export const DEFAULT_JOB_TEMPLATE: JobSpec = {
   onDemandLicenseSeller: '',
   tags: [],
   projectId: '',
+  orgCode: '',
   automations: [],
 }
 
@@ -892,6 +894,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
         onDemandLicenseSeller: job.onDemandLicenseSeller,
         tags: job.tags || [],
         projectId: job.projectId,
+        orgCode: job.orgCode || '',
         automations: job.automations || [],
       }))
 

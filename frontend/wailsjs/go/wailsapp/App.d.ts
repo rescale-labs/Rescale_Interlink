@@ -164,8 +164,6 @@ export function TriggerProfileRescan():Promise<void>;
 
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
 
-export function UpdateJobRow(arg1:number,arg2:wailsapp.JobSpecDTO):Promise<void>;
-
 export function ValidateAutoDownloadSetup():Promise<wailsapp.AutoDownloadValidationDTO>;
 
 export function ValidateJobSpec(arg1:wailsapp.JobSpecDTO):Promise<Array<string>>;

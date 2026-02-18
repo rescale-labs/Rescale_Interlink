@@ -22,6 +22,7 @@ type JobSpec struct {
 	OnDemandLicenseSeller string
 	Tags                  []string // Job tags (added in v1.0.0)
 	ProjectID             string   // Project ID to assign job to (added in v1.0.0)
+	OrgCode               string   // Organization code for project assignment (v4.6.5)
 	Automations           []string // Automation IDs to attach (added in v3.6.1)
 
 	// v4.0.8: File-based job inputs (for file scanning mode in PUR)

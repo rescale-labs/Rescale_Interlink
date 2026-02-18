@@ -14,6 +14,10 @@ VERSION := $(shell grep 'var Version' internal/version/version.go | sed 's/.*"\(
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
 
+# Auto-detect current platform for the default 'build' target
+DETECTED_GOOS := $(shell go env GOOS)
+DETECTED_GOARCH := $(shell go env GOARCH)
+
 # ldflags target the version package for consistency across all binaries
 LDFLAGS := -ldflags "-s -w -X github.com/rescale/rescale-int/internal/version.Version=$(VERSION) -X github.com/rescale/rescale-int/internal/version.BuildTime=$(BUILD_TIME)"
 
@@ -37,11 +41,15 @@ WINDOWS_AMD64_MESA_DIR := $(BIN_DIR)/windows-amd64-mesa
 all: build
 
 # Build for current platform (FIPS 140-3 compliant)
+# Output goes to bin/$(VERSION)/$(DETECTED_GOOS)-$(DETECTED_GOARCH)/ (never project root)
+DETECTED_BUILD_DIR := $(BIN_DIR)/$(DETECTED_GOOS)-$(DETECTED_GOARCH)
+DETECTED_EXE_SUFFIX := $(if $(filter windows,$(DETECTED_GOOS)),.exe,)
 .PHONY: build
 build:
-	@echo "Building FIPS 140-3 compliant binary for current platform..."
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) go build $(LDFLAGS) -o $(BINARY_NAME) ./cmd/rescale-int
-	@echo "✅ Built: $(BINARY_NAME) [FIPS 140-3]"
+	@echo "Building FIPS 140-3 compliant binary for $(DETECTED_GOOS)/$(DETECTED_GOARCH)..."
+	@mkdir -p $(DETECTED_BUILD_DIR)
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) go build $(LDFLAGS) -o $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) ./cmd/rescale-int
+	@echo "✅ Built: $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) [FIPS 140-3]"
 
 # Build macOS Apple Silicon binary (FIPS 140-3 compliant)
 .PHONY: build-darwin-arm64
@@ -125,6 +133,7 @@ package:
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -f $(BINARY_NAME)
+	@rm -rf $(BIN_DIR)
 	@rm -rf dist/
 	@echo "✅ Cleaned!"
 

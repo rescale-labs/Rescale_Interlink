@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.6.4.
+Complete command-line interface reference for `rescale-int` v4.6.7.
 
-**Version:** 4.6.4
-**Build Date:** February 12, 2026
+**Version:** 4.6.7
+**Build Date:** February 17, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -316,7 +316,7 @@ rescale-int files upload <file> [file...] [flags]
 
 **Features:**
 - Automatic encryption (AES-256-CBC) before upload
-- Multi-part upload for files >100MB (16MB chunks)
+- Multi-part upload for files >100MB (32MB chunks)
 - Automatic resume on interruption (state saved to `.rescale-upload-state`)
 - Progress bars with transfer speed and ETA
 - Support for both S3 and Azure storage backends
@@ -373,7 +373,7 @@ rescale-int files download <file-id> [file-id...] [flags]
 
 **Features (v2.3.0):**
 - Automatic decryption after download
-- Chunked download for large files (>100MB, 16MB chunks)
+- Chunked download for large files (>100MB, 32MB chunks)
 - Progress bars during download and decryption
 - Resume capability for interrupted downloads (state saved to `.rescale-download-state`)
 - **v2.3.0 Fix:** Correct PKCS7 padding handling (1-16 bytes) in resume logic
@@ -1142,6 +1142,7 @@ rescale-int pur make-dirs-csv --template TEMPLATE --output OUTPUT --pattern PATT
 - `--run-subpath string` - Subdirectory path to navigate before finding runs (v4.6.4)
 - `--validation-pattern string` - File pattern to validate directories (v4.6.4)
 - `--start-index int` - Starting index for job numbering (default: 1) (v4.6.4)
+- `--part-dirs strings` - Project directories for multi-part mode (v4.6.5)
 
 **Example:**
 ```bash
@@ -1162,6 +1163,14 @@ rescale-int pur make-dirs-csv \
   --output jobs.csv \
   --pattern "Run_*" \
   --iterate-command-patterns
+
+# Multi-part mode: scan multiple project directories (v4.6.5)
+rescale-int pur make-dirs-csv \
+  --template template.csv \
+  --output jobs.csv \
+  --pattern "Run_*" \
+  --part-dirs /data/DOE_1 /data/DOE_2 /data/DOE_3 \
+  --validation-pattern "*.avg.fnc"
 ```
 
 #### pur plan
@@ -1207,6 +1216,7 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `--upload-workers int` - Parallel upload workers (default from config) (v4.6.4)
 - `--job-workers int` - Parallel job creation workers (default from config) (v4.6.4)
 - `--rm-tar-on-success` - Delete local tar after successful upload (v4.6.4)
+- `--dry-run` - Validate and show plan without executing (v4.6.5)
 
 **Example:**
 ```bash
@@ -1219,6 +1229,9 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv \
 # With tar filtering:
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
   --exclude-pattern "*.log" --exclude-pattern "*.tmp"
+
+# Dry-run: validate and preview without executing (v4.6.5)
+rescale-int pur run --jobs-csv jobs.csv --dry-run
 ```
 
 #### pur resume
@@ -1242,10 +1255,14 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `--upload-workers int` - Parallel upload workers (v4.6.4)
 - `--job-workers int` - Parallel job creation workers (v4.6.4)
 - `--rm-tar-on-success` - Delete local tar after successful upload (v4.6.4)
+- `--dry-run` - Show what would be resumed without executing (v4.6.5)
 
 **Example:**
 ```bash
 rescale-int pur resume --jobs-csv jobs.csv --state state.csv
+
+# Dry-run: analyze state and show remaining work (v4.6.5)
+rescale-int pur resume --jobs-csv jobs.csv --state state.csv --dry-run
 ```
 
 #### pur submit-existing
@@ -1253,6 +1270,7 @@ Submit jobs using existing uploaded file IDs
 
 ```bash
 rescale-int pur submit-existing --jobs-csv FILE [--state FILE]
+rescale-int pur submit-existing --ids JOB1,JOB2,JOB3
 ```
 
 Skips tar and upload phases. Use when files are already uploaded to Rescale.
@@ -1260,6 +1278,16 @@ Skips tar and upload phases. Use when files are already uploaded to Rescale.
 **Flags:**
 - `--jobs-csv string` - Jobs CSV file with extrainputfileids column
 - `--state string` - State file
+- `--ids string` - Comma-separated job IDs to submit directly (v4.6.5, mutually exclusive with --jobs-csv)
+
+**Example:**
+```bash
+# Submit from CSV (existing behavior):
+rescale-int pur submit-existing --jobs-csv jobs_with_fileids.csv
+
+# Submit specific job IDs directly (v4.6.5):
+rescale-int pur submit-existing --ids "abc123,def456,ghi789"
+```
 
 **Example:**
 ```bash
@@ -1582,12 +1610,12 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v4.3.7 (January 14, 2026)
+This guide is for `rescale-int` v4.6.7 (February 17, 2026)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v4.3.7 (2026-01-14) [FIPS 140-3]
+# Output: rescale-int version v4.6.7 (2026-02-17) [FIPS 140-3]
 ```
 
 ### v4.2.1 Enhanced Eligibility Configuration (January 9, 2026)

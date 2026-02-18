@@ -58,7 +58,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			}, nil
 		}
 
-		proxyURL := buildProxyURL(cfg)
+		proxyURL := BuildProxyURL(cfg)
 		transport.Proxy = proxyFuncWithBypass(proxyURL, cfg.NoProxy)
 
 		// Wrap transport with NTLM
@@ -92,7 +92,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			}, nil
 		}
 
-		proxyURL := buildProxyURL(cfg)
+		proxyURL := BuildProxyURL(cfg)
 		transport.Proxy = proxyFuncWithBypass(proxyURL, cfg.NoProxy)
 
 		// v4.5.3: Log warning when credentials incomplete (user set but password missing)
@@ -136,8 +136,9 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 	return client, nil
 }
 
-// buildProxyURL constructs a proxy URL from config
-func buildProxyURL(cfg *config.Config) *url.URL {
+// BuildProxyURL constructs a proxy URL from config.
+// Exported in v4.6.5 for use by WarmupProxyConnection.
+func BuildProxyURL(cfg *config.Config) *url.URL {
 	scheme := "http"
 	host := cfg.ProxyHost
 	port := cfg.ProxyPort
@@ -186,6 +187,61 @@ func warmupProxy(client *nethttp.Client, cfg *config.Config) error {
 	if resp.StatusCode >= 500 {
 		return fmt.Errorf("warmup request returned server error: %d", resp.StatusCode)
 	}
+
+	return nil
+}
+
+// WarmupProxyConnection performs a standalone proxy warmup using a temporary HTTP client.
+// v4.6.5: Called before each upload in Basic proxy mode to prevent proxy session expiry
+// during long batch runs (matching old PUR behavior). This is separate from the startup
+// warmup in ConfigureHTTPClient — it creates a fresh connection each time.
+// Scoped to Basic proxy mode only for v4.6.5 (NTLM requires full transport setup).
+func WarmupProxyConnection(ctx context.Context, cfg *config.Config) error {
+	proxyURL := BuildProxyURL(cfg)
+
+	transport := &nethttp.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+		Proxy: proxyFuncWithBypass(proxyURL, cfg.NoProxy),
+	}
+
+	// Derive timeout from context, cap at 15 seconds
+	timeout := 15 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+
+	client := &nethttp.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+
+	warmupURL := cfg.APIBaseURL
+	if warmupURL == "" {
+		warmupURL = "https://platform.rescale.com"
+	}
+
+	warmupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := nethttp.NewRequestWithContext(warmupCtx, "GET", warmupURL+"/api/v3/", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("per-upload proxy warmup failed: %w", err)
+	}
+	defer resp.Body.Close()
 
 	return nil
 }

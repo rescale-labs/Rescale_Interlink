@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.6.4
-**Build Date:** February 12, 2026
+**Version:** 4.6.7
+**Build Date:** February 17, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -80,7 +80,7 @@ rescale-int files upload <file> --pre-encrypt
 - Single-part upload: Files <100MB use simpler single-upload for efficiency
 - **No file size limit** - Rescale Interlink supports files of any size
 - Source: `internal/constants/app.go`
-- Part size: 16MB chunks (`internal/cloud/upload/`)
+- Part size: 32MB chunks (`internal/cloud/upload/`)
 - Resume state saved to `.upload.resume` files
 - Encryption: AES-256-CBC with PKCS7 padding (`internal/crypto/encryption.go`, `internal/crypto/streaming.go`)
 
@@ -102,7 +102,7 @@ rescale-int files download <file-id1> [file-id2 ...] [-o output-dir]
 
 **Verified Technical Details:**
 - Download threshold: 100MB (`internal/cloud/download/constants.go`)
-- Chunk size: 16MB (`internal/cloud/download/s3_concurrent.go:44`)
+- Chunk size: 32MB (`internal/cloud/download/s3_concurrent.go:44`)
 - Resume state:  `.encrypted` file detection with size validation
 - Decryption message added in v2.3.0 (`internal/cloud/download/s3_concurrent.go:458`)
 - Resume logic fixed in v2.3.0: accounts for 1-16 byte PKCS7 padding (`internal/cli/download_helper.go:163-186`)
@@ -601,7 +601,7 @@ Warning: Token file <path> has insecure permissions <mode>. Consider using 'chmo
 **Implementation:** `internal/util/buffers/pool.go`
 
 **Memory Clearing:**
-- All buffer pools (16MB chunk buffers, 16KB encryption buffers) clear data before returning to pool
+- All buffer pools (32MB chunk buffers, 16KB encryption buffers) clear data before returning to pool
 - Prevents sensitive data from persisting in memory between operations
 - Uses Go's `clear()` builtin for efficient zeroing
 - **Source:** `internal/util/buffers/pool.go:50-56, 72-80`
@@ -1042,6 +1042,51 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 
 **Source:** `internal/ratelimit/`, `internal/cli/files.go`
 
+### v4.6.7 (February 17, 2026)
+**Audit Remediation (Security, Code Quality, Dead Code, Documentation):**
+- ✅ Corrected SECURITY.md crypto claims (AES-256-GCM → AES-256-CBC with PKCS7 padding)
+- ✅ URL sanitization: replaced substring-based FedRAMP URL detection with hostname parsing (frontend + backend) + 9 tests
+- ✅ Race condition fix in queue retry test (mutex synchronization)
+- ✅ Context leak fix in daemon.go (`defer cancel()`)
+- ✅ Shared FIPS init extracted to `internal/fips/init.go`; stdlib `slices.Contains` consolidation
+- ✅ Dead code removal: `ValidateForConnection`, `UpdateJobRow`, backward-compat aliases, `equalIgnoreCase`
+- ✅ Makefile `make build` fixed to output to versioned platform directory
+- ✅ Fixed stale 16MB → 32MB chunk size references; version consistency across all docs
+
+**Source:** `internal/fips/init.go`, `internal/config/csv_config.go`, `frontend/src/components/tabs/SetupTab.tsx`, `internal/services/daemon.go`
+
+### v4.6.6 (February 17, 2026)
+**Shared Job Download Fix (Azure):**
+- ✅ Fixed `AzureCredentials.Paths` type mismatch — API returns `[]object`, struct now uses `[]AzureCredentialPath` (was `[]string`)
+- ✅ Removed dead code branch in `buildSASURL()` (Paths-as-URL was never used by API)
+- ✅ Added `GetPerFileSASToken()` helper for per-file blob-level SAS token lookup with container-level fallback
+- ✅ Structured download error messages with step classification, root cause extraction, secret sanitization
+- ✅ 26 new unit tests across credentials, Azure client, error formatting, and API mocks
+
+**Source:** `internal/models/credentials.go`, `internal/cloud/providers/azure/client.go`, `internal/cli/download_helper.go`, `internal/cli/jobs.go`
+
+### v4.6.5 (February 16, 2026)
+**PUR Parity: Close All Gaps vs Old Python PUR:**
+- ✅ Per-upload proxy warmup — prevents Basic proxy session expiry during long batch runs
+- ✅ Multi-part `make-dirs-csv` with `--part-dirs` flag for scanning multiple project directories
+- ✅ OrgCode project assignment — per-job org code with API-based project assignment
+- ✅ `--dry-run` on `pur run` and `pur resume` — preview job summary without executing
+- ✅ `submit-existing --ids` — direct job submission by ID without CSV
+- ✅ Shared `multipart.ScanDirectories()` helper with 8 unit tests
+
+**Source:** `internal/http/proxy.go`, `internal/pur/pipeline/pipeline.go`, `internal/util/multipart/scan.go`, `internal/cli/pur.go`
+
+### v4.6.4 (February 12, 2026)
+**PUR Feature Parity, Bug Fixes, and Enhancements:**
+- ✅ Fixed pattern regex missing filenames with number-separator-text (e.g., `Run_335_Fluid_Meas.avg.snc`)
+- ✅ Fixed GUI template crash on null/missing fields (panic recovery, atomic writes)
+- ✅ Fixed Azure proxy timeout on block 0 (context-aware retry, deadline checks)
+- ✅ `--extra-input-files` — upload local files once, attach to every PUR job
+- ✅ `--iterate-command-patterns` — vary commands across runs with preview mode
+- ✅ Missing CLI flags exposed: `--include-pattern`, `--exclude-pattern`, `--flatten-tar`, `--tar-compression`
+
+**Source:** `internal/pur/pattern/pattern.go`, `internal/wailsapp/job_bindings.go`, `internal/cli/pur.go`, `internal/http/retry.go`
+
 ### v2.4.5 (November 19, 2025)
 **Cross-Storage Download & Signal Handling Fixes:**
 - ✅ Fixed job output downloads for cross-storage scenarios (Azure users can download S3 job outputs)
@@ -1110,5 +1155,5 @@ For more details, see:
 
 ---
 
-*Last Updated: February 10, 2026*
-*Version: 4.6.4*
+*Last Updated: February 17, 2026*
+*Version: 4.6.7*

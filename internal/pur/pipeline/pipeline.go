@@ -15,6 +15,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/util/tar"
@@ -621,6 +622,14 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 			log.Printf("[UPLOAD #%d] Uploading: %s", item.index, item.state.TarPath)
 			p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", 0.0)
 
+			// v4.6.5: Per-upload proxy warmup for Basic proxy mode.
+			// Prevents proxy session expiry during long batch runs (matching old PUR behavior).
+			if strings.ToLower(p.cfg.ProxyMode) == "basic" {
+				if err := inthttp.WarmupProxyConnection(ctx, p.cfg); err != nil {
+					log.Printf("[UPLOAD #%d] [WARN] Proxy warmup failed: %v (continuing anyway)", item.index, err)
+				}
+			}
+
 			var cloudFile *models.CloudFile
 			var err error
 			maxRetries := p.cfg.MaxRetries
@@ -668,7 +677,11 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 
 				if isTimeout && attempt < maxRetries {
 					log.Printf("[UPLOAD #%d] [RETRY] Detected proxy timeout, forcing fresh auth and retrying...", item.index)
-					if p.cfg.ProxyMode == "basic" || p.cfg.ProxyMode == "ntlm" {
+					// v4.6.5: Warmup proxy on retry to re-establish session
+					if strings.ToLower(p.cfg.ProxyMode) == "basic" {
+						_ = inthttp.WarmupProxyConnection(ctx, p.cfg)
+					}
+					if strings.ToLower(p.cfg.ProxyMode) == "basic" || strings.ToLower(p.cfg.ProxyMode) == "ntlm" {
 						log.Printf("[UPLOAD #%d] [RETRY] Waiting 2 seconds before retry...", item.index)
 						time.Sleep(2 * time.Second)
 					}
@@ -786,6 +799,27 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
 				log.Printf("[JOB #%d] Created: Job ID %s", item.index, jobResp.ID)
+
+				// v4.6.5: OrgCode project assignment (org-scoped endpoint)
+				orgCode := item.jobSpec.OrgCode
+				if orgCode == "" {
+					orgCode = p.cfg.OrgCode
+				}
+				if orgCode != "" && item.jobSpec.ProjectID != "" {
+					maxAssignRetries := 3
+					for assignAttempt := 1; assignAttempt <= maxAssignRetries; assignAttempt++ {
+						err := p.apiClient.AssignProjectToJob(ctx, orgCode, item.state.JobID, item.jobSpec.ProjectID)
+						if err == nil {
+							log.Printf("[JOB #%d] Project assignment successful (org=%s)", item.index, orgCode)
+							break
+						}
+						log.Printf("[JOB #%d] Project assignment attempt %d failed: %v", item.index, assignAttempt, err)
+						if assignAttempt < maxAssignRetries {
+							time.Sleep(time.Duration(min(60, 1<<uint(assignAttempt))) * time.Second)
+						}
+					}
+					// Non-fatal: job continues even if assignment fails
+				}
 			}
 
 			if shouldSubmit(item.jobSpec.SubmitMode) && item.state.SubmitStatus != "success" {

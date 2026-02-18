@@ -308,13 +308,6 @@ func (cfg *APIConfig) Validate() error {
 	return nil
 }
 
-// ValidateForConnection is deprecated.
-// v4.0.8: API key now comes from ResolveAPIKey(), not from this config.
-// This function is kept for backwards compatibility but always returns nil.
-func (cfg *APIConfig) ValidateForConnection() error {
-	return nil
-}
-
 // IsAutoDownloadEnabled returns true if auto-download is enabled and properly configured.
 // v4.0.4: Used by internal/service/multi_daemon.go to determine if a user daemon should start.
 func (cfg *APIConfig) IsAutoDownloadEnabled() bool {
