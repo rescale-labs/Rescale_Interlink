@@ -17,11 +17,18 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/pur/state"
-	"github.com/rescale/rescale-int/internal/util/tar"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/util/tar"
 )
+
+// AnalysisResolver abstracts the API call used by resolveAnalysisVersions.
+// This allows tests to inject a fast mock instead of calling the real API.
+type AnalysisResolver interface {
+	GetAnalyses(ctx context.Context) ([]models.Analysis, error)
+}
 
 // ProgressCallback is called when job progress updates
 type ProgressCallback func(completed, total int, stage string, jobName string)
@@ -35,13 +42,14 @@ type StateChangeCallback func(jobName, stage, newStatus, jobID, errorMessage str
 
 // Pipeline orchestrates the parallel tar/upload/job workflow
 type Pipeline struct {
-	cfg           *config.Config
-	apiClient     *api.Client
-	stateMgr      *state.Manager
-	jobs          []models.JobSpec
-	tempDir       string
-	multiPartMode bool
-	skipTarUpload bool // true for submit-existing: skip tar/upload, go directly to job creation
+	cfg              *config.Config
+	apiClient        *api.Client
+	analysisResolver AnalysisResolver // For version resolution (defaults to apiClient)
+	stateMgr         *state.Manager
+	jobs             []models.JobSpec
+	tempDir          string
+	multiPartMode    bool
+	skipTarUpload    bool // true for submit-existing: skip tar/upload, go directly to job creation
 
 	// Shared files attached to all jobs (from --extra-input-files)
 	extraInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
@@ -70,11 +78,19 @@ type Pipeline struct {
 	closeUploadOnce sync.Once
 	closeJobOnce    sync.Once
 
+	// Concurrent version resolution
+	versionsResolved chan struct{}
+	resolvedVersions map[string]string // "analysisCode:displayVersion" -> versionCode
+
 	// Progress tracking
 	mu            sync.Mutex
 	activeWorkers map[string]int
 	completedJobs int
 	totalJobs     int
+
+	// Phase timing
+	pipelineStart time.Time
+	firstTarOnce  sync.Once
 
 	// Callbacks (optional)
 	onProgress    ProgressCallback
@@ -132,6 +148,17 @@ func findCommonParent(jobs []models.JobSpec) string {
 // dual-state bug where GUI and pipeline each had their own state.Manager,
 // causing the GUI to always read empty state. CLI callers pass nil.
 func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, extraInputFiles string, decompressExtras bool) (*Pipeline, error) {
+	// Normalize all job directories to absolute paths at ingress.
+	// This prevents CWD-dependent failures when paths were generated
+	// with a different working directory (especially GUI mode).
+	for i := range jobs {
+		if jobs[i].Directory != "" && !filepath.IsAbs(jobs[i].Directory) {
+			if abs, err := pathutil.ResolveAbsolutePath(jobs[i].Directory); err == nil {
+				jobs[i].Directory = abs
+			}
+		}
+	}
+
 	// Find common parent directory of all jobs - this is where tarballs will be created
 	commonParent := findCommonParent(jobs)
 
@@ -165,6 +192,7 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 	p := &Pipeline{
 		cfg:              cfg,
 		apiClient:        apiClient,
+		analysisResolver: apiClient, // Default: real API client satisfies AnalysisResolver
 		stateMgr:         stateMgr,
 		jobs:             jobs,
 		tempDir:          tempDir,
@@ -173,10 +201,11 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		decompressExtras: decompressExtras,
 		resourceMgr:      resourceMgr,
 		transferMgr:      transferMgr,
-		feederDone:    make(chan struct{}),
-		tarWorkers:    cfg.TarWorkers,
-		uploadWorkers: cfg.UploadWorkers,
-		jobWorkers:    cfg.JobWorkers,
+		feederDone:       make(chan struct{}),
+		versionsResolved: make(chan struct{}),
+		tarWorkers:       cfg.TarWorkers,
+		uploadWorkers:    cfg.UploadWorkers,
+		jobWorkers:       cfg.JobWorkers,
 		// Dynamic queue sizes based on worker count for better throughput
 		tarQueue:      make(chan *workItem, cfg.TarWorkers*constants.DefaultQueueMultiplier),
 		uploadQueue:   make(chan *workItem, cfg.UploadWorkers*constants.DefaultQueueMultiplier),
@@ -192,6 +221,12 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 	}
 
 	return p, nil
+}
+
+// SetAnalysisResolver overrides the default AnalysisResolver (the API client).
+// Used in tests to inject a mock.
+func (p *Pipeline) SetAnalysisResolver(resolver AnalysisResolver) {
+	p.analysisResolver = resolver
 }
 
 // SetProgressCallback sets the progress callback function
@@ -214,14 +249,18 @@ func (p *Pipeline) SetRmTarOnSuccess(rm bool) {
 	p.rmTarOnSuccess = rm
 }
 
-// logf logs a message, using callback if available
+// logf logs a message, using callback if available.
+// When a callback is set (GUI mode via Engine), the callback path handles
+// both log.Printf and EventBus emission, so we skip direct logging to
+// avoid duplicate stdout output.
 func (p *Pipeline) logf(level, stage, jobName, format string, args ...interface{}) {
 	message := fmt.Sprintf(format, args...)
 	if p.onLog != nil {
 		p.onLog(level, message, stage, jobName)
+	} else {
+		// Only log directly when no callback is set (CLI mode without Engine)
+		log.Printf("[%s] [%s] %s", level, stage, message)
 	}
-	// Also log to standard logger
-	log.Printf("[%s] [%s] %s", level, stage, message)
 }
 
 // reportStateChange reports a state change, using callback if available
@@ -239,13 +278,27 @@ func (p *Pipeline) reportStateChange(jobName, stage, newStatus, jobID, errorMess
 // (e.g. "0") for all jobs. This catches every entry path: GUI, CLI PUR (CSV),
 // legacy saved templates, JSON/SGE imports.
 func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
-	analyses, err := p.apiClient.GetAnalyses(ctx)
+	p.logf("INFO", "pipeline", "", "Resolving analysis versions...")
+	analyses, err := p.analysisResolver.GetAnalyses(ctx)
 	if err != nil {
-		log.Printf("[PIPELINE] Warning: could not fetch analyses for version resolution: %v", err)
+		p.logf("WARN", "pipeline", "", "Could not fetch analyses for version resolution: %v", err)
 		return // best-effort; API will reject invalid versions later
 	}
 
-	// Build lookup: analysisCode → (version display name → versionCode)
+	// Build lookup: analysisCode -> (version display name -> versionCode)
+	resolved := make(map[string]string)
+	for _, a := range analyses {
+		for _, v := range a.Versions {
+			if v.Version != "" && v.VersionCode != "" {
+				resolved[a.Code+":"+v.Version] = v.VersionCode
+			}
+		}
+	}
+	p.resolvedVersions = resolved // Single write before channel close
+
+	// Preflight validation: check that each (analysisCode, analysisVersion) pair
+	// is recognized before tar/upload work begins.
+	// Build a lookup for validation
 	lookup := make(map[string]map[string]string)
 	for _, a := range analyses {
 		vmap := make(map[string]string)
@@ -257,19 +310,6 @@ func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
 		lookup[a.Code] = vmap
 	}
 
-	// Resolve each job's version
-	for i := range p.jobs {
-		if vm, ok := lookup[p.jobs[i].AnalysisCode]; ok {
-			if code, found := vm[p.jobs[i].AnalysisVersion]; found {
-				log.Printf("[PIPELINE] Resolved version %q → %q for %s",
-					p.jobs[i].AnalysisVersion, code, p.jobs[i].JobName)
-				p.jobs[i].AnalysisVersion = code
-			}
-		}
-	}
-
-	// Preflight validation: check that each (analysisCode, analysisVersion) pair
-	// is recognized before tar/upload work begins.
 	var validationErrors []string
 	for _, job := range p.jobs {
 		if job.AnalysisVersion == "" {
@@ -294,11 +334,11 @@ func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
 	}
 	if len(validationErrors) > 0 {
 		for _, e := range validationErrors {
-			log.Printf("[PIPELINE] PREFLIGHT ERROR: %s", e)
+			p.logf("ERROR", "pipeline", "", "PREFLIGHT: %s", e)
 		}
 		// Log prominently but don't block — the API will reject invalid versions
 		// and the error messages above give users clear diagnosis.
-		log.Printf("[PIPELINE] WARNING: %d job(s) have unrecognized analysis versions — these will likely fail at job creation", len(validationErrors))
+		p.logf("WARN", "pipeline", "", "%d job(s) have unrecognized analysis versions - these will likely fail at job creation", len(validationErrors))
 	}
 }
 
@@ -335,7 +375,7 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 				continue // Already uploaded
 			}
 
-			log.Printf("[PIPELINE] Uploading shared file: %s", absPath)
+			p.logf("INFO", "pipeline", "", "Uploading shared file: %s", absPath)
 			cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
 				LocalPath:    absPath,
 				APIClient:    p.apiClient,
@@ -346,7 +386,7 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 			}
 			p.sharedFileIDs = append(p.sharedFileIDs, cloudFile.ID)
 			seen[absPath] = true
-			log.Printf("[PIPELINE] Shared file uploaded: %s -> %s", absPath, cloudFile.ID)
+			p.logf("INFO", "pipeline", "", "Shared file uploaded: %s -> %s", absPath, cloudFile.ID)
 		}
 	}
 	return nil
@@ -354,21 +394,29 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 
 // Run executes the pipeline
 func (p *Pipeline) Run(ctx context.Context) error {
+	p.pipelineStart = time.Now()
 	p.logf("INFO", "pipeline", "", "Starting pipeline with %d jobs", p.totalJobs)
 	p.logf("INFO", "pipeline", "", "Workers: tar=%d upload=%d job=%d", p.tarWorkers, p.uploadWorkers, p.jobWorkers)
 
-	// Resolve analysis versions: map display names to versionCodes.
-	// Must happen before feeder goroutine starts workers.
-	p.resolveAnalysisVersions(ctx)
-
-	// Resolve shared files (--extra-input-files): upload local paths, collect IDs.
+	// Resolve shared files synchronously (fast: parses IDs or uploads 1-2 files)
+	sharedStart := time.Now()
 	if err := p.ResolveSharedFiles(ctx); err != nil {
 		return fmt.Errorf("failed to resolve shared files: %w", err)
 	}
+	p.logf("INFO", "pipeline", "", "Shared files resolved in %v", time.Since(sharedStart))
+
+	// Resolve analysis versions concurrently - only job workers need this
+	go func() {
+		defer close(p.versionsResolved)
+		vStart := time.Now()
+		p.resolveAnalysisVersions(ctx)
+		p.logf("INFO", "pipeline", "", "Analysis versions resolved in %v", time.Since(vStart))
+	}()
 
 	var wg sync.WaitGroup
 
-	// Start worker pools
+	// Start worker pools IMMEDIATELY (tar/upload don't need version info)
+	p.logf("INFO", "pipeline", "", "Workers started at %v after pipeline entry", time.Since(p.pipelineStart))
 	for i := 0; i < p.tarWorkers; i++ {
 		wg.Add(1)
 		go p.tarWorker(ctx, &wg, i)
@@ -480,7 +528,8 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	wg.Wait()
 	close(stopProgress)
 
-	log.Printf("Pipeline completed: %d/%d jobs finished", p.completedJobs, p.totalJobs)
+	p.logf("INFO", "pipeline", "", "Pipeline completed: %d/%d jobs finished in %v",
+		p.completedJobs, p.totalJobs, time.Since(p.pipelineStart))
 
 	return nil
 }
@@ -501,12 +550,21 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 
 			p.setActiveWorker("tar", 1)
 
+			// Belt-and-suspenders normalization for paths from legacy CSV/state files
+			if !filepath.IsAbs(item.jobSpec.Directory) {
+				if abs, err := pathutil.ResolveAbsolutePath(item.jobSpec.Directory); err == nil {
+					item.jobSpec.Directory = abs
+					p.logf("WARN", "tar", item.state.JobName,
+						"Normalized relative directory to absolute: %s", abs)
+				}
+			}
+
 			// Check if already tarred
 			if item.state.TarStatus == "success" {
 				exists, err := tar.ValidateTarExists(item.state.TarPath)
 				if err != nil {
-					log.Printf("[TAR #%d] Warning: error checking existing tar file %s: %v (will recreate)",
-						item.index, item.state.TarPath, err)
+					p.logf("WARN", "tar", item.state.JobName,
+						"Error checking existing tar file %s: %v (will recreate)", item.state.TarPath, err)
 				} else if exists {
 					p.setActiveWorker("tar", -1)
 					select {
@@ -527,7 +585,8 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				absRunDir, errRun := filepath.Abs(item.jobSpec.Directory)
 				rel, errRel := filepath.Rel(absRunDir, absSource)
 				if errAbs != nil || errRun != nil || errRel != nil || strings.HasPrefix(rel, "..") {
-					log.Printf("[TAR #%d] REJECTED: tar subpath '%s' escapes run directory", item.index, item.jobSpec.TarSubpath)
+					p.logf("ERROR", "tar", item.state.JobName,
+						"REJECTED: tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
 					item.state.TarStatus = "failed"
 					item.state.SubmitStatus = "failed"
 					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
@@ -538,7 +597,8 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 				// Verify subpath exists
 				if _, errStat := os.Stat(tarSourceDir); os.IsNotExist(errStat) {
-					log.Printf("[TAR #%d] FAILED: tar subpath '%s' does not exist", item.index, tarSourceDir)
+					p.logf("ERROR", "tar", item.state.JobName,
+						"Tar subpath '%s' does not exist in %s", item.jobSpec.TarSubpath, item.jobSpec.Directory)
 					item.state.TarStatus = "failed"
 					item.state.SubmitStatus = "failed"
 					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' does not exist in %s", item.jobSpec.TarSubpath, item.jobSpec.Directory)
@@ -553,18 +613,25 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 			item.state.TarPath = tarPath
 
 			p.reportStateChange(item.state.JobName, "tar", "in_progress", "", "", 0.0)
-			log.Printf("[TAR #%d] Creating archive: %s -> %s", item.index, tarSourceDir, tarPath)
+
+			p.firstTarOnce.Do(func() {
+				p.logf("INFO", "tar", item.state.JobName,
+					"First tarball creation started at %v after pipeline entry",
+					time.Since(p.pipelineStart))
+			})
+
+			p.logf("INFO", "tar", item.state.JobName, "Creating archive: %s -> %s", tarSourceDir, tarPath)
 
 			var err error
 			if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
 				if len(p.cfg.IncludePatterns) > 0 {
-					log.Printf("[TAR #%d] Include patterns: %v", item.index, p.cfg.IncludePatterns)
+					p.logf("INFO", "tar", item.state.JobName, "Include patterns: %v", p.cfg.IncludePatterns)
 				}
 				if len(p.cfg.ExcludePatterns) > 0 {
-					log.Printf("[TAR #%d] Exclude patterns: %v", item.index, p.cfg.ExcludePatterns)
+					p.logf("INFO", "tar", item.state.JobName, "Exclude patterns: %v", p.cfg.ExcludePatterns)
 				}
 				if p.cfg.FlattenTar {
-					log.Printf("[TAR #%d] Flatten mode enabled", item.index)
+					p.logf("INFO", "tar", item.state.JobName, "Flatten mode enabled")
 				}
 				err = tar.CreateTarGzWithOptions(tarSourceDir, tarPath, p.multiPartMode,
 					p.cfg.IncludePatterns, p.cfg.ExcludePatterns, p.cfg.FlattenTar, p.cfg.TarCompression)
@@ -573,7 +640,7 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 			}
 
 			if err != nil {
-				log.Printf("[TAR #%d] FAILED: %v", item.index, err)
+				p.logf("ERROR", "tar", item.state.JobName, "Failed: %v", err)
 				item.state.TarStatus = "failed"
 				item.state.SubmitStatus = "failed"
 				item.state.ErrorMessage = err.Error()
@@ -587,7 +654,7 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 			item.state.ErrorMessage = ""
 			p.stateMgr.UpdateState(item.state)
 			p.reportStateChange(item.state.JobName, "tar", "completed", "", "", 0.0)
-			log.Printf("[TAR #%d] Success", item.index)
+			p.logf("INFO", "tar", item.state.JobName, "Success")
 
 			p.setActiveWorker("tar", -1)
 			select {
@@ -637,14 +704,14 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				continue
 			}
 
-			log.Printf("[UPLOAD #%d] Uploading: %s", item.index, item.state.TarPath)
+			p.logf("INFO", "upload", item.state.JobName, "Uploading: %s", item.state.TarPath)
 			p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", 0.0)
 
 			// v4.6.5: Per-upload proxy warmup for Basic proxy mode.
 			// Prevents proxy session expiry during long batch runs (matching old PUR behavior).
 			if strings.ToLower(p.cfg.ProxyMode) == "basic" {
 				if err := inthttp.WarmupProxyConnection(ctx, p.cfg); err != nil {
-					log.Printf("[UPLOAD #%d] [WARN] Proxy warmup failed: %v (continuing anyway)", item.index, err)
+					p.logf("WARN", "upload", item.state.JobName, "Proxy warmup failed: %v (continuing anyway)", err)
 				}
 			}
 
@@ -657,7 +724,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 
 			fileInfo, err := os.Stat(item.state.TarPath)
 			if err != nil {
-				log.Printf("[UPLOAD #%d] FAILED to stat file: %v", item.index, err)
+				p.logf("ERROR", "upload", item.state.JobName, "Failed to stat file: %v", err)
 				item.state.UploadStatus = "failed"
 				item.state.SubmitStatus = "failed"
 				item.state.ErrorMessage = err.Error()
@@ -694,16 +761,16 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 					strings.Contains(errStr, "EOF")
 
 				if isTimeout && attempt < maxRetries {
-					log.Printf("[UPLOAD #%d] [RETRY] Detected proxy timeout, forcing fresh auth and retrying...", item.index)
+					p.logf("WARN", "upload", item.state.JobName, "Detected proxy timeout, forcing fresh auth and retrying...")
 					// v4.6.5: Warmup proxy on retry to re-establish session
 					if strings.ToLower(p.cfg.ProxyMode) == "basic" {
 						_ = inthttp.WarmupProxyConnection(ctx, p.cfg)
 					}
 					if strings.ToLower(p.cfg.ProxyMode) == "basic" || strings.ToLower(p.cfg.ProxyMode) == "ntlm" {
-						log.Printf("[UPLOAD #%d] [RETRY] Waiting 2 seconds before retry...", item.index)
+						p.logf("INFO", "upload", item.state.JobName, "Waiting 2 seconds before retry...")
 						time.Sleep(2 * time.Second)
 					}
-					log.Printf("[UPLOAD #%d] [RETRY] Attempt %d/%d", item.index, attempt+1, maxRetries)
+					p.logf("INFO", "upload", item.state.JobName, "Retry attempt %d/%d", attempt+1, maxRetries)
 					continue
 				}
 
@@ -712,9 +779,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 
 			if err != nil {
 				if strings.Contains(err.Error(), "timeout") {
-					log.Printf("[UPLOAD #%d] FAILED after %d retries: %v", item.index, maxRetries, err)
+					p.logf("ERROR", "upload", item.state.JobName, "Failed after %d retries: %v", maxRetries, err)
 				} else {
-					log.Printf("[UPLOAD #%d] FAILED: %v", item.index, err)
+					p.logf("ERROR", "upload", item.state.JobName, "Failed: %v", err)
 				}
 				item.state.UploadStatus = "failed"
 				item.state.SubmitStatus = "failed"
@@ -731,14 +798,14 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 			item.state.ErrorMessage = ""
 			p.stateMgr.UpdateState(item.state)
 			p.reportStateChange(item.state.JobName, "upload", "completed", "", "", 1.0)
-			log.Printf("[UPLOAD #%d] Success: File ID %s", item.index, cloudFile.ID)
+			p.logf("INFO", "upload", item.state.JobName, "Success: File ID %s", cloudFile.ID)
 
 			// Clean up tar file if requested
 			if p.rmTarOnSuccess && item.state.TarPath != "" {
 				if err := os.Remove(item.state.TarPath); err != nil {
-					log.Printf("[UPLOAD #%d] Warning: failed to remove tar file %s: %v", item.index, item.state.TarPath, err)
+					p.logf("WARN", "upload", item.state.JobName, "Failed to remove tar file %s: %v", item.state.TarPath, err)
 				} else {
-					log.Printf("[UPLOAD #%d] Removed tar file: %s", item.index, item.state.TarPath)
+					p.logf("INFO", "upload", item.state.JobName, "Removed tar file: %s", item.state.TarPath)
 				}
 			}
 
@@ -788,7 +855,25 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 			}
 
 			if item.state.JobID == "" {
-				log.Printf("[JOB #%d] Creating job: %s", item.index, item.jobSpec.JobName)
+				// Wait for version resolution (concurrent with tar/upload)
+				select {
+				case <-ctx.Done():
+					p.setActiveWorker("job", -1)
+					continue
+				case <-p.versionsResolved:
+				}
+
+				// Apply resolved version
+				if p.resolvedVersions != nil {
+					key := item.jobSpec.AnalysisCode + ":" + item.jobSpec.AnalysisVersion
+					if code, ok := p.resolvedVersions[key]; ok {
+						p.logf("INFO", "job", item.state.JobName,
+							"Resolved version %q -> %q", item.jobSpec.AnalysisVersion, code)
+						item.jobSpec.AnalysisVersion = code
+					}
+				}
+
+				p.logf("INFO", "job", item.state.JobName, "Creating job: %s", item.jobSpec.JobName)
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
 				// v4.6.8: When InputFiles are pre-specified (single job remoteFiles/localFiles mode),
@@ -801,7 +886,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 				jobReq, err := BuildJobRequest(item.jobSpec, fileIDs, p.sharedFileIDs, p.decompressExtras)
 				if err != nil {
-					log.Printf("[JOB #%d] FAILED to build request: %v", item.index, err)
+					p.logf("ERROR", "job", item.state.JobName, "Failed to build request: %v", err)
 					item.state.SubmitStatus = "failed"
 					item.state.ErrorMessage = err.Error()
 					p.stateMgr.UpdateState(item.state)
@@ -812,7 +897,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 
 				jobResp, err := p.apiClient.CreateJob(ctx, *jobReq)
 				if err != nil {
-					log.Printf("[JOB #%d] FAILED to create: %v", item.index, err)
+					p.logf("ERROR", "job", item.state.JobName, "Failed to create: %v", err)
 					item.state.SubmitStatus = "failed"
 					item.state.ErrorMessage = err.Error()
 					p.stateMgr.UpdateState(item.state)
@@ -824,7 +909,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				item.state.JobID = jobResp.ID
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
-				log.Printf("[JOB #%d] Created: Job ID %s", item.index, jobResp.ID)
+				p.logf("INFO", "job", item.state.JobName, "Created: Job ID %s", jobResp.ID)
 
 				// v4.6.5: OrgCode project assignment (org-scoped endpoint)
 				orgCode := item.jobSpec.OrgCode
@@ -836,10 +921,10 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					for assignAttempt := 1; assignAttempt <= maxAssignRetries; assignAttempt++ {
 						err := p.apiClient.AssignProjectToJob(ctx, orgCode, item.state.JobID, item.jobSpec.ProjectID)
 						if err == nil {
-							log.Printf("[JOB #%d] Project assignment successful (org=%s)", item.index, orgCode)
+							p.logf("INFO", "job", item.state.JobName, "Project assignment successful (org=%s)", orgCode)
 							break
 						}
-						log.Printf("[JOB #%d] Project assignment attempt %d failed: %v", item.index, assignAttempt, err)
+						p.logf("WARN", "job", item.state.JobName, "Project assignment attempt %d failed: %v", assignAttempt, err)
 						if assignAttempt < maxAssignRetries {
 							time.Sleep(time.Duration(min(60, 1<<uint(assignAttempt))) * time.Second)
 						}
@@ -849,12 +934,12 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 			}
 
 			if shouldSubmit(item.jobSpec.SubmitMode) && item.state.SubmitStatus != "success" {
-				log.Printf("[JOB #%d] Submitting job %s", item.index, item.state.JobID)
+				p.logf("INFO", "job", item.state.JobName, "Submitting job %s", item.state.JobID)
 				p.reportStateChange(item.state.JobName, "submit", "in_progress", item.state.JobID, "", 0.0)
 
 				err := p.apiClient.SubmitJob(ctx, item.state.JobID)
 				if err != nil {
-					log.Printf("[JOB #%d] FAILED to submit: %v", item.index, err)
+					p.logf("ERROR", "job", item.state.JobName, "Failed to submit: %v", err)
 					item.state.SubmitStatus = "failed"
 					item.state.ErrorMessage = err.Error()
 					p.stateMgr.UpdateState(item.state)
@@ -866,7 +951,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				item.state.SubmitStatus = "success"
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "submit", "completed", item.state.JobID, "", 0.0)
-				log.Printf("[JOB #%d] Submitted successfully", item.index)
+				p.logf("INFO", "job", item.state.JobName, "Submitted successfully")
 			} else if item.state.SubmitStatus != "success" && item.state.SubmitStatus != "failed" {
 				item.state.SubmitStatus = "skipped"
 				p.stateMgr.UpdateState(item.state)
@@ -1042,7 +1127,7 @@ func (p *Pipeline) progressReporter(stop chan struct{}) {
 			completed := p.completedJobs
 			p.mu.Unlock()
 
-			log.Printf("[PROGRESS] Active workers: tar=%d upload=%d job=%d | Completed: %d/%d",
+			p.logf("INFO", "pipeline", "", "Active workers: tar=%d upload=%d job=%d | Completed: %d/%d",
 				tarActive, uploadActive, jobActive, completed, p.totalJobs)
 
 		case <-stop:

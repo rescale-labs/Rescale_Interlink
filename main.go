@@ -1,6 +1,7 @@
 // Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
 // FIPS 140-3 Compliant Build Required
 //
+// v4.7.0: PUR performance & reliability: absolute paths, WalkDir scanning, concurrent version resolution, Activity Log routing.
 // v4.6.8: Fix automation JSON format, single job all input modes, GTK warnings, terminology.
 // v4.0.3: True server-side pagination with page caching, status message fix.
 // - No args + display available → GUI mode

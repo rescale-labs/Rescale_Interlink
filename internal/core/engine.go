@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
@@ -360,12 +362,13 @@ func (e *Engine) Scan(opts ScanOptions) error {
 
 		var dirs []string
 		if opts.Recursive {
-			// Recursive mode - walk directory tree
-			err := filepath.Walk(scanRoot, func(path string, info os.FileInfo, err error) error {
+			// Recursive mode - walk directory tree.
+			// Uses WalkDir instead of Walk to avoid per-entry os.Stat syscalls.
+			err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
-				if info.IsDir() {
+				if d.IsDir() {
 					// Skip hidden directories unless specified
 					if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
 						return filepath.SkipDir
@@ -374,6 +377,11 @@ func (e *Engine) Scan(opts ScanOptions) error {
 					matched, matchErr := filepath.Match(opts.Pattern, filepath.Base(path))
 					if matchErr == nil && matched && path != scanRoot {
 						dirs = append(dirs, path)
+						// SkipDir: intentionally stop descending into matched directories.
+						// Run directories (e.g., Run_*) are expected to be siblings, not nested.
+						// This avoids walking the full contents of each matched directory,
+						// which is the primary source of slow recursive scans.
+						return filepath.SkipDir
 					}
 				}
 				return nil
@@ -474,15 +482,10 @@ func (e *Engine) Scan(opts ScanOptions) error {
 			command = pattern.IterateCommandPatterns(command, templateIdx, dirNum)
 		}
 
-		// Directory path - use absolute for multi-part mode (required for tar)
+		// Normalize directory path to absolute
 		dirPath := entry.path
-		if !opts.MultiPartMode {
-			// Normal mode: try to use relative path
-			if cwd, err := os.Getwd(); err == nil {
-				if relPath, err := filepath.Rel(cwd, entry.path); err == nil {
-					dirPath = relPath
-				}
-			}
+		if absPath, err := pathutil.ResolveAbsolutePath(entry.path); err == nil {
+			dirPath = absPath
 		}
 
 		// Build row
@@ -629,12 +632,13 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 
 		var dirs []string
 		if opts.Recursive {
-			// Recursive mode - walk directory tree
-			err := filepath.Walk(scanRoot, func(path string, info os.FileInfo, err error) error {
+			// Recursive mode - walk directory tree.
+			// Uses WalkDir instead of Walk to avoid per-entry os.Stat syscalls.
+			err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
-				if info.IsDir() {
+				if d.IsDir() {
 					// Skip hidden directories unless specified
 					if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
 						return filepath.SkipDir
@@ -643,6 +647,11 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 					matched, matchErr := filepath.Match(opts.Pattern, filepath.Base(path))
 					if matchErr == nil && matched && path != scanRoot {
 						dirs = append(dirs, path)
+						// SkipDir: intentionally stop descending into matched directories.
+						// Run directories (e.g., Run_*) are expected to be siblings, not nested.
+						// This avoids walking the full contents of each matched directory,
+						// which is the primary source of slow recursive scans.
+						return filepath.SkipDir
 					}
 				}
 				return nil
@@ -730,15 +739,11 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 		// Create job from template
 		job := template
 
-		// Set directory path - use absolute for multi-part mode
-		job.Directory = entry.path
-		if !opts.MultiPartMode {
-			// Normal mode: try to use relative path
-			if cwd, err := os.Getwd(); err == nil {
-				if relPath, err := filepath.Rel(cwd, entry.path); err == nil {
-					job.Directory = relPath
-				}
-			}
+		// Normalize directory path to absolute
+		if absPath, err := pathutil.ResolveAbsolutePath(entry.path); err == nil {
+			job.Directory = absPath
+		} else {
+			job.Directory = entry.path
 		}
 
 		// Create job name with project suffix for multi-part mode

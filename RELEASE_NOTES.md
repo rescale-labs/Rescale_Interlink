@@ -1,5 +1,47 @@
 # Release Notes - Rescale Interlink
 
+## v4.7.0 - February 21, 2026
+
+### PUR Performance & Reliability
+
+Major improvements to the PUR (Parallel Upload and Run) pipeline addressing directory scanning speed, startup latency, path reliability, and GUI log visibility.
+
+#### Directory Path Fix
+- **Absolute path normalization**: Replaced relative path generation in `Scan()` and `ScanToSpecs()` with `pathutil.ResolveAbsolutePath()`. Relative paths failed when CWD at tar-creation time differed from CWD at scan time (especially in GUI mode where CWD is the application install directory). Paths are now normalized to absolute at three points: engine scan output, pipeline ingress (`NewPipeline`), and tar worker (belt-and-suspenders for legacy CSV/state files).
+
+#### Directory Scanning Speed
+- **`filepath.WalkDir` migration**: Replaced `filepath.Walk` with `filepath.WalkDir` in `engine.go` (recursive scan) and `multipart.go` (`ValidateRunDirectory`). `WalkDir` avoids per-entry `os.Stat` syscalls, significantly reducing I/O on directories with many files.
+- **`SkipDir` after match**: When a directory matches the scan pattern (e.g., `Run_*`), the walker now returns `filepath.SkipDir` to avoid descending into matched directories. This is the primary source of slow recursive scans — without it, the walker traverses all files inside each matched run directory. Nested matches (e.g., `Run_1/sub/Run_2`) are intentionally not discovered; run directories are expected to be siblings.
+
+#### PUR Startup Speed
+- **Concurrent version resolution**: `resolveAnalysisVersions()` (which calls the paginated `GetAnalyses` API) now runs in a goroutine concurrent with tar and upload workers. Previously this was a blocking call that delayed pipeline start. Tar and upload workers start immediately; only job workers wait on the `versionsResolved` channel before creating jobs. Data race safe via single write before channel close.
+
+#### Activity Log Routing
+- **Log callback duplicate fix**: `p.logf()` previously called both the log callback AND `log.Printf`, causing duplicate stdout output when the Engine's `LogCallback` (which itself calls `log.Printf` via `publishLog`) was set. Now `logf` only calls `log.Printf` when no callback is set (CLI mode without Engine).
+- **Full pipeline log routing**: Converted ~35 `log.Printf` calls across `resolveAnalysisVersions`, `ResolveSharedFiles`, `tarWorker`, `uploadWorker`, `jobWorker`, `progressReporter`, and `Run` completion to use `p.logf()` with appropriate level/stage/jobName. All pipeline messages now flow through the EventBus callback to the GUI Activity Log.
+
+#### Phase Timing & Observability
+- Added `pipelineStart` timestamp and timing logs at shared file resolution, worker startup, first tarball creation (`sync.Once`), and pipeline completion for concrete before/after measurement of startup delay improvements.
+
+#### Test Infrastructure
+- **`AnalysisResolver` interface**: Added narrow interface for the `GetAnalyses` API call, enabling mock injection for deterministic pipeline testing without real API calls.
+- **New `pipeline_test.go`**: 5 tests covering path normalization at ingress, concurrent version resolution timing, log callback delivery, and version resolution map correctness. All pass with `-race`.
+- **Updated `engine_test.go`**: 3 new tests verifying scan output paths are absolute and that `SkipDir` prevents nested directory matches.
+
+#### Files Changed
+| File | Changes |
+|------|---------|
+| `internal/pur/pipeline/pipeline.go` | All changes: path normalization, concurrent version resolution, log routing, timing logs, `AnalysisResolver` interface |
+| `internal/core/engine.go` | Absolute paths in Scan/ScanToSpecs, WalkDir + SkipDir for recursive scan |
+| `internal/util/multipart/multipart.go` | WalkDir in ValidateRunDirectory |
+| `internal/core/engine_test.go` | 3 new tests for absolute paths and SkipDir |
+| `internal/pur/pipeline/pipeline_test.go` | New file: 5 tests for pipeline behavior |
+
+#### Known Issues
+- **Download errors under low disk space**: A bug has been identified that causes download failures under certain circumstances. This is believed to be related to insufficient disk space on the target machine, but the root cause has not been conclusively determined. Investigation is ongoing.
+
+---
+
 ## v4.6.8 - February 18, 2026
 
 ### Bug Fixes

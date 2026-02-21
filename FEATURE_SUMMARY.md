@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.6.8
-**Build Date:** February 18, 2026
+**Version:** 4.7.0
+**Build Date:** February 21, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -1054,6 +1054,21 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 
 **Source:** `internal/ratelimit/`, `internal/cli/files.go`
 
+### v4.7.0 (February 21, 2026)
+**PUR Performance & Reliability:**
+- ✅ Fixed relative path generation: all scan output now uses absolute paths via `pathutil.ResolveAbsolutePath()`, preventing CWD-dependent failures in GUI mode
+- ✅ Pipeline ingress normalization: `NewPipeline()` normalizes relative paths at ingress, with belt-and-suspenders check in `tarWorker` for legacy CSV/state files
+- ✅ Replaced `filepath.Walk` with `filepath.WalkDir` in engine.go and multipart.go (no per-entry `os.Stat` syscalls)
+- ✅ Added `filepath.SkipDir` after matched directories to avoid descending into run directory contents
+- ✅ Concurrent version resolution: `resolveAnalysisVersions()` runs in goroutine; tar/upload workers start immediately instead of waiting for paginated API call
+- ✅ Fixed `p.logf()` duplicate logging: no longer calls both callback AND `log.Printf` when callback is set
+- ✅ Converted ~35 `log.Printf` calls in pipeline.go to `p.logf()` for GUI Activity Log visibility
+- ✅ Added `AnalysisResolver` interface for testable version resolution
+- ✅ Added phase timing logs: pipelineStart, first tarball, completion timing
+- ✅ New `pipeline_test.go` with 5 tests; 3 new engine tests for absolute paths and SkipDir behavior
+
+**Source:** `internal/pur/pipeline/pipeline.go`, `internal/core/engine.go`, `internal/util/multipart/multipart.go`
+
 ### v4.6.8 (February 18, 2026)
 **Bug Fixes & Terminology:**
 - ✅ Fixed automation JSON format: (1) nested `{"automation": {"id": "..."}}` object, not flat string; (2) `"environmentVariables": {}` must be present (API returns HTTP 500 if omitted). Added `NormalizeAutomations()` choke point + initialized at all construction sites
@@ -1181,5 +1196,5 @@ For more details, see:
 
 ---
 
-*Last Updated: February 18, 2026*
-*Version: 4.6.8*
+*Last Updated: February 21, 2026*
+*Version: 4.7.0*

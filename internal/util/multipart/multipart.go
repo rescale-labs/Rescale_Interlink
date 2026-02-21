@@ -2,6 +2,7 @@ package multipart
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -112,13 +113,14 @@ func ValidateRunDirectory(runPath, validationPattern string) bool {
 		return true
 	}
 
-	// Walk the directory tree looking for matching files
+	// Walk the directory tree looking for matching files.
+	// Uses WalkDir instead of Walk to avoid per-entry os.Stat syscalls.
 	found := false
-	filepath.Walk(runPath, func(path string, info os.FileInfo, err error) error {
+	filepath.WalkDir(runPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip errors, continue walking
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil // Continue into subdirectories
 		}
 
