@@ -43,7 +43,6 @@ import { wailsapp } from '../../../wailsjs/go/models';
 type TokenSource = 'environment' | 'file' | 'direct';
 
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
-const COMPRESSION_OPTIONS = ['gzip', 'none'] as const;
 
 // v4.6.6: Check if URL is a FedRAMP platform (requires FIPS compliance)
 // NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms
@@ -85,7 +84,6 @@ export function SetupTab() {
   } = useConfigStore();
 
   const [tokenSource, setTokenSource] = useState<TokenSource>('direct');
-  const [validationEnabled, setValidationEnabled] = useState(false);
   const [statusMessage, setStatusMessage] = useState('Ready');
   const [showApiKey, setShowApiKey] = useState(false); // v4.0.1: API key visibility toggle
   const [defaultConfigPath, setDefaultConfigPath] = useState<string>(''); // v4.0.8: Show config location
@@ -298,16 +296,6 @@ export function SetupTab() {
     };
     fetchFileLoggingSettings();
   }, []);
-
-  // Initialize local state from config
-  useEffect(() => {
-    if (config) {
-      // Check if we should enable validation based on pattern
-      if (config.validationPattern && config.validationPattern !== '*.avg.fnc') {
-        setValidationEnabled(true);
-      }
-    }
-  }, [config]);
 
   // v4.5.1: Auto-switch proxy mode when selecting FRM platform with NTLM
   useEffect(() => {
@@ -908,150 +896,6 @@ export function SetupTab() {
 
           {advancedExpanded && (
           <div className="p-4 space-y-6">
-
-        {/* Directory Scan Settings */}
-        <div className="card">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">
-            Directory Scan Settings
-          </h3>
-          <div className="space-y-4">
-            <div>
-              {/* v4.6.0: Clarified label from "Run Subpath" to "Scan Prefix" */}
-              <label className="label">Scan Prefix</label>
-              <input
-                type="text"
-                className="input"
-                placeholder="Navigate into subpath before scanning (e.g., Simcodes/Powerflow)"
-                value={config?.runSubpath || ''}
-                onChange={(e) => updateConfig({ runSubpath: e.target.value })}
-              />
-            </div>
-
-            <div className="flex items-center">
-              <input
-                type="checkbox"
-                id="validationEnabled"
-                checked={validationEnabled}
-                onChange={(e) => setValidationEnabled(e.target.checked)}
-                className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
-              />
-              <label htmlFor="validationEnabled" className="ml-2 text-sm text-gray-700 cursor-pointer">
-                Enable validation
-              </label>
-            </div>
-
-            <div>
-              <label className="label">Validation Pattern</label>
-              <input
-                type="text"
-                className="input"
-                placeholder="e.g., *.avg.fnc or results.dat"
-                value={config?.validationPattern || ''}
-                onChange={(e) => updateConfig({ validationPattern: e.target.value })}
-                disabled={!validationEnabled}
-              />
-              <p className="mt-1 text-xs text-gray-500">
-                Validation checks that each run directory contains files matching the pattern.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Worker Configuration Section */}
-        <div className="card">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Worker Configuration</h3>
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="label">Tar Workers</label>
-              <input
-                type="number"
-                min="1"
-                max="16"
-                className="input"
-                value={config?.tarWorkers || 4}
-                onChange={(e) => updateConfig({ tarWorkers: parseInt(e.target.value) || 4 })}
-              />
-            </div>
-            <div>
-              <label className="label">Upload Workers</label>
-              <input
-                type="number"
-                min="1"
-                max="16"
-                className="input"
-                value={config?.uploadWorkers || 4}
-                onChange={(e) => updateConfig({ uploadWorkers: parseInt(e.target.value) || 4 })}
-              />
-            </div>
-            <div>
-              <label className="label">Job Workers</label>
-              <input
-                type="number"
-                min="1"
-                max="16"
-                className="input"
-                value={config?.jobWorkers || 4}
-                onChange={(e) => updateConfig({ jobWorkers: parseInt(e.target.value) || 4 })}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Tar Options Section */}
-        <div className="card">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Tar Options</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="label">Exclude Patterns</label>
-              <input
-                type="text"
-                className="input"
-                placeholder="*.tmp,*.log,*.bak"
-                value={config?.excludePatterns || ''}
-                onChange={(e) => updateConfig({ excludePatterns: e.target.value })}
-              />
-            </div>
-            <div>
-              <label className="label">Include Patterns</label>
-              <input
-                type="text"
-                className="input"
-                placeholder="*.dat,*.csv,*.inp"
-                value={config?.includePatterns || ''}
-                onChange={(e) => updateConfig({ includePatterns: e.target.value })}
-              />
-            </div>
-            <div>
-              <label className="label">Compression</label>
-              <select
-                className="input"
-                value={config?.tarCompression || 'gzip'}
-                onChange={(e) => updateConfig({ tarCompression: e.target.value })}
-              >
-                {COMPRESSION_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>{opt}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex items-center">
-              <input
-                type="checkbox"
-                id="flattenTar"
-                checked={config?.flattenTar || false}
-                onChange={(e) => updateConfig({ flattenTar: e.target.checked })}
-                className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
-              />
-              <label htmlFor="flattenTar" className="ml-2 text-sm text-gray-700 cursor-pointer">
-                Flatten directory structure in tar
-              </label>
-            </div>
-            <p className="text-xs text-gray-500">
-              Patterns support wildcards (*). Use comma-separated list.
-              Exclude: skip these files when creating tar archives.
-              Include: only include these files (leave empty to include all).
-            </p>
-          </div>
-        </div>
 
         {/* Advanced Settings Section */}
         <div className="card">

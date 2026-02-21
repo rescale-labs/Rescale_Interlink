@@ -14,7 +14,8 @@ import {
   CheckIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, WorkflowState, JobRow, PipelineLogEntry, PipelineStageStats } from '../../stores'
+import { useJobStore, useConfigStore, WorkflowState, JobRow, PipelineLogEntry, PipelineStageStats } from '../../stores'
+import { wailsapp } from '../../../wailsjs/go/models'
 import { TemplateBuilder } from '../widgets'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import * as Runtime from '../../../wailsjs/runtime/runtime'
@@ -338,6 +339,124 @@ function ErrorSummary({ jobs }: { jobs: JobRow[] }) {
   )
 }
 
+// v4.7.1: Shared Pipeline Settings component for workers + tar options
+const COMPRESSION_OPTIONS = ['gzip', 'none'] as const
+
+function PipelineSettings({ config, updateConfig, saveConfig }: {
+  config: wailsapp.ConfigDTO | null
+  updateConfig: (updates: Partial<wailsapp.ConfigDTO>) => void
+  saveConfig: () => Promise<void>
+}) {
+  return (
+    <div className="border-t pt-4 mt-4">
+      <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Pipeline Settings</h4>
+      {/* Worker Configuration */}
+      <div className="mb-4">
+        <label className="block text-xs font-medium text-gray-500 mb-2">Worker Configuration</label>
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Tar Workers</label>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.tarWorkers || 4}
+              onChange={(e) => updateConfig({ tarWorkers: parseInt(e.target.value) || 4 })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Upload Workers</label>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.uploadWorkers || 4}
+              onChange={(e) => updateConfig({ uploadWorkers: parseInt(e.target.value) || 4 })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Job Workers</label>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.jobWorkers || 4}
+              onChange={(e) => updateConfig({ jobWorkers: parseInt(e.target.value) || 4 })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+        </div>
+      </div>
+      {/* Tar Options */}
+      <div>
+        <label className="block text-xs font-medium text-gray-500 mb-2">Tar Options</label>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Exclude Patterns</label>
+            <input
+              type="text"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="*.tmp,*.log,*.bak"
+              value={config?.excludePatterns || ''}
+              onChange={(e) => updateConfig({ excludePatterns: e.target.value })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Include Patterns</label>
+            <input
+              type="text"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="*.dat,*.csv,*.inp"
+              value={config?.includePatterns || ''}
+              onChange={(e) => updateConfig({ includePatterns: e.target.value })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Compression</label>
+            <select
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.tarCompression || 'gzip'}
+              onChange={(e) => {
+                updateConfig({ tarCompression: e.target.value })
+                saveConfig()
+              }}
+            >
+              {COMPRESSION_OPTIONS.map((opt) => (
+                <option key={opt} value={opt}>{opt}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center">
+            <input
+              type="checkbox"
+              id="pipelineFlattenTar"
+              checked={config?.flattenTar || false}
+              onChange={(e) => {
+                updateConfig({ flattenTar: e.target.checked })
+                saveConfig()
+              }}
+              className="h-4 w-4 rounded border border-gray-300 text-blue-500 focus:ring-blue-500 focus:ring-2 bg-white cursor-pointer"
+            />
+            <label htmlFor="pipelineFlattenTar" className="ml-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+              Flatten directory structure in tar
+            </label>
+          </div>
+        </div>
+        <p className="mt-1 text-xs text-gray-400">
+          Patterns support wildcards (*). Use comma-separated list.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 export function PURTab() {
   const {
     workflowState,
@@ -371,6 +490,9 @@ export function PURTab() {
     setPURRunOptions,
   } = useJobStore()
 
+  // v4.7.1: Config store for Pipeline Settings
+  const { config, updateConfig, saveConfig } = useConfigStore()
+
   // Template builder dialog state
   const [showTemplateBuilder, setShowTemplateBuilder] = useState(false)
   const [validationErrors, setValidationErrors] = useState<string[]>([])
@@ -380,6 +502,17 @@ export function PURTab() {
   useEffect(() => {
     loadMemory()
   }, [loadMemory])
+
+  // v4.7.1: Initialize scan options from persisted config
+  useEffect(() => {
+    if (config) {
+      setScanOptions({
+        runSubpath: scanOptions.runSubpath || config.runSubpath || '',
+        validationPattern: scanOptions.validationPattern || config.validationPattern || '',
+      })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config?.runSubpath, config?.validationPattern])
 
   // Local state for CSV loading
   const [isLoadingCSV, setIsLoadingCSV] = useState(false)
@@ -738,7 +871,11 @@ export function PURTab() {
                   <input
                     type="text"
                     value={scanOptions.validationPattern}
-                    onChange={(e) => setScanOptions({ validationPattern: e.target.value })}
+                    onChange={(e) => {
+                      setScanOptions({ validationPattern: e.target.value })
+                      updateConfig({ validationPattern: e.target.value })
+                    }}
+                    onBlur={() => saveConfig()}
                     placeholder="*.fnc"
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
@@ -751,7 +888,11 @@ export function PURTab() {
                   <input
                     type="text"
                     value={scanOptions.runSubpath}
-                    onChange={(e) => setScanOptions({ runSubpath: e.target.value })}
+                    onChange={(e) => {
+                      setScanOptions({ runSubpath: e.target.value })
+                      updateConfig({ runSubpath: e.target.value })
+                    }}
+                    onBlur={() => saveConfig()}
                     placeholder="Simcodes/Powerflow"
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
@@ -945,8 +1086,11 @@ export function PURTab() {
             </div>
           </div>
 
+          {/* v4.7.1: Pipeline Settings — workers + tar options */}
+          <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
+
           {scanError && (
-            <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
+            <div className="mb-4 mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
               {scanError}
             </div>
           )}
@@ -1057,6 +1201,9 @@ export function PURTab() {
           </div>
 
           <JobsTable jobs={jobRows} />
+
+          {/* v4.7.1: Pipeline Settings — also visible in CSV-loaded workflow */}
+          <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
         </div>
       )
     }

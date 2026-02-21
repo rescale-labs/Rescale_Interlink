@@ -7,6 +7,31 @@ import { ProgressEventDTO, TransferEventDTO, EnumerationEventDTO, EVENT_NAMES } 
 // Transfer task state
 export type TransferState = 'queued' | 'initializing' | 'active' | 'completed' | 'failed' | 'cancelled' | 'paused'
 
+// v4.7.1: Error classification for disk space and other error types
+export type TransferErrorType = 'disk_space' | 'generic'
+
+export function classifyError(error: string | undefined): TransferErrorType {
+  if (!error) return 'generic'
+  const lower = error.toLowerCase()
+  if (
+    lower.includes('insufficient disk space') ||
+    lower.includes('no space left on device') ||
+    lower.includes('disk full') ||
+    lower.includes('out of disk space') ||
+    lower.includes('not enough space') ||
+    lower.includes('disk quota exceeded') ||
+    lower.includes('enospc')
+  ) return 'disk_space'
+  return 'generic'
+}
+
+export function extractDiskSpaceInfo(error: string): { available: string; needed: string } | null {
+  const availMatch = error.match(/have ([\d.]+\s*[KMGT]?B) available/i)
+  const needMatch = error.match(/need ([\d.]+\s*[KMGT]?B)/i)
+  if (!availMatch) return null
+  return { available: availMatch[1], needed: needMatch ? needMatch[1] : 'unknown' }
+}
+
 // v4.0.8: Enumeration state for folder scan progress
 export interface Enumeration {
   id: string
@@ -25,6 +50,7 @@ export interface TransferTask extends wailsapp.TransferTaskDTO {
   displayProgress: number // Smoothed progress for display
   speedFormatted: string // Formatted speed string
   etaFormatted: string // Formatted ETA string
+  errorType?: TransferErrorType // v4.7.1: Classified error type
 }
 
 // Transfer statistics
@@ -101,6 +127,7 @@ function enhanceTask(dto: wailsapp.TransferTaskDTO): TransferTask {
     etaFormatted: dto.speed > 0 && dto.size > 0
       ? formatETA(((dto.size * (1 - dto.progress)) / dto.speed) * 1000)
       : '',
+    errorType: classifyError(dto.error),
   }
 }
 
@@ -294,6 +321,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       // Update error if present
       if (event.error) {
         task.error = event.error
+        task.errorType = classifyError(event.error)
       }
 
       updatedTasks[taskIndex] = task

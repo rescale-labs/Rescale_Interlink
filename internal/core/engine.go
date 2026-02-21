@@ -284,13 +284,8 @@ func (e *Engine) Scan(opts ScanOptions) error {
 	template := jobs[0]
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Using template: %s", template.JobName), "scan", "")
 
-	// Get validation pattern (use config default if not specified)
+	// v4.7.1: Use validation pattern from scan options only (no config fallback)
 	validationPattern := opts.ValidationPattern
-	if validationPattern == "" {
-		e.mu.RLock()
-		validationPattern = e.config.ValidationPattern
-		e.mu.RUnlock()
-	}
 
 	// Structure for directory entries
 	type dirEntry struct {
@@ -550,13 +545,8 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 	e.publishLog(events.InfoLevel, "Starting in-memory directory scan...", "scan", "")
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Using template: %s", template.JobName), "scan", "")
 
-	// Get validation pattern (use config default if not specified)
+	// v4.7.1: Use validation pattern from scan options only (no config fallback)
 	validationPattern := opts.ValidationPattern
-	if validationPattern == "" {
-		e.mu.RLock()
-		validationPattern = e.config.ValidationPattern
-		e.mu.RUnlock()
-	}
 
 	// Structure for directory entries
 	type dirEntry struct {

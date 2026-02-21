@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo } from 'react'
+import { useEffect, useCallback, useMemo, useState } from 'react'
 import {
   ArrowUpIcon,
   ArrowDownIcon,
@@ -7,11 +7,12 @@ import {
   TrashIcon,
   CheckCircleIcon,
   ExclamationCircleIcon,
+  ExclamationTriangleIcon,
   ClockIcon,
   FolderOpenIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useTransferStore, TransferTask, Enumeration } from '../../stores'
+import { useTransferStore, TransferTask, Enumeration, extractDiskSpaceInfo } from '../../stores'
 
 // Format file size
 // v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
@@ -120,6 +121,37 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
   )
 }
 
+// v4.7.1: Short error label for status column
+function getShortErrorLabel(task: TransferTask): string {
+  if (!task.error) return ''
+  if (task.errorType === 'disk_space') return 'No disk space'
+  return task.error
+}
+
+// v4.7.1: Disk space error banner
+function DiskSpaceBanner({ incident, onDismiss }: {
+  incident: { count: number; available: string; needed: string }
+  onDismiss: () => void
+}) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800">
+      <ExclamationTriangleIcon className="w-5 h-5 text-amber-600 flex-shrink-0" />
+      <div className="flex-1 text-sm text-amber-800 dark:text-amber-300">
+        <span className="font-medium">
+          {incident.count} download{incident.count !== 1 ? 's' : ''} failed: insufficient disk space.
+        </span>
+        {' '}
+        <span>{incident.available} available (latest failure needs {incident.needed}).</span>
+      </div>
+      <button onClick={onDismiss}
+        className="flex-shrink-0 text-amber-600 hover:text-amber-800 dark:hover:text-amber-200"
+        title="Dismiss">
+        <XMarkIcon className="w-4 h-4" />
+      </button>
+    </div>
+  )
+}
+
 interface TransferRowProps {
   task: TransferTask
   onCancel: (taskId: string) => void
@@ -178,9 +210,11 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
       </div>
 
       {/* Status */}
-      <div className={clsx('flex items-center gap-1 flex-shrink-0 w-28 text-sm', statusInfo.color)}>
-        <StatusIcon className={clsx('w-4 h-4', task.state === 'active' && 'animate-spin')} />
-        <span className="truncate">{task.error || statusInfo.label}</span>
+      <div className={clsx('flex items-center gap-1 flex-shrink-0 w-32 text-sm', statusInfo.color)}>
+        <StatusIcon className={clsx('w-4 h-4 flex-shrink-0', task.state === 'active' && 'animate-spin')} />
+        <span className="truncate" title={task.error || statusInfo.label}>
+          {task.error ? getShortErrorLabel(task) : statusInfo.label}
+        </span>
       </div>
 
       {/* Action button */}
@@ -221,11 +255,56 @@ export function TransfersTab() {
     clearCompletedTransfers,
   } = useTransferStore()
 
+  // v4.7.1: State for disk space banner — independent of task list
+  const [diskSpaceIncident, setDiskSpaceIncident] = useState<{
+    count: number
+    available: string
+    needed: string
+    fingerprint: string
+  } | null>(null)
+  const [diskSpaceBannerDismissed, setDiskSpaceBannerDismissed] = useState(false)
+  const [lastFingerprint, setLastFingerprint] = useState('')
+
   // Start polling when tab is mounted
   useEffect(() => {
     startPolling()
     return () => stopPolling()
   }, [startPolling, stopPolling])
+
+  // v4.7.1: Scan tasks for disk space errors; update incident state
+  useEffect(() => {
+    const failedDiskSpace = tasks.filter(
+      t => t.state === 'failed' && t.errorType === 'disk_space' && t.type === 'download'
+    )
+    if (failedDiskSpace.length === 0) return // Don't clear incident — it persists after clear
+
+    // Extract info from most recent error
+    let info: { available: string; needed: string } | null = null
+    for (let i = failedDiskSpace.length - 1; i >= 0; i--) {
+      info = extractDiskSpaceInfo(failedDiskSpace[i].error || '')
+      if (info) break
+    }
+
+    // Fingerprint: use task ID + completedAt, which changes on each failure attempt
+    const sorted = [...failedDiskSpace].sort((a, b) =>
+      (b.completedAt || '').localeCompare(a.completedAt || '')
+    )
+    const latest = sorted[0]
+    const fingerprint = `${latest.id}:${latest.completedAt || Date.now()}`
+
+    setDiskSpaceIncident({
+      count: failedDiskSpace.length,
+      available: info?.available || 'unknown',
+      needed: info?.needed || 'unknown',
+      fingerprint,
+    })
+
+    // Re-show banner when fingerprint changes (new failure, even after clear)
+    if (fingerprint !== lastFingerprint) {
+      setDiskSpaceBannerDismissed(false)
+      setLastFingerprint(fingerprint)
+    }
+  }, [tasks, lastFingerprint])
 
   // Handle cancel
   const handleCancel = useCallback((taskId: string) => {
@@ -293,6 +372,11 @@ export function TransfersTab() {
           )}
         </div>
       </div>
+
+      {/* v4.7.1: Disk space error banner */}
+      {diskSpaceIncident && !diskSpaceBannerDismissed && (
+        <DiskSpaceBanner incident={diskSpaceIncident} onDismiss={() => setDiskSpaceBannerDismissed(true)} />
+      )}
 
       {/* Transfer list */}
       <div className="flex-1 overflow-auto">

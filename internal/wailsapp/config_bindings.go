@@ -64,6 +64,11 @@ func (a *App) GetConfig() ConfigDTO {
 	if a.config == nil {
 		return ConfigDTO{}
 	}
+	// v4.7.1: Normalize legacy "gz" to "gzip" for consistent frontend display
+	compression := a.config.TarCompression
+	if compression == "gz" {
+		compression = "gzip"
+	}
 	return ConfigDTO{
 		APIBaseURL:        a.config.APIBaseURL,
 		TenantURL:         a.config.TenantURL,
@@ -81,7 +86,7 @@ func (a *App) GetConfig() ConfigDTO {
 		ExcludePatterns:   strings.Join(a.config.ExcludePatterns, ","),
 		IncludePatterns:   strings.Join(a.config.IncludePatterns, ","),
 		FlattenTar:        a.config.FlattenTar,
-		TarCompression:    a.config.TarCompression,
+		TarCompression:    compression,
 		ValidationPattern: a.config.ValidationPattern,
 		RunSubpath:        a.config.RunSubpath,
 		MaxRetries:        a.config.MaxRetries,

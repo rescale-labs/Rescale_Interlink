@@ -1,8 +1,8 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.7.0.
+Complete command-line interface reference for `rescale-int` v4.7.1.
 
-**Version:** 4.7.0
+**Version:** 4.7.1
 **Build Date:** February 21, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
@@ -70,6 +70,8 @@ This will prompt you for:
 - API base URL (default: https://platform.rescale.com)
 - Worker settings (tar, upload, job workers)
 - Proxy configuration (optional)
+
+**Note (v4.7.1):** Worker and tar settings are also configurable from the GUI PUR tab's Pipeline Settings section. Settings in config.csv are shared between CLI and GUI modes.
 
 Configuration is saved to `~/.config/rescale/config.csv`
 
@@ -156,10 +158,12 @@ Additional configuration options for specialized use cases:
 | `exclude_pattern` | Patterns to exclude from tarballs (semicolon-separated, e.g., `*.log;*.tmp`) | (none) |
 | `include_pattern` | Include-only patterns (mutually exclusive with exclude) | (none) |
 | `flatten_tar` | Remove subdirectory structure in tarballs (`true`/`false`) | false |
-| `run_subpath` | Subpath to traverse before finding run directories (e.g., `Simcodes/Powerflow`) | (none) |
-| `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`) | (none) |
-| `tar_compression` | Compression type: `none` or `gz` | none |
+| `run_subpath` | Scan prefix: subpath to navigate into before scanning for run directories (e.g., `Simcodes/Powerflow`) | (none) |
+| `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`), opt-in | (none) |
+| `tar_compression` | Compression type: `none` or `gzip` (legacy `gz` is auto-normalized to `gzip`) | none |
 | `max_retries` | Maximum upload retry attempts | 1 |
+
+**v4.7.1 Note:** In the GUI, worker and tar settings are configured via the **PUR tab's Pipeline Settings** section (visible in both the scan step and the jobs-validated step). Tar options are also available in the **SingleJob tab** when using directory input mode. The `run_subpath` and `validation_pattern` are configured on the **PUR tab** scan step and persist to `config.csv` automatically. These settings are no longer in the Setup tab's Advanced Settings.
 
 ## Global Flags
 
@@ -1229,7 +1233,7 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
 - `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
-- `--tar-compression string` - Tar compression: "none" or "gz" (v4.6.4)
+- `--tar-compression string` - Tar compression: "none" or "gzip" (v4.6.4, v4.7.1: normalized)
 - `--tar-workers int` - Parallel tar workers (default from config) (v4.6.4)
 - `--upload-workers int` - Parallel upload workers (default from config) (v4.6.4)
 - `--job-workers int` - Parallel job creation workers (default from config) (v4.6.4)
@@ -1268,7 +1272,7 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
 - `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
-- `--tar-compression string` - Tar compression: "none" or "gz" (v4.6.4)
+- `--tar-compression string` - Tar compression: "none" or "gzip" (v4.6.4, v4.7.1: normalized)
 - `--tar-workers int` - Parallel tar workers (v4.6.4)
 - `--upload-workers int` - Parallel upload workers (v4.6.4)
 - `--job-workers int` - Parallel job creation workers (v4.6.4)
@@ -1628,12 +1632,12 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v4.7.0 (February 21, 2026)
+This guide is for `rescale-int` v4.7.1 (February 21, 2026)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v4.7.0 (2026-02-21) [FIPS 140-3]
+# Output: rescale-int version v4.7.1 (2026-02-21) [FIPS 140-3]
 ```
 
 ### v4.2.1 Enhanced Eligibility Configuration (January 9, 2026)

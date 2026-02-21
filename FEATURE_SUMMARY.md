@@ -1,6 +1,6 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.7.0
+**Version:** 4.7.1
 **Build Date:** February 21, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
@@ -252,7 +252,7 @@ rescale-int jobs submit --script <path> --files <file-ids> [flags]
 ### GUI Single Job Tab (v4.0.0+ Wails)
 
 The GUI Single Job tab supports three input modes:
-- **Directory mode**: Tar and upload a local directory as job input
+- **Directory mode**: Tar and upload a local directory as job input. Includes inline tar options (exclude/include patterns, compression, flatten) added in v4.7.1.
 - **Local Files mode** (v4.6.8): Upload individual local files, then create the job with those file IDs
 - **Remote Files mode** (v4.6.8): Use already-uploaded Rescale file IDs directly (skips tar/upload)
 
@@ -808,9 +808,10 @@ rescale-int folders download-dir --folder-id xyz789 --outdir ./data
 ### Error Handling
 - Clear error messages with context
 - Disk space checks before operations (5% safety buffer)
+- **Disk space error UX (v4.7.1)**: Amber banner in Transfers tab when downloads fail due to insufficient space, showing available/needed amounts. Short "No disk space" labels with full hover tooltips. Error classification via `classifyError()`/`extractDiskSpaceInfo()`.
 - Resume state validation and cleanup
 - Graceful degradation on network issues
-- **Source:** `internal/diskspace/`, `internal/pur/storage/errors.go`
+- **Source:** `internal/diskspace/`, `internal/pur/storage/errors.go`, `frontend/src/stores/transferStore.ts`, `frontend/src/components/tabs/TransfersTab.tsx`
 
 ### GUI Enhancements (v2.6.0)
 
@@ -1054,6 +1055,17 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 
 **Source:** `internal/ratelimit/`, `internal/cli/files.go`
 
+### v4.7.1 (February 21, 2026)
+**Disk Space Error UX & Settings Reorganization:**
+- ✅ Disk space error banner in Transfers tab with available/needed space info
+- ✅ Short "No disk space" error labels with full tooltip on hover
+- ✅ Error classification (classifyError/extractDiskSpaceInfo) in transferStore
+- ✅ Moved Worker Configuration and Tar Options from Setup tab to PUR tab Pipeline Settings
+- ✅ Tar options added to SingleJob directory mode
+- ✅ Scan prefix and validation pattern persist to config.csv from PUR tab
+- ✅ Compression value normalized (legacy "gz" → "gzip")
+- ✅ Removed engine validation pattern fallback to config
+
 ### v4.7.0 (February 21, 2026)
 **PUR Performance & Reliability:**
 - ✅ Fixed relative path generation: all scan output now uses absolute paths via `pathutil.ResolveAbsolutePath()`, preventing CWD-dependent failures in GUI mode
@@ -1094,7 +1106,7 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 - ✅ Makefile `make build` fixed to output to versioned platform directory
 - ✅ Fixed stale 16MB → 32MB chunk size references; version consistency across all docs
 
-**Source:** `internal/fips/init.go`, `internal/config/csv_config.go`, `frontend/src/components/tabs/SetupTab.tsx`, `internal/services/daemon.go`
+**Source:** `internal/fips/init.go`, `internal/config/csv_config.go`, `frontend/src/components/tabs/SetupTab.tsx`, `frontend/src/components/tabs/PURTab.tsx`, `internal/services/daemon.go`
 
 ### v4.6.6 (February 17, 2026)
 **Shared Job Download Fix (Azure):**
@@ -1197,4 +1209,4 @@ For more details, see:
 ---
 
 *Last Updated: February 21, 2026*
-*Version: 4.7.0*
+*Version: 4.7.1*

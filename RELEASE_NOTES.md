@@ -1,5 +1,37 @@
 # Release Notes - Rescale Interlink
 
+## v4.7.1 - February 21, 2026
+
+### Disk Space Error UX
+
+- **Disk space error banner**: Downloads that fail due to insufficient disk space now trigger a prominent amber banner at the top of the Transfers tab showing the number of failed downloads, available space, and space needed. The banner persists after "Clear Completed" and requires explicit dismiss. New failures re-show the banner automatically.
+- **Short error labels**: Failed transfers with disk space errors show "No disk space" instead of a truncated long error string. Full error text is available via hover tooltip on all transfer rows.
+- **Error classification**: Added `classifyError()` and `extractDiskSpaceInfo()` utilities in `transferStore.ts` to detect disk space errors from backend error strings (matches `insufficient disk space`, `ENOSPC`, `disk quota exceeded`, etc.).
+
+### Settings Reorganization
+
+- **PUR-specific settings moved from Setup tab**: Worker Configuration (tar/upload/job workers), Tar Options (exclude/include patterns, compression, flatten), and Directory Scan Settings (scan prefix, validation pattern) have been removed from Setup tab's Advanced Settings.
+- **Pipeline Settings in PUR tab**: Workers and tar options now appear as "Pipeline Settings" in the PUR tab, visible in both the scan step and the jobs-validated step (ensuring CSV-loaded workflows also have access).
+- **Tar options in SingleJob directory mode**: When using directory input mode in SingleJob tab, tar options (exclude/include patterns, compression, flatten) are now visible inline below the directory selector.
+- **Scan option persistence**: Validation pattern and scan prefix are now persisted to config.csv when changed on the PUR tab, ensuring values survive app restarts.
+- **Compression normalization**: Legacy `gz` values in config.csv are normalized to `gzip` when loaded, ensuring consistent frontend display.
+- **Engine fallback removal**: `Scan()` and `ScanToSpecs()` in `engine.go` no longer fall back to `config.ValidationPattern` when the scan options don't specify one. The PUR tab is now the single source of truth for these values.
+
+### Files Changed
+| File | Changes |
+|------|---------|
+| `frontend/src/stores/transferStore.ts` | Error classification, `extractDiskSpaceInfo`, `errorType` on TransferTask |
+| `frontend/src/stores/index.ts` | Export new types and functions |
+| `frontend/src/components/tabs/TransfersTab.tsx` | DiskSpaceBanner, improved TransferRow error display, hover tooltips |
+| `frontend/src/components/tabs/SetupTab.tsx` | Removed Directory Scan Settings, Worker Configuration, Tar Options sections |
+| `frontend/src/components/tabs/PURTab.tsx` | PipelineSettings component, scan option persistence to config |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | Tar options section for directory mode |
+| `internal/core/engine.go` | Removed validation pattern fallback to config in Scan/ScanToSpecs |
+| `internal/config/csv_config.go` | Updated TarCompression comment |
+| `internal/wailsapp/config_bindings.go` | Normalize `gz` to `gzip` in GetConfig() |
+
+---
+
 ## v4.7.0 - February 21, 2026
 
 ### PUR Performance & Reliability
@@ -37,8 +69,8 @@ Major improvements to the PUR (Parallel Upload and Run) pipeline addressing dire
 | `internal/core/engine_test.go` | 3 new tests for absolute paths and SkipDir |
 | `internal/pur/pipeline/pipeline_test.go` | New file: 5 tests for pipeline behavior |
 
-#### Known Issues
-- **Download errors under low disk space**: A bug has been identified that causes download failures under certain circumstances. This is believed to be related to insufficient disk space on the target machine, but the root cause has not been conclusively determined. Investigation is ongoing.
+#### Known Issues (Fixed in v4.7.1)
+- **Download errors under low disk space**: Download failures due to insufficient disk space showed truncated error messages in the narrow status column, making the cause invisible. **Fixed in v4.7.1** with a prominent amber banner showing available/needed space, short "No disk space" labels, and hover tooltips for full error details.
 
 ---
 
@@ -180,7 +212,7 @@ Comprehensive gap analysis between old Python PUR (v0.7.6) and Interlink PUR, wi
 **Missing CLI Flags:** Exposed config-level features as CLI flags on `pur run` and `pur resume`:
 - `--include-pattern` / `--exclude-pattern` — Tar file filtering
 - `--flatten-tar` — Remove subdirectory structure in tarball
-- `--tar-compression` — "none" or "gz"
+- `--tar-compression` — "none" or "gzip" (accepts legacy "gz")
 - `--tar-workers` / `--upload-workers` / `--job-workers` — Worker pool sizes
 - `--rm-tar-on-success` — Delete local tar after successful upload
 

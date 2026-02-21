@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
 **Last Updated**: February 21, 2026
-**Version**: 4.7.0
+**Version**: 4.7.1
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -457,15 +457,38 @@ kill $GUI_PID   # Should terminate cleanly
    - Configure API settings
    - Test connection
    - Apply changes
+   - Verify Advanced Settings no longer shows Workers, Tar Options, or Directory Scan (v4.7.1)
 
-2. **Jobs Tab**
+2. **PUR Tab** (v4.7.1 Pipeline Settings)
+   - Pipeline Settings visible in scan step (workers + tar options)
+   - Pipeline Settings visible in jobs-validated step (CSV-loaded workflow)
+   - Change worker count → persists across app restart
+   - Change tar options → persists across app restart
+   - Scan prefix and validation pattern persist to config.csv on change
+   - Compression dropdown shows "gzip"/"none" consistently
+
+3. **SingleJob Tab** (v4.7.1 Tar Options)
+   - Directory mode shows tar options (exclude/include/compression/flatten)
+   - Local-files and remote-files modes do NOT show tar options
+   - Tar option changes persist to config.csv
+
+4. **Transfers Tab** (v4.7.1 Disk Space UX)
+   - Download to nearly-full disk → amber banner with available/needed values
+   - Individual rows show "No disk space" (not truncated raw error)
+   - Hover tooltip shows full error message on all transfer rows
+   - Click "Clear Completed" → banner persists (explicit dismiss only)
+   - Click banner X → banner dismissed
+   - New disk space error after dismiss → banner re-appears
+   - Non-disk-space errors show raw error (truncated with tooltip)
+
+5. **Jobs Tab**
    - Load jobs CSV
    - Run Plan validation
    - Submit jobs
    - Verify real-time table updates
    - Check job IDs appear
 
-3. **Activity Tab**
+6. **Activity Tab**
    - Verify logs appear
    - Test search/filter
    - Clear logs
@@ -564,6 +587,8 @@ jt.table.Refresh()  // ✓ Called WITHOUT lock
 - Tested on Windows AMD64: PASSED
 - 15% safety margin prevents failures
 - Error messages clear and actionable
+- v4.7.1: Amber error banner in Transfers tab for disk space failures with available/needed info
+- v4.7.1: Short "No disk space" labels with full hover tooltip
 
 ---
 
@@ -844,5 +869,5 @@ rm -rf /tmp/test
 ---
 
 **Last Updated**: February 21, 2026
-**Version**: 4.7.0
+**Version**: 4.7.1
 **Status**: All tests passing, code quality improvements (North Star alignment)

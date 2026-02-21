@@ -43,7 +43,7 @@ type Config struct {
 	ValidationPattern string // Pattern to validate runs (e.g., "*.avg.fnc"), opt-in feature (default: disabled)
 
 	// Tar compression
-	TarCompression string // "none" or "gz"
+	TarCompression string // "none" or "gzip" (v4.7.1: normalized from legacy "gz")
 
 	// Retry settings
 	MaxRetries int // Maximum upload retry attempts (default: 1)

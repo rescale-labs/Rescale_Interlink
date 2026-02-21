@@ -1,6 +1,6 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.7.0
+**Version**: 4.7.1
 **Last Updated**: February 21, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.7.0                 |
+|                 Rescale Interlink v4.7.1                 |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -917,10 +917,10 @@ if time.Since(eb.lastProgress[taskID]) < eb.progressInterval {
 **Frontend Components** (`frontend/src/components/tabs/`):
 
 1. **FileBrowserTab** - Two-pane local/remote file browser
-2. **TransfersTab** - Active upload/download progress tracking
-3. **SingleJobTab** - Job template builder and submission
-4. **PURTab** - Batch job pipeline
-5. **SetupTab** - Configuration and API settings
+2. **TransfersTab** - Active upload/download progress tracking, disk space error banner (v4.7.1)
+3. **SingleJobTab** - Job template builder and submission, tar options for directory mode (v4.7.1)
+4. **PURTab** - Batch job pipeline with Pipeline Settings (workers + tar options, v4.7.1)
+5. **SetupTab** - API settings, proxy configuration, logging, auto-download daemon
 6. **ActivityTab** - Logs and event monitoring
 
 ---
@@ -1039,6 +1039,33 @@ Return to User
 - Abstract platform differences (disk space, file paths)
 - Test on all target platforms
 - Provide consistent user experience
+
+---
+
+## Configuration & Settings Flow (v4.7.1)
+
+### Settings Persistence Architecture
+
+`config.csv` is the single source of truth for all persistent settings. The GUI reads from and writes to `config.csv` via the Go backend's `ConfigDTO`:
+
+```
+┌─────────────────────┐    updateConfig()     ┌──────────────────┐    SaveConfigCSV()    ┌────────────┐
+│  PUR Tab            │──────────────────────→│  config_bindings │───────────────────────→│ config.csv │
+│  (Pipeline Settings)│    saveConfig()       │  (Go backend)    │    LoadConfigCSV()    │            │
+│  SingleJob Tab      │←──────────────────────│                  │←──────────────────────│            │
+│  (Tar Options)      │    GetConfig()        │  GetConfig()     │                       │            │
+└─────────────────────┘                       │  normalizes gz→  │                       └────────────┘
+                                              │  gzip (v4.7.1)   │
+                                              └──────────────────┘
+```
+
+**Settings location by tab (v4.7.1):**
+- **Setup Tab**: API key, proxy configuration, detailed logging, auto-download daemon
+- **PUR Tab**: Pipeline Settings (tar/upload/job workers, tar options), scan prefix, validation pattern
+- **SingleJob Tab**: Tar options (directory mode only: exclude/include patterns, compression, flatten)
+
+**Scan options persistence (v4.7.1):**
+The PUR tab's scan prefix (`runSubpath`) and validation pattern (`validationPattern`) are persisted to `config.csv` on change. The engine's `Scan()` and `ScanToSpecs()` use only the value from scan options (no fallback to global config), making the PUR tab the single source of truth.
 
 ---
 

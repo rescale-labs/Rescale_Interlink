@@ -17,7 +17,7 @@ import {
   FolderPlusIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, JobSpec, DEFAULT_JOB_TEMPLATE } from '../../stores'
+import { useJobStore, useConfigStore, JobSpec, DEFAULT_JOB_TEMPLATE } from '../../stores'
 import { TemplateBuilder, RemoteFilePicker } from '../widgets'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../../wailsjs/go/models'
@@ -60,6 +60,9 @@ const STEPS = [
   { key: 'complete', label: 'Complete' },
 ]
 
+// v4.7.1: Compression options for tar
+const COMPRESSION_OPTIONS = ['gzip', 'none'] as const
+
 export function SingleJobTab() {
   const {
     loadMemory,
@@ -68,6 +71,9 @@ export function SingleJobTab() {
     loadJobFromSGE,
     saveJobToSGE,
   } = useJobStore()
+
+  // v4.7.1: Config store for tar options
+  const { config, updateConfig, saveConfig } = useConfigStore()
 
   // Local state for single job workflow
   const [state, setState] = useState<SingleJobState>('initial')
@@ -722,6 +728,69 @@ export function SingleJobTab() {
                 <p className="mt-1 text-xs text-gray-500">
                   This directory will be tar'd and uploaded as job input
                 </p>
+
+                {/* v4.7.1: Tar Options for directory mode */}
+                <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">
+                  <h5 className="text-xs font-medium text-gray-500 mb-2">Tar Options</h5>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Exclude Patterns</label>
+                        <input
+                          type="text"
+                          className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="*.tmp,*.log"
+                          value={config?.excludePatterns || ''}
+                          onChange={(e) => updateConfig({ excludePatterns: e.target.value })}
+                          onBlur={() => saveConfig()}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Include Patterns</label>
+                        <input
+                          type="text"
+                          className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          placeholder="*.dat,*.csv"
+                          value={config?.includePatterns || ''}
+                          onChange={(e) => updateConfig({ includePatterns: e.target.value })}
+                          onBlur={() => saveConfig()}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="flex-1">
+                        <label className="block text-xs text-gray-500 mb-1">Compression</label>
+                        <select
+                          className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          value={config?.tarCompression || 'gzip'}
+                          onChange={(e) => {
+                            updateConfig({ tarCompression: e.target.value })
+                            saveConfig()
+                          }}
+                        >
+                          {COMPRESSION_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt}>{opt}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <label className="flex items-center gap-2 mt-4 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={config?.flattenTar || false}
+                          onChange={(e) => {
+                            updateConfig({ flattenTar: e.target.checked })
+                            saveConfig()
+                          }}
+                          className="h-4 w-4 rounded border border-gray-300 text-blue-500 focus:ring-blue-500 focus:ring-2 bg-white cursor-pointer"
+                        />
+                        <span className="text-xs text-gray-600 dark:text-gray-300">Flatten</span>
+                      </label>
+                    </div>
+                    <p className="text-xs text-gray-400">
+                      Patterns support wildcards (*). Use comma-separated list.
+                    </p>
+                  </div>
+                </div>
               </div>
             )}
 
