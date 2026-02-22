@@ -554,7 +554,7 @@ export function SingleJobTab() {
                 className="flex items-center gap-2 px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
               >
                 <DocumentArrowUpIcon className="w-5 h-5" />
-                Load From...
+                Load Existing Job Settings
                 <ChevronDownIcon className="w-4 h-4" />
               </button>
               {showLoadMenu && (

@@ -1,5 +1,38 @@
 # Release Notes - Rescale Interlink
 
+## v4.7.2 - February 21, 2026
+
+### Consistent Load/Save UI
+
+- **PUR "Load Existing Base Job Settings" dropdown**: PUR tab now has a dropdown matching SingleJob's pattern with CSV, JSON, and SGE format options (previously was a single button that only opened a JSON file dialog).
+- **PUR "Save As..." dropdown**: Template can now be saved as CSV, JSON, or SGE from the scan configuration step, matching SingleJob's save functionality.
+- **SingleJob label update**: "Load From..." button renamed to "Load Existing Job Settings" for clarity.
+
+### Label Improvements
+
+- **PUR subtitle**: "Parallel Upload and Run" subtitle added to the progress bar header area, visible in all workflow states.
+- **PUR label clarity**: "Configure Job Settings" → "Configure Base Job Settings", "Create New Settings" → "Configure New Base Job Settings", "Scan Directories" → "Scan to Create Jobs" throughout the PUR workflow (button text, progress bar step label, and headings).
+- **SetupTab inner card**: Renamed inner "Advanced Settings" card heading to "Logging Settings" to eliminate redundant naming with the outer collapsible section.
+
+### Bug Fixes
+
+- **orgCode preservation**: Fixed `loadJobFromJSON` and `loadJobFromSGE` in jobStore.ts to include `orgCode` in the returned object. Previously `orgCode` was silently dropped when loading templates via JSON or SGE in both SingleJob and PUR workflows.
+
+### Files Changed
+| File | Changes |
+|------|---------|
+| `frontend/src/components/tabs/PURTab.tsx` | Load dropdown, save dropdown, subtitle, label renames, new handlers, WORKFLOW_STEPS update |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | "Load From..." → "Load Existing Job Settings" |
+| `frontend/src/components/tabs/SetupTab.tsx` | Inner "Advanced Settings" → "Logging Settings" |
+| `frontend/src/stores/jobStore.ts` | Added `orgCode` to `loadJobFromJSON` and `loadJobFromSGE` return objects |
+| `internal/version/version.go` | Version bump to v4.7.2 |
+| `main.go` | Version comment |
+| `wails.json` | productVersion |
+| `frontend/package.json` | version |
+| `frontend/package-lock.json` | version |
+
+---
+
 ## v4.7.1 - February 21, 2026
 
 ### Disk Space Error UX

@@ -1,8 +1,8 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.7.1.
+Complete command-line interface reference for `rescale-int` v4.7.2.
 
-**Version:** 4.7.1
+**Version:** 4.7.2
 **Build Date:** February 21, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
@@ -1632,12 +1632,12 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v4.7.1 (February 21, 2026)
+This guide is for `rescale-int` v4.7.2 (February 21, 2026)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v4.7.1 (2026-02-21) [FIPS 140-3]
+# Output: rescale-int version v4.7.2 (2026-02-21) [FIPS 140-3]
 ```
 
 ### v4.2.1 Enhanced Eligibility Configuration (January 9, 2026)

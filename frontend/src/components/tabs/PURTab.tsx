@@ -12,6 +12,7 @@ import {
   FolderOpenIcon,
   DocumentArrowDownIcon,
   CheckIcon,
+  ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import { useJobStore, useConfigStore, WorkflowState, JobRow, PipelineLogEntry, PipelineStageStats } from '../../stores'
@@ -24,7 +25,7 @@ import * as Runtime from '../../../wailsjs/runtime/runtime'
 const WORKFLOW_STEPS: { state: WorkflowState; label: string; shortLabel: string }[] = [
   { state: 'initial', label: 'Choose Source', shortLabel: 'Source' },
   { state: 'pathChosen', label: 'Configure', shortLabel: 'Config' },
-  { state: 'templateReady', label: 'Scan Directories', shortLabel: 'Scan' },
+  { state: 'templateReady', label: 'Scan to Create Jobs', shortLabel: 'Scan' },
   { state: 'directoriesScanned', label: 'Validate Jobs', shortLabel: 'Validate' },
   { state: 'jobsValidated', label: 'Ready to Run', shortLabel: 'Ready' },
   { state: 'executing', label: 'Running', shortLabel: 'Running' },
@@ -483,6 +484,9 @@ export function PURTab() {
     loadMemory,
     loadJobsFromCSV,
     saveJobsToCSV,
+    loadJobFromSGE,
+    saveJobToJSON,
+    saveJobToSGE,
     pipelineLogs,
     pipelineStageStats,
     startTime,
@@ -497,6 +501,9 @@ export function PURTab() {
   const [showTemplateBuilder, setShowTemplateBuilder] = useState(false)
   const [validationErrors, setValidationErrors] = useState<string[]>([])
   const [isValidating, setIsValidating] = useState(false)
+  const [showLoadMenu, setShowLoadMenu] = useState(false)
+  const [showSaveMenu, setShowSaveMenu] = useState(false)
+  const [loadSaveError, setLoadSaveError] = useState<string | null>(null)
 
   // Load workflow memory on mount
   useEffect(() => {
@@ -546,43 +553,123 @@ export function PURTab() {
     setWorkflowPath('createNew')
   }, [setWorkflowPath])
 
-  // Handle loading a template from JSON file
-  const handleLoadTemplate = useCallback(async () => {
-    try {
-      const path = await App.SelectFile('Select Template JSON File')
-      if (!path) return // User cancelled
+  // v4.7.2: Map a loaded job DTO to template format
+  const mapDTOToTemplate = useCallback((loaded: wailsapp.JobSpecDTO) => {
+    setTemplate({
+      directory: loaded.directory || '',
+      jobName: loaded.jobName || '',
+      analysisCode: loaded.analysisCode || '',
+      analysisVersion: loaded.analysisVersion || '',
+      command: loaded.command || '',
+      coreType: loaded.coreType || '',
+      coresPerSlot: loaded.coresPerSlot || 4,
+      walltimeHours: loaded.walltimeHours || 1,
+      slots: loaded.slots || 1,
+      licenseSettings: loaded.licenseSettings || '',
+      extraInputFileIds: loaded.extraInputFileIds || '',
+      noDecompress: loaded.noDecompress || false,
+      submitMode: loaded.submitMode || 'create_and_submit',
+      isLowPriority: loaded.isLowPriority || false,
+      onDemandLicenseSeller: loaded.onDemandLicenseSeller || '',
+      tags: loaded.tags || [],
+      projectId: loaded.projectId || '',
+      orgCode: loaded.orgCode || '',
+      automations: loaded.automations || [],
+    })
+  }, [setTemplate])
 
-      // Load the template from the JSON file
-      const jobs = await App.LoadJobsFromJSON(path)
+  // v4.7.2: Load template from CSV file
+  const handleLoadTemplateFromCSV = useCallback(async () => {
+    setShowLoadMenu(false)
+    try {
+      const path = await App.SelectFile('Select Jobs CSV File')
+      if (!path) return
+      setLoadSaveError(null)
+
+      const jobs = await App.LoadJobsFromCSV(path)
       if (jobs && jobs.length > 0) {
-        // Use the first job as the template
-        const loadedTemplate = jobs[0]
-        setTemplate({
-          directory: loadedTemplate.directory || '',
-          jobName: loadedTemplate.jobName || '',
-          analysisCode: loadedTemplate.analysisCode || '',
-          analysisVersion: loadedTemplate.analysisVersion || '',
-          command: loadedTemplate.command || '',
-          coreType: loadedTemplate.coreType || '',
-          coresPerSlot: loadedTemplate.coresPerSlot || 4,
-          walltimeHours: loadedTemplate.walltimeHours || 1,
-          slots: loadedTemplate.slots || 1,
-          licenseSettings: loadedTemplate.licenseSettings || '',
-          extraInputFileIds: loadedTemplate.extraInputFileIds || '',
-          noDecompress: loadedTemplate.noDecompress || false,
-          submitMode: loadedTemplate.submitMode || 'create_and_submit',
-          isLowPriority: loadedTemplate.isLowPriority || false,
-          onDemandLicenseSeller: loadedTemplate.onDemandLicenseSeller || '',
-          tags: loadedTemplate.tags || [],
-          projectId: loadedTemplate.projectId || '',
-          orgCode: loadedTemplate.orgCode || '',
-          automations: loadedTemplate.automations || [],
-        })
+        mapDTOToTemplate(jobs[0])
       }
     } catch (error) {
-      console.error('Failed to load template:', error)
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
     }
-  }, [setTemplate])
+  }, [mapDTOToTemplate])
+
+  // v4.7.2: Load template from JSON file
+  const handleLoadTemplateFromJSON = useCallback(async () => {
+    setShowLoadMenu(false)
+    try {
+      const path = await App.SelectFile('Select Template JSON File')
+      if (!path) return
+      setLoadSaveError(null)
+
+      const jobs = await App.LoadJobsFromJSON(path)
+      if (jobs && jobs.length > 0) {
+        mapDTOToTemplate(jobs[0])
+      }
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [mapDTOToTemplate])
+
+  // v4.7.2: Load template from SGE script
+  const handleLoadTemplateFromSGE = useCallback(async () => {
+    setShowLoadMenu(false)
+    try {
+      const path = await App.SelectFile('Select SGE Script')
+      if (!path) return
+      setLoadSaveError(null)
+
+      const loaded = await loadJobFromSGE(path)
+      if (loaded) {
+        setTemplate(loaded)
+      }
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [loadJobFromSGE, setTemplate])
+
+  // v4.7.2: Save template to CSV
+  const handleSaveTemplateToCSV = useCallback(async () => {
+    setShowSaveMenu(false)
+    try {
+      const path = await App.SaveFile('Save Template CSV')
+      if (!path) return
+      setLoadSaveError(null)
+
+      await App.SaveJobsToCSV(path, [template as unknown as wailsapp.JobSpecDTO])
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [template])
+
+  // v4.7.2: Save template to JSON
+  const handleSaveTemplateToJSON = useCallback(async () => {
+    setShowSaveMenu(false)
+    try {
+      const path = await App.SaveFile('Save Template JSON')
+      if (!path) return
+      setLoadSaveError(null)
+
+      await saveJobToJSON(path, template)
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [template, saveJobToJSON])
+
+  // v4.7.2: Save template to SGE script
+  const handleSaveTemplateToSGE = useCallback(async () => {
+    setShowSaveMenu(false)
+    try {
+      const path = await App.SaveFile('Save Template SGE Script')
+      if (!path) return
+      setLoadSaveError(null)
+
+      await saveJobToSGE(path, template)
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [template, saveJobToSGE])
 
   // Handle template save from builder
   const handleTemplateSave = useCallback(
@@ -755,9 +842,9 @@ export function PURTab() {
       // Create new path - template selection
       return (
         <div className="flex flex-col items-center justify-center h-full">
-          <h3 className="text-lg font-semibold mb-4">Configure Job Settings</h3>
+          <h3 className="text-lg font-semibold mb-4">Configure Base Job Settings</h3>
           <p className="text-gray-600 mb-6">
-            Create or load job settings to apply to all jobs
+            Create or load base job settings to apply to all jobs
           </p>
           <div className="flex gap-4">
             <button
@@ -765,16 +852,47 @@ export function PURTab() {
               className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
             >
               <FolderPlusIcon className="w-5 h-5" />
-              Create New Settings
+              Configure New Base Job Settings
             </button>
-            <button
-              onClick={handleLoadTemplate}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-            >
-              <DocumentArrowUpIcon className="w-5 h-5" />
-              Load Settings
-            </button>
+            {/* v4.7.2: Load dropdown with CSV, JSON, SGE */}
+            <div className="relative">
+              <button
+                onClick={() => setShowLoadMenu(!showLoadMenu)}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <DocumentArrowUpIcon className="w-5 h-5" />
+                Load Existing Base Job Settings
+                <ChevronDownIcon className="w-4 h-4" />
+              </button>
+              {showLoadMenu && (
+                <div className="absolute top-full left-0 mt-1 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10">
+                  <button
+                    onClick={handleLoadTemplateFromCSV}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded-t-lg"
+                  >
+                    CSV File
+                  </button>
+                  <button
+                    onClick={handleLoadTemplateFromJSON}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    JSON File
+                  </button>
+                  <button
+                    onClick={handleLoadTemplateFromSGE}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded-b-lg"
+                  >
+                    SGE Script
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
+          {loadSaveError && (
+            <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm max-w-md">
+              {loadSaveError}
+            </div>
+          )}
         </div>
       )
     }
@@ -783,7 +901,47 @@ export function PURTab() {
     if (workflowState === 'templateReady') {
       return (
         <div className="p-6">
-          <h3 className="text-lg font-semibold mb-4">Scan for Jobs</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold">Scan to Create Jobs</h3>
+            {/* v4.7.2: Save As dropdown for template */}
+            <div className="relative">
+              <button
+                onClick={() => setShowSaveMenu(!showSaveMenu)}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <DocumentArrowDownIcon className="w-4 h-4" />
+                Save As...
+                <ChevronDownIcon className="w-3 h-3" />
+              </button>
+              {showSaveMenu && (
+                <div className="absolute top-full right-0 mt-1 w-40 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10">
+                  <button
+                    onClick={handleSaveTemplateToCSV}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 rounded-t-lg"
+                  >
+                    CSV File
+                  </button>
+                  <button
+                    onClick={handleSaveTemplateToJSON}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    JSON File
+                  </button>
+                  <button
+                    onClick={handleSaveTemplateToSGE}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 rounded-b-lg"
+                  >
+                    SGE Script
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+          {loadSaveError && (
+            <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
+              {loadSaveError}
+            </div>
+          )}
 
           {/* v4.0.8: Scan Mode Toggle */}
           <div className="mb-4">
@@ -1113,7 +1271,7 @@ export function PURTab() {
             ) : (
               <>
                 <PlayIcon className="w-5 h-5" />
-                Scan Directories
+                Scan to Create Jobs
               </>
             )}
           </button>
@@ -1343,6 +1501,11 @@ export function PURTab() {
     <div className="h-full flex flex-col">
       {/* Progress bar */}
       <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+            Parallel Upload and Run
+          </p>
+        </div>
         <WorkflowProgressBar currentState={workflowState} />
 
         {/* Back button */}

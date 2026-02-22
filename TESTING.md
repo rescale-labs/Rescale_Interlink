@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
 **Last Updated**: February 21, 2026
-**Version**: 4.7.1
+**Version**: 4.7.2
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -457,17 +457,34 @@ kill $GUI_PID   # Should terminate cleanly
    - Configure API settings
    - Test connection
    - Apply changes
+   - Verify Advanced Settings collapsible contains "Logging Settings" card (v4.7.2, was "Advanced Settings")
    - Verify Advanced Settings no longer shows Workers, Tar Options, or Directory Scan (v4.7.1)
 
-2. **PUR Tab** (v4.7.1 Pipeline Settings)
+2. **PUR Tab** (v4.7.2 Load/Save + v4.7.1 Pipeline Settings)
+   - "Parallel Upload and Run" subtitle visible in progress bar header (v4.7.2)
+   - "Configure Base Job Settings" heading in createNew state (v4.7.2)
+   - "Load Existing Base Job Settings" dropdown with CSV, JSON, SGE options (v4.7.2)
+   - Load CSV → first job becomes template, transitions to templateReady
+   - Load JSON → first job becomes template, transitions to templateReady
+   - Load SGE → loads as template, transitions to templateReady
+   - Cancel file dialog → no error
+   - Load invalid file → error banner appears
+   - "Save As..." dropdown in templateReady state with CSV, JSON, SGE options (v4.7.2)
+   - Save template as CSV/JSON/SGE → valid file written
+   - Cancel save dialog → no error
+   - "Scan to Create Jobs" heading and button text (v4.7.2, was "Scan for Jobs" / "Scan Directories")
+   - Progress bar step label shows "Scan to Create Jobs" (v4.7.2, was "Scan Directories")
    - Pipeline Settings visible in scan step (workers + tar options)
    - Pipeline Settings visible in jobs-validated step (CSV-loaded workflow)
    - Change worker count → persists across app restart
    - Change tar options → persists across app restart
    - Scan prefix and validation pattern persist to config.csv on change
    - Compression dropdown shows "gzip"/"none" consistently
+   - "Export CSV" button in jobsValidated state still present and functional
 
-3. **SingleJob Tab** (v4.7.1 Tar Options)
+3. **SingleJob Tab** (v4.7.2 Label + v4.7.1 Tar Options)
+   - "Load Existing Job Settings" dropdown label (v4.7.2, was "Load From...")
+   - Dropdown still works with CSV, JSON, SGE options
    - Directory mode shows tar options (exclude/include/compression/flatten)
    - Local-files and remote-files modes do NOT show tar options
    - Tar option changes persist to config.csv
@@ -869,5 +886,5 @@ rm -rf /tmp/test
 ---
 
 **Last Updated**: February 21, 2026
-**Version**: 4.7.1
+**Version**: 4.7.2
 **Status**: All tests passing, code quality improvements (North Star alignment)

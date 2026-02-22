@@ -899,7 +899,7 @@ export function SetupTab() {
 
         {/* Advanced Settings Section */}
         <div className="card">
-          <h3 className="text-base font-semibold text-gray-900 mb-4">Advanced Settings</h3>
+          <h3 className="text-base font-semibold text-gray-900 mb-4">Logging Settings</h3>
           <div className="space-y-4">
             <div className="flex items-center">
               <input

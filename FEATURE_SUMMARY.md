@@ -1,6 +1,6 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.7.1
+**Version:** 4.7.2
 **Build Date:** February 21, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
@@ -1055,6 +1055,16 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 
 **Source:** `internal/ratelimit/`, `internal/cli/files.go`
 
+### v4.7.2 (February 21, 2026)
+**Consistent Load/Save UI + Label Improvements:**
+- ✅ PUR "Load Existing Base Job Settings" dropdown with CSV, JSON, SGE options (was single "Load Settings" button)
+- ✅ PUR "Save As..." dropdown with CSV, JSON, SGE options for template saving
+- ✅ SingleJob "Load From..." renamed to "Load Existing Job Settings"
+- ✅ PUR subtitle "Parallel Upload and Run" added to progress bar header
+- ✅ PUR label improvements: "Configure Base Job Settings", "Scan to Create Jobs"
+- ✅ SetupTab inner "Advanced Settings" renamed to "Logging Settings"
+- ✅ Fixed orgCode dropped in `loadJobFromJSON` and `loadJobFromSGE` (jobStore.ts)
+
 ### v4.7.1 (February 21, 2026)
 **Disk Space Error UX & Settings Reorganization:**
 - ✅ Disk space error banner in Transfers tab with available/needed space info
@@ -1209,4 +1219,4 @@ For more details, see:
 ---
 
 *Last Updated: February 21, 2026*
-*Version: 4.7.1*
+*Version: 4.7.2*

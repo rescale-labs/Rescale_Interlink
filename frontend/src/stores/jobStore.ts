@@ -955,6 +955,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
         onDemandLicenseSeller: job.onDemandLicenseSeller,
         tags: job.tags || [],
         projectId: job.projectId,
+        orgCode: job.orgCode || '',
         automations: job.automations || [],
       } as JobSpec
     } catch (error) {
@@ -988,6 +989,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
         onDemandLicenseSeller: job.onDemandLicenseSeller,
         tags: job.tags || [],
         projectId: job.projectId,
+        orgCode: job.orgCode || '',
         automations: job.automations || [],
       } as JobSpec
     } catch (error) {
