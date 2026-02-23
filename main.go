@@ -1,6 +1,7 @@
 // Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
 // FIPS 140-3 Compliant Build Required
 //
+// v4.7.3: Run session persistence and monitoring — survive tab nav and app restart.
 // v4.7.2: Consistent Load/Save UI across SingleJob and PUR tabs, label improvements, orgCode bugfix.
 // v4.7.1: Disk space error UX (banner + short labels) and settings reorganization (workers/tar from Setup to PUR/SingleJob).
 // v4.6.8: Fix automation JSON format, single job all input modes, GTK warnings, terminology.

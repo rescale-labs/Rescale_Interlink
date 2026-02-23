@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import {
   FolderIcon,
   DocumentIcon,
@@ -17,19 +17,13 @@ import {
   FolderPlusIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, useConfigStore, JobSpec, DEFAULT_JOB_TEMPLATE } from '../../stores'
+import { useJobStore, useConfigStore } from '../../stores'
+import type { JobSpec } from '../../stores'
+import { useSingleJobStore } from '../../stores/singleJobStore'
+import { useRunStore } from '../../stores/runStore'
 import { TemplateBuilder, RemoteFilePicker } from '../widgets'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../../wailsjs/go/models'
-
-// v4.0.0 G1: File info for displaying sizes
-interface FileInfo {
-  path: string
-  name: string
-  isDir: boolean
-  size: number
-  fileCount: number
-}
 
 // Helper to format file sizes nicely
 function formatFileSize(bytes: number): string {
@@ -39,18 +33,6 @@ function formatFileSize(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
-
-// Single job workflow states
-type SingleJobState =
-  | 'initial'
-  | 'jobConfigured'
-  | 'inputsReady'
-  | 'executing'
-  | 'completed'
-  | 'failed'
-
-// Input mode for single job
-type InputMode = 'directory' | 'localFiles' | 'remoteFiles'
 
 // Progress steps
 const STEPS = [
@@ -75,41 +57,51 @@ export function SingleJobTab() {
   // v4.7.1: Config store for tar options
   const { config, updateConfig, saveConfig } = useConfigStore()
 
-  // Local state for single job workflow
-  const [state, setState] = useState<SingleJobState>('initial')
-  const [job, setJob] = useState<JobSpec>({ ...DEFAULT_JOB_TEMPLATE })
-  const [inputMode, setInputMode] = useState<InputMode>('directory')
-  const [directory, setDirectory] = useState('')
-  const [localFiles, setLocalFiles] = useState<string[]>([])
-  const [remoteFileIds, setRemoteFileIds] = useState<string[]>([])
-  const [showTemplateBuilder, setShowTemplateBuilder] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [submittedJobId, setSubmittedJobId] = useState<string | null>(null)
-  const [showLoadMenu, setShowLoadMenu] = useState(false)
-  const [showSaveMenu, setShowSaveMenu] = useState(false)
-  const [showRemoteFilePicker, setShowRemoteFilePicker] = useState(false)
-  // v4.0.0 G1: File info cache for displaying sizes
-  const [fileInfoMap, setFileInfoMap] = useState<Record<string, FileInfo>>({})
+  // v4.7.3: Store-backed state (persists across tab navigation)
+  const sjStore = useSingleJobStore()
+  const {
+    state,
+    job,
+    inputMode,
+    directory,
+    localFiles,
+    remoteFileIds,
+    error,
+    fileInfoMap,
+    showTemplateBuilder,
+    showLoadMenu,
+    showSaveMenu,
+    showRemoteFilePicker,
+  } = sjStore
 
-  // v4.0.7 C1: Refs for polling state to avoid stale closure bugs
-  const isPollingRef = useRef(false)
-  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // v4.7.3: Run store for active run awareness and queue mechanism
+  const activeRun = useRunStore((s) => s.activeRun)
+  const queueStatus = useRunStore((s) => s.queueStatus)
+  const cancelRun = useRunStore((s) => s.cancelRun)
+  const clearActiveRun = useRunStore((s) => s.clearActiveRun)
+
+  // Derive whether a run is currently active (for queue behavior)
+  const isRunActive = activeRun?.status === 'active'
 
   // Load memory on mount
   useEffect(() => {
     loadMemory()
   }, [loadMemory])
 
-  // v4.0.7 C1: Cleanup polling on unmount
+  // v4.7.3 Fix: Sync singleJobStore.state when single-job run transitions to terminal state.
+  // sjStore.state is set to 'executing' (singleJobStore.ts submitJob) but never transitions
+  // to 'completed' on normal run completion — only on cancel. This bridges the gap.
   useEffect(() => {
-    return () => {
-      isPollingRef.current = false
-      if (pollTimeoutRef.current) {
-        clearTimeout(pollTimeoutRef.current)
-        pollTimeoutRef.current = null
+    if (activeRun && activeRun.runType === 'single' &&
+        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') &&
+        state === 'executing') {
+      if (activeRun.status === 'completed') {
+        sjStore.setState('completed')
+      } else {
+        sjStore.setState('failed')
       }
     }
-  }, [])
+  }, [activeRun?.status, state, sjStore])
 
   // Get current step index
   const getCurrentStep = () => {
@@ -132,14 +124,14 @@ export function SingleJobTab() {
 
   // Handle template save
   const handleTemplateSave = useCallback((template: JobSpec) => {
-    setJob(template)
-    setState('jobConfigured')
-    setShowTemplateBuilder(false)
-  }, [])
+    sjStore.setJob(template)
+    sjStore.setState('jobConfigured')
+    sjStore.setShowTemplateBuilder(false)
+  }, [sjStore])
 
   // Load from CSV
   const handleLoadFromCSV = useCallback(async () => {
-    setShowLoadMenu(false)
+    sjStore.setShowLoadMenu(false)
     try {
       const path = await App.SelectFile('Select Jobs CSV File')
       if (!path) return
@@ -148,7 +140,7 @@ export function SingleJobTab() {
       if (jobs && jobs.length > 0) {
         // Take the first job as the template
         const loadedJob = jobs[0]
-        setJob({
+        sjStore.setJob({
           directory: loadedJob.directory,
           jobName: loadedJob.jobName,
           analysisCode: loadedJob.analysisCode,
@@ -169,76 +161,76 @@ export function SingleJobTab() {
           orgCode: loadedJob.orgCode || '',
           automations: loadedJob.automations || [],
         })
-        setState('jobConfigured')
+        sjStore.setState('jobConfigured')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      sjStore.setError(err instanceof Error ? err.message : String(err))
     }
-  }, [])
+  }, [sjStore])
 
   // Load from JSON
   const handleLoadFromJSON = useCallback(async () => {
-    setShowLoadMenu(false)
+    sjStore.setShowLoadMenu(false)
     try {
       const path = await App.SelectFile('Select Job JSON File')
       if (!path) return
 
       const loadedJob = await loadJobFromJSON(path)
       if (loadedJob) {
-        setJob(loadedJob)
-        setState('jobConfigured')
+        sjStore.setJob(loadedJob)
+        sjStore.setState('jobConfigured')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      sjStore.setError(err instanceof Error ? err.message : String(err))
     }
-  }, [loadJobFromJSON])
+  }, [sjStore, loadJobFromJSON])
 
   // Load from SGE script
   const handleLoadFromSGE = useCallback(async () => {
-    setShowLoadMenu(false)
+    sjStore.setShowLoadMenu(false)
     try {
       const path = await App.SelectFile('Select SGE Script')
       if (!path) return
 
       const loadedJob = await loadJobFromSGE(path)
       if (loadedJob) {
-        setJob(loadedJob)
-        setState('jobConfigured')
+        sjStore.setJob(loadedJob)
+        sjStore.setState('jobConfigured')
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      sjStore.setError(err instanceof Error ? err.message : String(err))
     }
-  }, [loadJobFromSGE])
+  }, [sjStore, loadJobFromSGE])
 
   // Save to JSON
   const handleSaveToJSON = useCallback(async () => {
-    setShowSaveMenu(false)
+    sjStore.setShowSaveMenu(false)
     try {
       const path = await App.SaveFile('Save Job JSON')
       if (!path) return
 
       await saveJobToJSON(path, job)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      sjStore.setError(err instanceof Error ? err.message : String(err))
     }
-  }, [job, saveJobToJSON])
+  }, [sjStore, job, saveJobToJSON])
 
   // Save to SGE script
   const handleSaveToSGE = useCallback(async () => {
-    setShowSaveMenu(false)
+    sjStore.setShowSaveMenu(false)
     try {
       const path = await App.SaveFile('Save SGE Script')
       if (!path) return
 
       await saveJobToSGE(path, job)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      sjStore.setError(err instanceof Error ? err.message : String(err))
     }
-  }, [job, saveJobToSGE])
+  }, [sjStore, job, saveJobToSGE])
 
   // Save to CSV
   const handleSaveToCSV = useCallback(async () => {
-    setShowSaveMenu(false)
+    sjStore.setShowSaveMenu(false)
     try {
       const path = await App.SaveFile('Save Job CSV')
       if (!path) return
@@ -246,31 +238,31 @@ export function SingleJobTab() {
       // Convert job to the DTO format and save as an array
       await App.SaveJobsToCSV(path, [job as unknown as wailsapp.JobSpecDTO])
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      sjStore.setError(err instanceof Error ? err.message : String(err))
     }
-  }, [job])
+  }, [sjStore, job])
 
   // Handle directory selection
   const handleSelectDirectory = useCallback(async () => {
     try {
       const dir = await App.SelectDirectory('Select Job Directory')
       if (dir) {
-        setDirectory(dir)
+        sjStore.setDirectory(dir)
         if (inputMode === 'directory' && dir) {
-          setState('inputsReady')
+          sjStore.setState('inputsReady')
         }
       }
     } catch (err) {
       console.error('Failed to select directory:', err)
     }
-  }, [inputMode])
+  }, [sjStore, inputMode])
 
   // v4.0.0 G1: Fetch file info for given paths
   const fetchFileInfo = useCallback(async (paths: string[]) => {
     if (paths.length === 0) return
     try {
       const infos = await App.GetLocalFilesInfo(paths)
-      setFileInfoMap((prev) => {
+      sjStore.setFileInfoMap((prev) => {
         const updated = { ...prev }
         for (const info of infos) {
           updated[info.path] = {
@@ -286,7 +278,7 @@ export function SingleJobTab() {
     } catch (err) {
       console.error('Failed to fetch file info:', err)
     }
-  }, [])
+  }, [sjStore])
 
   // Handle file selection - v4.0.0: Use multi-file selection + fetch info
   const handleSelectFiles = useCallback(async () => {
@@ -297,7 +289,7 @@ export function SingleJobTab() {
         const existing = new Set(localFiles)
         const newFiles = files.filter((f: string) => !existing.has(f))
         if (newFiles.length > 0) {
-          setLocalFiles((prev) => [...prev, ...newFiles])
+          sjStore.addLocalFiles(newFiles)
           // Fetch file info for new files
           fetchFileInfo(newFiles)
         }
@@ -305,45 +297,30 @@ export function SingleJobTab() {
     } catch (err) {
       console.error('Failed to select files:', err)
     }
-  }, [localFiles, fetchFileInfo])
+  }, [sjStore, localFiles, fetchFileInfo])
 
   // v4.0.0 G1: Handle folder selection - adds folder as a single item
   const handleSelectFolder = useCallback(async () => {
     try {
       const dir = await App.SelectDirectory('Select Folder to Add')
       if (dir && !localFiles.includes(dir)) {
-        setLocalFiles((prev) => [...prev, dir])
+        sjStore.addLocalFiles([dir])
         fetchFileInfo([dir])
       }
     } catch (err) {
       console.error('Failed to select folder:', err)
     }
-  }, [localFiles, fetchFileInfo])
+  }, [sjStore, localFiles, fetchFileInfo])
 
   // Remove a single file from the list
   const handleRemoveFile = useCallback((index: number) => {
-    // v4.0.7 L1: Get path before removal to clean up cache
-    setLocalFiles((prev) => {
-      const pathToRemove = prev[index]
-      // Clean up file info cache entry
-      if (pathToRemove) {
-        setFileInfoMap((infoMap) => {
-          const { [pathToRemove]: _, ...rest } = infoMap
-          return rest
-        })
-      }
-      return prev.filter((_, i) => i !== index)
-    })
-  }, [])
+    sjStore.removeLocalFile(index)
+  }, [sjStore])
 
   // Handle input mode change
-  const handleInputModeChange = useCallback((mode: InputMode) => {
-    setInputMode(mode)
-    setDirectory('')
-    setLocalFiles([])
-    setRemoteFileIds([])
-    setFileInfoMap({}) // v4.0.0 G1: Clear file info cache
-  }, [])
+  const handleInputModeChange = useCallback((mode: 'directory' | 'localFiles' | 'remoteFiles') => {
+    sjStore.setInputMode(mode)
+  }, [sjStore])
 
   // v4.0.0 G1: Calculate total size from file info
   const totalSize = useMemo(() => {
@@ -370,122 +347,60 @@ export function SingleJobTab() {
 
   // Handle remote file selection from picker
   const handleRemoteFilesSelected = useCallback((fileIds: string[]) => {
-    setRemoteFileIds(fileIds)
+    sjStore.setRemoteFileIds(fileIds)
     // Automatically transition to inputsReady if we have files
     if (fileIds.length > 0) {
-      setState('inputsReady')
+      sjStore.setState('inputsReady')
     }
-  }, [])
+  }, [sjStore])
 
-  // Check if inputs are ready
-  const isInputsValid = useCallback(() => {
-    switch (inputMode) {
-      case 'directory':
-        return !!directory
-      case 'localFiles':
-        return localFiles.length > 0
-      case 'remoteFiles':
-        return remoteFileIds.length > 0
-      default:
-        return false
-    }
-  }, [inputMode, directory, localFiles, remoteFileIds])
-
-  // Handle job submission
+  // v4.7.3: Handle job submission — delegates to store's submitJob() or queueJob()
   const handleSubmit = useCallback(async () => {
-    if (!isInputsValid()) return
+    if (!sjStore.isInputsValid()) return
 
-    setError(null)
-    setState('executing')
-
-    try {
-      // Create input object matching SingleJobInputDTO structure
-      const input = {
-        job: job as unknown as wailsapp.JobSpecDTO,
-        inputMode,
-        directory,
-        localFiles,
-        remoteFileIds,
-      } as wailsapp.SingleJobInputDTO
-      const runId = await App.StartSingleJob(input)
-
-      if (runId) {
-        // v4.0.7 C1: Start polling with proper ref-based tracking to avoid stale closure
-        isPollingRef.current = true
-
-        const pollStatus = async () => {
-          // Check ref instead of state to avoid stale closure
-          if (!isPollingRef.current) return
-
-          try {
-            const status = await App.GetRunStatus()
-            if (status.state === 'completed') {
-              isPollingRef.current = false
-              // v4.0.7 H2: Get job ID BEFORE state transition to ensure it displays
-              const rows = await App.GetJobRows()
-              if (rows && rows.length > 0) {
-                setSubmittedJobId(rows[0].jobId)
-              }
-              setState('completed')
-            } else if (status.state === 'failed') {
-              isPollingRef.current = false
-              // v4.6.8: Display actual API error from backend instead of generic message
-              setError(status.error || 'Job submission failed')
-              setState('failed')
-            } else if (isPollingRef.current) {
-              // Continue polling using ref check, not state
-              pollTimeoutRef.current = setTimeout(pollStatus, 1000)
-            }
-          } catch (pollErr) {
-            // v4.0.7: Handle polling errors gracefully
-            isPollingRef.current = false
-            setError(pollErr instanceof Error ? pollErr.message : String(pollErr))
-            setState('failed')
-          }
-        }
-        pollStatus()
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-      setState('failed')
+    if (isRunActive) {
+      // Queue instead of submit when a run is already active
+      sjStore.queueJob()
+      return
     }
-  }, [job, inputMode, directory, localFiles, remoteFileIds, isInputsValid])
 
-  // Handle cancel
+    await sjStore.submitJob()
+  }, [sjStore, isRunActive])
+
+  // v4.7.3: Handle cancel — delegates to runStore.cancelRun()
+  // Guard: only cancel if the active run is actually a single-job run that's still active.
+  // After cancel, only force failed state if the run was actually cancelled (not if it already completed).
   const handleCancel = useCallback(async () => {
-    // v4.0.7 C1: Stop polling immediately on cancel
-    isPollingRef.current = false
-    if (pollTimeoutRef.current) {
-      clearTimeout(pollTimeoutRef.current)
-      pollTimeoutRef.current = null
-    }
+    const currentRun = useRunStore.getState().activeRun
+    if (!currentRun || currentRun.runType !== 'single' || currentRun.status !== 'active') return
+
     try {
-      await App.CancelRun()
-      setState('failed')
-      setError('Job cancelled by user')
+      await cancelRun()
+      const updatedRun = useRunStore.getState().activeRun
+      if (!updatedRun || updatedRun.status === 'cancelled') {
+        sjStore.setState('failed')
+        sjStore.setError('Job cancelled by user')
+      }
+      // If run already completed/failed, the useEffect sync (Fix 5a) handles the state transition
     } catch (err) {
       console.error('Failed to cancel job:', err)
     }
-  }, [])
+  }, [sjStore, cancelRun])
 
-  // Handle start over
-  const handleStartOver = useCallback(() => {
-    // v4.0.7 C1: Stop any active polling
-    isPollingRef.current = false
-    if (pollTimeoutRef.current) {
-      clearTimeout(pollTimeoutRef.current)
-      pollTimeoutRef.current = null
+  // v4.7.3: Handle start over — clears activeRun (if it's a terminal single-job run) + resets store.
+  // Guard: only clear activeRun if it's a completed/failed/cancelled single-job run — never kill an active PUR run.
+  const handleStartOver = useCallback(async () => {
+    if (activeRun && activeRun.runType === 'single' &&
+        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled')) {
+      await clearActiveRun()
     }
-    setState('initial')
-    setJob({ ...DEFAULT_JOB_TEMPLATE })
-    setInputMode('directory')
-    setDirectory('')
-    setLocalFiles([])
-    setRemoteFileIds([])
-    setFileInfoMap({}) // v4.0.0 G1: Clear file info cache
-    setError(null)
-    setSubmittedJobId(null)
-  }, [])
+    sjStore.reset()
+  }, [sjStore, activeRun, clearActiveRun])
+
+  // v4.7.3: Derive the submitted job ID from runStore's activeRun
+  const submittedJobId = activeRun?.runType === 'single' && activeRun.jobRows[0]?.jobId
+    ? activeRun.jobRows[0].jobId
+    : null
 
   // Render step indicator
   const renderStepIndicator = () => {
@@ -540,7 +455,7 @@ export function SingleJobTab() {
           </p>
           <div className="flex gap-4 mb-6">
             <button
-              onClick={() => setShowTemplateBuilder(true)}
+              onClick={() => sjStore.setShowTemplateBuilder(true)}
               className="flex items-center gap-2 px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
             >
               <PlayIcon className="w-5 h-5" />
@@ -550,7 +465,7 @@ export function SingleJobTab() {
             {/* Load From dropdown */}
             <div className="relative">
               <button
-                onClick={() => setShowLoadMenu(!showLoadMenu)}
+                onClick={() => sjStore.setShowLoadMenu(!showLoadMenu)}
                 className="flex items-center gap-2 px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
               >
                 <DocumentArrowUpIcon className="w-5 h-5" />
@@ -616,7 +531,7 @@ export function SingleJobTab() {
                   </div>
                 </div>
                 <button
-                  onClick={() => setShowTemplateBuilder(true)}
+                  onClick={() => sjStore.setShowTemplateBuilder(true)}
                   className="mt-3 text-sm text-blue-500 hover:text-blue-600"
                 >
                   Edit Configuration
@@ -626,7 +541,7 @@ export function SingleJobTab() {
               {/* Save As dropdown */}
               <div className="relative">
                 <button
-                  onClick={() => setShowSaveMenu(!showSaveMenu)}
+                  onClick={() => sjStore.setShowSaveMenu(!showSaveMenu)}
                   className="flex items-center gap-2 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
                 >
                   <DocumentArrowDownIcon className="w-4 h-4" />
@@ -714,7 +629,7 @@ export function SingleJobTab() {
                   <input
                     type="text"
                     value={directory}
-                    onChange={(e) => setDirectory(e.target.value)}
+                    onChange={(e) => sjStore.setDirectory(e.target.value)}
                     placeholder="/path/to/job/directory"
                     className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
@@ -824,10 +739,7 @@ export function SingleJobTab() {
                         {folderCount > 0 && `${folderCount} folder${folderCount !== 1 ? 's' : ''}`}
                       </span>
                       <button
-                        onClick={() => {
-                          setLocalFiles([])
-                          setFileInfoMap({})
-                        }}
+                        onClick={() => sjStore.clearLocalFiles()}
                         className="text-xs text-red-500 hover:text-red-600"
                       >
                         Clear All
@@ -896,7 +808,7 @@ export function SingleJobTab() {
               <div>
                 <label className="block text-sm font-medium mb-2">Remote Files</label>
                 <button
-                  onClick={() => setShowRemoteFilePicker(true)}
+                  onClick={() => sjStore.setShowRemoteFilePicker(true)}
                   className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
                 >
                   <CloudIcon className="w-5 h-5" />
@@ -909,7 +821,7 @@ export function SingleJobTab() {
                         {remoteFileIds.length} file{remoteFileIds.length !== 1 ? 's' : ''} selected
                       </span>
                       <button
-                        onClick={() => setRemoteFileIds([])}
+                        onClick={() => sjStore.setRemoteFileIds([])}
                         className="text-xs text-red-500 hover:text-red-600"
                       >
                         Clear
@@ -932,14 +844,14 @@ export function SingleJobTab() {
           {/* Continue button */}
           <button
             onClick={() => {
-              if (isInputsValid()) {
-                setState('inputsReady')
+              if (sjStore.isInputsValid()) {
+                sjStore.setState('inputsReady')
               }
             }}
-            disabled={!isInputsValid()}
+            disabled={!sjStore.isInputsValid()}
             className={clsx(
               'flex items-center gap-2 px-4 py-2 rounded',
-              isInputsValid()
+              sjStore.isInputsValid()
                 ? 'bg-blue-500 text-white hover:bg-blue-600'
                 : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
             )}
@@ -1005,42 +917,95 @@ export function SingleJobTab() {
             </div>
           </div>
 
+          {/* v4.7.3: Queue status inline banner */}
+          {queueStatus && (
+            <div className={clsx(
+              'mb-4 p-3 rounded text-sm',
+              queueStatus === 'queued' && 'bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 text-yellow-700 dark:text-yellow-400',
+              queueStatus === 'starting' && 'bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400',
+              queueStatus === 'started' && 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-400',
+              queueStatus.startsWith('failed') && 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400',
+            )}>
+              {queueStatus === 'queued' && 'Job queued. It will start automatically when the current run completes.'}
+              {queueStatus === 'starting' && 'Starting queued job...'}
+              {queueStatus === 'started' && 'Queued job started successfully.'}
+              {queueStatus.startsWith('failed') && `Queue failed: ${queueStatus.replace('failed: ', '')}`}
+            </div>
+          )}
+
           {/* Submit button */}
           <div className="flex gap-4">
             <button
-              onClick={() => setState('jobConfigured')}
+              onClick={() => sjStore.setState('jobConfigured')}
               className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
             >
               Back
             </button>
             <button
               onClick={handleSubmit}
-              className="flex items-center gap-2 px-6 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+              className={clsx(
+                'flex items-center gap-2 px-6 py-2 text-white rounded',
+                isRunActive
+                  ? 'bg-yellow-500 hover:bg-yellow-600'
+                  : 'bg-green-500 hover:bg-green-600'
+              )}
             >
               <PlayIcon className="w-5 h-5" />
-              Submit Job
+              {isRunActive ? 'Queue Job' : 'Submit Job'}
             </button>
           </div>
         </div>
       )
     }
 
-    // Executing
+    // Executing — status-aware: adapts header and buttons when run transitions to terminal state
     if (state === 'executing') {
+      const isTerminal = activeRun && activeRun.runType === 'single' &&
+        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled')
+
       return (
         <div className="flex flex-col items-center justify-center h-full">
-          <ArrowPathIcon className="w-16 h-16 text-blue-500 animate-spin mb-4" />
-          <h3 className="text-lg font-semibold mb-2">Submitting Job...</h3>
+          {!isTerminal && (
+            <ArrowPathIcon className="w-16 h-16 text-blue-500 animate-spin mb-4" />
+          )}
+          {isTerminal && activeRun.status === 'completed' && (
+            <CheckCircleIcon className="w-16 h-16 text-green-500 mb-4" />
+          )}
+          {isTerminal && (activeRun.status === 'failed' || activeRun.status === 'cancelled') && (
+            <XCircleIcon className="w-16 h-16 text-red-500 mb-4" />
+          )}
+          <h3 className="text-lg font-semibold mb-2">
+            {!activeRun || activeRun.status === 'active' ? 'Submitting Job...'
+              : activeRun.status === 'completed' ? 'Job Complete'
+              : activeRun.status === 'failed' ? 'Job Failed'
+              : activeRun.status === 'cancelled' ? 'Job Cancelled'
+              : 'Job Status'}
+          </h3>
           <p className="text-gray-600 dark:text-gray-400 mb-6">
-            Please wait while your job is being processed
+            {!isTerminal
+              ? 'Please wait while your job is being processed'
+              : activeRun.status === 'completed' ? 'Your job has been submitted successfully'
+              : activeRun.status === 'cancelled' ? 'Job was cancelled by user'
+              : 'Job submission encountered an error'}
           </p>
-          <button
-            onClick={handleCancel}
-            className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
-          >
-            <StopIcon className="w-5 h-5" />
-            Cancel
-          </button>
+          {activeRun?.runType === 'single' && activeRun?.status === 'active' && (
+            <button
+              onClick={handleCancel}
+              className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+            >
+              <StopIcon className="w-5 h-5" />
+              Cancel
+            </button>
+          )}
+          {isTerminal && (
+            <button
+              onClick={handleStartOver}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+            >
+              <ArrowPathIcon className="w-5 h-5" />
+              Submit Another Job
+            </button>
+          )}
         </div>
       )
     }
@@ -1106,14 +1071,14 @@ export function SingleJobTab() {
       <TemplateBuilder
         isOpen={showTemplateBuilder}
         initialTemplate={job}
-        onClose={() => setShowTemplateBuilder(false)}
+        onClose={() => sjStore.setShowTemplateBuilder(false)}
         onSave={handleTemplateSave}
       />
 
       {/* Remote file picker dialog */}
       <RemoteFilePicker
         isOpen={showRemoteFilePicker}
-        onClose={() => setShowRemoteFilePicker(false)}
+        onClose={() => sjStore.setShowRemoteFilePicker(false)}
         onSelect={handleRemoteFilesSelected}
         title="Select Remote Files for Job Input"
       />

@@ -86,6 +86,10 @@ export function GetFileLoggingSettings() {
   return window['go']['wailsapp']['App']['GetFileLoggingSettings']();
 }
 
+export function GetHistoricalJobRows(arg1) {
+  return window['go']['wailsapp']['App']['GetHistoricalJobRows'](arg1);
+}
+
 export function GetHomeDirectory() {
   return window['go']['wailsapp']['App']['GetHomeDirectory']();
 }
@@ -116,6 +120,10 @@ export function GetMyJobsFolderID() {
 
 export function GetMyLibraryFolderID() {
   return window['go']['wailsapp']['App']['GetMyLibraryFolderID']();
+}
+
+export function GetRunHistory() {
+  return window['go']['wailsapp']['App']['GetRunHistory']();
 }
 
 export function GetRunStatus() {

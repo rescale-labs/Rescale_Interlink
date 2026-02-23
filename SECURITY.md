@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.7.2
-**Last Updated:** 2026-02-21
+**Version:** 4.7.3
+**Last Updated:** 2026-02-22
 
 ## Overview
 
@@ -199,6 +199,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 4.7.3 | 2026-02-22 | Path traversal sanitization in GetHistoricalJobRows, event listener isolation (unsub callbacks) |
 | 4.5.7 | 2026-02-03 | Auto-download settings auto-save fix, debounced config save |
 | 4.5.1 | 2026-01-28 | Log permissions hardened (0700), NTLM/FIPS safeguards, fail-closed IPC auth |
 | 4.4.2 | 2025-12-XX | Centralized log directory |

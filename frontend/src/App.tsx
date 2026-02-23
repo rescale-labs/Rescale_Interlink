@@ -25,6 +25,7 @@ import { wailsapp } from '../wailsjs/go/models'
 import { useConfigStore } from './stores/configStore'
 import { useLogStore } from './stores/logStore'
 import { useTransferStore } from './stores/transferStore'
+import { useRunStore } from './stores/runStore'
 
 // Tab navigation context for switching tabs from other components
 interface TabNavigationContextType {
@@ -56,6 +57,8 @@ function AppComponent() {
   } = useConfigStore()
   const { overallMessage, overallProgress } = useLogStore()
   const { stats: transferStats, setupEventListeners: setupTransferEventListeners } = useTransferStore()
+  // v4.7.3: Run state manager for run session persistence
+  const { activeRun, setupEventListeners: setupRunEventListeners, recoverFromRestart } = useRunStore()
 
   // v4.0.0: Set up log event listeners at app level so they're always active.
   // Previously these were set up in ActivityTab, which meant events were missed
@@ -72,6 +75,19 @@ function AppComponent() {
     const cleanup = setupTransferEventListeners()
     return cleanup
   }, [setupTransferEventListeners])
+
+  // v4.7.3: Set up run event listeners at app level (same pattern as log/transfer stores).
+  // These track active runs, handle state changes, completion, and queued job auto-start.
+  useEffect(() => {
+    const cleanup = setupRunEventListeners()
+    return cleanup
+  }, [setupRunEventListeners])
+
+  // v4.7.3: Recover active run state after app restart.
+  // Checks localStorage for persisted run info and loads historical state from disk.
+  useEffect(() => {
+    recoverFromRestart()
+  }, [recoverFromRestart])
 
   // v4.0.4: Set up config event listeners and fetch config on mount
   useEffect(() => {
@@ -197,13 +213,22 @@ function AppComponent() {
               <span className="text-blue-600 font-medium">{overallProgress.toFixed(0)}%</span>
             )}
           </div>
-          {(transferStats.active > 0 || transferStats.queued > 0) && (
-            <span className="text-blue-600">
-              {transferStats.active > 0 && `${transferStats.active} active`}
-              {transferStats.active > 0 && transferStats.queued > 0 && ', '}
-              {transferStats.queued > 0 && `${transferStats.queued} queued`}
-            </span>
-          )}
+          <div className="flex items-center space-x-4">
+            {/* v4.7.3: Active run indicator */}
+            {activeRun && activeRun.status === 'active' && (
+              <span className="text-blue-600 font-medium">
+                {activeRun.runType === 'pur' ? 'PUR' : 'Job'} running:{' '}
+                {activeRun.completedJobs + activeRun.failedJobs}/{activeRun.totalJobs}
+              </span>
+            )}
+            {(transferStats.active > 0 || transferStats.queued > 0) && (
+              <span className="text-blue-600">
+                {transferStats.active > 0 && `${transferStats.active} active`}
+                {transferStats.active > 0 && transferStats.queued > 0 && ', '}
+                {transferStats.queued > 0 && `${transferStats.queued} queued`}
+              </span>
+            )}
+          </div>
         </footer>
       </div>
     </TabNavigationContext.Provider>

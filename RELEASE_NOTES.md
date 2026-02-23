@@ -1,5 +1,70 @@
 # Release Notes - Rescale Interlink
 
+## v4.7.3 - February 22, 2026
+
+### Run Session Persistence and Monitoring
+
+Users can now navigate away from the PUR or Single Job tab during an active run and return without losing progress. Active runs also survive app restart.
+
+- **Tab navigation persistence**: Running PUR or Single Job submissions no longer lose state when switching tabs. The new `runStore` tracks active runs at the app level, and `singleJobStore` preserves Single Job form state.
+- **PUR view modes**: On return during an active PUR run, users see a choice screen with "Monitor Active Run" or "Prepare New Run". The chosen view persists across further tab switches.
+- **Run monitoring banner**: When preparing a new PUR run while one is active, a collapsible progress banner shows at the top of the tab.
+- **Job queue**: When a run is active, the submit button becomes "Queue Run" (PUR) or "Queue Job" (Single Job). Queued jobs auto-start with retry/backoff after the current run completes.
+- **App restart recovery**: Active run metadata is persisted to localStorage. On restart, historical state files from disk are loaded and classified (completed/failed/interrupted).
+- **Active run indicator**: Footer status bar shows live progress for the currently running PUR or single job.
+- **Run history in Activity tab**: Completed runs (session-level) displayed in a collapsible panel with expandable job tables. "Load from disk" loads historical runs from state files.
+- **Log field mapping fix (C5)**: Pipeline log entries now correctly use `data.jobName` and `data.stage` from `LogEventDTO` instead of the incorrect `data.detail` and `data.category`.
+- **Cancellation handling (C1)**: Frontend-optimistic cancel with 5-second reconciliation timeout prevents stale "running" state.
+- **Path traversal sanitization (C8)**: `GetHistoricalJobRows` validates run IDs to prevent directory traversal attacks.
+- **Event listener safety (C9)**: `runStore` uses unsub callbacks instead of `EventsOff` to prevent removing other stores' event listeners.
+- **PUR monitor view state sync (C10)**: `workflowState` in jobStore never transitioned from `'executing'` to `'completed'` on normal pipeline completion — only on cancel. Added `useEffect` in PURTab to sync `workflowState` from `activeRun.status`, making the executing view status-aware (header, cancel button, "View Results" button). All three "Prepare New Run" buttons now call `reset()` before `setPurViewMode('configure')` to ensure clean navigation back to the config form.
+- **SingleJob executing view state sync (C11)**: Same class of bug — `singleJobStore.state` stayed `'executing'` after normal completion. Added `useEffect` sync, status-aware executing view (header adapts, cancel/submit-another buttons conditional), fixed `handleCancel` race condition (only forces failed if run was actually cancelled), and fixed `handleStartOver` to call guarded `clearActiveRun()` before `sjStore.reset()`.
+
+### Architecture
+
+- **New stores**: `runStore.ts` (central run state manager), `singleJobStore.ts` (persistent Single Job form state)
+- **Shared types**: `types/jobs.ts` (extracted from jobStore to break import cycles), `types/run.ts` (ActiveRun, CompletedRun, QueuedJob discriminated union)
+- **Extracted widgets**: `JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge` moved to `widgets/` for reuse
+- **Extracted utilities**: `computeStageStats` (was duplicated in jobStore), `formatDuration`/`formatDurationMs`
+- **jobStore refactored**: Event subscriptions, polling, and runtime state moved to runStore. jobStore is now purely the PUR workflow configuration state machine.
+
+### Backend
+
+- **`GetRunHistory()`**: Lists state files from `~/.rescale-int/states/` sorted by modification time
+- **`GetHistoricalJobRows(runId)`**: Loads job rows from a historical state file with path-traversal sanitization
+
+### Files Changed
+| File | Changes |
+|------|---------|
+| `frontend/src/types/jobs.ts` | **NEW** — Shared domain types (JobRow, JobSpec, PipelineLogEntry, etc.) |
+| `frontend/src/types/run.ts` | **NEW** — Run types (ActiveRun, CompletedRun, QueuedJob) |
+| `frontend/src/types/index.ts` | Re-exports new type files |
+| `frontend/src/stores/runStore.ts` | **NEW** — Central run state manager |
+| `frontend/src/stores/singleJobStore.ts` | **NEW** — SingleJob persistent state |
+| `frontend/src/stores/jobStore.ts` | Remove event/polling/runtime state, delegate to runStore |
+| `frontend/src/stores/index.ts` | Add new store exports |
+| `frontend/src/components/widgets/JobsTable.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/StatsBar.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/PipelineStageSummary.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/PipelineLogPanel.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/ErrorSummary.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/StatusBadge.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/index.ts` | Add new widget exports |
+| `frontend/src/utils/stageStats.ts` | **NEW** — computeStageStats extracted from jobStore |
+| `frontend/src/utils/formatDuration.ts` | **NEW** — Duration formatting utilities |
+| `frontend/src/components/tabs/PURTab.tsx` | View modes, monitor, banner, queue, use shared widgets; C10: useEffect sync, status-aware executing view, "Prepare New Run" reset fix |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | Use singleJobStore, runStore, queue mechanism; C11: useEffect sync, status-aware executing view, handleCancel race fix, handleStartOver clearActiveRun guard |
+| `frontend/src/components/tabs/ActivityTab.tsx` | Run history panel |
+| `frontend/src/App.tsx` | runStore event listeners, recovery, footer indicator |
+| `internal/wailsapp/job_bindings.go` | Add GetRunHistory, GetHistoricalJobRows |
+| `internal/wailsapp/job_bindings_test.go` | Tests for path traversal, missing files, empty dir |
+| `internal/version/version.go` | v4.7.3 |
+| `wails.json` | v4.7.3 |
+| `frontend/package.json` | v4.7.3 |
+| `main.go` | Version comment |
+
+---
+
 ## v4.7.2 - February 21, 2026
 
 ### Consistent Load/Save UI

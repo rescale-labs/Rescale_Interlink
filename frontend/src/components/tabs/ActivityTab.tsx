@@ -1,11 +1,17 @@
 import { useEffect, useRef, useMemo, useState } from 'react';
 import { useLogStore } from '../../stores';
+import { useRunStore } from '../../stores/runStore';
 import type { LogLevel } from '../../types';
-import { GetDaemonStatus, GetDaemonLogs } from '../../../wailsjs/go/wailsapp/App';
+import type { JobRow } from '../../types/jobs';
+import { GetDaemonStatus, GetDaemonLogs, GetRunHistory, GetHistoricalJobRows } from '../../../wailsjs/go/wailsapp/App';
+import { JobsTable } from '../widgets';
+import { formatDurationMs } from '../../utils/formatDuration';
 import {
   MagnifyingGlassIcon,
   ArrowDownTrayIcon,
   TrashIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -75,6 +81,14 @@ export function ActivityTab() {
   // v4.3.2: Daemon log state for IPC-based log streaming
   const [daemonLogs, setDaemonLogs] = useState<LogEntry[]>([]);
   const [daemonRunning, setDaemonRunning] = useState(false);
+
+  // Run history state
+  const { completedRuns } = useRunStore();
+  const [runHistoryExpanded, setRunHistoryExpanded] = useState(false);
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [historicalRuns, setHistoricalRuns] = useState<any[]>([]);
+  const [historicalRows, setHistoricalRows] = useState<Record<string, JobRow[]>>({});
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const logContainerRef = useRef<HTMLDivElement>(null);
 
@@ -165,6 +179,62 @@ export function ActivityTab() {
     const interval = setInterval(pollDaemonLogs, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // Run history helpers
+  const loadHistoricalRuns = async () => {
+    setLoadingHistory(true);
+    try {
+      const history = await GetRunHistory();
+      setHistoricalRuns(history || []);
+    } catch (err) {
+      console.error('Failed to load run history:', err);
+    }
+    setLoadingHistory(false);
+  };
+
+  const loadHistoricalJobRows = async (runId: string) => {
+    try {
+      const rows = await GetHistoricalJobRows(runId);
+      const mapped: JobRow[] = (rows || []).map((r, i) => ({
+        index: r.index ?? i,
+        directory: r.directory || '',
+        jobName: r.jobName || '',
+        tarStatus: r.tarStatus || '',
+        uploadStatus: r.uploadStatus || '',
+        uploadProgress: 0,
+        createStatus: r.createStatus || '',
+        submitStatus: r.submitStatus || '',
+        status: r.submitStatus || '',
+        jobId: r.jobId || '',
+        progress: 0,
+        error: r.error || '',
+      }));
+      setHistoricalRows((prev) => ({ ...prev, [runId]: mapped }));
+    } catch (err) {
+      console.error('Failed to load job rows:', err);
+    }
+  };
+
+  const handleRunEntryClick = (runId: string, jobRows?: JobRow[]) => {
+    if (expandedRunId === runId) {
+      setExpandedRunId(null);
+      return;
+    }
+    setExpandedRunId(runId);
+    // For historical runs without loaded rows, load them
+    if (!jobRows && !historicalRows[runId]) {
+      loadHistoricalJobRows(runId);
+    }
+  };
+
+  const STATUS_BG: Record<string, string> = {
+    completed: 'bg-green-100 text-green-800',
+    failed: 'bg-red-100 text-red-800',
+    cancelled: 'bg-yellow-100 text-yellow-800',
+    interrupted: 'bg-orange-100 text-orange-800',
+  };
+
+  const hasRunHistory = completedRuns.length > 0 || historicalRuns.length > 0;
 
   const handleExport = () => {
     const content = exportLogs();
@@ -281,6 +351,150 @@ export function ActivityTab() {
           </div>
         )}
       </div>
+
+      {/* Run History Section */}
+      {hasRunHistory && (
+        <div className="border border-gray-200 rounded-lg overflow-hidden mt-4">
+          <button
+            onClick={() => setRunHistoryExpanded(!runHistoryExpanded)}
+            className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 hover:bg-gray-100 transition-colors"
+          >
+            <span className="text-sm font-semibold text-gray-900">
+              Run History
+              <span className="ml-2 text-xs font-normal text-gray-500">
+                ({completedRuns.length} session{historicalRuns.length > 0 ? `, ${historicalRuns.length} on disk` : ''})
+              </span>
+            </span>
+            {runHistoryExpanded ? (
+              <ChevronDownIcon className="w-4 h-4 text-gray-500" />
+            ) : (
+              <ChevronRightIcon className="w-4 h-4 text-gray-500" />
+            )}
+          </button>
+
+          {runHistoryExpanded && (
+            <div className="p-3 space-y-2 max-h-96 overflow-auto">
+              {/* Session Runs */}
+              {completedRuns.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-medium text-gray-500 uppercase mb-1">Session Runs</h4>
+                  <div className="space-y-1">
+                    {completedRuns.map((run) => (
+                      <div key={run.runId}>
+                        <button
+                          onClick={() => handleRunEntryClick(run.runId, run.jobRows)}
+                          className={clsx(
+                            'w-full flex items-center justify-between px-3 py-2 rounded text-sm',
+                            'hover:bg-gray-100 transition-colors text-left',
+                            expandedRunId === run.runId && 'bg-gray-100'
+                          )}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className={clsx(
+                              'px-1.5 py-0.5 text-xs rounded font-medium',
+                              STATUS_BG[run.finalStatus] || 'bg-gray-100 text-gray-800'
+                            )}>
+                              {run.finalStatus}
+                            </span>
+                            <span className="text-xs font-medium text-gray-600 uppercase">
+                              {run.runType === 'pur' ? 'PUR' : 'Single'}
+                            </span>
+                            <span className="text-xs text-gray-500">
+                              {new Date(run.startTime).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 text-xs text-gray-500">
+                            <span>{formatDurationMs(run.durationMs)}</span>
+                            <span className="text-green-600">{run.completedJobs} ok</span>
+                            {run.failedJobs > 0 && (
+                              <span className="text-red-600">{run.failedJobs} failed</span>
+                            )}
+                            <span>{run.totalJobs} total</span>
+                          </div>
+                        </button>
+                        {expandedRunId === run.runId && run.jobRows && (
+                          <div className="ml-4 mt-1 mb-2 border border-gray-200 rounded">
+                            <JobsTable jobs={run.jobRows} />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Historical Runs (from disk) */}
+              <div className="border-t border-gray-200 pt-2">
+                <div className="flex items-center justify-between mb-1">
+                  <h4 className="text-xs font-medium text-gray-500 uppercase">Historical Runs (Disk)</h4>
+                  <button
+                    onClick={loadHistoricalRuns}
+                    disabled={loadingHistory}
+                    className={clsx(
+                      'text-xs px-2 py-1 rounded border border-gray-300',
+                      'hover:bg-gray-100 transition-colors',
+                      loadingHistory && 'opacity-50 cursor-not-allowed'
+                    )}
+                  >
+                    {loadingHistory ? 'Loading...' : 'Load from disk'}
+                  </button>
+                </div>
+                {historicalRuns.length > 0 ? (
+                  <div className="space-y-1">
+                    {historicalRuns.map((entry) => {
+                      // Skip entries that are already in session completedRuns
+                      if (completedRuns.some((r) => r.runId === entry.runId)) return null;
+                      const loadedRows = historicalRows[entry.runId];
+                      return (
+                        <div key={entry.runId}>
+                          <button
+                            onClick={() => handleRunEntryClick(entry.runId)}
+                            className={clsx(
+                              'w-full flex items-center justify-between px-3 py-2 rounded text-sm',
+                              'hover:bg-gray-100 transition-colors text-left',
+                              expandedRunId === entry.runId && 'bg-gray-100'
+                            )}
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="px-1.5 py-0.5 text-xs rounded font-medium bg-gray-100 text-gray-700">
+                                disk
+                              </span>
+                              <span className="text-xs font-medium text-gray-600 uppercase">
+                                {entry.runType === 'pur' ? 'PUR' : 'Single'}
+                              </span>
+                              <span className="text-xs text-gray-500">
+                                {new Date(entry.modTime).toLocaleString()}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-3 text-xs text-gray-500">
+                              <span>{entry.jobCount} job{entry.jobCount !== 1 ? 's' : ''}</span>
+                            </div>
+                          </button>
+                          {expandedRunId === entry.runId && (
+                            <div className="ml-4 mt-1 mb-2 border border-gray-200 rounded">
+                              {loadedRows ? (
+                                <JobsTable jobs={loadedRows} />
+                              ) : (
+                                <div className="text-center text-gray-500 text-sm py-4">
+                                  Loading job rows...
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-400 italic">
+                    Click "Load from disk" to view historical runs.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Log List - Virtualized */}
       <div

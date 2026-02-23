@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: February 21, 2026
-**Version**: 4.7.2
+**Last Updated**: February 22, 2026
+**Version**: 4.7.3
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -82,7 +82,7 @@ go test -v ./internal/pur/...
 | `internal/pur/pattern` | 4 | ~80% | Good |
 | `internal/pur/sanitize` | 4 (16 sub-tests) | ~90% | Excellent |
 | `internal/http` | 4 | ~70% | Good |
-| `internal/wailsapp` | 3 | ~40% | New |
+| `internal/wailsapp` | 17 | ~55% | Growing (v4.7.3: +3 tests for history/sanitization) |
 | `internal/cloud/transfer` | 5 | ~60% | Good |
 | **Total** | **70+** | **~80%** | **Good** |
 
@@ -498,17 +498,57 @@ kill $GUI_PID   # Should terminate cleanly
    - New disk space error after dismiss → banner re-appears
    - Non-disk-space errors show raw error (truncated with tooltip)
 
-5. **Jobs Tab**
-   - Load jobs CSV
-   - Run Plan validation
-   - Submit jobs
-   - Verify real-time table updates
-   - Check job IDs appear
+5. **PUR Tab - Run Session Persistence (v4.7.3)**
+   - Start a PUR run → navigate away → return → see choice screen with "Monitor Active Run" / "Prepare New Run"
+   - Click "Monitor Active Run" → see live dashboard with progress
+   - Navigate away → return → goes directly to monitor view (remembered)
+   - Click "Prepare New Run" → see config with monitoring banner at top
+   - Navigate away → return → goes directly to config view (remembered)
+   - Let a PUR run complete → navigate to PUR tab → see completed results summary
+   - Click "Start New Run" → fresh workflow
+   - Start PUR run → click Cancel → verify status shows 'cancelled'
+   - Start PUR run → "Prepare New Run" → configure → "Queue Run" button visible
+   - Queue a run → verify queue status banner shows "queued"
+   - First run completes → queued run auto-starts
+   - **C10 monitor view fixes:**
+   - Start PUR via workflow → during run, header shows "Pipeline Running", cancel button visible
+   - Let pipeline complete → header changes to "Pipeline Complete", cancel disappears, "View Results" appears
+   - Click "View Results" → navigates to completed results view
+   - During active run, click "Prepare New Run" (executing view) → lands in config form (source path selection), monitoring banner visible
+   - After completion, click "Prepare New Run" → lands in config form (not stuck in executing view)
+   - From choice screen, click "Prepare New Run" → lands in config form with monitoring banner
+   - From monitor view, click "Prepare New Run" → lands in config form
 
-6. **Activity Tab**
-   - Verify logs appear
-   - Test search/filter
-   - Clear logs
+6. **SingleJob Tab - Run Persistence (v4.7.3)**
+   - Configure job → submit → navigate away → return → see job status
+   - Configure another job → "Queue Job" button visible when a run is active
+   - Form state persists across tab navigation (software, hardware, command, etc.)
+   - **C11 executing view fixes:**
+   - Submit a single job → executing view shows "Submitting Job..." with cancel button and spinner
+   - Let job complete → header changes to "Job Complete", spinner replaced with green checkmark, "Submit Another Job" button appears
+   - Click "Submit Another Job" → returns to initial configuration form
+   - During active job, cancel → shows failed state with "Job Cancelled" header
+   - Cancel race condition: if job completes just before cancel, UI shows "Job Complete" (not "Job Failed")
+
+7. **Activity Tab (v4.7.3 Run History)**
+   - Complete a run → Activity tab shows "Run History" section with completed run
+   - Click run → see expanded job table
+   - Verify logs still appear, search/filter works
+
+8. **Footer Indicator (v4.7.3)**
+   - Start any run → footer shows active run type and progress count
+   - Navigate between tabs → footer persists
+
+9. **App Restart Recovery (v4.7.3)**
+   - Start run → quit app → reopen
+   - Verify completed runs recovered from state files (or clean state if lost)
+
+10. **Regression**
+   - PUR pipeline execution end-to-end still works
+   - SingleJob submission end-to-end still works
+   - File Browser unaffected
+   - Transfers tab unaffected
+   - Activity logs still show entries with correct `jobName` and `stage` fields
 
 **Deadlock Test** (Stress Test):
 ```bash
@@ -606,6 +646,41 @@ jt.table.Refresh()  // ✓ Called WITHOUT lock
 - Error messages clear and actionable
 - v4.7.1: Amber error banner in Transfers tab for disk space failures with available/needed info
 - v4.7.1: Short "No disk space" labels with full hover tooltip
+
+### v4.7.3 E2E Testing (February 22, 2026)
+
+**Builds**:
+- CLI binary (FIPS 140-3): `make build-darwin-arm64` — PASSED
+- Wails GUI binary (FIPS 140-3): `GOFIPS140=latest wails build -platform darwin/arm64` — PASSED
+- TypeScript compilation: `cd frontend && npm run build` (487 modules, 0 errors) — PASSED
+- Go unit tests: `go test ./...` — ALL PASSED (all packages including 3 new wailsapp tests)
+
+**S3 Backend (AWS) E2E Tests**:
+
+| Test | Result | Details |
+|------|--------|---------|
+| `--version` | PASS | `rescale-int version v4.7.3 (2026-02-22) [FIPS 140-3]` |
+| `config test` | PASS | Connection verified, user: user@example.com |
+| `jobs list --limit 3` | PASS | 3 of 802 jobs listed |
+| `hardware list --search emerald` | PASS | 5 hardware types found |
+| `software list --search openfoam` | PASS | Multiple OpenFOAM variants listed |
+| `files list --limit 3` | PASS | Files listed with sizes and dates |
+| `files upload` (test file) | PASS | File uploaded, ID: srQHGo |
+| `folders list` | PASS | My Library contents listed |
+
+**Azure Backend E2E Tests**:
+
+| Test | Result | Details |
+|------|--------|---------|
+| `config test` | PASS | Connection verified, user: user+test@example.com |
+| `jobs list --limit 3` | PASS | 3 of 48 jobs listed |
+| `hardware list --search emerald` | PASS | 3 hardware types found |
+| `software list --search openfoam` | PASS | Multiple OpenFOAM variants listed |
+| `files list --limit 3` | PASS | Files listed with sizes and dates |
+| `files upload` (test file) | PASS | File uploaded, ID: ArQHGo |
+| `folders list` | PASS | My Library contents listed |
+
+**Summary**: 15/15 E2E tests PASSED across both S3 and Azure backends. No regressions detected.
 
 ---
 
@@ -885,6 +960,6 @@ rm -rf /tmp/test
 
 ---
 
-**Last Updated**: February 21, 2026
-**Version**: 4.7.2
+**Last Updated**: February 22, 2026
+**Version**: 4.7.3
 **Status**: All tests passing, code quality improvements (North Star alignment)

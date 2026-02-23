@@ -776,6 +776,24 @@ export namespace wailsapp {
 	    }
 	}
 	
+	export class RunHistoryEntryDTO {
+	    runId: string;
+	    runType: string;
+	    modTime: string;
+	    jobCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new RunHistoryEntryDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.runId = source["runId"];
+	        this.runType = source["runType"];
+	        this.modTime = source["modTime"];
+	        this.jobCount = source["jobCount"];
+	    }
+	}
 	export class RunStatusDTO {
 	    state: string;
 	    totalJobs: number;

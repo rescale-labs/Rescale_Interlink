@@ -22,3 +22,7 @@ export type {
   PipelineLogEntry,
   PipelineStageStats,
 } from './jobStore';
+
+// v4.7.3: New stores for run session persistence
+export { useRunStore } from './runStore';
+export { useSingleJobStore } from './singleJobStore';

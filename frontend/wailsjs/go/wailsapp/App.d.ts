@@ -44,6 +44,8 @@ export function GetDefaultDownloadFolder():Promise<string>;
 
 export function GetFileLoggingSettings():Promise<wailsapp.FileLoggingSettingsDTO>;
 
+export function GetHistoricalJobRows(arg1:string):Promise<Array<wailsapp.JobRowDTO>>;
+
 export function GetHomeDirectory():Promise<string>;
 
 export function GetJobRows():Promise<Array<wailsapp.JobRowDTO>>;
@@ -59,6 +61,8 @@ export function GetLogsDirectory():Promise<string>;
 export function GetMyJobsFolderID():Promise<string>;
 
 export function GetMyLibraryFolderID():Promise<string>;
+
+export function GetRunHistory():Promise<Array<wailsapp.RunHistoryEntryDTO>>;
 
 export function GetRunStatus():Promise<wailsapp.RunStatusDTO>;
 

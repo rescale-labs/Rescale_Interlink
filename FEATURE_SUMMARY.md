@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.7.2
-**Build Date:** February 21, 2026
+**Version:** 4.7.3
+**Build Date:** February 22, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -258,7 +258,13 @@ The GUI Single Job tab supports three input modes:
 
 All three modes support the full job configuration: software, hardware, command, walltime, automations, license settings, extra input files, and submit mode (create-only or create-and-submit).
 
-**Source:** `internal/wailsapp/job_bindings.go:612-681`, `frontend/src/components/tabs/SingleJobTab.tsx`
+**v4.7.3 Enhancements:**
+- Form state persists across tab navigation via `singleJobStore` (Zustand store)
+- Submit becomes "Queue Job" when another run is active
+- Job status displayed from `runStore.activeRun` after submission
+- Cancel and "Start Over" actions integrated with `runStore`
+
+**Source:** `internal/wailsapp/job_bindings.go:612-681`, `frontend/src/components/tabs/SingleJobTab.tsx`, `frontend/src/stores/singleJobStore.ts`
 
 ### Stop Job
 ```bash
@@ -842,6 +848,52 @@ rescale-int folders download-dir --folder-id xyz789 --outdir ./data
 - Confirmation dialogs for destructive operations
 - **Source:** `frontend/src/components/` (React components)
 
+### Run Session Persistence (v4.7.3)
+
+**Central Run State Management:**
+- `runStore` tracks active run, completed runs (max 20), queued job, and queue status
+- App-level event listeners (`interlink:state_change`, `interlink:log`, `interlink:complete`) established in App.tsx
+- Reconciliation polling supplements event-driven updates
+- Active run metadata persisted to localStorage (`rescale-int-active-run`) for restart recovery
+- **Source:** `frontend/src/stores/runStore.ts`
+
+**PUR Tab View Modes:**
+- `purViewMode`: `'auto' | 'monitor' | 'configure'` with computed `effectiveView`
+- Choice screen when returning during active PUR run
+- Read-only monitoring dashboard with live progress from `runStore.activeRun`
+- Collapsible monitoring banner when configuring a new run
+- Completed results view with success/failure summary and job table snapshot
+- **Source:** `frontend/src/components/tabs/PURTab.tsx`
+
+**Job Queue:**
+- Submit button becomes "Queue Run"/"Queue Job" when a run is active
+- Configuration deep-copied at queue time via `structuredClone()` to prevent mutation
+- Auto-start with retry/backoff after current run completes (5 attempts, 500ms increments)
+- Inline queue status banners with color-coded feedback
+- **Source:** `frontend/src/stores/runStore.ts` (startQueuedJobWithRetry)
+
+**Restart Recovery:**
+- Reads `localStorage.getItem('rescale-int-active-run')` on app mount
+- Checks engine state via `GetRunStatus()` — if running, re-establishes monitoring
+- If idle: loads historical rows from disk via `GetHistoricalJobRows(runId)`
+- Classifies final status from rows: completed, failed, or interrupted
+- **Source:** `frontend/src/stores/runStore.ts` (recoverFromRestart)
+
+**Activity Tab Run History:**
+- Session-level completed runs with expandable job tables
+- Historical runs loaded from disk via `GetRunHistory()` + `GetHistoricalJobRows()`
+- Lazy-loading of historical job rows on click
+- **Source:** `frontend/src/components/tabs/ActivityTab.tsx`
+
+**Shared Widgets:**
+- `JobsTable` — Reusable job rows table extracted from PURTab
+- `StatsBar` — Run progress statistics
+- `PipelineStageSummary` — Per-stage success/fail counts
+- `PipelineLogPanel` — Scrollable pipeline log display
+- `ErrorSummary` — Failed job error display
+- `StatusBadge` — Color-coded status indicator
+- **Source:** `frontend/src/components/widgets/`
+
 ---
 
 ## Technical Infrastructure
@@ -1055,6 +1107,30 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 
 **Source:** `internal/ratelimit/`, `internal/cli/files.go`
 
+### v4.7.3 (February 22, 2026)
+**Run Session Persistence and Monitoring:**
+- ✅ New `runStore.ts`: Central run state manager with app-level event listeners, active run tracking, queue, restart recovery
+- ✅ New `singleJobStore.ts`: Single Job form state persisted across tab navigation via Zustand
+- ✅ PUR view modes: choice screen on return during active run, monitoring dashboard, progress banner, completed results view
+- ✅ Job queue: "Queue Run"/"Queue Job" when a run is active, with retry/backoff auto-start (500ms, 1s, 1.5s, 2s, 2.5s)
+- ✅ App restart recovery: localStorage persistence + historical state file loading from disk
+- ✅ Active run indicator in footer status bar
+- ✅ Activity tab run history: session-level completed runs + historical state file loading via `GetRunHistory()`/`GetHistoricalJobRows()`
+- ✅ Shared widget extraction: `JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge` in `widgets/`
+- ✅ Shared utility extraction: `computeStageStats`, `formatDuration`/`formatDurationMs` in `utils/`
+- ✅ Shared type extraction: `types/jobs.ts` (breaks import cycle), `types/run.ts` (ActiveRun, CompletedRun, QueuedJob)
+- ✅ jobStore refactored: event subscriptions/polling/runtime state moved to runStore
+- ✅ Log field mapping fix: `data.jobName`/`data.stage` instead of `data.detail`/`data.category` (C5)
+- ✅ Frontend-optimistic cancellation with 5-second reconciliation timeout (C1)
+- ✅ Path traversal sanitization in `GetHistoricalJobRows` (C8)
+- ✅ Event listener isolation: unsub callbacks instead of `EventsOff` (C9)
+- ✅ PUR monitor view state sync: `workflowState` synced from `activeRun.status` via useEffect, status-aware executing branch (header/cancel/view-results), all 3 "Prepare New Run" buttons call `reset()` (C10)
+- ✅ SingleJob executing view state sync: `singleJobStore.state` synced from `activeRun.status`, status-aware header/buttons, `handleCancel` race fix, `handleStartOver` guarded `clearActiveRun()` (C11)
+- ✅ Backend: `GetRunHistory()` lists `~/.rescale-int/states/` files, `GetHistoricalJobRows()` loads with sanitization
+- ✅ 3 new Go tests: path traversal, missing file, empty directory
+
+**Source:** `frontend/src/stores/runStore.ts`, `frontend/src/stores/singleJobStore.ts`, `frontend/src/stores/jobStore.ts`, `frontend/src/components/tabs/PURTab.tsx`, `frontend/src/components/tabs/SingleJobTab.tsx`, `frontend/src/components/tabs/ActivityTab.tsx`, `frontend/src/App.tsx`, `internal/wailsapp/job_bindings.go`
+
 ### v4.7.2 (February 21, 2026)
 **Consistent Load/Save UI + Label Improvements:**
 - ✅ PUR "Load Existing Base Job Settings" dropdown with CSV, JSON, SGE options (was single "Load Settings" button)
@@ -1218,5 +1294,5 @@ For more details, see:
 
 ---
 
-*Last Updated: February 21, 2026*
-*Version: 4.7.2*
+*Last Updated: February 22, 2026*
+*Version: 4.7.3*

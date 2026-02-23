@@ -829,6 +829,138 @@ func (a *App) ResetRun() {
 	a.runMu.Unlock()
 }
 
+// v4.7.3: RunHistoryEntryDTO represents a historical run entry.
+type RunHistoryEntryDTO struct {
+	RunID    string `json:"runId"`
+	RunType  string `json:"runType"`  // "pur" or "single", derived from ID prefix
+	ModTime  string `json:"modTime"`
+	JobCount int    `json:"jobCount"`
+}
+
+// GetRunHistory lists historical run state files, sorted by modification time (newest first).
+// v4.7.3: Added for run session persistence.
+func (a *App) GetRunHistory() []RunHistoryEntryDTO {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return []RunHistoryEntryDTO{}
+	}
+	stateDir := filepath.Join(homeDir, ".rescale-int", "states")
+
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return []RunHistoryEntryDTO{}
+	}
+
+	var results []RunHistoryEntryDTO
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".state") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		runID := strings.TrimSuffix(entry.Name(), ".state")
+
+		// Derive run type from ID prefix
+		runType := "pur"
+		if strings.HasPrefix(runID, "single_") {
+			runType = "single"
+		}
+
+		// Count job rows by counting non-header lines
+		filePath := filepath.Join(stateDir, entry.Name())
+		jobCount := 0
+		data, err := os.ReadFile(filePath)
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) > 1 {
+				jobCount = len(lines) - 1 // Subtract header row
+			}
+		}
+		// Tolerate malformed files: skip if we can't parse, don't fail the list
+
+		results = append(results, RunHistoryEntryDTO{
+			RunID:    runID,
+			RunType:  runType,
+			ModTime:  info.ModTime().Format(time.RFC3339),
+			JobCount: jobCount,
+		})
+	}
+
+	// Sort by modification time descending (newest first)
+	for i := 0; i < len(results); i++ {
+		for j := i + 1; j < len(results); j++ {
+			ti, _ := time.Parse(time.RFC3339, results[i].ModTime)
+			tj, _ := time.Parse(time.RFC3339, results[j].ModTime)
+			if tj.After(ti) {
+				results[i], results[j] = results[j], results[i]
+			}
+		}
+	}
+
+	return results
+}
+
+// GetHistoricalJobRows loads job rows from a historical state file.
+// v4.7.3: Added for run session persistence. Includes path traversal sanitization (C8).
+func (a *App) GetHistoricalJobRows(runID string) ([]JobRowDTO, error) {
+	// Path traversal sanitization (C8)
+	clean := filepath.Base(runID)
+	if clean != runID || strings.Contains(runID, "..") {
+		return nil, fmt.Errorf("invalid run ID: %s", runID)
+	}
+
+	stateFile := generateStateFilePath(clean)
+
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("state file not found for run: %s", runID)
+		}
+		return nil, fmt.Errorf("failed to read state file: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) <= 1 {
+		return []JobRowDTO{}, nil // Header only or empty
+	}
+
+	// Parse CSV-like state file: header + data rows
+	// State file format: index,jobName,directory,tarStatus,uploadStatus,uploadProgress,submitStatus,jobId,errorMessage
+	var rows []JobRowDTO
+	for i, line := range lines[1:] { // Skip header
+		fields := strings.Split(line, ",")
+		if len(fields) < 9 {
+			continue // Skip malformed rows
+		}
+
+		uploadProgress := 0.0
+		if len(fields) > 5 {
+			fmt.Sscanf(fields[5], "%f", &uploadProgress)
+		}
+
+		rows = append(rows, JobRowDTO{
+			Index:          i,
+			JobName:        fields[1],
+			Directory:      fields[2],
+			TarStatus:      fields[3],
+			UploadStatus:   fields[4],
+			UploadProgress: uploadProgress,
+			CreateStatus:   "",
+			SubmitStatus:   fields[6],
+			Status:         fields[6], // Use submit status as overall
+			JobID:          fields[7],
+			Progress:       0,
+			Error:          fields[8],
+		})
+	}
+
+	return rows, nil
+}
+
 // ValidateJobSpec validates a job specification.
 // v4.6.0: Delegates to shared validation.ValidateJobSpec for CLI/GUI consistency.
 func (a *App) ValidateJobSpec(job JobSpecDTO) []string {

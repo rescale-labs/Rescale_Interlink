@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 4.7.2
-**Last Updated**: February 21, 2026
+**Version**: 4.7.3
+**Last Updated**: February 22, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -160,8 +160,12 @@ rescale-int/
 ├── frontend/           # Wails GUI (React/TypeScript)
 │   ├── src/
 │   │   ├── components/ # React components
-│   │   ├── stores/     # Zustand state stores
-│   │   └── types/      # TypeScript type definitions
+│   │   │   ├── tabs/   # Tab components (Setup, SingleJob, PUR, etc.)
+│   │   │   ├── widgets/# Shared reusable widgets (JobsTable, StatsBar, etc.)
+│   │   │   └── common/ # Common components (ErrorBoundary, etc.)
+│   │   ├── stores/     # Zustand state stores (jobStore, runStore, etc.)
+│   │   ├── types/      # TypeScript type definitions (jobs, run, events)
+│   │   └── utils/      # Shared utilities (stageStats, formatDuration)
 │   ├── package.json    # Node.js dependencies
 │   └── wailsjs/        # Generated Wails bindings
 ├── internal/

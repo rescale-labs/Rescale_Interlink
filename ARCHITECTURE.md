@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.7.2
-**Last Updated**: February 21, 2026
+**Version**: 4.7.3
+**Last Updated**: February 22, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.7.2                 |
+|                 Rescale Interlink v4.7.3                 |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -84,11 +84,25 @@ rescale-int/
 │
 ├── frontend/                  # Wails React frontend (v4.0.0)
 │   ├── src/
-│   │   ├── App.tsx            # Main app with tab navigation
+│   │   ├── App.tsx            # Main app with tab navigation + runStore wiring
 │   │   ├── components/
 │   │   │   ├── tabs/          # 6 tab implementations
-│   │   │   └── widgets/       # Reusable UI components
-│   │   └── stores/            # Zustand state management
+│   │   │   ├── widgets/       # Shared widgets (JobsTable, StatsBar, etc.)
+│   │   │   └── common/        # Common components (ErrorBoundary)
+│   │   ├── stores/            # Zustand state management
+│   │   │   ├── jobStore.ts    # PUR workflow configuration state
+│   │   │   ├── runStore.ts    # Active run monitoring + queue (v4.7.3)
+│   │   │   ├── singleJobStore.ts # Single Job form state (v4.7.3)
+│   │   │   ├── configStore.ts # Configuration state
+│   │   │   ├── transferStore.ts # Transfer tracking
+│   │   │   └── logStore.ts    # Activity log state
+│   │   ├── types/             # TypeScript type definitions
+│   │   │   ├── jobs.ts        # Shared domain types (v4.7.3)
+│   │   │   ├── run.ts         # Run session types (v4.7.3)
+│   │   │   └── events.ts      # Event DTOs
+│   │   └── utils/             # Shared utilities (v4.7.3)
+│   │       ├── stageStats.ts  # Pipeline stage stats computation
+│   │       └── formatDuration.ts # Duration formatting
 │   ├── wailsjs/               # Auto-generated Go bindings
 │   └── package.json           # Node.js dependencies
 │
@@ -908,20 +922,40 @@ if time.Since(eb.lastProgress[taskID]) < eb.progressInterval {
    - `StartBulkRun()` - PUR batch submission
    - `StartSingleJob()` - Single job workflow
    - `GetCoreTypes()`, `GetAnalysisCodes()` - Metadata
+   - `GetRunHistory()` - List historical state files (v4.7.3)
+   - `GetHistoricalJobRows()` - Load job rows from state file with path-traversal sanitization (v4.7.3)
 
 5. **Event Bridge** (`event_bridge.go`):
    - Forwards EventBus events to Wails runtime
    - Handles Progress, Log, StateChange, Error, Complete events
    - Throttles progress updates (100ms interval)
 
+**Frontend Stores** (`frontend/src/stores/`):
+
+1. **jobStore** - PUR workflow configuration state machine (template, scan, validation, execution start)
+2. **runStore** - Active run monitoring, event subscriptions, polling, queue, restart recovery (v4.7.3)
+3. **singleJobStore** - Single Job form state persisted across tab navigation (v4.7.3)
+4. **configStore** - API configuration and connection state
+5. **transferStore** - Transfer queue tracking with disk space error classification
+6. **logStore** - Activity log entries and filtering
+
 **Frontend Components** (`frontend/src/components/tabs/`):
 
 1. **FileBrowserTab** - Two-pane local/remote file browser
 2. **TransfersTab** - Active upload/download progress tracking, disk space error banner (v4.7.1)
-3. **SingleJobTab** - Job template builder and submission, tar options for directory mode (v4.7.1)
-4. **PURTab** - Batch job pipeline with Pipeline Settings (workers + tar options, v4.7.1)
+3. **SingleJobTab** - Job template builder and submission, tar options for directory mode (v4.7.1), uses singleJobStore (v4.7.3)
+4. **PURTab** - Batch job pipeline with Pipeline Settings (workers + tar options, v4.7.1), view modes and run monitoring (v4.7.3)
 5. **SetupTab** - API settings, proxy configuration, logging, auto-download daemon
-6. **ActivityTab** - Logs and event monitoring
+6. **ActivityTab** - Logs, event monitoring, and run history panel (v4.7.3)
+
+**Frontend Shared Widgets** (`frontend/src/components/widgets/` - v4.7.3):
+
+1. **JobsTable** - Reusable job rows table with status badges
+2. **StatsBar** - Run progress statistics bar
+3. **PipelineStageSummary** - Per-stage success/fail counts
+4. **PipelineLogPanel** - Scrollable pipeline log display
+5. **ErrorSummary** - Failed job error display
+6. **StatusBadge** - Color-coded status indicator
 
 ---
 

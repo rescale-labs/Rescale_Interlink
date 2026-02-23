@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.7.2-green)
+![Status](https://img.shields.io/badge/status-v4.7.3-green)
 
 ---
 
@@ -60,7 +60,7 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
   - **PUR (Parallel Upload Run)**: Batch job pipeline with Pipeline Settings (workers, tar options), directory scanning
   - **File Browser**: Two-pane local/remote file browser with upload/download
   - **Transfers**: Real-time transfer queue with progress, cancel, retry, disk space error banner
-  - **Activity**: Live log display with filtering and search
+  - **Activity**: Live log display with filtering, search, and run history panel
 
 - **Modern UI**:
   - React-based responsive design
@@ -83,9 +83,24 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
   - Directory scanning with pattern matching
   - Real-time job status updates
 
+- **Run Session Persistence (v4.7.3)**:
+  - Active runs survive tab navigation and app restart
+  - PUR view modes: choice screen, monitoring dashboard, progress banner
+  - Job queue with auto-start on completion (retry/backoff)
+  - Active run indicator in footer status bar
+  - Run history in Activity tab with historical state file loading
+
 ---
 
 ## Recent Changes
+
+**v4.7.3 (February 22, 2026) - Run Session Persistence and Monitoring:**
+- **Tab navigation persistence**: PUR and Single Job runs no longer lose state when switching tabs. New `runStore` tracks active runs at the app level; `singleJobStore` persists Single Job form state.
+- **PUR view modes**: Choice screen on return during active run ("Monitor Active Run" / "Prepare New Run"), monitoring banner during new configuration, completed results view.
+- **Job queue**: Submit becomes "Queue Run"/"Queue Job" when a run is active. Queued jobs auto-start with retry/backoff after current run completes.
+- **App restart recovery**: Active run metadata persisted to localStorage; historical state files loaded from disk on restart.
+- **Activity tab run history**: Completed runs displayed in collapsible panel; "Load from disk" loads historical runs.
+- **Bug fixes**: Log field mapping (C5), cancellation handling (C1), path traversal sanitization (C8), event listener isolation (C9).
 
 **v4.7.2 (February 21, 2026) - Consistent Load/Save UI + Label Improvements:**
 - **PUR Load/Save parity**: PUR tab now has "Load Existing Base Job Settings" dropdown (CSV, JSON, SGE) and "Save As..." dropdown, matching SingleJob's pattern
@@ -222,15 +237,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.7.2-macos-arm64.tar.gz` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.7.2-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.7.2-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `rescale-interlink-v4.7.2-win_amd64.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.7.3-macos-arm64.tar.gz` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.7.3-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.7.3-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `rescale-interlink-v4.7.3-win_amd64.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Extract and move app to Applications
-tar -xzf rescale-interlink-v4.7.2-macos-arm64.tar.gz
+tar -xzf rescale-interlink-v4.7.3-macos-arm64.tar.gz
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -241,7 +256,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.7.2-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.7.3-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -254,7 +269,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.7.2-win_amd64.zip
+Expand-Archive rescale-interlink-v4.7.3-win_amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -564,7 +579,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.7.2                       |
+|                    Rescale Interlink v4.7.3                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -830,6 +845,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.7.2
+**Version**: 4.7.3
 **Status**: Production Ready
 **Last Updated**: February 21, 2026
