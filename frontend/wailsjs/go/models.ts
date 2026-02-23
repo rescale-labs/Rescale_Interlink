@@ -764,6 +764,7 @@ export namespace wailsapp {
 	export class PURRunOptionsDTO {
 	    extraInputFiles: string;
 	    decompressExtras: boolean;
+	    rmTarOnSuccess: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PURRunOptionsDTO(source);
@@ -773,6 +774,7 @@ export namespace wailsapp {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.extraInputFiles = source["extraInputFiles"];
 	        this.decompressExtras = source["decompressExtras"];
+	        this.rmTarOnSuccess = source["rmTarOnSuccess"];
 	    }
 	}
 	
@@ -1029,6 +1031,8 @@ export namespace wailsapp {
 	    dest: string;
 	    name: string;
 	    size: number;
+	    sourceLabel?: string;
+	    tags?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new TransferRequestDTO(source);
@@ -1041,6 +1045,8 @@ export namespace wailsapp {
 	        this.dest = source["dest"];
 	        this.name = source["name"];
 	        this.size = source["size"];
+	        this.sourceLabel = source["sourceLabel"];
+	        this.tags = source["tags"];
 	    }
 	}
 	export class TransferStatsDTO {
@@ -1077,6 +1083,7 @@ export namespace wailsapp {
 	    source: string;
 	    dest: string;
 	    size: number;
+	    sourceLabel?: string;
 	    progress: number;
 	    speed: number;
 	    error?: string;
@@ -1097,6 +1104,7 @@ export namespace wailsapp {
 	        this.source = source["source"];
 	        this.dest = source["dest"];
 	        this.size = source["size"];
+	        this.sourceLabel = source["sourceLabel"];
 	        this.progress = source["progress"];
 	        this.speed = source["speed"];
 	        this.error = source["error"];

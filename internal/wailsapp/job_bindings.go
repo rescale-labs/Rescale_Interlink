@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
@@ -20,6 +19,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/parser"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/services"
 )
 
 // emitScanProgress publishes a scan progress event for software/hardware catalog scanning.
@@ -496,6 +496,7 @@ func (a *App) GetAutomations() AutomationsResultDTO {
 type PURRunOptionsDTO struct {
 	ExtraInputFiles  string `json:"extraInputFiles"`  // Comma-separated paths and/or id:<fileId>
 	DecompressExtras bool   `json:"decompressExtras"` // Whether to decompress extra files on cluster
+	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`   // v4.7.4: Delete local tar files after successful upload
 }
 
 // StartBulkRunWithOptions starts a bulk job run with additional PUR options.
@@ -537,7 +538,11 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 
 	go func() {
 		defer a.engine.EndRun()
-		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, opts.ExtraInputFiles, opts.DecompressExtras)
+		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, core.RunOptions{
+			ExtraInputFiles:  opts.ExtraInputFiles,
+			DecompressExtras: opts.DecompressExtras,
+			RmTarOnSuccess:   opts.RmTarOnSuccess,
+		})
 		if err != nil && ctx.Err() == nil {
 			wailsLogger.Error().Err(err).Msg("Pipeline run failed")
 		}
@@ -678,16 +683,56 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	go func() {
 		defer a.engine.EndRun()
 
-		// v4.6.8: For localFiles mode, upload each file first, then create the job
+		// v4.7.4: For localFiles mode, expand folders and upload via TransferService.
+		// Fixes: (1) folders are now expanded to individual files, (2) uploads are visible
+		// in the Transfers tab, (3) failures are propagated to the GUI.
 		if input.InputMode == "localFiles" {
-			var fileIDs []string
+			// Expand folder paths to individual files
+			var expandedPaths []string
 			for _, localPath := range input.LocalFiles {
-				cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
-					LocalPath: localPath,
-					APIClient: a.engine.API(),
-				})
-				if err != nil {
-					wailsLogger.Error().Err(err).Str("file", localPath).Msg("File upload failed")
+				info, statErr := os.Stat(localPath)
+				if statErr != nil {
+					wailsLogger.Error().Err(statErr).Str("path", localPath).Msg("Cannot access file/folder")
+					a.failSingleJob(jobSpec.JobName, fmt.Sprintf("Cannot access %s: %v", localPath, statErr))
+					return
+				}
+				if info.IsDir() {
+					filepath.WalkDir(localPath, func(path string, d os.DirEntry, walkErr error) error {
+						if walkErr != nil {
+							return nil // skip errors
+						}
+						if !d.IsDir() {
+							expandedPaths = append(expandedPaths, path)
+						}
+						return nil
+					})
+				} else {
+					expandedPaths = append(expandedPaths, localPath)
+				}
+			}
+
+			if len(expandedPaths) == 0 {
+				a.failSingleJob(jobSpec.JobName, "No files found in the selected paths")
+				return
+			}
+
+			ts := a.engine.TransferService()
+			if ts == nil {
+				a.failSingleJob(jobSpec.JobName, "Transfer service not available")
+				return
+			}
+
+			var fileIDs []string
+			for _, filePath := range expandedPaths {
+				cloudFile, uploadErr := ts.UploadFileSync(ctx, services.TransferRequest{
+					Type:        services.TransferTypeUpload,
+					Source:      filePath,
+					Name:        filepath.Base(filePath),
+					SourceLabel: services.SourceLabelSingleJob,
+				}, services.UploadFileSyncParams{})
+				if uploadErr != nil {
+					wailsLogger.Error().Err(uploadErr).Str("file", filePath).Msg("File upload failed")
+					a.failSingleJob(jobSpec.JobName, fmt.Sprintf("Upload failed: %v", uploadErr))
 					return
 				}
 				fileIDs = append(fileIDs, cloudFile.ID)
@@ -702,6 +747,31 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	}()
 
 	return runID, nil
+}
+
+// failSingleJob reports a single-job failure to backend state and the event bus.
+// v4.7.4: Extracted for consistent error propagation in the localFiles upload path.
+func (a *App) failSingleJob(jobName string, errMsg string) {
+	// Update backend state for polling fallback
+	if sm := a.engine.GetState(); sm != nil {
+		sm.UpdateState(&models.JobState{
+			Index:        0,
+			JobName:      jobName,
+			UploadStatus: "failed",
+			SubmitStatus: "failed",
+			ErrorMessage: errMsg,
+		})
+	}
+
+	// Publish completion event so the GUI transitions out of "executing"
+	if a.engine.Events() != nil {
+		a.engine.Events().Publish(&events.CompleteEvent{
+			BaseEvent:   events.BaseEvent{EventType: events.EventComplete, Time: time.Now()},
+			TotalJobs:   1,
+			SuccessJobs: 0,
+			FailedJobs:  1,
+		})
+	}
 }
 
 // CancelRun cancels the current run.

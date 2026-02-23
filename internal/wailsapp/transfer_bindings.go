@@ -10,24 +10,27 @@ import (
 
 // TransferRequestDTO is the JSON-safe version of services.TransferRequest.
 type TransferRequestDTO struct {
-	Type   string `json:"type"`   // "upload" or "download"
-	Source string `json:"source"` // Local path (upload) or file ID (download)
-	Dest   string `json:"dest"`   // Folder ID (upload) or local path (download)
-	Name   string `json:"name"`   // Display name
-	Size   int64  `json:"size"`   // File size in bytes
+	Type        string   `json:"type"`                  // "upload" or "download"
+	Source      string   `json:"source"`                // Local path (upload) or file ID (download)
+	Dest        string   `json:"dest"`                  // Folder ID (upload) or local path (download)
+	Name        string   `json:"name"`                  // Display name
+	Size        int64    `json:"size"`                  // File size in bytes
+	SourceLabel string   `json:"sourceLabel,omitempty"` // v4.7.4: "PUR", "SingleJob", "FileBrowser"
+	Tags        []string `json:"tags,omitempty"`        // v4.7.4: Tags to apply after upload
 }
 
 // TransferTaskDTO is the JSON-safe version of services.TransferTask.
 type TransferTaskDTO struct {
 	ID          string  `json:"id"`
-	Type        string  `json:"type"`     // "upload" or "download"
-	State       string  `json:"state"`    // queued, initializing, active, completed, failed, cancelled
-	Name        string  `json:"name"`     // Display name
-	Source      string  `json:"source"`   // Source path or ID
-	Dest        string  `json:"dest"`     // Destination path or ID
-	Size        int64   `json:"size"`     // Total size in bytes
-	Progress    float64 `json:"progress"` // 0.0 to 1.0
-	Speed       float64 `json:"speed"`    // bytes/sec
+	Type        string  `json:"type"`                  // "upload" or "download"
+	State       string  `json:"state"`                 // queued, initializing, active, completed, failed, cancelled
+	Name        string  `json:"name"`                  // Display name
+	Source      string  `json:"source"`                // Source path or ID
+	Dest        string  `json:"dest"`                  // Destination path or ID
+	Size        int64   `json:"size"`                  // Total size in bytes
+	SourceLabel string  `json:"sourceLabel,omitempty"` // v4.7.4: "PUR", "SingleJob", "FileBrowser"
+	Progress    float64 `json:"progress"`              // 0.0 to 1.0
+	Speed       float64 `json:"speed"`                 // bytes/sec
 	Error       string  `json:"error,omitempty"`
 	CreatedAt   string  `json:"createdAt"`
 	StartedAt   string  `json:"startedAt,omitempty"`
@@ -62,11 +65,13 @@ func (a *App) StartTransfers(requests []TransferRequestDTO) error {
 	reqs := make([]services.TransferRequest, len(requests))
 	for i, r := range requests {
 		reqs[i] = services.TransferRequest{
-			Type:   services.TransferType(r.Type),
-			Source: r.Source,
-			Dest:   r.Dest,
-			Name:   r.Name,
-			Size:   r.Size,
+			Type:        services.TransferType(r.Type),
+			Source:      r.Source,
+			Dest:        r.Dest,
+			Name:        r.Name,
+			Size:        r.Size,
+			SourceLabel: r.SourceLabel, // v4.7.4
+			Tags:        r.Tags,        // v4.7.4
 		}
 	}
 
@@ -178,16 +183,17 @@ func (a *App) ClearCompletedTransfers() {
 // transferTaskToDTO converts a services.TransferTask to a DTO.
 func transferTaskToDTO(t services.TransferTask) TransferTaskDTO {
 	dto := TransferTaskDTO{
-		ID:        t.ID,
-		Type:      string(t.Type),
-		State:     string(t.State),
-		Name:      t.Name,
-		Source:    t.Source,
-		Dest:      t.Dest,
-		Size:      t.Size,
-		Progress:  t.Progress,
-		Speed:     t.Speed,
-		CreatedAt: t.CreatedAt.Format(time.RFC3339),
+		ID:          t.ID,
+		Type:        string(t.Type),
+		State:       string(t.State),
+		Name:        t.Name,
+		Source:      t.Source,
+		Dest:        t.Dest,
+		Size:        t.Size,
+		SourceLabel: t.SourceLabel, // v4.7.4
+		Progress:    t.Progress,
+		Speed:       t.Speed,
+		CreatedAt:   t.CreatedAt.Format(time.RFC3339),
 	}
 
 	if t.Error != nil {

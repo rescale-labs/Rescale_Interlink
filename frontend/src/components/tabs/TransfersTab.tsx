@@ -178,10 +178,19 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
         )}
       </div>
 
-      {/* Name and size */}
+      {/* Name, source label, and size */}
       <div className="flex-shrink-0 w-48">
-        <div className="text-sm font-medium truncate" title={task.name}>
-          {displayName}
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm font-medium truncate" title={task.name}>
+            {displayName}
+          </span>
+          {/* v4.7.4: Source label badge */}
+          {task.sourceLabel === 'PUR' && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 flex-shrink-0">PUR</span>
+          )}
+          {task.sourceLabel === 'SingleJob' && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 flex-shrink-0">Job</span>
+          )}
         </div>
         <div className="text-xs text-gray-500">
           {formatSize(task.size)}
@@ -217,9 +226,9 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
         </span>
       </div>
 
-      {/* Action button */}
+      {/* v4.7.4: Action buttons — only for FileBrowser tasks (pipeline manages its own retry/cancel) */}
       <div className="flex-shrink-0 w-20">
-        {isActive && (
+        {isActive && (!task.sourceLabel || task.sourceLabel === 'FileBrowser') && (
           <button
             onClick={() => onCancel(task.id)}
             className="flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30 rounded"
@@ -228,7 +237,7 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
             Cancel
           </button>
         )}
-        {canRetry && (
+        {canRetry && (!task.sourceLabel || task.sourceLabel === 'FileBrowser') && (
           <button
             onClick={() => onRetry(task.id)}
             className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"

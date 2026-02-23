@@ -1,5 +1,83 @@
 # Release Notes - Rescale Interlink
 
+## v4.7.4 - February 23, 2026
+
+### Unified Transfer Architecture
+
+All uploads — PUR pipeline, Single-Job local files, and File Browser — now route through TransferService. Previously, PUR and Single-Job uploads bypassed TransferService entirely, making them invisible in the Transfers tab.
+
+- **PUR uploads visible in Transfers tab**: `uploadWorker()` and `ResolveSharedFiles()` delegate to `TransferService.UploadFileSync()` via a new `SyncUploader` interface. CLI mode falls back to direct upload.
+- **Single-Job uploads visible in Transfers tab**: Local file uploads (including folder expansion via `filepath.WalkDir`) now use `TransferService.UploadFileSync()` with proper error propagation (state manager update + CompleteEvent on failure).
+- **Unified concurrency**: All uploads share TransferService's semaphore, preventing overloading the API regardless of entry point.
+- **Source label badges**: Transfers tab shows origin context — "PUR" (blue) and "Job" (green) badges next to task names. FileBrowser transfers show no badge (default).
+- **Action button gating**: Cancel/Retry buttons are hidden for PUR and SingleJob transfers (pipeline manages its own retry/cancel). "Cancel All" only cancels FileBrowser-owned transfers.
+
+### Bug Fixes
+
+- **Cancel actually stops transfers**: `executeUpload()`, `executeDownload()`, and retry paths now create a derived `context.WithCancel()` and register the cancel function via `queue.SetCancel()`. Previously, cancel only updated task state while the underlying transfer kept running.
+- **Cancel-state race fixed**: After cancellation, the `context.Canceled` error is detected and `queue.Fail()` is skipped, preventing the cancelled state from being overwritten with "failed".
+- **TransferHandle leak fixed**: All execution paths (`executeUpload`, `executeDownload`, retries, `UploadFileSync`) now call `defer transferHandle.Complete()` after allocation. Previously, transfer handles were allocated but never completed in the File Browser upload/download paths.
+- **Single-Job folder expansion**: "Add Folder" in Single-Job local files mode now correctly expands directory paths to individual files before uploading. Previously, directory paths were passed directly to `upload.UploadFile()` which rejected them.
+- **Tar deletion safety**: `safeRemoveTar()` replaces raw `os.Remove()` with 5 guardrails: canonical path resolution (reject symlinks), path must be under pipeline's tempDir, regular file only, must end in `.tar.gz` or `.tar`, and filename must match the FNV hash suffix pattern from `GenerateTarPath()`.
+- **PUR/SingleJob transfer speed display**: Pipeline and Single-Job uploads now show transfer speed and ETA in the Transfers tab. Previously speed was always 0 because the task's file size wasn't set (the adapter didn't pass it). `UploadFileSync()` now updates the task size from `os.Stat` before progress callbacks fire.
+
+### GUI Improvements
+
+- **Tarball options in PUR tab**: New "Delete local tar files after successful upload" checkbox under Extra Input Files. Explanatory text clarifies how PUR handles folders (tar.gz, upload, auto-decompress).
+- **Single-Job input mode labels**: Renamed for clarity — "Directory" to "Archive Directory", "Local Files" to "Select Files", "Remote Files" to "Rescale Library". Each mode includes descriptive helper text.
+- **Tags on File Browser upload**: Upload confirmation dialog now includes an optional tags input (comma-separated) with live tag chip preview. Tags are applied after each file/folder upload (non-fatal on failure).
+
+### Tags During Upload (CLI + GUI)
+
+- **CLI `files upload --tags`**: Comma-separated tags applied after each successful file upload. Tag failure is non-fatal (logged as warning).
+- **CLI `folders upload-dir --tags`**: Tags applied to all uploaded files after folder upload completes.
+- **GUI tags**: File Browser upload dialog accepts tags, passed through to `TransferService` which applies them via `apiClient.AddFileTags()` after upload.
+- **Tag normalization**: Centralized `NormalizeTags()` and `ParseCommaSeparated()` in `internal/util/tags/` — trims whitespace, deduplicates, removes empty strings.
+
+### Architecture
+
+- **`SyncUploader` interface** (`internal/pur/pipeline/pipeline.go`): Abstracts synchronous file upload for the pipeline. Implemented by `syncUploaderAdapter` in the engine layer, backed by `TransferService.UploadFileSync()`.
+- **`RunOptions` struct** (`internal/core/engine.go`): Replaces individual parameters on `RunFromSpecsWithOptions()` with a struct containing `ExtraInputFiles`, `DecompressExtras`, `RmTarOnSuccess`.
+- **`UploadFileSync()`** (`internal/services/transfer_service.go`): New synchronous upload method — registers task in queue (immediately visible), acquires semaphore, uploads with dual progress callback (queue + external), applies tags, returns `*models.CloudFile`.
+- **Source label constants** (`internal/services/types.go`): `SourceLabelPUR`, `SourceLabelSingleJob`, `SourceLabelFileBrowser` — typed constants to prevent drift.
+- **`TrackTransferWithLabel()`** (`internal/transfer/queue.go`): New method that sets `SourceLabel` on created tasks for origin tracking.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/services/transfer_service.go` | Add `UploadFileSync()`, `applyTags()`; fix all execution paths with `transferHandle.Complete()`, cancel context, cancel-state race |
+| `internal/services/types.go` | Source label constants; `SourceLabel`, `Tags` on `TransferRequest`/`TransferTask`; `UploadFileSyncParams` |
+| `internal/transfer/task.go` | `SourceLabel` field, `NewTransferTaskWithLabel()`, `Clone()` update |
+| `internal/transfer/queue.go` | `TrackTransferWithLabel()`, `UpdateSize()` methods |
+| `internal/pur/pipeline/pipeline.go` | `SyncUploader` interface, `SyncUploadParams`, `SetSyncUploader()`; delegate in `uploadWorker()` + `ResolveSharedFiles()`; `safeRemoveTar()` |
+| `internal/core/engine.go` | `RunOptions` struct, `syncUploaderAdapter`, wired into all 3 pipeline creation sites |
+| `internal/wailsapp/job_bindings.go` | `PURRunOptionsDTO.RmTarOnSuccess`; Single-Job folder expansion + `UploadFileSync()`; `failSingleJob()` helper |
+| `internal/wailsapp/transfer_bindings.go` | `SourceLabel`, `Tags` on DTOs; `StartTransfers` passes both through |
+| `internal/wailsapp/file_bindings.go` | `StartFolderUpload` accepts `uploadTags` parameter; `SourceLabel`/`Tags` on `TransferRequest` |
+| `internal/pathutil/resolve.go` | `HasFNVSuffix()` for tar deletion safety |
+| `internal/util/tags/tags.go` | **NEW** — `NormalizeTags()`, `ParseCommaSeparated()` |
+| `internal/util/tags/tags_test.go` | **NEW** — Tests for tag normalization |
+| `internal/cli/files.go` | `--tags` flag on `upload` command |
+| `internal/cli/upload_helper.go` | Thread `uploadTags` through `executeFileUploadWithDuplicateCheck` and `UploadFilesWithIDs` |
+| `internal/cli/folders.go` | `--tags` flag on `upload-dir` command |
+| `internal/cli/folder_upload_helper.go` | `UploadedFileIDs` on `UploadResult`; collect IDs in success paths |
+| `internal/cli/jobs.go` | Updated `UploadFilesWithIDs` callers for new `tags` parameter |
+| `frontend/src/stores/jobStore.ts` | `rmTarOnSuccess` in `PURRunOptions` |
+| `frontend/src/stores/transferStore.ts` | `cancelAllTransfers` filters by sourceLabel (FileBrowser only) |
+| `frontend/src/components/tabs/PURTab.tsx` | rmTarOnSuccess checkbox; PUR folder handling explanatory text |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Source label badges; cancel/retry button gating |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | Input mode label renames + helper text |
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Tags input in upload confirmation; `ConfirmDialog` children prop |
+| `frontend/wailsjs/go/models.ts` | `sourceLabel`, `tags`, `rmTarOnSuccess` on DTOs |
+| `frontend/wailsjs/go/wailsapp/App.js` | `StartFolderUpload` accepts 3rd arg |
+| `frontend/wailsjs/go/wailsapp/App.d.ts` | `StartFolderUpload` type updated |
+| `internal/version/version.go` | v4.7.4 |
+| `wails.json` | v4.7.4 |
+| `frontend/package.json` | v4.7.4 |
+
+---
+
 ## v4.7.3 - February 22, 2026
 
 ### Run Session Persistence and Monitoring

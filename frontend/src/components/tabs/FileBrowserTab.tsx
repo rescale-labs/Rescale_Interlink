@@ -18,6 +18,7 @@ interface ConfirmDialogProps {
   confirmText: string
   isDanger?: boolean
   warning?: string
+  children?: React.ReactNode
   onConfirm: () => void
   onCancel: () => void
 }
@@ -29,6 +30,7 @@ function ConfirmDialog({
   confirmText,
   isDanger = false,
   warning,
+  children,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -47,6 +49,7 @@ function ConfirmDialog({
             <span>{warning}</span>
           </div>
         )}
+        {children}
         <div className="flex justify-end gap-2">
           <button
             onClick={onCancel}
@@ -156,8 +159,12 @@ export function FileBrowserTab() {
       files: wailsapp.FileItemDTO[]
       folders: wailsapp.FileItemDTO[]
       destFolderId: string
+      tags: string[]
     }
   } | null>(null)
+
+  // v4.7.4: Upload tags
+  const [uploadTagsInput, setUploadTagsInput] = useState('')
 
   // Status message
   const [status, setStatus] = useState('Select files, then use Upload/Download')
@@ -225,10 +232,12 @@ export function FileBrowserTab() {
   }, [uploadState.allowed, getLocalSelectedItems, remote.breadcrumb])
 
   // v4.0.8: Helper function that performs the actual upload (called after merge confirmation if needed)
+  // v4.7.4: Added tags parameter for post-upload tagging
   const proceedWithUpload = useCallback(async (
     files: wailsapp.FileItemDTO[],
     folders: wailsapp.FileItemDTO[],
-    destFolderId: string
+    destFolderId: string,
+    tags: string[] = []
   ) => {
     setIsUploading(true)
     const totalItems = files.length + folders.length
@@ -244,7 +253,7 @@ export function FileBrowserTab() {
       for (const folder of folders) {
         setStatus(`Uploading folder: ${folder.name}...`)
         console.log(`[FileBrowserTab] Starting folder upload: ${folder.name} (id: ${folder.id}) to ${destFolderId}`)
-        const result = await App.StartFolderUpload(folder.id, destFolderId)
+        const result = await App.StartFolderUpload(folder.id, destFolderId, tags)
         console.log(`[FileBrowserTab] Folder upload result:`, result)
         if (result.error) {
           console.error(`Folder upload error for ${folder.name}:`, result.error)
@@ -270,6 +279,8 @@ export function FileBrowserTab() {
           dest: destFolderId,
           name: item.name,
           size: item.size ?? 0,
+          sourceLabel: 'FileBrowser',
+          tags: tags.length > 0 ? tags : undefined,
         }))
         await App.StartTransfers(requests)
       }
@@ -294,11 +305,19 @@ export function FileBrowserTab() {
     }
   }, [clearLocalSelection, switchToTab, refreshRemote])
 
+  // v4.7.4: Parse comma-separated tags from input
+  const parsedUploadTags = useMemo(() => {
+    if (!uploadTagsInput.trim()) return []
+    return uploadTagsInput.split(',').map(t => t.trim()).filter(Boolean)
+  }, [uploadTagsInput])
+
   // Confirm upload - v4.0.8: Now checks for existing folders first
   const confirmUpload = useCallback(async () => {
     if (!uploadConfirm) return
 
+    const tags = parsedUploadTags
     setUploadConfirm(null)
+    setUploadTagsInput('')
 
     // Separate files and folders
     const files = uploadConfirm.items.filter(item => !item.isFolder)
@@ -331,7 +350,7 @@ export function FileBrowserTab() {
       if (existingFolders.length > 0) {
         setMergeConfirm({
           existingFolders,
-          uploadData: { files, folders, destFolderId }
+          uploadData: { files, folders, destFolderId, tags }
         })
         setStatus('Waiting for merge confirmation...')
         return
@@ -339,15 +358,15 @@ export function FileBrowserTab() {
     }
 
     // No existing folders - proceed directly
-    await proceedWithUpload(files, folders, destFolderId)
-  }, [uploadConfirm, remote.mode, remote.myLibraryId, remote.currentFolderId, proceedWithUpload])
+    await proceedWithUpload(files, folders, destFolderId, tags)
+  }, [uploadConfirm, parsedUploadTags, remote.mode, remote.myLibraryId, remote.currentFolderId, proceedWithUpload])
 
   // v4.0.8: Confirm merge and proceed with upload
   const confirmMerge = useCallback(async () => {
     if (!mergeConfirm) return
-    const { files, folders, destFolderId } = mergeConfirm.uploadData
+    const { files, folders, destFolderId, tags } = mergeConfirm.uploadData
     setMergeConfirm(null)
-    await proceedWithUpload(files, folders, destFolderId)
+    await proceedWithUpload(files, folders, destFolderId, tags)
   }, [mergeConfirm, proceedWithUpload])
 
   // v4.0.8: Cancel merge (cancel upload)
@@ -606,8 +625,29 @@ export function FileBrowserTab() {
             : undefined
         }
         onConfirm={confirmUpload}
-        onCancel={() => setUploadConfirm(null)}
-      />
+        onCancel={() => { setUploadConfirm(null); setUploadTagsInput('') }}
+      >
+        {/* v4.7.4: Tags input */}
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-gray-500 mb-1">Tags (optional)</label>
+          <input
+            type="text"
+            value={uploadTagsInput}
+            onChange={(e) => setUploadTagsInput(e.target.value)}
+            placeholder="e.g. simulation, cfd, v2"
+            className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          {parsedUploadTags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {parsedUploadTags.map((tag, i) => (
+                <span key={i} className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </ConfirmDialog>
 
       <ConfirmDialog
         isOpen={downloadConfirm !== null}

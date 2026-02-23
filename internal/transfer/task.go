@@ -37,10 +37,11 @@ type TransferTask struct {
 	Type TaskType // Upload or download
 
 	// Source and destination
-	Name   string // Display name (filename)
-	Source string // Local path (upload) or remote file ID (download)
-	Dest   string // Remote folder ID (upload) or local path (download)
-	Size   int64  // File size in bytes
+	Name        string // Display name (filename)
+	Source      string // Local path (upload) or remote file ID (download)
+	Dest        string // Remote folder ID (upload) or local path (download)
+	Size        int64  // File size in bytes
+	SourceLabel string // v4.7.4: Origin context ("PUR", "SingleJob", "FileBrowser")
 
 	// State tracking
 	State    TaskState // Current state
@@ -81,6 +82,14 @@ func NewTransferTask(taskType TaskType, name, source, dest string, size int64) *
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+}
+
+// NewTransferTaskWithLabel creates a new transfer task with a source label.
+// v4.7.4: Added for transfer origin tracking (PUR, SingleJob, FileBrowser).
+func NewTransferTaskWithLabel(taskType TaskType, name, source, dest string, size int64, sourceLabel string) *TransferTask {
+	task := NewTransferTask(taskType, name, source, dest, size)
+	task.SourceLabel = sourceLabel
+	return task
 }
 
 // GetState returns the current state (thread-safe).
@@ -222,6 +231,7 @@ func (t *TransferTask) Clone() TransferTask {
 		Source:      t.Source,
 		Dest:        t.Dest,
 		Size:        t.Size,
+		SourceLabel: t.SourceLabel,
 		State:       t.State,
 		Progress:    t.Progress,
 		Speed:       t.Speed,

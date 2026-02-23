@@ -1010,6 +1010,12 @@ export function PURTab() {
 
           {/* Extra Input Files Section */}
           <div className="border-t pt-4 mt-4 mb-6">
+            {/* v4.7.4: Explanatory text about how PUR handles folders */}
+            <p className="text-xs text-gray-500 mb-3">
+              <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
+              automatically decompressed on the cluster. Extra input files below are shared files uploaded once and
+              attached to every job.
+            </p>
             <h4 className="text-sm font-medium text-gray-700 mb-2">
               Extra Input Files (shared across all jobs)
             </h4>
@@ -1054,6 +1060,21 @@ export function PURTab() {
               <p className="text-xs text-gray-400">
                 These files are uploaded once and attached to every job in the batch.
                 Use &quot;id:fileId&quot; for already-uploaded files.
+              </p>
+            </div>
+            {/* v4.7.4: Tar cleanup option */}
+            <div className="mt-3">
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={purRunOptions.rmTarOnSuccess}
+                  onChange={(e) => setPURRunOptions({ rmTarOnSuccess: e.target.checked })}
+                  className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
+                />
+                Delete local tar files after successful upload
+              </label>
+              <p className="text-xs text-gray-400 ml-6">
+                Saves disk space by removing intermediate tar archives once they are safely uploaded to Rescale.
               </p>
             </div>
           </div>

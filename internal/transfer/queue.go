@@ -110,6 +110,14 @@ func (q *Queue) TrackTransfer(name string, size int64, taskType TaskType, source
 	return task
 }
 
+// TrackTransferWithLabel registers a new transfer with a source label.
+// v4.7.4: Added for transfer origin tracking (PUR, SingleJob, FileBrowser).
+func (q *Queue) TrackTransferWithLabel(name string, size int64, taskType TaskType, source, dest, sourceLabel string) *TransferTask {
+	task := q.TrackTransfer(name, size, taskType, source, dest)
+	task.SourceLabel = sourceLabel
+	return task
+}
+
 // Activate marks a queued task as initializing when it acquires a semaphore slot.
 // Call this after acquiring a semaphore slot, BEFORE the actual transfer begins.
 // The task will transition to Active when StartTransfer() is called (i.e., when bytes start moving).
@@ -149,6 +157,16 @@ func (q *Queue) SetCancel(taskID string, cancelFn context.CancelFunc) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.cancelFuncs[taskID] = cancelFn
+}
+
+// UpdateSize updates a task's total size. Used when the size isn't known at
+// track time (e.g., pipeline uploads where the caller doesn't pass size).
+func (q *Queue) UpdateSize(taskID string, size int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if task, ok := q.tasksByID[taskID]; ok && task != nil {
+		task.Size = size
+	}
 }
 
 // UpdateProgress updates a task's progress.

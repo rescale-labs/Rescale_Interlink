@@ -979,7 +979,7 @@ func runCreateOnlyWorkflow(
 	var uploadedFileIDs []string
 	if len(inputFiles) > 0 {
 		logger.Info().Int("count", len(inputFiles)).Msg("Uploading input files")
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, apiClient, logger, false)
+		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
 			return fmt.Errorf("file upload failed: %w", err)
 		}
@@ -1027,7 +1027,7 @@ func runSubmitWorkflow(
 	var uploadedFileIDs []string
 	if len(inputFiles) > 0 {
 		logger.Info().Int("count", len(inputFiles)).Msg("Uploading input files")
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, apiClient, logger, false)
+		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
 			return fmt.Errorf("file upload failed: %w", err)
 		}
@@ -1088,7 +1088,7 @@ func runEndToEndJobWorkflow(
 		fmt.Println("\n[1/4] Uploading input files...")
 		fmt.Println(strings.Repeat("-", 70))
 
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, apiClient, logger, false)
+		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
 			return fmt.Errorf("file upload failed: %w", err)
 		}

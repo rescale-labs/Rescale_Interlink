@@ -29,6 +29,33 @@ import (
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
 
+// RunOptions groups PUR-specific pipeline options to avoid parameter creep.
+// v4.7.4: Introduced to replace individual parameters in RunFromSpecsWithOptions.
+type RunOptions struct {
+	ExtraInputFiles  string
+	DecompressExtras bool
+	RmTarOnSuccess   bool
+}
+
+// syncUploaderAdapter wraps TransferService to implement pipeline.SyncUploader.
+// v4.7.4: Bridges the pipeline package's interface to the services layer.
+type syncUploaderAdapter struct {
+	ts *services.TransferService
+}
+
+func (a *syncUploaderAdapter) UploadFileSync(ctx context.Context, params pipeline.SyncUploadParams) (*models.CloudFile, error) {
+	return a.ts.UploadFileSync(ctx, services.TransferRequest{
+		Type:        services.TransferTypeUpload,
+		Source:      params.LocalPath,
+		Dest:        params.FolderID,
+		Name:        params.Name,
+		SourceLabel: params.SourceLabel,
+		Tags:        params.Tags,
+	}, services.UploadFileSyncParams{
+		ExtraProgressCallback: params.ExtraProgressCallback,
+	})
+}
+
 // RunContext tracks metadata about an active pipeline run.
 // v4.0.0: Added for GUI job state synchronization.
 type RunContext struct {
@@ -884,6 +911,11 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 		return err
 	}
 
+	// v4.7.4: Wire sync uploader for TransferService integration
+	if e.transferService != nil {
+		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
+	}
+
 	// Set up callbacks to publish to event bus
 	pip.SetLogCallback(func(level, message, stage, jobName string) {
 		var eventLevel events.LogLevel
@@ -1029,6 +1061,11 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 		return err
 	}
 
+	// v4.7.4: Wire sync uploader for TransferService integration
+	if e.transferService != nil {
+		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
+	}
+
 	// Set up callbacks to publish to event bus (identical to Run method)
 	pip.SetLogCallback(func(level, message, stage, jobName string) {
 		var eventLevel events.LogLevel
@@ -1126,9 +1163,9 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 }
 
 // RunFromSpecsWithOptions executes the pipeline from an in-memory job list with
-// additional PUR options (extra input files, decompress flag). This is the GUI
-// entry point when extra input files are configured.
-func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobSpec, stateFile string, extraInputFiles string, decompressExtras bool) error {
+// additional PUR options (extra input files, decompress flag, tar cleanup).
+// v4.7.4: Changed from individual parameters to RunOptions struct.
+func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobSpec, stateFile string, opts RunOptions) error {
 	// Check if API key is configured before starting pipeline
 	e.mu.RLock()
 	hasAPIKey := e.config.APIKey != ""
@@ -1156,12 +1193,18 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	}
 
 	// Create pipeline directly from JobSpecs with shared state manager and extra input files
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, extraInputFiles, decompressExtras)
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, opts.ExtraInputFiles, opts.DecompressExtras)
 	if err != nil {
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
 		return err
 	}
+
+	// v4.7.4: Wire sync uploader and tar cleanup
+	if e.transferService != nil {
+		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
+	}
+	pip.SetRmTarOnSuccess(opts.RmTarOnSuccess)
 
 	// Set up callbacks to publish to event bus (identical to RunFromSpecs)
 	pip.SetLogCallback(func(level, message, stage, jobName string) {

@@ -146,7 +146,7 @@ export function StartDaemon():Promise<void>;
 
 export function StartFolderDownload(arg1:string,arg2:string,arg3:string):Promise<wailsapp.FolderDownloadResultDTO>;
 
-export function StartFolderUpload(arg1:string,arg2:string):Promise<wailsapp.FolderUploadResultDTO>;
+export function StartFolderUpload(arg1:string,arg2:string,arg3:Array<string>):Promise<wailsapp.FolderUploadResultDTO>;
 
 export function StartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
 

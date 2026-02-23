@@ -60,6 +60,7 @@ export interface SecondaryPattern {
 export interface PURRunOptions {
   extraInputFiles: string   // Comma-separated paths and/or id:fileId
   decompressExtras: boolean
+  rmTarOnSuccess: boolean   // v4.7.4: Delete local tar files after successful upload
 }
 
 // Scan options
@@ -272,6 +273,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
   purRunOptions: {
     extraInputFiles: '',
     decompressExtras: false,
+    rmTarOnSuccess: false, // v4.7.4
   },
 
   scanOptions: {

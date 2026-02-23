@@ -45,6 +45,7 @@ type UploadResult struct {
 	TotalBytes      int64
 	Errors          []UploadError
 	SymlinksSkipped []string
+	UploadedFileIDs []string // v4.7.4: Collected file IDs for post-upload tagging
 }
 
 // UploadError tracks failed uploads
@@ -610,6 +611,7 @@ func uploadDirectoryPipelined(
 					resultMutex.Lock()
 					result.FilesUploaded++
 					result.TotalBytes += fileInfo.Size()
+					result.UploadedFileIDs = append(result.UploadedFileIDs, cloudFile.ID) // v4.7.4
 					resultMutex.Unlock()
 				}(i, filePath, event.RemoteID)
 			}
@@ -979,6 +981,9 @@ func uploadFiles(
 			resultMutex.Lock()
 			result.FilesUploaded++
 			result.TotalBytes += fileInfo.Size()
+			if fileID != "" {
+				result.UploadedFileIDs = append(result.UploadedFileIDs, fileID) // v4.7.4
+			}
 			resultMutex.Unlock()
 		}(filePath)
 	}

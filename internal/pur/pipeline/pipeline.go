@@ -30,6 +30,26 @@ type AnalysisResolver interface {
 	GetAnalyses(ctx context.Context) ([]models.Analysis, error)
 }
 
+// SyncUploader abstracts synchronous file upload with transfer queue visibility.
+// v4.7.4: Implemented by TransferService adapter in the engine layer.
+// CLI mode passes nil (falls back to direct upload).
+type SyncUploader interface {
+	// UploadFileSync uploads a file synchronously and returns the cloud file result.
+	// The upload is tracked in the transfer queue (visible in Transfers tab).
+	UploadFileSync(ctx context.Context, params SyncUploadParams) (*models.CloudFile, error)
+}
+
+// SyncUploadParams contains parameters for SyncUploader.UploadFileSync.
+// v4.7.4: Uses primitive types to keep the pipeline testable without importing services.
+type SyncUploadParams struct {
+	LocalPath             string                 // Path to the local file
+	FolderID              string                 // Destination folder ID (empty = root)
+	Name                  string                 // Display name
+	SourceLabel           string                 // "PUR", "SingleJob", "FileBrowser"
+	ExtraProgressCallback func(progress float64) // Pipeline's own progress reporting
+	Tags                  []string               // Applied after upload (non-fatal on failure)
+}
+
 // ProgressCallback is called when job progress updates
 type ProgressCallback func(completed, total int, stage string, jobName string)
 
@@ -96,6 +116,11 @@ type Pipeline struct {
 	onProgress    ProgressCallback
 	onLog         LogCallback
 	onStateChange StateChangeCallback
+
+	// v4.7.4: Optional sync uploader for TransferService integration.
+	// When non-nil, uploadWorker and ResolveSharedFiles delegate uploads here
+	// instead of calling upload.UploadFile() directly.
+	syncUploader SyncUploader
 }
 
 type workItem struct {
@@ -249,6 +274,12 @@ func (p *Pipeline) SetRmTarOnSuccess(rm bool) {
 	p.rmTarOnSuccess = rm
 }
 
+// SetSyncUploader sets the sync uploader for TransferService integration.
+// v4.7.4: When set, uploads are routed through TransferService for queue visibility.
+func (p *Pipeline) SetSyncUploader(u SyncUploader) {
+	p.syncUploader = u
+}
+
 // logf logs a message, using callback if available.
 // When a callback is set (GUI mode via Engine), the callback path handles
 // both log.Printf and EventBus emission, so we skip direct logging to
@@ -376,11 +407,23 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 			}
 
 			p.logf("INFO", "pipeline", "", "Uploading shared file: %s", absPath)
-			cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
-				LocalPath:    absPath,
-				APIClient:    p.apiClient,
-				OutputWriter: io.Discard,
-			})
+
+			// v4.7.4: Delegate to SyncUploader if available (TransferService integration)
+			var cloudFile *models.CloudFile
+			if p.syncUploader != nil {
+				cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
+					LocalPath:   absPath,
+					Name:        filepath.Base(absPath),
+					SourceLabel: "PUR",
+				})
+			} else {
+				// CLI fallback: direct upload
+				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
+					LocalPath:    absPath,
+					APIClient:    p.apiClient,
+					OutputWriter: io.Discard,
+				})
+			}
 			if err != nil {
 				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
 			}
@@ -741,14 +784,26 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 					p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", progress)
 				}
 
-				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
-					LocalPath:        item.state.TarPath,
-					FolderID:         "",
-					APIClient:        p.apiClient,
-					ProgressCallback: progressCallback,
-					TransferHandle:   transferHandle,
-					OutputWriter:     io.Discard,
-				})
+				// v4.7.4: Delegate to SyncUploader if available (TransferService integration).
+				// Each retry attempt creates a new transfer task for auditability.
+				if p.syncUploader != nil {
+					cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
+						LocalPath:             item.state.TarPath,
+						Name:                  filepath.Base(item.state.TarPath),
+						SourceLabel:           "PUR",
+						ExtraProgressCallback: progressCallback,
+					})
+				} else {
+					// CLI fallback: direct upload
+					cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
+						LocalPath:        item.state.TarPath,
+						FolderID:         "",
+						APIClient:        p.apiClient,
+						ProgressCallback: progressCallback,
+						TransferHandle:   transferHandle,
+						OutputWriter:     io.Discard,
+					})
+				}
 
 				if err == nil {
 					break
@@ -800,12 +855,10 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 			p.reportStateChange(item.state.JobName, "upload", "completed", "", "", 1.0)
 			p.logf("INFO", "upload", item.state.JobName, "Success: File ID %s", cloudFile.ID)
 
-			// Clean up tar file if requested
+			// v4.7.4: Clean up tar file if requested, with safety guardrails
 			if p.rmTarOnSuccess && item.state.TarPath != "" {
-				if err := os.Remove(item.state.TarPath); err != nil {
-					p.logf("WARN", "upload", item.state.JobName, "Failed to remove tar file %s: %v", item.state.TarPath, err)
-				} else {
-					p.logf("INFO", "upload", item.state.JobName, "Removed tar file: %s", item.state.TarPath)
+				if err := p.safeRemoveTar(item.state.TarPath, item.state.JobName); err != nil {
+					p.logf("WARN", "upload", item.state.JobName, "Tar cleanup skipped: %v", err)
 				}
 			}
 
@@ -830,6 +883,53 @@ shutdown:
 		}()
 	}
 	p.mu.Unlock()
+}
+
+// safeRemoveTar safely deletes a tar file with multiple guardrails.
+// v4.7.4: Prevents accidental deletion of non-tar files or files outside tempDir.
+func (p *Pipeline) safeRemoveTar(tarPath, jobName string) error {
+	// 1. Canonical path: resolve symlinks, get absolute path
+	canonical, err := filepath.EvalSymlinks(tarPath)
+	if err != nil {
+		return fmt.Errorf("cannot resolve path %s: %w", tarPath, err)
+	}
+	canonical, err = filepath.Abs(canonical)
+	if err != nil {
+		return fmt.Errorf("cannot get absolute path for %s: %w", tarPath, err)
+	}
+
+	// 2. Must be under the pipeline's tempDir
+	tempDirAbs, _ := filepath.Abs(p.tempDir)
+	if !strings.HasPrefix(canonical, tempDirAbs+string(filepath.Separator)) && canonical != tempDirAbs {
+		return fmt.Errorf("path %s is not under tempDir %s", canonical, tempDirAbs)
+	}
+
+	// 3. Must be a regular file (not directory, symlink, etc.)
+	info, err := os.Lstat(tarPath) // Lstat to detect symlinks
+	if err != nil {
+		return fmt.Errorf("cannot stat %s: %w", tarPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s (mode=%s)", tarPath, info.Mode())
+	}
+
+	// 4. Expected extension
+	base := filepath.Base(canonical)
+	if !strings.HasSuffix(base, ".tar.gz") && !strings.HasSuffix(base, ".tar") {
+		return fmt.Errorf("unexpected extension for tar file: %s", base)
+	}
+
+	// 5. Filename must contain FNV hash suffix (created by GenerateTarPath)
+	// Pattern: name_XXXXXXXX.tar.gz where X is hex
+	if !pathutil.HasFNVSuffix(base) {
+		return fmt.Errorf("filename lacks FNV hash suffix (not created by Interlink): %s", base)
+	}
+
+	if err := os.Remove(tarPath); err != nil {
+		return fmt.Errorf("failed to remove %s: %w", tarPath, err)
+	}
+	p.logf("INFO", "upload", jobName, "Removed tar file: %s", tarPath)
+	return nil
 }
 
 // jobWorker processes job creation and submission

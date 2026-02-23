@@ -11,6 +11,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/util/filter"
+	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
 // newFilesCmd creates the 'files' command group.
@@ -41,6 +42,7 @@ func newFilesUploadCmd() *cobra.Command {
 	var allowDuplicates bool
 	var dryRun bool
 	var preEncrypt bool
+	var tagsFlag string // v4.7.4: Comma-separated tags to apply after upload
 
 	cmd := &cobra.Command{
 		Use:   "upload <file> [file...]",
@@ -140,8 +142,14 @@ Examples:
 				return err
 			}
 
+			// v4.7.4: Parse tags
+			var uploadTags []string
+			if tagsFlag != "" {
+				uploadTags = tags.ParseCommaSeparated(tagsFlag)
+			}
+
 			// Use helper function with duplicate mode
-			return executeFileUploadWithDuplicateCheck(GetContext(), args, folderID, maxConcurrent, duplicateMode, dryRun, preEncrypt, apiClient, logger)
+			return executeFileUploadWithDuplicateCheck(GetContext(), args, folderID, maxConcurrent, duplicateMode, dryRun, preEncrypt, uploadTags, apiClient, logger)
 		},
 	}
 
@@ -154,6 +162,7 @@ Examples:
 	cmd.Flags().BoolVar(&allowDuplicates, "allow-duplicates", false, "Check but upload anyway (explicitly allows duplicates)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview what would be uploaded without actually uploading")
 	cmd.Flags().BoolVar(&preEncrypt, "pre-encrypt", false, "Use legacy pre-encryption (for compatibility with older Rescale clients)")
+	cmd.Flags().StringVar(&tagsFlag, "tags", "", "Comma-separated tags to apply after upload (e.g., \"simulation,cfd,v2\")")
 
 	return cmd
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
 // newFoldersCmd creates the 'folders' command group.
@@ -186,6 +187,7 @@ func newFoldersUploadDirCmd() *cobra.Command {
 	var skipFolderConflicts bool
 	var mergeFolderConflicts bool
 	var checkConflicts bool
+	var tagsFlag string // v4.7.4: Comma-separated tags to apply after each file upload
 
 	cmd := &cobra.Command{
 		Use:   "upload-dir <directory>",
@@ -448,6 +450,23 @@ Examples:
 
 			fmt.Println() // Add blank line after progress bars
 
+			// v4.7.4: Apply tags to uploaded files (non-fatal)
+			if uploadTags := tags.ParseCommaSeparated(tagsFlag); len(uploadTags) > 0 && len(result.UploadedFileIDs) > 0 {
+				fmt.Printf("🏷  Applying tags to %d file(s)...\n", len(result.UploadedFileIDs))
+				tagFailed := 0
+				for _, fileID := range result.UploadedFileIDs {
+					if err := apiClient.AddFileTags(ctx, fileID, uploadTags); err != nil {
+						tagFailed++
+						logger.Warn().Err(err).Str("fileID", fileID).Msg("Failed to apply tags (non-fatal)")
+					}
+				}
+				if tagFailed > 0 {
+					fmt.Printf("⚠️  Tagging failed for %d of %d files\n", tagFailed, len(result.UploadedFileIDs))
+				} else {
+					fmt.Printf("✓ Tags applied to %d file(s)\n", len(result.UploadedFileIDs))
+				}
+			}
+
 			// Save symlinks list to result
 			result.SymlinksSkipped = symlinks
 			result.FoldersCreated = foldersCreated
@@ -540,6 +559,7 @@ Examples:
 	cmd.Flags().BoolVarP(&mergeFolderConflicts, "merge-folder-conflicts", "m", false, "Merge into existing folders (skip existing files)")
 	cmd.Flags().BoolVar(&skipExisting, "skip-existing", false, "DEPRECATED: Use --merge-folder-conflicts instead")
 	cmd.Flags().BoolVar(&checkConflicts, "check-conflicts", false, "Check for existing files before upload (slower but shows conflicts upfront)")
+	cmd.Flags().StringVar(&tagsFlag, "tags", "", "Comma-separated tags to apply after each file upload (e.g., \"simulation,cfd\")")
 	cmd.Flags().MarkHidden("skip-existing") // Hide deprecated flag
 
 	return cmd

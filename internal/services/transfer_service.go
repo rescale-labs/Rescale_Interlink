@@ -4,6 +4,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -18,8 +19,10 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
 // TransferService handles upload and download orchestration.
@@ -222,9 +225,20 @@ func (ts *TransferService) executeUpload(ctx context.Context, req TransferReques
 		fileName = filepath.Base(req.Source)
 	}
 
+	// v4.7.4: Track with source label for Transfers tab badges
+	sourceLabel := req.SourceLabel
+	if sourceLabel == "" {
+		sourceLabel = SourceLabelFileBrowser
+	}
+
 	// Track in queue (starts as Queued)
-	task := ts.queue.TrackTransfer(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest)
+	task := ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
 	taskID := task.ID
+
+	// v4.7.4: Create derived context for cancel support
+	uploadCtx, uploadCancel := context.WithCancel(ctx)
+	defer uploadCancel()
+	ts.queue.SetCancel(taskID, uploadCancel)
 
 	// Panic recovery
 	defer func() {
@@ -241,8 +255,11 @@ func (ts *TransferService) executeUpload(ctx context.Context, req TransferReques
 	select {
 	case ts.semaphore <- struct{}{}:
 		// Acquired slot
-	case <-ctx.Done():
-		ts.queue.Fail(taskID, ctx.Err())
+	case <-uploadCtx.Done():
+		if errors.Is(uploadCtx.Err(), context.Canceled) {
+			return // Cancelled via queue — state already set
+		}
+		ts.queue.Fail(taskID, uploadCtx.Err())
 		return
 	}
 
@@ -260,8 +277,11 @@ func (ts *TransferService) executeUpload(ctx context.Context, req TransferReques
 
 	// Check cancellation
 	select {
-	case <-ctx.Done():
-		ts.queue.Fail(taskID, ctx.Err())
+	case <-uploadCtx.Done():
+		if errors.Is(uploadCtx.Err(), context.Canceled) {
+			return
+		}
+		ts.queue.Fail(taskID, uploadCtx.Err())
 		return
 	default:
 	}
@@ -275,9 +295,10 @@ func (ts *TransferService) executeUpload(ctx context.Context, req TransferReques
 
 	// Allocate transfer handle
 	transferHandle := ts.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+	defer transferHandle.Complete() // v4.7.4: Fix resource/thread leak
 
 	// Execute upload with progress callback
-	_, err = upload.UploadFile(ctx, upload.UploadParams{
+	cloudFile, err := upload.UploadFile(uploadCtx, upload.UploadParams{
 		LocalPath: req.Source,
 		FolderID:  req.Dest,
 		APIClient: apiClient,
@@ -289,11 +310,143 @@ func (ts *TransferService) executeUpload(ctx context.Context, req TransferReques
 	})
 
 	if err != nil {
+		// v4.7.4: Don't overwrite cancelled state with failed
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		ts.queue.Fail(taskID, err)
 		ts.logger.Error().Err(err).Str("path", req.Source).Msg("Upload failed")
+		return
+	}
+
+	// v4.7.4: Apply tags after successful upload (non-fatal)
+	ts.applyTags(ctx, apiClient, cloudFile.ID, req.Tags, fileName)
+
+	ts.queue.Complete(taskID)
+	ts.logger.Info().Str("path", req.Source).Msg("File uploaded")
+}
+
+// UploadFileSync uploads a file synchronously with transfer queue visibility.
+// v4.7.4: Added for PUR pipeline and Single-Job integration. Unlike the async
+// executeUpload(), this blocks until the upload completes and returns the result.
+//
+// Transfer handle ownership:
+//   - If params.TransferHandle is provided: used for upload, NOT completed (caller owns)
+//   - If params.TransferHandle is nil: allocated internally and completed after upload
+func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferRequest, params UploadFileSyncParams) (*models.CloudFile, error) {
+	ts.mu.RLock()
+	apiClient := ts.apiClient
+	ts.mu.RUnlock()
+
+	if apiClient == nil {
+		return nil, fmt.Errorf("API client not configured")
+	}
+
+	fileName := req.Name
+	if fileName == "" {
+		fileName = filepath.Base(req.Source)
+	}
+
+	sourceLabel := req.SourceLabel
+	if sourceLabel == "" {
+		sourceLabel = SourceLabelFileBrowser
+	}
+
+	// Track in queue (immediately visible in Transfers tab)
+	task := ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
+	taskID := task.ID
+
+	// Create derived context for cancel support
+	uploadCtx, uploadCancel := context.WithCancel(ctx)
+	defer uploadCancel()
+	ts.queue.SetCancel(taskID, uploadCancel)
+
+	// Acquire semaphore slot (unified concurrency with File Browser)
+	select {
+	case ts.semaphore <- struct{}{}:
+	case <-uploadCtx.Done():
+		if errors.Is(uploadCtx.Err(), context.Canceled) {
+			return nil, uploadCtx.Err()
+		}
+		ts.queue.Fail(taskID, uploadCtx.Err())
+		return nil, uploadCtx.Err()
+	}
+	atomic.AddInt32(&ts.activeSlots, 1)
+
+	defer func() {
+		<-ts.semaphore
+		atomic.AddInt32(&ts.activeSlots, -1)
+	}()
+
+	ts.queue.Activate(taskID)
+
+	// Get file info for transfer handle allocation
+	fileInfo, err := os.Stat(req.Source)
+	if err != nil {
+		ts.queue.Fail(taskID, fmt.Errorf("failed to stat file: %w", err))
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	// Update task size from actual file (caller may not have passed it)
+	if fileInfo.Size() > 0 {
+		ts.queue.UpdateSize(taskID, fileInfo.Size())
+	}
+
+	// Transfer handle: allocate internally (UploadFile requires *transfer.Transfer).
+	// If the caller also has a handle, it manages its own lifecycle independently.
+	transferHandle := ts.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+	defer transferHandle.Complete()
+
+	// Dual progress callback: queue + external
+	progressCallback := func(progress float64) {
+		ts.queue.StartTransfer(taskID) // Idempotent
+		ts.queue.UpdateProgress(taskID, progress)
+		if params.ExtraProgressCallback != nil {
+			params.ExtraProgressCallback(progress)
+		}
+	}
+
+	cloudFile, err := upload.UploadFile(uploadCtx, upload.UploadParams{
+		LocalPath:        req.Source,
+		FolderID:         req.Dest,
+		APIClient:        apiClient,
+		ProgressCallback: progressCallback,
+		TransferHandle:   transferHandle,
+	})
+
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+		ts.queue.Fail(taskID, err)
+		return nil, err
+	}
+
+	// Apply tags after successful upload (non-fatal)
+	ts.applyTags(ctx, apiClient, cloudFile.ID, req.Tags, fileName)
+
+	ts.queue.Complete(taskID)
+	return cloudFile, nil
+}
+
+// applyTags applies tags to a file after upload. Failures are logged as warnings.
+// v4.7.4: Centralized tag application for all upload paths.
+func (ts *TransferService) applyTags(ctx context.Context, apiClient *api.Client, fileID string, rawTags []string, fileName string) {
+	normalized := tags.NormalizeTags(rawTags)
+	if len(normalized) == 0 {
+		return
+	}
+	if err := apiClient.AddFileTags(ctx, fileID, normalized); err != nil {
+		ts.logger.Warn().Err(err).
+			Str("file", fileName).
+			Str("fileID", fileID).
+			Strs("tags", normalized).
+			Msg("Failed to apply tags after upload (non-fatal)")
 	} else {
-		ts.queue.Complete(taskID)
-		ts.logger.Info().Str("path", req.Source).Msg("File uploaded")
+		ts.logger.Info().
+			Str("file", fileName).
+			Strs("tags", normalized).
+			Msg("Tags applied after upload")
 	}
 }
 
@@ -308,9 +461,20 @@ func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequ
 			Msg("Download: req.Name is empty, using file ID as filename")
 	}
 
+	// v4.7.4: Track with source label
+	sourceLabel := req.SourceLabel
+	if sourceLabel == "" {
+		sourceLabel = SourceLabelFileBrowser
+	}
+
 	// Track in queue (starts as Queued)
-	task := ts.queue.TrackTransfer(fileName, req.Size, transfer.TaskTypeDownload, req.Source, req.Dest)
+	task := ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeDownload, req.Source, req.Dest, sourceLabel)
 	taskID := task.ID
+
+	// v4.7.4: Create derived context for cancel support
+	dlCtx, dlCancel := context.WithCancel(ctx)
+	defer dlCancel()
+	ts.queue.SetCancel(taskID, dlCancel)
 
 	// Panic recovery
 	defer func() {
@@ -327,8 +491,11 @@ func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequ
 	select {
 	case ts.semaphore <- struct{}{}:
 		// Acquired slot
-	case <-ctx.Done():
-		ts.queue.Fail(taskID, ctx.Err())
+	case <-dlCtx.Done():
+		if errors.Is(dlCtx.Err(), context.Canceled) {
+			return
+		}
+		ts.queue.Fail(taskID, dlCtx.Err())
 		return
 	}
 
@@ -346,14 +513,18 @@ func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequ
 
 	// Check cancellation
 	select {
-	case <-ctx.Done():
-		ts.queue.Fail(taskID, ctx.Err())
+	case <-dlCtx.Done():
+		if errors.Is(dlCtx.Err(), context.Canceled) {
+			return
+		}
+		ts.queue.Fail(taskID, dlCtx.Err())
 		return
 	default:
 	}
 
 	// Allocate transfer handle
 	transferHandle := ts.transferMgr.AllocateTransfer(req.Size, 1)
+	defer transferHandle.Complete() // v4.7.4: Fix resource/thread leak
 
 	// Ensure dest is a file path, not a directory
 	// If dest is a directory, append the filename
@@ -367,7 +538,7 @@ func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequ
 	}
 
 	// Execute download with progress callback
-	err := download.DownloadFile(ctx, download.DownloadParams{
+	err := download.DownloadFile(dlCtx, download.DownloadParams{
 		FileID:    req.Source, // For downloads, Source is the file ID
 		LocalPath: localPath,  // For downloads, the full local file path
 		APIClient: apiClient,
@@ -379,6 +550,10 @@ func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequ
 	})
 
 	if err != nil {
+		// v4.7.4: Don't overwrite cancelled state with failed
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		ts.queue.Fail(taskID, err)
 		ts.logger.Error().Err(err).Str("file_id", req.Source).Str("name", fileName).Msg("Download failed")
 	} else {
@@ -426,6 +601,11 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
 	fileName := req.Name
 
+	// v4.7.4: Create derived context for cancel support
+	uploadCtx, uploadCancel := context.WithCancel(ctx)
+	defer uploadCancel()
+	ts.queue.SetCancel(taskID, uploadCancel)
+
 	// Panic recovery
 	defer func() {
 		if r := recover(); r != nil {
@@ -437,8 +617,11 @@ func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferR
 	// Wait for semaphore slot
 	select {
 	case ts.semaphore <- struct{}{}:
-	case <-ctx.Done():
-		ts.queue.Fail(taskID, ctx.Err())
+	case <-uploadCtx.Done():
+		if errors.Is(uploadCtx.Err(), context.Canceled) {
+			return
+		}
+		ts.queue.Fail(taskID, uploadCtx.Err())
 		return
 	}
 	atomic.AddInt32(&ts.activeSlots, 1)
@@ -457,8 +640,9 @@ func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferR
 	}
 
 	transferHandle := ts.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+	defer transferHandle.Complete() // v4.7.4: Fix resource/thread leak
 
-	_, err = upload.UploadFile(ctx, upload.UploadParams{
+	_, err = upload.UploadFile(uploadCtx, upload.UploadParams{
 		LocalPath: req.Source,
 		FolderID:  req.Dest,
 		APIClient: apiClient,
@@ -470,6 +654,10 @@ func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferR
 	})
 
 	if err != nil {
+		// v4.7.4: Don't overwrite cancelled state with failed
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		ts.queue.Fail(taskID, err)
 	} else {
 		ts.queue.Complete(taskID)
@@ -487,6 +675,11 @@ func (ts *TransferService) executeDownloadRetry(ctx context.Context, req Transfe
 			Msg("Retry: req.Name is empty, using file ID as filename")
 	}
 
+	// v4.7.4: Create derived context for cancel support
+	dlCtx, dlCancel := context.WithCancel(ctx)
+	defer dlCancel()
+	ts.queue.SetCancel(taskID, dlCancel)
+
 	// Panic recovery
 	defer func() {
 		if r := recover(); r != nil {
@@ -498,8 +691,11 @@ func (ts *TransferService) executeDownloadRetry(ctx context.Context, req Transfe
 	// Wait for semaphore slot
 	select {
 	case ts.semaphore <- struct{}{}:
-	case <-ctx.Done():
-		ts.queue.Fail(taskID, ctx.Err())
+	case <-dlCtx.Done():
+		if errors.Is(dlCtx.Err(), context.Canceled) {
+			return
+		}
+		ts.queue.Fail(taskID, dlCtx.Err())
 		return
 	}
 	atomic.AddInt32(&ts.activeSlots, 1)
@@ -512,11 +708,9 @@ func (ts *TransferService) executeDownloadRetry(ctx context.Context, req Transfe
 	ts.queue.Activate(taskID)
 
 	transferHandle := ts.transferMgr.AllocateTransfer(req.Size, 1)
+	defer transferHandle.Complete() // v4.7.4: Fix resource/thread leak
 
 	// v4.5.9: Normalize dest-is-directory in retry path (matching first-attempt path).
-	// Without this, retrying a download to a directory dest would create a file named
-	// after the directory itself instead of appending the filename.
-
 	localPath := req.Dest
 	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
 		localPath = filepath.Join(localPath, fileName)
@@ -526,7 +720,7 @@ func (ts *TransferService) executeDownloadRetry(ctx context.Context, req Transfe
 			Msg("Retry: Dest was a directory, appending filename")
 	}
 
-	err := download.DownloadFile(ctx, download.DownloadParams{
+	err := download.DownloadFile(dlCtx, download.DownloadParams{
 		FileID:    req.Source,
 		LocalPath: localPath,
 		APIClient: apiClient,
@@ -538,6 +732,10 @@ func (ts *TransferService) executeDownloadRetry(ctx context.Context, req Transfe
 	})
 
 	if err != nil {
+		// v4.7.4: Don't overwrite cancelled state with failed
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		ts.queue.Fail(taskID, err)
 	} else {
 		ts.queue.Complete(taskID)
@@ -588,6 +786,7 @@ func (ts *TransferService) GetTasks() []TransferTask {
 			Source:      qt.Source,
 			Dest:        qt.Dest,
 			Size:        qt.Size,
+			SourceLabel: qt.SourceLabel, // v4.7.4
 			Progress:    qt.Progress,
 			Speed:       qt.Speed,
 			Error:       qt.Error,

@@ -625,8 +625,9 @@ func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID strin
 // v4.0.0: Implements folder upload in GUI by creating folder structure and
 // queueing files to the TransferService for upload with progress events.
 // v4.0.8: Added enumeration events for real-time scanning progress in Transfers tab.
+// v4.7.4: Added tags parameter for post-upload tagging.
 // Uses merge mode (reuse existing folders) and queues all files for upload.
-func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUploadResultDTO {
+func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTags []string) FolderUploadResultDTO {
 	displayName := filepath.Base(localPath)
 	a.logInfo("folder-upload", fmt.Sprintf("Starting folder upload: %s", displayName))
 
@@ -805,11 +806,13 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 		}
 
 		transferRequests = append(transferRequests, services.TransferRequest{
-			Type:   services.TransferTypeUpload,
-			Source: filePath,
-			Dest:   remoteFolderID,
-			Name:   filepath.Base(filePath),
-			Size:   info.Size(),
+			Type:        services.TransferTypeUpload,
+			Source:      filePath,
+			Dest:        remoteFolderID,
+			Name:        filepath.Base(filePath),
+			Size:        info.Size(),
+			SourceLabel: services.SourceLabelFileBrowser,
+			Tags:        uploadTags, // v4.7.4
 		})
 		totalBytes += info.Size()
 	}

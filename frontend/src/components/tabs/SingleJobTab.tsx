@@ -588,8 +588,8 @@ export function SingleJobTab() {
                 )}
               >
                 <FolderIcon className="w-8 h-8 text-blue-500" />
-                <span className="font-medium">Directory</span>
-                <span className="text-xs text-gray-500">Tar and upload a folder</span>
+                <span className="font-medium">Archive Directory</span>
+                <span className="text-xs text-gray-500">Tar and upload a folder as a single archive</span>
               </button>
               <button
                 onClick={() => handleInputModeChange('localFiles')}
@@ -601,8 +601,8 @@ export function SingleJobTab() {
                 )}
               >
                 <DocumentIcon className="w-8 h-8 text-green-500" />
-                <span className="font-medium">Local Files</span>
-                <span className="text-xs text-gray-500">Upload individual files</span>
+                <span className="font-medium">Select Files</span>
+                <span className="text-xs text-gray-500">Upload files and folder contents individually</span>
               </button>
               <button
                 onClick={() => handleInputModeChange('remoteFiles')}
@@ -614,8 +614,8 @@ export function SingleJobTab() {
                 )}
               >
                 <CloudIcon className="w-8 h-8 text-purple-500" />
-                <span className="font-medium">Remote Files</span>
-                <span className="text-xs text-gray-500">Use existing Rescale files</span>
+                <span className="font-medium">Rescale Library</span>
+                <span className="text-xs text-gray-500">Use files already in your Rescale library</span>
               </button>
             </div>
           </div>
@@ -641,7 +641,7 @@ export function SingleJobTab() {
                   </button>
                 </div>
                 <p className="mt-1 text-xs text-gray-500">
-                  This directory will be tar'd and uploaded as job input
+                  This directory will be archived (tar.gz), uploaded, and automatically decompressed on the Rescale cluster.
                 </p>
 
                 {/* v4.7.1: Tar Options for directory mode */}
@@ -799,14 +799,14 @@ export function SingleJobTab() {
                   </div>
                 )}
                 <p className="mt-2 text-xs text-gray-500">
-                  Add files or folders to upload as job inputs
+                  Files and folder contents are uploaded individually as job inputs (no archiving).
                 </p>
               </div>
             )}
 
             {inputMode === 'remoteFiles' && (
               <div>
-                <label className="block text-sm font-medium mb-2">Remote Files</label>
+                <label className="block text-sm font-medium mb-2">Rescale Library</label>
                 <button
                   onClick={() => sjStore.setShowRemoteFilePicker(true)}
                   className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
@@ -835,7 +835,7 @@ export function SingleJobTab() {
                   </div>
                 )}
                 <p className="mt-2 text-xs text-gray-500">
-                  Browse and select files from your Rescale library
+                  Browse and select files already uploaded to your Rescale account.
                 </p>
               </div>
             )}

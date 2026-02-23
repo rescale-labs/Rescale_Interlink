@@ -79,11 +79,12 @@ func executeFileUpload(
 	logger *logging.Logger,
 ) error {
 	// Use the unified upload function which handles concurrency
-	_, err := UploadFilesWithIDs(ctx, filePatterns, folderID, maxConcurrent, preEncrypt, apiClient, logger, false)
+	_, err := UploadFilesWithIDs(ctx, filePatterns, folderID, maxConcurrent, preEncrypt, nil, apiClient, logger, false)
 	return err
 }
 
 // executeFileUploadWithDuplicateCheck handles file uploads with optional duplicate detection
+// v4.7.4: Added tags parameter for post-upload tagging.
 func executeFileUploadWithDuplicateCheck(
 	ctx context.Context,
 	filePatterns []string,
@@ -92,6 +93,7 @@ func executeFileUploadWithDuplicateCheck(
 	duplicateMode UploadDuplicateMode,
 	dryRun bool,
 	preEncrypt bool,
+	uploadTags []string, // v4.7.4: Tags to apply after upload
 	apiClient *api.Client,
 	logger *logging.Logger,
 ) error {
@@ -117,7 +119,7 @@ func executeFileUploadWithDuplicateCheck(
 
 	// If not checking duplicates, use the fast path
 	if duplicateMode == UploadDuplicateModeNoCheck {
-		_, err := UploadFilesWithIDs(ctx, filePaths, folderID, maxConcurrent, preEncrypt, apiClient, logger, false)
+		_, err := UploadFilesWithIDs(ctx, filePaths, folderID, maxConcurrent, preEncrypt, uploadTags, apiClient, logger, false)
 		return err
 	}
 
@@ -247,7 +249,7 @@ func executeFileUploadWithDuplicateCheck(
 	}
 
 	// Upload the filtered files
-	_, err = UploadFilesWithIDs(ctx, filesToUpload, folderID, maxConcurrent, preEncrypt, apiClient, logger, false)
+	_, err = UploadFilesWithIDs(ctx, filesToUpload, folderID, maxConcurrent, preEncrypt, uploadTags, apiClient, logger, false)
 	return err
 }
 
@@ -256,12 +258,14 @@ func executeFileUploadWithDuplicateCheck(
 // Returns file IDs in the same order as input files.
 // If preEncrypt is true, uses legacy pre-encryption mode (creates temp file before upload).
 // If preEncrypt is false (default), uses streaming encryption (encrypts on-the-fly, no temp file).
+// v4.7.4: Added uploadTags parameter for post-upload tagging.
 func UploadFilesWithIDs(
 	ctx context.Context,
 	filePatterns []string,
 	folderID string,
 	maxConcurrent int,
 	preEncrypt bool,
+	uploadTags []string, // v4.7.4: Tags to apply after each upload (nil = no tags)
 	apiClient *api.Client,
 	logger *logging.Logger,
 	silent bool, // If true, skip summary output (for use in job submission)
@@ -393,9 +397,15 @@ func UploadFilesWithIDs(
 				return
 			}
 
-			// NOTE: Logger is redirected to uploadUI.Writer() at this point.
-			// We skip logging here to avoid zerolog warnings from mixing structured JSON
-			// with progress bar ANSI codes. The upload success is already shown via progress UI.
+			// v4.7.4: Apply tags after successful upload (non-fatal)
+			if len(uploadTags) > 0 {
+				if err := apiClient.AddFileTags(ctx, cloudFile.ID, uploadTags); err != nil {
+					logger.Warn().Err(err).
+						Str("file", fPath).
+						Str("fileID", cloudFile.ID).
+						Msg("Failed to apply tags after upload (non-fatal)")
+				}
+			}
 
 			// Ensure progress bar exists before completing it
 			if fileBar == nil {
