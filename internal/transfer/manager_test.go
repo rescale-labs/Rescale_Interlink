@@ -102,21 +102,6 @@ func TestMultipleTransfers(t *testing.T) {
 	}
 }
 
-func TestRecordThroughput(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 10, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	transfer := transferMgr.AllocateTransfer(1024*1024*1024, 1)
-	defer transfer.Complete()
-
-	// Should not panic
-	transfer.RecordThroughput(10 * 1024 * 1024) // 10 MB/s
-	transfer.RecordThroughput(12 * 1024 * 1024) // 12 MB/s
-	transfer.RecordThroughput(11 * 1024 * 1024) // 11 MB/s
-
-	// Just verify it doesn't crash - throughput monitoring is tested in resources package
-}
-
 func TestGetStats(t *testing.T) {
 	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 15, AutoScale: true})
 	transferMgr := NewManager(resourceMgr)

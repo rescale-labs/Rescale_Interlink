@@ -96,7 +96,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rescale-interlink-${{ github.ref_name }}-win_amd64
-          path: rescale-interlink-${{ github.ref_name }}-win_amd64.*
+          path: |
+            rescale-interlink-${{ github.ref_name }}-win_amd64.*
+            !rescale-interlink-${{ github.ref_name }}-win_amd64.wixpdb
 
   macos-build:
     if: false  # Disabled until proper build implementation

@@ -474,7 +474,6 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				}
 
 				// Upload this part with retry logic
-				startTime := time.Now()
 				var uploadResp *s3.UploadPartOutput
 				partDataToUpload := job.data
 				currentPartNum := job.partNumber
@@ -503,13 +502,6 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				if uploadErr != nil {
 					setError(fmt.Errorf("failed to upload part %d/%d: %w", job.partNumber, totalParts, uploadErr))
 					return
-				}
-
-				// Calculate and record throughput
-				duration := time.Since(startTime).Seconds()
-				if duration > 0 {
-					bytesPerSec := float64(len(partDataToUpload)) / duration
-					params.TransferHandle.RecordThroughput(bytesPerSec)
 				}
 
 				// Send result

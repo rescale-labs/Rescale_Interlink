@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: February 22, 2026
-**Version**: 4.7.3
+**Last Updated**: February 25, 2026
+**Version**: 4.7.5
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -659,7 +659,7 @@ jt.table.Refresh()  // ✓ Called WITHOUT lock
 
 | Test | Result | Details |
 |------|--------|---------|
-| `--version` | PASS | `rescale-int version v4.7.3 (2026-02-22) [FIPS 140-3]` |
+| `--version` | PASS | `rescale-int version v4.7.5 (2026-02-25) [FIPS 140-3]` |
 | `config test` | PASS | Connection verified, user: user@example.com |
 | `jobs list --limit 3` | PASS | 3 of 802 jobs listed |
 | `hardware list --search emerald` | PASS | 5 hardware types found |
@@ -960,6 +960,6 @@ rm -rf /tmp/test
 
 ---
 
-**Last Updated**: February 22, 2026
-**Version**: 4.7.3
+**Last Updated**: February 25, 2026
+**Version**: 4.7.5
 **Status**: All tests passing, code quality improvements (North Star alignment)

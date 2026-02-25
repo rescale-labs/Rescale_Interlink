@@ -843,10 +843,6 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			bufferMu.Lock()
 		}
 
-		// Record throughput if transfer handle available
-		if prep.TransferHandle != nil {
-			prep.TransferHandle.RecordThroughput(float64(downloadedBytes))
-		}
 	}
 
 	// Check for errors
@@ -1161,13 +1157,6 @@ func (d *Downloader) downloadStreamingConcurrent(
 
 				// v3.6.3: Update progress using decrypted (plaintext) bytes for accuracy
 				atomic.AddInt64(&decryptedBytes, int64(len(plaintext)))
-
-				// Record throughput if transfer handle available
-				if prep.TransferHandle != nil {
-					// Rough estimate: assume ~100ms per part for throughput calculation
-					bytesPerSec := float64(len(ciphertext)) * 10.0
-					prep.TransferHandle.RecordThroughput(bytesPerSec)
-				}
 
 				resultChan <- partResult{
 					partIndex:     job.partIndex,

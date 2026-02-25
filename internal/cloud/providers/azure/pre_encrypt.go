@@ -394,7 +394,6 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				}
 
 				// Stage this block with retry logic
-				startTime := time.Now()
 				blockDataToUpload := job.data
 				currentBlockID := job.blockID
 
@@ -413,13 +412,6 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				if stageErr != nil {
 					setError(fmt.Errorf("failed to stage block %d/%d: %w", job.blockIndex+1, totalBlocks, stageErr))
 					return
-				}
-
-				// Calculate and record throughput
-				duration := time.Since(startTime).Seconds()
-				if duration > 0 {
-					bytesPerSec := float64(len(blockDataToUpload)) / duration
-					params.TransferHandle.RecordThroughput(bytesPerSec)
 				}
 
 				// Send result

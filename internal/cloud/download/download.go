@@ -161,7 +161,7 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	if err != nil {
 		return fmt.Errorf("failed to stat downloaded file: %w", err)
 	}
-	if fi.Size() == 0 {
+	if fi.Size() == 0 && fileInfo.DecryptedSize > 0 {
 		return fmt.Errorf("download failed: file is empty (0 bytes) - possible write error or filesystem issue")
 	}
 

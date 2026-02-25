@@ -200,47 +200,6 @@ func TestGetStats(t *testing.T) {
 	}
 }
 
-func TestThroughputMonitor(t *testing.T) {
-	monitor := NewThroughputMonitor()
-
-	transferID := "test-transfer"
-
-	// Record some samples
-	monitor.Record(transferID, 10*1024*1024)   // 10 MB/s
-	monitor.Record(transferID, 11*1024*1024)   // 11 MB/s
-	monitor.Record(transferID, 10.5*1024*1024) // 10.5 MB/s
-
-	// Should not scale up/down with too few samples
-	if monitor.ShouldScaleUp(transferID) {
-		t.Error("Should not scale up with only 3 samples")
-	}
-
-	// Record more samples with very high stable throughput
-	for i := 0; i < 7; i++ {
-		monitor.Record(transferID, 20*1024*1024) // Very high 20 MB/s
-	}
-
-	// With high stable throughput, should consider scaling up
-	// Note: This may not always trigger depending on variance calculation
-	scaleUp := monitor.ShouldScaleUp(transferID)
-	t.Logf("ShouldScaleUp with high stable throughput: %v", scaleUp)
-
-	// Record significantly dropping throughput
-	for i := 0; i < 5; i++ {
-		monitor.Record(transferID, float64(5-i)*1024*1024) // Dropping from 5MB to 1MB
-	}
-
-	// Should detect significant drop
-	scaleDown := monitor.ShouldScaleDown(transferID)
-	t.Logf("ShouldScaleDown with dropping throughput: %v", scaleDown)
-
-	// Cleanup
-	monitor.Cleanup(transferID)
-	if monitor.ShouldScaleUp(transferID) || monitor.ShouldScaleDown(transferID) {
-		t.Error("Should not have data after cleanup")
-	}
-}
-
 func TestConcurrentAccess(t *testing.T) {
 	mgr := NewManager(Config{MaxThreads: 20, AutoScale: true})
 

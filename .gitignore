@@ -152,6 +152,7 @@ testdata/
 !FEATURE_SUMMARY.md
 !SECURITY.md
 !.github/**/*.md
+.github/commit-whitelist.md
 
 *.txt
 # No .txt files are whitelisted - all are blocked

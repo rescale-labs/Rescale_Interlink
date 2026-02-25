@@ -226,21 +226,6 @@ const (
 	ThreadsFor10GBPlus = 16
 )
 
-// Resource Manager - Throughput Monitoring
-const (
-	// MaxThroughputSamples - keep last N samples for throughput analysis
-	MaxThroughputSamples = 10
-
-	// MinScaleUpThroughputMBps - minimum MB/s to consider scaling up
-	MinScaleUpThroughputMBps = 10.0
-
-	// MaxScaleUpVarianceMBps - maximum variance MB/s for scale-up eligibility
-	MaxScaleUpVarianceMBps = 2.0
-
-	// ScaleDownThresholdPercent - throughput drop percentage that triggers scale-down
-	ScaleDownThresholdPercent = 0.8
-)
-
 // System Memory Limits
 const (
 	// MinSystemMemory - minimum available memory (512 MB)

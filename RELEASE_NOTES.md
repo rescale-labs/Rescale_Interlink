@@ -1,5 +1,50 @@
 # Release Notes - Rescale Interlink
 
+## v4.7.5 - February 25, 2026
+
+### Bug Fixes
+- **Empty file upload fix:** Fixed crash when uploading 0-byte files through the streaming
+  upload path. The encryption goroutine now correctly emits one encrypted empty part for
+  0-byte files instead of producing zero parts, which caused "upload incomplete: received
+  0 of 1 parts" errors.
+- **Empty file download fix:** Fixed download validation rejecting legitimate 0-byte files.
+  The post-download size check now allows 0-byte results when the expected `DecryptedSize`
+  is also 0.
+
+### Maintenance
+- **Dead code cleanup:** Removed unused ThroughputMonitor infrastructure from the resource
+  manager. Throughput data was being collected at 5 call sites but never read (the scaler
+  goroutines use timer-based TryAcquireMore instead). Also fixed a minor memory leak where
+  completed transfer samples were never cleaned up.
+- **Build artifact cleanup:** Excluded .wixpdb files from release workflow artifacts
+  (`.github/workflows/release.yml`).
+- **Repository hygiene:** Added `.github/commit-whitelist.md` to `.gitignore` (local-only
+  development file).
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/cloud/upload/upload.go` | Handle 0-byte files in encryption goroutine; guard progress NaN |
+| `internal/cloud/download/download.go` | Allow 0-byte download when DecryptedSize is 0 |
+| `internal/resources/manager.go` | Remove unused ThroughputMonitor |
+| `internal/constants/app.go` | Remove unused throughput constants |
+| `internal/transfer/manager.go` | Remove unused RecordThroughput method |
+| `internal/cloud/providers/s3/pre_encrypt.go` | Remove RecordThroughput call |
+| `internal/cloud/providers/azure/pre_encrypt.go` | Remove RecordThroughput call |
+| `internal/cloud/providers/s3/download.go` | Remove RecordThroughput call |
+| `internal/cloud/transfer/downloader.go` | Remove RecordThroughput calls (2 sites) |
+| `internal/resources/manager_test.go` | Remove throughput-related tests |
+| `.github/workflows/release.yml` | Exclude .wixpdb from artifact upload |
+| `.gitignore` | Add .github/commit-whitelist.md exclusion |
+| `internal/version/version.go` | v4.7.4 → v4.7.5 |
+| `installer/License.rtf` | Copyright year 2025 → 2026 |
+| `installer/build-installer.ps1` | Copyright year 2025 → 2026 (2 instances) |
+| `build/build_dist.ps1` | Copyright year 2025 → 2026 (1 instance) |
+| `internal/transfer/manager_test.go` | Remove TestRecordThroughput |
+
+---
+
 ## v4.7.4 - February 23, 2026
 
 ### Unified Transfer Architecture
