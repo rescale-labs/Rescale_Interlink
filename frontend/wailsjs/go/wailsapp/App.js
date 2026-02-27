@@ -22,6 +22,10 @@ export function CheckFolderExistsForUpload(arg1, arg2) {
   return window['go']['wailsapp']['App']['CheckFolderExistsForUpload'](arg1, arg2);
 }
 
+export function CheckForUpdates() {
+  return window['go']['wailsapp']['App']['CheckForUpdates']();
+}
+
 export function ClearCatalogCache() {
   return window['go']['wailsapp']['App']['ClearCatalogCache']();
 }
