@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.7.5
-**Build Date:** February 25, 2026
+**Version:** 4.7.7
+**Build Date:** February 27, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -628,27 +628,31 @@ Warning: Token file <path> has insecure permissions <mode>. Consider using 'chmo
 
 ## Performance Features
 
-### Rate Limiting (Token Bucket Algorithm)
+### Rate Limiting (Token Bucket + Cross-Process Coordinator)
 
-**What it is**: Intelligent API throttling that prevents hitting Rescale's hard rate limits while maximizing throughput.
+**What it is**: Intelligent API throttling with cross-process coordination that prevents hitting Rescale's hard rate limits while maximizing throughput — even when GUI, daemon, and CLI run simultaneously.
 
 **How it works:**
-- Uses token bucket algorithm with configurable burst capacity
-- Three separate rate limiters for different API scopes:
-  - **User Scope**: 1.6 req/sec (80% of 2 req/sec hard limit) - all v3 endpoints
-  - **Job Submission**: 0.139 req/sec (50% of 0.278 req/sec limit) - POST /api/v2/jobs/{id}/submit/
-  - **Jobs Usage**: 20 req/sec (80% of 25 req/sec limit) - v2 job query endpoints (v2.4.7+)
+- Token bucket algorithm with per-scope rate limiters and configurable burst capacity
+- **Cross-process coordinator** (Unix socket / named pipe) ensures GUI + daemon + CLI share a single budget
+- **429 feedback loop**: CheckRetry callback drains + cools down across all processes instantly
+- **Utilization-based visibility**: warns when operating above 60% of capacity (with hysteresis to prevent flickering)
+- Three rate limiters for different API scopes:
+  - **User Scope**: 1.7 req/sec (85% of 2 req/sec hard limit) - all v3 endpoints
+  - **Job Submission**: 0.236 req/sec (85% of 0.278 req/sec limit) - POST /api/v2/jobs/{id}/submit/
+  - **Jobs Usage**: 21.25 req/sec (85% of 25 req/sec limit) - v2 job query endpoints (v2.4.7+)
 
 **Burst Capacity:**
-- User scope: 150 tokens (~93 seconds of rapid operations)
-- Job submission: 50 tokens (~360 seconds)
-- Jobs usage: 300 tokens (~15 seconds)
+- User scope: 150 tokens (~88 seconds of rapid operations)
+- Job submission: 50 tokens (~212 seconds)
+- Jobs usage: 300 tokens (~14 seconds)
 
 **Key Benefits:**
-- 20% safety margin prevents throttle lockouts
+- 15% safety margin prevents throttle lockouts; 429 feedback provides additional safety net
+- Cross-process coordination prevents independent processes from exceeding limits
 - Allows rapid burst operations at startup
 - Automatic rate adjustment based on endpoint type
-- Real-time usage monitoring (logs every 30 seconds)
+- Utilization-based notifications in CLI output and GUI Activity Logs
 
 **Configuration:**
 ```bash
@@ -658,7 +662,38 @@ Warning: Token file <path> has insecure permissions <mode>. Consider using 'chmo
 --no-auto-scale         # Disable dynamic thread adjustment
 ```
 
-**Source:** `internal/ratelimit/limiter.go`, `internal/ratelimit/constants.go`, `internal/api/client.go`
+**Source:** `internal/ratelimit/`, `internal/ratelimit/coordinator/`, `internal/api/client.go`
+
+### Transfer Grouping (v4.7.7)
+
+**What it is**: Bulk file transfers (folder uploads/downloads, PUR pipeline uploads, Single-Job uploads) are collapsed into a single aggregate batch row in the GUI Transfers tab, replacing 10k+ individual rows with one collapsible summary.
+
+**How it works:**
+- Each bulk operation generates a `BatchID` that propagates to all individual transfer tasks
+  - Folder uploads/downloads: use the enumeration ID as BatchID (natural group identifier)
+  - PUR pipeline: generates `pur_<timestamp>` batch ID with "PUR: N jobs" label
+  - Single-Job: generates `job_<timestamp>` batch ID with "Job: <name>" label
+  - Individual file uploads from File Browser: ungrouped (shown as individual rows)
+- Backend computes aggregate stats per batch in a single O(tasks) pass: total/queued/active/completed/failed, byte-weighted progress, aggregate speed
+- Batch rows are collapsible — expand to show paginated individual tasks (50 per page)
+
+**Event Optimization:**
+- Individual `EventTransferProgress` events **suppressed at source** for batched tasks (queue layer skip)
+- 1/sec aggregate `BatchProgressEvent` published per active batch (replaces 20k events/sec flood)
+- Terminal events (completed, failed, cancelled) still published individually for accuracy
+- Batch progress ticker auto-starts on first batch task, auto-stops when all tasks are terminal
+
+**Polling Optimization:**
+- Frontend polls: `GetTransferBatches()` (~200 bytes/batch) + `GetUngroupedTransferTasks()` + `GetTransferStats()`
+- Replaces previous `GetTransferTasks()` which serialized all 10k+ tasks (~2MB) per 500ms poll cycle
+- Expanded batch tasks fetched on-demand only when user clicks expand
+
+**Batch Actions:**
+- `CancelBatch(batchID)` — cancels all non-terminal tasks including queued tasks (standard `Cancel()` only handles active/initializing)
+- `RetryFailedInBatch(batchID)` — retries all failed tasks in batch
+- Source-label gating: cancel/retry only shown for FileBrowser-sourced batches (PUR/SingleJob manage their own lifecycle)
+
+**Source:** `internal/transfer/queue.go`, `internal/wailsapp/transfer_bindings.go`, `frontend/src/stores/transferStore.ts`, `frontend/src/components/tabs/TransfersTab.tsx`
 
 ### Concurrent Uploads
 
@@ -974,7 +1009,7 @@ internal/
 │   ├── parser/   # CSV/config parsing
 │   ├── pattern/  # File pattern matching
 │   └── pipeline/ # PUR pipeline execution
-├── ratelimit/    # Token bucket rate limiting
+├── ratelimit/    # Token bucket rate limiting + cross-process coordinator
 ├── transfer/     # Concurrent transfer manager
 ├── util/         # Buffer pools and utilities
 └── validation/   # Input validation
@@ -1106,6 +1141,63 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 - ✅ Fixed upload concurrency configuration
 
 **Source:** `internal/ratelimit/`, `internal/cli/files.go`
+
+### v4.7.7 (February 27, 2026)
+**GUI Performance for Bulk Transfers + Rate Limit Validation:**
+- ✅ Transfer grouping: folder uploads/downloads, PUR pipelines, Single-Job uploads collapse into aggregate batch rows (10k individual rows → 1 collapsible row)
+- ✅ `BatchID`/`BatchLabel` fields added to `TransferRequest`, `TransferTask`, DTOs — propagated through all transfer paths
+- ✅ `GetAllBatchStats()` — single-pass O(tasks) aggregate computation with byte-weighted progress
+- ✅ `GetBatchTasks(batchID, offset, limit)` — paginated expansion of individual tasks within a batch
+- ✅ `CancelBatch(batchID)` — cancels queued + active tasks (standard Cancel only handles active/initializing)
+- ✅ `RetryFailedInBatch(batchID)` — retries all failed tasks in a batch
+- ✅ `GetUngroupedTransferTasks()` — returns only tasks without a BatchID (avoids 10k-task IPC payload)
+- ✅ Event suppression: `publishTransferEvent()` skips `EventTransferProgress` for batched tasks; terminal events still published
+- ✅ Batch progress ticker: 1/sec per active batch, auto-starts/auto-stops based on task lifecycle
+- ✅ `BatchProgressEvent` type + event bridge forwarding as `interlink:batch_progress`
+- ✅ Frontend `BatchRow` component with `React.memo()`: collapsible aggregate progress, file count summary, cancel/retry (FileBrowser only)
+- ✅ Frontend polling optimization: `fetchBatches()` + `fetchUngroupedTasks()` (~1KB/cycle) replaces `fetchTasks()` (~2MB/cycle)
+- ✅ Rate limit end-to-end validation: 7 test scenarios pass (coordinator auto-spawn, no spawn on --version, concurrent sharing, sustained load enforcement, visibility messages, zero 429s, bucket state inspection)
+- ✅ 8 new unit tests: TrackTransferWithBatch, GetAllBatchStats, GetBatchTasksPaginated, GetUngroupedTasks, CancelBatch, RetryFailedInBatch, BatchProgressSuppressesIndividual, BatchProgressTickerPublishes
+
+**Source:** `internal/transfer/queue.go`, `internal/transfer/queue_test.go`, `internal/events/events.go`, `internal/wailsapp/transfer_bindings.go`, `internal/wailsapp/event_bridge.go`, `internal/wailsapp/file_bindings.go`, `internal/services/transfer_service.go`, `internal/pur/pipeline/pipeline.go`, `internal/core/engine.go`, `internal/wailsapp/job_bindings.go`, `frontend/src/stores/transferStore.ts`, `frontend/src/components/tabs/TransfersTab.tsx`, `frontend/src/types/events.ts`
+
+### v4.7.6 (February 26, 2026)
+**Auto-Download Reliability Fixes:**
+- ✅ Service-mode API key resolution: checks per-user token path before falling back to SYSTEM's AppData (fixes silent "no API key" failures on Windows Service)
+- ✅ Token persistence: GUI writes API key to token file before every daemon/service start
+- ✅ Config propagation: every config save triggers `ReloadDaemonConfig()` — restarts subprocess daemon or triggers service rescan
+- ✅ IPC ReloadConfig protocol: new `MsgReloadConfig` with active-download awareness (defers restart during active downloads)
+- ✅ Pre-flight validation: enable toggle validates API key and download folder first, specific error messages on failure
+- ✅ Progressive pending state: "Activating..." shows time-based messages (0-10s, 10-30s, 30s+) with Open Logs and Retry buttons
+- ✅ Install & Start Service: combined idempotent CLI subcommand and GUI button — single UAC prompt
+- ✅ Lookback fix: `getJobCompletionTime()` retries once; jobs with unknown completion time included
+- ✅ IPC lifecycle: IPC server starts before daemon on Windows; timeout increased from 2s to 5s
+- ✅ Skip-and-retry: users skipped for missing API key retried on each service rescan
+- ✅ Tray auto-launch: GUI automatically launches tray companion on startup (Windows only)
+- ✅ Daemon stderr surfacing: IPC timeout errors include last 3 lines from daemon-stderr.log
+
+**Source:** `internal/wailsapp/daemon_bindings.go`, `internal/daemon/`, `internal/service/`, `internal/config/apikey.go`, `internal/ipc/`, `frontend/src/components/tabs/SetupTab.tsx`
+
+### v4.7.5 (February 25, 2026)
+**Empty File Fix + Cleanup:**
+- ✅ Empty file upload: fixed crash when uploading 0-byte files through streaming encryption (zero parts → one empty encrypted part)
+- ✅ Empty file download: fixed download validation rejecting legitimate 0-byte files (allows 0-byte results when DecryptedSize is 0)
+- ✅ Dead code cleanup: removed unused ThroughputMonitor infrastructure from resource manager (collected at 5 sites, never read)
+- ✅ Build artifact cleanup: excluded `.wixpdb` files from release workflow artifacts
+
+### v4.7.4 (February 23, 2026)
+**Unified Transfer Architecture:**
+- ✅ PUR uploads visible in Transfers tab: pipeline workers delegate to `TransferService.UploadFileSync()` via new `SyncUploader` interface
+- ✅ Single-Job uploads visible in Transfers tab: local file uploads route through TransferService
+- ✅ Unified concurrency: all uploads share TransferService's semaphore regardless of entry point
+- ✅ Source label badges: "PUR" (blue) and "Job" (green) in Transfers tab; cancel/retry hidden for pipeline-managed transfers
+- ✅ Cancel fix: execution paths now create derived `context.WithCancel()` and register cancel function (previously only updated state)
+- ✅ Cancel-state race: `context.Canceled` detected to prevent cancelled state being overwritten with "failed"
+- ✅ TransferHandle leak: all paths now call `defer transferHandle.Complete()`
+- ✅ Tags on upload: File Browser upload dialog includes optional tags input with live chip preview; also available via CLI
+- ✅ Tarball deletion safety: `safeRemoveTar()` with 5 guardrails (canonical path, under tempDir, regular file, tar extension, FNV hash pattern)
+
+**Source:** `internal/services/transfer_service.go`, `internal/core/engine.go`, `internal/pur/pipeline/pipeline.go`, `internal/wailsapp/job_bindings.go`, `internal/wailsapp/file_bindings.go`, `frontend/src/components/tabs/TransfersTab.tsx`
 
 ### v4.7.3 (February 22, 2026)
 **Run Session Persistence and Monitoring:**
@@ -1272,7 +1364,8 @@ rescale-int files upload model.tar.gz -d abc123  # Folder ID
 
 | Feature | Key Benefit | Performance Impact |
 |---------|-------------|-------------------|
-| **Rate Limiting** | Prevents API lockouts while maximizing throughput | 20% safety margin, smart burst handling |
+| **Transfer Grouping** | Collapse 10k+ transfers into aggregate batch rows | 2000x reduction in IPC payload (2MB → 1KB/cycle), eliminates DOM flooding |
+| **Rate Limiting** | Prevents API lockouts while maximizing throughput | 15% safety margin, cross-process coordinator, 429 feedback, utilization-based visibility |
 | **Concurrent Uploads** | Process multiple files simultaneously | 5-10x faster than sequential |
 | **Concurrent Downloads** | Parallel downloads with resume support | 10-100x faster, limited by storage not API |
 | **Folder Operations** | Preserve directory structure | Eliminates manual folder management |

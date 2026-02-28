@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.7.5
-**Last Updated**: February 25, 2026
+**Version**: 4.7.7
+**Last Updated**: February 27, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -155,7 +155,8 @@ rescale-int/
 │   │   └── tar/               # TAR archive creation
 │   ├── diskspace/             # Disk space checking
 │   ├── logging/               # Logger
-│   ├── ratelimit/             # Rate limiting (token bucket)
+│   ├── ratelimit/             # Rate limiting (token bucket + cross-process coordinator)
+│   │   └── coordinator/      # Cross-process rate limit coordinator (Unix socket / named pipe)
 │   ├── state/                 # State manager
 │   ├── trace/                 # Tracing
 │   └── validation/            # Path validation
@@ -314,6 +315,12 @@ func (eb *EventBus) Publish(event Event) {
 - Thread-safe subscription management
 - Type-safe event dispatch
 
+**Transfer Batch Events (v4.7.7):**
+- `EventBatchProgress` — aggregate progress for batched transfers (1/sec per active batch)
+- Individual `EventTransferProgress` suppressed at source for batched tasks (queue-layer skip)
+- Terminal events (completed, failed, cancelled) always published individually for accuracy
+- Batch progress ticker auto-starts on first `TrackTransferWithBatch()`, auto-stops when all terminal
+
 ### 4. Folder Cache (`internal/cli/folder_upload_helper.go`)
 
 **Purpose**: Reduce API calls by 99.8% for folder operations
@@ -338,31 +345,55 @@ type FolderCache struct {
 
 ### 5. Rate Limiter (`internal/ratelimit/`)
 
-**Purpose**: Prevent API throttling (429 errors)
+**Purpose**: Prevent API throttling (429 errors) with cross-process coordination
 
-**Algorithm**: Token bucket with three scope-based limiters
+**Architecture**: Four-layer system:
+
+1. **Token Bucket** (`limiter.go`): Per-scope rate limiter with configurable rate/burst. Supports cooldown periods (from 429 responses) and coordinator delegation hooks.
+
+2. **Singleton Store** (`store.go`): Process-level store keyed by `{baseURL, hash(apiKey), scope}`. All `api.Client` instances sharing the same Rescale account share the same limiters. Wires coordinator hooks and visibility callbacks when creating new limiters.
+
+3. **Unified Registry** (`registry.go`): Single source of truth for endpoint-to-scope mapping. `ResolveScope(method, path)` returns the correct scope using specificity-based rule matching.
+
+4. **Cross-Process Coordinator** (`coordinator/`): Standalone process owning authoritative token buckets. GUI, daemon, and CLI all acquire tokens through it via Unix socket (`~/.config/rescale/ratelimit-coordinator.sock`) or Windows named pipe. Auto-starts on first API call, auto-exits on idle timeout.
 
 **Configuration** (from `internal/ratelimit/constants.go`):
 ```go
 // User Scope (all v3 API endpoints): 7200/hour = 2 req/sec
-// Target: 80% = 1.6 req/sec, Burst: 150 tokens
+// Target: 85% = 1.7 req/sec, Burst: 150 tokens
 userScopeLimiter := NewUserScopeRateLimiter()
 
 // Job Submission Scope: 1000/hour = 0.278 req/sec
-// Target: 50% = 0.139 req/sec, Burst: 50 tokens
+// Target: 85% = 0.236 req/sec, Burst: 50 tokens
 jobSubmitLimiter := NewJobSubmissionRateLimiter()
 
 // Jobs-Usage Scope (v2 job queries): 90000/hour = 25 req/sec
-// Target: 80% = 20 req/sec, Burst: 300 tokens
+// Target: 85% = 21.25 req/sec, Burst: 300 tokens
 jobsUsageLimiter := NewJobsUsageRateLimiter()
 ```
 
-**Backoff Strategy**:
-- On 429 response: Wait for Retry-After header (if present)
-- Otherwise: Exponential backoff with jitter
-- Base delay: 1s, doubles each retry (1s, 2s, 4s, 8s, 16s)
-- Max delay: 32s
-- Jitter: ±20% to prevent thundering herd
+**429 Feedback Loop**:
+- `CheckRetry` callback in `api/client.go` detects every 429 response
+- Calls `limiter.Drain()` + `limiter.SetCooldown()` through coordinator hooks
+- Propagates drain/cooldown across all processes via coordinator
+- Parses both delta-seconds and HTTP-date `Retry-After` formats
+
+**Visibility**: Utilization-based notifications with hysteresis:
+- Silent when utilization < 50% (e.g., emergency cap at 12.5%)
+- Warns when utilization >= 60% (e.g., normal operation at 85%)
+- Hysteresis: once active, warnings persist until utilization drops below 50%
+- Throttled to 1 notification per 10 seconds
+- CLI: `log.Printf()`; GUI: Activity Logs tab via EventBus
+
+**Coordinator Startup Wiring**:
+- CLI/daemon: `root.go` PersistentPreRun calls `SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)`
+- GUI: `app.go` startup() calls same (GUI bypasses CLI's PersistentPreRun entirely)
+- Lazy: coordinator only spawns when first `GetLimiter()` is called (not on `--version`/`--help`)
+
+**Fallback Behavior** (when coordinator is unreachable):
+- Emergency cap: `(hardLimit/4) * 0.5` per process (assumes max 4 concurrent processes)
+- Lease-based: if a valid lease exists, use its granted rate until lease expires
+- Auto-retry: store retries coordinator connection every 30 seconds
 
 ### 6. Disk Space Checker (`internal/diskspace/`)
 
@@ -754,14 +785,22 @@ Speedup: 500x
 
 ### Rate Limiting
 
-**Problem**: Bursts of API calls trigger 429 throttling
+**Problem**: Bursts of API calls trigger 429 throttling; multiple processes (GUI + daemon + CLI) can independently exceed limits
 
-**Solution**: Token bucket algorithm with predictable pacing
+**Solution**: Token bucket algorithm with cross-process coordinator and 429 feedback
+
+**Architecture**:
+- Process-level singleton store shares limiters across all `api.Client` instances
+- Cross-process coordinator (Unix socket / named pipe) ensures GUI + daemon + CLI share a single budget
+- 429 feedback: `CheckRetry` callback drains + cools down across all processes instantly
+- Utilization-based visibility with hysteresis (silent < 50%, warn >= 60%)
+- Targets at 85% of hard limit with 15% safety margin
 
 **Benefits**:
-- Eliminates 429 errors
+- Eliminates 429 errors (even across multiple processes)
 - Reduces total execution time (no retries)
 - Predictable, smooth API usage
+- Automatic failover to emergency cap if coordinator unreachable
 
 **Effectiveness**:
 - Before: 37% of requests returned 429
@@ -910,6 +949,10 @@ if time.Since(eb.lastProgress[taskID]) < eb.progressInterval {
    - `StartTransfers()` - Initiate upload/download batch
    - `CancelTransfer()` - Cancel single transfer
    - `GetTransferStats()` - Current stats
+   - `GetTransferBatches()` - Aggregate batch stats (v4.7.7)
+   - `GetUngroupedTransferTasks()` - Tasks with no batch ID (v4.7.7)
+   - `GetBatchTasks()` - Paginated tasks within a batch (v4.7.7)
+   - `CancelBatch()` / `RetryFailedInBatch()` - Batch-level actions (v4.7.7)
    - DTOs for cross-boundary data
 
 3. **File Bindings** (`file_bindings.go`):
@@ -927,8 +970,9 @@ if time.Since(eb.lastProgress[taskID]) < eb.progressInterval {
 
 5. **Event Bridge** (`event_bridge.go`):
    - Forwards EventBus events to Wails runtime
-   - Handles Progress, Log, StateChange, Error, Complete events
+   - Handles Progress, Log, StateChange, Error, Complete, BatchProgress events
    - Throttles progress updates (100ms interval)
+   - BatchProgressEvent forwarded as `interlink:batch_progress` (v4.7.7)
 
 **Frontend Stores** (`frontend/src/stores/`):
 
@@ -936,13 +980,13 @@ if time.Since(eb.lastProgress[taskID]) < eb.progressInterval {
 2. **runStore** - Active run monitoring, event subscriptions, polling, queue, restart recovery (v4.7.3)
 3. **singleJobStore** - Single Job form state persisted across tab navigation (v4.7.3)
 4. **configStore** - API configuration and connection state
-5. **transferStore** - Transfer queue tracking with disk space error classification
+5. **transferStore** - Transfer queue tracking with disk space error classification, batch grouping (v4.7.7)
 6. **logStore** - Activity log entries and filtering
 
 **Frontend Components** (`frontend/src/components/tabs/`):
 
 1. **FileBrowserTab** - Two-pane local/remote file browser
-2. **TransfersTab** - Active upload/download progress tracking, disk space error banner (v4.7.1)
+2. **TransfersTab** - Active upload/download progress tracking, disk space error banner (v4.7.1), transfer grouping with BatchRow component and paginated expansion (v4.7.7)
 3. **SingleJobTab** - Job template builder and submission, tar options for directory mode (v4.7.1), uses singleJobStore (v4.7.3)
 4. **PURTab** - Batch job pipeline with Pipeline Settings (workers + tar options, v4.7.1), view modes and run monitoring (v4.7.3)
 5. **SetupTab** - API settings, proxy configuration, logging, auto-download daemon
@@ -1067,7 +1111,7 @@ Return to User
 ### 5. Performance by Default
 - Connection reuse automatic
 - Folder caching transparent
-- Rate limiting prevents problems before they occur
+- Rate limiting prevents problems before they occur (cross-process coordinator ensures global budget sharing)
 
 ### 6. Cross-Platform Compatibility
 - Abstract platform differences (disk space, file paths)

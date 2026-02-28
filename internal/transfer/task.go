@@ -42,6 +42,8 @@ type TransferTask struct {
 	Dest        string // Remote folder ID (upload) or local path (download)
 	Size        int64  // File size in bytes
 	SourceLabel string // v4.7.4: Origin context ("PUR", "SingleJob", "FileBrowser")
+	BatchID     string // v4.7.7: Groups related transfers for bulk display
+	BatchLabel  string // v4.7.7: Display name for the batch (folder name, etc.)
 
 	// State tracking
 	State    TaskState // Current state
@@ -232,6 +234,8 @@ func (t *TransferTask) Clone() TransferTask {
 		Dest:        t.Dest,
 		Size:        t.Size,
 		SourceLabel: t.SourceLabel,
+		BatchID:     t.BatchID,
+		BatchLabel:  t.BatchLabel,
 		State:       t.State,
 		Progress:    t.Progress,
 		Speed:       t.Speed,

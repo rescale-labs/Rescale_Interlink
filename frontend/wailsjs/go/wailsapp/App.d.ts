@@ -4,6 +4,8 @@ import {wailsapp} from '../models';
 
 export function CancelAllTransfers():Promise<void>;
 
+export function CancelBatch(arg1:string):Promise<void>;
+
 export function CancelLocalDirectoryRead():Promise<void>;
 
 export function CancelRun():Promise<void>;
@@ -27,6 +29,8 @@ export function GetAnalysisCodes(arg1:string):Promise<wailsapp.AnalysisCodesResu
 export function GetAppInfo():Promise<wailsapp.AppInfoDTO>;
 
 export function GetAutomations():Promise<wailsapp.AutomationsResultDTO>;
+
+export function GetBatchTasks(arg1:string,arg2:number,arg3:number):Promise<Array<wailsapp.TransferTaskDTO>>;
 
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
 
@@ -68,9 +72,15 @@ export function GetRunStatus():Promise<wailsapp.RunStatusDTO>;
 
 export function GetServiceStatus():Promise<wailsapp.ServiceStatusDTO>;
 
+export function GetTransferBatches():Promise<Array<wailsapp.TransferBatchDTO>>;
+
 export function GetTransferStats():Promise<wailsapp.TransferStatsDTO>;
 
 export function GetTransferTasks():Promise<Array<wailsapp.TransferTaskDTO>>;
+
+export function GetUngroupedTransferTasks():Promise<Array<wailsapp.TransferTaskDTO>>;
+
+export function InstallAndStartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
 
 export function ListLocalDirectory(arg1:string):Promise<wailsapp.FolderContentsDTO>;
 
@@ -102,9 +112,13 @@ export function PauseDaemon():Promise<void>;
 
 export function PreviewCommandPatterns(arg1:string,arg2:Array<string>):Promise<Array<wailsapp.CommandPreviewDTO>>;
 
+export function ReloadDaemonConfig():Promise<wailsapp.ReloadConfigResultDTO>;
+
 export function ResetRun():Promise<void>;
 
 export function ResumeDaemon():Promise<void>;
+
+export function RetryFailedInBatch(arg1:string):Promise<void>;
 
 export function RetryTransfer(arg1:string):Promise<string>;
 
@@ -167,6 +181,8 @@ export function TriggerDaemonScan():Promise<void>;
 export function TriggerProfileRescan():Promise<void>;
 
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
+
+export function ValidateAutoDownloadPreFlight(arg1:string):Promise<wailsapp.PreFlightResultDTO>;
 
 export function ValidateAutoDownloadSetup():Promise<wailsapp.AutoDownloadValidationDTO>;
 

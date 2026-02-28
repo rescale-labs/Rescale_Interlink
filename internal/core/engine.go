@@ -50,6 +50,8 @@ func (a *syncUploaderAdapter) UploadFileSync(ctx context.Context, params pipelin
 		Dest:        params.FolderID,
 		Name:        params.Name,
 		SourceLabel: params.SourceLabel,
+		BatchID:     params.BatchID,    // v4.7.7
+		BatchLabel:  params.BatchLabel, // v4.7.7
 		Tags:        params.Tags,
 	}, services.UploadFileSyncParams{
 		ExtraProgressCallback: params.ExtraProgressCallback,

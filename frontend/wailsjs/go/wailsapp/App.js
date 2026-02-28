@@ -6,6 +6,10 @@ export function CancelAllTransfers() {
   return window['go']['wailsapp']['App']['CancelAllTransfers']();
 }
 
+export function CancelBatch(arg1) {
+  return window['go']['wailsapp']['App']['CancelBatch'](arg1);
+}
+
 export function CancelLocalDirectoryRead() {
   return window['go']['wailsapp']['App']['CancelLocalDirectoryRead']();
 }
@@ -52,6 +56,10 @@ export function GetAppInfo() {
 
 export function GetAutomations() {
   return window['go']['wailsapp']['App']['GetAutomations']();
+}
+
+export function GetBatchTasks(arg1, arg2, arg3) {
+  return window['go']['wailsapp']['App']['GetBatchTasks'](arg1, arg2, arg3);
 }
 
 export function GetConfig() {
@@ -134,12 +142,24 @@ export function GetServiceStatus() {
   return window['go']['wailsapp']['App']['GetServiceStatus']();
 }
 
+export function GetTransferBatches() {
+  return window['go']['wailsapp']['App']['GetTransferBatches']();
+}
+
 export function GetTransferStats() {
   return window['go']['wailsapp']['App']['GetTransferStats']();
 }
 
 export function GetTransferTasks() {
   return window['go']['wailsapp']['App']['GetTransferTasks']();
+}
+
+export function GetUngroupedTransferTasks() {
+  return window['go']['wailsapp']['App']['GetUngroupedTransferTasks']();
+}
+
+export function InstallAndStartServiceElevated() {
+  return window['go']['wailsapp']['App']['InstallAndStartServiceElevated']();
 }
 
 export function ListLocalDirectory(arg1) {
@@ -202,12 +222,20 @@ export function PreviewCommandPatterns(arg1, arg2) {
   return window['go']['wailsapp']['App']['PreviewCommandPatterns'](arg1, arg2);
 }
 
+export function ReloadDaemonConfig() {
+  return window['go']['wailsapp']['App']['ReloadDaemonConfig']();
+}
+
 export function ResetRun() {
   return window['go']['wailsapp']['App']['ResetRun']();
 }
 
 export function ResumeDaemon() {
   return window['go']['wailsapp']['App']['ResumeDaemon']();
+}
+
+export function RetryFailedInBatch(arg1) {
+  return window['go']['wailsapp']['App']['RetryFailedInBatch'](arg1);
 }
 
 export function RetryTransfer(arg1) {
@@ -332,6 +360,10 @@ export function TriggerProfileRescan() {
 
 export function UpdateConfig(arg1) {
   return window['go']['wailsapp']['App']['UpdateConfig'](arg1);
+}
+
+export function ValidateAutoDownloadPreFlight(arg1) {
+  return window['go']['wailsapp']['App']['ValidateAutoDownloadPreFlight'](arg1);
 }
 
 export function ValidateAutoDownloadSetup() {

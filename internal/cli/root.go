@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/fips140"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/version"
 )
@@ -76,6 +79,14 @@ Security:
 			if verbose || debug {
 				logging.SetGlobalLevel(-1) // Debug level (zerolog.DebugLevel)
 			}
+
+			// Wire cross-process rate limit coordinator (lazy — only spawns when GetLimiter is called)
+			ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
+
+			// Wire rate limit visibility notifications for CLI output
+			ratelimit.SetGlobalNotifyFunc(func(level, message string) {
+				log.Printf("%s", message)
+			})
 		},
 	}
 
@@ -290,7 +301,8 @@ func AddCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(newAutomationsCmd()) // v3.6.1: Automation discovery
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newDaemonCmd())  // v3.4.0: Background service for auto-downloading completed jobs
-	rootCmd.AddCommand(newServiceCmd()) // v4.0.0: Windows service management
+	rootCmd.AddCommand(newServiceCmd())      // v4.0.0: Windows service management
+	rootCmd.AddCommand(newCoordinatorCmd()) // internal: cross-process rate limit coordinator
 
 	// Add shortcuts for convenience
 	AddShortcuts(rootCmd)

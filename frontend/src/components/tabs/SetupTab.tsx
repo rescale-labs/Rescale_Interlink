@@ -36,6 +36,10 @@ import {
   StartServiceElevated,
   StopServiceElevated,
   TriggerProfileRescan,
+  ReloadDaemonConfig,
+  ValidateAutoDownloadPreFlight,
+  OpenLogsDirectory,
+  InstallAndStartServiceElevated,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 
@@ -114,6 +118,10 @@ export function SetupTab() {
   // v4.3.2: File logging state
   const [fileLoggingEnabled, setFileLoggingEnabled] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
+
+  // v4.7.6: Track how long user has been in "pending" state for progressive messages
+  const [pendingStartTime, setPendingStartTime] = useState<number | null>(null);
+  const [pendingElapsed, setPendingElapsed] = useState(0);
 
   // v4.5.1: Service status state (Windows SCM, separate from IPC-based daemon status)
   const [serviceStatus, setServiceStatus] = useState<wailsapp.ServiceStatusDTO | null>(null);
@@ -230,7 +238,23 @@ export function SetupTab() {
         setIsDaemonConfigSaving(true);
         await SaveDaemonConfig(config);
         setLastSavedConfig({ ...config });
-        setStatusMessage('Settings saved');
+
+        // v4.7.6: Notify daemon of config changes after every save
+        try {
+          const result = await ReloadDaemonConfig();
+          if (result.deferred) {
+            setStatusMessage(`Settings saved (will apply when ${result.activeDownloads} download${result.activeDownloads > 1 ? 's' : ''} finish)`);
+          } else if (result.applied) {
+            setStatusMessage('Settings saved and applied');
+          } else if (result.error) {
+            setStatusMessage(`Settings saved (daemon: ${result.error})`);
+          } else {
+            setStatusMessage('Settings saved');
+          }
+        } catch {
+          // Daemon may not be running — that's fine, save succeeded
+          setStatusMessage('Settings saved');
+        }
       } catch (err) {
         setStatusMessage(`Failed to save settings: ${err}`);
       } finally {
@@ -249,30 +273,12 @@ export function SetupTab() {
     }
   }, [daemonConfig, lastSavedConfig, debouncedSaveDaemonConfig]);
 
-  // v4.5.8: Trigger rescan when lookback increases significantly (more than doubled)
+  // v4.7.6: Lookback-specific rescan removed — debouncedSaveDaemonConfig now calls
+  // ReloadDaemonConfig() after every save, which handles all config propagation.
+  // Track prevLookbackRef for potential future use.
   useEffect(() => {
-    if (daemonConfig?.lookbackDays && prevLookbackRef.current !== null) {
-      const newLookback = daemonConfig.lookbackDays;
-      const oldLookback = prevLookbackRef.current;
-
-      // If lookback increased significantly and auto-download is enabled, trigger rescan
-      if (newLookback > oldLookback * 2 && daemonConfig.enabled) {
-        // Wait for debounced save to complete, then trigger rescan
-        const triggerRescanAfterSave = async () => {
-          try {
-            await TriggerProfileRescan();
-            setStatusMessage(`Lookback extended to ${newLookback} days. Scanning for older jobs...`);
-          } catch {
-            // Silent fail - rescan will happen on next poll
-          }
-        };
-
-        // Delay rescan to ensure save completes first
-        setTimeout(triggerRescanAfterSave, 1500);
-      }
-    }
     prevLookbackRef.current = daemonConfig?.lookbackDays ?? null;
-  }, [daemonConfig?.lookbackDays, daemonConfig?.enabled]);
+  }, [daemonConfig?.lookbackDays]);
 
   // v4.5.8: Cleanup debounce timeout on unmount
   useEffect(() => {
@@ -282,6 +288,25 @@ export function SetupTab() {
       }
     };
   }, []);
+
+  // v4.7.6: Track pending state elapsed time for progressive messages
+  useEffect(() => {
+    if (daemonStatus?.userState === 'pending') {
+      if (pendingStartTime === null) {
+        setPendingStartTime(Date.now());
+      }
+      const timer = setInterval(() => {
+        setPendingElapsed(Math.floor((Date.now() - (pendingStartTime ?? Date.now())) / 1000));
+      }, 1000);
+      return () => clearInterval(timer);
+    } else {
+      // Reset when no longer pending
+      if (pendingStartTime !== null) {
+        setPendingStartTime(null);
+        setPendingElapsed(0);
+      }
+    }
+  }, [daemonStatus?.userState, pendingStartTime]);
 
   // v4.3.2: Fetch file logging settings on mount
   useEffect(() => {
@@ -486,8 +511,27 @@ export function SetupTab() {
 
   // v4.5.8: Handler for Enable Auto-Download checkbox with auto-save and rollback on failure
   // Also cancels any pending debounced save to prevent race conditions
+  // v4.7.6: Added pre-flight validation on enable + ReloadDaemonConfig instead of TriggerProfileRescan
   const handleAutoDownloadToggle = async (checked: boolean) => {
     if (!daemonConfig) return;
+
+    // v4.7.6: Pre-flight validation when enabling
+    if (checked) {
+      try {
+        const preflight = await ValidateAutoDownloadPreFlight(daemonConfig.downloadFolder || '');
+        if (!preflight.apiKeyOk) {
+          setStatusMessage(preflight.apiKeyError || 'No API key configured');
+          return; // Don't toggle — leave checkbox unchecked
+        }
+        if (!preflight.folderOk) {
+          setStatusMessage(preflight.folderError || 'Download folder is not accessible');
+          return; // Don't toggle — leave checkbox unchecked
+        }
+      } catch (err) {
+        setStatusMessage(`Pre-flight check failed: ${err}`);
+        return;
+      }
+    }
 
     // v4.5.8: Cancel any pending debounced save
     if (debounceTimeoutRef.current) {
@@ -509,12 +553,13 @@ export function SetupTab() {
       setLastSavedConfig({ ...newConfig });
 
       if (checked) {
-        // Notify service to rescan profiles so it picks up this user
+        // v4.7.6: Use ReloadDaemonConfig instead of TriggerProfileRescan
         try {
-          await TriggerProfileRescan();
+          await ReloadDaemonConfig();
           setStatusMessage('Auto-download enabled. Scanning for your jobs now...');
         } catch {
-          // Service might not support rescan - that's OK, it will pick up on next 5-min cycle
+          // Daemon may not be running yet — that's fine for config-first workflow
+          try { await TriggerProfileRescan(); } catch { /* silent */ }
           setStatusMessage('Auto-download enabled. Service will detect within 5 minutes.');
         }
       } else {
@@ -587,6 +632,44 @@ export function SetupTab() {
       }
     } catch (err) {
       setStatusMessage(`Failed to start service: ${err}`);
+      setIsServiceLoading(false);
+    }
+  };
+
+  // v4.7.6: Combined install + start handler for when service is not installed
+  const handleInstallAndStartServiceElevated = async () => {
+    try {
+      setIsServiceLoading(true);
+      setShowUACConfirmDialog(null);
+      setStatusMessage('Installing and starting Windows Service (UAC prompt will appear)...');
+
+      const result = await InstallAndStartServiceElevated();
+      if (result.success) {
+        setStatusMessage('Install & start command executed. Waiting for service...');
+        // Poll for status change
+        let attempts = 0;
+        const maxAttempts = 20;
+        const pollInterval = setInterval(async () => {
+          attempts++;
+          const status = await GetServiceStatus();
+          setServiceStatus(status);
+          if (status.running) {
+            clearInterval(pollInterval);
+            setStatusMessage('Windows Service installed and started successfully');
+            setIsServiceLoading(false);
+            await refreshDaemonStatus();
+          } else if (attempts >= maxAttempts) {
+            clearInterval(pollInterval);
+            setStatusMessage('Service may still be starting. Check status in a moment.');
+            setIsServiceLoading(false);
+          }
+        }, 500);
+      } else {
+        setStatusMessage(`Failed to install and start service: ${result.error}`);
+        setIsServiceLoading(false);
+      }
+    } catch (err) {
+      setStatusMessage(`Failed to install and start service: ${err}`);
       setIsServiceLoading(false);
     }
   };
@@ -1256,8 +1339,9 @@ export function SetupTab() {
 
             {/* v4.5.1: Service Control Section - Windows Service lifecycle (SCM-based, requires UAC) */}
             {/* v4.5.2: Also show when SCM blocked but IPC indicates service mode */}
-            {/* Show when Windows Service is installed OR when SCM blocked + IPC service mode */}
-            {(serviceStatus?.installed || (serviceStatus?.scmBlocked && daemonStatus?.serviceMode)) && (
+            {/* v4.7.6: Also show "Install & Start" when not installed (on Windows) */}
+            {/* Show when Windows Service is installed OR when SCM blocked + IPC service mode OR when status is available */}
+            {(serviceStatus?.installed || (serviceStatus?.scmBlocked && daemonStatus?.serviceMode) || (serviceStatus && !serviceStatus.installed && serviceStatus.status !== 'Not Available (Windows only)')) && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <div className="flex items-center gap-2 mb-3">
                   <h4 className="text-sm font-medium text-gray-700">Service Control</h4>
@@ -1289,7 +1373,18 @@ export function SetupTab() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {!serviceStatus?.running ? (
+                      {/* v4.7.6: Not installed -> Install & Start button */}
+                      {!serviceStatus?.installed && !serviceStatus?.running ? (
+                        <button
+                          onClick={() => setShowUACConfirmDialog('start')}
+                          disabled={isServiceLoading}
+                          className="btn-primary text-sm flex items-center gap-1"
+                          title="Install and start Windows Service (requires administrator privileges)"
+                        >
+                          <ShieldCheckIcon className="w-4 h-4" />
+                          {isServiceLoading ? 'Installing...' : 'Install & Start Service'}
+                        </button>
+                      ) : !serviceStatus?.running ? (
                         <button
                           onClick={() => setShowUACConfirmDialog('start')}
                           disabled={isServiceLoading}
@@ -1332,6 +1427,7 @@ export function SetupTab() {
                   daemonStatus?.userState === 'not_configured' ? 'bg-yellow-50' :
                   daemonStatus?.userState === 'pending' ? 'bg-blue-50' :
                   daemonStatus?.userState === 'paused' ? 'bg-orange-50' :
+                  daemonStatus?.userState === 'error' ? 'bg-red-50' :
                   'bg-gray-50'
                 )}>
                   <div className="flex items-center justify-between">
@@ -1342,6 +1438,7 @@ export function SetupTab() {
                         daemonStatus?.userState === 'not_configured' ? 'bg-yellow-500' :
                         daemonStatus?.userState === 'pending' ? 'bg-blue-500 animate-pulse' :
                         daemonStatus?.userState === 'paused' ? 'bg-orange-500' :
+                        daemonStatus?.userState === 'error' ? 'bg-red-500' :
                         'bg-gray-400'
                       )} />
                       <div>
@@ -1350,6 +1447,7 @@ export function SetupTab() {
                            daemonStatus?.userState === 'not_configured' ? 'Setup Required' :
                            daemonStatus?.userState === 'pending' ? 'Activating...' :
                            daemonStatus?.userState === 'paused' ? 'Paused' :
+                           daemonStatus?.userState === 'error' ? 'Error' :
                            'Unknown'}
                         </div>
                         {daemonStatus?.userState === 'running' && daemonStatus.jobsDownloaded > 0 && (
@@ -1416,11 +1514,52 @@ export function SetupTab() {
                   {daemonStatus?.userState === 'pending' && (
                     <div className="mt-3 p-2 bg-blue-100 rounded border border-blue-300">
                       <p className="text-sm font-medium text-blue-800 flex items-center gap-2">
-                        <ArrowPathIcon className="w-4 h-4 animate-spin" /> Activating...
+                        <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                        {/* v4.7.6: Progressive pending messages with backend error codes */}
+                        {daemonStatus?.error && daemonStatus.error.toLowerCase().includes('api key')
+                          ? 'Service cannot find your API key'
+                          : daemonStatus?.error
+                            ? daemonStatus.error
+                            : pendingElapsed < 10
+                              ? 'Activating...'
+                              : pendingElapsed < 30
+                                ? 'Still waiting for service...'
+                                : 'Taking longer than expected.'}
                       </p>
                       <p className="text-xs text-blue-700 mt-1">
-                        The service is detecting your configuration. This usually takes a few seconds.
+                        {daemonStatus?.error && daemonStatus.error.toLowerCase().includes('api key')
+                          ? 'Ensure Connection settings are saved and Test Connection succeeds.'
+                          : pendingElapsed < 10
+                            ? 'The service is detecting your configuration. This usually takes a few seconds.'
+                            : pendingElapsed < 30
+                              ? 'The service may still be initializing. Please wait...'
+                              : 'The service may have encountered an issue.'}
                       </p>
+                      {pendingElapsed >= 30 && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            onClick={() => { OpenLogsDirectory().catch(() => {}); }}
+                            className="text-xs text-blue-700 underline hover:text-blue-900"
+                          >
+                            Open Logs
+                          </button>
+                          <button
+                            onClick={async () => {
+                              try {
+                                await ReloadDaemonConfig();
+                                setPendingStartTime(Date.now());
+                                setPendingElapsed(0);
+                                setStatusMessage('Retry triggered');
+                              } catch {
+                                try { await TriggerProfileRescan(); } catch { /* silent */ }
+                              }
+                            }}
+                            className="text-xs text-blue-700 underline hover:text-blue-900"
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1649,7 +1788,9 @@ export function SetupTab() {
                       Cancel
                     </button>
                     <button
-                      onClick={showUACConfirmDialog === 'start' ? handleStartServiceElevated : handleStopServiceElevated}
+                      onClick={showUACConfirmDialog === 'start'
+                        ? (!serviceStatus?.installed ? handleInstallAndStartServiceElevated : handleStartServiceElevated)
+                        : handleStopServiceElevated}
                       className="btn-primary flex items-center gap-2"
                     >
                       <ShieldCheckIcon className="w-4 h-4" />

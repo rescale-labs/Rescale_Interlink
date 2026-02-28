@@ -144,6 +144,11 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		// v4.0.8: Scan progress events for software/hardware catalog scanning
 		// Don't throttle - these are infrequent and important for UX
 		runtime.EventsEmit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
+
+	case *events.BatchProgressEvent:
+		// v4.7.7: Batch progress events for grouped transfer display
+		// No throttling needed — ticker already limits to 1/sec per batch
+		runtime.EventsEmit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
 	}
 }
 
@@ -316,21 +321,23 @@ type EnumerationEventDTO struct {
 	FoldersFound int    `json:"foldersFound"`
 	FilesFound   int    `json:"filesFound"`
 	BytesFound   int64  `json:"bytesFound"`
-	IsComplete   bool   `json:"isComplete"`
-	Error        string `json:"error,omitempty"`
+	IsComplete    bool   `json:"isComplete"`
+	Error         string `json:"error,omitempty"`
+	StatusMessage string `json:"statusMessage,omitempty"` // v4.7.7: Human-readable status
 }
 
 func enumerationEventToDTO(e *events.EnumerationEvent) EnumerationEventDTO {
 	return EnumerationEventDTO{
-		Timestamp:    e.Timestamp().Format(time.RFC3339Nano),
-		ID:           e.ID,
-		FolderName:   e.FolderName,
-		Direction:    e.Direction,
-		FoldersFound: e.FoldersFound,
-		FilesFound:   e.FilesFound,
-		BytesFound:   e.BytesFound,
-		IsComplete:   e.IsComplete,
-		Error:        e.Error,
+		Timestamp:     e.Timestamp().Format(time.RFC3339Nano),
+		ID:            e.ID,
+		FolderName:    e.FolderName,
+		Direction:     e.Direction,
+		FoldersFound:  e.FoldersFound,
+		FilesFound:    e.FilesFound,
+		BytesFound:    e.BytesFound,
+		IsComplete:    e.IsComplete,
+		Error:         e.Error,
+		StatusMessage: e.StatusMessage,
 	}
 }
 
@@ -354,5 +361,32 @@ func scanProgressEventToDTO(e *events.ScanProgressEvent) ScanProgressEventDTO {
 		IsComplete: e.IsComplete,
 		IsCached:   e.IsCached,
 		Error:      e.Error,
+	}
+}
+
+// BatchProgressEventDTO is the JSON-safe version of events.BatchProgressEvent (v4.7.7).
+type BatchProgressEventDTO struct {
+	Timestamp string  `json:"timestamp"`
+	BatchID   string  `json:"batchID"`
+	Label     string  `json:"label"`
+	Direction string  `json:"direction"`
+	Total     int     `json:"total"`
+	Completed int     `json:"completed"`
+	Failed    int     `json:"failed"`
+	Progress  float64 `json:"progress"`
+	Speed     float64 `json:"speed"`
+}
+
+func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO {
+	return BatchProgressEventDTO{
+		Timestamp: e.Timestamp().Format(time.RFC3339Nano),
+		BatchID:   e.BatchID,
+		Label:     e.Label,
+		Direction: e.Direction,
+		Total:     e.Total,
+		Completed: e.Completed,
+		Failed:    e.Failed,
+		Progress:  e.Progress,
+		Speed:     e.Speed,
 	}
 }

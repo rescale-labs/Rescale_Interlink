@@ -46,6 +46,8 @@ type SyncUploadParams struct {
 	FolderID              string                 // Destination folder ID (empty = root)
 	Name                  string                 // Display name
 	SourceLabel           string                 // "PUR", "SingleJob", "FileBrowser"
+	BatchID               string                 // v4.7.7: Batch grouping ID
+	BatchLabel            string                 // v4.7.7: Batch display label
 	ExtraProgressCallback func(progress float64) // Pipeline's own progress reporting
 	Tags                  []string               // Applied after upload (non-fatal on failure)
 }
@@ -121,6 +123,10 @@ type Pipeline struct {
 	// When non-nil, uploadWorker and ResolveSharedFiles delegate uploads here
 	// instead of calling upload.UploadFile() directly.
 	syncUploader SyncUploader
+
+	// v4.7.7: Batch ID for grouping all uploads in this pipeline run
+	batchID    string
+	batchLabel string
 }
 
 type workItem struct {
@@ -415,6 +421,8 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 					LocalPath:   absPath,
 					Name:        filepath.Base(absPath),
 					SourceLabel: "PUR",
+					BatchID:     p.batchID,    // v4.7.7
+					BatchLabel:  p.batchLabel, // v4.7.7
 				})
 			} else {
 				// CLI fallback: direct upload
@@ -438,6 +446,13 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 // Run executes the pipeline
 func (p *Pipeline) Run(ctx context.Context) error {
 	p.pipelineStart = time.Now()
+
+	// v4.7.7: Generate batch ID for grouping all uploads in this pipeline run
+	if p.syncUploader != nil {
+		p.batchID = fmt.Sprintf("pur_%d", p.pipelineStart.UnixNano())
+		p.batchLabel = fmt.Sprintf("PUR: %d jobs", p.totalJobs)
+	}
+
 	p.logf("INFO", "pipeline", "", "Starting pipeline with %d jobs", p.totalJobs)
 	p.logf("INFO", "pipeline", "", "Workers: tar=%d upload=%d job=%d", p.tarWorkers, p.uploadWorkers, p.jobWorkers)
 
@@ -791,6 +806,8 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 						LocalPath:             item.state.TarPath,
 						Name:                  filepath.Base(item.state.TarPath),
 						SourceLabel:           "PUR",
+						BatchID:               p.batchID,    // v4.7.7
+						BatchLabel:            p.batchLabel, // v4.7.7
 						ExtraProgressCallback: progressCallback,
 					})
 				} else {

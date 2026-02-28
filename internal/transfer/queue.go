@@ -62,6 +62,9 @@ type Queue struct {
 
 	// Event publishing
 	eventBus *events.EventBus
+
+	// v4.7.7: Batch progress ticker
+	batchTickerRunning bool
 }
 
 // NewQueue creates a new transfer queue with the specified event bus.
@@ -115,6 +118,21 @@ func (q *Queue) TrackTransfer(name string, size int64, taskType TaskType, source
 func (q *Queue) TrackTransferWithLabel(name string, size int64, taskType TaskType, source, dest, sourceLabel string) *TransferTask {
 	task := q.TrackTransfer(name, size, taskType, source, dest)
 	task.SourceLabel = sourceLabel
+	return task
+}
+
+// TrackTransferWithBatch registers a new transfer with source label and batch info.
+// v4.7.7: Added for batch grouping in Transfers tab.
+func (q *Queue) TrackTransferWithBatch(name string, size int64, taskType TaskType, source, dest, sourceLabel, batchID, batchLabel string) *TransferTask {
+	task := q.TrackTransferWithLabel(name, size, taskType, source, dest, sourceLabel)
+	task.BatchID = batchID
+	task.BatchLabel = batchLabel
+
+	// Start batch progress ticker if this is the first batched task
+	if batchID != "" {
+		q.ensureBatchTicker()
+	}
+
 	return task
 }
 
@@ -434,8 +452,16 @@ func (q *Queue) GetTask(taskID string) (TransferTask, bool) {
 }
 
 // publishTransferEvent publishes a transfer event to the event bus.
+// v4.7.7: Suppresses progress events for batched tasks to reduce event flood.
+// Terminal events (completed, failed, cancelled) are always published.
 func (q *Queue) publishTransferEvent(eventType events.EventType, task *TransferTask) {
 	if q.eventBus == nil {
+		return
+	}
+
+	// v4.7.7: Skip individual progress events for batched tasks.
+	// The batch progress ticker publishes aggregate events instead.
+	if eventType == events.EventTransferProgress && task.BatchID != "" {
 		return
 	}
 
@@ -453,4 +479,256 @@ func (q *Queue) publishTransferEvent(eventType events.EventType, task *TransferT
 		Error:    task.GetError(),
 	}
 	q.eventBus.Publish(event)
+}
+
+// BatchStats holds aggregate stats for a batch of transfers.
+// v4.7.7: Used for grouped display in Transfers tab.
+type BatchStats struct {
+	BatchID     string
+	BatchLabel  string
+	Direction   string // "upload" or "download"
+	SourceLabel string
+	Total       int
+	Queued      int
+	Active      int
+	Completed   int
+	Failed      int
+	Cancelled   int
+	TotalBytes  int64
+	Progress    float64 // byte-weighted 0.0-1.0
+	Speed       float64 // aggregate bytes/sec
+}
+
+// GetAllBatchStats returns aggregate stats for all batches in a single pass.
+// v4.7.7: O(tasks) scan, returns one BatchStats per distinct BatchID.
+func (q *Queue) GetAllBatchStats() []BatchStats {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	batchMap := make(map[string]*BatchStats)
+	var batchOrder []string // Preserve insertion order
+
+	for _, task := range q.tasks {
+		if task.BatchID == "" {
+			continue
+		}
+
+		bs, exists := batchMap[task.BatchID]
+		if !exists {
+			bs = &BatchStats{
+				BatchID:     task.BatchID,
+				BatchLabel:  task.BatchLabel,
+				Direction:   string(task.Type),
+				SourceLabel: task.SourceLabel,
+			}
+			batchMap[task.BatchID] = bs
+			batchOrder = append(batchOrder, task.BatchID)
+		}
+
+		bs.Total++
+		bs.TotalBytes += task.Size
+
+		state := task.GetState()
+		switch state {
+		case TaskQueued, TaskInitializing:
+			bs.Queued++
+		case TaskActive:
+			bs.Active++
+			bs.Speed += task.GetSpeed()
+		case TaskCompleted:
+			bs.Completed++
+		case TaskFailed:
+			bs.Failed++
+		case TaskCancelled:
+			bs.Cancelled++
+		}
+	}
+
+	// Compute byte-weighted progress
+	result := make([]BatchStats, 0, len(batchOrder))
+	for _, batchID := range batchOrder {
+		bs := batchMap[batchID]
+		if bs.TotalBytes > 0 {
+			var transferredBytes int64
+			for _, task := range q.tasks {
+				if task.BatchID == batchID {
+					transferredBytes += int64(task.GetProgress() * float64(task.Size))
+				}
+			}
+			bs.Progress = float64(transferredBytes) / float64(bs.TotalBytes)
+		} else if bs.Total > 0 {
+			// No size info — use file count
+			bs.Progress = float64(bs.Completed) / float64(bs.Total)
+		}
+		result = append(result, *bs)
+	}
+	return result
+}
+
+// GetBatchTasks returns paginated tasks for a specific batch.
+// v4.7.7: Used for expanded batch detail view.
+func (q *Queue) GetBatchTasks(batchID string, offset, limit int) []TransferTask {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	var matching []TransferTask
+	for _, task := range q.tasks {
+		if task.BatchID == batchID {
+			matching = append(matching, task.Clone())
+		}
+	}
+
+	// Apply pagination
+	if offset >= len(matching) {
+		return []TransferTask{}
+	}
+	end := offset + limit
+	if end > len(matching) {
+		end = len(matching)
+	}
+	return matching[offset:end]
+}
+
+// GetUngroupedTasks returns tasks with no BatchID.
+// v4.7.7: Used by polling to avoid sending 10k batched tasks over IPC.
+func (q *Queue) GetUngroupedTasks() []TransferTask {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	var result []TransferTask
+	for _, task := range q.tasks {
+		if task.BatchID == "" {
+			result = append(result, task.Clone())
+		}
+	}
+	if result == nil {
+		return []TransferTask{}
+	}
+	return result
+}
+
+// CancelBatch cancels all non-terminal tasks in a batch.
+// v4.7.7: Unlike single Cancel(), this also handles queued tasks (the majority in large batches).
+func (q *Queue) CancelBatch(batchID string) error {
+	q.mu.Lock()
+	var tasksToCancel []*TransferTask
+	var cancelFns []context.CancelFunc
+
+	for _, task := range q.tasks {
+		if task.BatchID != batchID {
+			continue
+		}
+		state := task.GetState()
+		if state == TaskCompleted || state == TaskFailed || state == TaskCancelled {
+			continue
+		}
+		tasksToCancel = append(tasksToCancel, task)
+		if fn := q.cancelFuncs[task.ID]; fn != nil {
+			cancelFns = append(cancelFns, fn)
+		}
+	}
+	q.mu.Unlock()
+
+	// Call cancel functions for active tasks
+	for _, fn := range cancelFns {
+		fn()
+	}
+
+	// Update states
+	q.mu.Lock()
+	for _, task := range tasksToCancel {
+		task.State = TaskCancelled
+		task.CompletedAt = time.Now()
+		delete(q.cancelFuncs, task.ID)
+	}
+	q.mu.Unlock()
+
+	// Publish events
+	for _, task := range tasksToCancel {
+		q.publishTransferEvent(events.EventTransferCancelled, task)
+	}
+
+	return nil
+}
+
+// RetryFailedInBatch retries all failed tasks in a batch.
+// v4.7.7: Batch retry for grouped Transfers tab view.
+func (q *Queue) RetryFailedInBatch(batchID string) error {
+	q.mu.RLock()
+	var failedTaskIDs []string
+	for _, task := range q.tasks {
+		if task.BatchID == batchID && task.GetState() == TaskFailed {
+			failedTaskIDs = append(failedTaskIDs, task.ID)
+		}
+	}
+	q.mu.RUnlock()
+
+	for _, taskID := range failedTaskIDs {
+		if _, err := q.Retry(taskID); err != nil {
+			// Log but continue — don't fail the whole batch retry for one task
+			continue
+		}
+	}
+	return nil
+}
+
+// ensureBatchTicker starts the batch progress ticker if not already running.
+// v4.7.7: Publishes BatchProgressEvent at 1/sec for each active batch.
+func (q *Queue) ensureBatchTicker() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.batchTickerRunning {
+		return
+	}
+	q.batchTickerRunning = true
+
+	go q.batchTickerLoop()
+}
+
+// batchTickerLoop publishes batch progress events every second.
+func (q *Queue) batchTickerLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		stats := q.GetAllBatchStats()
+		if len(stats) == 0 {
+			q.mu.Lock()
+			q.batchTickerRunning = false
+			q.mu.Unlock()
+			return
+		}
+
+		allTerminal := true
+		for _, bs := range stats {
+			if bs.Queued > 0 || bs.Active > 0 {
+				allTerminal = false
+			}
+
+			if q.eventBus != nil {
+				q.eventBus.Publish(&events.BatchProgressEvent{
+					BaseEvent: events.BaseEvent{
+						EventType: events.EventBatchProgress,
+						Time:      time.Now(),
+					},
+					BatchID:   bs.BatchID,
+					Label:     bs.BatchLabel,
+					Direction: bs.Direction,
+					Total:     bs.Total,
+					Completed: bs.Completed,
+					Failed:    bs.Failed,
+					Progress:  bs.Progress,
+					Speed:     bs.Speed,
+				})
+			}
+		}
+
+		if allTerminal {
+			q.mu.Lock()
+			q.batchTickerRunning = false
+			q.mu.Unlock()
+			return
+		}
+	}
 }

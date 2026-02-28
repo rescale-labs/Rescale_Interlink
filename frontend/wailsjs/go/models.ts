@@ -778,6 +778,42 @@ export namespace wailsapp {
 	    }
 	}
 	
+	export class PreFlightResultDTO {
+	    apiKeyOk: boolean;
+	    folderOk: boolean;
+	    apiKeyError?: string;
+	    folderError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PreFlightResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.apiKeyOk = source["apiKeyOk"];
+	        this.folderOk = source["folderOk"];
+	        this.apiKeyError = source["apiKeyError"];
+	        this.folderError = source["folderError"];
+	    }
+	}
+	export class ReloadConfigResultDTO {
+	    applied: boolean;
+	    deferred: boolean;
+	    activeDownloads: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReloadConfigResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.applied = source["applied"];
+	        this.deferred = source["deferred"];
+	        this.activeDownloads = source["activeDownloads"];
+	        this.error = source["error"];
+	    }
+	}
 	export class RunHistoryEntryDTO {
 	    runId: string;
 	    runType: string;
@@ -1025,6 +1061,42 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	export class TransferBatchDTO {
+	    batchID: string;
+	    batchLabel: string;
+	    direction: string;
+	    sourceLabel: string;
+	    total: number;
+	    queued: number;
+	    active: number;
+	    completed: number;
+	    failed: number;
+	    cancelled: number;
+	    totalBytes: number;
+	    progress: number;
+	    speed: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TransferBatchDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
+	        this.direction = source["direction"];
+	        this.sourceLabel = source["sourceLabel"];
+	        this.total = source["total"];
+	        this.queued = source["queued"];
+	        this.active = source["active"];
+	        this.completed = source["completed"];
+	        this.failed = source["failed"];
+	        this.cancelled = source["cancelled"];
+	        this.totalBytes = source["totalBytes"];
+	        this.progress = source["progress"];
+	        this.speed = source["speed"];
+	    }
+	}
 	export class TransferRequestDTO {
 	    type: string;
 	    source: string;
@@ -1032,6 +1104,8 @@ export namespace wailsapp {
 	    name: string;
 	    size: number;
 	    sourceLabel?: string;
+	    batchID?: string;
+	    batchLabel?: string;
 	    tags?: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -1046,6 +1120,8 @@ export namespace wailsapp {
 	        this.name = source["name"];
 	        this.size = source["size"];
 	        this.sourceLabel = source["sourceLabel"];
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
 	        this.tags = source["tags"];
 	    }
 	}
@@ -1084,6 +1160,8 @@ export namespace wailsapp {
 	    dest: string;
 	    size: number;
 	    sourceLabel?: string;
+	    batchID?: string;
+	    batchLabel?: string;
 	    progress: number;
 	    speed: number;
 	    error?: string;
@@ -1105,6 +1183,8 @@ export namespace wailsapp {
 	        this.dest = source["dest"];
 	        this.size = source["size"];
 	        this.sourceLabel = source["sourceLabel"];
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
 	        this.progress = source["progress"];
 	        this.speed = source["speed"];
 	        this.error = source["error"];

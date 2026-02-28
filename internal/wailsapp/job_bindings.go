@@ -722,6 +722,10 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 				return
 			}
 
+			// v4.7.7: Generate batch ID for grouping uploads in Transfers tab
+			jobBatchID := fmt.Sprintf("job_%d", time.Now().UnixNano())
+			jobBatchLabel := fmt.Sprintf("Job: %s", jobSpec.JobName)
+
 			var fileIDs []string
 			for _, filePath := range expandedPaths {
 				cloudFile, uploadErr := ts.UploadFileSync(ctx, services.TransferRequest{
@@ -729,6 +733,8 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 					Source:      filePath,
 					Name:        filepath.Base(filePath),
 					SourceLabel: services.SourceLabelSingleJob,
+					BatchID:     jobBatchID,    // v4.7.7
+					BatchLabel:  jobBatchLabel, // v4.7.7
 				}, services.UploadFileSyncParams{})
 				if uploadErr != nil {
 					wailsLogger.Error().Err(uploadErr).Str("file", filePath).Msg("File upload failed")

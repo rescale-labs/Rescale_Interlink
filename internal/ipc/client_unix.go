@@ -265,3 +265,19 @@ func (c *Client) GetRecentLogs(ctx context.Context, count int) ([]LogEntryData, 
 	}
 	return []LogEntryData{}, nil
 }
+
+// ReloadConfig sends a config reload request to the daemon.
+// v4.7.6: Used by GUI to notify daemon of configuration changes.
+func (c *Client) ReloadConfig(ctx context.Context) (*ReloadConfigData, error) {
+	req := NewRequest(MsgReloadConfig)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("server error: %s", resp.Error)
+	}
+
+	return resp.GetReloadConfigData(), nil
+}

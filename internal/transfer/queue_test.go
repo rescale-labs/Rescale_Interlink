@@ -712,3 +712,291 @@ func TestQueueSpeedCalculation(t *testing.T) {
 		t.Error("Speed should be calculated after progress updates")
 	}
 }
+
+// v4.7.7: Batch grouping tests
+
+func TestTrackTransferWithBatch(t *testing.T) {
+	queue := NewQueue(nil)
+
+	task := queue.TrackTransferWithBatch("file.dat", 1024, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "My Folder")
+
+	if task.BatchID != "batch1" {
+		t.Errorf("Expected BatchID 'batch1', got %q", task.BatchID)
+	}
+	if task.BatchLabel != "My Folder" {
+		t.Errorf("Expected BatchLabel 'My Folder', got %q", task.BatchLabel)
+	}
+	if task.SourceLabel != "FileBrowser" {
+		t.Errorf("Expected SourceLabel 'FileBrowser', got %q", task.SourceLabel)
+	}
+}
+
+func TestGetAllBatchStats(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create batched tasks
+	t1 := queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder A")
+	t2 := queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder A")
+	queue.TrackTransferWithBatch("c.txt", 300, TaskTypeDownload, "id1", "/c", "FileBrowser", "batch2", "Folder B")
+
+	// Create ungrouped tasks
+	queue.TrackTransfer("d.txt", 400, TaskTypeUpload, "/d", "f")
+
+	// Complete one task in batch1
+	queue.Activate(t1.ID)
+	queue.Complete(t1.ID)
+
+	// Activate one task in batch1
+	queue.Activate(t2.ID)
+
+	stats := queue.GetAllBatchStats()
+	if len(stats) != 2 {
+		t.Fatalf("Expected 2 batches, got %d", len(stats))
+	}
+
+	// Find batch1 stats
+	var bs1, bs2 *BatchStats
+	for i := range stats {
+		if stats[i].BatchID == "batch1" {
+			bs1 = &stats[i]
+		} else if stats[i].BatchID == "batch2" {
+			bs2 = &stats[i]
+		}
+	}
+
+	if bs1 == nil {
+		t.Fatal("batch1 not found in stats")
+	}
+	if bs1.Total != 2 {
+		t.Errorf("batch1: expected total=2, got %d", bs1.Total)
+	}
+	if bs1.Completed != 1 {
+		t.Errorf("batch1: expected completed=1, got %d", bs1.Completed)
+	}
+	if bs1.BatchLabel != "Folder A" {
+		t.Errorf("batch1: expected label 'Folder A', got %q", bs1.BatchLabel)
+	}
+	if bs1.Direction != "upload" {
+		t.Errorf("batch1: expected direction 'upload', got %q", bs1.Direction)
+	}
+	if bs1.TotalBytes != 300 { // 100 + 200
+		t.Errorf("batch1: expected totalBytes=300, got %d", bs1.TotalBytes)
+	}
+
+	if bs2 == nil {
+		t.Fatal("batch2 not found in stats")
+	}
+	if bs2.Total != 1 {
+		t.Errorf("batch2: expected total=1, got %d", bs2.Total)
+	}
+	if bs2.Direction != "download" {
+		t.Errorf("batch2: expected direction 'download', got %q", bs2.Direction)
+	}
+}
+
+func TestGetBatchTasksPaginated(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create 5 tasks in a batch
+	for i := 0; i < 5; i++ {
+		queue.TrackTransferWithBatch("file.txt", 100, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "Test")
+	}
+
+	// First page: offset=0, limit=3
+	page1 := queue.GetBatchTasks("batch1", 0, 3)
+	if len(page1) != 3 {
+		t.Errorf("Expected 3 tasks in page1, got %d", len(page1))
+	}
+
+	// Second page: offset=3, limit=3
+	page2 := queue.GetBatchTasks("batch1", 3, 3)
+	if len(page2) != 2 {
+		t.Errorf("Expected 2 tasks in page2, got %d", len(page2))
+	}
+
+	// Beyond end: offset=10, limit=3
+	page3 := queue.GetBatchTasks("batch1", 10, 3)
+	if len(page3) != 0 {
+		t.Errorf("Expected 0 tasks beyond end, got %d", len(page3))
+	}
+
+	// Nonexistent batch
+	page4 := queue.GetBatchTasks("nonexistent", 0, 50)
+	if len(page4) != 0 {
+		t.Errorf("Expected 0 tasks for nonexistent batch, got %d", len(page4))
+	}
+}
+
+func TestGetUngroupedTasks(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create batched tasks
+	queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder")
+	queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder")
+
+	// Create ungrouped tasks
+	queue.TrackTransfer("c.txt", 300, TaskTypeUpload, "/c", "f")
+	queue.TrackTransfer("d.txt", 400, TaskTypeDownload, "id", "/d")
+
+	ungrouped := queue.GetUngroupedTasks()
+	if len(ungrouped) != 2 {
+		t.Errorf("Expected 2 ungrouped tasks, got %d", len(ungrouped))
+	}
+	for _, task := range ungrouped {
+		if task.BatchID != "" {
+			t.Errorf("Ungrouped task should have empty BatchID, got %q", task.BatchID)
+		}
+	}
+}
+
+func TestCancelBatch(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create tasks in a batch: some queued, one active, one completed
+	t1 := queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder")
+	t2 := queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder")
+	t3 := queue.TrackTransferWithBatch("c.txt", 300, TaskTypeUpload, "/c", "f", "FileBrowser", "batch1", "Folder")
+
+	// Make t2 active with cancel function
+	queue.Activate(t2.ID)
+	ctx, cancelFn := context.WithCancel(context.Background())
+	queue.SetCancel(t2.ID, cancelFn)
+
+	// Make t3 completed (should NOT be cancelled)
+	queue.Activate(t3.ID)
+	queue.Complete(t3.ID)
+
+	// Cancel batch
+	err := queue.CancelBatch("batch1")
+	if err != nil {
+		t.Fatalf("CancelBatch failed: %v", err)
+	}
+
+	// Verify context was cancelled for t2
+	select {
+	case <-ctx.Done():
+		// Good
+	default:
+		t.Error("Active task's context should be cancelled")
+	}
+
+	// Check states
+	task1, _ := queue.GetTask(t1.ID)
+	if task1.State != TaskCancelled {
+		t.Errorf("Queued task should be cancelled, got %s", task1.State)
+	}
+
+	task2, _ := queue.GetTask(t2.ID)
+	if task2.State != TaskCancelled {
+		t.Errorf("Active task should be cancelled, got %s", task2.State)
+	}
+
+	task3, _ := queue.GetTask(t3.ID)
+	if task3.State != TaskCompleted {
+		t.Errorf("Completed task should remain completed, got %s", task3.State)
+	}
+}
+
+func TestRetryFailedInBatch(t *testing.T) {
+	eb := events.NewEventBus(100)
+	queue := NewQueue(eb)
+	executor := newMockRetryExecutor()
+	queue.SetRetryExecutor(executor)
+
+	// Create tasks: one failed, one completed, one queued
+	t1 := queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder")
+	t2 := queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder")
+	t3 := queue.TrackTransferWithBatch("c.txt", 300, TaskTypeUpload, "/c", "f", "FileBrowser", "batch1", "Folder")
+
+	queue.Activate(t1.ID)
+	queue.Fail(t1.ID, errors.New("test error"))
+
+	queue.Activate(t2.ID)
+	queue.Complete(t2.ID)
+
+	// t3 stays queued
+
+	// Retry failed
+	err := queue.RetryFailedInBatch("batch1")
+	if err != nil {
+		t.Fatalf("RetryFailedInBatch failed: %v", err)
+	}
+
+	// Wait for retry to execute
+	if !executor.waitForExecutions(1, 2*time.Second) {
+		t.Fatal("Timed out waiting for retry execution")
+	}
+
+	executed := executor.getExecuted()
+	if len(executed) != 1 {
+		t.Errorf("Expected 1 retried task, got %d", len(executed))
+	}
+	if len(executed) > 0 && executed[0].ID != t1.ID {
+		t.Errorf("Expected retried task %s, got %s", t1.ID, executed[0].ID)
+	}
+	_ = t3 // Queued task should not be retried
+}
+
+func TestBatchProgressSuppressesIndividual(t *testing.T) {
+	eb := events.NewEventBus(100)
+	queue := NewQueue(eb)
+
+	// Subscribe to events
+	ch := eb.Subscribe(events.EventTransferProgress)
+	completedCh := eb.Subscribe(events.EventTransferCompleted)
+
+	// Create a batched task
+	task := queue.TrackTransferWithBatch("file.dat", 1000, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "Folder")
+	queue.Activate(task.ID)
+
+	// Update progress — should NOT publish individual progress event
+	queue.UpdateProgress(task.ID, 0.5)
+
+	select {
+	case <-ch:
+		t.Error("Individual progress event should be suppressed for batched tasks")
+	case <-time.After(50 * time.Millisecond):
+		// Good — no event received
+	}
+
+	// Complete — should still publish terminal event
+	queue.Complete(task.ID)
+
+	select {
+	case <-completedCh:
+		// Good — terminal events are not suppressed
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Terminal event should NOT be suppressed for batched tasks")
+	}
+}
+
+func TestBatchProgressTickerPublishes(t *testing.T) {
+	eb := events.NewEventBus(100)
+	queue := NewQueue(eb)
+
+	ch := eb.Subscribe(events.EventBatchProgress)
+
+	// Create a batched task (this starts the ticker)
+	task := queue.TrackTransferWithBatch("file.dat", 1000, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "Folder")
+	queue.Activate(task.ID)
+
+	// Wait for ticker to fire (1 second interval)
+	select {
+	case evt := <-ch:
+		bpe, ok := evt.(*events.BatchProgressEvent)
+		if !ok {
+			t.Fatalf("Expected *events.BatchProgressEvent, got %T", evt)
+		}
+		if bpe.BatchID != "batch1" {
+			t.Errorf("Expected BatchID 'batch1', got %q", bpe.BatchID)
+		}
+		if bpe.Total != 1 {
+			t.Errorf("Expected Total=1, got %d", bpe.Total)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("Expected batch progress event within 3 seconds")
+	}
+
+	// Complete the task so the ticker stops
+	queue.Complete(task.ID)
+}

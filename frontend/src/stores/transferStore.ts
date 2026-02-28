@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../wailsjs/go/models'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { ProgressEventDTO, TransferEventDTO, EnumerationEventDTO, EVENT_NAMES } from '../types/events'
+import { ProgressEventDTO, TransferEventDTO, EnumerationEventDTO, BatchProgressEventDTO, EVENT_NAMES } from '../types/events'
 
 // Transfer task state
 export type TransferState = 'queued' | 'initializing' | 'active' | 'completed' | 'failed' | 'cancelled' | 'paused'
@@ -33,6 +33,7 @@ export function extractDiskSpaceInfo(error: string): { available: string; needed
 }
 
 // v4.0.8: Enumeration state for folder scan progress
+// v4.7.7: Added statusMessage, completedAt, lastEventAt for seamless batch transition
 export interface Enumeration {
   id: string
   folderName: string
@@ -42,6 +43,26 @@ export interface Enumeration {
   bytesFound: number
   isComplete: boolean
   error?: string
+  statusMessage?: string    // v4.7.7: Human-readable status (e.g. "Creating folders... (3 of 47)")
+  completedAt?: number      // v4.7.7: Timestamp when isComplete was set
+  lastEventAt: number       // v4.7.7: Timestamp of last event received (for staleness-based fallback)
+}
+
+// v4.7.7: Transfer batch for grouped display
+export interface TransferBatch {
+  batchID: string
+  batchLabel: string
+  direction: string
+  sourceLabel: string
+  total: number
+  queued: number
+  active: number
+  completed: number
+  failed: number
+  cancelled: number
+  totalBytes: number
+  progress: number
+  speed: number
 }
 
 // Extended transfer task with UI state
@@ -63,6 +84,10 @@ interface TransferStore {
   tasks: TransferTask[]
   stats: TransferStats
   enumerations: Enumeration[] // v4.0.8: Active folder scans
+  batches: TransferBatch[] // v4.7.7: Batch aggregates
+  expandedBatches: Set<string> // v4.7.7: Which batches are expanded
+  batchTasks: Map<string, TransferTask[]> // v4.7.7: Lazily loaded expanded tasks
+  batchEpochs: Map<string, number> // v4.7.7: Epoch counter per batch for stale-response protection
   isLoading: boolean
   error: string | null
   isPolling: boolean
@@ -71,15 +96,22 @@ interface TransferStore {
   // Actions
   fetchTasks: () => Promise<void>
   fetchStats: () => Promise<void>
+  fetchBatches: () => Promise<void>
+  fetchUngroupedTasks: () => Promise<void>
+  fetchBatchTasks: (batchID: string, offset: number, limit: number) => Promise<void>
   startPolling: (intervalMs?: number) => void
   stopPolling: () => void
   cancelTransfer: (taskId: string) => Promise<void>
   cancelAllTransfers: () => Promise<void>
+  cancelBatch: (batchID: string) => Promise<void>
   retryTransfer: (taskId: string) => Promise<string | null>
+  retryFailedInBatch: (batchID: string) => Promise<void>
   clearCompletedTransfers: () => void
+  toggleBatchExpanded: (batchID: string) => void
   handleProgressEvent: (event: ProgressEventDTO) => void
   handleTransferEvent: (event: TransferEventDTO) => void
   handleEnumerationEvent: (event: EnumerationEventDTO) => void // v4.0.8
+  handleBatchProgressEvent: (event: BatchProgressEventDTO) => void // v4.7.7
 
   // v4.0.8: App-level event listeners (always active, unlike polling which is tab-specific)
   setupEventListeners: () => () => void
@@ -89,12 +121,13 @@ interface TransferStore {
   _unsubscribeProgress: (() => void) | null
   _unsubscribeTransfer: (() => void) | null
   _unsubscribeEnumeration: (() => void) | null // v4.0.8
+  _unsubscribeBatchProgress: (() => void) | null // v4.7.7
   _appEventListenersSetup: boolean // v4.0.8: Track if app-level listeners are set up
 }
 
 // Format speed in bytes/sec to human readable
 // v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
-function formatSpeed(bytesPerSec: number): string {
+export function formatSpeed(bytesPerSec: number): string {
   // Handle undefined, NaN, or non-finite values
   if (typeof bytesPerSec !== 'number' || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return ''
   const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']
@@ -105,7 +138,7 @@ function formatSpeed(bytesPerSec: number): string {
 
 // Format ETA in milliseconds to human readable
 // v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
-function formatETA(etaMs: number): string {
+export function formatETA(etaMs: number): string {
   // Handle undefined, NaN, or non-finite values
   if (typeof etaMs !== 'number' || !Number.isFinite(etaMs) || etaMs <= 0) return ''
   const seconds = Math.floor(etaMs / 1000)
@@ -147,6 +180,10 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   tasks: [],
   stats: initialStats,
   enumerations: [], // v4.0.8: Active folder scans
+  batches: [], // v4.7.7
+  expandedBatches: new Set<string>(), // v4.7.7
+  batchTasks: new Map<string, TransferTask[]>(), // v4.7.7
+  batchEpochs: new Map<string, number>(), // v4.7.7: epoch counter per batch for stale-response protection
   isLoading: false,
   error: null,
   isPolling: false,
@@ -155,7 +192,126 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   _unsubscribeProgress: null,
   _unsubscribeTransfer: null,
   _unsubscribeEnumeration: null,
+  _unsubscribeBatchProgress: null,
   _appEventListenersSetup: false,
+
+  // v4.7.7: Fetch only ungrouped tasks (no batchID) — lightweight for large batches
+  fetchUngroupedTasks: async () => {
+    try {
+      const tasks = await App.GetUngroupedTransferTasks()
+      set({
+        tasks: (tasks || []).map(enhanceTask),
+        lastUpdate: Date.now(),
+        error: null,
+      })
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) })
+    }
+  },
+
+  // v4.7.7: Fetch batch aggregates + reconcile enumerations for seamless transition
+  fetchBatches: async () => {
+    try {
+      const batches = await App.GetTransferBatches()
+      set({ batches: batches || [] })
+
+      // Refresh expanded batch tasks
+      const expanded = get().expandedBatches
+      for (const batchID of expanded) {
+        get().fetchBatchTasks(batchID, 0, 50)
+      }
+
+      // v4.7.7: Enumeration-to-batch reconciliation (4-layer removal)
+      const currentBatches = batches || []
+      const batchIDs = new Set(currentBatches.map(b => b.batchID))
+      const now = Date.now()
+      const enumerations = get().enumerations
+      const toRemove: string[] = []
+
+      for (const e of enumerations) {
+        const hasMatchingBatch = batchIDs.has(e.id)
+
+        if (e.isComplete && e.completedAt && hasMatchingBatch) {
+          // Layer 1: isComplete + matching batch → remove after 500ms
+          if (now - e.completedAt >= 500) {
+            toRemove.push(e.id)
+          }
+        } else if (!e.isComplete && hasMatchingBatch) {
+          // Layer 2: !isComplete but matching batch found → immediate removal
+          // (handles dropped EventEnumerationCompleted)
+          toRemove.push(e.id)
+        } else if (!e.isComplete && !hasMatchingBatch && (now - e.lastEventAt > 30000)) {
+          // Layer 3: !isComplete, no matching batch, stale for 30s → remove
+          // Uses lastEventAt (staleness) not createdAt (absolute age) to avoid
+          // prematurely removing long-running folder creation progress
+          toRemove.push(e.id)
+        } else if (e.isComplete && e.completedAt && !hasMatchingBatch && (now - e.completedAt > 10000)) {
+          // Completed but no batch appeared after 10s (error path, empty folder, zero files)
+          toRemove.push(e.id)
+        }
+      }
+
+      if (toRemove.length > 0) {
+        const removeSet = new Set(toRemove)
+        set(s => ({
+          enumerations: s.enumerations.filter(e => !removeSet.has(e.id))
+        }))
+      }
+    } catch (error) {
+      console.error('Failed to fetch batches:', error)
+    }
+  },
+
+  // v4.7.7: Fetch paginated tasks for an expanded batch
+  // v4.7.7: Merge + dedupe + epoch guard to preserve "Show more" pagination across polling
+  fetchBatchTasks: async (batchID: string, offset: number, limit: number) => {
+    try {
+      // Capture epoch before the async call
+      const epochBefore = get().batchEpochs.get(batchID) ?? 0
+      const tasks = await App.GetBatchTasks(batchID, offset, limit)
+      const enhanced = (tasks || []).map(enhanceTask)
+
+      // After await: check if batch was invalidated while request was in flight
+      const epochAfter = get().batchEpochs.get(batchID) ?? 0
+      if (epochAfter !== epochBefore) return // Stale response — drop it
+
+      set(state => {
+        const newMap = new Map(state.batchTasks)
+        const existing = newMap.get(batchID) || []
+
+        if (offset === 0) {
+          if (enhanced.length < existing.length) {
+            // Poll returned fewer items than user has loaded via "Show more".
+            // Check prefix alignment to detect composition changes.
+            const prefixAligned = enhanced.length > 0 && enhanced.every(
+              (t, i) => i < existing.length && existing[i].id === t.id
+            )
+            if (prefixAligned) {
+              // IDs match — merge fresh first page + keep tail, dedupe.
+              const freshIds = new Set(enhanced.map(t => t.id))
+              const tail = existing.slice(enhanced.length).filter(t => !freshIds.has(t.id))
+              newMap.set(batchID, [...enhanced, ...tail])
+            } else {
+              // Composition changed — replace entirely.
+              newMap.set(batchID, enhanced)
+            }
+          } else {
+            // Normal case: fresh data is same size or larger — replace.
+            newMap.set(batchID, enhanced)
+          }
+        } else {
+          // Append path ("Show more") — dedupe to handle rapid clicks.
+          const existingIds = new Set(existing.map(t => t.id))
+          const deduped = enhanced.filter(t => !existingIds.has(t.id))
+          newMap.set(batchID, [...existing, ...deduped])
+        }
+
+        return { batchTasks: newMap }
+      })
+    } catch (error) {
+      console.error('Failed to fetch batch tasks:', error)
+    }
+  },
 
   fetchTasks: async () => {
     try {
@@ -191,9 +347,10 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     // Already polling
     if (state.isPolling) return
 
-    // Start polling for task list
+    // v4.7.7: Poll batches + ungrouped tasks instead of all tasks
     const pollInterval = setInterval(() => {
-      get().fetchTasks()
+      get().fetchBatches()
+      get().fetchUngroupedTasks()
       get().fetchStats()
     }, intervalMs)
 
@@ -206,7 +363,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     // via setupEventListeners() so they persist when navigating away
 
     // Initial fetch
-    get().fetchTasks()
+    get().fetchBatches()
+    get().fetchUngroupedTasks()
     get().fetchStats()
 
     set({
@@ -240,8 +398,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   cancelTransfer: async (taskId: string) => {
     try {
       await App.CancelTransfer(taskId)
-      // Refresh tasks
-      get().fetchTasks()
+      get().fetchUngroupedTasks()
     } catch (error) {
       console.error('Failed to cancel transfer:', error)
     }
@@ -257,18 +414,33 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       for (const task of activeTasks) {
         await App.CancelTransfer(task.id)
       }
-      // Refresh tasks
-      get().fetchTasks()
+      get().fetchUngroupedTasks()
     } catch (error) {
       console.error('Failed to cancel transfers:', error)
+    }
+  },
+
+  // v4.7.7: Cancel all tasks in a batch
+  cancelBatch: async (batchID: string) => {
+    try {
+      await App.CancelBatch(batchID)
+      set(state => {
+        const newMap = new Map(state.batchTasks)
+        newMap.delete(batchID)
+        const newEpochs = new Map(state.batchEpochs)
+        newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
+        return { batchTasks: newMap, batchEpochs: newEpochs }
+      })
+      get().fetchBatches()
+    } catch (error) {
+      console.error('Failed to cancel batch:', error)
     }
   },
 
   retryTransfer: async (taskId: string) => {
     try {
       const newTaskId = await App.RetryTransfer(taskId)
-      // Refresh tasks
-      get().fetchTasks()
+      get().fetchUngroupedTasks()
       return newTaskId
     } catch (error) {
       console.error('Failed to retry transfer:', error)
@@ -276,10 +448,54 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
+  // v4.7.7: Retry all failed tasks in a batch
+  retryFailedInBatch: async (batchID: string) => {
+    try {
+      await App.RetryFailedInBatch(batchID)
+      set(state => {
+        const newMap = new Map(state.batchTasks)
+        newMap.delete(batchID)
+        const newEpochs = new Map(state.batchEpochs)
+        newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
+        return { batchTasks: newMap, batchEpochs: newEpochs }
+      })
+      get().fetchBatches()
+    } catch (error) {
+      console.error('Failed to retry failed in batch:', error)
+    }
+  },
+
   clearCompletedTransfers: () => {
     App.ClearCompletedTransfers()
-    // Refresh tasks
-    get().fetchTasks()
+    // Invalidate all expanded batch caches — composition changed
+    set(state => {
+      const newEpochs = new Map(state.batchEpochs)
+      for (const batchID of state.expandedBatches) {
+        newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
+      }
+      return { batchTasks: new Map(), batchEpochs: newEpochs }
+    })
+    get().fetchBatches()
+    get().fetchUngroupedTasks()
+  },
+
+  // v4.7.7: Toggle batch expanded/collapsed state
+  toggleBatchExpanded: (batchID: string) => {
+    const expanded = new Set(get().expandedBatches)
+    if (expanded.has(batchID)) {
+      expanded.delete(batchID)
+      // Clear cached tasks to free memory; bump epoch to discard any in-flight stale responses
+      const newMap = new Map(get().batchTasks)
+      newMap.delete(batchID)
+      const newEpochs = new Map(get().batchEpochs)
+      newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
+      set({ expandedBatches: expanded, batchTasks: newMap, batchEpochs: newEpochs })
+    } else {
+      expanded.add(batchID)
+      set({ expandedBatches: expanded })
+      // Fetch first page of tasks
+      get().fetchBatchTasks(batchID, 0, 50)
+    }
   },
 
   handleProgressEvent: (event: ProgressEventDTO) => {
@@ -336,13 +552,33 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     })
   },
 
+  // v4.7.7: Handle batch progress events for real-time aggregate updates
+  handleBatchProgressEvent: (event: BatchProgressEventDTO) => {
+    set(state => {
+      const batchIndex = state.batches.findIndex(b => b.batchID === event.batchID)
+      if (batchIndex === -1) return state
+
+      const updatedBatches = [...state.batches]
+      updatedBatches[batchIndex] = {
+        ...updatedBatches[batchIndex],
+        completed: event.completed,
+        failed: event.failed,
+        progress: event.progress,
+        speed: event.speed,
+      }
+      return { batches: updatedBatches, lastUpdate: Date.now() }
+    })
+  },
+
   // v4.0.8: Handle enumeration events for folder scan progress
+  // v4.7.7: No longer removes on completion — removal is handled by fetchBatches reconciliation
   handleEnumerationEvent: (event: EnumerationEventDTO) => {
     set(state => {
       const existingIndex = state.enumerations.findIndex(e => e.id === event.id)
+      const now = Date.now()
 
       if (event.isComplete) {
-        // Remove completed enumeration after a short delay (let user see final count)
+        // Mark as complete but do NOT start a removal timer — fetchBatches handles removal
         if (existingIndex !== -1) {
           const updated = [...state.enumerations]
           updated[existingIndex] = {
@@ -351,14 +587,11 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
             filesFound: event.filesFound,
             bytesFound: event.bytesFound,
             isComplete: true,
+            completedAt: now,
+            lastEventAt: now,
             error: event.error,
+            statusMessage: event.statusMessage,
           }
-          // Remove after 2 seconds
-          setTimeout(() => {
-            set(s => ({
-              enumerations: s.enumerations.filter(e => e.id !== event.id)
-            }))
-          }, 2000)
           return { enumerations: updated }
         }
         return state
@@ -376,6 +609,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
             bytesFound: event.bytesFound,
             isComplete: event.isComplete,
             error: event.error,
+            statusMessage: event.statusMessage,
+            lastEventAt: now,
           }]
         }
       } else {
@@ -386,6 +621,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           foldersFound: event.foldersFound,
           filesFound: event.filesFound,
           bytesFound: event.bytesFound,
+          statusMessage: event.statusMessage,
+          lastEventAt: now,
         }
         return { enumerations: updated }
       }
@@ -411,12 +648,18 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       get().handleEnumerationEvent(event)
     })
 
+    // v4.7.7: Subscribe to batch progress events
+    const unsubscribeBatchProgress = EventsOn(EVENT_NAMES.BATCH_PROGRESS, (event: BatchProgressEventDTO) => {
+      get().handleBatchProgressEvent(event)
+    })
+
     set({ _appEventListenersSetup: true })
 
     // Return cleanup function
     return () => {
       unsubscribeTransfer()
       unsubscribeEnumeration()
+      unsubscribeBatchProgress()
       set({ _appEventListenersSetup: false })
     }
   },

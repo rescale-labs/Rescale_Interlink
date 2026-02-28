@@ -79,6 +79,8 @@ func (h *ServiceIPCHandler) GetUserList() []ipc.UserStatus {
 		state := "stopped"
 		if s.Running {
 			state = "running"
+		} else if s.LastError != "" {
+			state = "error" // v4.7.6: Skipped user with known error
 		} else if !s.Enabled {
 			state = "disabled"
 		}
@@ -97,7 +99,7 @@ func (h *ServiceIPCHandler) GetUserList() []ipc.UserStatus {
 			DownloadFolder: s.DownloadFolder,
 			LastScanTime:   lastScanTime,     // v4.0.8: Now populated
 			JobsDownloaded: s.JobsDownloaded, // v4.0.8: Now populated
-			LastError:      "",
+			LastError:      s.LastError,       // v4.7.6: Propagate skip reason (e.g., "No API key configured")
 		})
 	}
 
@@ -209,6 +211,16 @@ func (h *ServiceIPCHandler) Shutdown() error {
 	h.logger.Info().Msg("IPC shutdown requested")
 	h.service.Stop()
 	return nil
+}
+
+// ReloadConfig handles config reload for service mode.
+// v4.7.6: Delegates to TriggerRescan() which detects config changes and restarts per-user daemons.
+func (h *ServiceIPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
+	h.logger.Info().Str("user_id", userID).Msg("Config reload requested via IPC — triggering rescan")
+	h.service.TriggerRescan()
+	return &ipc.ReloadConfigData{
+		Applied: true,
+	}
 }
 
 // GetRecentLogs returns recent log entries from the daemon.

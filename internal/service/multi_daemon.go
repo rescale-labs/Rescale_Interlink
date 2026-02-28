@@ -37,12 +37,13 @@ type MultiUserDaemon struct {
 
 // userDaemonEntry tracks a daemon for a specific user.
 type userDaemonEntry struct {
-	profile   UserProfile
-	daemon    *daemon.Daemon
-	config    *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
-	cancel    context.CancelFunc
-	running   bool
-	logBuffer *daemon.LogBuffer // v4.5.0: Per-user log buffer for IPC GetRecentLogs
+	profile    UserProfile
+	daemon     *daemon.Daemon
+	config     *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
+	cancel     context.CancelFunc
+	running    bool
+	logBuffer  *daemon.LogBuffer // v4.5.0: Per-user log buffer for IPC GetRecentLogs
+	skipReason string            // v4.7.6: Reason user was skipped (e.g., "no_api_key")
 }
 
 // NewMultiUserDaemon creates a new multi-user daemon orchestrator.
@@ -146,8 +147,17 @@ func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 
 		// Check if we already have a daemon for this profile
 		if entry, exists := m.daemons[profile.ProfilePath]; exists {
-			// Check if config has changed
-			if m.configChanged(entry, profile) {
+			// v4.7.6: Check if previously skipped user now has an API key
+			if entry.skipReason == "no_api_key" {
+				apiKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath)
+				if apiKey != "" {
+					m.logger.Info().Str("user", profile.Username).
+						Msg("API key now available — starting previously skipped user daemon")
+					delete(m.daemons, profile.ProfilePath) // Remove skip entry, fall through to startUserDaemon
+				} else {
+					continue // Still no key, keep skipped
+				}
+			} else if m.configChanged(entry, profile) {
 				m.logger.Info().
 					Str("user", profile.Username).
 					Msg("Config changed, restarting user daemon")
@@ -156,8 +166,10 @@ func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 					m.logger.Error().Err(err).Str("user", profile.Username).
 						Msg("Failed to restart user daemon")
 				}
+				continue
+			} else {
+				continue
 			}
-			continue
 		}
 
 		// New profile - start a daemon
@@ -234,8 +246,14 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Priority: token file -> environment variable
 	apiKey, apiKeySource := config.ResolveAPIKeySource("", profile.ProfilePath)
 	if apiKey == "" {
-		m.logger.Debug().Str("user", profile.Username).
-			Msg("No API key found (checked token file, env var), skipping")
+		// v4.7.6: Promote to Error level and track skip reason for retry + IPC visibility
+		m.logger.Error().Str("user", profile.Username).
+			Msg("No API key found (checked user-token-file, apiconfig, token-file, env var), skipping")
+		m.daemons[profile.ProfilePath] = &userDaemonEntry{
+			profile:    profile,
+			config:     daemonConf,
+			skipReason: "no_api_key",
+		}
 		return nil
 	}
 
@@ -423,6 +441,11 @@ func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 			status.ActiveDownloads = entry.daemon.GetActiveDownloads()
 		}
 
+		// v4.7.6: Populate error from skip reason for IPC visibility
+		if entry.skipReason == "no_api_key" {
+			status.LastError = "No API key configured"
+		}
+
 		statuses = append(statuses, status)
 	}
 
@@ -440,6 +463,7 @@ type UserDaemonStatus struct {
 	LastScanTime    time.Time // v4.0.8: Last poll/scan time
 	JobsDownloaded  int       // v4.0.8: Total jobs downloaded
 	ActiveDownloads int       // v4.0.8: Currently active downloads
+	LastError       string    // v4.7.6: Error reason if daemon was skipped or failed
 }
 
 // RunningCount returns the number of currently running user daemons.

@@ -177,6 +177,26 @@ func (h *IPCHandler) Shutdown() error {
 	return nil
 }
 
+// ReloadConfig handles config reload for subprocess mode.
+// v4.7.6: Returns active download count so GUI can decide whether to restart now or defer.
+// The actual restart is managed by the GUI (stop + start) — simpler and avoids in-process mutation.
+func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
+	activeDownloads := h.daemon.GetActiveDownloads()
+	if activeDownloads > 0 {
+		h.daemon.logger.Info().Int("active_downloads", activeDownloads).
+			Msg("Config reload requested but downloads active — deferring")
+		return &ipc.ReloadConfigData{
+			Deferred:        true,
+			ActiveDownloads: activeDownloads,
+		}
+	}
+
+	h.daemon.logger.Info().Msg("Config reload requested — ready for restart")
+	return &ipc.ReloadConfigData{
+		Applied: true,
+	}
+}
+
 // IsPaused returns whether the daemon is currently paused.
 func (h *IPCHandler) IsPaused() bool {
 	h.mu.RLock()

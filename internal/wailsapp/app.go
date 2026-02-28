@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,8 @@ import (
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
 )
 
 // Assets holds the embedded frontend files, passed in from main package.
@@ -152,12 +155,31 @@ func (a *App) startup(ctx context.Context) {
 		// v4.0.0: Set EventBus for timing infrastructure
 		// This allows timing logs to appear in Activity tab when DetailedLogging is enabled
 		cloud.SetEventBus(a.engine.Events())
+
+		// Wire cross-process rate limit coordinator (lazy — only spawns when GetLimiter is called)
+		ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
+
+		// Wire rate limit visibility notifications for GUI Activity Logs
+		eb := a.engine.Events()
+		ratelimit.SetGlobalNotifyFunc(func(level, message string) {
+			log.Printf("%s", message)
+			if eb != nil {
+				lvl := events.InfoLevel
+				if level == "warn" {
+					lvl = events.WarnLevel
+				}
+				eb.PublishLog(lvl, message, "rate-limit", "", nil)
+			}
+		})
 	}
 
 	// v4.0.0: Initialize detailed logging from config
 	if a.config != nil {
 		cloud.SetDetailedLogging(a.config.DetailedLogging)
 	}
+
+	// v4.7.6: Auto-launch tray companion if available (Windows only, no-op on other platforms)
+	go a.launchTrayIfNeeded()
 
 	wailsLogger.Info().Msg("Wails application started")
 }

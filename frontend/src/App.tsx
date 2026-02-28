@@ -76,6 +76,16 @@ function AppComponent() {
     return cleanup
   }, [setupTransferEventListeners])
 
+  // v4.7.7: App-level stats polling so footer updates on all tabs.
+  // The Transfers tab's own 500ms polling also calls fetchStats(), giving faster
+  // updates when on that tab. Both are idempotent and harmless to overlap.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      useTransferStore.getState().fetchStats()
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [])
+
   // v4.7.3: Set up run event listeners at app level (same pattern as log/transfer stores).
   // These track active runs, handle state changes, completion, and queued job auto-start.
   useEffect(() => {

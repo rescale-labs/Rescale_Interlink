@@ -320,18 +320,6 @@ const (
 	JobProgressLogInterval = 30 * time.Second
 )
 
-// Rate Limiter Timeouts
-const (
-	// RateLimitWarningThreshold - delay threshold to show warning (2 seconds)
-	RateLimitWarningThreshold = 2 * time.Second
-
-	// RateLimitWarningInterval - minimum interval between warnings (10 seconds)
-	RateLimitWarningInterval = 10 * time.Second
-
-	// RateLimitLogThreshold - delay threshold for logging (5 seconds)
-	RateLimitLogThreshold = 5 * time.Second
-)
-
 // Pagination Safety Limits
 const (
 	// MaxPaginationPages - maximum pages to fetch before stopping (prevents infinite loops)

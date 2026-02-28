@@ -73,25 +73,30 @@ func getStringField(m map[string]interface{}, key string, context string) string
 	return str
 }
 
-// apiMetrics tracks API usage statistics
+// apiMetrics tracks API usage statistics per scope
 type apiMetrics struct {
 	sync.Mutex
-	totalCalls    int64
-	callsByPath   map[string]int64
-	windowStart   time.Time
-	callsInWindow int64
+	totalCalls      int64
+	callsByPath     map[string]int64
+	callsByScope    map[ratelimit.Scope]int64
+	windowStart     time.Time
+	callsInWindow   int64
+	scopeInWindow   map[ratelimit.Scope]int64
 }
 
-// Client represents the Rescale API client
+// Client represents the Rescale API client.
+//
+// Rate limiters are obtained from the process-level singleton store
+// (ratelimit.GlobalStore), so multiple Client instances pointing at the same
+// Rescale account share the same token buckets. This prevents independent
+// clients from exceeding the server-side rate limit.
 type Client struct {
-	httpClient       *nethttp.Client
-	config           *config.Config
-	baseURL          string
-	apiKey           string
-	userScopeLimiter *ratelimit.RateLimiter // All v3 endpoints (user scope: 7200/hour)
-	jobSubmitLimiter *ratelimit.RateLimiter // POST /api/v2/jobs/{id}/submit/ only
-	jobsUsageLimiter *ratelimit.RateLimiter // v2 job query endpoints (jobs-usage scope: 90000/hour)
-	metrics          *apiMetrics            // API usage tracking
+	httpClient *nethttp.Client
+	config     *config.Config
+	baseURL    string
+	apiKey     string
+	store      *ratelimit.LimiterStore // Process-level singleton limiter store
+	metrics    *apiMetrics             // API usage tracking
 }
 
 // NewClient creates a new API client
@@ -114,8 +119,17 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	retryClient.RetryWaitMax = 30 * time.Second
 	retryClient.Logger = &retryLogger{} // Enable error/warning logging
 
+	// Capture baseURL and apiKey for use in CheckRetry/Backoff closures
+	clientBaseURL := strings.TrimSuffix(cfg.APIBaseURL, "/")
+	clientAPIKey := cfg.APIKey
+	store := ratelimit.GlobalStore()
+
 	// v4.6.8: Custom retry policy — don't retry non-idempotent job creation/submission
 	// on 5xx, and never retry 4xx (except 429 rate limiting).
+	//
+	// Phase 2: On 429, drain+cooldown through coordinator BEFORE returning (true, nil).
+	// This ensures the rate limiter learns about EVERY 429, not just the ones that
+	// exhaust all retries and flow through to doRequest(). Fixes H3.
 	retryClient.CheckRetry = func(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
 		// Don't retry on context cancellation
 		if ctx.Err() != nil {
@@ -125,6 +139,30 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		if err != nil {
 			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 		}
+
+		// Phase 2: On 429, drain + cooldown through coordinator hooks
+		// This runs BEFORE returning (true, nil) so the coordinator knows
+		// about the 429 and can block all other processes' requests.
+		if resp != nil && resp.StatusCode == 429 && resp.Request != nil {
+			registry := store.Registry()
+			scope := registry.ResolveScope(resp.Request.Method, resp.Request.URL.Path)
+			limiter := store.GetLimiter(clientBaseURL, clientAPIKey, scope)
+
+			// Drain (goes through coordinator hooks if connected)
+			limiter.Drain()
+
+			// Parse Retry-After per RFC 7231: delta-seconds or HTTP-date
+			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil && seconds > 0 {
+					limiter.SetCooldown(time.Duration(seconds) * time.Second)
+				} else if t, parseErr := nethttp.ParseTime(retryAfter); parseErr == nil {
+					if d := time.Until(t); d > 0 {
+						limiter.SetCooldown(d)
+					}
+				}
+			}
+		}
+
 		// Never retry 4xx (client errors) — not recoverable.
 		// Return (false, nil) so the response flows through to the caller.
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 429 {
@@ -145,6 +183,28 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 	}
 
+	// Phase 2: Custom backoff that honors coordinator cooldowns.
+	// After CheckRetry triggers drain+cooldown on a 429, retryablehttp's default
+	// backoff might return a short delay (e.g., 2s) while the server said "wait 60s".
+	// This function returns max(defaultBackoff, cooldownRemaining) so in-flight retries
+	// respect the server's Retry-After.
+	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *nethttp.Response) time.Duration {
+		defaultBackoff := retryablehttp.DefaultBackoff(min, max, attemptNum, resp)
+
+		if resp != nil && resp.StatusCode == 429 && resp.Request != nil {
+			registry := store.Registry()
+			scope := registry.ResolveScope(resp.Request.Method, resp.Request.URL.Path)
+			limiter := store.GetLimiter(clientBaseURL, clientAPIKey, scope)
+
+			cooldown := limiter.CooldownRemaining()
+			if cooldown > defaultBackoff {
+				return cooldown
+			}
+		}
+
+		return defaultBackoff
+	}
+
 	// v4.6.8: Custom error handler to preserve response body on retry exhaustion.
 	// Without this, go-retryablehttp drains the body and returns a generic
 	// "giving up after N attempt(s)" message, losing the actual API error.
@@ -153,21 +213,22 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	}
 
 	// Rate Limiter Setup
-	// All v3 API endpoints share the "user" scope (7200/hour = 2 req/sec limit).
-	// We use a single shared rate limiter instance for all v3 calls.
-	// See internal/ratelimit/constants.go for detailed scope assignments.
+	// Rate limiters are obtained from the process-level singleton store, keyed by
+	// {baseURL, apiKey, scope}. Multiple Client instances sharing the same account
+	// share token buckets — preventing independent clients from exceeding the limit.
+	// See internal/ratelimit/registry.go for scope definitions and routing rules.
 
 	return &Client{
-		httpClient:       retryClient.StandardClient(),
-		config:           cfg,
-		baseURL:          strings.TrimSuffix(cfg.APIBaseURL, "/"),
-		apiKey:           cfg.APIKey,
-		userScopeLimiter: ratelimit.NewUserScopeRateLimiter(),     // All v3 endpoints
-		jobSubmitLimiter: ratelimit.NewJobSubmissionRateLimiter(), // v2 submit only
-		jobsUsageLimiter: ratelimit.NewJobsUsageRateLimiter(),     // v2 job queries
+		httpClient: retryClient.StandardClient(),
+		config:     cfg,
+		baseURL:    clientBaseURL,
+		apiKey:     clientAPIKey,
+		store:      store,
 		metrics: &apiMetrics{
-			callsByPath: make(map[string]int64),
-			windowStart: time.Now(),
+			callsByPath:  make(map[string]int64),
+			callsByScope: make(map[ratelimit.Scope]int64),
+			windowStart:  time.Now(),
+			scopeInWindow: make(map[ratelimit.Scope]int64),
 		},
 	}, nil
 }
@@ -189,51 +250,53 @@ func readResponseBody(body io.ReadCloser) string {
 	return string(data)
 }
 
-// doRequest performs an HTTP request with authentication and rate limiting
+// doRequest performs an HTTP request with authentication and rate limiting.
+// Scope resolution uses the unified registry (ratelimit.Registry) — the same
+// registry is used by the CheckRetry callback for 429 feedback, ensuring
+// consistent scope identification across the request lifecycle.
 func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) (*nethttp.Response, error) {
-	// Select appropriate rate limiter based on endpoint scope
-	limiter := c.userScopeLimiter // DEFAULT: all v3 endpoints use user scope (1.6 req/sec)
-
-	if strings.Contains(path, "/api/v2/jobs/") {
-		if strings.Contains(path, "/submit/") {
-			// Job submission scope (0.139 req/sec)
-			limiter = c.jobSubmitLimiter
-		} else {
-			// v2 job query endpoints use jobs-usage scope (20 req/sec)
-			// Examples: GET /api/v2/jobs/{id}/files/
-			limiter = c.jobsUsageLimiter
-		}
-	}
-	// Note: All v3 endpoints (files, folders, jobs, credentials, etc.) share the same
-	// user scope limiter on Rescale's side, so no need for separate routing.
+	// Resolve scope via the unified registry and get the shared limiter
+	registry := c.store.Registry()
+	scope := registry.ResolveScope(method, path)
+	limiter := c.store.GetLimiter(c.baseURL, c.apiKey, scope)
 
 	// Wait for rate limiter to allow request
 	if err := limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limiter cancelled: %w", err)
 	}
 
-	// Track API call metrics
+	// Track API call metrics per scope
 	c.metrics.Lock()
 	c.metrics.totalCalls++
 	c.metrics.callsByPath[path]++
+	c.metrics.callsByScope[scope]++
 	c.metrics.callsInWindow++
+	c.metrics.scopeInWindow[scope]++
 
 	// Log stats every 30 seconds
 	if time.Since(c.metrics.windowStart) >= 30*time.Second {
 		reqPerSec := float64(c.metrics.callsInWindow) / 30.0
 
-		// Calculate percentages relative to both our target and Rescale's hard limit
-		targetRate := 1.6 // Our target: 80% of hard limit (see constants.UserScopeRatePerSec)
-		hardLimit := 2.0  // Rescale's hard limit: 7200/hour = 2/sec
+		// Per-scope breakdown
+		scopeCfg := registry.GetScopeConfig(scope)
+		percentOfTarget := (reqPerSec / scopeCfg.TargetRate) * 100
+		percentOfLimit := (reqPerSec / scopeCfg.HardLimitPerS) * 100
 
-		percentOfTarget := (reqPerSec / targetRate) * 100
-		percentOfLimit := (reqPerSec / hardLimit) * 100
+		log.Printf("📊 API usage: %.2f req/sec (%.0f%% of %.1f/sec target, %.0f%% of %.1f/sec limit), %d total calls",
+			reqPerSec, percentOfTarget, scopeCfg.TargetRate, percentOfLimit, scopeCfg.HardLimitPerS, c.metrics.totalCalls)
 
-		// Show both percentages to help diagnose throttling issues
-		log.Printf("📊 API usage: %.2f req/sec (%.0f%% of 1.6/sec target, %.0f%% of 2/sec limit), %d total calls",
-			reqPerSec, percentOfTarget, percentOfLimit, c.metrics.totalCalls)
+		// Log per-scope breakdown if multiple scopes active
+		if len(c.metrics.scopeInWindow) > 1 {
+			for s, count := range c.metrics.scopeInWindow {
+				sPerSec := float64(count) / 30.0
+				sCfg := registry.GetScopeConfig(s)
+				log.Printf("   └─ %s: %.2f req/sec (%.0f%% of %.1f/sec limit)",
+					s, sPerSec, (sPerSec/sCfg.HardLimitPerS)*100, sCfg.HardLimitPerS)
+			}
+		}
 
 		c.metrics.callsInWindow = 0
+		c.metrics.scopeInWindow = make(map[ratelimit.Scope]int64)
 		c.metrics.windowStart = time.Now()
 	}
 	c.metrics.Unlock()
@@ -281,33 +344,32 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 
-	// Check for rate limit (429 Too Many Requests) response
+	// Check for rate limit (429 Too Many Requests) response.
+	//
+	// NOTE: Most 429s are absorbed by retryablehttp's internal retry loop
+	// (CheckRetry returns true for 429). This handler only sees 429s that
+	// survive all retry attempts. Phase 3 adds a CheckRetry hook to drain
+	// the limiter on EVERY 429, not just the ones that exhaust retries.
 	if resp.StatusCode == 429 {
-		// Determine which scope/endpoint is being throttled
-		// Most v3 endpoints belong to "user" scope (7200/hour = 2 req/sec)
-		scope := "unknown"
-		if strings.HasPrefix(path, "/api/v3/") {
-			// v3 endpoints use "user" scope (unless explicitly listed in throttle table)
-			scope = "user (v3 default, 7200/hour = 2/sec)"
-		} else if strings.Contains(path, "/api/v2/files") {
-			scope = "file-access (v2, 90000/hour)"
-		} else if strings.Contains(path, "/api/v2/credentials") {
-			scope = "credential-access (v2, 90000/hour)"
-		} else if strings.Contains(path, "/submit/") {
-			scope = "job-submission (1000/hour)"
-		} else if strings.Contains(path, "/jobs") || strings.Contains(path, "/desktops") {
-			scope = "jobs-usage (v2, 90000/hour)"
-		}
+		// Use the same registry for scope identification as doRequest routing
+		scopeDisplay := registry.ScopeDisplayString(scope)
 
-		// Log throttle event with details
-		log.Printf("⚠️  THROTTLED: %s %s - Rate limit exceeded on '%s' scope", method, path, scope)
+		log.Printf("⚠️  THROTTLED: %s %s - Rate limit exceeded on '%s' scope", method, path, scopeDisplay)
 
-		// Check for Retry-After header
+		// Drain the limiter for this scope to prevent further requests
+		limiter.Drain()
+
+		// Parse and apply Retry-After header as cooldown
 		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-			log.Printf("   └─ Retry-After: %s seconds", retryAfter)
+			if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
+				limiter.SetCooldown(time.Duration(seconds) * time.Second)
+				log.Printf("   └─ Retry-After: %d seconds (cooldown applied)", seconds)
+			} else {
+				log.Printf("   └─ Retry-After: %s (unparseable, using drain only)", retryAfter)
+			}
 		}
 
-		// Check for rate limit headers
+		// Log rate limit headers for diagnostics
 		if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
 			log.Printf("   └─ X-RateLimit-Remaining: %s", remaining)
 		}

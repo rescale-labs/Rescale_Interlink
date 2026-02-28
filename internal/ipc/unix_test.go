@@ -67,6 +67,11 @@ func (h *mockHandler) GetRecentLogs(userID string, count int) []LogEntryData {
 	}
 }
 
+// v4.7.6: ReloadConfig returns mock reload config data
+func (h *mockHandler) ReloadConfig(userID string) *ReloadConfigData {
+	return &ReloadConfigData{Applied: true}
+}
+
 func TestUnixIPCClientServer(t *testing.T) {
 	// Create temp socket path
 	tmpDir := t.TempDir()

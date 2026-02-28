@@ -232,7 +232,13 @@ func (ts *TransferService) executeUpload(ctx context.Context, req TransferReques
 	}
 
 	// Track in queue (starts as Queued)
-	task := ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
+	// v4.7.7: Use batch-aware tracking when BatchID is set
+	var task *transfer.TransferTask
+	if req.BatchID != "" {
+		task = ts.queue.TrackTransferWithBatch(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel, req.BatchID, req.BatchLabel)
+	} else {
+		task = ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
+	}
 	taskID := task.ID
 
 	// v4.7.4: Create derived context for cancel support
@@ -353,7 +359,13 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 	}
 
 	// Track in queue (immediately visible in Transfers tab)
-	task := ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
+	// v4.7.7: Use batch-aware tracking when BatchID is set
+	var task *transfer.TransferTask
+	if req.BatchID != "" {
+		task = ts.queue.TrackTransferWithBatch(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel, req.BatchID, req.BatchLabel)
+	} else {
+		task = ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
+	}
 	taskID := task.ID
 
 	// Create derived context for cancel support
@@ -468,7 +480,13 @@ func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequ
 	}
 
 	// Track in queue (starts as Queued)
-	task := ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeDownload, req.Source, req.Dest, sourceLabel)
+	// v4.7.7: Use batch-aware tracking when BatchID is set
+	var task *transfer.TransferTask
+	if req.BatchID != "" {
+		task = ts.queue.TrackTransferWithBatch(fileName, req.Size, transfer.TaskTypeDownload, req.Source, req.Dest, sourceLabel, req.BatchID, req.BatchLabel)
+	} else {
+		task = ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeDownload, req.Source, req.Dest, sourceLabel)
+	}
 	taskID := task.ID
 
 	// v4.7.4: Create derived context for cancel support
@@ -787,6 +805,8 @@ func (ts *TransferService) GetTasks() []TransferTask {
 			Dest:        qt.Dest,
 			Size:        qt.Size,
 			SourceLabel: qt.SourceLabel, // v4.7.4
+			BatchID:     qt.BatchID,     // v4.7.7
+			BatchLabel:  qt.BatchLabel,  // v4.7.7
 			Progress:    qt.Progress,
 			Speed:       qt.Speed,
 			Error:       qt.Error,

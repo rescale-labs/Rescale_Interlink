@@ -1,6 +1,8 @@
 // Package ratelimit provides rate limiting constants for Rescale API throttle scopes.
 package ratelimit
 
+import "time"
+
 // Rescale API Throttle Limits
 //
 // Rescale's API uses scope-based throttling where endpoints are grouped into scopes,
@@ -28,41 +30,43 @@ const (
 	JobsUsageLimitPerHour = 90000 // 25 requests per second
 )
 
-// Conservative target percentages
+// Target percentages
 //
-// We target a percentage BELOW the hard limit to:
-// 1. Prevent hitting the hard limit (which blocks access for extended time)
-// 2. Account for concurrent operations and burst traffic
-// 3. Provide safety margin for credential refreshes and other overhead
+// We target 85% of the hard limit:
+// 1. 15% safety margin prevents hitting the hard limit (which blocks access for extended time)
+// 2. Maximizes throughput while accounting for concurrent operations and burst traffic
+// 3. The 429 feedback system (CheckRetry + coordinator drain/cooldown) provides a safety net
+//    if the server does reject requests
 const (
-	// UserScopeTargetPercent: Use 80% of the user scope limit
-	// Rationale: 20% safety margin prevents throttle lockouts during concurrent uploads/downloads
-	UserScopeTargetPercent = 80
+	// UserScopeTargetPercent: Use 85% of the user scope limit
+	// Rationale: 15% safety margin balances throughput and safety
+	UserScopeTargetPercent = 85
 
-	// JobSubmissionTargetPercent: Use 50% of the job submission limit
-	// Rationale: Job submission is infrequent, so conservative limit is fine
-	JobSubmissionTargetPercent = 50
+	// JobSubmissionTargetPercent: Use 85% of the job submission limit
+	// Rationale: With cross-process coordinator sharing the budget, 85% is safe
+	JobSubmissionTargetPercent = 85
 
-	// JobsUsageTargetPercent: Use 80% of the jobs-usage scope limit
-	// Rationale: 20% safety margin, same as user scope
-	JobsUsageTargetPercent = 80
+	// JobsUsageTargetPercent: Use 85% of the jobs-usage scope limit
+	// Rationale: 15% safety margin, consistent with other scopes
+	JobsUsageTargetPercent = 85
 )
 
 // Calculated target rates (requests per second)
 //
 // These are the actual rates our token bucket rate limiters use.
+// 85% provides 15% safety margin while maximizing throughput.
 const (
-	// UserScopeRatePerSec is 80% of 2 req/sec = 1.6 req/sec
+	// UserScopeRatePerSec is 85% of 2 req/sec = 1.7 req/sec
 	// Used for all v3 API endpoints (files, folders, jobs, credentials, etc.)
-	UserScopeRatePerSec = 1.6
+	UserScopeRatePerSec = 1.7
 
-	// JobSubmissionRatePerSec is 50% of 0.278 req/sec = 0.139 req/sec
+	// JobSubmissionRatePerSec is 85% of 0.278 req/sec = 0.236 req/sec
 	// Used only for POST /api/v2/jobs/{id}/submit/
-	JobSubmissionRatePerSec = 0.139
+	JobSubmissionRatePerSec = 0.236
 
-	// JobsUsageRatePerSec is 80% of 25 req/sec = 20 req/sec
+	// JobsUsageRatePerSec is 85% of 25 req/sec = 21.25 req/sec
 	// Used for v2 job query endpoints (GET /api/v2/jobs/{id}/files/, etc.)
-	JobsUsageRatePerSec = 20.0
+	JobsUsageRatePerSec = 21.25
 )
 
 // Burst capacities (tokens)
@@ -70,20 +74,38 @@ const (
 // Burst capacity allows rapid initial operations before settling into sustained rate.
 // Calculated as: tokens = duration_in_seconds × rate_per_second
 const (
-	// UserScopeBurstCapacity allows ~93 seconds of burst operations
-	// Calculation: 150 tokens ÷ 1.6 req/sec = 93.75 seconds
+	// UserScopeBurstCapacity allows ~88 seconds of burst operations
+	// Calculation: 150 tokens ÷ 1.7 req/sec = 88.2 seconds
 	// This allows rapid file registration or downloads at startup without throttling
 	UserScopeBurstCapacity = 150
 
-	// JobSubmissionBurstCapacity allows ~360 seconds of burst operations
-	// Calculation: 50 tokens ÷ 0.139 req/sec = 359.7 seconds
+	// JobSubmissionBurstCapacity allows ~212 seconds of burst operations
+	// Calculation: 50 tokens ÷ 0.236 req/sec = 211.9 seconds
 	// Sufficient for batch job submissions
 	JobSubmissionBurstCapacity = 50
 
-	// JobsUsageBurstCapacity allows ~15 seconds of burst operations
-	// Calculation: 300 tokens ÷ 20 req/sec = 15 seconds
+	// JobsUsageBurstCapacity allows ~14 seconds of burst operations
+	// Calculation: 300 tokens ÷ 21.25 req/sec = 14.1 seconds
 	// Allows rapid file listing at startup
 	JobsUsageBurstCapacity = 300
+)
+
+// Visibility thresholds for utilization-based rate limit notifications.
+//
+// Hysteresis prevents flickering between warn and silent states:
+//   - Warning activates when utilization >= UtilizationWarnThreshold (60%)
+//   - Warning deactivates only when utilization drops below UtilizationSuppressThreshold (50%)
+const (
+	// UtilizationWarnThreshold is the utilization level above which warnings are emitted.
+	UtilizationWarnThreshold = 0.60
+
+	// UtilizationSuppressThreshold is the utilization level below which warnings are suppressed.
+	// Must be less than UtilizationWarnThreshold to provide hysteresis.
+	UtilizationSuppressThreshold = 0.50
+
+	// NotifyMinInterval is the minimum time between consecutive notifications.
+	// Prevents log spam during sustained high-utilization periods.
+	NotifyMinInterval = 10 * time.Second
 )
 
 // Endpoint Scope Assignments

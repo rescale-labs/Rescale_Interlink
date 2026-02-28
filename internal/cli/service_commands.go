@@ -36,6 +36,7 @@ Note: Service management requires administrator privileges.`,
 	cmd.AddCommand(newServiceStartCmd())
 	cmd.AddCommand(newServiceStopCmd())
 	cmd.AddCommand(newServiceStatusCmd())
+	cmd.AddCommand(newServiceInstallAndStartCmd())
 
 	return cmd
 }
@@ -133,6 +134,55 @@ Example:
 			}
 
 			return service.StopService()
+		},
+	}
+}
+
+// newServiceInstallAndStartCmd creates the 'service install-and-start' command.
+// v4.7.6: Combined idempotent install + start for single UAC prompt.
+func newServiceInstallAndStartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install-and-start",
+		Short: "Install and start the Windows service (idempotent)",
+		Long: `Install (if not already installed) and start the Rescale Interlink service.
+
+This is an idempotent operation: if the service is already installed, the install
+step is skipped. If the service is already running, the start step is skipped.
+Requires administrator privileges.
+
+Example:
+  rescale-int service install-and-start`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if runtime.GOOS != "windows" {
+				return fmt.Errorf("service management is only supported on Windows")
+			}
+
+			// Idempotent install: skip if already installed
+			if !service.IsInstalled() {
+				execPath, err := service.GetExecutablePath()
+				if err != nil {
+					return fmt.Errorf("failed to get executable path: %w", err)
+				}
+				if err := service.Install(execPath, ""); err != nil {
+					return fmt.Errorf("install failed: %w", err)
+				}
+				fmt.Println("Service installed successfully")
+			} else {
+				fmt.Println("Service already installed, skipping install")
+			}
+
+			// Idempotent start: skip if already running
+			status, err := service.QueryStatus()
+			if err == nil && status == service.StatusRunning {
+				fmt.Println("Service already running")
+				return nil
+			}
+
+			if err := service.StartService(); err != nil {
+				return fmt.Errorf("start failed: %w", err)
+			}
+			fmt.Println("Service started successfully")
+			return nil
 		},
 	}
 }

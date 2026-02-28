@@ -122,14 +122,8 @@ func (ws *multiUserWindowsService) Execute(args []string, r <-chan svc.ChangeReq
 	// Report start pending
 	changes <- svc.Status{State: svc.StartPending}
 
-	// Start the multi-user daemon
-	if err := ws.service.Start(); err != nil {
-		ws.elog.Error(1, fmt.Sprintf("Failed to start multi-user service: %v", err))
-		changes <- svc.Status{State: svc.StopPending}
-		return false, 1
-	}
-
-	// Start the IPC server for tray/GUI communication
+	// v4.7.6: Start IPC server BEFORE daemon so GUI can connect immediately
+	// when SCM reports "running" (fixes brief gap where IPC fails)
 	if ws.ipcServer != nil {
 		if err := ws.ipcServer.Start(); err != nil {
 			ws.elog.Warning(1, fmt.Sprintf("Failed to start IPC server (tray communication unavailable): %v", err))
@@ -137,6 +131,17 @@ func (ws *multiUserWindowsService) Execute(args []string, r <-chan svc.ChangeReq
 		} else {
 			ws.elog.Info(1, "IPC server started for tray/GUI communication")
 		}
+	}
+
+	// Start the multi-user daemon
+	if err := ws.service.Start(); err != nil {
+		ws.elog.Error(1, fmt.Sprintf("Failed to start multi-user service: %v", err))
+		// v4.7.6: Clean up IPC server if daemon start fails
+		if ws.ipcServer != nil {
+			ws.ipcServer.Stop()
+		}
+		changes <- svc.Status{State: svc.StopPending}
+		return false, 1
 	}
 
 	// Report running

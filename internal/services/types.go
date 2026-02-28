@@ -65,6 +65,14 @@ type TransferRequest struct {
 	// v4.7.4: Used for Transfers tab badges and cancel/retry gating.
 	SourceLabel string
 
+	// BatchID groups related transfers (e.g., all files in a folder upload).
+	// v4.7.7: Used for transfer grouping in Transfers tab to collapse bulk operations.
+	BatchID string
+
+	// BatchLabel is the display name for the batch (e.g., folder name, "PUR: <run>").
+	// v4.7.7: Shown as the collapsed row label in Transfers tab.
+	BatchLabel string
+
 	// Tags to apply after successful upload.
 	// v4.7.4: Tagging failure is non-fatal (logged as warning).
 	Tags []string
@@ -97,6 +105,14 @@ type TransferTask struct {
 	// SourceLabel identifies the origin ("PUR", "SingleJob", "FileBrowser").
 	// v4.7.4: Used for Transfers tab badges and cancel/retry gating.
 	SourceLabel string
+
+	// BatchID groups related transfers (e.g., all files in a folder upload).
+	// v4.7.7: Used for transfer grouping in Transfers tab.
+	BatchID string
+
+	// BatchLabel is the display name for the batch (e.g., folder name).
+	// v4.7.7: Shown as the collapsed row label in Transfers tab.
+	BatchLabel string
 
 	// Progress is 0.0 to 1.0
 	Progress float64

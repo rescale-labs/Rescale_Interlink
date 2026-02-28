@@ -69,6 +69,7 @@ export interface EnumerationEventDTO {
   bytesFound: number;
   isComplete: boolean;
   error?: string;
+  statusMessage?: string; // v4.7.7: Human-readable status (e.g. "Creating folders... (3 of 47)")
 }
 
 // v4.0.8: Scan progress event for software/hardware catalog scanning
@@ -80,6 +81,19 @@ export interface ScanProgressEventDTO {
   isComplete: boolean;
   isCached: boolean;
   error?: string;
+}
+
+// v4.7.7: Batch progress event for grouped transfer display
+export interface BatchProgressEventDTO {
+  timestamp: string;
+  batchID: string;
+  label: string;
+  direction: string;
+  total: number;
+  completed: number;
+  failed: number;
+  progress: number;
+  speed: number;
 }
 
 export interface ConnectionResultDTO {
@@ -102,6 +116,7 @@ export const EVENT_NAMES = {
   TRANSFER: 'interlink:transfer',
   ENUMERATION: 'interlink:enumeration', // v4.0.8: folder scan progress
   SCAN_PROGRESS: 'interlink:scan_progress', // v4.0.8: software/hardware catalog scan
+  BATCH_PROGRESS: 'interlink:batch_progress', // v4.7.7: batch progress for grouped transfers
 } as const;
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';

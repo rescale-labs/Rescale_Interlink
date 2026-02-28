@@ -37,6 +37,9 @@ const (
 
 	// v4.0.8: Scan progress events for software/hardware catalog scanning
 	EventScanProgress EventType = "scan_progress" // Catalog scan progress
+
+	// v4.7.7: Batch progress events for grouped transfer display
+	EventBatchProgress EventType = "batch_progress" // Aggregate batch progress
 )
 
 // LogLevel defines log severity levels
@@ -163,8 +166,9 @@ type EnumerationEvent struct {
 	FoldersFound int    `json:"foldersFound"` // Folders discovered so far
 	FilesFound   int    `json:"filesFound"`   // Files discovered so far
 	BytesFound   int64  `json:"bytesFound"`   // Total bytes discovered
-	IsComplete   bool   `json:"isComplete"`   // True when enumeration finished
-	Error        string `json:"error"`        // Error if enumeration failed
+	IsComplete    bool   `json:"isComplete"`    // True when enumeration finished
+	Error         string `json:"error"`         // Error if enumeration failed
+	StatusMessage string `json:"statusMessage"` // v4.7.7: Human-readable status (e.g. "Creating folders... (3 of 47)")
 }
 
 // ScanProgressEvent represents catalog scan progress (v4.0.8)
@@ -177,6 +181,20 @@ type ScanProgressEvent struct {
 	IsComplete bool   `json:"isComplete"` // True when scan finished
 	IsCached   bool   `json:"isCached"`   // True if result came from cache
 	Error      string `json:"error"`      // Error if scan failed
+}
+
+// BatchProgressEvent represents aggregate batch progress (v4.7.7)
+// Published by the queue's batch ticker at 1/sec for each active batch.
+type BatchProgressEvent struct {
+	BaseEvent
+	BatchID   string  `json:"batchID"`
+	Label     string  `json:"label"`
+	Direction string  `json:"direction"` // "upload" or "download"
+	Total     int     `json:"total"`
+	Completed int     `json:"completed"`
+	Failed    int     `json:"failed"`
+	Progress  float64 `json:"progress"` // 0.0-1.0
+	Speed     float64 `json:"speed"`    // aggregate bytes/sec
 }
 
 // EventBus manages event subscriptions and publishing

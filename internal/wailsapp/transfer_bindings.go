@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/services"
+	"github.com/rescale/rescale-int/internal/transfer"
 )
 
 // TransferRequestDTO is the JSON-safe version of services.TransferRequest.
@@ -16,6 +17,8 @@ type TransferRequestDTO struct {
 	Name        string   `json:"name"`                  // Display name
 	Size        int64    `json:"size"`                  // File size in bytes
 	SourceLabel string   `json:"sourceLabel,omitempty"` // v4.7.4: "PUR", "SingleJob", "FileBrowser"
+	BatchID     string   `json:"batchID,omitempty"`     // v4.7.7: Batch grouping ID
+	BatchLabel  string   `json:"batchLabel,omitempty"`  // v4.7.7: Batch display label
 	Tags        []string `json:"tags,omitempty"`        // v4.7.4: Tags to apply after upload
 }
 
@@ -29,6 +32,8 @@ type TransferTaskDTO struct {
 	Dest        string  `json:"dest"`                  // Destination path or ID
 	Size        int64   `json:"size"`                  // Total size in bytes
 	SourceLabel string  `json:"sourceLabel,omitempty"` // v4.7.4: "PUR", "SingleJob", "FileBrowser"
+	BatchID     string  `json:"batchID,omitempty"`     // v4.7.7: Batch grouping ID
+	BatchLabel  string  `json:"batchLabel,omitempty"`  // v4.7.7: Batch display label
 	Progress    float64 `json:"progress"`              // 0.0 to 1.0
 	Speed       float64 `json:"speed"`                 // bytes/sec
 	Error       string  `json:"error,omitempty"`
@@ -71,6 +76,8 @@ func (a *App) StartTransfers(requests []TransferRequestDTO) error {
 			Name:        r.Name,
 			Size:        r.Size,
 			SourceLabel: r.SourceLabel, // v4.7.4
+			BatchID:     r.BatchID,     // v4.7.7
+			BatchLabel:  r.BatchLabel,  // v4.7.7
 			Tags:        r.Tags,        // v4.7.4
 		}
 	}
@@ -180,6 +187,151 @@ func (a *App) ClearCompletedTransfers() {
 	ts.ClearCompleted()
 }
 
+// TransferBatchDTO is the JSON-safe aggregate view of a batch of transfers.
+// v4.7.7: Used for grouped display in Transfers tab.
+type TransferBatchDTO struct {
+	BatchID     string  `json:"batchID"`
+	BatchLabel  string  `json:"batchLabel"`
+	Direction   string  `json:"direction"`              // "upload" or "download"
+	SourceLabel string  `json:"sourceLabel"`            // "FileBrowser", "PUR", "SingleJob"
+	Total       int     `json:"total"`
+	Queued      int     `json:"queued"`
+	Active      int     `json:"active"`
+	Completed   int     `json:"completed"`
+	Failed      int     `json:"failed"`
+	Cancelled   int     `json:"cancelled"`
+	TotalBytes  int64   `json:"totalBytes"`
+	Progress    float64 `json:"progress"`               // byte-weighted 0.0-1.0
+	Speed       float64 `json:"speed"`                  // aggregate bytes/sec
+}
+
+// GetTransferBatches returns aggregate stats for each batch of transfers.
+// v4.7.7: Lightweight call for Transfers tab polling (returns ~200 bytes per batch).
+func (a *App) GetTransferBatches() []TransferBatchDTO {
+	if a.engine == nil {
+		return []TransferBatchDTO{}
+	}
+
+	ts := a.engine.TransferService()
+	if ts == nil {
+		return []TransferBatchDTO{}
+	}
+
+	batchStats := ts.GetQueue().GetAllBatchStats()
+	dtos := make([]TransferBatchDTO, len(batchStats))
+	for i, bs := range batchStats {
+		dtos[i] = TransferBatchDTO{
+			BatchID:     bs.BatchID,
+			BatchLabel:  bs.BatchLabel,
+			Direction:   bs.Direction,
+			SourceLabel: bs.SourceLabel,
+			Total:       bs.Total,
+			Queued:      bs.Queued,
+			Active:      bs.Active,
+			Completed:   bs.Completed,
+			Failed:      bs.Failed,
+			Cancelled:   bs.Cancelled,
+			TotalBytes:  bs.TotalBytes,
+			Progress:    bs.Progress,
+			Speed:       bs.Speed,
+		}
+	}
+	return dtos
+}
+
+// GetUngroupedTransferTasks returns only tasks with no BatchID.
+// v4.7.7: Replaces GetTransferTasks() in polling path when batches exist,
+// avoiding the 10k-task IPC payload.
+func (a *App) GetUngroupedTransferTasks() []TransferTaskDTO {
+	if a.engine == nil {
+		return []TransferTaskDTO{}
+	}
+
+	ts := a.engine.TransferService()
+	if ts == nil {
+		return []TransferTaskDTO{}
+	}
+
+	tasks := ts.GetQueue().GetUngroupedTasks()
+	dtos := make([]TransferTaskDTO, len(tasks))
+	for i, t := range tasks {
+		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(t))
+	}
+	return dtos
+}
+
+// GetBatchTasks returns paginated tasks for a specific batch.
+// v4.7.7: Used for expanded batch detail view in Transfers tab.
+func (a *App) GetBatchTasks(batchID string, offset int, limit int) []TransferTaskDTO {
+	if a.engine == nil {
+		return []TransferTaskDTO{}
+	}
+
+	ts := a.engine.TransferService()
+	if ts == nil {
+		return []TransferTaskDTO{}
+	}
+
+	tasks := ts.GetQueue().GetBatchTasks(batchID, offset, limit)
+	dtos := make([]TransferTaskDTO, len(tasks))
+	for i, t := range tasks {
+		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(t))
+	}
+	return dtos
+}
+
+// CancelBatch cancels all non-terminal tasks in a batch.
+// v4.7.7: Handles queued tasks too (standard Cancel only handles active/initializing).
+func (a *App) CancelBatch(batchID string) error {
+	if a.engine == nil {
+		return ErrNoEngine
+	}
+
+	ts := a.engine.TransferService()
+	if ts == nil {
+		return ErrNoTransferService
+	}
+
+	return ts.GetQueue().CancelBatch(batchID)
+}
+
+// RetryFailedInBatch retries all failed tasks in a batch.
+// v4.7.7: Batch retry for Transfers tab grouped view.
+func (a *App) RetryFailedInBatch(batchID string) error {
+	if a.engine == nil {
+		return ErrNoEngine
+	}
+
+	ts := a.engine.TransferService()
+	if ts == nil {
+		return ErrNoTransferService
+	}
+
+	return ts.GetQueue().RetryFailedInBatch(batchID)
+}
+
+// serviceTaskFromQueueTask converts a transfer.TransferTask to services.TransferTask.
+func serviceTaskFromQueueTask(qt transfer.TransferTask) services.TransferTask {
+	return services.TransferTask{
+		ID:          qt.ID,
+		Type:        services.TransferType(qt.Type),
+		State:       services.TransferState(qt.State),
+		Name:        qt.Name,
+		Source:      qt.Source,
+		Dest:        qt.Dest,
+		Size:        qt.Size,
+		SourceLabel: qt.SourceLabel,
+		BatchID:     qt.BatchID,
+		BatchLabel:  qt.BatchLabel,
+		Progress:    qt.Progress,
+		Speed:       qt.Speed,
+		Error:       qt.Error,
+		CreatedAt:   qt.CreatedAt,
+		StartedAt:   qt.StartedAt,
+		CompletedAt: qt.CompletedAt,
+	}
+}
+
 // transferTaskToDTO converts a services.TransferTask to a DTO.
 func transferTaskToDTO(t services.TransferTask) TransferTaskDTO {
 	dto := TransferTaskDTO{
@@ -191,6 +343,8 @@ func transferTaskToDTO(t services.TransferTask) TransferTaskDTO {
 		Dest:        t.Dest,
 		Size:        t.Size,
 		SourceLabel: t.SourceLabel, // v4.7.4
+		BatchID:     t.BatchID,     // v4.7.7
+		BatchLabel:  t.BatchLabel,  // v4.7.7
 		Progress:    t.Progress,
 		Speed:       t.Speed,
 		CreatedAt:   t.CreatedAt.Format(time.RFC3339),

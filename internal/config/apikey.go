@@ -12,15 +12,16 @@ import (
 //
 // Priority (highest to lowest):
 //  1. Provided apiKey parameter (if non-empty) - e.g., from --api-key flag
-//  2. apiconfig INI file (for auto-download service compatibility)
-//  3. Default token file (~/.config/rescale/token) - created by 'config init' or GUI
-//  4. RESCALE_API_KEY environment variable
+//  2. Per-user token file (service mode only, when userProfilePath is provided)
+//  3. apiconfig INI file (for auto-download service compatibility)
+//  4. Default token file (~/.config/rescale/token) - created by 'config init' or GUI
+//  5. RESCALE_API_KEY environment variable
 //
 // Parameters:
 //   - apiKey: Explicitly provided API key (e.g., from command line flag)
-//   - userProfilePath: User's profile directory for loading apiconfig
+//   - userProfilePath: User's profile directory for loading per-user token and apiconfig
 //     (Windows: C:\Users\username, Unix: /home/username)
-//     If empty, apiconfig is not checked.
+//     If empty, per-user token and apiconfig checks are skipped (subprocess mode).
 //
 // Returns empty string if no API key found in any source.
 func ResolveAPIKey(apiKey string, userProfilePath string) string {
@@ -29,7 +30,16 @@ func ResolveAPIKey(apiKey string, userProfilePath string) string {
 		return apiKey
 	}
 
-	// 2. Try apiconfig INI file (for auto-download service compatibility)
+	// 2. Per-user token file (for service mode where default path resolves to SYSTEM)
+	// v4.7.6: Check user-specific token path first when userProfilePath is provided
+	if userProfilePath != "" {
+		userTokenPath := GetUserTokenPath(userProfilePath)
+		if key, err := ReadTokenFile(userTokenPath); err == nil && key != "" {
+			return key
+		}
+	}
+
+	// 3. Try apiconfig INI file (for auto-download service compatibility)
 	if userProfilePath != "" {
 		apiconfigPath := APIConfigPathForUser(userProfilePath)
 		if cfg, err := LoadAPIConfig(apiconfigPath); err == nil && cfg.APIKey != "" {
@@ -37,14 +47,14 @@ func ResolveAPIKey(apiKey string, userProfilePath string) string {
 		}
 	}
 
-	// 3. Try default token file (~/.config/rescale/token)
+	// 4. Try default token file (~/.config/rescale/token)
 	if tokenPath := GetDefaultTokenPath(); tokenPath != "" {
 		if key, err := ReadTokenFile(tokenPath); err == nil && key != "" {
 			return key
 		}
 	}
 
-	// 4. Environment variable (lowest priority)
+	// 5. Environment variable (lowest priority)
 	return os.Getenv("RESCALE_API_KEY")
 }
 
@@ -55,9 +65,10 @@ func ResolveAPIKey(apiKey string, userProfilePath string) string {
 //
 // Priority (highest to lowest):
 //  1. Provided apiKey parameter (if non-empty)
-//  2. apiconfig INI file in current user's profile
-//  3. Default token file (~/.config/rescale/token)
-//  4. RESCALE_API_KEY environment variable
+//  2. Per-user token file in current user's profile
+//  3. apiconfig INI file in current user's profile
+//  4. Default token file (~/.config/rescale/token)
+//  5. RESCALE_API_KEY environment variable
 func ResolveAPIKeyForCurrentUser(apiKey string) string {
 	// Get current user's home directory to construct profile path
 	homeDir, err := os.UserHomeDir()
@@ -71,17 +82,33 @@ func ResolveAPIKeyForCurrentUser(apiKey string) string {
 // ResolveAPIKeySource returns the API key and its source for debugging/logging.
 // This is useful for CLI --verbose mode to show where the API key came from.
 //
+// Priority matches ResolveAPIKey:
+//  1. flag (explicitly provided apiKey parameter)
+//  2. user-token-file (per-user token, service mode only)
+//  3. apiconfig (INI file, service mode only)
+//  4. token-file (default token path)
+//  5. environment (RESCALE_API_KEY env var)
+//
 // Returns:
 //   - apiKey: The resolved API key (empty if not found)
 //   - source: Description of where the key was found
-//     "flag", "apiconfig", "token-file", "environment", or "" if not found
+//     "flag", "user-token-file", "apiconfig", "token-file", "environment", or "" if not found
 func ResolveAPIKeySource(apiKey string, userProfilePath string) (string, string) {
 	// 1. If explicitly provided, use it
 	if apiKey != "" {
 		return apiKey, "flag"
 	}
 
-	// 2. Try apiconfig INI file
+	// 2. Per-user token file (for service mode where default path resolves to SYSTEM)
+	// v4.7.6: Check user-specific token path first when userProfilePath is provided
+	if userProfilePath != "" {
+		userTokenPath := GetUserTokenPath(userProfilePath)
+		if key, err := ReadTokenFile(userTokenPath); err == nil && key != "" {
+			return key, "user-token-file"
+		}
+	}
+
+	// 3. Try apiconfig INI file
 	if userProfilePath != "" {
 		apiconfigPath := APIConfigPathForUser(userProfilePath)
 		if cfg, err := LoadAPIConfig(apiconfigPath); err == nil && cfg.APIKey != "" {
@@ -89,14 +116,14 @@ func ResolveAPIKeySource(apiKey string, userProfilePath string) (string, string)
 		}
 	}
 
-	// 3. Try default token file
+	// 4. Try default token file
 	if tokenPath := GetDefaultTokenPath(); tokenPath != "" {
 		if key, err := ReadTokenFile(tokenPath); err == nil && key != "" {
 			return key, "token-file"
 		}
 	}
 
-	// 4. Environment variable
+	// 5. Environment variable
 	if envKey := os.Getenv("RESCALE_API_KEY"); envKey != "" {
 		return envKey, "environment"
 	}

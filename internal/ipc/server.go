@@ -57,6 +57,10 @@ type ServiceHandler interface {
 	// v4.5.0: Added userID parameter for per-user routing in service mode.
 	// In subprocess mode, userID is ignored (only one user).
 	GetRecentLogs(userID string, count int) []LogEntryData
+
+	// ReloadConfig requests daemon config reload.
+	// v4.7.6: Added for GUI config propagation.
+	ReloadConfig(userID string) *ReloadConfigData
 }
 
 // Server handles IPC requests from clients via named pipe.
@@ -475,6 +479,18 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		}
 		logs := s.handler.GetRecentLogs(userID, 100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
+
+	case MsgReloadConfig:
+		// v4.7.6: Config reload request
+		userID := req.UserID
+		if userID == "" && s.serviceMode {
+			userID = callerSID
+		}
+		if err := s.authorizeModifyRequest(callerSID, "ReloadConfig"); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		result := s.handler.ReloadConfig(userID)
+		return NewReloadConfigResponse(result)
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))

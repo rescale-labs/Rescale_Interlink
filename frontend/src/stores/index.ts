@@ -3,8 +3,8 @@ export { useConfigStore } from './configStore';
 export { useLogStore } from './logStore';
 export { useFileBrowserStore } from './fileBrowserStore';
 export type { BrowseMode, SelectionState, BreadcrumbEntry } from './fileBrowserStore';
-export { useTransferStore, classifyError, extractDiskSpaceInfo } from './transferStore';
-export type { TransferTask, TransferState, TransferStats, TransferErrorType, Enumeration } from './transferStore';
+export { useTransferStore, classifyError, extractDiskSpaceInfo, formatSpeed, formatETA } from './transferStore';
+export type { TransferTask, TransferBatch, TransferState, TransferStats, TransferErrorType, Enumeration } from './transferStore';
 export { useJobStore, DEFAULT_JOB_TEMPLATE } from './jobStore';
 export type {
   WorkflowState,

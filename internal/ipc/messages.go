@@ -29,14 +29,16 @@ const (
 	MsgShutdown       MessageType = "Shutdown"
 	MsgSubscribeLogs  MessageType = "SubscribeLogs"  // v4.3.2: Subscribe to log stream
 	MsgGetRecentLogs  MessageType = "GetRecentLogs"  // v4.3.2: Get recent log entries
+	MsgReloadConfig   MessageType = "ReloadConfig"   // v4.7.6: Reload daemon config
 
 	// Response types (server -> client)
 	MsgStatusResponse   MessageType = "StatusResponse"
 	MsgUserListResponse MessageType = "UserListResponse"
 	MsgOK               MessageType = "OK"
 	MsgError            MessageType = "Error"
-	MsgLogEntry         MessageType = "LogEntry"       // v4.3.2: Log entry push
-	MsgRecentLogs       MessageType = "RecentLogs"     // v4.3.2: Recent logs response
+	MsgLogEntry             MessageType = "LogEntry"              // v4.3.2: Log entry push
+	MsgRecentLogs           MessageType = "RecentLogs"            // v4.3.2: Recent logs response
+	MsgReloadConfigResponse MessageType = "ReloadConfigResponse"  // v4.7.6: Reload config response
 )
 
 // Request represents an IPC request from client to server.
@@ -136,6 +138,15 @@ type RecentLogsData struct {
 	Entries []LogEntryData `json:"entries"`
 }
 
+// ReloadConfigData contains the result of a config reload request.
+// v4.7.6: Used to communicate whether config was applied immediately or deferred.
+type ReloadConfigData struct {
+	Applied         bool   `json:"applied"`
+	Deferred        bool   `json:"deferred"`
+	ActiveDownloads int    `json:"active_downloads"`
+	Error           string `json:"error,omitempty"`
+}
+
 // NewRequest creates a new IPC request.
 func NewRequest(msgType MessageType) *Request {
 	return &Request{Type: msgType}
@@ -176,6 +187,12 @@ func NewLogEntryResponse(entry *LogEntryData) *Response {
 // v4.3.2: Returns a batch of recent log entries.
 func NewRecentLogsResponse(entries []LogEntryData) *Response {
 	return &Response{Type: MsgRecentLogs, Success: true, Data: &RecentLogsData{Entries: entries}}
+}
+
+// NewReloadConfigResponse creates a reload config response.
+// v4.7.6: Added for config reload IPC support.
+func NewReloadConfigResponse(data *ReloadConfigData) *Response {
+	return &Response{Type: MsgReloadConfigResponse, Success: true, Data: data}
 }
 
 // Encode serializes a request to JSON.
@@ -256,6 +273,33 @@ func (r *Response) GetUserListData() *UserListData {
 			return nil
 		}
 		return &userList
+	}
+	return nil
+}
+
+// GetReloadConfigData extracts ReloadConfigData from a response.
+// Returns nil if the response doesn't contain reload config data.
+func (r *Response) GetReloadConfigData() *ReloadConfigData {
+	if r.Data == nil {
+		return nil
+	}
+
+	switch v := r.Data.(type) {
+	case *ReloadConfigData:
+		return v
+	case ReloadConfigData:
+		return &v
+	case map[string]interface{}:
+		// Re-marshal and unmarshal to convert
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		var result ReloadConfigData
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil
+		}
+		return &result
 	}
 	return nil
 }

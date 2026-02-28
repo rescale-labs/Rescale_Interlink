@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.7.5-green)
+![Status](https://img.shields.io/badge/status-v4.7.7-green)
 
 ---
 
@@ -93,6 +93,40 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 ---
 
 ## Recent Changes
+
+**v4.7.7 (February 27, 2026) - GUI Performance for Bulk Transfers + Rate Limit Validation:**
+- **Transfer grouping**: Folder uploads/downloads, PUR pipelines, and Single-Job uploads now collapse into a single aggregate batch row in the Transfers tab instead of rendering 10,000+ individual rows. Batches show aggregate progress, speed, ETA, file count, and expand to show paginated individual tasks on demand.
+- **Backend event optimization**: Individual progress events for batched transfers are suppressed at the queue layer; a 1/sec aggregate `BatchProgressEvent` per active batch replaces the previous 20k events/sec flood. Terminal events (completed, failed, cancelled) still publish individually.
+- **Polling optimization**: Transfers tab now fetches lightweight batch aggregates + ungrouped tasks (~1KB/cycle) instead of serializing all 10k+ tasks (~2MB/cycle) over IPC every poll.
+- **Rate limit end-to-end validation**: All 7 test scenarios pass against platform.rescale.com — coordinator auto-spawn, concurrent process sharing, rate enforcement under sustained load (200 concurrent processes), visibility messages ("Rate limiting: 85% of API capacity"), zero 429 errors, bucket state inspection.
+- **New backend endpoints**: `GetTransferBatches`, `GetUngroupedTransferTasks`, `GetBatchTasks`, `CancelBatch`, `RetryFailedInBatch`.
+- **New frontend components**: `BatchRow` (collapsible with aggregate progress), `TransferRow` with `React.memo()`, grouped rendering (enumerations → batches → ungrouped tasks).
+
+**v4.7.6 (February 26, 2026) - Auto-Download Reliability Fixes:**
+- **Credential path fix (CRITICAL)**: Service-mode API key resolution now checks per-user token path before falling back to SYSTEM's AppData path. Fixes silent "no API key" failures when running as Windows Service.
+- **Token persistence**: GUI writes API key to token file before every daemon/service start, preventing token-file-missing races.
+- **Config propagation**: Every config save now triggers `ReloadDaemonConfig()`, which restarts the subprocess daemon or triggers a service rescan. No more stale config until next poll.
+- **IPC ReloadConfig protocol**: New `MsgReloadConfig` IPC command with active-download awareness. Subprocess mode defers restart during active downloads; service mode delegates to `TriggerRescan()`.
+- **Pre-flight validation**: Enable toggle now validates API key and download folder before enabling auto-download. Specific error messages on failure.
+- **Progressive pending state**: "Activating..." now shows time-based messages (0-10s, 10-30s, 30s+) with Open Logs and Retry buttons. Backend error codes surface real issues (e.g., "No API key configured").
+- **Install & Start Service**: Combined idempotent `install-and-start` CLI subcommand and GUI button — single UAC prompt for both operations.
+- **Lookback fix**: `getJobCompletionTime()` retries once on failure; jobs with unknown completion time are included (not incorrectly skipped). Completion cutoff vs API creation pre-filter clearly distinguished in logs.
+- **IPC lifecycle**: IPC server starts before daemon on Windows to prevent brief IPC-unavailable window. Timeout increased from 2s to 5s.
+- **Skip-and-retry**: Users skipped for missing API key are retried on each service rescan when a key becomes available. Skip reason propagated to GUI as `LastError`.
+- **Tray auto-launch**: GUI automatically launches the tray companion app on startup (Windows only).
+- **Daemon stderr surfacing**: IPC timeout errors now include the last 3 lines from daemon-stderr.log.
+
+**v4.7.5 (February 25, 2026) - Empty File Fix + Cleanup:**
+- **Empty file upload**: Fixed crash when uploading 0-byte files through streaming encryption (zero parts emitted instead of one empty encrypted part).
+- **Empty file download**: Fixed download validation rejecting legitimate 0-byte files.
+- **Dead code cleanup**: Removed unused ThroughputMonitor infrastructure from resource manager.
+
+**v4.7.4 (February 23, 2026) - Unified Transfer Architecture:**
+- **PUR uploads visible in Transfers tab**: Pipeline workers delegate to `TransferService.UploadFileSync()` via new `SyncUploader` interface.
+- **Single-Job uploads visible in Transfers tab**: Local file uploads now route through TransferService.
+- **Source label badges**: Transfers tab shows origin — "PUR" (blue) and "Job" (green). Cancel/Retry hidden for pipeline-managed transfers.
+- **Cancel fix**: Transfers now properly stop underlying operations (context cancellation was missing).
+- **Tags on upload**: File Browser upload dialog includes optional tags input with live chip preview.
 
 **v4.7.3 (February 22, 2026) - Run Session Persistence and Monitoring:**
 - **Tab navigation persistence**: PUR and Single Job runs no longer lose state when switching tabs. New `runStore` tracks active runs at the app level; `singleJobStore` persists Single Job form state.
@@ -237,15 +271,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.7.5-macos-arm64.tar.gz` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.7.5-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.7.5-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `rescale-interlink-v4.7.5-win_amd64.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.7.7-macos-arm64.tar.gz` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.7.7-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.7.7-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `rescale-interlink-v4.7.7-win_amd64.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Extract and move app to Applications
-tar -xzf rescale-interlink-v4.7.5-macos-arm64.tar.gz
+tar -xzf rescale-interlink-v4.7.7-macos-arm64.tar.gz
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -256,7 +290,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.7.5-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.7.7-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -269,7 +303,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.7.5-win_amd64.zip
+Expand-Archive rescale-interlink-v4.7.7-win_amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -444,7 +478,7 @@ rescale-int daemon stop
 
 ### Auto-Start on Login (Mac/Linux)
 
-On **Windows with MSI installer**, the daemon starts automatically as a Windows Service.
+On **Windows with MSI installer**, the service is installed but must be started manually from the GUI Setup tab (click "Install & Start Service") or via `rescale-int service install-and-start` from an elevated command prompt. The MSI does not auto-start the service.
 
 On **Mac and Linux**, you can configure auto-start manually using the system's init system:
 
@@ -579,7 +613,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.7.5                       |
+|                    Rescale Interlink v4.7.7                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -845,6 +879,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.7.5
+**Version**: 4.7.7
 **Status**: Production Ready
-**Last Updated**: February 21, 2026
+**Last Updated**: February 27, 2026
