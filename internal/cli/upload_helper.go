@@ -17,6 +17,17 @@ import (
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
+// cliUploadItem wraps a file for upload with index info.
+// Implements transfer.WorkItem for BatchExecutor.
+type cliUploadItem struct {
+	idx  int
+	path string
+	size int64
+}
+
+// FileSize implements transfer.WorkItem.
+func (u cliUploadItem) FileSize() int64 { return u.size }
+
 // expandGlobPatterns expands glob patterns like *.zip, even when quoted
 // Returns deduplicated list of file paths
 func expandGlobPatterns(patterns []string) ([]string, error) {
@@ -331,109 +342,94 @@ func UploadFilesWithIDs(
 	resourceMgr := CreateResourceManager()
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// Use semaphore to limit concurrent uploads
-	semaphore := make(chan struct{}, maxConcurrent)
-	var wg sync.WaitGroup
-	errChan := make(chan error, len(filePaths))
+	// v4.8.1: Build work items for BatchExecutor
+	items := make([]cliUploadItem, len(filePaths))
+	for i, fPath := range filePaths {
+		fileInfo, _ := os.Stat(fPath)
+		var size int64
+		if fileInfo != nil {
+			size = fileInfo.Size()
+		}
+		items[i] = cliUploadItem{idx: i, path: fPath, size: size}
+	}
 
-	// Upload each file concurrently
-	for i, filePath := range filePaths {
-		wg.Add(1)
-		go func(idx int, fPath string) {
-			defer wg.Done()
+	cfg := transfer.BatchConfig{
+		MaxWorkers:  maxConcurrent,
+		ResourceMgr: resourceMgr,
+		Label:       "FILE-UPLOAD",
+	}
+	numWorkers := transfer.ComputedWorkers(items, cfg)
 
-			// Acquire semaphore
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
+	// Upload each file concurrently via BatchExecutor
+	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item cliUploadItem) error {
+		fPath := item.path
+		fileInfo, _ := os.Stat(fPath)
 
-			fileInfo, _ := os.Stat(fPath)
+		if !silent {
+			fmt.Fprintf(uploadUI.Writer(), "[%d/%d] Preparing to upload %s...\n", item.idx+1, len(filePaths), filepath.Base(fPath))
+		}
 
-			// Show "Preparing..." message before fetching credentials
-			if !silent {
-				fmt.Fprintf(uploadUI.Writer(), "[%d/%d] Preparing to upload %s...\n", idx+1, len(filePaths), filepath.Base(fPath))
-			}
+		// v4.8.1: Pass adaptive worker count for correct per-file thread allocation
+		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
 
-			// Allocate transfer handle for this file
-			transferHandle := transferMgr.AllocateTransfer(fileInfo.Size(), len(filePaths))
+		var fileBar *progress.FileBar
+		var barOnce sync.Once
 
-			// Create progress bar for this file (will be created just before upload starts)
-			var fileBar *progress.FileBar
-			var barOnce sync.Once
-
-			// Upload with progress callback and transfer handle
-			// Uses streaming encryption by default (preEncrypt=false), or legacy pre-encryption if preEncrypt=true
-			cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
-				LocalPath: fPath,
-				FolderID:  folderID,
-				APIClient: apiClient,
-				ProgressCallback: func(fraction float64) {
-					// Create progress bar on first progress update (lazy initialization)
-					barOnce.Do(func() {
-						fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
-					})
-					if fileBar != nil {
-						fileBar.UpdateProgress(fraction)
-					}
-				},
-				TransferHandle: transferHandle,
-				OutputWriter:   uploadUI.Writer(),
-				PreEncrypt:     preEncrypt,
-			})
-
-			if err != nil {
-				// Ensure progress bar exists before completing it
-				if fileBar == nil {
+		cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
+			LocalPath: fPath,
+			FolderID:  folderID,
+			APIClient: apiClient,
+			ProgressCallback: func(fraction float64) {
+				barOnce.Do(func() {
 					fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
+				})
+				if fileBar != nil {
+					fileBar.UpdateProgress(fraction)
 				}
-				fileBar.Complete("", err)
+			},
+			TransferHandle: transferHandle,
+			OutputWriter:   uploadUI.Writer(),
+			PreEncrypt:     preEncrypt,
+		})
 
-				// Check if resume state exists to provide helpful guidance
-				if state.UploadResumeStateExists(fPath) {
-					fmt.Fprintf(os.Stderr, "\n💡 Resume state saved. To resume this upload, run the same command again:\n")
-					fmt.Fprintf(os.Stderr, "   rescale-int files upload %s\n\n", fPath)
-				}
-
-				errChan <- fmt.Errorf("failed to upload %s: %w", fPath, err)
-				return
-			}
-
-			// v4.7.4: Apply tags after successful upload (non-fatal)
-			if len(uploadTags) > 0 {
-				if err := apiClient.AddFileTags(ctx, cloudFile.ID, uploadTags); err != nil {
-					logger.Warn().Err(err).
-						Str("file", fPath).
-						Str("fileID", cloudFile.ID).
-						Msg("Failed to apply tags after upload (non-fatal)")
-				}
-			}
-
-			// Ensure progress bar exists before completing it
+		if err != nil {
 			if fileBar == nil {
 				fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
 			}
-			fileBar.Complete(cloudFile.ID, nil)
+			fileBar.Complete("", err)
 
-			// Store result in correct position to maintain order
-			uploadedFileIDs[idx] = cloudFile.ID
-		}(i, filePath)
-	}
+			if state.UploadResumeStateExists(fPath) {
+				fmt.Fprintf(os.Stderr, "\n💡 Resume state saved. To resume this upload, run the same command again:\n")
+				fmt.Fprintf(os.Stderr, "   rescale-int files upload %s\n\n", fPath)
+			}
 
-	// Wait for all uploads to complete
-	wg.Wait()
-	close(errChan)
+			return fmt.Errorf("failed to upload %s: %w", fPath, err)
+		}
 
-	// Collect all errors (drain channel to prevent leaks and report all failures)
-	var errors []error
-	for err := range errChan {
-		errors = append(errors, err)
-	}
+		if len(uploadTags) > 0 {
+			if err := apiClient.AddFileTags(ctx, cloudFile.ID, uploadTags); err != nil {
+				logger.Warn().Err(err).
+					Str("file", fPath).
+					Str("fileID", cloudFile.ID).
+					Msg("Failed to apply tags after upload (non-fatal)")
+			}
+		}
+
+		if fileBar == nil {
+			fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
+		}
+		fileBar.Complete(cloudFile.ID, nil)
+
+		uploadedFileIDs[item.idx] = cloudFile.ID
+		return nil
+	})
 
 	// Return first error but report count of all failures
-	if len(errors) > 0 {
-		if len(errors) == 1 {
-			return nil, errors[0]
+	if len(batchResult.Errors) > 0 {
+		if len(batchResult.Errors) == 1 {
+			return nil, batchResult.Errors[0]
 		}
-		return nil, fmt.Errorf("upload failed: %d file(s) failed (first error: %v)", len(errors), errors[0])
+		return nil, fmt.Errorf("upload failed: %d file(s) failed (first error: %v)", len(batchResult.Errors), batchResult.Errors[0])
 	}
 
 	// Summary
