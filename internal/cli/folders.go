@@ -417,16 +417,18 @@ Examples:
 				}
 
 				// File conflict mode: merge-folder-conflicts means skip existing files
-				fileConflictMode := FileOverwriteOnce
+				initialFileMode := FileOverwriteOnce
 				if mergeFolderConflicts {
-					fileConflictMode = FileSkipAll
+					initialFileMode = FileSkipAll
 				}
-				errorMode := ErrorContinueOnce
+				// v4.8.1: Use ConflictResolvers instead of raw pointers
+				fileConflictResolver := NewFileConflictResolver(initialFileMode)
+				errorResolver := NewErrorActionResolver(ErrorContinueOnce)
 				// v4.8.1: Pass resource manager from global CLI flags
 				uploadResourceMgr := CreateResourceManager()
 				uploadResult, err := uploadFiles(
 					ctx, localPath, files, mapping, apiClient, cache, uploadUI,
-					&fileConflictMode, &errorMode, continueOnError, maxConcurrent, cfg, logger, uploadResourceMgr)
+					fileConflictResolver, errorResolver, continueOnError, maxConcurrent, cfg, logger, uploadResourceMgr)
 				if err != nil {
 					return err
 				}

@@ -434,14 +434,17 @@ func uploadDirectoryPipelined(
 	}
 
 	// Shared state for conflict modes
+	// Note: folderConflictMode is passed by pointer to CreateFolderStructure
 	folderConflictMode := ConflictMergeOnce
 	if skipExisting {
 		folderConflictMode = ConflictMergeAll
 	}
-	fileConflictMode := FileOverwriteOnce
+	// v4.8.1: Use shared ConflictResolver for file conflicts
+	initialFileMode := FileOverwriteOnce
 	if skipExisting {
-		fileConflictMode = FileSkipAll
+		initialFileMode = FileSkipAll
 	}
+	fileConflictResolver := NewFileConflictResolver(initialFileMode)
 	errorMode := ErrorContinueOnce
 
 	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
@@ -497,9 +500,6 @@ func uploadDirectoryPipelined(
 	}
 	uploadWorkCh := make(chan uploadWorkItem, 100)
 
-	// Mutex for conflict mode reads/writes across concurrent workers
-	var promptMutex sync.Mutex
-
 	// Start fixed worker pool for file uploads
 	// v4.8.1: Use adaptive worker count (was fileConcurrency, Bug #2)
 	var uploadWg sync.WaitGroup
@@ -528,25 +528,17 @@ func uploadDirectoryPipelined(
 				}
 
 				if exists {
-					// Handle file conflict — hold promptMutex across read-check-prompt-write
-					promptMutex.Lock()
-					action := fileConflictMode
-					if action == FileSkipOnce || action == FileOverwriteOnce {
-						var promptErr error
-						action, promptErr = promptFileConflict(fileName, relativePath)
-						if promptErr != nil {
-							promptMutex.Unlock()
-							logger.Error().Err(promptErr).Str("file", fileName).Msg("Error prompting for file conflict")
-							resultMutex.Lock()
-							result.Errors = append(result.Errors, UploadError{fpath, promptErr})
-							resultMutex.Unlock()
-							continue
-						}
-						if action == FileSkipAll || action == FileOverwriteAll {
-							fileConflictMode = action
-						}
+					// v4.8.1: Use shared ConflictResolver instead of inline state machine
+					action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
+						return promptFileConflict(fileName, relativePath)
+					})
+					if promptErr != nil {
+						logger.Error().Err(promptErr).Str("file", fileName).Msg("Error prompting for file conflict")
+						resultMutex.Lock()
+						result.Errors = append(result.Errors, UploadError{fpath, promptErr})
+						resultMutex.Unlock()
+						continue
 					}
-					promptMutex.Unlock()
 
 					switch action {
 					case FileSkipOnce, FileSkipAll:
@@ -663,7 +655,8 @@ func uploadDirectoryPipelined(
 	return result, foldersCreated, nil
 }
 
-// uploadFiles uploads all files with progress tracking and conflict/error handling
+// uploadFiles uploads all files with progress tracking and conflict/error handling.
+// v4.8.1: Uses ConflictResolver instead of raw pointer-based state machines.
 // v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
 func uploadFiles(
 	ctx context.Context,
@@ -673,8 +666,8 @@ func uploadFiles(
 	apiClient *api.Client,
 	cache *FolderCache,
 	uploadUI *progress.UploadUI,
-	fileConflictMode *FileConflictAction,
-	errorMode *ErrorAction,
+	fileConflictResolver *ConflictResolver[FileConflictAction],
+	errorResolver *ConflictResolver[ErrorAction],
 	continueOnError bool,
 	maxConcurrent int,
 	cfg *config.Config,
@@ -723,9 +716,6 @@ func uploadFiles(
 	}
 	close(workCh)
 
-	// Mutex for conflict/error mode reads/writes across concurrent workers
-	var promptMutex sync.Mutex
-
 	var wg sync.WaitGroup
 	for w := 0; w < adaptiveWorkers; w++ {
 		wg.Add(1)
@@ -761,61 +751,47 @@ func uploadFiles(
 				}
 
 				if cfg.CheckConflictsBeforeUpload && err != nil {
-					promptMutex.Lock()
-					if continueOnError || *errorMode == ErrorContinueAll {
-						promptMutex.Unlock()
+					if continueOnError {
 						resultMutex.Lock()
 						result.Errors = append(result.Errors, UploadError{fpath, err})
 						resultMutex.Unlock()
 						logger.Error().Str("file", fpath).Err(err).Msg("Error checking file existence")
 						continue
-					} else if *errorMode == ErrorContinueOnce {
-						action, promptErr := promptUploadError(fileName, err)
-						if promptErr != nil {
-							promptMutex.Unlock()
-							logger.Error().Err(promptErr).Msg("Error prompting user")
-							continue
-						}
-						if action == ErrorAbort {
-							promptMutex.Unlock()
-							logger.Info().Msg("Upload aborted by user")
-							continue
-						}
-						if action == ErrorContinueAll {
-							*errorMode = ErrorContinueAll
-						}
-						promptMutex.Unlock()
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, err})
-						resultMutex.Unlock()
-						continue
-					} else {
-						promptMutex.Unlock()
-						logger.Error().Err(err).Str("file", fpath).Msg("Failed to check if file exists")
+					}
+					// v4.8.1: Use shared error resolver instead of inline state machine
+					checkErr := err
+					action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
+						return promptUploadError(fileName, checkErr)
+					})
+					if promptErr != nil {
+						logger.Error().Err(promptErr).Msg("Error prompting user")
 						continue
 					}
+					if action == ErrorAbort {
+						logger.Info().Msg("Upload aborted by user")
+						continue
+					}
+					// ErrorContinueOnce or ErrorContinueAll — record and continue
+					resultMutex.Lock()
+					result.Errors = append(result.Errors, UploadError{fpath, checkErr})
+					resultMutex.Unlock()
+					continue
 				}
 
 				// SAFE MODE: Handle conflicts BEFORE upload
 				if cfg.CheckConflictsBeforeUpload && exists {
-					promptMutex.Lock()
-					action := *fileConflictMode
-					if action == FileSkipOnce || action == FileOverwriteOnce {
+					// v4.8.1: Use shared ConflictResolver instead of inline state machine
+					action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
 						folderPath := filepath.Dir(relativePath)
 						if folderPath == "." {
 							folderPath = filepath.Base(rootPath)
 						}
-						action, err = promptFileConflict(fileName, folderPath)
-						if err != nil {
-							promptMutex.Unlock()
-							logger.Error().Err(err).Msg("Error prompting user")
-							continue
-						}
-						if action == FileSkipAll || action == FileOverwriteAll {
-							*fileConflictMode = action
-						}
+						return promptFileConflict(fileName, folderPath)
+					})
+					if promptErr != nil {
+						logger.Error().Err(promptErr).Msg("Error prompting user")
+						continue
 					}
-					promptMutex.Unlock()
 
 					switch action {
 					case FileSkipOnce, FileSkipAll:
@@ -839,39 +815,29 @@ func uploadFiles(
 				// Get file info
 				fileInfo, err := os.Stat(fpath)
 				if err != nil {
-					promptMutex.Lock()
-					if continueOnError || *errorMode == ErrorContinueAll {
-						promptMutex.Unlock()
+					if continueOnError {
 						resultMutex.Lock()
 						result.Errors = append(result.Errors, UploadError{fpath, err})
 						resultMutex.Unlock()
 						logger.Error().Str("file", fpath).Err(err).Msg("Error getting file info")
 						continue
-					} else if *errorMode == ErrorContinueOnce {
-						action, promptErr := promptUploadError(fileName, err)
-						if promptErr != nil {
-							promptMutex.Unlock()
-							logger.Error().Err(promptErr).Msg("Error prompting user")
-							continue
-						}
-						if action == ErrorAbort {
-							promptMutex.Unlock()
-							logger.Info().Msg("Upload aborted by user")
-							continue
-						}
-						if action == ErrorContinueAll {
-							*errorMode = ErrorContinueAll
-						}
-						promptMutex.Unlock()
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, err})
-						resultMutex.Unlock()
-						continue
-					} else {
-						promptMutex.Unlock()
-						logger.Error().Err(err).Str("file", fpath).Msg("Failed to stat file")
+					}
+					statErr := err
+					action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
+						return promptUploadError(fileName, statErr)
+					})
+					if promptErr != nil {
+						logger.Error().Err(promptErr).Msg("Error prompting user")
 						continue
 					}
+					if action == ErrorAbort {
+						logger.Info().Msg("Upload aborted by user")
+						continue
+					}
+					resultMutex.Lock()
+					result.Errors = append(result.Errors, UploadError{fpath, statErr})
+					resultMutex.Unlock()
+					continue
 				}
 
 				// Create progress bar for this file
@@ -956,25 +922,18 @@ func uploadFiles(
 							continue
 						}
 
-						// Prompt user for conflict resolution — hold promptMutex
-						promptMutex.Lock()
-						action := *fileConflictMode
-						if action == FileSkipOnce || action == FileOverwriteOnce {
+						// v4.8.1: Use shared ConflictResolver for post-upload conflict
+						action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
 							folderPath := filepath.Dir(relativePath)
 							if folderPath == "." {
 								folderPath = filepath.Base(rootPath)
 							}
-							action, promptErr := promptFileConflict(fileName, folderPath)
-							if promptErr != nil {
-								promptMutex.Unlock()
-								logger.Error().Err(promptErr).Msg("Error prompting user")
-								continue
-							}
-							if action == FileSkipAll || action == FileOverwriteAll {
-								*fileConflictMode = action
-							}
+							return promptFileConflict(fileName, folderPath)
+						})
+						if promptErr != nil {
+							logger.Error().Err(promptErr).Msg("Error prompting user")
+							continue
 						}
-						promptMutex.Unlock()
 
 						switch action {
 						case FileSkipOnce, FileSkipAll:
@@ -1032,39 +991,29 @@ func uploadFiles(
 					}
 
 					// Handle other upload errors
-					promptMutex.Lock()
-					if continueOnError || *errorMode == ErrorContinueAll {
-						promptMutex.Unlock()
+					if continueOnError {
 						resultMutex.Lock()
 						result.Errors = append(result.Errors, UploadError{fpath, err})
 						resultMutex.Unlock()
 						logger.Error().Str("file", fpath).Err(err).Msg("Upload failed")
 						continue
-					} else if *errorMode == ErrorContinueOnce {
-						action, promptErr := promptUploadError(fileName, err)
-						if promptErr != nil {
-							promptMutex.Unlock()
-							logger.Error().Err(promptErr).Msg("Error prompting user")
-							continue
-						}
-						if action == ErrorAbort {
-							promptMutex.Unlock()
-							logger.Info().Msg("Upload aborted by user")
-							continue
-						}
-						if action == ErrorContinueAll {
-							*errorMode = ErrorContinueAll
-						}
-						promptMutex.Unlock()
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, err})
-						resultMutex.Unlock()
-						continue
-					} else {
-						promptMutex.Unlock()
-						logger.Error().Err(err).Str("file", fpath).Msg("Failed to upload file")
+					}
+					uploadErr := err
+					action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
+						return promptUploadError(fileName, uploadErr)
+					})
+					if promptErr != nil {
+						logger.Error().Err(promptErr).Msg("Error prompting user")
 						continue
 					}
+					if action == ErrorAbort {
+						logger.Info().Msg("Upload aborted by user")
+						continue
+					}
+					resultMutex.Lock()
+					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
+					resultMutex.Unlock()
+					continue
 				}
 
 				// Mark upload as successful

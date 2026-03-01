@@ -75,8 +75,8 @@ func DownloadFolderRecursive(
 		Msg("Starting recursive folder download")
 
 	// Determine conflict handling mode
-	var fileConflictMode DownloadConflictAction
-	var folderConflictMode FolderDownloadConflictAction
+	var initialFileMode DownloadConflictAction
+	var initialFolderMode FolderDownloadConflictAction
 
 	// Count how many conflict flags are set
 	flagsSet := 0
@@ -114,20 +114,22 @@ func DownloadFolderRecursive(
 
 	// Set initial conflict modes based on flags
 	if overwriteAll {
-		fileConflictMode = DownloadOverwriteAll
-		folderConflictMode = FolderDownloadMergeAll // Overwrite files but merge into folders
+		initialFileMode = DownloadOverwriteAll
+		initialFolderMode = FolderDownloadMergeAll // Overwrite files but merge into folders
 	} else if skipAll {
-		fileConflictMode = DownloadSkipAll
-		folderConflictMode = FolderDownloadSkipAll
+		initialFileMode = DownloadSkipAll
+		initialFolderMode = FolderDownloadSkipAll
 	} else if mergeAll {
-		fileConflictMode = DownloadSkipAll // Merge = use existing folders, skip existing files
-		folderConflictMode = FolderDownloadMergeAll
+		initialFileMode = DownloadSkipAll // Merge = use existing folders, skip existing files
+		initialFolderMode = FolderDownloadMergeAll
 	} else {
-		fileConflictMode = DownloadSkipOnce // Will prompt
-		folderConflictMode = FolderDownloadSkipOnce
+		initialFileMode = DownloadSkipOnce // Will prompt
+		initialFolderMode = FolderDownloadSkipOnce
 	}
 
-	var conflictMutex sync.Mutex
+	// v4.8.1: Use shared ConflictResolvers instead of inline state machines
+	fileConflictResolver := NewDownloadConflictResolver(initialFileMode)
+	folderConflictResolver := NewFolderDownloadConflictResolver(initialFolderMode)
 
 	// Scan the remote folder structure with live progress
 	fmt.Println("📡 Scanning remote folder structure...")
@@ -154,35 +156,15 @@ func DownloadFolderRecursive(
 
 	// Check if root output directory already exists
 	if info, err := os.Stat(rootOutputDir); err == nil && info.IsDir() {
-		conflictMutex.Lock()
-		currentFolderMode := folderConflictMode
-		conflictMutex.Unlock()
-
-		var action FolderDownloadConflictAction
-		switch currentFolderMode {
-		case FolderDownloadSkipAll:
-			action = FolderDownloadSkipAll
-		case FolderDownloadMergeAll:
-			action = FolderDownloadMergeAll
-		default:
-			// Prompt user for root folder conflict
-			conflictMutex.Lock()
-			action, err = promptFolderDownloadConflict(rootFolderName, rootOutputDir)
-			if err != nil {
-				conflictMutex.Unlock()
-				return nil, err
-			}
-			// Update mode if user chose "for all"
-			if action == FolderDownloadSkipAll || action == FolderDownloadMergeAll {
-				folderConflictMode = action
-				// Also set file conflict mode based on folder choice
-				if action == FolderDownloadMergeAll {
-					fileConflictMode = DownloadSkipAll // Merge = skip existing files
-				} else {
-					fileConflictMode = DownloadSkipAll
-				}
-			}
-			conflictMutex.Unlock()
+		action, err := folderConflictResolver.Resolve(func() (FolderDownloadConflictAction, error) {
+			return promptFolderDownloadConflict(rootFolderName, rootOutputDir)
+		})
+		if err != nil {
+			return nil, err
+		}
+		// Cascade folder "All" decision to file conflict mode
+		if action == FolderDownloadSkipAll || action == FolderDownloadMergeAll {
+			fileConflictResolver.SetMode(DownloadSkipAll)
 		}
 
 		switch action {
@@ -217,27 +199,11 @@ func DownloadFolderRecursive(
 
 		// Check if folder already exists
 		if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
-			conflictMutex.Lock()
-			currentFolderMode := folderConflictMode
-			conflictMutex.Unlock()
-
-			var action FolderDownloadConflictAction
-			switch currentFolderMode {
-			case FolderDownloadSkipAll:
-				action = FolderDownloadSkipAll
-			case FolderDownloadMergeAll:
-				action = FolderDownloadMergeAll
-			default:
-				conflictMutex.Lock()
-				action, err = promptFolderDownloadConflict(folder.Name, localPath)
-				if err != nil {
-					conflictMutex.Unlock()
-					return nil, err
-				}
-				if action == FolderDownloadSkipAll || action == FolderDownloadMergeAll {
-					folderConflictMode = action
-				}
-				conflictMutex.Unlock()
+			action, err := folderConflictResolver.Resolve(func() (FolderDownloadConflictAction, error) {
+				return promptFolderDownloadConflict(folder.Name, localPath)
+			})
+			if err != nil {
+				return nil, err
 			}
 
 			switch action {
@@ -277,7 +243,6 @@ func DownloadFolderRecursive(
 	defer downloadUI.Wait()
 
 	var downloadMutex sync.Mutex
-	conflictMode := fileConflictMode
 
 	errChan := make(chan DownloadError, len(allFiles))
 
@@ -333,26 +298,13 @@ func DownloadFolderRecursive(
 
 		// Check if file exists and handle conflict
 		if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-			conflictMutex.Lock()
-			var action DownloadConflictAction
-
-			switch conflictMode {
-			case DownloadSkipAll:
-				action = DownloadSkipAll
-			case DownloadOverwriteAll:
-				action = DownloadOverwriteAll
-			default:
-				action, err = promptDownloadConflict(task.Name, localPath)
-				if err != nil {
-					conflictMutex.Unlock()
-					errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: err}
-					return nil
-				}
-				if action == DownloadSkipAll || action == DownloadOverwriteAll {
-					conflictMode = action
-				}
+			action, err := fileConflictResolver.Resolve(func() (DownloadConflictAction, error) {
+				return promptDownloadConflict(task.Name, localPath)
+			})
+			if err != nil {
+				errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: err}
+				return nil
 			}
-			conflictMutex.Unlock()
 
 			switch action {
 			case DownloadSkipOnce, DownloadSkipAll:

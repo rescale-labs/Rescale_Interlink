@@ -188,17 +188,17 @@ func executeFileDownload(
 	downloadedFiles := make([]string, 0, len(validFiles))
 	skippedFiles := make([]string, 0)
 	var downloadMutex sync.Mutex
-	var conflictMode DownloadConflictAction = DownloadSkipOnce
 
-	// Set initial conflict mode from flags
+	// v4.8.1: Use shared ConflictResolver instead of inline state machine
+	initialConflictMode := DownloadSkipOnce
 	if overwriteAll {
-		conflictMode = DownloadOverwriteAll
+		initialConflictMode = DownloadOverwriteAll
 	} else if skipAll {
-		conflictMode = DownloadSkipAll
+		initialConflictMode = DownloadSkipAll
 	} else if resumeAll {
-		conflictMode = DownloadResumeAll
+		initialConflictMode = DownloadResumeAll
 	}
-	var conflictMutex sync.Mutex
+	conflictResolver := NewDownloadConflictResolver(initialConflictMode)
 
 	// Create resource manager from global flags
 	resourceMgr := CreateResourceManager()
@@ -239,31 +239,11 @@ func executeFileDownload(
 
 		// Check if file exists and handle conflict
 		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
-			conflictMutex.Lock()
-			currentMode := conflictMode
-			conflictMutex.Unlock()
-
-			var action DownloadConflictAction
-
-			switch currentMode {
-			case DownloadSkipAll:
-				action = DownloadSkipAll
-			case DownloadOverwriteAll:
-				action = DownloadOverwriteAll
-			case DownloadResumeAll:
-				action = DownloadResumeAll
-			default:
-				conflictMutex.Lock()
-				var err error
-				action, err = promptDownloadConflict(item.name, outputPath)
-				if err != nil {
-					conflictMutex.Unlock()
-					return fmt.Errorf("conflict prompt failed: %w", err)
-				}
-				if action == DownloadSkipAll || action == DownloadOverwriteAll || action == DownloadResumeAll {
-					conflictMode = action
-				}
-				conflictMutex.Unlock()
+			action, err := conflictResolver.Resolve(func() (DownloadConflictAction, error) {
+				return promptDownloadConflict(item.name, outputPath)
+			})
+			if err != nil {
+				return fmt.Errorf("conflict prompt failed: %w", err)
 			}
 
 			switch action {
@@ -547,17 +527,17 @@ func executeJobDownload(
 	downloadedFiles := make([]string, 0, len(files))
 	skippedFiles := make([]string, 0)
 	var downloadMutex sync.Mutex
-	var conflictMode DownloadConflictAction = DownloadSkipOnce
 
-	// Set initial conflict mode from flags
+	// v4.8.1: Use shared ConflictResolver instead of inline state machine
+	initialConflictMode := DownloadSkipOnce
 	if overwriteAll {
-		conflictMode = DownloadOverwriteAll
+		initialConflictMode = DownloadOverwriteAll
 	} else if skipAll {
-		conflictMode = DownloadSkipAll
+		initialConflictMode = DownloadSkipAll
 	} else if resumeAll {
-		conflictMode = DownloadResumeAll
+		initialConflictMode = DownloadResumeAll
 	}
-	var conflictMutex sync.Mutex
+	conflictResolver := NewDownloadConflictResolver(initialConflictMode)
 
 	// Create resource manager from global flags
 	resourceMgr := CreateResourceManager()
@@ -607,11 +587,7 @@ func executeJobDownload(
 
 		// Check if file already exists
 		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
-			conflictMutex.Lock()
-			currentMode := conflictMode
-			conflictMutex.Unlock()
-
-			switch currentMode {
+			switch conflictResolver.Mode() {
 			case DownloadSkipOnce, DownloadSkipAll:
 				fmt.Fprintf(downloadUI.Writer(), "⊘ Skipping existing file: %s\n", item.name)
 				downloadMutex.Lock()
