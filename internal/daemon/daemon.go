@@ -342,6 +342,8 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		MaxThreads: d.cfg.MaxConcurrent,
 		AutoScale:  true,
 	})
+	// v4.8.1: Create TransferManager once per job, not per file (Bug #4)
+	transferMgr := transfer.NewManager(resourceMgr)
 
 	// Download files
 	var totalSize int64
@@ -405,8 +407,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 			continue
 		}
 
-		// Allocate transfer handle
-		transferMgr := transfer.NewManager(resourceMgr)
+		// Allocate transfer handle (reuses single TransferManager per job)
 		transferHandle := transferMgr.AllocateTransfer(file.DecryptedSize, 1)
 
 		// Download file
