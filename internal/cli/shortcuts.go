@@ -90,8 +90,10 @@ Examples:
 			logger := GetLogger()
 
 			// Validate max-concurrent
-			if maxConcurrent < 1 || maxConcurrent > 10 {
-				return fmt.Errorf("--max-concurrent must be between 1 and 10, got %d", maxConcurrent)
+			// v4.8.1: Use constants for range validation (was hardcoded 1-10, Bug #5)
+			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
+				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
+					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
 
 			// Get API client

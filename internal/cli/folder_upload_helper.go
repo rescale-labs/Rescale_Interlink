@@ -383,6 +383,7 @@ func CreateFolderStructure(
 
 // uploadDirectoryPipelined coordinates pipelined folder creation and file uploads
 // Folders are created depth-by-depth, and files are uploaded as soon as their parent folder is ready
+// v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
 func uploadDirectoryPipelined(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -397,6 +398,7 @@ func uploadDirectoryPipelined(
 	skipExisting bool,
 	cfg *config.Config,
 	logger *logging.Logger,
+	resourceMgr *resources.Manager,
 ) (*UploadResult, int, error) {
 	result := &UploadResult{}
 	var resultMutex sync.Mutex
@@ -442,9 +444,11 @@ func uploadDirectoryPipelined(
 	}
 	errorMode := ErrorContinueOnce
 
-	// v4.8.0: Create resource manager for CLI per-file multi-threading
-	cliUploadResourceMgr := resources.NewManager(resources.Config{AutoScale: true})
-	cliUploadTransferMgr := transfer.NewManager(cliUploadResourceMgr)
+	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
+	if resourceMgr == nil {
+		panic("uploadDirectoryPipelined: resourceMgr is required (use CreateResourceManager())")
+	}
+	cliUploadTransferMgr := transfer.NewManager(resourceMgr)
 
 	// v4.8.0: Compute adaptive concurrency from file sizes
 	uploadFileSizes := make([]int64, 0, len(files))
@@ -453,7 +457,7 @@ func uploadDirectoryPipelined(
 			uploadFileSizes = append(uploadFileSizes, info.Size())
 		}
 	}
-	cliUploadWorkerCount := cliUploadResourceMgr.ComputeBatchConcurrency(uploadFileSizes, fileConcurrency)
+	cliUploadWorkerCount := resourceMgr.ComputeBatchConcurrency(uploadFileSizes, fileConcurrency)
 	fmt.Printf("  Upload workers: %d (adaptive, based on file sizes)\n", cliUploadWorkerCount)
 
 	// WaitGroup to track all operations
@@ -497,8 +501,9 @@ func uploadDirectoryPipelined(
 	var promptMutex sync.Mutex
 
 	// Start fixed worker pool for file uploads
+	// v4.8.1: Use adaptive worker count (was fileConcurrency, Bug #2)
 	var uploadWg sync.WaitGroup
-	for w := 0; w < fileConcurrency; w++ {
+	for w := 0; w < cliUploadWorkerCount; w++ {
 		uploadWg.Add(1)
 		go func() {
 			defer uploadWg.Done()
@@ -659,6 +664,7 @@ func uploadDirectoryPipelined(
 }
 
 // uploadFiles uploads all files with progress tracking and conflict/error handling
+// v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
 func uploadFiles(
 	ctx context.Context,
 	rootPath string,
@@ -673,6 +679,7 @@ func uploadFiles(
 	maxConcurrent int,
 	cfg *config.Config,
 	logger *logging.Logger,
+	resourceMgr *resources.Manager,
 ) (*UploadResult, error) {
 	result := &UploadResult{}
 	var resultMutex sync.Mutex
@@ -691,9 +698,20 @@ func uploadFiles(
 		// Continue anyway - uploads will fetch credentials as needed
 	}
 
-	// v4.8.0: Create resource manager for CLI per-file multi-threading
-	seqResourceMgr := resources.NewManager(resources.Config{AutoScale: true})
-	seqTransferMgr := transfer.NewManager(seqResourceMgr)
+	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
+	if resourceMgr == nil {
+		panic("uploadFiles: resourceMgr is required (use CreateResourceManager())")
+	}
+	seqTransferMgr := transfer.NewManager(resourceMgr)
+
+	// v4.8.1: Compute adaptive concurrency from file sizes (was using raw maxConcurrent, Bug #3)
+	fileSizes := make([]int64, 0, len(files))
+	for _, f := range files {
+		if info, err := os.Stat(f); err == nil {
+			fileSizes = append(fileSizes, info.Size())
+		}
+	}
+	adaptiveWorkers := resourceMgr.ComputeBatchConcurrency(fileSizes, maxConcurrent)
 
 	// Bounded worker pool: feed file tasks through a channel
 	type uploadWorkItem struct {
@@ -709,7 +727,7 @@ func uploadFiles(
 	var promptMutex sync.Mutex
 
 	var wg sync.WaitGroup
-	for w := 0; w < maxConcurrent; w++ {
+	for w := 0; w < adaptiveWorkers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -860,7 +878,8 @@ func uploadFiles(
 				fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
 
 				// v4.8.0: Allocate transfer handle for per-file multi-threading
-				seqHandle := seqTransferMgr.AllocateTransfer(fileInfo.Size(), maxConcurrent)
+				// v4.8.1: Pass adaptive worker count (was maxConcurrent, Bug #3)
+				seqHandle := seqTransferMgr.AllocateTransfer(fileInfo.Size(), adaptiveWorkers)
 
 				// Upload with progress callback
 				cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{

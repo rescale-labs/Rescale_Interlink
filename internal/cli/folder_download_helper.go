@@ -40,6 +40,8 @@ type DownloadError struct {
 // DownloadFolderRecursive recursively downloads a folder and all its contents
 // Exported for GUI reuse
 // folderName: optional name for the downloaded folder. If empty, uses folderID.
+// v4.8.1: Added resourceMgr parameter — must be created via CreateResourceManager()
+// at the command entrypoint, not constructed internally. Passing nil will panic.
 func DownloadFolderRecursive(
 	ctx context.Context,
 	folderID string,
@@ -54,6 +56,7 @@ func DownloadFolderRecursive(
 	dryRun bool,
 	apiClient *api.Client,
 	logger *logging.Logger,
+	resourceMgr *resources.Manager,
 ) (*DownloadResult, error) {
 	result := &DownloadResult{
 		Errors: make([]DownloadError, 0),
@@ -283,165 +286,145 @@ func DownloadFolderRecursive(
 	defer cancelDownload()
 	var cancelled atomic.Bool
 
-	// v4.8.0: Create resource manager and transfer manager for CLI per-file multi-threading
-	cliResourceMgr := resources.NewManager(resources.Config{AutoScale: true})
-	cliTransferMgr := transfer.NewManager(cliResourceMgr)
-
-	// v4.8.0: Compute adaptive concurrency from file sizes
-	fileSizes := make([]int64, len(allFiles))
-	for i, f := range allFiles {
-		fileSizes[i] = f.Size
+	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
+	if resourceMgr == nil {
+		panic("DownloadFolderRecursive: resourceMgr is required (use CreateResourceManager())")
 	}
-	adaptiveWorkers := cliResourceMgr.ComputeBatchConcurrency(fileSizes, maxConcurrent)
-	fmt.Printf("  Workers: %d (adaptive, based on file sizes)\n", adaptiveWorkers)
+	cliTransferMgr := transfer.NewManager(resourceMgr)
 
-	// Bounded worker pool: feed file tasks through a channel
-	type downloadWork struct {
-		idx  int
-		task RemoteFileTask
-	}
-	workCh := make(chan downloadWork, len(allFiles))
+	// Build work items for BatchExecutor
+	items := make([]folderDownloadWorkItem, len(allFiles))
 	for i, fileTask := range allFiles {
-		workCh <- downloadWork{idx: i, task: fileTask}
+		items[i] = folderDownloadWorkItem{idx: i, task: fileTask}
 	}
-	close(workCh)
 
-	var wg sync.WaitGroup
-	for w := 0; w < adaptiveWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range workCh {
-				idx := item.idx
-				task := item.task
+	cfg := transfer.BatchConfig{
+		MaxWorkers:  maxConcurrent,
+		ResourceMgr: resourceMgr,
+		Label:       "FOLDER-DOWNLOAD",
+	}
+	numWorkers := transfer.ComputedWorkers(items, cfg)
+	fmt.Printf("  Workers: %d (adaptive, based on file sizes)\n", numWorkers)
 
-				// Check if download was cancelled
-				select {
-				case <-downloadCtx.Done():
-					downloadMutex.Lock()
-					result.FilesSkipped++
-					downloadMutex.Unlock()
-					continue
-				default:
-				}
+	batchResult := transfer.RunBatch(downloadCtx, items, cfg, func(ctx context.Context, item folderDownloadWorkItem) error {
+		task := item.task
 
-				localPath := filepath.Join(rootOutputDir, task.RelativePath)
+		// Check if download was cancelled
+		select {
+		case <-ctx.Done():
+			downloadMutex.Lock()
+			result.FilesSkipped++
+			downloadMutex.Unlock()
+			return nil
+		default:
+		}
 
-				// Check if path exists as a directory (name collision with folder)
-				if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
-					originalPath := localPath
-					localPath = localPath + ".file"
-					logger.Warn().
-						Str("original_path", originalPath).
-						Str("renamed_to", localPath).
-						Msg("File name conflicts with existing directory, renaming file")
-				}
+		localPath := filepath.Join(rootOutputDir, task.RelativePath)
 
-				// Check if file exists and handle conflict
-				// Hold conflictMutex across the entire read-check-prompt-write sequence
-				// to avoid TOCTOU race between reading and updating conflictMode.
-				if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-					conflictMutex.Lock()
-					var action DownloadConflictAction
+		// Check if path exists as a directory (name collision with folder)
+		if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
+			originalPath := localPath
+			localPath = localPath + ".file"
+			logger.Warn().
+				Str("original_path", originalPath).
+				Str("renamed_to", localPath).
+				Msg("File name conflicts with existing directory, renaming file")
+		}
 
-					switch conflictMode {
-					case DownloadSkipAll:
-						action = DownloadSkipAll
-					case DownloadOverwriteAll:
-						action = DownloadOverwriteAll
-					default:
-						// Prompt user (serialized by conflictMutex)
-						action, err = promptDownloadConflict(task.Name, localPath)
-						if err != nil {
-							conflictMutex.Unlock()
-							errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: err}
-							continue
-						}
-						if action == DownloadSkipAll || action == DownloadOverwriteAll {
-							conflictMode = action
-						}
-					}
-					conflictMutex.Unlock()
+		// Check if file exists and handle conflict
+		if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+			conflictMutex.Lock()
+			var action DownloadConflictAction
 
-					// Handle the action
-					switch action {
-					case DownloadSkipOnce, DownloadSkipAll:
-						downloadMutex.Lock()
-						result.FilesSkipped++
-						downloadMutex.Unlock()
-						continue
-					case DownloadAbort:
-						errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: fmt.Errorf("download aborted by user")}
-						continue
-					case DownloadOverwriteOnce, DownloadOverwriteAll:
-						if err := os.Remove(localPath); err != nil {
-							errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: fmt.Errorf("failed to remove existing file: %w", err)}
-							continue
-						}
-					}
-				}
-
-				// Create progress bar for this file
-				fileBar := downloadUI.AddFileBar(idx+1, task.FileID, task.Name, localPath, task.Size)
-
-				// v4.8.0: Allocate transfer handle for per-file multi-threading
-				transferHandle := cliTransferMgr.AllocateTransfer(task.Size, adaptiveWorkers)
-
-				// Download file with progress callback — use downloadCtx (not ctx)
-				// v4.8.0: Pass pre-fetched CloudFile metadata to skip GetFileInfo() API call
-				err := download.DownloadFile(downloadCtx, download.DownloadParams{
-					FileID:         task.FileID,
-					FileInfo:       task.CloudFile,
-					LocalPath:      localPath,
-					APIClient:      apiClient,
-					TransferHandle: transferHandle,
-					ProgressCallback: func(fraction float64) {
-						fileBar.UpdateProgress(fraction)
-					},
-					SkipChecksum: skipChecksum,
-				})
-				transferHandle.Complete()
-
+			switch conflictMode {
+			case DownloadSkipAll:
+				action = DownloadSkipAll
+			case DownloadOverwriteAll:
+				action = DownloadOverwriteAll
+			default:
+				action, err = promptDownloadConflict(task.Name, localPath)
 				if err != nil {
-					fileBar.Complete(err)
-
-					if state.DownloadResumeStateExists(localPath) {
-						fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume, re-run the download command.\n", filepath.Base(localPath))
-					}
-
-					downloadMutex.Lock()
-					result.FilesFailed++
-					downloadMutex.Unlock()
+					conflictMutex.Unlock()
 					errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: err}
-
-					if !continueOnError {
-						if !cancelled.Swap(true) {
-							cancelDownload()
-						}
-					}
-					continue
+					return nil
 				}
-
-				logger.Info().
-					Str("file_id", task.FileID).
-					Str("path", localPath).
-					Msg("File downloaded successfully")
-
-				fileBar.Complete(nil)
-
-				downloadMutex.Lock()
-				result.FilesDownloaded++
-				result.TotalBytes += task.Size
-				downloadMutex.Unlock()
+				if action == DownloadSkipAll || action == DownloadOverwriteAll {
+					conflictMode = action
+				}
 			}
-		}()
-	}
+			conflictMutex.Unlock()
 
-	// Wait for all workers
-	wg.Wait()
+			switch action {
+			case DownloadSkipOnce, DownloadSkipAll:
+				downloadMutex.Lock()
+				result.FilesSkipped++
+				downloadMutex.Unlock()
+				return nil
+			case DownloadAbort:
+				errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: fmt.Errorf("download aborted by user")}
+				return nil
+			case DownloadOverwriteOnce, DownloadOverwriteAll:
+				if err := os.Remove(localPath); err != nil {
+					errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: fmt.Errorf("failed to remove existing file: %w", err)}
+					return nil
+				}
+			}
+		}
+
+		fileBar := downloadUI.AddFileBar(item.idx+1, task.FileID, task.Name, localPath, task.Size)
+
+		// v4.8.1: Pass adaptive worker count for correct per-file thread allocation
+		transferHandle := cliTransferMgr.AllocateTransfer(task.Size, numWorkers)
+
+		err := download.DownloadFile(ctx, download.DownloadParams{
+			FileID:         task.FileID,
+			FileInfo:       task.CloudFile,
+			LocalPath:      localPath,
+			APIClient:      apiClient,
+			TransferHandle: transferHandle,
+			ProgressCallback: func(fraction float64) {
+				fileBar.UpdateProgress(fraction)
+			},
+			SkipChecksum: skipChecksum,
+		})
+		transferHandle.Complete()
+
+		if err != nil {
+			fileBar.Complete(err)
+
+			if state.DownloadResumeStateExists(localPath) {
+				fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume, re-run the download command.\n", filepath.Base(localPath))
+			}
+
+			downloadMutex.Lock()
+			result.FilesFailed++
+			downloadMutex.Unlock()
+			errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: err}
+
+			if !continueOnError {
+				if !cancelled.Swap(true) {
+					cancelDownload()
+				}
+			}
+			return nil
+		}
+
+		logger.Info().
+			Str("file_id", task.FileID).
+			Str("path", localPath).
+			Msg("File downloaded successfully")
+
+		fileBar.Complete(nil)
+
+		downloadMutex.Lock()
+		result.FilesDownloaded++
+		result.TotalBytes += task.Size
+		downloadMutex.Unlock()
+		return nil
+	})
+	_ = batchResult // errors collected via errChan for DownloadError tracking
+
 	close(errChan)
-
-	// Collect errors
 	for downloadErr := range errChan {
 		result.Errors = append(result.Errors, downloadErr)
 	}
@@ -464,6 +447,16 @@ type RemoteFileTask struct {
 	Size         int64
 	CloudFile    *models.CloudFile // v4.8.0: Pre-fetched full metadata (nil = fallback to GetFileInfo)
 }
+
+// folderDownloadWorkItem wraps RemoteFileTask with index for BatchExecutor.
+// Implements transfer.WorkItem.
+type folderDownloadWorkItem struct {
+	idx  int
+	task RemoteFileTask
+}
+
+// FileSize implements transfer.WorkItem.
+func (f folderDownloadWorkItem) FileSize() int64 { return f.task.Size }
 
 // ScanRemoteFolderRecursive recursively scans a remote folder structure
 // Exported for GUI reuse

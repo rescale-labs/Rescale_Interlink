@@ -422,9 +422,11 @@ Examples:
 					fileConflictMode = FileSkipAll
 				}
 				errorMode := ErrorContinueOnce
+				// v4.8.1: Pass resource manager from global CLI flags
+				uploadResourceMgr := CreateResourceManager()
 				uploadResult, err := uploadFiles(
 					ctx, localPath, files, mapping, apiClient, cache, uploadUI,
-					&fileConflictMode, &errorMode, continueOnError, maxConcurrent, cfg, logger)
+					&fileConflictMode, &errorMode, continueOnError, maxConcurrent, cfg, logger, uploadResourceMgr)
 				if err != nil {
 					return err
 				}
@@ -437,9 +439,11 @@ Examples:
 				// Note: pipelined mode currently only supports merge behavior
 				effectiveSkipExisting := mergeFolderConflicts || skipFolderConflicts
 
+				// v4.8.1: Pass resource manager from global CLI flags
+				pipelineResourceMgr := CreateResourceManager()
 				uploadResult, created, err := uploadDirectoryPipelined(
 					ctx, apiClient, cache, localPath, directories, rootFolderID,
-					files, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger)
+					files, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
 				if err != nil {
 					return err
 				}
@@ -725,8 +729,10 @@ Examples:
 			// Use helper function for recursive download
 			// Note: folderName is empty, so it will use folderID as the folder name
 			// TODO: Add --name flag or fetch folder name from API
+			// v4.8.1: Create resource manager from global CLI flags and pass explicitly
+			downloadResourceMgr := CreateResourceManager()
 			result, err := DownloadFolderRecursive(
-				ctx, folderID, "", outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger)
+				ctx, folderID, "", outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger, downloadResourceMgr)
 			if err != nil {
 				return err
 			}
