@@ -108,10 +108,14 @@ func (ts *TransferService) GetSemaphore() chan struct{} {
 // The function handles both uploads and downloads based on request type.
 // preRegItem holds a request and its pre-registered task ID.
 // v4.8.0: Used by synchronous pre-registration in StartTransfers.
+// Implements transfer.WorkItem for BatchExecutor compatibility.
 type preRegItem struct {
 	req    TransferRequest
 	taskID string
 }
+
+// FileSize implements transfer.WorkItem.
+func (p preRegItem) FileSize() int64 { return p.req.Size }
 
 func (ts *TransferService) StartTransfers(ctx context.Context, requests []TransferRequest) error {
 	if len(requests) == 0 {
@@ -169,113 +173,9 @@ func (ts *TransferService) warmCredentialCache(ctx context.Context) {
 	}
 }
 
-// executeUploadBatch handles a batch of upload requests using a bounded worker pool.
-// Pre-registers ALL tasks so queue Total is correct immediately, then feeds
-// (req, taskID) pairs into a channel consumed by cap(semaphore) workers.
-func (ts *TransferService) executeUploadBatch(ctx context.Context, requests []TransferRequest) {
-	ts.mu.RLock()
-	apiClient := ts.apiClient
-	ts.mu.RUnlock()
-
-	if apiClient == nil {
-		ts.logger.Error().Msg("Upload batch aborted: no API client")
-		return
-	}
-
-	total := len(requests)
-	currentSlots := atomic.LoadInt32(&ts.activeSlots)
-	log.Printf("[BATCH] Starting UPLOAD batch: %d files (active=%d/%d)", total, currentSlots, cap(ts.semaphore))
-
-	// Pre-register ALL tasks
-	type workItem struct {
-		req    TransferRequest
-		taskID string
-	}
-	work := make(chan workItem, total)
-	for _, req := range requests {
-		taskID := ts.registerUploadTask(req)
-		work <- workItem{req: req, taskID: taskID}
-	}
-	close(work)
-
-	// v4.8.0: Adaptive concurrency — use median file size to pick worker count
-	sizes := make([]int64, len(requests))
-	for i, r := range requests {
-		sizes[i] = r.Size
-	}
-	numWorkers := ts.resourceMgr.ComputeBatchConcurrency(sizes, cap(ts.semaphore))
-	log.Printf("[BATCH] UPLOAD adaptive concurrency: %d workers (median-based)", numWorkers)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range work {
-				ts.executeUploadTask(ctx, item.req, item.taskID, apiClient)
-			}
-		}()
-	}
-
-	wg.Wait()
-	log.Printf("[BATCH] UPLOAD batch complete: %d files", total)
-}
-
-// executeDownloadBatch handles a batch of download requests using a bounded worker pool.
-// Pre-registers ALL tasks in the queue (so Total is correct immediately and the batch
-// ticker won't see allTerminal prematurely), then feeds (req, taskID) pairs into a
-// channel consumed by cap(semaphore) workers.
-func (ts *TransferService) executeDownloadBatch(ctx context.Context, requests []TransferRequest) {
-	ts.mu.RLock()
-	apiClient := ts.apiClient
-	ts.mu.RUnlock()
-
-	if apiClient == nil {
-		ts.logger.Error().Msg("Download batch aborted: no API client")
-		return
-	}
-
-	total := len(requests)
-	currentSlots := atomic.LoadInt32(&ts.activeSlots)
-	log.Printf("[BATCH] Starting DOWNLOAD batch: %d files (active=%d/%d)", total, currentSlots, cap(ts.semaphore))
-
-	// Pre-register ALL tasks so queue Total is correct immediately
-	type workItem struct {
-		req    TransferRequest
-		taskID string
-	}
-	work := make(chan workItem, total)
-	for _, req := range requests {
-		taskID := ts.registerDownloadTask(req)
-		work <- workItem{req: req, taskID: taskID}
-	}
-	close(work)
-
-	// v4.8.0: Adaptive concurrency — use median file size to pick worker count
-	sizes := make([]int64, len(requests))
-	for i, r := range requests {
-		sizes[i] = r.Size
-	}
-	numWorkers := ts.resourceMgr.ComputeBatchConcurrency(sizes, cap(ts.semaphore))
-	log.Printf("[BATCH] DOWNLOAD adaptive concurrency: %d workers (median-based)", numWorkers)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range work {
-				ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient)
-			}
-		}()
-	}
-
-	wg.Wait()
-	log.Printf("[BATCH] DOWNLOAD batch complete: %d files", total)
-}
-
 // executePreRegisteredUploadBatch dispatches pre-registered upload tasks to workers.
 // v4.8.0: Called by StartTransfers after synchronous pre-registration.
+// v4.8.1: Refactored to use shared BatchExecutor.
 func (ts *TransferService) executePreRegisteredUploadBatch(ctx context.Context, items []preRegItem) {
 	ts.mu.RLock()
 	apiClient := ts.apiClient
@@ -286,39 +186,21 @@ func (ts *TransferService) executePreRegisteredUploadBatch(ctx context.Context, 
 		return
 	}
 
-	total := len(items)
-	log.Printf("[BATCH] Starting pre-registered UPLOAD batch: %d files", total)
-
-	work := make(chan preRegItem, total)
-	for _, item := range items {
-		work <- item
-	}
-	close(work)
-
-	sizes := make([]int64, len(items))
-	for i, item := range items {
-		sizes[i] = item.req.Size
-	}
-	numWorkers := ts.resourceMgr.ComputeBatchConcurrency(sizes, cap(ts.semaphore))
-	log.Printf("[BATCH] UPLOAD adaptive concurrency: %d workers (median-based)", numWorkers)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range work {
-				ts.executeUploadTask(ctx, item.req, item.taskID, apiClient)
-			}
-		}()
+	cfg := transfer.BatchConfig{
+		MaxWorkers:  cap(ts.semaphore),
+		ResourceMgr: ts.resourceMgr,
+		Label:       "UPLOAD",
 	}
 
-	wg.Wait()
-	log.Printf("[BATCH] UPLOAD batch complete: %d files", total)
+	transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item preRegItem) error {
+		ts.executeUploadTask(ctx, item.req, item.taskID, apiClient)
+		return nil // errors handled internally via queue.Fail
+	})
 }
 
 // executePreRegisteredDownloadBatch dispatches pre-registered download tasks to workers.
 // v4.8.0: Called by StartTransfers after synchronous pre-registration.
+// v4.8.1: Refactored to use shared BatchExecutor.
 func (ts *TransferService) executePreRegisteredDownloadBatch(ctx context.Context, items []preRegItem) {
 	ts.mu.RLock()
 	apiClient := ts.apiClient
@@ -329,41 +211,23 @@ func (ts *TransferService) executePreRegisteredDownloadBatch(ctx context.Context
 		return
 	}
 
-	total := len(items)
-	log.Printf("[BATCH] Starting pre-registered DOWNLOAD batch: %d files", total)
-
-	work := make(chan preRegItem, total)
-	for _, item := range items {
-		work <- item
-	}
-	close(work)
-
-	sizes := make([]int64, len(items))
-	for i, item := range items {
-		sizes[i] = item.req.Size
-	}
-	numWorkers := ts.resourceMgr.ComputeBatchConcurrency(sizes, cap(ts.semaphore))
-	log.Printf("[BATCH] DOWNLOAD adaptive concurrency: %d workers (median-based)", numWorkers)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range work {
-				ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient)
-			}
-		}()
+	cfg := transfer.BatchConfig{
+		MaxWorkers:  cap(ts.semaphore),
+		ResourceMgr: ts.resourceMgr,
+		Label:       "DOWNLOAD",
 	}
 
-	wg.Wait()
-	log.Printf("[BATCH] DOWNLOAD batch complete: %d files", total)
+	transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item preRegItem) error {
+		ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient)
+		return nil // errors handled internally via queue.Fail
+	})
 }
 
 // StartStreamingDownloadBatch accepts a channel of TransferRequest and registers+dispatches
 // them incrementally as they arrive. Downloads begin within seconds of scan start.
 // The batchCtx is cancelled when CancelBatch is called (via batchCancelFuncs in queue).
 // v4.8.0: Streaming scan+download architecture.
+// v4.8.1: Uses RunBatchFromChannel for adaptive concurrency (fixes hardcoded 5 workers).
 func (ts *TransferService) StartStreamingDownloadBatch(
 	ctx context.Context,
 	requestCh <-chan TransferRequest,
@@ -383,10 +247,11 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 	batchCtx, batchCancel := context.WithCancel(ctx)
 	ts.queue.RegisterBatchCancel(batchID, batchCancel)
 
-	// Dispatch channel: registered tasks ready for download workers
+	// Dispatch channel: registration goroutine → RunBatchFromChannel
 	dispatchCh := make(chan preRegItem, 256)
 
-	// Registration goroutine: reads from requestCh, registers tasks, sends to dispatch
+	// Registration goroutine: reads from requestCh, registers tasks, sends to dispatch.
+	// Lifecycle invariants preserved: RegisterBatchCancel, CleanupBatch, cancel propagation.
 	go func() {
 		defer close(dispatchCh)
 		defer ts.queue.CleanupBatch(batchID)
@@ -409,21 +274,18 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 		}
 	}()
 
-	// Worker goroutines: consume from dispatch channel
-	// Start with DefaultMaxConcurrent; adaptive sizing happens per-file via resource manager
-	numWorkers := constants.DefaultMaxConcurrent
+	// Worker goroutines via RunBatchFromChannel: adaptive concurrency from file sizes.
+	cfg := transfer.BatchConfig{
+		MaxWorkers:  cap(ts.semaphore),
+		ResourceMgr: ts.resourceMgr,
+		Label:       "DOWNLOAD-STREAM",
+	}
+
 	go func() {
-		var wg sync.WaitGroup
-		for i := 0; i < numWorkers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for item := range dispatchCh {
-					ts.executeDownloadTask(batchCtx, item.req, item.taskID, apiClient)
-				}
-			}()
-		}
-		wg.Wait()
+		transfer.RunBatchFromChannel(batchCtx, dispatchCh, cfg, func(ctx context.Context, item preRegItem) error {
+			ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient)
+			return nil // errors handled internally via queue.Fail
+		})
 		log.Printf("[BATCH] Streaming DOWNLOAD batch complete: %s", batchID)
 	}()
 
