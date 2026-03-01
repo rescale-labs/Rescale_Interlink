@@ -8,6 +8,8 @@ package services
 import (
 	"context"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/models"
 )
 
 // TransferType identifies whether a transfer is an upload or download.
@@ -76,6 +78,11 @@ type TransferRequest struct {
 	// Tags to apply after successful upload.
 	// v4.7.4: Tagging failure is non-fatal (logged as warning).
 	Tags []string
+
+	// FileInfo is optional pre-fetched file metadata for downloads.
+	// v4.8.0: When set, DownloadFile() skips the GetFileInfo() API call.
+	// Nil means download will fetch metadata via API (safe degradation).
+	FileInfo *models.CloudFile
 }
 
 // TransferTask represents an active or completed transfer.

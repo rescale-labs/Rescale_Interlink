@@ -252,6 +252,15 @@ func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	}
 }
 
+// GetTransferStatus returns daemon transfer batch status.
+// v4.7.8: Subprocess mode — userID is ignored (single-user).
+func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
+	if h.daemon == nil {
+		return &ipc.TransferStatusData{}, nil
+	}
+	return h.daemon.GetTransferStatus(), nil
+}
+
 // IsPaused returns whether the daemon is currently paused.
 // v4.4.0: Now functional (was previously always returning false).
 func (h *IPCHandler) IsPaused() bool {

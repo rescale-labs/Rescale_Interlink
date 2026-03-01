@@ -77,6 +77,9 @@ type Daemon struct {
 
 	// v4.0.8: Active download tracking for IPC status reporting
 	activeDownloads int32
+
+	// v4.7.8: Transfer tracker for GUI visibility of daemon downloads
+	tracker *DaemonTransferTracker
 }
 
 // New creates a new daemon instance.
@@ -112,6 +115,7 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 		monitor:   monitor,
 		logger:    logger,
 		stopChan:  make(chan struct{}),
+		tracker:   NewDaemonTransferTracker(), // v4.7.8: GUI visibility
 	}, nil
 }
 
@@ -320,6 +324,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		return
 	}
 
+	// v4.7.8: Compute total bytes for tracker and start batch tracking
+	var trackerTotalBytes int64
+	for _, f := range files {
+		trackerTotalBytes += f.DecryptedSize
+	}
+	d.tracker.StartBatch(job.ID, job.Name, len(files), trackerTotalBytes)
+	defer d.tracker.FinalizeBatch(job.ID)
+
 	d.logger.Info().
 		Str("job_id", job.ID).
 		Int("file_count", len(files)).
@@ -358,6 +370,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Str("file_name", file.Name).
 				Err(err).
 				Msg("Skipping file with invalid name")
+			d.tracker.SkipFile(job.ID, file.DecryptedSize) // v4.7.8: adjust batch totals
 			continue
 		}
 
@@ -379,6 +392,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			d.logger.Error().Err(err).Str("path", localPath).Msg("Failed to create file directory")
+			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
 			continue
 		}
 
@@ -387,6 +401,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 			d.logger.Debug().Str("path", localPath).Msg("File already exists, skipping")
 			downloadedCount++
 			totalSize += file.DecryptedSize
+			d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8: counts as completed
 			continue
 		}
 
@@ -406,7 +421,8 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 			LocalPath: localPath,
 			APIClient: d.apiClient,
 			ProgressCallback: func(fraction float64) {
-				// Silent progress for daemon mode
+				// v4.7.8: Report progress to tracker for GUI visibility
+				d.tracker.UpdateFileProgress(job.ID, file.DecryptedSize, fraction)
 			},
 			TransferHandle: transferHandle,
 			SkipChecksum:   false,
@@ -418,12 +434,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Str("file_id", file.ID).
 				Str("file_name", file.Name).
 				Msg("Failed to download file")
+			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
 			// Continue with other files rather than failing entire job
 			continue
 		}
 
 		downloadedCount++
 		totalSize += file.DecryptedSize
+		d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8
 	}
 
 	if downloadErr != nil {

@@ -63,6 +63,7 @@ export interface TransferBatch {
   totalBytes: number
   progress: number
   speed: number
+  totalKnown: boolean // v4.8.0: True when scan complete, total is final
 }
 
 // Extended transfer task with UI state
@@ -79,12 +80,28 @@ export interface TransferStats extends wailsapp.TransferStatsDTO {
   totalActive: number
 }
 
+// v4.7.8: Daemon auto-download batch (read-only, from IPC)
+export interface DaemonBatchStatus {
+  batchID: string
+  batchLabel: string
+  total: number
+  completed: number
+  failed: number
+  active: number
+  totalBytes: number
+  bytesDone: number
+  speed: number
+  startedAt: number   // unix millis
+  completedAt: number // zero if active
+}
+
 interface TransferStore {
   // State
   tasks: TransferTask[]
   stats: TransferStats
   enumerations: Enumeration[] // v4.0.8: Active folder scans
   batches: TransferBatch[] // v4.7.7: Batch aggregates
+  daemonBatches: DaemonBatchStatus[] // v4.7.8: Daemon auto-download batches (read-only)
   expandedBatches: Set<string> // v4.7.7: Which batches are expanded
   batchTasks: Map<string, TransferTask[]> // v4.7.7: Lazily loaded expanded tasks
   batchEpochs: Map<string, number> // v4.7.7: Epoch counter per batch for stale-response protection
@@ -97,6 +114,7 @@ interface TransferStore {
   fetchTasks: () => Promise<void>
   fetchStats: () => Promise<void>
   fetchBatches: () => Promise<void>
+  fetchDaemonBatches: () => Promise<void> // v4.7.8
   fetchUngroupedTasks: () => Promise<void>
   fetchBatchTasks: (batchID: string, offset: number, limit: number) => Promise<void>
   startPolling: (intervalMs?: number) => void
@@ -181,6 +199,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   stats: initialStats,
   enumerations: [], // v4.0.8: Active folder scans
   batches: [], // v4.7.7
+  daemonBatches: [], // v4.7.8: Daemon auto-download batches
   expandedBatches: new Set<string>(), // v4.7.7
   batchTasks: new Map<string, TransferTask[]>(), // v4.7.7
   batchEpochs: new Map<string, number>(), // v4.7.7: epoch counter per batch for stale-response protection
@@ -212,8 +231,13 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   // v4.7.7: Fetch batch aggregates + reconcile enumerations for seamless transition
   fetchBatches: async () => {
     try {
-      const batches = await App.GetTransferBatches()
-      set({ batches: batches || [] })
+      const raw = await App.GetTransferBatches()
+      // v4.8.0: Map DTO to TransferBatch (totalKnown defaults true for non-streaming batches)
+      const batches: TransferBatch[] = (raw || []).map((b) => ({
+        ...b,
+        totalKnown: b.totalKnown ?? true,
+      }))
+      set({ batches })
 
       // Refresh expanded batch tasks
       const expanded = get().expandedBatches
@@ -259,6 +283,16 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       }
     } catch (error) {
       console.error('Failed to fetch batches:', error)
+    }
+  },
+
+  // v4.7.8: Fetch daemon auto-download batch status via IPC
+  fetchDaemonBatches: async () => {
+    try {
+      const batches = await App.GetDaemonTransfers()
+      set({ daemonBatches: batches || [] })
+    } catch {
+      // Silent fail — daemon may not be running or may not support this
     }
   },
 
@@ -352,6 +386,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       get().fetchBatches()
       get().fetchUngroupedTasks()
       get().fetchStats()
+      get().fetchDaemonBatches() // v4.7.8: Daemon auto-download visibility
     }, intervalMs)
 
     // Subscribe to progress events for real-time updates (legacy PUR jobs)
@@ -366,6 +401,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     get().fetchBatches()
     get().fetchUngroupedTasks()
     get().fetchStats()
+    get().fetchDaemonBatches() // v4.7.8
 
     set({
       isPolling: true,
@@ -561,10 +597,14 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       const updatedBatches = [...state.batches]
       updatedBatches[batchIndex] = {
         ...updatedBatches[batchIndex],
+        total: event.total,         // v4.8.0: Evolving total during streaming scan
+        active: event.active,
+        queued: event.queued,
         completed: event.completed,
         failed: event.failed,
         progress: event.progress,
         speed: event.speed,
+        totalKnown: event.totalKnown, // v4.8.0: True when scan complete
       }
       return { batches: updatedBatches, lastUpdate: Date.now() }
     })

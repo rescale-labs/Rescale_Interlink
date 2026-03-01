@@ -42,6 +42,8 @@ export function GetDaemonLogs(arg1:number):Promise<Array<wailsapp.DaemonLogEntry
 
 export function GetDaemonStatus():Promise<wailsapp.DaemonStatusDTO>;
 
+export function GetDaemonTransfers():Promise<Array<wailsapp.DaemonBatchStatusDTO>>;
+
 export function GetDefaultConfigPath():Promise<string>;
 
 export function GetDefaultDownloadFolder():Promise<string>;

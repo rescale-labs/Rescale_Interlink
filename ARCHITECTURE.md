@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.7.7
-**Last Updated**: February 27, 2026
+**Version**: 4.8.0
+**Last Updated**: March 1, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -115,6 +115,7 @@ rescale-int/
 │   │   ├── transfer_bindings.go # Upload/download methods
 │   │   ├── file_bindings.go   # File browser methods
 │   │   ├── job_bindings.go    # Job submission methods
+│   │   ├── daemon_bindings.go # Daemon IPC bindings (v4.7.8)
 │   │   └── event_bridge.go    # EventBus to Wails events
 │   ├── services/              # GUI-agnostic services
 │   │   ├── transfer_service.go
@@ -155,6 +156,23 @@ rescale-int/
 │   │   └── tar/               # TAR archive creation
 │   ├── diskspace/             # Disk space checking
 │   ├── logging/               # Logger
+│   ├── daemon/                # Auto-download daemon (background service)
+│   │   ├── daemon.go          # Daemon lifecycle, job polling, downloadJob()
+│   │   ├── monitor.go         # Job eligibility checking
+│   │   ├── state.go           # Persistent daemon state (downloaded/failed)
+│   │   ├── transfer_tracker.go # In-memory batch tracker for GUI visibility (v4.7.8)
+│   │   ├── ipc_handler.go     # Subprocess IPC handler (Unix)
+│   │   └── ipc_handler_windows.go # Subprocess IPC handler (Windows)
+│   ├── ipc/                   # Cross-process IPC (daemon ↔ GUI communication)
+│   │   ├── messages.go        # Message types and structs
+│   │   ├── client.go          # IPC client (Windows named pipe)
+│   │   ├── client_unix.go     # IPC client (Unix domain socket)
+│   │   ├── server.go          # IPC server + ServiceHandler interface (Windows)
+│   │   └── server_unix.go     # IPC server + ServiceHandler interface (Unix)
+│   ├── service/               # Windows service mode (multi-user daemon)
+│   │   ├── service.go         # MultiUserService wrapper
+│   │   ├── multi_daemon.go    # MultiUserDaemon (per-user daemon management)
+│   │   └── ipc_handler.go     # Service-mode IPC handler
 │   ├── ratelimit/             # Rate limiting (token bucket + cross-process coordinator)
 │   │   └── coordinator/      # Cross-process rate limit coordinator (Unix socket / named pipe)
 │   ├── state/                 # State manager
@@ -578,10 +596,34 @@ func DecryptFileStreaming(src, dst string, key, iv []byte) error {
 
 | Operation | Authorization |
 |-----------|---------------|
-| GetStatus, GetUserList, GetRecentLogs, OpenLogs | Open (read-only) |
+| GetStatus, GetUserList, GetRecentLogs, OpenLogs, GetTransferStatus | Open (read-only) |
 | PauseUser, ResumeUser, TriggerScan, Shutdown | Owner SID required |
 
 **Rationale**: Prevents User A from controlling User B's daemon on multi-user Windows systems.
+
+### Daemon Transfer Visibility (v4.7.8)
+
+The daemon auto-download process is decoupled from the GUI's TransferService. To provide GUI visibility into daemon downloads without coupling the two systems, v4.7.8 introduces an IPC-based observation pattern:
+
+```
+Daemon Process                          GUI Process (Wails)
+┌─────────────────────┐                ┌──────────────────────────┐
+│ downloadJob()       │                │ transferStore.ts         │
+│   ├─ StartBatch()   │                │   ├─ fetchDaemonBatches()│
+│   ├─ downloads files│   IPC poll     │   └─ daemonBatches state │
+│   └─ FinalizeBatch()│◄──────────────►│                          │
+│                     │ GetTransfer    │ TransfersTab.tsx          │
+│ DaemonTransferTracker│    Status     │   └─ DaemonBatchRow (RO) │
+│   ├─ active batches │                │       (purple "Auto" badge│
+│   └─ recent history │                │        no cancel/retry)  │
+└─────────────────────┘                └──────────────────────────┘
+```
+
+**DaemonTransferTracker** (`internal/daemon/transfer_tracker.go`): In-memory tracker with per-file accounting (Complete/Fail/Skip) and partial-file-bytes progress for smooth progress bars. Speed computed internally from byte deltas. Recent history capped at 10 completed batches.
+
+**IPC Flow**: `MsgGetTransferStatus` → `ServiceHandler.GetTransferStatus(userID)` → `DaemonTransferTracker.GetStatus()` → `TransferStatusData` (IPC-native struct, distinct from Wails DTOs to avoid import cycles).
+
+**Service-mode routing** (3-layer delegation): `ServiceIPCHandler` → `MultiUserService.GetUserTransferStatus()` → `MultiUserDaemon.GetUserTransferStatus()` with SID/username matching (same pattern as PauseUser/GetUserLogs).
 
 ---
 
@@ -845,6 +887,49 @@ wg.Wait()
 - Total progress summary
 - No output overlap or corruption
 
+### Adaptive Concurrency (v4.8.0)
+
+**Problem**: Fixed concurrent transfer count (5) is conservative for batches of many small files, where per-file overhead dominates and each file needs only 1 thread.
+
+**Solution**: `ComputeBatchConcurrency()` in the resource manager dynamically scales concurrent transfers based on the median file size in the batch:
+
+| Median File Size | Concurrent Transfers | Threads/File |
+|-----------------|---------------------|--------------|
+| < 100MB (small) | Up to 20 | 1 |
+| 100MB – 1GB (medium) | Up to 10 | 4 |
+| > 1GB (large) | Up to 5 | 8–16 |
+
+**Validation**: The adaptive count is validated against:
+1. Thread pool capacity (`totalThreads / desiredThreadsPerFile`)
+2. Available memory (75% of system memory, at `MemoryPerThreadMB` per thread)
+3. User-specified `--max-concurrent` cap (when explicitly set)
+4. File count (never more workers than files)
+5. Minimum guarantee (`MinMaxConcurrent = 1`)
+
+**Implementation**: `internal/resources/manager.go` — method on the resource manager, sharing mutex access with thread allocation. Applied symmetrically in GUI (`transfer_service.go`) and CLI (`folder_download_helper.go`, `folder_upload_helper.go`).
+
+### FileInfo Enrichment (v4.8.0)
+
+**Problem**: Every file download required a separate `GetFileInfo()` API call at 1.7 req/sec — ~2.2 hours for 13,000 files.
+
+**Solution**: `ListFolderContentsPage()` now parses full metadata from the folder listing response (encryption keys, storage info, checksums, path parts). `FileInfo.ToCloudFile()` converts to the format `DownloadFile()` needs. Returns `nil` if required fields are missing, triggering graceful fallback to `GetFileInfo()`.
+
+**Impact**: Eliminates ~13,000 rate-limited API calls for complete metadata.
+
+### Streaming Scan-to-Download (v4.8.0, GUI)
+
+**Problem**: Folder downloads blocked for the full recursive scan (~40 minutes for 13k files) before any download began.
+
+**Solution**: `ScanRemoteFolderStreaming()` uses 8 concurrent workers scanning subfolders, emitting files to a channel. `StartStreamingDownloadBatch()` consumes the channel and starts downloads as files are discovered. Downloads begin within seconds of scan initiation.
+
+**Key design**:
+- Bounded subfolder workers (8 goroutines) via work channel
+- Files emitted to `scanEventCh` immediately as discovered
+- `requestCh` bridges scanner → batch registrar (closed exactly once via `defer`)
+- Context cancellation stops all three layers: scan workers, registration, in-flight downloads
+- `batchScanInProgress` map tracks scan state for `TotalKnown` semantics
+- `CleanupBatch()` removes map entries on all terminal paths (success, error, cancel)
+
 ---
 
 ## Threading Model
@@ -857,7 +942,8 @@ wg.Wait()
 - Progress bar rendering
 
 **Background Goroutines**:
-- Concurrent uploads (controlled by semaphore)
+- Concurrent uploads/downloads (controlled by semaphore, adaptive count 5–20 based on file sizes in v4.8.0)
+- Per-file multi-threaded transfers via `TransferHandle` from resource manager (v4.8.0)
 - API calls with timeouts
 - Progress updates
 
@@ -1208,6 +1294,13 @@ All configuration constants centralized in one file with:
    - File size thresholds (100MB, 500MB, 1GB, 5GB, 10GB)
    - Thread allocation strategies (auto-scale vs fixed)
    - Adaptive allocation based on file size
+
+10. **Adaptive Concurrency** (v4.8.0, `lines 158-181`)
+    - `DefaultMaxConcurrent = 5` — default for non-adaptive paths
+    - `MaxMaxConcurrent = 20` — upper bound for adaptive scaling
+    - `AdaptiveSmallFileConcurrency = 20` — files < 100MB
+    - `AdaptiveMediumFileConcurrency = 10` — files 100MB–1GB
+    - `AdaptiveLargeFileConcurrency = 5` — files > 1GB
 
 **Usage Example**:
 ```go

@@ -804,6 +804,15 @@ func sanitizeErrorString(s string) string {
 	// Redact AWS-style keys
 	s = regexp.MustCompile(`(?i)(access.?key|secret.?key|session.?token)=\S+`).ReplaceAllString(s, "$1=REDACTED")
 
+	// Redact Azure connection string account keys
+	s = regexp.MustCompile(`(?i)AccountKey=[^;&\s"']+`).ReplaceAllString(s, "AccountKey=REDACTED")
+
+	// Redact Bearer/JWT tokens (preserving the scheme prefix)
+	s = regexp.MustCompile(`(?i)(Authorization:\s*)?((Bearer|Token)\s+)[A-Za-z0-9._\-/+=]+`).ReplaceAllString(s, "${1}${2}REDACTED")
+
+	// Redact AWS access key IDs
+	s = regexp.MustCompile(`AKIA[A-Z0-9]{16}`).ReplaceAllString(s, "[REDACTED_AWS_KEY]")
+
 	return s
 }
 

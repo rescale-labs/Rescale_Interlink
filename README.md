@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.7.7-green)
+![Status](https://img.shields.io/badge/status-v4.8.0-green)
 
 ---
 
@@ -93,6 +93,16 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
 ---
 
 ## Recent Changes
+
+**v4.8.0 (March 1, 2026) - Adaptive Concurrency, Streaming Downloads & Performance:**
+- **Adaptive concurrency**: Concurrent transfers scale dynamically based on file size distribution — up to 20 for small files, 10 for medium, 5 for large. Validated against thread pool capacity and available memory. Symmetric across GUI/CLI, uploads/downloads.
+- **FileInfo enrichment**: Folder listing API now parses full file metadata, eliminating per-file `GetFileInfo()` calls. Saves ~2 hours of API overhead for 13k-file folders.
+- **page_size=1000**: All folder listing pagination enforces 1000 items/page (~40x reduction in API calls for large folders).
+- **Streaming scan-to-download (GUI)**: Downloads start within seconds of scan initiation via streaming pipeline with 8 concurrent scanner workers.
+- **Evolving batch totals (GUI)**: Batch total increases during streaming scan; UI shows "X completed, Y discovered..." until scan completes.
+- **CLI per-file multi-threading**: CLI transfers now use resource manager for per-file thread allocation (previously always single-threaded).
+- **Sync pre-registration**: Batch entries appear immediately in Transfers tab (fixes disappearing batch bug).
+- **Scan progress feedback**: Real-time scan progress shown in both CLI and GUI during folder downloads.
 
 **v4.7.7 (February 27, 2026) - GUI Performance for Bulk Transfers + Rate Limit Validation:**
 - **Transfer grouping**: Folder uploads/downloads, PUR pipelines, and Single-Job uploads now collapse into a single aggregate batch row in the Transfers tab instead of rendering 10,000+ individual rows. Batches show aggregate progress, speed, ETA, file count, and expand to show paginated individual tasks on demand.

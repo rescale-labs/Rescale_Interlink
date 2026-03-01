@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"sync"
@@ -12,6 +11,8 @@ import (
 
 	"github.com/rescale/rescale-int/internal/ratelimit"
 )
+
+const maxIPCMessageSize = 1 << 20 // 1MB - bounds IPC message reads to prevent OOM
 
 // Server is the cross-process rate limit coordinator.
 // It owns the authoritative token buckets and arbitrates access among
@@ -362,16 +363,21 @@ func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
-	reader := bufio.NewReader(conn)
 
-	// Read request (newline-delimited JSON)
-	data, err := reader.ReadBytes('\n')
-	if err != nil {
-		if err != io.EOF {
+	// Read request (newline-delimited JSON) with bounded buffer to prevent OOM
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, maxIPCMessageSize), maxIPCMessageSize)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			if err == bufio.ErrTooLong {
+				s.sendResponse(conn, NewErrorResponse("IPC message exceeds maximum size"))
+				return
+			}
 			log.Printf("coordinator: read error: %v", err)
 		}
 		return
 	}
+	data := scanner.Bytes()
 
 	req, err := DecodeRequest(data)
 	if err != nil {

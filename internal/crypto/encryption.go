@@ -83,16 +83,16 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 func pkcs7Unpad(data []byte) ([]byte, error) {
 	length := len(data)
 	if length == 0 {
-		return nil, fmt.Errorf("invalid padding: empty data")
+		return nil, fmt.Errorf("decryption failed: invalid padding")
 	}
 	padding := int(data[length-1])
 	if padding > length || padding > aes.BlockSize || padding == 0 {
-		return nil, fmt.Errorf("invalid padding size: %d", padding)
+		return nil, fmt.Errorf("decryption failed: invalid padding")
 	}
 	// Verify all padding bytes have the correct value
 	for i := 0; i < padding; i++ {
 		if data[length-1-i] != byte(padding) {
-			return nil, fmt.Errorf("invalid padding byte at position %d: expected %d, got %d", i, padding, data[length-1-i])
+			return nil, fmt.Errorf("decryption failed: invalid padding")
 		}
 	}
 	return data[:length-padding], nil

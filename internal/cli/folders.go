@@ -137,8 +137,8 @@ Example:
 				logger.Info().Str("folder_id", folderID).Msg("Listing My Library")
 			}
 
-			// List folder contents
-			contents, err := apiClient.ListFolderContents(ctx, folderID)
+			// List folder contents (all pages)
+			contents, err := apiClient.ListFolderContentsAll(ctx, folderID)
 			if err != nil {
 				return fmt.Errorf("failed to list folder: %w", err)
 			}
@@ -233,6 +233,11 @@ Examples:
 			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
 				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			}
+			// v4.8.0: If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
+			// so adaptive concurrency can scale up for small files (default of 5 would cap it)
+			if !cmd.Flags().Changed("max-concurrent") {
+				maxConcurrent = constants.MaxMaxConcurrent
 			}
 
 			// Validate folder-concurrency
@@ -687,6 +692,11 @@ Examples:
 			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
 				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			}
+			// v4.8.0: If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
+			// so adaptive concurrency can scale up for small files (default of 5 would cap it)
+			if !cmd.Flags().Changed("max-concurrent") {
+				maxConcurrent = constants.MaxMaxConcurrent
 			}
 
 			// Validate conflict flags (only one can be set)

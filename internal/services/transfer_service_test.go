@@ -20,9 +20,10 @@ func TestNewTransferService(t *testing.T) {
 		t.Error("Queue not initialized")
 	}
 
-	// Semaphore should be initialized with default capacity (5)
-	if cap(ts.semaphore) != 5 {
-		t.Errorf("Semaphore capacity = %d, want 5", cap(ts.semaphore))
+	// Semaphore should be initialized with default capacity (MaxMaxConcurrent=20)
+	// v4.8.0: Default changed from 5 to 20 for adaptive concurrency
+	if cap(ts.semaphore) != 20 {
+		t.Errorf("Semaphore capacity = %d, want 20", cap(ts.semaphore))
 	}
 }
 

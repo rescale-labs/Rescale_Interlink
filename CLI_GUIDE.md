@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.7.5.
+Complete command-line interface reference for `rescale-int` v4.8.0.
 
-**Version:** 4.7.5
-**Build Date:** February 25, 2026
+**Version:** 4.8.0
+**Build Date:** March 1, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -328,7 +328,7 @@ rescale-int files upload <file> [file...] [flags]
 
 **Flags:**
 - `-d, --folder-id string` - Target folder ID
-- `-m, --max-concurrent int` - Maximum concurrent uploads (default: 5)
+- `-m, --max-concurrent int` - Maximum concurrent uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `--check-duplicates` - Check for existing files before uploading (prompts for each duplicate)
 - `--no-check-duplicates` - Skip duplicate checking (fast mode, may create duplicates)
 - `--skip-duplicates` - Check and automatically skip files that already exist
@@ -387,7 +387,7 @@ rescale-int files download <file-id> [file-id...] [flags]
 
 **Flags:**
 - `-o, --outdir string` - Output directory (default: current directory)
-- `-m, --max-concurrent int` - Maximum concurrent downloads (default: 5)
+- `-m, --max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `-w, --overwrite` - Overwrite existing files without prompting
 - `-S, --skip` - Skip existing files without prompting
 - `-r, --resume` - Resume interrupted downloads without prompting
@@ -491,7 +491,7 @@ rescale-int folders upload-dir <directory> [flags]
 
 **Flags:**
 - `--parent-id string` - Parent folder ID (default: My Library root)
-- `--max-concurrent int` - Maximum concurrent file uploads (default: 5)
+- `--max-concurrent int` - Maximum concurrent file uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `--include-hidden` - Include hidden files (starting with .)
 - `--sequential` - Use sequential mode (create all folders, then upload all files)
 - `--continue-on-error` - Continue uploading on errors without prompting
@@ -552,7 +552,7 @@ rescale-int folders download-dir <folder-id> [flags]
 
 **Flags:**
 - `-o, --outdir string` - Output directory for downloaded files (default: current directory)
-- `--max-concurrent int` - Maximum concurrent downloads (default: 5)
+- `--max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `-S, --skip` - Skip existing files/folders without prompting
 - `-w, --overwrite` - Overwrite existing files without prompting
 - `-m, --merge` - Merge into existing folders, skip existing files
@@ -718,7 +718,7 @@ rescale-int jobs download -j <job-id> [flags]
 - `--file-id string` - Specific file ID to download (optional)
 - `-d, --outdir string` - Output directory for batch download
 - `-o, --output string` - Output file path (for single file)
-- `-m, --max-concurrent int` - Maximum concurrent downloads (default: 5)
+- `-m, --max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `-w, --overwrite` - Overwrite existing files
 - `-S, --skip` - Skip existing files
 - `-r, --resume` - Resume interrupted downloads
@@ -1574,7 +1574,15 @@ rescale-int files upload file.tar.gz --no-auto-scale
 **Global flags for thread control**:
 - `--max-threads N`: Total thread pool size (0=auto, 1-32)
 - `--no-auto-scale`: Disable adaptive thread allocation
-- Combines with `--max-concurrent` for file-level concurrency
+- `--max-concurrent N`: Override adaptive file-level concurrency with a fixed value
+
+**Adaptive concurrency (v4.8.0)**:
+Folder uploads and downloads automatically scale concurrent transfers based on file size distribution:
+- Many small files (<100MB): up to 20 concurrent transfers
+- Medium files (100MB–1GB): up to 10 concurrent transfers
+- Large files (>1GB): up to 5 concurrent transfers (more threads per file)
+
+The adaptive count is validated against available system memory and thread pool capacity. Use `--max-concurrent N` to override with a fixed value if needed.
 
 ### General Tips
 
@@ -1583,6 +1591,7 @@ rescale-int files upload file.tar.gz --no-auto-scale
 3. **PUR pipeline**: Efficiently manage dozens or hundreds of jobs
 4. **State files**: Resume interrupted operations without starting over
 5. **Thread tuning**: Use `--max-threads` for large files on fast connections
+6. **Adaptive concurrency**: For folders with many small files, the default adaptive mode (v4.8.0) provides the best throughput automatically
 
 ## Troubleshooting
 

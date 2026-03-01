@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	nethttp "net/http"
+	neturl "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -1022,12 +1023,44 @@ type FolderInfo struct {
 	DateUploaded time.Time
 }
 
-// FileInfo represents basic file information
+// FileInfo represents file information from folder contents listing.
+// v4.8.0: Extended with full metadata to eliminate per-file GetFileInfo() API calls.
 type FileInfo struct {
 	ID            string
 	Name          string
 	DecryptedSize int64
 	DateUploaded  time.Time
+
+	// v4.8.0: Full metadata fields — when populated, downloads skip GetFileInfo()
+	EncodedEncryptionKey string
+	IV                   string
+	PathParts            *models.CloudFilePathParts
+	Storage              *models.CloudFileStorage
+	FileChecksums        []models.FileChecksum
+	Owner                string
+	Path                 string
+}
+
+// ToCloudFile converts a FileInfo to a models.CloudFile for use by download.DownloadFile().
+// Returns nil if required fields are missing (encryption key, PathParts, Storage),
+// signaling the caller to fall back to GetFileInfo().
+// v4.8.0: Eliminates per-file API calls when folder listing returns full metadata.
+func (fi *FileInfo) ToCloudFile() *models.CloudFile {
+	if fi.EncodedEncryptionKey == "" || fi.PathParts == nil || fi.Storage == nil {
+		return nil
+	}
+	return &models.CloudFile{
+		ID:                   fi.ID,
+		Name:                 fi.Name,
+		Owner:                fi.Owner,
+		Path:                 fi.Path,
+		EncodedEncryptionKey: fi.EncodedEncryptionKey,
+		IV:                   fi.IV,
+		PathParts:            fi.PathParts,
+		Storage:              fi.Storage,
+		DecryptedSize:        fi.DecryptedSize,
+		FileChecksums:        fi.FileChecksums,
+	}
 }
 
 // CreateFolder creates a new folder
@@ -1068,6 +1101,96 @@ func (c *Client) ListFolderContents(ctx context.Context, folderID string) (*Fold
 	return c.ListFolderContentsPage(ctx, folderID, "", 0)
 }
 
+// parsePathParts extracts CloudFilePathParts from raw JSON item data.
+// v4.8.0: Used to enrich FileInfo from folder listing to skip GetFileInfo().
+func parsePathParts(itemData map[string]interface{}) *models.CloudFilePathParts {
+	ppRaw, ok := itemData["pathParts"]
+	if !ok || ppRaw == nil {
+		return nil
+	}
+	ppMap, ok := ppRaw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	container, _ := ppMap["container"].(string)
+	path, _ := ppMap["path"].(string)
+	if container == "" && path == "" {
+		return nil
+	}
+	return &models.CloudFilePathParts{
+		Container: container,
+		Path:      path,
+	}
+}
+
+// parseStorage extracts CloudFileStorage from raw JSON item data.
+// v4.8.0: Used to enrich FileInfo from folder listing to skip GetFileInfo().
+func parseStorage(itemData map[string]interface{}) *models.CloudFileStorage {
+	storRaw, ok := itemData["storage"]
+	if !ok || storRaw == nil {
+		return nil
+	}
+	storMap, ok := storRaw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	id, _ := storMap["id"].(string)
+	storageType, _ := storMap["storageType"].(string)
+	encryptionType, _ := storMap["encryptionType"].(string)
+	if storageType == "" {
+		return nil
+	}
+
+	cs := models.ConnectionSettings{}
+	if connRaw, ok := storMap["connectionSettings"].(map[string]interface{}); ok {
+		cs.Region, _ = connRaw["region"].(string)
+		cs.Container, _ = connRaw["container"].(string)
+		cs.PathBase, _ = connRaw["pathBase"].(string)
+		cs.PathPartsBase, _ = connRaw["pathPartsBase"].(string)
+		cs.StorageAccount, _ = connRaw["storageAccount"].(string)
+		cs.AccountName, _ = connRaw["accountName"].(string)
+	}
+
+	return &models.CloudFileStorage{
+		ID:                 id,
+		StorageType:        storageType,
+		EncryptionType:     encryptionType,
+		ConnectionSettings: cs,
+	}
+}
+
+// parseFileChecksums extracts []FileChecksum from raw JSON item data.
+// v4.8.0: Used to enrich FileInfo from folder listing to skip GetFileInfo().
+func parseFileChecksums(itemData map[string]interface{}) []models.FileChecksum {
+	csRaw, ok := itemData["fileChecksums"]
+	if !ok || csRaw == nil {
+		return nil
+	}
+	csSlice, ok := csRaw.([]interface{})
+	if !ok || len(csSlice) == 0 {
+		return nil
+	}
+	result := make([]models.FileChecksum, 0, len(csSlice))
+	for _, item := range csSlice {
+		csMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		hashFunc, _ := csMap["hashFunction"].(string)
+		fileHash, _ := csMap["fileHash"].(string)
+		if hashFunc != "" && fileHash != "" {
+			result = append(result, models.FileChecksum{
+				HashFunction: hashFunc,
+				FileHash:     fileHash,
+			})
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // ListFolderContentsPage fetches a specific page of folder contents.
 // Pass pageURL="" for the first page, or use NextURL/PrevURL from previous response.
 // v4.0.3: Added pageSize parameter - pass 0 for API default, or specify items per page.
@@ -1085,6 +1208,17 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 			url = fmt.Sprintf("/api/v3/folders/%s/contents/?page_size=%d", folderID, pageSize)
 		} else {
 			url = fmt.Sprintf("/api/v3/folders/%s/contents/", folderID)
+		}
+	}
+
+	// v4.8.0: Force page_size on ALL pagination URLs — replace existing value, not just append.
+	// The API's nextURL may carry page_size=25 (server default), reintroducing slow pagination.
+	if pageSize > 0 && pageURL != "" {
+		if u, err := neturl.Parse(url); err == nil {
+			q := u.Query()
+			q.Set("page_size", strconv.Itoa(pageSize))
+			u.RawQuery = q.Encode()
+			url = u.String()
 		}
 	}
 
@@ -1169,6 +1303,15 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 				Name:          name,
 				DecryptedSize: size,
 			}
+			// v4.8.0: Parse full metadata to eliminate per-file GetFileInfo() calls
+			file.EncodedEncryptionKey, _ = itemData["encodedEncryptionKey"].(string)
+			file.IV, _ = itemData["iv"].(string)
+			file.Owner, _ = itemData["owner"].(string)
+			file.Path, _ = itemData["path"].(string)
+			file.PathParts = parsePathParts(itemData)
+			file.Storage = parseStorage(itemData)
+			file.FileChecksums = parseFileChecksums(itemData)
+
 			// Parse date: try dateUploaded (library), dateInserted (jobs), dateCreated
 			if dateStr, ok := itemData["dateUploaded"].(string); ok {
 				if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
@@ -1224,12 +1367,12 @@ func (c *Client) ListFolderContentsAll(ctx context.Context, folderID string) (*F
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d items fetched)",
+			return nil, fmt.Errorf("pagination limit exceeded: %d pages (%d items), folder too large",
 				pageCount-1, len(contents.Folders)+len(contents.Files))
-			break
 		}
 
-		page, err := c.ListFolderContentsPage(ctx, folderID, nextURL, 0)
+		// v4.8.0: Use page_size=1000 (API max) to reduce pagination calls ~40x
+		page, err := c.ListFolderContentsPage(ctx, folderID, nextURL, 1000)
 		if err != nil {
 			return nil, err
 		}

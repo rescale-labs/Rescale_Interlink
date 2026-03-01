@@ -191,10 +191,13 @@ type BatchProgressEvent struct {
 	Label     string  `json:"label"`
 	Direction string  `json:"direction"` // "upload" or "download"
 	Total     int     `json:"total"`
+	Active    int     `json:"active"`    // Currently transferring
+	Queued    int     `json:"queued"`    // Waiting for semaphore slot
 	Completed int     `json:"completed"`
 	Failed    int     `json:"failed"`
-	Progress  float64 `json:"progress"` // 0.0-1.0
-	Speed     float64 `json:"speed"`    // aggregate bytes/sec
+	Progress   float64 `json:"progress"`   // 0.0-1.0
+	Speed      float64 `json:"speed"`      // aggregate bytes/sec
+	TotalKnown bool    `json:"totalKnown"` // v4.8.0: True when scan complete, Total is final
 }
 
 // EventBus manages event subscriptions and publishing

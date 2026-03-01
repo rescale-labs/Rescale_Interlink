@@ -250,6 +250,26 @@ func (c *Client) GetRecentLogs(ctx context.Context, count int) ([]LogEntryData, 
 	return []LogEntryData{}, nil
 }
 
+// GetTransferStatus retrieves daemon transfer batch status.
+// v4.7.8: Used by GUI to display daemon auto-download progress.
+func (c *Client) GetTransferStatus(ctx context.Context) (*TransferStatusData, error) {
+	req := NewRequest(MsgGetTransferStatus)
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("server error: %s", resp.Error)
+	}
+
+	data := resp.GetTransferStatusData()
+	if data == nil {
+		return &TransferStatusData{}, nil
+	}
+	return data, nil
+}
+
 // ReloadConfig sends a config reload request to the daemon.
 // v4.7.6: Used by GUI to notify daemon of configuration changes.
 func (c *Client) ReloadConfig(ctx context.Context) (*ReloadConfigData, error) {

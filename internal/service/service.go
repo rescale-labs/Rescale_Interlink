@@ -148,3 +148,9 @@ func (s *MultiUserService) TriggerUserScan(identifier string) error {
 func (s *MultiUserService) GetUserLogs(identifier string, count int) []ipc.LogEntryData {
 	return s.daemon.GetUserLogs(identifier, count)
 }
+
+// GetUserTransferStatus returns daemon transfer batch status for a specific user.
+// v4.7.8: Added to support daemon auto-download visibility in GUI.
+func (s *MultiUserService) GetUserTransferStatus(identifier string) *ipc.TransferStatusData {
+	return s.daemon.GetUserTransferStatus(identifier)
+}

@@ -363,6 +363,38 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	export class DaemonBatchStatusDTO {
+	    batchID: string;
+	    batchLabel: string;
+	    total: number;
+	    completed: number;
+	    failed: number;
+	    active: number;
+	    totalBytes: number;
+	    bytesDone: number;
+	    speed: number;
+	    startedAt: number;
+	    completedAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonBatchStatusDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
+	        this.total = source["total"];
+	        this.completed = source["completed"];
+	        this.failed = source["failed"];
+	        this.active = source["active"];
+	        this.totalBytes = source["totalBytes"];
+	        this.bytesDone = source["bytesDone"];
+	        this.speed = source["speed"];
+	        this.startedAt = source["startedAt"];
+	        this.completedAt = source["completedAt"];
+	    }
+	}
 	export class DaemonConfigDTO {
 	    enabled: boolean;
 	    downloadFolder: string;
@@ -1075,6 +1107,7 @@ export namespace wailsapp {
 	    totalBytes: number;
 	    progress: number;
 	    speed: number;
+	    totalKnown: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new TransferBatchDTO(source);
@@ -1095,6 +1128,7 @@ export namespace wailsapp {
 	        this.totalBytes = source["totalBytes"];
 	        this.progress = source["progress"];
 	        this.speed = source["speed"];
+	        this.totalKnown = source["totalKnown"];
 	    }
 	}
 	export class TransferRequestDTO {

@@ -82,6 +82,10 @@ export function GetDaemonStatus() {
   return window['go']['wailsapp']['App']['GetDaemonStatus']();
 }
 
+export function GetDaemonTransfers() {
+  return window['go']['wailsapp']['App']['GetDaemonTransfers']();
+}
+
 export function GetDefaultConfigPath() {
   return window['go']['wailsapp']['App']['GetDefaultConfigPath']();
 }

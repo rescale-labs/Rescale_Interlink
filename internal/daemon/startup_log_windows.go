@@ -32,7 +32,7 @@ func WriteStartupLog(format string, args ...interface{}) {
 		return
 	}
 
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
 	}

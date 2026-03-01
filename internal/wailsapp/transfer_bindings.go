@@ -203,6 +203,7 @@ type TransferBatchDTO struct {
 	TotalBytes  int64   `json:"totalBytes"`
 	Progress    float64 `json:"progress"`               // byte-weighted 0.0-1.0
 	Speed       float64 `json:"speed"`                  // aggregate bytes/sec
+	TotalKnown  bool    `json:"totalKnown"`             // v4.8.0: True when scan complete
 }
 
 // GetTransferBatches returns aggregate stats for each batch of transfers.
@@ -234,6 +235,7 @@ func (a *App) GetTransferBatches() []TransferBatchDTO {
 			TotalBytes:  bs.TotalBytes,
 			Progress:    bs.Progress,
 			Speed:       bs.Speed,
+			TotalKnown:  bs.TotalKnown, // v4.8.0
 		}
 	}
 	return dtos
@@ -254,8 +256,8 @@ func (a *App) GetUngroupedTransferTasks() []TransferTaskDTO {
 
 	tasks := ts.GetQueue().GetUngroupedTasks()
 	dtos := make([]TransferTaskDTO, len(tasks))
-	for i, t := range tasks {
-		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(t))
+	for i := range tasks {
+		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(&tasks[i]))
 	}
 	return dtos
 }
@@ -274,8 +276,8 @@ func (a *App) GetBatchTasks(batchID string, offset int, limit int) []TransferTas
 
 	tasks := ts.GetQueue().GetBatchTasks(batchID, offset, limit)
 	dtos := make([]TransferTaskDTO, len(tasks))
-	for i, t := range tasks {
-		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(t))
+	for i := range tasks {
+		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(&tasks[i]))
 	}
 	return dtos
 }
@@ -311,7 +313,8 @@ func (a *App) RetryFailedInBatch(batchID string) error {
 }
 
 // serviceTaskFromQueueTask converts a transfer.TransferTask to services.TransferTask.
-func serviceTaskFromQueueTask(qt transfer.TransferTask) services.TransferTask {
+// v4.7.8: Takes pointer to avoid copying sync.RWMutex embedded in TransferTask.
+func serviceTaskFromQueueTask(qt *transfer.TransferTask) services.TransferTask {
 	return services.TransferTask{
 		ID:          qt.ID,
 		Type:        services.TransferType(qt.Type),

@@ -29,7 +29,8 @@ const (
 	MsgShutdown       MessageType = "Shutdown"
 	MsgSubscribeLogs  MessageType = "SubscribeLogs"  // v4.3.2: Subscribe to log stream
 	MsgGetRecentLogs  MessageType = "GetRecentLogs"  // v4.3.2: Get recent log entries
-	MsgReloadConfig   MessageType = "ReloadConfig"   // v4.7.6: Reload daemon config
+	MsgReloadConfig        MessageType = "ReloadConfig"        // v4.7.6: Reload daemon config
+	MsgGetTransferStatus   MessageType = "GetTransferStatus"   // v4.7.8: Query daemon transfer batches
 
 	// Response types (server -> client)
 	MsgStatusResponse   MessageType = "StatusResponse"
@@ -38,7 +39,8 @@ const (
 	MsgError            MessageType = "Error"
 	MsgLogEntry             MessageType = "LogEntry"              // v4.3.2: Log entry push
 	MsgRecentLogs           MessageType = "RecentLogs"            // v4.3.2: Recent logs response
-	MsgReloadConfigResponse MessageType = "ReloadConfigResponse"  // v4.7.6: Reload config response
+	MsgReloadConfigResponse     MessageType = "ReloadConfigResponse"      // v4.7.6: Reload config response
+	MsgTransferStatusResponse   MessageType = "TransferStatusResponse"   // v4.7.8: Transfer status response
 )
 
 // Request represents an IPC request from client to server.
@@ -147,6 +149,28 @@ type ReloadConfigData struct {
 	Error           string `json:"error,omitempty"`
 }
 
+// TransferBatchInfo represents a single daemon transfer batch in IPC format.
+// v4.7.8: IPC-native struct — NOT a Wails DTO. Wails bindings map separately.
+type TransferBatchInfo struct {
+	BatchID     string  `json:"batchID"`
+	BatchLabel  string  `json:"batchLabel"`
+	Total       int     `json:"total"`
+	Completed   int     `json:"completed"`
+	Failed      int     `json:"failed"`
+	Active      int     `json:"active"`
+	TotalBytes  int64   `json:"totalBytes"`
+	BytesDone   int64   `json:"bytesDone"`
+	Speed       float64 `json:"speed"`
+	StartedAt   int64   `json:"startedAt"`   // unix millis
+	CompletedAt int64   `json:"completedAt"` // zero if active
+}
+
+// TransferStatusData contains daemon transfer batch information.
+// v4.7.8: Response payload for MsgGetTransferStatus.
+type TransferStatusData struct {
+	Batches []TransferBatchInfo `json:"batches"`
+}
+
 // NewRequest creates a new IPC request.
 func NewRequest(msgType MessageType) *Request {
 	return &Request{Type: msgType}
@@ -193,6 +217,38 @@ func NewRecentLogsResponse(entries []LogEntryData) *Response {
 // v4.7.6: Added for config reload IPC support.
 func NewReloadConfigResponse(data *ReloadConfigData) *Response {
 	return &Response{Type: MsgReloadConfigResponse, Success: true, Data: data}
+}
+
+// NewTransferStatusResponse creates a transfer status response.
+// v4.7.8: Added for daemon transfer visibility in GUI.
+func NewTransferStatusResponse(data *TransferStatusData) *Response {
+	return &Response{Type: MsgTransferStatusResponse, Success: true, Data: data}
+}
+
+// GetTransferStatusData extracts TransferStatusData from a response.
+// Returns nil if the response doesn't contain transfer status data.
+func (r *Response) GetTransferStatusData() *TransferStatusData {
+	if r.Data == nil {
+		return nil
+	}
+
+	switch v := r.Data.(type) {
+	case *TransferStatusData:
+		return v
+	case TransferStatusData:
+		return &v
+	case map[string]interface{}:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		var result TransferStatusData
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil
+		}
+		return &result
+	}
+	return nil
 }
 
 // Encode serializes a request to JSON.

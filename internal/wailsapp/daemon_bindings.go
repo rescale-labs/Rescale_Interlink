@@ -727,6 +727,67 @@ func (a *App) GetLogFileLocation() string {
 }
 
 // =============================================================================
+// Daemon Transfer Visibility (v4.7.8)
+// =============================================================================
+
+// DaemonBatchStatusDTO represents a daemon auto-download batch for the frontend.
+// v4.7.8: Read-only visibility into daemon downloads.
+type DaemonBatchStatusDTO struct {
+	BatchID     string  `json:"batchID"`
+	BatchLabel  string  `json:"batchLabel"`
+	Total       int     `json:"total"`
+	Completed   int     `json:"completed"`
+	Failed      int     `json:"failed"`
+	Active      int     `json:"active"`
+	TotalBytes  int64   `json:"totalBytes"`
+	BytesDone   int64   `json:"bytesDone"`
+	Speed       float64 `json:"speed"`
+	StartedAt   int64   `json:"startedAt"`
+	CompletedAt int64   `json:"completedAt"`
+}
+
+// GetDaemonTransfers retrieves daemon auto-download batch status via IPC.
+// v4.7.8: Called by frontend to display daemon downloads in Transfers tab.
+func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
+	if daemon.IsDaemonRunning() == 0 {
+		return nil
+	}
+
+	client := ipc.NewClient()
+	client.SetTimeout(3 * time.Second) // Short timeout for polling
+
+	ctx := context.Background()
+	data, err := client.GetTransferStatus(ctx)
+	if err != nil {
+		// Silent fail — daemon may not support this message yet
+		return nil
+	}
+
+	if data == nil || len(data.Batches) == 0 {
+		return nil
+	}
+
+	result := make([]DaemonBatchStatusDTO, len(data.Batches))
+	for i, b := range data.Batches {
+		result[i] = DaemonBatchStatusDTO{
+			BatchID:     b.BatchID,
+			BatchLabel:  b.BatchLabel,
+			Total:       b.Total,
+			Completed:   b.Completed,
+			Failed:      b.Failed,
+			Active:      b.Active,
+			TotalBytes:  b.TotalBytes,
+			BytesDone:   b.BytesDone,
+			Speed:       b.Speed,
+			StartedAt:   b.StartedAt,
+			CompletedAt: b.CompletedAt,
+		}
+	}
+
+	return result
+}
+
+// =============================================================================
 // Daemon Log Retrieval (v4.3.2)
 // =============================================================================
 

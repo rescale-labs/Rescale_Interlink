@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.7.7
-**Build Date:** February 27, 2026
+**Version:** 4.8.0
+**Build Date:** March 1, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -362,7 +362,8 @@ rescale-int daemon run --download-dir ./results [flags]
 - Output directories include job ID suffix to prevent collisions
 - Graceful shutdown on Ctrl+C
 - Integration with existing download infrastructure (checksums enabled)
-- **Source:** `internal/daemon/daemon.go`, `internal/daemon/monitor.go`, `internal/daemon/state.go`
+- **GUI visibility (v4.7.8):** Daemon auto-downloads appear as read-only rows in the Transfers tab with real-time progress, speed, and file counts. Uses IPC polling (`MsgGetTransferStatus`) to relay `DaemonTransferTracker` state from the daemon process to the GUI. Works in both subprocess mode (macOS/Linux) and Windows service mode.
+- **Source:** `internal/daemon/daemon.go`, `internal/daemon/monitor.go`, `internal/daemon/state.go`, `internal/daemon/transfer_tracker.go`
 
 ### Daemon Status
 ```bash
@@ -664,16 +665,16 @@ Warning: Token file <path> has insecure permissions <mode>. Consider using 'chmo
 
 **Source:** `internal/ratelimit/`, `internal/ratelimit/coordinator/`, `internal/api/client.go`
 
-### Transfer Grouping (v4.7.7)
+### Transfer Grouping (v4.7.7, extended v4.7.8)
 
-**What it is**: Bulk file transfers (folder uploads/downloads, PUR pipeline uploads, Single-Job uploads) are collapsed into a single aggregate batch row in the GUI Transfers tab, replacing 10k+ individual rows with one collapsible summary.
+**What it is**: Bulk file transfers (folder uploads/downloads, PUR pipeline uploads, Single-Job uploads, FileBrowser multi-file selections) are collapsed into a single aggregate batch row in the GUI Transfers tab, replacing 10k+ individual rows with one collapsible summary. Daemon auto-downloads also appear as read-only batch rows (v4.7.8).
 
 **How it works:**
 - Each bulk operation generates a `BatchID` that propagates to all individual transfer tasks
   - Folder uploads/downloads: use the enumeration ID as BatchID (natural group identifier)
   - PUR pipeline: generates `pur_<timestamp>` batch ID with "PUR: N jobs" label
   - Single-Job: generates `job_<timestamp>` batch ID with "Job: <name>" label
-  - Individual file uploads from File Browser: ungrouped (shown as individual rows)
+  - FileBrowser multi-file selections (50+ files): generates `fb_upload_<timestamp>` / `fb_download_<timestamp>` batch IDs (v4.7.8)
 - Backend computes aggregate stats per batch in a single O(tasks) pass: total/queued/active/completed/failed, byte-weighted progress, aggregate speed
 - Batch rows are collapsible — expand to show paginated individual tasks (50 per page)
 
@@ -695,12 +696,104 @@ Warning: Token file <path> has insecure permissions <mode>. Consider using 'chmo
 
 **Source:** `internal/transfer/queue.go`, `internal/wailsapp/transfer_bindings.go`, `frontend/src/stores/transferStore.ts`, `frontend/src/components/tabs/TransfersTab.tsx`
 
-### Concurrent Uploads
+### Adaptive Concurrency (v4.8.0)
 
-**Default Behavior**: Uploads 5 files simultaneously with automatic multi-part chunking for large files.
+**What it is**: Dynamic scaling of concurrent file transfers based on file size distribution in the batch, validated against thread pool capacity and available memory. Small files get more workers (up to 20), large files get fewer (5) to leave room for multi-threaded per-file transfers.
 
 **How it works:**
-1. **File-level Concurrency**: Process multiple files in parallel (default: 5, max: 10)
+- `ComputeBatchConcurrency()` in the resource manager computes the median file size across the batch
+- Maps to a concurrency tier: <100MB → 20 workers, 100MB–1GB → 10 workers, >1GB → 5 workers
+- Validates against thread pool capacity (`totalThreadsNeeded ≤ totalThreads`) and memory constraints (`memoryNeeded ≤ 75% of available memory`)
+- Applied symmetrically to both uploads and downloads, GUI and CLI
+
+**Tier Table:**
+
+| Median File Size | Concurrency | Threads/File | Rationale |
+|-----------------|-------------|--------------|-----------|
+| < 100 MB | 20 | 1 | Per-file overhead dominates; maximize parallelism |
+| 100 MB – 1 GB | 10 | 4 | Balance parallelism with per-file threading |
+| > 1 GB | 5 | 8–16 | Multi-threaded per-file transfers need thread pool share |
+
+**Source:** `internal/resources/manager.go:ComputeBatchConcurrency()`, `internal/constants/app.go:158-181`
+
+### FileInfo Enrichment & GetFileInfo Elimination (v4.8.0)
+
+**What it is**: Folder listing API responses now parse full file metadata (encryption keys, storage info, checksums, path parts) so that downloads skip the per-file `GetFileInfo()` API call entirely.
+
+**Impact**: For a 13,000-file folder, this eliminates ~13,000 rate-limited API calls (~2+ hours of overhead at 1.7 req/sec). Combined with page_size=1000, folder download scan time drops from ~40 minutes to ~3.5 minutes.
+
+**How it works:**
+1. `ListFolderContentsPage` in `api/client.go` now extracts 7 additional fields: `EncodedEncryptionKey`, `IV`, `PathParts`, `Storage`, `FileChecksums`, `Owner`, `Path`
+2. `FileInfo.ToCloudFile()` converts scan output to download input type. Returns nil if required fields are missing (safe fallback to `GetFileInfo()`)
+3. `TransferRequest.FileInfo` propagates the metadata through the entire download pipeline
+4. `download.DownloadFile()` checks `params.FileInfo != nil` and skips `GetFileInfo()` when metadata is complete
+
+**Graceful degradation**: If the API omits fields (e.g., older files), `ToCloudFile()` returns nil and the download transparently falls back to calling `GetFileInfo()`.
+
+**Source:** `internal/api/client.go:1026-1064`, `internal/services/types.go:FileInfo`, `internal/cloud/download/download.go:87-94`
+
+### Page Size Enforcement (v4.8.0)
+
+**What it is**: All folder listing pagination now uses `page_size=1000` (the API maximum), including follow-on pages whose URLs may carry the server default of `page_size=25`.
+
+**How it works:** After retrieving the API's `nextURL`, the URL is parsed and `page_size` is forced to 1000 via `url.Query().Set()` before the request is made. This replaces any existing `page_size` parameter rather than appending a duplicate.
+
+**Impact**: Pagination calls reduced ~40x (from ~538 to ~14 for a 13,446-item folder).
+
+**Source:** `internal/api/client.go:ListFolderContentsPage`, `internal/api/client.go:ListFolderContentsAll`
+
+### Streaming Scan-to-Download (v4.8.0, GUI)
+
+**What it is**: GUI folder downloads now start downloading files within seconds of scan initiation, instead of waiting for the entire recursive scan to complete. Files are discovered and downloaded concurrently.
+
+**How it works:**
+1. `ScanRemoteFolderStreaming()` uses 8 concurrent subfolder workers, emitting file and folder events to a channel as they're discovered
+2. `StartStreamingDownloadBatch()` consumes the channel, registering and dispatching download tasks as files arrive
+3. `StartFolderDownload` in `file_bindings.go` orchestrates the pipeline, returning immediately to the GUI
+4. Batch cancel propagates through a batch-level context, stopping the scan, registration, and in-flight downloads
+
+**Lifecycle guarantees:**
+- `requestCh` is closed on all terminal paths (success, error, cancel) via `defer`
+- Completion emission guarded by `sync.Once` to prevent double-emit
+- `CleanupBatch()` removes `batchCancelFuncs` and `batchScanInProgress` entries deterministically
+
+**Source:** `internal/cli/folder_download_helper.go:ScanRemoteFolderStreaming`, `internal/services/transfer_service.go:StartStreamingDownloadBatch`, `internal/wailsapp/file_bindings.go:StartFolderDownload`
+
+### Evolving Batch Totals (v4.8.0, GUI)
+
+**What it is**: During streaming scan, the batch total increases as files are discovered. The GUI shows "X completed, Y discovered..." until scan completes, then switches to "X of Y files".
+
+**How it works:**
+- `TotalKnown bool` field added to `BatchStats`, `BatchProgressEvent`, `BatchProgressEventDTO`, and `TransferBatchDTO`
+- Flows through both the real-time event path AND the polling path (critical: `fetchBatches` overwrites batch state every poll cycle)
+- `MarkBatchScanInProgress(batchID, true)` set at batch creation; `false` when scan completes
+
+**Source:** `internal/transfer/queue.go:TotalKnown`, `internal/events/events.go`, `frontend/src/components/tabs/TransfersTab.tsx`
+
+### Scan Progress Feedback (v4.8.0)
+
+**What it is**: CLI folder downloads now show live progress during the recursive scan phase.
+
+**Display**: `\rScanning: X folders, Y files (Z MB)...` updated in-place as subfolders are scanned.
+
+**Source:** `internal/cli/folder_download_helper.go:ScanRemoteFolderRecursiveWithProgress`
+
+### CLI TransferHandle Wiring (v4.8.0)
+
+**What it is**: CLI download and upload paths now use the resource manager's `TransferHandle` for per-file multi-threading. Previously, all CLI transfers ran single-threaded regardless of file size.
+
+**How it works:** Each CLI batch creates its own `resources.Manager` and `transfer.Manager`. Per-file, `AllocateTransfer(fileSize, batchConcurrency)` returns a `TransferHandle` with the allocated thread count, which is passed to the upload/download function and completed via `defer handle.Complete()`.
+
+**Affected paths:** CLI folder download (`folder_download_helper.go`), CLI pipelined upload (`folder_upload_helper.go:uploadDirectoryPipelined`), CLI sequential upload (`folder_upload_helper.go:uploadFiles`)
+
+**Source:** `internal/cli/folder_download_helper.go`, `internal/cli/folder_upload_helper.go`
+
+### Concurrent Uploads
+
+**Default Behavior**: Uploads up to 20 files simultaneously (v4.8.0, adaptive based on file sizes; previously fixed at 5) with automatic multi-part chunking for large files.
+
+**How it works:**
+1. **File-level Concurrency**: Process multiple files in parallel (adaptive: 5–20 based on file sizes, max: 20)
 2. **Chunk-level Concurrency**: Large files split into parts (default: auto, max: 10 parts/file)
 3. **Dynamic Thread Allocation**: Thread pool shared across all active transfers
 4. **Resource Manager**: Auto-scales threads based on file sizes and system resources

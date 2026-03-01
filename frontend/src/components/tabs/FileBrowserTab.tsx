@@ -272,7 +272,10 @@ export function FileBrowserTab() {
       }
 
       // Upload individual files using transfer queue
+      // v4.7.8: Batch grouping for 50+ files to collapse into single row in Transfers tab
       if (files.length > 0) {
+        const batchID = files.length >= 50 ? `fb_upload_${Date.now()}` : undefined
+        const batchLabel = files.length >= 50 ? `Upload: ${files.length} files` : undefined
         const requests = files.map(item => ({
           type: 'upload',
           source: item.id,
@@ -281,6 +284,8 @@ export function FileBrowserTab() {
           size: item.size ?? 0,
           sourceLabel: 'FileBrowser',
           tags: tags.length > 0 ? tags : undefined,
+          batchID,
+          batchLabel,
         }))
         await App.StartTransfers(requests)
       }
@@ -425,12 +430,16 @@ export function FileBrowserTab() {
           console.error(`Folder download error for ${folder.name}:`, result.error)
           // Continue with other items
         } else {
-          setStatus(`Folder '${folder.name}': ${result.filesDownloaded} files queued for download`)
+          // v4.8.0: Streaming — returns immediately, real-time progress in Transfers tab
+          setStatus(`Downloading folder: ${folder.name}...`)
         }
       }
 
       // Download individual files using transfer queue
+      // v4.7.8: Batch grouping for 50+ files + missing sourceLabel fix
       if (files.length > 0) {
+        const batchID = files.length >= 50 ? `fb_download_${Date.now()}` : undefined
+        const batchLabel = files.length >= 50 ? `Download: ${files.length} files` : undefined
         const requests = files.map(item => ({
           type: 'download',
           source: item.id, // Remote file ID
@@ -439,6 +448,9 @@ export function FileBrowserTab() {
             : local.currentPath + '/' + item.name,
           name: item.name,
           size: item.size ?? 0,
+          sourceLabel: 'FileBrowser',
+          batchID,
+          batchLabel,
         }))
 
         await App.StartTransfers(requests)

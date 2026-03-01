@@ -8,7 +8,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"reflect"
 	"strings"
@@ -20,6 +19,8 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"golang.org/x/sys/windows"
 )
+
+const maxIPCMessageSize = 1 << 20 // 1MB - bounds IPC message reads to prevent OOM
 
 var (
 	modkernel32                   = windows.NewLazySystemDLL("kernel32.dll")
@@ -61,6 +62,10 @@ type ServiceHandler interface {
 	// ReloadConfig requests daemon config reload.
 	// v4.7.6: Added for GUI config propagation.
 	ReloadConfig(userID string) *ReloadConfigData
+
+	// GetTransferStatus returns daemon transfer batch status.
+	// v4.7.8: Added for GUI visibility into daemon auto-downloads.
+	GetTransferStatus(userID string) (*TransferStatusData, error)
 }
 
 // Server handles IPC requests from clients via named pipe.
@@ -247,16 +252,20 @@ func (s *Server) handleConnection(conn net.Conn) {
 		s.logger.Debug().Err(err).Str("conn_type", fmt.Sprintf("%T", conn)).Msg("Failed to extract client PID from connection")
 	}
 
-	reader := bufio.NewReader(conn)
-
-	// Read request (newline-delimited JSON)
-	data, err := reader.ReadBytes('\n')
-	if err != nil {
-		if err != io.EOF {
-			s.logger.Warn().Err(err).Msg("Failed to read IPC request")
+	// Read request (newline-delimited JSON) with bounded buffer to prevent OOM
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, maxIPCMessageSize), maxIPCMessageSize)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			if err == bufio.ErrTooLong {
+				s.sendResponse(conn, NewErrorResponse("IPC message exceeds maximum size"))
+				return
+			}
+			s.logger.Debug().Err(err).Msg("IPC read error")
 		}
 		return
 	}
+	data := scanner.Bytes()
 
 	// Decode request
 	req, err := DecodeRequest(data)
@@ -385,10 +394,10 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewUserListResponse(users)
 
 	case MsgPauseUser:
-		// v4.5.0: In service mode, infer caller SID when userID is empty
+		// v4.7.8: In service mode, always use callerSID to prevent cross-user operations
 		userID := req.UserID
-		if userID == "" && s.serviceMode {
-			userID = callerSID // Route to caller's daemon
+		if s.serviceMode {
+			userID = callerSID // Always scope to caller's daemon
 		}
 		if userID == "" {
 			return NewErrorResponse("user_id required for PauseUser")
@@ -403,10 +412,10 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgResumeUser:
-		// v4.5.0: In service mode, infer caller SID when userID is empty
+		// v4.7.8: In service mode, always use callerSID to prevent cross-user operations
 		userID := req.UserID
-		if userID == "" && s.serviceMode {
-			userID = callerSID // Route to caller's daemon
+		if s.serviceMode {
+			userID = callerSID // Always scope to caller's daemon
 		}
 		if userID == "" {
 			return NewErrorResponse("user_id required for ResumeUser")
@@ -422,9 +431,9 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 
 	case MsgTriggerScan:
 		userID := req.UserID
-		// v4.5.0: In service mode, infer caller SID when userID is empty
-		if userID == "" && s.serviceMode {
-			userID = callerSID // Route to caller's daemon
+		// v4.7.8: In service mode, always use callerSID to prevent cross-user operations
+		if s.serviceMode {
+			userID = callerSID // Always scope to caller's daemon
 		} else if userID == "" {
 			userID = "all"
 		}
@@ -438,8 +447,14 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgOpenLogs:
-		// Read-only: no authorization required
+		// v4.7.8: Scope to callerSID in service mode, fail-closed on missing SID
 		userID := req.UserID
+		if s.serviceMode && userID != "service" {
+			if callerSID == "" {
+				return NewErrorResponse("unauthorized: could not identify caller")
+			}
+			userID = callerSID // Scope to caller in service mode
+		}
 		if userID == "" {
 			userID = "service"
 		}
@@ -471,19 +486,18 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgGetRecentLogs:
-		// Read-only: no authorization required
-		// v4.5.0: Route to calling user's logs in service mode
+		// v4.7.8: In service mode, always use callerSID to prevent cross-user log access
 		userID := req.UserID
-		if userID == "" && s.serviceMode {
-			userID = callerSID // Route to caller's logs
+		if s.serviceMode {
+			userID = callerSID // Always scope to caller's logs
 		}
 		logs := s.handler.GetRecentLogs(userID, 100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
 
 	case MsgReloadConfig:
-		// v4.7.6: Config reload request
+		// v4.7.8: In service mode, always use callerSID for logging/scoping
 		userID := req.UserID
-		if userID == "" && s.serviceMode {
+		if s.serviceMode {
 			userID = callerSID
 		}
 		if err := s.authorizeModifyRequest(callerSID, "ReloadConfig"); err != nil {
@@ -491,6 +505,18 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		}
 		result := s.handler.ReloadConfig(userID)
 		return NewReloadConfigResponse(result)
+
+	case MsgGetTransferStatus:
+		// v4.7.8: In service mode, always use callerSID to prevent cross-user status access
+		userID := req.UserID
+		if s.serviceMode {
+			userID = callerSID // Always scope to caller's transfers
+		}
+		data, err := s.handler.GetTransferStatus(userID)
+		if err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewTransferStatusResponse(data)
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))

@@ -90,10 +90,13 @@ export interface BatchProgressEventDTO {
   label: string;
   direction: string;
   total: number;
+  active: number;
+  queued: number;
   completed: number;
   failed: number;
   progress: number;
   speed: number;
+  totalKnown: boolean; // v4.8.0: True when scan complete, total is final
 }
 
 export interface ConnectionResultDTO {

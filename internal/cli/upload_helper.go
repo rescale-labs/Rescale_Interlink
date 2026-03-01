@@ -135,7 +135,7 @@ func executeFileUploadWithDuplicateCheck(
 
 	// Get existing files in destination folder
 	fmt.Println("📡 Checking for existing files in destination...")
-	folderContents, err := apiClient.ListFolderContents(ctx, destFolderID)
+	folderContents, err := apiClient.ListFolderContentsAll(ctx, destFolderID)
 	if err != nil {
 		return fmt.Errorf("failed to list destination folder: %w", err)
 	}

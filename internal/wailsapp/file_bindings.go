@@ -438,8 +438,8 @@ type FolderDownloadResultDTO struct {
 // v4.7.7: Restructured enumeration events — emits EventEnumerationCompleted only after
 // StartTransfers succeeds, with deferred completion on all error paths.
 // folderName: the display name for the folder (used as the local folder name)
+// v4.8.0: Rewritten for streaming scan+download — returns immediately, downloads begin within seconds.
 func (a *App) StartFolderDownload(folderID string, folderName string, destPath string) FolderDownloadResultDTO {
-	// Helper to emit log events to Activity tab
 	displayName := folderName
 	if displayName == "" {
 		displayName = folderID
@@ -456,7 +456,6 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		}
 	}
 
-	// v4.0.8: Helper to emit enumeration events
 	enumID := fmt.Sprintf("enum_dl_%d", time.Now().UnixNano())
 	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string) {
 		if a.engine != nil && a.engine.Events() != nil {
@@ -475,131 +474,143 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		}
 	}
 
-	// v4.7.7: Deferred completion — ensures EventEnumerationCompleted is emitted on ALL exit paths
-	completionEmitted := false
-	var deferredError string
-	defer func() {
-		if !completionEmitted {
-			emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, deferredError, "")
-		}
-	}()
-
 	emitLog(events.InfoLevel, fmt.Sprintf("Starting folder download: %s to %s", displayName, destPath))
 
 	if a.engine == nil {
 		emitLog(events.ErrorLevel, "Engine not initialized")
-		deferredError = ErrNoEngine.Error()
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoEngine.Error(), "")
 		return FolderDownloadResultDTO{Error: ErrNoEngine.Error()}
 	}
 
-	// Get API client from engine
 	apiClient := a.engine.API()
 	if apiClient == nil {
 		emitLog(events.ErrorLevel, "API client not configured")
-		deferredError = "API client not configured"
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "API client not configured", "")
 		return FolderDownloadResultDTO{Error: "API client not configured"}
 	}
 
-	// Get TransferService for queueing file downloads
 	ts := a.engine.TransferService()
 	if ts == nil {
 		emitLog(events.ErrorLevel, "TransferService not available")
-		deferredError = ErrNoTransferService.Error()
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoTransferService.Error(), "")
 		return FolderDownloadResultDTO{Error: ErrNoTransferService.Error()}
 	}
 
 	ctx := context.Background()
 
-	// v4.0.8: Emit enumeration started event
+	// Emit enumeration started
 	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "")
 
-	// Scan remote folder structure using shared CLI function
-	// v4.0.5: Changed to InfoLevel so users see scanning progress (issue #19)
-	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
-	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, folderID, "")
-	if err != nil {
-		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to scan folder: %s", err.Error()))
-		deferredError = err.Error()
-		return FolderDownloadResultDTO{Error: "Failed to scan remote folder: " + err.Error()}
-	}
-
-	// v4.0.8: Calculate total bytes
-	var scanTotalBytes int64
-	for _, file := range allFiles {
-		scanTotalBytes += file.Size
-	}
-	// v4.7.7: Emit progress (NOT completed) — scan done, preparing download
-	statusMsg := fmt.Sprintf("Scan complete: %d files. Preparing download...", len(allFiles))
-	emitEnumeration(events.EventEnumerationProgress, len(allFolders), len(allFiles), scanTotalBytes, false, "", statusMsg)
-
-	emitLog(events.InfoLevel, fmt.Sprintf("Found %d folders, %d files", len(allFolders), len(allFiles)))
-
-	// Determine root folder name
+	// Create root output directory
 	rootFolderName := folderName
 	if rootFolderName == "" {
 		rootFolderName = folderID
 	}
 	rootOutputDir := filepath.Join(destPath, rootFolderName)
-
-	// Create root folder
 	if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to create root folder: %s", err.Error()))
-		deferredError = "Failed to create root folder: " + err.Error()
-		return FolderDownloadResultDTO{Error: deferredError}
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Failed to create root folder: "+err.Error(), "")
+		return FolderDownloadResultDTO{Error: "Failed to create root folder: " + err.Error()}
 	}
-	foldersCreated := 1
 
-	// Create local directory structure
-	for _, folder := range allFolders {
-		localPath := filepath.Join(rootOutputDir, folder.RelativePath)
-		if err := os.MkdirAll(localPath, 0755); err != nil {
-			emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
-			continue
+	// v4.8.0: Start streaming scan — files emitted as discovered
+	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
+	scanEventCh, scanErrCh := cli.ScanRemoteFolderStreaming(ctx, apiClient, folderID,
+		func(p cli.ScanProgress) {
+			emitEnumeration(events.EventEnumerationProgress,
+				p.FoldersFound, p.FilesFound, p.BytesFound, false, "",
+				fmt.Sprintf("Scanning: %d folders, %d files...", p.FoldersFound, p.FilesFound))
+		},
+	)
+
+	// Create request channel for streaming batch
+	requestCh := make(chan services.TransferRequest, 256)
+
+	// Mark scan in progress for TotalKnown tracking
+	ts.GetQueue().MarkBatchScanInProgress(enumID, true)
+
+	// Start streaming download batch (workers start consuming immediately)
+	if err := ts.StartStreamingDownloadBatch(ctx, requestCh, enumID, displayName); err != nil {
+		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to start streaming batch: %s", err.Error()))
+		close(requestCh)
+		ts.GetQueue().MarkBatchScanInProgress(enumID, false)
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error(), "")
+		return FolderDownloadResultDTO{Error: err.Error()}
+	}
+
+	// v4.8.0: Scan-consumer goroutine — owns requestCh, closes it on all exit paths
+	go func() {
+		defer close(requestCh)
+
+		var completionOnce sync.Once
+		emitCompletion := func(folders, files int, bytes int64, errMsg string) {
+			completionOnce.Do(func() {
+				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
+				emitEnumeration(events.EventEnumerationCompleted, folders, files, bytes, true, errMsg, "")
+			})
 		}
-		foldersCreated++
-	}
-	emitLog(events.DebugLevel, fmt.Sprintf("Created %d local directories", foldersCreated))
+		// Safety net: ensure completion is emitted even on panic
+		defer emitCompletion(0, 0, 0, "scan goroutine exited unexpectedly")
 
-	// Build TransferRequests for each file
-	var totalBytes int64
-	var transferRequests []services.TransferRequest
+		var foldersCreated int
+		var filesQueued int
+		var totalBytes int64
 
-	for _, file := range allFiles {
-		localPath := filepath.Join(rootOutputDir, file.RelativePath)
-		transferRequests = append(transferRequests, services.TransferRequest{
-			Type:       services.TransferTypeDownload,
-			Source:     file.FileID,    // Remote file ID
-			Dest:       localPath,      // Local file path
-			Name:       file.Name,
-			Size:       file.Size,
-			BatchID:    enumID,         // v4.7.7: Group by enumeration
-			BatchLabel: displayName,    // v4.7.7: Folder name as batch label
-		})
-		totalBytes += file.Size
-	}
-
-	// Queue downloads through TransferService
-	if len(transferRequests) > 0 {
-		if err := ts.StartTransfers(ctx, transferRequests); err != nil {
-			emitLog(events.ErrorLevel, fmt.Sprintf("Failed to queue downloads: %s", err.Error()))
-			deferredError = "Failed to queue file downloads: " + err.Error()
-			return FolderDownloadResultDTO{
-				FoldersCreated: foldersCreated,
-				Error:          deferredError,
+		for event := range scanEventCh {
+			if event.Folder != nil {
+				// Create local directory
+				localPath := filepath.Join(rootOutputDir, event.Folder.RelativePath)
+				if err := os.MkdirAll(localPath, 0755); err != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
+				} else {
+					foldersCreated++
+				}
+			}
+			if event.File != nil {
+				localPath := filepath.Join(rootOutputDir, event.File.RelativePath)
+				req := services.TransferRequest{
+					Type:       services.TransferTypeDownload,
+					Source:     event.File.FileID,
+					Dest:       localPath,
+					Name:       event.File.Name,
+					Size:       event.File.Size,
+					BatchID:    enumID,
+					BatchLabel: displayName,
+					FileInfo:   event.File.CloudFile,
+				}
+				select {
+				case requestCh <- req:
+					filesQueued++
+					totalBytes += event.File.Size
+				case <-ctx.Done():
+					emitCompletion(foldersCreated, filesQueued, totalBytes, "cancelled")
+					return
+				}
 			}
 		}
-	}
 
-	// v4.7.7: Emit enumeration completed NOW — after StartTransfers succeeds
-	emitEnumeration(events.EventEnumerationCompleted, len(allFolders), len(allFiles), scanTotalBytes, true, "", "")
-	completionEmitted = true
+		// Check for scan errors
+		var scanErr error
+		select {
+		case scanErr = <-scanErrCh:
+		default:
+		}
 
-	emitLog(events.InfoLevel, fmt.Sprintf("Queued %d files for download (%.2f MB)", len(transferRequests), float64(totalBytes)/(1024*1024)))
+		if scanErr != nil {
+			emitLog(events.ErrorLevel, fmt.Sprintf("Scan error: %s", scanErr.Error()))
+			emitCompletion(foldersCreated, filesQueued, totalBytes, scanErr.Error())
+			return
+		}
 
+		emitLog(events.InfoLevel, fmt.Sprintf("Scan complete: %d folders, %d files (%.2f MB). Downloads in progress.",
+			foldersCreated, filesQueued, float64(totalBytes)/(1024*1024)))
+		emitCompletion(foldersCreated, filesQueued, totalBytes, "")
+	}()
+
+	// Return immediately — scan and downloads proceed in background
 	return FolderDownloadResultDTO{
-		FoldersCreated:  foldersCreated,
-		FilesDownloaded: len(transferRequests), // FilesQueued, will update as they complete
-		TotalBytes:      totalBytes,
+		FoldersCreated:  1, // Root folder created synchronously
+		FilesDownloaded: 0, // Streaming — files are being discovered/queued
 	}
 }
 

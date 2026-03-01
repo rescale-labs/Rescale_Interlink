@@ -14,6 +14,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/config"
+	intfips "github.com/rescale/rescale-int/internal/fips"
 )
 
 // AppInfoDTO contains application version and status information.
@@ -29,7 +30,7 @@ func (a *App) GetAppInfo() AppInfoDTO {
 	return AppInfoDTO{
 		Version:     cli.Version,
 		BuildTime:   cli.BuildTime,
-		FIPSEnabled: cli.FIPSStatus() != "",
+		FIPSEnabled: intfips.Enabled,
 		FIPSStatus:  cli.FIPSStatus(),
 	}
 }

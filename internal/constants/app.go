@@ -164,7 +164,20 @@ const (
 	MinMaxConcurrent = 1
 
 	// MaxMaxConcurrent - maximum concurrent operations allowed
-	MaxMaxConcurrent = 10
+	// v4.8.0: Increased from 10 to 20 for adaptive concurrency with small files
+	MaxMaxConcurrent = 20
+
+	// Adaptive concurrency tiers (used by resource manager)
+	// v4.8.0: Scale concurrency based on file size distribution in batch
+
+	// AdaptiveSmallFileConcurrency - for files < SmallFileThreshold (100MB): 1 thread each
+	AdaptiveSmallFileConcurrency = 20
+
+	// AdaptiveMediumFileConcurrency - for files 100MB - 1GB: 4 threads each
+	AdaptiveMediumFileConcurrency = 10
+
+	// AdaptiveLargeFileConcurrency - for files > 1GB: 8-16 threads each
+	AdaptiveLargeFileConcurrency = 5
 )
 
 // Resource Manager - Thread Limits

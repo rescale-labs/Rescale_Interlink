@@ -842,9 +842,9 @@ func TestGetUngroupedTasks(t *testing.T) {
 	if len(ungrouped) != 2 {
 		t.Errorf("Expected 2 ungrouped tasks, got %d", len(ungrouped))
 	}
-	for _, task := range ungrouped {
-		if task.BatchID != "" {
-			t.Errorf("Ungrouped task should have empty BatchID, got %q", task.BatchID)
+	for i := range ungrouped {
+		if ungrouped[i].BatchID != "" {
+			t.Errorf("Ungrouped task should have empty BatchID, got %q", ungrouped[i].BatchID)
 		}
 	}
 }

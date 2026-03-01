@@ -3,6 +3,7 @@ package resources
 import (
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/constants"
@@ -282,6 +283,62 @@ func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
 	}
 
 	return desired
+}
+
+// ComputeBatchConcurrency determines optimal concurrent transfer count for a batch
+// based on the median file size, validated against thread pool capacity and memory.
+// maxAllowed is the upper cap (typically cap(semaphore)).
+// v4.8.0: Adaptive concurrency — small files get more workers, large files get fewer.
+func (m *Manager) ComputeBatchConcurrency(fileSizes []int64, maxAllowed int) int {
+	if len(fileSizes) == 0 {
+		return constants.DefaultMaxConcurrent
+	}
+
+	// Compute median file size
+	sorted := make([]int64, len(fileSizes))
+	copy(sorted, fileSizes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	median := sorted[len(sorted)/2]
+
+	// Determine tier from file size distribution
+	var tier int
+	switch {
+	case median < int64(constants.SmallFileThreshold):
+		tier = constants.AdaptiveSmallFileConcurrency
+	case median < int64(constants.LargeFile1GB):
+		tier = constants.AdaptiveMediumFileConcurrency
+	default:
+		tier = constants.AdaptiveLargeFileConcurrency
+	}
+
+	// Validate against resource constraints
+	m.mu.Lock()
+	desiredThreadsPerFile := m.calculateDesiredThreads(median, tier)
+	totalThreadsNeeded := tier * desiredThreadsPerFile
+	if totalThreadsNeeded > m.totalThreads {
+		// Scale down concurrency to fit within thread pool
+		if desiredThreadsPerFile > 0 {
+			tier = m.totalThreads / desiredThreadsPerFile
+		}
+	}
+	memoryNeeded := int64(tier) * int64(desiredThreadsPerFile) * int64(constants.MemoryPerThreadMB) * 1024 * 1024
+	availMem := getAvailableMemory()
+	if memoryNeeded > int64(float64(availMem)*0.75) && desiredThreadsPerFile > 0 {
+		tier = int(float64(availMem) * 0.75 / float64(int64(desiredThreadsPerFile)*int64(constants.MemoryPerThreadMB)*1024*1024))
+	}
+	m.mu.Unlock()
+
+	// Apply caps
+	if tier > maxAllowed {
+		tier = maxAllowed
+	}
+	if tier > len(fileSizes) {
+		tier = len(fileSizes)
+	}
+	if tier < constants.MinMaxConcurrent {
+		tier = constants.MinMaxConcurrent
+	}
+	return tier
 }
 
 // String returns a human-readable representation of the manager state

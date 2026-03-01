@@ -1,5 +1,120 @@
 # Release Notes - Rescale Interlink
 
+## v4.8.0 - March 1, 2026
+
+### Performance
+
+- **Adaptive concurrency**: Concurrent transfer count now scales dynamically based on file size distribution in each batch. Small files (<100MB) run up to 20 concurrent transfers, medium files (100MB–1GB) up to 10, and large files (>1GB) stay at 5. The resource manager validates the adaptive count against thread pool capacity and available memory before applying it. Works symmetrically across GUI and CLI, uploads and downloads.
+- **FileInfo enrichment / GetFileInfo elimination**: Folder listing API responses now parse full file metadata (encryption keys, storage info, checksums, path parts). Downloads use this pre-fetched metadata directly, eliminating per-file `GetFileInfo()` API calls. For a 13,000-file folder, this saves ~2 hours of rate-limited API overhead. Falls back gracefully when metadata is incomplete.
+- **page_size=1000 enforcement**: All folder listing API calls now enforce `page_size=1000`, including pagination URLs returned by the API (which default to 25). Reduces pagination calls ~40x for large folders (e.g., 83 calls instead of ~538 for 13,468 items).
+- **CLI TransferHandle wiring**: CLI download and upload paths now create a resource manager and pass `TransferHandle` to each transfer, enabling per-file multi-threading based on file size. Previously CLI transfers were always single-threaded regardless of file size.
+
+### GUI Features
+
+- **Streaming scan-to-download**: Folder downloads now use a streaming pipeline where 8 concurrent scanner workers discover files and downloads begin within seconds — no more waiting for the full scan to complete. For a 13,000-file folder, this eliminates the ~40-minute scan-then-download delay.
+- **Evolving batch totals**: During streaming folder downloads, the batch total increases as files are discovered. The UI shows "X completed, Y discovered..." during scan, switching to "X of Y files" once the scan completes. Works through both the WebSocket event path and the polling path.
+- **Queued count display**: Batch rows in the Transfers tab now show "X downloading, Y queued" instead of just "X active".
+- **Scan progress feedback**: Both CLI and GUI show real-time scan progress (folders found, files found, bytes discovered) during folder downloads.
+
+### Bug Fixes
+
+- **Synchronous pre-registration**: `StartTransfers()` now pre-registers all tasks in the queue synchronously before launching async workers. Previously, the batch entry could disappear from the Transfers tab because registration happened inside the async goroutine after the enumeration-completed event fired.
+- **Streaming cancel gate**: `CancelBatch()` now cancels the batch-level context, stopping the streaming scanner, the registration goroutine, and in-flight downloads. Previously, cancelling a streaming batch only affected already-registered tasks while the scanner kept pushing new ones.
+- **Adaptive concurrency CLI activation**: Fixed `--max-concurrent` flag default (5) capping the adaptive concurrency result. When the user doesn't explicitly set `--max-concurrent`, the adaptive system now uses the full range (up to 20). Explicit `--max-concurrent N` still works as a hard cap.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/api/client.go` | Extended `FileInfo` struct with encryption/storage fields; `ToCloudFile()` with nil-guard; `page_size=1000` enforcement on all pages |
+| `internal/cli/folder_download_helper.go` | `RemoteFileTask.CloudFile`; `TransferHandle` wiring; adaptive concurrency; scan progress callback; streaming scanner |
+| `internal/cli/folder_upload_helper.go` | `TransferHandle` wiring for pipelined and sequential modes; adaptive concurrency |
+| `internal/cli/folders.go` | Adaptive `--max-concurrent` default (use `MaxMaxConcurrent` when flag not explicitly set) |
+| `internal/services/transfer_service.go` | `TransferRequest.FileInfo`; adaptive concurrency in batch execution; synchronous pre-registration; `StartStreamingDownloadBatch` |
+| `internal/resources/manager.go` | `ComputeBatchConcurrency()` with thread pool and memory validation |
+| `internal/constants/app.go` | `MaxMaxConcurrent=20`; adaptive concurrency tier constants |
+| `internal/transfer/queue.go` | `batchCancelFuncs` for streaming cancel; `batchScanInProgress` + `TotalKnown`; `CleanupBatch()` |
+| `internal/events/events.go` | `TotalKnown` in `BatchProgressEvent` |
+| `internal/wailsapp/event_bridge.go` | `TotalKnown` in `BatchProgressEventDTO` + mapper |
+| `internal/wailsapp/transfer_bindings.go` | `TotalKnown` in `TransferBatchDTO` + polling mapper |
+| `internal/wailsapp/file_bindings.go` | Streaming `StartFolderDownload`; `FileInfo` wiring; updated return semantics |
+| `internal/version/version.go` | v4.7.8 → v4.8.0 |
+| `wails.json` | v4.8.0 |
+| `frontend/package.json` | v4.8.0 |
+| `frontend/src/types/events.ts` | `totalKnown` field |
+| `frontend/src/stores/transferStore.ts` | `totalKnown` in both event handler and polling path |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Queued count display; evolving total display |
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Updated status message for streaming return semantics |
+
+---
+
+## v4.7.8 - February 28, 2026
+
+### Internal
+
+- **Intermediate development version**: Internal version bump during v4.8.0 development. All changes from this version are included in and superseded by the v4.8.0 release. No separate release was made.
+
+---
+
+## v4.7.7 - February 27, 2026
+
+### GUI Performance for Bulk Transfers
+
+- **Transfer grouping**: Folder uploads/downloads, PUR pipelines, and Single-Job uploads now collapse into a single aggregate batch row in the Transfers tab instead of rendering 10,000+ individual rows. Batches show aggregate progress, speed, ETA, file count, and expand to show paginated individual tasks on demand.
+- **Backend event optimization**: Individual progress events for batched transfers are suppressed at the queue layer; a 1/sec aggregate `BatchProgressEvent` per active batch replaces the previous 20k events/sec flood. Terminal events (completed, failed, cancelled) still publish individually.
+- **Polling optimization**: Transfers tab now fetches lightweight batch aggregates + ungrouped tasks (~1KB/cycle) instead of serializing all 10k+ tasks (~2MB/cycle) over IPC every poll.
+- **New backend endpoints**: `GetTransferBatches`, `GetUngroupedTransferTasks`, `GetBatchTasks`, `CancelBatch`, `RetryFailedInBatch`.
+- **New frontend components**: `BatchRow` (collapsible with aggregate progress), `TransferRow` with `React.memo()`, grouped rendering (enumerations → batches → ungrouped tasks).
+
+### Rate Limit Validation
+
+- **End-to-end validation**: All 7 test scenarios pass against platform.rescale.com — coordinator auto-spawn, concurrent process sharing, rate enforcement under sustained load (200 concurrent processes), visibility messages, zero 429 errors, bucket state inspection.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/queue.go` | Batch grouping, `BatchProgressEvent` emission, batch-level cancel/retry |
+| `internal/services/transfer_service.go` | Batch ID propagation, batch-level worker pools |
+| `internal/wailsapp/transfer_bindings.go` | `GetTransferBatches`, `GetBatchTasks`, `CancelBatch`, `RetryFailedInBatch` endpoints |
+| `internal/wailsapp/event_bridge.go` | `BatchProgressEvent` forwarding |
+| `internal/events/events.go` | `BatchProgressEvent` type |
+| `frontend/src/stores/transferStore.ts` | Batch state management, enumeration-to-batch reconciliation |
+| `frontend/src/components/tabs/TransfersTab.tsx` | `BatchRow`, `TransferRow`, paginated batch expansion |
+| `internal/version/version.go` | v4.7.6 → v4.7.7 |
+
+---
+
+## v4.7.6 - February 26, 2026
+
+### Auto-Download Reliability Fixes
+
+- **Credential path fix (CRITICAL)**: Service-mode API key resolution now checks per-user token path before falling back to SYSTEM's AppData path. Fixes silent "no API key" failures when running as Windows Service.
+- **Token persistence**: GUI writes API key to token file before every daemon/service start, preventing token-file-missing races.
+- **Config propagation**: Every config save now triggers `ReloadDaemonConfig()`, which restarts the subprocess daemon or triggers a service rescan. No more stale config until next poll.
+- **IPC ReloadConfig protocol**: New `MsgReloadConfig` IPC command with active-download awareness. Subprocess mode defers restart during active downloads; service mode delegates to `TriggerRescan()`.
+- **Pre-flight validation**: Enable toggle now validates API key and download folder before enabling auto-download. Specific error messages on failure.
+- **Progressive pending state**: "Activating..." now shows time-based messages (0-10s, 10-30s, 30s+) with Open Logs and Retry buttons. Backend error codes surface real issues.
+- **Install & Start Service**: Combined idempotent `install-and-start` CLI subcommand and GUI button — single UAC prompt for both operations.
+- **Lookback fix**: `getJobCompletionTime()` retries once on failure; jobs with unknown completion time are included (not incorrectly skipped).
+- **IPC lifecycle**: IPC server starts before daemon on Windows to prevent brief IPC-unavailable window. Timeout increased from 2s to 5s.
+- **Skip-and-retry**: Users skipped for missing API key are retried on each service rescan when a key becomes available.
+- **Tray auto-launch**: GUI automatically launches the tray companion app on startup (Windows only).
+- **Daemon stderr surfacing**: IPC timeout errors now include the last 3 lines from daemon-stderr.log.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/daemon/daemon.go` | Credential path resolution, lookback fix, IPC lifecycle |
+| `internal/daemon/service_windows.go` | Install-and-start, service rescan, skip-and-retry |
+| `internal/ipc/handler.go` | `MsgReloadConfig` with active-download awareness |
+| `internal/wailsapp/daemon_bindings.go` | Pre-flight validation, progressive pending state, stderr surfacing |
+| `internal/cli/daemon.go` | `install-and-start` subcommand |
+| `internal/version/version.go` | v4.7.5 → v4.7.6 |
+
+---
+
 ## v4.7.5 - February 25, 2026
 
 ### Bug Fixes

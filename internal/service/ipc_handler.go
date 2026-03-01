@@ -223,6 +223,12 @@ func (h *ServiceIPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	}
 }
 
+// GetTransferStatus returns daemon transfer batch status for a specific user.
+// v4.7.8: Routes to per-user daemon via MultiUserService.
+func (h *ServiceIPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
+	return h.service.GetUserTransferStatus(userID), nil
+}
+
 // GetRecentLogs returns recent log entries from the daemon.
 // v4.5.0: Now routes to per-user logs based on userID (SID or username).
 func (h *ServiceIPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {

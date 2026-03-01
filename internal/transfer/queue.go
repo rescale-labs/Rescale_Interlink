@@ -65,16 +65,22 @@ type Queue struct {
 
 	// v4.7.7: Batch progress ticker
 	batchTickerRunning bool
+
+	// v4.8.0: Streaming batch support
+	batchCancelFuncs   map[string]context.CancelFunc // Cancel functions for streaming batches
+	batchScanInProgress map[string]bool               // True while scan is still discovering files
 }
 
 // NewQueue creates a new transfer queue with the specified event bus.
 // The queue is immediately ready to track tasks - no Start() needed.
 func NewQueue(eventBus *events.EventBus) *Queue {
 	return &Queue{
-		tasks:       make([]*TransferTask, 0),
-		tasksByID:   make(map[string]*TransferTask),
-		cancelFuncs: make(map[string]context.CancelFunc),
-		eventBus:    eventBus,
+		tasks:               make([]*TransferTask, 0),
+		tasksByID:           make(map[string]*TransferTask),
+		cancelFuncs:         make(map[string]context.CancelFunc),
+		batchCancelFuncs:    make(map[string]context.CancelFunc),
+		batchScanInProgress: make(map[string]bool),
+		eventBus:            eventBus,
 	}
 }
 
@@ -136,21 +142,23 @@ func (q *Queue) TrackTransferWithBatch(name string, size int64, taskType TaskTyp
 	return task
 }
 
-// Activate marks a queued task as initializing when it acquires a semaphore slot.
+// Activate atomically transitions a queued task to initializing when it acquires a semaphore slot.
+// Returns true if the transition succeeded (task was in TaskQueued state), false otherwise.
 // Call this after acquiring a semaphore slot, BEFORE the actual transfer begins.
 // The task will transition to Active when StartTransfer() is called (i.e., when bytes start moving).
-func (q *Queue) Activate(taskID string) {
+func (q *Queue) Activate(taskID string) bool {
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
-	if exists && task != nil && task.State == TaskQueued {
-		task.State = TaskInitializing
-		task.StartedAt = time.Now()
+	if !exists || task == nil || task.State != TaskQueued {
+		q.mu.Unlock()
+		return false
 	}
+	task.State = TaskInitializing
+	task.StartedAt = time.Now()
 	q.mu.Unlock()
 
-	if exists && task != nil {
-		q.publishTransferEvent(events.EventTransferInitializing, task)
-	}
+	q.publishTransferEvent(events.EventTransferInitializing, task)
+	return true
 }
 
 // StartTransfer marks an initializing task as actively transferring.
@@ -175,6 +183,35 @@ func (q *Queue) SetCancel(taskID string, cancelFn context.CancelFunc) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.cancelFuncs[taskID] = cancelFn
+}
+
+// ClearCancel removes a stale cancel fn entry for a task.
+// Used on early-return paths where the task is already terminal (e.g., cancelled by CancelBatch).
+func (q *Queue) ClearCancel(taskID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.cancelFuncs, taskID)
+}
+
+// FailIfNotTerminal atomically checks if a task is non-terminal and transitions to Failed.
+// Returns true if the transition happened, false if the task was already terminal or not found.
+// Avoids TOCTOU race between IsTerminal check and Fail call. Used on cancel/error paths
+// after SetCancel() where CancelBatch may have already set the task to TaskCancelled.
+func (q *Queue) FailIfNotTerminal(taskID string, err error) bool {
+	q.mu.Lock()
+	task, exists := q.tasksByID[taskID]
+	if !exists || task == nil || task.IsTerminal() {
+		delete(q.cancelFuncs, taskID) // Cleanup
+		q.mu.Unlock()
+		return false
+	}
+	task.State = TaskFailed
+	task.Error = err
+	task.CompletedAt = time.Now()
+	delete(q.cancelFuncs, taskID)
+	q.mu.Unlock()
+	q.publishTransferEvent(events.EventTransferFailed, task)
+	return true
 }
 
 // UpdateSize updates a task's total size. Used when the size isn't known at
@@ -497,6 +534,7 @@ type BatchStats struct {
 	TotalBytes  int64
 	Progress    float64 // byte-weighted 0.0-1.0
 	Speed       float64 // aggregate bytes/sec
+	TotalKnown  bool    // v4.8.0: True when scan is complete and Total is final
 }
 
 // GetAllBatchStats returns aggregate stats for all batches in a single pass.
@@ -515,11 +553,14 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 
 		bs, exists := batchMap[task.BatchID]
 		if !exists {
+			// v4.8.0: TotalKnown = true when scan NOT in progress
+			// Default: batches not in batchScanInProgress map have TotalKnown=true
 			bs = &BatchStats{
 				BatchID:     task.BatchID,
 				BatchLabel:  task.BatchLabel,
 				Direction:   string(task.Type),
 				SourceLabel: task.SourceLabel,
+				TotalKnown:  !q.batchScanInProgress[task.BatchID],
 			}
 			batchMap[task.BatchID] = bs
 			batchOrder = append(batchOrder, task.BatchID)
@@ -609,7 +650,15 @@ func (q *Queue) GetUngroupedTasks() []TransferTask {
 
 // CancelBatch cancels all non-terminal tasks in a batch.
 // v4.7.7: Unlike single Cancel(), this also handles queued tasks (the majority in large batches).
+// v4.8.0: Also cancels the batch-level context (stops streaming scan + registration).
 func (q *Queue) CancelBatch(batchID string) error {
+	// v4.8.0: Cancel batch-level context first (stops scan and registration goroutines)
+	q.mu.Lock()
+	if batchCancel, ok := q.batchCancelFuncs[batchID]; ok {
+		batchCancel()
+	}
+	q.mu.Unlock()
+
 	q.mu.Lock()
 	var tasksToCancel []*TransferTask
 	var cancelFns []context.CancelFunc
@@ -648,7 +697,39 @@ func (q *Queue) CancelBatch(batchID string) error {
 		q.publishTransferEvent(events.EventTransferCancelled, task)
 	}
 
+	// v4.8.0: Cleanup streaming batch state
+	q.CleanupBatch(batchID)
+
 	return nil
+}
+
+// RegisterBatchCancel stores a cancel function for a streaming batch.
+// v4.8.0: Called by StartStreamingDownloadBatch to enable CancelBatch to stop the scan.
+func (q *Queue) RegisterBatchCancel(batchID string, cancelFn context.CancelFunc) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.batchCancelFuncs[batchID] = cancelFn
+}
+
+// MarkBatchScanInProgress sets whether a batch's scan is still discovering files.
+// v4.8.0: Used to determine TotalKnown in batch stats.
+func (q *Queue) MarkBatchScanInProgress(batchID string, inProgress bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if inProgress {
+		q.batchScanInProgress[batchID] = true
+	} else {
+		delete(q.batchScanInProgress, batchID)
+	}
+}
+
+// CleanupBatch removes all streaming batch metadata for deterministic cleanup.
+// v4.8.0: Prevents long-session map growth from stale batch entries.
+func (q *Queue) CleanupBatch(batchID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.batchCancelFuncs, batchID)
+	delete(q.batchScanInProgress, batchID)
 }
 
 // RetryFailedInBatch retries all failed tasks in a batch.
@@ -712,14 +793,17 @@ func (q *Queue) batchTickerLoop() {
 						EventType: events.EventBatchProgress,
 						Time:      time.Now(),
 					},
-					BatchID:   bs.BatchID,
-					Label:     bs.BatchLabel,
-					Direction: bs.Direction,
-					Total:     bs.Total,
-					Completed: bs.Completed,
-					Failed:    bs.Failed,
-					Progress:  bs.Progress,
-					Speed:     bs.Speed,
+					BatchID:    bs.BatchID,
+					Label:      bs.BatchLabel,
+					Direction:  bs.Direction,
+					Total:      bs.Total,
+					Active:     bs.Active,
+					Queued:     bs.Queued,
+					Completed:  bs.Completed,
+					Failed:     bs.Failed,
+					Progress:   bs.Progress,
+					Speed:      bs.Speed,
+					TotalKnown: bs.TotalKnown, // v4.8.0
 				})
 			}
 		}

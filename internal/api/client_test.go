@@ -170,3 +170,84 @@ func TestGetStorageCredentials_MalformedJSON(t *testing.T) {
 		t.Errorf("error should mention decoding, got %q", err.Error())
 	}
 }
+
+// v4.8.0: FileInfo.ToCloudFile() tests
+
+func TestToCloudFile_Complete(t *testing.T) {
+	fi := &FileInfo{
+		ID:                   "file123",
+		Name:                 "test.dat",
+		DecryptedSize:        1024,
+		EncodedEncryptionKey: "base64key==",
+		IV:                   "base64iv==",
+		Owner:                "user1",
+		Path:                 "/some/path",
+		PathParts:            &models.CloudFilePathParts{Container: "bucket", Path: "user/file"},
+		Storage:              &models.CloudFileStorage{ID: "stor1", StorageType: "S3"},
+		FileChecksums:        []models.FileChecksum{{HashFunction: "md5", FileHash: "abc123"}},
+	}
+	cf := fi.ToCloudFile()
+	if cf == nil {
+		t.Fatal("ToCloudFile() returned nil for complete metadata")
+	}
+	if cf.ID != "file123" {
+		t.Errorf("ID = %q, want %q", cf.ID, "file123")
+	}
+	if cf.Name != "test.dat" {
+		t.Errorf("Name = %q, want %q", cf.Name, "test.dat")
+	}
+	if cf.EncodedEncryptionKey != "base64key==" {
+		t.Errorf("EncodedEncryptionKey = %q, want %q", cf.EncodedEncryptionKey, "base64key==")
+	}
+	if cf.PathParts == nil || cf.PathParts.Container != "bucket" {
+		t.Errorf("PathParts.Container = %v, want %q", cf.PathParts, "bucket")
+	}
+	if cf.Storage == nil || cf.Storage.StorageType != "S3" {
+		t.Errorf("Storage.StorageType = %v, want S3", cf.Storage)
+	}
+	if cf.DecryptedSize != 1024 {
+		t.Errorf("DecryptedSize = %d, want 1024", cf.DecryptedSize)
+	}
+	if len(cf.FileChecksums) != 1 || cf.FileChecksums[0].FileHash != "abc123" {
+		t.Errorf("FileChecksums unexpected: %v", cf.FileChecksums)
+	}
+}
+
+func TestToCloudFile_MissingEncryptionKey(t *testing.T) {
+	fi := &FileInfo{
+		ID:            "file123",
+		PathParts:     &models.CloudFilePathParts{Container: "bucket", Path: "user/file"},
+		Storage:       &models.CloudFileStorage{ID: "stor1", StorageType: "S3"},
+		// EncodedEncryptionKey is empty
+	}
+	cf := fi.ToCloudFile()
+	if cf != nil {
+		t.Errorf("ToCloudFile() should return nil when encryption key is missing, got %+v", cf)
+	}
+}
+
+func TestToCloudFile_MissingPathParts(t *testing.T) {
+	fi := &FileInfo{
+		ID:                   "file123",
+		EncodedEncryptionKey: "base64key==",
+		Storage:              &models.CloudFileStorage{ID: "stor1", StorageType: "S3"},
+		// PathParts is nil
+	}
+	cf := fi.ToCloudFile()
+	if cf != nil {
+		t.Errorf("ToCloudFile() should return nil when PathParts is missing, got %+v", cf)
+	}
+}
+
+func TestToCloudFile_MissingStorage(t *testing.T) {
+	fi := &FileInfo{
+		ID:                   "file123",
+		EncodedEncryptionKey: "base64key==",
+		PathParts:            &models.CloudFilePathParts{Container: "bucket", Path: "user/file"},
+		// Storage is nil
+	}
+	cf := fi.ToCloudFile()
+	if cf != nil {
+		t.Errorf("ToCloudFile() should return nil when Storage is missing, got %+v", cf)
+	}
+}

@@ -697,3 +697,36 @@ func (m *MultiUserDaemon) GetUserLogs(identifier string, count int) []ipc.LogEnt
 	}
 	return nil
 }
+
+// GetUserTransferStatus returns daemon transfer batch status for a specific user.
+// v4.7.8: Follows same SID/username matching pattern as PauseUser/GetUserLogs.
+func (m *MultiUserDaemon) GetUserTransferStatus(identifier string) *ipc.TransferStatusData {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// First pass: try exact SID or username match
+	for _, entry := range m.daemons {
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
+			if entry.daemon != nil {
+				return entry.daemon.GetTransferStatus()
+			}
+			return &ipc.TransferStatusData{}
+		}
+	}
+
+	// Fallback: resolve SID to username (same pattern as PauseUser second pass)
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		if resolved := ResolveSIDToUsername(identifier); resolved != "" {
+			for _, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolved) {
+					if entry.daemon != nil {
+						return entry.daemon.GetTransferStatus()
+					}
+				}
+			}
+		}
+	}
+
+	return &ipc.TransferStatusData{}
+}
