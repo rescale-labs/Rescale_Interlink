@@ -1,10 +1,35 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.8.0
+**Version:** 4.8.1
 **Build Date:** March 1, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
+
+---
+
+## v4.8.1 Changes — Transfer System Convergence
+
+### Shared Batch Executor (`internal/transfer/batch.go`)
+- **`RunBatch[T WorkItem]`**: Executes a known set of items with adaptive concurrency computed from file sizes. Replaces 10+ inline worker pool implementations across CLI, GUI, and daemon.
+- **`RunBatchFromChannel[T WorkItem]`**: Streaming mode for when items arrive incrementally (e.g., folder scan → download). Dynamic worker scaling: samples first 20 items, resamples every 50, scales workers up to 2x per interval (capped at `MaxWorkers`). Exposes current adaptive target via `AdaptiveWorkerCount` for downstream `AllocateTransfer` calls.
+- Both enforce adaptive concurrency via `resources.Manager.ComputeBatchConcurrency()`.
+
+### Generic Conflict Resolver (`internal/cli/conflict.go`)
+- **`ConflictResolver[A comparable]`**: Thread-safe state machine for user-prompted conflict resolution. Handles Once (prompt each time) and All (apply automatically) modes with automatic escalation.
+- Convenience constructors: `NewDownloadConflictResolver`, `NewFolderDownloadConflictResolver`, `NewFileConflictResolver`, `NewErrorActionResolver`.
+- Replaces 6 inline lock/switch/prompt/unlock patterns.
+
+### Shared Progress Readers (`internal/cloud/transfer/progress.go`)
+- `ProgressReader`: Threshold-based progress callback wrapper for download streams.
+- `UploadProgressReader`: Same for uploads, with `Seek` rollback to prevent double-counting during SDK retries.
+- Extracted from S3 and Azure providers (~125 lines removed).
+
+### Centralized Channel Constants (`internal/constants/app.go`)
+- `DispatchChannelBuffer = 256`, `WorkChannelBuffer = 100` replace magic numbers in 6 files.
+
+### Bug Fixes
+- 5 concurrency bugs fixed (see RELEASE_NOTES.md for details).
 
 ---
 

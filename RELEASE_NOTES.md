@@ -1,5 +1,52 @@
 # Release Notes - Rescale Interlink
 
+## v4.8.1 - March 1, 2026
+
+### Transfer System Convergence
+
+Major refactoring of the transfer dispatching layer to eliminate ~1,200 lines of duplicated code and fix 5 concurrency bugs caused by copy-paste drift.
+
+### New Abstractions
+
+- **`RunBatch` / `RunBatchFromChannel`** (`internal/transfer/batch.go`): Shared batch executor replaces 10+ inline worker pool implementations. Generic over `WorkItem` interface. `RunBatch` handles known item sets; `RunBatchFromChannel` handles streaming mode with dynamic worker scaling (sample 20 items, resample every 50, scale up to 2x per interval). Both enforce adaptive concurrency via `ComputeBatchConcurrency`.
+- **`ConflictResolver[A]`** (`internal/cli/conflict.go`): Generic conflict state machine replaces 6 inline lock/switch/prompt/unlock patterns across download and upload helpers. Handles Once→All escalation, concurrent access, and abort propagation.
+- **Shared `ProgressReader` / `UploadProgressReader`** (`internal/cloud/transfer/progress.go`): Threshold-based progress reporting wrappers extracted from S3 and Azure providers. `UploadProgressReader` includes Seek rollback for SDK retry scenarios.
+
+### Bug Fixes
+
+- **Bug #1**: GUI streaming download used hardcoded 5 workers instead of adaptive concurrency. Now uses `RunBatchFromChannel` with `ResourceManager` for file-size-based worker scaling.
+- **Bug #2**: CLI pipelined folder upload computed adaptive worker count via `ComputeBatchConcurrency` but spawned workers using the raw `fileConcurrency` parameter. Now uses the computed `cliUploadWorkerCount`.
+- **Bug #3**: CLI sequential folder upload created a resource manager but never used it for batch concurrency. Now calls `ComputeBatchConcurrency` and uses the adaptive result.
+- **Bug #4**: Daemon created a new `TransferManager` per file, defeating resource pooling. Now creates one `TransferManager` per job and reuses it across all files.
+- **Bug #5**: Download shortcut enforced 1–10 max-concurrent range while all other commands used 1–20. Now uses `constants.MinMaxConcurrent`–`constants.MaxMaxConcurrent`.
+
+### Centralized Constants
+
+- `DispatchChannelBuffer = 256` and `WorkChannelBuffer = 100` replace magic numbers across 6 files.
+- `ProgressReaderThreshold = 1MB` shared between S3 and Azure providers.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/batch.go` | **NEW**: `RunBatch`, `RunBatchFromChannel`, `CollectErrors`, `ComputedWorkers` |
+| `internal/transfer/batch_test.go` | **NEW**: 20 tests with `-race` (empty, single, error, cancel, adaptive, streaming, scaling) |
+| `internal/cli/conflict.go` | **NEW**: `ConflictResolver[A]` with 4 convenience constructors |
+| `internal/cli/conflict_test.go` | **NEW**: 14 tests (concurrency, escalation, abort, all action types) |
+| `internal/cloud/transfer/progress.go` | **NEW**: `ProgressReader`, `UploadProgressReader`, `ProgressReaderThreshold` |
+| `internal/services/transfer_service.go` | Deleted 2 dead batch methods; migrated 3 methods to `RunBatch`/`RunBatchFromChannel` |
+| `internal/cli/download_helper.go` | Migrated 2 worker pools to `RunBatch`; conflict handling via `ConflictResolver` |
+| `internal/cli/folder_download_helper.go` | Migrated worker pool; conflict handling via `ConflictResolver` |
+| `internal/cli/folder_upload_helper.go` | Migrated 2 worker pools; conflict/error handling via `ConflictResolver`; Bugs #2, #3 fixed |
+| `internal/cli/folders.go` | Updated `uploadFiles` call site for `ConflictResolver` API |
+| `internal/cli/shortcuts.go` | Bug #5: max-concurrent range uses constants |
+| `internal/daemon/daemon.go` | Bug #4: `TransferManager` reused per job |
+| `internal/cloud/providers/s3/streaming_concurrent.go` | Use shared `ProgressReader` types |
+| `internal/cloud/providers/azure/streaming_concurrent.go` | Use shared `ProgressReader` types |
+| `internal/constants/app.go` | `DispatchChannelBuffer`, `WorkChannelBuffer` |
+
+---
+
 ## v4.8.0 - March 1, 2026
 
 ### Performance

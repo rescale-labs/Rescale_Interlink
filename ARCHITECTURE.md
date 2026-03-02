@@ -1,6 +1,6 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.8.0
+**Version**: 4.8.1
 **Last Updated**: March 1, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -1022,6 +1022,51 @@ if time.Since(eb.lastProgress[taskID]) < eb.progressInterval {
 
 **Resume Capabilities**: Both upload and download resume are fully implemented. Download resume uses byte-offset HTTP Range requests to continue interrupted downloads from exact positions.
 
+### Two-Layer Concurrency Model (v4.8.1)
+
+Transfer concurrency uses two layers sharing a single global thread pool (`resources.Manager`):
+
+**Layer 1 — Batch Concurrency** (`RunBatch` / `RunBatchFromChannel` in `internal/transfer/batch.go`):
+- Determines how many files transfer simultaneously
+- `ComputeBatchConcurrency()` computes median file size → picks tier (small=20, medium=10, large=5)
+- Validates tier against thread pool capacity and 75% of available memory
+- All transfer paths (CLI, GUI, daemon) use this shared abstraction
+
+**Layer 2 — Per-File Multi-Threading** (`AllocateForTransfer` in `resources/manager.go`):
+- When each file starts, allocates threads from the shared pool
+- Thread count based on file size tiers (500MB-1GB: 4, 1-5GB: 8, 5-10GB: 12, 10GB+: 16)
+- Dynamic rebalancing: as files complete, freed threads become available for active transfers
+
+**Key invariant**: Layer 1 uses `ComputeBatchConcurrency` to ensure the batch concurrency never oversubscribes the thread pool. Layer 2's `AllocateForTransfer(fileSize, totalFiles)` uses the adaptive worker count from Layer 1 to compute each file's fair share of the pool.
+
+```
+                        ┌─────────────────────┐
+                        │  resources.Manager   │
+                        │  (Global Thread Pool)│
+                        └──────────┬──────────┘
+                                   │
+              ┌────────────────────┼────────────────────┐
+              │                    │                     │
+    ┌─────────▼─────────┐  ┌──────▼──────┐  ┌──────────▼─────────┐
+    │   RunBatch         │  │RunBatchFrom-│  │  ForceSequential   │
+    │   (known items)    │  │ Channel     │  │  (daemon mode)     │
+    │   adaptive workers │  │ (streaming) │  │  1 worker          │
+    └─────────┬─────────┘  └──────┬──────┘  └──────────┬─────────┘
+              │                    │                     │
+              └────────────────────┼────────────────────┘
+                                   │ per file
+                        ┌──────────▼──────────┐
+                        │  AllocateTransfer    │
+                        │  (per-file threads)  │
+                        └─────────────────────┘
+```
+
+### Conflict Resolution (v4.8.1)
+
+File conflict handling (skip/overwrite/rename) uses a shared `ConflictResolver[A comparable]` generic type (`internal/cli/conflict.go`). The resolver is thread-safe and handles automatic escalation from "Once" (prompt per conflict) to "All" (apply automatically). Used by:
+- Download helpers: `NewDownloadConflictResolver`, `NewFolderDownloadConflictResolver`
+- Upload helpers: `NewFileConflictResolver`, `NewErrorActionResolver`
+
 ### GUI Components (v4.0.0+ Wails)
 
 **Backend Bindings** (`internal/wailsapp/`):
@@ -1301,6 +1346,10 @@ All configuration constants centralized in one file with:
     - `AdaptiveSmallFileConcurrency = 20` — files < 100MB
     - `AdaptiveMediumFileConcurrency = 10` — files 100MB–1GB
     - `AdaptiveLargeFileConcurrency = 5` — files > 1GB
+
+11. **Channel Buffer Sizes** (v4.8.1)
+    - `DispatchChannelBuffer = 256` — high-throughput dispatch channels (streaming downloads, GUI requests)
+    - `WorkChannelBuffer = 100` — bounded worker pool channels (pipelined uploads, log subscribers)
 
 **Usage Example**:
 ```go
