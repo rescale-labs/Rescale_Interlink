@@ -12,6 +12,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
@@ -413,7 +414,7 @@ func uploadDirectoryPipelined(
 	}
 
 	// Create folder ready channel (buffered to prevent blocking)
-	folderReadyChan := make(chan FolderReadyEvent, 100)
+	folderReadyChan := make(chan FolderReadyEvent, constants.WorkChannelBuffer)
 
 	// Create progress UI
 	uploadUI := progress.NewUploadUI(len(files))
@@ -498,7 +499,7 @@ func uploadDirectoryPipelined(
 		remoteFolderID string
 		relativePath   string
 	}
-	uploadWorkCh := make(chan uploadWorkItem, 100)
+	uploadWorkCh := make(chan uploadWorkItem, constants.WorkChannelBuffer)
 
 	// Start fixed worker pool for file uploads
 	// v4.8.1: Use adaptive worker count (was fileConcurrency, Bug #2)

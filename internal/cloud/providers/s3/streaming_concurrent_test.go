@@ -5,6 +5,8 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/cloud/transfer"
 )
 
 // TestUploadProgressReaderSeek verifies that uploadProgressReader implements
@@ -13,10 +15,10 @@ func TestUploadProgressReaderSeek(t *testing.T) {
 	data := []byte("hello, world — this is test data for seek verification")
 	var totalReported int64
 
-	pr := &uploadProgressReader{
-		reader:    bytes.NewReader(data),
-		callback:  func(n int64) { totalReported += n },
-		threshold: 1, // Report on every read for testing
+	pr := &transfer.UploadProgressReader{
+		Reader:    bytes.NewReader(data),
+		Callback:  func(n int64) { totalReported += n },
+		Threshold: 1, // Report on every read for testing
 	}
 
 	// Verify io.ReadSeeker interface compliance
@@ -57,12 +59,12 @@ func TestUploadProgressReaderSeekRollsBackProgress(t *testing.T) {
 	data := []byte("abcdefghij") // 10 bytes
 	var netProgress atomic.Int64
 
-	pr := &uploadProgressReader{
-		reader: bytes.NewReader(data),
-		callback: func(n int64) {
+	pr := &transfer.UploadProgressReader{
+		Reader: bytes.NewReader(data),
+		Callback: func(n int64) {
 			netProgress.Add(n)
 		},
-		threshold: 1, // Report on every read
+		Threshold: 1, // Report on every read
 	}
 
 	// Read all bytes — should report +10 total
@@ -105,13 +107,13 @@ func TestUploadProgressReaderThreshold(t *testing.T) {
 	var callbackCalls int
 	var callbackValues []int64
 
-	pr := &uploadProgressReader{
-		reader: bytes.NewReader(data),
-		callback: func(n int64) {
+	pr := &transfer.UploadProgressReader{
+		Reader: bytes.NewReader(data),
+		Callback: func(n int64) {
 			callbackCalls++
 			callbackValues = append(callbackValues, n)
 		},
-		threshold: 30,
+		Threshold: 30,
 	}
 
 	// Read in small chunks to test threshold accumulation

@@ -524,7 +524,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	)
 
 	// Create request channel for streaming batch
-	requestCh := make(chan services.TransferRequest, 256)
+	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
 
 	// Mark scan in progress for TotalKnown tracking
 	ts.GetQueue().MarkBatchScanInProgress(enumID, true)

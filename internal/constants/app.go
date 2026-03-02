@@ -357,3 +357,15 @@ const (
 	// Used when a directory contains many symlinks that need os.Stat() calls
 	SymlinkWorkerCount = 8
 )
+
+// Channel Buffer Sizes (v4.8.1)
+// Centralized from hardcoded magic numbers across transfer/service code.
+const (
+	// DispatchChannelBuffer - buffer for high-throughput streaming dispatch channels.
+	// Used in: BatchExecutor dispatch, TransferService pre-reg dispatch, folder scan.
+	DispatchChannelBuffer = 256
+
+	// WorkChannelBuffer - buffer for bounded worker pool work channels.
+	// Used in: pipelined upload work items, folder-ready events, daemon log buffer.
+	WorkChannelBuffer = 100
+)

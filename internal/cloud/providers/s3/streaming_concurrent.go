@@ -36,76 +36,8 @@ var _ transfer.StreamingConcurrentUploader = (*Provider)(nil)
 var _ transfer.StreamingConcurrentDownloader = (*Provider)(nil)
 var _ transfer.StreamingPartDownloader = (*Provider)(nil)
 
-// progressReader wraps an io.Reader and reports bytes read to a callback.
-// v3.6.3: Enables real-time progress tracking during S3 uploads.
-// Uses threshold-based reporting to avoid jumpy progress from many small reads.
-type progressReader struct {
-	reader      io.Reader
-	callback    func(bytesRead int64)
-	accumulated int64 // Bytes accumulated since last callback
-	threshold   int64 // Report every N bytes (1MB default)
-}
-
-// progressReaderThreshold is the minimum bytes to accumulate before reporting.
-// 1MB provides smooth progress without excessive updates.
-const progressReaderThreshold = 1 * 1024 * 1024 // 1MB
-
-func (pr *progressReader) Read(p []byte) (n int, err error) {
-	n, err = pr.reader.Read(p)
-	if n > 0 && pr.callback != nil {
-		pr.accumulated += int64(n)
-		// Report when threshold reached OR on EOF (to flush remaining)
-		if pr.accumulated >= pr.threshold || err == io.EOF {
-			pr.callback(pr.accumulated)
-			pr.accumulated = 0
-		}
-	}
-	return n, err
-}
-
-// uploadProgressReader wraps bytes.Reader with progress tracking for S3 uploads.
-// Unlike progressReader (used for downloads), this implements io.ReadSeeker
-// so the AWS SDK can rewind the stream on retry.
-// Modeled after Azure's progressReadSeekCloser.
-// v4.6.3: Fixes "stream not seekable" failures during PUR uploads.
-type uploadProgressReader struct {
-	reader      *bytes.Reader
-	callback    func(bytesRead int64)
-	accumulated int64 // Bytes accumulated since last callback
-	threshold   int64 // Report every N bytes (1MB default)
-	reported    int64 // Total bytes reported to callback (for rollback on retry)
-}
-
-func (pr *uploadProgressReader) Read(p []byte) (n int, err error) {
-	n, err = pr.reader.Read(p)
-	if n > 0 && pr.callback != nil {
-		pr.accumulated += int64(n)
-		if pr.accumulated >= pr.threshold || err == io.EOF {
-			pr.reported += pr.accumulated
-			pr.callback(pr.accumulated)
-			pr.accumulated = 0
-		}
-	}
-	// Flush remaining accumulated bytes on EOF even when n == 0
-	// (bytes.Reader returns n=0, io.EOF after all data is consumed)
-	if err == io.EOF && pr.accumulated > 0 && pr.callback != nil {
-		pr.reported += pr.accumulated
-		pr.callback(pr.accumulated)
-		pr.accumulated = 0
-	}
-	return n, err
-}
-
-func (pr *uploadProgressReader) Seek(offset int64, whence int) (int64, error) {
-	// Roll back any progress reported during the failed attempt
-	// so the retry doesn't double-count bytes (matches download pattern at line 734)
-	if pr.reported > 0 && pr.callback != nil {
-		pr.callback(-pr.reported)
-	}
-	pr.accumulated = 0
-	pr.reported = 0
-	return pr.reader.Seek(offset, whence)
-}
+// v4.8.1: progressReader and uploadProgressReader moved to shared
+// internal/cloud/transfer/progress.go (transfer.ProgressReader, transfer.UploadProgressReader).
 
 // InitStreamingUpload initializes a multipart upload with streaming encryption.
 // Uses CBC chaining format compatible with Rescale platform.
@@ -311,10 +243,10 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 		// Create fresh reader per attempt (enables retry after partial read)
 		var bodyReader io.ReadSeeker = bytes.NewReader(ciphertext)
 		if uploadState.ByteProgressCallback != nil {
-			bodyReader = &uploadProgressReader{
-				reader:    bytes.NewReader(ciphertext),
-				callback:  uploadState.ByteProgressCallback,
-				threshold: progressReaderThreshold,
+			bodyReader = &transfer.UploadProgressReader{
+				Reader:    bytes.NewReader(ciphertext),
+				Callback:  uploadState.ByteProgressCallback,
+				Threshold: transfer.ProgressReaderThreshold,
 			}
 		}
 
@@ -765,13 +697,13 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 		// Wrap response body with progress tracking for smooth download progress
 		var reader io.Reader = resp.Body
 		if progressCallback != nil {
-			reader = &progressReader{
-				reader: resp.Body,
-				callback: func(n int64) {
+			reader = &transfer.ProgressReader{
+				Reader: resp.Body,
+				Callback: func(n int64) {
 					attemptBytes += n
 					progressCallback(n)
 				},
-				threshold: progressReaderThreshold,
+				Threshold: transfer.ProgressReaderThreshold,
 			}
 		}
 

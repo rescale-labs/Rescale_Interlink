@@ -11,6 +11,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
@@ -565,7 +566,7 @@ func ScanRemoteFolderStreaming(
 	folderID string,
 	onProgress func(ScanProgress),
 ) (<-chan ScanEvent, <-chan error) {
-	eventCh := make(chan ScanEvent, 256)
+	eventCh := make(chan ScanEvent, constants.DispatchChannelBuffer)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -581,7 +582,7 @@ func ScanRemoteFolderStreaming(
 			relativePath string
 		}
 
-		workCh := make(chan scanWork, 256)
+		workCh := make(chan scanWork, constants.DispatchChannelBuffer)
 		var wg sync.WaitGroup
 
 		// Seed with root folder

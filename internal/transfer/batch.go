@@ -162,7 +162,7 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 		cfg.Label, initialWorkers, maxWorkers)
 
 	// Internal dispatch channel — workers consume from this.
-	dispatch := make(chan T, 256)
+	dispatch := make(chan T, constants.DispatchChannelBuffer)
 
 	var (
 		completed atomic.Int32

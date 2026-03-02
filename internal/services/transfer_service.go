@@ -248,7 +248,7 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 	ts.queue.RegisterBatchCancel(batchID, batchCancel)
 
 	// Dispatch channel: registration goroutine → RunBatchFromChannel
-	dispatchCh := make(chan preRegItem, 256)
+	dispatchCh := make(chan preRegItem, constants.DispatchChannelBuffer)
 
 	// Registration goroutine: reads from requestCh, registers tasks, sends to dispatch.
 	// Lifecycle invariants preserved: RegisterBatchCancel, CleanupBatch, cancel propagation.
