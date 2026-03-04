@@ -475,7 +475,9 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		}
 	}
 
-	emitLog(events.InfoLevel, fmt.Sprintf("Starting folder download: %s to %s", displayName, destPath))
+	// v4.8.3: Timing instrumentation for Issue #1 diagnosis
+	startTime := time.Now()
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] StartFolderDownload entry at %s — folder=%s dest=%s", startTime.Format("15:04:05.000"), displayName, destPath))
 
 	if a.engine == nil {
 		emitLog(events.ErrorLevel, "Engine not initialized")
@@ -524,6 +526,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	// v4.8.2: No enumeration progress during scan — batch row handles progress display.
 	// This eliminates phantom "Scanning" row flashing caused by EventEnumerationProgress
 	// re-creating the enumeration after reconciliation removes it.
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Starting ScanRemoteFolderStreaming — elapsed=%s", time.Since(startTime)))
 	scanEventCh, scanErrCh := cli.ScanRemoteFolderStreaming(scanCtx, apiClient, folderID, nil)
 
 	// Create request channel for streaming batch
@@ -560,8 +563,14 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		var foldersCreated int
 		var filesQueued int
 		var totalBytes int64
+		firstScanEvent := true
+		firstFileQueued := true
 
 		for event := range scanEventCh {
+			if firstScanEvent {
+				emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] First scan event received — elapsed=%s", time.Since(startTime)))
+				firstScanEvent = false
+			}
 			if event.Folder != nil {
 				// Create local directory
 				localPath := filepath.Join(rootOutputDir, event.Folder.RelativePath)
@@ -585,6 +594,10 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				}
 				select {
 				case requestCh <- req:
+					if firstFileQueued {
+						emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] First file queued — elapsed=%s", time.Since(startTime)))
+						firstFileQueued = false
+					}
 					filesQueued++
 					totalBytes += event.File.Size
 				case <-scanCtx.Done():
@@ -593,6 +606,8 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				}
 			}
 		}
+
+		emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Scan loop exited — folders=%d files=%d elapsed=%s", foldersCreated, filesQueued, time.Since(startTime)))
 
 		// Check for scan errors
 		var scanErr error
