@@ -179,6 +179,10 @@ func (ts *TransferService) warmCredentialCache(ctx context.Context) {
 	ts.mu.Unlock()
 
 	if credManager != nil {
+		// v4.8.3: Proactively refresh stale credentials before any transfer work.
+		if err := credManager.EnsureFresh(ctx); err != nil {
+			log.Printf("[CRED] EnsureFresh failed during cache warmup: %v", err)
+		}
 		_, _ = credManager.GetUserProfile(ctx)
 		_, _ = credManager.GetRootFolders(ctx)
 	}
@@ -401,6 +405,21 @@ func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRe
 		ts.queue.FailIfNotTerminal(taskID, uploadCtx.Err())
 		return
 	default:
+	}
+
+	// v4.8.3: Proactive credential freshness check before upload.
+	// Lazy-init credManager synchronously if warmCredentialCache hasn't run yet.
+	ts.mu.Lock()
+	if ts.credManager == nil && ts.apiClient != nil {
+		ts.credManager = credentials.GetManager(ts.apiClient)
+	}
+	cm := ts.credManager
+	ts.mu.Unlock()
+	if cm != nil {
+		if err := cm.EnsureFresh(uploadCtx); err != nil {
+			log.Printf("[CRED] EnsureFresh failed before upload %s: %v", fileName, err)
+			// Non-fatal: retry path will handle credential refresh on failure
+		}
 	}
 
 	// Get file info for transfer allocation
@@ -668,6 +687,21 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 		ts.queue.FailIfNotTerminal(taskID, dlCtx.Err())
 		return
 	default:
+	}
+
+	// v4.8.3: Proactive credential freshness check before download.
+	// Lazy-init credManager synchronously if warmCredentialCache hasn't run yet.
+	ts.mu.Lock()
+	if ts.credManager == nil && ts.apiClient != nil {
+		ts.credManager = credentials.GetManager(ts.apiClient)
+	}
+	cmDl := ts.credManager
+	ts.mu.Unlock()
+	if cmDl != nil {
+		if err := cmDl.EnsureFresh(dlCtx); err != nil {
+			log.Printf("[CRED] EnsureFresh failed before download %s: %v", fileName, err)
+			// Non-fatal: retry path will handle credential refresh on failure
+		}
 	}
 
 	// Allocate transfer handle

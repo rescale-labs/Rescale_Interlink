@@ -62,6 +62,13 @@ const (
 	// LargeFileThreshold - files larger than this trigger periodic credential refresh (1 GB)
 	// Only applies to Azure backend (S3 uses AWS SDK automatic refresh)
 	LargeFileThreshold = 1 * 1024 * 1024 * 1024
+
+	// CredentialFreshnessThreshold - proactive refresh threshold (8 minutes)
+	// If credentials are older than this when a transfer is about to start,
+	// refresh proactively to prevent ExpiredToken errors after laptop sleep.
+	// Set 2 minutes below GlobalCredentialRefreshInterval for safety margin.
+	// v4.8.3
+	CredentialFreshnessThreshold = 8 * time.Minute
 )
 
 // Retry configuration

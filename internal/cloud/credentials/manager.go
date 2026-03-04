@@ -186,6 +186,52 @@ func (m *Manager) GetAge() time.Duration {
 	return time.Since(m.lastCredsRefresh)
 }
 
+// EnsureFresh proactively refreshes credentials if older than
+// CredentialFreshnessThreshold. Uses double-checked locking to prevent
+// redundant API calls when multiple goroutines detect staleness simultaneously.
+// Provider-agnostic: checks both S3 and Azure creds so neither backend
+// causes spurious refresh storms.
+//
+// Uses wall-clock time (via Round(0)) instead of monotonic clock for age checks,
+// because Go's monotonic clock may not account for system sleep on all platforms.
+// This ensures correct staleness detection after laptop sleep/wake.
+// v4.8.3
+func (m *Manager) EnsureFresh(ctx context.Context) error {
+	// Fast path: read-lock only, no contention
+	// Use wall-clock time via Round(0) to correctly detect staleness after sleep
+	m.mu.RLock()
+	age := time.Now().Round(0).Sub(m.lastCredsRefresh.Round(0))
+	hasCreds := m.s3Credentials != nil || m.azureCredentials != nil
+	fresh := age <= constants.CredentialFreshnessThreshold && hasCreds
+	m.mu.RUnlock()
+	if fresh {
+		return nil
+	}
+
+	// Slow path: write lock with double-check
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Double-check: another goroutine may have refreshed while we waited for the lock
+	age = time.Now().Round(0).Sub(m.lastCredsRefresh.Round(0))
+	hasCreds = m.s3Credentials != nil || m.azureCredentials != nil
+	if age <= constants.CredentialFreshnessThreshold && hasCreds {
+		return nil
+	}
+
+	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to proactively refresh credentials: %w", err)
+	}
+
+	m.s3Credentials = s3Creds
+	m.azureCredentials = azureCreds
+	m.lastCredsRefresh = time.Now()
+	return nil
+}
+
 // GetS3CredentialsForStorage returns cached S3 credentials for a specific storage, refreshing if needed.
 // This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
 // The cache is keyed by storage ID to share credentials across files from the same storage.
