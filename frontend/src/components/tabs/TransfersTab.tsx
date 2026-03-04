@@ -242,7 +242,7 @@ const BatchRow = memo(function BatchRow({
           {isActive && (
             <span className="text-blue-500 flex items-center gap-1">
               <ArrowPathIcon className="w-4 h-4 animate-spin" />
-              {batch.active} downloading{batch.queued > 0 ? `, ${batch.queued.toLocaleString()} queued` : ''}
+              {batch.active} {batch.direction === 'download' ? 'downloading' : 'uploading'}{batch.queued > 0 ? `, ${batch.queued.toLocaleString()} queued` : ''}
             </span>
           )}
           {isAllComplete && (

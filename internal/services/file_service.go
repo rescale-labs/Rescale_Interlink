@@ -11,6 +11,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cli"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/util/paths"
@@ -281,7 +282,7 @@ func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string
 		directories,
 		rootRemoteID,
 		&conflictMode,
-		15, // maxConcurrent folders
+		constants.DefaultFolderConcurrency,
 		fs.logger,
 		nil, // folderReadyChan not needed
 		nil, // progressWriter not needed

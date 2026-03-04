@@ -907,7 +907,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	a.logInfo("folder-upload", "Creating folder structure on remote...")
 	mapping, created, err := cli.CreateFolderStructure(
 		ctx, apiClient, cache, localPath, directories, rootFolderID,
-		&folderConflictMode, 3, logger, nil, progressWriter, // 3 = default folder concurrency
+		&folderConflictMode, constants.DefaultFolderConcurrency, logger, nil, progressWriter,
 	)
 	if err != nil {
 		a.logError("folder-upload", fmt.Sprintf("Failed to create folders: %v", err))

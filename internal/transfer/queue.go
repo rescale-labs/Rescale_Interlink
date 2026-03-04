@@ -738,6 +738,21 @@ func (q *Queue) PreRegisterBatch(batchID, batchLabel, direction, sourceLabel str
 	}
 	q.mu.Unlock()
 
+	// v4.8.3: Fire immediate batch progress event so the batch row appears
+	// in the Transfers tab within ~100ms instead of waiting up to 1s for the ticker.
+	if q.eventBus != nil {
+		q.eventBus.Publish(&events.BatchProgressEvent{
+			BaseEvent: events.BaseEvent{
+				EventType: events.EventBatchProgress,
+				Time:      time.Now(),
+			},
+			BatchID:    batchID,
+			Label:      batchLabel,
+			Direction:  direction,
+			TotalKnown: false,
+		})
+	}
+
 	// Start batch ticker so pre-registered batch gets tick events during scan
 	q.ensureBatchTicker()
 }

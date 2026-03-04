@@ -592,7 +592,26 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   handleBatchProgressEvent: (event: BatchProgressEventDTO) => {
     set(state => {
       const batchIndex = state.batches.findIndex(b => b.batchID === event.batchID)
-      if (batchIndex === -1) return state
+      if (batchIndex === -1) {
+        // v4.8.3: Upsert — create batch from PreRegisterBatch's immediate event
+        const newBatch: TransferBatch = {
+          batchID: event.batchID,
+          batchLabel: event.label,
+          direction: event.direction,
+          sourceLabel: '',
+          total: event.total,
+          queued: event.queued,
+          active: event.active,
+          completed: event.completed,
+          failed: event.failed,
+          cancelled: 0,
+          totalBytes: 0,
+          progress: event.progress,
+          speed: event.speed,
+          totalKnown: event.totalKnown,
+        }
+        return { batches: [...state.batches, newBatch], lastUpdate: Date.now() }
+      }
 
       const updatedBatches = [...state.batches]
       updatedBatches[batchIndex] = {

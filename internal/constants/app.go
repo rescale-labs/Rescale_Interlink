@@ -358,6 +358,14 @@ const (
 	SymlinkWorkerCount = 8
 )
 
+// Folder Creation
+const (
+	// DefaultFolderConcurrency - default concurrent folder creation operations.
+	// Used by GUI and service-layer upload paths. CLI allows user override via --folder-concurrency flag.
+	// v4.8.3: Centralized from inconsistent values (was 3 in GUI, 15 in service layer).
+	DefaultFolderConcurrency = 8
+)
+
 // Channel Buffer Sizes (v4.8.1)
 // Centralized from hardcoded magic numbers across transfer/service code.
 const (
