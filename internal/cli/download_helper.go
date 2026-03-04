@@ -13,6 +13,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/cloud/state"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
@@ -69,6 +70,9 @@ func executeFileDownload(
 	if len(fileIDs) == 0 {
 		return fmt.Errorf("at least one file ID is required")
 	}
+
+	// v4.8.2: Warm proxy before first API call
+	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 	if outputDir == "" {
 		outputDir = "."
@@ -425,6 +429,9 @@ func executeJobDownload(
 	apiClient *api.Client,
 	logger *logging.Logger,
 ) error {
+	// v4.8.2: Warm proxy before first API call
+	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+
 	// List all job output files
 	fmt.Printf("Fetching output files for job %s...\n", jobID)
 	logger.Info().Str("job_id", jobID).Msg("Listing job output files")

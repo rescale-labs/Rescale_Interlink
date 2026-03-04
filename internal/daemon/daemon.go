@@ -13,6 +13,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/config"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -64,6 +65,7 @@ func DefaultConfig() *Config {
 // Daemon is the background service for auto-downloading completed jobs.
 type Daemon struct {
 	cfg       *Config
+	appCfg    *config.Config // v4.8.2: App config for proxy warmup
 	apiClient *api.Client
 	state     *State
 	monitor   *Monitor
@@ -110,6 +112,7 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 
 	return &Daemon{
 		cfg:       daemonCfg,
+		appCfg:    appCfg, // v4.8.2: Store for proxy warmup
 		apiClient: apiClient,
 		state:     state,
 		monitor:   monitor,
@@ -200,6 +203,9 @@ func (d *Daemon) poll(ctx context.Context) {
 
 	scanStart := time.Now()
 	d.logger.Info().Msg("=== SCAN STARTED ===")
+
+	// v4.8.2: Warm proxy before first API call each poll cycle
+	inthttp.WarmupProxyIfNeeded(scanCtx, d.appCfg)
 
 	// Find completed jobs that need downloading
 	result, err := d.monitor.FindCompletedJobs(scanCtx)

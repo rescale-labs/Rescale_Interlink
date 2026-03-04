@@ -604,71 +604,79 @@ func ScanRemoteFolderStreaming(
 					default:
 					}
 
-					contents, err := apiClient.ListFolderContentsAll(ctx, work.folderID)
+					// v4.8.2: Stream pages — emit files/folders as each API page arrives
+					// instead of waiting for the entire folder to be enumerated.
+					err := apiClient.ListFolderContentsStreaming(ctx, work.folderID,
+						func(folders []api.FolderInfo, files []api.FileInfo) error {
+							// Emit folders first (so parent dirs can be created before files)
+							for _, folder := range folders {
+								folderRelPath := filepath.Join(work.relativePath, folder.Name)
+								info := RemoteFolderInfo{
+									FolderID:     folder.ID,
+									Name:         folder.Name,
+									RelativePath: folderRelPath,
+								}
+
+								select {
+								case eventCh <- ScanEvent{Folder: &info}:
+								case <-ctx.Done():
+									return ctx.Err()
+								}
+
+								mu.Lock()
+								progress.FoldersFound++
+								mu.Unlock()
+
+								// Enqueue subfolder for scanning
+								wg.Add(1)
+								select {
+								case workCh <- scanWork{folderID: folder.ID, relativePath: folderRelPath}:
+								case <-ctx.Done():
+									wg.Add(-1) // Undo the Add since we won't process it
+									return ctx.Err()
+								}
+							}
+
+							// Emit files
+							for _, file := range files {
+								if err := validation.ValidateFilename(file.Name); err != nil {
+									continue // Skip invalid filenames
+								}
+								fileRelPath := filepath.Join(work.relativePath, file.Name)
+								task := RemoteFileTask{
+									FileID:       file.ID,
+									Name:         file.Name,
+									RelativePath: fileRelPath,
+									Size:         file.DecryptedSize,
+									CloudFile:    file.ToCloudFile(),
+								}
+
+								select {
+								case eventCh <- ScanEvent{File: &task}:
+								case <-ctx.Done():
+									return ctx.Err()
+								}
+
+								mu.Lock()
+								progress.FilesFound++
+								progress.BytesFound += file.DecryptedSize
+								mu.Unlock()
+							}
+
+							return nil
+						},
+					)
 					if err != nil {
+						// v4.8.2: Don't report context cancellation as a scan error — it's a clean cancel
+						if ctx.Err() != nil {
+							wg.Done()
+							continue
+						}
 						scanErrOnce.Do(func() {
 							errCh <- fmt.Errorf("failed to list folder %s: %w", work.folderID, err)
 						})
 						wg.Done()
 						continue
-					}
-
-					// Emit folders first (so parent dirs can be created before files)
-					for _, folder := range contents.Folders {
-						folderRelPath := filepath.Join(work.relativePath, folder.Name)
-						info := RemoteFolderInfo{
-							FolderID:     folder.ID,
-							Name:         folder.Name,
-							RelativePath: folderRelPath,
-						}
-
-						select {
-						case eventCh <- ScanEvent{Folder: &info}:
-						case <-ctx.Done():
-							wg.Done()
-							return
-						}
-
-						mu.Lock()
-						progress.FoldersFound++
-						mu.Unlock()
-
-						// Enqueue subfolder for scanning
-						wg.Add(1)
-						select {
-						case workCh <- scanWork{folderID: folder.ID, relativePath: folderRelPath}:
-						case <-ctx.Done():
-							wg.Add(-1) // Undo the Add since we won't process it
-							wg.Done()
-							return
-						}
-					}
-
-					// Emit files
-					for _, file := range contents.Files {
-						if err := validation.ValidateFilename(file.Name); err != nil {
-							continue // Skip invalid filenames
-						}
-						fileRelPath := filepath.Join(work.relativePath, file.Name)
-						task := RemoteFileTask{
-							FileID:       file.ID,
-							Name:         file.Name,
-							RelativePath: fileRelPath,
-							Size:         file.DecryptedSize,
-							CloudFile:    file.ToCloudFile(),
-						}
-
-						select {
-						case eventCh <- ScanEvent{File: &task}:
-						case <-ctx.Done():
-							wg.Done()
-							return
-						}
-
-						mu.Lock()
-						progress.FilesFound++
-						progress.BytesFound += file.DecryptedSize
-						mu.Unlock()
 					}
 
 					// Report progress after this folder

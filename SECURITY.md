@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.7.5
-**Last Updated:** 2026-02-25
+**Version:** 4.8.2
+**Last Updated:** 2026-03-02
 
 ## Overview
 
@@ -128,6 +128,20 @@ API keys should be stored securely:
 
 ---
 
+## Update Checks (v4.8.2)
+
+Rescale Interlink can check GitHub for newer releases on GUI startup. This makes a single
+unauthenticated HTTPS request to `api.github.com`.
+
+- **Disabled by default on FedRAMP platforms** (`rescale-gov.com` domains)
+- **Environment variable kill switch**: Set `RESCALE_DISABLE_UPDATE_CHECK=1` to disable
+- **No credentials sent**: Request is unauthenticated (GitHub public API)
+- **Rate limited**: Results cached for 24 hours (errors cached 1 hour)
+- **Trusted URLs only**: The "open in browser" action opens a hardcoded GitHub URL, not API-provided URLs
+- **Proxy aware**: Respects configured proxy settings (without warmup side effects)
+
+---
+
 ## IPC Security (Windows)
 
 ### Authorization Model
@@ -199,6 +213,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 4.8.2 | 2026-03-02 | Automatic update check with policy gate (FedRAMP, env var), trusted URL enforcement |
 | 4.7.5 | 2026-02-25 | Empty file upload fix, ThroughputMonitor dead code cleanup, build artifact exclusions |
 | 4.7.3 | 2026-02-22 | Path traversal sanitization in GetHistoricalJobRows, event listener isolation (unsub callbacks) |
 | 4.5.7 | 2026-02-03 | Auto-download settings auto-save fix, debounced config save |

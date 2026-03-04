@@ -89,11 +89,34 @@ export namespace wailsapp {
 		}
 	}
 	
+	export class VersionCheckDTO {
+	    hasUpdate: boolean;
+	    latestVersion?: string;
+	    currentVersion: string;
+	    releaseUrl?: string;
+	    checkedAt: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new VersionCheckDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hasUpdate = source["hasUpdate"];
+	        this.latestVersion = source["latestVersion"];
+	        this.currentVersion = source["currentVersion"];
+	        this.releaseUrl = source["releaseUrl"];
+	        this.checkedAt = source["checkedAt"];
+	        this.error = source["error"];
+	    }
+	}
 	export class AppInfoDTO {
 	    version: string;
 	    buildTime: string;
 	    fipsEnabled: boolean;
 	    fipsStatus: string;
+	    versionCheck?: VersionCheckDTO;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppInfoDTO(source);
@@ -105,7 +128,26 @@ export namespace wailsapp {
 	        this.buildTime = source["buildTime"];
 	        this.fipsEnabled = source["fipsEnabled"];
 	        this.fipsStatus = source["fipsStatus"];
+	        this.versionCheck = this.convertValues(source["versionCheck"], VersionCheckDTO);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class AutoDownloadValidationDTO {
 	    customFieldsEnabled: boolean;

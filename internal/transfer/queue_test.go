@@ -1000,3 +1000,96 @@ func TestBatchProgressTickerPublishes(t *testing.T) {
 	// Complete the task so the ticker stops
 	queue.Complete(task.ID)
 }
+
+// v4.8.2: PreRegisterBatch tests
+
+// TestPreRegisterBatch verifies the pre-registration mechanism:
+// 1. Pre-registered batch appears in GetAllBatchStats() with Total=0, TotalKnown=false
+// 2. After TrackTransferWithBatch, pre-registered entry is shadowed (still 1 batch)
+// 3. CleanupBatch removes pre-registered entry
+func TestPreRegisterBatch(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	q := NewQueue(eventBus)
+
+	batchID := "batch-001"
+	batchLabel := "TestFolder"
+
+	// Step 1: Pre-register batch
+	q.PreRegisterBatch(batchID, batchLabel, "download", "FileBrowser")
+
+	stats := q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch after PreRegisterBatch, got %d", len(stats))
+	}
+
+	bs := stats[0]
+	if bs.BatchID != batchID {
+		t.Errorf("BatchID = %q, want %q", bs.BatchID, batchID)
+	}
+	if bs.BatchLabel != batchLabel {
+		t.Errorf("BatchLabel = %q, want %q", bs.BatchLabel, batchLabel)
+	}
+	if bs.Direction != "download" {
+		t.Errorf("Direction = %q, want %q", bs.Direction, "download")
+	}
+	if bs.SourceLabel != "FileBrowser" {
+		t.Errorf("SourceLabel = %q, want %q", bs.SourceLabel, "FileBrowser")
+	}
+	if bs.Total != 0 {
+		t.Errorf("Total = %d, want 0", bs.Total)
+	}
+	if bs.TotalKnown {
+		t.Error("TotalKnown = true, want false")
+	}
+
+	// Step 2: Register a real task — pre-registered entry should be shadowed
+	q.MarkBatchScanInProgress(batchID, true)
+	q.TrackTransferWithBatch("file1.txt", 1024, TaskTypeDownload, "id-1", "/tmp/file1.txt", "FileBrowser", batchID, batchLabel)
+
+	stats = q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch after task registration, got %d", len(stats))
+	}
+
+	bs = stats[0]
+	if bs.Total != 1 {
+		t.Errorf("Total = %d, want 1 (task should shadow pre-registered entry)", bs.Total)
+	}
+	if bs.TotalKnown {
+		t.Error("TotalKnown = true, want false (scan still in progress)")
+	}
+
+	// Step 3: CleanupBatch removes pre-registered entry
+	q.CleanupBatch(batchID)
+
+	// Pre-registered entry is gone, but the task-derived batch entry still exists
+	stats = q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch after CleanupBatch (task-derived), got %d", len(stats))
+	}
+	// After cleanup, scan is no longer in progress, so TotalKnown should be true
+	if !stats[0].TotalKnown {
+		t.Error("TotalKnown = false after CleanupBatch, want true")
+	}
+}
+
+// TestPreRegisterBatchNoTasksAfterCleanup verifies that a pre-registered batch
+// with no tasks disappears after CleanupBatch.
+func TestPreRegisterBatchNoTasksAfterCleanup(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	q := NewQueue(eventBus)
+
+	q.PreRegisterBatch("batch-empty", "Empty", "download", "FileBrowser")
+
+	stats := q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(stats))
+	}
+
+	q.CleanupBatch("batch-empty")
+
+	stats = q.GetAllBatchStats()
+	if len(stats) != 0 {
+		t.Fatalf("expected 0 batches after CleanupBatch with no tasks, got %d", len(stats))
+	}
+}

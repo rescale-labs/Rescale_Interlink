@@ -251,3 +251,166 @@ func TestToCloudFile_MissingStorage(t *testing.T) {
 		t.Errorf("ToCloudFile() should return nil when Storage is missing, got %+v", cf)
 	}
 }
+
+// v4.8.2: ListFolderContentsStreaming tests
+
+// folderContentsPage builds a JSON response matching the API's folder contents format.
+func folderContentsPage(folders []map[string]string, files []map[string]interface{}, nextURL string) []byte {
+	results := make([]map[string]interface{}, 0, len(folders)+len(files))
+	for _, f := range folders {
+		results = append(results, map[string]interface{}{
+			"type": "folder",
+			"item": map[string]interface{}{
+				"id":   f["id"],
+				"name": f["name"],
+			},
+		})
+	}
+	for _, f := range files {
+		results = append(results, map[string]interface{}{
+			"type": "file",
+			"item": f,
+		})
+	}
+	resp := map[string]interface{}{"results": results}
+	if nextURL != "" {
+		resp["next"] = nextURL
+	}
+	b, _ := json.Marshal(resp)
+	return b
+}
+
+func TestListFolderContentsStreaming_EmitsPerPage(t *testing.T) {
+	pageCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pageCount++
+		w.Header().Set("Content-Type", "application/json")
+		switch pageCount {
+		case 1:
+			// Use relative URL — extractAPIPath handles full URLs, and ListFolderContentsPage
+			// passes relative paths through to doRequest which prepends the base URL
+			next := "/api/v3/folders/fold1/contents/?page=2&page_size=1000"
+			w.Write(folderContentsPage(
+				[]map[string]string{{"id": "sub1", "name": "subfolder1"}},
+				[]map[string]interface{}{
+					{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
+						"encodedEncryptionKey": "key1", "iv": "iv1",
+						"owner": "u1", "path": "/p",
+						"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+						"pathParts": map[string]interface{}{"container": "b", "path": "p"},
+					},
+				},
+				next,
+			))
+		case 2:
+			w.Write(folderContentsPage(
+				nil,
+				[]map[string]interface{}{
+					{"id": "f2", "name": "file2.txt", "decryptedSize": json.Number("200"),
+						"encodedEncryptionKey": "key2", "iv": "iv2",
+						"owner": "u1", "path": "/p",
+						"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+						"pathParts": map[string]interface{}{"container": "b", "path": "p"},
+					},
+				},
+				"",
+			))
+		default:
+			t.Errorf("unexpected page request %d", pageCount)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+
+	var callbacks int
+	var totalFolders, totalFiles int
+	err := client.ListFolderContentsStreaming(context.Background(), "fold1",
+		func(folders []FolderInfo, files []FileInfo) error {
+			callbacks++
+			totalFolders += len(folders)
+			totalFiles += len(files)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ListFolderContentsStreaming() error = %v", err)
+	}
+	if callbacks != 2 {
+		t.Errorf("callbacks = %d, want 2 (one per page)", callbacks)
+	}
+	if totalFolders != 1 {
+		t.Errorf("totalFolders = %d, want 1", totalFolders)
+	}
+	if totalFiles != 2 {
+		t.Errorf("totalFiles = %d, want 2", totalFiles)
+	}
+}
+
+func TestListFolderContentsStreaming_CallbackErrorAbortsPagination(t *testing.T) {
+	pageCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pageCount++
+		w.Header().Set("Content-Type", "application/json")
+		next := "/api/v3/folders/fold1/contents/?page=2&page_size=1000"
+		w.Write(folderContentsPage(nil,
+			[]map[string]interface{}{
+				{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
+					"encodedEncryptionKey": "key1", "iv": "iv1",
+					"owner": "u1", "path": "/p",
+					"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+					"pathParts": map[string]interface{}{"container": "b", "path": "p"},
+				},
+			},
+			next,
+		))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+
+	callbackErr := json.Unmarshal([]byte("invalid"), nil) // arbitrary non-nil error
+	err := client.ListFolderContentsStreaming(context.Background(), "fold1",
+		func(folders []FolderInfo, files []FileInfo) error {
+			return callbackErr
+		},
+	)
+	if err != callbackErr {
+		t.Errorf("error = %v, want %v", err, callbackErr)
+	}
+	if pageCount != 1 {
+		t.Errorf("pageCount = %d, want 1 (should stop after callback error)", pageCount)
+	}
+}
+
+func TestListFolderContentsStreaming_ContextCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next := "/api/v3/folders/fold1/contents/?page=2&page_size=1000"
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(folderContentsPage(nil,
+			[]map[string]interface{}{
+				{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
+					"encodedEncryptionKey": "key1", "iv": "iv1",
+					"owner": "u1", "path": "/p",
+					"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+					"pathParts": map[string]interface{}{"container": "b", "path": "p"},
+				},
+			},
+			next,
+		))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	err := client.ListFolderContentsStreaming(ctx, "fold1",
+		func(folders []FolderInfo, files []FileInfo) error {
+			cancel() // Cancel after first page
+			return nil
+		},
+	)
+	if err != context.Canceled {
+		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}

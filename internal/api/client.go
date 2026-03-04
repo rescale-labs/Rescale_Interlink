@@ -1385,6 +1385,48 @@ func (c *Client) ListFolderContentsAll(ctx context.Context, folderID string) (*F
 	return contents, nil
 }
 
+// ListFolderContentsStreaming paginates through folder contents, calling onPage
+// after each API page with the folders and files from that page. This enables
+// callers to process items as they're discovered rather than waiting for the
+// full folder to be enumerated.
+//
+// onPage receives the folders and files from each page. If onPage returns an
+// error, pagination stops and that error is returned. Context cancellation is
+// returned directly (not wrapped) so callers can distinguish cancel from real errors.
+//
+// v4.8.2: Streaming pagination for immediate download start.
+func (c *Client) ListFolderContentsStreaming(
+	ctx context.Context,
+	folderID string,
+	onPage func(folders []FolderInfo, files []FileInfo) error,
+) error {
+	nextURL := fmt.Sprintf("/api/v3/folders/%s/contents/", folderID)
+	pageCount := 0
+
+	for nextURL != "" {
+		pageCount++
+		if pageCount > constants.MaxPaginationPages {
+			return fmt.Errorf("pagination limit exceeded: %d pages, folder too large", pageCount-1)
+		}
+
+		page, err := c.ListFolderContentsPage(ctx, folderID, nextURL, 1000)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+
+		if err := onPage(page.Folders, page.Files); err != nil {
+			return err
+		}
+
+		nextURL = page.NextURL
+	}
+
+	return nil
+}
+
 // MoveFileToFolder moves a file to a specific folder
 func (c *Client) MoveFileToFolder(ctx context.Context, fileID, folderID string) error {
 	path := fmt.Sprintf("/api/v3/files/%s/", fileID)

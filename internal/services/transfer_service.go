@@ -18,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
@@ -130,6 +131,9 @@ func (ts *TransferService) StartTransfers(ctx context.Context, requests []Transf
 		return fmt.Errorf("API client not configured")
 	}
 
+	// v4.8.2: Synchronous proxy warmup before first API call
+	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+
 	// v4.0.0: Warm credential cache in background to avoid blocking downloads.
 	go ts.warmCredentialCache(ctx)
 
@@ -160,6 +164,13 @@ func (ts *TransferService) StartTransfers(ctx context.Context, requests []Transf
 
 // warmCredentialCache pre-warms the credential cache.
 func (ts *TransferService) warmCredentialCache(ctx context.Context) {
+	// v4.8.2: Best-effort async proxy warmup (redundant with synchronous warmup, harmless)
+	ts.mu.RLock()
+	if ts.apiClient != nil {
+		inthttp.WarmupProxyIfNeeded(ctx, ts.apiClient.GetConfig())
+	}
+	ts.mu.RUnlock()
+
 	ts.mu.Lock()
 	if ts.credManager == nil && ts.apiClient != nil {
 		ts.credManager = credentials.GetManager(ts.apiClient)
@@ -228,10 +239,14 @@ func (ts *TransferService) executePreRegisteredDownloadBatch(ctx context.Context
 // The batchCtx is cancelled when CancelBatch is called (via batchCancelFuncs in queue).
 // v4.8.0: Streaming scan+download architecture.
 // v4.8.1: Uses RunBatchFromChannel for adaptive concurrency (fixes hardcoded 5 workers).
+// v4.8.2: cancelFn parameter for atomic cancel registration — if non-nil, registered as
+// the batch cancel function so CancelBatch() cancels the caller's context (which propagates
+// to batchCtx). If nil, falls back to internal batchCancel (backwards compatible).
 func (ts *TransferService) StartStreamingDownloadBatch(
 	ctx context.Context,
 	requestCh <-chan TransferRequest,
-	batchID, batchLabel string,
+	batchID, batchLabel, sourceLabel string,
+	cancelFn context.CancelFunc,
 ) error {
 	ts.mu.RLock()
 	apiClient := ts.apiClient
@@ -245,7 +260,17 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 
 	// Create a cancellable batch context — CancelBatch() will cancel this
 	batchCtx, batchCancel := context.WithCancel(ctx)
-	ts.queue.RegisterBatchCancel(batchID, batchCancel)
+
+	// v4.8.2: Register caller-provided cancelFn if given (cancels scanCtx → batchCtx).
+	// This eliminates the race window between RegisterBatchCancel and any external override.
+	if cancelFn != nil {
+		ts.queue.RegisterBatchCancel(batchID, cancelFn)
+	} else {
+		ts.queue.RegisterBatchCancel(batchID, batchCancel)
+	}
+
+	// v4.8.2: Pre-register batch for immediate UI visibility during scan
+	ts.queue.PreRegisterBatch(batchID, batchLabel, "download", sourceLabel)
 
 	// Dispatch channel: registration goroutine → RunBatchFromChannel
 	dispatchCh := make(chan preRegItem, constants.DispatchChannelBuffer)
@@ -282,6 +307,7 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 	}
 
 	go func() {
+		defer batchCancel() // Ensure batchCtx resources are released when batch completes
 		transfer.RunBatchFromChannel(batchCtx, dispatchCh, cfg, func(ctx context.Context, item preRegItem) error {
 			ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient)
 			return nil // errors handled internally via queue.Fail

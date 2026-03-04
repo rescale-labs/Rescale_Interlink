@@ -6,6 +6,7 @@ vi.mock('../../wailsjs/runtime/runtime', () => ({
   EventsOn: vi.fn(() => vi.fn()),
   EventsOff: vi.fn(),
   ClipboardGetText: vi.fn(() => Promise.resolve('')),
+  BrowserOpenURL: vi.fn(),
 }))
 
 // Mock Wails Go bindings
@@ -23,6 +24,11 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
     version: '4.0.0-dev',
     fipsEnabled: true,
     fipsStatus: 'FIPS 140-3',
+  })),
+  CheckForUpdates: vi.fn(() => Promise.resolve({
+    hasUpdate: false,
+    currentVersion: 'v4.8.2',
+    checkedAt: new Date().toISOString(),
   })),
   UpdateConfig: vi.fn(() => Promise.resolve()),
   SaveConfig: vi.fn(() => Promise.resolve()),

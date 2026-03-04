@@ -602,11 +602,10 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 		}
 	}
 
-	// Start periodic refresh for large files
-	if encryptedSize > constants.LargeFileThreshold {
-		azureClient.StartPeriodicRefresh(ctx)
-		defer azureClient.StopPeriodicRefresh()
-	}
+	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
+	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
+	azureClient.StartPeriodicRefresh(ctx)
+	defer azureClient.StopPeriodicRefresh()
 
 	// Create output file (plaintext, no temp file needed!)
 	outFile, err := os.Create(localPath)

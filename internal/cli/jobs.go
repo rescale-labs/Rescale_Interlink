@@ -16,6 +16,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/constants"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
@@ -851,6 +852,9 @@ Examples:
 
 			// MODE 2: Download specific file
 			logger.Info().Str("file_id", fileID).Msg("Downloading specific file")
+
+			// v4.8.2: Warm proxy before first API call
+			inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 			// Get file info
 			fileInfo, err := apiClient.GetFileInfo(ctx, fileID)

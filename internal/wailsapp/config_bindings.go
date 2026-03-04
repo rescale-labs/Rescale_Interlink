@@ -19,20 +19,38 @@ import (
 
 // AppInfoDTO contains application version and status information.
 type AppInfoDTO struct {
-	Version     string `json:"version"`
-	BuildTime   string `json:"buildTime"`
-	FIPSEnabled bool   `json:"fipsEnabled"`
-	FIPSStatus  string `json:"fipsStatus"`
+	Version      string           `json:"version"`
+	BuildTime    string           `json:"buildTime"`
+	FIPSEnabled  bool             `json:"fipsEnabled"`
+	FIPSStatus   string           `json:"fipsStatus"`
+	VersionCheck *VersionCheckDTO `json:"versionCheck,omitempty"` // v4.8.2: cached update check result
 }
 
 // GetAppInfo returns version, build time, and FIPS status.
+// v4.8.2: Also includes cached version check result if available.
 func (a *App) GetAppInfo() AppInfoDTO {
-	return AppInfoDTO{
+	info := AppInfoDTO{
 		Version:     cli.Version,
 		BuildTime:   cli.BuildTime,
 		FIPSEnabled: intfips.Enabled,
 		FIPSStatus:  cli.FIPSStatus(),
 	}
+
+	// v4.8.2: Include cached version check if available and not expired
+	versionCheckCache.mu.RLock()
+	if versionCheckCache.cacheValid {
+		cacheTTL := successCacheDuration
+		if versionCheckCache.result.Error != "" {
+			cacheTTL = errorCacheDuration
+		}
+		if time.Since(versionCheckCache.lastCheck) < cacheTTL {
+			result := versionCheckCache.result
+			info.VersionCheck = &result
+		}
+	}
+	versionCheckCache.mu.RUnlock()
+
+	return info
 }
 
 // ConfigDTO is the JSON-safe configuration structure.

@@ -14,6 +14,7 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/filescan"
 	"github.com/rescale/rescale-int/internal/pur/parser"
@@ -720,6 +721,11 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 			if ts == nil {
 				a.failSingleJob(jobSpec.JobName, "Transfer service not available")
 				return
+			}
+
+			// v4.8.2: Warm proxy before first API call
+			if apiClient := a.engine.API(); apiClient != nil {
+				inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 			}
 
 			// v4.7.7: Generate batch ID for grouping uploads in Transfers tab

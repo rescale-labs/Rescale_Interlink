@@ -1,5 +1,74 @@
 # Release Notes - Rescale Interlink
 
+## v4.8.2 - March 2, 2026
+
+### Proxy Resilience
+
+Comprehensive proxy warmup coverage for Basic auth proxy environments. Previously, `WarmupProxyConnection` was only called in the PUR upload pipeline. Long-running batch transfers through a Basic auth proxy could see proxy sessions expire, causing credential refresh failures and mid-transfer deaths.
+
+- **Warmup response validation**: `WarmupProxyConnection` now detects 407/401 (proxy auth failure) and 5xx (proxy/server error) responses instead of silently returning success for any HTTP response.
+- **`WarmupProxyIfNeeded` convenience wrapper**: Safe to call unconditionally — returns immediately for non-basic proxy modes, logs errors as non-fatal warnings.
+- **Credential manager integration**: Proxy warmup injected into all 8 credential manager slow paths (S3, Azure, storage-specific, user profile, root folders) *before* write lock acquisition. Every credential refresh API call is now preceded by a proxy warmup.
+- **Entry point coverage**: One-time warmup added at the start of all CLI commands (`folders upload-dir`/`download-dir`, `files download`/`upload`, `jobs` single-file download), all GUI entry points (File Browser folder download, single-job upload, `StartTransfers`), and the daemon poll cycle.
+- **`ForceRefreshForStorage` cache key fix**: Forced credential refresh for Azure per-file SAS tokens previously wrote to a bare `storageID` key while `GetAzureCredentialsForStorage` reads from `storageID:path`. The stale entry was never replaced. Now uses the same composite cache key.
+- **Azure periodic refresh for all file sizes**: `StartPeriodicRefresh` (8-minute background credential refresh) was only started for files >1GB. Smaller files through slow proxies got no background refresh. Guard removed from all 3 Azure transfer paths — the goroutine is lightweight and cancelled by `StopPeriodicRefresh` when the transfer completes.
+
+### Streaming Download UX
+
+Three UX issues discovered during a 13,446-file GUI batch download, deferred from v4.8.0 pending the v4.8.1 transfer convergence refactor.
+
+- **Batch pre-registration**: New `PreRegisterBatch()` creates an empty batch entry visible in the Transfers tab immediately when a streaming download starts, before any files are discovered. Eliminates the 10-20s "flashing" where the batch would appear only after the first file was registered.
+- **Indeterminate progress bar**: During folder scan (`!totalKnown`), the progress bar shows an animated pulsing indicator with "Scanning... (N files)" and a live discovered-file count. Once the scan completes, it transitions to a standard determinate bar with percentage and ETA.
+- **Cancel button during scan**: Scanning batches (`!totalKnown`) are now treated as active, so the Cancel button is visible during the scan phase — not just after the first file starts downloading.
+- **Empty batch completion fix**: A pre-registered batch with 0 files no longer falsely shows as "Complete" (green checkmark). Requires `totalKnown && total > 0` to display completion status.
+
+### Automatic Update Notification
+
+- **Version check on startup**: GUI checks GitHub releases for newer versions ~2 seconds after launch (non-blocking).
+- **Yellow badge**: "Update available: vX.Y.Z &rarr;" badge appears below the version number; clicking opens the GitHub releases page.
+- **24-hour caching**: Results cached in-memory for the app session (24h for successes, 1h for errors).
+- **Enterprise policy gate**: Disabled automatically on FedRAMP platforms (`rescale-gov.com`). Set `RESCALE_DISABLE_UPDATE_CHECK=1` to disable globally.
+- **Security**: Opens hardcoded trusted GitHub URL only; no API-provided URLs opened in browser.
+- Based on community contribution by @roque-rescale (PR #14).
+
+### Bug Fixes
+
+- **Bug #1**: `ForceRefreshForStorage` cache key mismatch — Azure per-file SAS token forced refreshes were writing to the wrong cache key, so stale tokens were never replaced (see Proxy Resilience above).
+- **Bug #2**: `batchTickerLoop` would prematurely stop for scanning batches (Total=0, Queued=0, Active=0). Fixed by treating `!TotalKnown` batches as non-terminal.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/version/version.go` | v4.8.1 → v4.8.2 |
+| `wails.json` | productVersion 4.8.0 → 4.8.2 |
+| `frontend/package.json` | version 4.8.0 → 4.8.2 |
+| `internal/http/proxy.go` | Fix warmup response validation (407/401/5xx); add `WarmupProxyIfNeeded` helper |
+| `internal/cloud/credentials/manager.go` | Proxy warmup in 8 slow paths (before lock); `ForceRefreshForStorage` cache key fix |
+| `internal/cloud/credentials/manager_test.go` | **NEW**: Credential manager unit tests (warmup no-op, cache key consistency) |
+| `internal/cli/folders.go` | Warmup at `upload-dir` and `download-dir` entry |
+| `internal/cli/download_helper.go` | Warmup before `executeFileDownload`, `executeJobDownload` |
+| `internal/cli/upload_helper.go` | Warmup before `UploadFilesWithIDs` |
+| `internal/cli/jobs.go` | Warmup before single-file job download |
+| `internal/cloud/providers/azure/download.go` | Remove LargeFileThreshold guard on `StartPeriodicRefresh` |
+| `internal/cloud/providers/azure/streaming_concurrent.go` | Same |
+| `internal/cloud/providers/azure/pre_encrypt.go` | Same |
+| `internal/wailsapp/file_bindings.go` | Warmup before `ScanRemoteFolderStreaming`; pass `"FileBrowser"` sourceLabel |
+| `internal/wailsapp/job_bindings.go` | Warmup before `UploadFileSync` loop |
+| `internal/services/transfer_service.go` | Warmup in `StartTransfers`/`warmCredentialCache`; `sourceLabel` param + `PreRegisterBatch` call |
+| `internal/services/transfer_service_test.go` | Updated `StartStreamingDownloadBatch` call for new sourceLabel param |
+| `internal/daemon/daemon.go` | Store `appCfg`; warmup in `poll()` |
+| `internal/transfer/queue.go` | `preRegisteredBatches`, `PreRegisterBatch()`, merge in `GetAllBatchStats()`, cleanup, ticker fixes |
+| `internal/transfer/queue_test.go` | `TestPreRegisterBatch`, `TestPreRegisterBatchNoTasksAfterCleanup` |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Fix `isActive`/`isAllComplete`; indeterminate progress bar during scan |
+| `internal/wailsapp/version_bindings.go` | **NEW**: Version check logic, cache, policy gate, dedup |
+| `internal/wailsapp/version_bindings_test.go` | **NEW**: Unit tests (compareVersions, HTTP, cache TTL, policy, dedup) |
+| `internal/wailsapp/config_bindings.go` | Add `VersionCheck` to `AppInfoDTO`, update `GetAppInfo()` |
+| `frontend/src/App.tsx` | Add update check useEffect, yellow badge display |
+| `frontend/src/test/setup.ts` | Add mocks for `CheckForUpdates` and `BrowserOpenURL` |
+
+---
+
 ## v4.8.1 - March 1, 2026
 
 ### Transfer System Convergence

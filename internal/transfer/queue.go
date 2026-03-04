@@ -67,20 +67,24 @@ type Queue struct {
 	batchTickerRunning bool
 
 	// v4.8.0: Streaming batch support
-	batchCancelFuncs   map[string]context.CancelFunc // Cancel functions for streaming batches
+	batchCancelFuncs    map[string]context.CancelFunc // Cancel functions for streaming batches
 	batchScanInProgress map[string]bool               // True while scan is still discovering files
+
+	// v4.8.2: Pre-registered batches visible before first task is discovered
+	preRegisteredBatches map[string]*BatchStats
 }
 
 // NewQueue creates a new transfer queue with the specified event bus.
 // The queue is immediately ready to track tasks - no Start() needed.
 func NewQueue(eventBus *events.EventBus) *Queue {
 	return &Queue{
-		tasks:               make([]*TransferTask, 0),
-		tasksByID:           make(map[string]*TransferTask),
-		cancelFuncs:         make(map[string]context.CancelFunc),
-		batchCancelFuncs:    make(map[string]context.CancelFunc),
-		batchScanInProgress: make(map[string]bool),
-		eventBus:            eventBus,
+		tasks:                make([]*TransferTask, 0),
+		tasksByID:            make(map[string]*TransferTask),
+		cancelFuncs:          make(map[string]context.CancelFunc),
+		batchCancelFuncs:     make(map[string]context.CancelFunc),
+		batchScanInProgress:  make(map[string]bool),
+		preRegisteredBatches: make(map[string]*BatchStats),
+		eventBus:             eventBus,
 	}
 }
 
@@ -585,6 +589,14 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		}
 	}
 
+	// v4.8.2: Include pre-registered batches that have no tasks yet
+	for batchID, preBatch := range q.preRegisteredBatches {
+		if _, exists := batchMap[batchID]; !exists {
+			batchMap[batchID] = preBatch
+			batchOrder = append(batchOrder, batchID)
+		}
+	}
+
 	// Compute byte-weighted progress
 	result := make([]BatchStats, 0, len(batchOrder))
 	for _, batchID := range batchOrder {
@@ -711,6 +723,25 @@ func (q *Queue) RegisterBatchCancel(batchID string, cancelFn context.CancelFunc)
 	q.batchCancelFuncs[batchID] = cancelFn
 }
 
+// PreRegisterBatch creates an empty batch entry so it appears in GetAllBatchStats()
+// before any tasks are registered. Used by streaming downloads where API scan
+// may take 10-20s before the first file is discovered.
+// v4.8.2: Eliminates batch entry "flashing" in the Transfers tab.
+func (q *Queue) PreRegisterBatch(batchID, batchLabel, direction, sourceLabel string) {
+	q.mu.Lock()
+	q.preRegisteredBatches[batchID] = &BatchStats{
+		BatchID:     batchID,
+		BatchLabel:  batchLabel,
+		Direction:   direction,
+		SourceLabel: sourceLabel,
+		TotalKnown:  false,
+	}
+	q.mu.Unlock()
+
+	// Start batch ticker so pre-registered batch gets tick events during scan
+	q.ensureBatchTicker()
+}
+
 // MarkBatchScanInProgress sets whether a batch's scan is still discovering files.
 // v4.8.0: Used to determine TotalKnown in batch stats.
 func (q *Queue) MarkBatchScanInProgress(batchID string, inProgress bool) {
@@ -730,6 +761,7 @@ func (q *Queue) CleanupBatch(batchID string) {
 	defer q.mu.Unlock()
 	delete(q.batchCancelFuncs, batchID)
 	delete(q.batchScanInProgress, batchID)
+	delete(q.preRegisteredBatches, batchID)
 }
 
 // RetryFailedInBatch retries all failed tasks in a batch.
@@ -783,7 +815,8 @@ func (q *Queue) batchTickerLoop() {
 
 		allTerminal := true
 		for _, bs := range stats {
-			if bs.Queued > 0 || bs.Active > 0 {
+			// v4.8.2: Scanning batches (!TotalKnown) are also non-terminal
+			if bs.Queued > 0 || bs.Active > 0 || !bs.TotalKnown {
 				allTerminal = false
 			}
 

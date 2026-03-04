@@ -8,6 +8,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -89,6 +90,9 @@ func (m *Manager) GetS3Credentials(ctx context.Context) (*models.S3Credentials, 
 	}
 	m.mu.RUnlock()
 
+	// v4.8.2: Warm proxy before credential refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
+
 	// Slow path: refresh needed (write lock)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -127,6 +131,9 @@ func (m *Manager) GetAzureCredentials(ctx context.Context) (*models.AzureCredent
 	}
 	m.mu.RUnlock()
 
+	// v4.8.2: Warm proxy before credential refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
+
 	// Slow path: refresh needed (write lock)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -153,6 +160,9 @@ func (m *Manager) GetAzureCredentials(ctx context.Context) (*models.AzureCredent
 // ForceRefresh forces an immediate credential refresh, bypassing the cache
 // Useful for recovering from token expiration errors or when credentials are known to be invalid
 func (m *Manager) ForceRefresh(ctx context.Context) error {
+	// v4.8.2: Warm proxy before credential refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -203,6 +213,9 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 		return creds, nil
 	}
 	m.mu.RUnlock()
+
+	// v4.8.2: Warm proxy before credential refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
 	m.mu.Lock()
@@ -266,6 +279,9 @@ func (m *Manager) GetAzureCredentialsForStorage(ctx context.Context, fileInfo *m
 	}
 	m.mu.RUnlock()
 
+	// v4.8.2: Warm proxy before credential refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
+
 	// Slow path: refresh needed (write lock)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -298,19 +314,28 @@ func (m *Manager) ForceRefreshForStorage(ctx context.Context, fileInfo *models.C
 		return m.ForceRefresh(ctx)
 	}
 
+	// v4.8.2: Warm proxy before credential refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	storageID := fileInfo.Storage.ID
+
+	// v4.8.2: Use same cache key as GetAzureCredentialsForStorage (storageID:path)
+	cacheKey := storageID
+	if fileInfo.PathParts != nil && fileInfo.PathParts.Path != "" {
+		cacheKey = storageID + ":" + fileInfo.PathParts.Path
+	}
 
 	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
 	if err != nil {
 		return fmt.Errorf("failed to force refresh storage-specific credentials: %w", err)
 	}
 
-	m.storageS3Creds[storageID] = s3Creds
-	m.storageAzureCreds[storageID] = azureCreds
-	m.storageCredsRefresh[storageID] = time.Now()
+	m.storageS3Creds[cacheKey] = s3Creds
+	m.storageAzureCreds[cacheKey] = azureCreds
+	m.storageCredsRefresh[cacheKey] = time.Now()
 
 	return nil
 }
@@ -328,6 +353,9 @@ func (m *Manager) GetUserProfile(ctx context.Context) (*models.UserProfile, erro
 		return profile, nil
 	}
 	m.mu.RUnlock()
+
+	// v4.8.2: Warm proxy before profile refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
 	m.mu.Lock()
@@ -364,6 +392,9 @@ func (m *Manager) GetRootFolders(ctx context.Context) (*models.RootFolders, erro
 		return folders, nil
 	}
 	m.mu.RUnlock()
+
+	// v4.8.2: Warm proxy before folder refresh API call
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
 	m.mu.Lock()

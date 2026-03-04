@@ -612,8 +612,17 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
   // v4.0.8: Handle enumeration events for folder scan progress
   // v4.7.7: No longer removes on completion — removal is handled by fetchBatches reconciliation
+  // v4.8.2: Ignore non-complete events for enumerations that already have a matching batch
+  // (prevents phantom "Scanning" row flash during active downloads)
   handleEnumerationEvent: (event: EnumerationEventDTO) => {
     set(state => {
+      // v4.8.2: Defense-in-depth — if a batch already exists for this enumeration,
+      // ignore non-complete progress events (batch row handles progress display)
+      if (!event.isComplete) {
+        const hasBatch = state.batches.some(b => b.batchID === event.id)
+        if (hasBatch) return state
+      }
+
       const existingIndex = state.enumerations.findIndex(e => e.id === event.id)
       const now = Date.now()
 

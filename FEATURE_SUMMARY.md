@@ -1,10 +1,35 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.8.1
-**Build Date:** March 1, 2026
+**Version:** 4.8.2
+**Build Date:** March 2, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
+
+---
+
+## v4.8.2 Changes — Proxy Resilience + Streaming Download UX
+
+### Proxy Warmup Infrastructure (`internal/http/proxy.go`, `internal/cloud/credentials/manager.go`)
+- **`WarmupProxyIfNeeded`**: Convenience wrapper that calls `WarmupProxyConnection` for Basic auth proxies; safe to call unconditionally, errors logged as non-fatal. Injected into all 8 credential manager slow paths (before write lock), all CLI/GUI/daemon entry points.
+- **Response validation**: `WarmupProxyConnection` now detects 407/401 (proxy auth failure) and 5xx (server error) instead of silently succeeding.
+- **`ForceRefreshForStorage` cache key fix**: Azure per-file SAS token forced refreshes now use the same `storageID:path` composite cache key as `GetAzureCredentialsForStorage`.
+
+### Azure Periodic Refresh for All File Sizes
+- `StartPeriodicRefresh` (8-minute background credential refresh) was previously gated on files >1GB. Guard removed from all 3 Azure transfer paths (`download.go`, `streaming_concurrent.go`, `pre_encrypt.go`). Lightweight goroutine cancelled by `StopPeriodicRefresh` when transfer completes.
+
+### Automatic Update Notification (`internal/wailsapp/version_bindings.go`, `App.tsx`)
+- **Version check on startup**: GUI checks GitHub releases for newer versions ~2 seconds after launch (non-blocking, 5s timeout).
+- **Yellow badge**: "Update available: vX.Y.Z" badge appears below the version number in the header; clicking opens the GitHub releases page.
+- **24-hour caching**: Successful results cached 24h, errors cached 1h (in-memory, session-scoped).
+- **Enterprise policy gate**: Disabled automatically on FedRAMP platforms (`rescale-gov.com`). Set `RESCALE_DISABLE_UPDATE_CHECK=1` to disable globally.
+- **Security**: Opens hardcoded trusted GitHub URL only; no API-provided URLs used. Proxy-aware without warmup side effects. In-flight dedup prevents concurrent checks.
+
+### Streaming Download UX (`internal/transfer/queue.go`, `TransfersTab.tsx`)
+- **`PreRegisterBatch()`**: Creates an empty batch entry visible in the Transfers tab immediately when a streaming download starts, before any files are discovered. Eliminates 10-20s "flashing" during API scan.
+- **Indeterminate progress bar**: Animated pulsing bar with "Scanning... (N files)" during folder scan. Transitions to determinate bar with percentage and ETA once scan completes.
+- **Cancel button during scan**: Scanning batches (`!totalKnown`) treated as active — Cancel button visible throughout scan phase.
+- **Empty batch completion fix**: Pre-registered batch with 0 files no longer falsely shows as "Complete".
 
 ---
 

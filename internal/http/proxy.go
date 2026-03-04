@@ -243,7 +243,27 @@ func WarmupProxyConnection(ctx context.Context, cfg *config.Config) error {
 	}
 	defer resp.Body.Close()
 
+	// v4.8.2: Validate response — 407/401 indicate proxy auth failure,
+	// 5xx indicates proxy/server error. Non-fatal but improves observability.
+	if resp.StatusCode == 407 || resp.StatusCode == 401 {
+		return fmt.Errorf("proxy warmup: authentication error (HTTP %d)", resp.StatusCode)
+	} else if resp.StatusCode >= 500 {
+		return fmt.Errorf("proxy warmup: server error (HTTP %d)", resp.StatusCode)
+	}
 	return nil
+}
+
+// WarmupProxyIfNeeded calls WarmupProxyConnection if the proxy mode is "basic".
+// Safe to call unconditionally — returns immediately for non-basic proxy modes.
+// Errors are logged but non-fatal (warmup failure should not block transfers).
+// v4.8.2: Convenience wrapper used by credential manager and transfer entry points.
+func WarmupProxyIfNeeded(ctx context.Context, cfg *config.Config) {
+	if cfg == nil || strings.ToLower(cfg.ProxyMode) != "basic" {
+		return
+	}
+	if err := WarmupProxyConnection(ctx, cfg); err != nil {
+		log.Printf("[PROXY] warmup warning (non-fatal): %v", err)
+	}
 }
 
 // proxyFuncWithBypass returns a proxy function that respects the NoProxy bypass list.

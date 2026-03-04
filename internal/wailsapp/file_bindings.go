@@ -15,6 +15,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/pathutil"
@@ -496,7 +497,8 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: ErrNoTransferService.Error()}
 	}
 
-	ctx := context.Background()
+	// v4.8.2: Unified cancellable context — CancelBatch() → scanCancel() → stops everything
+	scanCtx, scanCancel := context.WithCancel(context.Background())
 
 	// Emit enumeration started
 	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "")
@@ -508,20 +510,21 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	}
 	rootOutputDir := filepath.Join(destPath, rootFolderName)
 	if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
+		scanCancel() // Release context resources on early return
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to create root folder: %s", err.Error()))
 		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Failed to create root folder: "+err.Error(), "")
 		return FolderDownloadResultDTO{Error: "Failed to create root folder: " + err.Error()}
 	}
 
+	// v4.8.2: Warm proxy before first API call
+	inthttp.WarmupProxyIfNeeded(scanCtx, apiClient.GetConfig())
+
 	// v4.8.0: Start streaming scan — files emitted as discovered
 	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
-	scanEventCh, scanErrCh := cli.ScanRemoteFolderStreaming(ctx, apiClient, folderID,
-		func(p cli.ScanProgress) {
-			emitEnumeration(events.EventEnumerationProgress,
-				p.FoldersFound, p.FilesFound, p.BytesFound, false, "",
-				fmt.Sprintf("Scanning: %d folders, %d files...", p.FoldersFound, p.FilesFound))
-		},
-	)
+	// v4.8.2: No enumeration progress during scan — batch row handles progress display.
+	// This eliminates phantom "Scanning" row flashing caused by EventEnumerationProgress
+	// re-creating the enumeration after reconciliation removes it.
+	scanEventCh, scanErrCh := cli.ScanRemoteFolderStreaming(scanCtx, apiClient, folderID, nil)
 
 	// Create request channel for streaming batch
 	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
@@ -530,7 +533,9 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	ts.GetQueue().MarkBatchScanInProgress(enumID, true)
 
 	// Start streaming download batch (workers start consuming immediately)
-	if err := ts.StartStreamingDownloadBatch(ctx, requestCh, enumID, displayName); err != nil {
+	// v4.8.2: Pass scanCancel so CancelBatch() → scanCancel() → cancels scanCtx → stops everything
+	if err := ts.StartStreamingDownloadBatch(scanCtx, requestCh, enumID, displayName, "FileBrowser", scanCancel); err != nil {
+		scanCancel() // Stop scan goroutines on batch start failure
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to start streaming batch: %s", err.Error()))
 		close(requestCh)
 		ts.GetQueue().MarkBatchScanInProgress(enumID, false)
@@ -582,8 +587,8 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				case requestCh <- req:
 					filesQueued++
 					totalBytes += event.File.Size
-				case <-ctx.Done():
-					emitCompletion(foldersCreated, filesQueued, totalBytes, "cancelled")
+				case <-scanCtx.Done():
+					emitCompletion(foldersCreated, filesQueued, totalBytes, "")
 					return
 				}
 			}
@@ -596,7 +601,8 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		default:
 		}
 
-		if scanErr != nil {
+		// v4.8.2: Only report as error if we weren't cancelled — cancel is clean termination
+		if scanErr != nil && scanCtx.Err() == nil {
 			emitLog(events.ErrorLevel, fmt.Sprintf("Scan error: %s", scanErr.Error()))
 			emitCompletion(foldersCreated, filesQueued, totalBytes, scanErr.Error())
 			return
@@ -767,6 +773,9 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	// Create logger for this upload
 	logger := logging.NewLogger("folder-upload", nil)
 	ctx := context.Background()
+
+	// v4.8.2: Warm proxy before first API call
+	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 	// v4.0.8: Emit enumeration started event
 	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "")

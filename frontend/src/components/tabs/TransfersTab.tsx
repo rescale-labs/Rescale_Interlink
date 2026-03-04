@@ -157,8 +157,8 @@ interface BatchRowProps {
 const BatchRow = memo(function BatchRow({
   batch, isExpanded, expandedTasks, onToggle, onCancel, onRetryFailed, onLoadMore, onCancelTask, onRetryTask
 }: BatchRowProps) {
-  const isActive = batch.queued > 0 || batch.active > 0
-  const isAllComplete = batch.completed === batch.total
+  const isActive = batch.queued > 0 || batch.active > 0 || !batch.totalKnown
+  const isAllComplete = batch.totalKnown && batch.total > 0 && batch.completed === batch.total
   const hasFailed = batch.failed > 0
   const isFileBrowser = batch.sourceLabel === 'FileBrowser'
 
@@ -217,15 +217,23 @@ const BatchRow = memo(function BatchRow({
         {/* Progress bar */}
         <div className="flex-1 min-w-0">
           <div className="relative h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className={clsx('absolute top-0 left-0 h-full rounded-full transition-all duration-300', barColor)}
-              style={{ width: `${batch.progress * 100}%` }}
-            />
+            {batch.totalKnown ? (
+              <div
+                className={clsx('absolute top-0 left-0 h-full rounded-full transition-all duration-300', barColor)}
+                style={{ width: `${batch.progress * 100}%` }}
+              />
+            ) : (
+              <div className="absolute top-0 left-0 h-full w-full rounded-full bg-blue-400 animate-pulse opacity-60" />
+            )}
           </div>
           <div className="flex justify-between mt-1 text-xs text-gray-500">
-            <span>{Math.round(batch.progress * 100)}%</span>
+            <span>
+              {batch.totalKnown
+                ? `${Math.round(batch.progress * 100)}%`
+                : `Scanning... (${formatNumber(batch.total)} files)`}
+            </span>
             {speedFormatted && <span>{speedFormatted}</span>}
-            {etaFormatted && <span>ETA: {etaFormatted}</span>}
+            {batch.totalKnown && etaFormatted && <span>ETA: {etaFormatted}</span>}
           </div>
         </div>
 
@@ -685,7 +693,11 @@ export function TransfersTab() {
         ) : (
           <div>
             {/* v4.0.8: Show enumeration rows at top */}
-            {enumerations.map((enumeration) => (
+            {/* v4.8.2: Filter out non-complete enumerations that have a matching batch —
+                final render-layer defense against phantom "Scanning" row flash */}
+            {enumerations
+              .filter(e => e.isComplete || !batches.some(b => b.batchID === e.id))
+              .map((enumeration) => (
               <EnumerationRow
                 key={enumeration.id}
                 enumeration={enumeration}

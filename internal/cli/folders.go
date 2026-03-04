@@ -13,6 +13,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/diskspace"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/util/tags"
 )
@@ -281,6 +282,9 @@ Examples:
 			}
 
 			ctx := GetContext()
+
+			// v4.8.2: Warm proxy before first API call
+			inthttp.WarmupProxyIfNeeded(ctx, cfg)
 
 			// Get parent folder ID (default to My Library)
 			if parentID == "" {
@@ -727,6 +731,9 @@ Examples:
 			}
 
 			ctx := GetContext()
+
+			// v4.8.2: Warm proxy before first API call
+			inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 			// Use helper function for recursive download
 			// Note: folderName is empty, so it will use folderID as the folder name

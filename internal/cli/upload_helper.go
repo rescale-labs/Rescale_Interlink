@@ -12,6 +12,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/constants"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -281,6 +282,9 @@ func UploadFilesWithIDs(
 	logger *logging.Logger,
 	silent bool, // If true, skip summary output (for use in job submission)
 ) ([]string, error) {
+	// v4.8.2: Warm proxy before first API call
+	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+
 	// Expand glob patterns
 	filePaths, err := expandGlobPatterns(filePatterns)
 	if err != nil {

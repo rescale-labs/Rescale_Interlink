@@ -131,7 +131,7 @@ func TestStreamingDownloadBatchAdaptiveConcurrency(t *testing.T) {
 	// immediately — before reaching RunBatchFromChannel. This verifies the error path.
 	ch := make(chan TransferRequest)
 	close(ch)
-	err := ts.StartStreamingDownloadBatch(context.Background(), ch, "test-batch", "test")
+	err := ts.StartStreamingDownloadBatch(context.Background(), ch, "test-batch", "test", "", nil)
 	if err == nil {
 		t.Fatal("expected error with nil API client")
 	}

@@ -52,11 +52,10 @@ func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.Le
 		fileSize = props.ContentLength
 	}
 
-	// Start periodic refresh for large files
-	if fileSize > constants.LargeFileThreshold {
-		azureClient.StartPeriodicRefresh(ctx)
-		defer azureClient.StopPeriodicRefresh()
-	}
+	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
+	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
+	azureClient.StartPeriodicRefresh(ctx)
+	defer azureClient.StopPeriodicRefresh()
 
 	// Choose download method based on file size and transfer handle
 	if fileSize > constants.MultipartThreshold {

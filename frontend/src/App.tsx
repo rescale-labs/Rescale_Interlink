@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext } from 'react'
+import { useState, useEffect, useRef, createContext, useContext } from 'react'
 import { Tab } from '@headlessui/react'
 import {
   Cog6ToothIcon,
@@ -22,6 +22,7 @@ import {
 import { ErrorBoundary } from './components/common'
 import * as App from '../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../wailsjs/go/models'
+import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
 import { useConfigStore } from './stores/configStore'
 import { useLogStore } from './stores/logStore'
 import { useTransferStore } from './stores/transferStore'
@@ -127,6 +128,23 @@ function AppComponent() {
     App.GetAppInfo().then(setAppInfo).catch(console.error)
   }, [])
 
+  // v4.8.2: Check for updates on startup (non-blocking, 2s delay)
+  const updateCheckRan = useRef(false)
+  useEffect(() => {
+    if (updateCheckRan.current) return
+    updateCheckRan.current = true
+    const timer = setTimeout(async () => {
+      try {
+        await App.CheckForUpdates()
+        const refreshedInfo = await App.GetAppInfo()
+        setAppInfo(refreshedInfo)
+      } catch (err) {
+        console.error('Failed to check for updates:', err)
+      }
+    }, 2000)
+    return () => clearTimeout(timer)
+  }, [])
+
   // Tab navigation function
   const switchToTab = (tabName: string) => {
     const index = tabs.findIndex(t => t.name === tabName)
@@ -164,17 +182,29 @@ function AppComponent() {
               </span>
             )}
           </div>
-          {/* Version and FIPS status (right) */}
-          <div className="flex items-center space-x-4 text-sm text-gray-500">
-            {appInfo && (
-              <>
-                <span>{appInfo.version}</span>
-                {appInfo.fipsEnabled && appInfo.fipsStatus && (
-                  <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
-                    {appInfo.fipsStatus}
-                  </span>
-                )}
-              </>
+          {/* Version, FIPS status, and update notification (right) */}
+          <div className="flex flex-col items-end text-sm text-gray-500">
+            <div className="flex items-center space-x-4">
+              {appInfo && (
+                <>
+                  <span>{appInfo.version}</span>
+                  {appInfo.fipsEnabled && appInfo.fipsStatus && (
+                    <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
+                      {appInfo.fipsStatus}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            {/* v4.8.2: Version update notification */}
+            {appInfo?.versionCheck?.hasUpdate && appInfo.versionCheck.releaseUrl && (
+              <button
+                onClick={() => BrowserOpenURL(appInfo.versionCheck!.releaseUrl!)}
+                className="text-xs px-2 py-0.5 bg-yellow-100 text-yellow-700 hover:bg-yellow-200 rounded font-medium cursor-pointer transition-colors"
+                title={`Update available: ${appInfo.versionCheck.latestVersion}`}
+              >
+                Update available: {appInfo.versionCheck.latestVersion} &rarr;
+              </button>
             )}
           </div>
         </header>
