@@ -322,6 +322,84 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 	return nil
 }
 
+// StartStreamingUploadBatch accepts a channel of TransferRequest and registers+dispatches
+// them incrementally as they arrive. Uploads begin as soon as their destination folder
+// is created, without waiting for all folders to be created first.
+// v4.8.3: Symmetric to StartStreamingDownloadBatch. Used by pipelined folder upload.
+func (ts *TransferService) StartStreamingUploadBatch(
+	ctx context.Context,
+	requestCh <-chan TransferRequest,
+	batchID, batchLabel, sourceLabel string,
+	cancelFn context.CancelFunc,
+) error {
+	ts.mu.RLock()
+	apiClient := ts.apiClient
+	ts.mu.RUnlock()
+
+	if apiClient == nil {
+		return fmt.Errorf("API client not configured")
+	}
+
+	go ts.warmCredentialCache(ctx)
+
+	// Create a cancellable batch context — CancelBatch() will cancel this
+	batchCtx, batchCancel := context.WithCancel(ctx)
+
+	// Register caller-provided cancelFn if given (cancels uploadCtx → batchCtx).
+	if cancelFn != nil {
+		ts.queue.RegisterBatchCancel(batchID, cancelFn)
+	} else {
+		ts.queue.RegisterBatchCancel(batchID, batchCancel)
+	}
+
+	// Pre-register batch for immediate UI visibility during folder creation
+	ts.queue.PreRegisterBatch(batchID, batchLabel, "upload", sourceLabel)
+
+	// Dispatch channel: registration goroutine → RunBatchFromChannel
+	dispatchCh := make(chan preRegItem, constants.DispatchChannelBuffer)
+
+	// Registration goroutine: reads from requestCh, registers tasks, sends to dispatch.
+	go func() {
+		defer close(dispatchCh)
+		defer ts.queue.CleanupBatch(batchID)
+
+		for {
+			select {
+			case <-batchCtx.Done():
+				return
+			case req, ok := <-requestCh:
+				if !ok {
+					return // Channel closed — all files queued
+				}
+				taskID := ts.registerUploadTask(req)
+				select {
+				case dispatchCh <- preRegItem{req: req, taskID: taskID}:
+				case <-batchCtx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// Worker goroutines via RunBatchFromChannel: adaptive concurrency from file sizes.
+	cfg := transfer.BatchConfig{
+		MaxWorkers:  cap(ts.semaphore),
+		ResourceMgr: ts.resourceMgr,
+		Label:       "UPLOAD-STREAM",
+	}
+
+	go func() {
+		defer batchCancel() // Ensure batchCtx resources are released when batch completes
+		transfer.RunBatchFromChannel(batchCtx, dispatchCh, cfg, func(ctx context.Context, item preRegItem) error {
+			ts.executeUploadTask(ctx, item.req, item.taskID, apiClient)
+			return nil // errors handled internally via queue.Fail
+		})
+		log.Printf("[BATCH] Streaming UPLOAD batch complete: %s", batchID)
+	}()
+
+	return nil
+}
+
 // registerUploadTask registers an upload task in the queue (starts as Queued).
 // Returns the task ID. No context or cancel fn is set — that happens in executeUploadTask.
 func (ts *TransferService) registerUploadTask(req TransferRequest) string {

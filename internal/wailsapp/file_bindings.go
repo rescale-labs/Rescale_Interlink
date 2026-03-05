@@ -745,6 +745,18 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		}
 	}
 
+	emitLog := func(level events.LogLevel, msg string) {
+		if a.engine != nil && a.engine.Events() != nil {
+			a.engine.Events().Publish(&events.LogEvent{
+				BaseEvent: events.BaseEvent{EventType: events.EventLog, Time: time.Now()},
+				Level:     level,
+				Message:   msg,
+				Stage:     "folder-upload",
+				JobName:   displayName,
+			})
+		}
+	}
+
 	// v4.7.7: Deferred completion — ensures EventEnumerationCompleted is emitted on ALL exit paths
 	completionEmitted := false
 	var deferredError string
@@ -902,82 +914,116 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		}
 	}
 
-	// Create folder structure with merge mode (skip existing folders)
-	folderConflictMode := cli.ConflictMergeAll
-	a.logInfo("folder-upload", "Creating folder structure on remote...")
-	mapping, created, err := cli.CreateFolderStructure(
-		ctx, apiClient, cache, localPath, directories, rootFolderID,
-		&folderConflictMode, constants.DefaultFolderConcurrency, logger, nil, progressWriter,
-	)
-	if err != nil {
-		a.logError("folder-upload", fmt.Sprintf("Failed to create folders: %v", err))
-		deferredError = "Failed to create folder structure: " + err.Error()
+	// v4.8.3: Pre-compute files per directory for pipelined dispatch
+	filesPerDir := make(map[string][]string)
+	for _, filePath := range files {
+		filesPerDir[filepath.Dir(filePath)] = append(filesPerDir[filepath.Dir(filePath)], filePath)
+	}
+
+	// v4.8.3: Pipelined upload — folder creation and file uploads run concurrently.
+	// Files are queued for upload as soon as their parent folder is created,
+	// instead of waiting for ALL folders to be created first.
+	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+	folderReadyChan := make(chan cli.FolderReadyEvent, constants.WorkChannelBuffer)
+	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
+
+	// Mark scan in progress + start streaming upload batch
+	ts.GetQueue().MarkBatchScanInProgress(enumID, true)
+
+	if err := ts.StartStreamingUploadBatch(uploadCtx, requestCh, enumID, displayName, "FileBrowser", uploadCancel); err != nil {
+		uploadCancel()
+		close(requestCh)
+		ts.GetQueue().MarkBatchScanInProgress(enumID, false)
+		deferredError = "Failed to start streaming batch: " + err.Error()
 		return FolderUploadResultDTO{Error: deferredError}
 	}
-	foldersCreated += created
-	a.logInfo("folder-upload", fmt.Sprintf("Created %d folders on remote", foldersCreated))
 
-	// Queue files for upload using TransferService
-	var totalBytes int64
-	var transferRequests []services.TransferRequest
+	// Goroutine 1: Folder creation — sends FolderReadyEvent as each folder is created
+	folderConflictMode := cli.ConflictMergeAll
+	folderErrCh := make(chan error, 1)
 
-	for _, filePath := range files {
-		// Get parent folder ID from mapping
-		dirPath := filepath.Dir(filePath)
-		remoteFolderID, ok := mapping[dirPath]
-		if !ok {
-			// Fallback to root if directory not in mapping
-			remoteFolderID = mapping[localPath]
-			if remoteFolderID == "" {
-				remoteFolderID = rootFolderID
+	go func() {
+		defer close(folderReadyChan)
+		_, created, err := cli.CreateFolderStructure(
+			uploadCtx, apiClient, cache, localPath, directories, rootFolderID,
+			&folderConflictMode, constants.DefaultFolderConcurrency, logger,
+			folderReadyChan, progressWriter,
+		)
+		if err != nil && uploadCtx.Err() == nil {
+			emitLog(events.ErrorLevel, fmt.Sprintf("Folder creation error: %v", err))
+			folderErrCh <- err
+		} else {
+			emitLog(events.InfoLevel, fmt.Sprintf("Created %d remote folders", created))
+		}
+		close(folderErrCh)
+	}()
+
+	// Goroutine 2: Event dispatcher — reads FolderReadyEvent, maps to files, sends TransferRequest
+	go func() {
+		defer close(requestCh)
+
+		var completionOnce sync.Once
+		emitCompletion := func(errMsg string) {
+			completionOnce.Do(func() {
+				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
+				emitEnumeration(events.EventEnumerationCompleted,
+					len(directories), len(files), scanTotalBytes, true, errMsg, "")
+			})
+		}
+		defer emitCompletion("upload dispatcher exited unexpectedly")
+
+		processedFolders := make(map[string]bool)
+		var filesQueued int
+
+		for event := range folderReadyChan {
+			if processedFolders[event.LocalPath] {
+				continue
+			}
+			processedFolders[event.LocalPath] = true
+
+			for _, filePath := range filesPerDir[event.LocalPath] {
+				info, statErr := os.Stat(filePath)
+				if statErr != nil {
+					continue
+				}
+				req := services.TransferRequest{
+					Type:        services.TransferTypeUpload,
+					Source:      filePath,
+					Dest:        event.RemoteID,
+					Name:        filepath.Base(filePath),
+					Size:        info.Size(),
+					SourceLabel: services.SourceLabelFileBrowser,
+					BatchID:     enumID,
+					BatchLabel:  displayName,
+					Tags:        uploadTags,
+				}
+				select {
+				case requestCh <- req:
+					filesQueued++
+				case <-uploadCtx.Done():
+					emitCompletion("")
+					return
+				}
 			}
 		}
 
-		// Get file info
-		info, err := os.Stat(filePath)
-		if err != nil {
-			logger.Warn().Str("file", filePath).Err(err).Msg("Skipping file")
-			continue
+		// Check for folder creation errors after folderReadyChan closes
+		if folderErr := <-folderErrCh; folderErr != nil {
+			emitCompletion("Folder creation failed: " + folderErr.Error())
+			return
 		}
 
-		transferRequests = append(transferRequests, services.TransferRequest{
-			Type:        services.TransferTypeUpload,
-			Source:      filePath,
-			Dest:        remoteFolderID,
-			Name:        filepath.Base(filePath),
-			Size:        info.Size(),
-			SourceLabel: services.SourceLabelFileBrowser,
-			BatchID:     enumID,       // v4.7.7: Group by enumeration
-			BatchLabel:  displayName,  // v4.7.7: Folder name as batch label
-			Tags:        uploadTags,   // v4.7.4
-		})
-		totalBytes += info.Size()
-	}
+		emitLog(events.InfoLevel, fmt.Sprintf("All %d files queued for upload", filesQueued))
+		emitCompletion("")
+	}()
 
-	// Start transfers
-	if len(transferRequests) > 0 {
-		a.logInfo("folder-upload", fmt.Sprintf("Queueing %d files for upload...", len(transferRequests)))
-		if err := ts.StartTransfers(ctx, transferRequests); err != nil {
-			a.logError("folder-upload", fmt.Sprintf("Failed to queue uploads: %v", err))
-			deferredError = "Failed to queue file uploads: " + err.Error()
-			return FolderUploadResultDTO{
-				FoldersCreated: foldersCreated,
-				Error:          deferredError,
-			}
-		}
-		a.logInfo("folder-upload", fmt.Sprintf("Queued %d files (%.2f MB) for upload", len(transferRequests), float64(totalBytes)/(1024*1024)))
-	} else {
-		a.logWarn("folder-upload", "No files to upload in folder")
-	}
-
-	// v4.7.7: Emit enumeration completed NOW — after StartTransfers succeeds
-	emitEnumeration(events.EventEnumerationCompleted, len(directories), len(files), scanTotalBytes, true, "", "")
+	// Dispatcher goroutine owns completion — prevent deferred emitter
 	completionEmitted = true
 
 	return FolderUploadResultDTO{
 		FoldersCreated: foldersCreated,
-		FilesQueued:    len(transferRequests),
-		TotalBytes:     totalBytes,
+		FilesQueued:    len(files),      // Total expected from scan
+		TotalBytes:     scanTotalBytes,
 		MergedInto:     mergedIntoFolder,
 	}
 }
