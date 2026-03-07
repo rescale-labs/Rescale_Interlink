@@ -33,6 +33,9 @@ type RateLimiter struct {
 	coordinatorDrain    func()
 	coordinatorCooldown func(d time.Duration)
 
+	// v4.8.4: Self-healing state
+	degraded bool // true when at emergency cap after coordinator disconnect
+
 	// Visibility: utilization-based notifications with hysteresis.
 	hardLimitPerS  float64                     // Server hard limit for utilization calculation
 	notifyFn       func(level, message string) // Optional visibility callback
@@ -137,6 +140,22 @@ func (rl *RateLimiter) SetCoordinatorHook(
 // ClearCoordinatorHook removes all coordinator delegation functions.
 func (rl *RateLimiter) ClearCoordinatorHook() {
 	rl.SetCoordinatorHook(nil, nil, nil)
+}
+
+// IsDegraded returns whether this limiter is at emergency cap after a coordinator disconnect.
+// v4.8.4: Used by recovery to find limiters that need restoration.
+func (rl *RateLimiter) IsDegraded() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.degraded
+}
+
+// HasCoordinatorHooks returns whether this limiter has coordinator hooks installed.
+// v4.8.4: Used to detect stale hooks that need rebinding after a wall-clock gap.
+func (rl *RateLimiter) HasCoordinatorHooks() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.coordinatorWait != nil
 }
 
 // SetHardLimit sets the server hard limit (requests/second) for utilization calculation.

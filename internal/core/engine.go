@@ -25,6 +25,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
@@ -163,6 +164,13 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 	if e.fileService != nil {
 		e.fileService.SetAPIClient(apiClient)
 	}
+
+	// v4.8.4: Register API client idle-connection cleanup for sleep/wake recovery.
+	// Re-registered on each config update so the hook always points at the current client.
+	ratelimit.GlobalStore().SetStaleConnectionCleanup(func() {
+		apiClient.CloseIdleConnections()
+	})
+
 	e.mu.Unlock()
 
 	e.publishLog(events.InfoLevel, "Configuration updated", "", "")

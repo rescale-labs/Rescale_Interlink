@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -369,7 +370,7 @@ func TestListFolderContentsStreaming_CallbackErrorAbortsPagination(t *testing.T)
 
 	client := newTestClient(t, server.URL)
 
-	callbackErr := json.Unmarshal([]byte("invalid"), nil) // arbitrary non-nil error
+	callbackErr := errors.New("callback error") // arbitrary non-nil error
 	err := client.ListFolderContentsStreaming(context.Background(), "fold1",
 		func(folders []FolderInfo, files []FileInfo) error {
 			return callbackErr

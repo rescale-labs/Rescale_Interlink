@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/resources"
 )
 
@@ -59,6 +60,11 @@ func RunBatch[T WorkItem](ctx context.Context, items []T, cfg BatchConfig, execu
 	if cfg.ResourceMgr == nil {
 		panic("transfer.RunBatch: ResourceMgr is required")
 	}
+
+	// v4.8.4: Signal active transfer batch — prevents coordinator idle timeout.
+	// Covers both GUI (TransferService) and CLI (direct RunBatch) paths.
+	ratelimit.GlobalStore().BeginTransferActivity()
+	defer ratelimit.GlobalStore().EndTransferActivity()
 
 	// Compute adaptive concurrency from file sizes.
 	numWorkers := computeWorkers(items, cfg)
@@ -141,6 +147,11 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 	if cfg.ResourceMgr == nil {
 		panic("transfer.RunBatchFromChannel: ResourceMgr is required")
 	}
+
+	// v4.8.4: Signal active transfer batch — prevents coordinator idle timeout.
+	// Covers both GUI (TransferService) and CLI (direct RunBatchFromChannel) paths.
+	ratelimit.GlobalStore().BeginTransferActivity()
+	defer ratelimit.GlobalStore().EndTransferActivity()
 
 	maxWorkers := cfg.MaxWorkers
 	if maxWorkers <= 0 {

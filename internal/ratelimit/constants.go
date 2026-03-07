@@ -108,6 +108,20 @@ const (
 	NotifyMinInterval = 10 * time.Second
 )
 
+// v4.8.4: Coordinator self-healing constants
+const (
+	// RecoveryCheckInterval is how often the background goroutine checks for degraded limiters.
+	RecoveryCheckInterval = 30 * time.Second
+
+	// WallClockGapThreshold triggers recovery when the gap between GetLimiter() calls exceeds this.
+	// Set well below the coordinator's 5-minute idle timeout.
+	WallClockGapThreshold = 2 * time.Minute
+
+	// CoordinatorKeepaliveInterval is how often we ping the coordinator during active transfers.
+	// Set well below the coordinator's 5-minute idle timeout.
+	CoordinatorKeepaliveInterval = 2 * time.Minute
+)
+
 // Endpoint Scope Assignments
 //
 // Documentation of which Rescale API endpoints belong to which throttle scope.

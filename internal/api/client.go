@@ -240,6 +240,16 @@ func (c *Client) GetConfig() *config.Config {
 	return c.config
 }
 
+// CloseIdleConnections closes idle connections in the API HTTP client pool.
+// Called after sleep/wake or long idle periods to discard potentially stale connections.
+// Note: This only covers the API client pool. S3/Azure transport pools are separate.
+// v4.8.4
+func (c *Client) CloseIdleConnections() {
+	if c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
+}
+
 // readResponseBody reads and returns the response body content as a string.
 // If reading fails, returns a placeholder message indicating the failure.
 // This ensures error messages are always informative even when body reading fails.
