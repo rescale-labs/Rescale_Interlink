@@ -162,9 +162,8 @@ const BatchRow = memo(function BatchRow({
   const hasFailed = batch.failed > 0
   const isFileBrowser = batch.sourceLabel === 'FileBrowser'
 
-  // Compute ETA from speed and remaining bytes
-  const remainingBytes = batch.totalBytes * (1 - batch.progress)
-  const etaFormatted = batch.speed > 0 ? formatETA((remainingBytes / batch.speed) * 1000) : ''
+  // v4.8.5: Use backend-computed ETA (smoothed, handles discovered bytes correctly)
+  const etaFormatted = batch.etaSeconds > 0 ? formatETA(batch.etaSeconds * 1000) : ''
   const speedFormatted = formatSpeed(batch.speed)
 
   // Status color for progress bar
@@ -233,6 +232,9 @@ const BatchRow = memo(function BatchRow({
                 : `Scanning... (${formatNumber(batch.total)} files)`}
             </span>
             {speedFormatted && <span>{speedFormatted}</span>}
+            {!speedFormatted && batch.filesPerSec > 0 && (
+              <span>{batch.filesPerSec.toFixed(1)} files/s</span>
+            )}
             {batch.totalKnown && etaFormatted && <span>ETA: {etaFormatted}</span>}
           </div>
         </div>

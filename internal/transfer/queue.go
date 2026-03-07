@@ -72,19 +72,35 @@ type Queue struct {
 
 	// v4.8.2: Pre-registered batches visible before first task is discovered
 	preRegisteredBatches map[string]*BatchStats
+
+	// v4.8.5: Batch-level speed/ETA tracking
+	batchBytesTransferred map[string]int64       // cumulative bytes per batch
+	batchSpeedWindows     map[string]*speedWindow // 10s sliding window (bytes)
+	batchFilesCompleted   map[string]int64       // cumulative completed files per batch
+	batchFileRateWindows  map[string]*speedWindow // 10s sliding window (files)
+	batchDiscoveredTotal  map[string]int         // total files discovered (may exceed registered tasks)
+	batchDiscoveredBytes  map[string]int64       // total bytes discovered
+	batchPrevETA          map[string]float64     // smoothed ETA state
 }
 
 // NewQueue creates a new transfer queue with the specified event bus.
 // The queue is immediately ready to track tasks - no Start() needed.
 func NewQueue(eventBus *events.EventBus) *Queue {
 	return &Queue{
-		tasks:                make([]*TransferTask, 0),
-		tasksByID:            make(map[string]*TransferTask),
-		cancelFuncs:          make(map[string]context.CancelFunc),
-		batchCancelFuncs:     make(map[string]context.CancelFunc),
-		batchScanInProgress:  make(map[string]bool),
-		preRegisteredBatches: make(map[string]*BatchStats),
-		eventBus:             eventBus,
+		tasks:                 make([]*TransferTask, 0),
+		tasksByID:             make(map[string]*TransferTask),
+		cancelFuncs:           make(map[string]context.CancelFunc),
+		batchCancelFuncs:      make(map[string]context.CancelFunc),
+		batchScanInProgress:   make(map[string]bool),
+		preRegisteredBatches:  make(map[string]*BatchStats),
+		batchBytesTransferred: make(map[string]int64),
+		batchSpeedWindows:     make(map[string]*speedWindow),
+		batchFilesCompleted:   make(map[string]int64),
+		batchFileRateWindows:  make(map[string]*speedWindow),
+		batchDiscoveredTotal:  make(map[string]int),
+		batchDiscoveredBytes:  make(map[string]int64),
+		batchPrevETA:          make(map[string]float64),
+		eventBus:              eventBus,
 	}
 }
 
@@ -274,6 +290,17 @@ func (q *Queue) UpdateProgress(taskID string, progress float64) {
 
 	task.Progress = progress
 	task.lastUpdateTime = now
+
+	// v4.8.5: Track cumulative bytes transferred for batch-level speed window
+	if task.BatchID != "" && task.Size > 0 {
+		taskBytes := int64(progress * float64(task.Size))
+		delta := taskBytes - task.lastBatchBytes
+		if delta > 0 {
+			task.lastBatchBytes = taskBytes
+			q.batchBytesTransferred[task.BatchID] += delta
+		}
+	}
+
 	q.mu.Unlock()
 
 	// Publish progress event (outside lock to avoid holding lock during event dispatch)
@@ -288,6 +315,19 @@ func (q *Queue) Complete(taskID string) {
 		task.State = TaskCompleted
 		task.Progress = 1.0
 		task.CompletedAt = time.Now()
+
+		// v4.8.5: Account for remaining bytes not yet counted toward batch total
+		if task.BatchID != "" && task.Size > 0 {
+			remaining := task.Size - task.lastBatchBytes
+			if remaining > 0 {
+				task.lastBatchBytes = task.Size
+				q.batchBytesTransferred[task.BatchID] += remaining
+			}
+		}
+		// v4.8.5: Track completed file count for files/sec window
+		if task.BatchID != "" {
+			q.batchFilesCompleted[task.BatchID]++
+		}
 	}
 	delete(q.cancelFuncs, taskID) // Clean up cancel function
 	q.mu.Unlock()
@@ -414,6 +454,7 @@ func (q *Queue) Retry(taskID string) (string, error) {
 	originalTask.CompletedAt = time.Time{}
 	originalTask.lastBytes = 0
 	originalTask.lastUpdateTime = time.Time{}
+	originalTask.lastBatchBytes = 0 // v4.8.5: Reset batch byte tracking on retry
 	// Note: Keep ID, Type, Name, Source, Dest, Size, CreatedAt unchanged
 	originalTask.mu.Unlock()
 
@@ -525,20 +566,24 @@ func (q *Queue) publishTransferEvent(eventType events.EventType, task *TransferT
 // BatchStats holds aggregate stats for a batch of transfers.
 // v4.7.7: Used for grouped display in Transfers tab.
 type BatchStats struct {
-	BatchID     string
-	BatchLabel  string
-	Direction   string // "upload" or "download"
-	SourceLabel string
-	Total       int
-	Queued      int
-	Active      int
-	Completed   int
-	Failed      int
-	Cancelled   int
-	TotalBytes  int64
-	Progress    float64 // byte-weighted 0.0-1.0
-	Speed       float64 // aggregate bytes/sec
-	TotalKnown  bool    // v4.8.0: True when scan is complete and Total is final
+	BatchID         string
+	BatchLabel      string
+	Direction       string // "upload" or "download"
+	SourceLabel     string
+	Total           int
+	Queued          int
+	Active          int
+	Completed       int
+	Failed          int
+	Cancelled       int
+	TotalBytes      int64
+	Progress        float64 // byte-weighted 0.0-1.0
+	Speed           float64 // aggregate bytes/sec
+	TotalKnown      bool    // v4.8.0: True when scan is complete and Total is final
+	FilesPerSec     float64 // v4.8.5: file completion rate (windowed)
+	ETASeconds      float64 // v4.8.5: estimated time remaining (smoothed, -1 = unknown)
+	DiscoveredTotal int     // v4.8.5: files discovered by scan (may > Total during queueing)
+	DiscoveredBytes int64   // v4.8.5: bytes discovered by scan
 }
 
 // GetAllBatchStats returns aggregate stats for all batches in a single pass.
@@ -581,13 +626,29 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 			bs.Active++ // v4.8.4: initializing tasks have a semaphore slot and are doing real work
 		case TaskActive:
 			bs.Active++
-			bs.Speed += task.GetSpeed()
+			// v4.8.5: Per-task speed sum removed — batch speed comes from sliding window
 		case TaskCompleted:
 			bs.Completed++
 		case TaskFailed:
 			bs.Failed++
 		case TaskCancelled:
 			bs.Cancelled++
+		}
+	}
+
+	// v4.8.5: Compute batch speed from sliding windows (replaces per-task speed sum)
+	for batchID, bs := range batchMap {
+		if window, exists := q.batchSpeedWindows[batchID]; exists {
+			bs.Speed = window.Speed()
+		}
+		if window, exists := q.batchFileRateWindows[batchID]; exists {
+			bs.FilesPerSec = window.Speed()
+		}
+		if dt, exists := q.batchDiscoveredTotal[batchID]; exists {
+			bs.DiscoveredTotal = dt
+		}
+		if db, exists := q.batchDiscoveredBytes[batchID]; exists {
+			bs.DiscoveredBytes = db
 		}
 	}
 
@@ -600,17 +661,34 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 	}
 
 	// Compute byte-weighted progress
+	// v4.8.5: Use DiscoveredBytes as denominator when available, since registered
+	// tasks (TotalBytes) may lag behind discovery during streaming uploads.
 	result := make([]BatchStats, 0, len(batchOrder))
 	for _, batchID := range batchOrder {
 		bs := batchMap[batchID]
-		if bs.TotalBytes > 0 {
-			var transferredBytes int64
-			for _, task := range q.tasks {
-				if task.BatchID == batchID {
-					transferredBytes += int64(task.GetProgress() * float64(task.Size))
+
+		// Determine denominator: prefer DiscoveredBytes when it exceeds TotalBytes
+		denomBytes := bs.TotalBytes
+		if bs.DiscoveredBytes > denomBytes {
+			denomBytes = bs.DiscoveredBytes
+		}
+
+		if denomBytes > 0 {
+			// Numerator: use the batch-level cumulative byte counter (more accurate
+			// than summing per-task progress * size, which misses in-flight deltas)
+			transferredBytes, exists := q.batchBytesTransferred[batchID]
+			if !exists {
+				// Fallback: sum per-task progress (for pre-registered or legacy batches)
+				for _, task := range q.tasks {
+					if task.BatchID == batchID {
+						transferredBytes += int64(task.GetProgress() * float64(task.Size))
+					}
 				}
 			}
-			bs.Progress = float64(transferredBytes) / float64(bs.TotalBytes)
+			bs.Progress = float64(transferredBytes) / float64(denomBytes)
+			if bs.Progress > 1.0 {
+				bs.Progress = 1.0
+			}
 		} else if bs.Total > 0 {
 			// No size info — use file count
 			bs.Progress = float64(bs.Completed) / float64(bs.Total)
@@ -714,6 +792,11 @@ func (q *Queue) CancelBatch(batchID string) error {
 	// v4.8.0: Cleanup streaming batch state
 	q.CleanupBatch(batchID)
 
+	// v4.8.5: Cleanup speed/ETA metrics
+	q.mu.Lock()
+	q.cleanupBatchMetrics(batchID)
+	q.mu.Unlock()
+
 	return nil
 }
 
@@ -771,6 +854,16 @@ func (q *Queue) MarkBatchScanInProgress(batchID string, inProgress bool) {
 	}
 }
 
+// UpdateBatchDiscovered updates the batch-level discovered file/byte totals.
+// v4.8.5: Called by the streaming dispatcher as files are discovered, before they
+// are registered as tasks. Used for accurate progress/ETA computation.
+func (q *Queue) UpdateBatchDiscovered(batchID string, totalFiles int, totalBytes int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.batchDiscoveredTotal[batchID] = totalFiles
+	q.batchDiscoveredBytes[batchID] = totalBytes
+}
+
 // CleanupBatch removes all streaming batch metadata for deterministic cleanup.
 // v4.8.0: Prevents long-session map growth from stale batch entries.
 func (q *Queue) CleanupBatch(batchID string) {
@@ -816,12 +909,96 @@ func (q *Queue) ensureBatchTicker() {
 	go q.batchTickerLoop()
 }
 
+// computeBatchETA returns the estimated time remaining in seconds for a batch.
+// v4.8.5: Returns -1 during scan (!TotalKnown), 0 when complete, else smoothed ETA.
+// Must be called under q.mu write lock (reads/writes batchPrevETA).
+func (q *Queue) computeBatchETA(batchID string, bs *BatchStats) float64 {
+	if !bs.TotalKnown {
+		return -1 // Unknown — scan still in progress
+	}
+	if bs.Progress >= 1.0 || (bs.Total > 0 && bs.Completed >= bs.Total) {
+		return 0 // Complete
+	}
+	if bs.Speed <= 0 {
+		return -1 // No speed data — can't estimate
+	}
+
+	// Use DiscoveredBytes when available for more accurate remaining calculation
+	denomBytes := bs.TotalBytes
+	if bs.DiscoveredBytes > denomBytes {
+		denomBytes = bs.DiscoveredBytes
+	}
+	if denomBytes <= 0 {
+		return -1
+	}
+
+	transferredBytes := float64(denomBytes) * bs.Progress
+	remainingBytes := float64(denomBytes) - transferredBytes
+	if remainingBytes <= 0 {
+		return 0
+	}
+
+	rawETA := remainingBytes / bs.Speed
+	return q.smoothETA(batchID, rawETA)
+}
+
+// smoothETA applies jump capping and EMA to prevent wild ETA swings.
+// v4.8.5: Must be called under q.mu write lock.
+func (q *Queue) smoothETA(batchID string, rawETA float64) float64 {
+	prev, hasPrev := q.batchPrevETA[batchID]
+	if !hasPrev || prev <= 0 {
+		q.batchPrevETA[batchID] = rawETA
+		return rawETA
+	}
+
+	// Jump cap: clamp single-tick changes to 2x in either direction
+	capped := rawETA
+	if capped > prev*2 {
+		capped = prev * 2
+	} else if capped < prev*0.5 {
+		capped = prev * 0.5
+	}
+
+	// EMA with alpha=0.3
+	const alpha = 0.3
+	smoothed := alpha*capped + (1-alpha)*prev
+
+	// Fast convergence: if raw ETA < 0.5x smoothed, apply alpha twice
+	if rawETA < smoothed*0.5 {
+		smoothed = alpha*capped + (1-alpha)*smoothed
+	}
+
+	q.batchPrevETA[batchID] = smoothed
+	return smoothed
+}
+
 // batchTickerLoop publishes batch progress events every second.
 func (q *Queue) batchTickerLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
+		// v4.8.5: Record speed/rate samples under write lock before computing stats
+		q.mu.Lock()
+		now := time.Now()
+		for batchID, totalBytes := range q.batchBytesTransferred {
+			window, exists := q.batchSpeedWindows[batchID]
+			if !exists {
+				window = newSpeedWindow(10 * time.Second)
+				q.batchSpeedWindows[batchID] = window
+			}
+			window.Record(now, totalBytes)
+		}
+		for batchID, filesCompleted := range q.batchFilesCompleted {
+			window, exists := q.batchFileRateWindows[batchID]
+			if !exists {
+				window = newSpeedWindow(10 * time.Second)
+				q.batchFileRateWindows[batchID] = window
+			}
+			window.Record(now, filesCompleted)
+		}
+		q.mu.Unlock()
+
 		stats := q.GetAllBatchStats()
 		if len(stats) == 0 {
 			q.mu.Lock()
@@ -829,6 +1006,13 @@ func (q *Queue) batchTickerLoop() {
 			q.mu.Unlock()
 			return
 		}
+
+		// v4.8.5: Compute ETAs under write lock (needs batchPrevETA state)
+		q.mu.Lock()
+		for i := range stats {
+			stats[i].ETASeconds = q.computeBatchETA(stats[i].BatchID, &stats[i])
+		}
+		q.mu.Unlock()
 
 		allTerminal := true
 		for _, bs := range stats {
@@ -843,26 +1027,47 @@ func (q *Queue) batchTickerLoop() {
 						EventType: events.EventBatchProgress,
 						Time:      time.Now(),
 					},
-					BatchID:    bs.BatchID,
-					Label:      bs.BatchLabel,
-					Direction:  bs.Direction,
-					Total:      bs.Total,
-					Active:     bs.Active,
-					Queued:     bs.Queued,
-					Completed:  bs.Completed,
-					Failed:     bs.Failed,
-					Progress:   bs.Progress,
-					Speed:      bs.Speed,
-					TotalKnown: bs.TotalKnown, // v4.8.0
+					BatchID:         bs.BatchID,
+					Label:           bs.BatchLabel,
+					Direction:       bs.Direction,
+					Total:           bs.Total,
+					Active:          bs.Active,
+					Queued:          bs.Queued,
+					Completed:       bs.Completed,
+					Failed:          bs.Failed,
+					Progress:        bs.Progress,
+					Speed:           bs.Speed,
+					TotalKnown:      bs.TotalKnown,
+					FilesPerSec:     bs.FilesPerSec,
+					ETASeconds:      bs.ETASeconds,
+					DiscoveredTotal: bs.DiscoveredTotal,
+					DiscoveredBytes: bs.DiscoveredBytes,
 				})
 			}
 		}
 
 		if allTerminal {
+			// v4.8.5: Clean up batch metrics for all terminal batches
 			q.mu.Lock()
+			for _, bs := range stats {
+				q.cleanupBatchMetrics(bs.BatchID)
+			}
 			q.batchTickerRunning = false
 			q.mu.Unlock()
 			return
 		}
 	}
+}
+
+// cleanupBatchMetrics removes speed/ETA tracking state for a batch.
+// v4.8.5: Called when batch is fully terminal (all tasks complete/failed/cancelled).
+// Separate from CleanupBatch() which runs at registration end, not transfer end.
+func (q *Queue) cleanupBatchMetrics(batchID string) {
+	delete(q.batchBytesTransferred, batchID)
+	delete(q.batchSpeedWindows, batchID)
+	delete(q.batchFilesCompleted, batchID)
+	delete(q.batchFileRateWindows, batchID)
+	delete(q.batchDiscoveredTotal, batchID)
+	delete(q.batchDiscoveredBytes, batchID)
+	delete(q.batchPrevETA, batchID)
 }

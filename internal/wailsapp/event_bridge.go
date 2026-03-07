@@ -366,33 +366,41 @@ func scanProgressEventToDTO(e *events.ScanProgressEvent) ScanProgressEventDTO {
 
 // BatchProgressEventDTO is the JSON-safe version of events.BatchProgressEvent (v4.7.7).
 type BatchProgressEventDTO struct {
-	Timestamp  string  `json:"timestamp"`
-	BatchID    string  `json:"batchID"`
-	Label      string  `json:"label"`
-	Direction  string  `json:"direction"`
-	Total      int     `json:"total"`
-	Active     int     `json:"active"`
-	Queued     int     `json:"queued"`
-	Completed  int     `json:"completed"`
-	Failed     int     `json:"failed"`
-	Progress   float64 `json:"progress"`
-	Speed      float64 `json:"speed"`
-	TotalKnown bool    `json:"totalKnown"` // v4.8.0: True when scan complete
+	Timestamp       string  `json:"timestamp"`
+	BatchID         string  `json:"batchID"`
+	Label           string  `json:"label"`
+	Direction       string  `json:"direction"`
+	Total           int     `json:"total"`
+	Active          int     `json:"active"`
+	Queued          int     `json:"queued"`
+	Completed       int     `json:"completed"`
+	Failed          int     `json:"failed"`
+	Progress        float64 `json:"progress"`
+	Speed           float64 `json:"speed"`
+	TotalKnown      bool    `json:"totalKnown"`      // v4.8.0: True when scan complete
+	FilesPerSec     float64 `json:"filesPerSec"`     // v4.8.5: file completion rate
+	ETASeconds      float64 `json:"etaSeconds"`      // v4.8.5: estimated time remaining
+	DiscoveredTotal int     `json:"discoveredTotal"` // v4.8.5: files discovered by scan
+	DiscoveredBytes int64   `json:"discoveredBytes"` // v4.8.5: bytes discovered by scan
 }
 
 func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO {
 	return BatchProgressEventDTO{
-		Timestamp:  e.Timestamp().Format(time.RFC3339Nano),
-		BatchID:    e.BatchID,
-		Label:      e.Label,
-		Direction:  e.Direction,
-		Total:      e.Total,
-		Active:     e.Active,
-		Queued:     e.Queued,
-		Completed:  e.Completed,
-		Failed:     e.Failed,
-		Progress:   e.Progress,
-		Speed:      e.Speed,
-		TotalKnown: e.TotalKnown,
+		Timestamp:       e.Timestamp().Format(time.RFC3339Nano),
+		BatchID:         e.BatchID,
+		Label:           e.Label,
+		Direction:       e.Direction,
+		Total:           e.Total,
+		Active:          e.Active,
+		Queued:          e.Queued,
+		Completed:       e.Completed,
+		Failed:          e.Failed,
+		Progress:        e.Progress,
+		Speed:           e.Speed,
+		TotalKnown:      e.TotalKnown,
+		FilesPerSec:     e.FilesPerSec,
+		ETASeconds:      e.ETASeconds,
+		DiscoveredTotal: e.DiscoveredTotal,
+		DiscoveredBytes: e.DiscoveredBytes,
 	}
 }

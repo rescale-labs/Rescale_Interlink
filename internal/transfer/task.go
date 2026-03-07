@@ -55,6 +55,9 @@ type TransferTask struct {
 	lastBytes      int64     // Bytes transferred at last update
 	lastUpdateTime time.Time // Time of last update
 
+	// v4.8.5: Batch-level byte tracking
+	lastBatchBytes int64 // Bytes already counted toward batch total
+
 	// Timestamps
 	CreatedAt   time.Time // When task was enqueued
 	StartedAt   time.Time // When task started executing

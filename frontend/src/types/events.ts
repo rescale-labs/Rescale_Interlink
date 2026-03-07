@@ -97,6 +97,10 @@ export interface BatchProgressEventDTO {
   progress: number;
   speed: number;
   totalKnown: boolean; // v4.8.0: True when scan complete, total is final
+  filesPerSec: number; // v4.8.5: file completion rate (windowed)
+  etaSeconds: number; // v4.8.5: estimated time remaining (-1 = unknown)
+  discoveredTotal: number; // v4.8.5: files discovered by scan
+  discoveredBytes: number; // v4.8.5: bytes discovered by scan
 }
 
 export interface ConnectionResultDTO {

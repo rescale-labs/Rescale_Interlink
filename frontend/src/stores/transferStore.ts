@@ -64,6 +64,10 @@ export interface TransferBatch {
   progress: number
   speed: number
   totalKnown: boolean // v4.8.0: True when scan complete, total is final
+  filesPerSec: number // v4.8.5: file completion rate (windowed)
+  etaSeconds: number // v4.8.5: estimated time remaining (-1 = unknown)
+  discoveredTotal: number // v4.8.5: files discovered by scan
+  discoveredBytes: number // v4.8.5: bytes discovered by scan
 }
 
 // Extended transfer task with UI state
@@ -236,6 +240,10 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       const batches: TransferBatch[] = (raw || []).map((b) => ({
         ...b,
         totalKnown: b.totalKnown ?? true,
+        filesPerSec: (b as TransferBatch).filesPerSec ?? 0,
+        etaSeconds: (b as TransferBatch).etaSeconds ?? -1,
+        discoveredTotal: (b as TransferBatch).discoveredTotal ?? 0,
+        discoveredBytes: (b as TransferBatch).discoveredBytes ?? 0,
       }))
       set({ batches })
 
@@ -609,6 +617,10 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           progress: event.progress,
           speed: event.speed,
           totalKnown: event.totalKnown,
+          filesPerSec: event.filesPerSec ?? 0,
+          etaSeconds: event.etaSeconds ?? -1,
+          discoveredTotal: event.discoveredTotal ?? 0,
+          discoveredBytes: event.discoveredBytes ?? 0,
         }
         return { batches: [...state.batches, newBatch], lastUpdate: Date.now() }
       }
@@ -624,6 +636,10 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         progress: event.progress,
         speed: event.speed,
         totalKnown: event.totalKnown, // v4.8.0: True when scan complete
+        filesPerSec: event.filesPerSec ?? 0,       // v4.8.5
+        etaSeconds: event.etaSeconds ?? -1,         // v4.8.5
+        discoveredTotal: event.discoveredTotal ?? 0, // v4.8.5
+        discoveredBytes: event.discoveredBytes ?? 0, // v4.8.5
       }
       return { batches: updatedBatches, lastUpdate: Date.now() }
     })

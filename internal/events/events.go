@@ -187,17 +187,21 @@ type ScanProgressEvent struct {
 // Published by the queue's batch ticker at 1/sec for each active batch.
 type BatchProgressEvent struct {
 	BaseEvent
-	BatchID   string  `json:"batchID"`
-	Label     string  `json:"label"`
-	Direction string  `json:"direction"` // "upload" or "download"
-	Total     int     `json:"total"`
-	Active    int     `json:"active"`    // Currently transferring
-	Queued    int     `json:"queued"`    // Waiting for semaphore slot
-	Completed int     `json:"completed"`
-	Failed    int     `json:"failed"`
-	Progress   float64 `json:"progress"`   // 0.0-1.0
-	Speed      float64 `json:"speed"`      // aggregate bytes/sec
-	TotalKnown bool    `json:"totalKnown"` // v4.8.0: True when scan complete, Total is final
+	BatchID         string  `json:"batchID"`
+	Label           string  `json:"label"`
+	Direction       string  `json:"direction"` // "upload" or "download"
+	Total           int     `json:"total"`
+	Active          int     `json:"active"`    // Currently transferring
+	Queued          int     `json:"queued"`    // Waiting for semaphore slot
+	Completed       int     `json:"completed"`
+	Failed          int     `json:"failed"`
+	Progress        float64 `json:"progress"`        // 0.0-1.0
+	Speed           float64 `json:"speed"`           // aggregate bytes/sec
+	TotalKnown      bool    `json:"totalKnown"`      // v4.8.0: True when scan complete, Total is final
+	FilesPerSec     float64 `json:"filesPerSec"`     // v4.8.5: file completion rate (windowed)
+	ETASeconds      float64 `json:"etaSeconds"`      // v4.8.5: estimated time remaining (-1 = unknown)
+	DiscoveredTotal int     `json:"discoveredTotal"` // v4.8.5: files discovered by scan
+	DiscoveredBytes int64   `json:"discoveredBytes"` // v4.8.5: bytes discovered by scan
 }
 
 // EventBus manages event subscriptions and publishing
