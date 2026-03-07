@@ -99,15 +99,19 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	// Get the global credential manager (caches user profile and credentials)
 	credManager := credentials.GetManager(params.APIClient)
 
-	// Get user profile (cached for 5 minutes)
-	profile, err := credManager.GetUserProfile(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get user profile: %w", err)
+	// v4.8.4: Skip GetUserProfile() when scan provided storage metadata in FileInfo.
+	// getStorageInfo() only needs profile as fallback when fileInfo.Storage is nil.
+	// This eliminates a cache-lookup per file and avoids cache-miss latency after sleep/wake.
+	var storageInfo *models.StorageInfo
+	if fileInfo.Storage != nil && fileInfo.Storage.StorageType != "" {
+		storageInfo = getStorageInfo(fileInfo, nil)
+	} else {
+		profile, err := credManager.GetUserProfile(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get user profile: %w", err)
+		}
+		storageInfo = getStorageInfo(fileInfo, profile)
 	}
-
-	// Determine storage type: use file's storage if available, otherwise user's default
-	// This allows downloading job outputs from platform storage (e.g., S3) even if user has Azure
-	storageInfo := getStorageInfo(fileInfo, profile)
 
 	// Create provider using factory (S3 or Azure based on storage type)
 	factory := providers.NewFactory()

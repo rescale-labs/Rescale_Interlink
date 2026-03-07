@@ -62,6 +62,9 @@ type DownloadPrep struct {
 
 	// v4.4.2: Hash computed during download to avoid re-reading file for verification
 	ComputedHash string
+
+	// v4.8.4: Cached encrypted size from verification probe, avoids redundant HEAD request in downloadCBCStreaming
+	EncryptedSize int64
 }
 
 // Download downloads and decrypts a file using the configured provider.
@@ -209,6 +212,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 				// Get encrypted size for verification probe
 				encryptedSize, sizeErr := partDownloader.GetEncryptedSize(ctx, params.RemotePath)
 				if sizeErr == nil && encryptedSize > 0 {
+					prep.EncryptedSize = encryptedSize // v4.8.4: cache for downloadCBCStreaming
 					// Run quick 32-byte verification probe
 					verifyErr := d.verifyDecryptionQuick(ctx, partDownloader, params.RemotePath, encryptedSize, effectiveIV, encryptionKey)
 					if verifyErr != nil {
@@ -537,10 +541,14 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		return d.downloadLegacy(ctx, prep)
 	}
 
-	// Get encrypted size from cloud
-	encryptedSize, err := partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
-	if err != nil {
-		return fmt.Errorf("failed to get encrypted size: %w", err)
+	// v4.8.4: Use cached encrypted size from verification probe if available
+	encryptedSize := prep.EncryptedSize
+	if encryptedSize == 0 {
+		var err error
+		encryptedSize, err = partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
+		if err != nil {
+			return fmt.Errorf("failed to get encrypted size: %w", err)
+		}
 	}
 
 	// Create output file directly (no temp file!)

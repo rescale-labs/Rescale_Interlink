@@ -114,13 +114,21 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	}
 	log.Printf("[DEBUG] %s: GetUserProfile took %v", fileName, time.Since(t1))
 
-	// Get root folders (for currentFolderId in file registration) (cached for 5 minutes)
-	t2 := time.Now()
-	folders, err := credManager.GetRootFolders(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get root folders: %w", err)
+	// v4.8.4: Skip GetRootFolders() when caller provides FolderID (batch uploads always do).
+	// GetRootFolders is only needed to resolve MyLibrary as default target.
+	var targetFolder string
+	if params.FolderID != "" {
+		targetFolder = params.FolderID
+		log.Printf("[DEBUG] %s: GetRootFolders skipped (FolderID provided)", fileName)
+	} else {
+		t2 := time.Now()
+		folders, err := credManager.GetRootFolders(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get root folders: %w", err)
+		}
+		targetFolder = folders.MyLibrary
+		log.Printf("[DEBUG] %s: GetRootFolders took %v", fileName, time.Since(t2))
 	}
-	log.Printf("[DEBUG] %s: GetRootFolders took %v", fileName, time.Since(t2))
 
 	// Create provider using factory
 	t3 := time.Now()
@@ -165,12 +173,6 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		return nil, fmt.Errorf("failed to calculate file hash: %w", err)
 	}
 	hashTimer.StopWithThroughput(fileInfo.Size())
-
-	// Determine target folder
-	targetFolder := folders.MyLibrary
-	if params.FolderID != "" {
-		targetFolder = params.FolderID
-	}
 
 	// Build file registration request
 	filename := filepath.Base(params.LocalPath)

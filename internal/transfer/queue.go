@@ -575,8 +575,10 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 
 		state := task.GetState()
 		switch state {
-		case TaskQueued, TaskInitializing:
+		case TaskQueued:
 			bs.Queued++
+		case TaskInitializing:
+			bs.Active++ // v4.8.4: initializing tasks have a semaphore slot and are doing real work
 		case TaskActive:
 			bs.Active++
 			bs.Speed += task.GetSpeed()
