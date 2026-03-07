@@ -314,30 +314,36 @@ func transferEventToDTO(e *events.TransferEvent) TransferEventDTO {
 
 // EnumerationEventDTO is the JSON-safe version of events.EnumerationEvent (v4.0.8).
 type EnumerationEventDTO struct {
-	Timestamp    string `json:"timestamp"`
-	ID           string `json:"id"`
-	FolderName   string `json:"folderName"`
-	Direction    string `json:"direction"` // "upload" or "download"
-	FoldersFound int    `json:"foldersFound"`
-	FilesFound   int    `json:"filesFound"`
-	BytesFound   int64  `json:"bytesFound"`
-	IsComplete    bool   `json:"isComplete"`
-	Error         string `json:"error,omitempty"`
-	StatusMessage string `json:"statusMessage,omitempty"` // v4.7.7: Human-readable status
+	Timestamp      string `json:"timestamp"`
+	ID             string `json:"id"`
+	FolderName     string `json:"folderName"`
+	Direction      string `json:"direction"` // "upload" or "download"
+	FoldersFound   int    `json:"foldersFound"`
+	FilesFound     int    `json:"filesFound"`
+	BytesFound     int64  `json:"bytesFound"`
+	IsComplete     bool   `json:"isComplete"`
+	Error          string `json:"error,omitempty"`
+	StatusMessage  string `json:"statusMessage,omitempty"` // v4.7.7: Human-readable status
+	Phase          string `json:"phase,omitempty"`          // v4.8.5: structured phase
+	FoldersTotal   int    `json:"foldersTotal"`             // v4.8.5: total folders to create
+	FoldersCreated int    `json:"foldersCreated"`           // v4.8.5: folders created so far
 }
 
 func enumerationEventToDTO(e *events.EnumerationEvent) EnumerationEventDTO {
 	return EnumerationEventDTO{
-		Timestamp:     e.Timestamp().Format(time.RFC3339Nano),
-		ID:            e.ID,
-		FolderName:    e.FolderName,
-		Direction:     e.Direction,
-		FoldersFound:  e.FoldersFound,
-		FilesFound:    e.FilesFound,
-		BytesFound:    e.BytesFound,
-		IsComplete:    e.IsComplete,
-		Error:         e.Error,
-		StatusMessage: e.StatusMessage,
+		Timestamp:      e.Timestamp().Format(time.RFC3339Nano),
+		ID:             e.ID,
+		FolderName:     e.FolderName,
+		Direction:      e.Direction,
+		FoldersFound:   e.FoldersFound,
+		FilesFound:     e.FilesFound,
+		BytesFound:     e.BytesFound,
+		IsComplete:     e.IsComplete,
+		Error:          e.Error,
+		StatusMessage:  e.StatusMessage,
+		Phase:          e.Phase,
+		FoldersTotal:   e.FoldersTotal,
+		FoldersCreated: e.FoldersCreated,
 	}
 }
 

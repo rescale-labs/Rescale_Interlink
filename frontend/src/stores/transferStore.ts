@@ -43,9 +43,12 @@ export interface Enumeration {
   bytesFound: number
   isComplete: boolean
   error?: string
-  statusMessage?: string    // v4.7.7: Human-readable status (e.g. "Creating folders... (3 of 47)")
+  statusMessage?: string    // v4.7.7: Human-readable status
   completedAt?: number      // v4.7.7: Timestamp when isComplete was set
   lastEventAt: number       // v4.7.7: Timestamp of last event received (for staleness-based fallback)
+  phase?: string            // v4.8.5: "scanning", "creating_folders", "complete", "error"
+  foldersTotal?: number     // v4.8.5: total folders to create
+  foldersCreated?: number   // v4.8.5: folders created so far
 }
 
 // v4.7.7: Transfer batch for grouped display
@@ -675,6 +678,9 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
             lastEventAt: now,
             error: event.error,
             statusMessage: event.statusMessage,
+            phase: event.phase,
+            foldersTotal: event.foldersTotal,
+            foldersCreated: event.foldersCreated,
           }
           return { enumerations: updated }
         }
@@ -695,6 +701,9 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
             error: event.error,
             statusMessage: event.statusMessage,
             lastEventAt: now,
+            phase: event.phase,
+            foldersTotal: event.foldersTotal,
+            foldersCreated: event.foldersCreated,
           }]
         }
       } else {
@@ -707,6 +716,9 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           bytesFound: event.bytesFound,
           statusMessage: event.statusMessage,
           lastEventAt: now,
+          phase: event.phase,
+          foldersTotal: event.foldersTotal,
+          foldersCreated: event.foldersCreated,
         }
         return { enumerations: updated }
       }

@@ -64,13 +64,23 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
   const isComplete = enumeration.isComplete
   const hasError = !!enumeration.error
   const statusMessage = enumeration.statusMessage
-  const isCreatingFolders = statusMessage?.includes('Creating folders')
+  // v4.8.5: Use structured phase instead of substring matching
+  const isCreatingFolders = enumeration.phase === 'creating_folders'
+  const isUpload = enumeration.direction === 'upload'
+
+  // v4.8.5: Direction-aware subtitle
+  const subtitle = isCreatingFolders
+    ? 'Creating remote folders...'
+    : isUpload ? 'Preparing upload...' : 'Scanning remote folder...'
+
+  // v4.8.5: Direction-aware spinner text
+  const spinnerText = isUpload ? 'Preparing...' : 'Scanning...'
 
   return (
     <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20">
       {/* Direction icon */}
       <div className="flex-shrink-0 w-6">
-        {enumeration.direction === 'upload' ? (
+        {isUpload ? (
           <ArrowUpIcon className="w-5 h-5 text-blue-500" />
         ) : (
           <ArrowDownIcon className="w-5 h-5 text-green-500" />
@@ -87,26 +97,41 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
               : enumeration.folderName}
           </div>
           <div className="text-xs text-gray-500">
-            {isCreatingFolders ? 'Creating folders...' : 'Scanning folder...'}
+            {subtitle}
           </div>
         </div>
       </div>
 
       {/* Scanning/progress indicator */}
       <div className="flex-1 min-w-0 flex items-center gap-3">
-        {!isComplete && !hasError && !statusMessage && (
+        {!isComplete && !hasError && !statusMessage && !isCreatingFolders && (
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-sm text-blue-600">Scanning...</span>
+            <span className="text-sm text-blue-600">{spinnerText}</span>
           </div>
         )}
-        {!isComplete && !hasError && statusMessage && (
+        {!isComplete && !hasError && isCreatingFolders && (
           <div className="flex items-center gap-2">
-            {isCreatingFolders ? (
-              <FolderOpenIcon className="w-4 h-4 text-blue-500" />
-            ) : (
-              <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            <FolderOpenIcon className="w-4 h-4 text-blue-500" />
+            <span className="text-sm text-blue-600">
+              {enumeration.foldersTotal && enumeration.foldersTotal > 0
+                ? `Creating remote folders... (${enumeration.foldersCreated ?? 0} of ${enumeration.foldersTotal})`
+                : 'Creating remote folders...'}
+            </span>
+            {/* v4.8.5: Sub-progress bar for folder creation */}
+            {enumeration.foldersTotal && enumeration.foldersTotal > 0 && (
+              <div className="w-24 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.min(100, ((enumeration.foldersCreated ?? 0) / enumeration.foldersTotal) * 100)}%` }}
+                />
+              </div>
             )}
+          </div>
+        )}
+        {!isComplete && !hasError && statusMessage && !isCreatingFolders && (
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-sm text-blue-600">{statusMessage}</span>
           </div>
         )}
@@ -207,7 +232,9 @@ const BatchRow = memo(function BatchRow({
             <div className="text-xs text-gray-500">
               {batch.totalKnown
                 ? `${formatNumber(batch.completed)} of ${formatNumber(batch.total)} files`
-                : `${formatNumber(batch.completed)} completed, ${formatNumber(batch.total)} queued...`}
+                : batch.direction === 'upload'
+                  ? `${formatNumber(batch.active)} uploading, ${formatNumber(batch.queued)} queued...`
+                  : `${formatNumber(batch.completed)} completed, ${formatNumber(batch.total)} queued...`}
               {batch.totalBytes > 0 && ` — ${formatSize(batch.totalBytes)}`}
             </div>
           </div>
@@ -229,7 +256,9 @@ const BatchRow = memo(function BatchRow({
             <span>
               {batch.totalKnown
                 ? `${Math.round(batch.progress * 100)}%`
-                : `Scanning... (${formatNumber(batch.total)} files)`}
+                : batch.direction === 'upload'
+                  ? `Preparing upload... (${formatNumber(batch.total)} files)`
+                  : `Scanning... (${formatNumber(batch.total)} files)`}
             </span>
             {speedFormatted && <span>{speedFormatted}</span>}
             {!speedFormatted && batch.filesPerSec > 0 && (

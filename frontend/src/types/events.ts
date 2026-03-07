@@ -69,7 +69,10 @@ export interface EnumerationEventDTO {
   bytesFound: number;
   isComplete: boolean;
   error?: string;
-  statusMessage?: string; // v4.7.7: Human-readable status (e.g. "Creating folders... (3 of 47)")
+  statusMessage?: string; // v4.7.7: Human-readable status
+  phase?: string; // v4.8.5: "scanning", "creating_folders", "complete", "error"
+  foldersTotal?: number; // v4.8.5: total folders to create
+  foldersCreated?: number; // v4.8.5: folders created so far
 }
 
 // v4.0.8: Scan progress event for software/hardware catalog scanning
