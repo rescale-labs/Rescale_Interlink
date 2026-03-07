@@ -220,6 +220,111 @@ func resolveSymlinksParallel(ctx context.Context, entries []entryInfo, symlinkIn
 	wg.Wait()
 }
 
+// WalkStream walks a directory tree and streams entries through separate channels
+// for directories and files. Unlike WalkCollect which returns all results at once,
+// WalkStream enables pipelined processing where folder creation can begin while
+// the walk is still discovering files.
+//
+// v4.8.5: Added for streaming upload scalability — avoids loading all files into
+// memory before uploads start. Uses the same filtering logic as WalkCollect
+// (hidden handling, symlink skipping) for consistent behavior.
+//
+// Key property: filepath.WalkDir visits parents before children (depth-first,
+// parent-first), so directories at depth N are emitted before files at depth N+1.
+//
+// Both channels are closed when the walk completes. Errors are sent to errChan
+// (buffered at 1). Context cancellation stops the walk and closes all channels.
+func WalkStream(ctx context.Context, root string, opts WalkOptions) (
+	dirChan <-chan FileEntry,
+	fileChan <-chan FileEntry,
+	errChan <-chan error,
+) {
+	dirs := make(chan FileEntry, 1000)
+	files := make(chan FileEntry, 1000)
+	errs := make(chan error, 1)
+
+	go func() {
+		defer close(dirs)
+		defer close(files)
+		defer close(errs)
+
+		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil // Skip inaccessible entries (matches WalkCollect)
+			}
+
+			// Check context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			// Skip root itself
+			if path == root {
+				return nil
+			}
+
+			name := d.Name()
+
+			// Handle hidden items (matches WalkCollect exactly)
+			if !opts.IncludeHidden && IsHiddenName(name) {
+				if d.IsDir() && opts.SkipHiddenDirs {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			// Check if symlink using Lstat (doesn't follow symlinks)
+			fileInfo, err := os.Lstat(path)
+			if err != nil {
+				return nil // Skip entries we can't stat
+			}
+
+			isSymlink := fileInfo.Mode()&os.ModeSymlink != 0
+
+			// Skip symlinks entirely (matches WalkCollect — prevents infinite loops)
+			if isSymlink {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			entry := FileEntry{
+				Path:    path,
+				Name:    name,
+				Size:    fileInfo.Size(),
+				IsDir:   d.IsDir(),
+				ModTime: fileInfo.ModTime(),
+				Mode:    fileInfo.Mode(),
+			}
+
+			if d.IsDir() {
+				select {
+				case dirs <- entry:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			} else {
+				select {
+				case files <- entry:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+
+			return nil
+		})
+
+		if walkErr != nil && ctx.Err() == nil {
+			errs <- walkErr
+		}
+	}()
+
+	return dirs, files, errs
+}
+
 // WalkCollectResult contains the categorized results of WalkCollect.
 type WalkCollectResult struct {
 	Directories []FileEntry // All directories found

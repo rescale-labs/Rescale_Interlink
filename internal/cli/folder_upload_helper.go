@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
@@ -185,9 +186,120 @@ func checkFileExists(ctx context.Context, apiClient *api.Client, cache *FolderCa
 	return "", false, nil
 }
 
-// CreateFolderStructure creates all folders recursively, handling conflicts
-// If folderReadyChan is provided, sends events as folders become ready for file uploads
-// Exported for GUI reuse
+// processFolderParams groups the shared parameters for per-folder processing.
+// v4.8.5: Extracted to enable code reuse between CreateFolderStructure and
+// CreateFolderStructureStreaming (North Star: maximum code reuse).
+type processFolderParams struct {
+	ctx                context.Context
+	apiClient          *api.Client
+	cache              *FolderCache
+	folderConflictMode *ConflictAction
+	logger             *logging.Logger
+	progressWriter     io.Writer
+	folderReadyChan    chan<- FolderReadyEvent
+	mapping            map[string]string // localPath → remoteID
+	mappingMu          *sync.RWMutex
+	foldersCreated     *int32 // atomic counter
+}
+
+// processFolder creates or merges a single folder, updating the mapping.
+// v4.8.5: Shared helper between CreateFolderStructure and CreateFolderStructureStreaming.
+// Returns (remoteID, created, error). On skip, returns ("", false, nil).
+func processFolder(p processFolderParams, dirPath string) (string, bool, error) {
+	parentPath := filepath.Dir(dirPath)
+	p.mappingMu.RLock()
+	parentRemoteID, ok := p.mapping[parentPath]
+	p.mappingMu.RUnlock()
+
+	if !ok {
+		return "", false, fmt.Errorf("parent folder not created: %s", parentPath)
+	}
+
+	folderName := filepath.Base(dirPath)
+
+	// Check if exists (uses cache)
+	existingID, exists, err := CheckFolderExists(p.ctx, p.apiClient, p.cache, parentRemoteID, folderName)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to check if folder exists: %w", err)
+	}
+
+	if exists {
+		action := *p.folderConflictMode
+		if action == ConflictSkipOnce || action == ConflictMergeOnce {
+			action, err = promptFolderConflict(folderName)
+			if err != nil {
+				return "", false, err
+			}
+			if action == ConflictSkipAll || action == ConflictMergeAll {
+				*p.folderConflictMode = action
+			}
+		}
+
+		switch action {
+		case ConflictSkipOnce, ConflictSkipAll:
+			if p.progressWriter != nil {
+				fmt.Fprintf(p.progressWriter, "  ⏭  Skipping existing folder: %s\n", folderName)
+			}
+			return "", false, nil // Skip — don't add to mapping
+		case ConflictMergeOnce, ConflictMergeAll:
+			if p.progressWriter != nil {
+				fmt.Fprintf(p.progressWriter, "  ♻️  Using existing folder: %s\n", folderName)
+			}
+			p.mappingMu.Lock()
+			p.mapping[dirPath] = existingID
+			p.mappingMu.Unlock()
+
+			if p.folderReadyChan != nil {
+				depth := strings.Count(dirPath, string(os.PathSeparator))
+				select {
+				case p.folderReadyChan <- FolderReadyEvent{LocalPath: dirPath, RemoteID: existingID, Depth: depth}:
+				case <-p.ctx.Done():
+					return "", false, p.ctx.Err()
+				}
+			}
+			return existingID, false, nil
+		case ConflictAbort:
+			return "", false, fmt.Errorf("upload aborted by user")
+		}
+	}
+
+	// Create new folder
+	folderID, err := p.apiClient.CreateFolder(p.ctx, folderName, parentRemoteID)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to create folder %s: %w", folderName, err)
+	}
+
+	// Populate cache for newly created folder
+	if _, err := p.cache.Get(p.ctx, p.apiClient, folderID); err != nil {
+		p.logger.Warn().Str("folder_id", folderID).Err(err).Msg("Failed to populate cache for new folder")
+	}
+
+	p.mappingMu.Lock()
+	p.mapping[dirPath] = folderID
+	p.mappingMu.Unlock()
+
+	atomic.AddInt32(p.foldersCreated, 1)
+
+	if p.progressWriter != nil {
+		fmt.Fprintf(p.progressWriter, "  ✓ Created folder: %s (ID: %s)\n", folderName, folderID)
+	}
+
+	if p.folderReadyChan != nil {
+		depth := strings.Count(dirPath, string(os.PathSeparator))
+		select {
+		case p.folderReadyChan <- FolderReadyEvent{LocalPath: dirPath, RemoteID: folderID, Depth: depth}:
+		case <-p.ctx.Done():
+			return "", false, p.ctx.Err()
+		}
+	}
+
+	return folderID, true, nil
+}
+
+// CreateFolderStructure creates all folders recursively, handling conflicts.
+// If folderReadyChan is provided, sends events as folders become ready for file uploads.
+// v4.8.5: Refactored to use processFolder helper for North Star code reuse.
+// Exported for GUI reuse.
 func CreateFolderStructure(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -201,11 +313,10 @@ func CreateFolderStructure(
 	folderReadyChan chan<- FolderReadyEvent,
 	progressWriter io.Writer,
 ) (map[string]string, int, error) {
-	// Returns mapping: local path -> remote folder ID, and count of folders created
 	mapping := make(map[string]string)
 	mapping[rootPath] = rootRemoteID
-	foldersCreated := 0
-	var mappingMutex sync.RWMutex
+	var foldersCreated int32
+	var mappingMu sync.RWMutex
 
 	// Send ready event for root folder if channel provided
 	if folderReadyChan != nil {
@@ -218,6 +329,19 @@ func CreateFolderStructure(
 		case <-ctx.Done():
 			return nil, 0, ctx.Err()
 		}
+	}
+
+	params := processFolderParams{
+		ctx:                ctx,
+		apiClient:          apiClient,
+		cache:              cache,
+		folderConflictMode: folderConflictMode,
+		logger:             logger,
+		progressWriter:     progressWriter,
+		folderReadyChan:    folderReadyChan,
+		mapping:            mapping,
+		mappingMu:          &mappingMu,
+		foldersCreated:     &foldersCreated,
 	}
 
 	// Sort directories by depth (create parents first)
@@ -234,7 +358,6 @@ func CreateFolderStructure(
 		depthGroups[depth] = append(depthGroups[depth], dirPath)
 	}
 
-	// Process each depth level sequentially, but folders within a level concurrently
 	depths := make([]int, 0, len(depthGroups))
 	for depth := range depthGroups {
 		depths = append(depths, depth)
@@ -244,7 +367,6 @@ func CreateFolderStructure(
 	for _, depth := range depths {
 		dirsAtDepth := depthGroups[depth]
 
-		// Use semaphore to limit concurrent folder creates
 		semaphore := make(chan struct{}, maxConcurrent)
 		var wg sync.WaitGroup
 		errChan := make(chan error, len(dirsAtDepth))
@@ -253,133 +375,192 @@ func CreateFolderStructure(
 			wg.Add(1)
 			go func(dp string) {
 				defer wg.Done()
-
-				// Acquire semaphore
 				semaphore <- struct{}{}
 				defer func() { <-semaphore }()
 
-				// Get parent directory
-				parentPath := filepath.Dir(dp)
-				mappingMutex.RLock()
-				parentRemoteID, ok := mapping[parentPath]
-				mappingMutex.RUnlock()
-
-				if !ok {
-					errChan <- fmt.Errorf("parent folder not created: %s", parentPath)
-					return
-				}
-
-				// Get folder name
-				folderName := filepath.Base(dp)
-
-				// Check if exists (uses cache)
-				existingID, exists, err := CheckFolderExists(ctx, apiClient, cache, parentRemoteID, folderName)
+				_, _, err := processFolder(params, dp)
 				if err != nil {
-					errChan <- fmt.Errorf("failed to check if folder exists: %w", err)
-					return
-				}
-
-				if exists {
-					// Handle conflict (note: prompts will serialize due to stdin)
-					action := *folderConflictMode
-					if action == ConflictSkipOnce || action == ConflictMergeOnce {
-						// Prompt user
-						action, err = promptFolderConflict(folderName)
-						if err != nil {
-							errChan <- err
-							return
-						}
-						// Update mode if "all" selected
-						if action == ConflictSkipAll || action == ConflictMergeAll {
-							*folderConflictMode = action
-						}
-					}
-
-					switch action {
-					case ConflictSkipOnce, ConflictSkipAll:
-						if progressWriter != nil {
-							fmt.Fprintf(progressWriter, "  ⏭  Skipping existing folder: %s\n", folderName)
-						}
-						// Don't add to mapping, so files in this folder will also be skipped
-						return
-					case ConflictMergeOnce, ConflictMergeAll:
-						if progressWriter != nil {
-							fmt.Fprintf(progressWriter, "  ♻️  Using existing folder: %s\n", folderName)
-						}
-						mappingMutex.Lock()
-						mapping[dp] = existingID
-						mappingMutex.Unlock()
-
-						// Send folder ready event if channel provided
-						if folderReadyChan != nil {
-							select {
-							case folderReadyChan <- FolderReadyEvent{
-								LocalPath: dp,
-								RemoteID:  existingID,
-								Depth:     depth,
-							}:
-							case <-ctx.Done():
-								errChan <- ctx.Err()
-								return
-							}
-						}
-					case ConflictAbort:
-						errChan <- fmt.Errorf("upload aborted by user")
-						return
-					}
-				} else {
-					// Create new folder
-					folderID, err := apiClient.CreateFolder(ctx, folderName, parentRemoteID)
-					if err != nil {
-						errChan <- fmt.Errorf("failed to create folder %s: %w", folderName, err)
-						return
-					}
-
-					// Populate cache for newly created folder (empty initially)
-					// This ensures subsequent file checks can use cache
-					_, err = cache.Get(ctx, apiClient, folderID)
-					if err != nil {
-						logger.Warn().Str("folder_id", folderID).Err(err).Msg("Failed to populate cache for new folder")
-						// Non-fatal, continue
-					}
-
-					mappingMutex.Lock()
-					mapping[dp] = folderID
-					foldersCreated++
-					mappingMutex.Unlock()
-
-					if progressWriter != nil {
-						fmt.Fprintf(progressWriter, "  ✓ Created folder: %s (ID: %s)\n", folderName, folderID)
-					}
-
-					// Send folder ready event if channel provided
-					if folderReadyChan != nil {
-						select {
-						case folderReadyChan <- FolderReadyEvent{
-							LocalPath: dp,
-							RemoteID:  folderID,
-							Depth:     depth,
-						}:
-						case <-ctx.Done():
-							errChan <- ctx.Err()
-							return
-						}
-					}
+					errChan <- err
 				}
 			}(dirPath)
 		}
 
-		// Wait for all folders at this depth level
 		wg.Wait()
 		close(errChan)
 
-		// Check for errors
 		for err := range errChan {
 			return nil, 0, err
 		}
 	}
 
-	return mapping, foldersCreated, nil
+	return mapping, int(foldersCreated), nil
+}
+
+// CreateFolderStructureStreaming creates remote folders from a streaming directory channel.
+// Unlike CreateFolderStructure which requires all directories upfront, this processes
+// directories as they are discovered by WalkStream.
+//
+// v4.8.5: Uses parent-ready gating — a folder can be created as soon as its parent
+// exists in the mapping. filepath.WalkDir guarantees parents are visited before
+// children, so pending buffers stay small.
+//
+// Returns the mapping (localPath → remoteID), folders created count, and any error.
+func CreateFolderStructureStreaming(
+	ctx context.Context,
+	apiClient *api.Client,
+	cache *FolderCache,
+	rootPath string,
+	dirChan <-chan localfs.FileEntry,
+	rootRemoteID string,
+	folderConflictMode *ConflictAction,
+	maxConcurrent int,
+	logger *logging.Logger,
+	folderReadyChan chan<- FolderReadyEvent,
+	progressWriter io.Writer,
+) (map[string]string, int, error) {
+	mapping := make(map[string]string)
+	mapping[rootPath] = rootRemoteID
+	var foldersCreated int32
+	var mappingMu sync.RWMutex
+
+	// Send ready event for root folder
+	if folderReadyChan != nil {
+		select {
+		case folderReadyChan <- FolderReadyEvent{
+			LocalPath: rootPath,
+			RemoteID:  rootRemoteID,
+			Depth:     strings.Count(rootPath, string(os.PathSeparator)),
+		}:
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
+
+	params := processFolderParams{
+		ctx:                ctx,
+		apiClient:          apiClient,
+		cache:              cache,
+		folderConflictMode: folderConflictMode,
+		logger:             logger,
+		progressWriter:     progressWriter,
+		folderReadyChan:    folderReadyChan,
+		mapping:            mapping,
+		mappingMu:          &mappingMu,
+		foldersCreated:     &foldersCreated,
+	}
+
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+	var pendingDirs []string
+	var pendingMu sync.Mutex
+	var firstErr error
+	var errMu sync.Mutex
+
+	setErr := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+	}
+
+	// flushPending launches goroutines for any pending dirs whose parent is now ready.
+	// Declared as var for recursive use from goroutines.
+	// Must be called under pendingMu lock.
+	var flushPending func()
+	flushPending = func() {
+		remaining := pendingDirs[:0]
+		for _, dp := range pendingDirs {
+			parentPath := filepath.Dir(dp)
+			mappingMu.RLock()
+			_, parentReady := mapping[parentPath]
+			mappingMu.RUnlock()
+
+			if parentReady {
+				dpCopy := dp
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+
+					_, _, err := processFolder(params, dpCopy)
+					if err != nil {
+						setErr(err)
+						return
+					}
+					// After adding to mapping, flush any pending children
+					pendingMu.Lock()
+					flushPending()
+					pendingMu.Unlock()
+				}()
+			} else {
+				remaining = append(remaining, dp)
+			}
+		}
+		pendingDirs = remaining
+	}
+
+	// Process directories as they arrive from the walk
+	for dir := range dirChan {
+		errMu.Lock()
+		hasErr := firstErr != nil
+		errMu.Unlock()
+		if hasErr {
+			break
+		}
+
+		dirPath := dir.Path
+		parentPath := filepath.Dir(dirPath)
+
+		mappingMu.RLock()
+		_, parentReady := mapping[parentPath]
+		mappingMu.RUnlock()
+
+		if parentReady {
+			// Parent is ready — create immediately
+			wg.Add(1)
+			go func(dp string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				_, _, err := processFolder(params, dp)
+				if err != nil {
+					setErr(err)
+					return
+				}
+				// Flush any pending children
+				pendingMu.Lock()
+				flushPending()
+				pendingMu.Unlock()
+			}(dirPath)
+		} else {
+			// Parent not yet created — buffer
+			pendingMu.Lock()
+			pendingDirs = append(pendingDirs, dirPath)
+			pendingMu.Unlock()
+		}
+	}
+
+	// Wait for all in-flight folder creations
+	wg.Wait()
+
+	// Final flush attempt for any remaining pending dirs
+	pendingMu.Lock()
+	flushPending()
+	pendingMu.Unlock()
+	wg.Wait()
+
+	// Any remaining pending dirs are errors (parent was never created)
+	pendingMu.Lock()
+	if len(pendingDirs) > 0 && firstErr == nil {
+		firstErr = fmt.Errorf("orphaned directories (parent never created): %d remaining, first: %s",
+			len(pendingDirs), pendingDirs[0])
+	}
+	pendingMu.Unlock()
+
+	return mapping, int(foldersCreated), firstErr
 }
 
 // uploadDirectoryPipelined coordinates pipelined folder creation and file uploads

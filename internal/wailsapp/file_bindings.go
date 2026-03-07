@@ -818,25 +818,6 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		parentID = folders.MyLibrary
 	}
 
-	// Build directory tree (include hidden files for completeness)
-	directories, files, _, err := cli.BuildDirectoryTree(localPath, true)
-	if err != nil {
-		deferredError = err.Error()
-		return FolderUploadResultDTO{Error: "Failed to scan directory: " + err.Error()}
-	}
-
-	// v4.0.8: Calculate total bytes from scanned files for enumeration event
-	var scanTotalBytes int64
-	for _, filePath := range files {
-		if info, err := os.Stat(filePath); err == nil {
-			scanTotalBytes += info.Size()
-		}
-	}
-	// v4.7.7: Emit progress (NOT completed) — scan done, folder creation starting
-	statusMsg := fmt.Sprintf("Scan complete: %d files, %d folders. Creating remote folder structure...", len(files), len(directories))
-	emitEnumeration(events.EventEnumerationProgress, len(directories), len(files), scanTotalBytes, false, "", statusMsg)
-	a.logInfo("folder-upload", fmt.Sprintf("Scan complete: %d folders, %d files", len(directories), len(files)))
-
 	// Initialize folder cache for API call optimization
 	cache := cli.NewFolderCache()
 
@@ -860,7 +841,6 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 			// v4.0.8: Handle "folder already exists" error with clear user guidance
 			if api.IsFileExistsError(err) {
 				a.logWarn("folder-upload", fmt.Sprintf("Folder '%s' already exists, checking if visible...", rootFolderName))
-				// Invalidate cache and re-check to see if we can find it
 				cache.Invalidate(parentID)
 				existingID, found, findErr := cli.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
 				if findErr != nil {
@@ -869,12 +849,10 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but couldn't be accessed. Please check your Rescale Trash and permanently delete it, then try again."}
 				}
 				if found {
-					// Folder exists and is visible - use it (merge mode)
 					rootFolderID = existingID
 					mergedIntoFolder = rootFolderName
 					a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
 				} else {
-					// Folder exists (duplicate error) but not visible - likely in Trash
 					a.logError("folder-upload", fmt.Sprintf("Folder '%s' exists but is not visible - may be in Trash", rootFolderName))
 					deferredError = "Folder exists but is not visible - may be in Trash"
 					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but is not visible. Please check your Rescale Trash and permanently delete it, then try again."}
@@ -889,41 +867,26 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 			foldersCreated++
 		}
 	} else {
-		// Folder already exists and was found - use it (merge mode)
 		mergedIntoFolder = rootFolderName
 		a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
 	}
 
-	// Populate cache for root folder (v4.0.4: log warning if cache warming fails)
+	// Populate cache for root folder
 	if _, err := cache.Get(ctx, apiClient, rootFolderID); err != nil {
 		logger.Warn().Err(err).Str("folderID", rootFolderID).Msg("Failed to warm cache for root folder")
 	}
 
-	// v4.7.7: Create folder progress writer to emit enumeration events during folder creation
-	var progressWriter *folderProgressWriter
-	if a.engine != nil && a.engine.Events() != nil && len(directories) > 0 {
-		progressWriter = &folderProgressWriter{
-			enumID:       enumID,
-			folderName:   displayName,
-			direction:    "upload",
-			filesFound:   len(files),
-			foldersFound: len(directories),
-			bytesFound:   scanTotalBytes,
-			totalDirs:    len(directories),
-			eventBus:     a.engine.Events(),
-		}
-	}
-
-	// v4.8.3: Pre-compute files per directory for pipelined dispatch
-	filesPerDir := make(map[string][]string)
-	for _, filePath := range files {
-		filesPerDir[filepath.Dir(filePath)] = append(filesPerDir[filepath.Dir(filePath)], filePath)
-	}
-
-	// v4.8.3: Pipelined upload — folder creation and file uploads run concurrently.
-	// Files are queued for upload as soon as their parent folder is created,
-	// instead of waiting for ALL folders to be created first.
+	// v4.8.5: Streaming pipeline — WalkStream feeds dirChan to CreateFolderStructureStreaming
+	// and fileChan to the dispatcher. Uploads start while discovery is still in progress.
 	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+
+	// Start streaming walk
+	dirChan, fileChan, walkErrChan := localfs.WalkStream(uploadCtx, localPath, localfs.WalkOptions{
+		IncludeHidden:  true,
+		SkipHiddenDirs: true,
+	})
+
+	// Folder creation channel + request channel
 	folderReadyChan := make(chan cli.FolderReadyEvent, constants.WorkChannelBuffer)
 	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
 
@@ -938,16 +901,16 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		return FolderUploadResultDTO{Error: deferredError}
 	}
 
-	// Goroutine 1: Folder creation — sends FolderReadyEvent as each folder is created
+	// Goroutine 1: Streaming folder creation — reads dirChan, creates folders as parents become ready
 	folderConflictMode := cli.ConflictMergeAll
 	folderErrCh := make(chan error, 1)
 
 	go func() {
 		defer close(folderReadyChan)
-		_, created, err := cli.CreateFolderStructure(
-			uploadCtx, apiClient, cache, localPath, directories, rootFolderID,
+		_, created, err := cli.CreateFolderStructureStreaming(
+			uploadCtx, apiClient, cache, localPath, dirChan, rootFolderID,
 			&folderConflictMode, constants.DefaultFolderConcurrency, logger,
-			folderReadyChan, progressWriter,
+			folderReadyChan, nil, // progressWriter handled by enumeration events now
 		)
 		if err != nil && uploadCtx.Err() == nil {
 			emitLog(events.ErrorLevel, fmt.Sprintf("Folder creation error: %v", err))
@@ -958,72 +921,156 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		close(folderErrCh)
 	}()
 
-	// Goroutine 2: Event dispatcher — reads FolderReadyEvent, maps to files, sends TransferRequest
+	// Goroutine 2: Orchestrator/Dispatcher — merges fileChan + folderReadyChan
+	// Owns: requestCh closure, scan completion, enumeration completion
 	go func() {
 		defer close(requestCh)
 
 		var completionOnce sync.Once
-		emitCompletion := func(errMsg string) {
+		emitCompletion := func(foldersFound, filesFound int, bytesFound int64, errMsg string) {
 			completionOnce.Do(func() {
 				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
 				emitEnumeration(events.EventEnumerationCompleted,
-					len(directories), len(files), scanTotalBytes, true, errMsg, "")
+					foldersFound, filesFound, bytesFound, true, errMsg, "")
 			})
 		}
-		defer emitCompletion("upload dispatcher exited unexpectedly")
+		defer emitCompletion(0, 0, 0, "upload dispatcher exited unexpectedly")
 
-		processedFolders := make(map[string]bool)
+		// Folder mapping: populated by folderReadyChan events
+		folderMapping := make(map[string]string) // localDirPath → remoteID
+		folderMapping[localPath] = rootFolderID
+
+		// Pending files: buffered until parent folder is ready
+		pendingFiles := make(map[string][]localfs.FileEntry) // parentDir → files
+
+		// Discovery counters
+		var discoveredFiles int
+		var discoveredBytes int64
+		var discoveredDirs int
 		var filesQueued int
 
-		for event := range folderReadyChan {
-			if processedFolders[event.LocalPath] {
-				continue
-			}
-			processedFolders[event.LocalPath] = true
+		fileChClosed := false
+		folderChClosed := false
 
-			for _, filePath := range filesPerDir[event.LocalPath] {
-				info, statErr := os.Stat(filePath)
-				if statErr != nil {
+		for !fileChClosed || !folderChClosed {
+			select {
+			case file, ok := <-fileChan:
+				if !ok {
+					fileChClosed = true
+					// fileChan closed = scan complete for files
+					ts.GetQueue().MarkBatchScanInProgress(enumID, false)
 					continue
 				}
-				req := services.TransferRequest{
-					Type:        services.TransferTypeUpload,
-					Source:      filePath,
-					Dest:        event.RemoteID,
-					Name:        filepath.Base(filePath),
-					Size:        info.Size(),
-					SourceLabel: services.SourceLabelFileBrowser,
-					BatchID:     enumID,
-					BatchLabel:  displayName,
-					Tags:        uploadTags,
+				discoveredFiles++
+				discoveredBytes += file.Size
+				// Update batch discovered totals periodically
+				if discoveredFiles%100 == 0 || discoveredFiles == 1 {
+					ts.GetQueue().UpdateBatchDiscovered(enumID, discoveredFiles, discoveredBytes)
 				}
-				select {
-				case requestCh <- req:
-					filesQueued++
-				case <-uploadCtx.Done():
-					emitCompletion("")
-					return
+
+				parentDir := filepath.Dir(file.Path)
+				if remoteID, ready := folderMapping[parentDir]; ready {
+					// Parent folder ready — queue immediately
+					req := services.TransferRequest{
+						Type:        services.TransferTypeUpload,
+						Source:      file.Path,
+						Dest:        remoteID,
+						Name:        file.Name,
+						Size:        file.Size,
+						SourceLabel: services.SourceLabelFileBrowser,
+						BatchID:     enumID,
+						BatchLabel:  displayName,
+						Tags:        uploadTags,
+					}
+					select {
+					case requestCh <- req:
+						filesQueued++
+					case <-uploadCtx.Done():
+						emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "")
+						return
+					}
+				} else {
+					// Parent not ready — buffer
+					pendingFiles[parentDir] = append(pendingFiles[parentDir], file)
 				}
+
+			case event, ok := <-folderReadyChan:
+				if !ok {
+					folderChClosed = true
+					continue
+				}
+				discoveredDirs++
+				folderMapping[event.LocalPath] = event.RemoteID
+
+				// Flush any pending files for this folder
+				if pending, has := pendingFiles[event.LocalPath]; has {
+					for _, file := range pending {
+						req := services.TransferRequest{
+							Type:        services.TransferTypeUpload,
+							Source:      file.Path,
+							Dest:        event.RemoteID,
+							Name:        file.Name,
+							Size:        file.Size,
+							SourceLabel: services.SourceLabelFileBrowser,
+							BatchID:     enumID,
+							BatchLabel:  displayName,
+							Tags:        uploadTags,
+						}
+						select {
+						case requestCh <- req:
+							filesQueued++
+						case <-uploadCtx.Done():
+							emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "")
+							return
+						}
+					}
+					delete(pendingFiles, event.LocalPath)
+				}
+
+			case <-uploadCtx.Done():
+				emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "")
+				return
 			}
 		}
 
-		// Check for folder creation errors after folderReadyChan closes
+		// Final update of discovered totals
+		ts.GetQueue().UpdateBatchDiscovered(enumID, discoveredFiles, discoveredBytes)
+
+		// Check for walk errors
+		select {
+		case walkErr := <-walkErrChan:
+			if walkErr != nil && uploadCtx.Err() == nil {
+				emitLog(events.ErrorLevel, fmt.Sprintf("Walk error: %v", walkErr))
+				emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, walkErr.Error())
+				return
+			}
+		default:
+		}
+
+		// Check for folder creation errors
 		if folderErr := <-folderErrCh; folderErr != nil {
-			emitCompletion("Folder creation failed: " + folderErr.Error())
+			emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "Folder creation failed: "+folderErr.Error())
 			return
 		}
 
-		emitLog(events.InfoLevel, fmt.Sprintf("All %d files queued for upload", filesQueued))
-		emitCompletion("")
+		// Flush any remaining pending files (parent folders that were skipped won't be in mapping)
+		for parentDir, pending := range pendingFiles {
+			emitLog(events.WarnLevel, fmt.Sprintf("Skipping %d files in unmapped folder: %s", len(pending), parentDir))
+		}
+
+		emitLog(events.InfoLevel, fmt.Sprintf("All %d files queued for upload (%d discovered)", filesQueued, discoveredFiles))
+		emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "")
 	}()
 
 	// Dispatcher goroutine owns completion — prevent deferred emitter
 	completionEmitted = true
 
+	// v4.8.5: Return immediately with FilesQueued=0 — files are discovered asynchronously.
+	// Frontend already handles !totalKnown state. Batch events drive UI updates.
 	return FolderUploadResultDTO{
 		FoldersCreated: foldersCreated,
-		FilesQueued:    len(files),      // Total expected from scan
-		TotalBytes:     scanTotalBytes,
+		FilesQueued:    0,
+		TotalBytes:     0,
 		MergedInto:     mergedIntoFolder,
 	}
 }
