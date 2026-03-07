@@ -208,7 +208,7 @@ const BatchRow = memo(function BatchRow({
             <div className="text-xs text-gray-500">
               {batch.totalKnown
                 ? `${formatNumber(batch.completed)} of ${formatNumber(batch.total)} files`
-                : `${formatNumber(batch.completed)} completed, ${formatNumber(batch.total)} discovered...`}
+                : `${formatNumber(batch.completed)} completed, ${formatNumber(batch.total)} queued...`}
               {batch.totalBytes > 0 && ` — ${formatSize(batch.totalBytes)}`}
             </div>
           </div>
