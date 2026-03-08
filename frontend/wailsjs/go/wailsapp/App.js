@@ -26,6 +26,10 @@ export function CheckFolderExistsForUpload(arg1, arg2) {
   return window['go']['wailsapp']['App']['CheckFolderExistsForUpload'](arg1, arg2);
 }
 
+export function CheckFoldersExistForUpload(arg1, arg2) {
+  return window['go']['wailsapp']['App']['CheckFoldersExistForUpload'](arg1, arg2);
+}
+
 export function CheckForUpdates() {
   return window['go']['wailsapp']['App']['CheckForUpdates']();
 }
@@ -380,4 +384,12 @@ export function ValidateAutoDownloadSetup() {
 
 export function ValidateJobSpec(arg1) {
   return window['go']['wailsapp']['App']['ValidateJobSpec'](arg1);
+}
+
+export function ValidateLocalDirectory(arg1) {
+  return window['go']['wailsapp']['App']['ValidateLocalDirectory'](arg1);
+}
+
+export function ValidateRemoteFolder(arg1) {
+  return window['go']['wailsapp']['App']['ValidateRemoteFolder'](arg1);
 }

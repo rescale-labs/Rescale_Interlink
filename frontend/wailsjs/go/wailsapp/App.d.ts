@@ -14,6 +14,8 @@ export function CancelTransfer(arg1:string):Promise<void>;
 
 export function CheckFolderExistsForUpload(arg1:string,arg2:string):Promise<wailsapp.FolderExistsCheckDTO>;
 
+export function CheckFoldersExistForUpload(arg1:Array<string>,arg2:string):Promise<Array<wailsapp.FolderExistsCheckDTO>>;
+
 export function CheckForUpdates():Promise<wailsapp.VersionCheckDTO>;
 
 export function ClearCatalogCache():Promise<void>;
@@ -191,3 +193,7 @@ export function ValidateAutoDownloadPreFlight(arg1:string):Promise<wailsapp.PreF
 export function ValidateAutoDownloadSetup():Promise<wailsapp.AutoDownloadValidationDTO>;
 
 export function ValidateJobSpec(arg1:wailsapp.JobSpecDTO):Promise<Array<string>>;
+
+export function ValidateLocalDirectory(arg1:string):Promise<void>;
+
+export function ValidateRemoteFolder(arg1:string):Promise<void>;

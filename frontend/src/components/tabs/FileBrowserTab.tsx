@@ -137,15 +137,20 @@ export function FileBrowserTab() {
   const [isDeleting, setIsDeleting] = useState(false)
 
   // Confirmation dialogs with optional warning
+  // v4.8.6: Frozen fields snapshot state at click time so confirm uses the original destination
   const [uploadConfirm, setUploadConfirm] = useState<{
     items: wailsapp.FileItemDTO[]
     destPath: string
     folderCount: number
+    frozenDestFolderId: string        // v4.8.6: snapshot at click time
+    frozenMode: string                // v4.8.6: browse mode at click time
+    frozenMyLibraryId: string | null  // v4.8.6: for legacy mode fallback
   } | null>(null)
   const [downloadConfirm, setDownloadConfirm] = useState<{
     items: wailsapp.FileItemDTO[]
     destPath: string
     folderCount: number
+    frozenLocalPath: string           // v4.8.6: snapshot at click time
   } | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
 
@@ -223,13 +228,24 @@ export function FileBrowserTab() {
     // Get destination path from breadcrumb
     const destPath = remote.breadcrumb.map(b => b.name).join(' > ') || 'My Library'
 
+    // v4.8.6: Resolve destination folder ID at snapshot time
+    const resolvedDestFolderId = remote.currentFolderId || remote.myLibraryId || ''
+    if (!resolvedDestFolderId) {
+      setStatus('Please wait for folder to load before uploading.')
+      return
+    }
+
     // v4.0.0: Support both files and folders
+    // v4.8.6: Snapshot destination state at click time
     setUploadConfirm({
-      items: selectedItems, // Include all items (files AND folders)
+      items: selectedItems,
       destPath,
-      folderCount
+      folderCount,
+      frozenDestFolderId: resolvedDestFolderId,
+      frozenMode: remote.mode,
+      frozenMyLibraryId: remote.myLibraryId,
     })
-  }, [uploadState.allowed, getLocalSelectedItems, remote.breadcrumb])
+  }, [uploadState.allowed, getLocalSelectedItems, remote.breadcrumb, remote.currentFolderId, remote.mode, remote.myLibraryId])
 
   // v4.0.8: Helper function that performs the actual upload (called after merge confirmation if needed)
   // v4.7.4: Added tags parameter for post-upload tagging
@@ -244,6 +260,18 @@ export function FileBrowserTab() {
     setStatus(`Uploading ${totalItems} item(s)...`)
 
     try {
+      // v4.8.6: Validate destination folder before any transfers
+      try {
+        await App.ValidateRemoteFolder(destFolderId)
+      } catch (err) {
+        setErrorDialog({
+          title: 'Invalid Destination',
+          message: `The destination folder is no longer accessible. Please select a new destination and try again.`
+        })
+        setIsUploading(false)
+        return
+      }
+
       // Switch to Transfers tab early for folder uploads
       if (folders.length > 0) {
         switchToTab('Transfers')
@@ -328,27 +356,29 @@ export function FileBrowserTab() {
     const files = uploadConfirm.items.filter(item => !item.isFolder)
     const folders = uploadConfirm.items.filter(item => item.isFolder)
 
-    // For Legacy mode, uploads go to My Library root folder
-    const destFolderId = remote.mode === 'legacy'
-      ? (remote.myLibraryId || remote.currentFolderId)
-      : remote.currentFolderId
+    // v4.8.6: Use frozen values from click time instead of live store state
+    const destFolderId = uploadConfirm.frozenMode === 'legacy'
+      ? (uploadConfirm.frozenMyLibraryId || uploadConfirm.frozenDestFolderId)
+      : uploadConfirm.frozenDestFolderId
 
     // v4.0.8: Check if any folders already exist before uploading
+    // v4.8.5 bugfix: Use batch check with shared cache — single API paginate instead of N
     if (folders.length > 0) {
       setStatus('Checking for existing folders...')
-      const existingFolders: string[] = []
+      let existingFolders: string[] = []
 
-      for (const folder of folders) {
-        try {
-          const check = await App.CheckFolderExistsForUpload(folder.name, destFolderId)
-          if (check.error) {
-            console.warn(`Error checking folder ${folder.name}:`, check.error)
-          } else if (check.exists) {
-            existingFolders.push(folder.name)
-          }
-        } catch (err) {
-          console.warn(`Error checking folder ${folder.name}:`, err)
-        }
+      try {
+        const folderNames = folders.map(f => f.name)
+        const checks = await App.CheckFoldersExistForUpload(folderNames, destFolderId)
+        existingFolders = folderNames.filter((_, i) => checks[i]?.exists)
+      } catch (err) {
+        // v4.8.6: Surface folder-check errors instead of silently ignoring
+        setErrorDialog({
+          title: 'Upload Error',
+          message: `Failed to check for existing folders: ${err instanceof Error ? err.message : String(err)}`
+        })
+        setStatus('')
+        return
       }
 
       // If any folders exist, show merge confirmation dialog
@@ -364,7 +394,7 @@ export function FileBrowserTab() {
 
     // No existing folders - proceed directly
     await proceedWithUpload(files, folders, destFolderId, tags)
-  }, [uploadConfirm, parsedUploadTags, remote.mode, remote.myLibraryId, remote.currentFolderId, proceedWithUpload])
+  }, [uploadConfirm, parsedUploadTags, proceedWithUpload])
 
   // v4.0.8: Confirm merge and proceed with upload
   const confirmMerge = useCallback(async () => {
@@ -393,16 +423,21 @@ export function FileBrowserTab() {
     const destPath = local.currentPath || 'Home'
 
     // v4.0.0: Support both files and folders
+    // v4.8.6: Snapshot local path at click time
     setDownloadConfirm({
-      items: selectedItems, // Include all selected items (files AND folders)
+      items: selectedItems,
       destPath,
-      folderCount
+      folderCount,
+      frozenLocalPath: local.currentPath,
     })
   }, [remoteSelectedCount, getRemoteSelectedItems, local.currentPath])
 
   // Confirm download
   const confirmDownload = useCallback(async () => {
     if (!downloadConfirm) return
+
+    // v4.8.6: Use frozen local path from click time instead of live store state
+    const destLocalPath = downloadConfirm.frozenLocalPath
 
     setDownloadConfirm(null)
     setIsDownloading(true)
@@ -415,6 +450,18 @@ export function FileBrowserTab() {
     setStatus(`Downloading ${totalItems} item(s)...`)
 
     try {
+      // v4.8.6: Validate local destination before starting downloads
+      try {
+        await App.ValidateLocalDirectory(destLocalPath)
+      } catch (err) {
+        setErrorDialog({
+          title: 'Invalid Destination',
+          message: `The local destination "${destLocalPath}" is no longer accessible.`
+        })
+        setIsDownloading(false)
+        return
+      }
+
       // v4.0.5: Switch to Transfers tab early so users can see Activity log (issue #19)
       // This shows the scanning progress as log events in the Activity tab
       if (folders.length > 0) {
@@ -425,7 +472,7 @@ export function FileBrowserTab() {
       for (const folder of folders) {
         // v4.0.5: Show "Scanning" status since that's what happens first (issue #19)
         setStatus(`Scanning folder: ${folder.name}...`)
-        const result = await App.StartFolderDownload(folder.id, folder.name, local.currentPath)
+        const result = await App.StartFolderDownload(folder.id, folder.name, destLocalPath)
         if (result.error) {
           console.error(`Folder download error for ${folder.name}:`, result.error)
           // Continue with other items
@@ -443,9 +490,9 @@ export function FileBrowserTab() {
         const requests = files.map(item => ({
           type: 'download',
           source: item.id, // Remote file ID
-          dest: local.currentPath.endsWith('/')
-            ? local.currentPath + item.name
-            : local.currentPath + '/' + item.name,
+          dest: destLocalPath.endsWith('/')
+            ? destLocalPath + item.name
+            : destLocalPath + '/' + item.name,
           name: item.name,
           size: item.size ?? 0,
           sourceLabel: 'FileBrowser',
@@ -483,7 +530,7 @@ export function FileBrowserTab() {
     } finally {
       setIsDownloading(false)
     }
-  }, [downloadConfirm, local.currentPath, clearRemoteSelection, refreshLocal, switchToTab])
+  }, [downloadConfirm, clearRemoteSelection, refreshLocal, switchToTab])
 
   // Handle delete button click
   const handleDelete = useCallback(() => {
