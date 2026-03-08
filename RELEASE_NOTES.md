@@ -1,5 +1,56 @@
 # Release Notes - Rescale Interlink
 
+## v4.8.5 - March 7, 2026
+
+### Batch Speed/ETA Overhaul
+
+The per-task speed summation approach (which frequently produced blank or zero speed) is replaced with batch-level sliding window tracking.
+
+- **10-second sliding window**: New `speedWindow` type tracks cumulative bytes transferred and files completed across the entire batch. Produces a stable, current throughput value that responds to stalls without being diluted by startup or idle periods.
+- **Backend ETA with smoothing**: ETA is now computed server-side using remaining bytes / window speed, passed through jump capping (2x max single-tick change) and exponential moving average (alpha=0.3). Frontend is a one-line consumer. Replaces the previous frontend `remainingBytes / speed` calculation which had no smoothing and inherited all speed display problems.
+- **Files/sec fallback**: When byte-level speed is too small to display meaningfully (e.g., batches of tiny files), the UI falls back to showing file completion rate (e.g., "2.3 files/s") from a separate sliding window.
+- **Discovered totals**: New `UpdateBatchDiscovered()` bridges the gap between "files found by scan" and "tasks registered in queue", so the UI shows correct totals even while tasks are still being registered.
+- **Metric lifecycle fix**: Speed/ETA state is cleaned up when a batch becomes terminal (`cleanupBatchMetrics`), not when registration ends (`CleanupBatch`). Prevents premature metric loss for batches where registration finishes before transfers complete.
+
+### Streaming Local Enumeration
+
+Folder uploads previously loaded the entire directory tree into memory before starting any uploads. For large folders (thousands+ of files), this caused a long blocking "Scanning..." phase with no uploads happening.
+
+- **`WalkStream()`**: New streaming directory walker in `internal/localfs/browser.go` emits directories and files on separate buffered channels as they are discovered. Uploads can begin as soon as the first files and their parent folders are ready.
+- **Parent-ready gating**: `CreateFolderStructureStreaming()` creates remote folders as soon as their parent exists in the mapping, rather than processing by depth level. Works correctly with `filepath.WalkDir`'s depth-first parent-first traversal order.
+- **GUI streaming pipeline**: The orchestrator goroutine merges `fileChan` (discovered files) and `folderReadyChan` (created folders) via a `select` loop. Files whose parent folder is ready are queued immediately; others are buffered until the parent is created.
+- **`WalkCollect()` preserved**: The existing non-streaming walker is unchanged for non-upload code paths.
+
+### Upload Labels and Structured Phases
+
+- **Direction-aware labels**: Upload batches show "Preparing upload..." instead of "Scanning..." during the discovery phase. Download batches retain "Scanning..." since they scan a remote folder.
+- **Structured phase enum**: `EnumerationEvent` carries a `Phase` field (`scanning`, `creating_folders`, `complete`, `error`) replacing frontend substring matching on `statusMessage`.
+- **Folder creation sub-progress**: During folder creation, the UI shows "Creating remote folders... (X of Y)" with structured `FoldersTotal`/`FoldersCreated` fields.
+- **Phase emission wiring**: All `emitEnumeration` call sites (both upload and download paths) set the `Phase` field. Periodic progress events emitted every 100 files (scanning) and every 3 folders (creating).
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/speed_window.go` | **NEW**: Sliding window speed/rate calculator |
+| `internal/transfer/speed_window_test.go` | **NEW**: Unit tests for speed window |
+| `internal/transfer/queue.go` | Batch byte/file tracking, window-based speed, ETA computation, discovered totals, metric cleanup |
+| `internal/transfer/task.go` | `lastBatchBytes` field for incremental byte tracking |
+| `internal/events/events.go` | `FilesPerSec`, `ETASeconds`, `DiscoveredTotal`, `DiscoveredBytes` on `BatchProgressEvent`; `Phase`, `FoldersTotal`, `FoldersCreated` on `EnumerationEvent` |
+| `internal/wailsapp/event_bridge.go` | New DTO fields and mappings for both event types |
+| `internal/localfs/browser.go` | **NEW**: `WalkStream()` streaming directory walker |
+| `internal/localfs/browser_test.go` | **NEW**: WalkStream tests |
+| `internal/cli/folder_upload_helper.go` | `processFolder()` extraction, `CreateFolderStructureStreaming()` with parent-ready gating |
+| `internal/cli/folder_upload_helper_test.go` | **NEW**: Streaming folder creation tests |
+| `internal/wailsapp/file_bindings.go` | GUI streaming pipeline, phase-aware enumeration events, `folderProgressWriter` updates |
+| `frontend/src/types/events.ts` | New fields: `filesPerSec`, `etaSeconds`, `discoveredTotal`, `discoveredBytes`, `phase`, `foldersTotal`, `foldersCreated` |
+| `frontend/src/stores/transferStore.ts` | New fields on `TransferBatch` and `Enumeration`, event handlers |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Backend ETA, files/sec fallback, direction-aware labels, phase-based rendering, folder progress |
+| `internal/version/version.go` | v4.8.4 → v4.8.5 |
+| `wails.json` | productVersion 4.8.4 → 4.8.5 |
+
+---
+
 ## v4.8.2 - March 2, 2026
 
 ### Proxy Resilience

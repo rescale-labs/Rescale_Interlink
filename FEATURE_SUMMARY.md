@@ -1,10 +1,33 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.8.2
-**Build Date:** March 2, 2026
+**Version:** 4.8.5
+**Build Date:** March 7, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
+
+---
+
+## v4.8.5 Changes — Speed/ETA Overhaul + Streaming Upload Architecture
+
+### Batch Speed Display (`internal/transfer/speed_window.go`, `internal/transfer/queue.go`)
+- **Sliding window speed**: 10-second sliding window over cumulative bytes transferred replaces per-task speed summation. Produces stable, current throughput that responds to stalls without dilution from startup or idle periods.
+- **Files/sec fallback**: Separate sliding window over cumulative file completions. UI shows file rate (e.g., "2.3 files/s") when byte-level speed is too small to display.
+- **Discovered totals**: `UpdateBatchDiscovered()` tracks files found by scan separately from tasks registered in queue. UI shows correct totals during registration.
+
+### Backend ETA (`internal/transfer/queue.go`)
+- **Server-side computation**: `computeBatchETA()` computes remaining bytes / window speed.
+- **Smoothing**: Jump capping (2x max single-tick change) + EMA (alpha=0.3) via `smoothETA()`. Frontend is a one-line consumer of `batch.etaSeconds`.
+
+### Streaming Local Enumeration (`internal/localfs/browser.go`, `internal/cli/folder_upload_helper.go`, `internal/wailsapp/file_bindings.go`)
+- **`WalkStream()`**: Streaming directory walker emits dirs and files on separate buffered channels. Uploads begin as soon as first files and parent folders are ready.
+- **`CreateFolderStructureStreaming()`**: Parent-ready gating creates remote folders as soon as parent is mapped, rather than depth-level batching.
+- **GUI streaming pipeline**: Orchestrator merges `fileChan` + `folderReadyChan` via `select` loop. Files queued immediately when parent ready, buffered otherwise.
+
+### Upload Labels and Phases (`frontend/src/components/tabs/TransfersTab.tsx`, `internal/events/events.go`)
+- **Direction-aware labels**: Uploads show "Preparing upload..." instead of "Scanning..." during discovery.
+- **Structured phase enum**: `EnumerationEvent.Phase` field (`scanning`/`creating_folders`/`complete`/`error`) replaces substring matching.
+- **Folder creation sub-progress**: "Creating remote folders... (X of Y)" with `FoldersTotal`/`FoldersCreated` fields.
 
 ---
 
