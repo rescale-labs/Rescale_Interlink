@@ -15,6 +15,7 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/validation"
@@ -282,6 +283,14 @@ func (d *Daemon) poll(ctx context.Context) {
 	}
 }
 
+// daemonDownloadItem implements transfer.WorkItem for downloadJob RunBatch migration.
+// v4.8.6: Replaces hand-rolled sequential loop with transfer.RunBatch(ForceSequential).
+type daemonDownloadItem struct {
+	file models.JobFile
+}
+
+func (d daemonDownloadItem) FileSize() int64 { return d.file.DecryptedSize }
+
 // downloadJob downloads all files from a completed job.
 func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	// v4.0.8: Track active downloads for IPC status
@@ -351,25 +360,37 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	// v4.8.1: Create TransferManager once per job, not per file (Bug #4)
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// Download files
+	// v4.8.6: Wire stopChan to context cancellation for RunBatch.
+	downloadCtx, downloadCancel := context.WithCancel(ctx)
+	defer downloadCancel()
+	go func() {
+		select {
+		case <-d.stopChan:
+			downloadCancel()
+		case <-downloadCtx.Done():
+		}
+	}()
+
+	// v4.8.6: Build work items for RunBatch.
+	items := make([]daemonDownloadItem, len(files))
+	for i := range files {
+		items[i] = daemonDownloadItem{file: files[i]}
+	}
+
+	// v4.8.6: Download files using transfer.RunBatch with ForceSequential.
+	// Note: We do NOT rely on BatchResult — all real outcomes are tracked
+	// by manual counters (downloadedCount, totalSize, tracker).
 	var totalSize int64
 	downloadedCount := 0
-	var downloadErr error
+	batchCfg := transfer.BatchConfig{
+		MaxWorkers:      d.cfg.MaxConcurrent,
+		ResourceMgr:     resourceMgr,
+		Label:           "DAEMON-DOWNLOAD",
+		ForceSequential: true,
+	}
 
-	for _, file := range files {
-		select {
-		case <-ctx.Done():
-			downloadErr = ctx.Err()
-			break
-		case <-d.stopChan:
-			downloadErr = fmt.Errorf("daemon stopped during download")
-			break
-		default:
-		}
-
-		if downloadErr != nil {
-			break
-		}
+	transfer.RunBatch(downloadCtx, items, batchCfg, func(ctx context.Context, item daemonDownloadItem) error {
+		file := item.file
 
 		// Validate filename
 		if err := validation.ValidateFilename(file.Name); err != nil {
@@ -379,7 +400,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Err(err).
 				Msg("Skipping file with invalid name")
 			d.tracker.SkipFile(job.ID, file.DecryptedSize) // v4.7.8: adjust batch totals
-			continue
+			return nil
 		}
 
 		// Compute output path
@@ -401,7 +422,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			d.logger.Error().Err(err).Str("path", localPath).Msg("Failed to create file directory")
 			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
-			continue
+			return nil
 		}
 
 		// Skip if file exists
@@ -410,11 +431,13 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 			downloadedCount++
 			totalSize += file.DecryptedSize
 			d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8: counts as completed
-			continue
+			return nil
 		}
 
 		// Allocate transfer handle (reuses single TransferManager per job)
+		// v4.8.6: Fix resource leak — defer Complete() (was never called in prior code)
 		transferHandle := transferMgr.AllocateTransfer(file.DecryptedSize, 1)
+		defer transferHandle.Complete()
 
 		// Download file
 		d.logger.Debug().
@@ -443,15 +466,22 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Msg("Failed to download file")
 			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
 			// Continue with other files rather than failing entire job
-			continue
+			return nil
 		}
 
 		downloadedCount++
 		totalSize += file.DecryptedSize
 		d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8
-	}
+		return nil
+	})
 
-	if downloadErr != nil {
+	// v4.8.6: Check if download was interrupted (context cancelled by stopChan or parent)
+	if downloadCtx.Err() != nil {
+		downloadErr := downloadCtx.Err()
+		if ctx.Err() == nil {
+			// stopChan was closed — not parent context
+			downloadErr = fmt.Errorf("daemon stopped during download")
+		}
 		d.logger.Error().Err(downloadErr).Str("job_id", job.ID).Msg("Job download interrupted")
 		d.state.MarkFailed(job.ID, job.Name, downloadErr)
 		return

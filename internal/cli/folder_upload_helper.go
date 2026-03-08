@@ -563,9 +563,21 @@ func CreateFolderStructureStreaming(
 	return mapping, int(foldersCreated), firstErr
 }
 
+// cliPipelinedUploadItem implements transfer.WorkItem for uploadDirectoryPipelined.
+// v4.8.6: Replaces hand-rolled worker pool with transfer.RunBatchFromChannel.
+type cliPipelinedUploadItem struct {
+	fpath          string
+	remoteFolderID string
+	relativePath   string
+	size           int64
+}
+
+func (p cliPipelinedUploadItem) FileSize() int64 { return p.size }
+
 // uploadDirectoryPipelined coordinates pipelined folder creation and file uploads
 // Folders are created depth-by-depth, and files are uploaded as soon as their parent folder is ready
 // v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
+// v4.8.6: Migrated file upload worker pool to transfer.RunBatchFromChannel.
 func uploadDirectoryPipelined(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -635,17 +647,17 @@ func uploadDirectoryPipelined(
 	}
 	cliUploadTransferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.0: Compute adaptive concurrency from file sizes
-	uploadFileSizes := make([]int64, 0, len(files))
-	for _, f := range files {
-		if info, err := os.Stat(filepath.Join(rootPath, f)); err == nil {
-			uploadFileSizes = append(uploadFileSizes, info.Size())
-		}
+	// v4.8.6: Use RunBatchFromChannel with AdaptiveCount for dynamic worker scaling.
+	// Replaces manual ComputeBatchConcurrency + fixed worker pool.
+	var adaptive *transfer.AdaptiveWorkerCount
+	batchCfg := transfer.BatchConfig{
+		MaxWorkers:    fileConcurrency,
+		ResourceMgr:   resourceMgr,
+		Label:         "CLI-PIPELINED-UPLOAD",
+		AdaptiveCount: &adaptive,
 	}
-	cliUploadWorkerCount := resourceMgr.ComputeBatchConcurrency(uploadFileSizes, fileConcurrency)
-	fmt.Printf("  Upload workers: %d (adaptive, based on file sizes)\n", cliUploadWorkerCount)
 
-	// WaitGroup to track all operations
+	// WaitGroup to track folder creation + event dispatcher
 	var wg sync.WaitGroup
 
 	// 1. Start folder creation goroutine
@@ -671,25 +683,19 @@ func uploadDirectoryPipelined(
 		logger.Info().Int("folders", created).Msg("Folder creation complete")
 	}()
 
-	// 2. Start bounded file upload worker pool.
-	// The event-processing goroutine sends work items to a channel as folders become ready.
-	// Fixed-count workers consume from the channel. This avoids the goroutine-per-file
-	// problem and the unsafe WaitGroup pattern (Add after Wait starts).
-	type uploadWorkItem struct {
-		fpath          string
-		remoteFolderID string
-		relativePath   string
-	}
-	uploadWorkCh := make(chan uploadWorkItem, constants.WorkChannelBuffer)
+	// 2. Start RunBatchFromChannel for file uploads.
+	// The event dispatcher sends cliPipelinedUploadItem to batchCh as folders become ready.
+	// RunBatchFromChannel consumes from batchCh with adaptive worker scaling.
+	batchCh := make(chan cliPipelinedUploadItem, constants.WorkChannelBuffer)
 
-	// Start fixed worker pool for file uploads
-	// v4.8.1: Use adaptive worker count (was fileConcurrency, Bug #2)
-	var uploadWg sync.WaitGroup
-	for w := 0; w < cliUploadWorkerCount; w++ {
-		uploadWg.Add(1)
-		go func() {
-			defer uploadWg.Done()
-			for item := range uploadWorkCh {
+	var batchWg sync.WaitGroup
+	batchWg.Add(1)
+	go func() {
+		defer batchWg.Done()
+		// Note: We do NOT rely on BatchResult.Completed — many nil returns are
+		// skips/conflicts. All real outcomes are tracked by manual counters.
+		transfer.RunBatchFromChannel(ctx, batchCh, batchCfg,
+			func(ctx context.Context, item cliPipelinedUploadItem) error {
 				fpath := item.fpath
 				remoteFolderID := item.remoteFolderID
 				relativePath := item.relativePath
@@ -703,10 +709,10 @@ func uploadDirectoryPipelined(
 						result.Errors = append(result.Errors, UploadError{fpath, checkErr})
 						resultMutex.Unlock()
 						logger.Error().Str("file", fpath).Err(checkErr).Msg("Error checking file existence")
-						continue
+						return nil
 					}
 					logger.Error().Err(checkErr).Str("file", fpath).Msg("Failed to check if file exists")
-					continue
+					return nil
 				}
 
 				if exists {
@@ -719,7 +725,7 @@ func uploadDirectoryPipelined(
 						resultMutex.Lock()
 						result.Errors = append(result.Errors, UploadError{fpath, promptErr})
 						resultMutex.Unlock()
-						continue
+						return nil
 					}
 
 					switch action {
@@ -728,14 +734,14 @@ func uploadDirectoryPipelined(
 						resultMutex.Lock()
 						result.FilesIgnored++
 						resultMutex.Unlock()
-						continue
+						return nil
 					case FileOverwriteOnce, FileOverwriteAll:
 						if delErr := apiClient.DeleteFile(ctx, existingFileID); delErr != nil {
 							logger.Error().Str("file", fileName).Err(delErr).Msg("Failed to delete existing file")
 						}
 					case FileAbort:
 						logger.Info().Msg("Upload aborted by user")
-						continue
+						return nil
 					}
 				}
 
@@ -745,14 +751,18 @@ func uploadDirectoryPipelined(
 					resultMutex.Lock()
 					result.Errors = append(result.Errors, UploadError{fpath, statErr})
 					resultMutex.Unlock()
-					continue
+					return nil
 				}
 
 				// Create progress bar
 				fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
 
-				// v4.8.0: Allocate transfer handle for per-file multi-threading
-				transferHandle := cliUploadTransferMgr.AllocateTransfer(fileInfo.Size(), cliUploadWorkerCount)
+				// v4.8.6: Use adaptive worker count from RunBatchFromChannel
+				workerCount := constants.DefaultMaxConcurrent
+				if adaptive != nil {
+					workerCount = adaptive.Load()
+				}
+				transferHandle := cliUploadTransferMgr.AllocateTransfer(fileInfo.Size(), workerCount)
 
 				// Upload file
 				cloudFile, uploadErr := upload.UploadFile(ctx, upload.UploadParams{
@@ -778,7 +788,7 @@ func uploadDirectoryPipelined(
 					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
 					resultMutex.Unlock()
 					logger.Error().Str("file", fpath).Err(uploadErr).Msg("Failed to upload file")
-					continue
+					return nil
 				}
 
 				// Success
@@ -788,15 +798,15 @@ func uploadDirectoryPipelined(
 				result.TotalBytes += fileInfo.Size()
 				result.UploadedFileIDs = append(result.UploadedFileIDs, cloudFile.ID)
 				resultMutex.Unlock()
-			}
-		}()
-	}
+				return nil
+			})
+	}()
 
-	// Event dispatcher goroutine: reads folder ready events, sends work to upload channel
+	// Event dispatcher goroutine: reads folder ready events, sends work to batch channel
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer close(uploadWorkCh) // Signal workers to exit when all folders processed
+		defer close(batchCh) // Signal RunBatchFromChannel to finish when all folders processed
 
 		processedFolders := make(map[string]bool)
 
@@ -811,8 +821,8 @@ func uploadDirectoryPipelined(
 			}
 			processedFolders[event.LocalPath] = true
 
-			relativePath, err := filepath.Rel(rootPath, event.LocalPath)
-			if err != nil {
+			relativePath, relErr := filepath.Rel(rootPath, event.LocalPath)
+			if relErr != nil {
 				relativePath = filepath.Base(event.LocalPath)
 			} else if relativePath == "." {
 				relativePath = filepath.Base(rootPath)
@@ -820,10 +830,16 @@ func uploadDirectoryPipelined(
 			uploadUI.SetFolderPath(event.RemoteID, relativePath)
 
 			for _, filePath := range filesInFolder {
-				uploadWorkCh <- uploadWorkItem{
+				// Stat for FileSize() — used by RunBatchFromChannel for adaptive scaling
+				var sz int64
+				if info, statErr := os.Stat(filePath); statErr == nil {
+					sz = info.Size()
+				}
+				batchCh <- cliPipelinedUploadItem{
 					fpath:          filePath,
 					remoteFolderID: event.RemoteID,
 					relativePath:   relativePath,
+					size:           sz,
 				}
 			}
 		}
@@ -831,15 +847,25 @@ func uploadDirectoryPipelined(
 
 	// Wait for folder creation + event dispatcher to finish
 	wg.Wait()
-	// Wait for all upload workers to drain the channel and finish
-	uploadWg.Wait()
+	// Wait for RunBatchFromChannel to drain and finish
+	batchWg.Wait()
 
 	return result, foldersCreated, nil
 }
 
+// cliUploadWorkItem implements transfer.WorkItem for uploadFiles RunBatch migration.
+// v4.8.6: Replaces hand-rolled worker pool with transfer.RunBatch.
+type cliUploadWorkItem struct {
+	fpath string
+	size  int64
+}
+
+func (u cliUploadWorkItem) FileSize() int64 { return u.size }
+
 // uploadFiles uploads all files with progress tracking and conflict/error handling.
 // v4.8.1: Uses ConflictResolver instead of raw pointer-based state machines.
 // v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
+// v4.8.6: Migrated from hand-rolled worker pool to transfer.RunBatch.
 func uploadFiles(
 	ctx context.Context,
 	rootPath string,
@@ -879,200 +905,208 @@ func uploadFiles(
 	}
 	seqTransferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.1: Compute adaptive concurrency from file sizes (was using raw maxConcurrent, Bug #3)
-	fileSizes := make([]int64, 0, len(files))
-	for _, f := range files {
-		if info, err := os.Stat(f); err == nil {
-			fileSizes = append(fileSizes, info.Size())
+	// v4.8.6: Build work items with file sizes for adaptive concurrency.
+	items := make([]cliUploadWorkItem, len(files))
+	for i, f := range files {
+		var sz int64
+		if info, statErr := os.Stat(f); statErr == nil {
+			sz = info.Size()
 		}
+		items[i] = cliUploadWorkItem{fpath: f, size: sz}
 	}
-	adaptiveWorkers := resourceMgr.ComputeBatchConcurrency(fileSizes, maxConcurrent)
 
-	// Bounded worker pool: feed file tasks through a channel
-	type uploadWorkItem struct {
-		fpath string
+	// v4.8.6: Compute adaptive worker count for AllocateTransfer (same count RunBatch will use).
+	batchCfg := transfer.BatchConfig{
+		MaxWorkers:  maxConcurrent,
+		ResourceMgr: resourceMgr,
+		Label:       "CLI-UPLOAD",
 	}
-	workCh := make(chan uploadWorkItem, len(files))
-	for _, filePath := range files {
-		workCh <- uploadWorkItem{fpath: filePath}
-	}
-	close(workCh)
+	adaptiveWorkers := transfer.ComputedWorkers(items, batchCfg)
 
-	var wg sync.WaitGroup
-	for w := 0; w < adaptiveWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for item := range workCh {
-				fpath := item.fpath
+	// v4.8.6: Use transfer.RunBatch instead of hand-rolled worker pool.
+	// Note: We do NOT rely on BatchResult.Completed — many nil returns are
+	// skips/conflicts. All real outcomes are tracked by manual counters.
+	transfer.RunBatch(ctx, items, batchCfg, func(ctx context.Context, item cliUploadWorkItem) error {
+		fpath := item.fpath
 
-				// Get parent directory
-				dirPath := filepath.Dir(fpath)
-				remoteFolderID, ok := mapping[dirPath]
-				if !ok {
+		// Get parent directory
+		dirPath := filepath.Dir(fpath)
+		remoteFolderID, ok := mapping[dirPath]
+		if !ok {
+			resultMutex.Lock()
+			result.FilesSkipped++
+			resultMutex.Unlock()
+			logger.Info().Str("file", fpath).Msg("Skipping file (parent folder was skipped)")
+			return nil
+		}
+
+		fileName := filepath.Base(fpath)
+		relativePath, relErr := filepath.Rel(rootPath, fpath)
+		if relErr != nil {
+			relativePath = fileName
+		}
+
+		// SAFE MODE: Check if file exists before uploading (uses cache)
+		var existingFileID string
+		var exists bool
+		var checkErr error
+
+		if cfg.CheckConflictsBeforeUpload {
+			existingFileID, exists, checkErr = checkFileExists(ctx, apiClient, cache, remoteFolderID, fileName)
+		}
+
+		if cfg.CheckConflictsBeforeUpload && checkErr != nil {
+			if continueOnError {
+				resultMutex.Lock()
+				result.Errors = append(result.Errors, UploadError{fpath, checkErr})
+				resultMutex.Unlock()
+				logger.Error().Str("file", fpath).Err(checkErr).Msg("Error checking file existence")
+				return nil
+			}
+			// v4.8.1: Use shared error resolver instead of inline state machine
+			action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
+				return promptUploadError(fileName, checkErr)
+			})
+			if promptErr != nil {
+				logger.Error().Err(promptErr).Msg("Error prompting user")
+				return nil
+			}
+			if action == ErrorAbort {
+				logger.Info().Msg("Upload aborted by user")
+				return nil
+			}
+			// ErrorContinueOnce or ErrorContinueAll — record and continue
+			resultMutex.Lock()
+			result.Errors = append(result.Errors, UploadError{fpath, checkErr})
+			resultMutex.Unlock()
+			return nil
+		}
+
+		// SAFE MODE: Handle conflicts BEFORE upload
+		if cfg.CheckConflictsBeforeUpload && exists {
+			// v4.8.1: Use shared ConflictResolver instead of inline state machine
+			action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
+				folderPath := filepath.Dir(relativePath)
+				if folderPath == "." {
+					folderPath = filepath.Base(rootPath)
+				}
+				return promptFileConflict(fileName, folderPath)
+			})
+			if promptErr != nil {
+				logger.Error().Err(promptErr).Msg("Error prompting user")
+				return nil
+			}
+
+			switch action {
+			case FileSkipOnce, FileSkipAll:
+				logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
+				fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
+				resultMutex.Lock()
+				result.FilesIgnored++
+				resultMutex.Unlock()
+				return nil
+			case FileOverwriteOnce, FileOverwriteAll:
+				logger.Info().Str("file", fileName).Str("file_id", existingFileID).Msg("Deleting existing file before overwrite")
+				if err := apiClient.DeleteFile(ctx, existingFileID); err != nil {
+					logger.Error().Str("file", fileName).Err(err).Msg("Failed to delete existing file")
+				}
+			case FileAbort:
+				logger.Info().Msg("Upload aborted by user")
+				return nil
+			}
+		}
+
+		// Get file info
+		fileInfo, statErr := os.Stat(fpath)
+		if statErr != nil {
+			if continueOnError {
+				resultMutex.Lock()
+				result.Errors = append(result.Errors, UploadError{fpath, statErr})
+				resultMutex.Unlock()
+				logger.Error().Str("file", fpath).Err(statErr).Msg("Error getting file info")
+				return nil
+			}
+			action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
+				return promptUploadError(fileName, statErr)
+			})
+			if promptErr != nil {
+				logger.Error().Err(promptErr).Msg("Error prompting user")
+				return nil
+			}
+			if action == ErrorAbort {
+				logger.Info().Msg("Upload aborted by user")
+				return nil
+			}
+			resultMutex.Lock()
+			result.Errors = append(result.Errors, UploadError{fpath, statErr})
+			resultMutex.Unlock()
+			return nil
+		}
+
+		// Create progress bar for this file
+		fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
+
+		// v4.8.0: Allocate transfer handle for per-file multi-threading
+		// v4.8.1: Pass adaptive worker count (was maxConcurrent, Bug #3)
+		seqHandle := seqTransferMgr.AllocateTransfer(fileInfo.Size(), adaptiveWorkers)
+
+		// Upload with progress callback
+		cloudFile, uploadErr := upload.UploadFile(ctx, upload.UploadParams{
+			LocalPath: fpath,
+			FolderID:  remoteFolderID,
+			APIClient: apiClient,
+			ProgressCallback: func(prog float64) {
+				fileBar.UpdateProgress(prog)
+			},
+			OutputWriter:   uploadUI.Writer(),
+			TransferHandle: seqHandle,
+		})
+		seqHandle.Complete()
+
+		fileID := ""
+		if cloudFile != nil {
+			fileID = cloudFile.ID
+		}
+
+		if uploadErr != nil {
+			fileBar.Complete(fileID, uploadErr)
+
+			if diskspace.IsInsufficientSpaceError(uploadErr) {
+				resultMutex.Lock()
+				result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
+				resultMutex.Unlock()
+				logger.Error().Str("file", fpath).Err(uploadErr).Msg("Upload skipped - insufficient disk space")
+				return nil
+			}
+
+			// FAST MODE: Handle conflict detected on upload
+			if !cfg.CheckConflictsBeforeUpload && api.IsFileExistsError(uploadErr) {
+				logger.Warn().Str("file", fileName).Msg("File already exists (detected on upload)")
+
+				// Query folder to get existing file ID — use cache with stale fallback
+				contents, queryErr := cache.Get(ctx, apiClient, remoteFolderID)
+				if queryErr != nil {
+					logger.Error().Err(queryErr).Msg("Failed to query folder after conflict")
 					resultMutex.Lock()
-					result.FilesSkipped++
+					result.Errors = append(result.Errors, UploadError{fpath, queryErr})
 					resultMutex.Unlock()
-					logger.Info().Str("file", fpath).Msg("Skipping file (parent folder was skipped)")
-					continue
+					return nil
 				}
 
-				fileName := filepath.Base(fpath)
-				relativePath, relErr := filepath.Rel(rootPath, fpath)
-				if relErr != nil {
-					relativePath = fileName
-				}
-
-				// SAFE MODE: Check if file exists before uploading (uses cache)
-				var existingFileID string
-				var exists bool
-				var err error
-
-				if cfg.CheckConflictsBeforeUpload {
-					existingFileID, exists, err = checkFileExists(ctx, apiClient, cache, remoteFolderID, fileName)
-				}
-
-				if cfg.CheckConflictsBeforeUpload && err != nil {
-					if continueOnError {
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, err})
-						resultMutex.Unlock()
-						logger.Error().Str("file", fpath).Err(err).Msg("Error checking file existence")
-						continue
-					}
-					// v4.8.1: Use shared error resolver instead of inline state machine
-					checkErr := err
-					action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
-						return promptUploadError(fileName, checkErr)
-					})
-					if promptErr != nil {
-						logger.Error().Err(promptErr).Msg("Error prompting user")
-						continue
-					}
-					if action == ErrorAbort {
-						logger.Info().Msg("Upload aborted by user")
-						continue
-					}
-					// ErrorContinueOnce or ErrorContinueAll — record and continue
-					resultMutex.Lock()
-					result.Errors = append(result.Errors, UploadError{fpath, checkErr})
-					resultMutex.Unlock()
-					continue
-				}
-
-				// SAFE MODE: Handle conflicts BEFORE upload
-				if cfg.CheckConflictsBeforeUpload && exists {
-					// v4.8.1: Use shared ConflictResolver instead of inline state machine
-					action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
-						folderPath := filepath.Dir(relativePath)
-						if folderPath == "." {
-							folderPath = filepath.Base(rootPath)
-						}
-						return promptFileConflict(fileName, folderPath)
-					})
-					if promptErr != nil {
-						logger.Error().Err(promptErr).Msg("Error prompting user")
-						continue
-					}
-
-					switch action {
-					case FileSkipOnce, FileSkipAll:
-						logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
-						fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
-						resultMutex.Lock()
-						result.FilesIgnored++
-						resultMutex.Unlock()
-						continue
-					case FileOverwriteOnce, FileOverwriteAll:
-						logger.Info().Str("file", fileName).Str("file_id", existingFileID).Msg("Deleting existing file before overwrite")
-						if err := apiClient.DeleteFile(ctx, existingFileID); err != nil {
-							logger.Error().Str("file", fileName).Err(err).Msg("Failed to delete existing file")
-						}
-					case FileAbort:
-						logger.Info().Msg("Upload aborted by user")
-						continue
+				foundExisting := false
+				for _, file := range contents.Files {
+					if file.Name == fileName {
+						existingFileID = file.ID
+						foundExisting = true
+						break
 					}
 				}
 
-				// Get file info
-				fileInfo, err := os.Stat(fpath)
-				if err != nil {
-					if continueOnError {
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, err})
-						resultMutex.Unlock()
-						logger.Error().Str("file", fpath).Err(err).Msg("Error getting file info")
-						continue
-					}
-					statErr := err
-					action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
-						return promptUploadError(fileName, statErr)
-					})
-					if promptErr != nil {
-						logger.Error().Err(promptErr).Msg("Error prompting user")
-						continue
-					}
-					if action == ErrorAbort {
-						logger.Info().Msg("Upload aborted by user")
-						continue
-					}
-					resultMutex.Lock()
-					result.Errors = append(result.Errors, UploadError{fpath, statErr})
-					resultMutex.Unlock()
-					continue
-				}
-
-				// Create progress bar for this file
-				fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
-
-				// v4.8.0: Allocate transfer handle for per-file multi-threading
-				// v4.8.1: Pass adaptive worker count (was maxConcurrent, Bug #3)
-				seqHandle := seqTransferMgr.AllocateTransfer(fileInfo.Size(), adaptiveWorkers)
-
-				// Upload with progress callback
-				cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
-					LocalPath: fpath,
-					FolderID:  remoteFolderID,
-					APIClient: apiClient,
-					ProgressCallback: func(prog float64) {
-						fileBar.UpdateProgress(prog)
-					},
-					OutputWriter:   uploadUI.Writer(),
-					TransferHandle: seqHandle,
-				})
-				seqHandle.Complete()
-
-				fileID := ""
-				if cloudFile != nil {
-					fileID = cloudFile.ID
-				}
-
-				if err != nil {
-					fileBar.Complete(fileID, err)
-
-					if diskspace.IsInsufficientSpaceError(err) {
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, err})
-						resultMutex.Unlock()
-						logger.Error().Str("file", fpath).Err(err).Msg("Upload skipped - insufficient disk space")
-						continue
-					}
-
-					// FAST MODE: Handle conflict detected on upload
-					if !cfg.CheckConflictsBeforeUpload && api.IsFileExistsError(err) {
-						logger.Warn().Str("file", fileName).Msg("File already exists (detected on upload)")
-
-						// Query folder to get existing file ID — use cache with stale fallback
-						contents, queryErr := cache.Get(ctx, apiClient, remoteFolderID)
-						if queryErr != nil {
-							logger.Error().Err(queryErr).Msg("Failed to query folder after conflict")
-							resultMutex.Lock()
-							result.Errors = append(result.Errors, UploadError{fpath, queryErr})
-							resultMutex.Unlock()
-							continue
-						}
-
-						foundExisting := false
+				// Stale-cache fallback: invalidate and retry once
+				if !foundExisting {
+					cache.Invalidate(remoteFolderID)
+					contents, queryErr = cache.Get(ctx, apiClient, remoteFolderID)
+					if queryErr == nil {
 						for _, file := range contents.Files {
 							if file.Name == fileName {
 								existingFileID = file.ID
@@ -1080,140 +1114,122 @@ func uploadFiles(
 								break
 							}
 						}
-
-						// Stale-cache fallback: invalidate and retry once
-						if !foundExisting {
-							cache.Invalidate(remoteFolderID)
-							contents, queryErr = cache.Get(ctx, apiClient, remoteFolderID)
-							if queryErr == nil {
-								for _, file := range contents.Files {
-									if file.Name == fileName {
-										existingFileID = file.ID
-										foundExisting = true
-										break
-									}
-								}
-							}
-						}
-
-						if !foundExisting {
-							logger.Error().Msg("File exists error but couldn't find existing file")
-							resultMutex.Lock()
-							result.Errors = append(result.Errors, UploadError{fpath, err})
-							resultMutex.Unlock()
-							continue
-						}
-
-						// v4.8.1: Use shared ConflictResolver for post-upload conflict
-						action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
-							folderPath := filepath.Dir(relativePath)
-							if folderPath == "." {
-								folderPath = filepath.Base(rootPath)
-							}
-							return promptFileConflict(fileName, folderPath)
-						})
-						if promptErr != nil {
-							logger.Error().Err(promptErr).Msg("Error prompting user")
-							continue
-						}
-
-						switch action {
-						case FileSkipOnce, FileSkipAll:
-							logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
-							fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
-							resultMutex.Lock()
-							result.FilesIgnored++
-							resultMutex.Unlock()
-							continue
-
-						case FileOverwriteOnce, FileOverwriteAll:
-							logger.Info().Str("file", fileName).Str("file_id", existingFileID).Msg("Deleting existing file for overwrite")
-							if delErr := apiClient.DeleteFile(ctx, existingFileID); delErr != nil {
-								logger.Error().Err(delErr).Msg("Failed to delete existing file")
-								resultMutex.Lock()
-								result.Errors = append(result.Errors, UploadError{fpath, delErr})
-								resultMutex.Unlock()
-								continue
-							}
-
-							logger.Info().Str("file", fileName).Msg("Retrying upload after deletion")
-							cloudFile, retryErr := upload.UploadFile(ctx, upload.UploadParams{
-								LocalPath: fpath,
-								FolderID:  remoteFolderID,
-								APIClient: apiClient,
-								ProgressCallback: func(prog float64) {
-									fileBar.UpdateProgress(prog)
-								},
-								OutputWriter: uploadUI.Writer(),
-							})
-
-							if retryErr != nil {
-								fileBar.Complete("", retryErr)
-								logger.Error().Err(retryErr).Msg("Upload failed after overwrite")
-								resultMutex.Lock()
-								result.Errors = append(result.Errors, UploadError{fpath, retryErr})
-								resultMutex.Unlock()
-								continue
-							}
-
-							fileBar.Complete(cloudFile.ID, nil)
-							resultMutex.Lock()
-							result.FilesUploaded++
-							result.TotalBytes += cloudFile.DecryptedSize
-							resultMutex.Unlock()
-							logger.Info().Str("file", fileName).Str("file_id", cloudFile.ID).Msg("Upload successful (after overwrite)")
-							continue
-
-						case FileAbort:
-							logger.Info().Msg("Upload aborted by user")
-							continue
-						}
-
-						continue
 					}
+				}
 
-					// Handle other upload errors
-					if continueOnError {
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, err})
-						resultMutex.Unlock()
-						logger.Error().Str("file", fpath).Err(err).Msg("Upload failed")
-						continue
-					}
-					uploadErr := err
-					action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
-						return promptUploadError(fileName, uploadErr)
-					})
-					if promptErr != nil {
-						logger.Error().Err(promptErr).Msg("Error prompting user")
-						continue
-					}
-					if action == ErrorAbort {
-						logger.Info().Msg("Upload aborted by user")
-						continue
-					}
+				if !foundExisting {
+					logger.Error().Msg("File exists error but couldn't find existing file")
 					resultMutex.Lock()
 					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
 					resultMutex.Unlock()
-					continue
+					return nil
 				}
 
-				// Mark upload as successful
-				fileBar.Complete(fileID, nil)
-
-				resultMutex.Lock()
-				result.FilesUploaded++
-				result.TotalBytes += fileInfo.Size()
-				if fileID != "" {
-					result.UploadedFileIDs = append(result.UploadedFileIDs, fileID)
+				// v4.8.1: Use shared ConflictResolver for post-upload conflict
+				action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
+					folderPath := filepath.Dir(relativePath)
+					if folderPath == "." {
+						folderPath = filepath.Base(rootPath)
+					}
+					return promptFileConflict(fileName, folderPath)
+				})
+				if promptErr != nil {
+					logger.Error().Err(promptErr).Msg("Error prompting user")
+					return nil
 				}
-				resultMutex.Unlock()
+
+				switch action {
+				case FileSkipOnce, FileSkipAll:
+					logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
+					fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
+					resultMutex.Lock()
+					result.FilesIgnored++
+					resultMutex.Unlock()
+					return nil
+
+				case FileOverwriteOnce, FileOverwriteAll:
+					logger.Info().Str("file", fileName).Str("file_id", existingFileID).Msg("Deleting existing file for overwrite")
+					if delErr := apiClient.DeleteFile(ctx, existingFileID); delErr != nil {
+						logger.Error().Err(delErr).Msg("Failed to delete existing file")
+						resultMutex.Lock()
+						result.Errors = append(result.Errors, UploadError{fpath, delErr})
+						resultMutex.Unlock()
+						return nil
+					}
+
+					logger.Info().Str("file", fileName).Msg("Retrying upload after deletion")
+					cloudFile, retryErr := upload.UploadFile(ctx, upload.UploadParams{
+						LocalPath: fpath,
+						FolderID:  remoteFolderID,
+						APIClient: apiClient,
+						ProgressCallback: func(prog float64) {
+							fileBar.UpdateProgress(prog)
+						},
+						OutputWriter: uploadUI.Writer(),
+					})
+
+					if retryErr != nil {
+						fileBar.Complete("", retryErr)
+						logger.Error().Err(retryErr).Msg("Upload failed after overwrite")
+						resultMutex.Lock()
+						result.Errors = append(result.Errors, UploadError{fpath, retryErr})
+						resultMutex.Unlock()
+						return nil
+					}
+
+					fileBar.Complete(cloudFile.ID, nil)
+					resultMutex.Lock()
+					result.FilesUploaded++
+					result.TotalBytes += cloudFile.DecryptedSize
+					resultMutex.Unlock()
+					logger.Info().Str("file", fileName).Str("file_id", cloudFile.ID).Msg("Upload successful (after overwrite)")
+					return nil
+
+				case FileAbort:
+					logger.Info().Msg("Upload aborted by user")
+					return nil
+				}
+
+				return nil
 			}
-		}()
-	}
 
-	// Wait for all workers
-	wg.Wait()
+			// Handle other upload errors
+			if continueOnError {
+				resultMutex.Lock()
+				result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
+				resultMutex.Unlock()
+				logger.Error().Str("file", fpath).Err(uploadErr).Msg("Upload failed")
+				return nil
+			}
+			action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
+				return promptUploadError(fileName, uploadErr)
+			})
+			if promptErr != nil {
+				logger.Error().Err(promptErr).Msg("Error prompting user")
+				return nil
+			}
+			if action == ErrorAbort {
+				logger.Info().Msg("Upload aborted by user")
+				return nil
+			}
+			resultMutex.Lock()
+			result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
+			resultMutex.Unlock()
+			return nil
+		}
+
+		// Mark upload as successful
+		fileBar.Complete(fileID, nil)
+
+		resultMutex.Lock()
+		result.FilesUploaded++
+		result.TotalBytes += fileInfo.Size()
+		if fileID != "" {
+			result.UploadedFileIDs = append(result.UploadedFileIDs, fileID)
+		}
+		resultMutex.Unlock()
+		return nil
+	})
 
 	return result, nil
 }

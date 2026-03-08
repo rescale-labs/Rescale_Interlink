@@ -435,6 +435,68 @@ func TestRunBatchFromChannel_ForceSequential(t *testing.T) {
 	}
 }
 
+func TestRunBatchFromChannel_AdaptiveCountExposed(t *testing.T) {
+	// Verify that AdaptiveCount is populated and readable from within the execute closure.
+	var adaptive *AdaptiveWorkerCount
+	cfg := BatchConfig{
+		MaxWorkers:    10,
+		ResourceMgr:   newTestResourceMgr(),
+		Label:         "TEST-ADAPTIVE",
+		AdaptiveCount: &adaptive,
+	}
+
+	ch := make(chan testItem, 10)
+	for i := 0; i < 10; i++ {
+		ch <- testItem{size: 1024 * 1024, id: "file"}
+	}
+	close(ch)
+
+	var observedFromClosure atomic.Int32
+	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
+		// Read adaptive count from within the closure — should be > 0.
+		if adaptive != nil {
+			observedFromClosure.Store(int32(adaptive.Load()))
+		}
+		return nil
+	})
+
+	if adaptive == nil {
+		t.Fatal("expected AdaptiveCount to be populated, got nil")
+	}
+	if adaptive.Load() < 1 {
+		t.Errorf("expected AdaptiveCount >= 1, got %d", adaptive.Load())
+	}
+	if observedFromClosure.Load() < 1 {
+		t.Errorf("expected closure to observe AdaptiveCount >= 1, got %d", observedFromClosure.Load())
+	}
+	if result.Completed != 10 {
+		t.Errorf("expected 10 completed, got %d", result.Completed)
+	}
+}
+
+func TestRunBatchFromChannel_AdaptiveCountNilIgnored(t *testing.T) {
+	// Verify that nil AdaptiveCount doesn't cause a panic.
+	cfg := BatchConfig{
+		MaxWorkers:  10,
+		ResourceMgr: newTestResourceMgr(),
+		Label:       "TEST-NIL-ADAPTIVE",
+		// AdaptiveCount not set (nil)
+	}
+
+	ch := make(chan testItem, 5)
+	for i := 0; i < 5; i++ {
+		ch <- testItem{size: 1024, id: "file"}
+	}
+	close(ch)
+
+	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
+		return nil
+	})
+	if result.Completed != 5 {
+		t.Errorf("expected 5 completed, got %d", result.Completed)
+	}
+}
+
 // --- CollectErrors tests ---
 
 func TestCollectErrors_Empty(t *testing.T) {

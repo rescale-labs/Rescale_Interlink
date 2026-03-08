@@ -36,6 +36,11 @@ type BatchConfig struct {
 	// on item-count thresholds that race with goroutine scheduling.
 	// If nil, no hook is called.
 	ScaleCheckHook func()
+
+	// AdaptiveCount, if non-nil, receives a pointer to the live AdaptiveWorkerCount
+	// created by RunBatchFromChannel. Execute closures can read it for per-item
+	// thread allocation (AllocateTransfer). Ignored by RunBatch.
+	AdaptiveCount **AdaptiveWorkerCount
 }
 
 // BatchResult tracks the outcome of a batch execution.
@@ -168,6 +173,11 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 
 	adaptive := &AdaptiveWorkerCount{}
 	adaptive.value.Store(int32(initialWorkers))
+
+	// v4.8.6: Expose AdaptiveWorkerCount to callers for per-item thread allocation.
+	if cfg.AdaptiveCount != nil {
+		*cfg.AdaptiveCount = adaptive
+	}
 
 	log.Printf("[BATCH] %s: streaming mode, initial %d workers (max %d)",
 		cfg.Label, initialWorkers, maxWorkers)
