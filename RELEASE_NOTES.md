@@ -1,5 +1,44 @@
 # Release Notes - Rescale Interlink
 
+## v4.8.6 - March 8, 2026
+
+### Destination Snapshot Hardening (4F)
+
+GUI upload/download flows now freeze destination state at click time, preventing stale or changed state from misdirecting transfers.
+
+- **Frozen destination snapshots**: `uploadConfirm` state includes `frozenDestFolderId`, `frozenMode`, `frozenMyLibraryId` captured when the user clicks Upload. `downloadConfirm` includes `frozenLocalPath`. Confirm handlers use these frozen values exclusively — live store state is never re-read after the user initiates the operation.
+- **Navigation generation counter**: `navGeneration` in `fileBrowserStore` is bumped synchronously on every navigation and mode switch. Async folder loads capture the generation before the API call and discard the response if it has changed. Prevents stale folder-listing responses from overwriting current state.
+- **Backend pre-validation**: New `ValidateRemoteFolder()` method probes destination with `ListFolderContentsPage(folderID, "", 1)` — a single lightweight API call. New `ValidateLocalDirectory()` validates local path with `os.Stat` + `IsDir()`. Both are called before any transfers begin. `StartFolderUpload` and `StartFolderDownload` also perform pre-validation internally.
+- **Error surfacing**: Folder-check errors in `confirmUpload()` are now surfaced via `setErrorDialog` instead of silently swallowed with `console.warn`.
+- **Validation timeout hardening**: Both `ValidateRemoteFolder()` and the `StartFolderUpload` pre-validation use 30-second bounded contexts instead of unbounded `context.Background()`. Prevents silent hang on first API call after idle periods.
+
+### CLI RunBatch Migration (4A)
+
+All remaining hand-rolled worker pools migrated to the shared `transfer.RunBatch` / `RunBatchFromChannel` framework.
+
+- **`uploadFiles()` → `RunBatch`**: Two-phase sequential upload uses `RunBatch` with adaptive concurrency. `cliUploadWorkItem` struct. All manual counters preserved (skips, conflicts, errors tracked independently of `BatchResult.Completed`).
+- **`uploadDirectoryPipelined()` → `RunBatchFromChannel`**: Pipelined upload uses streaming channel mode. `cliPipelinedUploadItem` struct. New `AdaptiveCount` field on `BatchConfig` exposes live adaptive worker count to execute closures for `AllocateTransfer`.
+- **`downloadJob()` → `RunBatch`**: Daemon auto-download uses `ForceSequential: true`. `daemonDownloadItem` struct. `stopChan` wired to context cancellation via derived context.
+- **Transfer handle resource leak fix**: Daemon `downloadJob()` allocated `transferHandle` via `AllocateTransfer()` but never called `Complete()` to release resources. Fixed with `defer transferHandle.Complete()` in the migrated closure.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Frozen snapshot fields, pre-validation calls, error surfacing |
+| `frontend/src/stores/fileBrowserStore.ts` | `navGeneration` counter, stale-response guards in `loadRemoteFolder` + `loadRemoteLegacy` |
+| `internal/wailsapp/file_bindings.go` | `ValidateRemoteFolder`, `ValidateLocalDirectory`, pre-validation in `StartFolderUpload` + `StartFolderDownload` |
+| `frontend/wailsjs/go/wailsapp/App.js` | Binding exports for new validation methods |
+| `frontend/wailsjs/go/wailsapp/App.d.ts` | TypeScript declarations for new validation methods |
+| `internal/transfer/batch.go` | `AdaptiveCount **AdaptiveWorkerCount` field on `BatchConfig`, populated in `RunBatchFromChannel` |
+| `internal/transfer/batch_test.go` | Tests for `AdaptiveCount` exposure and nil safety |
+| `internal/cli/folder_upload_helper.go` | `uploadFiles()` → `RunBatch`, `uploadDirectoryPipelined()` → `RunBatchFromChannel` |
+| `internal/daemon/daemon.go` | `downloadJob()` → `RunBatch` with `ForceSequential`, transfer handle leak fix |
+| `internal/version/version.go` | v4.8.5 → v4.8.6 |
+| `wails.json` | productVersion 4.8.5 → 4.8.6 |
+
+---
+
 ## v4.8.5 - March 7, 2026
 
 ### Batch Speed/ETA Overhaul
@@ -48,6 +87,64 @@ Folder uploads previously loaded the entire directory tree into memory before st
 | `frontend/src/components/tabs/TransfersTab.tsx` | Backend ETA, files/sec fallback, direction-aware labels, phase-based rendering, folder progress |
 | `internal/version/version.go` | v4.8.4 → v4.8.5 |
 | `wails.json` | productVersion 4.8.4 → 4.8.5 |
+
+### Bugfixes (March 7, 2026)
+
+Three user-visible bugs discovered during manual testing:
+
+#### Speed/ETA Flashing Fix
+
+Speed and ETA values would alternate between appearing and disappearing, causing layout jumps in the Transfers tab. The root cause was `speedWindow.Speed()` returning 0 when no bytes transferred between file completions (zero delta in the sliding window). When speed=0, `formatSpeed()` returns empty string, the speed span disappears, `computeBatchETA()` returns -1, the ETA span disappears, and `flex justify-between` reflows the layout.
+
+- **Backend grace period**: `speedWindow` now holds the last non-zero speed for up to 3 seconds after bytes stop flowing. Speed only drops to 0 after a genuine 3-second stall. New fields: `lastNonZero`, `lastNonZeroTime`.
+- **Fixed 3-column grid**: Replaced `flex justify-between` with `grid grid-cols-3` in both `BatchRow` and `DaemonBatchRow`. Columns (percentage, speed, ETA) hold their positions regardless of whether content is present.
+
+#### Slow Scan Denominator Fix (Backpressure)
+
+During folder uploads, the total-files count in the UI crawled barely faster than uploads completed. The orchestrator's `select` loop blocked on `requestCh` sends (buffer=256) when full, preventing it from reading the next file from `fileChan`. Discovery was throttled to the upload consumption rate.
+
+- **Unbounded backlog**: The orchestrator now appends requests to a `[]TransferRequest` slice at filesystem speed. A separate dispatcher goroutine drains the backlog into `requestCh`. Discovery is fully decoupled from upload throughput.
+- **TotalKnown timing**: `MarkBatchScanInProgress(false)` fires immediately after the orchestrator finishes discovering all files — not after the dispatcher drains all items through `requestCh` (which blocked for minutes on large uploads since the channel is consumed at upload throughput). The discovered count is final as soon as the scan completes; registration catches up in the background.
+- **discoveredTotal display**: During scan phase (`!totalKnown`), the UI now shows `discoveredTotal` instead of `batch.total` (registered tasks). This reflects actual filesystem discovery speed.
+
+#### Batch Folder Existence Check (Pre-existing from v4.0.8)
+
+"Checking for existing folders..." blocked the File Browser tab for 10-20s when uploading multiple folders. Each folder check created a new `FolderCache`, causing redundant API calls for the same parent folder contents.
+
+- **`CheckFoldersExistForUpload` (plural)**: New backend method takes all folder names + parent ID. Uses a single shared `FolderCache` — parent contents fetched once, subsequent checks are cache hits.
+- **Frontend batch call**: `FileBrowserTab.tsx` now makes a single `CheckFoldersExistForUpload` call instead of a sequential loop of `CheckFolderExistsForUpload` calls.
+
+#### Polling Path Missing Fields (Discovered During Testing)
+
+`TransferBatchDTO` and `GetTransferBatches()` (the 500ms polling path) were missing `discoveredTotal`, `discoveredBytes`, `filesPerSec`, and `etaSeconds` fields. Every poll cycle overwrote event-driven data with zeros, causing the file count to flash between the correct discovered total and the slow-climbing registration count. Fixed by adding all four fields to the DTO and populating them from `BatchStats`.
+
+#### Scan Count Update Frequency
+
+`UpdateBatchDiscovered()` was called only every 100th file during discovery. Between updates, the frontend could see `discoveredTotal < batch.total` and fall back to the slow registration count. Changed to update on every discovered file — this is cheap (two map writes under a lock) and ensures the polling path always has accurate counts.
+
+#### Upload Label During Active Transfers
+
+"Preparing upload..." was shown even while files were actively uploading, because `totalKnown` stayed false until the backlog dispatcher fully drained. Now the progress label shows three states:
+- `totalKnown=true` → percentage (e.g., "45%")
+- `totalKnown=false` and `active > 0` → "Uploading... (X completed of ~Y found)"
+- `totalKnown=false` and `active == 0` → "Preparing upload... (~N files found)"
+
+The `~` prefix disappears once `totalKnown` flips true (scan complete). With the TotalKnown timing fix above, this transition happens within seconds of the scan finishing.
+
+#### EnumerationRow Flash Suppression
+
+A brief second-row flash occurred when starting folder uploads: the EnumerationRow appeared during the scanning phase before the BatchRow was created. The previous filter (hide enumeration when matching batch exists) left a 1-frame gap. Now upload enumerations are only rendered during the `creating_folders` phase — once folder creation finishes and scanning starts, the BatchRow takes over immediately.
+
+#### Bugfix Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/speed_window.go` | Grace period: `lastNonZero`, `lastNonZeroTime`, `speedGracePeriod` |
+| `internal/transfer/speed_window_test.go` | Grace period tests: `TestSpeedWindow_GracePeriod`, `TestSpeedWindow_GracePeriodResumesAfterStall` |
+| `internal/wailsapp/file_bindings.go` | Backlog dispatcher, `MarkBatchScanInProgress` moved to shutdown sequence, `CheckFoldersExistForUpload`, `UpdateBatchDiscovered` on every file |
+| `internal/wailsapp/transfer_bindings.go` | `TransferBatchDTO` + `GetTransferBatches()`: added `discoveredTotal`, `discoveredBytes`, `filesPerSec`, `etaSeconds` |
+| `frontend/src/components/tabs/TransfersTab.tsx` | 3-column grid layout, `discoveredTotal` during scan, "Uploading... (X of ~Y)" when active |
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Batch folder existence check |
 
 ---
 

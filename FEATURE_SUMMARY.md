@@ -1,10 +1,27 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.8.5
-**Build Date:** March 7, 2026
+**Version:** 4.8.6
+**Build Date:** March 8, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
+
+---
+
+## v4.8.6 Changes — Destination Snapshot Hardening + CLI RunBatch Migration
+
+### Destination Snapshot Hardening (`FileBrowserTab.tsx`, `fileBrowserStore.ts`, `file_bindings.go`)
+- **Frozen destination snapshots**: Upload/download confirmation state captures destination IDs at click time (`frozenDestFolderId`, `frozenMode`, `frozenMyLibraryId`, `frozenLocalPath`). Confirm handlers use frozen values exclusively.
+- **Navigation generation counter**: `navGeneration` bumped synchronously on navigation/mode-switch. Async folder loads discard stale responses via generation check.
+- **Backend pre-validation**: `ValidateRemoteFolder()` probes with `ListFolderContentsPage(folderID, "", 1)`. `ValidateLocalDirectory()` uses `os.Stat` + `IsDir()`. Called before any transfers.
+- **Error surfacing**: Folder-check errors in `confirmUpload()` shown via `setErrorDialog` instead of silently swallowed.
+- **Validation timeout hardening**: Pre-validation calls use 30-second bounded contexts to prevent silent hangs on first API call after idle.
+
+### CLI RunBatch Migration (`folder_upload_helper.go`, `daemon.go`, `batch.go`)
+- **`uploadFiles()` → `RunBatch`**: Adaptive concurrency, `cliUploadWorkItem`, all manual counters preserved.
+- **`uploadDirectoryPipelined()` → `RunBatchFromChannel`**: Streaming channel mode, `cliPipelinedUploadItem`. New `AdaptiveCount` field on `BatchConfig` for live worker count in closures.
+- **`downloadJob()` → `RunBatch`**: `ForceSequential: true`, `daemonDownloadItem`. `stopChan` wired to context cancellation.
+- **Transfer handle leak fix**: `defer transferHandle.Complete()` in daemon download (was never called).
 
 ---
 
@@ -28,6 +45,18 @@ This document provides a comprehensive, verified list of all features available 
 - **Direction-aware labels**: Uploads show "Preparing upload..." instead of "Scanning..." during discovery.
 - **Structured phase enum**: `EnumerationEvent.Phase` field (`scanning`/`creating_folders`/`complete`/`error`) replaces substring matching.
 - **Folder creation sub-progress**: "Creating remote folders... (X of Y)" with `FoldersTotal`/`FoldersCreated` fields.
+
+### v4.8.5 Bugfixes (`internal/transfer/speed_window.go`, `internal/wailsapp/file_bindings.go`, `TransfersTab.tsx`, `FileBrowserTab.tsx`)
+- **Speed/ETA grace period**: `speedWindow.Speed()` holds last non-zero speed for 3s during inter-file gaps, preventing speed/ETA flashing.
+- **Fixed 3-column grid**: `BatchRow` and `DaemonBatchRow` use CSS `grid-cols-3` instead of `flex justify-between`, eliminating layout jumps.
+- **Backlog dispatcher**: Orchestrator appends to unbounded slice; separate goroutine drains into `requestCh`. Discovery no longer throttled by upload rate.
+- **TotalKnown timing**: `MarkBatchScanInProgress(false)` fires immediately after scan completes, not after dispatcher drains (which blocked for minutes).
+- **discoveredTotal in UI**: Scan phase shows `discoveredTotal` (filesystem speed) instead of `batch.total` (registration speed).
+- **Batch folder check**: `CheckFoldersExistForUpload` uses shared `FolderCache` — single API paginate for N folders.
+- **Polling DTO parity**: `TransferBatchDTO` now includes `discoveredTotal`, `discoveredBytes`, `filesPerSec`, `etaSeconds` — prevents 500ms poll from overwriting event-driven data with zeros.
+- **Per-file discovered update**: `UpdateBatchDiscovered()` called on every file (not every 100th) so polling path always has accurate scan count.
+- **Upload label states**: Progress line shows "Uploading... (X completed of ~Y found)" once transfers are active but scan hasn't finished; "Preparing upload... (~N files found)" before transfers start. `~` disappears when `totalKnown` flips.
+- **EnumerationRow flash suppression**: Upload enumerations only shown during `creating_folders` phase, eliminating 1-frame flash when batch row appears.
 
 ---
 
