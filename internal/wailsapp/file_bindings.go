@@ -458,7 +458,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	}
 
 	enumID := fmt.Sprintf("enum_dl_%d", time.Now().UnixNano())
-	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string) {
+	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string, phase string) {
 		if a.engine != nil && a.engine.Events() != nil {
 			a.engine.Events().Publish(&events.EnumerationEvent{
 				BaseEvent:     events.BaseEvent{EventType: eventType, Time: time.Now()},
@@ -471,6 +471,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				IsComplete:    isComplete,
 				Error:         errMsg,
 				StatusMessage: statusMessage,
+				Phase:         phase,
 			})
 		}
 	}
@@ -481,21 +482,21 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 
 	if a.engine == nil {
 		emitLog(events.ErrorLevel, "Engine not initialized")
-		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoEngine.Error(), "")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoEngine.Error(), "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: ErrNoEngine.Error()}
 	}
 
 	apiClient := a.engine.API()
 	if apiClient == nil {
 		emitLog(events.ErrorLevel, "API client not configured")
-		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "API client not configured", "")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "API client not configured", "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: "API client not configured"}
 	}
 
 	ts := a.engine.TransferService()
 	if ts == nil {
 		emitLog(events.ErrorLevel, "TransferService not available")
-		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoTransferService.Error(), "")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoTransferService.Error(), "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: ErrNoTransferService.Error()}
 	}
 
@@ -503,7 +504,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	scanCtx, scanCancel := context.WithCancel(context.Background())
 
 	// Emit enumeration started
-	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "")
+	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "", events.EnumPhaseScanning)
 
 	// Create root output directory
 	rootFolderName := folderName
@@ -514,7 +515,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
 		scanCancel() // Release context resources on early return
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to create root folder: %s", err.Error()))
-		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Failed to create root folder: "+err.Error(), "")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Failed to create root folder: "+err.Error(), "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: "Failed to create root folder: " + err.Error()}
 	}
 
@@ -542,7 +543,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to start streaming batch: %s", err.Error()))
 		close(requestCh)
 		ts.GetQueue().MarkBatchScanInProgress(enumID, false)
-		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error(), "")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error(), "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: err.Error()}
 	}
 
@@ -553,8 +554,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		var completionOnce sync.Once
 		emitCompletion := func(folders, files int, bytes int64, errMsg string) {
 			completionOnce.Do(func() {
+				phase := events.EnumPhaseComplete
+				if errMsg != "" {
+					phase = events.EnumPhaseError
+				}
 				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
-				emitEnumeration(events.EventEnumerationCompleted, folders, files, bytes, true, errMsg, "")
+				emitEnumeration(events.EventEnumerationCompleted, folders, files, bytes, true, errMsg, "", phase)
 			})
 		}
 		// Safety net: ensure completion is emitted even on panic
@@ -699,15 +704,18 @@ func (w *folderProgressWriter) Write(p []byte) (n int, err error) {
 	if w.totalDirs <= 100 || w.dirsProcessed%3 == 0 || w.dirsProcessed == w.totalDirs {
 		if w.eventBus != nil {
 			w.eventBus.Publish(&events.EnumerationEvent{
-				BaseEvent:     events.BaseEvent{EventType: events.EventEnumerationProgress, Time: time.Now()},
-				ID:            w.enumID,
-				FolderName:    w.folderName,
-				Direction:     w.direction,
-				FoldersFound:  w.foldersFound,
-				FilesFound:    w.filesFound,
-				BytesFound:    w.bytesFound,
-				IsComplete:    false,
-				StatusMessage: fmt.Sprintf("Creating folders... (%d of %d)", w.dirsProcessed, w.totalDirs),
+				BaseEvent:      events.BaseEvent{EventType: events.EventEnumerationProgress, Time: time.Now()},
+				ID:             w.enumID,
+				FolderName:     w.folderName,
+				Direction:      w.direction,
+				FoldersFound:   w.foldersFound,
+				FilesFound:     w.filesFound,
+				BytesFound:     w.bytesFound,
+				IsComplete:     false,
+				StatusMessage:  fmt.Sprintf("Creating folders... (%d of %d)", w.dirsProcessed, w.totalDirs),
+				Phase:          events.EnumPhaseCreatingFolders,
+				FoldersTotal:   w.totalDirs,
+				FoldersCreated: w.dirsProcessed,
 			})
 		}
 	}
@@ -728,7 +736,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 
 	// v4.0.8: Helper to emit enumeration events
 	enumID := fmt.Sprintf("enum_ul_%d", time.Now().UnixNano())
-	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string) {
+	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string, phase string) {
 		if a.engine != nil && a.engine.Events() != nil {
 			a.engine.Events().Publish(&events.EnumerationEvent{
 				BaseEvent:     events.BaseEvent{EventType: eventType, Time: time.Now()},
@@ -741,6 +749,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 				IsComplete:    isComplete,
 				Error:         errMsg,
 				StatusMessage: statusMessage,
+				Phase:         phase,
 			})
 		}
 	}
@@ -762,7 +771,11 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	var deferredError string
 	defer func() {
 		if !completionEmitted {
-			emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, deferredError, "")
+			phase := events.EnumPhaseComplete
+			if deferredError != "" {
+				phase = events.EnumPhaseError
+			}
+			emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, deferredError, "", phase)
 		}
 	}()
 
@@ -805,7 +818,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 	// v4.0.8: Emit enumeration started event
-	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "")
+	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "", events.EnumPhaseScanning)
 
 	// Get parent folder ID (default to My Library if empty)
 	parentID := destFolderID
@@ -929,9 +942,13 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		var completionOnce sync.Once
 		emitCompletion := func(foldersFound, filesFound int, bytesFound int64, errMsg string) {
 			completionOnce.Do(func() {
+				phase := events.EnumPhaseComplete
+				if errMsg != "" {
+					phase = events.EnumPhaseError
+				}
 				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
 				emitEnumeration(events.EventEnumerationCompleted,
-					foldersFound, filesFound, bytesFound, true, errMsg, "")
+					foldersFound, filesFound, bytesFound, true, errMsg, "", phase)
 			})
 		}
 		defer emitCompletion(0, 0, 0, "upload dispatcher exited unexpectedly")
@@ -963,9 +980,13 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 				}
 				discoveredFiles++
 				discoveredBytes += file.Size
-				// Update batch discovered totals periodically
+				// Update batch discovered totals and emit scanning progress periodically
 				if discoveredFiles%100 == 0 || discoveredFiles == 1 {
 					ts.GetQueue().UpdateBatchDiscovered(enumID, discoveredFiles, discoveredBytes)
+					emitEnumeration(events.EventEnumerationProgress,
+						discoveredDirs, discoveredFiles, discoveredBytes, false, "",
+						fmt.Sprintf("Scanning local files... (%d found)", discoveredFiles),
+						events.EnumPhaseScanning)
 				}
 
 				parentDir := filepath.Dir(file.Path)
@@ -1001,6 +1022,14 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 				}
 				discoveredDirs++
 				folderMapping[event.LocalPath] = event.RemoteID
+
+				// v4.8.5: Emit folder creation progress periodically
+				if discoveredDirs%3 == 0 || discoveredDirs == 1 {
+					emitEnumeration(events.EventEnumerationProgress,
+						discoveredDirs, discoveredFiles, discoveredBytes, false, "",
+						fmt.Sprintf("Creating remote folders... (%d created)", discoveredDirs),
+						events.EnumPhaseCreatingFolders)
+				}
 
 				// Flush any pending files for this folder
 				if pending, has := pendingFiles[event.LocalPath]; has {
