@@ -190,20 +190,25 @@ func (a *App) ClearCompletedTransfers() {
 // TransferBatchDTO is the JSON-safe aggregate view of a batch of transfers.
 // v4.7.7: Used for grouped display in Transfers tab.
 type TransferBatchDTO struct {
-	BatchID     string  `json:"batchID"`
-	BatchLabel  string  `json:"batchLabel"`
-	Direction   string  `json:"direction"`              // "upload" or "download"
-	SourceLabel string  `json:"sourceLabel"`            // "FileBrowser", "PUR", "SingleJob"
-	Total       int     `json:"total"`
-	Queued      int     `json:"queued"`
-	Active      int     `json:"active"`
-	Completed   int     `json:"completed"`
-	Failed      int     `json:"failed"`
-	Cancelled   int     `json:"cancelled"`
-	TotalBytes  int64   `json:"totalBytes"`
-	Progress    float64 `json:"progress"`               // byte-weighted 0.0-1.0
-	Speed       float64 `json:"speed"`                  // aggregate bytes/sec
-	TotalKnown  bool    `json:"totalKnown"`             // v4.8.0: True when scan complete
+	BatchID         string  `json:"batchID"`
+	BatchLabel      string  `json:"batchLabel"`
+	Direction       string  `json:"direction"`              // "upload" or "download"
+	SourceLabel     string  `json:"sourceLabel"`            // "FileBrowser", "PUR", "SingleJob"
+	Total           int     `json:"total"`
+	Queued          int     `json:"queued"`
+	Active          int     `json:"active"`
+	Completed       int     `json:"completed"`
+	Failed          int     `json:"failed"`
+	Cancelled       int     `json:"cancelled"`
+	TotalBytes      int64   `json:"totalBytes"`
+	Progress        float64 `json:"progress"`               // byte-weighted 0.0-1.0
+	Speed           float64 `json:"speed"`                  // aggregate bytes/sec
+	TotalKnown      bool    `json:"totalKnown"`             // v4.8.0: True when scan complete
+	FilesPerSec     float64 `json:"filesPerSec"`            // v4.8.5: file completion rate (windowed)
+	ETASeconds      float64 `json:"etaSeconds"`             // v4.8.5: estimated time remaining (-1 = unknown)
+	DiscoveredTotal int     `json:"discoveredTotal"`        // v4.8.5: files discovered by scan
+	DiscoveredBytes int64   `json:"discoveredBytes"`        // v4.8.5: bytes discovered by scan
+	StartedAtUnix   int64   `json:"startedAtUnix"`          // v4.8.7: batch start time (Unix seconds)
 }
 
 // GetTransferBatches returns aggregate stats for each batch of transfers.
@@ -222,20 +227,25 @@ func (a *App) GetTransferBatches() []TransferBatchDTO {
 	dtos := make([]TransferBatchDTO, len(batchStats))
 	for i, bs := range batchStats {
 		dtos[i] = TransferBatchDTO{
-			BatchID:     bs.BatchID,
-			BatchLabel:  bs.BatchLabel,
-			Direction:   bs.Direction,
-			SourceLabel: bs.SourceLabel,
-			Total:       bs.Total,
-			Queued:      bs.Queued,
-			Active:      bs.Active,
-			Completed:   bs.Completed,
-			Failed:      bs.Failed,
-			Cancelled:   bs.Cancelled,
-			TotalBytes:  bs.TotalBytes,
-			Progress:    bs.Progress,
-			Speed:       bs.Speed,
-			TotalKnown:  bs.TotalKnown, // v4.8.0
+			BatchID:         bs.BatchID,
+			BatchLabel:      bs.BatchLabel,
+			Direction:        bs.Direction,
+			SourceLabel:     bs.SourceLabel,
+			Total:           bs.Total,
+			Queued:          bs.Queued,
+			Active:          bs.Active,
+			Completed:       bs.Completed,
+			Failed:          bs.Failed,
+			Cancelled:       bs.Cancelled,
+			TotalBytes:      bs.TotalBytes,
+			Progress:        bs.Progress,
+			Speed:           bs.Speed,
+			TotalKnown:      bs.TotalKnown,      // v4.8.0
+			FilesPerSec:     bs.FilesPerSec,      // v4.8.5
+			ETASeconds:      bs.ETASeconds,       // v4.8.5
+			DiscoveredTotal: bs.DiscoveredTotal,   // v4.8.5
+			DiscoveredBytes: bs.DiscoveredBytes,   // v4.8.5
+			StartedAtUnix:   bs.StartedAt.Unix(),  // v4.8.7
 		}
 	}
 	return dtos

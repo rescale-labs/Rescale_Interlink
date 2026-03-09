@@ -191,6 +191,25 @@ const BatchRow = memo(function BatchRow({
   const etaFormatted = batch.etaSeconds > 0 ? formatETA(batch.etaSeconds * 1000) : ''
   const speedFormatted = formatSpeed(batch.speed)
 
+  // v4.8.7: Elapsed time display — 1s timer only while batch is active
+  const [elapsedTick, setElapsedTick] = useState(0)
+  useEffect(() => {
+    if (!isActive) return
+    const id = setInterval(() => setElapsedTick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [isActive])
+
+  const elapsedFormatted = useMemo(() => {
+    void elapsedTick // trigger re-computation on tick
+    if (!batch.startedAtUnix || batch.startedAtUnix <= 0) return ''
+    const elapsed = Math.floor(Date.now() / 1000) - batch.startedAtUnix
+    if (elapsed < 10) return '' // hide for first 10s
+    const minutes = Math.floor(elapsed / 60)
+    const seconds = elapsed % 60
+    if (minutes > 0) return `${minutes}m ${seconds}s`
+    return `${seconds}s`
+  }, [elapsedTick, batch.startedAtUnix])
+
   // Status color for progress bar
   const barColor = isAllComplete ? 'bg-green-500' :
     hasFailed && !isActive ? 'bg-red-500' :
@@ -252,19 +271,37 @@ const BatchRow = memo(function BatchRow({
               <div className="absolute top-0 left-0 h-full w-full rounded-full bg-blue-400 animate-pulse opacity-60" />
             )}
           </div>
-          <div className="flex justify-between mt-1 text-xs text-gray-500">
+          {/* v4.8.5 bugfix: Fixed 3-column grid prevents layout jump when speed/ETA toggle */}
+          <div className="grid grid-cols-3 mt-1 text-xs text-gray-500">
             <span>
-              {batch.totalKnown
-                ? `${Math.round(batch.progress * 100)}%`
-                : batch.direction === 'upload'
-                  ? `Preparing upload... (${formatNumber(batch.total)} files)`
-                  : `Scanning... (${formatNumber(batch.total)} files)`}
+              {(() => {
+                if (batch.totalKnown) {
+                  return `${Math.round(batch.progress * 100)}%`
+                }
+                // v4.8.5 bugfix: Use discoveredTotal (fast filesystem count) over
+                // batch.total (slow registration count) during scan phase
+                const scanCount = batch.discoveredTotal > batch.total
+                  ? batch.discoveredTotal : batch.total
+                if (batch.direction === 'upload') {
+                  // v4.8.5 bugfix: Once files are actively uploading, switch label
+                  // from "Preparing upload..." to "Uploading..." with progress count.
+                  // Use "completed" and "found" for clarity; ~ prefix indicates scan in progress.
+                  if (batch.active > 0) {
+                    return `Uploading... (${formatNumber(batch.completed)} completed of ~${formatNumber(scanCount)} found)`
+                  }
+                  return `Preparing upload... (~${formatNumber(scanCount)} files found)`
+                }
+                return `Scanning... (${formatNumber(batch.total)} files)`
+              })()}
             </span>
-            {speedFormatted && <span>{speedFormatted}</span>}
-            {!speedFormatted && batch.filesPerSec > 0 && (
-              <span>{batch.filesPerSec.toFixed(1)} files/s</span>
-            )}
-            {batch.totalKnown && etaFormatted && <span>ETA: {etaFormatted}</span>}
+            <span className="text-center">
+              {speedFormatted || (batch.filesPerSec > 0 ? `${batch.filesPerSec.toFixed(1)} files/s` : '')}
+            </span>
+            <span className="text-right">
+              {batch.totalKnown && etaFormatted
+                ? `ETA: ${etaFormatted}`
+                : (isActive && elapsedFormatted ? `Elapsed: ${elapsedFormatted}` : '')}
+            </span>
           </div>
         </div>
 
@@ -399,10 +436,11 @@ const DaemonBatchRow = memo(function DaemonBatchRow({ batch }: DaemonBatchRowPro
             style={{ width: `${progress * 100}%` }}
           />
         </div>
-        <div className="flex justify-between mt-1 text-xs text-gray-500">
+        {/* v4.8.5 bugfix: Fixed 3-column grid prevents layout jump when speed/ETA toggle */}
+        <div className="grid grid-cols-3 mt-1 text-xs text-gray-500">
           <span>{Math.round(progress * 100)}%</span>
-          {speedFormatted && <span>{speedFormatted}</span>}
-          {etaFormatted && <span>ETA: {etaFormatted}</span>}
+          <span className="text-center">{speedFormatted || ''}</span>
+          <span className="text-right">{etaFormatted ? `ETA: ${etaFormatted}` : ''}</span>
         </div>
       </div>
 
@@ -724,10 +762,18 @@ export function TransfersTab() {
         ) : (
           <div>
             {/* v4.0.8: Show enumeration rows at top */}
-            {/* v4.8.2: Filter out non-complete enumerations that have a matching batch —
-                final render-layer defense against phantom "Scanning" row flash */}
+            {/* v4.8.5: Filter non-complete upload enumerations past folder-creation phase.
+                Once folders are created and scanning starts, the BatchRow takes over.
+                The previous filter (batch exists → hide) left a 1-frame flash because
+                the batch doesn't exist yet on the first render after scanning starts.
+                Now: for uploads, only show during creating_folders phase (or completed/error). */}
             {enumerations
-              .filter(e => e.isComplete || !batches.some(b => b.batchID === e.id))
+              .filter(e => {
+                if (e.isComplete) return true
+                if (batches.some(b => b.batchID === e.id)) return false
+                if (e.direction === 'upload' && e.phase !== 'creating_folders') return false
+                return true
+              })
               .map((enumeration) => (
               <EnumerationRow
                 key={enumeration.id}

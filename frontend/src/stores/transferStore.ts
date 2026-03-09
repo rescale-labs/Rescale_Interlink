@@ -71,6 +71,7 @@ export interface TransferBatch {
   etaSeconds: number // v4.8.5: estimated time remaining (-1 = unknown)
   discoveredTotal: number // v4.8.5: files discovered by scan
   discoveredBytes: number // v4.8.5: bytes discovered by scan
+  startedAtUnix: number // v4.8.7: batch start time (Unix seconds)
 }
 
 // Extended transfer task with UI state
@@ -247,6 +248,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         etaSeconds: (b as TransferBatch).etaSeconds ?? -1,
         discoveredTotal: (b as TransferBatch).discoveredTotal ?? 0,
         discoveredBytes: (b as TransferBatch).discoveredBytes ?? 0,
+        startedAtUnix: (b as TransferBatch).startedAtUnix ?? 0,
       }))
       set({ batches })
 
@@ -624,6 +626,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           etaSeconds: event.etaSeconds ?? -1,
           discoveredTotal: event.discoveredTotal ?? 0,
           discoveredBytes: event.discoveredBytes ?? 0,
+          startedAtUnix: 0, // v4.8.7: Will be populated on next fetchBatches
         }
         return { batches: [...state.batches, newBatch], lastUpdate: Date.now() }
       }

@@ -81,6 +81,7 @@ type Queue struct {
 	batchDiscoveredTotal  map[string]int         // total files discovered (may exceed registered tasks)
 	batchDiscoveredBytes  map[string]int64       // total bytes discovered
 	batchPrevETA          map[string]float64     // smoothed ETA state
+	batchStartedAt        map[string]time.Time   // v4.8.7: batch start time for elapsed display
 }
 
 // NewQueue creates a new transfer queue with the specified event bus.
@@ -100,6 +101,7 @@ func NewQueue(eventBus *events.EventBus) *Queue {
 		batchDiscoveredTotal:  make(map[string]int),
 		batchDiscoveredBytes:  make(map[string]int64),
 		batchPrevETA:          make(map[string]float64),
+		batchStartedAt:        make(map[string]time.Time),
 		eventBus:              eventBus,
 	}
 }
@@ -153,6 +155,15 @@ func (q *Queue) TrackTransferWithBatch(name string, size int64, taskType TaskTyp
 	task := q.TrackTransferWithLabel(name, size, taskType, source, dest, sourceLabel)
 	task.BatchID = batchID
 	task.BatchLabel = batchLabel
+
+	// v4.8.7: Stamp start time if not already set (non-streaming batches skip PreRegisterBatch).
+	if batchID != "" {
+		q.mu.Lock()
+		if _, exists := q.batchStartedAt[batchID]; !exists {
+			q.batchStartedAt[batchID] = time.Now()
+		}
+		q.mu.Unlock()
+	}
 
 	// Start batch progress ticker if this is the first batched task
 	if batchID != "" {
@@ -582,8 +593,9 @@ type BatchStats struct {
 	TotalKnown      bool    // v4.8.0: True when scan is complete and Total is final
 	FilesPerSec     float64 // v4.8.5: file completion rate (windowed)
 	ETASeconds      float64 // v4.8.5: estimated time remaining (smoothed, -1 = unknown)
-	DiscoveredTotal int     // v4.8.5: files discovered by scan (may > Total during queueing)
-	DiscoveredBytes int64   // v4.8.5: bytes discovered by scan
+	DiscoveredTotal int       // v4.8.5: files discovered by scan (may > Total during queueing)
+	DiscoveredBytes int64     // v4.8.5: bytes discovered by scan
+	StartedAt       time.Time // v4.8.7: batch start time for elapsed display
 }
 
 // GetAllBatchStats returns aggregate stats for all batches in a single pass.
@@ -649,6 +661,10 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		}
 		if db, exists := q.batchDiscoveredBytes[batchID]; exists {
 			bs.DiscoveredBytes = db
+		}
+		// v4.8.7: Populate batch start time
+		if t, exists := q.batchStartedAt[batchID]; exists {
+			bs.StartedAt = t
 		}
 	}
 
@@ -813,6 +829,7 @@ func (q *Queue) RegisterBatchCancel(batchID string, cancelFn context.CancelFunc)
 // may take 10-20s before the first file is discovered.
 // v4.8.2: Eliminates batch entry "flashing" in the Transfers tab.
 func (q *Queue) PreRegisterBatch(batchID, batchLabel, direction, sourceLabel string) {
+	now := time.Now()
 	q.mu.Lock()
 	q.preRegisteredBatches[batchID] = &BatchStats{
 		BatchID:     batchID,
@@ -820,7 +837,9 @@ func (q *Queue) PreRegisterBatch(batchID, batchLabel, direction, sourceLabel str
 		Direction:   direction,
 		SourceLabel: sourceLabel,
 		TotalKnown:  false,
+		StartedAt:   now, // v4.8.7
 	}
+	q.batchStartedAt[batchID] = now // v4.8.7
 	q.mu.Unlock()
 
 	// v4.8.3: Fire immediate batch progress event so the batch row appears
@@ -872,6 +891,7 @@ func (q *Queue) CleanupBatch(batchID string) {
 	delete(q.batchCancelFuncs, batchID)
 	delete(q.batchScanInProgress, batchID)
 	delete(q.preRegisteredBatches, batchID)
+	delete(q.batchStartedAt, batchID) // v4.8.7
 }
 
 // RetryFailedInBatch retries all failed tasks in a batch.
@@ -1070,4 +1090,5 @@ func (q *Queue) cleanupBatchMetrics(batchID string) {
 	delete(q.batchDiscoveredTotal, batchID)
 	delete(q.batchDiscoveredBytes, batchID)
 	delete(q.batchPrevETA, batchID)
+	delete(q.batchStartedAt, batchID) // v4.8.7
 }
