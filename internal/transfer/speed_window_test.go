@@ -74,12 +74,92 @@ func TestSpeedWindow_ZeroDelta(t *testing.T) {
 	sw := newSpeedWindow(10 * time.Second)
 	base := time.Now()
 
-	// No bytes transferred (stall)
+	// No bytes transferred (stall) — no prior non-zero speed, so no grace period
 	sw.Record(base, 100)
 	sw.Record(base.Add(2*time.Second), 100)
 
 	if speed := sw.Speed(); speed != 0 {
-		t.Errorf("expected 0 with zero delta, got %.1f", speed)
+		t.Errorf("expected 0 with zero delta and no prior speed, got %.1f", speed)
+	}
+}
+
+func TestSpeedWindow_GracePeriod(t *testing.T) {
+	sw := newSpeedWindow(10 * time.Second)
+	base := time.Now()
+
+	// Build up a non-zero speed: 1000 bytes over 2 seconds = 500 B/s
+	sw.Record(base, 0)
+	sw.Record(base.Add(1*time.Second), 500)
+	sw.Record(base.Add(2*time.Second), 1000)
+
+	speed := sw.Speed()
+	if speed < 490 || speed > 510 {
+		t.Fatalf("expected ~500 B/s baseline, got %.1f", speed)
+	}
+
+	// Stall: no new bytes for 1 second (within 3s grace period)
+	sw.Record(base.Add(3*time.Second), 1000)
+	speed = sw.Speed()
+	if speed < 100 {
+		t.Errorf("expected grace period to hold non-zero speed, got %.1f", speed)
+	}
+
+	// Still within grace period at 2s after last non-zero
+	sw.Record(base.Add(4*time.Second), 1000)
+	speed = sw.Speed()
+	if speed == 0 {
+		t.Error("expected non-zero speed within grace period, got 0")
+	}
+
+	// Beyond grace period (>3s after last non-zero sample at t=2s)
+	// Need samples spanning enough time that the window only contains stalled data
+	sw2 := newSpeedWindow(3 * time.Second) // small window
+	base2 := time.Now()
+
+	// Build non-zero speed
+	sw2.Record(base2, 0)
+	sw2.Record(base2.Add(1*time.Second), 500)
+
+	speed = sw2.Speed()
+	if speed < 400 || speed > 600 {
+		t.Fatalf("expected ~500 B/s baseline, got %.1f", speed)
+	}
+
+	// Stall for 4+ seconds (beyond 3s grace period)
+	sw2.Record(base2.Add(2*time.Second), 500)
+	sw2.Record(base2.Add(3*time.Second), 500)
+	sw2.Record(base2.Add(4*time.Second), 500)
+	sw2.Record(base2.Add(5*time.Second), 500) // 4s after lastNonZeroTime (t=1s)
+
+	speed = sw2.Speed()
+	if speed != 0 {
+		t.Errorf("expected 0 after grace period expired, got %.1f", speed)
+	}
+}
+
+func TestSpeedWindow_GracePeriodResumesAfterStall(t *testing.T) {
+	sw := newSpeedWindow(10 * time.Second)
+	base := time.Now()
+
+	// Build speed, stall, then resume — speed should recover
+	sw.Record(base, 0)
+	sw.Record(base.Add(1*time.Second), 500)
+	sw.Record(base.Add(2*time.Second), 1000)
+
+	// Stall
+	sw.Record(base.Add(3*time.Second), 1000)
+	speed := sw.Speed()
+	if speed == 0 {
+		t.Error("expected grace period speed during stall, got 0")
+	}
+
+	// Resume: new bytes arrive
+	sw.Record(base.Add(4*time.Second), 1500)
+	sw.Record(base.Add(5*time.Second), 2000)
+
+	speed = sw.Speed()
+	if speed < 100 {
+		t.Errorf("expected recovered speed after stall, got %.1f", speed)
 	}
 }
 

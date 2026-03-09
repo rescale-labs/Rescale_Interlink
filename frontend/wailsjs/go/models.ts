@@ -1150,6 +1150,10 @@ export namespace wailsapp {
 	    progress: number;
 	    speed: number;
 	    totalKnown: boolean;
+	    filesPerSec: number;
+	    etaSeconds: number;
+	    discoveredTotal: number;
+	    discoveredBytes: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new TransferBatchDTO(source);
@@ -1171,6 +1175,10 @@ export namespace wailsapp {
 	        this.progress = source["progress"];
 	        this.speed = source["speed"];
 	        this.totalKnown = source["totalKnown"];
+	        this.filesPerSec = source["filesPerSec"];
+	        this.etaSeconds = source["etaSeconds"];
+	        this.discoveredTotal = source["discoveredTotal"];
+	        this.discoveredBytes = source["discoveredBytes"];
 	    }
 	}
 	export class TransferRequestDTO {

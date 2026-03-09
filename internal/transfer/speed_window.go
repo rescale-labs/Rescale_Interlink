@@ -16,10 +16,16 @@ type speedSample struct {
 // speedWindow computes a sliding-window rate from cumulative counter samples.
 // Used for both bytes/sec (speed) and files/sec (completion rate).
 // Thread-safe via mutex.
+//
+// v4.8.5 bugfix: Grace period — when speed transiently drops to 0 between file
+// completions (no byte delta in the current window), the last non-zero speed is
+// held for up to 3 seconds. This prevents speed/ETA flashing in the UI.
 type speedWindow struct {
-	mu         sync.Mutex
-	samples    []speedSample
-	windowSize time.Duration
+	mu              sync.Mutex
+	samples         []speedSample
+	windowSize      time.Duration
+	lastNonZero     float64
+	lastNonZeroTime time.Time
 }
 
 // newSpeedWindow creates a speed window with the specified duration.
@@ -56,8 +62,16 @@ func (sw *speedWindow) Record(now time.Time, cumulativeBytes int64) {
 	}
 }
 
+// speedGracePeriod is how long a non-zero speed is held when the computed
+// speed transiently drops to 0 (e.g., between file completions).
+const speedGracePeriod = 3 * time.Second
+
 // Speed returns the current rate (units per second) based on the sliding window.
 // Returns 0 if fewer than 2 samples or time span < 500ms.
+//
+// v4.8.5 bugfix: If the computed speed is 0 but a previous non-zero speed exists
+// and the last sample is within speedGracePeriod of lastNonZeroTime, the previous
+// non-zero value is returned. This prevents speed/ETA flashing between file completions.
 func (sw *speedWindow) Speed() float64 {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
@@ -75,9 +89,18 @@ func (sw *speedWindow) Speed() float64 {
 	}
 
 	delta := last.bytes - first.bytes
-	if delta <= 0 {
-		return 0
+	if delta > 0 {
+		computed := float64(delta) / span
+		sw.lastNonZero = computed
+		sw.lastNonZeroTime = last.time
+		return computed
 	}
 
-	return float64(delta) / span
+	// delta <= 0: check grace period
+	if sw.lastNonZero > 0 && !sw.lastNonZeroTime.IsZero() &&
+		last.time.Sub(sw.lastNonZeroTime) <= speedGracePeriod {
+		return sw.lastNonZero
+	}
+
+	return 0
 }
