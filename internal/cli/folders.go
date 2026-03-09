@@ -296,30 +296,16 @@ Examples:
 				logger.Info().Str("parent_id", parentID).Msg("Using My Library as parent")
 			}
 
-			// Build directory tree
-			fmt.Println("Scanning local directory...")
-			logger.Info().Str("path", localPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
-			directories, files, symlinks, err := BuildDirectoryTree(localPath, includeHidden)
-			if err != nil {
-				return fmt.Errorf("failed to scan directory: %w", err)
-			}
-
-			// Notify about skipped symlinks
-			if len(symlinks) > 0 {
-				fmt.Printf("\nℹ️  Skipped %d symbolic link(s):\n", len(symlinks))
-				for _, link := range symlinks {
-					relPath, _ := filepath.Rel(localPath, link)
-					fmt.Printf("  - %s\n", relPath)
+			// v4.8.7: Pipelined path uses WalkStream (no upfront scan needed).
+			// Sequential path still uses BuildDirectoryTree for full directory/file lists.
+			// Validate local path early for pipelined path to avoid remote side-effects.
+			if !sequential {
+				if info, err := os.Stat(localPath); err != nil {
+					return fmt.Errorf("cannot access local path: %w", err)
+				} else if !info.IsDir() {
+					return fmt.Errorf("local path is not a directory: %s", localPath)
 				}
 			}
-
-			fmt.Printf("\n📊 Scan complete:\n")
-			fmt.Printf("  Directories: %d\n", len(directories))
-			fmt.Printf("  Files: %d\n", len(files))
-			if len(symlinks) > 0 {
-				fmt.Printf("  Symlinks (skipped): %d\n", len(symlinks))
-			}
-			fmt.Println()
 
 			// Initialize folder cache for API call optimization
 			cache := NewFolderCache()
@@ -383,9 +369,36 @@ Examples:
 
 			var result *UploadResult
 			var foldersCreated int
+			var symlinks []string // populated by sequential path; pipelined path doesn't track symlinks
 
 			if sequential {
-				// Sequential mode: create all folders first, then upload all files
+				// Sequential mode: upfront scan, then create all folders, then upload all files
+				fmt.Println("Scanning local directory...")
+				logger.Info().Str("path", localPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
+				var directories, files []string
+				var err error
+				directories, files, symlinks, err = BuildDirectoryTree(localPath, includeHidden)
+				if err != nil {
+					return fmt.Errorf("failed to scan directory: %w", err)
+				}
+
+				// Notify about skipped symlinks
+				if len(symlinks) > 0 {
+					fmt.Printf("\nℹ️  Skipped %d symbolic link(s):\n", len(symlinks))
+					for _, link := range symlinks {
+						relPath, _ := filepath.Rel(localPath, link)
+						fmt.Printf("  - %s\n", relPath)
+					}
+				}
+
+				fmt.Printf("\n📊 Scan complete:\n")
+				fmt.Printf("  Directories: %d\n", len(directories))
+				fmt.Printf("  Files: %d\n", len(files))
+				if len(symlinks) > 0 {
+					fmt.Printf("  Symlinks (skipped): %d\n", len(symlinks))
+				}
+				fmt.Println()
+
 				fmt.Println("📂 Creating folder structure...")
 
 				// Determine folder conflict mode based on flags
@@ -438,8 +451,8 @@ Examples:
 				}
 				result = uploadResult
 			} else {
-				// Pipelined mode (default): create folders and upload files in parallel
-				fmt.Println("📂 Starting pipelined folder creation and file upload...")
+				// v4.8.7: Pipelined mode (default) — streaming WalkStream, no upfront scan
+				fmt.Println("📂 Starting streaming pipelined upload...")
 
 				// Convert flags to single skipExisting for pipelined mode
 				// Note: pipelined mode currently only supports merge behavior
@@ -448,8 +461,8 @@ Examples:
 				// v4.8.1: Pass resource manager from global CLI flags
 				pipelineResourceMgr := CreateResourceManager()
 				uploadResult, created, err := uploadDirectoryPipelined(
-					ctx, apiClient, cache, localPath, directories, rootFolderID,
-					files, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
+					ctx, apiClient, cache, localPath, rootFolderID,
+					includeHidden, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
 				if err != nil {
 					return err
 				}

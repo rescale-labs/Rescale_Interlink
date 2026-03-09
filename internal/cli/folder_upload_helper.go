@@ -576,8 +576,12 @@ type cliPipelinedUploadItem struct {
 
 func (p cliPipelinedUploadItem) FileSize() int64 { return p.size }
 
-// uploadDirectoryPipelined coordinates pipelined folder creation and file uploads
-// Folders are created depth-by-depth, and files are uploaded as soon as their parent folder is ready
+// uploadDirectoryPipelined coordinates streaming pipelined folder creation and file uploads.
+// v4.8.7: Uses WalkStream for streaming discovery — files start uploading before scan completes.
+// Three-part structure ported from GUI path (file_bindings.go:999-1277):
+//   1. Folder creation goroutine (CreateFolderStructureStreaming)
+//   2. Unbounded backlog + dispatcher (prevents backpressure from throttling discovery)
+//   3. Orchestrator merging fileChan + folderReadyChan into backlog
 // v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
 // v4.8.6: Migrated file upload worker pool to transfer.RunBatchFromChannel.
 func uploadDirectoryPipelined(
@@ -585,9 +589,8 @@ func uploadDirectoryPipelined(
 	apiClient *api.Client,
 	cache *FolderCache,
 	rootPath string,
-	directories []string,
 	rootRemoteID string,
-	files []string,
+	includeHidden bool,
 	folderConcurrency int,
 	fileConcurrency int,
 	continueOnError bool,
@@ -601,41 +604,33 @@ func uploadDirectoryPipelined(
 	foldersCreated := 0
 	var foldersCreatedMutex sync.Mutex
 
-	// Build map of files per directory
-	filesPerDir := make(map[string][]string)
-	for _, filePath := range files {
-		dirPath := filepath.Dir(filePath)
-		filesPerDir[dirPath] = append(filesPerDir[dirPath], filePath)
-	}
+	// v4.8.7: Start streaming walk — directories and files arrive as they're discovered.
+	dirChan, fileChan, walkErrChan := localfs.WalkStream(ctx, rootPath, localfs.WalkOptions{
+		IncludeHidden:  includeHidden,
+		SkipHiddenDirs: true,
+	})
 
 	// Create folder ready channel (buffered to prevent blocking)
 	folderReadyChan := make(chan FolderReadyEvent, constants.WorkChannelBuffer)
 
-	// Create progress UI
-	uploadUI := progress.NewUploadUI(len(files))
+	// v4.8.7: Streaming progress UI — total starts at 0, increments as files are discovered.
+	uploadUI := progress.NewUploadUI(0)
 
 	// NOTE: Do NOT redirect zerolog through uploadUI.Writer()
 	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
 	// when mixed with ANSI escape codes from mpb progress bars.
-	// The mpb library handles rendering progress bars above stderr output automatically.
-
 	defer uploadUI.Wait()
 
-	// Pre-warm credentials and prepare for uploads
-	logger.Debug().Msg("Pre-fetching storage credentials")
+	// v4.8.7: Unified credential warming — session + provider + metadata caches.
+	logger.Debug().Msg("Pre-warming credential caches")
 	credManager := credentials.GetManager(apiClient)
-	_, err := credManager.GetS3Credentials(ctx)
-	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to pre-fetch credentials, will fetch on demand")
-	}
+	credManager.WarmAll(ctx)
 
 	// Shared state for conflict modes
-	// Note: folderConflictMode is passed by pointer to CreateFolderStructure
 	folderConflictMode := ConflictMergeOnce
 	if skipExisting {
 		folderConflictMode = ConflictMergeAll
 	}
-	// v4.8.1: Use shared ConflictResolver for file conflicts
 	initialFileMode := FileOverwriteOnce
 	if skipExisting {
 		initialFileMode = FileSkipAll
@@ -643,14 +638,12 @@ func uploadDirectoryPipelined(
 	fileConflictResolver := NewFileConflictResolver(initialFileMode)
 	errorMode := ErrorContinueOnce
 
-	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
 	if resourceMgr == nil {
 		panic("uploadDirectoryPipelined: resourceMgr is required (use CreateResourceManager())")
 	}
 	cliUploadTransferMgr := transfer.NewManager(resourceMgr)
 
 	// v4.8.6: Use RunBatchFromChannel with AdaptiveCount for dynamic worker scaling.
-	// Replaces manual ComputeBatchConcurrency + fixed worker pool.
 	var adaptive *transfer.AdaptiveWorkerCount
 	batchCfg := transfer.BatchConfig{
 		MaxWorkers:    fileConcurrency,
@@ -659,43 +652,94 @@ func uploadDirectoryPipelined(
 		AdaptiveCount: &adaptive,
 	}
 
-	// WaitGroup to track folder creation + event dispatcher
-	var wg sync.WaitGroup
-
-	// 1. Start folder creation goroutine
-	wg.Add(1)
+	// === Part A: Folder creation goroutine ===
+	// Uses CreateFolderStructureStreaming to process directories as they arrive from WalkStream.
+	folderErrCh := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		defer close(folderReadyChan) // Signal completion to file uploader
-
-		_, created, err := CreateFolderStructure(
-			ctx, apiClient, cache, rootPath, directories, rootRemoteID,
-			&folderConflictMode, folderConcurrency, logger, folderReadyChan,
-			uploadUI.Writer())
-
-		if err != nil {
-			logger.Error().Err(err).Msg("Folder creation failed")
-			return
+		defer close(folderReadyChan)
+		_, created, err := CreateFolderStructureStreaming(
+			ctx, apiClient, cache, rootPath, dirChan, rootRemoteID,
+			&folderConflictMode, folderConcurrency, logger,
+			folderReadyChan, uploadUI.Writer())
+		if err != nil && ctx.Err() == nil {
+			folderErrCh <- err
 		}
+		close(folderErrCh)
 
 		foldersCreatedMutex.Lock()
 		foldersCreated = created
 		foldersCreatedMutex.Unlock()
-
 		logger.Info().Int("folders", created).Msg("Folder creation complete")
 	}()
 
-	// 2. Start RunBatchFromChannel for file uploads.
-	// The event dispatcher sends cliPipelinedUploadItem to batchCh as folders become ready.
-	// RunBatchFromChannel consumes from batchCh with adaptive worker scaling.
+	// === Part B: Unbounded backlog + dispatcher ===
+	// Decouples discovery speed from batchCh consumption rate.
+	// Mirrors file_bindings.go:1039-1101.
 	batchCh := make(chan cliPipelinedUploadItem, constants.WorkChannelBuffer)
 
+	var readyBacklog []cliPipelinedUploadItem
+	var backlogMu sync.Mutex
+	backlogReady := make(chan struct{}, 1)
+	backlogDone := make(chan struct{})
+
+	appendToBacklog := func(item cliPipelinedUploadItem) {
+		backlogMu.Lock()
+		readyBacklog = append(readyBacklog, item)
+		backlogMu.Unlock()
+		select {
+		case backlogReady <- struct{}{}:
+		default:
+		}
+	}
+
+	// Dispatcher goroutine: drains backlog into batchCh, then closes batchCh.
+	var dispatchWg sync.WaitGroup
+	dispatchWg.Add(1)
+	go func() {
+		defer dispatchWg.Done()
+		defer close(batchCh)
+		for {
+			backlogMu.Lock()
+			if len(readyBacklog) == 0 {
+				backlogMu.Unlock()
+				select {
+				case <-backlogReady:
+					continue
+				case <-backlogDone:
+					// Producer done — drain any remaining items
+					backlogMu.Lock()
+					remaining := readyBacklog
+					readyBacklog = nil
+					backlogMu.Unlock()
+					for _, item := range remaining {
+						select {
+						case batchCh <- item:
+						case <-ctx.Done():
+							return
+						}
+					}
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			item := readyBacklog[0]
+			readyBacklog = readyBacklog[1:]
+			backlogMu.Unlock()
+
+			select {
+			case batchCh <- item:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Start RunBatchFromChannel consumer
 	var batchWg sync.WaitGroup
 	batchWg.Add(1)
 	go func() {
 		defer batchWg.Done()
-		// Note: We do NOT rely on BatchResult.Completed — many nil returns are
-		// skips/conflicts. All real outcomes are tracked by manual counters.
 		transfer.RunBatchFromChannel(ctx, batchCh, batchCfg,
 			func(ctx context.Context, item cliPipelinedUploadItem) error {
 				fpath := item.fpath
@@ -718,7 +762,6 @@ func uploadDirectoryPipelined(
 				}
 
 				if exists {
-					// v4.8.1: Use shared ConflictResolver instead of inline state machine
 					action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
 						return promptFileConflict(fileName, relativePath)
 					})
@@ -759,7 +802,6 @@ func uploadDirectoryPipelined(
 				// Create progress bar
 				fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
 
-				// v4.8.6: Use adaptive worker count from RunBatchFromChannel
 				workerCount := constants.DefaultMaxConcurrent
 				if adaptive != nil {
 					workerCount = adaptive.Load()
@@ -802,52 +844,99 @@ func uploadDirectoryPipelined(
 			})
 	}()
 
-	// Event dispatcher goroutine: reads folder ready events, sends work to batch channel
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer close(batchCh) // Signal RunBatchFromChannel to finish when all folders processed
+	// === Part C: Orchestrator ===
+	// Merges fileChan + folderReadyChan into the backlog.
+	// Mirrors file_bindings.go:1105-1277.
+	func() {
+		defer close(backlogDone)
 
-		processedFolders := make(map[string]bool)
+		folderMapping := map[string]string{rootPath: rootRemoteID}
+		pendingFiles := map[string][]localfs.FileEntry{}
 
-		for event := range folderReadyChan {
-			filesInFolder, hasFiles := filesPerDir[event.LocalPath]
-			if !hasFiles || len(filesInFolder) == 0 {
-				continue
-			}
-
-			if processedFolders[event.LocalPath] {
-				continue
-			}
-			processedFolders[event.LocalPath] = true
-
-			relativePath, relErr := filepath.Rel(rootPath, event.LocalPath)
-			if relErr != nil {
-				relativePath = filepath.Base(event.LocalPath)
-			} else if relativePath == "." {
-				relativePath = filepath.Base(rootPath)
-			}
-			uploadUI.SetFolderPath(event.RemoteID, relativePath)
-
-			for _, filePath := range filesInFolder {
-				// Stat for FileSize() — used by RunBatchFromChannel for adaptive scaling
-				var sz int64
-				if info, statErr := os.Stat(filePath); statErr == nil {
-					sz = info.Size()
+		flushPending := func(localDir, remoteID string) {
+			if pending, has := pendingFiles[localDir]; has {
+				relativePath, relErr := filepath.Rel(rootPath, localDir)
+				if relErr != nil {
+					relativePath = filepath.Base(localDir)
+				} else if relativePath == "." {
+					relativePath = filepath.Base(rootPath)
 				}
-				batchCh <- cliPipelinedUploadItem{
-					fpath:          filePath,
-					remoteFolderID: event.RemoteID,
-					relativePath:   relativePath,
-					size:           sz,
+				uploadUI.SetFolderPath(remoteID, relativePath)
+				for _, file := range pending {
+					appendToBacklog(cliPipelinedUploadItem{
+						fpath:          file.Path,
+						remoteFolderID: remoteID,
+						relativePath:   relativePath,
+						size:           file.Size,
+					})
 				}
+				delete(pendingFiles, localDir)
 			}
+		}
+
+		fileChClosed, folderChClosed := false, false
+		for !fileChClosed || !folderChClosed {
+			select {
+			case file, ok := <-fileChan:
+				if !ok {
+					fileChClosed = true
+					continue
+				}
+				// v4.8.7: Streaming total increment
+				uploadUI.IncrementTotal()
+
+				parentDir := filepath.Dir(file.Path)
+				if remoteID, ready := folderMapping[parentDir]; ready {
+					relativePath, relErr := filepath.Rel(rootPath, parentDir)
+					if relErr != nil {
+						relativePath = filepath.Base(parentDir)
+					} else if relativePath == "." {
+						relativePath = filepath.Base(rootPath)
+					}
+					uploadUI.SetFolderPath(remoteID, relativePath)
+					appendToBacklog(cliPipelinedUploadItem{
+						fpath:          file.Path,
+						remoteFolderID: remoteID,
+						relativePath:   relativePath,
+						size:           file.Size,
+					})
+				} else {
+					pendingFiles[parentDir] = append(pendingFiles[parentDir], file)
+				}
+
+			case event, ok := <-folderReadyChan:
+				if !ok {
+					folderChClosed = true
+					continue
+				}
+				folderMapping[event.LocalPath] = event.RemoteID
+				flushPending(event.LocalPath, event.RemoteID)
+
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		// Final checks
+		select {
+		case walkErr := <-walkErrChan:
+			if walkErr != nil && ctx.Err() == nil {
+				logger.Error().Err(walkErr).Msg("Walk error during streaming scan")
+			}
+		default:
+		}
+		if folderErr := <-folderErrCh; folderErr != nil {
+			logger.Error().Err(folderErr).Msg("Folder creation failed")
+		}
+		// Warn about unmapped pending files
+		for dir, files := range pendingFiles {
+			logger.Warn().Int("count", len(files)).Str("dir", dir).Msg("Skipping files in unmapped folder")
 		}
 	}()
 
-	// Wait for folder creation + event dispatcher to finish
-	wg.Wait()
-	// Wait for RunBatchFromChannel to drain and finish
+	// Wait for dispatcher to drain remaining backlog into batchCh
+	dispatchWg.Wait()
+	// Wait for RunBatchFromChannel to finish all uploads
 	batchWg.Wait()
 
 	return result, foldersCreated, nil
