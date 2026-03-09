@@ -1,5 +1,70 @@
 # Release Notes - Rescale Interlink
 
+## v4.8.7 - March 8, 2026
+
+### Foundations & Quick Wins (Plan 1)
+
+Six independent improvements covering error handling, credential warming, transport cleanup, elapsed time display, CLI streaming uploads, and rate limiter fairness.
+
+### Error Collection Unification (4C)
+- Replaced inline error-channel drain patterns with `transfer.CollectErrors()` in `azure/download.go` and `folder_upload_helper.go`. Consistent first-error semantics across the codebase.
+
+### Credential Warming Standardization (4E)
+- New `WarmAll(ctx)` method on `credentials.Manager`: session-level (`EnsureFresh`) + provider-level (`GetS3Credentials`, `GetAzureCredentials`) + metadata (`GetUserProfile`, `GetRootFolders`) — all best-effort, non-fatal.
+- All transfer entry points now call `WarmAll`: `transfer_service.go`, `folder_upload_helper.go` (pipelined + sequential), `download_helper.go` (file + job), `upload_helper.go`, `daemon.go`.
+
+### S3/Azure Transport Pool Cleanup (5C)
+- `CloseIdleConnections()` methods added to `S3Client` and `AzureClient`.
+- Transport cleanup registry in `internal/http/client.go`: `CreateOptimizedClient()` auto-tracks each HTTP client; `CloseAllIdleConnections()` closes idle connections on all tracked transports.
+- Engine stale-connection callback extended: sleep/wake recovery now covers S3/Azure provider transports in addition to the API client.
+
+### Transfer Elapsed Time Display (8)
+- `StartedAt` field added to `BatchStats`, stamped at `PreRegisterBatch()` time (streaming batches) and `TrackTransferWithBatch()` time (non-streaming batches).
+- Exposed via `StartedAtUnix` in `TransferBatchDTO` → frontend `TransferBatch` interface.
+- Frontend `BatchRow` shows "Elapsed: Xm Ys" when ETA is unavailable and elapsed > 10s. 1-second timer only ticks while batch is active.
+- Cleanup hooks added to both `CleanupBatch()` and `cleanupBatchMetrics()`.
+
+### CLI WalkStream Adoption (9)
+- CLI pipelined upload path (`uploadDirectoryPipelined`) now uses `WalkStream` for streaming discovery — files start uploading before scan completes.
+- Three-part streaming structure ported from GUI (`file_bindings.go`): (1) `CreateFolderStructureStreaming` goroutine, (2) unbounded backlog + dispatcher, (3) orchestrator merging `fileChan` + `folderReadyChan`.
+- `UploadUI.IncrementTotal()` added for streaming total updates; `totalFiles` field changed to atomic int32.
+- Local path validation added before remote root folder creation for pipelined path.
+- `BuildDirectoryTree` call moved inside sequential branch only.
+
+### Rate Limiter FIFO Fix (3)
+- `Wait()` now guarantees FIFO ordering under contention. Single locked decision point: if no waiters queued and token available → acquire immediately; otherwise → enqueue with `fifoTicket`, only front-of-queue waiter may acquire.
+- `tryAcquireUnlocked()` and `timeUntilNextTokenUnlocked()` extracted for use when caller already holds the lock.
+- New `TestWaitFIFOOrder` test: drains bucket, launches N goroutines with stagger, verifies acquisition order.
+- Coordinator and cooldown paths unchanged — checked before the FIFO decision point.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/cloud/providers/azure/download.go` | CollectErrors migration |
+| `internal/cli/folder_upload_helper.go` | CollectErrors migration, WarmAll, WalkStream streaming rewrite |
+| `internal/cloud/credentials/manager.go` | New `WarmAll(ctx)` method |
+| `internal/services/transfer_service.go` | WarmAll adoption |
+| `internal/cli/download_helper.go` | WarmAll adoption |
+| `internal/cli/upload_helper.go` | WarmAll adoption |
+| `internal/daemon/daemon.go` | WarmAll adoption |
+| `internal/cloud/providers/s3/client.go` | `CloseIdleConnections()` method |
+| `internal/cloud/providers/azure/client.go` | `CloseIdleConnections()` method |
+| `internal/http/client.go` | Transport cleanup registry, auto-tracking |
+| `internal/core/engine.go` | Extended stale-connection callback |
+| `internal/transfer/queue.go` | `StartedAt` in BatchStats, `batchStartedAt` map, cleanup hooks |
+| `internal/wailsapp/transfer_bindings.go` | `StartedAtUnix` in DTO |
+| `frontend/src/stores/transferStore.ts` | `startedAtUnix` in TransferBatch interface |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Elapsed time display in BatchRow |
+| `internal/cli/folders.go` | Pipelined path restructured for WalkStream |
+| `internal/progress/uploadui.go` | `IncrementTotal()`, atomic `totalFiles` |
+| `internal/ratelimit/limiter.go` | FIFO wait queue, unlocked helpers |
+| `internal/ratelimit/limiter_test.go` | `TestWaitFIFOOrder` |
+| `internal/version/version.go` | v4.8.6 → v4.8.7 |
+| `wails.json` | productVersion 4.8.6 → 4.8.7 |
+
+---
+
 ## v4.8.6 - March 8, 2026
 
 ### Destination Snapshot Hardening (4F)

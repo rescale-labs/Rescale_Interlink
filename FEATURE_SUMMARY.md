@@ -1,10 +1,39 @@
 # Rescale Interlink - Complete Feature Summary
 
-**Version:** 4.8.6
+**Version:** 4.8.7
 **Build Date:** March 8, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
+
+---
+
+## v4.8.7 Changes — Foundations & Quick Wins
+
+### Error Collection Unification (4C)
+- Inline error-channel drain patterns replaced with `transfer.CollectErrors()` in `azure/download.go` and `folder_upload_helper.go`.
+
+### Credential Warming Standardization (4E)
+- New `credentials.Manager.WarmAll(ctx)` method: session + provider + metadata warming in a single best-effort call.
+- All 7 transfer entry points (GUI service, CLI upload/download/folder, daemon) now use `WarmAll`.
+
+### S3/Azure Transport Pool Cleanup (5C)
+- `CloseIdleConnections()` on S3Client and AzureClient.
+- Auto-tracking registry in `CreateOptimizedClient()` with `CloseAllIdleConnections()` callback.
+- Engine sleep/wake recovery extended to cover all provider transports.
+
+### Transfer Elapsed Time Display (8)
+- `BatchStats.StartedAt` stamped at batch creation, exposed via DTO.
+- Frontend shows "Elapsed: Xm Ys" during scan phase or when ETA unavailable (>10s).
+
+### CLI Streaming Upload — WalkStream Adoption (9)
+- CLI pipelined upload now uses `WalkStream` for streaming discovery.
+- Three-part structure (folder creation, backlog+dispatcher, orchestrator) ported from GUI.
+- `UploadUI.IncrementTotal()` for streaming progress bar totals.
+
+### Rate Limiter FIFO Fix (3)
+- `Wait()` guarantees FIFO ordering under contention via ticket queue.
+- Prevents scan starvation during concurrent upload/download operations.
 
 ---
 
