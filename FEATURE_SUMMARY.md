@@ -49,6 +49,21 @@ This document provides a comprehensive, verified list of all features available 
 - New `internal/platform/` package: macOS (IOPMAssertion via CGO), Windows (SetThreadExecutionState), Linux (systemd-inhibit).
 - Ref-counted integration in `ratelimit/store.go`. Covers all batch and non-batch transfer paths.
 
+## v4.8.7 Changes — GUI/CLI Upload Orchestration Convergence (Plan 2b)
+
+### Folder-Upload Primitives Extraction (2D)
+- Neutral folder-creation logic extracted from `internal/cli/` to `internal/transfer/folder/` package, fixing the layering violation where GUI imported CLI internals.
+- `ConflictPrompt` callback replaces hardcoded CLI prompt — GUI passes nil (auto-merge), CLI passes interactive wrapper.
+
+### Shared RunOrchestrator (2D)
+- Generic `RunOrchestrator[T any]` encapsulates the three-part streaming pipeline (folder creation, backlog+dispatcher, orchestrator).
+- `OrchestratorCallbacks[T]` parameterizes progress, item construction, orphan handling, and completion — no transfer-specific types leak into the package.
+- Full `ProgressSnapshot` on every callback ensures frontend counter integrity.
+
+### GUI + CLI Migration (2D)
+- GUI `StartFolderUpload` and CLI `uploadDirectoryPipelined` both use `RunOrchestrator`, eliminating ~400 lines of duplicated orchestration.
+- Per-file upload logic, `RunBatchFromChannel` consumer, and event cadence unchanged.
+
 ---
 
 ## v4.8.6 Changes — Destination Snapshot Hardening + CLI RunBatch Migration

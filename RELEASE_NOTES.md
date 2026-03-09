@@ -56,6 +56,26 @@ Three hardening items: a GUI thread allocation bug fix, credential change handli
 - **Linux**: `systemd-inhibit` subprocess (graceful no-op if unavailable).
 - Integrated into `BeginTransferActivity()`/`EndTransferActivity()` in `ratelimit/store.go` (ref-counted). Five additional call sites for non-batch paths: `UploadFileSync`, `ExecuteRetry`, CLI PUR fallback (2), CLI single-file job download.
 
+### GUI/CLI Upload Orchestration Convergence (Plan 2b)
+
+Eliminated ~400 lines of duplicated orchestration logic by extracting a shared streaming pipeline.
+
+### Folder-Upload Primitives Extraction (2D)
+- Moved neutral folder-creation logic (`FolderCache`, `CheckFolderExists`, `BuildDirectoryTree`, `CreateFolderStructure`, `CreateFolderStructureStreaming`, `ConflictAction`) from `internal/cli/` to new `internal/transfer/folder/` package.
+- Compatibility layer (`folder_upload_compat.go`) preserves `cli.*` API surface for CLI callers during transition.
+- `ConflictPrompt` callback type replaces hardcoded `promptFolderConflict` dependency, enabling GUI (nil = auto-merge) and CLI (interactive prompt) to share the same code.
+
+### Shared RunOrchestrator (2D)
+- New generic `RunOrchestrator[T any]` function in `internal/transfer/folder/orchestrator.go` implements the three-part streaming pipeline: (A) folder creation goroutine, (B) unbounded backlog + dispatcher, (C) orchestrator merging fileChan + folderReadyChan.
+- `OrchestratorCallbacks[T]` parameterizes progress reporting (`OnFileDiscovered`, `OnFolderReady`), item construction (`BuildItem`), orphan handling (`OnUnmappedFiles`), and completion signaling (`OnOrchestratorDone`).
+- `ProgressSnapshot` carries full counters (dirs, files, bytes) on every callback — frontend overwrites atomically.
+- Channel ownership documented: Part A owns folderReadyChan, Part B owns outputCh, Part C owns backlogDone and OrchestratorResult.
+
+### GUI + CLI Migration (2D)
+- GUI `StartFolderUpload` (`file_bindings.go`): ~280 lines of inline pipeline replaced with `RunOrchestrator` call. Event cadence preserved exactly: `UpdateBatchDiscovered` on every file, scan progress every 100 files, folder progress every 3 folders, `MarkBatchScanInProgress(false)` before dispatcher drain.
+- CLI `uploadDirectoryPipelined` (`folder_upload_helper.go`): ~300 lines of inline Parts A/B/C replaced. Per-file execution closure and `RunBatchFromChannel` consumer unchanged.
+- Service layer `PrepareUploadFolder` (`file_service.go`): repointed from `cli.*` to `folder.*` (layering fix).
+
 ### Files Changed
 
 | File | Changes |
@@ -92,6 +112,16 @@ Three hardening items: a GUI thread allocation bug fix, credential change handli
 | `internal/progress/uploadui.go` | `IncrementTotal()`, atomic `totalFiles` |
 | `internal/ratelimit/limiter.go` | FIFO wait queue, unlocked helpers |
 | `internal/ratelimit/limiter_test.go` | `TestWaitFIFOOrder` |
+| `internal/transfer/folder/conflict.go` | **New**: ConflictAction type + ConflictPrompt callback (moved from cli/prompt.go) |
+| `internal/transfer/folder/folder.go` | **New**: FolderCache, CheckFolderExists, BuildDirectoryTree, processFolder, CreateFolderStructure, CreateFolderStructureStreaming (moved from cli/folder_upload_helper.go) |
+| `internal/transfer/folder/orchestrator.go` | **New**: RunOrchestrator[T any], OrchestratorCallbacks, OrchestratorConfig, OrchestratorResult, ProgressSnapshot |
+| `internal/transfer/folder/folder_test.go` | **New**: First-party tests for moved primitives |
+| `internal/transfer/folder/orchestrator_test.go` | **New**: Orchestrator unit tests (empty dir, flat dir, cancellation, callbacks, snapshot integrity) |
+| `internal/cli/folder_upload_compat.go` | **New**: Type aliases + wrapper functions preserving cli.* API surface |
+| `internal/cli/folder_upload_helper.go` | 2D: Removed moved types/functions; uploadDirectoryPipelined uses folder.RunOrchestrator |
+| `internal/cli/prompt.go` | 2D: Removed ConflictAction type + constants (moved to folder package) |
+| `internal/wailsapp/file_bindings.go` | 2D: cli.* → folder.* for upload types; inline pipeline → RunOrchestrator |
+| `internal/services/file_service.go` | 2D: cli.* → folder.* for folder-upload primitives (layering fix) |
 | `internal/version/version.go` | v4.8.6 → v4.8.7 |
 | `wails.json` | productVersion 4.8.6 → 4.8.7 |
 

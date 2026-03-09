@@ -20,6 +20,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/services"
+	"github.com/rescale/rescale-int/internal/transfer/folder"
 )
 
 // translateAPIError converts common API errors to user-friendly messages.
@@ -722,8 +723,8 @@ func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID strin
 		return FolderExistsCheckDTO{Error: "API client not configured"}
 	}
 
-	cache := cli.NewFolderCache()
-	folderID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, parentFolderID, folderName)
+	cache := folder.NewFolderCache()
+	folderID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, parentFolderID, folderName)
 	if err != nil {
 		return FolderExistsCheckDTO{Error: "Failed to check folder: " + err.Error()}
 	}
@@ -758,9 +759,9 @@ func (a *App) CheckFoldersExistForUpload(folderNames []string, parentFolderID st
 	}
 
 	// Single shared cache — parent folder contents fetched once for all checks
-	cache := cli.NewFolderCache()
+	cache := folder.NewFolderCache()
 	for i, name := range folderNames {
-		folderID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, parentFolderID, name)
+		folderID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, parentFolderID, name)
 		if err != nil {
 			results[i] = FolderExistsCheckDTO{Error: "Failed to check folder: " + err.Error()}
 		} else {
@@ -934,12 +935,12 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	}
 
 	// Initialize folder cache for API call optimization
-	cache := cli.NewFolderCache()
+	cache := folder.NewFolderCache()
 
 	// Create or get root folder (merge mode: use existing if it exists)
 	rootFolderName := filepath.Base(localPath)
 	a.logInfo("folder-upload", fmt.Sprintf("Checking if folder '%s' exists in parent %s...", rootFolderName, parentID))
-	rootFolderID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
+	rootFolderID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
 	if err != nil {
 		a.logError("folder-upload", fmt.Sprintf("Failed to check root folder: %v", err))
 		deferredError = "Failed to check root folder: " + err.Error()
@@ -957,7 +958,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 			if api.IsFileExistsError(err) {
 				a.logWarn("folder-upload", fmt.Sprintf("Folder '%s' already exists, checking if visible...", rootFolderName))
 				cache.Invalidate(parentID)
-				existingID, found, findErr := cli.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
+				existingID, found, findErr := folder.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
 				if findErr != nil {
 					a.logError("folder-upload", fmt.Sprintf("Failed to find existing folder: %v", findErr))
 					deferredError = "A folder named '" + rootFolderName + "' already exists but couldn't be accessed"
@@ -991,18 +992,9 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		logger.Warn().Err(err).Str("folderID", rootFolderID).Msg("Failed to warm cache for root folder")
 	}
 
-	// v4.8.5: Streaming pipeline — WalkStream feeds dirChan to CreateFolderStructureStreaming
-	// and fileChan to the dispatcher. Uploads start while discovery is still in progress.
+	// v4.8.7 Plan 2b: Shared orchestrator replaces ~280 lines of inline pipeline.
 	uploadCtx, uploadCancel := context.WithCancel(context.Background())
 
-	// Start streaming walk
-	dirChan, fileChan, walkErrChan := localfs.WalkStream(uploadCtx, localPath, localfs.WalkOptions{
-		IncludeHidden:  true,
-		SkipHiddenDirs: true,
-	})
-
-	// Folder creation channel + request channel
-	folderReadyChan := make(chan cli.FolderReadyEvent, constants.WorkChannelBuffer)
 	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
 
 	// Mark scan in progress + start streaming upload batch
@@ -1016,267 +1008,97 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		return FolderUploadResultDTO{Error: deferredError}
 	}
 
-	// Goroutine 1: Streaming folder creation — reads dirChan, creates folders as parents become ready
-	folderConflictMode := cli.ConflictMergeAll
-	folderErrCh := make(chan error, 1)
-
-	go func() {
-		defer close(folderReadyChan)
-		_, created, err := cli.CreateFolderStructureStreaming(
-			uploadCtx, apiClient, cache, localPath, dirChan, rootFolderID,
-			&folderConflictMode, constants.DefaultFolderConcurrency, logger,
-			folderReadyChan, nil, // progressWriter handled by enumeration events now
-		)
-		if err != nil && uploadCtx.Err() == nil {
-			emitLog(events.ErrorLevel, fmt.Sprintf("Folder creation error: %v", err))
-			folderErrCh <- err
-		} else {
-			emitLog(events.InfoLevel, fmt.Sprintf("Created %d remote folders", created))
-		}
-		close(folderErrCh)
-	}()
-
-	// v4.8.5 bugfix: Unbounded backlog decouples discovery from requestCh sends.
-	// Discovery appends to backlog at filesystem speed; dispatcher drains into requestCh.
-	// This prevents the orchestrator select loop from blocking on a full requestCh,
-	// which previously throttled scan speed to the upload consumption rate.
-	var readyBacklog []services.TransferRequest
-	var backlogMu sync.Mutex
-	backlogReady := make(chan struct{}, 1) // signal that items are available
-	backlogDone := make(chan struct{})     // closed by orchestrator when discovery complete
-
-	// appendToBacklog adds a request to the backlog and signals the dispatcher.
-	appendToBacklog := func(req services.TransferRequest) {
-		backlogMu.Lock()
-		readyBacklog = append(readyBacklog, req)
-		backlogMu.Unlock()
-		select {
-		case backlogReady <- struct{}{}:
-		default:
-		}
+	var completionOnce sync.Once
+	emitCompletion := func(foldersFound, filesFound int, bytesFound int64, errMsg string) {
+		completionOnce.Do(func() {
+			phase := events.EnumPhaseComplete
+			if errMsg != "" {
+				phase = events.EnumPhaseError
+			}
+			emitEnumeration(events.EventEnumerationCompleted,
+				foldersFound, filesFound, bytesFound, true, errMsg, "", phase)
+		})
 	}
 
-	// Dispatcher goroutine: drains backlog into requestCh, then closes requestCh.
-	// Owns requestCh closure (removed from orchestrator).
-	var dispatchWg sync.WaitGroup
-	dispatchWg.Add(1)
-	go func() {
-		defer dispatchWg.Done()
-		defer close(requestCh)
-		for {
-			backlogMu.Lock()
-			if len(readyBacklog) == 0 {
-				backlogMu.Unlock()
-				select {
-				case <-backlogReady:
-					continue
-				case <-backlogDone:
-					// Producer done — drain any remaining items
-					backlogMu.Lock()
-					remaining := readyBacklog
-					readyBacklog = nil
-					backlogMu.Unlock()
-					for _, req := range remaining {
-						select {
-						case requestCh <- req:
-						case <-uploadCtx.Done():
-							return
-						}
-					}
-					return
-				case <-uploadCtx.Done():
-					return
-				}
-			}
-			req := readyBacklog[0]
-			readyBacklog = readyBacklog[1:]
-			backlogMu.Unlock()
-
-			select {
-			case requestCh <- req:
-			case <-uploadCtx.Done():
-				return
-			}
-		}
-	}()
-
-	// Goroutine 2: Orchestrator — merges fileChan + folderReadyChan, appends to backlog.
-	// Dispatcher goroutine owns requestCh closure. Orchestrator signals via close(backlogDone).
-	go func() {
-		// v4.8.5 bugfix: Always signal dispatcher and mark scan complete on exit.
-		// This covers both normal and error/cancel paths to prevent goroutine leaks.
-		var backlogDoneClosed bool
-		defer func() {
-			if !backlogDoneClosed {
-				close(backlogDone)
-			}
-			// v4.8.5 bugfix: Mark scan complete immediately — don't wait for
-			// dispatchWg. The discovered count is already final when the select
-			// loop exits. Waiting for the dispatcher to drain all items through
-			// requestCh blocks for minutes on large uploads (requestCh is bounded
-			// and consumed at upload speed). The dispatcher drains in background.
-			ts.GetQueue().MarkBatchScanInProgress(enumID, false)
-		}()
-
-		var completionOnce sync.Once
-		emitCompletion := func(foldersFound, filesFound int, bytesFound int64, errMsg string) {
-			completionOnce.Do(func() {
-				phase := events.EnumPhaseComplete
-				if errMsg != "" {
-					phase = events.EnumPhaseError
-				}
-				emitEnumeration(events.EventEnumerationCompleted,
-					foldersFound, filesFound, bytesFound, true, errMsg, "", phase)
-			})
-		}
-		defer emitCompletion(0, 0, 0, "upload dispatcher exited unexpectedly")
-
-		// Folder mapping: populated by folderReadyChan events
-		folderMapping := make(map[string]string) // localDirPath → remoteID
-		folderMapping[localPath] = rootFolderID
-
-		// Pending files: buffered until parent folder is ready
-		pendingFiles := make(map[string][]localfs.FileEntry) // parentDir → files
-
-		// Discovery counters
-		var discoveredFiles int
-		var discoveredBytes int64
-		var discoveredDirs int
-		var filesQueued int
-
-		fileChClosed := false
-		folderChClosed := false
-
-		for !fileChClosed || !folderChClosed {
-			select {
-			case file, ok := <-fileChan:
-				if !ok {
-					fileChClosed = true
-					// v4.8.5 bugfix: Do NOT call MarkBatchScanInProgress(false) here.
-					// Items may still be in the backlog. Moved to shutdown sequence.
-					continue
-				}
-				discoveredFiles++
-				discoveredBytes += file.Size
+	_, _ = folder.RunOrchestrator(uploadCtx,
+		folder.OrchestratorConfig{
+			RootPath:          localPath,
+			RootRemoteID:      rootFolderID,
+			IncludeHidden:     true,
+			FolderConcurrency: constants.DefaultFolderConcurrency,
+			ConflictMode:      folder.ConflictMergeAll,
+			ConflictPrompt:    nil, // GUI: always merge, no interactive prompt
+			Logger:            logger,
+			APIClient:         apiClient,
+			Cache:             cache,
+		},
+		folder.OrchestratorCallbacks[services.TransferRequest]{
+			OnFileDiscovered: func(snap folder.ProgressSnapshot) {
 				// v4.8.5 bugfix: Update discovered totals on every file so the polling
-				// path always has an accurate count. This is cheap (two map writes + lock).
-				// Enumeration events still emitted every 100 files to limit event volume.
-				ts.GetQueue().UpdateBatchDiscovered(enumID, discoveredFiles, discoveredBytes)
-				if discoveredFiles%100 == 0 || discoveredFiles == 1 {
+				// path always has an accurate count.
+				ts.GetQueue().UpdateBatchDiscovered(enumID, snap.TotalFiles, snap.TotalBytes)
+				// Enumeration events emitted every 100 files to limit event volume.
+				if snap.TotalFiles%100 == 0 || snap.TotalFiles == 1 {
 					emitEnumeration(events.EventEnumerationProgress,
-						discoveredDirs, discoveredFiles, discoveredBytes, false, "",
-						fmt.Sprintf("Scanning local files... (%d found)", discoveredFiles),
+						snap.TotalDirs, snap.TotalFiles, snap.TotalBytes, false, "",
+						fmt.Sprintf("Scanning local files... (%d found)", snap.TotalFiles),
 						events.EnumPhaseScanning)
 				}
-
-				parentDir := filepath.Dir(file.Path)
-				if remoteID, ready := folderMapping[parentDir]; ready {
-					// Parent folder ready — append to backlog (non-blocking)
-					req := services.TransferRequest{
-						Type:        services.TransferTypeUpload,
-						Source:      file.Path,
-						Dest:        remoteID,
-						Name:        file.Name,
-						Size:        file.Size,
-						SourceLabel: services.SourceLabelFileBrowser,
-						BatchID:     enumID,
-						BatchLabel:  displayName,
-						Tags:        uploadTags,
-					}
-					appendToBacklog(req)
-					filesQueued++
-				} else {
-					// Parent not ready — buffer
-					pendingFiles[parentDir] = append(pendingFiles[parentDir], file)
-				}
-
-			case event, ok := <-folderReadyChan:
-				if !ok {
-					folderChClosed = true
-					continue
-				}
-				discoveredDirs++
-				folderMapping[event.LocalPath] = event.RemoteID
-
-				// v4.8.5: Emit folder creation progress periodically
-				if discoveredDirs%3 == 0 || discoveredDirs == 1 {
+			},
+			OnFolderReady: func(snap folder.ProgressSnapshot, localPath, remoteID string) {
+				// v4.8.5: Emit folder creation progress every 3 folders
+				if snap.TotalDirs%3 == 0 || snap.TotalDirs == 1 {
 					emitEnumeration(events.EventEnumerationProgress,
-						discoveredDirs, discoveredFiles, discoveredBytes, false, "",
-						fmt.Sprintf("Creating remote folders... (%d created)", discoveredDirs),
+						snap.TotalDirs, snap.TotalFiles, snap.TotalBytes, false, "",
+						fmt.Sprintf("Creating remote folders... (%d created)", snap.TotalDirs),
 						events.EnumPhaseCreatingFolders)
 				}
-
-				// Flush any pending files for this folder — append to backlog (non-blocking)
-				if pending, has := pendingFiles[event.LocalPath]; has {
-					for _, file := range pending {
-						req := services.TransferRequest{
-							Type:        services.TransferTypeUpload,
-							Source:      file.Path,
-							Dest:        event.RemoteID,
-							Name:        file.Name,
-							Size:        file.Size,
-							SourceLabel: services.SourceLabelFileBrowser,
-							BatchID:     enumID,
-							BatchLabel:  displayName,
-							Tags:        uploadTags,
-						}
-						appendToBacklog(req)
-						filesQueued++
-					}
-					delete(pendingFiles, event.LocalPath)
+			},
+			BuildItem: func(file localfs.FileEntry, remoteFolderID, rootPath string) services.TransferRequest {
+				return services.TransferRequest{
+					Type:        services.TransferTypeUpload,
+					Source:      file.Path,
+					Dest:        remoteFolderID,
+					Name:        file.Name,
+					Size:        file.Size,
+					SourceLabel: services.SourceLabelFileBrowser,
+					BatchID:     enumID,
+					BatchLabel:  displayName,
+					Tags:        uploadTags,
 				}
+			},
+			OnUnmappedFiles: func(parentDir string, count int) {
+				emitLog(events.WarnLevel, fmt.Sprintf("Skipping %d files in unmapped folder: %s", count, parentDir))
+			},
+			OnOrchestratorDone: func(r *folder.OrchestratorResult) {
+				// v4.8.5 bugfix preserved: scan marked complete when discovery
+				// count is final, BEFORE dispatcher drains (which blocks for minutes).
+				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
 
-			case <-uploadCtx.Done():
-				emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "")
-				return
-			}
-		}
+				// Final update of discovered totals
+				ts.GetQueue().UpdateBatchDiscovered(enumID, r.DiscoveredFiles, r.DiscoveredBytes)
 
-		// Final update of discovered totals
-		ts.GetQueue().UpdateBatchDiscovered(enumID, discoveredFiles, discoveredBytes)
+				errMsg := ""
+				if r.WalkError != nil {
+					emitLog(events.ErrorLevel, fmt.Sprintf("Walk error: %v", r.WalkError))
+					errMsg = r.WalkError.Error()
+				}
+				if r.FolderError != nil {
+					emitLog(events.ErrorLevel, fmt.Sprintf("Folder creation error: %v", r.FolderError))
+					if errMsg == "" {
+						errMsg = "Folder creation failed: " + r.FolderError.Error()
+					}
+				} else {
+					emitLog(events.InfoLevel, fmt.Sprintf("Created %d remote folders", r.FoldersCreated))
+				}
+				emitLog(events.InfoLevel, fmt.Sprintf("All files queued for upload (%d discovered)", r.DiscoveredFiles))
+				emitCompletion(r.DiscoveredDirs, r.DiscoveredFiles, r.DiscoveredBytes, errMsg)
+			},
+		},
+		requestCh,
+	)
 
-		// Check for walk errors
-		select {
-		case walkErr := <-walkErrChan:
-			if walkErr != nil && uploadCtx.Err() == nil {
-				emitLog(events.ErrorLevel, fmt.Sprintf("Walk error: %v", walkErr))
-				emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, walkErr.Error())
-				return
-			}
-		default:
-		}
-
-		// Check for folder creation errors
-		if folderErr := <-folderErrCh; folderErr != nil {
-			emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "Folder creation failed: "+folderErr.Error())
-			return
-		}
-
-		// Flush any remaining pending files (parent folders that were skipped won't be in mapping)
-		for parentDir, pending := range pendingFiles {
-			emitLog(events.WarnLevel, fmt.Sprintf("Skipping %d files in unmapped folder: %s", len(pending), parentDir))
-		}
-
-		// v4.8.5 bugfix: Shutdown sequence:
-		// 1. fileChan closed → fileChClosed = true (discovery done)
-		// 2. folderReadyChan closed → folderChClosed = true (folder creation done)
-		// 3. Select loop exits (we are here)
-		// 4. close(backlogDone) — signal dispatcher to drain remaining items in background
-		// 5. MarkBatchScanInProgress(false) — handled by deferred cleanup (flips totalKnown NOW)
-		// 6. emitCompletion(...)
-		//
-		// NOTE: We do NOT wait for dispatchWg here. The dispatcher goroutine continues
-		// draining backlog → requestCh in the background, eventually closing requestCh
-		// which cascades through registration → dispatchCh → workers. Waiting would block
-		// for minutes on large uploads since requestCh is consumed at upload throughput.
-		close(backlogDone)
-		backlogDoneClosed = true
-
-		emitLog(events.InfoLevel, fmt.Sprintf("All %d files queued for upload (%d discovered)", filesQueued, discoveredFiles))
-		emitCompletion(discoveredDirs, discoveredFiles, discoveredBytes, "")
-	}()
-
-	// Dispatcher goroutine owns completion — prevent deferred emitter
+	// Orchestrator owns completion via OnOrchestratorDone — prevent deferred emitter
 	completionEmitted = true
 
 	// v4.8.5: Return immediately with FilesQueued=0 — files are discovered asynchronously.
