@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/constants"
@@ -284,6 +285,8 @@ func UploadFilesWithIDs(
 ) ([]string, error) {
 	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+	// v4.8.7: Unified credential warming
+	credentials.GetManager(apiClient).WarmAll(ctx)
 
 	// Expand glob patterns
 	filePaths, err := expandGlobPatterns(filePatterns)

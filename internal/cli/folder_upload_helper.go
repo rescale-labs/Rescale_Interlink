@@ -889,15 +889,10 @@ func uploadFiles(
 	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
 	// when mixed with ANSI escape codes from mpb progress bars.
 
-	// Pre-warm credential cache before starting uploads
-	// This eliminates the first-upload credential fetch delay
-	logger.Debug().Msg("Pre-fetching storage credentials")
+	// v4.8.7: Unified credential warming — session + provider + metadata caches.
+	logger.Debug().Msg("Pre-warming credential caches")
 	credManager := credentials.GetManager(apiClient)
-	_, err := credManager.GetS3Credentials(ctx)
-	if err != nil {
-		logger.Warn().Err(err).Msg("Failed to pre-fetch credentials, will fetch on demand")
-		// Continue anyway - uploads will fetch credentials as needed
-	}
+	credManager.WarmAll(ctx)
 
 	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
 	if resourceMgr == nil {

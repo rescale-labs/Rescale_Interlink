@@ -232,6 +232,19 @@ func (m *Manager) EnsureFresh(ctx context.Context) error {
 	return nil
 }
 
+// WarmAll performs best-effort warming of all credential caches.
+// Session-level (EnsureFresh) + provider-level (S3 + Azure) + metadata (profile + folders).
+// All calls non-fatal — errors are silently ignored since callers retry on demand.
+// Proxy warmup NOT included (needs config.Config, handled separately by callers).
+// v4.8.7
+func (m *Manager) WarmAll(ctx context.Context) {
+	_ = m.EnsureFresh(ctx)
+	_, _ = m.GetS3Credentials(ctx)
+	_, _ = m.GetAzureCredentials(ctx)
+	_, _ = m.GetUserProfile(ctx)
+	_, _ = m.GetRootFolders(ctx)
+}
+
 // GetS3CredentialsForStorage returns cached S3 credentials for a specific storage, refreshing if needed.
 // This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
 // The cache is keyed by storage ID to share credentials across files from the same storage.

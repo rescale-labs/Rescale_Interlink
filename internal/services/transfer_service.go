@@ -179,12 +179,8 @@ func (ts *TransferService) warmCredentialCache(ctx context.Context) {
 	ts.mu.Unlock()
 
 	if credManager != nil {
-		// v4.8.3: Proactively refresh stale credentials before any transfer work.
-		if err := credManager.EnsureFresh(ctx); err != nil {
-			log.Printf("[CRED] EnsureFresh failed during cache warmup: %v", err)
-		}
-		_, _ = credManager.GetUserProfile(ctx)
-		_, _ = credManager.GetRootFolders(ctx)
+		// v4.8.7: Unified credential warming — session + provider + metadata caches.
+		credManager.WarmAll(ctx)
 	}
 }
 

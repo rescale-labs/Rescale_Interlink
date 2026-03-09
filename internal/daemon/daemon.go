@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/config"
 	inthttp "github.com/rescale/rescale-int/internal/http"
@@ -207,6 +208,8 @@ func (d *Daemon) poll(ctx context.Context) {
 
 	// v4.8.2: Warm proxy before first API call each poll cycle
 	inthttp.WarmupProxyIfNeeded(scanCtx, d.appCfg)
+	// v4.8.7: Unified credential warming
+	credentials.GetManager(d.apiClient).WarmAll(scanCtx)
 
 	// Find completed jobs that need downloading
 	result, err := d.monitor.FindCompletedJobs(scanCtx)

@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	inthttp "github.com/rescale/rescale-int/internal/http"
@@ -73,6 +74,8 @@ func executeFileDownload(
 
 	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+	// v4.8.7: Unified credential warming
+	credentials.GetManager(apiClient).WarmAll(ctx)
 
 	if outputDir == "" {
 		outputDir = "."
@@ -431,6 +434,8 @@ func executeJobDownload(
 ) error {
 	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+	// v4.8.7: Unified credential warming
+	credentials.GetManager(apiClient).WarmAll(ctx)
 
 	// List all job output files
 	fmt.Printf("Fetching output files for job %s...\n", jobID)
