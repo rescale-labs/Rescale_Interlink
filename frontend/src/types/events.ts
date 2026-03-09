@@ -86,6 +86,13 @@ export interface ScanProgressEventDTO {
   error?: string;
 }
 
+// v4.8.7: Config changed event for credential invalidation
+export interface ConfigChangedEventDTO {
+  timestamp: string;
+  source: string;
+  email: string;
+}
+
 // v4.7.7: Batch progress event for grouped transfer display
 export interface BatchProgressEventDTO {
   timestamp: string;
@@ -127,6 +134,7 @@ export const EVENT_NAMES = {
   ENUMERATION: 'interlink:enumeration', // v4.0.8: folder scan progress
   SCAN_PROGRESS: 'interlink:scan_progress', // v4.0.8: software/hardware catalog scan
   BATCH_PROGRESS: 'interlink:batch_progress', // v4.7.7: batch progress for grouped transfers
+  CONFIG_CHANGED: 'interlink:config_changed', // v4.8.7: credential/config changes
 } as const;
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';

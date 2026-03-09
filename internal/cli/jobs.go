@@ -20,6 +20,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/pur/parser"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -908,6 +909,10 @@ Examples:
 
 			// Download file with progress tracking and transfer manager
 			// Use strict checksum verification (skipChecksum=false) for job downloads
+			// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
+			// Single-file job download bypasses RunBatch/RunBatchFromChannel, so must signal directly.
+			ratelimit.GlobalStore().BeginTransferActivity()
+			defer ratelimit.GlobalStore().EndTransferActivity()
 			err = download.DownloadFile(ctx, download.DownloadParams{
 				FileID:    fileID,
 				LocalPath: outputPath,

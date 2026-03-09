@@ -21,6 +21,7 @@ import (
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/tags"
@@ -203,8 +204,11 @@ func (ts *TransferService) executePreRegisteredUploadBatch(ctx context.Context, 
 		Label:       "UPLOAD",
 	}
 
+	// v4.8.7: Pre-compute adaptive worker count so AllocateTransfer divides thread pool correctly.
+	numWorkers := transfer.ComputedWorkers(items, cfg)
+
 	transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item preRegItem) error {
-		ts.executeUploadTask(ctx, item.req, item.taskID, apiClient)
+		ts.executeUploadTask(ctx, item.req, item.taskID, apiClient, numWorkers)
 		return nil // errors handled internally via queue.Fail
 	})
 }
@@ -228,8 +232,11 @@ func (ts *TransferService) executePreRegisteredDownloadBatch(ctx context.Context
 		Label:       "DOWNLOAD",
 	}
 
+	// v4.8.7: Pre-compute adaptive worker count so AllocateTransfer divides thread pool correctly.
+	numWorkers := transfer.ComputedWorkers(items, cfg)
+
 	transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item preRegItem) error {
-		ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient)
+		ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient, numWorkers)
 		return nil // errors handled internally via queue.Fail
 	})
 }
@@ -300,16 +307,26 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 	}()
 
 	// Worker goroutines via RunBatchFromChannel: adaptive concurrency from file sizes.
+	// v4.8.7: Track adaptive worker count so AllocateTransfer uses the actual count, not cap(semaphore).
+	var adaptive *transfer.AdaptiveWorkerCount
 	cfg := transfer.BatchConfig{
-		MaxWorkers:  cap(ts.semaphore),
-		ResourceMgr: ts.resourceMgr,
-		Label:       "DOWNLOAD-STREAM",
+		MaxWorkers:    cap(ts.semaphore),
+		ResourceMgr:   ts.resourceMgr,
+		Label:         "DOWNLOAD-STREAM",
+		AdaptiveCount: &adaptive,
 	}
 
 	go func() {
 		defer batchCancel() // Ensure batchCtx resources are released when batch completes
 		transfer.RunBatchFromChannel(batchCtx, dispatchCh, cfg, func(ctx context.Context, item preRegItem) error {
-			ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient)
+			wc := constants.DefaultMaxConcurrent
+			if adaptive != nil {
+				wc = adaptive.Load()
+			}
+			if wc < 1 {
+				wc = 1
+			}
+			ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient, wc)
 			return nil // errors handled internally via queue.Fail
 		})
 		log.Printf("[BATCH] Streaming DOWNLOAD batch complete: %s", batchID)
@@ -378,16 +395,26 @@ func (ts *TransferService) StartStreamingUploadBatch(
 	}()
 
 	// Worker goroutines via RunBatchFromChannel: adaptive concurrency from file sizes.
+	// v4.8.7: Track adaptive worker count so AllocateTransfer uses the actual count, not cap(semaphore).
+	var adaptive *transfer.AdaptiveWorkerCount
 	cfg := transfer.BatchConfig{
-		MaxWorkers:  cap(ts.semaphore),
-		ResourceMgr: ts.resourceMgr,
-		Label:       "UPLOAD-STREAM",
+		MaxWorkers:    cap(ts.semaphore),
+		ResourceMgr:   ts.resourceMgr,
+		Label:         "UPLOAD-STREAM",
+		AdaptiveCount: &adaptive,
 	}
 
 	go func() {
 		defer batchCancel() // Ensure batchCtx resources are released when batch completes
 		transfer.RunBatchFromChannel(batchCtx, dispatchCh, cfg, func(ctx context.Context, item preRegItem) error {
-			ts.executeUploadTask(ctx, item.req, item.taskID, apiClient)
+			wc := constants.DefaultMaxConcurrent
+			if adaptive != nil {
+				wc = adaptive.Load()
+			}
+			if wc < 1 {
+				wc = 1
+			}
+			ts.executeUploadTask(ctx, item.req, item.taskID, apiClient, wc)
 			return nil // errors handled internally via queue.Fail
 		})
 		log.Printf("[BATCH] Streaming UPLOAD batch complete: %s", batchID)
@@ -422,7 +449,7 @@ func (ts *TransferService) registerUploadTask(req TransferRequest) string {
 // Handles semaphore acquisition, atomic claim via Activate(), cancel cleanup,
 // and ensures every early-return path after SetCancel() transitions the task
 // to a terminal state if it isn't already terminal.
-func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
+func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client, workerCount int) {
 	fileName := req.Name
 	if fileName == "" {
 		fileName = filepath.Base(req.Source)
@@ -504,8 +531,9 @@ func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRe
 	}
 
 	// Allocate transfer handle
-	// v4.8.0: Pass adaptive worker count so resource manager divides thread pool correctly
-	transferHandle := ts.transferMgr.AllocateTransfer(fileInfo.Size(), cap(ts.semaphore))
+	// v4.8.7: Pass actual adaptive worker count so resource manager divides thread pool correctly.
+	// Previously used cap(ts.semaphore) which was always 20, severely under-allocating threads.
+	transferHandle := ts.transferMgr.AllocateTransfer(fileInfo.Size(), workerCount)
 	defer transferHandle.Complete()
 
 	// Execute upload with progress callback
@@ -542,7 +570,7 @@ func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRe
 // Used for non-batch single-file uploads.
 func (ts *TransferService) executeUpload(ctx context.Context, req TransferRequest, apiClient *api.Client) {
 	taskID := ts.registerUploadTask(req)
-	ts.executeUploadTask(ctx, req, taskID, apiClient)
+	ts.executeUploadTask(ctx, req, taskID, apiClient, 1)
 }
 
 // UploadFileSync uploads a file synchronously with transfer queue visibility.
@@ -597,6 +625,11 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 		return nil, uploadCtx.Err()
 	}
 	atomic.AddInt32(&ts.activeSlots, 1)
+
+	// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
+	// UploadFileSync bypasses RunBatch/RunBatchFromChannel, so must signal directly.
+	ratelimit.GlobalStore().BeginTransferActivity()
+	defer ratelimit.GlobalStore().EndTransferActivity()
 
 	defer func() {
 		<-ts.semaphore
@@ -704,7 +737,7 @@ func (ts *TransferService) registerDownloadTask(req TransferRequest) string {
 // Handles semaphore acquisition, atomic claim via Activate(), cancel cleanup,
 // and ensures every early-return path after SetCancel() transitions the task
 // to a terminal state if it isn't already terminal.
-func (ts *TransferService) executeDownloadTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
+func (ts *TransferService) executeDownloadTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client, workerCount int) {
 	fileName := req.Name
 	if fileName == "" {
 		fileName = req.Source
@@ -779,8 +812,9 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 	}
 
 	// Allocate transfer handle
-	// v4.8.0: Pass adaptive worker count so resource manager divides thread pool correctly
-	transferHandle := ts.transferMgr.AllocateTransfer(req.Size, cap(ts.semaphore))
+	// v4.8.7: Pass actual adaptive worker count so resource manager divides thread pool correctly.
+	// Previously used cap(ts.semaphore) which was always 20, severely under-allocating threads.
+	transferHandle := ts.transferMgr.AllocateTransfer(req.Size, workerCount)
 	defer transferHandle.Complete()
 
 	// Ensure dest is a file path, not a directory
@@ -825,7 +859,7 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 // Used for non-batch single-file downloads.
 func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequest, apiClient *api.Client) {
 	taskID := ts.registerDownloadTask(req)
-	ts.executeDownloadTask(ctx, req, taskID, apiClient)
+	ts.executeDownloadTask(ctx, req, taskID, apiClient, 1)
 }
 
 // ExecuteRetry implements transfer.RetryExecutor.
@@ -839,6 +873,11 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 		ts.queue.Fail(task.ID, fmt.Errorf("API client not configured"))
 		return
 	}
+
+	// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
+	// Retry runs outside RunBatch/RunBatchFromChannel, so must signal directly.
+	ratelimit.GlobalStore().BeginTransferActivity()
+	defer ratelimit.GlobalStore().EndTransferActivity()
 
 	ctx := context.Background()
 
@@ -865,14 +904,16 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 
 // executeUploadRetry delegates to executeUploadTask with the existing task ID.
 // The task was already reset to TaskQueued by queue.Retry().
+// v4.8.7: workerCount=1 — retry is single-file outside batch, gets full thread pool.
 func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
-	ts.executeUploadTask(ctx, req, taskID, apiClient)
+	ts.executeUploadTask(ctx, req, taskID, apiClient, 1)
 }
 
 // executeDownloadRetry delegates to executeDownloadTask with the existing task ID.
 // The task was already reset to TaskQueued by queue.Retry().
+// v4.8.7: workerCount=1 — retry is single-file outside batch, gets full thread pool.
 func (ts *TransferService) executeDownloadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
-	ts.executeDownloadTask(ctx, req, taskID, apiClient)
+	ts.executeDownloadTask(ctx, req, taskID, apiClient, 1)
 }
 
 // CancelTransfer cancels an active transfer.

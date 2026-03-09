@@ -1154,6 +1154,7 @@ export namespace wailsapp {
 	    etaSeconds: number;
 	    discoveredTotal: number;
 	    discoveredBytes: number;
+	    startedAtUnix: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new TransferBatchDTO(source);
@@ -1179,6 +1180,7 @@ export namespace wailsapp {
 	        this.etaSeconds = source["etaSeconds"];
 	        this.discoveredTotal = source["discoveredTotal"];
 	        this.discoveredBytes = source["discoveredBytes"];
+	        this.startedAtUnix = source["startedAtUnix"];
 	    }
 	}
 	export class TransferRequestDTO {

@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
+import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import { wailsapp } from '../../wailsjs/go/models'
+import { EVENT_NAMES } from '../types/events'
 
 // Browse mode for remote browser (matching Go BrowseMode)
 export type BrowseMode = 'library' | 'jobs' | 'legacy'
@@ -96,6 +98,9 @@ interface FileBrowserStore {
   setRemoteItemsPerPage: (size: number) => void       // Change page size, reload page 0
   goToNextRemotePage: () => Promise<void>             // Navigate to next page (replaces items)
   goToPreviousRemotePage: () => Promise<void>         // Navigate to previous page (from cache)
+
+  // Event listeners
+  setupEventListeners: () => () => void
 
   // Common actions
   getLocalSelectedItems: () => wailsapp.FileItemDTO[]
@@ -731,6 +736,24 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       console.error('Failed to delete items:', error)
       return { deleted: 0, failed: items.length }
     }
+  },
+
+  // ===== EVENT LISTENERS =====
+
+  // v4.8.7: Subscribe to config changes so file browser resets when API key changes.
+  setupEventListeners: () => {
+    const handleConfigChanged = () => {
+      console.log('[FileBrowser] Config changed, invalidating remote cache')
+      set(state => ({
+        remote: {
+          ...initialRemoteState,
+          navGeneration: state.remote.navGeneration + 1,
+        }
+      }))
+      get().initRemote()
+    }
+    EventsOn(EVENT_NAMES.CONFIG_CHANGED, handleConfigChanged)
+    return () => { EventsOff(EVENT_NAMES.CONFIG_CHANGED) }
   },
 
   // ===== COMMON ACTIONS =====

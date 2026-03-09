@@ -19,6 +19,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/pur/state"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/tar"
@@ -426,11 +427,15 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 				})
 			} else {
 				// CLI fallback: direct upload
+				// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
+				// CLI fallback bypasses RunBatch/RunBatchFromChannel, so must signal directly.
+				ratelimit.GlobalStore().BeginTransferActivity()
 				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 					LocalPath:    absPath,
 					APIClient:    p.apiClient,
 					OutputWriter: io.Discard,
 				})
+				ratelimit.GlobalStore().EndTransferActivity()
 			}
 			if err != nil {
 				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
@@ -812,6 +817,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 					})
 				} else {
 					// CLI fallback: direct upload
+					// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
+					// CLI fallback bypasses RunBatch/RunBatchFromChannel, so must signal directly.
+					ratelimit.GlobalStore().BeginTransferActivity()
 					cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 						LocalPath:        item.state.TarPath,
 						FolderID:         "",
@@ -820,6 +828,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 						TransferHandle:   transferHandle,
 						OutputWriter:     io.Discard,
 					})
+					ratelimit.GlobalStore().EndTransferActivity()
 				}
 
 				if err == nil {

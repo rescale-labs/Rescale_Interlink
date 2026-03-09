@@ -1,14 +1,14 @@
 # Rescale Interlink - Complete Feature Summary
 
 **Version:** 4.8.7
-**Build Date:** March 8, 2026
+**Build Date:** March 9, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
 
 ---
 
-## v4.8.7 Changes — Foundations & Quick Wins
+## v4.8.7 Changes — Foundations & Quick Wins (Plan 1)
 
 ### Error Collection Unification (4C)
 - Inline error-channel drain patterns replaced with `transfer.CollectErrors()` in `azure/download.go` and `folder_upload_helper.go`.
@@ -34,6 +34,20 @@ This document provides a comprehensive, verified list of all features available 
 ### Rate Limiter FIFO Fix (3)
 - `Wait()` guarantees FIFO ordering under contention via ticket queue.
 - Prevents scan starvation during concurrent upload/download operations.
+
+## v4.8.7 Changes — Hardening (Plan 2a)
+
+### Consistent TransferHandle Allocation (4D)
+- Fixed GUI batch paths passing `cap(ts.semaphore)` (always 20) instead of actual adaptive worker count to `AllocateTransfer()`.
+- Pre-registered batches use `ComputedWorkers()`. Streaming batches read live `AdaptiveWorkerCount`. Single-file/retry paths pass `1`.
+
+### Session/Credential Invalidation (4F-R3)
+- `ConfigChangedEvent` forwarded through Wails event bridge (was silently dropped).
+- File browser resets remote state on credential change: clears cache, bumps `navGeneration`, re-fetches root folders.
+
+### Cross-Platform Sleep Prevention (5A/5B/5D)
+- New `internal/platform/` package: macOS (IOPMAssertion via CGO), Windows (SetThreadExecutionState), Linux (systemd-inhibit).
+- Ref-counted integration in `ratelimit/store.go`. Covers all batch and non-batch transfer paths.
 
 ---
 

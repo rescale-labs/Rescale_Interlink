@@ -1,6 +1,6 @@
 # Release Notes - Rescale Interlink
 
-## v4.8.7 - March 8, 2026
+## v4.8.7 - March 9, 2026
 
 ### Foundations & Quick Wins (Plan 1)
 
@@ -37,14 +37,46 @@ Six independent improvements covering error handling, credential warming, transp
 - New `TestWaitFIFOOrder` test: drains bucket, launches N goroutines with stagger, verifies acquisition order.
 - Coordinator and cooldown paths unchanged — checked before the FIFO decision point.
 
+### Hardening (Plan 2a)
+
+Three hardening items: a GUI thread allocation bug fix, credential change handling, and cross-platform sleep prevention.
+
+### Consistent TransferHandle Allocation (4D)
+- Fixed GUI batch paths that passed `cap(ts.semaphore)` (fixed 20) instead of the actual adaptive worker count to `AllocateTransfer()`. Each file now receives the correct share of the thread pool.
+- Pre-registered batches use `ComputedWorkers()` to pre-compute the adaptive count. Streaming batches read the live `AdaptiveWorkerCount` via `BatchConfig.AdaptiveCount`.
+
+### Session/Credential Invalidation (4F-R3)
+- `ConfigChangedEvent` now forwarded through the Wails event bridge to the frontend (was silently dropped).
+- File browser subscribes to `interlink:config_changed` and resets remote state: clears page cache, items, breadcrumbs, and cursors. Bumps `navGeneration` to discard in-flight responses. Re-fetches root folder IDs for the new account.
+
+### Cross-Platform Sleep Prevention (5A/5B/5D)
+- New `internal/platform/` package prevents OS sleep during active file transfers.
+- **macOS**: `IOPMAssertionCreateWithName` via CGO + IOKit.
+- **Windows**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` on locked OS thread.
+- **Linux**: `systemd-inhibit` subprocess (graceful no-op if unavailable).
+- Integrated into `BeginTransferActivity()`/`EndTransferActivity()` in `ratelimit/store.go` (ref-counted). Five additional call sites for non-batch paths: `UploadFileSync`, `ExecuteRetry`, CLI PUR fallback (2), CLI single-file job download.
+
 ### Files Changed
 
 | File | Changes |
 |------|---------|
+| `internal/services/transfer_service.go` | 4D: workerCount parameter, adaptive count wiring; 4E: WarmAll adoption; 5D: sleep inhibition for UploadFileSync and ExecuteRetry |
+| `internal/wailsapp/event_bridge.go` | 4F-R3: ConfigChangedEvent forwarding + DTO |
+| `frontend/src/types/events.ts` | 4F-R3: CONFIG_CHANGED event name and DTO |
+| `frontend/src/stores/fileBrowserStore.ts` | 4F-R3: setupEventListeners for config change invalidation |
+| `frontend/src/App.tsx` | 4F-R3: wire up file browser event listeners |
+| `internal/platform/sleep.go` | 5D: InhibitSleep public API |
+| `internal/platform/sleep_darwin.go` | 5D: macOS IOPMAssertion via CGO |
+| `internal/platform/sleep_windows.go` | 5D: Windows SetThreadExecutionState |
+| `internal/platform/sleep_linux.go` | 5D: Linux systemd-inhibit subprocess |
+| `internal/platform/sleep_other.go` | 5D: Fallback no-op |
+| `internal/platform/sleep_test.go` | 5D: Integration test with idempotency check |
+| `internal/ratelimit/store.go` | 5D: sleep inhibition in BeginTransferActivity/EndTransferActivity |
+| `internal/pur/pipeline/pipeline.go` | 5D: sleep inhibition for CLI PUR fallback uploads |
+| `internal/cli/jobs.go` | 5D: sleep inhibition for CLI single-file job download |
 | `internal/cloud/providers/azure/download.go` | CollectErrors migration |
 | `internal/cli/folder_upload_helper.go` | CollectErrors migration, WarmAll, WalkStream streaming rewrite |
 | `internal/cloud/credentials/manager.go` | New `WarmAll(ctx)` method |
-| `internal/services/transfer_service.go` | WarmAll adoption |
 | `internal/cli/download_helper.go` | WarmAll adoption |
 | `internal/cli/upload_helper.go` | WarmAll adoption |
 | `internal/daemon/daemon.go` | WarmAll adoption |

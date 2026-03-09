@@ -24,6 +24,7 @@ import * as App from '../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../wailsjs/go/models'
 import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
 import { useConfigStore } from './stores/configStore'
+import { useFileBrowserStore } from './stores/fileBrowserStore'
 import { useLogStore } from './stores/logStore'
 import { useTransferStore } from './stores/transferStore'
 import { useRunStore } from './stores/runStore'
@@ -60,6 +61,8 @@ function AppComponent() {
   const { stats: transferStats, setupEventListeners: setupTransferEventListeners } = useTransferStore()
   // v4.7.3: Run state manager for run session persistence
   const { activeRun, setupEventListeners: setupRunEventListeners, recoverFromRestart } = useRunStore()
+  // v4.8.7: File browser event listeners for credential invalidation
+  const { setupEventListeners: setupFileBrowserEventListeners } = useFileBrowserStore()
 
   // v4.0.0: Set up log event listeners at app level so they're always active.
   // Previously these were set up in ActivityTab, which meant events were missed
@@ -93,6 +96,12 @@ function AppComponent() {
     const cleanup = setupRunEventListeners()
     return cleanup
   }, [setupRunEventListeners])
+
+  // v4.8.7: Set up file browser event listeners for credential/config change invalidation.
+  useEffect(() => {
+    const cleanup = setupFileBrowserEventListeners()
+    return cleanup
+  }, [setupFileBrowserEventListeners])
 
   // v4.7.3: Recover active run state after app restart.
   // Checks localStorage for persisted run info and loads historical state from disk.

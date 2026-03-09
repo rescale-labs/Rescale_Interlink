@@ -149,6 +149,10 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		// v4.7.7: Batch progress events for grouped transfer display
 		// No throttling needed — ticker already limits to 1/sec per batch
 		runtime.EventsEmit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
+
+	case *events.ConfigChangedEvent:
+		// v4.8.7: Forward credential changes so file browser can invalidate cache
+		runtime.EventsEmit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
 	}
 }
 
@@ -408,5 +412,20 @@ func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO
 		ETASeconds:      e.ETASeconds,
 		DiscoveredTotal: e.DiscoveredTotal,
 		DiscoveredBytes: e.DiscoveredBytes,
+	}
+}
+
+// ConfigChangedEventDTO is the JSON-safe version of events.ConfigChangedEvent (v4.8.7).
+type ConfigChangedEventDTO struct {
+	Timestamp string `json:"timestamp"`
+	Source    string `json:"source"`
+	Email     string `json:"email"`
+}
+
+func configChangedEventToDTO(e *events.ConfigChangedEvent) ConfigChangedEventDTO {
+	return ConfigChangedEventDTO{
+		Timestamp: e.Timestamp().Format(time.RFC3339Nano),
+		Source:    e.Source,
+		Email:     e.Email,
 	}
 }

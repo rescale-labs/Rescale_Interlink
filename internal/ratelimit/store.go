@@ -7,6 +7,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/platform"
 )
 
 // limiterEntry wraps a RateLimiter with recovery metadata needed to restore it
@@ -94,6 +96,7 @@ type LimiterStore struct {
 	keepaliveMu     sync.Mutex
 	keepaliveCount  int32              // number of active transfer batches
 	keepaliveCancel context.CancelFunc
+	sleepRelease    func()             // v4.8.7: release function for OS sleep inhibition
 }
 
 const coordRetryBackoff = 30 * time.Second
@@ -519,10 +522,19 @@ func (s *LimiterStore) BeginTransferActivity() {
 	s.keepaliveMu.Lock()
 	defer s.keepaliveMu.Unlock()
 	s.keepaliveCount++
-	if s.keepaliveCount == 1 && s.coordEnsurer != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		s.keepaliveCancel = cancel
-		go s.keepaliveLoop(ctx)
+	if s.keepaliveCount == 1 {
+		// v4.8.7: Inhibit OS sleep during active transfers.
+		release, err := platform.InhibitSleep("Rescale Interlink file transfer in progress")
+		if err != nil {
+			log.Printf("[RATELIMIT] Sleep inhibition failed (non-fatal): %v", err)
+		}
+		s.sleepRelease = release
+
+		if s.coordEnsurer != nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			s.keepaliveCancel = cancel
+			go s.keepaliveLoop(ctx)
+		}
 	}
 }
 
@@ -538,6 +550,11 @@ func (s *LimiterStore) EndTransferActivity() {
 		if s.keepaliveCancel != nil {
 			s.keepaliveCancel()
 			s.keepaliveCancel = nil
+		}
+		// v4.8.7: Release OS sleep inhibition when all transfers complete.
+		if s.sleepRelease != nil {
+			s.sleepRelease()
+			s.sleepRelease = nil
 		}
 	}
 }
