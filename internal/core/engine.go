@@ -18,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/events"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pathutil"
@@ -165,10 +166,12 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 		e.fileService.SetAPIClient(apiClient)
 	}
 
-	// v4.8.4: Register API client idle-connection cleanup for sleep/wake recovery.
+	// v4.8.4: Register idle-connection cleanup for sleep/wake recovery.
 	// Re-registered on each config update so the hook always points at the current client.
+	// v4.8.7: Extended to cover S3/Azure provider transports via CloseAllIdleConnections.
 	ratelimit.GlobalStore().SetStaleConnectionCleanup(func() {
-		apiClient.CloseIdleConnections()
+		apiClient.CloseIdleConnections()    // API client transport
+		inthttp.CloseAllIdleConnections()   // S3 + Azure provider transports
 	})
 
 	e.mu.Unlock()

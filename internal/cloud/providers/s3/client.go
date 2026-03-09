@@ -117,6 +117,15 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 	}, nil
 }
 
+// CloseIdleConnections closes idle connections in the S3 HTTP transport pool.
+// Called by the stale-connection cleanup hook after sleep/wake gaps.
+// v4.8.7
+func (c *S3Client) CloseIdleConnections() {
+	if c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
+}
+
 // Client returns the underlying S3 client.
 // Thread-safe: Returns the current client under mutex protection.
 func (c *S3Client) Client() *s3.Client {

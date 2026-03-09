@@ -4,11 +4,40 @@ import (
 	"crypto/tls"
 	nethttp "net/http"
 	"os"
+	"sync"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"golang.org/x/net/http2"
 )
+
+// Transport cleanup registry — tracks all optimized HTTP clients for sleep/wake cleanup.
+// CreateOptimizedClient auto-registers each client it creates. CloseAllIdleConnections
+// is called by the engine's stale-connection callback after wall-clock gaps.
+//
+// Accumulation is bounded by the number of CreateOptimizedClient calls over the session
+// lifetime. Each entry is a single *nethttp.Client pointer (~8 bytes). Even 10,000
+// transfers would consume <100KB. The transport itself is GC'd independently — calling
+// CloseIdleConnections on a client whose transport has been GC'd is a harmless no-op.
+// v4.8.7
+var (
+	transportMu      sync.Mutex
+	trackedTransports []*nethttp.Client
+)
+
+// CloseAllIdleConnections closes idle connections on all tracked optimized HTTP clients.
+// Called by the engine's stale-connection callback after sleep/wake wall-clock gaps.
+// Safe to call concurrently; idempotent.
+// v4.8.7
+func CloseAllIdleConnections() {
+	transportMu.Lock()
+	clients := make([]*nethttp.Client, len(trackedTransports))
+	copy(clients, trackedTransports)
+	transportMu.Unlock()
+	for _, c := range clients {
+		c.CloseIdleConnections()
+	}
+}
 
 // CreateOptimizedClient creates an HTTP client optimized for large file transfers with proxy support.
 // Configuration based on extensive upload performance testing and benchmarking.
@@ -52,6 +81,10 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 		// v4.5.4: Clear the 300s timeout to allow long transfers
 		// Per-operation timeouts should be used via context instead
 		baseClient.Timeout = 0
+		// v4.8.7: Track for sleep/wake cleanup even when transport is wrapped
+		transportMu.Lock()
+		trackedTransports = append(trackedTransports, baseClient)
+		transportMu.Unlock()
 		return baseClient, nil
 	}
 
@@ -113,6 +146,11 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 	// Update the client's transport with our optimized version
 	baseClient.Transport = tr
 	baseClient.Timeout = 0 // No overall timeout - each operation sets its own timeout
+
+	// v4.8.7: Track for sleep/wake stale-connection cleanup.
+	transportMu.Lock()
+	trackedTransports = append(trackedTransports, baseClient)
+	transportMu.Unlock()
 
 	return baseClient, nil
 }
