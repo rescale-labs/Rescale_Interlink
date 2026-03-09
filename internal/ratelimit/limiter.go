@@ -6,8 +6,17 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// fifoTicket represents a waiter's position in the FIFO queue.
+// v4.8.7: Ensures fair token acquisition under contention.
+type fifoTicket struct {
+	id uint64
+}
+
+var fifoTicketCounter uint64 // atomic, global counter for unique ticket IDs
 
 // RateLimiter implements a token bucket rate limiter.
 // It allows bursts up to maxTokens, then refills at refillRate tokens/second.
@@ -35,6 +44,9 @@ type RateLimiter struct {
 
 	// v4.8.4: Self-healing state
 	degraded bool // true when at emergency cap after coordinator disconnect
+
+	// v4.8.7: FIFO wait queue — ensures fair token acquisition under contention.
+	waitQueue []*fifoTicket
 
 	// Visibility: utilization-based notifications with hysteresis.
 	hardLimitPerS  float64                     // Server hard limit for utilization calculation
@@ -303,22 +315,46 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 		}
 	}
 
-	// Try immediate acquire first
-	if rl.tryAcquire() {
-		return nil
+	// v4.8.7: FIFO queue — single locked decision point.
+	// If no one is waiting AND a token is available → acquire immediately.
+	// Otherwise → enqueue and only the front waiter may acquire.
+	rl.mu.Lock()
+	if len(rl.waitQueue) == 0 && rl.tryAcquireUnlocked() {
+		rl.mu.Unlock()
+		return nil // Fast path: no contention, token available
 	}
 
-	// Standard wait loop
+	// Enqueue: must wait behind existing waiters
+	ticket := &fifoTicket{id: atomic.AddUint64(&fifoTicketCounter, 1)}
+	rl.waitQueue = append(rl.waitQueue, ticket)
+	rl.mu.Unlock()
+
+	// Remove ticket from queue on exit (cancellation or success)
+	defer func() {
+		rl.mu.Lock()
+		for i, t := range rl.waitQueue {
+			if t == ticket {
+				rl.waitQueue = append(rl.waitQueue[:i], rl.waitQueue[i+1:]...)
+				break
+			}
+		}
+		rl.mu.Unlock()
+	}()
+
+	// Poll loop: only front-of-queue may acquire
 	for {
-		// Check if context is already cancelled
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Try to acquire a token
-		if rl.tryAcquire() {
+		rl.mu.Lock()
+		isFront := len(rl.waitQueue) > 0 && rl.waitQueue[0] == ticket
+		if isFront && rl.tryAcquireUnlocked() {
+			rl.waitQueue = rl.waitQueue[1:]
+			rl.mu.Unlock()
+
 			// Emit utilization-based notice if wait was non-trivial
 			actualWait := time.Since(startTime)
 			if actualWait > 100*time.Millisecond {
@@ -326,16 +362,13 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 			}
 			return nil
 		}
+		waitDuration := rl.timeUntilNextTokenUnlocked()
+		rl.mu.Unlock()
 
-		// Calculate how long to wait for next token
-		waitDuration := rl.timeUntilNextToken()
-
-		// Wait for either a token to be available or context cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(waitDuration):
-			// Loop again to try acquiring
 		}
 	}
 }
@@ -345,7 +378,13 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 func (rl *RateLimiter) tryAcquire() bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	return rl.tryAcquireUnlocked()
+}
 
+// tryAcquireUnlocked is the lock-free version of tryAcquire.
+// Caller MUST hold rl.mu.
+// v4.8.7: Extracted for FIFO queue where caller already holds the lock.
+func (rl *RateLimiter) tryAcquireUnlocked() bool {
 	// Refill tokens based on elapsed time
 	now := time.Now()
 	elapsed := now.Sub(rl.lastRefill).Seconds()
@@ -370,7 +409,13 @@ func (rl *RateLimiter) tryAcquire() bool {
 func (rl *RateLimiter) timeUntilNextToken() time.Duration {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	return rl.timeUntilNextTokenUnlocked()
+}
 
+// timeUntilNextTokenUnlocked is the lock-free version of timeUntilNextToken.
+// Caller MUST hold rl.mu.
+// v4.8.7: Extracted for FIFO queue where caller already holds the lock.
+func (rl *RateLimiter) timeUntilNextTokenUnlocked() time.Duration {
 	tokensNeeded := 1.0 - rl.tokens
 	if tokensNeeded <= 0 {
 		return 0

@@ -714,3 +714,50 @@ func TestConcurrentCoordinatorHooks(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestWaitFIFOOrder verifies that Wait() grants tokens in FIFO order under contention.
+// v4.8.7: Drain the bucket, launch N goroutines with stagger, verify acquisition order.
+func TestWaitFIFOOrder(t *testing.T) {
+	// Slow refill (1 token/sec) with 1-token bucket — forces sequential acquisition
+	rl := NewRateLimiter(1.0, 1.0)
+
+	// Drain the bucket
+	ctx := context.Background()
+	_ = rl.Wait(ctx) // consumes the 1 starting token
+
+	const N = 5
+	results := make(chan int, N)
+	var wg sync.WaitGroup
+
+	// Launch N goroutines with stagger to establish a deterministic queue order
+	for i := 0; i < N; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := rl.Wait(ctx)
+			if err != nil {
+				t.Errorf("goroutine %d: Wait returned error: %v", i, err)
+				return
+			}
+			results <- i
+		}()
+		// 50ms stagger between launches ensures queue ordering
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	wg.Wait()
+	close(results)
+
+	// Verify FIFO order
+	expected := 0
+	for got := range results {
+		if got != expected {
+			t.Errorf("expected goroutine %d to acquire next, got %d", expected, got)
+		}
+		expected++
+	}
+	if expected != N {
+		t.Errorf("expected %d results, got %d", N, expected)
+	}
+}
