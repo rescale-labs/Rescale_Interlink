@@ -462,12 +462,12 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 
 	// Wait for workers
 	wg.Wait()
+	close(errChan)
 
-	// Check for errors
-	select {
-	case err := <-errChan:
-		return err
-	default:
+	// v4.8.7: Use unified error collection
+	errs := internaltransfer.CollectErrors(errChan)
+	if len(errs) > 0 {
+		return errs[0]
 	}
 
 	// Delete resume state on success

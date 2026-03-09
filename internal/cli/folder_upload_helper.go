@@ -388,8 +388,10 @@ func CreateFolderStructure(
 		wg.Wait()
 		close(errChan)
 
-		for err := range errChan {
-			return nil, 0, err
+		// v4.8.7: Use unified error collection
+		errs := transfer.CollectErrors(errChan)
+		if len(errs) > 0 {
+			return nil, 0, errs[0]
 		}
 	}
 
@@ -779,11 +781,9 @@ func uploadDirectoryPipelined(
 
 				if uploadErr != nil {
 					fileBar.Complete("", uploadErr)
-
 					if state.UploadResumeStateExists(fpath) {
 						fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume, re-run the upload command.\n", filepath.Base(fpath))
 					}
-
 					resultMutex.Lock()
 					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
 					resultMutex.Unlock()
