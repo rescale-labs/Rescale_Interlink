@@ -5,6 +5,14 @@ import type { LogEventDTO, LogLevel, ProgressEventDTO, StateChangeEventDTO } fro
 // Maximum number of logs to keep in memory
 const MAX_LOGS = 10000;
 
+// v4.8.7: Level severity for ">=" filtering (higher = more severe)
+const LEVEL_SEVERITY: Record<string, number> = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
+};
+
 interface LogEntry {
   id: number;
   timestamp: Date;
@@ -79,7 +87,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   logs: [],
   stats: { total: 0, errors: 0, warnings: 0, uptime: 0 },
   startTime: new Date(),
-  levelFilter: null,
+  levelFilter: 'INFO' as LogLevel,
   searchTerm: '',
   autoScroll: true,
   overallProgress: 0,
@@ -146,9 +154,11 @@ export const useLogStore = create<LogState>((set, get) => ({
     const lowerSearch = searchTerm.toLowerCase();
 
     return logs.filter((log) => {
-      // Level filter
-      if (levelFilter && log.level !== levelFilter) {
-        return false;
+      // v4.8.7: Level filter uses ">=" semantics (e.g. INFO shows INFO+WARN+ERROR)
+      if (levelFilter) {
+        const minSeverity = LEVEL_SEVERITY[levelFilter] ?? 0;
+        const logSeverity = LEVEL_SEVERITY[log.level] ?? 0;
+        if (logSeverity < minSeverity) return false;
       }
 
       // Search filter - use cached lowercase text

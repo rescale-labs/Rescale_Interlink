@@ -17,12 +17,21 @@ import clsx from 'clsx';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
 const LOG_LEVELS: Array<LogLevel | null> = [null, 'DEBUG', 'INFO', 'WARN', 'ERROR'];
+// v4.8.7: Labels indicate ">=" semantics (e.g. INFO+ shows INFO, WARN, ERROR)
 const LEVEL_LABELS: Record<string, string> = {
   '': 'All Levels',
-  'DEBUG': 'DEBUG',
-  'INFO': 'INFO',
-  'WARN': 'WARN',
+  'DEBUG': 'DEBUG+',
+  'INFO': 'INFO+',
+  'WARN': 'WARN+',
   'ERROR': 'ERROR',
+};
+
+// v4.8.7: Level severity for ">=" filtering (higher = more severe)
+const LEVEL_SEVERITY: Record<string, number> = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
 };
 
 const LEVEL_COLORS: Record<LogLevel, string> = {
@@ -97,9 +106,14 @@ export function ActivityTab() {
     const guiFiltered = getFilteredLogs();
     const lowerSearch = searchTerm.toLowerCase();
 
-    // Filter daemon logs with same criteria
+    // Filter daemon logs with same ">=" criteria
     const daemonFiltered = daemonLogs.filter((log) => {
-      if (levelFilter && log.level !== levelFilter) return false;
+      // v4.8.7: ">=" semantics — INFO shows INFO+WARN+ERROR
+      if (levelFilter) {
+        const minSev = LEVEL_SEVERITY[levelFilter] ?? 0;
+        const logSev = LEVEL_SEVERITY[log.level] ?? 0;
+        if (logSev < minSev) return false;
+      }
       if (searchTerm && !log.lowerText.includes(lowerSearch)) return false;
       return true;
     });

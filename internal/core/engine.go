@@ -5,7 +5,6 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1576,8 +1575,10 @@ func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
 // Private helper methods
 
 func (e *Engine) publishLog(level events.LogLevel, message, stage, jobName string) {
-	// Always log to console
-	log.Printf("[%s] %s", level.String(), message)
+	// v4.8.7: Write to stdout directly (not log.Printf) to avoid double-publish
+	// when TeeWriter is active on stdlib log — the EventBus publish below is
+	// the intended path for GUI Activity Logs.
+	fmt.Printf("[%s] %s\n", level.String(), message)
 
 	// Only publish events if enabled (to prevent deadlocks)
 	e.eventMu.RLock()

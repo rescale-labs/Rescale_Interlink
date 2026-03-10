@@ -166,10 +166,17 @@ func (a *App) startup(ctx context.Context) {
 		// Wire cross-process rate limit coordinator (lazy — only spawns when GetLimiter is called)
 		ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
 
+		// v4.8.7: Route backend log.Printf to GUI Activity Logs via TeeWriter.
+		// This intercepts all stdlib log output and publishes to EventBus.
+		tee := logging.NewTeeWriter(os.Stderr, a.engine.Events())
+		log.SetOutput(tee)
+
 		// Wire rate limit visibility notifications for GUI Activity Logs
 		eb := a.engine.Events()
 		ratelimit.SetGlobalNotifyFunc(func(level, message string) {
-			log.Printf("%s", message)
+			// v4.8.7: Use fmt.Printf instead of log.Printf to avoid double-publish
+			// via TeeWriter — the explicit PublishLog below is the intended path.
+			fmt.Printf("%s\n", message)
 			if eb != nil {
 				lvl := events.InfoLevel
 				if level == "warn" {
