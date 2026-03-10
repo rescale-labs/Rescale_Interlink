@@ -84,6 +84,42 @@ func StateDirectory() string {
 	return filepath.Join(homeDir, ".config", "rescale-int")
 }
 
+// ReportDirectory returns the directory for error report files.
+// v4.8.7: Used by safe error reporting (Plan 3, 6A-6E).
+//
+// Locations:
+//   - Windows: %LOCALAPPDATA%\Rescale\Interlink\reports
+//   - Unix: ~/.config/rescale/reports
+func ReportDirectory() string {
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return filepath.Join(os.TempDir(), "rescale-interlink-reports")
+			}
+			localAppData = filepath.Join(homeDir, "AppData", "Local")
+		}
+		return filepath.Join(localAppData, "Rescale", "Interlink", "reports")
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return filepath.Join(os.TempDir(), "rescale-interlink-reports")
+		}
+		return filepath.Join(homeDir, ".config", "rescale", "reports")
+	}
+	return filepath.Join(configDir, "rescale", "reports")
+}
+
+// EnsureReportDirectory creates the report directory if it doesn't exist.
+// v4.8.7: Uses 0700 permissions to restrict access to owner only.
+func EnsureReportDirectory() error {
+	return os.MkdirAll(ReportDirectory(), 0700)
+}
+
 // RuntimeDirectory returns the directory for runtime files (PID files, sockets).
 // v4.5.8: Centralized runtime path to prevent drift.
 //

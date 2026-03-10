@@ -22,6 +22,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/tags"
@@ -330,6 +331,9 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 			return nil // errors handled internally via queue.Fail
 		})
 		log.Printf("[BATCH] Streaming DOWNLOAD batch complete: %s", batchID)
+
+		// v4.8.7: Check for total batch failure and publish reportable error event.
+		ts.checkBatchFailure(batchID, "download")
 	}()
 
 	return nil
@@ -418,6 +422,9 @@ func (ts *TransferService) StartStreamingUploadBatch(
 			return nil // errors handled internally via queue.Fail
 		})
 		log.Printf("[BATCH] Streaming UPLOAD batch complete: %s", batchID)
+
+		// v4.8.7: Check for total batch failure and publish reportable error event.
+		ts.checkBatchFailure(batchID, "upload")
 	}()
 
 	return nil
@@ -972,6 +979,24 @@ func (ts *TransferService) GetTasks() []TransferTask {
 		}
 	}
 	return tasks
+}
+
+// checkBatchFailure checks if a completed batch had all tasks fail (0 succeeded, >0 failed).
+// If so, it publishes a ReportableErrorEvent via the EventBus.
+// v4.8.7: Plan 3 (6A-6E) — batch-level failure reporting.
+func (ts *TransferService) checkBatchFailure(batchID, direction string) {
+	batches := ts.queue.GetAllBatchStats()
+	for _, bs := range batches {
+		if bs.BatchID != batchID {
+			continue
+		}
+		// Only report total wipeout: all tasks failed, none completed
+		if bs.Failed > 0 && bs.Completed == 0 && bs.Total > 0 {
+			err := fmt.Errorf("batch %s failed: %d/%d transfers failed", direction, bs.Failed, bs.Total)
+			reporting.ClassifyAndPublish(ts.eventBus, err, reporting.CategoryTransfer, "folder_"+direction, "")
+		}
+		return
+	}
 }
 
 // ClearCompleted removes completed/failed/cancelled transfers from tracking.

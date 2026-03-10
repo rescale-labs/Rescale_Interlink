@@ -15,6 +15,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/version"
 )
@@ -280,7 +281,18 @@ func Execute() error {
 
 	rootCmd := NewRootCmd()
 	AddCommands(rootCmd)
-	err := rootCmd.Execute()
+	executedCmd, err := rootCmd.ExecuteC()
+
+	// v4.8.7: Safe error reporting — classify and auto-save report for blocking failures.
+	// ExecuteC returns the actual subcommand that ran, so we get a meaningful operation
+	// like "rescale-int folders upload-dir" instead of just "rescale-int".
+	if err != nil {
+		operation := ""
+		if executedCmd != nil {
+			operation = executedCmd.CommandPath()
+		}
+		reporting.HandleCLIError(err, "cli", operation, "")
+	}
 
 	// Clean up signal handler
 	signal.Stop(sigChan)

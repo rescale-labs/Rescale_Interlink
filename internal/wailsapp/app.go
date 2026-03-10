@@ -28,6 +28,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // Assets holds the embedded frontend files, passed in from main package.
@@ -58,6 +59,9 @@ type App struct {
 	cachedCoreTypes   []CoreTypeDTO
 	cachedAnalyses    []AnalysisCodeDTO
 	cachedAutomations []AutomationDTO
+
+	// v4.8.7: Safe error reporting (Plan 3, 6A-6E)
+	reporter *reporting.Reporter
 }
 
 // NewApp creates a new Wails application instance.
@@ -151,6 +155,9 @@ func (a *App) startup(ctx context.Context) {
 		if err := a.eventBridge.Start(); err != nil {
 			wailsLogger.Error().Err(err).Msg("Failed to start event bridge")
 		}
+
+		// v4.8.7: Initialize reporter for safe error reporting
+		a.reporter = reporting.NewReporter(a.engine.Events())
 
 		// v4.0.0: Set EventBus for timing infrastructure
 		// This allows timing logs to appear in Activity tab when DetailedLogging is enabled

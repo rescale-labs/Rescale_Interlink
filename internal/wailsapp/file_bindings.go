@@ -19,6 +19,7 @@ import (
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/pathutil"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
 )
@@ -677,6 +678,10 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		if scanErr != nil && scanCtx.Err() == nil {
 			emitLog(events.ErrorLevel, fmt.Sprintf("Scan error: %s", scanErr.Error()))
 			emitCompletion(foldersCreated, filesQueued, totalBytes, scanErr.Error())
+			// v4.8.7: Report scan failure if no files were queued (total failure)
+			if filesQueued == 0 && a.reporter != nil {
+				a.reporter.Report(scanErr, reporting.CategoryTransfer, "folder_download", "")
+			}
 			return
 		}
 
@@ -918,6 +923,10 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		folders, err := apiClient.GetRootFolders(ctx)
 		if err != nil {
 			deferredError = err.Error()
+			// v4.8.7: Report pre-transfer API failure
+			if a.reporter != nil {
+				a.reporter.Report(err, reporting.CategoryTransfer, "folder_upload", "")
+			}
 			return FolderUploadResultDTO{Error: "Failed to get root folders: " + err.Error()}
 		}
 		parentID = folders.MyLibrary
@@ -929,6 +938,10 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		if _, err := apiClient.ListFolderContentsPage(valCtx, parentID, "", 1); err != nil {
 			valCancel()
 			deferredError = fmt.Sprintf("Destination folder not found or inaccessible: %s", err.Error())
+			// v4.8.7: Report pre-transfer API failure
+			if a.reporter != nil {
+				a.reporter.Report(err, reporting.CategoryTransfer, "folder_upload", "")
+			}
 			return FolderUploadResultDTO{Error: deferredError}
 		}
 		valCancel()

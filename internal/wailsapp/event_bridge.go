@@ -153,6 +153,10 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 	case *events.ConfigChangedEvent:
 		// v4.8.7: Forward credential changes so file browser can invalidate cache
 		runtime.EventsEmit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
+
+	case *events.ReportableErrorEvent:
+		// v4.8.7: Reportable error events for safe error reporting — NOT throttled
+		runtime.EventsEmit(eb.ctx, "interlink:reportable_error", reportableErrorEventToDTO(e))
 	}
 }
 
@@ -427,5 +431,32 @@ func configChangedEventToDTO(e *events.ConfigChangedEvent) ConfigChangedEventDTO
 		Timestamp: e.Timestamp().Format(time.RFC3339Nano),
 		Source:    e.Source,
 		Email:     e.Email,
+	}
+}
+
+// ReportableErrorEventDTO is the JSON-safe version of events.ReportableErrorEvent (v4.8.7).
+type ReportableErrorEventDTO struct {
+	Timestamp    string                          `json:"timestamp"`
+	ErrorID      string                          `json:"errorID"`
+	Category     string                          `json:"category"`
+	Severity     string                          `json:"severity"`
+	Operation    string                          `json:"operation"`
+	Backend      string                          `json:"backend"`
+	ErrorMessage string                          `json:"errorMessage"`
+	ErrorClass   string                          `json:"errorClass"`
+	Timeline     []events.SanitizedTimelineEntry `json:"timeline"`
+}
+
+func reportableErrorEventToDTO(e *events.ReportableErrorEvent) ReportableErrorEventDTO {
+	return ReportableErrorEventDTO{
+		Timestamp:    e.Timestamp().Format(time.RFC3339Nano),
+		ErrorID:      e.ErrorID,
+		Category:     e.Category,
+		Severity:     e.Severity,
+		Operation:    e.Operation,
+		Backend:      e.Backend,
+		ErrorMessage: e.ErrorMessage,
+		ErrorClass:   e.ErrorClass,
+		Timeline:     e.Timeline,
 	}
 }

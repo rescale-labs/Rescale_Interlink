@@ -20,6 +20,7 @@ import {
   PURTab,
 } from './components/tabs'
 import { ErrorBoundary } from './components/common'
+import ErrorReportModal from './components/ErrorReportModal'
 import * as App from '../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../wailsjs/go/models'
 import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
@@ -28,6 +29,7 @@ import { useFileBrowserStore } from './stores/fileBrowserStore'
 import { useLogStore } from './stores/logStore'
 import { useTransferStore } from './stores/transferStore'
 import { useRunStore } from './stores/runStore'
+import { useErrorReportStore } from './stores/errorReportStore'
 
 // Tab navigation context for switching tabs from other components
 interface TabNavigationContextType {
@@ -63,6 +65,8 @@ function AppComponent() {
   const { activeRun, setupEventListeners: setupRunEventListeners, recoverFromRestart } = useRunStore()
   // v4.8.7: File browser event listeners for credential invalidation
   const { setupEventListeners: setupFileBrowserEventListeners } = useFileBrowserStore()
+  // v4.8.7: Error report modal event listeners (Plan 3, 6A-6E)
+  const { setupEventListeners: setupErrorReportEventListeners } = useErrorReportStore()
 
   // v4.0.0: Set up log event listeners at app level so they're always active.
   // Previously these were set up in ActivityTab, which meant events were missed
@@ -102,6 +106,12 @@ function AppComponent() {
     const cleanup = setupFileBrowserEventListeners()
     return cleanup
   }, [setupFileBrowserEventListeners])
+
+  // v4.8.7: Set up error report event listeners (Plan 3, 6A-6E).
+  useEffect(() => {
+    const cleanup = setupErrorReportEventListeners()
+    return cleanup
+  }, [setupErrorReportEventListeners])
 
   // v4.7.3: Recover active run state after app restart.
   // Checks localStorage for persisted run info and loads historical state from disk.
@@ -164,6 +174,8 @@ function AppComponent() {
 
   return (
     <TabNavigationContext.Provider value={{ switchToTab }}>
+      {/* v4.8.7: Error report modal — always rendered, visibility controlled by store */}
+      <ErrorReportModal />
       <div className="h-screen flex flex-col bg-slate-50">
         {/* Header */}
         <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">

@@ -17,6 +17,7 @@ import (
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/validation"
@@ -325,6 +326,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		d.logger.Error().Err(err).Str("dir", outputDir).Msg("Failed to create output directory")
 		d.state.MarkFailed(job.ID, job.Name, err)
+		reporting.HandleCLIError(err, "daemon", "job_download", "")
 		return
 	}
 
@@ -333,6 +335,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	if err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to list job files")
 		d.state.MarkFailed(job.ID, job.Name, err)
+		reporting.HandleCLIError(err, "daemon", "job_download", "")
 		return
 	}
 
@@ -487,6 +490,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		}
 		d.logger.Error().Err(downloadErr).Str("job_id", job.ID).Msg("Job download interrupted")
 		d.state.MarkFailed(job.ID, job.Name, downloadErr)
+		reporting.HandleCLIError(downloadErr, "daemon", "job_download", "")
 		return
 	}
 

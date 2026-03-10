@@ -49,6 +49,36 @@ This document provides a comprehensive, verified list of all features available 
 - New `internal/platform/` package: macOS (IOPMAssertion via CGO), Windows (SetThreadExecutionState), Linux (systemd-inhibit).
 - Ref-counted integration in `ratelimit/store.go`. Covers all batch and non-batch transfer paths.
 
+## v4.8.7 Changes — Safe Serious-Error Reporting (Plan 3)
+
+### Error Classification & Reporting (`internal/reporting/`)
+- New `internal/reporting/` package: classifier (ErrorCategory, Severity, ErrorClass), redactor (hex tokens, URLs, emails, auth tokens, paths), builder (report assembly from classified error + timeline), reporter (GUI wrapper for classify + publish).
+- **Reportability philosophy**: "A report is for 'I did everything right and something broke.'" Only server errors (5xx) and unclassified internal errors are reportable. User-fixable errors (auth 401/403, network, timeout, disk space, client 4xx) are filtered out — users can diagnose these from the error message alone.
+- `IsReportable()` uses `classifyErrorClass()` to filter: auth, network, timeout, disk_space, client_error classes all return false. Only server_error and internal (unclassified) pass through.
+- `RingBuffer` on `EventBus` (capacity 50) captures recent events for timeline context. Timeline snapshotted + redacted at classify time.
+
+### GUI ErrorReportModal (`frontend/src/components/ErrorReportModal.tsx`)
+- Hand-rolled overlay modal: error summary, operation/backend context, expandable technical details, optional user note textarea, "Copy to Clipboard" / "Save Report" / "Dismiss" buttons.
+- Call-to-action: "Please copy or save this error report and send it to your Rescale contact or support@rescale.com for faster diagnosis."
+- Reports include workspace name, workspace ID, and platform URL for support context.
+- Zustand store (`errorReportStore.ts`) manages modal state. Duplicate suppression: subsequent events dropped while modal is open.
+- Privacy note: "Reports contain only technical diagnostics. No API keys, passwords, or file contents are included."
+
+### CLI/Daemon Auto-Save (`internal/reporting/cli_helper.go`)
+- `HandleCLIError()` at CLI `ExecuteC()` error seam: classifies, builds report (no timeline), auto-saves to `config.ReportDirectory()`, prints text summary + path to stderr.
+- Two-layer CLI filtering: `isCLIUsageError()` catches Cobra parse errors and local validation errors (unknown flags, bad paths, user cancellation, "no valid files"), then `IsReportable()` catches broader user-fixable errors.
+- `ExecuteC()` returns the actual subcommand, enabling meaningful operation names (e.g., "rescale-int folders upload-dir") via `CommandPath()`.
+- Same pattern at daemon `MarkFailed()` callsites (3 sites).
+- `config.ReportDirectory()` follows existing `LogDirectory()`/`StateDirectory()` conventions.
+
+### Integration Hooks
+- Engine: pipeline completion paths report total failure (all failed, 0 succeeded, not cancelled).
+- TransferService: streaming batch completion checks for total wipeout.
+- file_bindings.go: pre-transfer API failures (auth, folder not found) trigger reportable error.
+- job_bindings.go: `failSingleJob()` reports pre-pipeline failure.
+
+---
+
 ## v4.8.7 Changes — GUI/CLI Upload Orchestration Convergence (Plan 2b)
 
 ### Folder-Upload Primitives Extraction (2D)

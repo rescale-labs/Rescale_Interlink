@@ -76,11 +76,45 @@ Eliminated ~400 lines of duplicated orchestration logic by extracting a shared s
 - CLI `uploadDirectoryPipelined` (`folder_upload_helper.go`): ~300 lines of inline Parts A/B/C replaced. Per-file execution closure and `RunBatchFromChannel` consumer unchanged.
 - Service layer `PrepareUploadFolder` (`file_service.go`): repointed from `cli.*` to `folder.*` (layering fix).
 
+### Safe Serious-Error Reporting (Plan 3)
+
+User-friendly error reporting flow for serious blocking failures — server errors (5xx) and unclassified internal errors only. When a reportable error occurs (transfer batch wipeout, pipeline total failure, unexpected server error), a modal appears with "Copy to Clipboard" and "Save Report" options. Reports contain only safe diagnostic context — no API keys, tokens, or file contents. User-fixable errors (wrong API key, network issues, timeouts, bad file IDs) are NOT reportable — users can diagnose these from the error message alone.
+
+### Error Classification & Redaction (6A-6B)
+- New `internal/reporting/` package: classifier (ErrorCategory, Severity, ErrorClass), redactor (hex tokens, URL query params, email, auth tokens, home paths), builder (report assembly), reporter (GUI convenience wrapper).
+- `IsReportable()` uses `classifyErrorClass()` to filter: auth (401/403), network, timeout, disk_space, client_error (400/404) all return false. Only server_error (500/502/503) and internal (unclassified) pass through.
+- `ErrorClass` split: `ClassClientError` (4xx — user gave bad input) vs `ClassServerError` (5xx — server broke).
+
+### Ring Buffer Timeline (6C)
+- New `RingBuffer` (capacity 50) on `EventBus` captures recent events for timeline context.
+- Timeline snapshotted and redacted at classify time — no staleness from delayed user action.
+- CLI/daemon reports have empty timeline (no EventBus).
+
+### ErrorReportModal (6D)
+- Frontend `ErrorReportModal.tsx` with error summary, category/operation context, expandable technical details, optional user note, Copy/Save buttons.
+- Call-to-action: "Please copy or save this error report and send it to your Rescale contact or support@rescale.com for faster diagnosis."
+- Reports include workspace name, workspace ID, and platform URL for support context.
+- `errorReportStore.ts` manages modal state and event subscription. Duplicate suppression: if modal is open, subsequent events are dropped.
+- `BuildErrorReport` and `SaveErrorReport` Wails bindings (reporting_bindings.go).
+
+### CLI/Daemon Integration (6D-6E)
+- `HandleCLIError()` at `cli/root.go` `ExecuteC()` seam: auto-save report + print summary to stderr.
+- Two-layer CLI filtering: `isCLIUsageError()` catches Cobra parse errors (unknown flag/command, bad flag syntax, arg count) and local validation errors (file not found, user cancellation, "no valid files"). Then `IsReportable()` catches broader user-fixable errors.
+- `ExecuteC()` returns the actual subcommand for meaningful operation names (e.g., "rescale-int folders upload-dir").
+- `HandleCLIError()` at daemon MarkFailed callsites (3 sites).
+- Reports auto-saved to `config.ReportDirectory()`: `~/Library/Application Support/rescale/reports/` (macOS) / `~/.config/rescale/reports/` (Linux) / `%LOCALAPPDATA%\Rescale\Interlink\reports` (Windows).
+
+### GUI Integration Hooks (6D-6E)
+- Engine: pipeline completion paths report total failure (all jobs failed, not cancelled).
+- TransferService: batch completion checks for total wipeout (0 succeeded, >0 failed).
+- file_bindings.go: pre-transfer API failures (GetRootFolders, ListFolderContentsPage, scan errors).
+- job_bindings.go: `failSingleJob()` reports pre-pipeline single-job failure.
+
 ### Files Changed
 
 | File | Changes |
 |------|---------|
-| `internal/services/transfer_service.go` | 4D: workerCount parameter, adaptive count wiring; 4E: WarmAll adoption; 5D: sleep inhibition for UploadFileSync and ExecuteRetry |
+| `internal/services/transfer_service.go` | 4D: workerCount parameter, adaptive count wiring; 4E: WarmAll adoption; 5D: sleep inhibition for UploadFileSync and ExecuteRetry; 6D: batch failure reporting |
 | `internal/wailsapp/event_bridge.go` | 4F-R3: ConfigChangedEvent forwarding + DTO |
 | `frontend/src/types/events.ts` | 4F-R3: CONFIG_CHANGED event name and DTO |
 | `frontend/src/stores/fileBrowserStore.ts` | 4F-R3: setupEventListeners for config change invalidation |
@@ -120,8 +154,31 @@ Eliminated ~400 lines of duplicated orchestration logic by extracting a shared s
 | `internal/cli/folder_upload_compat.go` | **New**: Type aliases + wrapper functions preserving cli.* API surface |
 | `internal/cli/folder_upload_helper.go` | 2D: Removed moved types/functions; uploadDirectoryPipelined uses folder.RunOrchestrator |
 | `internal/cli/prompt.go` | 2D: Removed ConflictAction type + constants (moved to folder package) |
-| `internal/wailsapp/file_bindings.go` | 2D: cli.* → folder.* for upload types; inline pipeline → RunOrchestrator |
+| `internal/wailsapp/file_bindings.go` | 2D: cli.* → folder.* for upload types; inline pipeline → RunOrchestrator; 6D: pre-transfer API failure reporting |
 | `internal/services/file_service.go` | 2D: cli.* → folder.* for folder-upload primitives (layering fix) |
+| `internal/core/engine.go` | 6D: Pipeline completion → reportable error for total failure |
+| `internal/wailsapp/job_bindings.go` | 6D: failSingleJob → reporter.Report() |
+| `internal/wailsapp/app.go` | 6D: Reporter initialization in startup() |
+| `internal/wailsapp/event_bridge.go` | 6D: ReportableErrorEvent forwarding + DTO |
+| `internal/events/events.go` | 6D: ReportableErrorEvent, SanitizedTimelineEntry, RingBuffer on EventBus |
+| `internal/events/ringbuffer.go` | **New**: Ring buffer for timeline capture (capacity 50) |
+| `internal/config/paths.go` | 6D: ReportDirectory(), EnsureReportDirectory() |
+| `internal/cli/root.go` | 6D: HandleCLIError at Execute() seam |
+| `internal/daemon/daemon.go` | 6D: HandleCLIError at MarkFailed callsites |
+| `internal/reporting/classifier.go` | **New**: Error classification + reportability check |
+| `internal/reporting/redactor.go` | **New**: Allowlist-based sanitization |
+| `internal/reporting/builder.go` | **New**: Report assembly from classified error + timeline |
+| `internal/reporting/reporter.go` | **New**: GUI convenience wrapper: classify + publish event |
+| `internal/reporting/transport.go` | **New**: File export + text summary formatter |
+| `internal/reporting/cli_helper.go` | **New**: Standalone CLI/daemon error handler |
+| `internal/reporting/reporting_test.go` | **New**: Unit tests for classifier, redactor, builder, transport, reporter |
+| `internal/wailsapp/reporting_bindings.go` | **New**: Wails bindings: BuildErrorReport, SaveErrorReport |
+| `frontend/src/components/ErrorReportModal.tsx` | **New**: Error report modal UI |
+| `frontend/src/stores/errorReportStore.ts` | **New**: Zustand store for reportable errors |
+| `frontend/src/types/events.ts` | 6D: REPORTABLE_ERROR event name + DTO |
+| `frontend/src/App.tsx` | 6D: ErrorReportModal + event listener setup |
+| `frontend/src/stores/index.ts` | 6D: Export useErrorReportStore |
+| `frontend/src/components/common/index.ts` | 6D: Export ErrorReportModal |
 | `internal/version/version.go` | v4.8.6 → v4.8.7 |
 | `wails.json` | productVersion 4.8.6 → 4.8.7 |
 

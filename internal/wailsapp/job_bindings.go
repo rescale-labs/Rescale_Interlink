@@ -20,6 +20,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/parser"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 )
 
@@ -783,6 +784,11 @@ func (a *App) failSingleJob(jobName string, errMsg string) {
 			SuccessJobs: 0,
 			FailedJobs:  1,
 		})
+	}
+
+	// v4.8.7: Report pre-pipeline single-job failure for error reporting (Plan 3).
+	if a.reporter != nil {
+		a.reporter.Report(fmt.Errorf("%s", errMsg), reporting.CategoryJobCreate, "single_job", "")
 	}
 }
 

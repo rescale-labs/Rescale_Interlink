@@ -93,6 +93,26 @@ export interface ConfigChangedEventDTO {
   email: string;
 }
 
+// v4.8.7: Sanitized timeline entry for error reports
+export interface SanitizedTimelineEntry {
+  timestamp: string;
+  type: string;
+  summary: string;
+}
+
+// v4.8.7: Reportable error event for safe error reporting (Plan 3, 6A-6E)
+export interface ReportableErrorEventDTO {
+  timestamp: string;
+  errorID: string;
+  category: string;     // "transfer", "job_create", "pur_pipeline", "auth"
+  severity: string;     // "critical", "error"
+  operation: string;    // "folder_upload", "file_download", etc.
+  backend: string;      // "s3", "azure", ""
+  errorMessage: string; // Redacted
+  errorClass: string;   // "network", "auth", "disk_space", "client_error", "server_error", "internal", "timeout"
+  timeline: SanitizedTimelineEntry[];
+}
+
 // v4.7.7: Batch progress event for grouped transfer display
 export interface BatchProgressEventDTO {
   timestamp: string;
@@ -135,6 +155,7 @@ export const EVENT_NAMES = {
   SCAN_PROGRESS: 'interlink:scan_progress', // v4.0.8: software/hardware catalog scan
   BATCH_PROGRESS: 'interlink:batch_progress', // v4.7.7: batch progress for grouped transfers
   CONFIG_CHANGED: 'interlink:config_changed', // v4.8.7: credential/config changes
+  REPORTABLE_ERROR: 'interlink:reportable_error', // v4.8.7: safe error reporting
 } as const;
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';

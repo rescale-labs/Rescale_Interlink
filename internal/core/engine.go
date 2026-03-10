@@ -27,6 +27,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
 	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
@@ -1012,6 +1013,16 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 		Duration:    duration,
 	})
 
+	// v4.8.7: Report total pipeline failure for error reporting (Plan 3).
+	// Only report if all jobs failed, not cancelled, and there were jobs to run.
+	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
+		derivedErr := err
+		if derivedErr == nil {
+			derivedErr = fmt.Errorf("pipeline completed with %d/%d jobs failed", stats.Failed, stats.Total)
+		}
+		reporting.ClassifyAndPublish(e.eventBus, derivedErr, reporting.CategoryPURPipeline, "run", "")
+	}
+
 	if err != nil {
 		if err == context.Canceled {
 			e.publishLog(events.InfoLevel, "Pipeline stopped by user", "run", "")
@@ -1300,6 +1311,15 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 		FailedJobs:  stats.Failed,
 		Duration:    duration,
 	})
+
+	// v4.8.7: Report total pipeline failure for error reporting (Plan 3).
+	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
+		derivedErr := err
+		if derivedErr == nil {
+			derivedErr = fmt.Errorf("pipeline completed with %d/%d jobs failed", stats.Failed, stats.Total)
+		}
+		reporting.ClassifyAndPublish(e.eventBus, derivedErr, reporting.CategoryPURPipeline, "run", "")
+	}
 
 	if err != nil {
 		if err == context.Canceled {
