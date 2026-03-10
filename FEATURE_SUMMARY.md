@@ -94,6 +94,25 @@ This document provides a comprehensive, verified list of all features available 
 - GUI `StartFolderUpload` and CLI `uploadDirectoryPipelined` both use `RunOrchestrator`, eliminating ~400 lines of duplicated orchestration.
 - Per-file upload logic, `RunBatchFromChannel` consumer, and event cadence unchanged.
 
+## v4.8.7 Changes — Transfer Progress UX Polish (Plan 4)
+
+### Progress Display Fixes (9A/9B/9C)
+- **9A**: Progress denominator uses `max(discoveredTotal, total)` during scan — the best-known file count instead of the pipeline queue count.
+- **9B**: Both uploads and downloads show `~N files (scanning...)` with tilde prefix during discovery. Consistent provisional count display.
+- **9C**: File counts persist alongside progress bar: `42% — 420 of 1,000 files` when `totalKnown=true`.
+
+### Elapsed + ETA Coexistence (8B)
+- Elapsed time and ETA now display together: `2m 15s | ETA 3m 40s`. Previously showed one or the other.
+
+### Backend Log Routing to GUI (8C)
+- `TeeWriter` intercepts stdlib `log.Printf` and publishes to EventBus. Prefix classification maps `[BATCH]`/`[SLOT]`/`[DEBUG]` to DEBUG, `[CRED]` to WARN, `[RATELIMIT]`/`[TIMING]` to INFO.
+- `[SLOT]` and `[DEBUG]` throttled to 2/sec. Activity Logs default filter is `INFO+` — users switch to `DEBUG+` to see backend diagnostic logs.
+
+### Download Cold-Start Fix
+- Synchronous credential pre-warm in `StartFolderDownload`/`StartFolderUpload` eliminates 2-5s lock contention on first download.
+- Download scan-consumer calls `UpdateBatchDiscovered()` on every file at discovery (was missing — only uploads had it).
+- `[TIMING]` instrumentation from credential pre-warm through to `DownloadFile()` entry.
+
 ---
 
 ## v4.8.6 Changes — Destination Snapshot Hardening + CLI RunBatch Migration

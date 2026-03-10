@@ -110,11 +110,33 @@ User-friendly error reporting flow for serious blocking failures — server erro
 - file_bindings.go: pre-transfer API failures (GetRootFolders, ListFolderContentsPage, scan errors).
 - job_bindings.go: `failSingleJob()` reports pre-pipeline single-job failure.
 
+### Transfer Progress UX Polish (Plan 4)
+
+Five user-facing display fixes plus backend log routing and download cold-start optimization.
+
+### Progress Display Fixes (9A/9B/9C)
+- **9A**: Label area and progress text use `max(discoveredTotal, total)` as denominator during scan — best-known count instead of confusing pipeline queue metric.
+- **9B**: Both uploads and downloads show `~N files (scanning...)` during discovery — consistent provisional count display with tilde prefix.
+- **9C**: When scan completes (`totalKnown=true`), progress text shows `42% — 420 of 1,000 files` — file counts persist alongside the progress bar.
+
+### Elapsed + ETA Coexistence (8B)
+- Elapsed time and ETA now display together as `2m 15s | ETA 3m 40s` instead of showing one or the other. Elapsed always first (no label prefix); ETA keeps its label for clarity.
+
+### Backend Log Routing to GUI (8C)
+- New `TeeWriter` (`internal/logging/tee_writer.go`) intercepts stdlib `log.Printf` and publishes to EventBus. `[BATCH]`→DEBUG, `[SLOT]`→DEBUG (throttled 2/sec), `[DEBUG]`→DEBUG (throttled), `[CRED]`→WARN, `[RATELIMIT]`→INFO, `[TIMING]`→INFO.
+- Go stdlib timestamp prefix stripped before publishing. Double-publish fixed in `Engine.publishLog()` and rate-limit notify callback (switched to `fmt.Printf`).
+- Activity Logs level filter changed to `>=` semantics: default is `INFO+` (shows INFO, WARN, ERROR; hides DEBUG). Users can switch to `DEBUG+` to see backend diagnostic logs.
+
+### Download Cold-Start Fix
+- **Credential pre-warm**: `WarmCredentialCache()` called synchronously in `StartFolderDownload` and `StartFolderUpload` BEFORE scan starts. Eliminates 2-5s of credential lock contention when first download worker competes with async warm goroutine.
+- **Download discovered totals**: Download scan-consumer now calls `UpdateBatchDiscovered()` on every file at discovery time (was missing — only uploads called it). Enables accurate 9A progress denominator for downloads.
+- **Timing instrumentation**: `[TIMING]` logs at credential pre-warm, semaphore acquire, credential check complete, and `DownloadFile()` entry. Complete timeline from click to first byte.
+
 ### Files Changed
 
 | File | Changes |
 |------|---------|
-| `internal/services/transfer_service.go` | 4D: workerCount parameter, adaptive count wiring; 4E: WarmAll adoption; 5D: sleep inhibition for UploadFileSync and ExecuteRetry; 6D: batch failure reporting |
+| `internal/services/transfer_service.go` | 4D: workerCount parameter, adaptive count wiring; 4E: WarmAll adoption; 5D: sleep inhibition for UploadFileSync and ExecuteRetry; 6D: batch failure reporting; Plan 4: export WarmCredentialCache, remove async warm from streaming batch methods, timing logs in executeDownloadTask |
 | `internal/wailsapp/event_bridge.go` | 4F-R3: ConfigChangedEvent forwarding + DTO |
 | `frontend/src/types/events.ts` | 4F-R3: CONFIG_CHANGED event name and DTO |
 | `frontend/src/stores/fileBrowserStore.ts` | 4F-R3: setupEventListeners for config change invalidation |
@@ -156,9 +178,9 @@ User-friendly error reporting flow for serious blocking failures — server erro
 | `internal/cli/prompt.go` | 2D: Removed ConflictAction type + constants (moved to folder package) |
 | `internal/wailsapp/file_bindings.go` | 2D: cli.* → folder.* for upload types; inline pipeline → RunOrchestrator; 6D: pre-transfer API failure reporting |
 | `internal/services/file_service.go` | 2D: cli.* → folder.* for folder-upload primitives (layering fix) |
-| `internal/core/engine.go` | 6D: Pipeline completion → reportable error for total failure |
+| `internal/core/engine.go` | 6D: Pipeline completion → reportable error for total failure; Plan 4: publishLog double-publish fix (log.Printf → fmt.Printf) |
 | `internal/wailsapp/job_bindings.go` | 6D: failSingleJob → reporter.Report() |
-| `internal/wailsapp/app.go` | 6D: Reporter initialization in startup() |
+| `internal/wailsapp/app.go` | 6D: Reporter initialization in startup(); Plan 4: TeeWriter log.SetOutput + double-publish fix in rate-limit notify |
 | `internal/wailsapp/event_bridge.go` | 6D: ReportableErrorEvent forwarding + DTO |
 | `internal/events/events.go` | 6D: ReportableErrorEvent, SanitizedTimelineEntry, RingBuffer on EventBus |
 | `internal/events/ringbuffer.go` | **New**: Ring buffer for timeline capture (capacity 50) |
@@ -181,6 +203,12 @@ User-friendly error reporting flow for serious blocking failures — server erro
 | `frontend/src/components/common/index.ts` | 6D: Export ErrorReportModal |
 | `internal/version/version.go` | v4.8.6 → v4.8.7 |
 | `wails.json` | productVersion 4.8.6 → 4.8.7 |
+| `internal/logging/tee_writer.go` | **New**: TeeWriter intercepts stdlib log.Printf, routes to EventBus with prefix classification and throttling |
+| `internal/logging/tee_writer_test.go` | **New**: Unit tests for TeeWriter (passthrough, classification, throttle, timestamp stripping, nil safety) |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Plan 4: 9A/9B/9C progress display fixes + 8B elapsed+ETA coexistence |
+| `frontend/src/stores/logStore.ts` | Plan 4: Default levelFilter='INFO', ">=" severity semantics |
+| `frontend/src/components/tabs/ActivityTab.tsx` | Plan 4: ">=" level filter semantics + DEBUG+/INFO+/WARN+ labels |
+| `internal/wailsapp/file_bindings.go` | Plan 4: Synchronous credential pre-warm, UpdateBatchDiscovered for downloads, timing logs |
 
 ---
 
