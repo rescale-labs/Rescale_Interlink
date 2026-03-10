@@ -249,12 +249,27 @@ const BatchRow = memo(function BatchRow({
               )}
             </div>
             <div className="text-xs text-gray-500">
-              {batch.totalKnown
-                ? `${formatNumber(batch.completed)} of ${formatNumber(batch.total)} files`
-                : batch.direction === 'upload'
-                  ? `${formatNumber(batch.active)} uploading, ${formatNumber(batch.queued)} queued...`
-                  : `${formatNumber(batch.completed)} completed, ${formatNumber(batch.total)} queued...`}
-              {batch.totalBytes > 0 && ` — ${formatSize(batch.totalBytes)}`}
+              {(() => {
+                if (batch.totalKnown) {
+                  return `${formatNumber(batch.completed)} of ${formatNumber(batch.total)} files`
+                }
+                // 9A/9B: Use discoveredTotal as approximate denominator during scan
+                const scanCount = Math.max(batch.discoveredTotal, batch.total)
+                if (scanCount > 0) {
+                  return `${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files (scanning...)`
+                }
+                return batch.direction === 'upload' ? 'Preparing upload...' : 'Scanning...'
+              })()}
+              {(() => {
+                if (!batch.totalKnown && batch.totalBytes > 0) {
+                  const scanBytes = Math.max(batch.discoveredBytes || 0, batch.totalBytes)
+                  return ` — ~${formatSize(scanBytes)}`
+                }
+                if (batch.totalBytes > 0) {
+                  return ` — ${formatSize(batch.totalBytes)}`
+                }
+                return ''
+              })()}
             </div>
           </div>
         </div>
@@ -276,31 +291,34 @@ const BatchRow = memo(function BatchRow({
             <span>
               {(() => {
                 if (batch.totalKnown) {
-                  return `${Math.round(batch.progress * 100)}%`
+                  // 9C: File count persists alongside percentage
+                  return `${Math.round(batch.progress * 100)}% — ${formatNumber(batch.completed)} of ${formatNumber(batch.total)} files`
                 }
-                // v4.8.5 bugfix: Use discoveredTotal (fast filesystem count) over
-                // batch.total (slow registration count) during scan phase
-                const scanCount = batch.discoveredTotal > batch.total
-                  ? batch.discoveredTotal : batch.total
-                if (batch.direction === 'upload') {
-                  // v4.8.5 bugfix: Once files are actively uploading, switch label
-                  // from "Preparing upload..." to "Uploading..." with progress count.
-                  // Use "completed" and "found" for clarity; ~ prefix indicates scan in progress.
-                  if (batch.active > 0) {
-                    return `Uploading... (${formatNumber(batch.completed)} completed of ~${formatNumber(scanCount)} found)`
-                  }
-                  return `Preparing upload... (~${formatNumber(scanCount)} files found)`
+                // 9A: Use discoveredTotal during scan phase
+                const scanCount = Math.max(batch.discoveredTotal, batch.total)
+                if (batch.active > 0 && scanCount > 0) {
+                  return `${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files`
                 }
-                return `Scanning... (${formatNumber(batch.total)} files)`
+                if (scanCount > 0) {
+                  return `~${formatNumber(scanCount)} files found`
+                }
+                return batch.direction === 'upload' ? 'Preparing...' : 'Scanning...'
               })()}
             </span>
             <span className="text-center">
               {speedFormatted || (batch.filesPerSec > 0 ? `${batch.filesPerSec.toFixed(1)} files/s` : '')}
             </span>
             <span className="text-right">
-              {batch.totalKnown && etaFormatted
-                ? `ETA: ${etaFormatted}`
-                : (isActive && elapsedFormatted ? `Elapsed: ${elapsedFormatted}` : '')}
+              {(() => {
+                const parts: string[] = []
+                if (isActive && elapsedFormatted) {
+                  parts.push(elapsedFormatted)
+                }
+                if (batch.totalKnown && etaFormatted) {
+                  parts.push(`ETA ${etaFormatted}`)
+                }
+                return parts.join(' | ')
+              })()}
             </span>
           </div>
         </div>
