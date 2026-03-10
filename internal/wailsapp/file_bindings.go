@@ -575,6 +575,13 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(scanCtx, apiClient.GetConfig())
 
+	// v4.8.7: Pre-warm credentials synchronously before scan starts.
+	// This eliminates 2-5s of credential lock contention on the first download,
+	// since warmCredentialCache and executeDownloadTask both compete for credManager.mu.
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Starting credential pre-warm — elapsed=%s", time.Since(startTime)))
+	ts.WarmCredentialCache(scanCtx)
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Credential pre-warm complete — elapsed=%s", time.Since(startTime)))
+
 	// v4.8.0: Start streaming scan — files emitted as discovered
 	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
 	// v4.8.2: No enumeration progress during scan — batch row handles progress display.
@@ -658,6 +665,9 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 					}
 					filesQueued++
 					totalBytes += event.File.Size
+					// v4.8.7: Update discovered totals immediately at file discovery
+					// for accurate progress denominator (symmetric with upload path).
+					ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
 				case <-scanCtx.Done():
 					emitCompletion(foldersCreated, filesQueued, totalBytes, "")
 					return
@@ -684,6 +694,9 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 			}
 			return
 		}
+
+		// v4.8.7: Final discovered totals update (ensures exact count is set)
+		ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
 
 		emitLog(events.InfoLevel, fmt.Sprintf("Scan complete: %d folders, %d files (%.2f MB). Downloads in progress.",
 			foldersCreated, filesQueued, float64(totalBytes)/(1024*1024)))
@@ -913,6 +926,10 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 
 	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+
+	// v4.8.7: Pre-warm credentials synchronously before upload starts.
+	// Symmetric with download path — eliminates credential lock contention.
+	ts.WarmCredentialCache(ctx)
 
 	// v4.0.8: Emit enumeration started event
 	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "", events.EnumPhaseScanning)

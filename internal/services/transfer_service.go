@@ -137,7 +137,9 @@ func (ts *TransferService) StartTransfers(ctx context.Context, requests []Transf
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 	// v4.0.0: Warm credential cache in background to avoid blocking downloads.
-	go ts.warmCredentialCache(ctx)
+	// NOTE: StartTransfers is called by transfer_bindings.go (GUI single-file transfers
+	// from FileBrowser) which does NOT pre-warm — keep async warm as safety net.
+	go ts.WarmCredentialCache(ctx)
 
 	// v4.8.0: Pre-register ALL tasks SYNCHRONOUSLY before launching async workers.
 	// This ensures tasks are visible in the queue before StartTransfers() returns,
@@ -164,8 +166,10 @@ func (ts *TransferService) StartTransfers(ctx context.Context, requests []Transf
 	return nil
 }
 
-// warmCredentialCache pre-warms the credential cache.
-func (ts *TransferService) warmCredentialCache(ctx context.Context) {
+// WarmCredentialCache pre-warms the credential cache.
+// v4.8.7: Exported so callers (file_bindings.go) can invoke it synchronously
+// before scan/download to eliminate credential lock contention on first download.
+func (ts *TransferService) WarmCredentialCache(ctx context.Context) {
 	// v4.8.2: Best-effort async proxy warmup (redundant with synchronous warmup, harmless)
 	ts.mu.RLock()
 	if ts.apiClient != nil {
@@ -264,7 +268,8 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 		return fmt.Errorf("API client not configured")
 	}
 
-	go ts.warmCredentialCache(ctx)
+	// v4.8.7: Removed async warmCredentialCache — callers (file_bindings.go) now
+	// pre-warm credentials synchronously before calling this method.
 
 	// Create a cancellable batch context — CancelBatch() will cancel this
 	batchCtx, batchCancel := context.WithCancel(ctx)
@@ -357,7 +362,8 @@ func (ts *TransferService) StartStreamingUploadBatch(
 		return fmt.Errorf("API client not configured")
 	}
 
-	go ts.warmCredentialCache(ctx)
+	// v4.8.7: Removed async warmCredentialCache — callers (file_bindings.go) now
+	// pre-warm credentials synchronously before calling this method.
 
 	// Create a cancellable batch context — CancelBatch() will cancel this
 	batchCtx, batchCancel := context.WithCancel(ctx)
@@ -781,6 +787,7 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 
 	slotsNow := atomic.AddInt32(&ts.activeSlots, 1)
 	log.Printf("[SLOT] DOWNLOAD %s: ACQUIRED (active=%d/%d)", fileName, slotsNow, cap(ts.semaphore))
+	log.Printf("[TIMING] DOWNLOAD %s: semaphore acquired, starting credential check", fileName)
 
 	defer func() {
 		<-ts.semaphore
@@ -817,6 +824,7 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 			// Non-fatal: retry path will handle credential refresh on failure
 		}
 	}
+	log.Printf("[TIMING] DOWNLOAD %s: credential check complete, starting download", fileName)
 
 	// Allocate transfer handle
 	// v4.8.7: Pass actual adaptive worker count so resource manager divides thread pool correctly.
@@ -836,6 +844,7 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 
 	// Execute download with progress callback
 	// v4.8.0: Pass pre-fetched FileInfo to skip GetFileInfo() API call when available
+	log.Printf("[TIMING] DOWNLOAD %s: DownloadFile() entered, provider init starting", fileName)
 	err := download.DownloadFile(dlCtx, download.DownloadParams{
 		FileID:    req.Source,
 		FileInfo:  req.FileInfo,
