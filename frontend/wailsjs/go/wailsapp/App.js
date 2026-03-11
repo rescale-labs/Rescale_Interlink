@@ -70,8 +70,8 @@ export function GetAutomations() {
   return window['go']['wailsapp']['App']['GetAutomations']();
 }
 
-export function GetBatchTasks(arg1, arg2, arg3) {
-  return window['go']['wailsapp']['App']['GetBatchTasks'](arg1, arg2, arg3);
+export function GetBatchTasks(arg1, arg2, arg3, arg4) {
+  return window['go']['wailsapp']['App']['GetBatchTasks'](arg1, arg2, arg3, arg4);
 }
 
 export function GetConfig() {

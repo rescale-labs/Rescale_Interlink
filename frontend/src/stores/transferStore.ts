@@ -113,6 +113,7 @@ interface TransferStore {
   expandedBatches: Set<string> // v4.7.7: Which batches are expanded
   batchTasks: Map<string, TransferTask[]> // v4.7.7: Lazily loaded expanded tasks
   batchEpochs: Map<string, number> // v4.7.7: Epoch counter per batch for stale-response protection
+  batchStatusFilter: Map<string, string> // v4.8.7: Per-batch status filter ("" = all, "active", "completed", "failed", "cancelled")
   isLoading: boolean
   error: string | null
   isPolling: boolean
@@ -134,6 +135,7 @@ interface TransferStore {
   retryFailedInBatch: (batchID: string) => Promise<void>
   clearCompletedTransfers: () => void
   toggleBatchExpanded: (batchID: string) => void
+  setBatchStatusFilter: (batchID: string, filter: string) => void // v4.8.7: 10D status filter
   handleProgressEvent: (event: ProgressEventDTO) => void
   handleTransferEvent: (event: TransferEventDTO) => void
   handleEnumerationEvent: (event: EnumerationEventDTO) => void // v4.0.8
@@ -211,6 +213,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   expandedBatches: new Set<string>(), // v4.7.7
   batchTasks: new Map<string, TransferTask[]>(), // v4.7.7
   batchEpochs: new Map<string, number>(), // v4.7.7: epoch counter per batch for stale-response protection
+  batchStatusFilter: new Map<string, string>(), // v4.8.7: per-batch status filter
   isLoading: false,
   error: null,
   isPolling: false,
@@ -311,11 +314,14 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
   // v4.7.7: Fetch paginated tasks for an expanded batch
   // v4.7.7: Merge + dedupe + epoch guard to preserve "Show more" pagination across polling
+  // v4.8.7: Reads batchStatusFilter and passes to backend (10D)
   fetchBatchTasks: async (batchID: string, offset: number, limit: number) => {
     try {
+      // v4.8.7: Read active status filter for this batch
+      const stateFilter = get().batchStatusFilter.get(batchID) || ''
       // Capture epoch before the async call
       const epochBefore = get().batchEpochs.get(batchID) ?? 0
-      const tasks = await App.GetBatchTasks(batchID, offset, limit)
+      const tasks = await App.GetBatchTasks(batchID, offset, limit, stateFilter)
       const enhanced = (tasks || []).map(enhanceTask)
 
       // After await: check if batch was invalidated while request was in flight
@@ -327,7 +333,12 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         const existing = newMap.get(batchID) || []
 
         if (offset === 0) {
-          if (enhanced.length < existing.length) {
+          // v4.8.7: When a status filter is active, always replace on offset-0 refresh.
+          // Tasks may have left the filter between polls (e.g., a retried task moves
+          // from "failed" to "active") so stale entries must not survive.
+          if (stateFilter) {
+            newMap.set(batchID, enhanced)
+          } else if (enhanced.length < existing.length) {
             // Poll returned fewer items than user has loaded via "Show more".
             // Check prefix alignment to detect composition changes.
             const prefixAligned = enhanced.length > 0 && enhanced.every(
@@ -538,13 +549,35 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       newMap.delete(batchID)
       const newEpochs = new Map(get().batchEpochs)
       newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
-      set({ expandedBatches: expanded, batchTasks: newMap, batchEpochs: newEpochs })
+      // v4.8.7: Clear status filter on collapse (10D)
+      const newFilters = new Map(get().batchStatusFilter)
+      newFilters.delete(batchID)
+      set({ expandedBatches: expanded, batchTasks: newMap, batchEpochs: newEpochs, batchStatusFilter: newFilters })
     } else {
       expanded.add(batchID)
       set({ expandedBatches: expanded })
       // Fetch first page of tasks
       get().fetchBatchTasks(batchID, 0, 50)
     }
+  },
+
+  // v4.8.7: Set status filter for a batch's expanded task view (10D).
+  // Clears cached tasks, bumps epoch, and re-fetches page 0 with the new filter.
+  setBatchStatusFilter: (batchID: string, filter: string) => {
+    const newFilters = new Map(get().batchStatusFilter)
+    if (filter) {
+      newFilters.set(batchID, filter)
+    } else {
+      newFilters.delete(batchID)
+    }
+    // Clear cached tasks and bump epoch to invalidate in-flight responses
+    const newMap = new Map(get().batchTasks)
+    newMap.delete(batchID)
+    const newEpochs = new Map(get().batchEpochs)
+    newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
+    set({ batchStatusFilter: newFilters, batchTasks: newMap, batchEpochs: newEpochs })
+    // Re-fetch with new filter
+    get().fetchBatchTasks(batchID, 0, 50)
   },
 
   handleProgressEvent: (event: ProgressEventDTO) => {

@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
 **Version:** 4.8.7
-**Build Date:** March 10, 2026
+**Build Date:** March 11, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -116,6 +116,20 @@ This document provides a comprehensive, verified list of all features available 
 ### Bug Fixes (discovered during Plan 4 testing)
 - **ETA flicker fix**: Polling DTO now returns last ticker-computed ETA instead of zero (was causing ETA to flash in/out every 500ms).
 - **Export Logs button**: Uses native save dialog via Go binding instead of blob URL (which doesn't work in Wails WebView).
+
+## v4.8.7 Changes — Transfer Resilience & GUI Polish (Plan 5)
+
+### DNS Error Retry Classification (10A)
+- `ClassifyError()` recognizes DNS errors via `*net.DNSError` type assertion + 4 string fallbacks (`no such host`, `temporary failure in name resolution`, `server misbehaving`, `nodename nor servname provided`). All retry-wrapped operations automatically retry DNS errors.
+
+### Partial-Batch Failure Reporting (10B)
+- New `reportPartialBatchFailure` in `transfer_service.go`: when some files succeed but others fail, network/timeout errors override `IsReportable` suppression (batch context proves infrastructure works). Dominant error class computed from up to 5 failed task samples. Auth/disk/client errors remain suppressed.
+
+### Activity Log Level-Aware Trimming (10C)
+- Two-tier ring buffer: `debugInfoLogs` (8,000 cap) + `warnErrorLogs` (2,000 cap). WARN/ERROR entries are never evicted by high-volume DEBUG/INFO logs. `logVersion` counter enables efficient `useMemo` dependencies.
+
+### Transfer Task Status Filtering (10D)
+- Backend `GetBatchTasks` accepts `stateFilter` parameter (`""`, `"active"`, `"completed"`, `"failed"`, `"cancelled"`). Frontend: filter chip bar in expanded batch view with per-category count badges. Server-side filtering for correct pagination. Cache invalidation on filter change.
 
 ---
 

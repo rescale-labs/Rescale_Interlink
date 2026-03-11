@@ -69,9 +69,9 @@ func TestClassifyErrorClass(t *testing.T) {
 		{"some unknown error", ClassInternal},
 	}
 	for _, tt := range tests {
-		got := classifyErrorClass(tt.msg)
+		got := ClassifyErrorClass(tt.msg)
 		if got != tt.want {
-			t.Errorf("classifyErrorClass(%q) = %q, want %q", tt.msg, got, tt.want)
+			t.Errorf("ClassifyErrorClass(%q) = %q, want %q", tt.msg, got, tt.want)
 		}
 	}
 }

@@ -61,6 +61,13 @@ func ClassifyError(err error) ErrorType {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return ErrorTypeNetwork
 	}
+	// v4.8.7: DNS resolution errors — type-based check (preferred over string matching).
+	// Catches all DNS errors regardless of message format: "no such host",
+	// "server misbehaving", temporary failures, etc.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return ErrorTypeNetwork
+	}
 
 	errStr := strings.ToLower(err.Error())
 
@@ -89,6 +96,8 @@ func ClassifyError(err error) ErrorType {
 
 	// Network errors - retryable with backoff
 	// v4.5.4: Added proxy/connection errors that occur mid-transfer
+	// v4.8.7: Added DNS resolution error string fallbacks for SDK-wrapped errors
+	// where errors.As won't unwrap to *net.DNSError
 	if strings.Contains(errStr, "tls handshake timeout") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "i/o timeout") ||
@@ -100,7 +109,11 @@ func ClassifyError(err error) ErrorType {
 		strings.Contains(errStr, "server closed idle connection") ||
 		strings.Contains(errStr, "proxyconnect tcp") ||
 		strings.Contains(errStr, "stream error") ||
-		strings.Contains(errStr, "http2: server sent goaway") {
+		strings.Contains(errStr, "http2: server sent goaway") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "temporary failure in name resolution") ||
+		strings.Contains(errStr, "server misbehaving") ||
+		strings.Contains(errStr, "nodename nor servname provided") {
 		return ErrorTypeNetwork
 	}
 

@@ -2,8 +2,10 @@ import { create } from 'zustand';
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
 import type { LogEventDTO, LogLevel, ProgressEventDTO, StateChangeEventDTO } from '../types';
 
-// Maximum number of logs to keep in memory
-const MAX_LOGS = 10000;
+// v4.8.7: Two-tier ring buffer — WARN/ERROR entries are never evicted by DEBUG/INFO volume.
+// Total capacity remains 10,000 entries (same memory footprint).
+const MAX_DEBUG_INFO = 8000;   // DEBUG + INFO entries
+const MAX_WARN_ERROR = 2000;   // WARN + ERROR entries (protected tier)
 
 // v4.8.7: Level severity for ">=" filtering (higher = more severe)
 const LEVEL_SEVERITY: Record<string, number> = {
@@ -33,9 +35,31 @@ interface LogStats {
   uptime: number; // milliseconds
 }
 
+// v4.8.7: Merge two sorted-by-id arrays into one. O(n) merge.
+function mergeSortedLogs(a: LogEntry[], b: LogEntry[]): LogEntry[] {
+  if (a.length === 0) return b;
+  if (b.length === 0) return a;
+  const result: LogEntry[] = new Array(a.length + b.length);
+  let i = 0, j = 0, k = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i].id <= b[j].id) {
+      result[k++] = a[i++];
+    } else {
+      result[k++] = b[j++];
+    }
+  }
+  while (i < a.length) result[k++] = a[i++];
+  while (j < b.length) result[k++] = b[j++];
+  return result;
+}
+
 interface LogState {
-  // Data
-  logs: LogEntry[];
+  // v4.8.7: Two-tier storage
+  debugInfoLogs: LogEntry[];
+  warnErrorLogs: LogEntry[];
+  logVersion: number; // Increments on every addLog — lightweight change counter for useMemo
+  errorCount: number;
+  warningCount: number;
   stats: LogStats;
   startTime: Date;
 
@@ -82,9 +106,18 @@ function formatLogEntry(entry: LogEventDTO): string {
   return parts.join(' ');
 }
 
+// v4.8.7: Check if a level is WARN or ERROR (routes to protected tier)
+function isWarnOrError(level: string): boolean {
+  return level === 'WARN' || level === 'ERROR';
+}
+
 export const useLogStore = create<LogState>((set, get) => ({
-  // Initial state
-  logs: [],
+  // Initial state — v4.8.7: two-tier ring buffer
+  debugInfoLogs: [],
+  warnErrorLogs: [],
+  logVersion: 0,
+  errorCount: 0,
+  warningCount: 0,
   stats: { total: 0, errors: 0, warnings: 0, uptime: 0 },
   startTime: new Date(),
   levelFilter: 'INFO' as LogLevel,
@@ -108,21 +141,51 @@ export const useLogStore = create<LogState>((set, get) => ({
     };
 
     set((state) => {
-      // Add new log and trim if needed
-      let newLogs = [...state.logs, entry];
-      if (newLogs.length > MAX_LOGS) {
-        newLogs = newLogs.slice(newLogs.length - MAX_LOGS);
+      let newDebugInfo = state.debugInfoLogs;
+      let newWarnError = state.warnErrorLogs;
+      let newErrorCount = state.errorCount;
+      let newWarningCount = state.warningCount;
+
+      if (isWarnOrError(entry.level)) {
+        // Route to protected WARN/ERROR tier
+        newWarnError = [...newWarnError, entry];
+        if (entry.level === 'ERROR') newErrorCount++;
+        if (entry.level === 'WARN') newWarningCount++;
+
+        // Trim WARN/ERROR tier if over capacity
+        if (newWarnError.length > MAX_WARN_ERROR) {
+          const trimmed = newWarnError.slice(newWarnError.length - MAX_WARN_ERROR);
+          // Recompute counts after trim (rare — only when 2,000 WARN/ERROR entries overflow)
+          newErrorCount = 0;
+          newWarningCount = 0;
+          for (const log of trimmed) {
+            if (log.level === 'ERROR') newErrorCount++;
+            if (log.level === 'WARN') newWarningCount++;
+          }
+          newWarnError = trimmed;
+        }
+      } else {
+        // Route to DEBUG/INFO tier
+        newDebugInfo = [...newDebugInfo, entry];
+        if (newDebugInfo.length > MAX_DEBUG_INFO) {
+          newDebugInfo = newDebugInfo.slice(newDebugInfo.length - MAX_DEBUG_INFO);
+        }
       }
 
-      // Update stats
-      const stats = {
-        total: newLogs.length,
-        errors: newLogs.filter(l => l.level === 'ERROR').length,
-        warnings: newLogs.filter(l => l.level === 'WARN').length,
-        uptime: Date.now() - state.startTime.getTime(),
+      const total = newDebugInfo.length + newWarnError.length;
+      return {
+        debugInfoLogs: newDebugInfo,
+        warnErrorLogs: newWarnError,
+        logVersion: state.logVersion + 1,
+        errorCount: newErrorCount,
+        warningCount: newWarningCount,
+        stats: {
+          total,
+          errors: newErrorCount,
+          warnings: newWarningCount,
+          uptime: Date.now() - state.startTime.getTime(),
+        },
       };
-
-      return { logs: newLogs, stats };
     });
   },
 
@@ -141,7 +204,11 @@ export const useLogStore = create<LogState>((set, get) => ({
   clearLogs: () => {
     nextLogId = 0;
     set({
-      logs: [],
+      debugInfoLogs: [],
+      warnErrorLogs: [],
+      logVersion: 0,
+      errorCount: 0,
+      warningCount: 0,
       stats: { total: 0, errors: 0, warnings: 0, uptime: 0 },
       startTime: new Date(),
       overallProgress: 0,
@@ -150,13 +217,18 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   getFilteredLogs: () => {
-    const { logs, levelFilter, searchTerm } = get();
+    const { debugInfoLogs, warnErrorLogs, levelFilter, searchTerm } = get();
     const lowerSearch = searchTerm.toLowerCase();
 
-    return logs.filter((log) => {
+    // v4.8.7: Optimization — when filter >= WARN, skip DEBUG/INFO tier entirely
+    const minSeverity = levelFilter ? (LEVEL_SEVERITY[levelFilter] ?? 0) : 0;
+    const source = minSeverity >= 2
+      ? warnErrorLogs
+      : mergeSortedLogs(debugInfoLogs, warnErrorLogs);
+
+    return source.filter((log) => {
       // v4.8.7: Level filter uses ">=" semantics (e.g. INFO shows INFO+WARN+ERROR)
       if (levelFilter) {
-        const minSeverity = LEVEL_SEVERITY[levelFilter] ?? 0;
         const logSeverity = LEVEL_SEVERITY[log.level] ?? 0;
         if (logSeverity < minSeverity) return false;
       }
@@ -198,16 +270,17 @@ export const useLogStore = create<LogState>((set, get) => ({
   },
 
   exportLogs: () => {
-    const { logs } = get();
+    const { debugInfoLogs, warnErrorLogs } = get();
+    const allLogs = mergeSortedLogs(debugInfoLogs, warnErrorLogs);
     const lines = [
       'Rescale Interlink Activity Log Export',
       `Exported: ${new Date().toISOString()}`,
-      `Total Entries: ${logs.length}`,
+      `Total Entries: ${allLogs.length}`,
       '='.repeat(80),
       '',
     ];
 
-    for (const log of logs) {
+    for (const log of allLogs) {
       lines.push(log.formattedText);
     }
 

@@ -70,7 +70,9 @@ interface LogEntry {
 
 export function ActivityTab() {
   const {
-    logs,
+    logVersion,
+    debugInfoLogs,
+    warnErrorLogs,
     stats,
     levelFilter,
     searchTerm,
@@ -122,7 +124,7 @@ export function ActivityTab() {
     return [...guiFiltered, ...daemonFiltered].sort(
       (a, b) => a.timestamp.getTime() - b.timestamp.getTime()
     );
-  }, [logs, daemonLogs, levelFilter, searchTerm, getFilteredLogs]);
+  }, [logVersion, daemonLogs, levelFilter, searchTerm, getFilteredLogs]);
 
   // Virtual scrolling for performance with large log counts
   const rowVirtualizer = useVirtualizer({
@@ -515,7 +517,7 @@ export function ActivityTab() {
       >
         {filteredLogs.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-gray-500">
-            {logs.length === 0 ? 'Activity logs will appear here...' : 'No logs match the current filters'}
+            {(debugInfoLogs.length + warnErrorLogs.length) === 0 ? 'Activity logs will appear here...' : 'No logs match the current filters'}
           </div>
         ) : (
           <div

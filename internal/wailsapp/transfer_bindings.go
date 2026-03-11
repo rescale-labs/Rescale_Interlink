@@ -274,7 +274,8 @@ func (a *App) GetUngroupedTransferTasks() []TransferTaskDTO {
 
 // GetBatchTasks returns paginated tasks for a specific batch.
 // v4.7.7: Used for expanded batch detail view in Transfers tab.
-func (a *App) GetBatchTasks(batchID string, offset int, limit int) []TransferTaskDTO {
+// v4.8.7: Added stateFilter parameter for status filtering (10D).
+func (a *App) GetBatchTasks(batchID string, offset int, limit int, stateFilter string) []TransferTaskDTO {
 	if a.engine == nil {
 		return []TransferTaskDTO{}
 	}
@@ -284,7 +285,7 @@ func (a *App) GetBatchTasks(batchID string, offset int, limit int) []TransferTas
 		return []TransferTaskDTO{}
 	}
 
-	tasks := ts.GetQueue().GetBatchTasks(batchID, offset, limit)
+	tasks := ts.GetQueue().GetBatchTasks(batchID, offset, limit, stateFilter)
 	dtos := make([]TransferTaskDTO, len(tasks))
 	for i := range tasks {
 		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(&tasks[i]))

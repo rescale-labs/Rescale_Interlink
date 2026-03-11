@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
@@ -216,6 +217,16 @@ func (ts *TransferService) executePreRegisteredUploadBatch(ctx context.Context, 
 		ts.executeUploadTask(ctx, item.req, item.taskID, apiClient, numWorkers)
 		return nil // errors handled internally via queue.Fail
 	})
+
+	// v4.8.7: Check for batch failures across all batch IDs in this execution.
+	seen := make(map[string]bool)
+	for _, item := range items {
+		bid := item.req.BatchID
+		if bid != "" && !seen[bid] {
+			seen[bid] = true
+			ts.checkBatchCompletion(bid, "upload")
+		}
+	}
 }
 
 // executePreRegisteredDownloadBatch dispatches pre-registered download tasks to workers.
@@ -244,6 +255,16 @@ func (ts *TransferService) executePreRegisteredDownloadBatch(ctx context.Context
 		ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient, numWorkers)
 		return nil // errors handled internally via queue.Fail
 	})
+
+	// v4.8.7: Check for batch failures across all batch IDs in this execution.
+	seen := make(map[string]bool)
+	for _, item := range items {
+		bid := item.req.BatchID
+		if bid != "" && !seen[bid] {
+			seen[bid] = true
+			ts.checkBatchCompletion(bid, "download")
+		}
+	}
 }
 
 // StartStreamingDownloadBatch accepts a channel of TransferRequest and registers+dispatches
@@ -338,7 +359,7 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 		log.Printf("[BATCH] Streaming DOWNLOAD batch complete: %s", batchID)
 
 		// v4.8.7: Check for total batch failure and publish reportable error event.
-		ts.checkBatchFailure(batchID, "download")
+		ts.checkBatchCompletion(batchID, "download")
 	}()
 
 	return nil
@@ -430,7 +451,7 @@ func (ts *TransferService) StartStreamingUploadBatch(
 		log.Printf("[BATCH] Streaming UPLOAD batch complete: %s", batchID)
 
 		// v4.8.7: Check for total batch failure and publish reportable error event.
-		ts.checkBatchFailure(batchID, "upload")
+		ts.checkBatchCompletion(batchID, "upload")
 	}()
 
 	return nil
@@ -990,22 +1011,120 @@ func (ts *TransferService) GetTasks() []TransferTask {
 	return tasks
 }
 
-// checkBatchFailure checks if a completed batch had all tasks fail (0 succeeded, >0 failed).
-// If so, it publishes a ReportableErrorEvent via the EventBus.
+// checkBatchCompletion checks a completed batch for failures and publishes appropriate reports.
 // v4.8.7: Plan 3 (6A-6E) — batch-level failure reporting.
-func (ts *TransferService) checkBatchFailure(batchID, direction string) {
+// v4.8.7: Plan 5 (10B) — partial-batch failure reporting for mixed success/failure batches.
+func (ts *TransferService) checkBatchCompletion(batchID, direction string) {
 	batches := ts.queue.GetAllBatchStats()
 	for _, bs := range batches {
 		if bs.BatchID != batchID {
 			continue
 		}
-		// Only report total wipeout: all tasks failed, none completed
-		if bs.Failed > 0 && bs.Completed == 0 && bs.Total > 0 {
+		if bs.Failed == 0 || bs.Total == 0 {
+			return // No failures
+		}
+
+		if bs.Completed == 0 {
+			// Total wipeout — existing behavior (standard reportability check).
+			// If the error is user-fixable (e.g., network down), IsReportable correctly suppresses it.
 			err := fmt.Errorf("batch %s failed: %d/%d transfers failed", direction, bs.Failed, bs.Total)
 			reporting.ClassifyAndPublish(ts.eventBus, err, reporting.CategoryTransfer, "folder_"+direction, "")
+		} else {
+			// Partial failure: some succeeded, some failed.
+			// Batch context proves infrastructure works — per-error classification (e.g., ClassNetwork)
+			// would wrongly suppress this. Build a report with batch context + representative failure.
+			ts.reportPartialBatchFailure(batchID, direction, bs)
 		}
 		return
 	}
+}
+
+// reportPartialBatchFailure inspects failed tasks in a partial-failure batch, determines the
+// dominant error class, and publishes a ReportableErrorEvent when batch context contradicts
+// the per-error classification (e.g., network errors in a mostly-successful batch).
+// v4.8.7: Plan 5 (10B).
+func (ts *TransferService) reportPartialBatchFailure(batchID, direction string, bs transfer.BatchStats) {
+	failedTasks := ts.queue.GetFailedTaskErrors(batchID, 5)
+	if len(failedTasks) == 0 {
+		return
+	}
+
+	// Compute the dominant error class across sampled failures.
+	classCounts := make(map[reporting.ErrorClass]int)
+	for _, errMsg := range failedTasks {
+		cls := reporting.ClassifyErrorClass(errMsg)
+		classCounts[cls]++
+	}
+	var dominantClass reporting.ErrorClass
+	var maxCount int
+	for cls, count := range classCounts {
+		if count > maxCount {
+			dominantClass = cls
+			maxCount = count
+		}
+	}
+
+	// Pick the first error matching the dominant class as representative.
+	var representativeErr string
+	for _, errMsg := range failedTasks {
+		if reporting.ClassifyErrorClass(errMsg) == dominantClass {
+			representativeErr = errMsg
+			break
+		}
+	}
+
+	// GATE: Explicit handling per error class.
+	switch dominantClass {
+	case reporting.ClassNetwork, reporting.ClassTimeout:
+		// Override suppression: batch context contradicts per-error classification.
+		// Network/timeout errors are "user-fixable" per IsReportable, but most files
+		// succeeded on the same network -> transient infrastructure issue -> publish.
+		// (Falls through to publish below)
+
+	case reporting.ClassAuth, reporting.ClassDiskSpace, reporting.ClassClientError:
+		// DO NOT publish. Batch context does NOT contradict these:
+		// - Auth: bad credentials affect all files
+		// - Disk: local condition, not infrastructure
+		// - Client: 400/404 = bad input for specific files
+		return
+
+	case reporting.ClassServerError, reporting.ClassInternal:
+		// Use normal reporting path — these are already reportable via IsReportable.
+		// Re-classify using the representative error so the classifier sees the original markers.
+		reporting.ClassifyAndPublish(ts.eventBus, errors.New(representativeErr),
+			reporting.CategoryTransfer, "folder_"+direction, "")
+		return
+	}
+
+	// Build message with batch context + representative failure (for network/timeout override)
+	msg := fmt.Sprintf("batch %s partial failure: %d/%d succeeded, %d failed; representative error: %s",
+		direction, bs.Completed, bs.Total, bs.Failed, representativeErr)
+
+	classified := reporting.Classify(errors.New(msg), reporting.CategoryTransfer, "folder_"+direction, "")
+	if classified == nil {
+		return
+	}
+
+	var timeline []events.SanitizedTimelineEntry
+	if ts.eventBus != nil {
+		raw := ts.eventBus.RecentEvents()
+		timeline = reporting.RedactTimeline(raw, 20)
+	}
+
+	ts.eventBus.Publish(&events.ReportableErrorEvent{
+		BaseEvent: events.BaseEvent{
+			EventType: events.EventReportableError,
+			Time:      time.Now(),
+		},
+		ErrorID:      classified.ErrorID,
+		Category:     string(classified.Category),
+		Severity:     string(classified.Severity),
+		Operation:    classified.Operation,
+		Backend:      classified.Backend,
+		ErrorMessage: classified.ErrorMessage,
+		ErrorClass:   string(classified.ErrorClass),
+		Timeline:     timeline,
+	})
 }
 
 // ClearCompleted removes completed/failed/cancelled transfers from tracking.

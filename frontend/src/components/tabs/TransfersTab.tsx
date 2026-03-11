@@ -167,20 +167,23 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
 }
 
 // v4.7.7: Batch row for grouped transfer display
+// v4.8.7: Added statusFilter and onFilterChange for 10D status filtering
 interface BatchRowProps {
   batch: TransferBatch
   isExpanded: boolean
   expandedTasks: TransferTask[]
+  statusFilter: string
   onToggle: () => void
   onCancel: () => void
   onRetryFailed: () => void
   onLoadMore: () => void
   onCancelTask: (taskId: string) => void
   onRetryTask: (taskId: string) => void
+  onFilterChange: (filter: string) => void
 }
 
 const BatchRow = memo(function BatchRow({
-  batch, isExpanded, expandedTasks, onToggle, onCancel, onRetryFailed, onLoadMore, onCancelTask, onRetryTask
+  batch, isExpanded, expandedTasks, statusFilter, onToggle, onCancel, onRetryFailed, onLoadMore, onCancelTask, onRetryTask, onFilterChange
 }: BatchRowProps) {
   const isActive = batch.queued > 0 || batch.active > 0 || !batch.totalKnown
   const isAllComplete = batch.totalKnown && batch.total > 0 && batch.completed === batch.total
@@ -368,9 +371,87 @@ const BatchRow = memo(function BatchRow({
         </div>
       </div>
 
-      {/* Expanded: show paginated task rows */}
+      {/* Expanded: show filter chips + paginated task rows */}
       {isExpanded && (
         <div className="bg-gray-50/50 dark:bg-gray-800/20">
+          {/* v4.8.7: Status filter chips (10D) */}
+          {batch.total > 0 && (
+            <div className="flex items-center gap-1.5 px-4 py-2 border-b border-gray-100 dark:border-gray-700/50" onClick={e => e.stopPropagation()}>
+              <span className="text-xs text-gray-500 mr-1">Filter:</span>
+              {/* All */}
+              <button
+                onClick={() => onFilterChange('')}
+                className={clsx(
+                  'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                  !statusFilter
+                    ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                    : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                )}
+              >
+                All ({formatNumber(batch.total)})
+              </button>
+              {/* Active — only shown when count > 0 */}
+              {(batch.active + batch.queued) > 0 && (
+                <button
+                  onClick={() => onFilterChange('active')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'active'
+                      ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Active ({formatNumber(batch.active + batch.queued)})
+                </button>
+              )}
+              {/* Succeeded */}
+              {batch.completed > 0 && (
+                <button
+                  onClick={() => onFilterChange('completed')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'completed'
+                      ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 border-green-300 dark:border-green-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Succeeded ({formatNumber(batch.completed)})
+                </button>
+              )}
+              {/* Failed */}
+              {batch.failed > 0 && (
+                <button
+                  onClick={() => onFilterChange('failed')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'failed'
+                      ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 border-red-300 dark:border-red-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Failed ({formatNumber(batch.failed)})
+                  {/* Red badge when failed > 0 and not actively filtered */}
+                  {statusFilter !== 'failed' && (
+                    <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-red-500" />
+                  )}
+                </button>
+              )}
+              {/* Cancelled */}
+              {batch.cancelled > 0 && (
+                <button
+                  onClick={() => onFilterChange('cancelled')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'cancelled'
+                      ? 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-400 dark:border-gray-600'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Cancelled ({formatNumber(batch.cancelled)})
+                </button>
+              )}
+            </div>
+          )}
           {expandedTasks.map(task => (
             <TransferRow
               key={task.id}
@@ -380,16 +461,26 @@ const BatchRow = memo(function BatchRow({
               indent
             />
           ))}
-          {expandedTasks.length < batch.total && (
-            <div className="px-4 py-2 text-center">
-              <button
-                onClick={(e) => { e.stopPropagation(); onLoadMore() }}
-                className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
-              >
-                Show more ({formatNumber(batch.total - expandedTasks.length)} remaining)
-              </button>
-            </div>
-          )}
+          {(() => {
+            // v4.8.7: "Show more" count uses filtered total when filter is active (10D)
+            const filteredTotal = statusFilter === 'completed' ? batch.completed
+              : statusFilter === 'failed' ? batch.failed
+              : statusFilter === 'cancelled' ? batch.cancelled
+              : statusFilter === 'active' ? (batch.active + batch.queued)
+              : batch.total
+            const remaining = filteredTotal - expandedTasks.length
+            if (remaining <= 0) return null
+            return (
+              <div className="px-4 py-2 text-center">
+                <button
+                  onClick={(e) => { e.stopPropagation(); onLoadMore() }}
+                  className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
+                >
+                  Show more ({formatNumber(remaining)} remaining)
+                </button>
+              </div>
+            )
+          })()}
         </div>
       )}
     </>
@@ -626,6 +717,7 @@ export function TransfersTab() {
     daemonBatches, // v4.7.8: daemon auto-download batches (read-only)
     expandedBatches,
     batchTasks,
+    batchStatusFilter,
     startPolling,
     stopPolling,
     cancelTransfer,
@@ -636,6 +728,7 @@ export function TransfersTab() {
     clearCompletedTransfers,
     toggleBatchExpanded,
     fetchBatchTasks,
+    setBatchStatusFilter,
   } = useTransferStore()
 
   // v4.7.1: State for disk space banner — independent of task list
@@ -806,6 +899,7 @@ export function TransfersTab() {
                 batch={batch}
                 isExpanded={expandedBatches.has(batch.batchID)}
                 expandedTasks={batchTasks.get(batch.batchID) || []}
+                statusFilter={batchStatusFilter.get(batch.batchID) || ''}
                 onToggle={() => toggleBatchExpanded(batch.batchID)}
                 onCancel={() => cancelBatch(batch.batchID)}
                 onRetryFailed={() => retryFailedInBatch(batch.batchID)}
@@ -815,6 +909,7 @@ export function TransfersTab() {
                 }}
                 onCancelTask={handleCancel}
                 onRetryTask={handleRetry}
+                onFilterChange={(filter) => setBatchStatusFilter(batch.batchID, filter)}
               />
             ))}
 

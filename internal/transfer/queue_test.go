@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -803,27 +804,79 @@ func TestGetBatchTasksPaginated(t *testing.T) {
 	}
 
 	// First page: offset=0, limit=3
-	page1 := queue.GetBatchTasks("batch1", 0, 3)
+	page1 := queue.GetBatchTasks("batch1", 0, 3, "")
 	if len(page1) != 3 {
 		t.Errorf("Expected 3 tasks in page1, got %d", len(page1))
 	}
 
 	// Second page: offset=3, limit=3
-	page2 := queue.GetBatchTasks("batch1", 3, 3)
+	page2 := queue.GetBatchTasks("batch1", 3, 3, "")
 	if len(page2) != 2 {
 		t.Errorf("Expected 2 tasks in page2, got %d", len(page2))
 	}
 
 	// Beyond end: offset=10, limit=3
-	page3 := queue.GetBatchTasks("batch1", 10, 3)
+	page3 := queue.GetBatchTasks("batch1", 10, 3, "")
 	if len(page3) != 0 {
 		t.Errorf("Expected 0 tasks beyond end, got %d", len(page3))
 	}
 
 	// Nonexistent batch
-	page4 := queue.GetBatchTasks("nonexistent", 0, 50)
+	page4 := queue.GetBatchTasks("nonexistent", 0, 50, "")
 	if len(page4) != 0 {
 		t.Errorf("Expected 0 tasks for nonexistent batch, got %d", len(page4))
+	}
+}
+
+// v4.8.7: Test stateFilter parameter for status-based task filtering (10D).
+func TestGetBatchTasksWithStateFilter(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create 10 tasks in a batch: 6 completed, 3 failed, 1 queued
+	for i := 0; i < 6; i++ {
+		task := queue.TrackTransferWithBatch("ok.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
+		queue.Complete(task.ID)
+	}
+	for i := 0; i < 3; i++ {
+		task := queue.TrackTransferWithBatch("fail.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
+		queue.Fail(task.ID, fmt.Errorf("network error"))
+	}
+	queue.TrackTransferWithBatch("queued.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
+
+	// No filter — all 10
+	all := queue.GetBatchTasks("batch-filter", 0, 50, "")
+	if len(all) != 10 {
+		t.Errorf("no filter: expected 10 tasks, got %d", len(all))
+	}
+
+	// Filter: completed
+	completed := queue.GetBatchTasks("batch-filter", 0, 50, "completed")
+	if len(completed) != 6 {
+		t.Errorf("completed filter: expected 6, got %d", len(completed))
+	}
+
+	// Filter: failed
+	failed := queue.GetBatchTasks("batch-filter", 0, 50, "failed")
+	if len(failed) != 3 {
+		t.Errorf("failed filter: expected 3, got %d", len(failed))
+	}
+
+	// Filter: active (queued tasks count as active meta-filter)
+	active := queue.GetBatchTasks("batch-filter", 0, 50, "active")
+	if len(active) != 1 {
+		t.Errorf("active filter: expected 1 (queued), got %d", len(active))
+	}
+
+	// Filter: cancelled (none)
+	cancelled := queue.GetBatchTasks("batch-filter", 0, 50, "cancelled")
+	if len(cancelled) != 0 {
+		t.Errorf("cancelled filter: expected 0, got %d", len(cancelled))
+	}
+
+	// Pagination with filter: failed, page of 2
+	failedPage := queue.GetBatchTasks("batch-filter", 0, 2, "failed")
+	if len(failedPage) != 2 {
+		t.Errorf("failed paginated: expected 2, got %d", len(failedPage))
 	}
 }
 

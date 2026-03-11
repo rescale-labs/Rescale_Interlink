@@ -61,7 +61,7 @@ func Classify(err error, category ErrorCategory, operation, backend string) *Cla
 	}
 
 	msg := err.Error()
-	class := classifyErrorClass(msg)
+	class := ClassifyErrorClass(msg)
 
 	severity := SeverityError
 	if category == CategoryAuth || class == ClassAuth {
@@ -113,7 +113,7 @@ func IsReportable(err error, category ErrorCategory) bool {
 
 	// Classify the error to filter user-fixable problems.
 	// Only server errors (5xx) and unclassified internal errors are reportable.
-	class := classifyErrorClass(msg)
+	class := ClassifyErrorClass(msg)
 	switch class {
 	case ClassAuth: // wrong/expired credentials — user can fix
 		return false
@@ -132,10 +132,11 @@ func IsReportable(err error, category ErrorCategory) bool {
 	return true
 }
 
-// classifyErrorClass maps error message patterns to an ErrorClass.
+// ClassifyErrorClass maps error message patterns to an ErrorClass.
+// Exported in v4.8.7 for partial-batch failure gate in transfer_service.go.
 // Mirrors the pattern matching in translateAPIError (file_bindings.go)
 // and classifyError (transferStore.ts).
-func classifyErrorClass(msg string) ErrorClass {
+func ClassifyErrorClass(msg string) ErrorClass {
 	lower := strings.ToLower(msg)
 
 	switch {

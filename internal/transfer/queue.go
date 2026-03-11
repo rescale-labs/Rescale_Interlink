@@ -722,15 +722,33 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 
 // GetBatchTasks returns paginated tasks for a specific batch.
 // v4.7.7: Used for expanded batch detail view.
-func (q *Queue) GetBatchTasks(batchID string, offset, limit int) []TransferTask {
+// v4.8.7: Added stateFilter parameter for status filtering (10D).
+//
+//	"" = all tasks, "active" = non-terminal (queued/initializing/active),
+//	or exact state string ("completed", "failed", "cancelled").
+func (q *Queue) GetBatchTasks(batchID string, offset, limit int, stateFilter string) []TransferTask {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
 	var matching []TransferTask
 	for _, task := range q.tasks {
-		if task.BatchID == batchID {
-			matching = append(matching, task.Clone())
+		if task.BatchID != batchID {
+			continue
 		}
+		if stateFilter != "" {
+			state := task.GetState()
+			if stateFilter == "active" {
+				// Meta-filter: non-terminal states (queued, initializing, active).
+				// Consistent with BatchStats.Active counting (queue.go:639-642).
+				// TaskPaused excluded — BatchStats doesn't count it in Active.
+				if state == TaskCompleted || state == TaskFailed || state == TaskCancelled || state == TaskPaused {
+					continue
+				}
+			} else if string(state) != stateFilter {
+				continue
+			}
+		}
+		matching = append(matching, task.Clone())
 	}
 
 	// Apply pagination
@@ -742,6 +760,23 @@ func (q *Queue) GetBatchTasks(batchID string, offset, limit int) []TransferTask 
 		end = len(matching)
 	}
 	return matching[offset:end]
+}
+
+// GetFailedTaskErrors returns error messages from failed tasks in a batch (up to limit).
+// v4.8.7: Used by partial-batch failure reporter to include representative failure details.
+func (q *Queue) GetFailedTaskErrors(batchID string, limit int) []string {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	var errs []string
+	for _, task := range q.tasks {
+		if task.BatchID == batchID && task.GetState() == TaskFailed && task.Error != nil {
+			errs = append(errs, task.Error.Error())
+			if len(errs) >= limit {
+				break
+			}
+		}
+	}
+	return errs
 }
 
 // GetUngroupedTasks returns tasks with no BatchID.

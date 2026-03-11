@@ -36,7 +36,7 @@ export function GetAppInfo():Promise<wailsapp.AppInfoDTO>;
 
 export function GetAutomations():Promise<wailsapp.AutomationsResultDTO>;
 
-export function GetBatchTasks(arg1:string,arg2:number,arg3:number):Promise<Array<wailsapp.TransferTaskDTO>>;
+export function GetBatchTasks(arg1:string,arg2:number,arg3:number,arg4:string):Promise<Array<wailsapp.TransferTaskDTO>>;
 
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
 

@@ -2,9 +2,12 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/transfer"
 )
 
 func TestNewTransferService(t *testing.T) {
@@ -153,5 +156,183 @@ func TestStreamingDownloadBatchAdaptiveConcurrency(t *testing.T) {
 	if smallWorkers <= largeWorkers {
 		t.Errorf("adaptive concurrency broken: small files got %d workers, large files got %d (expected small > large)",
 			smallWorkers, largeWorkers)
+	}
+}
+
+// v4.8.7: checkBatchCompletion tests (Plan 5, 10B)
+
+// TestCheckBatchCompletion_TotalWipeout verifies that a batch where ALL tasks failed
+// triggers a report via the standard ClassifyAndPublish path.
+func TestCheckBatchCompletion_TotalWipeout(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	// Create 5 tasks, fail all of them with a 500 error (reportable via standard path)
+	for i := 0; i < 5; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("file%d.dat", i), 1024, transfer.TaskTypeUpload,
+			"/src", "/dst", "FileBrowser", "batch-total", "TestBatch",
+		)
+		q.Fail(task.ID, fmt.Errorf("500 internal server error"))
+	}
+
+	ts.checkBatchCompletion("batch-total", "upload")
+
+	select {
+	case event := <-ch:
+		re := event.(*events.ReportableErrorEvent)
+		if re.Category != "transfer" {
+			t.Errorf("expected category 'transfer', got %q", re.Category)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected ReportableErrorEvent for total wipeout, got none")
+	}
+}
+
+// TestCheckBatchCompletion_PartialNetworkFailure verifies that a batch with partial
+// network failures publishes a report (overriding IsReportable suppression).
+func TestCheckBatchCompletion_PartialNetworkFailure(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	// 8 completed + 2 failed with DNS error
+	for i := 0; i < 8; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeUpload,
+			"/src", "/dst", "FileBrowser", "batch-partial", "TestBatch",
+		)
+		q.Complete(task.ID)
+	}
+	for i := 0; i < 2; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("fail%d.dat", i), 1024, transfer.TaskTypeUpload,
+			"/src", "/dst", "FileBrowser", "batch-partial", "TestBatch",
+		)
+		q.Fail(task.ID, fmt.Errorf("dial tcp: lookup api.rescale.com: no such host"))
+	}
+
+	ts.checkBatchCompletion("batch-partial", "upload")
+
+	select {
+	case event := <-ch:
+		re := event.(*events.ReportableErrorEvent)
+		if re.Category != "transfer" {
+			t.Errorf("expected category 'transfer', got %q", re.Category)
+		}
+		// Should contain partial failure context
+		if re.ErrorMessage == "" {
+			t.Error("expected non-empty ErrorMessage with batch context")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected ReportableErrorEvent for partial network failure, got none")
+	}
+}
+
+// TestCheckBatchCompletion_PartialAuthFailure verifies that partial auth failures
+// are NOT published (batch context doesn't contradict auth errors).
+func TestCheckBatchCompletion_PartialAuthFailure(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	// 5 completed + 2 failed with auth error
+	for i := 0; i < 5; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeDownload,
+			"/src", "/dst", "FileBrowser", "batch-auth", "TestBatch",
+		)
+		q.Complete(task.ID)
+	}
+	for i := 0; i < 2; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("fail%d.dat", i), 1024, transfer.TaskTypeDownload,
+			"/src", "/dst", "FileBrowser", "batch-auth", "TestBatch",
+		)
+		q.Fail(task.ID, fmt.Errorf("403 Forbidden"))
+	}
+
+	ts.checkBatchCompletion("batch-auth", "download")
+
+	select {
+	case <-ch:
+		t.Fatal("expected NO ReportableErrorEvent for partial auth failure, but got one")
+	case <-time.After(200 * time.Millisecond):
+		// Expected — auth errors in partial batch should NOT be reported
+	}
+}
+
+// TestCheckBatchCompletion_NoFailures verifies that a fully successful batch
+// does NOT trigger any report.
+func TestCheckBatchCompletion_NoFailures(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	for i := 0; i < 5; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeUpload,
+			"/src", "/dst", "FileBrowser", "batch-ok", "TestBatch",
+		)
+		q.Complete(task.ID)
+	}
+
+	ts.checkBatchCompletion("batch-ok", "upload")
+
+	select {
+	case <-ch:
+		t.Fatal("expected NO ReportableErrorEvent for successful batch, but got one")
+	case <-time.After(200 * time.Millisecond):
+		// Expected — no failures means no report
+	}
+}
+
+// TestCheckBatchCompletion_PartialServerError verifies that partial server errors
+// use the standard ClassifyAndPublish path (server errors are already reportable).
+func TestCheckBatchCompletion_PartialServerError(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	// 3 completed + 1 failed with 500 server error
+	for i := 0; i < 3; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeUpload,
+			"/src", "/dst", "FileBrowser", "batch-5xx", "TestBatch",
+		)
+		q.Complete(task.ID)
+	}
+	task := q.TrackTransferWithBatch(
+		"fail.dat", 1024, transfer.TaskTypeUpload,
+		"/src", "/dst", "FileBrowser", "batch-5xx", "TestBatch",
+	)
+	q.Fail(task.ID, fmt.Errorf("500 internal server error"))
+
+	ts.checkBatchCompletion("batch-5xx", "upload")
+
+	select {
+	case event := <-ch:
+		re := event.(*events.ReportableErrorEvent)
+		if re.ErrorClass != "server_error" {
+			t.Errorf("expected error class 'server_error', got %q", re.ErrorClass)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected ReportableErrorEvent for partial server error, got none")
 	}
 }

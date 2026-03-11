@@ -1,6 +1,6 @@
 # Release Notes - Rescale Interlink
 
-## v4.8.7 - March 10, 2026
+## v4.8.7 - March 11, 2026
 
 ### Foundations & Quick Wins (Plan 1)
 
@@ -136,6 +136,22 @@ Five user-facing display fixes plus backend log routing and download cold-start 
 - **ETA flicker fix (10E)**: `GetAllBatchStats()` (polled every 500ms) never populated `ETASeconds`, returning 0 and overwriting the event-driven ETA every poll cycle. Added `batchLastETA` map — batch ticker stores computed ETA, polling reads it back. ETA now displays stably.
 - **Export Logs button (10F)**: Blob URL downloads don't work in Wails WebView. Added `SaveLogExport()` Go binding using native `runtime.SaveFileDialog`. Activity Logs "Export" button now opens a save dialog.
 
+### Transfer Resilience & GUI Polish (Plan 5)
+
+Four fixes discovered during Plan 4 manual testing of a 14,000-file batch upload.
+
+### DNS Error Retry Classification (10A)
+- `ClassifyError()` now recognizes DNS resolution failures (`*net.DNSError` type assertion + 4 string fallback patterns). All S3/Azure operations wrapped in `RetryWithBackoff` automatically retry DNS errors with exponential backoff. Previously, `"no such host"` errors fell through to `ErrorTypeFatal` and were never retried.
+
+### Partial-Batch Failure Reporting (10B)
+- `checkBatchCompletion` (renamed from `checkBatchFailure`) now handles partial failures: when some files succeed and some fail, the error report dialog is triggered for network/timeout errors (overriding `IsReportable` suppression — batch context proves infrastructure works). Auth/disk/client errors remain correctly suppressed. Dominant error class computed across up to 5 sampled failures.
+
+### Activity Log Level-Aware Trimming (10C)
+- Two-tier ring buffer: `debugInfoLogs` (8,000 cap) + `warnErrorLogs` (2,000 cap). WARN/ERROR entries are never evicted by DEBUG/INFO volume. Same 10,000 total memory footprint. `getFilteredLogs()` skips merge when filter >= WARN.
+
+### Transfer Task Status Filtering (10D)
+- Expanded batch view now shows filter chips: All / Active / Succeeded / Failed / Cancelled. Clicking a chip filters the task list server-side (`GetBatchTasks` with `stateFilter` parameter). Failed chip has red dot indicator when failures exist. "Show more" pagination respects the active filter.
+
 ### Files Changed
 
 | File | Changes |
@@ -215,7 +231,20 @@ Five user-facing display fixes plus backend log routing and download cold-start 
 | `internal/wailsapp/file_bindings.go` | Plan 4: Synchronous credential pre-warm, UpdateBatchDiscovered for downloads, timing logs |
 | `internal/transfer/queue.go` | Plan 4 testing: batchLastETA map for stable ETA in polling DTO (10E fix) |
 | `internal/wailsapp/reporting_bindings.go` | Plan 4 testing: SaveLogExport binding for native save dialog (10F fix) |
-| `frontend/src/components/tabs/ActivityTab.tsx` | Plan 4 testing: handleExport uses SaveLogExport binding instead of blob URL (10F fix) |
+| `frontend/src/components/tabs/ActivityTab.tsx` | Plan 4 testing: handleExport uses SaveLogExport binding instead of blob URL (10F fix); Plan 5 10C: logVersion/debugInfoLogs/warnErrorLogs dependency update |
+| `internal/http/retry.go` | Plan 5 10A: `*net.DNSError` type check + 4 DNS string fallback patterns in ClassifyError |
+| `internal/http/retry_test.go` | Plan 5 10A: TestClassifyError (20 cases) + TestExecuteWithRetry_DNSError + TestExecuteWithRetry_DNSErrorString |
+| `internal/reporting/classifier.go` | Plan 5 10B: Export `classifyErrorClass` → `ClassifyErrorClass` for partial-batch gate |
+| `internal/services/transfer_service.go` | Plan 5 10B: Rename checkBatchFailure→checkBatchCompletion, new reportPartialBatchFailure, batch completion checks in pre-registered paths |
+| `internal/services/transfer_service_test.go` | Plan 5 10B: 5 tests — total wipeout, partial network, partial auth, no failures, partial server error |
+| `internal/transfer/queue.go` | Plan 5 10B: GetFailedTaskErrors; 10D: stateFilter parameter on GetBatchTasks |
+| `internal/transfer/queue_test.go` | Plan 5 10D: TestGetBatchTasksWithStateFilter |
+| `internal/wailsapp/transfer_bindings.go` | Plan 5 10D: 4th stateFilter parameter on GetBatchTasks binding |
+| `frontend/wailsjs/go/wailsapp/App.js` | Plan 5 10D: Auto-generated — GetBatchTasks 4-arg signature |
+| `frontend/wailsjs/go/wailsapp/App.d.ts` | Plan 5 10D: Auto-generated — GetBatchTasks type with stateFilter |
+| `frontend/src/stores/logStore.ts` | Plan 5 10C: Two-tier ring buffer (debugInfoLogs 8k + warnErrorLogs 2k), logVersion counter, mergeSortedLogs |
+| `frontend/src/stores/transferStore.ts` | Plan 5 10D: batchStatusFilter Map, setBatchStatusFilter action, filtered fetchBatchTasks, cache invalidation |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Plan 5 10D: Filter chip bar (All/Active/Succeeded/Failed/Cancelled) in expanded batch view |
 
 ---
 
