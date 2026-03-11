@@ -146,6 +146,8 @@ export function SaveJobToSGE(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>
 
 export function SaveJobsToCSV(arg1:string,arg2:Array<wailsapp.JobSpecDTO>):Promise<void>;
 
+export function SaveLogExport(arg1:string):Promise<string>;
+
 export function SaveTemplate(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>;
 
 export function ScanDirectory(arg1:wailsapp.ScanOptionsDTO,arg2:wailsapp.JobSpecDTO):Promise<wailsapp.ScanResultDTO>;

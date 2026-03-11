@@ -3,7 +3,7 @@ import { useLogStore } from '../../stores';
 import { useRunStore } from '../../stores/runStore';
 import type { LogLevel } from '../../types';
 import type { JobRow } from '../../types/jobs';
-import { GetDaemonStatus, GetDaemonLogs, GetRunHistory, GetHistoricalJobRows } from '../../../wailsjs/go/wailsapp/App';
+import { GetDaemonStatus, GetDaemonLogs, GetRunHistory, GetHistoricalJobRows, SaveLogExport } from '../../../wailsjs/go/wailsapp/App';
 import { JobsTable } from '../widgets';
 import { formatDurationMs } from '../../utils/formatDuration';
 import {
@@ -250,18 +250,16 @@ export function ActivityTab() {
 
   const hasRunHistory = completedRuns.length > 0 || historicalRuns.length > 0;
 
-  const handleExport = () => {
+  const handleExport = async () => {
     const content = exportLogs();
-    // Create a blob and download
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `interlink-activity-${new Date().toISOString().slice(0, 10)}.log`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    try {
+      const path = await SaveLogExport(content);
+      if (path) {
+        console.log('Logs exported to:', path);
+      }
+    } catch (err) {
+      console.error('Failed to export logs:', err);
+    }
   };
 
   const handleClear = () => {

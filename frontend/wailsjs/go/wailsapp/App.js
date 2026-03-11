@@ -290,6 +290,10 @@ export function SaveJobsToCSV(arg1, arg2) {
   return window['go']['wailsapp']['App']['SaveJobsToCSV'](arg1, arg2);
 }
 
+export function SaveLogExport(arg1) {
+  return window['go']['wailsapp']['App']['SaveLogExport'](arg1);
+}
+
 export function SaveTemplate(arg1, arg2) {
   return window['go']['wailsapp']['App']['SaveTemplate'](arg1, arg2);
 }

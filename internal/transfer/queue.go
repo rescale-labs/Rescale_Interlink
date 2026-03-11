@@ -81,6 +81,7 @@ type Queue struct {
 	batchDiscoveredTotal  map[string]int         // total files discovered (may exceed registered tasks)
 	batchDiscoveredBytes  map[string]int64       // total bytes discovered
 	batchPrevETA          map[string]float64     // smoothed ETA state
+	batchLastETA          map[string]float64     // v4.8.7: last computed ETA (for polling DTO)
 	batchStartedAt        map[string]time.Time   // v4.8.7: batch start time for elapsed display
 }
 
@@ -101,6 +102,7 @@ func NewQueue(eventBus *events.EventBus) *Queue {
 		batchDiscoveredTotal:  make(map[string]int),
 		batchDiscoveredBytes:  make(map[string]int64),
 		batchPrevETA:          make(map[string]float64),
+		batchLastETA:          make(map[string]float64),
 		batchStartedAt:        make(map[string]time.Time),
 		eventBus:              eventBus,
 	}
@@ -666,6 +668,10 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		if t, exists := q.batchStartedAt[batchID]; exists {
 			bs.StartedAt = t
 		}
+		// v4.8.7: Return last ticker-computed ETA so polling DTO doesn't zero it out
+		if eta, exists := q.batchLastETA[batchID]; exists {
+			bs.ETASeconds = eta
+		}
 	}
 
 	// v4.8.2: Include pre-registered batches that have no tasks yet
@@ -1028,9 +1034,11 @@ func (q *Queue) batchTickerLoop() {
 		}
 
 		// v4.8.5: Compute ETAs under write lock (needs batchPrevETA state)
+		// v4.8.7: Store last computed ETA so polling DTO can return it
 		q.mu.Lock()
 		for i := range stats {
 			stats[i].ETASeconds = q.computeBatchETA(stats[i].BatchID, &stats[i])
+			q.batchLastETA[stats[i].BatchID] = stats[i].ETASeconds
 		}
 		q.mu.Unlock()
 
@@ -1090,5 +1098,6 @@ func (q *Queue) cleanupBatchMetrics(batchID string) {
 	delete(q.batchDiscoveredTotal, batchID)
 	delete(q.batchDiscoveredBytes, batchID)
 	delete(q.batchPrevETA, batchID)
+	delete(q.batchLastETA, batchID)   // v4.8.7
 	delete(q.batchStartedAt, batchID) // v4.8.7
 }

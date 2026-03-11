@@ -1,7 +1,7 @@
 # Rescale Interlink - Complete Feature Summary
 
 **Version:** 4.8.7
-**Build Date:** March 9, 2026
+**Build Date:** March 10, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document provides a comprehensive, verified list of all features available in Rescale Interlink.
@@ -112,6 +112,10 @@ This document provides a comprehensive, verified list of all features available 
 - Synchronous credential pre-warm in `StartFolderDownload`/`StartFolderUpload` eliminates 2-5s lock contention on first download.
 - Download scan-consumer calls `UpdateBatchDiscovered()` on every file at discovery (was missing — only uploads had it).
 - `[TIMING]` instrumentation from credential pre-warm through to `DownloadFile()` entry.
+
+### Bug Fixes (discovered during Plan 4 testing)
+- **ETA flicker fix**: Polling DTO now returns last ticker-computed ETA instead of zero (was causing ETA to flash in/out every 500ms).
+- **Export Logs button**: Uses native save dialog via Go binding instead of blob URL (which doesn't work in Wails WebView).
 
 ---
 

@@ -1,6 +1,6 @@
 # Release Notes - Rescale Interlink
 
-## v4.8.7 - March 9, 2026
+## v4.8.7 - March 10, 2026
 
 ### Foundations & Quick Wins (Plan 1)
 
@@ -132,6 +132,10 @@ Five user-facing display fixes plus backend log routing and download cold-start 
 - **Download discovered totals**: Download scan-consumer now calls `UpdateBatchDiscovered()` on every file at discovery time (was missing — only uploads called it). Enables accurate 9A progress denominator for downloads.
 - **Timing instrumentation**: `[TIMING]` logs at credential pre-warm, semaphore acquire, credential check complete, and `DownloadFile()` entry. Complete timeline from click to first byte.
 
+### Bug Fixes (discovered during Plan 4 testing)
+- **ETA flicker fix (10E)**: `GetAllBatchStats()` (polled every 500ms) never populated `ETASeconds`, returning 0 and overwriting the event-driven ETA every poll cycle. Added `batchLastETA` map — batch ticker stores computed ETA, polling reads it back. ETA now displays stably.
+- **Export Logs button (10F)**: Blob URL downloads don't work in Wails WebView. Added `SaveLogExport()` Go binding using native `runtime.SaveFileDialog`. Activity Logs "Export" button now opens a save dialog.
+
 ### Files Changed
 
 | File | Changes |
@@ -209,6 +213,9 @@ Five user-facing display fixes plus backend log routing and download cold-start 
 | `frontend/src/stores/logStore.ts` | Plan 4: Default levelFilter='INFO', ">=" severity semantics |
 | `frontend/src/components/tabs/ActivityTab.tsx` | Plan 4: ">=" level filter semantics + DEBUG+/INFO+/WARN+ labels |
 | `internal/wailsapp/file_bindings.go` | Plan 4: Synchronous credential pre-warm, UpdateBatchDiscovered for downloads, timing logs |
+| `internal/transfer/queue.go` | Plan 4 testing: batchLastETA map for stable ETA in polling DTO (10E fix) |
+| `internal/wailsapp/reporting_bindings.go` | Plan 4 testing: SaveLogExport binding for native save dialog (10F fix) |
+| `frontend/src/components/tabs/ActivityTab.tsx` | Plan 4 testing: handleExport uses SaveLogExport binding instead of blob URL (10F fix) |
 
 ---
 

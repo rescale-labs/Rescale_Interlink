@@ -4,6 +4,7 @@ package wailsapp
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -96,6 +97,34 @@ func (a *App) SaveErrorReport(reportJSON string) (string, error) {
 	}
 	if err := ft.Save(&report, path); err != nil {
 		return "", err
+	}
+
+	return path, nil
+}
+
+// SaveLogExport opens a native save dialog and writes log text to the selected path.
+// v4.8.7: Replaces blob URL download which doesn't work in Wails WebView.
+func (a *App) SaveLogExport(content string) (string, error) {
+	suggestedName := fmt.Sprintf("interlink-activity-%s.log", time.Now().Format("2006-01-02"))
+
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		DefaultFilename: suggestedName,
+		Title:           "Export Activity Logs",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Log Files (*.log)", Pattern: "*.log"},
+			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
+			{DisplayName: "All Files (*.*)", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("save dialog: %w", err)
+	}
+	if path == "" {
+		return "", nil // User cancelled
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("write log export: %w", err)
 	}
 
 	return path, nil
