@@ -880,6 +880,73 @@ func TestGetBatchTasksWithStateFilter(t *testing.T) {
 	}
 }
 
+// v4.8.7: 11C — Test "inprogress" and "queued" filter values
+func TestGetBatchTasksWithInProgressAndQueuedFilters(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create batch: 2 active (transferring), 1 initializing, 3 queued, 2 completed
+	// Activate() sets TaskInitializing; StartTransfer() transitions to TaskActive
+	active1 := queue.TrackTransferWithBatch("a1.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	queue.Activate(active1.ID)
+	queue.StartTransfer(active1.ID) // now TaskActive
+	active2 := queue.TrackTransferWithBatch("a2.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	queue.Activate(active2.ID)
+	queue.StartTransfer(active2.ID) // now TaskActive
+	// init1 stays at TaskInitializing (Activate only, no StartTransfer)
+	init1 := queue.TrackTransferWithBatch("i1.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	queue.Activate(init1.ID)
+
+	for i := 0; i < 3; i++ {
+		queue.TrackTransferWithBatch("q.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	}
+	for i := 0; i < 2; i++ {
+		task := queue.TrackTransferWithBatch("c.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+		queue.Complete(task.ID)
+	}
+
+	// "inprogress" filter: should return active + initializing = 3
+	inprogress := queue.GetBatchTasks("batch-ip", 0, 50, "inprogress")
+	if len(inprogress) != 3 {
+		t.Errorf("inprogress filter: expected 3 (2 active + 1 initializing), got %d", len(inprogress))
+	}
+	for i := range inprogress {
+		state := inprogress[i].GetState()
+		if state != TaskActive && state != TaskInitializing {
+			t.Errorf("inprogress filter: unexpected state %v", state)
+		}
+	}
+
+	// "queued" filter: should return 3
+	queued := queue.GetBatchTasks("batch-ip", 0, 50, "queued")
+	if len(queued) != 3 {
+		t.Errorf("queued filter: expected 3, got %d", len(queued))
+	}
+	for i := range queued {
+		if queued[i].GetState() != TaskQueued {
+			t.Errorf("queued filter: unexpected state %v", queued[i].GetState())
+		}
+	}
+
+	// Verify counts match GetAllBatchStats()
+	stats := queue.GetAllBatchStats()
+	var bs *BatchStats
+	for i := range stats {
+		if stats[i].BatchID == "batch-ip" {
+			bs = &stats[i]
+			break
+		}
+	}
+	if bs == nil {
+		t.Fatal("batch-ip not found in GetAllBatchStats()")
+	}
+	if bs.Active != len(inprogress) {
+		t.Errorf("batch.active=%d != inprogress count=%d", bs.Active, len(inprogress))
+	}
+	if bs.Queued != len(queued) {
+		t.Errorf("batch.queued=%d != queued count=%d", bs.Queued, len(queued))
+	}
+}
+
 func TestGetUngroupedTasks(t *testing.T) {
 	queue := NewQueue(nil)
 

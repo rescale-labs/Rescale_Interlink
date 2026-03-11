@@ -101,8 +101,8 @@ func TestClassifyLine_SLOT(t *testing.T) {
 
 func TestClassifyLine_TIMING(t *testing.T) {
 	level, stage := classifyLine("[TIMING] credential pre-warm complete")
-	if level != events.InfoLevel {
-		t.Errorf("level = %v, want InfoLevel", level)
+	if level != events.DebugLevel {
+		t.Errorf("level = %v, want DebugLevel", level)
 	}
 	if stage != "TIMING" {
 		t.Errorf("stage = %q, want %q", stage, "TIMING")
@@ -233,4 +233,57 @@ func TestTeeWriter_NilEventBus(t *testing.T) {
 	if n != 6 {
 		t.Errorf("Write returned %d, want 6", n)
 	}
+}
+
+// v4.8.7: 11D — Verify RATELIMIT is classified as DEBUG
+func TestClassifyLine_RATELIMIT_Level(t *testing.T) {
+	level, stage := classifyLine("[RATELIMIT] token bucket refill")
+	if level != events.DebugLevel {
+		t.Errorf("level = %v, want DebugLevel", level)
+	}
+	if stage != "RATELIMIT" {
+		t.Errorf("stage = %q, want %q", stage, "RATELIMIT")
+	}
+}
+
+// v4.8.7: 11D — Prove TIMING is throttled end-to-end at the Write() level
+func TestTeeWriter_ThrottleTIMING(t *testing.T) {
+	var buf bytes.Buffer
+	eb, collector := collectingEventBus(t)
+	tw := NewTeeWriter(&buf, eb)
+	tw.interval = 100 * time.Millisecond
+
+	// Send 10 rapid [TIMING] messages — only the first should pass through
+	for i := 0; i < 10; i++ {
+		tw.Write([]byte("[TIMING] credential check\n"))
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if got := collector.count(); got != 1 {
+		t.Errorf("throttle TIMING: got %d events, want 1", got)
+	}
+
+	eb.Close()
+}
+
+// v4.8.7: 11D — Prove RATELIMIT is throttled end-to-end at the Write() level
+func TestTeeWriter_ThrottleRATELIMIT(t *testing.T) {
+	var buf bytes.Buffer
+	eb, collector := collectingEventBus(t)
+	tw := NewTeeWriter(&buf, eb)
+	tw.interval = 100 * time.Millisecond
+
+	// Send 10 rapid [RATELIMIT] messages — only the first should pass through
+	for i := 0; i < 10; i++ {
+		tw.Write([]byte("[RATELIMIT] token bucket refill\n"))
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if got := collector.count(); got != 1 {
+		t.Errorf("throttle RATELIMIT: got %d events, want 1", got)
+	}
+
+	eb.Close()
 }

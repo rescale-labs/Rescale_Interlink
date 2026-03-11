@@ -105,6 +105,12 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	if cfg.APIBaseURL == "" {
 		return nil, fmt.Errorf("API base URL is empty — check configuration (config.csv api_base_url)")
 	}
+	// v4.8.7: 11E — Validate platform URL against allowlist (security hardening).
+	// This is the primary enforcement point — all call sites for NewClient() pass through here,
+	// including paths that bypass config.Validate() (engine startup, GUI test-connection, PUR, etc.).
+	if err := config.ValidatePlatformURL(cfg.APIBaseURL); err != nil {
+		return nil, fmt.Errorf("invalid platform URL %q: %w", cfg.APIBaseURL, err)
+	}
 
 	// Configure HTTP client with proxy support
 	httpClient, err := http.ConfigureHTTPClient(cfg)

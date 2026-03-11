@@ -60,6 +60,7 @@ const isFRMPlatform = (url: string): boolean => {
 };
 
 // v4.3.0: Platform URL options for dropdown
+// v4.8.7: This list must stay in sync with internal/config/platforms.go AllowedPlatformURLs
 const PLATFORM_URLS = [
   { value: 'https://platform.rescale.com', label: 'North America (platform.rescale.com)' },
   { value: 'https://kr.rescale.com', label: 'Korea (kr.rescale.com)' },

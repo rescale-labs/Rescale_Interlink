@@ -442,6 +442,11 @@ func (c *Config) Validate() error {
 	if c.APIBaseURL == "" {
 		return fmt.Errorf("API base URL is required")
 	}
+	// v4.8.7: 11E — Defense-in-depth: also validate in Validate() for paths that
+	// check config validity before creating a client.
+	if err := ValidatePlatformURL(c.APIBaseURL); err != nil {
+		return fmt.Errorf("invalid platform URL %q: %w", c.APIBaseURL, err)
+	}
 	if c.TarWorkers < 1 {
 		return fmt.Errorf("tar_workers must be at least 1")
 	}

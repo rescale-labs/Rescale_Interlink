@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
 // TestNewClientRejectsEmptyBaseURL verifies that NewClient fails with a clear error
@@ -51,6 +53,8 @@ func TestNewClientAcceptsValidBaseURL(t *testing.T) {
 }
 
 // newTestClient creates a Client pointing at the given test server URL.
+// Constructs the Client struct directly to bypass platform URL validation —
+// httptest URLs (http://127.0.0.1:XXXXX) are not in the allowlist.
 func newTestClient(t *testing.T, serverURL string) *Client {
 	t.Helper()
 	cfg := &config.Config{
@@ -58,11 +62,19 @@ func newTestClient(t *testing.T, serverURL string) *Client {
 		APIKey:     "test-key",
 		ProxyMode:  "no-proxy",
 	}
-	client, err := NewClient(cfg)
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+	return &Client{
+		httpClient: &http.Client{},
+		config:     cfg,
+		baseURL:    strings.TrimSuffix(serverURL, "/"),
+		apiKey:     "test-key",
+		store:      ratelimit.GlobalStore(),
+		metrics: &apiMetrics{
+			callsByPath:   make(map[string]int64),
+			callsByScope:  make(map[ratelimit.Scope]int64),
+			windowStart:   time.Now(),
+			scopeInWindow: make(map[ratelimit.Scope]int64),
+		},
 	}
-	return client
 }
 
 // TestGetStorageCredentials_AzureSharedFile verifies that the credentials endpoint
@@ -413,5 +425,36 @@ func TestListFolderContentsStreaming_ContextCancellation(t *testing.T) {
 	)
 	if err != context.Canceled {
 		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}
+
+// v4.8.7: 11E — NewClient rejects non-allowlisted platform URLs
+func TestNewClient_RejectsInvalidPlatformURL(t *testing.T) {
+	cfg := &config.Config{
+		APIBaseURL: "https://evil.example.com",
+		APIKey:     "test-key",
+		ProxyMode:  "no-proxy",
+	}
+	_, err := NewClient(cfg)
+	if err == nil {
+		t.Fatal("NewClient() should reject non-allowlisted URL")
+	}
+	if !strings.Contains(err.Error(), "invalid platform URL") {
+		t.Errorf("error = %q, want 'invalid platform URL'", err.Error())
+	}
+}
+
+func TestNewClient_RejectsLocalhostURL(t *testing.T) {
+	cfg := &config.Config{
+		APIBaseURL: "http://127.0.0.1:12345",
+		APIKey:     "test-key",
+		ProxyMode:  "no-proxy",
+	}
+	_, err := NewClient(cfg)
+	if err == nil {
+		t.Fatal("NewClient() should reject localhost URL (no exemption)")
+	}
+	if !strings.Contains(err.Error(), "invalid platform URL") {
+		t.Errorf("error = %q, want 'invalid platform URL'", err.Error())
 	}
 }

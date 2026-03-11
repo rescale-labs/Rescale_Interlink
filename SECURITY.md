@@ -128,6 +128,28 @@ API keys should be stored securely:
 
 ---
 
+## Platform URL Allowlist (v4.8.7)
+
+Rescale Interlink restricts API communication to a fixed set of known Rescale platform URLs.
+This prevents credential exfiltration to arbitrary endpoints via `--api-url` or configuration files.
+
+- **Allowlist enforcement**: `ValidatePlatformURL()` in `internal/config/platforms.go` checks URLs against 6 known Rescale platform hostnames
+- **Strict origin validation**: HTTPS-only, no custom ports, no userinfo, no path/query/fragment components accepted
+- **Primary enforcement point**: `api.NewClient()` — all client creation paths pass through here, including engine startup, GUI test-connection, PUR, CLI, and daemon
+- **Defense-in-depth**: `config.Validate()` also checks the platform URL
+- **CLI protection**: `config init` uses a numbered menu instead of free-text URL input
+- **GUI**: Already restricted to dropdown selection since v4.3.0
+
+**Allowed platforms:**
+- `https://platform.rescale.com` (North America)
+- `https://kr.rescale.com` (Korea)
+- `https://platform.rescale.jp` (Japan)
+- `https://eu.rescale.com` (Europe)
+- `https://itar.rescale.com` (US ITAR)
+- `https://itar.rescale-gov.com` (US ITAR FRM)
+
+---
+
 ## Update Checks (v4.8.2)
 
 Rescale Interlink can check GitHub for newer releases on GUI startup. This makes a single
@@ -213,6 +235,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 4.8.7 | 2026-03-11 | Platform URL allowlist — strict origin enforcement, credential exfiltration prevention |
 | 4.8.2 | 2026-03-02 | Automatic update check with policy gate (FedRAMP, env var), trusted URL enforcement |
 | 4.7.5 | 2026-02-25 | Empty file upload fix, ThroughputMonitor dead code cleanup, build artifact exclusions |
 | 4.7.3 | 2026-02-22 | Path traversal sanitization in GetHistoricalJobRows, event listener isolation (unsub callbacks) |

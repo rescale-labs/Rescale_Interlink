@@ -26,9 +26,9 @@ var knownPrefixes = map[string]prefixInfo{
 	"SLOT":      {events.DebugLevel, "SLOT", true},
 	"DEBUG":     {events.DebugLevel, "DEBUG", true},
 	"CRED":      {events.WarnLevel, "CRED", false},
-	"RATELIMIT": {events.InfoLevel, "RATELIMIT", false},
+	"RATELIMIT": {events.DebugLevel, "RATELIMIT", true},  // v4.8.7: 11D — DEBUG + throttled (floods during transfers)
 	"FIPS":      {events.InfoLevel, "FIPS", false},
-	"TIMING":    {events.InfoLevel, "TIMING", false},
+	"TIMING":    {events.DebugLevel, "TIMING", true},    // v4.8.7: 11D — DEBUG + throttled (floods during transfers)
 }
 
 // TeeWriter intercepts log.Printf output and routes it to both

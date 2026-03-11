@@ -265,7 +265,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 
 	// Create app config for API client
 	appCfg := &config.Config{
-		APIBaseURL: "https://platform.rescale.com", // Default URL, could be configurable
+		APIBaseURL: config.DefaultPlatformURL,
 		APIKey:     apiKey,
 	}
 

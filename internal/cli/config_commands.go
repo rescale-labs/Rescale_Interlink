@@ -84,12 +84,25 @@ Use --force to overwrite existing configuration.`,
 				}
 			}
 
-			// API Base URL
-			fmt.Print("API Base URL [https://platform.rescale.com]: ")
-			apiURLInput, _ := reader.ReadString('\n')
-			apiURLInput = strings.TrimSpace(apiURLInput)
-			if apiURLInput == "" {
-				apiURLInput = "https://platform.rescale.com"
+			// API Base URL — menu of valid platforms (v4.8.7: 11E security)
+			fmt.Println("\nRescale Platform:")
+			for i, p := range config.AllowedPlatformURLs {
+				fmt.Printf("  %d. %s (%s)\n", i+1, p.Label, p.URL)
+			}
+			fmt.Printf("Select platform [1]: ")
+			selInput, _ := reader.ReadString('\n')
+			selInput = strings.TrimSpace(selInput)
+			apiURLInput := ""
+			if selInput == "" {
+				apiURLInput = config.DefaultPlatformURL
+			} else {
+				sel, err := strconv.Atoi(selInput)
+				if err != nil || sel < 1 || sel > len(config.AllowedPlatformURLs) {
+					fmt.Printf("  Invalid selection, using default (%s)\n", config.AllowedPlatformURLs[0].Label)
+					apiURLInput = config.DefaultPlatformURL
+				} else {
+					apiURLInput = config.AllowedPlatformURLs[sel-1].URL
+				}
 			}
 
 			// Worker settings

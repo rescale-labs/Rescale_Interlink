@@ -131,6 +131,23 @@ This document provides a comprehensive, verified list of all features available 
 ### Transfer Task Status Filtering (10D)
 - Backend `GetBatchTasks` accepts `stateFilter` parameter (`""`, `"active"`, `"completed"`, `"failed"`, `"cancelled"`). Frontend: filter chip bar in expanded batch view with per-category count badges. Server-side filtering for correct pagination. Cache invalidation on filter change.
 
+## v4.8.7 Changes — Batch Progress UX, Filter UX, Log Verbosity & Platform URL Security (Plan 6)
+
+### Batch Progress Denominator Fix (11A)
+- Progress denominator uses `Math.max(discoveredTotal, batch.total)` instead of just `batch.total`. Prevents the denominator from dropping when scan completes but task registration is still streaming in.
+
+### Progress Text Clarity (11B)
+- "Completed X of Y files" clarifies numerator. "(discovering...)" replaces "(scanning...)" during scan phase.
+
+### Split Active Filter (11C)
+- "Active (530)" chip replaced with "In Progress (15)" and "Queued (515)". Backend adds `"inprogress"` and `"queued"` stateFilter values. "Show more" count respects the active filter.
+
+### TIMING + RATELIMIT Logs → DEBUG (11D)
+- `[TIMING]` and `[RATELIMIT]` reclassified from INFO to DEBUG and throttled (max 2/sec). Eliminates 30+/sec log flood during transfers.
+
+### Platform URL Security Allowlist (11E)
+- `ValidatePlatformURL()` rejects URLs not matching 6 known Rescale platforms. Strict origin enforcement (HTTPS-only, no port/userinfo/path). Primary enforcement in `api.NewClient()`, defense-in-depth in `config.Validate()`. CLI `config setup` uses numbered menu. Prevents credential exfiltration via `--api-url`.
+
 ---
 
 ## v4.8.6 Changes — Destination Snapshot Hardening + CLI RunBatch Migration

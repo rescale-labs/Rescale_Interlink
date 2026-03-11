@@ -254,12 +254,16 @@ const BatchRow = memo(function BatchRow({
             <div className="text-xs text-gray-500">
               {(() => {
                 if (batch.totalKnown) {
-                  return `${formatNumber(batch.completed)} of ${formatNumber(batch.total)} files`
+                  // v4.8.7: 11A — Use discoveredTotal as progress denominator when it's the better estimate.
+                  // batch.total counts registered tasks (grows during streaming). discoveredTotal is the
+                  // true file count from the scan. For progress text, always use the higher value.
+                  const progressDenom = Math.max(batch.discoveredTotal, batch.total)
+                  return `Completed ${formatNumber(batch.completed)} of ${formatNumber(progressDenom)} files`
                 }
                 // 9A/9B: Use discoveredTotal as approximate denominator during scan
                 const scanCount = Math.max(batch.discoveredTotal, batch.total)
                 if (scanCount > 0) {
-                  return `${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files (scanning...)`
+                  return `Completed ${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files (discovering...)`
                 }
                 return batch.direction === 'upload' ? 'Preparing upload...' : 'Scanning...'
               })()}
@@ -294,13 +298,14 @@ const BatchRow = memo(function BatchRow({
             <span>
               {(() => {
                 if (batch.totalKnown) {
-                  // 9C: File count persists alongside percentage
-                  return `${Math.round(batch.progress * 100)}% — ${formatNumber(batch.completed)} of ${formatNumber(batch.total)} files`
+                  // v4.8.7: 11A — Use discoveredTotal as progress denominator (same as subtitle)
+                  const progressDenom = Math.max(batch.discoveredTotal, batch.total)
+                  return `${Math.round(batch.progress * 100)}% — Completed ${formatNumber(batch.completed)} of ${formatNumber(progressDenom)} files`
                 }
                 // 9A: Use discoveredTotal during scan phase
                 const scanCount = Math.max(batch.discoveredTotal, batch.total)
                 if (batch.active > 0 && scanCount > 0) {
-                  return `${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files`
+                  return `Completed ${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files`
                 }
                 if (scanCount > 0) {
                   return `~${formatNumber(scanCount)} files found`
@@ -390,18 +395,31 @@ const BatchRow = memo(function BatchRow({
               >
                 All ({formatNumber(batch.total)})
               </button>
-              {/* Active — only shown when count > 0 */}
-              {(batch.active + batch.queued) > 0 && (
+              {/* v4.8.7: 11C — Split "Active" into "In Progress" + "Queued" */}
+              {batch.active > 0 && (
                 <button
-                  onClick={() => onFilterChange('active')}
+                  onClick={() => onFilterChange('inprogress')}
                   className={clsx(
                     'px-2 py-0.5 text-xs rounded-full border transition-colors',
-                    statusFilter === 'active'
+                    statusFilter === 'inprogress'
                       ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
                       : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
                   )}
                 >
-                  Active ({formatNumber(batch.active + batch.queued)})
+                  In Progress ({formatNumber(batch.active)})
+                </button>
+              )}
+              {batch.queued > 0 && (
+                <button
+                  onClick={() => onFilterChange('queued')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'queued'
+                      ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Queued ({formatNumber(batch.queued)})
                 </button>
               )}
               {/* Succeeded */}
@@ -462,10 +480,12 @@ const BatchRow = memo(function BatchRow({
             />
           ))}
           {(() => {
-            // v4.8.7: "Show more" count uses filtered total when filter is active (10D)
+            // v4.8.7: "Show more" count uses filtered total when filter is active (10D, 11C)
             const filteredTotal = statusFilter === 'completed' ? batch.completed
               : statusFilter === 'failed' ? batch.failed
               : statusFilter === 'cancelled' ? batch.cancelled
+              : statusFilter === 'inprogress' ? batch.active
+              : statusFilter === 'queued' ? batch.queued
               : statusFilter === 'active' ? (batch.active + batch.queued)
               : batch.total
             const remaining = filteredTotal - expandedTasks.length

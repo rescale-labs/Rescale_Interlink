@@ -245,6 +245,38 @@ Four fixes discovered during Plan 4 manual testing of a 14,000-file batch upload
 | `frontend/src/stores/logStore.ts` | Plan 5 10C: Two-tier ring buffer (debugInfoLogs 8k + warnErrorLogs 2k), logVersion counter, mergeSortedLogs |
 | `frontend/src/stores/transferStore.ts` | Plan 5 10D: batchStatusFilter Map, setBatchStatusFilter action, filtered fetchBatchTasks, cache invalidation |
 | `frontend/src/components/tabs/TransfersTab.tsx` | Plan 5 10D: Filter chip bar (All/Active/Succeeded/Failed/Cancelled) in expanded batch view |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Plan 6 11A/11B: Progress denominator fix (use discoveredTotal), "Completed X of Y files" text clarity, "(discovering...)" replaces "(scanning...)"; 11C: Split Active chip into In Progress + Queued |
+| `internal/transfer/queue.go` | Plan 6 11C: `"inprogress"` and `"queued"` stateFilter values in GetBatchTasks |
+| `internal/transfer/queue_test.go` | Plan 6 11C: TestGetBatchTasksWithInProgressAndQueuedFilters |
+| `internal/logging/tee_writer.go` | Plan 6 11D: TIMING + RATELIMIT → DEBUG level + throttled |
+| `internal/logging/tee_writer_test.go` | Plan 6 11D: Updated TIMING level assertion, added RATELIMIT level test + throttle burst tests |
+| `internal/config/platforms.go` | **New** Plan 6 11E: Platform URL allowlist + ValidatePlatformURL (strict origin enforcement) |
+| `internal/config/platforms_test.go` | **New** Plan 6 11E: 13 tests (positive, negative, strict origin, subdomain attack) |
+| `internal/api/client.go` | Plan 6 11E: Primary enforcement — ValidatePlatformURL in NewClient() |
+| `internal/api/client_test.go` | Plan 6 11E: Refactored newTestClient (bypass NewClient), 2 rejection tests |
+| `internal/config/csv_config.go` | Plan 6 11E: Defense-in-depth — ValidatePlatformURL in Validate() |
+| `internal/cli/config_commands.go` | Plan 6 11E: Menu-based platform selection in config setup |
+| `internal/service/multi_daemon.go` | Plan 6 11E: Use config.DefaultPlatformURL constant |
+| `frontend/src/components/tabs/SetupTab.tsx` | Plan 6 11E: Sync comment for AllowedPlatformURLs |
+
+### Batch Progress UX, Filter UX, Log Verbosity & Platform URL Security (Plan 6)
+
+Five fixes discovered during Plan 5 manual testing of a ~14,000-file batch upload.
+
+### Batch Progress Denominator Fix (11A)
+- Progress text denominator now uses `Math.max(discoveredTotal, batch.total)` instead of just `batch.total`. Prevents the denominator from dropping (e.g., 13,446 → 3,692) when the scan completes but task registration is still streaming in. `batch.total` is preserved for task-backed operations (chip counts, pagination).
+
+### Progress Text Clarity (11B)
+- "Completed X of Y files" clarifies that the numerator means completed (not "in progress" or "pending"). "(discovering...)" replaces "(scanning...)" during the scan phase — more accurately describes filesystem enumeration. Applied to both subtitle and progress bar text.
+
+### Split Active Filter Into In Progress + Queued (11C)
+- The "Active (530)" filter chip was misleading — 530 = 15 transferring + 515 queued. Now shows separate "In Progress (15)" and "Queued (515)" chips. Backend adds `"inprogress"` and `"queued"` stateFilter values. "Show more" pagination count respects the active filter.
+
+### TIMING + RATELIMIT Logs → DEBUG (11D)
+- `[TIMING]` and `[RATELIMIT]` log prefixes reclassified from INFO to DEBUG and throttled. These fire 30+/sec during transfers and flooded the Activity Logs tab. Now invisible at default INFO level, visible at DEBUG when troubleshooting.
+
+### Platform URL Security Allowlist (11E)
+- **Security hardening**: `ValidatePlatformURL()` rejects any URL not matching the 6 known Rescale platform hostnames. Strict origin enforcement: HTTPS-only, no custom ports, no userinfo, no path/query/fragment. Primary enforcement in `api.NewClient()` catches all client creation paths. Defense-in-depth in `config.Validate()`. CLI `config setup` now shows a numbered platform menu instead of free-text input. Prevents credential exfiltration to arbitrary endpoints via `--api-url`.
 
 ---
 

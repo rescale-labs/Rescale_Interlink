@@ -744,6 +744,16 @@ func (q *Queue) GetBatchTasks(batchID string, offset, limit int, stateFilter str
 				if state == TaskCompleted || state == TaskFailed || state == TaskCancelled || state == TaskPaused {
 					continue
 				}
+			} else if stateFilter == "inprogress" {
+				// v4.8.7: 11C — Only tasks with a transfer slot (actually transferring)
+				if state != TaskActive && state != TaskInitializing {
+					continue
+				}
+			} else if stateFilter == "queued" {
+				// v4.8.7: 11C — Only tasks waiting for a slot
+				if state != TaskQueued {
+					continue
+				}
 			} else if string(state) != stateFilter {
 				continue
 			}
