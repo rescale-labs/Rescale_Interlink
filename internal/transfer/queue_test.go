@@ -1213,3 +1213,119 @@ func TestPreRegisterBatchNoTasksAfterCleanup(t *testing.T) {
 		t.Fatalf("expected 0 batches after CleanupBatch with no tasks, got %d", len(stats))
 	}
 }
+
+// v4.8.7 RF4: Verify Cancel() now accepts queued tasks.
+func TestCancel_QueuedTask(t *testing.T) {
+	queue := NewQueue(nil)
+
+	task := queue.TrackTransfer("queued.dat", 1000, TaskTypeUpload, "/path", "folder")
+	// Task is in TaskQueued state — no Activate() call
+
+	err := queue.Cancel(task.ID)
+	if err != nil {
+		t.Fatalf("Cancel on queued task should succeed, got: %v", err)
+	}
+
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCancelled {
+		t.Errorf("Expected TaskCancelled, got %v", retrieved.State)
+	}
+}
+
+// v4.8.7 RF4: Verify CancelAll includes queued tasks.
+func TestCancelAll_IncludesQueuedTasks(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create tasks in different states
+	tActive := queue.TrackTransfer("active.dat", 100, TaskTypeUpload, "/p1", "f")
+	queue.Activate(tActive.ID)
+	queue.StartTransfer(tActive.ID) // TaskActive
+
+	tInit := queue.TrackTransfer("init.dat", 100, TaskTypeUpload, "/p2", "f")
+	queue.Activate(tInit.ID) // TaskInitializing
+
+	tQueued := queue.TrackTransfer("queued.dat", 100, TaskTypeUpload, "/p3", "f")
+	// TaskQueued — no Activate
+
+	queue.CancelAll()
+
+	for _, id := range []string{tActive.ID, tInit.ID, tQueued.ID} {
+		retrieved, _ := queue.GetTask(id)
+		if retrieved.State != TaskCancelled {
+			t.Errorf("Task %s: expected TaskCancelled, got %v", id, retrieved.State)
+		}
+	}
+}
+
+// v4.8.7 RF4: Deterministic TOCTOU repro for CancelAll.
+// CancelAll calls cancel functions in the gap between its two lock sections.
+// We install a cancel function that calls Complete(taskID) — this fires
+// exactly in that gap, deterministically reproducing the race.
+func TestCancelAll_NoFalseCancelledEvent(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	queue := NewQueue(eb)
+
+	task := queue.TrackTransfer("test.dat", 1000, TaskTypeUpload, "/path", "folder")
+
+	// Move to Active state so it gets a cancel function
+	queue.Activate(task.ID)      // → TaskInitializing
+	queue.StartTransfer(task.ID) // → TaskActive
+
+	// Install cancel function that completes the task.
+	// CancelAll calls this in the gap between its two lock sections.
+	queue.SetCancel(task.ID, func() {
+		queue.Complete(task.ID) // Runs between CancelAll's unlock and re-lock
+	})
+
+	// Subscribe to cancelled events
+	cancelledCh := eb.Subscribe(events.EventTransferCancelled)
+
+	queue.CancelAll()
+
+	// Task should be Completed (Complete() ran first in the cancel function).
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCompleted {
+		t.Errorf("Expected TaskCompleted, got %v", retrieved.State)
+	}
+
+	// No EventTransferCancelled should have been published.
+	select {
+	case evt := <-cancelledCh:
+		t.Errorf("Should not have received cancelled event, got: %+v", evt)
+	default:
+		// Good — no false cancelled event
+	}
+}
+
+// v4.8.7 RF4: Same TOCTOU repro for CancelBatch.
+func TestCancelBatch_NoFalseCancelledEvent(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	queue := NewQueue(eb)
+
+	task := queue.TrackTransferWithBatch("test.dat", 1000, TaskTypeUpload, "/path", "folder", "FB", "batch-race", "Test")
+
+	queue.Activate(task.ID)
+	queue.StartTransfer(task.ID)
+
+	queue.SetCancel(task.ID, func() {
+		queue.Complete(task.ID)
+	})
+
+	cancelledCh := eb.Subscribe(events.EventTransferCancelled)
+
+	queue.CancelBatch("batch-race")
+
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCompleted {
+		t.Errorf("Expected TaskCompleted, got %v", retrieved.State)
+	}
+
+	select {
+	case evt := <-cancelledCh:
+		t.Errorf("Should not have received cancelled event, got: %+v", evt)
+	default:
+		// Good
+	}
+}

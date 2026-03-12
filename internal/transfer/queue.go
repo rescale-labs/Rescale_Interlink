@@ -197,15 +197,18 @@ func (q *Queue) Activate(taskID string) bool {
 // StartTransfer marks an initializing task as actively transferring.
 // Call this when the first progress callback fires (i.e., bytes are actually moving).
 // Idempotent: only transitions from TaskInitializing to TaskActive.
+// v4.8.7 RF4: Capture transition decision inside lock to prevent data race.
 func (q *Queue) StartTransfer(taskID string) {
+	var shouldPublish bool
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
 	if exists && task != nil && task.State == TaskInitializing {
 		task.State = TaskActive
+		shouldPublish = true
 	}
 	q.mu.Unlock()
 
-	if exists && task != nil && task.State == TaskActive {
+	if shouldPublish {
 		q.publishTransferEvent(events.EventTransferStarted, task)
 	}
 }
@@ -367,47 +370,41 @@ func (q *Queue) Fail(taskID string, err error) {
 	}
 }
 
-// Cancel cancels an active or initializing task by calling its stored cancel function.
+// Cancel cancels an active, initializing, or queued task by calling its stored cancel function.
+// v4.8.7 RF4: Merge check+mutate into one critical section to prevent TOCTOU race.
 func (q *Queue) Cancel(taskID string) error {
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
-	cancelFn := q.cancelFuncs[taskID]
-	q.mu.Unlock()
-
 	if !exists || task == nil {
+		q.mu.Unlock()
 		return errors.New("task not found")
 	}
-
-	// Only cancel if task is active or initializing
-	state := task.GetState()
-	if state != TaskActive && state != TaskInitializing {
-		return errors.New("task is not active or initializing")
+	if task.State != TaskActive && task.State != TaskInitializing && task.State != TaskQueued {
+		q.mu.Unlock()
+		return errors.New("task is not cancellable")
 	}
-
-	// Call cancel function if available
-	if cancelFn != nil {
-		cancelFn()
-	}
-
-	// Update state
-	q.mu.Lock()
+	cancelFn := q.cancelFuncs[taskID]
 	task.State = TaskCancelled
 	task.CompletedAt = time.Now()
 	delete(q.cancelFuncs, taskID)
 	q.mu.Unlock()
 
+	if cancelFn != nil {
+		cancelFn()
+	}
 	q.publishTransferEvent(events.EventTransferCancelled, task)
 	return nil
 }
 
-// CancelAll cancels all active and initializing tasks.
+// CancelAll cancels all active, initializing, and queued tasks.
+// v4.8.7 RF4: Include queued tasks, add idempotent guard + actuallyCancelled slice.
 func (q *Queue) CancelAll() {
 	q.mu.Lock()
 	tasksToCancel := make([]*TransferTask, 0)
 	cancelFns := make([]context.CancelFunc, 0)
 
 	for _, task := range q.tasks {
-		if task.State == TaskActive || task.State == TaskInitializing {
+		if task.State == TaskActive || task.State == TaskInitializing || task.State == TaskQueued {
 			tasksToCancel = append(tasksToCancel, task)
 			if fn := q.cancelFuncs[task.ID]; fn != nil {
 				cancelFns = append(cancelFns, fn)
@@ -416,21 +413,25 @@ func (q *Queue) CancelAll() {
 	}
 	q.mu.Unlock()
 
-	// Call all cancel functions
+	// Call all cancel functions (outside lock — cancelFn may call Complete/Fail)
 	for _, fn := range cancelFns {
 		fn()
 	}
 
-	// Update states and publish events
+	// Re-acquire lock and only transition tasks that haven't gone terminal
+	var actuallyCancelled []*TransferTask
 	q.mu.Lock()
 	for _, task := range tasksToCancel {
-		task.State = TaskCancelled
-		task.CompletedAt = time.Now()
+		if !task.IsTerminal() {
+			task.State = TaskCancelled
+			task.CompletedAt = time.Now()
+			actuallyCancelled = append(actuallyCancelled, task)
+		}
 		delete(q.cancelFuncs, task.ID)
 	}
 	q.mu.Unlock()
 
-	for _, task := range tasksToCancel {
+	for _, task := range actuallyCancelled {
 		q.publishTransferEvent(events.EventTransferCancelled, task)
 	}
 }
@@ -842,17 +843,20 @@ func (q *Queue) CancelBatch(batchID string) error {
 		fn()
 	}
 
-	// Update states
+	// v4.8.7 RF4: Idempotent guard — only transition tasks that haven't gone terminal
+	var actuallyCancelled []*TransferTask
 	q.mu.Lock()
 	for _, task := range tasksToCancel {
-		task.State = TaskCancelled
-		task.CompletedAt = time.Now()
+		if !task.IsTerminal() {
+			task.State = TaskCancelled
+			task.CompletedAt = time.Now()
+			actuallyCancelled = append(actuallyCancelled, task)
+		}
 		delete(q.cancelFuncs, task.ID)
 	}
 	q.mu.Unlock()
 
-	// Publish events
-	for _, task := range tasksToCancel {
+	for _, task := range actuallyCancelled {
 		q.publishTransferEvent(events.EventTransferCancelled, task)
 	}
 
