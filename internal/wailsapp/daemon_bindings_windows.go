@@ -153,11 +153,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 				result.UserRegistered = true
 				result.UserState = users[0].State
 			}
-			// Fallback to first user if current user not found
-			if result.DownloadFolder == "" && len(users) > 0 {
-				result.JobsDownloaded = users[0].JobsDownloaded
-				result.DownloadFolder = users[0].DownloadFolder
-			}
 		}
 
 		// v4.5.6: Determine user state based on configuration + registration

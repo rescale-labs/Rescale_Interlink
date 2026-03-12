@@ -118,19 +118,10 @@ func (l *Logger) WithStr(key, value string) *Logger {
 // This is useful for redirecting logs through progress bars.
 func (l *Logger) SetOutput(w io.Writer) {
 	l.output = w
-	// Rebuild the logger with the new writer, preserving formatting
-	if l.mode == "cli" {
-		l.zlog = zerolog.New(zerolog.ConsoleWriter{
-			Out:        w,
-			TimeFormat: "15:04:05",
-		}).With().Timestamp().Logger()
-	} else {
-		// GUI mode
-		l.zlog = zerolog.New(zerolog.ConsoleWriter{
-			Out:        w,
-			TimeFormat: "15:04:05",
-		}).With().Timestamp().Logger()
-	}
+	l.zlog = zerolog.New(zerolog.ConsoleWriter{
+		Out:        w,
+		TimeFormat: "15:04:05",
+	}).With().Timestamp().Logger()
 }
 
 // Output returns the current output writer.

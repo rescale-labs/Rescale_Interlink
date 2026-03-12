@@ -2,10 +2,22 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 )
+
+var legacyKeyWarningOnce sync.Once
+
+func warnLegacyAPIKeyOnce() {
+	legacyKeyWarningOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "WARNING: API key loaded from legacy apiconfig file. "+
+			"For improved security, run 'rescale-int config init' to migrate your key "+
+			"to the token file, then delete the api_key entry from your apiconfig.\n")
+	})
+}
 
 // ResolveAPIKey returns an API key by checking multiple sources in priority order.
 // This provides consistent API key resolution across CLI, GUI, and auto-download service.
@@ -43,6 +55,7 @@ func ResolveAPIKey(apiKey string, userProfilePath string) string {
 	if userProfilePath != "" {
 		apiconfigPath := APIConfigPathForUser(userProfilePath)
 		if cfg, err := LoadAPIConfig(apiconfigPath); err == nil && cfg.APIKey != "" {
+			warnLegacyAPIKeyOnce()
 			return cfg.APIKey
 		}
 	}
@@ -112,6 +125,7 @@ func ResolveAPIKeySource(apiKey string, userProfilePath string) (string, string)
 	if userProfilePath != "" {
 		apiconfigPath := APIConfigPathForUser(userProfilePath)
 		if cfg, err := LoadAPIConfig(apiconfigPath); err == nil && cfg.APIKey != "" {
+			warnLegacyAPIKeyOnce()
 			return cfg.APIKey, "apiconfig"
 		}
 	}

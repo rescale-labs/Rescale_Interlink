@@ -65,8 +65,10 @@ func TestSaveAndLoadAPIConfig(t *testing.T) {
 	if loadedCfg.PlatformURL != cfg.PlatformURL {
 		t.Errorf("PlatformURL mismatch: expected %s, got %s", cfg.PlatformURL, loadedCfg.PlatformURL)
 	}
-	if loadedCfg.APIKey != cfg.APIKey {
-		t.Errorf("APIKey mismatch: expected %s, got %s", cfg.APIKey, loadedCfg.APIKey)
+	// v4.8.7 RF3: API key is intentionally NOT written to file (security fix).
+	// SaveAPIConfig strips legacy keys on save.
+	if loadedCfg.APIKey != "" {
+		t.Errorf("APIKey should not be saved to file, but loaded as %q", loadedCfg.APIKey)
 	}
 	if loadedCfg.AutoDownload.Enabled != cfg.AutoDownload.Enabled {
 		t.Errorf("Enabled mismatch: expected %v, got %v", cfg.AutoDownload.Enabled, loadedCfg.AutoDownload.Enabled)
@@ -408,5 +410,53 @@ api_key = partial-key
 	}
 	if cfg.AutoDownload.ScanIntervalMinutes != 10 {
 		t.Errorf("ScanIntervalMinutes should default to 10, got %d", cfg.AutoDownload.ScanIntervalMinutes)
+	}
+}
+
+// v4.8.7 RF3: Verify LoadAPIConfig still reads legacy api_key values for backwards compat.
+func TestLoadAPIConfig_LegacyAPIKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "apiconfig")
+
+	content := "[rescale]\nplatform_url = https://test.rescale.com\napi_key = legacy-key-value\n"
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	cfg, err := LoadAPIConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadAPIConfig failed: %v", err)
+	}
+	if cfg.APIKey != "legacy-key-value" {
+		t.Errorf("expected legacy APIKey to be read, got %q", cfg.APIKey)
+	}
+}
+
+// v4.8.7 RF3: Verify SaveAPIConfig strips legacy api_key from disk.
+func TestSaveAPIConfig_StripsLegacyKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "apiconfig")
+
+	// Write an INI with api_key
+	content := "[rescale]\nplatform_url = https://test.rescale.com\napi_key = old-key\n"
+	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	// Save a new config (with APIKey field set — it should still not be written)
+	cfg := NewAPIConfig()
+	cfg.PlatformURL = "https://test.rescale.com"
+	cfg.APIKey = "should-not-be-written"
+	if err := SaveAPIConfig(cfg, configPath); err != nil {
+		t.Fatalf("SaveAPIConfig failed: %v", err)
+	}
+
+	// Read back and verify api_key is gone
+	loaded, err := LoadAPIConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadAPIConfig failed: %v", err)
+	}
+	if loaded.APIKey != "" {
+		t.Errorf("expected APIKey to be stripped, got %q", loaded.APIKey)
 	}
 }

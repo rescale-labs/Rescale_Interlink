@@ -347,14 +347,17 @@ Examples:
 
 			for _, file := range files {
 				if fileMap, ok := file.(map[string]interface{}); ok {
-					id := fileMap["id"].(string)
-					name := fileMap["name"].(string)
+					id, _ := fileMap["id"].(string)
+					name, _ := fileMap["name"].(string)
+					if id == "" || name == "" {
+						continue
+					}
 					size := int64(0)
 					if s, ok := fileMap["decryptedSize"].(float64); ok {
 						size = int64(s)
 					}
 					created := ""
-					if c, ok := fileMap["dateUploaded"].(string); ok {
+					if c, ok := fileMap["dateUploaded"].(string); ok && len(c) >= 10 {
 						created = c[:10] // Just the date part
 					}
 

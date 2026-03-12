@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
+import { EventsOn } from '../../wailsjs/runtime/runtime';
 import type { LogEventDTO, LogLevel, ProgressEventDTO, StateChangeEventDTO } from '../types';
 
 // v4.8.7: Two-tier ring buffer — WARN/ERROR entries are never evicted by DEBUG/INFO volume.
@@ -327,18 +327,19 @@ export const useLogStore = create<LogState>((set, get) => ({
       }
     };
 
-    EventsOn('interlink:log', handleLog);
-    EventsOn('interlink:progress', handleProgress);
-    EventsOn('interlink:error', handleError);
-    EventsOn('interlink:transfer', handleTransfer);
-    EventsOn('interlink:state_change', handleStateChange);
+    // v4.8.7 RF9: Use unsub callbacks, NEVER EventsOff (would remove other stores' listeners)
+    const unsubLog = EventsOn('interlink:log', handleLog);
+    const unsubProgress = EventsOn('interlink:progress', handleProgress);
+    const unsubError = EventsOn('interlink:error', handleError);
+    const unsubTransfer = EventsOn('interlink:transfer', handleTransfer);
+    const unsubStateChange = EventsOn('interlink:state_change', handleStateChange);
 
     return () => {
-      EventsOff('interlink:log');
-      EventsOff('interlink:progress');
-      EventsOff('interlink:error');
-      EventsOff('interlink:transfer');
-      EventsOff('interlink:state_change');
+      unsubLog();
+      unsubProgress();
+      unsubError();
+      unsubTransfer();
+      unsubStateChange();
     };
   },
 }));

@@ -184,11 +184,9 @@ func newTestManagerWithServer(t *testing.T) (*Manager, *httptest.Server, *atomic
 		APIKey:     "test-key",
 		ProxyMode:  "no-proxy",
 	}
-	client, err := api.NewClient(cfg)
-	if err != nil {
-		server.Close()
-		t.Fatalf("api.NewClient: %v", err)
-	}
+	// v4.8.7: Use NewClientForTest to bypass platform URL allowlist —
+	// httptest URLs (http://127.0.0.1:PORT) are not in the allowlist.
+	client := api.NewClientForTest(cfg)
 
 	// Reset global singleton to avoid test pollution
 	globalManagerMu.Lock()

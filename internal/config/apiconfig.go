@@ -33,8 +33,10 @@ import (
 //	show_download_complete = true
 //	show_download_failed = true
 //
-// NOTE: API key is NOT stored here. Use config.ResolveAPIKey() to get the API key
-// from the unified source (token file or environment variable).
+// NOTE: API key is read from this file for backwards compatibility with older versions
+// that stored keys here. New code should use config.ResolveAPIKey() which prefers
+// the token file. SaveAPIConfig intentionally does NOT write the API key —
+// saves act as a migration step, stripping any legacy plaintext key from disk.
 // Platform URL comes from the main config.csv or defaults to https://platform.rescale.com
 type APIConfig struct {
 	// PlatformURL is kept for backwards compatibility with existing apiconfig files.
@@ -213,7 +215,9 @@ func LoadAPIConfig(path string) (*APIConfig, error) {
 
 // SaveAPIConfig saves configuration to an INI file.
 // Creates parent directories if they don't exist.
-// The API key is stored in the file - ensure appropriate file permissions.
+// NOTE: The API key is intentionally NOT written to the file (security policy).
+// This means saves will strip any legacy api_key that was previously in the file.
+// LoadAPIConfig still reads legacy api_key values for backwards compatibility.
 func SaveAPIConfig(cfg *APIConfig, path string) error {
 	// If no path provided, use default
 	if path == "" {
@@ -239,7 +243,7 @@ func SaveAPIConfig(cfg *APIConfig, path string) error {
 		return fmt.Errorf("failed to create rescale section: %w", err)
 	}
 	rescaleSection.Key("platform_url").SetValue(cfg.PlatformURL)
-	rescaleSection.Key("api_key").SetValue(cfg.APIKey)
+	// v4.8.7 RF3: API key intentionally NOT written — saves strip legacy plaintext keys
 
 	// Write [interlink.autoDownload] section
 	autoSection, err := iniFile.NewSection("interlink.autoDownload")
@@ -268,7 +272,7 @@ func SaveAPIConfig(cfg *APIConfig, path string) error {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
-	// Set restrictive permissions (API key is sensitive)
+	// Set restrictive permissions (config may contain platform URL)
 	if runtime.GOOS != "windows" {
 		if err := os.Chmod(tmpPath, 0600); err != nil {
 			os.Remove(tmpPath)

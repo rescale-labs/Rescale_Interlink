@@ -18,6 +18,7 @@ import (
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/validation"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
@@ -564,6 +565,13 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	if rootFolderName == "" {
 		rootFolderName = folderID
 	}
+	// v4.8.7 RF1: Validate folder name from API to prevent path traversal
+	if err := validation.ValidateFilename(rootFolderName); err != nil {
+		scanCancel()
+		emitLog(events.ErrorLevel, fmt.Sprintf("Invalid folder name from API: %s", err.Error()))
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Invalid folder name: "+err.Error(), "", events.EnumPhaseError)
+		return FolderDownloadResultDTO{Error: "Invalid folder name: " + err.Error()}
+	}
 	rootOutputDir := filepath.Join(destPath, rootFolderName)
 	if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
 		scanCancel() // Release context resources on early return
@@ -637,16 +645,22 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				firstScanEvent = false
 			}
 			if event.Folder != nil {
-				// Create local directory
-				localPath := filepath.Join(rootOutputDir, event.Folder.RelativePath)
-				if err := os.MkdirAll(localPath, 0755); err != nil {
+				// v4.8.7 RF1: Validate folder path to prevent path traversal
+				if localPath, err := resolveSafeDownloadPath(event.Folder.RelativePath, rootOutputDir); err != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping folder with invalid path %q: %s", event.Folder.RelativePath, err.Error()))
+				} else if err := os.MkdirAll(localPath, 0755); err != nil {
 					emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
 				} else {
 					foldersCreated++
 				}
 			}
 			if event.File != nil {
-				localPath := filepath.Join(rootOutputDir, event.File.RelativePath)
+				// v4.8.7 RF1: Validate file path to prevent path traversal
+				localPath, pathErr := resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
+				if pathErr != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", event.File.RelativePath, pathErr.Error()))
+					continue
+				}
 				req := services.TransferRequest{
 					Type:       services.TransferTypeDownload,
 					Source:     event.File.FileID,

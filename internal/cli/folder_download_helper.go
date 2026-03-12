@@ -610,6 +610,10 @@ func ScanRemoteFolderStreaming(
 						func(folders []api.FolderInfo, files []api.FileInfo) error {
 							// Emit folders first (so parent dirs can be created before files)
 							for _, folder := range folders {
+								// v4.8.7 RF1: Defense-in-depth — validate folder names from API
+								if err := validation.ValidateFilename(folder.Name); err != nil {
+									continue
+								}
 								folderRelPath := filepath.Join(work.relativePath, folder.Name)
 								info := RemoteFolderInfo{
 									FolderID:     folder.ID,

@@ -260,7 +260,7 @@ func (c *Client) CloseIdleConnections() {
 // If reading fails, returns a placeholder message indicating the failure.
 // This ensures error messages are always informative even when body reading fails.
 func readResponseBody(body io.ReadCloser) string {
-	data, err := io.ReadAll(body)
+	data, err := io.ReadAll(io.LimitReader(body, 1<<20)) // 1MB cap for error bodies
 	if err != nil {
 		return fmt.Sprintf("(failed to read response body: %v)", err)
 	}

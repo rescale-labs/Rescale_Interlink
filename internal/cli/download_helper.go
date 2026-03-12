@@ -36,6 +36,15 @@ var (
 	}
 )
 
+// v4.8.7 S7: Precompiled regexes for sanitizeErrorString — avoids recompilation per call.
+var (
+	reSASToken       = regexp.MustCompile(`(sig|se|sp|sv|sr|spr|sip|srt|ss)=[^&\s"')]+`)
+	reAWSKey         = regexp.MustCompile(`(?i)(access.?key|secret.?key|session.?token)=\S+`)
+	reAzureKey       = regexp.MustCompile(`(?i)AccountKey=[^;&\s"']+`)
+	reBearerToken    = regexp.MustCompile(`(?i)(Authorization:\s*)?((Bearer|Token)\s+)[A-Za-z0-9._\-/+=]+`)
+	reAWSAccessKeyID = regexp.MustCompile(`AKIA[A-Z0-9]{16}`)
+)
+
 // cliDownloadItem wraps a file for download with index info.
 // Implements transfer.WorkItem for BatchExecutor.
 type cliDownloadItem struct {
@@ -741,23 +750,11 @@ func executeJobDownload(
 // sanitizeErrorString removes secrets (SAS tokens, access keys, session tokens)
 // from error messages to prevent leakage in logs and user-facing output.
 func sanitizeErrorString(s string) string {
-	// Redact SAS token query parameters (sig=..., se=..., sp=..., sv=..., sr=...)
-	// These appear in Azure SAS URLs embedded in error messages
-	sasPattern := regexp.MustCompile(`(sig|se|sp|sv|sr|spr|sip|srt|ss)=[^&\s"')]+`)
-	s = sasPattern.ReplaceAllString(s, "$1=REDACTED")
-
-	// Redact AWS-style keys
-	s = regexp.MustCompile(`(?i)(access.?key|secret.?key|session.?token)=\S+`).ReplaceAllString(s, "$1=REDACTED")
-
-	// Redact Azure connection string account keys
-	s = regexp.MustCompile(`(?i)AccountKey=[^;&\s"']+`).ReplaceAllString(s, "AccountKey=REDACTED")
-
-	// Redact Bearer/JWT tokens (preserving the scheme prefix)
-	s = regexp.MustCompile(`(?i)(Authorization:\s*)?((Bearer|Token)\s+)[A-Za-z0-9._\-/+=]+`).ReplaceAllString(s, "${1}${2}REDACTED")
-
-	// Redact AWS access key IDs
-	s = regexp.MustCompile(`AKIA[A-Z0-9]{16}`).ReplaceAllString(s, "[REDACTED_AWS_KEY]")
-
+	s = reSASToken.ReplaceAllString(s, "$1=REDACTED")
+	s = reAWSKey.ReplaceAllString(s, "$1=REDACTED")
+	s = reAzureKey.ReplaceAllString(s, "AccountKey=REDACTED")
+	s = reBearerToken.ReplaceAllString(s, "${1}${2}REDACTED")
+	s = reAWSAccessKeyID.ReplaceAllString(s, "[REDACTED_AWS_KEY]")
 	return s
 }
 
