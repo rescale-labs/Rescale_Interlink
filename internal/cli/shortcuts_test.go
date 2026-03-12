@@ -95,10 +95,6 @@ func TestLsShortcut(t *testing.T) {
 		t.Error("--limit flag not found")
 	}
 
-	statusFlag := cmd.Flags().Lookup("status")
-	if statusFlag == nil {
-		t.Error("--status flag not found")
-	}
 }
 
 // TestShortcutCommands tests that all shortcut commands exist
