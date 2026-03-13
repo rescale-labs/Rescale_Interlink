@@ -15,10 +15,10 @@ import (
 // The tray provides system tray presence for daemon status and quick controls.
 
 var (
-	kernel32                  = syscall.NewLazyDLL("kernel32.dll")
+	// kernel32 is declared in singleinstance_windows.go
 	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
-	procProcess32FirstW       = kernel32.NewProc("Process32FirstW")
-	procProcess32NextW        = kernel32.NewProc("Process32NextW")
+	procProcess32FirstW          = kernel32.NewProc("Process32FirstW")
+	procProcess32NextW           = kernel32.NewProc("Process32NextW")
 )
 
 const (
