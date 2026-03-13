@@ -101,13 +101,46 @@ jobs:
             !rescale-interlink-${{ github.ref_name }}-win_amd64.wixpdb
 
   macos-build:
-    if: false  # Disabled until proper build implementation
-    runs-on: macos-latest
+    runs-on: macos-14  # Apple Silicon (M1) runner
     environment: production
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install Go 1.24.2
+        run: |
+          curl -L -o go1.24.2.darwin-arm64.tar.gz https://go.dev/dl/go1.24.2.darwin-arm64.tar.gz
+          sudo rm -rf /usr/local/go
+          sudo tar -C /usr/local -xzf go1.24.2.darwin-arm64.tar.gz
+          rm go1.24.2.darwin-arm64.tar.gz
+          echo "/usr/local/go/bin" >> $GITHUB_PATH
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm install
+
+      - name: Build Wails GUI application
+        run: |
+          BUILD_TIME=$(date +%Y-%m-%d)
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+            wails build -platform darwin/arm64 -ldflags "$LDFLAGS"
+
+      - name: Build standalone CLI binary
+        run: |
+          BUILD_TIME=$(date +%Y-%m-%d)
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+            go build -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
       - name: Install Apple Certificate
         env:
@@ -131,48 +164,130 @@ jobs:
           security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
-      - name: Build Executable
-        run: |
-          curl -O https://REMOVED.example.com/rescale-int
+          # List identities to verify import and capture the signing identity
+          echo "Available signing identities:"
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
 
-      - name: Sign Executable
+      - name: Sign application bundle
         env:
-          # This should match the "Common Name" of your certificate (e.g., "Developer ID Application: Name (ID)")
           IDENTITY: "Rescale, Inc"
         run: |
-          codesign --force --options runtime --sign "$IDENTITY" rescale-int
+          APP_PATH="build/bin/rescale-int-gui.app"
 
-      - name: Create Zip Archive
+          # Deep-sign the .app bundle (signs all nested binaries/frameworks)
+          codesign --force --deep --options runtime \
+            --sign "$IDENTITY" \
+            --timestamp \
+            "$APP_PATH"
+
+          # Sign the standalone CLI binary
+          codesign --force --options runtime \
+            --sign "$IDENTITY" \
+            --timestamp \
+            rescale-int
+
+          # Verify signatures
+          echo "Verifying .app signature:"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          echo ""
+          echo "Verifying CLI signature:"
+          codesign --verify --strict --verbose=2 rescale-int
+
+      - name: Create distribution zip
         run: |
-          zip rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip rescale-int
+          # Create README
+          cat > README.txt << 'EOF'
+          Rescale Interlink ${{ github.ref_name }} - macOS (Apple Silicon)
+
+          CONTENTS
+          ========
+          rescale-int-gui.app  - GUI application (double-click to run)
+          rescale-int          - CLI tool (run from terminal)
+
+          QUICK START
+          ===========
+          GUI Mode:
+            Double-click "rescale-int-gui.app", or:
+            open rescale-int-gui.app
+
+          CLI Mode:
+            ./rescale-int --help
+            ./rescale-int jobs list
+            ./rescale-int upload file.txt
+
+          For CLI-only usage, copy rescale-int to a directory in your PATH:
+            sudo cp rescale-int /usr/local/bin/
+
+          Documentation: https://docs.rescale.com
+          Copyright (c) 2026 Rescale, Inc.
+          EOF
+
+          # Create zip with .app bundle + CLI + README
+          # Use ditto for macOS — it preserves extended attributes, resource forks,
+          # and code signatures (unlike zip which can strip them)
+          mkdir -p _dist
+          cp -R build/bin/rescale-int-gui.app _dist/
+          cp rescale-int _dist/
+          cp README.txt _dist/
+          cd _dist
+          ditto -c -k --sequesterRsrc --keepParent . \
+            ../rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip
+          cd ..
 
       - name: Write App Store Connect API key to disk
-        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/notary"
           echo "${{ secrets.ASC_API_KEY_P8_B64 }}" | base64 --decode > "$RUNNER_TEMP/notary/AuthKey.p8"
           chmod 600 "$RUNNER_TEMP/notary/AuthKey.p8"
 
       - name: Notarize
-        if: false
-        shell: bash
         run: |
-          xcrun notarytool submit "MyApp.zip" \
+          xcrun notarytool submit \
+            "rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip" \
             --key "$RUNNER_TEMP/notary/AuthKey.p8" \
             --key-id "${{ secrets.ASC_KEY_ID }}" \
             --issuer "${{ secrets.ASC_ISSUER_ID }}" \
             --wait
 
+      - name: Staple notarization ticket
+        run: |
+          # Staple the ticket to the .app bundle (not the zip)
+          xcrun stapler staple build/bin/rescale-int-gui.app
+
+          # Recreate the zip with the stapled .app
+          rm -rf _dist
+          mkdir -p _dist
+          cp -R build/bin/rescale-int-gui.app _dist/
+          cp rescale-int _dist/
+          cp README.txt _dist/
+          cd _dist
+          ditto -c -k --sequesterRsrc --keepParent . \
+            ../rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip
+          cd ..
+
+      - name: Generate checksum
+        run: |
+          shasum -a 256 rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip > \
+            rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip.sha256
+          cat rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip.sha256
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: rescale-interlink-${{ github.ref_name }}-macos_aarch64
-          path: rescale-interlink-${{ github.ref_name }}-macos_aarch64.*
+          path: |
+            rescale-interlink-${{ github.ref_name }}-macos_aarch64.*
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+          rm -f $RUNNER_TEMP/build_certificate.p12 2>/dev/null || true
+          rm -rf $RUNNER_TEMP/notary 2>/dev/null || true
 
   release:
     name: Create Release
-    needs: [windows-build]  # macOS disabled for now
+    needs: [windows-build, macos-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
