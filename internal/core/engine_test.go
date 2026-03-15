@@ -27,7 +27,7 @@ func TestNewEngine(t *testing.T) {
 
 	// Test with custom config
 	cfg, _ := config.LoadConfigCSV("")
-	cfg.APIBaseURL = "https://test.rescale.com"
+	cfg.APIBaseURL = "https://eu.rescale.com"
 	cfg.APIKey = "test-key"
 
 	engine2, err := NewEngine(cfg)
@@ -36,8 +36,8 @@ func TestNewEngine(t *testing.T) {
 	}
 
 	gotCfg := engine2.GetConfig()
-	if gotCfg.APIBaseURL != "https://test.rescale.com" {
-		t.Errorf("Expected API URL 'https://test.rescale.com', got '%s'", gotCfg.APIBaseURL)
+	if gotCfg.APIBaseURL != "https://eu.rescale.com" {
+		t.Errorf("Expected API URL 'https://eu.rescale.com', got '%s'", gotCfg.APIBaseURL)
 	}
 }
 
@@ -62,7 +62,7 @@ func TestEngine_UpdateConfig(t *testing.T) {
 
 	newCfg, _ := config.LoadConfigCSV("")
 	newCfg.TarWorkers = 12
-	newCfg.APIBaseURL = "https://updated.rescale.com"
+	newCfg.APIBaseURL = "https://platform.rescale.com"
 
 	err := engine.UpdateConfig(newCfg)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestEngine_UpdateConfig(t *testing.T) {
 	if gotCfg.TarWorkers != 12 {
 		t.Errorf("Config not updated: expected TarWorkers=12, got %d", gotCfg.TarWorkers)
 	}
-	if gotCfg.APIBaseURL != "https://updated.rescale.com" {
+	if gotCfg.APIBaseURL != "https://platform.rescale.com" {
 		t.Errorf("Config not updated: expected updated URL, got '%s'", gotCfg.APIBaseURL)
 	}
 }
@@ -169,15 +169,18 @@ func TestEngine_Stop(t *testing.T) {
 func TestEngine_SaveConfig(t *testing.T) {
 	cfg, _ := config.LoadConfigCSV("")
 	cfg.TarWorkers = 8
-	cfg.APIBaseURL = "https://test.rescale.com"
+	cfg.APIBaseURL = "https://platform.rescale.com"
 
-	engine, _ := NewEngine(cfg)
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
 
 	// Create temp file for saving
 	tmpDir := t.TempDir()
 	savePath := filepath.Join(tmpDir, "test_config.csv")
 
-	err := engine.SaveConfig(savePath)
+	err = engine.SaveConfig(savePath)
 	if err != nil {
 		t.Fatalf("SaveConfig failed: %v", err)
 	}

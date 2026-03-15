@@ -6,7 +6,7 @@ import {
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
 import { LocalBrowser, RemoteBrowser } from '../widgets'
-import { useFileBrowserStore } from '../../stores'
+import { useFileBrowserStore, useTransferStore } from '../../stores'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../../wailsjs/go/models'
 import { useTabNavigation } from '../../App'
@@ -363,16 +363,37 @@ export function FileBrowserTab() {
 
     // v4.0.8: Check if any folders already exist before uploading
     // v4.8.5 bugfix: Use batch check with shared cache — single API paginate instead of N
+    // v4.8.8: Switch to Transfers tab immediately for visible feedback
     if (folders.length > 0) {
-      setStatus('Checking for existing folders...')
-      let existingFolders: string[] = []
+      const displayName = folders.length === 1
+        ? folders[0].name
+        : `${folders.length} folders`
+      useTransferStore.getState().setFolderCheckStatus({ folderName: displayName })
+      switchToTab('Transfers')
 
+      let existingFolders: string[] = []
       try {
         const folderNames = folders.map(f => f.name)
         const checks = await App.CheckFoldersExistForUpload(folderNames, destFolderId)
+
+        // v4.8.8: Check DTO-level errors
+        const dtoError = checks.find(c => c?.error)
+        if (dtoError) {
+          useTransferStore.getState().setFolderCheckStatus(null)
+          switchToTab('File Browser')
+          setErrorDialog({
+            title: 'Upload Error',
+            message: `Failed to check for existing folders: ${dtoError.error}`
+          })
+          setStatus('')
+          return
+        }
+
         existingFolders = folderNames.filter((_, i) => checks[i]?.exists)
       } catch (err) {
         // v4.8.6: Surface folder-check errors instead of silently ignoring
+        useTransferStore.getState().setFolderCheckStatus(null)
+        switchToTab('File Browser')
         setErrorDialog({
           title: 'Upload Error',
           message: `Failed to check for existing folders: ${err instanceof Error ? err.message : String(err)}`
@@ -383,6 +404,8 @@ export function FileBrowserTab() {
 
       // If any folders exist, show merge confirmation dialog
       if (existingFolders.length > 0) {
+        useTransferStore.getState().setFolderCheckStatus(null)
+        switchToTab('File Browser')
         setMergeConfirm({
           existingFolders,
           uploadData: { files, folders, destFolderId, tags }
@@ -390,6 +413,11 @@ export function FileBrowserTab() {
         setStatus('Waiting for merge confirmation...')
         return
       }
+
+      // NOTE: Do NOT clear folderCheckStatus here yet. StartFolderUpload() still does
+      // warmup, validation, and pre-registration work before emitting visible events.
+      // The transferStore auto-clears it when the first visible replacement appears
+      // (creating_folders enumeration or batch pre-registration).
     }
 
     // No existing folders - proceed directly

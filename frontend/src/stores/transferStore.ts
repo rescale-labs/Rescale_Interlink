@@ -114,6 +114,7 @@ interface TransferStore {
   batchTasks: Map<string, TransferTask[]> // v4.7.7: Lazily loaded expanded tasks
   batchEpochs: Map<string, number> // v4.7.7: Epoch counter per batch for stale-response protection
   batchStatusFilter: Map<string, string> // v4.8.7: Per-batch status filter ("" = all, "active", "completed", "failed", "cancelled")
+  folderCheckStatus: { folderName: string } | null  // v4.8.8: Pre-upload check visibility
   isLoading: boolean
   error: string | null
   isPolling: boolean
@@ -140,6 +141,7 @@ interface TransferStore {
   handleTransferEvent: (event: TransferEventDTO) => void
   handleEnumerationEvent: (event: EnumerationEventDTO) => void // v4.0.8
   handleBatchProgressEvent: (event: BatchProgressEventDTO) => void // v4.7.7
+  setFolderCheckStatus: (status: { folderName: string } | null) => void  // v4.8.8
 
   // v4.0.8: App-level event listeners (always active, unlike polling which is tab-specific)
   setupEventListeners: () => () => void
@@ -214,6 +216,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   batchTasks: new Map<string, TransferTask[]>(), // v4.7.7
   batchEpochs: new Map<string, number>(), // v4.7.7: epoch counter per batch for stale-response protection
   batchStatusFilter: new Map<string, string>(), // v4.8.7: per-batch status filter
+  folderCheckStatus: null, // v4.8.8: Pre-upload check visibility
   isLoading: false,
   error: null,
   isPolling: false,
@@ -561,6 +564,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
+  setFolderCheckStatus: (status) => set({ folderCheckStatus: status }),
+
   // v4.8.7: Set status filter for a batch's expanded task view (10D).
   // Clears cached tasks, bumps epoch, and re-fetches page 0 with the new filter.
   setBatchStatusFilter: (batchID: string, filter: string) => {
@@ -640,6 +645,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       const batchIndex = state.batches.findIndex(b => b.batchID === event.batchID)
       if (batchIndex === -1) {
         // v4.8.3: Upsert — create batch from PreRegisterBatch's immediate event
+        // v4.8.8: Clear pre-check row — batch row is now visible as replacement
         const newBatch: TransferBatch = {
           batchID: event.batchID,
           batchLabel: event.label,
@@ -661,7 +667,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           discoveredBytes: event.discoveredBytes ?? 0,
           startedAtUnix: 0, // v4.8.7: Will be populated on next fetchBatches
         }
-        return { batches: [...state.batches, newBatch], lastUpdate: Date.now() }
+        return { batches: [...state.batches, newBatch], lastUpdate: Date.now(), folderCheckStatus: null }
       }
 
       const updatedBatches = [...state.batches]
@@ -718,14 +724,22 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
             foldersTotal: event.foldersTotal,
             foldersCreated: event.foldersCreated,
           }
-          return { enumerations: updated }
+          // v4.8.8: Clear pre-check row on completion/error
+          return { enumerations: updated, folderCheckStatus: null }
         }
-        return state
+        // v4.8.8: Clear pre-check row even if enumeration not tracked
+        return { folderCheckStatus: null }
       }
+
+      // v4.8.8: Clear pre-check row when a visible replacement appears.
+      // Upload enumerations in creating_folders phase are shown by TransfersTab filter,
+      // so they provide visual continuity from the pre-check row.
+      const clearPreCheck = event.phase === 'creating_folders'
 
       if (existingIndex === -1) {
         // New enumeration - add it
         return {
+          ...(clearPreCheck ? { folderCheckStatus: null } : {}),
           enumerations: [...state.enumerations, {
             id: event.id,
             folderName: event.folderName,
@@ -756,7 +770,10 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           foldersTotal: event.foldersTotal,
           foldersCreated: event.foldersCreated,
         }
-        return { enumerations: updated }
+        return {
+          ...(clearPreCheck ? { folderCheckStatus: null } : {}),
+          enumerations: updated,
+        }
       }
     })
   },

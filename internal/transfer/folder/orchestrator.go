@@ -108,6 +108,7 @@ func RunOrchestrator[T any](
 	dirChan, fileChan, walkErrChan := localfs.WalkStream(ctx, cfg.RootPath, localfs.WalkOptions{
 		IncludeHidden:  cfg.IncludeHidden,
 		SkipHiddenDirs: true,
+		FollowSymlinks: true, // v4.8.8: Follow symlinks with cycle detection
 	})
 
 	// Create folder ready channel (buffered to prevent blocking)

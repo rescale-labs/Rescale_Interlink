@@ -87,7 +87,8 @@ func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string
 	// Use shared localfs.WalkCollect() for core directory walking
 	result, err := localfs.WalkCollect(rootPath, localfs.WalkOptions{
 		IncludeHidden:  includeHidden,
-		SkipHiddenDirs: true, // Skip hidden directories entirely
+		SkipHiddenDirs: true,  // Skip hidden directories entirely
+		FollowSymlinks: true,  // v4.8.8: Follow symlinks with cycle detection
 	})
 	if err != nil {
 		return nil, nil, nil, err

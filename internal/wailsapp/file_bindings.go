@@ -934,6 +934,15 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		return FolderUploadResultDTO{Error: deferredError}
 	}
 
+	// v4.8.8: Resolve symlinks in root path so WalkStream operates on the real directory.
+	// IMPORTANT: Do NOT overwrite localPath — it's used for display name (rootFolderName)
+	// and user-facing messages. Only use resolvedLocalPath for filesystem operations.
+	resolvedLocalPath, err := pathutil.ResolveAbsolutePath(localPath)
+	if err != nil {
+		deferredError = "Failed to resolve directory path: " + err.Error()
+		return FolderUploadResultDTO{Error: deferredError}
+	}
+
 	// Create logger for this upload
 	logger := logging.NewLogger("folder-upload", nil)
 	ctx := context.Background()
@@ -1066,7 +1075,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 
 	_, _ = folder.RunOrchestrator(uploadCtx,
 		folder.OrchestratorConfig{
-			RootPath:          localPath,
+			RootPath:          resolvedLocalPath, // v4.8.8: Use resolved path for filesystem walk
 			RootRemoteID:      rootFolderID,
 			IncludeHidden:     true,
 			FolderConcurrency: constants.DefaultFolderConcurrency,

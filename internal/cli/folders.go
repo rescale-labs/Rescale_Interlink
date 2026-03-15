@@ -13,6 +13,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/diskspace"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/util/tags"
@@ -307,6 +308,13 @@ Examples:
 				}
 			}
 
+			// v4.8.8: Resolve symlinks in root path so filesystem operations use the real directory.
+			// Keep original localPath for display name (rootFolderName) and user-facing messages.
+			resolvedLocalPath, err := pathutil.ResolveAbsolutePath(localPath)
+			if err != nil {
+				return fmt.Errorf("failed to resolve directory path: %w", err)
+			}
+
 			// Initialize folder cache for API call optimization
 			cache := NewFolderCache()
 
@@ -374,10 +382,11 @@ Examples:
 			if sequential {
 				// Sequential mode: upfront scan, then create all folders, then upload all files
 				fmt.Println("Scanning local directory...")
-				logger.Info().Str("path", localPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
+				logger.Info().Str("path", resolvedLocalPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
 				var directories, files []string
 				var err error
-				directories, files, symlinks, err = BuildDirectoryTree(localPath, includeHidden)
+				// v4.8.8: Use resolvedLocalPath for filesystem walk so paths are consistent
+				directories, files, symlinks, err = BuildDirectoryTree(resolvedLocalPath, includeHidden)
 				if err != nil {
 					return fmt.Errorf("failed to scan directory: %w", err)
 				}
@@ -386,7 +395,7 @@ Examples:
 				if len(symlinks) > 0 {
 					fmt.Printf("\nℹ️  Skipped %d symbolic link(s):\n", len(symlinks))
 					for _, link := range symlinks {
-						relPath, _ := filepath.Rel(localPath, link)
+						relPath, _ := filepath.Rel(resolvedLocalPath, link)
 						fmt.Printf("  - %s\n", relPath)
 					}
 				}
@@ -411,8 +420,9 @@ Examples:
 					folderConflictMode = ConflictMergeOnce // Will prompt for each
 				}
 
+				// v4.8.8: Use resolvedLocalPath consistently — directories[] paths are under resolvedLocalPath
 				mapping, created, err := CreateFolderStructure(
-					ctx, apiClient, cache, localPath, directories, rootFolderID, &folderConflictMode, folderConcurrency, logger, nil, os.Stdout)
+					ctx, apiClient, cache, resolvedLocalPath, directories, rootFolderID, &folderConflictMode, folderConcurrency, logger, nil, os.Stdout)
 				if err != nil {
 					return fmt.Errorf("failed to create folder structure: %w", err)
 				}
@@ -425,10 +435,11 @@ Examples:
 				defer uploadUI.Wait()
 
 				// Cache folder paths for display
+				// v4.8.8: mapping keys are under resolvedLocalPath; use it for Rel
 				for localDir, folderID := range mapping {
-					relativePath, _ := filepath.Rel(localPath, localDir)
+					relativePath, _ := filepath.Rel(resolvedLocalPath, localDir)
 					if relativePath == "." {
-						relativePath = filepath.Base(localPath)
+						relativePath = filepath.Base(localPath) // display name from original
 					}
 					uploadUI.SetFolderPath(folderID, relativePath)
 				}
@@ -443,8 +454,9 @@ Examples:
 				errorResolver := NewErrorActionResolver(ErrorContinueOnce)
 				// v4.8.1: Pass resource manager from global CLI flags
 				uploadResourceMgr := CreateResourceManager()
+				// v4.8.8: Use resolvedLocalPath — files[] and mapping keys are both under it
 				uploadResult, err := uploadFiles(
-					ctx, localPath, files, mapping, apiClient, cache, uploadUI,
+					ctx, resolvedLocalPath, files, mapping, apiClient, cache, uploadUI,
 					fileConflictResolver, errorResolver, continueOnError, maxConcurrent, cfg, logger, uploadResourceMgr)
 				if err != nil {
 					return err
@@ -460,8 +472,9 @@ Examples:
 
 				// v4.8.1: Pass resource manager from global CLI flags
 				pipelineResourceMgr := CreateResourceManager()
+				// v4.8.8: Use resolvedLocalPath for filesystem operations
 				uploadResult, created, err := uploadDirectoryPipelined(
-					ctx, apiClient, cache, localPath, rootFolderID,
+					ctx, apiClient, cache, resolvedLocalPath, rootFolderID,
 					includeHidden, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
 				if err != nil {
 					return err

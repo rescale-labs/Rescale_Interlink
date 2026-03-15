@@ -265,6 +265,7 @@ func uploadDirectoryPipelined(
 	}()
 
 	// v4.8.7 Plan 2b: Shared orchestrator replaces inline Parts A/B/C.
+	// v4.8.8: rootPath is already resolved by caller (folders.go) — no need to double-resolve.
 	dispatchDone, orchResult := folder.RunOrchestrator(ctx,
 		folder.OrchestratorConfig{
 			RootPath:          rootPath,

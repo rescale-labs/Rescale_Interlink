@@ -54,6 +54,34 @@ function getStatusInfo(state: string): { icon: typeof CheckCircleIcon; color: st
   }
 }
 
+// v4.8.8: Pre-upload check row — shown while CheckFoldersExistForUpload is running
+function FolderCheckRow({ folderName }: { folderName: string }) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20">
+      <div className="flex-shrink-0 w-6">
+        <ArrowUpIcon className="w-5 h-5 text-blue-500" />
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0 w-48">
+        <FolderOpenIcon className="w-5 h-5 text-yellow-500" />
+        <div>
+          <div className="text-sm font-medium truncate" title={folderName}>
+            {folderName.length > 25 ? folderName.slice(0, 22) + '...' : folderName}
+          </div>
+          <div className="text-xs text-gray-500">Preparing upload...</div>
+        </div>
+      </div>
+      <div className="flex-1 min-w-0 flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-600">Checking destination for conflicts...</span>
+        </div>
+      </div>
+      <div className="flex-shrink-0 w-40" />
+      <div className="flex-shrink-0 w-20" />
+    </div>
+  )
+}
+
 // v4.0.8: Enumeration row for folder scan progress
 // v4.7.7: Enhanced with statusMessage display for folder creation phase
 interface EnumerationRowProps {
@@ -738,6 +766,7 @@ export function TransfersTab() {
     expandedBatches,
     batchTasks,
     batchStatusFilter,
+    folderCheckStatus, // v4.8.8: Pre-upload check visibility
     startPolling,
     stopPolling,
     cancelTransfer,
@@ -829,8 +858,8 @@ export function TransfersTab() {
     return stats.completed + stats.failed + stats.cancelled
   }, [stats])
 
-  // Empty state - v4.0.8: also check enumerations, v4.7.7: check batches, v4.7.8: check daemon batches
-  const isEmpty = tasks.length === 0 && enumerations.length === 0 && batches.length === 0 && daemonBatches.length === 0
+  // Empty state - v4.0.8: also check enumerations, v4.7.7: check batches, v4.7.8: check daemon batches, v4.8.8: check folderCheckStatus
+  const isEmpty = tasks.length === 0 && enumerations.length === 0 && batches.length === 0 && daemonBatches.length === 0 && !folderCheckStatus
 
   return (
     <div className="flex flex-col h-full">
@@ -892,6 +921,9 @@ export function TransfersTab() {
           </div>
         ) : (
           <div>
+            {/* v4.8.8: Pre-upload check row */}
+            {folderCheckStatus && <FolderCheckRow folderName={folderCheckStatus.folderName} />}
+
             {/* v4.0.8: Show enumeration rows at top */}
             {/* v4.8.5: Filter non-complete upload enumerations past folder-creation phase.
                 Once folders are created and scanning starts, the BatchRow takes over.
