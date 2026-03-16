@@ -80,6 +80,16 @@ type Daemon struct {
 	running  bool
 	mu       sync.RWMutex
 
+	// v4.8.8 Bug F: Prevents concurrent poll() execution
+	polling atomic.Bool
+
+	// v4.8.8 Bug F: Lifecycle context — created in Start(), cancelled in Stop()
+	cancelFunc   context.CancelFunc
+	lifecycleCtx context.Context
+
+	// v4.8.8 Bug G: Centralized pause state, checked by pollLoop and TriggerPoll
+	paused atomic.Bool
+
 	// v4.0.8: Active download tracking for IPC status reporting
 	activeDownloads int32
 
@@ -133,6 +143,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return fmt.Errorf("daemon is already running")
 	}
 	d.running = true
+	d.lifecycleCtx, d.cancelFunc = context.WithCancel(ctx)
 	d.mu.Unlock()
 
 	d.logger.Info().
@@ -141,11 +152,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 		Msg("Daemon starting")
 
 	// Run initial poll immediately
-	d.poll(ctx)
+	d.poll(d.lifecycleCtx)
 
 	// Start polling loop
 	d.wg.Add(1)
-	go d.pollLoop(ctx)
+	go d.pollLoop(d.lifecycleCtx)
 
 	return nil
 }
@@ -161,6 +172,7 @@ func (d *Daemon) Stop() {
 	d.mu.Unlock()
 
 	d.logger.Info().Msg("Daemon stopping")
+	d.cancelFunc() // v4.8.8 Bug F: Cancel lifecycle context first
 	close(d.stopChan)
 	d.wg.Wait()
 
@@ -188,6 +200,10 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 			d.logger.Info().Msg("Poll loop stopped")
 			return
 		case <-ticker.C:
+			if d.paused.Load() {
+				d.logger.Debug().Msg("Daemon paused, skipping scheduled poll")
+				continue
+			}
 			d.poll(ctx)
 		}
 	}
@@ -199,6 +215,13 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 // v4.3.6: Silent filtering - only log jobs with Auto Download = Enabled/Conditional
 // v4.5.5: Added 10-minute scan timeout to prevent indefinite hangs
 func (d *Daemon) poll(ctx context.Context) {
+	// v4.8.8 Bug F: Prevent concurrent polls (Start, pollLoop, TriggerPoll can all invoke)
+	if !d.polling.CompareAndSwap(false, true) {
+		d.logger.Debug().Msg("Poll already in progress, skipping")
+		return
+	}
+	defer d.polling.Store(false)
+
 	// v4.5.5: Add timeout to entire scan operation (10 minutes max)
 	// Must be longer than HTTP client timeout (300s) to allow retries
 	scanCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
@@ -254,7 +277,10 @@ func (d *Daemon) poll(ctx context.Context) {
 
 		// v4.3.6: Check eligibility - result now includes ShouldLog flag
 		if d.cfg.Eligibility != nil {
-			eligResult := d.monitor.CheckEligibility(ctx, job.ID)
+			// v4.8.8 Bug J: Per-call timeout for eligibility checks
+			eligCtx, eligCancel := context.WithTimeout(ctx, 2*time.Minute)
+			eligResult := d.monitor.CheckEligibility(eligCtx, job.ID)
+			eligCancel()
 
 			if !eligResult.ShouldLog {
 				// Not a real candidate (Auto Download not set/disabled) - skip silently
@@ -310,11 +336,36 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	baseDir := d.cfg.DownloadDir
 	if d.cfg.Eligibility != nil {
 		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
-			d.logger.Debug().
-				Str("job_id", job.ID).
-				Str("custom_path", customPath).
-				Msg("Using custom download path from job")
-			baseDir = customPath
+			// v4.8.8 Bug D: Custom path must resolve to within DownloadDir.
+			// This prevents arbitrary filesystem writes even when daemon runs as SYSTEM.
+			candidate := customPath
+			if !filepath.IsAbs(candidate) {
+				candidate = filepath.Join(d.cfg.DownloadDir, candidate)
+			}
+			candidate = filepath.Clean(candidate)
+
+			// Resolve symlinks on both paths to prevent symlink-based escapes.
+			realDownloadDir, err := filepath.EvalSymlinks(d.cfg.DownloadDir)
+			if err != nil {
+				realDownloadDir = filepath.Clean(d.cfg.DownloadDir)
+			}
+			realCandidate := resolvePathWithSymlinks(candidate)
+
+			if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
+				d.logger.Warn().
+					Str("job_id", job.ID).
+					Str("custom_path", customPath).
+					Str("download_dir", d.cfg.DownloadDir).
+					Err(err).
+					Msg("Rejecting custom download path: escapes download directory")
+			} else {
+				d.logger.Debug().
+					Str("job_id", job.ID).
+					Str("custom_path", customPath).
+					Str("resolved", realCandidate).
+					Msg("Using custom download path (validated under download directory)")
+				baseDir = realCandidate
+			}
 		}
 	}
 
@@ -326,6 +377,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		d.logger.Error().Err(err).Str("dir", outputDir).Msg("Failed to create output directory")
 		d.state.MarkFailed(job.ID, job.Name, err)
+		if saveErr := d.state.Save(); saveErr != nil {
+			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
+		}
 		reporting.HandleCLIError(err, "daemon", "job_download", "")
 		return
 	}
@@ -335,6 +389,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	if err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to list job files")
 		d.state.MarkFailed(job.ID, job.Name, err)
+		if saveErr := d.state.Save(); saveErr != nil {
+			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
+		}
 		reporting.HandleCLIError(err, "daemon", "job_download", "")
 		return
 	}
@@ -342,6 +399,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	if len(files) == 0 {
 		d.logger.Info().Str("job_id", job.ID).Msg("No files to download for job")
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, 0, 0)
+		if saveErr := d.state.Save(); saveErr != nil {
+			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
+		}
 		return
 	}
 
@@ -387,6 +447,8 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	// Note: We do NOT rely on BatchResult — all real outcomes are tracked
 	// by manual counters (downloadedCount, totalSize, tracker).
 	var totalSize int64
+	var failedCount int32  // v4.8.8 Bug B: Track per-file download failures
+	var skippedCount int32 // v4.8.8 Bug B: Track files skipped (invalid name, etc.)
 	downloadedCount := 0
 	batchCfg := transfer.BatchConfig{
 		MaxWorkers:      d.cfg.MaxConcurrent,
@@ -406,6 +468,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Err(err).
 				Msg("Skipping file with invalid name")
 			d.tracker.SkipFile(job.ID, file.DecryptedSize) // v4.7.8: adjust batch totals
+			atomic.AddInt32(&skippedCount, 1)
 			return nil
 		}
 
@@ -428,16 +491,24 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			d.logger.Error().Err(err).Str("path", localPath).Msg("Failed to create file directory")
 			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
+			atomic.AddInt32(&failedCount, 1)
 			return nil
 		}
 
-		// Skip if file exists
-		if _, err := os.Stat(localPath); err == nil {
-			d.logger.Debug().Str("path", localPath).Msg("File already exists, skipping")
-			downloadedCount++
-			totalSize += file.DecryptedSize
-			d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8: counts as completed
-			return nil
+		if info, statErr := os.Stat(localPath); statErr == nil {
+			if info.Size() == file.DecryptedSize {
+				d.logger.Debug().Str("path", localPath).Msg("File already exists with correct size, skipping")
+				downloadedCount++
+				totalSize += file.DecryptedSize
+				d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8: counts as completed
+				return nil
+			}
+			// File exists but wrong size — re-download
+			d.logger.Warn().
+				Str("path", localPath).
+				Int64("expected_size", file.DecryptedSize).
+				Int64("actual_size", info.Size()).
+				Msg("File exists with wrong size, re-downloading")
 		}
 
 		// Allocate transfer handle (reuses single TransferManager per job)
@@ -471,7 +542,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Str("file_name", file.Name).
 				Msg("Failed to download file")
 			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
-			// Continue with other files rather than failing entire job
+			atomic.AddInt32(&failedCount, 1)
 			return nil
 		}
 
@@ -490,35 +561,54 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		}
 		d.logger.Error().Err(downloadErr).Str("job_id", job.ID).Msg("Job download interrupted")
 		d.state.MarkFailed(job.ID, job.Name, downloadErr)
+		if saveErr := d.state.Save(); saveErr != nil {
+			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
+		}
 		reporting.HandleCLIError(downloadErr, "daemon", "job_download", "")
 		return
 	}
 
-	// Mark as downloaded in local state
-	d.state.MarkDownloaded(job.ID, job.Name, outputDir, downloadedCount, totalSize)
+	// v4.8.8 Bug B: Only mark job as downloaded when ALL files succeeded
+	fc := atomic.LoadInt32(&failedCount)
+	sc := atomic.LoadInt32(&skippedCount)
+	if fc+sc > 0 {
+		failErr := fmt.Errorf("%d failed + %d skipped of %d files", fc, sc, len(files))
+		d.logger.Warn().
+			Str("job_id", job.ID).
+			Int32("failed_files", fc).
+			Int32("skipped_files", sc).
+			Int("total_files", len(files)).
+			Msg("Job incomplete, marking as failed for retry")
+		d.state.MarkFailed(job.ID, job.Name, failErr)
+	} else {
+		d.state.MarkDownloaded(job.ID, job.Name, outputDir, downloadedCount, totalSize)
 
-	// v4.0.0: Tag the job as downloaded (D2.3)
-	// v4.3.0: Use hardcoded tag from config package
-	// This prevents the job from being downloaded again via eligibility checking
-	if d.cfg.Eligibility != nil {
-		if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
-			// Log but don't fail - job is already downloaded locally
-			d.logger.Warn().
-				Err(err).
-				Str("job_id", job.ID).
-				Str("tag", config.DownloadedTag).
-				Msg("Failed to tag job as downloaded (will retry on next poll)")
-		} else {
-			d.logger.Debug().
-				Str("job_id", job.ID).
-				Str("tag", config.DownloadedTag).
-				Msg("Tagged job as downloaded")
+		// v4.0.0: Tag the job as downloaded (D2.3)
+		// v4.3.0: Use hardcoded tag from config package
+		// This prevents the job from being downloaded again via eligibility checking
+		if d.cfg.Eligibility != nil {
+			if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
+				d.logger.Warn().
+					Err(err).
+					Str("job_id", job.ID).
+					Str("tag", config.DownloadedTag).
+					Msg("Failed to tag job as downloaded (will retry on next poll)")
+			} else {
+				d.logger.Debug().
+					Str("job_id", job.ID).
+					Str("tag", config.DownloadedTag).
+					Msg("Tagged job as downloaded")
+			}
 		}
+
+		d.logger.Info().Msgf("COMPLETED: %s [%s] - %d files, %s",
+			job.Name, job.ID, downloadedCount, formatBytes(totalSize))
 	}
 
-	// v4.3.5: Embed info in message text for GUI visibility
-	d.logger.Info().Msgf("COMPLETED: %s [%s] - %d files, %s",
-		job.Name, job.ID, downloadedCount, formatBytes(totalSize))
+	// v4.8.8 Bug K: Persist state after each job for crash safety
+	if saveErr := d.state.Save(); saveErr != nil {
+		d.logger.Error().Err(saveErr).Msg("Failed to persist state")
+	}
 }
 
 // formatBytes formats a byte count as a human-readable string.
@@ -533,6 +623,42 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// resolvePathWithSymlinks resolves symlinks for a path that may not fully exist.
+// It walks upward from the given path to find the longest existing ancestor,
+// resolves symlinks on that ancestor, then appends the non-existent suffix.
+// This is needed because filepath.EvalSymlinks requires the path to exist.
+func resolvePathWithSymlinks(path string) string {
+	// Try the full path first
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+
+	// Walk upward to find the longest existing ancestor
+	current := path
+	var suffix []string
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached filesystem root without finding an existing path
+			break
+		}
+		suffix = append([]string{filepath.Base(current)}, suffix...)
+		current = parent
+
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			// Found an existing ancestor — resolve and append suffix
+			result := resolved
+			for _, s := range suffix {
+				result = filepath.Join(result, s)
+			}
+			return result
+		}
+	}
+
+	// Nothing resolvable — return cleaned original path
+	return filepath.Clean(path)
 }
 
 // RunOnce performs a single poll cycle and exits.
@@ -563,18 +689,45 @@ func (d *Daemon) GetActiveDownloads() int {
 	return int(atomic.LoadInt32(&d.activeDownloads))
 }
 
+// v4.8.8 Bug G: Centralized pause state methods
+
+func (d *Daemon) SetPaused(paused bool) {
+	d.paused.Store(paused)
+	if paused {
+		d.logger.Info().Msg("Daemon paused")
+	} else {
+		d.logger.Info().Msg("Daemon resumed")
+	}
+}
+
+func (d *Daemon) IsPaused() bool {
+	return d.paused.Load()
+}
+
 // TriggerPoll manually triggers a poll cycle outside the normal schedule.
 // This is used by the tray app's "Trigger Scan Now" feature.
+// v4.8.8 Bug F: Hold lock through wg.Add to prevent race with Stop().
+// Uses stored lifecycleCtx instead of context.Background().
 func (d *Daemon) TriggerPoll() {
 	d.mu.RLock()
-	running := d.running
-	d.mu.RUnlock()
-
-	if !running {
+	if !d.running {
+		d.mu.RUnlock()
 		return
 	}
+	if d.paused.Load() {
+		d.mu.RUnlock()
+		d.logger.Debug().Msg("Daemon paused, ignoring manual trigger")
+		return
+	}
+	// wg.Add under lock — Stop() holds write lock before wg.Wait(),
+	// so this Add is guaranteed to happen before or after Wait, never during.
+	d.wg.Add(1)
+	ctx := d.lifecycleCtx
+	d.mu.RUnlock()
 
-	// Run poll in background to not block caller
-	go d.poll(context.Background())
+	go func() {
+		defer d.wg.Done()
+		d.poll(ctx)
+	}()
 }
 

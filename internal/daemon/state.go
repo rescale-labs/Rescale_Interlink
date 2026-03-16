@@ -20,6 +20,10 @@ type DownloadedJob struct {
 	FileCount    int       `json:"file_count"`
 	TotalSize    int64     `json:"total_size"`
 	Error        string    `json:"error,omitempty"`
+
+	// v4.8.8 Bug I: Retry tracking for exponential backoff
+	RetryCount  int       `json:"retry_count,omitempty"`
+	LastAttempt time.Time `json:"last_attempt,omitempty"`
 }
 
 // State maintains the daemon's persistent state.
@@ -123,7 +127,9 @@ func (s *State) Save() error {
 	return nil
 }
 
-// IsDownloaded checks if a job has already been downloaded.
+// IsDownloaded checks if a job has already been downloaded or should be skipped.
+// v4.8.8 Bug I: Returns true (skip) for failed jobs that have exhausted retries
+// or are still within their backoff window.
 func (s *State) IsDownloaded(jobID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -132,8 +138,24 @@ func (s *State) IsDownloaded(jobID string) bool {
 	if !exists {
 		return false
 	}
-	// Consider downloaded if no error
-	return job.Error == ""
+	if job.Error == "" {
+		return true
+	}
+	// v4.8.8: Give up after 5 failures
+	if job.RetryCount >= 5 {
+		return true
+	}
+	// v4.8.8: Exponential backoff — 5min, 10min, 20min, 30min cap
+	if job.RetryCount > 0 && !job.LastAttempt.IsZero() {
+		backoff := 5 * time.Minute * time.Duration(1<<(job.RetryCount-1))
+		if backoff > 30*time.Minute {
+			backoff = 30 * time.Minute
+		}
+		if time.Since(job.LastAttempt) < backoff {
+			return true // Still in backoff period
+		}
+	}
+	return false
 }
 
 // MarkDownloaded records a job as successfully downloaded.
@@ -152,15 +174,24 @@ func (s *State) MarkDownloaded(jobID, jobName, outputDir string, fileCount int, 
 }
 
 // MarkFailed records a job download failure.
+// v4.8.8 Bug I: Preserves and increments retry count from existing failure entry.
 func (s *State) MarkFailed(jobID, jobName string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	retryCount := 0
+	if existing, ok := s.Downloaded[jobID]; ok && existing.Error != "" {
+		retryCount = existing.RetryCount
+	}
+
+	now := time.Now()
 	s.Downloaded[jobID] = &DownloadedJob{
 		JobID:        jobID,
 		JobName:      jobName,
-		DownloadedAt: time.Now(),
+		DownloadedAt: now,
 		Error:        err.Error(),
+		RetryCount:   retryCount + 1,
+		LastAttempt:  now,
 	}
 }
 
