@@ -698,7 +698,7 @@ func TestQueueStats(t *testing.T) {
 func TestQueueSpeedCalculation(t *testing.T) {
 	queue := NewQueue(nil)
 
-	task := queue.TrackTransfer("speed.dat", 100000, TaskTypeUpload, "/path", "folder") // 100KB for realistic speed calc
+	task := queue.TrackTransfer("speed.dat", 10*1024*1024, TaskTypeUpload, "/path", "folder") // 10MB — byte delta must exceed 100KB threshold
 	queue.Activate(task.ID)
 
 	// First update

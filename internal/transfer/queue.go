@@ -281,10 +281,13 @@ func (q *Queue) UpdateProgress(taskID string, progress float64) {
 	// Only calculate speed if:
 	// 1. At least 0.3 seconds elapsed (avoid noisy samples)
 	// 2. Progress actually increased (ignore backwards jumps)
-	// 3. Progress delta is meaningful (> 0.001 = 0.1%)
+	// 3. Byte delta is meaningful (> 100KB) — uses bytes instead of progress fraction
+	//    so the threshold works for both small and very large files.
+	//    (v4.8.8: Fixed — the old 0.001 fraction threshold meant 55.9 MB for a 55.9 GB file,
+	//    which was never reached between 500ms progress callbacks at typical Azure speeds.)
 	progressDelta := progress - task.Progress
-	if elapsed >= 0.3 && progressDelta > 0.001 {
-		bytesTransferred := progressDelta * float64(task.Size)
+	bytesTransferred := progressDelta * float64(task.Size)
+	if elapsed >= 0.3 && progressDelta > 0 && bytesTransferred > 100*1024 {
 		instantSpeed := bytesTransferred / elapsed
 
 		// Sanity check: clamp to reasonable range (1 KB/s to 1 GB/s)
