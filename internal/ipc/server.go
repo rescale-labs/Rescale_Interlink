@@ -477,9 +477,7 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 			return NewErrorResponse(err.Error())
 		}
 		// Schedule server stop after response is sent to client
-		s.wg.Add(1)
 		go func() {
-			defer s.wg.Done()
 			time.Sleep(100 * time.Millisecond)
 			s.Stop()
 		}()

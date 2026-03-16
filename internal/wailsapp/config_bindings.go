@@ -4,6 +4,7 @@ package wailsapp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -220,6 +221,16 @@ func (a *App) SaveConfig() error {
 			return fmt.Errorf("failed to save API key: %w", err)
 		}
 		a.logInfo("config", "API key saved successfully")
+	} else {
+		// v4.8.8: User cleared the API key — remove persisted token file
+		tokenPath := config.GetDefaultTokenPath()
+		if tokenPath != "" {
+			if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
+				a.logError("config", fmt.Sprintf("Failed to remove token file: %v", err))
+			} else if err == nil {
+				a.logInfo("config", "API key cleared, token file removed")
+			}
+		}
 	}
 
 	a.logInfo("config", "Config saved successfully")

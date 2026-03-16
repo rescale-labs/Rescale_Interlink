@@ -74,7 +74,15 @@ func (s *State) Load() error {
 	}
 
 	if err := json.Unmarshal(data, s); err != nil {
-		return fmt.Errorf("failed to parse state file: %w", err)
+		// v4.8.8: Corrupt state file — preserve and start fresh instead of failing.
+		// Use timestamped suffix to avoid overwriting previous .corrupt files.
+		corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().Unix())
+		os.Rename(s.filePath, corruptPath) // best-effort, ignore error
+		// Fully reinitialize — Unmarshal may have left partial state
+		s.Version = "1.0.0"
+		s.Downloaded = make(map[string]*DownloadedJob)
+		s.LastPoll = time.Time{}
+		return nil
 	}
 
 	// Ensure map is initialized
