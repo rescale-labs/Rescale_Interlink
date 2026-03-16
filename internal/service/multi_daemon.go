@@ -42,8 +42,10 @@ type userDaemonEntry struct {
 	config     *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
 	cancel     context.CancelFunc
 	running    bool
-	logBuffer  *daemon.LogBuffer // v4.5.0: Per-user log buffer for IPC GetRecentLogs
-	skipReason string            // v4.7.6: Reason user was skipped (e.g., "no_api_key")
+	logBuffer  *daemon.LogBuffer      // v4.5.0: Per-user log buffer for IPC GetRecentLogs
+	logWriter  *daemon.DaemonLogWriter // v4.8.8 Bug M: Track for Close() on shutdown
+	apiKey     string                  // v4.8.8 Bug O: Track for rotation detection
+	skipReason string                  // v4.7.6: Reason user was skipped (e.g., "no_api_key")
 }
 
 // NewMultiUserDaemon creates a new multi-user daemon orchestrator.
@@ -89,6 +91,10 @@ func (m *MultiUserDaemon) Stop() {
 			m.logger.Debug().Str("user", entry.profile.Username).Msg("Stopping user daemon")
 			entry.cancel()
 			entry.daemon.Stop()
+			// v4.8.8 Bug M: Close log writer to prevent file handle leak
+			if entry.logWriter != nil {
+				entry.logWriter.Close()
+			}
 			entry.running = false
 		}
 		delete(m.daemons, path)
@@ -246,6 +252,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Priority: token file -> environment variable
 	apiKey, apiKeySource := config.ResolveAPIKeySource("", profile.ProfilePath)
 	if apiKey == "" {
+		logWriter.Close() // v4.8.8 Bug M: Close before early return
 		// v4.7.6: Promote to Error level and track skip reason for retry + IPC visibility
 		m.logger.Error().Str("user", profile.Username).
 			Msg("No API key found (checked user-token-file, apiconfig, token-file, env var), skipping")
@@ -263,11 +270,16 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		Str("api_key_source", apiKeySource).
 		Msg("API key resolved for user daemon")
 
-	// Create app config for API client
-	appCfg := &config.Config{
-		APIBaseURL: config.DefaultPlatformURL,
-		APIKey:     apiKey,
+	// v4.8.8 Bug C: Load user's config.csv for correct APIBaseURL and proxy settings.
+	userConfigPath := config.GetConfigPathForProfile(profile.ProfilePath)
+	appCfg, loadErr := config.LoadConfigCSV(userConfigPath)
+	if loadErr != nil {
+		m.logger.Warn().Err(loadErr).Str("user", profile.Username).
+			Str("config_path", userConfigPath).
+			Msg("Failed to load user config.csv, using defaults")
+		appCfg = &config.Config{APIBaseURL: config.DefaultPlatformURL}
 	}
+	appCfg.APIKey = apiKey
 
 	// v4.3.0: Simplified - mode is now per-job, only tag and lookback are configurable
 	eligibility := &daemon.EligibilityConfig{
@@ -319,6 +331,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Create the daemon
 	d, err := daemon.New(appCfg, daemonCfg, userLogger)
 	if err != nil {
+		logWriter.Close() // v4.8.8 Bug M: Close before early return
 		return fmt.Errorf("failed to create daemon for %s: %w", profile.Username, err)
 	}
 
@@ -331,6 +344,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Start the daemon
 	if err := d.Start(ctx); err != nil {
 		cancel()
+		logWriter.Close() // v4.8.8 Bug M: Close before early return
 		return fmt.Errorf("failed to start daemon for %s: %w", profile.Username, err)
 	}
 
@@ -342,6 +356,8 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		cancel:    cancel,
 		running:   true,
 		logBuffer: logBuffer,
+		logWriter: logWriter, // v4.8.8 Bug M: Track for Close() on shutdown
+		apiKey:    apiKey,    // v4.8.8 Bug O: Track for rotation detection
 	}
 
 	m.logger.Info().Str("user", profile.Username).Msg("User daemon started successfully")
@@ -362,6 +378,13 @@ func (m *MultiUserDaemon) stopUserDaemon(entry *userDaemonEntry) {
 	}
 	if entry.daemon != nil {
 		entry.daemon.Stop()
+	}
+	// v4.8.8 Bug M: Close log writer to prevent file handle leak
+	if entry.logWriter != nil {
+		if err := entry.logWriter.Close(); err != nil {
+			m.logger.Warn().Err(err).Str("user", entry.profile.Username).
+				Msg("Failed to close log writer")
+		}
 	}
 	entry.running = false
 }
@@ -411,6 +434,14 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 		return true
 	}
 	if oldCfg.Filters.Exclude != newCfg.Filters.Exclude {
+		return true
+	}
+
+	// v4.8.8 Bug O: Detect API key rotation
+	currentKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath)
+	if currentKey != entry.apiKey {
+		m.logger.Info().Str("user", profile.Username).
+			Msg("API key changed (rotation detected)")
 		return true
 	}
 

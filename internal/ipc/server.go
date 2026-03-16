@@ -389,7 +389,20 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewStatusResponse(status)
 
 	case MsgGetUserList:
-		// Read-only: no authorization required
+		// v4.8.8 Bug N: In service mode, filter to caller's own entry only
+		if s.serviceMode {
+			if callerSID == "" {
+				return NewErrorResponse("unauthorized: could not identify caller")
+			}
+			allUsers := s.handler.GetUserList()
+			var filtered []UserStatus
+			for _, u := range allUsers {
+				if u.SID == callerSID {
+					filtered = append(filtered, u)
+				}
+			}
+			return NewUserListResponse(filtered)
+		}
 		users := s.handler.GetUserList()
 		return NewUserListResponse(users)
 

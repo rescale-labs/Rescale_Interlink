@@ -20,6 +20,7 @@ type capturingHandler struct {
 	lastOpenLogsUserID       string
 	lastGetRecentLogsUserID  string
 	lastGetTransferStatusUID string
+	userList                 []UserStatus // v4.8.8 Bug N: configurable user list for filtering tests
 }
 
 func (h *capturingHandler) GetStatus() *StatusData {
@@ -27,6 +28,9 @@ func (h *capturingHandler) GetStatus() *StatusData {
 }
 
 func (h *capturingHandler) GetUserList() []UserStatus {
+	if len(h.userList) > 0 {
+		return h.userList
+	}
 	return []UserStatus{{Username: "testuser", State: "running"}}
 }
 
@@ -216,5 +220,82 @@ func TestSubprocessModeUnchanged(t *testing.T) {
 	}
 	if handler.lastGetRecentLogsUserID != clientUserID {
 		t.Errorf("Handler received userID=%q, want client-supplied %q", handler.lastGetRecentLogsUserID, clientUserID)
+	}
+}
+
+// TestServiceModeGetUserListFilteredByCallerSID verifies that in service mode,
+// GetUserList only returns the caller's own entry (v4.8.8 Bug N).
+func TestServiceModeGetUserListFilteredByCallerSID(t *testing.T) {
+	callerSID := "S-1-5-21-CALLER"
+	otherSID := "S-1-5-21-OTHER"
+
+	handler := &capturingHandler{
+		userList: []UserStatus{
+			{Username: "alice", SID: callerSID, State: "running"},
+			{Username: "bob", SID: otherSID, State: "running"},
+		},
+	}
+	server := newServiceModeServerForTest(handler)
+
+	req := NewRequestWithUser(MsgGetUserList, "")
+	resp := server.handleRequest(req, callerSID)
+	if !resp.Success {
+		t.Fatalf("Expected success, got error: %s", resp.Error)
+	}
+
+	data := resp.GetUserListData()
+	if data == nil {
+		t.Fatal("Expected UserListData, got nil")
+	}
+	if len(data.Users) != 1 {
+		t.Fatalf("Expected 1 user, got %d", len(data.Users))
+	}
+	if data.Users[0].Username != "alice" {
+		t.Errorf("Expected alice, got %q", data.Users[0].Username)
+	}
+	if data.Users[0].SID != callerSID {
+		t.Errorf("Expected SID %q, got %q", callerSID, data.Users[0].SID)
+	}
+}
+
+// TestServiceModeGetUserListDeniedWithoutCallerSID verifies that in service mode,
+// GetUserList fails closed when callerSID is empty (v4.8.8 Bug N).
+func TestServiceModeGetUserListDeniedWithoutCallerSID(t *testing.T) {
+	handler := &capturingHandler{}
+	server := newServiceModeServerForTest(handler)
+
+	req := NewRequestWithUser(MsgGetUserList, "")
+	resp := server.handleRequest(req, "") // empty callerSID
+	if resp.Success {
+		t.Fatal("Expected error for empty callerSID, got success")
+	}
+	if resp.Error != "unauthorized: could not identify caller" {
+		t.Errorf("Unexpected error: %q", resp.Error)
+	}
+}
+
+// TestSubprocessModeGetUserListUnfiltered verifies that in non-service mode,
+// GetUserList returns all users unfiltered (v4.8.8 Bug N).
+func TestSubprocessModeGetUserListUnfiltered(t *testing.T) {
+	handler := &capturingHandler{
+		userList: []UserStatus{
+			{Username: "alice", SID: "S-1-5-21-ALICE", State: "running"},
+			{Username: "bob", SID: "S-1-5-21-BOB", State: "running"},
+		},
+	}
+	server := newSubprocessModeServerForTest(handler)
+
+	req := NewRequestWithUser(MsgGetUserList, "")
+	resp := server.handleRequest(req, "S-1-5-21-ALICE")
+	if !resp.Success {
+		t.Fatalf("Expected success, got error: %s", resp.Error)
+	}
+
+	data := resp.GetUserListData()
+	if data == nil {
+		t.Fatal("Expected UserListData, got nil")
+	}
+	if len(data.Users) != 2 {
+		t.Errorf("Expected 2 users (unfiltered), got %d", len(data.Users))
 	}
 }
