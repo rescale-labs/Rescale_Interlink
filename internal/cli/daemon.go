@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -131,7 +132,7 @@ Examples:
 			if runtime.GOOS == "windows" {
 				daemon.WriteStartupLog("=== DAEMON CLI STARTING ===")
 				daemon.WriteStartupLog("PID: %d", os.Getpid())
-				daemon.WriteStartupLog("Args: %v", os.Args)
+				daemon.WriteStartupLog("Args: %v", redactArgs(os.Args))
 				if wd, err := os.Getwd(); err == nil {
 					daemon.WriteStartupLog("Working directory: %s", wd)
 				}
@@ -1239,4 +1240,19 @@ To create the custom field:
 			return nil
 		},
 	}
+}
+
+// redactArgs returns a copy of args with --api-key values replaced by [REDACTED].
+// Handles both "--api-key VALUE" (space-separated) and "--api-key=VALUE" (equals-joined).
+func redactArgs(args []string) []string {
+	redacted := make([]string, len(args))
+	copy(redacted, args)
+	for i := 0; i < len(redacted); i++ {
+		if redacted[i] == "--api-key" && i+1 < len(redacted) {
+			redacted[i+1] = "[REDACTED]"
+		} else if strings.HasPrefix(redacted[i], "--api-key=") {
+			redacted[i] = "--api-key=[REDACTED]"
+		}
+	}
+	return redacted
 }

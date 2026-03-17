@@ -37,12 +37,15 @@ type MultiUserDaemon struct {
 
 // userDaemonEntry tracks a daemon for a specific user.
 type userDaemonEntry struct {
-	profile   UserProfile
-	daemon    *daemon.Daemon
-	config    *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
-	cancel    context.CancelFunc
-	running   bool
-	logBuffer *daemon.LogBuffer // v4.5.0: Per-user log buffer for IPC GetRecentLogs
+	profile    UserProfile
+	daemon     *daemon.Daemon
+	config     *config.DaemonConfig // v4.2.0: Use DaemonConfig instead of APIConfig
+	cancel     context.CancelFunc
+	running    bool
+	logBuffer  *daemon.LogBuffer      // v4.5.0: Per-user log buffer for IPC GetRecentLogs
+	logWriter  *daemon.DaemonLogWriter // v4.8.8 Bug M: Track for Close() on shutdown
+	apiKey     string                  // v4.8.8 Bug O: Track for rotation detection
+	skipReason string                  // v4.7.6: Reason user was skipped (e.g., "no_api_key")
 }
 
 // NewMultiUserDaemon creates a new multi-user daemon orchestrator.
@@ -88,6 +91,10 @@ func (m *MultiUserDaemon) Stop() {
 			m.logger.Debug().Str("user", entry.profile.Username).Msg("Stopping user daemon")
 			entry.cancel()
 			entry.daemon.Stop()
+			// v4.8.8 Bug M: Close log writer to prevent file handle leak
+			if entry.logWriter != nil {
+				entry.logWriter.Close()
+			}
 			entry.running = false
 		}
 		delete(m.daemons, path)
@@ -146,8 +153,17 @@ func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 
 		// Check if we already have a daemon for this profile
 		if entry, exists := m.daemons[profile.ProfilePath]; exists {
-			// Check if config has changed
-			if m.configChanged(entry, profile) {
+			// v4.7.6: Check if previously skipped user now has an API key
+			if entry.skipReason == "no_api_key" {
+				apiKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath)
+				if apiKey != "" {
+					m.logger.Info().Str("user", profile.Username).
+						Msg("API key now available — starting previously skipped user daemon")
+					delete(m.daemons, profile.ProfilePath) // Remove skip entry, fall through to startUserDaemon
+				} else {
+					continue // Still no key, keep skipped
+				}
+			} else if m.configChanged(entry, profile) {
 				m.logger.Info().
 					Str("user", profile.Username).
 					Msg("Config changed, restarting user daemon")
@@ -156,8 +172,10 @@ func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 					m.logger.Error().Err(err).Str("user", profile.Username).
 						Msg("Failed to restart user daemon")
 				}
+				continue
+			} else {
+				continue
 			}
-			continue
 		}
 
 		// New profile - start a daemon
@@ -234,8 +252,15 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Priority: token file -> environment variable
 	apiKey, apiKeySource := config.ResolveAPIKeySource("", profile.ProfilePath)
 	if apiKey == "" {
-		m.logger.Debug().Str("user", profile.Username).
-			Msg("No API key found (checked token file, env var), skipping")
+		logWriter.Close() // v4.8.8 Bug M: Close before early return
+		// v4.7.6: Promote to Error level and track skip reason for retry + IPC visibility
+		m.logger.Error().Str("user", profile.Username).
+			Msg("No API key found (checked user-token-file, apiconfig, token-file, env var), skipping")
+		m.daemons[profile.ProfilePath] = &userDaemonEntry{
+			profile:    profile,
+			config:     daemonConf,
+			skipReason: "no_api_key",
+		}
 		return nil
 	}
 
@@ -245,11 +270,16 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		Str("api_key_source", apiKeySource).
 		Msg("API key resolved for user daemon")
 
-	// Create app config for API client
-	appCfg := &config.Config{
-		APIBaseURL: "https://platform.rescale.com", // Default URL, could be configurable
-		APIKey:     apiKey,
+	// v4.8.8 Bug C: Load user's config.csv for correct APIBaseURL and proxy settings.
+	userConfigPath := config.GetConfigPathForProfile(profile.ProfilePath)
+	appCfg, loadErr := config.LoadConfigCSV(userConfigPath)
+	if loadErr != nil {
+		m.logger.Warn().Err(loadErr).Str("user", profile.Username).
+			Str("config_path", userConfigPath).
+			Msg("Failed to load user config.csv, using defaults")
+		appCfg = &config.Config{APIBaseURL: config.DefaultPlatformURL}
 	}
+	appCfg.APIKey = apiKey
 
 	// v4.3.0: Simplified - mode is now per-job, only tag and lookback are configurable
 	eligibility := &daemon.EligibilityConfig{
@@ -301,6 +331,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Create the daemon
 	d, err := daemon.New(appCfg, daemonCfg, userLogger)
 	if err != nil {
+		logWriter.Close() // v4.8.8 Bug M: Close before early return
 		return fmt.Errorf("failed to create daemon for %s: %w", profile.Username, err)
 	}
 
@@ -313,6 +344,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	// Start the daemon
 	if err := d.Start(ctx); err != nil {
 		cancel()
+		logWriter.Close() // v4.8.8 Bug M: Close before early return
 		return fmt.Errorf("failed to start daemon for %s: %w", profile.Username, err)
 	}
 
@@ -324,6 +356,8 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 		cancel:    cancel,
 		running:   true,
 		logBuffer: logBuffer,
+		logWriter: logWriter, // v4.8.8 Bug M: Track for Close() on shutdown
+		apiKey:    apiKey,    // v4.8.8 Bug O: Track for rotation detection
 	}
 
 	m.logger.Info().Str("user", profile.Username).Msg("User daemon started successfully")
@@ -344,6 +378,13 @@ func (m *MultiUserDaemon) stopUserDaemon(entry *userDaemonEntry) {
 	}
 	if entry.daemon != nil {
 		entry.daemon.Stop()
+	}
+	// v4.8.8 Bug M: Close log writer to prevent file handle leak
+	if entry.logWriter != nil {
+		if err := entry.logWriter.Close(); err != nil {
+			m.logger.Warn().Err(err).Str("user", entry.profile.Username).
+				Msg("Failed to close log writer")
+		}
 	}
 	entry.running = false
 }
@@ -396,6 +437,14 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 		return true
 	}
 
+	// v4.8.8 Bug O: Detect API key rotation
+	currentKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath)
+	if currentKey != entry.apiKey {
+		m.logger.Info().Str("user", profile.Username).
+			Msg("API key changed (rotation detected)")
+		return true
+	}
+
 	return false
 }
 
@@ -423,6 +472,11 @@ func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 			status.ActiveDownloads = entry.daemon.GetActiveDownloads()
 		}
 
+		// v4.7.6: Populate error from skip reason for IPC visibility
+		if entry.skipReason == "no_api_key" {
+			status.LastError = "No API key configured"
+		}
+
 		statuses = append(statuses, status)
 	}
 
@@ -440,6 +494,7 @@ type UserDaemonStatus struct {
 	LastScanTime    time.Time // v4.0.8: Last poll/scan time
 	JobsDownloaded  int       // v4.0.8: Total jobs downloaded
 	ActiveDownloads int       // v4.0.8: Currently active downloads
+	LastError       string    // v4.7.6: Error reason if daemon was skipped or failed
 }
 
 // RunningCount returns the number of currently running user daemons.
@@ -672,4 +727,37 @@ func (m *MultiUserDaemon) GetUserLogs(identifier string, count int) []ipc.LogEnt
 		}
 	}
 	return nil
+}
+
+// GetUserTransferStatus returns daemon transfer batch status for a specific user.
+// v4.7.8: Follows same SID/username matching pattern as PauseUser/GetUserLogs.
+func (m *MultiUserDaemon) GetUserTransferStatus(identifier string) *ipc.TransferStatusData {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// First pass: try exact SID or username match
+	for _, entry := range m.daemons {
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
+			if entry.daemon != nil {
+				return entry.daemon.GetTransferStatus()
+			}
+			return &ipc.TransferStatusData{}
+		}
+	}
+
+	// Fallback: resolve SID to username (same pattern as PauseUser second pass)
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		if resolved := ResolveSIDToUsername(identifier); resolved != "" {
+			for _, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolved) {
+					if entry.daemon != nil {
+						return entry.daemon.GetTransferStatus()
+					}
+				}
+			}
+		}
+	}
+
+	return &ipc.TransferStatusData{}
 }

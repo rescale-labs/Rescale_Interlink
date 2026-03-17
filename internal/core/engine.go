@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
-	"log"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,15 +17,48 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/events"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
+
+// RunOptions groups PUR-specific pipeline options to avoid parameter creep.
+// v4.7.4: Introduced to replace individual parameters in RunFromSpecsWithOptions.
+type RunOptions struct {
+	ExtraInputFiles  string
+	DecompressExtras bool
+	RmTarOnSuccess   bool
+}
+
+// syncUploaderAdapter wraps TransferService to implement pipeline.SyncUploader.
+// v4.7.4: Bridges the pipeline package's interface to the services layer.
+type syncUploaderAdapter struct {
+	ts *services.TransferService
+}
+
+func (a *syncUploaderAdapter) UploadFileSync(ctx context.Context, params pipeline.SyncUploadParams) (*models.CloudFile, error) {
+	return a.ts.UploadFileSync(ctx, services.TransferRequest{
+		Type:        services.TransferTypeUpload,
+		Source:      params.LocalPath,
+		Dest:        params.FolderID,
+		Name:        params.Name,
+		SourceLabel: params.SourceLabel,
+		BatchID:     params.BatchID,    // v4.7.7
+		BatchLabel:  params.BatchLabel, // v4.7.7
+		Tags:        params.Tags,
+	}, services.UploadFileSyncParams{
+		ExtraProgressCallback: params.ExtraProgressCallback,
+	})
+}
 
 // RunContext tracks metadata about an active pipeline run.
 // v4.0.0: Added for GUI job state synchronization.
@@ -132,6 +165,15 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 	if e.fileService != nil {
 		e.fileService.SetAPIClient(apiClient)
 	}
+
+	// v4.8.4: Register idle-connection cleanup for sleep/wake recovery.
+	// Re-registered on each config update so the hook always points at the current client.
+	// v4.8.7: Extended to cover S3/Azure provider transports via CloseAllIdleConnections.
+	ratelimit.GlobalStore().SetStaleConnectionCleanup(func() {
+		apiClient.CloseIdleConnections()    // API client transport
+		inthttp.CloseAllIdleConnections()   // S3 + Azure provider transports
+	})
+
 	e.mu.Unlock()
 
 	e.publishLog(events.InfoLevel, "Configuration updated", "", "")
@@ -282,13 +324,8 @@ func (e *Engine) Scan(opts ScanOptions) error {
 	template := jobs[0]
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Using template: %s", template.JobName), "scan", "")
 
-	// Get validation pattern (use config default if not specified)
+	// v4.7.1: Use validation pattern from scan options only (no config fallback)
 	validationPattern := opts.ValidationPattern
-	if validationPattern == "" {
-		e.mu.RLock()
-		validationPattern = e.config.ValidationPattern
-		e.mu.RUnlock()
-	}
 
 	// Structure for directory entries
 	type dirEntry struct {
@@ -360,12 +397,13 @@ func (e *Engine) Scan(opts ScanOptions) error {
 
 		var dirs []string
 		if opts.Recursive {
-			// Recursive mode - walk directory tree
-			err := filepath.Walk(scanRoot, func(path string, info os.FileInfo, err error) error {
+			// Recursive mode - walk directory tree.
+			// Uses WalkDir instead of Walk to avoid per-entry os.Stat syscalls.
+			err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
-				if info.IsDir() {
+				if d.IsDir() {
 					// Skip hidden directories unless specified
 					if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
 						return filepath.SkipDir
@@ -374,6 +412,11 @@ func (e *Engine) Scan(opts ScanOptions) error {
 					matched, matchErr := filepath.Match(opts.Pattern, filepath.Base(path))
 					if matchErr == nil && matched && path != scanRoot {
 						dirs = append(dirs, path)
+						// SkipDir: intentionally stop descending into matched directories.
+						// Run directories (e.g., Run_*) are expected to be siblings, not nested.
+						// This avoids walking the full contents of each matched directory,
+						// which is the primary source of slow recursive scans.
+						return filepath.SkipDir
 					}
 				}
 				return nil
@@ -474,15 +517,10 @@ func (e *Engine) Scan(opts ScanOptions) error {
 			command = pattern.IterateCommandPatterns(command, templateIdx, dirNum)
 		}
 
-		// Directory path - use absolute for multi-part mode (required for tar)
+		// Normalize directory path to absolute
 		dirPath := entry.path
-		if !opts.MultiPartMode {
-			// Normal mode: try to use relative path
-			if cwd, err := os.Getwd(); err == nil {
-				if relPath, err := filepath.Rel(cwd, entry.path); err == nil {
-					dirPath = relPath
-				}
-			}
+		if absPath, err := pathutil.ResolveAbsolutePath(entry.path); err == nil {
+			dirPath = absPath
 		}
 
 		// Build row
@@ -547,13 +585,8 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 	e.publishLog(events.InfoLevel, "Starting in-memory directory scan...", "scan", "")
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Using template: %s", template.JobName), "scan", "")
 
-	// Get validation pattern (use config default if not specified)
+	// v4.7.1: Use validation pattern from scan options only (no config fallback)
 	validationPattern := opts.ValidationPattern
-	if validationPattern == "" {
-		e.mu.RLock()
-		validationPattern = e.config.ValidationPattern
-		e.mu.RUnlock()
-	}
 
 	// Structure for directory entries
 	type dirEntry struct {
@@ -629,12 +662,13 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 
 		var dirs []string
 		if opts.Recursive {
-			// Recursive mode - walk directory tree
-			err := filepath.Walk(scanRoot, func(path string, info os.FileInfo, err error) error {
+			// Recursive mode - walk directory tree.
+			// Uses WalkDir instead of Walk to avoid per-entry os.Stat syscalls.
+			err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
-				if info.IsDir() {
+				if d.IsDir() {
 					// Skip hidden directories unless specified
 					if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
 						return filepath.SkipDir
@@ -643,6 +677,11 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 					matched, matchErr := filepath.Match(opts.Pattern, filepath.Base(path))
 					if matchErr == nil && matched && path != scanRoot {
 						dirs = append(dirs, path)
+						// SkipDir: intentionally stop descending into matched directories.
+						// Run directories (e.g., Run_*) are expected to be siblings, not nested.
+						// This avoids walking the full contents of each matched directory,
+						// which is the primary source of slow recursive scans.
+						return filepath.SkipDir
 					}
 				}
 				return nil
@@ -730,15 +769,11 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 		// Create job from template
 		job := template
 
-		// Set directory path - use absolute for multi-part mode
-		job.Directory = entry.path
-		if !opts.MultiPartMode {
-			// Normal mode: try to use relative path
-			if cwd, err := os.Getwd(); err == nil {
-				if relPath, err := filepath.Rel(cwd, entry.path); err == nil {
-					job.Directory = relPath
-				}
-			}
+		// Normalize directory path to absolute
+		if absPath, err := pathutil.ResolveAbsolutePath(entry.path); err == nil {
+			job.Directory = absPath
+		} else {
+			job.Directory = entry.path
 		}
 
 		// Create job name with project suffix for multi-part mode
@@ -889,6 +924,11 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 		return err
 	}
 
+	// v4.7.4: Wire sync uploader for TransferService integration
+	if e.transferService != nil {
+		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
+	}
+
 	// Set up callbacks to publish to event bus
 	pip.SetLogCallback(func(level, message, stage, jobName string) {
 		var eventLevel events.LogLevel
@@ -972,6 +1012,16 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 		Duration:    duration,
 	})
 
+	// v4.8.7: Report total pipeline failure for error reporting (Plan 3).
+	// Only report if all jobs failed, not cancelled, and there were jobs to run.
+	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
+		derivedErr := err
+		if derivedErr == nil {
+			derivedErr = fmt.Errorf("pipeline completed with %d/%d jobs failed", stats.Failed, stats.Total)
+		}
+		reporting.ClassifyAndPublish(e.eventBus, derivedErr, reporting.CategoryPURPipeline, "run", "")
+	}
+
 	if err != nil {
 		if err == context.Canceled {
 			e.publishLog(events.InfoLevel, "Pipeline stopped by user", "run", "")
@@ -1032,6 +1082,11 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
 		return err
+	}
+
+	// v4.7.4: Wire sync uploader for TransferService integration
+	if e.transferService != nil {
+		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
 	}
 
 	// Set up callbacks to publish to event bus (identical to Run method)
@@ -1131,9 +1186,9 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 }
 
 // RunFromSpecsWithOptions executes the pipeline from an in-memory job list with
-// additional PUR options (extra input files, decompress flag). This is the GUI
-// entry point when extra input files are configured.
-func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobSpec, stateFile string, extraInputFiles string, decompressExtras bool) error {
+// additional PUR options (extra input files, decompress flag, tar cleanup).
+// v4.7.4: Changed from individual parameters to RunOptions struct.
+func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobSpec, stateFile string, opts RunOptions) error {
 	// Check if API key is configured before starting pipeline
 	e.mu.RLock()
 	hasAPIKey := e.config.APIKey != ""
@@ -1161,12 +1216,18 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	}
 
 	// Create pipeline directly from JobSpecs with shared state manager and extra input files
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, extraInputFiles, decompressExtras)
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, opts.ExtraInputFiles, opts.DecompressExtras)
 	if err != nil {
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
 		return err
 	}
+
+	// v4.7.4: Wire sync uploader and tar cleanup
+	if e.transferService != nil {
+		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
+	}
+	pip.SetRmTarOnSuccess(opts.RmTarOnSuccess)
 
 	// Set up callbacks to publish to event bus (identical to RunFromSpecs)
 	pip.SetLogCallback(func(level, message, stage, jobName string) {
@@ -1249,6 +1310,15 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 		FailedJobs:  stats.Failed,
 		Duration:    duration,
 	})
+
+	// v4.8.7: Report total pipeline failure for error reporting (Plan 3).
+	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
+		derivedErr := err
+		if derivedErr == nil {
+			derivedErr = fmt.Errorf("pipeline completed with %d/%d jobs failed", stats.Failed, stats.Total)
+		}
+		reporting.ClassifyAndPublish(e.eventBus, derivedErr, reporting.CategoryPURPipeline, "run", "")
+	}
 
 	if err != nil {
 		if err == context.Canceled {
@@ -1505,8 +1575,10 @@ func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
 // Private helper methods
 
 func (e *Engine) publishLog(level events.LogLevel, message, stage, jobName string) {
-	// Always log to console
-	log.Printf("[%s] %s", level.String(), message)
+	// v4.8.7: Write to stdout directly (not log.Printf) to avoid double-publish
+	// when TeeWriter is active on stdlib log — the EventBus publish below is
+	// the intended path for GUI Activity Logs.
+	fmt.Printf("[%s] %s\n", level.String(), message)
 
 	// Only publish events if enabled (to prevent deadlocks)
 	e.eventMu.RLock()

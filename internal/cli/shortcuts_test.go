@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/spf13/cobra"
 )
 
@@ -93,10 +95,6 @@ func TestLsShortcut(t *testing.T) {
 		t.Error("--limit flag not found")
 	}
 
-	statusFlag := cmd.Flags().Lookup("status")
-	if statusFlag == nil {
-		t.Error("--status flag not found")
-	}
 }
 
 // TestShortcutCommands tests that all shortcut commands exist
@@ -152,5 +150,85 @@ func TestAddShortcuts(t *testing.T) {
 		if !foundShortcuts[expected] {
 			t.Errorf("Shortcut command '%s' not found in root command", expected)
 		}
+	}
+}
+
+// TestDownloadShortcutMaxConcurrentRange verifies Bug #5 fix:
+// Download shortcut uses MaxMaxConcurrent (20), not hardcoded 10.
+// v4.8.1: The range validation was changed from 1-10 to constants.MinMaxConcurrent-MaxMaxConcurrent.
+func TestDownloadShortcutMaxConcurrentRange(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       string
+		wantRangeErr bool
+	}{
+		{"below_min", "0", true},
+		{"at_min", "1", false},
+		{"default_value", "5", false},
+		{"at_old_max_10", "10", false},
+		{"above_old_max_15", "15", false},
+		{"at_new_max_20", "20", false},
+		{"above_max_21", "21", true},
+		{"way_above_max", "100", true},
+		{"negative", "-1", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newDownloadShortcut()
+			cmd.Flags().Set("max-concurrent", tt.value)
+			// RunE will validate max-concurrent first, then fail on getAPIClient().
+			// We only care whether the range error occurs.
+			err := cmd.RunE(cmd, []string{"fake-file-id"})
+			if err == nil {
+				t.Fatal("expected error (at least from missing API client), got nil")
+			}
+			isRangeErr := strings.Contains(err.Error(), "must be between")
+			if tt.wantRangeErr && !isRangeErr {
+				t.Errorf("expected range validation error, got: %v", err)
+			}
+			if !tt.wantRangeErr && isRangeErr {
+				t.Errorf("did not expect range error for value %s, got: %v", tt.value, err)
+			}
+		})
+	}
+
+	// Verify the actual constant values used
+	if constants.MinMaxConcurrent != 1 {
+		t.Errorf("MinMaxConcurrent = %d, want 1", constants.MinMaxConcurrent)
+	}
+	if constants.MaxMaxConcurrent != 20 {
+		t.Errorf("MaxMaxConcurrent = %d, want 20 (was 10 before Bug #5 fix)", constants.MaxMaxConcurrent)
+	}
+}
+
+// TestUploadShortcutMaxConcurrentRange verifies upload shortcut also uses MaxMaxConcurrent.
+func TestUploadShortcutMaxConcurrentRange(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       string
+		wantRangeErr bool
+	}{
+		{"below_min", "0", true},
+		{"at_max_20", "20", false},
+		{"above_max_21", "21", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newUploadShortcut()
+			cmd.Flags().Set("max-concurrent", tt.value)
+			err := cmd.RunE(cmd, []string{"fake-file"})
+			if err == nil {
+				t.Fatal("expected error (at least from missing API client), got nil")
+			}
+			isRangeErr := strings.Contains(err.Error(), "must be between")
+			if tt.wantRangeErr && !isRangeErr {
+				t.Errorf("expected range validation error, got: %v", err)
+			}
+			if !tt.wantRangeErr && isRangeErr {
+				t.Errorf("did not expect range error for value %s, got: %v", tt.value, err)
+			}
+		})
 	}
 }

@@ -226,10 +226,10 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 		// v3.6.3: Use progress-tracking reader if callback is set
 		var reader io.ReadSeekCloser
 		if uploadState.ByteProgressCallback != nil {
-			reader = &progressReadSeekCloser{
+			reader = &transfer.UploadProgressReader{
 				Reader:    bytes.NewReader(ciphertext),
-				callback:  uploadState.ByteProgressCallback,
-				threshold: progressReaderThreshold,
+				Callback:  uploadState.ByteProgressCallback,
+				Threshold: transfer.ProgressReaderThreshold,
 			}
 		} else {
 			reader = &readSeekCloser{Reader: bytes.NewReader(ciphertext)}
@@ -401,59 +401,8 @@ func (rsc *readSeekCloser) Close() error {
 	return nil
 }
 
-// progressReadSeekCloser wraps readSeekCloser with progress callback.
-// v3.6.3: Enables real-time progress tracking during Azure uploads.
-// Uses threshold-based reporting to avoid jumpy progress from many small reads.
-type progressReadSeekCloser struct {
-	*bytes.Reader
-	callback    func(bytesRead int64)
-	accumulated int64 // Bytes accumulated since last callback
-	threshold   int64 // Report every N bytes (1MB default)
-}
-
-// progressReaderThreshold is the minimum bytes to accumulate before reporting.
-// 1MB provides smooth progress without excessive updates.
-const progressReaderThreshold = 1 * 1024 * 1024 // 1MB
-
-func (prsc *progressReadSeekCloser) Read(p []byte) (n int, err error) {
-	n, err = prsc.Reader.Read(p)
-	if n > 0 && prsc.callback != nil {
-		prsc.accumulated += int64(n)
-		// Report when threshold reached OR on EOF (to flush remaining)
-		if prsc.accumulated >= prsc.threshold || err == io.EOF {
-			prsc.callback(prsc.accumulated)
-			prsc.accumulated = 0
-		}
-	}
-	return n, err
-}
-
-func (prsc *progressReadSeekCloser) Close() error {
-	return nil
-}
-
-// progressReader wraps an io.Reader and reports bytes read to a callback.
-// v4.0.0: Enables real-time progress tracking during Azure downloads.
-// Uses threshold-based reporting to avoid jumpy progress from many small reads.
-type progressReader struct {
-	reader      io.Reader
-	callback    func(bytesRead int64)
-	accumulated int64 // Bytes accumulated since last callback
-	threshold   int64 // Report every N bytes (1MB default)
-}
-
-func (pr *progressReader) Read(p []byte) (n int, err error) {
-	n, err = pr.reader.Read(p)
-	if n > 0 && pr.callback != nil {
-		pr.accumulated += int64(n)
-		// Report when threshold reached OR on EOF (to flush remaining)
-		if pr.accumulated >= pr.threshold || err == io.EOF {
-			pr.callback(pr.accumulated)
-			pr.accumulated = 0
-		}
-	}
-	return n, err
-}
+// v4.8.1: progressReader and progressReadSeekCloser moved to shared
+// internal/cloud/transfer/progress.go (transfer.ProgressReader, transfer.UploadProgressReader).
 
 // =============================================================================
 // StreamingConcurrentDownloader Interface Implementation
@@ -653,11 +602,10 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 		}
 	}
 
-	// Start periodic refresh for large files
-	if encryptedSize > constants.LargeFileThreshold {
-		azureClient.StartPeriodicRefresh(ctx)
-		defer azureClient.StopPeriodicRefresh()
-	}
+	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
+	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
+	azureClient.StartPeriodicRefresh(ctx)
+	defer azureClient.StopPeriodicRefresh()
 
 	// Create output file (plaintext, no temp file needed!)
 	outFile, err := os.Create(localPath)
@@ -788,13 +736,13 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 		// Wrap response body with progress tracking for smooth download progress
 		var reader io.Reader = resp.Body
 		if progressCallback != nil {
-			reader = &progressReader{
-				reader: resp.Body,
-				callback: func(n int64) {
+			reader = &transfer.ProgressReader{
+				Reader: resp.Body,
+				Callback: func(n int64) {
 					attemptBytes += n
 					progressCallback(n)
 				},
-				threshold: progressReaderThreshold,
+				Threshold: transfer.ProgressReaderThreshold,
 			}
 		}
 

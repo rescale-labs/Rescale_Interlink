@@ -154,6 +154,17 @@ func InstallServiceElevated() error {
 	return RunElevated(cliPath, "service install", workDir)
 }
 
+// InstallAndStartServiceElevated triggers UAC to run "rescale-int service install-and-start".
+// v4.7.6: Combined idempotent install + start with a single UAC prompt.
+func InstallAndStartServiceElevated() error {
+	cliPath, workDir, err := getCliExecutablePath()
+	if err != nil {
+		return fmt.Errorf("failed to locate CLI: %w", err)
+	}
+
+	return RunElevated(cliPath, "service install-and-start", workDir)
+}
+
 // UninstallServiceElevated triggers UAC to run "rescale-int service uninstall".
 // v4.5.8: Added for GUI/tray to uninstall Windows Service with elevation.
 // The elevated CLI process handles SCM removal and clears HKLM registry marker.

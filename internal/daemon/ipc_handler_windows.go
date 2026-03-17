@@ -5,7 +5,6 @@ package daemon
 
 import (
 	"os/user"
-	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -19,10 +18,6 @@ import (
 type IPCHandler struct {
 	daemon    *Daemon
 	startTime time.Time
-
-	// Pause/resume state
-	mu     sync.RWMutex
-	paused bool
 
 	// Shutdown callback
 	shutdownFunc func()
@@ -50,12 +45,10 @@ func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
 // GetStatus returns the current daemon status.
 // v4.4.0: Now returns real data (was previously hardcoded stub).
 func (h *IPCHandler) GetStatus() *ipc.StatusData {
-	h.mu.RLock()
 	state := "running"
-	if h.paused {
+	if h.daemon != nil && h.daemon.IsPaused() {
 		state = "paused"
 	}
-	h.mu.RUnlock()
 
 	var lastPollPtr *time.Time
 	if h.daemon != nil {
@@ -87,12 +80,10 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 // On Windows subprocess mode, returns a single user (the current user).
 // v4.4.0: Now returns real data (was previously nil).
 func (h *IPCHandler) GetUserList() []ipc.UserStatus {
-	h.mu.RLock()
 	state := "running"
-	if h.paused {
+	if h.daemon != nil && h.daemon.IsPaused() {
 		state = "paused"
 	}
-	h.mu.RUnlock()
 
 	// Get current user
 	username := "unknown"
@@ -138,11 +129,8 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 // On Windows subprocess mode, userID is ignored.
 // v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) PauseUser(userID string) error {
-	h.mu.Lock()
-	h.paused = true
-	h.mu.Unlock()
-	if h.daemon != nil && h.daemon.logger != nil {
-		h.daemon.logger.Info().Msg("Daemon paused via IPC")
+	if h.daemon != nil {
+		h.daemon.SetPaused(true)
 	}
 	return nil
 }
@@ -151,11 +139,8 @@ func (h *IPCHandler) PauseUser(userID string) error {
 // On Windows subprocess mode, userID is ignored.
 // v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) ResumeUser(userID string) error {
-	h.mu.Lock()
-	h.paused = false
-	h.mu.Unlock()
-	if h.daemon != nil && h.daemon.logger != nil {
-		h.daemon.logger.Info().Msg("Daemon resumed via IPC")
+	if h.daemon != nil {
+		h.daemon.SetPaused(false)
 	}
 	return nil
 }
@@ -163,12 +148,8 @@ func (h *IPCHandler) ResumeUser(userID string) error {
 // TriggerScan triggers an immediate job scan.
 // v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) TriggerScan(userID string) error {
-	h.mu.RLock()
-	paused := h.paused
-	h.mu.RUnlock()
-
-	if paused {
-		if h.daemon != nil && h.daemon.logger != nil {
+	if h.daemon != nil && h.daemon.IsPaused() {
+		if h.daemon.logger != nil {
 			h.daemon.logger.Warn().Msg("Scan requested but daemon is paused")
 		}
 		return nil
@@ -224,12 +205,50 @@ func (h *IPCHandler) Shutdown() error {
 	return nil
 }
 
+// ReloadConfig handles config reload for subprocess mode.
+// v4.7.6: Returns active download count so GUI can decide whether to restart now or defer.
+// The actual restart is managed by the GUI (stop + start) — simpler and avoids in-process mutation.
+func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
+	activeDownloads := 0
+	if h.daemon != nil {
+		activeDownloads = h.daemon.GetActiveDownloads()
+	}
+
+	if activeDownloads > 0 {
+		if h.daemon != nil && h.daemon.logger != nil {
+			h.daemon.logger.Info().Int("active_downloads", activeDownloads).
+				Msg("Config reload requested but downloads active — deferring")
+		}
+		return &ipc.ReloadConfigData{
+			Deferred:        true,
+			ActiveDownloads: activeDownloads,
+		}
+	}
+
+	if h.daemon != nil && h.daemon.logger != nil {
+		h.daemon.logger.Info().Msg("Config reload requested — ready for restart")
+	}
+	return &ipc.ReloadConfigData{
+		Applied: true,
+	}
+}
+
+// GetTransferStatus returns daemon transfer batch status.
+// v4.7.8: Subprocess mode — userID is ignored (single-user).
+func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
+	if h.daemon == nil {
+		return &ipc.TransferStatusData{}, nil
+	}
+	return h.daemon.GetTransferStatus(), nil
+}
+
 // IsPaused returns whether the daemon is currently paused.
 // v4.4.0: Now functional (was previously always returning false).
 func (h *IPCHandler) IsPaused() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.paused
+	if h.daemon != nil {
+		return h.daemon.IsPaused()
+	}
+	return false
 }
 
 // ShouldPoll returns whether the daemon should perform polling.

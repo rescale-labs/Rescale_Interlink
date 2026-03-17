@@ -37,10 +37,13 @@ type TransferTask struct {
 	Type TaskType // Upload or download
 
 	// Source and destination
-	Name   string // Display name (filename)
-	Source string // Local path (upload) or remote file ID (download)
-	Dest   string // Remote folder ID (upload) or local path (download)
-	Size   int64  // File size in bytes
+	Name        string // Display name (filename)
+	Source      string // Local path (upload) or remote file ID (download)
+	Dest        string // Remote folder ID (upload) or local path (download)
+	Size        int64  // File size in bytes
+	SourceLabel string // v4.7.4: Origin context ("PUR", "SingleJob", "FileBrowser")
+	BatchID     string // v4.7.7: Groups related transfers for bulk display
+	BatchLabel  string // v4.7.7: Display name for the batch (folder name, etc.)
 
 	// State tracking
 	State    TaskState // Current state
@@ -51,6 +54,9 @@ type TransferTask struct {
 	// Speed calculation internals (for EMA smoothing)
 	lastBytes      int64     // Bytes transferred at last update
 	lastUpdateTime time.Time // Time of last update
+
+	// v4.8.5: Batch-level byte tracking
+	lastBatchBytes int64 // Bytes already counted toward batch total
 
 	// Timestamps
 	CreatedAt   time.Time // When task was enqueued
@@ -81,6 +87,14 @@ func NewTransferTask(taskType TaskType, name, source, dest string, size int64) *
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+}
+
+// NewTransferTaskWithLabel creates a new transfer task with a source label.
+// v4.7.4: Added for transfer origin tracking (PUR, SingleJob, FileBrowser).
+func NewTransferTaskWithLabel(taskType TaskType, name, source, dest string, size int64, sourceLabel string) *TransferTask {
+	task := NewTransferTask(taskType, name, source, dest, size)
+	task.SourceLabel = sourceLabel
+	return task
 }
 
 // GetState returns the current state (thread-safe).
@@ -222,6 +236,9 @@ func (t *TransferTask) Clone() TransferTask {
 		Source:      t.Source,
 		Dest:        t.Dest,
 		Size:        t.Size,
+		SourceLabel: t.SourceLabel,
+		BatchID:     t.BatchID,
+		BatchLabel:  t.BatchLabel,
 		State:       t.State,
 		Progress:    t.Progress,
 		Speed:       t.Speed,

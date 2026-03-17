@@ -89,11 +89,34 @@ export namespace wailsapp {
 		}
 	}
 	
+	export class VersionCheckDTO {
+	    hasUpdate: boolean;
+	    latestVersion?: string;
+	    currentVersion: string;
+	    releaseUrl?: string;
+	    checkedAt: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new VersionCheckDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.hasUpdate = source["hasUpdate"];
+	        this.latestVersion = source["latestVersion"];
+	        this.currentVersion = source["currentVersion"];
+	        this.releaseUrl = source["releaseUrl"];
+	        this.checkedAt = source["checkedAt"];
+	        this.error = source["error"];
+	    }
+	}
 	export class AppInfoDTO {
 	    version: string;
 	    buildTime: string;
 	    fipsEnabled: boolean;
 	    fipsStatus: string;
+	    versionCheck?: VersionCheckDTO;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppInfoDTO(source);
@@ -105,7 +128,26 @@ export namespace wailsapp {
 	        this.buildTime = source["buildTime"];
 	        this.fipsEnabled = source["fipsEnabled"];
 	        this.fipsStatus = source["fipsStatus"];
+	        this.versionCheck = this.convertValues(source["versionCheck"], VersionCheckDTO);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class AutoDownloadValidationDTO {
 	    customFieldsEnabled: boolean;
@@ -362,6 +404,38 @@ export namespace wailsapp {
 		    }
 		    return a;
 		}
+	}
+	export class DaemonBatchStatusDTO {
+	    batchID: string;
+	    batchLabel: string;
+	    total: number;
+	    completed: number;
+	    failed: number;
+	    active: number;
+	    totalBytes: number;
+	    bytesDone: number;
+	    speed: number;
+	    startedAt: number;
+	    completedAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonBatchStatusDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
+	        this.total = source["total"];
+	        this.completed = source["completed"];
+	        this.failed = source["failed"];
+	        this.active = source["active"];
+	        this.totalBytes = source["totalBytes"];
+	        this.bytesDone = source["bytesDone"];
+	        this.speed = source["speed"];
+	        this.startedAt = source["startedAt"];
+	        this.completedAt = source["completedAt"];
+	    }
 	}
 	export class DaemonConfigDTO {
 	    enabled: boolean;
@@ -764,6 +838,7 @@ export namespace wailsapp {
 	export class PURRunOptionsDTO {
 	    extraInputFiles: string;
 	    decompressExtras: boolean;
+	    rmTarOnSuccess: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PURRunOptionsDTO(source);
@@ -773,9 +848,64 @@ export namespace wailsapp {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.extraInputFiles = source["extraInputFiles"];
 	        this.decompressExtras = source["decompressExtras"];
+	        this.rmTarOnSuccess = source["rmTarOnSuccess"];
 	    }
 	}
 	
+	export class PreFlightResultDTO {
+	    apiKeyOk: boolean;
+	    folderOk: boolean;
+	    apiKeyError?: string;
+	    folderError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PreFlightResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.apiKeyOk = source["apiKeyOk"];
+	        this.folderOk = source["folderOk"];
+	        this.apiKeyError = source["apiKeyError"];
+	        this.folderError = source["folderError"];
+	    }
+	}
+	export class ReloadConfigResultDTO {
+	    applied: boolean;
+	    deferred: boolean;
+	    activeDownloads: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReloadConfigResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.applied = source["applied"];
+	        this.deferred = source["deferred"];
+	        this.activeDownloads = source["activeDownloads"];
+	        this.error = source["error"];
+	    }
+	}
+	export class RunHistoryEntryDTO {
+	    runId: string;
+	    runType: string;
+	    modTime: string;
+	    jobCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new RunHistoryEntryDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.runId = source["runId"];
+	        this.runType = source["runType"];
+	        this.modTime = source["modTime"];
+	        this.jobCount = source["jobCount"];
+	    }
+	}
 	export class RunStatusDTO {
 	    state: string;
 	    totalJobs: number;
@@ -1005,12 +1135,64 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	export class TransferBatchDTO {
+	    batchID: string;
+	    batchLabel: string;
+	    direction: string;
+	    sourceLabel: string;
+	    total: number;
+	    queued: number;
+	    active: number;
+	    completed: number;
+	    failed: number;
+	    cancelled: number;
+	    totalBytes: number;
+	    progress: number;
+	    speed: number;
+	    totalKnown: boolean;
+	    filesPerSec: number;
+	    etaSeconds: number;
+	    discoveredTotal: number;
+	    discoveredBytes: number;
+	    startedAtUnix: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TransferBatchDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
+	        this.direction = source["direction"];
+	        this.sourceLabel = source["sourceLabel"];
+	        this.total = source["total"];
+	        this.queued = source["queued"];
+	        this.active = source["active"];
+	        this.completed = source["completed"];
+	        this.failed = source["failed"];
+	        this.cancelled = source["cancelled"];
+	        this.totalBytes = source["totalBytes"];
+	        this.progress = source["progress"];
+	        this.speed = source["speed"];
+	        this.totalKnown = source["totalKnown"];
+	        this.filesPerSec = source["filesPerSec"];
+	        this.etaSeconds = source["etaSeconds"];
+	        this.discoveredTotal = source["discoveredTotal"];
+	        this.discoveredBytes = source["discoveredBytes"];
+	        this.startedAtUnix = source["startedAtUnix"];
+	    }
+	}
 	export class TransferRequestDTO {
 	    type: string;
 	    source: string;
 	    dest: string;
 	    name: string;
 	    size: number;
+	    sourceLabel?: string;
+	    batchID?: string;
+	    batchLabel?: string;
+	    tags?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new TransferRequestDTO(source);
@@ -1023,6 +1205,10 @@ export namespace wailsapp {
 	        this.dest = source["dest"];
 	        this.name = source["name"];
 	        this.size = source["size"];
+	        this.sourceLabel = source["sourceLabel"];
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
+	        this.tags = source["tags"];
 	    }
 	}
 	export class TransferStatsDTO {
@@ -1059,6 +1245,9 @@ export namespace wailsapp {
 	    source: string;
 	    dest: string;
 	    size: number;
+	    sourceLabel?: string;
+	    batchID?: string;
+	    batchLabel?: string;
 	    progress: number;
 	    speed: number;
 	    error?: string;
@@ -1079,6 +1268,9 @@ export namespace wailsapp {
 	        this.source = source["source"];
 	        this.dest = source["dest"];
 	        this.size = source["size"];
+	        this.sourceLabel = source["sourceLabel"];
+	        this.batchID = source["batchID"];
+	        this.batchLabel = source["batchLabel"];
 	        this.progress = source["progress"];
 	        this.speed = source["speed"];
 	        this.error = source["error"];

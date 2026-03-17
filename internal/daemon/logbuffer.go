@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/ipc"
 )
 
@@ -100,7 +101,7 @@ func (lb *LogBuffer) Subscribe() (string, <-chan *ipc.LogEntryData) {
 
 	lb.nextSubID++
 	id := string(rune(lb.nextSubID))
-	ch := make(chan *ipc.LogEntryData, 100) // Buffer 100 entries
+	ch := make(chan *ipc.LogEntryData, constants.WorkChannelBuffer)
 
 	lb.subscribers[id] = ch
 	return id, ch

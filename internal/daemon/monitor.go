@@ -198,7 +198,19 @@ type CompletedJob struct {
 // getJobCompletionTime retrieves the actual completion time from job status history.
 // v4.3.0: Used for accurate lookback filtering based on when the job finished,
 // not when it was created.
+// v4.7.6: Retries once on failure (500ms delay) before returning error.
 func (m *Monitor) getJobCompletionTime(ctx context.Context, jobID string) (time.Time, error) {
+	completionTime, err := m.getJobCompletionTimeOnce(ctx, jobID)
+	if err != nil {
+		// v4.7.6: Retry once after 500ms
+		time.Sleep(500 * time.Millisecond)
+		completionTime, err = m.getJobCompletionTimeOnce(ctx, jobID)
+	}
+	return completionTime, err
+}
+
+// getJobCompletionTimeOnce performs a single attempt to get the completion time.
+func (m *Monitor) getJobCompletionTimeOnce(ctx context.Context, jobID string) (time.Time, error) {
 	statuses, err := m.apiClient.GetJobStatuses(ctx, jobID)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to get job statuses: %w", err)
@@ -240,23 +252,28 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 
 	// v4.3.0: Calculate lookback cutoff date if eligibility is configured
 	// This is now based on completion time, not creation time
+	// v4.7.6: Improved logging to distinguish completion cutoff from creation pre-filter
 	var lookbackCutoff time.Time
 	if m.eligibility != nil && m.eligibility.LookbackDays > 0 {
 		lookbackCutoff = time.Now().AddDate(0, 0, -m.eligibility.LookbackDays)
 		m.logger.Debug().
 			Int("lookback_days", m.eligibility.LookbackDays).
-			Time("cutoff", lookbackCutoff).
-			Msg("Applying lookback filter (based on completion time)")
+			Time("completion_cutoff", lookbackCutoff).
+			Msg("Applying lookback filter (jobs completed before this date are skipped)")
 	}
 
 	// v4.3.4: Use optimized API call with early termination when lookback is configured
 	// This fetches jobs ordered by date (newest first) and stops when hitting old jobs
+	// v4.7.6: Improved logging to distinguish creation pre-filter from completion cutoff
 	var jobs []models.JobResponse
 	var err error
 	if !lookbackCutoff.IsZero() {
-		// Use creation cutoff with buffer for API early termination
+		// Use creation cutoff with buffer for API early termination (optimization only)
 		// Jobs created more than (lookback_days + 30) days ago cannot have completed within window
 		creationCutoff := time.Now().AddDate(0, 0, -(m.eligibility.LookbackDays + 30))
+		m.logger.Debug().
+			Time("creation_cutoff", creationCutoff).
+			Msg("API pre-filter: skipping jobs created before this date (optimization, not lookback)")
 		jobs, err = m.apiClient.ListJobsWithCutoff(ctx, creationCutoff)
 	} else {
 		jobs, err = m.apiClient.ListJobs(ctx)
@@ -324,6 +341,8 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 		}
 
 		// v4.3.0: Get actual completion time for accurate lookback filtering
+		// v4.7.6: On unknown completion time, include the job rather than falling back
+		// to creation time (which incorrectly skips long-running jobs)
 		var completedAt time.Time
 		if !lookbackCutoff.IsZero() {
 			var err error
@@ -333,21 +352,21 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 					Str("job_id", job.ID).
 					Str("job_name", job.Name).
 					Err(err).
-					Msg("Could not get completion time, using creation time as fallback")
-				// Fallback to creation time if status history unavailable
-				if job.CreatedAt != "" {
-					completedAt, _ = time.Parse(time.RFC3339, job.CreatedAt)
-				}
+					Msg("Could not get completion time after retry — including job (passed creation pre-filter)")
+				// v4.7.6: Don't fall back to creation time — job already passed the
+				// creation pre-filter so it's likely recent enough. Include it.
+				// completedAt stays zero, which skips the lookback filter below.
 			}
 
 			// Apply lookback filter based on completion time
+			// v4.7.6: Zero completedAt (unknown) is NOT filtered — include the job
 			if !completedAt.IsZero() && completedAt.Before(lookbackCutoff) {
 				skippedOutsideWindow++
 				m.logger.Debug().
 					Str("job_id", job.ID).
 					Str("job_name", job.Name).
 					Time("completed_at", completedAt).
-					Time("cutoff", lookbackCutoff).
+					Time("completion_cutoff", lookbackCutoff).
 					Msg("Job completed before lookback window, skipping")
 				continue
 			}

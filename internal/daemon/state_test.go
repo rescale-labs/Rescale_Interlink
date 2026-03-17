@@ -75,10 +75,19 @@ func TestState_IsDownloaded(t *testing.T) {
 		t.Error("job1 should be marked as downloaded")
 	}
 
-	// Test 3: Failed download should not be considered "downloaded"
+	// Test 3: Failed download within backoff period should be considered "downloaded" (skip)
+	// v4.8.8 Bug I: freshly failed jobs are suppressed during backoff
 	state.MarkFailed("job2", "Test Job 2", fmt.Errorf("network error"))
+	if !state.IsDownloaded("job2") {
+		t.Error("job2 should be suppressed during backoff period (just failed)")
+	}
+
+	// Test 4: Failed download past backoff period should NOT be considered downloaded (allow retry)
+	state.mu.Lock()
+	state.Downloaded["job2"].LastAttempt = time.Now().Add(-6 * time.Minute)
+	state.mu.Unlock()
 	if state.IsDownloaded("job2") {
-		t.Error("job2 should not be considered downloaded (failed)")
+		t.Error("job2 should be eligible for retry after backoff expires")
 	}
 }
 
@@ -241,5 +250,100 @@ func TestState_FilePermissions(t *testing.T) {
 
 	if perm != expectedPerm {
 		t.Errorf("State file permissions should be %o, got %o", expectedPerm, perm)
+	}
+}
+
+// v4.8.8 Bug I: Retry backoff tests
+
+func TestState_RetryBackoff(t *testing.T) {
+	state := NewState("")
+	state.Downloaded = make(map[string]*DownloadedJob)
+
+	// Mark as failed with retry count 1 and recent attempt
+	state.Downloaded["job1"] = &DownloadedJob{
+		JobID:       "job1",
+		JobName:     "Test Job",
+		Error:       "network error",
+		RetryCount:  1,
+		LastAttempt: time.Now(), // just now
+	}
+
+	// Should be suppressed (within 5min backoff)
+	if !state.IsDownloaded("job1") {
+		t.Error("job1 should be suppressed during backoff period")
+	}
+
+	// Set last attempt to well past backoff (6 minutes ago)
+	state.mu.Lock()
+	state.Downloaded["job1"].LastAttempt = time.Now().Add(-6 * time.Minute)
+	state.mu.Unlock()
+
+	// Should now be eligible for retry
+	if state.IsDownloaded("job1") {
+		t.Error("job1 should be eligible for retry after backoff expires")
+	}
+}
+
+func TestState_MarkFailedPreservesRetryCount(t *testing.T) {
+	state := NewState("")
+	state.Downloaded = make(map[string]*DownloadedJob)
+
+	// Three sequential failures
+	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 1"))
+	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 2"))
+	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 3"))
+
+	job := state.Downloaded["job1"]
+	if job.RetryCount != 3 {
+		t.Errorf("Expected RetryCount=3 after 3 failures, got %d", job.RetryCount)
+	}
+	if job.Error != "error 3" {
+		t.Errorf("Expected latest error message, got %q", job.Error)
+	}
+}
+
+func TestState_RetryGivesUpAfter5(t *testing.T) {
+	state := NewState("")
+	state.Downloaded = make(map[string]*DownloadedJob)
+
+	// Simulate 5 failures
+	for i := 0; i < 5; i++ {
+		state.MarkFailed("job1", "Test Job", fmt.Errorf("error %d", i+1))
+	}
+
+	// Even with last attempt far in the past, should be permanently suppressed
+	state.mu.Lock()
+	state.Downloaded["job1"].LastAttempt = time.Now().Add(-1 * time.Hour)
+	state.mu.Unlock()
+
+	if !state.IsDownloaded("job1") {
+		t.Error("job1 should be permanently suppressed after 5 failures")
+	}
+}
+
+func TestState_SuccessResetsRetryCount(t *testing.T) {
+	state := NewState("")
+	state.Downloaded = make(map[string]*DownloadedJob)
+
+	// Fail twice
+	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 1"))
+	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 2"))
+
+	if state.Downloaded["job1"].RetryCount != 2 {
+		t.Fatalf("Expected RetryCount=2, got %d", state.Downloaded["job1"].RetryCount)
+	}
+
+	// Succeed
+	state.MarkDownloaded("job1", "Test Job", "/output", 5, 1024)
+
+	job := state.Downloaded["job1"]
+	if job.RetryCount != 0 {
+		t.Errorf("Expected RetryCount=0 after success, got %d", job.RetryCount)
+	}
+	if job.Error != "" {
+		t.Errorf("Expected empty error after success, got %q", job.Error)
+	}
+	if !state.IsDownloaded("job1") {
+		t.Error("job1 should be marked as downloaded after success")
 	}
 }

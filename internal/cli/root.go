@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/fips140"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,6 +13,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/version"
 )
@@ -76,6 +80,14 @@ Security:
 			if verbose || debug {
 				logging.SetGlobalLevel(-1) // Debug level (zerolog.DebugLevel)
 			}
+
+			// Wire cross-process rate limit coordinator (lazy — only spawns when GetLimiter is called)
+			ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
+
+			// Wire rate limit visibility notifications for CLI output
+			ratelimit.SetGlobalNotifyFunc(func(level, message string) {
+				log.Printf("%s", message)
+			})
 		},
 	}
 
@@ -269,7 +281,18 @@ func Execute() error {
 
 	rootCmd := NewRootCmd()
 	AddCommands(rootCmd)
-	err := rootCmd.Execute()
+	executedCmd, err := rootCmd.ExecuteC()
+
+	// v4.8.7: Safe error reporting — classify and auto-save report for blocking failures.
+	// ExecuteC returns the actual subcommand that ran, so we get a meaningful operation
+	// like "rescale-int folders upload-dir" instead of just "rescale-int".
+	if err != nil {
+		operation := ""
+		if executedCmd != nil {
+			operation = executedCmd.CommandPath()
+		}
+		reporting.HandleCLIError(err, "cli", operation, "")
+	}
 
 	// Clean up signal handler
 	signal.Stop(sigChan)
@@ -290,7 +313,8 @@ func AddCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(newAutomationsCmd()) // v3.6.1: Automation discovery
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newDaemonCmd())  // v3.4.0: Background service for auto-downloading completed jobs
-	rootCmd.AddCommand(newServiceCmd()) // v4.0.0: Windows service management
+	rootCmd.AddCommand(newServiceCmd())      // v4.0.0: Windows service management
+	rootCmd.AddCommand(newCoordinatorCmd()) // internal: cross-process rate limit coordinator
 
 	// Add shortcuts for convenience
 	AddShortcuts(rootCmd)

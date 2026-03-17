@@ -144,6 +144,19 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		// v4.0.8: Scan progress events for software/hardware catalog scanning
 		// Don't throttle - these are infrequent and important for UX
 		runtime.EventsEmit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
+
+	case *events.BatchProgressEvent:
+		// v4.7.7: Batch progress events for grouped transfer display
+		// No throttling needed — ticker already limits to 1/sec per batch
+		runtime.EventsEmit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
+
+	case *events.ConfigChangedEvent:
+		// v4.8.7: Forward credential changes so file browser can invalidate cache
+		runtime.EventsEmit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
+
+	case *events.ReportableErrorEvent:
+		// v4.8.7: Reportable error events for safe error reporting — NOT throttled
+		runtime.EventsEmit(eb.ctx, "interlink:reportable_error", reportableErrorEventToDTO(e))
 	}
 }
 
@@ -309,28 +322,36 @@ func transferEventToDTO(e *events.TransferEvent) TransferEventDTO {
 
 // EnumerationEventDTO is the JSON-safe version of events.EnumerationEvent (v4.0.8).
 type EnumerationEventDTO struct {
-	Timestamp    string `json:"timestamp"`
-	ID           string `json:"id"`
-	FolderName   string `json:"folderName"`
-	Direction    string `json:"direction"` // "upload" or "download"
-	FoldersFound int    `json:"foldersFound"`
-	FilesFound   int    `json:"filesFound"`
-	BytesFound   int64  `json:"bytesFound"`
-	IsComplete   bool   `json:"isComplete"`
-	Error        string `json:"error,omitempty"`
+	Timestamp      string `json:"timestamp"`
+	ID             string `json:"id"`
+	FolderName     string `json:"folderName"`
+	Direction      string `json:"direction"` // "upload" or "download"
+	FoldersFound   int    `json:"foldersFound"`
+	FilesFound     int    `json:"filesFound"`
+	BytesFound     int64  `json:"bytesFound"`
+	IsComplete     bool   `json:"isComplete"`
+	Error          string `json:"error,omitempty"`
+	StatusMessage  string `json:"statusMessage,omitempty"` // v4.7.7: Human-readable status
+	Phase          string `json:"phase,omitempty"`          // v4.8.5: structured phase
+	FoldersTotal   int    `json:"foldersTotal"`             // v4.8.5: total folders to create
+	FoldersCreated int    `json:"foldersCreated"`           // v4.8.5: folders created so far
 }
 
 func enumerationEventToDTO(e *events.EnumerationEvent) EnumerationEventDTO {
 	return EnumerationEventDTO{
-		Timestamp:    e.Timestamp().Format(time.RFC3339Nano),
-		ID:           e.ID,
-		FolderName:   e.FolderName,
-		Direction:    e.Direction,
-		FoldersFound: e.FoldersFound,
-		FilesFound:   e.FilesFound,
-		BytesFound:   e.BytesFound,
-		IsComplete:   e.IsComplete,
-		Error:        e.Error,
+		Timestamp:      e.Timestamp().Format(time.RFC3339Nano),
+		ID:             e.ID,
+		FolderName:     e.FolderName,
+		Direction:      e.Direction,
+		FoldersFound:   e.FoldersFound,
+		FilesFound:     e.FilesFound,
+		BytesFound:     e.BytesFound,
+		IsComplete:     e.IsComplete,
+		Error:          e.Error,
+		StatusMessage:  e.StatusMessage,
+		Phase:          e.Phase,
+		FoldersTotal:   e.FoldersTotal,
+		FoldersCreated: e.FoldersCreated,
 	}
 }
 
@@ -354,5 +375,88 @@ func scanProgressEventToDTO(e *events.ScanProgressEvent) ScanProgressEventDTO {
 		IsComplete: e.IsComplete,
 		IsCached:   e.IsCached,
 		Error:      e.Error,
+	}
+}
+
+// BatchProgressEventDTO is the JSON-safe version of events.BatchProgressEvent (v4.7.7).
+type BatchProgressEventDTO struct {
+	Timestamp       string  `json:"timestamp"`
+	BatchID         string  `json:"batchID"`
+	Label           string  `json:"label"`
+	Direction       string  `json:"direction"`
+	Total           int     `json:"total"`
+	Active          int     `json:"active"`
+	Queued          int     `json:"queued"`
+	Completed       int     `json:"completed"`
+	Failed          int     `json:"failed"`
+	Progress        float64 `json:"progress"`
+	Speed           float64 `json:"speed"`
+	TotalKnown      bool    `json:"totalKnown"`      // v4.8.0: True when scan complete
+	FilesPerSec     float64 `json:"filesPerSec"`     // v4.8.5: file completion rate
+	ETASeconds      float64 `json:"etaSeconds"`      // v4.8.5: estimated time remaining
+	DiscoveredTotal int     `json:"discoveredTotal"` // v4.8.5: files discovered by scan
+	DiscoveredBytes int64   `json:"discoveredBytes"` // v4.8.5: bytes discovered by scan
+}
+
+func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO {
+	return BatchProgressEventDTO{
+		Timestamp:       e.Timestamp().Format(time.RFC3339Nano),
+		BatchID:         e.BatchID,
+		Label:           e.Label,
+		Direction:       e.Direction,
+		Total:           e.Total,
+		Active:          e.Active,
+		Queued:          e.Queued,
+		Completed:       e.Completed,
+		Failed:          e.Failed,
+		Progress:        e.Progress,
+		Speed:           e.Speed,
+		TotalKnown:      e.TotalKnown,
+		FilesPerSec:     e.FilesPerSec,
+		ETASeconds:      e.ETASeconds,
+		DiscoveredTotal: e.DiscoveredTotal,
+		DiscoveredBytes: e.DiscoveredBytes,
+	}
+}
+
+// ConfigChangedEventDTO is the JSON-safe version of events.ConfigChangedEvent (v4.8.7).
+type ConfigChangedEventDTO struct {
+	Timestamp string `json:"timestamp"`
+	Source    string `json:"source"`
+	Email     string `json:"email"`
+}
+
+func configChangedEventToDTO(e *events.ConfigChangedEvent) ConfigChangedEventDTO {
+	return ConfigChangedEventDTO{
+		Timestamp: e.Timestamp().Format(time.RFC3339Nano),
+		Source:    e.Source,
+		Email:     e.Email,
+	}
+}
+
+// ReportableErrorEventDTO is the JSON-safe version of events.ReportableErrorEvent (v4.8.7).
+type ReportableErrorEventDTO struct {
+	Timestamp    string                          `json:"timestamp"`
+	ErrorID      string                          `json:"errorID"`
+	Category     string                          `json:"category"`
+	Severity     string                          `json:"severity"`
+	Operation    string                          `json:"operation"`
+	Backend      string                          `json:"backend"`
+	ErrorMessage string                          `json:"errorMessage"`
+	ErrorClass   string                          `json:"errorClass"`
+	Timeline     []events.SanitizedTimelineEntry `json:"timeline"`
+}
+
+func reportableErrorEventToDTO(e *events.ReportableErrorEvent) ReportableErrorEventDTO {
+	return ReportableErrorEventDTO{
+		Timestamp:    e.Timestamp().Format(time.RFC3339Nano),
+		ErrorID:      e.ErrorID,
+		Category:     e.Category,
+		Severity:     e.Severity,
+		Operation:    e.Operation,
+		Backend:      e.Backend,
+		ErrorMessage: e.ErrorMessage,
+		ErrorClass:   e.ErrorClass,
+		Timeline:     e.Timeline,
 	}
 }

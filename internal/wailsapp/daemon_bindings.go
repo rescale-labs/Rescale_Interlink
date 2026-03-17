@@ -100,7 +100,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 
 	// Try to connect via IPC for live status
 	client := ipc.NewClient()
-	client.SetTimeout(2 * time.Second)
+	client.SetTimeout(5 * time.Second)
 
 	ctx := context.Background()
 	if status, err := client.GetStatus(ctx); err == nil {
@@ -151,6 +151,17 @@ func (a *App) StartDaemon() error {
 	// Check if already running
 	if pid := daemon.IsDaemonRunning(); pid != 0 {
 		return fmt.Errorf("daemon is already running (PID %d)", pid)
+	}
+
+	// v4.7.6: Ensure token file exists before daemon starts (Phase 0b)
+	if err := a.ensureTokenPersisted(); err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Token persistence warning: %v", err))
+	}
+
+	// v4.7.6: Pre-check API key availability (Phase 3a)
+	apiKey := config.ResolveAPIKeyForCurrentUser("")
+	if apiKey == "" {
+		return fmt.Errorf("cannot start daemon: no API key configured. Set your API key in Connection settings and test the connection first")
 	}
 
 	// Get current executable path
@@ -343,6 +354,99 @@ func (a *App) TriggerProfileRescan() error {
 
 	a.logInfo("Daemon", "Profile rescan triggered")
 	return nil
+}
+
+// ReloadConfigResultDTO represents the result of a config reload request from the frontend.
+// v4.7.6: Used for GUI to know if config was applied or deferred.
+type ReloadConfigResultDTO struct {
+	Applied         bool   `json:"applied"`
+	Deferred        bool   `json:"deferred"`
+	ActiveDownloads int    `json:"activeDownloads"`
+	Error           string `json:"error,omitempty"`
+}
+
+// ReloadDaemonConfig notifies the running daemon to reload its configuration.
+// v4.7.6: Called after SaveDaemonConfig to propagate changes.
+// In subprocess mode, returns whether restart is needed.
+func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
+	result := ReloadConfigResultDTO{}
+
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+
+	if !client.IsServiceRunning(ctx) {
+		result.Error = "daemon not running"
+		return result
+	}
+
+	data, err := client.ReloadConfig(ctx)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	if data.Applied {
+		// Subprocess mode: stop and restart for config to take effect
+		a.logInfo("Daemon", "Config reload accepted — restarting daemon for new config")
+		if err := a.StopDaemon(); err != nil {
+			result.Error = fmt.Sprintf("failed to stop daemon for restart: %v", err)
+			return result
+		}
+		time.Sleep(500 * time.Millisecond)
+		if err := a.StartDaemon(); err != nil {
+			result.Error = fmt.Sprintf("daemon stopped but failed to restart: %v", err)
+			return result
+		}
+		result.Applied = true
+	} else if data.Deferred {
+		result.Deferred = true
+		result.ActiveDownloads = data.ActiveDownloads
+	}
+
+	return result
+}
+
+// PreFlightResultDTO represents the result of auto-download pre-flight checks.
+// v4.7.6: Used by GUI before enabling auto-download.
+type PreFlightResultDTO struct {
+	APIKeyOK    bool   `json:"apiKeyOk"`
+	FolderOK    bool   `json:"folderOk"`
+	APIKeyError string `json:"apiKeyError,omitempty"`
+	FolderError string `json:"folderError,omitempty"`
+}
+
+// ValidateAutoDownloadPreFlight checks prerequisites before enabling auto-download.
+// v4.7.6: Only checks API key and folder (not service/IPC — user may configure first).
+func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResultDTO {
+	result := PreFlightResultDTO{}
+
+	// Check API key
+	apiKey := config.ResolveAPIKeyForCurrentUser("")
+	if apiKey != "" {
+		result.APIKeyOK = true
+	} else {
+		result.APIKeyError = "No API key configured. Set your API key in Connection settings and test the connection first."
+	}
+
+	// Check download folder
+	if downloadFolder == "" {
+		downloadFolder = config.DefaultDownloadFolder()
+	}
+	if downloadFolder != "" {
+		if info, err := os.Stat(downloadFolder); err == nil && info.IsDir() {
+			result.FolderOK = true
+		} else if os.IsNotExist(err) {
+			// Will be created on daemon start — OK
+			result.FolderOK = true
+		} else if err != nil {
+			result.FolderError = fmt.Sprintf("Cannot access folder: %v", err)
+		} else {
+			result.FolderError = "Path exists but is not a directory"
+		}
+	}
+
+	return result
 }
 
 // DaemonConfigDTO represents the daemon configuration for the frontend.
@@ -623,6 +727,67 @@ func (a *App) GetLogFileLocation() string {
 }
 
 // =============================================================================
+// Daemon Transfer Visibility (v4.7.8)
+// =============================================================================
+
+// DaemonBatchStatusDTO represents a daemon auto-download batch for the frontend.
+// v4.7.8: Read-only visibility into daemon downloads.
+type DaemonBatchStatusDTO struct {
+	BatchID     string  `json:"batchID"`
+	BatchLabel  string  `json:"batchLabel"`
+	Total       int     `json:"total"`
+	Completed   int     `json:"completed"`
+	Failed      int     `json:"failed"`
+	Active      int     `json:"active"`
+	TotalBytes  int64   `json:"totalBytes"`
+	BytesDone   int64   `json:"bytesDone"`
+	Speed       float64 `json:"speed"`
+	StartedAt   int64   `json:"startedAt"`
+	CompletedAt int64   `json:"completedAt"`
+}
+
+// GetDaemonTransfers retrieves daemon auto-download batch status via IPC.
+// v4.7.8: Called by frontend to display daemon downloads in Transfers tab.
+func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
+	if daemon.IsDaemonRunning() == 0 {
+		return nil
+	}
+
+	client := ipc.NewClient()
+	client.SetTimeout(3 * time.Second) // Short timeout for polling
+
+	ctx := context.Background()
+	data, err := client.GetTransferStatus(ctx)
+	if err != nil {
+		// Silent fail — daemon may not support this message yet
+		return nil
+	}
+
+	if data == nil || len(data.Batches) == 0 {
+		return nil
+	}
+
+	result := make([]DaemonBatchStatusDTO, len(data.Batches))
+	for i, b := range data.Batches {
+		result[i] = DaemonBatchStatusDTO{
+			BatchID:     b.BatchID,
+			BatchLabel:  b.BatchLabel,
+			Total:       b.Total,
+			Completed:   b.Completed,
+			Failed:      b.Failed,
+			Active:      b.Active,
+			TotalBytes:  b.TotalBytes,
+			BytesDone:   b.BytesDone,
+			Speed:       b.Speed,
+			StartedAt:   b.StartedAt,
+			CompletedAt: b.CompletedAt,
+		}
+	}
+
+	return result
+}
+
+// =============================================================================
 // Daemon Log Retrieval (v4.3.2)
 // =============================================================================
 
@@ -750,6 +915,15 @@ func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
 // StopServiceElevated triggers UAC prompt to stop Windows Service.
 // v4.5.1: On non-Windows platforms, returns error.
 func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
+	return ElevatedServiceResultDTO{
+		Success: false,
+		Error:   "Windows Service control is only available on Windows",
+	}
+}
+
+// InstallAndStartServiceElevated triggers UAC prompt to install + start Windows Service.
+// v4.7.6: On non-Windows platforms, returns error.
+func (a *App) InstallAndStartServiceElevated() ElevatedServiceResultDTO {
 	return ElevatedServiceResultDTO{
 		Success: false,
 		Error:   "Windows Service control is only available on Windows",

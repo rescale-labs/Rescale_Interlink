@@ -3,8 +3,8 @@ package resources
 import (
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
-	"time"
 
 	"github.com/rescale/rescale-int/internal/constants"
 )
@@ -21,7 +21,6 @@ type Manager struct {
 	aggressiveThreshold int64          // File size threshold for aggressive mode
 	allocations         map[string]int // Track allocations per transfer ID
 	mu                  sync.Mutex     // Protects all fields
-	monitor             *ThroughputMonitor
 }
 
 // Config holds configuration for the resource manager
@@ -90,7 +89,6 @@ func NewManager(config Config) *Manager {
 		aggressiveMode:      aggressiveMode,
 		aggressiveThreshold: aggressiveThreshold,
 		allocations:         make(map[string]int),
-		monitor:             NewThroughputMonitor(),
 	}
 }
 
@@ -287,25 +285,60 @@ func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
 	return desired
 }
 
-// RecordThroughput records throughput for a part/chunk
-func (m *Manager) RecordThroughput(transferID string, bytesPerSecond float64) {
-	m.monitor.Record(transferID, bytesPerSecond)
-}
-
-// ShouldScaleUp determines if we should increase parallelism based on throughput
-func (m *Manager) ShouldScaleUp(transferID string) bool {
-	if !m.autoScale {
-		return false
+// ComputeBatchConcurrency determines optimal concurrent transfer count for a batch
+// based on the median file size, validated against thread pool capacity and memory.
+// maxAllowed is the upper cap (typically cap(semaphore)).
+// v4.8.0: Adaptive concurrency — small files get more workers, large files get fewer.
+func (m *Manager) ComputeBatchConcurrency(fileSizes []int64, maxAllowed int) int {
+	if len(fileSizes) == 0 {
+		return constants.DefaultMaxConcurrent
 	}
-	return m.monitor.ShouldScaleUp(transferID)
-}
 
-// ShouldScaleDown determines if we should decrease parallelism
-func (m *Manager) ShouldScaleDown(transferID string) bool {
-	if !m.autoScale {
-		return false
+	// Compute median file size
+	sorted := make([]int64, len(fileSizes))
+	copy(sorted, fileSizes)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	median := sorted[len(sorted)/2]
+
+	// Determine tier from file size distribution
+	var tier int
+	switch {
+	case median < int64(constants.SmallFileThreshold):
+		tier = constants.AdaptiveSmallFileConcurrency
+	case median < int64(constants.LargeFile1GB):
+		tier = constants.AdaptiveMediumFileConcurrency
+	default:
+		tier = constants.AdaptiveLargeFileConcurrency
 	}
-	return m.monitor.ShouldScaleDown(transferID)
+
+	// Validate against resource constraints
+	m.mu.Lock()
+	desiredThreadsPerFile := m.calculateDesiredThreads(median, tier)
+	totalThreadsNeeded := tier * desiredThreadsPerFile
+	if totalThreadsNeeded > m.totalThreads {
+		// Scale down concurrency to fit within thread pool
+		if desiredThreadsPerFile > 0 {
+			tier = m.totalThreads / desiredThreadsPerFile
+		}
+	}
+	memoryNeeded := int64(tier) * int64(desiredThreadsPerFile) * int64(constants.MemoryPerThreadMB) * 1024 * 1024
+	availMem := getAvailableMemory()
+	if memoryNeeded > int64(float64(availMem)*0.75) && desiredThreadsPerFile > 0 {
+		tier = int(float64(availMem) * 0.75 / float64(int64(desiredThreadsPerFile)*int64(constants.MemoryPerThreadMB)*1024*1024))
+	}
+	m.mu.Unlock()
+
+	// Apply caps
+	if tier > maxAllowed {
+		tier = maxAllowed
+	}
+	if tier > len(fileSizes) {
+		tier = len(fileSizes)
+	}
+	if tier < constants.MinMaxConcurrent {
+		tier = constants.MinMaxConcurrent
+	}
+	return tier
 }
 
 // String returns a human-readable representation of the manager state
@@ -314,123 +347,6 @@ func (m *Manager) String() string {
 	return fmt.Sprintf("ResourceManager[total=%d available=%d active=%d transfers=%d autoscale=%v]",
 		stats.TotalThreads, stats.AvailableThreads, stats.ActiveThreads,
 		stats.ActiveTransfers, stats.AutoScaleEnabled)
-}
-
-// ThroughputMonitor tracks throughput for each transfer to detect saturation
-type ThroughputMonitor struct {
-	mu      sync.Mutex
-	samples map[string][]Sample // Per-transfer samples
-}
-
-// Sample represents a single throughput measurement
-type Sample struct {
-	Timestamp   time.Time
-	BytesPerSec float64
-}
-
-// NewThroughputMonitor creates a new throughput monitor
-func NewThroughputMonitor() *ThroughputMonitor {
-	return &ThroughputMonitor{
-		samples: make(map[string][]Sample),
-	}
-}
-
-// Record records a throughput sample
-func (tm *ThroughputMonitor) Record(transferID string, bytesPerSecond float64) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	samples := tm.samples[transferID]
-	samples = append(samples, Sample{
-		Timestamp:   time.Now(),
-		BytesPerSec: bytesPerSecond,
-	})
-
-	// Keep only last N samples
-	if len(samples) > constants.MaxThroughputSamples {
-		samples = samples[len(samples)-constants.MaxThroughputSamples:]
-	}
-
-	tm.samples[transferID] = samples
-}
-
-// ShouldScaleUp returns true if throughput is high and stable
-func (tm *ThroughputMonitor) ShouldScaleUp(transferID string) bool {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	samples := tm.samples[transferID]
-	if len(samples) < 3 {
-		return false // Not enough data
-	}
-
-	// Check if throughput is high and stable
-	avg := tm.calculateAverage(samples)
-	variance := tm.calculateVariance(samples, avg)
-
-	avgMBps := avg / (1024 * 1024)
-	varianceMBps := variance / (1024 * 1024)
-
-	return avgMBps > constants.MinScaleUpThroughputMBps && varianceMBps < constants.MaxScaleUpVarianceMBps
-}
-
-// ShouldScaleDown returns true if throughput is dropping
-func (tm *ThroughputMonitor) ShouldScaleDown(transferID string) bool {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	samples := tm.samples[transferID]
-	if len(samples) < 6 {
-		return false // Not enough data (need 6 samples for recent vs older comparison)
-	}
-
-	// Check if throughput is consistently decreasing
-	recent := samples[len(samples)-3:]
-	older := samples[len(samples)-6 : len(samples)-3]
-
-	recentAvg := tm.calculateAverage(recent)
-	olderAvg := tm.calculateAverage(older)
-
-	// If recent average is significantly lower, scale down
-	if recentAvg < olderAvg*constants.ScaleDownThresholdPercent {
-		return true
-	}
-
-	return false
-}
-
-// calculateAverage calculates the average throughput
-func (tm *ThroughputMonitor) calculateAverage(samples []Sample) float64 {
-	if len(samples) == 0 {
-		return 0
-	}
-
-	var sum float64
-	for _, s := range samples {
-		sum += s.BytesPerSec
-	}
-	return sum / float64(len(samples))
-}
-
-// calculateVariance calculates the variance in throughput
-func (tm *ThroughputMonitor) calculateVariance(samples []Sample, avg float64) float64 {
-	if len(samples) == 0 {
-		return 0
-	}
-
-	var sumSquares float64
-	for _, s := range samples {
-		diff := s.BytesPerSec - avg
-		sumSquares += diff * diff
-	}
-	return sumSquares / float64(len(samples))
-}
-
-// Cleanup removes samples for a completed transfer
-func (tm *ThroughputMonitor) Cleanup(transferID string) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	delete(tm.samples, transferID)
 }
 
 // =============================================================================

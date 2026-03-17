@@ -52,11 +52,10 @@ func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.Le
 		fileSize = props.ContentLength
 	}
 
-	// Start periodic refresh for large files
-	if fileSize > constants.LargeFileThreshold {
-		azureClient.StartPeriodicRefresh(ctx)
-		defer azureClient.StopPeriodicRefresh()
-	}
+	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
+	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
+	azureClient.StartPeriodicRefresh(ctx)
+	defer azureClient.StopPeriodicRefresh()
 
 	// Choose download method based on file size and transfer handle
 	if fileSize > constants.MultipartThreshold {
@@ -463,12 +462,12 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 
 	// Wait for workers
 	wg.Wait()
+	close(errChan)
 
-	// Check for errors
-	select {
-	case err := <-errChan:
-		return err
-	default:
+	// v4.8.7: Use unified error collection
+	errs := internaltransfer.CollectErrors(errChan)
+	if len(errs) > 0 {
+		return errs[0]
 	}
 
 	// Delete resume state on success

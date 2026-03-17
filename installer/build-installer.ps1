@@ -81,7 +81,7 @@ Documentation:
 Support:
   support@rescale.com
 
-Copyright (c) 2025 Rescale, Inc.
+Copyright (c) 2026 Rescale, Inc.
 "@
 
 $ReadmeContent | Out-File -FilePath "$BuildDir\README.txt" -Encoding UTF8
@@ -89,7 +89,7 @@ $ReadmeContent | Out-File -FilePath "$BuildDir\README.txt" -Encoding UTF8
 $LicenseContent = @"
 MIT License
 
-Copyright (c) 2025 Rescale, Inc.
+Copyright (c) 2026 Rescale, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

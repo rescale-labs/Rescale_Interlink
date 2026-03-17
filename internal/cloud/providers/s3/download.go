@@ -410,7 +410,6 @@ func (p *Provider) downloadChunkedConcurrent(
 
 				// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
 				// Uses GetObjectRangeOnce to avoid nested retries (GetObjectRange already retries internally)
-				startTime := time.Now()
 				var chunkData []byte
 				downloadErr := s3Client.RetryWithBackoff(opCtx, fmt.Sprintf("DownloadChunk %d", job.chunkIndex), func() error {
 					// Per-attempt timeout to prevent stalled reads from hanging
@@ -433,13 +432,6 @@ func (p *Provider) downloadChunkedConcurrent(
 				if downloadErr != nil {
 					setError(fmt.Errorf("failed to download chunk %d at offset %d: %w", job.chunkIndex, job.offset, downloadErr))
 					return
-				}
-
-				// Record throughput
-				duration := time.Since(startTime).Seconds()
-				if duration > 0 {
-					bytesPerSec := float64(len(chunkData)) / duration
-					transferHandle.RecordThroughput(bytesPerSec)
 				}
 
 				resultChan <- chunkResult{

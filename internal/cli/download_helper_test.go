@@ -29,6 +29,58 @@ func TestSanitizeErrorString_SASTokens(t *testing.T) {
 	}
 }
 
+func TestSanitizeErrorString_AzureAccountKey(t *testing.T) {
+	input := "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=abc123secret456+base64==;EndpointSuffix=core.windows.net"
+	result := sanitizeErrorString(input)
+
+	if strings.Contains(result, "abc123secret456") {
+		t.Errorf("sanitizeErrorString() should redact AccountKey value, got %q", result)
+	}
+	if !strings.Contains(result, "AccountKey=REDACTED") {
+		t.Errorf("sanitizeErrorString() should contain AccountKey=REDACTED, got %q", result)
+	}
+	// AccountName should NOT be redacted
+	if !strings.Contains(result, "AccountName=myaccount") {
+		t.Errorf("sanitizeErrorString() should preserve AccountName, got %q", result)
+	}
+}
+
+func TestSanitizeErrorString_BearerToken(t *testing.T) {
+	input := `Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature`
+	result := sanitizeErrorString(input)
+
+	if strings.Contains(result, "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9") {
+		t.Errorf("sanitizeErrorString() should redact JWT token, got %q", result)
+	}
+	if !strings.Contains(result, "Bearer REDACTED") {
+		t.Errorf("sanitizeErrorString() should contain 'Bearer REDACTED', got %q", result)
+	}
+}
+
+func TestSanitizeErrorString_TokenScheme(t *testing.T) {
+	input := `Token abc123def456`
+	result := sanitizeErrorString(input)
+
+	if strings.Contains(result, "abc123def456") {
+		t.Errorf("sanitizeErrorString() should redact Token value, got %q", result)
+	}
+	if !strings.Contains(result, "Token REDACTED") {
+		t.Errorf("sanitizeErrorString() should contain 'Token REDACTED', got %q", result)
+	}
+}
+
+func TestSanitizeErrorString_AWSAccessKeyID(t *testing.T) {
+	input := "credentials error: AKIAIOSFODNN7EXAMPLE used for request"
+	result := sanitizeErrorString(input)
+
+	if strings.Contains(result, "AKIAIOSFODNN7EXAMPLE") {
+		t.Errorf("sanitizeErrorString() should redact AWS key ID, got %q", result)
+	}
+	if !strings.Contains(result, "[REDACTED_AWS_KEY]") {
+		t.Errorf("sanitizeErrorString() should contain [REDACTED_AWS_KEY], got %q", result)
+	}
+}
+
 func TestSanitizeErrorString_NoSecrets(t *testing.T) {
 	input := "connection timeout after 30 seconds"
 	result := sanitizeErrorString(input)

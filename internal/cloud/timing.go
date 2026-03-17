@@ -25,8 +25,8 @@ import (
 
 // Global state for GUI-mode detailed logging (v4.0.0)
 var (
-	detailedLoggingEnabled int32           // atomic: 1 = enabled, 0 = disabled
-	globalEventBus         *events.EventBus // set by wailsapp for GUI mode
+	detailedLoggingEnabled int32                           // atomic: 1 = enabled, 0 = disabled
+	globalEventBus         atomic.Pointer[events.EventBus] // v4.8.7 S3: atomic to prevent data race
 )
 
 // SetDetailedLogging enables or disables detailed logging globally.
@@ -42,7 +42,7 @@ func SetDetailedLogging(enabled bool) {
 // SetEventBus sets the global event bus for emitting timing logs to GUI.
 // Called from wailsapp during startup.
 func SetEventBus(eb *events.EventBus) {
-	globalEventBus = eb
+	globalEventBus.Store(eb)
 }
 
 // TimingEnabled returns true if detailed logging is enabled.
@@ -70,8 +70,8 @@ func TimingLog(w io.Writer, format string, args ...interface{}) {
 	fmt.Fprintf(w, "%s\n", formattedMsg)
 
 	// v4.0.0: Also emit to EventBus for GUI Activity tab
-	if globalEventBus != nil {
-		globalEventBus.PublishLog(events.DebugLevel, formattedMsg, "timing", "", nil)
+	if eb := globalEventBus.Load(); eb != nil {
+		eb.PublishLog(events.DebugLevel, formattedMsg, "timing", "", nil)
 	}
 }
 

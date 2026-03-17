@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.6.8-green)
+![Status](https://img.shields.io/badge/status-v4.8.0-green)
 
 ---
 
@@ -55,12 +55,12 @@ A unified tool combining comprehensive command-line interface and graphical inte
 The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) with a React/TypeScript frontend:
 
 - **Six-Tab Interface**:
-  - **Setup**: Configuration management, API key setup, proxy settings, test connection
-  - **Single Job**: Configure and submit individual jobs (directory, local files, or remote files)
-  - **PUR (Parallel Upload Run)**: Batch job pipeline execution with directory scanning
+  - **Setup**: API key, proxy configuration, logging settings, test connection
+  - **Single Job**: Configure and submit individual jobs (directory with tar options, local files, or remote files)
+  - **PUR (Parallel Upload Run)**: Batch job pipeline with Pipeline Settings (workers, tar options), directory scanning
   - **File Browser**: Two-pane local/remote file browser with upload/download
-  - **Transfers**: Real-time transfer queue with progress, cancel, retry
-  - **Activity**: Live log display with filtering and search
+  - **Transfers**: Real-time transfer queue with progress, cancel, retry, disk space error banner
+  - **Activity**: Live log display with filtering, search, and run history panel
 
 - **Modern UI**:
   - React-based responsive design
@@ -83,9 +83,73 @@ The GUI has been rebuilt from the ground up using [Wails](https://wails.io/) wit
   - Directory scanning with pattern matching
   - Real-time job status updates
 
+- **Run Session Persistence (v4.7.3)**:
+  - Active runs survive tab navigation and app restart
+  - PUR view modes: choice screen, monitoring dashboard, progress banner
+  - Job queue with auto-start on completion (retry/backoff)
+  - Active run indicator in footer status bar
+  - Run history in Activity tab with historical state file loading
+
 ---
 
 ## Recent Changes
+
+**v4.8.0 (March 1, 2026) - Adaptive Concurrency, Streaming Downloads & Performance:**
+- **Adaptive concurrency**: Concurrent transfers scale dynamically based on file size distribution — up to 20 for small files, 10 for medium, 5 for large. Validated against thread pool capacity and available memory. Symmetric across GUI/CLI, uploads/downloads.
+- **FileInfo enrichment**: Folder listing API now parses full file metadata, eliminating per-file `GetFileInfo()` calls. Saves ~2 hours of API overhead for 13k-file folders.
+- **page_size=1000**: All folder listing pagination enforces 1000 items/page (~40x reduction in API calls for large folders).
+- **Streaming scan-to-download (GUI)**: Downloads start within seconds of scan initiation via streaming pipeline with 8 concurrent scanner workers.
+- **Evolving batch totals (GUI)**: Batch total increases during streaming scan; UI shows "X completed, Y discovered..." until scan completes.
+- **CLI per-file multi-threading**: CLI transfers now use resource manager for per-file thread allocation (previously always single-threaded).
+- **Sync pre-registration**: Batch entries appear immediately in Transfers tab (fixes disappearing batch bug).
+- **Scan progress feedback**: Real-time scan progress shown in both CLI and GUI during folder downloads.
+
+**v4.7.7 (February 27, 2026) - GUI Performance for Bulk Transfers + Rate Limit Validation:**
+- **Transfer grouping**: Folder uploads/downloads, PUR pipelines, and Single-Job uploads now collapse into a single aggregate batch row in the Transfers tab instead of rendering 10,000+ individual rows. Batches show aggregate progress, speed, ETA, file count, and expand to show paginated individual tasks on demand.
+- **Backend event optimization**: Individual progress events for batched transfers are suppressed at the queue layer; a 1/sec aggregate `BatchProgressEvent` per active batch replaces the previous 20k events/sec flood. Terminal events (completed, failed, cancelled) still publish individually.
+- **Polling optimization**: Transfers tab now fetches lightweight batch aggregates + ungrouped tasks (~1KB/cycle) instead of serializing all 10k+ tasks (~2MB/cycle) over IPC every poll.
+- **Rate limit end-to-end validation**: All 7 test scenarios pass against platform.rescale.com — coordinator auto-spawn, concurrent process sharing, rate enforcement under sustained load (200 concurrent processes), visibility messages ("Rate limiting: 85% of API capacity"), zero 429 errors, bucket state inspection.
+- **New backend endpoints**: `GetTransferBatches`, `GetUngroupedTransferTasks`, `GetBatchTasks`, `CancelBatch`, `RetryFailedInBatch`.
+- **New frontend components**: `BatchRow` (collapsible with aggregate progress), `TransferRow` with `React.memo()`, grouped rendering (enumerations → batches → ungrouped tasks).
+
+**v4.7.6 (February 26, 2026) - Auto-Download Reliability Fixes:**
+- **Credential path fix (CRITICAL)**: Service-mode API key resolution now checks per-user token path before falling back to SYSTEM's AppData path. Fixes silent "no API key" failures when running as Windows Service.
+- **Token persistence**: GUI writes API key to token file before every daemon/service start, preventing token-file-missing races.
+- **Config propagation**: Every config save now triggers `ReloadDaemonConfig()`, which restarts the subprocess daemon or triggers a service rescan. No more stale config until next poll.
+- **IPC ReloadConfig protocol**: New `MsgReloadConfig` IPC command with active-download awareness. Subprocess mode defers restart during active downloads; service mode delegates to `TriggerRescan()`.
+- **Pre-flight validation**: Enable toggle now validates API key and download folder before enabling auto-download. Specific error messages on failure.
+- **Progressive pending state**: "Activating..." now shows time-based messages (0-10s, 10-30s, 30s+) with Open Logs and Retry buttons. Backend error codes surface real issues (e.g., "No API key configured").
+- **Install & Start Service**: Combined idempotent `install-and-start` CLI subcommand and GUI button — single UAC prompt for both operations.
+- **Lookback fix**: `getJobCompletionTime()` retries once on failure; jobs with unknown completion time are included (not incorrectly skipped). Completion cutoff vs API creation pre-filter clearly distinguished in logs.
+- **IPC lifecycle**: IPC server starts before daemon on Windows to prevent brief IPC-unavailable window. Timeout increased from 2s to 5s.
+- **Skip-and-retry**: Users skipped for missing API key are retried on each service rescan when a key becomes available. Skip reason propagated to GUI as `LastError`.
+- **Tray auto-launch**: GUI automatically launches the tray companion app on startup (Windows only).
+- **Daemon stderr surfacing**: IPC timeout errors now include the last 3 lines from daemon-stderr.log.
+
+**v4.7.5 (February 25, 2026) - Empty File Fix + Cleanup:**
+- **Empty file upload**: Fixed crash when uploading 0-byte files through streaming encryption (zero parts emitted instead of one empty encrypted part).
+- **Empty file download**: Fixed download validation rejecting legitimate 0-byte files.
+- **Dead code cleanup**: Removed unused ThroughputMonitor infrastructure from resource manager.
+
+**v4.7.4 (February 23, 2026) - Unified Transfer Architecture:**
+- **PUR uploads visible in Transfers tab**: Pipeline workers delegate to `TransferService.UploadFileSync()` via new `SyncUploader` interface.
+- **Single-Job uploads visible in Transfers tab**: Local file uploads now route through TransferService.
+- **Source label badges**: Transfers tab shows origin — "PUR" (blue) and "Job" (green). Cancel/Retry hidden for pipeline-managed transfers.
+- **Cancel fix**: Transfers now properly stop underlying operations (context cancellation was missing).
+- **Tags on upload**: File Browser upload dialog includes optional tags input with live chip preview.
+
+**v4.7.3 (February 22, 2026) - Run Session Persistence and Monitoring:**
+- **Tab navigation persistence**: PUR and Single Job runs no longer lose state when switching tabs. New `runStore` tracks active runs at the app level; `singleJobStore` persists Single Job form state.
+- **PUR view modes**: Choice screen on return during active run ("Monitor Active Run" / "Prepare New Run"), monitoring banner during new configuration, completed results view.
+- **Job queue**: Submit becomes "Queue Run"/"Queue Job" when a run is active. Queued jobs auto-start with retry/backoff after current run completes.
+- **App restart recovery**: Active run metadata persisted to localStorage; historical state files loaded from disk on restart.
+- **Activity tab run history**: Completed runs displayed in collapsible panel; "Load from disk" loads historical runs.
+- **Bug fixes**: Log field mapping (C5), cancellation handling (C1), path traversal sanitization (C8), event listener isolation (C9).
+
+**v4.7.2 (February 21, 2026) - Consistent Load/Save UI + Label Improvements:**
+- **PUR Load/Save parity**: PUR tab now has "Load Existing Base Job Settings" dropdown (CSV, JSON, SGE) and "Save As..." dropdown, matching SingleJob's pattern
+- **Label improvements**: PUR subtitle "Parallel Upload and Run", clearer headings ("Configure Base Job Settings", "Scan to Create Jobs"), inner "Advanced Settings" → "Logging Settings"
+- **orgCode bugfix**: Fixed `loadJobFromJSON` and `loadJobFromSGE` dropping `orgCode` field
 
 **v4.6.4 (February 10, 2026) - S3 Upload Retry Fix:**
 - **S3 Upload**: Fixed "stream not seekable" failures during PUR uploads — new `uploadProgressReader` with `io.ReadSeeker` support, reader creation moved inside retry closure
@@ -217,15 +281,15 @@ Download from [GitHub Releases](https://github.com/rescale-labs/Rescale_Interlin
 
 | Platform | Package | Contents |
 |----------|---------|----------|
-| macOS (Apple Silicon) | `rescale-interlink-v4.6.8-macos-arm64.tar.gz` | `rescale-int-gui.app` |
-| Linux (x64) | `rescale-interlink-v4.6.8-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
-| Windows (x64) | `rescale-interlink-v4.6.8-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
-| Windows Installer | `rescale-interlink-v4.6.8-win_amd64.msi` | Full installer with Start Menu integration |
+| macOS (Apple Silicon) | `rescale-interlink-v4.7.7-macos-arm64.tar.gz` | `rescale-int-gui.app` |
+| Linux (x64) | `rescale-interlink-v4.7.7-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
+| Windows (x64) | `rescale-interlink-v4.7.7-win_amd64.zip` | `rescale-int-gui.exe` + `rescale-int.exe` |
+| Windows Installer | `rescale-interlink-v4.7.7-win_amd64.msi` | Full installer with Start Menu integration |
 
 **macOS:**
 ```bash
 # Extract and move app to Applications
-tar -xzf rescale-interlink-v4.6.8-macos-arm64.tar.gz
+tar -xzf rescale-interlink-v4.7.7-macos-arm64.tar.gz
 mv rescale-int-gui.app /Applications/
 
 # First run: allow in System Settings > Privacy & Security
@@ -236,7 +300,7 @@ xattr -d com.apple.quarantine /Applications/rescale-int-gui.app
 **Linux:**
 ```bash
 # Extract and make executable
-tar -xzf rescale-interlink-v4.6.8-linux-amd64.tar.gz
+tar -xzf rescale-interlink-v4.7.7-linux-amd64.tar.gz
 chmod +x rescale-int-gui.AppImage rescale-int
 
 # Run GUI (double-click or):
@@ -249,7 +313,7 @@ chmod +x rescale-int-gui.AppImage rescale-int
 **Windows:**
 ```powershell
 # Unzip and run GUI:
-Expand-Archive rescale-interlink-v4.6.8-win_amd64.zip
+Expand-Archive rescale-interlink-v4.7.7-win_amd64.zip
 .\rescale-int-gui.exe
 
 # Or install MSI for Start Menu integration
@@ -388,11 +452,11 @@ open /Applications/rescale-int-gui.app
 
 The GUI provides six tabs:
 
-1. **Setup**: Configure API credentials, proxy settings, transfer options, **daemon control**
-2. **Single Job**: Create and submit individual jobs (supports directory, local file, and remote file input modes)
-3. **PUR**: Parallel Upload Run - batch job pipeline for multiple directories
+1. **Setup**: API credentials, proxy settings, logging, **daemon control**
+2. **Single Job**: Create and submit individual jobs (directory with tar options, local files, or remote files)
+3. **PUR**: Parallel Upload Run - batch job pipeline with Pipeline Settings (workers, tar options)
 4. **File Browser**: Two-pane file manager for local and remote files
-5. **Transfers**: Monitor active transfers with progress and controls
+5. **Transfers**: Monitor active transfers with progress, controls, and disk space error banner
 6. **Activity**: View real-time logs with filtering and search
 
 ### Daemon Control (v4.1.0)
@@ -424,7 +488,7 @@ rescale-int daemon stop
 
 ### Auto-Start on Login (Mac/Linux)
 
-On **Windows with MSI installer**, the daemon starts automatically as a Windows Service.
+On **Windows with MSI installer**, the service is installed but must be started manually from the GUI Setup tab (click "Install & Start Service") or via `rescale-int service install-and-start` from an elevated command prompt. The MSI does not auto-start the service.
 
 On **Mac and Linux**, you can configure auto-start manually using the system's init system:
 
@@ -559,7 +623,7 @@ rescale-int --token-file ~/.config/rescale/token <command>
 
 ```
 +------------------------------------------------------------------+
-|                    Rescale Interlink v4.6.8                       |
+|                    Rescale Interlink v4.7.7                       |
 +------------------------------------------------------------------+
 |                                                                   |
 |  +--------------------+               +--------------------+      |
@@ -825,6 +889,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.6.8
+**Version**: 4.7.7
 **Status**: Production Ready
-**Last Updated**: February 17, 2026
+**Last Updated**: February 27, 2026

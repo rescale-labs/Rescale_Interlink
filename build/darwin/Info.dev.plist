@@ -64,5 +64,7 @@
             <key>NSAllowsLocalNetworking</key>
             <true/>
         </dict>
+        <key>NSAppSleepDisabled</key>
+        <true/>
     </dict>
 </plist>

@@ -43,7 +43,7 @@ type Config struct {
 	ValidationPattern string // Pattern to validate runs (e.g., "*.avg.fnc"), opt-in feature (default: disabled)
 
 	// Tar compression
-	TarCompression string // "none" or "gz"
+	TarCompression string // "none" or "gzip" (v4.7.1: normalized from legacy "gz")
 
 	// Retry settings
 	MaxRetries int // Maximum upload retry attempts (default: 1)
@@ -442,6 +442,11 @@ func (c *Config) Validate() error {
 	if c.APIBaseURL == "" {
 		return fmt.Errorf("API base URL is required")
 	}
+	// v4.8.7: 11E — Defense-in-depth: also validate in Validate() for paths that
+	// check config validity before creating a client.
+	if err := ValidatePlatformURL(c.APIBaseURL); err != nil {
+		return fmt.Errorf("invalid platform URL %q: %w", c.APIBaseURL, err)
+	}
 	if c.TarWorkers < 1 {
 		return fmt.Errorf("tar_workers must be at least 1")
 	}
@@ -545,6 +550,26 @@ func GetDefaultConfigPath() string {
 
 	// Neither exists - return new path (for new installations)
 	return newPath
+}
+
+// GetConfigPathForProfile returns the config.csv path for a specific user profile.
+// v4.8.8 Bug C: Used by the Windows service to load per-user config.csv for correct
+// APIBaseURL and proxy settings instead of hardcoding DefaultPlatformURL.
+//   - Windows: <userProfilePath>\AppData\Roaming\Rescale\Interlink\config.csv
+//   - Unix: <userProfilePath>/.config/rescale/config.csv
+//
+// This is a direct path construction, not a migration-aware lookup.
+// GetDefaultConfigPath() has old-path fallback logic, but that depends on
+// os.UserHomeDir() which resolves to SYSTEM's home in service mode.
+func GetConfigPathForProfile(userProfilePath string) string {
+	if userProfilePath == "" {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		appData := filepath.Join(userProfilePath, "AppData", "Roaming")
+		return filepath.Join(appData, "Rescale", "Interlink", "config.csv")
+	}
+	return filepath.Join(userProfilePath, ".config", ConfigDir, "config.csv")
 }
 
 // GetDefaultTokenPath returns the default token file path

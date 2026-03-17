@@ -8,7 +8,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,6 +16,8 @@ import (
 
 	"github.com/rescale/rescale-int/internal/logging"
 )
+
+const maxIPCMessageSize = 1 << 20 // 1MB - bounds IPC message reads to prevent OOM
 
 // ServiceHandler defines the interface for daemon operations.
 // The daemon implements this to handle IPC requests.
@@ -48,6 +49,16 @@ type ServiceHandler interface {
 	// v4.5.0: Added userID parameter for per-user routing in service mode.
 	// In subprocess mode, userID is ignored (only one user).
 	GetRecentLogs(userID string, count int) []LogEntryData
+
+	// ReloadConfig requests daemon config reload.
+	// v4.7.6: Added for GUI config propagation.
+	// In subprocess mode, returns active download count for GUI to decide restart timing.
+	// In service mode, delegates to TriggerRescan().
+	ReloadConfig(userID string) *ReloadConfigData
+
+	// GetTransferStatus returns daemon transfer batch status.
+	// v4.7.8: Added for GUI visibility into daemon auto-downloads.
+	GetTransferStatus(userID string) (*TransferStatusData, error)
 }
 
 // Server handles IPC requests from clients via Unix domain socket.
@@ -180,16 +191,20 @@ func (s *Server) handleConnection(conn net.Conn) {
 	// Set read/write deadlines
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	reader := bufio.NewReader(conn)
-
-	// Read request (newline-delimited JSON)
-	data, err := reader.ReadBytes('\n')
-	if err != nil {
-		if err != io.EOF {
-			s.logger.Warn().Err(err).Msg("Failed to read IPC request")
+	// Read request (newline-delimited JSON) with bounded buffer to prevent OOM
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, maxIPCMessageSize), maxIPCMessageSize)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			if err == bufio.ErrTooLong {
+				s.sendResponse(conn, NewErrorResponse("IPC message exceeds maximum size"))
+				return
+			}
+			s.logger.Debug().Err(err).Msg("IPC read error")
 		}
 		return
 	}
+	data := scanner.Bytes()
 
 	// Decode request
 	req, err := DecodeRequest(data)
@@ -277,6 +292,20 @@ func (s *Server) handleRequest(req *Request) *Response {
 			s.Stop()
 		}()
 		return resp
+
+	case MsgReloadConfig:
+		// v4.7.6: Config reload request
+		userID := req.UserID
+		result := s.handler.ReloadConfig(userID)
+		return NewReloadConfigResponse(result)
+
+	case MsgGetTransferStatus:
+		// v4.7.8: Read-only — return daemon transfer batch status
+		data, err := s.handler.GetTransferStatus(req.UserID)
+		if err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewTransferStatusResponse(data)
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))

@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.6.8.
+Complete command-line interface reference for `rescale-int` v4.8.0.
 
-**Version:** 4.6.8
-**Build Date:** February 18, 2026
+**Version:** 4.8.0
+**Build Date:** March 1, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -70,6 +70,8 @@ This will prompt you for:
 - API base URL (default: https://platform.rescale.com)
 - Worker settings (tar, upload, job workers)
 - Proxy configuration (optional)
+
+**Note (v4.7.1):** Worker and tar settings are also configurable from the GUI PUR tab's Pipeline Settings section. Settings in config.csv are shared between CLI and GUI modes.
 
 Configuration is saved to `~/.config/rescale/config.csv`
 
@@ -156,10 +158,12 @@ Additional configuration options for specialized use cases:
 | `exclude_pattern` | Patterns to exclude from tarballs (semicolon-separated, e.g., `*.log;*.tmp`) | (none) |
 | `include_pattern` | Include-only patterns (mutually exclusive with exclude) | (none) |
 | `flatten_tar` | Remove subdirectory structure in tarballs (`true`/`false`) | false |
-| `run_subpath` | Subpath to traverse before finding run directories (e.g., `Simcodes/Powerflow`) | (none) |
-| `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`) | (none) |
-| `tar_compression` | Compression type: `none` or `gz` | none |
+| `run_subpath` | Scan prefix: subpath to navigate into before scanning for run directories (e.g., `Simcodes/Powerflow`) | (none) |
+| `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`), opt-in | (none) |
+| `tar_compression` | Compression type: `none` or `gzip` (legacy `gz` is auto-normalized to `gzip`) | none |
 | `max_retries` | Maximum upload retry attempts | 1 |
+
+**v4.7.1 Note:** In the GUI, worker and tar settings are configured via the **PUR tab's Pipeline Settings** section (visible in both the scan step and the jobs-validated step). Tar options are also available in the **SingleJob tab** when using directory input mode. The `run_subpath` and `validation_pattern` are configured on the **PUR tab** scan step and persist to `config.csv` automatically. These settings are no longer in the Setup tab's Advanced Settings.
 
 ## Global Flags
 
@@ -324,7 +328,7 @@ rescale-int files upload <file> [file...] [flags]
 
 **Flags:**
 - `-d, --folder-id string` - Target folder ID
-- `-m, --max-concurrent int` - Maximum concurrent uploads (default: 5)
+- `-m, --max-concurrent int` - Maximum concurrent uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `--check-duplicates` - Check for existing files before uploading (prompts for each duplicate)
 - `--no-check-duplicates` - Skip duplicate checking (fast mode, may create duplicates)
 - `--skip-duplicates` - Check and automatically skip files that already exist
@@ -383,7 +387,7 @@ rescale-int files download <file-id> [file-id...] [flags]
 
 **Flags:**
 - `-o, --outdir string` - Output directory (default: current directory)
-- `-m, --max-concurrent int` - Maximum concurrent downloads (default: 5)
+- `-m, --max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `-w, --overwrite` - Overwrite existing files without prompting
 - `-S, --skip` - Skip existing files without prompting
 - `-r, --resume` - Resume interrupted downloads without prompting
@@ -487,7 +491,7 @@ rescale-int folders upload-dir <directory> [flags]
 
 **Flags:**
 - `--parent-id string` - Parent folder ID (default: My Library root)
-- `--max-concurrent int` - Maximum concurrent file uploads (default: 5)
+- `--max-concurrent int` - Maximum concurrent file uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `--include-hidden` - Include hidden files (starting with .)
 - `--sequential` - Use sequential mode (create all folders, then upload all files)
 - `--continue-on-error` - Continue uploading on errors without prompting
@@ -548,7 +552,7 @@ rescale-int folders download-dir <folder-id> [flags]
 
 **Flags:**
 - `-o, --outdir string` - Output directory for downloaded files (default: current directory)
-- `--max-concurrent int` - Maximum concurrent downloads (default: 5)
+- `--max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `-S, --skip` - Skip existing files/folders without prompting
 - `-w, --overwrite` - Overwrite existing files without prompting
 - `-m, --merge` - Merge into existing folders, skip existing files
@@ -714,7 +718,7 @@ rescale-int jobs download -j <job-id> [flags]
 - `--file-id string` - Specific file ID to download (optional)
 - `-d, --outdir string` - Output directory for batch download
 - `-o, --output string` - Output file path (for single file)
-- `-m, --max-concurrent int` - Maximum concurrent downloads (default: 5)
+- `-m, --max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `-w, --overwrite` - Overwrite existing files
 - `-S, --skip` - Skip existing files
 - `-r, --resume` - Resume interrupted downloads
@@ -1229,7 +1233,7 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
 - `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
-- `--tar-compression string` - Tar compression: "none" or "gz" (v4.6.4)
+- `--tar-compression string` - Tar compression: "none" or "gzip" (v4.6.4, v4.7.1: normalized)
 - `--tar-workers int` - Parallel tar workers (default from config) (v4.6.4)
 - `--upload-workers int` - Parallel upload workers (default from config) (v4.6.4)
 - `--job-workers int` - Parallel job creation workers (default from config) (v4.6.4)
@@ -1268,7 +1272,7 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
 - `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
-- `--tar-compression string` - Tar compression: "none" or "gz" (v4.6.4)
+- `--tar-compression string` - Tar compression: "none" or "gzip" (v4.6.4, v4.7.1: normalized)
 - `--tar-workers int` - Parallel tar workers (v4.6.4)
 - `--upload-workers int` - Parallel upload workers (v4.6.4)
 - `--job-workers int` - Parallel job creation workers (v4.6.4)
@@ -1570,7 +1574,15 @@ rescale-int files upload file.tar.gz --no-auto-scale
 **Global flags for thread control**:
 - `--max-threads N`: Total thread pool size (0=auto, 1-32)
 - `--no-auto-scale`: Disable adaptive thread allocation
-- Combines with `--max-concurrent` for file-level concurrency
+- `--max-concurrent N`: Override adaptive file-level concurrency with a fixed value
+
+**Adaptive concurrency (v4.8.0)**:
+Folder uploads and downloads automatically scale concurrent transfers based on file size distribution:
+- Many small files (<100MB): up to 20 concurrent transfers
+- Medium files (100MB–1GB): up to 10 concurrent transfers
+- Large files (>1GB): up to 5 concurrent transfers (more threads per file)
+
+The adaptive count is validated against available system memory and thread pool capacity. Use `--max-concurrent N` to override with a fixed value if needed.
 
 ### General Tips
 
@@ -1579,6 +1591,7 @@ rescale-int files upload file.tar.gz --no-auto-scale
 3. **PUR pipeline**: Efficiently manage dozens or hundreds of jobs
 4. **State files**: Resume interrupted operations without starting over
 5. **Thread tuning**: Use `--max-threads` for large files on fast connections
+6. **Adaptive concurrency**: For folders with many small files, the default adaptive mode (v4.8.0) provides the best throughput automatically
 
 ## Troubleshooting
 
@@ -1628,12 +1641,12 @@ For issues and feature requests:
 
 ## Version & Release Notes
 
-This guide is for `rescale-int` v4.6.8 (February 18, 2026)
+This guide is for `rescale-int` v4.7.5 (February 25, 2026)
 
 View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v4.6.8 (2026-02-18) [FIPS 140-3]
+# Output: rescale-int version v4.7.5 (2026-02-25) [FIPS 140-3]
 ```
 
 ### v4.2.1 Enhanced Eligibility Configuration (January 9, 2026)

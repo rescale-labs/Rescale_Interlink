@@ -11,7 +11,9 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cli"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/transfer/folder"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/util/paths"
 )
@@ -242,11 +244,11 @@ func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string
 		return nil, fmt.Errorf("API client not configured")
 	}
 
-	// Use CLI's folder cache for efficient API calls
-	cache := cli.NewFolderCache()
+	// v4.8.7 Plan 2b: Use folder package directly (fixes layering — service shouldn't import cli)
+	cache := folder.NewFolderCache()
 
 	// Step 1: Scan local directory
-	directories, files, symlinks, err := cli.BuildDirectoryTree(localPath, false)
+	directories, files, symlinks, err := folder.BuildDirectoryTree(localPath, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan directory: %w", err)
 	}
@@ -257,7 +259,7 @@ func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string
 
 	// Step 2: Create or get root remote folder
 	folderName := filepath.Base(localPath)
-	rootRemoteID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, remoteFolderID, folderName)
+	rootRemoteID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, remoteFolderID, folderName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check root folder: %w", err)
 	}
@@ -272,8 +274,8 @@ func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string
 	}
 
 	// Step 3: Create remote folder structure
-	conflictMode := cli.ConflictMergeAll // Auto-merge for service (no prompts)
-	mapping, _, err := cli.CreateFolderStructure(
+	conflictMode := folder.ConflictMergeAll // Auto-merge for service (no prompts)
+	mapping, _, err := folder.CreateFolderStructure(
 		ctx,
 		apiClient,
 		cache,
@@ -281,10 +283,11 @@ func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string
 		directories,
 		rootRemoteID,
 		&conflictMode,
-		15, // maxConcurrent folders
+		constants.DefaultFolderConcurrency,
 		fs.logger,
 		nil, // folderReadyChan not needed
 		nil, // progressWriter not needed
+		nil, // conflictPrompt not needed (auto-merge)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create folder structure: %w", err)

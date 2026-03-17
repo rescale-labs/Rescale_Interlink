@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState } from 'react'
+import { useEffect, useCallback, useState, useMemo } from 'react'
 import {
   FolderPlusIcon,
   DocumentArrowUpIcon,
@@ -12,10 +12,15 @@ import {
   FolderOpenIcon,
   DocumentArrowDownIcon,
   CheckIcon,
+  ChevronDownIcon,
+  EyeIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, WorkflowState, JobRow, PipelineLogEntry, PipelineStageStats } from '../../stores'
-import { TemplateBuilder } from '../widgets'
+import { useJobStore, useConfigStore, useRunStore } from '../../stores'
+import type { WorkflowState } from '../../types/jobs'
+import { wailsapp } from '../../../wailsjs/go/models'
+import { TemplateBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
+import { formatDuration } from '../../utils/formatDuration'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import * as Runtime from '../../../wailsjs/runtime/runtime'
 
@@ -23,36 +28,15 @@ import * as Runtime from '../../../wailsjs/runtime/runtime'
 const WORKFLOW_STEPS: { state: WorkflowState; label: string; shortLabel: string }[] = [
   { state: 'initial', label: 'Choose Source', shortLabel: 'Source' },
   { state: 'pathChosen', label: 'Configure', shortLabel: 'Config' },
-  { state: 'templateReady', label: 'Scan Directories', shortLabel: 'Scan' },
+  { state: 'templateReady', label: 'Scan to Create Jobs', shortLabel: 'Scan' },
   { state: 'directoriesScanned', label: 'Validate Jobs', shortLabel: 'Validate' },
   { state: 'jobsValidated', label: 'Ready to Run', shortLabel: 'Ready' },
   { state: 'executing', label: 'Running', shortLabel: 'Running' },
   { state: 'completed', label: 'Complete', shortLabel: 'Done' },
 ]
 
-// Status badge component
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    pending: 'bg-gray-200 text-gray-700',
-    running: 'bg-blue-200 text-blue-700',
-    in_progress: 'bg-blue-200 text-blue-700',
-    success: 'bg-green-200 text-green-700',
-    completed: 'bg-green-200 text-green-700',
-    failed: 'bg-red-200 text-red-700',
-    skipped: 'bg-gray-100 text-gray-500',
-  }
-
-  return (
-    <span
-      className={clsx(
-        'px-2 py-0.5 text-xs rounded-full font-medium',
-        styles[status] || 'bg-gray-200 text-gray-700'
-      )}
-    >
-      {status}
-    </span>
-  )
-}
+// v4.7.3: StatusBadge, StatsBar, JobsTable, PipelineStageSummary, PipelineLogPanel,
+// ErrorSummary extracted to widgets/ for reuse. Imported above.
 
 // v4.0.0 G2: Improved progress bar with numbered steps and checkmarks
 function WorkflowProgressBar({ currentState }: { currentState: WorkflowState }) {
@@ -112,228 +96,120 @@ function WorkflowProgressBar({ currentState }: { currentState: WorkflowState }) 
   )
 }
 
-// Stats bar component
-function StatsBar({ jobs }: { jobs: JobRow[] }) {
-  const stats = jobs.reduce(
-    (acc, job) => {
-      acc.total++
-      if (job.submitStatus === 'completed' || job.submitStatus === 'success' || job.submitStatus === 'skipped') {
-        acc.completed++
-      } else if (job.submitStatus === 'failed' || job.tarStatus === 'failed' || job.uploadStatus === 'failed') {
-        acc.failed++
-      } else if (
-        job.tarStatus === 'running' || job.tarStatus === 'in_progress' ||
-        job.uploadStatus === 'running' || job.uploadStatus === 'in_progress' ||
-        job.createStatus === 'running' || job.createStatus === 'in_progress' ||
-        job.submitStatus === 'running' || job.submitStatus === 'in_progress'
-      ) {
-        acc.inProgress++
-      } else {
-        acc.pending++
-      }
-      return acc
-    },
-    { total: 0, completed: 0, inProgress: 0, pending: 0, failed: 0 }
-  )
+// v4.7.1: Shared Pipeline Settings component for workers + tar options
+const COMPRESSION_OPTIONS = ['gzip', 'none'] as const
 
+function PipelineSettings({ config, updateConfig, saveConfig }: {
+  config: wailsapp.ConfigDTO | null
+  updateConfig: (updates: Partial<wailsapp.ConfigDTO>) => void
+  saveConfig: () => Promise<void>
+}) {
   return (
-    <div className="flex items-center gap-4 mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm">
-      <span className="font-medium">Jobs:</span>
-      <span>Total: <span className="font-semibold">{stats.total}</span></span>
-      <span className="text-green-600">Completed: <span className="font-semibold">{stats.completed}</span></span>
-      <span className="text-blue-600">In Progress: <span className="font-semibold">{stats.inProgress}</span></span>
-      <span className="text-gray-500">Pending: <span className="font-semibold">{stats.pending}</span></span>
-      {stats.failed > 0 && (
-        <span className="text-red-600">Failed: <span className="font-semibold">{stats.failed}</span></span>
-      )}
-    </div>
-  )
-}
-
-// Jobs table component
-function JobsTable({ jobs }: { jobs: JobRow[] }) {
-  if (jobs.length === 0) {
-    return (
-      <div className="text-center text-gray-500 py-8">
-        No jobs to display
+    <div className="border-t pt-4 mt-4">
+      <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Pipeline Settings</h4>
+      {/* Worker Configuration */}
+      <div className="mb-4">
+        <label className="block text-xs font-medium text-gray-500 mb-2">Worker Configuration</label>
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Tar Workers</label>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.tarWorkers || 4}
+              onChange={(e) => updateConfig({ tarWorkers: parseInt(e.target.value) || 4 })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Upload Workers</label>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.uploadWorkers || 4}
+              onChange={(e) => updateConfig({ uploadWorkers: parseInt(e.target.value) || 4 })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Job Workers</label>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.jobWorkers || 4}
+              onChange={(e) => updateConfig({ jobWorkers: parseInt(e.target.value) || 4 })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+        </div>
       </div>
-    )
-  }
-
-  return (
-    <div className="overflow-auto max-h-96">
-      <table className="w-full text-sm">
-        <thead className="bg-gray-50 dark:bg-gray-800 sticky top-0">
-          <tr>
-            <th className="px-4 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-              #
-            </th>
-            <th className="px-4 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-              Directory
-            </th>
-            <th className="px-4 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-              Job Name
-            </th>
-            <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
-              Tar
-            </th>
-            <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
-              Upload
-            </th>
-            {/* v4.6.0: Re-added Create column — pipeline has distinct create and submit stages */}
-            <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
-              Create
-            </th>
-            <th className="px-4 py-2 text-center font-medium text-gray-700 dark:text-gray-300">
-              Submit
-            </th>
-            <th className="px-4 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-              Job ID
-            </th>
-            <th className="px-4 py-2 text-left font-medium text-gray-700 dark:text-gray-300">
-              Error
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-          {jobs.map((job) => (
-            <tr
-              key={job.index}
-              className={clsx(
-                'hover:bg-gray-50 dark:hover:bg-gray-800/50',
-                job.error && 'bg-red-50 dark:bg-red-900/10'
-              )}
+      {/* Tar Options */}
+      <div>
+        <label className="block text-xs font-medium text-gray-500 mb-2">Tar Options</label>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Exclude Patterns</label>
+            <input
+              type="text"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="*.tmp,*.log,*.bak"
+              value={config?.excludePatterns || ''}
+              onChange={(e) => updateConfig({ excludePatterns: e.target.value })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Include Patterns</label>
+            <input
+              type="text"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="*.dat,*.csv,*.inp"
+              value={config?.includePatterns || ''}
+              onChange={(e) => updateConfig({ includePatterns: e.target.value })}
+              onBlur={() => saveConfig()}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Compression</label>
+            <select
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={config?.tarCompression || 'gzip'}
+              onChange={(e) => {
+                updateConfig({ tarCompression: e.target.value })
+                saveConfig()
+              }}
             >
-              <td className="px-4 py-2 text-gray-600">{job.index + 1}</td>
-              <td className="px-4 py-2 font-mono text-xs truncate max-w-48" title={job.directory}>
-                {job.directory}
-              </td>
-              <td className="px-4 py-2">{job.jobName}</td>
-              <td className="px-4 py-2 text-center">
-                <StatusBadge status={job.tarStatus} />
-              </td>
-              <td className="px-4 py-2 text-center">
-                {(job.uploadStatus === 'running' || job.uploadStatus === 'in_progress') && job.uploadProgress > 0 ? (
-                  <span className="px-2 py-0.5 text-xs rounded-full font-medium bg-blue-200 text-blue-700">
-                    {job.uploadProgress.toFixed(1)}%
-                  </span>
-                ) : (
-                  <StatusBadge status={job.uploadStatus} />
-                )}
-              </td>
-              {/* v4.6.0: Re-added Create column */}
-              <td className="px-4 py-2 text-center">
-                <StatusBadge status={job.createStatus} />
-              </td>
-              <td className="px-4 py-2 text-center">
-                <StatusBadge status={job.submitStatus} />
-              </td>
-              <td className="px-4 py-2 font-mono text-xs text-gray-500">
-                {job.jobId || '-'}
-              </td>
-              <td className="px-4 py-2 text-xs max-w-48 truncate" title={job.error || ''}>
-                {job.error ? (
-                  <span className="text-red-600">{job.error}</span>
-                ) : '-'}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-// v4.6.0: Pipeline stage summary showing per-stage breakdown
-function PipelineStageSummary({ stats, total }: { stats: PipelineStageStats; total: number }) {
-  const stages = [
-    { label: 'Tar', data: stats.tar },
-    { label: 'Upload', data: stats.upload },
-    { label: 'Create', data: stats.create },
-    { label: 'Submit', data: stats.submit },
-  ]
-
-  return (
-    <div className="flex items-center gap-6 mb-3 p-2 bg-blue-50 dark:bg-blue-900/20 rounded text-xs">
-      {stages.map((s) => (
-        <span key={s.label}>
-          <span className="font-medium">{s.label}:</span>{' '}
-          <span className="text-green-600">{s.data.completed}</span>
-          {s.data.failed > 0 && <span className="text-red-600">/{s.data.failed}err</span>}
-          /{total}
-        </span>
-      ))}
-    </div>
-  )
-}
-
-// v4.6.0: Pipeline log panel for in-tab diagnostic output
-function PipelineLogPanel({ logs, maxHeight = 200 }: { logs: PipelineLogEntry[]; maxHeight?: number }) {
-  const [expanded, setExpanded] = useState(false)
-
-  if (logs.length === 0) return null
-
-  const displayLogs = expanded ? logs : logs.slice(-10)
-
-  return (
-    <div className="mt-4">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 mb-1"
-      >
-        {expanded ? 'Hide' : 'Show'} Pipeline Log ({logs.length} entries)
-      </button>
-      {expanded && (
-        <div
-          className="bg-gray-900 text-gray-200 rounded p-2 font-mono text-xs overflow-auto"
-          style={{ maxHeight }}
-        >
-          {displayLogs.map((log, i) => (
-            <div key={i} className={clsx(
-              'py-0.5',
-              log.level === 'error' && 'text-red-400',
-              log.level === 'warn' && 'text-yellow-400',
-            )}>
-              <span className="text-gray-500">{new Date(log.timestamp).toLocaleTimeString()}</span>
-              {' '}
-              {log.jobName && <span className="text-blue-400">[{log.jobName}]</span>}
-              {' '}
-              {log.message}
-            </div>
-          ))}
+              {COMPRESSION_OPTIONS.map((opt) => (
+                <option key={opt} value={opt}>{opt}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center">
+            <input
+              type="checkbox"
+              id="pipelineFlattenTar"
+              checked={config?.flattenTar || false}
+              onChange={(e) => {
+                updateConfig({ flattenTar: e.target.checked })
+                saveConfig()
+              }}
+              className="h-4 w-4 rounded border border-gray-300 text-blue-500 focus:ring-blue-500 focus:ring-2 bg-white cursor-pointer"
+            />
+            <label htmlFor="pipelineFlattenTar" className="ml-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
+              Flatten directory structure in tar
+            </label>
+          </div>
         </div>
-      )}
-    </div>
-  )
-}
-
-// v4.6.0: Error summary for completed view
-function ErrorSummary({ jobs }: { jobs: JobRow[] }) {
-  const failedJobs = jobs.filter((j) => j.error)
-  const [expanded, setExpanded] = useState(false)
-
-  if (failedJobs.length === 0) return null
-
-  return (
-    <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 text-sm font-medium text-red-700 dark:text-red-400"
-      >
-        <ExclamationTriangleIcon className="w-4 h-4" />
-        {failedJobs.length} job{failedJobs.length !== 1 ? 's' : ''} failed
-        <span className="text-xs text-red-500">({expanded ? 'hide' : 'show details'})</span>
-      </button>
-      {expanded && (
-        <div className="mt-2 space-y-1 text-xs">
-          {failedJobs.map((job) => (
-            <div key={job.index} className="flex items-start gap-2">
-              <span className="font-medium text-red-600 whitespace-nowrap">{job.jobName}:</span>
-              <span className="text-red-500">{job.error}</span>
-            </div>
-          ))}
-        </div>
-      )}
+        <p className="mt-1 text-xs text-gray-400">
+          Patterns support wildcards (*). Use comma-separated list.
+        </p>
+      </div>
     </div>
   )
 }
@@ -364,22 +240,84 @@ export function PURTab() {
     loadMemory,
     loadJobsFromCSV,
     saveJobsToCSV,
-    pipelineLogs,
-    pipelineStageStats,
-    startTime,
+    loadJobFromSGE,
+    saveJobToJSON,
+    saveJobToSGE,
     purRunOptions,
     setPURRunOptions,
   } = useJobStore()
+
+  // v4.7.3: Run store for run session persistence
+  const {
+    activeRun,
+    queuedJob,
+    queueStatus,
+    purViewMode,
+    setPurViewMode,
+    clearActiveRun,
+    setQueuedJob,
+    cancelRun: cancelActiveRun,
+  } = useRunStore()
+
+  // v4.7.1: Config store for Pipeline Settings
+  const { config, updateConfig, saveConfig } = useConfigStore()
 
   // Template builder dialog state
   const [showTemplateBuilder, setShowTemplateBuilder] = useState(false)
   const [validationErrors, setValidationErrors] = useState<string[]>([])
   const [isValidating, setIsValidating] = useState(false)
+  const [showLoadMenu, setShowLoadMenu] = useState(false)
+  const [showSaveMenu, setShowSaveMenu] = useState(false)
+  const [loadSaveError, setLoadSaveError] = useState<string | null>(null)
+  const [monitorBannerCollapsed, setMonitorBannerCollapsed] = useState(false)
+
+  // v4.7.3: Compute effective view mode
+  const effectiveView = useMemo(() => {
+    if (purViewMode === 'monitor' || purViewMode === 'configure') return purViewMode
+
+    // Auto mode
+    if (activeRun && activeRun.runType === 'pur' && activeRun.status === 'active') {
+      // If user was mid-configuration, show configure with banner
+      if (['pathChosen', 'templateReady', 'directoriesScanned', 'jobsValidated'].includes(workflowState)) {
+        return 'configure' as const
+      }
+      return 'choice' as const
+    }
+
+    if (activeRun && activeRun.runType === 'pur' &&
+        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled')) {
+      return 'results' as const
+    }
+
+    return 'configure' as const
+  }, [purViewMode, activeRun, workflowState])
 
   // Load workflow memory on mount
   useEffect(() => {
     loadMemory()
   }, [loadMemory])
+
+  // v4.7.3 Fix: Sync jobStore.workflowState when run transitions to terminal state.
+  // workflowState is set to 'executing' (jobStore.ts startBulkRun) but never transitions
+  // to 'completed' on normal pipeline completion — only on cancel. This bridges the gap.
+  useEffect(() => {
+    if (activeRun && activeRun.runType === 'pur' &&
+        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') &&
+        workflowState === 'executing') {
+      useJobStore.setState({ workflowState: 'completed' })
+    }
+  }, [activeRun?.status, workflowState])
+
+  // v4.7.1: Initialize scan options from persisted config
+  useEffect(() => {
+    if (config) {
+      setScanOptions({
+        runSubpath: scanOptions.runSubpath || config.runSubpath || '',
+        validationPattern: scanOptions.validationPattern || config.validationPattern || '',
+      })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config?.runSubpath, config?.validationPattern])
 
   // Local state for CSV loading
   const [isLoadingCSV, setIsLoadingCSV] = useState(false)
@@ -413,43 +351,123 @@ export function PURTab() {
     setWorkflowPath('createNew')
   }, [setWorkflowPath])
 
-  // Handle loading a template from JSON file
-  const handleLoadTemplate = useCallback(async () => {
-    try {
-      const path = await App.SelectFile('Select Template JSON File')
-      if (!path) return // User cancelled
+  // v4.7.2: Map a loaded job DTO to template format
+  const mapDTOToTemplate = useCallback((loaded: wailsapp.JobSpecDTO) => {
+    setTemplate({
+      directory: loaded.directory || '',
+      jobName: loaded.jobName || '',
+      analysisCode: loaded.analysisCode || '',
+      analysisVersion: loaded.analysisVersion || '',
+      command: loaded.command || '',
+      coreType: loaded.coreType || '',
+      coresPerSlot: loaded.coresPerSlot || 4,
+      walltimeHours: loaded.walltimeHours || 1,
+      slots: loaded.slots || 1,
+      licenseSettings: loaded.licenseSettings || '',
+      extraInputFileIds: loaded.extraInputFileIds || '',
+      noDecompress: loaded.noDecompress || false,
+      submitMode: loaded.submitMode || 'create_and_submit',
+      isLowPriority: loaded.isLowPriority || false,
+      onDemandLicenseSeller: loaded.onDemandLicenseSeller || '',
+      tags: loaded.tags || [],
+      projectId: loaded.projectId || '',
+      orgCode: loaded.orgCode || '',
+      automations: loaded.automations || [],
+    })
+  }, [setTemplate])
 
-      // Load the template from the JSON file
-      const jobs = await App.LoadJobsFromJSON(path)
+  // v4.7.2: Load template from CSV file
+  const handleLoadTemplateFromCSV = useCallback(async () => {
+    setShowLoadMenu(false)
+    try {
+      const path = await App.SelectFile('Select Jobs CSV File')
+      if (!path) return
+      setLoadSaveError(null)
+
+      const jobs = await App.LoadJobsFromCSV(path)
       if (jobs && jobs.length > 0) {
-        // Use the first job as the template
-        const loadedTemplate = jobs[0]
-        setTemplate({
-          directory: loadedTemplate.directory || '',
-          jobName: loadedTemplate.jobName || '',
-          analysisCode: loadedTemplate.analysisCode || '',
-          analysisVersion: loadedTemplate.analysisVersion || '',
-          command: loadedTemplate.command || '',
-          coreType: loadedTemplate.coreType || '',
-          coresPerSlot: loadedTemplate.coresPerSlot || 4,
-          walltimeHours: loadedTemplate.walltimeHours || 1,
-          slots: loadedTemplate.slots || 1,
-          licenseSettings: loadedTemplate.licenseSettings || '',
-          extraInputFileIds: loadedTemplate.extraInputFileIds || '',
-          noDecompress: loadedTemplate.noDecompress || false,
-          submitMode: loadedTemplate.submitMode || 'create_and_submit',
-          isLowPriority: loadedTemplate.isLowPriority || false,
-          onDemandLicenseSeller: loadedTemplate.onDemandLicenseSeller || '',
-          tags: loadedTemplate.tags || [],
-          projectId: loadedTemplate.projectId || '',
-          orgCode: loadedTemplate.orgCode || '',
-          automations: loadedTemplate.automations || [],
-        })
+        mapDTOToTemplate(jobs[0])
       }
     } catch (error) {
-      console.error('Failed to load template:', error)
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
     }
-  }, [setTemplate])
+  }, [mapDTOToTemplate])
+
+  // v4.7.2: Load template from JSON file
+  const handleLoadTemplateFromJSON = useCallback(async () => {
+    setShowLoadMenu(false)
+    try {
+      const path = await App.SelectFile('Select Template JSON File')
+      if (!path) return
+      setLoadSaveError(null)
+
+      const jobs = await App.LoadJobsFromJSON(path)
+      if (jobs && jobs.length > 0) {
+        mapDTOToTemplate(jobs[0])
+      }
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [mapDTOToTemplate])
+
+  // v4.7.2: Load template from SGE script
+  const handleLoadTemplateFromSGE = useCallback(async () => {
+    setShowLoadMenu(false)
+    try {
+      const path = await App.SelectFile('Select SGE Script')
+      if (!path) return
+      setLoadSaveError(null)
+
+      const loaded = await loadJobFromSGE(path)
+      if (loaded) {
+        setTemplate(loaded)
+      }
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [loadJobFromSGE, setTemplate])
+
+  // v4.7.2: Save template to CSV
+  const handleSaveTemplateToCSV = useCallback(async () => {
+    setShowSaveMenu(false)
+    try {
+      const path = await App.SaveFile('Save Template CSV')
+      if (!path) return
+      setLoadSaveError(null)
+
+      await App.SaveJobsToCSV(path, [template as unknown as wailsapp.JobSpecDTO])
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [template])
+
+  // v4.7.2: Save template to JSON
+  const handleSaveTemplateToJSON = useCallback(async () => {
+    setShowSaveMenu(false)
+    try {
+      const path = await App.SaveFile('Save Template JSON')
+      if (!path) return
+      setLoadSaveError(null)
+
+      await saveJobToJSON(path, template)
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [template, saveJobToJSON])
+
+  // v4.7.2: Save template to SGE script
+  const handleSaveTemplateToSGE = useCallback(async () => {
+    setShowSaveMenu(false)
+    try {
+      const path = await App.SaveFile('Save Template SGE Script')
+      if (!path) return
+      setLoadSaveError(null)
+
+      await saveJobToSGE(path, template)
+    } catch (error) {
+      setLoadSaveError(error instanceof Error ? error.message : String(error))
+    }
+  }, [template, saveJobToSGE])
 
   // Handle template save from builder
   const handleTemplateSave = useCallback(
@@ -509,16 +527,32 @@ export function PURTab() {
     }
   }, [saveJobsToCSV])
 
-  // Handle cancel
+  // v4.7.3: Handle cancel delegates to runStore
   const handleCancel = useCallback(async () => {
-    await cancelRun()
-  }, [cancelRun])
+    await cancelActiveRun()
+    // Also transition jobStore workflow state
+    cancelRun()
+  }, [cancelActiveRun, cancelRun])
 
-  // Handle start over
-  const handleStartOver = useCallback(() => {
+  // v4.7.3: Handle start over clears both stores
+  const handleStartOver = useCallback(async () => {
+    await clearActiveRun()
     reset()
     setValidationErrors([])
-  }, [reset])
+    setPurViewMode('auto')
+  }, [clearActiveRun, reset, setPurViewMode])
+
+  // v4.7.3: Handle queue - deep-copies current config and stores in runStore
+  const handleQueueRun = useCallback(() => {
+    const jobsSnapshot = structuredClone(scannedJobs) as wailsapp.JobSpecDTO[]
+    const optsSnapshot = structuredClone(purRunOptions) as wailsapp.PURRunOptionsDTO
+    setQueuedJob({
+      runType: 'pur',
+      input: { jobs: jobsSnapshot, opts: optsSnapshot },
+      queuedAt: Date.now(),
+    })
+    useRunStore.setState({ queueStatus: 'queued' })
+  }, [scannedJobs, purRunOptions, setQueuedJob])
 
   // Render content based on workflow state
   const renderContent = () => {
@@ -622,9 +656,9 @@ export function PURTab() {
       // Create new path - template selection
       return (
         <div className="flex flex-col items-center justify-center h-full">
-          <h3 className="text-lg font-semibold mb-4">Configure Job Settings</h3>
+          <h3 className="text-lg font-semibold mb-4">Configure Base Job Settings</h3>
           <p className="text-gray-600 mb-6">
-            Create or load job settings to apply to all jobs
+            Create or load base job settings to apply to all jobs
           </p>
           <div className="flex gap-4">
             <button
@@ -632,16 +666,47 @@ export function PURTab() {
               className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
             >
               <FolderPlusIcon className="w-5 h-5" />
-              Create New Settings
+              Configure New Base Job Settings
             </button>
-            <button
-              onClick={handleLoadTemplate}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
-            >
-              <DocumentArrowUpIcon className="w-5 h-5" />
-              Load Settings
-            </button>
+            {/* v4.7.2: Load dropdown with CSV, JSON, SGE */}
+            <div className="relative">
+              <button
+                onClick={() => setShowLoadMenu(!showLoadMenu)}
+                className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <DocumentArrowUpIcon className="w-5 h-5" />
+                Load Existing Base Job Settings
+                <ChevronDownIcon className="w-4 h-4" />
+              </button>
+              {showLoadMenu && (
+                <div className="absolute top-full left-0 mt-1 w-48 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10">
+                  <button
+                    onClick={handleLoadTemplateFromCSV}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded-t-lg"
+                  >
+                    CSV File
+                  </button>
+                  <button
+                    onClick={handleLoadTemplateFromJSON}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    JSON File
+                  </button>
+                  <button
+                    onClick={handleLoadTemplateFromSGE}
+                    className="w-full px-4 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 rounded-b-lg"
+                  >
+                    SGE Script
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
+          {loadSaveError && (
+            <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm max-w-md">
+              {loadSaveError}
+            </div>
+          )}
         </div>
       )
     }
@@ -650,7 +715,47 @@ export function PURTab() {
     if (workflowState === 'templateReady') {
       return (
         <div className="p-6">
-          <h3 className="text-lg font-semibold mb-4">Scan for Jobs</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold">Scan to Create Jobs</h3>
+            {/* v4.7.2: Save As dropdown for template */}
+            <div className="relative">
+              <button
+                onClick={() => setShowSaveMenu(!showSaveMenu)}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <DocumentArrowDownIcon className="w-4 h-4" />
+                Save As...
+                <ChevronDownIcon className="w-3 h-3" />
+              </button>
+              {showSaveMenu && (
+                <div className="absolute top-full right-0 mt-1 w-40 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10">
+                  <button
+                    onClick={handleSaveTemplateToCSV}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 rounded-t-lg"
+                  >
+                    CSV File
+                  </button>
+                  <button
+                    onClick={handleSaveTemplateToJSON}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    JSON File
+                  </button>
+                  <button
+                    onClick={handleSaveTemplateToSGE}
+                    className="w-full px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 rounded-b-lg"
+                  >
+                    SGE Script
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+          {loadSaveError && (
+            <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
+              {loadSaveError}
+            </div>
+          )}
 
           {/* v4.0.8: Scan Mode Toggle */}
           <div className="mb-4">
@@ -738,7 +843,11 @@ export function PURTab() {
                   <input
                     type="text"
                     value={scanOptions.validationPattern}
-                    onChange={(e) => setScanOptions({ validationPattern: e.target.value })}
+                    onChange={(e) => {
+                      setScanOptions({ validationPattern: e.target.value })
+                      updateConfig({ validationPattern: e.target.value })
+                    }}
+                    onBlur={() => saveConfig()}
                     placeholder="*.fnc"
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
@@ -751,7 +860,11 @@ export function PURTab() {
                   <input
                     type="text"
                     value={scanOptions.runSubpath}
-                    onChange={(e) => setScanOptions({ runSubpath: e.target.value })}
+                    onChange={(e) => {
+                      setScanOptions({ runSubpath: e.target.value })
+                      updateConfig({ runSubpath: e.target.value })
+                    }}
+                    onBlur={() => saveConfig()}
                     placeholder="Simcodes/Powerflow"
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
@@ -897,6 +1010,12 @@ export function PURTab() {
 
           {/* Extra Input Files Section */}
           <div className="border-t pt-4 mt-4 mb-6">
+            {/* v4.7.4: Explanatory text about how PUR handles folders */}
+            <p className="text-xs text-gray-500 mb-3">
+              <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
+              automatically decompressed on the cluster. Extra input files below are shared files uploaded once and
+              attached to every job.
+            </p>
             <h4 className="text-sm font-medium text-gray-700 mb-2">
               Extra Input Files (shared across all jobs)
             </h4>
@@ -943,10 +1062,28 @@ export function PURTab() {
                 Use &quot;id:fileId&quot; for already-uploaded files.
               </p>
             </div>
+            {/* v4.7.4: Tar cleanup option */}
+            <div className="mt-3">
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={purRunOptions.rmTarOnSuccess}
+                  onChange={(e) => setPURRunOptions({ rmTarOnSuccess: e.target.checked })}
+                  className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
+                />
+                Delete local tar files after successful upload
+              </label>
+              <p className="text-xs text-gray-400 ml-6">
+                Saves disk space by removing intermediate tar archives once they are safely uploaded to Rescale.
+              </p>
+            </div>
           </div>
 
+          {/* v4.7.1: Pipeline Settings — workers + tar options */}
+          <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
+
           {scanError && (
-            <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
+            <div className="mb-4 mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
               {scanError}
             </div>
           )}
@@ -969,7 +1106,7 @@ export function PURTab() {
             ) : (
               <>
                 <PlayIcon className="w-5 h-5" />
-                Scan Directories
+                Scan to Create Jobs
               </>
             )}
           </button>
@@ -1046,56 +1183,121 @@ export function PURTab() {
                 <DocumentArrowDownIcon className="w-5 h-5" />
                 Export CSV
               </button>
-              <button
-                onClick={handleRun}
-                className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
-              >
-                <PlayIcon className="w-5 h-5" />
-                Start Pipeline
-              </button>
+              {/* v4.7.3: Queue button when a run is active */}
+              {activeRun?.status === 'active' ? (
+                <button
+                  onClick={handleQueueRun}
+                  disabled={!!queuedJob}
+                  className={clsx(
+                    'flex items-center gap-2 px-4 py-2 rounded',
+                    queuedJob
+                      ? 'bg-gray-400 text-white cursor-not-allowed'
+                      : 'bg-yellow-500 text-white hover:bg-yellow-600'
+                  )}
+                >
+                  <PlayIcon className="w-5 h-5" />
+                  {queuedJob ? 'Run Queued' : 'Queue Run'}
+                </button>
+              ) : (
+                <button
+                  onClick={handleRun}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+                >
+                  <PlayIcon className="w-5 h-5" />
+                  Start Pipeline
+                </button>
+              )}
             </div>
           </div>
 
+          {/* v4.7.3: Queue status banner */}
+          {queueStatus && (
+            <div className={clsx(
+              'mb-3 p-2 text-sm rounded',
+              queueStatus === 'queued' && 'bg-yellow-50 text-yellow-700 border border-yellow-200',
+              queueStatus === 'starting' && 'bg-blue-50 text-blue-700 border border-blue-200',
+              queueStatus === 'started' && 'bg-green-50 text-green-700 border border-green-200',
+              queueStatus.startsWith('failed') && 'bg-red-50 text-red-700 border border-red-200',
+            )}>
+              {queueStatus === 'queued' && 'Run queued — will start automatically when current run completes'}
+              {queueStatus === 'starting' && 'Starting queued run...'}
+              {queueStatus === 'started' && 'Queued run started successfully'}
+              {queueStatus.startsWith('failed') && `Queue failed: ${queueStatus.replace('failed: ', '')}`}
+            </div>
+          )}
+
           <JobsTable jobs={jobRows} />
+
+          {/* v4.7.1: Pipeline Settings — also visible in CSV-loaded workflow */}
+          <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
         </div>
       )
     }
 
-    // Executing - show progress
+    // v4.7.3: Executing — reads from runStore.activeRun for live data
     if (workflowState === 'executing') {
-      const totalJobs = jobRows.length || runStatus.totalJobs || 1
-      const completedJobs = jobRows.filter((j) =>
+      // If runStore has an active PUR run, use its data; otherwise fall back
+      const runData = activeRun && activeRun.runType === 'pur' ? activeRun : null
+      const displayRows = runData ? runData.jobRows : jobRows
+      const totalJobs = runData ? runData.totalJobs : (jobRows.length || runStatus.totalJobs || 1)
+      const completedJobs = runData ? runData.completedJobs : displayRows.filter((j) =>
         j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
       ).length
-      const failedJobs = jobRows.filter((j) =>
+      const failedJobs = runData ? runData.failedJobs : displayRows.filter((j) =>
         j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
       ).length
       const doneJobs = completedJobs + failedJobs
-      const elapsed = startTime ? Math.round((Date.now() - startTime) / 1000) : 0
-      const elapsedStr = elapsed > 3600
-        ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`
-        : elapsed > 60
-          ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
-          : `${elapsed}s`
+      const elapsed = runData ? Math.round(runData.durationMs / 1000) : 0
+      const elapsedStr = formatDuration(elapsed)
+      const stageStats = runData ? runData.pipelineStageStats : null
+      const logs = runData ? runData.pipelineLogs : []
 
       return (
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-lg font-semibold">Pipeline Running</h3>
+              <h3 className="text-lg font-semibold">
+                {!activeRun || activeRun.status === 'active' ? 'Pipeline Running'
+                  : activeRun.status === 'completed' ? 'Pipeline Complete'
+                  : activeRun.status === 'failed' ? 'Pipeline Failed'
+                  : activeRun.status === 'cancelled' ? 'Pipeline Cancelled'
+                  : 'Pipeline Status'}
+              </h3>
               <p className="text-sm text-gray-500">
                 {doneJobs} of {totalJobs} complete
                 {failedJobs > 0 && ` (${failedJobs} failed)`}
                 {' '}&middot; Elapsed: {elapsedStr}
               </p>
             </div>
-            <button
-              onClick={handleCancel}
-              className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
-            >
-              <StopIcon className="w-5 h-5" />
-              Cancel Pipeline
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  reset()
+                  setPurViewMode('configure')
+                }}
+                className="flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-sm"
+              >
+                Prepare New Run
+              </button>
+              {activeRun?.runType === 'pur' && activeRun?.status === 'active' && (
+                <button
+                  onClick={handleCancel}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+                >
+                  <StopIcon className="w-5 h-5" />
+                  Cancel Pipeline
+                </button>
+              )}
+              {activeRun && activeRun.runType === 'pur' &&
+                (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') && (
+                <button
+                  onClick={() => setPurViewMode('auto')}
+                  className="flex items-center gap-2 px-3 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+                >
+                  View Results
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Progress bar */}
@@ -1119,29 +1321,29 @@ export function PURTab() {
             </div>
           </div>
 
-          {/* v4.6.0: Per-stage breakdown */}
-          <PipelineStageSummary stats={pipelineStageStats} total={totalJobs} />
+          {stageStats && <PipelineStageSummary stats={stageStats} total={totalJobs} />}
 
-          <StatsBar jobs={jobRows} />
-          <JobsTable jobs={jobRows} />
+          <StatsBar jobs={displayRows} />
+          <JobsTable jobs={displayRows} />
 
-          {/* v4.6.0: Pipeline log panel */}
-          <PipelineLogPanel logs={pipelineLogs} />
+          <PipelineLogPanel logs={logs} />
         </div>
       )
     }
 
-    // Completed
+    // v4.7.3: Completed — reads from runStore.activeRun for final snapshot
     if (workflowState === 'completed') {
-      // v4.6.0: Compute stats from jobRows (more reliable than runStatus which may lag)
-      const completedCount = jobRows.filter((j) =>
+      const runData = activeRun && activeRun.runType === 'pur' ? activeRun : null
+      const displayRows = runData ? runData.jobRows : jobRows
+      const completedCount = runData ? runData.completedJobs : displayRows.filter((j) =>
         j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
       ).length
-      const failedCount = jobRows.filter((j) =>
+      const failedCount = runData ? runData.failedJobs : displayRows.filter((j) =>
         j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.error
       ).length
       const allSuccess = failedCount === 0
-      const wasCancelled = runStatus.state === 'cancelled'
+      const wasCancelled = runData?.status === 'cancelled' || runStatus.state === 'cancelled'
+      const logs = runData ? runData.pipelineLogs : []
 
       return (
         <div className="p-6">
@@ -1162,18 +1364,15 @@ export function PURTab() {
             </h3>
             <p className="text-sm text-gray-500">
               {completedCount} succeeded, {failedCount} failed
-              {wasCancelled && `, ${jobRows.length - completedCount - failedCount} cancelled`}
+              {wasCancelled && `, ${displayRows.length - completedCount - failedCount} cancelled`}
             </p>
           </div>
 
-          {/* v4.6.0: Error summary with expandable details */}
-          <ErrorSummary jobs={jobRows} />
+          <ErrorSummary jobs={displayRows} />
+          <JobsTable jobs={displayRows} />
 
-          <JobsTable jobs={jobRows} />
-
-          {/* v4.6.0: Pipeline log on completion for diagnostics */}
-          {pipelineLogs.length > 0 && (
-            <PipelineLogPanel logs={pipelineLogs} maxHeight={300} />
+          {logs.length > 0 && (
+            <PipelineLogPanel logs={logs} maxHeight={300} />
           )}
 
           <div className="flex justify-center mt-6">
@@ -1192,10 +1391,268 @@ export function PURTab() {
     return null
   }
 
+  // v4.7.3: ChoiceScreen — shown when returning to PUR during active run
+  const renderChoiceScreen = () => {
+    if (!activeRun) return null
+    const doneJobs = activeRun.completedJobs + activeRun.failedJobs
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8">
+        <ArrowPathIcon className="w-16 h-16 text-blue-500 animate-spin mb-4" />
+        <h3 className="text-lg font-semibold mb-2">PUR Pipeline In Progress</h3>
+        <p className="text-sm text-gray-500 mb-6">
+          {doneJobs} of {activeRun.totalJobs} jobs complete
+          {activeRun.failedJobs > 0 && ` (${activeRun.failedJobs} failed)`}
+        </p>
+        <div className="flex gap-4">
+          <button
+            onClick={() => setPurViewMode('monitor')}
+            className="flex items-center gap-2 px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+          >
+            <EyeIcon className="w-5 h-5" />
+            Monitor Active Run
+          </button>
+          <button
+            onClick={() => {
+              reset()
+              setPurViewMode('configure')
+            }}
+            className="flex items-center gap-2 px-6 py-3 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+          >
+            <PlayIcon className="w-5 h-5" />
+            Prepare New Run
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // v4.7.3: RunMonitorView — read-only dashboard from runStore.activeRun
+  const renderMonitorView = () => {
+    if (!activeRun) return null
+    const doneJobs = activeRun.completedJobs + activeRun.failedJobs
+    const elapsed = Math.round(activeRun.durationMs / 1000)
+    const elapsedStr = formatDuration(elapsed)
+    const totalJobs = activeRun.totalJobs || 1
+
+    return (
+      <div className="p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg font-semibold">
+              {activeRun.status === 'active' ? 'Pipeline Running'
+                : activeRun.status === 'completed' ? 'Pipeline Complete'
+                : activeRun.status === 'failed' ? 'Pipeline Failed'
+                : activeRun.status === 'cancelled' ? 'Pipeline Cancelled'
+                : 'Pipeline Status'}
+            </h3>
+            <p className="text-sm text-gray-500">
+              {doneJobs} of {totalJobs} complete
+              {activeRun.failedJobs > 0 && ` (${activeRun.failedJobs} failed)`}
+              {' '}&middot; Elapsed: {elapsedStr}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                reset()
+                setPurViewMode('configure')
+              }}
+              className="flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-sm"
+            >
+              Prepare New Run
+            </button>
+            {activeRun.status === 'active' && (
+              <button
+                onClick={handleCancel}
+                className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+              >
+                <StopIcon className="w-5 h-5" />
+                Cancel Pipeline
+              </button>
+            )}
+            {(activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') && (
+              <button
+                onClick={() => setPurViewMode('auto')}
+                className="flex items-center gap-2 px-3 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+              >
+                View Results
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        <div className="mb-4">
+          <div className="flex justify-between text-sm mb-1">
+            <span>Progress</span>
+            <span>{Math.round((doneJobs / totalJobs) * 100) || 0}%</span>
+          </div>
+          <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+            <div
+              className="h-full transition-all duration-500"
+              style={{
+                width: `${(doneJobs / totalJobs) * 100 || 0}%`,
+                background: activeRun.failedJobs > 0
+                  ? `linear-gradient(to right, #3b82f6 ${(activeRun.completedJobs / totalJobs) * 100}%, #ef4444 ${(activeRun.completedJobs / totalJobs) * 100}%)`
+                  : '#3b82f6',
+              }}
+            />
+          </div>
+        </div>
+
+        <PipelineStageSummary stats={activeRun.pipelineStageStats} total={totalJobs} />
+        <StatsBar jobs={activeRun.jobRows} />
+        <JobsTable jobs={activeRun.jobRows} />
+        <PipelineLogPanel logs={activeRun.pipelineLogs} />
+      </div>
+    )
+  }
+
+  // v4.7.3: CompletedResultsView — shown for completed/failed/cancelled runs
+  const renderResultsView = () => {
+    if (!activeRun) return null
+    const allSuccess = activeRun.failedJobs === 0
+    const wasCancelled = activeRun.status === 'cancelled'
+
+    return (
+      <div className="p-6">
+        <div className="flex flex-col items-center justify-center mb-6">
+          {wasCancelled ? (
+            <StopIcon className="w-16 h-16 text-gray-500 mb-4" />
+          ) : allSuccess ? (
+            <CheckCircleIcon className="w-16 h-16 text-green-500 mb-4" />
+          ) : (
+            <ExclamationTriangleIcon className="w-16 h-16 text-yellow-500 mb-4" />
+          )}
+          <h3 className="text-lg font-semibold mb-2">
+            {wasCancelled
+              ? 'Pipeline Cancelled'
+              : allSuccess
+                ? 'Pipeline Complete!'
+                : 'Pipeline Complete with Errors'}
+          </h3>
+          <p className="text-sm text-gray-500">
+            {activeRun.completedJobs} succeeded, {activeRun.failedJobs} failed
+          </p>
+        </div>
+
+        <ErrorSummary jobs={activeRun.jobRows} />
+        <JobsTable jobs={activeRun.jobRows} />
+
+        {activeRun.pipelineLogs.length > 0 && (
+          <PipelineLogPanel logs={activeRun.pipelineLogs} maxHeight={300} />
+        )}
+
+        <div className="flex justify-center mt-6">
+          <button
+            onClick={handleStartOver}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+          >
+            <ArrowPathIcon className="w-5 h-5" />
+            Start New Pipeline
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // v4.7.3: RunMonitoringBanner — thin bar during configure mode with active run
+  const renderMonitoringBanner = () => {
+    if (!activeRun || activeRun.status !== 'active' || activeRun.runType !== 'pur') return null
+    if (monitorBannerCollapsed) {
+      return (
+        <button
+          onClick={() => setMonitorBannerCollapsed(false)}
+          className="px-4 py-1 bg-blue-50 dark:bg-blue-900/20 border-b border-blue-200 text-xs text-blue-600 hover:bg-blue-100 flex items-center gap-1"
+        >
+          <EyeIcon className="w-3 h-3" />
+          PUR running ({activeRun.completedJobs + activeRun.failedJobs}/{activeRun.totalJobs})
+          <span className="text-blue-400">— click to expand</span>
+        </button>
+      )
+    }
+    const doneJobs = activeRun.completedJobs + activeRun.failedJobs
+    return (
+      <div className="px-4 py-2 bg-blue-50 dark:bg-blue-900/20 border-b border-blue-200 flex items-center justify-between text-sm">
+        <div className="flex items-center gap-3">
+          <ArrowPathIcon className="w-4 h-4 text-blue-500 animate-spin" />
+          <span className="text-blue-700 font-medium">
+            PUR running: {doneJobs}/{activeRun.totalJobs} complete
+            {activeRun.failedJobs > 0 && ` (${activeRun.failedJobs} failed)`}
+          </span>
+          <div className="w-24 h-1.5 bg-blue-200 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 transition-all"
+              style={{ width: `${(doneJobs / (activeRun.totalJobs || 1)) * 100}%` }}
+            />
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPurViewMode('monitor')}
+            className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+          >
+            Monitor
+          </button>
+          <button
+            onClick={() => setMonitorBannerCollapsed(true)}
+            className="text-xs text-blue-400 hover:text-blue-600"
+          >
+            Hide
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // v4.7.3: View mode rendering
+  if (effectiveView === 'choice') {
+    return (
+      <div className="h-full flex flex-col">
+        {renderChoiceScreen()}
+      </div>
+    )
+  }
+
+  if (effectiveView === 'monitor') {
+    return (
+      <div className="h-full flex flex-col">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+          <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+            Run Monitor
+          </p>
+        </div>
+        <div className="flex-1 overflow-auto">{renderMonitorView()}</div>
+      </div>
+    )
+  }
+
+  if (effectiveView === 'results') {
+    return (
+      <div className="h-full flex flex-col">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+          <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+            Run Results
+          </p>
+        </div>
+        <div className="flex-1 overflow-auto">{renderResultsView()}</div>
+      </div>
+    )
+  }
+
+  // effectiveView === 'configure' — normal workflow with optional monitoring banner
   return (
     <div className="h-full flex flex-col">
+      {/* v4.7.3: Monitoring banner when configuring during active run */}
+      {renderMonitoringBanner()}
+
       {/* Progress bar */}
       <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+            Parallel Upload and Run
+          </p>
+        </div>
         <WorkflowProgressBar currentState={workflowState} />
 
         {/* Back button */}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/models"
 )
 
 func TestNewEngine(t *testing.T) {
@@ -26,7 +27,7 @@ func TestNewEngine(t *testing.T) {
 
 	// Test with custom config
 	cfg, _ := config.LoadConfigCSV("")
-	cfg.APIBaseURL = "https://test.rescale.com"
+	cfg.APIBaseURL = "https://eu.rescale.com"
 	cfg.APIKey = "test-key"
 
 	engine2, err := NewEngine(cfg)
@@ -35,8 +36,8 @@ func TestNewEngine(t *testing.T) {
 	}
 
 	gotCfg := engine2.GetConfig()
-	if gotCfg.APIBaseURL != "https://test.rescale.com" {
-		t.Errorf("Expected API URL 'https://test.rescale.com', got '%s'", gotCfg.APIBaseURL)
+	if gotCfg.APIBaseURL != "https://eu.rescale.com" {
+		t.Errorf("Expected API URL 'https://eu.rescale.com', got '%s'", gotCfg.APIBaseURL)
 	}
 }
 
@@ -61,7 +62,7 @@ func TestEngine_UpdateConfig(t *testing.T) {
 
 	newCfg, _ := config.LoadConfigCSV("")
 	newCfg.TarWorkers = 12
-	newCfg.APIBaseURL = "https://updated.rescale.com"
+	newCfg.APIBaseURL = "https://platform.rescale.com"
 
 	err := engine.UpdateConfig(newCfg)
 	if err != nil {
@@ -72,7 +73,7 @@ func TestEngine_UpdateConfig(t *testing.T) {
 	if gotCfg.TarWorkers != 12 {
 		t.Errorf("Config not updated: expected TarWorkers=12, got %d", gotCfg.TarWorkers)
 	}
-	if gotCfg.APIBaseURL != "https://updated.rescale.com" {
+	if gotCfg.APIBaseURL != "https://platform.rescale.com" {
 		t.Errorf("Config not updated: expected updated URL, got '%s'", gotCfg.APIBaseURL)
 	}
 }
@@ -168,15 +169,18 @@ func TestEngine_Stop(t *testing.T) {
 func TestEngine_SaveConfig(t *testing.T) {
 	cfg, _ := config.LoadConfigCSV("")
 	cfg.TarWorkers = 8
-	cfg.APIBaseURL = "https://test.rescale.com"
+	cfg.APIBaseURL = "https://platform.rescale.com"
 
-	engine, _ := NewEngine(cfg)
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatalf("NewEngine failed: %v", err)
+	}
 
 	// Create temp file for saving
 	tmpDir := t.TempDir()
 	savePath := filepath.Join(tmpDir, "test_config.csv")
 
-	err := engine.SaveConfig(savePath)
+	err = engine.SaveConfig(savePath)
 	if err != nil {
 		t.Fatalf("SaveConfig failed: %v", err)
 	}
@@ -255,6 +259,110 @@ func TestEngine_Scan(t *testing.T) {
 
 	if len(jobs) != 2 {
 		t.Errorf("Expected 2 jobs, got %d", len(jobs))
+	}
+
+	// Verify scan output paths are absolute (Change 1: no more relative paths)
+	for i, job := range jobs {
+		if !filepath.IsAbs(job.Directory) {
+			t.Errorf("Job %d directory should be absolute, got %q", i, job.Directory)
+		}
+	}
+}
+
+func TestEngine_ScanToSpecs_AbsolutePaths(t *testing.T) {
+	cfg, _ := config.LoadConfigCSV("")
+	cfg.ValidationPattern = ""
+	engine, _ := NewEngine(cfg)
+
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "Run_1"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "Run_2"), 0755)
+
+	template := models.JobSpec{
+		JobName:         "test_job_1",
+		AnalysisCode:    "user_included",
+		AnalysisVersion: "1.0",
+		Command:         "./run.sh",
+		CoreType:        "emerald",
+		CoresPerSlot:    4,
+		Slots:           1,
+		WalltimeHours:   1.0,
+	}
+
+	opts := ScanOptions{
+		Pattern:           "Run_*",
+		StartIndex:        1,
+		ValidationPattern: "",
+		PartDirs:          []string{tmpDir},
+	}
+
+	jobs, err := engine.ScanToSpecs(template, opts)
+	if err != nil {
+		t.Fatalf("ScanToSpecs failed: %v", err)
+	}
+
+	if len(jobs) != 2 {
+		t.Fatalf("Expected 2 jobs, got %d", len(jobs))
+	}
+
+	for i, job := range jobs {
+		if !filepath.IsAbs(job.Directory) {
+			t.Errorf("Job %d directory should be absolute, got %q", i, job.Directory)
+		}
+	}
+}
+
+func TestEngine_RecursiveScan_SkipDir(t *testing.T) {
+	// Verify that nested directories matching the pattern are NOT discovered
+	// when using recursive scan (SkipDir behavior).
+	cfg, _ := config.LoadConfigCSV("")
+	cfg.ValidationPattern = ""
+	engine, _ := NewEngine(cfg)
+
+	tmpDir := t.TempDir()
+	// Create top-level Run dirs
+	os.MkdirAll(filepath.Join(tmpDir, "Run_1"), 0755)
+	os.MkdirAll(filepath.Join(tmpDir, "Run_2"), 0755)
+	// Create nested Run dir inside Run_1
+	os.MkdirAll(filepath.Join(tmpDir, "Run_1", "sub", "Run_3"), 0755)
+
+	// Change to temp directory for scan
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+
+	outputPath := filepath.Join(tmpDir, "jobs_recursive.csv")
+	templatePath := filepath.Join(tmpDir, "template.csv")
+	templateContent := `Directory,JobName,AnalysisCode,AnalysisVersion,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings
+/tmp/test,test_job_1,user_included,1.0,./run.sh,emerald,4,1.0,1,`
+	os.WriteFile(templatePath, []byte(templateContent), 0644)
+
+	opts := ScanOptions{
+		TemplateCSV:       templatePath,
+		OutputCSV:         outputPath,
+		Pattern:           "Run_*",
+		Recursive:         true,
+		StartIndex:        1,
+		Overwrite:         true,
+		ValidationPattern: "",
+	}
+
+	err := engine.Scan(opts)
+	if err != nil {
+		t.Fatalf("Recursive scan failed: %v", err)
+	}
+
+	jobs, err := config.LoadJobsCSV(outputPath)
+	if err != nil {
+		t.Fatalf("Failed to load scan output: %v", err)
+	}
+
+	// Should find only Run_1 and Run_2 (not nested Run_3)
+	if len(jobs) != 2 {
+		t.Errorf("Expected 2 jobs (SkipDir should prevent nested match), got %d", len(jobs))
+		for _, j := range jobs {
+			t.Logf("  Found: %s -> %s", j.JobName, j.Directory)
+		}
 	}
 }
 

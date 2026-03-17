@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -697,7 +698,7 @@ func TestQueueStats(t *testing.T) {
 func TestQueueSpeedCalculation(t *testing.T) {
 	queue := NewQueue(nil)
 
-	task := queue.TrackTransfer("speed.dat", 100000, TaskTypeUpload, "/path", "folder") // 100KB for realistic speed calc
+	task := queue.TrackTransfer("speed.dat", 10*1024*1024, TaskTypeUpload, "/path", "folder") // 10MB — byte delta must exceed 100KB threshold
 	queue.Activate(task.ID)
 
 	// First update
@@ -710,5 +711,621 @@ func TestQueueSpeedCalculation(t *testing.T) {
 	retrieved, _ := queue.GetTask(task.ID)
 	if retrieved.Speed == 0 {
 		t.Error("Speed should be calculated after progress updates")
+	}
+}
+
+// v4.7.7: Batch grouping tests
+
+func TestTrackTransferWithBatch(t *testing.T) {
+	queue := NewQueue(nil)
+
+	task := queue.TrackTransferWithBatch("file.dat", 1024, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "My Folder")
+
+	if task.BatchID != "batch1" {
+		t.Errorf("Expected BatchID 'batch1', got %q", task.BatchID)
+	}
+	if task.BatchLabel != "My Folder" {
+		t.Errorf("Expected BatchLabel 'My Folder', got %q", task.BatchLabel)
+	}
+	if task.SourceLabel != "FileBrowser" {
+		t.Errorf("Expected SourceLabel 'FileBrowser', got %q", task.SourceLabel)
+	}
+}
+
+func TestGetAllBatchStats(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create batched tasks
+	t1 := queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder A")
+	t2 := queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder A")
+	queue.TrackTransferWithBatch("c.txt", 300, TaskTypeDownload, "id1", "/c", "FileBrowser", "batch2", "Folder B")
+
+	// Create ungrouped tasks
+	queue.TrackTransfer("d.txt", 400, TaskTypeUpload, "/d", "f")
+
+	// Complete one task in batch1
+	queue.Activate(t1.ID)
+	queue.Complete(t1.ID)
+
+	// Activate one task in batch1
+	queue.Activate(t2.ID)
+
+	stats := queue.GetAllBatchStats()
+	if len(stats) != 2 {
+		t.Fatalf("Expected 2 batches, got %d", len(stats))
+	}
+
+	// Find batch1 stats
+	var bs1, bs2 *BatchStats
+	for i := range stats {
+		if stats[i].BatchID == "batch1" {
+			bs1 = &stats[i]
+		} else if stats[i].BatchID == "batch2" {
+			bs2 = &stats[i]
+		}
+	}
+
+	if bs1 == nil {
+		t.Fatal("batch1 not found in stats")
+	}
+	if bs1.Total != 2 {
+		t.Errorf("batch1: expected total=2, got %d", bs1.Total)
+	}
+	if bs1.Completed != 1 {
+		t.Errorf("batch1: expected completed=1, got %d", bs1.Completed)
+	}
+	if bs1.BatchLabel != "Folder A" {
+		t.Errorf("batch1: expected label 'Folder A', got %q", bs1.BatchLabel)
+	}
+	if bs1.Direction != "upload" {
+		t.Errorf("batch1: expected direction 'upload', got %q", bs1.Direction)
+	}
+	if bs1.TotalBytes != 300 { // 100 + 200
+		t.Errorf("batch1: expected totalBytes=300, got %d", bs1.TotalBytes)
+	}
+
+	if bs2 == nil {
+		t.Fatal("batch2 not found in stats")
+	}
+	if bs2.Total != 1 {
+		t.Errorf("batch2: expected total=1, got %d", bs2.Total)
+	}
+	if bs2.Direction != "download" {
+		t.Errorf("batch2: expected direction 'download', got %q", bs2.Direction)
+	}
+}
+
+func TestGetBatchTasksPaginated(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create 5 tasks in a batch
+	for i := 0; i < 5; i++ {
+		queue.TrackTransferWithBatch("file.txt", 100, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "Test")
+	}
+
+	// First page: offset=0, limit=3
+	page1 := queue.GetBatchTasks("batch1", 0, 3, "")
+	if len(page1) != 3 {
+		t.Errorf("Expected 3 tasks in page1, got %d", len(page1))
+	}
+
+	// Second page: offset=3, limit=3
+	page2 := queue.GetBatchTasks("batch1", 3, 3, "")
+	if len(page2) != 2 {
+		t.Errorf("Expected 2 tasks in page2, got %d", len(page2))
+	}
+
+	// Beyond end: offset=10, limit=3
+	page3 := queue.GetBatchTasks("batch1", 10, 3, "")
+	if len(page3) != 0 {
+		t.Errorf("Expected 0 tasks beyond end, got %d", len(page3))
+	}
+
+	// Nonexistent batch
+	page4 := queue.GetBatchTasks("nonexistent", 0, 50, "")
+	if len(page4) != 0 {
+		t.Errorf("Expected 0 tasks for nonexistent batch, got %d", len(page4))
+	}
+}
+
+// v4.8.7: Test stateFilter parameter for status-based task filtering (10D).
+func TestGetBatchTasksWithStateFilter(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create 10 tasks in a batch: 6 completed, 3 failed, 1 queued
+	for i := 0; i < 6; i++ {
+		task := queue.TrackTransferWithBatch("ok.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
+		queue.Complete(task.ID)
+	}
+	for i := 0; i < 3; i++ {
+		task := queue.TrackTransferWithBatch("fail.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
+		queue.Fail(task.ID, fmt.Errorf("network error"))
+	}
+	queue.TrackTransferWithBatch("queued.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
+
+	// No filter — all 10
+	all := queue.GetBatchTasks("batch-filter", 0, 50, "")
+	if len(all) != 10 {
+		t.Errorf("no filter: expected 10 tasks, got %d", len(all))
+	}
+
+	// Filter: completed
+	completed := queue.GetBatchTasks("batch-filter", 0, 50, "completed")
+	if len(completed) != 6 {
+		t.Errorf("completed filter: expected 6, got %d", len(completed))
+	}
+
+	// Filter: failed
+	failed := queue.GetBatchTasks("batch-filter", 0, 50, "failed")
+	if len(failed) != 3 {
+		t.Errorf("failed filter: expected 3, got %d", len(failed))
+	}
+
+	// Filter: active (queued tasks count as active meta-filter)
+	active := queue.GetBatchTasks("batch-filter", 0, 50, "active")
+	if len(active) != 1 {
+		t.Errorf("active filter: expected 1 (queued), got %d", len(active))
+	}
+
+	// Filter: cancelled (none)
+	cancelled := queue.GetBatchTasks("batch-filter", 0, 50, "cancelled")
+	if len(cancelled) != 0 {
+		t.Errorf("cancelled filter: expected 0, got %d", len(cancelled))
+	}
+
+	// Pagination with filter: failed, page of 2
+	failedPage := queue.GetBatchTasks("batch-filter", 0, 2, "failed")
+	if len(failedPage) != 2 {
+		t.Errorf("failed paginated: expected 2, got %d", len(failedPage))
+	}
+}
+
+// v4.8.7: 11C — Test "inprogress" and "queued" filter values
+func TestGetBatchTasksWithInProgressAndQueuedFilters(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create batch: 2 active (transferring), 1 initializing, 3 queued, 2 completed
+	// Activate() sets TaskInitializing; StartTransfer() transitions to TaskActive
+	active1 := queue.TrackTransferWithBatch("a1.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	queue.Activate(active1.ID)
+	queue.StartTransfer(active1.ID) // now TaskActive
+	active2 := queue.TrackTransferWithBatch("a2.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	queue.Activate(active2.ID)
+	queue.StartTransfer(active2.ID) // now TaskActive
+	// init1 stays at TaskInitializing (Activate only, no StartTransfer)
+	init1 := queue.TrackTransferWithBatch("i1.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	queue.Activate(init1.ID)
+
+	for i := 0; i < 3; i++ {
+		queue.TrackTransferWithBatch("q.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+	}
+	for i := 0; i < 2; i++ {
+		task := queue.TrackTransferWithBatch("c.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
+		queue.Complete(task.ID)
+	}
+
+	// "inprogress" filter: should return active + initializing = 3
+	inprogress := queue.GetBatchTasks("batch-ip", 0, 50, "inprogress")
+	if len(inprogress) != 3 {
+		t.Errorf("inprogress filter: expected 3 (2 active + 1 initializing), got %d", len(inprogress))
+	}
+	for i := range inprogress {
+		state := inprogress[i].GetState()
+		if state != TaskActive && state != TaskInitializing {
+			t.Errorf("inprogress filter: unexpected state %v", state)
+		}
+	}
+
+	// "queued" filter: should return 3
+	queued := queue.GetBatchTasks("batch-ip", 0, 50, "queued")
+	if len(queued) != 3 {
+		t.Errorf("queued filter: expected 3, got %d", len(queued))
+	}
+	for i := range queued {
+		if queued[i].GetState() != TaskQueued {
+			t.Errorf("queued filter: unexpected state %v", queued[i].GetState())
+		}
+	}
+
+	// Verify counts match GetAllBatchStats()
+	stats := queue.GetAllBatchStats()
+	var bs *BatchStats
+	for i := range stats {
+		if stats[i].BatchID == "batch-ip" {
+			bs = &stats[i]
+			break
+		}
+	}
+	if bs == nil {
+		t.Fatal("batch-ip not found in GetAllBatchStats()")
+	}
+	if bs.Active != len(inprogress) {
+		t.Errorf("batch.active=%d != inprogress count=%d", bs.Active, len(inprogress))
+	}
+	if bs.Queued != len(queued) {
+		t.Errorf("batch.queued=%d != queued count=%d", bs.Queued, len(queued))
+	}
+}
+
+func TestGetUngroupedTasks(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create batched tasks
+	queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder")
+	queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder")
+
+	// Create ungrouped tasks
+	queue.TrackTransfer("c.txt", 300, TaskTypeUpload, "/c", "f")
+	queue.TrackTransfer("d.txt", 400, TaskTypeDownload, "id", "/d")
+
+	ungrouped := queue.GetUngroupedTasks()
+	if len(ungrouped) != 2 {
+		t.Errorf("Expected 2 ungrouped tasks, got %d", len(ungrouped))
+	}
+	for i := range ungrouped {
+		if ungrouped[i].BatchID != "" {
+			t.Errorf("Ungrouped task should have empty BatchID, got %q", ungrouped[i].BatchID)
+		}
+	}
+}
+
+func TestCancelBatch(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create tasks in a batch: some queued, one active, one completed
+	t1 := queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder")
+	t2 := queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder")
+	t3 := queue.TrackTransferWithBatch("c.txt", 300, TaskTypeUpload, "/c", "f", "FileBrowser", "batch1", "Folder")
+
+	// Make t2 active with cancel function
+	queue.Activate(t2.ID)
+	ctx, cancelFn := context.WithCancel(context.Background())
+	queue.SetCancel(t2.ID, cancelFn)
+
+	// Make t3 completed (should NOT be cancelled)
+	queue.Activate(t3.ID)
+	queue.Complete(t3.ID)
+
+	// Cancel batch
+	err := queue.CancelBatch("batch1")
+	if err != nil {
+		t.Fatalf("CancelBatch failed: %v", err)
+	}
+
+	// Verify context was cancelled for t2
+	select {
+	case <-ctx.Done():
+		// Good
+	default:
+		t.Error("Active task's context should be cancelled")
+	}
+
+	// Check states
+	task1, _ := queue.GetTask(t1.ID)
+	if task1.State != TaskCancelled {
+		t.Errorf("Queued task should be cancelled, got %s", task1.State)
+	}
+
+	task2, _ := queue.GetTask(t2.ID)
+	if task2.State != TaskCancelled {
+		t.Errorf("Active task should be cancelled, got %s", task2.State)
+	}
+
+	task3, _ := queue.GetTask(t3.ID)
+	if task3.State != TaskCompleted {
+		t.Errorf("Completed task should remain completed, got %s", task3.State)
+	}
+}
+
+func TestRetryFailedInBatch(t *testing.T) {
+	eb := events.NewEventBus(100)
+	queue := NewQueue(eb)
+	executor := newMockRetryExecutor()
+	queue.SetRetryExecutor(executor)
+
+	// Create tasks: one failed, one completed, one queued
+	t1 := queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FileBrowser", "batch1", "Folder")
+	t2 := queue.TrackTransferWithBatch("b.txt", 200, TaskTypeUpload, "/b", "f", "FileBrowser", "batch1", "Folder")
+	t3 := queue.TrackTransferWithBatch("c.txt", 300, TaskTypeUpload, "/c", "f", "FileBrowser", "batch1", "Folder")
+
+	queue.Activate(t1.ID)
+	queue.Fail(t1.ID, errors.New("test error"))
+
+	queue.Activate(t2.ID)
+	queue.Complete(t2.ID)
+
+	// t3 stays queued
+
+	// Retry failed
+	err := queue.RetryFailedInBatch("batch1")
+	if err != nil {
+		t.Fatalf("RetryFailedInBatch failed: %v", err)
+	}
+
+	// Wait for retry to execute
+	if !executor.waitForExecutions(1, 2*time.Second) {
+		t.Fatal("Timed out waiting for retry execution")
+	}
+
+	executed := executor.getExecuted()
+	if len(executed) != 1 {
+		t.Errorf("Expected 1 retried task, got %d", len(executed))
+	}
+	if len(executed) > 0 && executed[0].ID != t1.ID {
+		t.Errorf("Expected retried task %s, got %s", t1.ID, executed[0].ID)
+	}
+	_ = t3 // Queued task should not be retried
+}
+
+func TestBatchProgressSuppressesIndividual(t *testing.T) {
+	eb := events.NewEventBus(100)
+	queue := NewQueue(eb)
+
+	// Subscribe to events
+	ch := eb.Subscribe(events.EventTransferProgress)
+	completedCh := eb.Subscribe(events.EventTransferCompleted)
+
+	// Create a batched task
+	task := queue.TrackTransferWithBatch("file.dat", 1000, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "Folder")
+	queue.Activate(task.ID)
+
+	// Update progress — should NOT publish individual progress event
+	queue.UpdateProgress(task.ID, 0.5)
+
+	select {
+	case <-ch:
+		t.Error("Individual progress event should be suppressed for batched tasks")
+	case <-time.After(50 * time.Millisecond):
+		// Good — no event received
+	}
+
+	// Complete — should still publish terminal event
+	queue.Complete(task.ID)
+
+	select {
+	case <-completedCh:
+		// Good — terminal events are not suppressed
+	case <-time.After(100 * time.Millisecond):
+		t.Error("Terminal event should NOT be suppressed for batched tasks")
+	}
+}
+
+func TestBatchProgressTickerPublishes(t *testing.T) {
+	eb := events.NewEventBus(100)
+	queue := NewQueue(eb)
+
+	ch := eb.Subscribe(events.EventBatchProgress)
+
+	// Create a batched task (this starts the ticker)
+	task := queue.TrackTransferWithBatch("file.dat", 1000, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "Folder")
+	queue.Activate(task.ID)
+
+	// Wait for ticker to fire (1 second interval)
+	select {
+	case evt := <-ch:
+		bpe, ok := evt.(*events.BatchProgressEvent)
+		if !ok {
+			t.Fatalf("Expected *events.BatchProgressEvent, got %T", evt)
+		}
+		if bpe.BatchID != "batch1" {
+			t.Errorf("Expected BatchID 'batch1', got %q", bpe.BatchID)
+		}
+		if bpe.Total != 1 {
+			t.Errorf("Expected Total=1, got %d", bpe.Total)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("Expected batch progress event within 3 seconds")
+	}
+
+	// Complete the task so the ticker stops
+	queue.Complete(task.ID)
+}
+
+// v4.8.2: PreRegisterBatch tests
+
+// TestPreRegisterBatch verifies the pre-registration mechanism:
+// 1. Pre-registered batch appears in GetAllBatchStats() with Total=0, TotalKnown=false
+// 2. After TrackTransferWithBatch, pre-registered entry is shadowed (still 1 batch)
+// 3. CleanupBatch removes pre-registered entry
+func TestPreRegisterBatch(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	q := NewQueue(eventBus)
+
+	batchID := "batch-001"
+	batchLabel := "TestFolder"
+
+	// Step 1: Pre-register batch
+	q.PreRegisterBatch(batchID, batchLabel, "download", "FileBrowser")
+
+	stats := q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch after PreRegisterBatch, got %d", len(stats))
+	}
+
+	bs := stats[0]
+	if bs.BatchID != batchID {
+		t.Errorf("BatchID = %q, want %q", bs.BatchID, batchID)
+	}
+	if bs.BatchLabel != batchLabel {
+		t.Errorf("BatchLabel = %q, want %q", bs.BatchLabel, batchLabel)
+	}
+	if bs.Direction != "download" {
+		t.Errorf("Direction = %q, want %q", bs.Direction, "download")
+	}
+	if bs.SourceLabel != "FileBrowser" {
+		t.Errorf("SourceLabel = %q, want %q", bs.SourceLabel, "FileBrowser")
+	}
+	if bs.Total != 0 {
+		t.Errorf("Total = %d, want 0", bs.Total)
+	}
+	if bs.TotalKnown {
+		t.Error("TotalKnown = true, want false")
+	}
+
+	// Step 2: Register a real task — pre-registered entry should be shadowed
+	q.MarkBatchScanInProgress(batchID, true)
+	q.TrackTransferWithBatch("file1.txt", 1024, TaskTypeDownload, "id-1", "/tmp/file1.txt", "FileBrowser", batchID, batchLabel)
+
+	stats = q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch after task registration, got %d", len(stats))
+	}
+
+	bs = stats[0]
+	if bs.Total != 1 {
+		t.Errorf("Total = %d, want 1 (task should shadow pre-registered entry)", bs.Total)
+	}
+	if bs.TotalKnown {
+		t.Error("TotalKnown = true, want false (scan still in progress)")
+	}
+
+	// Step 3: CleanupBatch removes pre-registered entry
+	q.CleanupBatch(batchID)
+
+	// Pre-registered entry is gone, but the task-derived batch entry still exists
+	stats = q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch after CleanupBatch (task-derived), got %d", len(stats))
+	}
+	// After cleanup, scan is no longer in progress, so TotalKnown should be true
+	if !stats[0].TotalKnown {
+		t.Error("TotalKnown = false after CleanupBatch, want true")
+	}
+}
+
+// TestPreRegisterBatchNoTasksAfterCleanup verifies that a pre-registered batch
+// with no tasks disappears after CleanupBatch.
+func TestPreRegisterBatchNoTasksAfterCleanup(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	q := NewQueue(eventBus)
+
+	q.PreRegisterBatch("batch-empty", "Empty", "download", "FileBrowser")
+
+	stats := q.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(stats))
+	}
+
+	q.CleanupBatch("batch-empty")
+
+	stats = q.GetAllBatchStats()
+	if len(stats) != 0 {
+		t.Fatalf("expected 0 batches after CleanupBatch with no tasks, got %d", len(stats))
+	}
+}
+
+// v4.8.7 RF4: Verify Cancel() now accepts queued tasks.
+func TestCancel_QueuedTask(t *testing.T) {
+	queue := NewQueue(nil)
+
+	task := queue.TrackTransfer("queued.dat", 1000, TaskTypeUpload, "/path", "folder")
+	// Task is in TaskQueued state — no Activate() call
+
+	err := queue.Cancel(task.ID)
+	if err != nil {
+		t.Fatalf("Cancel on queued task should succeed, got: %v", err)
+	}
+
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCancelled {
+		t.Errorf("Expected TaskCancelled, got %v", retrieved.State)
+	}
+}
+
+// v4.8.7 RF4: Verify CancelAll includes queued tasks.
+func TestCancelAll_IncludesQueuedTasks(t *testing.T) {
+	queue := NewQueue(nil)
+
+	// Create tasks in different states
+	tActive := queue.TrackTransfer("active.dat", 100, TaskTypeUpload, "/p1", "f")
+	queue.Activate(tActive.ID)
+	queue.StartTransfer(tActive.ID) // TaskActive
+
+	tInit := queue.TrackTransfer("init.dat", 100, TaskTypeUpload, "/p2", "f")
+	queue.Activate(tInit.ID) // TaskInitializing
+
+	tQueued := queue.TrackTransfer("queued.dat", 100, TaskTypeUpload, "/p3", "f")
+	// TaskQueued — no Activate
+
+	queue.CancelAll()
+
+	for _, id := range []string{tActive.ID, tInit.ID, tQueued.ID} {
+		retrieved, _ := queue.GetTask(id)
+		if retrieved.State != TaskCancelled {
+			t.Errorf("Task %s: expected TaskCancelled, got %v", id, retrieved.State)
+		}
+	}
+}
+
+// v4.8.7 RF4: Deterministic TOCTOU repro for CancelAll.
+// CancelAll calls cancel functions in the gap between its two lock sections.
+// We install a cancel function that calls Complete(taskID) — this fires
+// exactly in that gap, deterministically reproducing the race.
+func TestCancelAll_NoFalseCancelledEvent(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	queue := NewQueue(eb)
+
+	task := queue.TrackTransfer("test.dat", 1000, TaskTypeUpload, "/path", "folder")
+
+	// Move to Active state so it gets a cancel function
+	queue.Activate(task.ID)      // → TaskInitializing
+	queue.StartTransfer(task.ID) // → TaskActive
+
+	// Install cancel function that completes the task.
+	// CancelAll calls this in the gap between its two lock sections.
+	queue.SetCancel(task.ID, func() {
+		queue.Complete(task.ID) // Runs between CancelAll's unlock and re-lock
+	})
+
+	// Subscribe to cancelled events
+	cancelledCh := eb.Subscribe(events.EventTransferCancelled)
+
+	queue.CancelAll()
+
+	// Task should be Completed (Complete() ran first in the cancel function).
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCompleted {
+		t.Errorf("Expected TaskCompleted, got %v", retrieved.State)
+	}
+
+	// No EventTransferCancelled should have been published.
+	select {
+	case evt := <-cancelledCh:
+		t.Errorf("Should not have received cancelled event, got: %+v", evt)
+	default:
+		// Good — no false cancelled event
+	}
+}
+
+// v4.8.7 RF4: Same TOCTOU repro for CancelBatch.
+func TestCancelBatch_NoFalseCancelledEvent(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	queue := NewQueue(eb)
+
+	task := queue.TrackTransferWithBatch("test.dat", 1000, TaskTypeUpload, "/path", "folder", "FB", "batch-race", "Test")
+
+	queue.Activate(task.ID)
+	queue.StartTransfer(task.ID)
+
+	queue.SetCancel(task.ID, func() {
+		queue.Complete(task.ID)
+	})
+
+	cancelledCh := eb.Subscribe(events.EventTransferCancelled)
+
+	queue.CancelBatch("batch-race")
+
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCompleted {
+		t.Errorf("Expected TaskCompleted, got %v", retrieved.State)
+	}
+
+	select {
+	case evt := <-cancelledCh:
+		t.Errorf("Should not have received cancelled event, got: %+v", evt)
+	default:
+		// Good
 	}
 }

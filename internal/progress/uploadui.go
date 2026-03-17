@@ -22,7 +22,7 @@ type UploadUI struct {
 	bars       sync.Map // filepath -> *FileBar
 	pathCache  sync.Map // folderID -> human path
 	isTerminal bool
-	totalFiles int
+	totalFiles int32 // v4.8.7: atomic — streaming uploads increment as files are discovered
 	started    int32 // Atomic counter for file index (1, 2, 3, ...)
 	completed  int32
 }
@@ -64,8 +64,15 @@ func NewUploadUI(totalFiles int) *UploadUI {
 	return &UploadUI{
 		progress:   p,
 		isTerminal: isTerminal,
-		totalFiles: totalFiles,
+		totalFiles: int32(totalFiles),
 	}
+}
+
+// IncrementTotal atomically increments the total file count.
+// Used by streaming uploads where the total is unknown at start and grows as files are discovered.
+// v4.8.7
+func (u *UploadUI) IncrementTotal() {
+	atomic.AddInt32(&u.totalFiles, 1)
 }
 
 // SetFolderPath caches a human-readable path for a folder ID
@@ -116,7 +123,7 @@ func (u *UploadUI) AddFileBar(localPath, folderID string, size int64) *FileBar {
 				decor.Any(func(s decor.Statistics) string {
 					retries := atomic.LoadInt32(&fb.retries)
 					base := fmt.Sprintf("[%d/%d] %s (%.1f MiB) → %s",
-						fb.index, u.totalFiles,
+						fb.index, atomic.LoadInt32(&u.totalFiles),
 						sourcePath,
 						float64(size)/(1024*1024),
 						folderPath)
@@ -149,7 +156,7 @@ func (u *UploadUI) AddFileBar(localPath, folderID string, size int64) *FileBar {
 	} else {
 		// Non-TTY: print simple start message
 		fmt.Printf("Uploading [%d/%d]: %s (%.1f MiB) → %s\n",
-			fb.index, u.totalFiles,
+			fb.index, atomic.LoadInt32(&u.totalFiles),
 			truncatePath(localPath, 2),
 			float64(size)/(1024*1024),
 			folderPath)

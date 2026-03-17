@@ -65,11 +65,10 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 	}
 	encryptedSize := info.Size()
 
-	// Start periodic credential refresh for large files
-	if encryptedSize > constants.LargeFileThreshold {
-		azureClient.StartPeriodicRefresh(ctx)
-		defer azureClient.StopPeriodicRefresh()
-	}
+	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
+	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
+	azureClient.StartPeriodicRefresh(ctx)
+	defer azureClient.StopPeriodicRefresh()
 
 	// Choose upload method based on file size and transfer handle
 	var uploadErr error
@@ -394,7 +393,6 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				}
 
 				// Stage this block with retry logic
-				startTime := time.Now()
 				blockDataToUpload := job.data
 				currentBlockID := job.blockID
 
@@ -413,13 +411,6 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				if stageErr != nil {
 					setError(fmt.Errorf("failed to stage block %d/%d: %w", job.blockIndex+1, totalBlocks, stageErr))
 					return
-				}
-
-				// Calculate and record throughput
-				duration := time.Since(startTime).Seconds()
-				if duration > 0 {
-					bytesPerSec := float64(len(blockDataToUpload)) / duration
-					params.TransferHandle.RecordThroughput(bytesPerSec)
 				}
 
 				// Send result

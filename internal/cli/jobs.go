@@ -16,9 +16,11 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/constants"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/pur/parser"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -852,6 +854,9 @@ Examples:
 			// MODE 2: Download specific file
 			logger.Info().Str("file_id", fileID).Msg("Downloading specific file")
 
+			// v4.8.2: Warm proxy before first API call
+			inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+
 			// Get file info
 			fileInfo, err := apiClient.GetFileInfo(ctx, fileID)
 			if err != nil {
@@ -904,6 +909,10 @@ Examples:
 
 			// Download file with progress tracking and transfer manager
 			// Use strict checksum verification (skipChecksum=false) for job downloads
+			// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
+			// Single-file job download bypasses RunBatch/RunBatchFromChannel, so must signal directly.
+			ratelimit.GlobalStore().BeginTransferActivity()
+			defer ratelimit.GlobalStore().EndTransferActivity()
 			err = download.DownloadFile(ctx, download.DownloadParams{
 				FileID:    fileID,
 				LocalPath: outputPath,
@@ -979,7 +988,7 @@ func runCreateOnlyWorkflow(
 	var uploadedFileIDs []string
 	if len(inputFiles) > 0 {
 		logger.Info().Int("count", len(inputFiles)).Msg("Uploading input files")
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, apiClient, logger, false)
+		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
 			return fmt.Errorf("file upload failed: %w", err)
 		}
@@ -1027,7 +1036,7 @@ func runSubmitWorkflow(
 	var uploadedFileIDs []string
 	if len(inputFiles) > 0 {
 		logger.Info().Int("count", len(inputFiles)).Msg("Uploading input files")
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, apiClient, logger, false)
+		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
 			return fmt.Errorf("file upload failed: %w", err)
 		}
@@ -1088,7 +1097,7 @@ func runEndToEndJobWorkflow(
 		fmt.Println("\n[1/4] Uploading input files...")
 		fmt.Println(strings.Repeat("-", 70))
 
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, apiClient, logger, false)
+		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
 			return fmt.Errorf("file upload failed: %w", err)
 		}

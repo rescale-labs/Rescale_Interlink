@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.6.8
-**Last Updated:** 2026-02-18
+**Version:** 4.8.2
+**Last Updated:** 2026-03-02
 
 ## Overview
 
@@ -128,6 +128,42 @@ API keys should be stored securely:
 
 ---
 
+## Platform URL Allowlist (v4.8.7)
+
+Rescale Interlink restricts API communication to a fixed set of known Rescale platform URLs.
+This prevents credential exfiltration to arbitrary endpoints via `--api-url` or configuration files.
+
+- **Allowlist enforcement**: `ValidatePlatformURL()` in `internal/config/platforms.go` checks URLs against 6 known Rescale platform hostnames
+- **Strict origin validation**: HTTPS-only, no custom ports, no userinfo, no path/query/fragment components accepted
+- **Primary enforcement point**: `api.NewClient()` — all client creation paths pass through here, including engine startup, GUI test-connection, PUR, CLI, and daemon
+- **Defense-in-depth**: `config.Validate()` also checks the platform URL
+- **CLI protection**: `config init` uses a numbered menu instead of free-text URL input
+- **GUI**: Already restricted to dropdown selection since v4.3.0
+
+**Allowed platforms:**
+- `https://platform.rescale.com` (North America)
+- `https://kr.rescale.com` (Korea)
+- `https://platform.rescale.jp` (Japan)
+- `https://eu.rescale.com` (Europe)
+- `https://itar.rescale.com` (US ITAR)
+- `https://itar.rescale-gov.com` (US ITAR FRM)
+
+---
+
+## Update Checks (v4.8.2)
+
+Rescale Interlink can check GitHub for newer releases on GUI startup. This makes a single
+unauthenticated HTTPS request to `api.github.com`.
+
+- **Disabled by default on FedRAMP platforms** (`rescale-gov.com` domains)
+- **Environment variable kill switch**: Set `RESCALE_DISABLE_UPDATE_CHECK=1` to disable
+- **No credentials sent**: Request is unauthenticated (GitHub public API)
+- **Rate limited**: Results cached for 24 hours (errors cached 1 hour)
+- **Trusted URLs only**: The "open in browser" action opens a hardcoded GitHub URL, not API-provided URLs
+- **Proxy aware**: Respects configured proxy settings (without warmup side effects)
+
+---
+
 ## IPC Security (Windows)
 
 ### Authorization Model
@@ -199,6 +235,10 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 4.8.7 | 2026-03-11 | Platform URL allowlist — strict origin enforcement, credential exfiltration prevention |
+| 4.8.2 | 2026-03-02 | Automatic update check with policy gate (FedRAMP, env var), trusted URL enforcement |
+| 4.7.5 | 2026-02-25 | Empty file upload fix, ThroughputMonitor dead code cleanup, build artifact exclusions |
+| 4.7.3 | 2026-02-22 | Path traversal sanitization in GetHistoricalJobRows, event listener isolation (unsub callbacks) |
 | 4.5.7 | 2026-02-03 | Auto-download settings auto-save fix, debounced config save |
 | 4.5.1 | 2026-01-28 | Log permissions hardened (0700), NTLM/FIPS safeguards, fail-closed IPC auth |
 | 4.4.2 | 2025-12-XX | Centralized log directory |

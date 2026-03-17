@@ -5,7 +5,6 @@ package daemon
 
 import (
 	"os/user"
-	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -17,10 +16,6 @@ import (
 type IPCHandler struct {
 	daemon    *Daemon
 	startTime time.Time
-
-	// Pause/resume state
-	mu     sync.RWMutex
-	paused bool
 
 	// Shutdown callback
 	shutdownFunc func()
@@ -46,12 +41,10 @@ func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
 
 // GetStatus returns the current daemon status.
 func (h *IPCHandler) GetStatus() *ipc.StatusData {
-	h.mu.RLock()
 	state := "running"
-	if h.paused {
+	if h.daemon.IsPaused() {
 		state = "paused"
 	}
-	h.mu.RUnlock()
 
 	lastPoll := h.daemon.GetLastPollTime()
 	var lastPollPtr *time.Time
@@ -75,12 +68,10 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 // GetUserList returns the list of user daemon statuses.
 // On Unix single-user mode, returns a single user (the current user).
 func (h *IPCHandler) GetUserList() []ipc.UserStatus {
-	h.mu.RLock()
 	state := "running"
-	if h.paused {
+	if h.daemon.IsPaused() {
 		state = "paused"
 	}
-	h.mu.RUnlock()
 
 	// Get current user
 	username := "unknown"
@@ -108,30 +99,20 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 // PauseUser pauses auto-download.
 // On Unix single-user mode, userID is ignored.
 func (h *IPCHandler) PauseUser(userID string) error {
-	h.mu.Lock()
-	h.paused = true
-	h.mu.Unlock()
-	h.daemon.logger.Info().Msg("Daemon paused via IPC")
+	h.daemon.SetPaused(true)
 	return nil
 }
 
 // ResumeUser resumes auto-download.
 // On Unix single-user mode, userID is ignored.
 func (h *IPCHandler) ResumeUser(userID string) error {
-	h.mu.Lock()
-	h.paused = false
-	h.mu.Unlock()
-	h.daemon.logger.Info().Msg("Daemon resumed via IPC")
+	h.daemon.SetPaused(false)
 	return nil
 }
 
 // TriggerScan triggers an immediate job scan.
 func (h *IPCHandler) TriggerScan(userID string) error {
-	h.mu.RLock()
-	paused := h.paused
-	h.mu.RUnlock()
-
-	if paused {
+	if h.daemon.IsPaused() {
 		h.daemon.logger.Warn().Msg("Scan requested but daemon is paused")
 		return nil
 	}
@@ -177,11 +158,35 @@ func (h *IPCHandler) Shutdown() error {
 	return nil
 }
 
+// ReloadConfig handles config reload for subprocess mode.
+// v4.7.6: Returns active download count so GUI can decide whether to restart now or defer.
+// The actual restart is managed by the GUI (stop + start) — simpler and avoids in-process mutation.
+func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
+	activeDownloads := h.daemon.GetActiveDownloads()
+	if activeDownloads > 0 {
+		h.daemon.logger.Info().Int("active_downloads", activeDownloads).
+			Msg("Config reload requested but downloads active — deferring")
+		return &ipc.ReloadConfigData{
+			Deferred:        true,
+			ActiveDownloads: activeDownloads,
+		}
+	}
+
+	h.daemon.logger.Info().Msg("Config reload requested — ready for restart")
+	return &ipc.ReloadConfigData{
+		Applied: true,
+	}
+}
+
+// GetTransferStatus returns daemon transfer batch status.
+// v4.7.8: Subprocess mode — userID is ignored (single-user).
+func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
+	return h.daemon.GetTransferStatus(), nil
+}
+
 // IsPaused returns whether the daemon is currently paused.
 func (h *IPCHandler) IsPaused() bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.paused
+	return h.daemon.IsPaused()
 }
 
 // ShouldPoll returns whether the daemon should perform polling.

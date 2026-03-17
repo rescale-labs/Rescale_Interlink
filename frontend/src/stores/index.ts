@@ -3,8 +3,8 @@ export { useConfigStore } from './configStore';
 export { useLogStore } from './logStore';
 export { useFileBrowserStore } from './fileBrowserStore';
 export type { BrowseMode, SelectionState, BreadcrumbEntry } from './fileBrowserStore';
-export { useTransferStore } from './transferStore';
-export type { TransferTask, TransferState, TransferStats, Enumeration } from './transferStore';
+export { useTransferStore, classifyError, extractDiskSpaceInfo, formatSpeed, formatETA } from './transferStore';
+export type { TransferTask, TransferBatch, TransferState, TransferStats, TransferErrorType, Enumeration, DaemonBatchStatus } from './transferStore';
 export { useJobStore, DEFAULT_JOB_TEMPLATE } from './jobStore';
 export type {
   WorkflowState,
@@ -22,3 +22,10 @@ export type {
   PipelineLogEntry,
   PipelineStageStats,
 } from './jobStore';
+
+// v4.7.3: New stores for run session persistence
+export { useRunStore } from './runStore';
+export { useSingleJobStore } from './singleJobStore';
+
+// v4.8.7: Error report store (Plan 3, 6A-6E)
+export { useErrorReportStore } from './errorReportStore';

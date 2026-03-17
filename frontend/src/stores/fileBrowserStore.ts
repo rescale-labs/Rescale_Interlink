@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
+import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import { wailsapp } from '../../wailsjs/go/models'
+import { EVENT_NAMES } from '../types/events'
 
 // Browse mode for remote browser (matching Go BrowseMode)
 export type BrowseMode = 'library' | 'jobs' | 'legacy'
@@ -52,6 +54,7 @@ interface RemoteBrowserState {
   nextCursor: string
   myLibraryId: string | null
   myJobsId: string | null
+  navGeneration: number             // v4.8.6: bumped on every view-changing operation (navigation, mode switch)
   selection: SelectionState
   // v4.0.3: Server-side pagination state
   currentPage: number            // 0-indexed page number
@@ -96,6 +99,9 @@ interface FileBrowserStore {
   goToNextRemotePage: () => Promise<void>             // Navigate to next page (replaces items)
   goToPreviousRemotePage: () => Promise<void>         // Navigate to previous page (from cache)
 
+  // Event listeners
+  setupEventListeners: () => () => void
+
   // Common actions
   getLocalSelectedItems: () => wailsapp.FileItemDTO[]
   getRemoteSelectedItems: () => wailsapp.FileItemDTO[]
@@ -122,6 +128,7 @@ const initialRemoteState: RemoteBrowserState = {
   nextCursor: '',
   myLibraryId: null,
   myJobsId: null,
+  navGeneration: 0,
   selection: { selectedIds: new Set(), lastSelectedId: null },
   // v4.0.3: Server-side pagination initial state
   currentPage: 0,
@@ -289,6 +296,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     const { myLibraryId, myJobsId } = get().remote
 
     // v4.0.3: Reset all pagination state when changing modes
+    // v4.8.6: Bump navGeneration to discard stale in-flight responses
     set(state => ({
       remote: {
         ...state.remote,
@@ -302,6 +310,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         pageCursors: [''],
         knownTotalPages: 1,
         pageCache: new Map(),
+        navGeneration: state.remote.navGeneration + 1,
       }
     }))
 
@@ -348,6 +357,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       return
     }
 
+    // v4.8.6: Capture navGeneration before async call to detect stale responses
+    const myGen = get().remote.navGeneration
+
     set(state => ({
       remote: { ...state.remote, isLoading: true, error: null }
     }))
@@ -355,6 +367,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     try {
       // v4.0.3: Pass itemsPerPage to API
       const contents = await App.ListRemoteFolderPage(targetId, cursor, itemsPerPage)
+
+      // v4.8.6: Discard stale response if navigation changed while loading
+      if (get().remote.navGeneration !== myGen) return
 
       // Update breadcrumb only on new navigation
       let breadcrumb = state.breadcrumb
@@ -428,6 +443,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }))
       }
     } catch (error) {
+      // v4.8.6: Discard stale error if navigation changed while loading
+      if (get().remote.navGeneration !== myGen) return
       set(state => ({
         remote: {
           ...state.remote,
@@ -461,6 +478,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       return
     }
 
+    // v4.8.6: Capture navGeneration before async call to detect stale responses
+    const myGen = get().remote.navGeneration
+
     set(state => ({
       remote: { ...state.remote, isLoading: true, error: null }
     }))
@@ -468,6 +488,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     try {
       // v4.0.3: Pass itemsPerPage to API
       const contents = await App.ListRemoteLegacy(cursor, itemsPerPage)
+
+      // v4.8.6: Discard stale response if navigation changed while loading
+      if (get().remote.navGeneration !== myGen) return
 
       // v4.0.3: Store next cursor for future page navigation
       const newPageCursors = [...state.pageCursors]
@@ -514,6 +537,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }
       }))
     } catch (error) {
+      // v4.8.6: Discard stale error if navigation changed while loading
+      if (get().remote.navGeneration !== myGen) return
       set(state => ({
         remote: {
           ...state.remote,
@@ -592,6 +617,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
   navigateRemoteTo: (folderId: string, folderName: string) => {
     // v4.0.3: Reset pagination state when navigating to a new folder
+    // v4.8.6: Bump navGeneration to discard stale in-flight responses
     set(state => ({
       remote: {
         ...state.remote,
@@ -600,6 +626,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         pageCursors: [''],
         knownTotalPages: 1,
         pageCache: new Map(),
+        navGeneration: state.remote.navGeneration + 1,
       }
     }))
     get().loadRemoteFolder(folderId, folderName)
@@ -611,6 +638,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
     const target = breadcrumb[index]
     // v4.0.3: Reset pagination state when navigating via breadcrumb
+    // v4.8.6: Bump navGeneration to discard stale in-flight responses
     set(state => ({
       remote: {
         ...state.remote,
@@ -620,6 +648,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         pageCursors: [''],
         knownTotalPages: 1,
         pageCache: new Map(),
+        navGeneration: state.remote.navGeneration + 1,
       }
     }))
     get().loadRemoteFolder(target.id, target.name)
@@ -707,6 +736,24 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       console.error('Failed to delete items:', error)
       return { deleted: 0, failed: items.length }
     }
+  },
+
+  // ===== EVENT LISTENERS =====
+
+  // v4.8.7: Subscribe to config changes so file browser resets when API key changes.
+  setupEventListeners: () => {
+    const handleConfigChanged = () => {
+      console.log('[FileBrowser] Config changed, invalidating remote cache')
+      set(state => ({
+        remote: {
+          ...initialRemoteState,
+          navGeneration: state.remote.navGeneration + 1,
+        }
+      }))
+      get().initRemote()
+    }
+    EventsOn(EVENT_NAMES.CONFIG_CHANGED, handleConfigChanged)
+    return () => { EventsOff(EVENT_NAMES.CONFIG_CHANGED) }
   },
 
   // ===== COMMON ACTIONS =====

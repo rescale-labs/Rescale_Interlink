@@ -1,5 +1,959 @@
 # Release Notes - Rescale Interlink
 
+## v4.8.7 - March 11, 2026
+
+### Foundations & Quick Wins (Plan 1)
+
+Six independent improvements covering error handling, credential warming, transport cleanup, elapsed time display, CLI streaming uploads, and rate limiter fairness.
+
+### Error Collection Unification (4C)
+- Replaced inline error-channel drain patterns with `transfer.CollectErrors()` in `azure/download.go` and `folder_upload_helper.go`. Consistent first-error semantics across the codebase.
+
+### Credential Warming Standardization (4E)
+- New `WarmAll(ctx)` method on `credentials.Manager`: session-level (`EnsureFresh`) + provider-level (`GetS3Credentials`, `GetAzureCredentials`) + metadata (`GetUserProfile`, `GetRootFolders`) — all best-effort, non-fatal.
+- All transfer entry points now call `WarmAll`: `transfer_service.go`, `folder_upload_helper.go` (pipelined + sequential), `download_helper.go` (file + job), `upload_helper.go`, `daemon.go`.
+
+### S3/Azure Transport Pool Cleanup (5C)
+- `CloseIdleConnections()` methods added to `S3Client` and `AzureClient`.
+- Transport cleanup registry in `internal/http/client.go`: `CreateOptimizedClient()` auto-tracks each HTTP client; `CloseAllIdleConnections()` closes idle connections on all tracked transports.
+- Engine stale-connection callback extended: sleep/wake recovery now covers S3/Azure provider transports in addition to the API client.
+
+### Transfer Elapsed Time Display (8)
+- `StartedAt` field added to `BatchStats`, stamped at `PreRegisterBatch()` time (streaming batches) and `TrackTransferWithBatch()` time (non-streaming batches).
+- Exposed via `StartedAtUnix` in `TransferBatchDTO` → frontend `TransferBatch` interface.
+- Frontend `BatchRow` shows "Elapsed: Xm Ys" when ETA is unavailable and elapsed > 10s. 1-second timer only ticks while batch is active.
+- Cleanup hooks added to both `CleanupBatch()` and `cleanupBatchMetrics()`.
+
+### CLI WalkStream Adoption (9)
+- CLI pipelined upload path (`uploadDirectoryPipelined`) now uses `WalkStream` for streaming discovery — files start uploading before scan completes.
+- Three-part streaming structure ported from GUI (`file_bindings.go`): (1) `CreateFolderStructureStreaming` goroutine, (2) unbounded backlog + dispatcher, (3) orchestrator merging `fileChan` + `folderReadyChan`.
+- `UploadUI.IncrementTotal()` added for streaming total updates; `totalFiles` field changed to atomic int32.
+- Local path validation added before remote root folder creation for pipelined path.
+- `BuildDirectoryTree` call moved inside sequential branch only.
+
+### Rate Limiter FIFO Fix (3)
+- `Wait()` now guarantees FIFO ordering under contention. Single locked decision point: if no waiters queued and token available → acquire immediately; otherwise → enqueue with `fifoTicket`, only front-of-queue waiter may acquire.
+- `tryAcquireUnlocked()` and `timeUntilNextTokenUnlocked()` extracted for use when caller already holds the lock.
+- New `TestWaitFIFOOrder` test: drains bucket, launches N goroutines with stagger, verifies acquisition order.
+- Coordinator and cooldown paths unchanged — checked before the FIFO decision point.
+
+### Hardening (Plan 2a)
+
+Three hardening items: a GUI thread allocation bug fix, credential change handling, and cross-platform sleep prevention.
+
+### Consistent TransferHandle Allocation (4D)
+- Fixed GUI batch paths that passed `cap(ts.semaphore)` (fixed 20) instead of the actual adaptive worker count to `AllocateTransfer()`. Each file now receives the correct share of the thread pool.
+- Pre-registered batches use `ComputedWorkers()` to pre-compute the adaptive count. Streaming batches read the live `AdaptiveWorkerCount` via `BatchConfig.AdaptiveCount`.
+
+### Session/Credential Invalidation (4F-R3)
+- `ConfigChangedEvent` now forwarded through the Wails event bridge to the frontend (was silently dropped).
+- File browser subscribes to `interlink:config_changed` and resets remote state: clears page cache, items, breadcrumbs, and cursors. Bumps `navGeneration` to discard in-flight responses. Re-fetches root folder IDs for the new account.
+
+### Cross-Platform Sleep Prevention (5A/5B/5D)
+- New `internal/platform/` package prevents OS sleep during active file transfers.
+- **macOS**: `IOPMAssertionCreateWithName` via CGO + IOKit.
+- **Windows**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` on locked OS thread.
+- **Linux**: `systemd-inhibit` subprocess (graceful no-op if unavailable).
+- Integrated into `BeginTransferActivity()`/`EndTransferActivity()` in `ratelimit/store.go` (ref-counted). Five additional call sites for non-batch paths: `UploadFileSync`, `ExecuteRetry`, CLI PUR fallback (2), CLI single-file job download.
+
+### GUI/CLI Upload Orchestration Convergence (Plan 2b)
+
+Eliminated ~400 lines of duplicated orchestration logic by extracting a shared streaming pipeline.
+
+### Folder-Upload Primitives Extraction (2D)
+- Moved neutral folder-creation logic (`FolderCache`, `CheckFolderExists`, `BuildDirectoryTree`, `CreateFolderStructure`, `CreateFolderStructureStreaming`, `ConflictAction`) from `internal/cli/` to new `internal/transfer/folder/` package.
+- Compatibility layer (`folder_upload_compat.go`) preserves `cli.*` API surface for CLI callers during transition.
+- `ConflictPrompt` callback type replaces hardcoded `promptFolderConflict` dependency, enabling GUI (nil = auto-merge) and CLI (interactive prompt) to share the same code.
+
+### Shared RunOrchestrator (2D)
+- New generic `RunOrchestrator[T any]` function in `internal/transfer/folder/orchestrator.go` implements the three-part streaming pipeline: (A) folder creation goroutine, (B) unbounded backlog + dispatcher, (C) orchestrator merging fileChan + folderReadyChan.
+- `OrchestratorCallbacks[T]` parameterizes progress reporting (`OnFileDiscovered`, `OnFolderReady`), item construction (`BuildItem`), orphan handling (`OnUnmappedFiles`), and completion signaling (`OnOrchestratorDone`).
+- `ProgressSnapshot` carries full counters (dirs, files, bytes) on every callback — frontend overwrites atomically.
+- Channel ownership documented: Part A owns folderReadyChan, Part B owns outputCh, Part C owns backlogDone and OrchestratorResult.
+
+### GUI + CLI Migration (2D)
+- GUI `StartFolderUpload` (`file_bindings.go`): ~280 lines of inline pipeline replaced with `RunOrchestrator` call. Event cadence preserved exactly: `UpdateBatchDiscovered` on every file, scan progress every 100 files, folder progress every 3 folders, `MarkBatchScanInProgress(false)` before dispatcher drain.
+- CLI `uploadDirectoryPipelined` (`folder_upload_helper.go`): ~300 lines of inline Parts A/B/C replaced. Per-file execution closure and `RunBatchFromChannel` consumer unchanged.
+- Service layer `PrepareUploadFolder` (`file_service.go`): repointed from `cli.*` to `folder.*` (layering fix).
+
+### Safe Serious-Error Reporting (Plan 3)
+
+User-friendly error reporting flow for serious blocking failures — server errors (5xx) and unclassified internal errors only. When a reportable error occurs (transfer batch wipeout, pipeline total failure, unexpected server error), a modal appears with "Copy to Clipboard" and "Save Report" options. Reports contain only safe diagnostic context — no API keys, tokens, or file contents. User-fixable errors (wrong API key, network issues, timeouts, bad file IDs) are NOT reportable — users can diagnose these from the error message alone.
+
+### Error Classification & Redaction (6A-6B)
+- New `internal/reporting/` package: classifier (ErrorCategory, Severity, ErrorClass), redactor (hex tokens, URL query params, email, auth tokens, home paths), builder (report assembly), reporter (GUI convenience wrapper).
+- `IsReportable()` uses `classifyErrorClass()` to filter: auth (401/403), network, timeout, disk_space, client_error (400/404) all return false. Only server_error (500/502/503) and internal (unclassified) pass through.
+- `ErrorClass` split: `ClassClientError` (4xx — user gave bad input) vs `ClassServerError` (5xx — server broke).
+
+### Ring Buffer Timeline (6C)
+- New `RingBuffer` (capacity 50) on `EventBus` captures recent events for timeline context.
+- Timeline snapshotted and redacted at classify time — no staleness from delayed user action.
+- CLI/daemon reports have empty timeline (no EventBus).
+
+### ErrorReportModal (6D)
+- Frontend `ErrorReportModal.tsx` with error summary, category/operation context, expandable technical details, optional user note, Copy/Save buttons.
+- Call-to-action: "Please copy or save this error report and send it to your Rescale contact or support@rescale.com for faster diagnosis."
+- Reports include workspace name, workspace ID, and platform URL for support context.
+- `errorReportStore.ts` manages modal state and event subscription. Duplicate suppression: if modal is open, subsequent events are dropped.
+- `BuildErrorReport` and `SaveErrorReport` Wails bindings (reporting_bindings.go).
+
+### CLI/Daemon Integration (6D-6E)
+- `HandleCLIError()` at `cli/root.go` `ExecuteC()` seam: auto-save report + print summary to stderr.
+- Two-layer CLI filtering: `isCLIUsageError()` catches Cobra parse errors (unknown flag/command, bad flag syntax, arg count) and local validation errors (file not found, user cancellation, "no valid files"). Then `IsReportable()` catches broader user-fixable errors.
+- `ExecuteC()` returns the actual subcommand for meaningful operation names (e.g., "rescale-int folders upload-dir").
+- `HandleCLIError()` at daemon MarkFailed callsites (3 sites).
+- Reports auto-saved to `config.ReportDirectory()`: `~/Library/Application Support/rescale/reports/` (macOS) / `~/.config/rescale/reports/` (Linux) / `%LOCALAPPDATA%\Rescale\Interlink\reports` (Windows).
+
+### GUI Integration Hooks (6D-6E)
+- Engine: pipeline completion paths report total failure (all jobs failed, not cancelled).
+- TransferService: batch completion checks for total wipeout (0 succeeded, >0 failed).
+- file_bindings.go: pre-transfer API failures (GetRootFolders, ListFolderContentsPage, scan errors).
+- job_bindings.go: `failSingleJob()` reports pre-pipeline single-job failure.
+
+### Transfer Progress UX Polish (Plan 4)
+
+Five user-facing display fixes plus backend log routing and download cold-start optimization.
+
+### Progress Display Fixes (9A/9B/9C)
+- **9A**: Label area and progress text use `max(discoveredTotal, total)` as denominator during scan — best-known count instead of confusing pipeline queue metric.
+- **9B**: Both uploads and downloads show `~N files (scanning...)` during discovery — consistent provisional count display with tilde prefix.
+- **9C**: When scan completes (`totalKnown=true`), progress text shows `42% — 420 of 1,000 files` — file counts persist alongside the progress bar.
+
+### Elapsed + ETA Coexistence (8B)
+- Elapsed time and ETA now display together as `2m 15s | ETA 3m 40s` instead of showing one or the other. Elapsed always first (no label prefix); ETA keeps its label for clarity.
+
+### Backend Log Routing to GUI (8C)
+- New `TeeWriter` (`internal/logging/tee_writer.go`) intercepts stdlib `log.Printf` and publishes to EventBus. `[BATCH]`→DEBUG, `[SLOT]`→DEBUG (throttled 2/sec), `[DEBUG]`→DEBUG (throttled), `[CRED]`→WARN, `[RATELIMIT]`→INFO, `[TIMING]`→INFO.
+- Go stdlib timestamp prefix stripped before publishing. Double-publish fixed in `Engine.publishLog()` and rate-limit notify callback (switched to `fmt.Printf`).
+- Activity Logs level filter changed to `>=` semantics: default is `INFO+` (shows INFO, WARN, ERROR; hides DEBUG). Users can switch to `DEBUG+` to see backend diagnostic logs.
+
+### Download Cold-Start Fix
+- **Credential pre-warm**: `WarmCredentialCache()` called synchronously in `StartFolderDownload` and `StartFolderUpload` BEFORE scan starts. Eliminates 2-5s of credential lock contention when first download worker competes with async warm goroutine.
+- **Download discovered totals**: Download scan-consumer now calls `UpdateBatchDiscovered()` on every file at discovery time (was missing — only uploads called it). Enables accurate 9A progress denominator for downloads.
+- **Timing instrumentation**: `[TIMING]` logs at credential pre-warm, semaphore acquire, credential check complete, and `DownloadFile()` entry. Complete timeline from click to first byte.
+
+### Bug Fixes (discovered during Plan 4 testing)
+- **ETA flicker fix (10E)**: `GetAllBatchStats()` (polled every 500ms) never populated `ETASeconds`, returning 0 and overwriting the event-driven ETA every poll cycle. Added `batchLastETA` map — batch ticker stores computed ETA, polling reads it back. ETA now displays stably.
+- **Export Logs button (10F)**: Blob URL downloads don't work in Wails WebView. Added `SaveLogExport()` Go binding using native `runtime.SaveFileDialog`. Activity Logs "Export" button now opens a save dialog.
+
+### Transfer Resilience & GUI Polish (Plan 5)
+
+Four fixes discovered during Plan 4 manual testing of a 14,000-file batch upload.
+
+### DNS Error Retry Classification (10A)
+- `ClassifyError()` now recognizes DNS resolution failures (`*net.DNSError` type assertion + 4 string fallback patterns). All S3/Azure operations wrapped in `RetryWithBackoff` automatically retry DNS errors with exponential backoff. Previously, `"no such host"` errors fell through to `ErrorTypeFatal` and were never retried.
+
+### Partial-Batch Failure Reporting (10B)
+- `checkBatchCompletion` (renamed from `checkBatchFailure`) now handles partial failures: when some files succeed and some fail, the error report dialog is triggered for network/timeout errors (overriding `IsReportable` suppression — batch context proves infrastructure works). Auth/disk/client errors remain correctly suppressed. Dominant error class computed across up to 5 sampled failures.
+
+### Activity Log Level-Aware Trimming (10C)
+- Two-tier ring buffer: `debugInfoLogs` (8,000 cap) + `warnErrorLogs` (2,000 cap). WARN/ERROR entries are never evicted by DEBUG/INFO volume. Same 10,000 total memory footprint. `getFilteredLogs()` skips merge when filter >= WARN.
+
+### Transfer Task Status Filtering (10D)
+- Expanded batch view now shows filter chips: All / Active / Succeeded / Failed / Cancelled. Clicking a chip filters the task list server-side (`GetBatchTasks` with `stateFilter` parameter). Failed chip has red dot indicator when failures exist. "Show more" pagination respects the active filter.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/services/transfer_service.go` | 4D: workerCount parameter, adaptive count wiring; 4E: WarmAll adoption; 5D: sleep inhibition for UploadFileSync and ExecuteRetry; 6D: batch failure reporting; Plan 4: export WarmCredentialCache, remove async warm from streaming batch methods, timing logs in executeDownloadTask |
+| `internal/wailsapp/event_bridge.go` | 4F-R3: ConfigChangedEvent forwarding + DTO |
+| `frontend/src/types/events.ts` | 4F-R3: CONFIG_CHANGED event name and DTO |
+| `frontend/src/stores/fileBrowserStore.ts` | 4F-R3: setupEventListeners for config change invalidation |
+| `frontend/src/App.tsx` | 4F-R3: wire up file browser event listeners |
+| `internal/platform/sleep.go` | 5D: InhibitSleep public API |
+| `internal/platform/sleep_darwin.go` | 5D: macOS IOPMAssertion via CGO |
+| `internal/platform/sleep_windows.go` | 5D: Windows SetThreadExecutionState |
+| `internal/platform/sleep_linux.go` | 5D: Linux systemd-inhibit subprocess |
+| `internal/platform/sleep_other.go` | 5D: Fallback no-op |
+| `internal/platform/sleep_test.go` | 5D: Integration test with idempotency check |
+| `internal/ratelimit/store.go` | 5D: sleep inhibition in BeginTransferActivity/EndTransferActivity |
+| `internal/pur/pipeline/pipeline.go` | 5D: sleep inhibition for CLI PUR fallback uploads |
+| `internal/cli/jobs.go` | 5D: sleep inhibition for CLI single-file job download |
+| `internal/cloud/providers/azure/download.go` | CollectErrors migration |
+| `internal/cli/folder_upload_helper.go` | CollectErrors migration, WarmAll, WalkStream streaming rewrite |
+| `internal/cloud/credentials/manager.go` | New `WarmAll(ctx)` method |
+| `internal/cli/download_helper.go` | WarmAll adoption |
+| `internal/cli/upload_helper.go` | WarmAll adoption |
+| `internal/daemon/daemon.go` | WarmAll adoption |
+| `internal/cloud/providers/s3/client.go` | `CloseIdleConnections()` method |
+| `internal/cloud/providers/azure/client.go` | `CloseIdleConnections()` method |
+| `internal/http/client.go` | Transport cleanup registry, auto-tracking |
+| `internal/core/engine.go` | Extended stale-connection callback |
+| `internal/transfer/queue.go` | `StartedAt` in BatchStats, `batchStartedAt` map, cleanup hooks |
+| `internal/wailsapp/transfer_bindings.go` | `StartedAtUnix` in DTO |
+| `frontend/src/stores/transferStore.ts` | `startedAtUnix` in TransferBatch interface |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Elapsed time display in BatchRow |
+| `internal/cli/folders.go` | Pipelined path restructured for WalkStream |
+| `internal/progress/uploadui.go` | `IncrementTotal()`, atomic `totalFiles` |
+| `internal/ratelimit/limiter.go` | FIFO wait queue, unlocked helpers |
+| `internal/ratelimit/limiter_test.go` | `TestWaitFIFOOrder` |
+| `internal/transfer/folder/conflict.go` | **New**: ConflictAction type + ConflictPrompt callback (moved from cli/prompt.go) |
+| `internal/transfer/folder/folder.go` | **New**: FolderCache, CheckFolderExists, BuildDirectoryTree, processFolder, CreateFolderStructure, CreateFolderStructureStreaming (moved from cli/folder_upload_helper.go) |
+| `internal/transfer/folder/orchestrator.go` | **New**: RunOrchestrator[T any], OrchestratorCallbacks, OrchestratorConfig, OrchestratorResult, ProgressSnapshot |
+| `internal/transfer/folder/folder_test.go` | **New**: First-party tests for moved primitives |
+| `internal/transfer/folder/orchestrator_test.go` | **New**: Orchestrator unit tests (empty dir, flat dir, cancellation, callbacks, snapshot integrity) |
+| `internal/cli/folder_upload_compat.go` | **New**: Type aliases + wrapper functions preserving cli.* API surface |
+| `internal/cli/folder_upload_helper.go` | 2D: Removed moved types/functions; uploadDirectoryPipelined uses folder.RunOrchestrator |
+| `internal/cli/prompt.go` | 2D: Removed ConflictAction type + constants (moved to folder package) |
+| `internal/wailsapp/file_bindings.go` | 2D: cli.* → folder.* for upload types; inline pipeline → RunOrchestrator; 6D: pre-transfer API failure reporting |
+| `internal/services/file_service.go` | 2D: cli.* → folder.* for folder-upload primitives (layering fix) |
+| `internal/core/engine.go` | 6D: Pipeline completion → reportable error for total failure; Plan 4: publishLog double-publish fix (log.Printf → fmt.Printf) |
+| `internal/wailsapp/job_bindings.go` | 6D: failSingleJob → reporter.Report() |
+| `internal/wailsapp/app.go` | 6D: Reporter initialization in startup(); Plan 4: TeeWriter log.SetOutput + double-publish fix in rate-limit notify |
+| `internal/wailsapp/event_bridge.go` | 6D: ReportableErrorEvent forwarding + DTO |
+| `internal/events/events.go` | 6D: ReportableErrorEvent, SanitizedTimelineEntry, RingBuffer on EventBus |
+| `internal/events/ringbuffer.go` | **New**: Ring buffer for timeline capture (capacity 50) |
+| `internal/config/paths.go` | 6D: ReportDirectory(), EnsureReportDirectory() |
+| `internal/cli/root.go` | 6D: HandleCLIError at Execute() seam |
+| `internal/daemon/daemon.go` | 6D: HandleCLIError at MarkFailed callsites |
+| `internal/reporting/classifier.go` | **New**: Error classification + reportability check |
+| `internal/reporting/redactor.go` | **New**: Allowlist-based sanitization |
+| `internal/reporting/builder.go` | **New**: Report assembly from classified error + timeline |
+| `internal/reporting/reporter.go` | **New**: GUI convenience wrapper: classify + publish event |
+| `internal/reporting/transport.go` | **New**: File export + text summary formatter |
+| `internal/reporting/cli_helper.go` | **New**: Standalone CLI/daemon error handler |
+| `internal/reporting/reporting_test.go` | **New**: Unit tests for classifier, redactor, builder, transport, reporter |
+| `internal/wailsapp/reporting_bindings.go` | **New**: Wails bindings: BuildErrorReport, SaveErrorReport |
+| `frontend/src/components/ErrorReportModal.tsx` | **New**: Error report modal UI |
+| `frontend/src/stores/errorReportStore.ts` | **New**: Zustand store for reportable errors |
+| `frontend/src/types/events.ts` | 6D: REPORTABLE_ERROR event name + DTO |
+| `frontend/src/App.tsx` | 6D: ErrorReportModal + event listener setup |
+| `frontend/src/stores/index.ts` | 6D: Export useErrorReportStore |
+| `frontend/src/components/common/index.ts` | 6D: Export ErrorReportModal |
+| `internal/version/version.go` | v4.8.6 → v4.8.7 |
+| `wails.json` | productVersion 4.8.6 → 4.8.7 |
+| `internal/logging/tee_writer.go` | **New**: TeeWriter intercepts stdlib log.Printf, routes to EventBus with prefix classification and throttling |
+| `internal/logging/tee_writer_test.go` | **New**: Unit tests for TeeWriter (passthrough, classification, throttle, timestamp stripping, nil safety) |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Plan 4: 9A/9B/9C progress display fixes + 8B elapsed+ETA coexistence |
+| `frontend/src/stores/logStore.ts` | Plan 4: Default levelFilter='INFO', ">=" severity semantics |
+| `frontend/src/components/tabs/ActivityTab.tsx` | Plan 4: ">=" level filter semantics + DEBUG+/INFO+/WARN+ labels |
+| `internal/wailsapp/file_bindings.go` | Plan 4: Synchronous credential pre-warm, UpdateBatchDiscovered for downloads, timing logs |
+| `internal/transfer/queue.go` | Plan 4 testing: batchLastETA map for stable ETA in polling DTO (10E fix) |
+| `internal/wailsapp/reporting_bindings.go` | Plan 4 testing: SaveLogExport binding for native save dialog (10F fix) |
+| `frontend/src/components/tabs/ActivityTab.tsx` | Plan 4 testing: handleExport uses SaveLogExport binding instead of blob URL (10F fix); Plan 5 10C: logVersion/debugInfoLogs/warnErrorLogs dependency update |
+| `internal/http/retry.go` | Plan 5 10A: `*net.DNSError` type check + 4 DNS string fallback patterns in ClassifyError |
+| `internal/http/retry_test.go` | Plan 5 10A: TestClassifyError (20 cases) + TestExecuteWithRetry_DNSError + TestExecuteWithRetry_DNSErrorString |
+| `internal/reporting/classifier.go` | Plan 5 10B: Export `classifyErrorClass` → `ClassifyErrorClass` for partial-batch gate |
+| `internal/services/transfer_service.go` | Plan 5 10B: Rename checkBatchFailure→checkBatchCompletion, new reportPartialBatchFailure, batch completion checks in pre-registered paths |
+| `internal/services/transfer_service_test.go` | Plan 5 10B: 5 tests — total wipeout, partial network, partial auth, no failures, partial server error |
+| `internal/transfer/queue.go` | Plan 5 10B: GetFailedTaskErrors; 10D: stateFilter parameter on GetBatchTasks |
+| `internal/transfer/queue_test.go` | Plan 5 10D: TestGetBatchTasksWithStateFilter |
+| `internal/wailsapp/transfer_bindings.go` | Plan 5 10D: 4th stateFilter parameter on GetBatchTasks binding |
+| `frontend/wailsjs/go/wailsapp/App.js` | Plan 5 10D: Auto-generated — GetBatchTasks 4-arg signature |
+| `frontend/wailsjs/go/wailsapp/App.d.ts` | Plan 5 10D: Auto-generated — GetBatchTasks type with stateFilter |
+| `frontend/src/stores/logStore.ts` | Plan 5 10C: Two-tier ring buffer (debugInfoLogs 8k + warnErrorLogs 2k), logVersion counter, mergeSortedLogs |
+| `frontend/src/stores/transferStore.ts` | Plan 5 10D: batchStatusFilter Map, setBatchStatusFilter action, filtered fetchBatchTasks, cache invalidation |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Plan 5 10D: Filter chip bar (All/Active/Succeeded/Failed/Cancelled) in expanded batch view |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Plan 6 11A/11B: Progress denominator fix (use discoveredTotal), "Completed X of Y files" text clarity, "(discovering...)" replaces "(scanning...)"; 11C: Split Active chip into In Progress + Queued |
+| `internal/transfer/queue.go` | Plan 6 11C: `"inprogress"` and `"queued"` stateFilter values in GetBatchTasks |
+| `internal/transfer/queue_test.go` | Plan 6 11C: TestGetBatchTasksWithInProgressAndQueuedFilters |
+| `internal/logging/tee_writer.go` | Plan 6 11D: TIMING + RATELIMIT → DEBUG level + throttled |
+| `internal/logging/tee_writer_test.go` | Plan 6 11D: Updated TIMING level assertion, added RATELIMIT level test + throttle burst tests |
+| `internal/config/platforms.go` | **New** Plan 6 11E: Platform URL allowlist + ValidatePlatformURL (strict origin enforcement) |
+| `internal/config/platforms_test.go` | **New** Plan 6 11E: 13 tests (positive, negative, strict origin, subdomain attack) |
+| `internal/api/client.go` | Plan 6 11E: Primary enforcement — ValidatePlatformURL in NewClient() |
+| `internal/api/client_test.go` | Plan 6 11E: Refactored newTestClient (bypass NewClient), 2 rejection tests |
+| `internal/config/csv_config.go` | Plan 6 11E: Defense-in-depth — ValidatePlatformURL in Validate() |
+| `internal/cli/config_commands.go` | Plan 6 11E: Menu-based platform selection in config setup |
+| `internal/service/multi_daemon.go` | Plan 6 11E: Use config.DefaultPlatformURL constant |
+| `frontend/src/components/tabs/SetupTab.tsx` | Plan 6 11E: Sync comment for AllowedPlatformURLs |
+
+### Batch Progress UX, Filter UX, Log Verbosity & Platform URL Security (Plan 6)
+
+Five fixes discovered during Plan 5 manual testing of a ~14,000-file batch upload.
+
+### Batch Progress Denominator Fix (11A)
+- Progress text denominator now uses `Math.max(discoveredTotal, batch.total)` instead of just `batch.total`. Prevents the denominator from dropping (e.g., 13,446 → 3,692) when the scan completes but task registration is still streaming in. `batch.total` is preserved for task-backed operations (chip counts, pagination).
+
+### Progress Text Clarity (11B)
+- "Completed X of Y files" clarifies that the numerator means completed (not "in progress" or "pending"). "(discovering...)" replaces "(scanning...)" during the scan phase — more accurately describes filesystem enumeration. Applied to both subtitle and progress bar text.
+
+### Split Active Filter Into In Progress + Queued (11C)
+- The "Active (530)" filter chip was misleading — 530 = 15 transferring + 515 queued. Now shows separate "In Progress (15)" and "Queued (515)" chips. Backend adds `"inprogress"` and `"queued"` stateFilter values. "Show more" pagination count respects the active filter.
+
+### TIMING + RATELIMIT Logs → DEBUG (11D)
+- `[TIMING]` and `[RATELIMIT]` log prefixes reclassified from INFO to DEBUG and throttled. These fire 30+/sec during transfers and flooded the Activity Logs tab. Now invisible at default INFO level, visible at DEBUG when troubleshooting.
+
+### Platform URL Security Allowlist (11E)
+- **Security hardening**: `ValidatePlatformURL()` rejects any URL not matching the 6 known Rescale platform hostnames. Strict origin enforcement: HTTPS-only, no custom ports, no userinfo, no path/query/fragment. Primary enforcement in `api.NewClient()` catches all client creation paths. Defense-in-depth in `config.Validate()`. CLI `config setup` now shows a numbered platform menu instead of free-text input. Prevents credential exfiltration to arbitrary endpoints via `--api-url`.
+
+---
+
+## v4.8.6 - March 8, 2026
+
+### Destination Snapshot Hardening (4F)
+
+GUI upload/download flows now freeze destination state at click time, preventing stale or changed state from misdirecting transfers.
+
+- **Frozen destination snapshots**: `uploadConfirm` state includes `frozenDestFolderId`, `frozenMode`, `frozenMyLibraryId` captured when the user clicks Upload. `downloadConfirm` includes `frozenLocalPath`. Confirm handlers use these frozen values exclusively — live store state is never re-read after the user initiates the operation.
+- **Navigation generation counter**: `navGeneration` in `fileBrowserStore` is bumped synchronously on every navigation and mode switch. Async folder loads capture the generation before the API call and discard the response if it has changed. Prevents stale folder-listing responses from overwriting current state.
+- **Backend pre-validation**: New `ValidateRemoteFolder()` method probes destination with `ListFolderContentsPage(folderID, "", 1)` — a single lightweight API call. New `ValidateLocalDirectory()` validates local path with `os.Stat` + `IsDir()`. Both are called before any transfers begin. `StartFolderUpload` and `StartFolderDownload` also perform pre-validation internally.
+- **Error surfacing**: Folder-check errors in `confirmUpload()` are now surfaced via `setErrorDialog` instead of silently swallowed with `console.warn`.
+- **Validation timeout hardening**: Both `ValidateRemoteFolder()` and the `StartFolderUpload` pre-validation use 30-second bounded contexts instead of unbounded `context.Background()`. Prevents silent hang on first API call after idle periods.
+
+### CLI RunBatch Migration (4A)
+
+All remaining hand-rolled worker pools migrated to the shared `transfer.RunBatch` / `RunBatchFromChannel` framework.
+
+- **`uploadFiles()` → `RunBatch`**: Two-phase sequential upload uses `RunBatch` with adaptive concurrency. `cliUploadWorkItem` struct. All manual counters preserved (skips, conflicts, errors tracked independently of `BatchResult.Completed`).
+- **`uploadDirectoryPipelined()` → `RunBatchFromChannel`**: Pipelined upload uses streaming channel mode. `cliPipelinedUploadItem` struct. New `AdaptiveCount` field on `BatchConfig` exposes live adaptive worker count to execute closures for `AllocateTransfer`.
+- **`downloadJob()` → `RunBatch`**: Daemon auto-download uses `ForceSequential: true`. `daemonDownloadItem` struct. `stopChan` wired to context cancellation via derived context.
+- **Transfer handle resource leak fix**: Daemon `downloadJob()` allocated `transferHandle` via `AllocateTransfer()` but never called `Complete()` to release resources. Fixed with `defer transferHandle.Complete()` in the migrated closure.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Frozen snapshot fields, pre-validation calls, error surfacing |
+| `frontend/src/stores/fileBrowserStore.ts` | `navGeneration` counter, stale-response guards in `loadRemoteFolder` + `loadRemoteLegacy` |
+| `internal/wailsapp/file_bindings.go` | `ValidateRemoteFolder`, `ValidateLocalDirectory`, pre-validation in `StartFolderUpload` + `StartFolderDownload` |
+| `frontend/wailsjs/go/wailsapp/App.js` | Binding exports for new validation methods |
+| `frontend/wailsjs/go/wailsapp/App.d.ts` | TypeScript declarations for new validation methods |
+| `internal/transfer/batch.go` | `AdaptiveCount **AdaptiveWorkerCount` field on `BatchConfig`, populated in `RunBatchFromChannel` |
+| `internal/transfer/batch_test.go` | Tests for `AdaptiveCount` exposure and nil safety |
+| `internal/cli/folder_upload_helper.go` | `uploadFiles()` → `RunBatch`, `uploadDirectoryPipelined()` → `RunBatchFromChannel` |
+| `internal/daemon/daemon.go` | `downloadJob()` → `RunBatch` with `ForceSequential`, transfer handle leak fix |
+| `internal/version/version.go` | v4.8.5 → v4.8.6 |
+| `wails.json` | productVersion 4.8.5 → 4.8.6 |
+
+---
+
+## v4.8.5 - March 7, 2026
+
+### Batch Speed/ETA Overhaul
+
+The per-task speed summation approach (which frequently produced blank or zero speed) is replaced with batch-level sliding window tracking.
+
+- **10-second sliding window**: New `speedWindow` type tracks cumulative bytes transferred and files completed across the entire batch. Produces a stable, current throughput value that responds to stalls without being diluted by startup or idle periods.
+- **Backend ETA with smoothing**: ETA is now computed server-side using remaining bytes / window speed, passed through jump capping (2x max single-tick change) and exponential moving average (alpha=0.3). Frontend is a one-line consumer. Replaces the previous frontend `remainingBytes / speed` calculation which had no smoothing and inherited all speed display problems.
+- **Files/sec fallback**: When byte-level speed is too small to display meaningfully (e.g., batches of tiny files), the UI falls back to showing file completion rate (e.g., "2.3 files/s") from a separate sliding window.
+- **Discovered totals**: New `UpdateBatchDiscovered()` bridges the gap between "files found by scan" and "tasks registered in queue", so the UI shows correct totals even while tasks are still being registered.
+- **Metric lifecycle fix**: Speed/ETA state is cleaned up when a batch becomes terminal (`cleanupBatchMetrics`), not when registration ends (`CleanupBatch`). Prevents premature metric loss for batches where registration finishes before transfers complete.
+
+### Streaming Local Enumeration
+
+Folder uploads previously loaded the entire directory tree into memory before starting any uploads. For large folders (thousands+ of files), this caused a long blocking "Scanning..." phase with no uploads happening.
+
+- **`WalkStream()`**: New streaming directory walker in `internal/localfs/browser.go` emits directories and files on separate buffered channels as they are discovered. Uploads can begin as soon as the first files and their parent folders are ready.
+- **Parent-ready gating**: `CreateFolderStructureStreaming()` creates remote folders as soon as their parent exists in the mapping, rather than processing by depth level. Works correctly with `filepath.WalkDir`'s depth-first parent-first traversal order.
+- **GUI streaming pipeline**: The orchestrator goroutine merges `fileChan` (discovered files) and `folderReadyChan` (created folders) via a `select` loop. Files whose parent folder is ready are queued immediately; others are buffered until the parent is created.
+- **`WalkCollect()` preserved**: The existing non-streaming walker is unchanged for non-upload code paths.
+
+### Upload Labels and Structured Phases
+
+- **Direction-aware labels**: Upload batches show "Preparing upload..." instead of "Scanning..." during the discovery phase. Download batches retain "Scanning..." since they scan a remote folder.
+- **Structured phase enum**: `EnumerationEvent` carries a `Phase` field (`scanning`, `creating_folders`, `complete`, `error`) replacing frontend substring matching on `statusMessage`.
+- **Folder creation sub-progress**: During folder creation, the UI shows "Creating remote folders... (X of Y)" with structured `FoldersTotal`/`FoldersCreated` fields.
+- **Phase emission wiring**: All `emitEnumeration` call sites (both upload and download paths) set the `Phase` field. Periodic progress events emitted every 100 files (scanning) and every 3 folders (creating).
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/speed_window.go` | **NEW**: Sliding window speed/rate calculator |
+| `internal/transfer/speed_window_test.go` | **NEW**: Unit tests for speed window |
+| `internal/transfer/queue.go` | Batch byte/file tracking, window-based speed, ETA computation, discovered totals, metric cleanup |
+| `internal/transfer/task.go` | `lastBatchBytes` field for incremental byte tracking |
+| `internal/events/events.go` | `FilesPerSec`, `ETASeconds`, `DiscoveredTotal`, `DiscoveredBytes` on `BatchProgressEvent`; `Phase`, `FoldersTotal`, `FoldersCreated` on `EnumerationEvent` |
+| `internal/wailsapp/event_bridge.go` | New DTO fields and mappings for both event types |
+| `internal/localfs/browser.go` | **NEW**: `WalkStream()` streaming directory walker |
+| `internal/localfs/browser_test.go` | **NEW**: WalkStream tests |
+| `internal/cli/folder_upload_helper.go` | `processFolder()` extraction, `CreateFolderStructureStreaming()` with parent-ready gating |
+| `internal/cli/folder_upload_helper_test.go` | **NEW**: Streaming folder creation tests |
+| `internal/wailsapp/file_bindings.go` | GUI streaming pipeline, phase-aware enumeration events, `folderProgressWriter` updates |
+| `frontend/src/types/events.ts` | New fields: `filesPerSec`, `etaSeconds`, `discoveredTotal`, `discoveredBytes`, `phase`, `foldersTotal`, `foldersCreated` |
+| `frontend/src/stores/transferStore.ts` | New fields on `TransferBatch` and `Enumeration`, event handlers |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Backend ETA, files/sec fallback, direction-aware labels, phase-based rendering, folder progress |
+| `internal/version/version.go` | v4.8.4 → v4.8.5 |
+| `wails.json` | productVersion 4.8.4 → 4.8.5 |
+
+### Bugfixes (March 7, 2026)
+
+Three user-visible bugs discovered during manual testing:
+
+#### Speed/ETA Flashing Fix
+
+Speed and ETA values would alternate between appearing and disappearing, causing layout jumps in the Transfers tab. The root cause was `speedWindow.Speed()` returning 0 when no bytes transferred between file completions (zero delta in the sliding window). When speed=0, `formatSpeed()` returns empty string, the speed span disappears, `computeBatchETA()` returns -1, the ETA span disappears, and `flex justify-between` reflows the layout.
+
+- **Backend grace period**: `speedWindow` now holds the last non-zero speed for up to 3 seconds after bytes stop flowing. Speed only drops to 0 after a genuine 3-second stall. New fields: `lastNonZero`, `lastNonZeroTime`.
+- **Fixed 3-column grid**: Replaced `flex justify-between` with `grid grid-cols-3` in both `BatchRow` and `DaemonBatchRow`. Columns (percentage, speed, ETA) hold their positions regardless of whether content is present.
+
+#### Slow Scan Denominator Fix (Backpressure)
+
+During folder uploads, the total-files count in the UI crawled barely faster than uploads completed. The orchestrator's `select` loop blocked on `requestCh` sends (buffer=256) when full, preventing it from reading the next file from `fileChan`. Discovery was throttled to the upload consumption rate.
+
+- **Unbounded backlog**: The orchestrator now appends requests to a `[]TransferRequest` slice at filesystem speed. A separate dispatcher goroutine drains the backlog into `requestCh`. Discovery is fully decoupled from upload throughput.
+- **TotalKnown timing**: `MarkBatchScanInProgress(false)` fires immediately after the orchestrator finishes discovering all files — not after the dispatcher drains all items through `requestCh` (which blocked for minutes on large uploads since the channel is consumed at upload throughput). The discovered count is final as soon as the scan completes; registration catches up in the background.
+- **discoveredTotal display**: During scan phase (`!totalKnown`), the UI now shows `discoveredTotal` instead of `batch.total` (registered tasks). This reflects actual filesystem discovery speed.
+
+#### Batch Folder Existence Check (Pre-existing from v4.0.8)
+
+"Checking for existing folders..." blocked the File Browser tab for 10-20s when uploading multiple folders. Each folder check created a new `FolderCache`, causing redundant API calls for the same parent folder contents.
+
+- **`CheckFoldersExistForUpload` (plural)**: New backend method takes all folder names + parent ID. Uses a single shared `FolderCache` — parent contents fetched once, subsequent checks are cache hits.
+- **Frontend batch call**: `FileBrowserTab.tsx` now makes a single `CheckFoldersExistForUpload` call instead of a sequential loop of `CheckFolderExistsForUpload` calls.
+
+#### Polling Path Missing Fields (Discovered During Testing)
+
+`TransferBatchDTO` and `GetTransferBatches()` (the 500ms polling path) were missing `discoveredTotal`, `discoveredBytes`, `filesPerSec`, and `etaSeconds` fields. Every poll cycle overwrote event-driven data with zeros, causing the file count to flash between the correct discovered total and the slow-climbing registration count. Fixed by adding all four fields to the DTO and populating them from `BatchStats`.
+
+#### Scan Count Update Frequency
+
+`UpdateBatchDiscovered()` was called only every 100th file during discovery. Between updates, the frontend could see `discoveredTotal < batch.total` and fall back to the slow registration count. Changed to update on every discovered file — this is cheap (two map writes under a lock) and ensures the polling path always has accurate counts.
+
+#### Upload Label During Active Transfers
+
+"Preparing upload..." was shown even while files were actively uploading, because `totalKnown` stayed false until the backlog dispatcher fully drained. Now the progress label shows three states:
+- `totalKnown=true` → percentage (e.g., "45%")
+- `totalKnown=false` and `active > 0` → "Uploading... (X completed of ~Y found)"
+- `totalKnown=false` and `active == 0` → "Preparing upload... (~N files found)"
+
+The `~` prefix disappears once `totalKnown` flips true (scan complete). With the TotalKnown timing fix above, this transition happens within seconds of the scan finishing.
+
+#### EnumerationRow Flash Suppression
+
+A brief second-row flash occurred when starting folder uploads: the EnumerationRow appeared during the scanning phase before the BatchRow was created. The previous filter (hide enumeration when matching batch exists) left a 1-frame gap. Now upload enumerations are only rendered during the `creating_folders` phase — once folder creation finishes and scanning starts, the BatchRow takes over immediately.
+
+#### Bugfix Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/speed_window.go` | Grace period: `lastNonZero`, `lastNonZeroTime`, `speedGracePeriod` |
+| `internal/transfer/speed_window_test.go` | Grace period tests: `TestSpeedWindow_GracePeriod`, `TestSpeedWindow_GracePeriodResumesAfterStall` |
+| `internal/wailsapp/file_bindings.go` | Backlog dispatcher, `MarkBatchScanInProgress` moved to shutdown sequence, `CheckFoldersExistForUpload`, `UpdateBatchDiscovered` on every file |
+| `internal/wailsapp/transfer_bindings.go` | `TransferBatchDTO` + `GetTransferBatches()`: added `discoveredTotal`, `discoveredBytes`, `filesPerSec`, `etaSeconds` |
+| `frontend/src/components/tabs/TransfersTab.tsx` | 3-column grid layout, `discoveredTotal` during scan, "Uploading... (X of ~Y)" when active |
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Batch folder existence check |
+
+---
+
+## v4.8.2 - March 2, 2026
+
+### Proxy Resilience
+
+Comprehensive proxy warmup coverage for Basic auth proxy environments. Previously, `WarmupProxyConnection` was only called in the PUR upload pipeline. Long-running batch transfers through a Basic auth proxy could see proxy sessions expire, causing credential refresh failures and mid-transfer deaths.
+
+- **Warmup response validation**: `WarmupProxyConnection` now detects 407/401 (proxy auth failure) and 5xx (proxy/server error) responses instead of silently returning success for any HTTP response.
+- **`WarmupProxyIfNeeded` convenience wrapper**: Safe to call unconditionally — returns immediately for non-basic proxy modes, logs errors as non-fatal warnings.
+- **Credential manager integration**: Proxy warmup injected into all 8 credential manager slow paths (S3, Azure, storage-specific, user profile, root folders) *before* write lock acquisition. Every credential refresh API call is now preceded by a proxy warmup.
+- **Entry point coverage**: One-time warmup added at the start of all CLI commands (`folders upload-dir`/`download-dir`, `files download`/`upload`, `jobs` single-file download), all GUI entry points (File Browser folder download, single-job upload, `StartTransfers`), and the daemon poll cycle.
+- **`ForceRefreshForStorage` cache key fix**: Forced credential refresh for Azure per-file SAS tokens previously wrote to a bare `storageID` key while `GetAzureCredentialsForStorage` reads from `storageID:path`. The stale entry was never replaced. Now uses the same composite cache key.
+- **Azure periodic refresh for all file sizes**: `StartPeriodicRefresh` (8-minute background credential refresh) was only started for files >1GB. Smaller files through slow proxies got no background refresh. Guard removed from all 3 Azure transfer paths — the goroutine is lightweight and cancelled by `StopPeriodicRefresh` when the transfer completes.
+
+### Streaming Download UX
+
+Three UX issues discovered during a 13,446-file GUI batch download, deferred from v4.8.0 pending the v4.8.1 transfer convergence refactor.
+
+- **Batch pre-registration**: New `PreRegisterBatch()` creates an empty batch entry visible in the Transfers tab immediately when a streaming download starts, before any files are discovered. Eliminates the 10-20s "flashing" where the batch would appear only after the first file was registered.
+- **Indeterminate progress bar**: During folder scan (`!totalKnown`), the progress bar shows an animated pulsing indicator with "Scanning... (N files)" and a live discovered-file count. Once the scan completes, it transitions to a standard determinate bar with percentage and ETA.
+- **Cancel button during scan**: Scanning batches (`!totalKnown`) are now treated as active, so the Cancel button is visible during the scan phase — not just after the first file starts downloading.
+- **Empty batch completion fix**: A pre-registered batch with 0 files no longer falsely shows as "Complete" (green checkmark). Requires `totalKnown && total > 0` to display completion status.
+
+### Automatic Update Notification
+
+- **Version check on startup**: GUI checks GitHub releases for newer versions ~2 seconds after launch (non-blocking).
+- **Yellow badge**: "Update available: vX.Y.Z &rarr;" badge appears below the version number; clicking opens the GitHub releases page.
+- **24-hour caching**: Results cached in-memory for the app session (24h for successes, 1h for errors).
+- **Enterprise policy gate**: Disabled automatically on FedRAMP platforms (`rescale-gov.com`). Set `RESCALE_DISABLE_UPDATE_CHECK=1` to disable globally.
+- **Security**: Opens hardcoded trusted GitHub URL only; no API-provided URLs opened in browser.
+- Based on community contribution by @roque-rescale (PR #14).
+
+### Bug Fixes
+
+- **Bug #1**: `ForceRefreshForStorage` cache key mismatch — Azure per-file SAS token forced refreshes were writing to the wrong cache key, so stale tokens were never replaced (see Proxy Resilience above).
+- **Bug #2**: `batchTickerLoop` would prematurely stop for scanning batches (Total=0, Queued=0, Active=0). Fixed by treating `!TotalKnown` batches as non-terminal.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/version/version.go` | v4.8.1 → v4.8.2 |
+| `wails.json` | productVersion 4.8.0 → 4.8.2 |
+| `frontend/package.json` | version 4.8.0 → 4.8.2 |
+| `internal/http/proxy.go` | Fix warmup response validation (407/401/5xx); add `WarmupProxyIfNeeded` helper |
+| `internal/cloud/credentials/manager.go` | Proxy warmup in 8 slow paths (before lock); `ForceRefreshForStorage` cache key fix |
+| `internal/cloud/credentials/manager_test.go` | **NEW**: Credential manager unit tests (warmup no-op, cache key consistency) |
+| `internal/cli/folders.go` | Warmup at `upload-dir` and `download-dir` entry |
+| `internal/cli/download_helper.go` | Warmup before `executeFileDownload`, `executeJobDownload` |
+| `internal/cli/upload_helper.go` | Warmup before `UploadFilesWithIDs` |
+| `internal/cli/jobs.go` | Warmup before single-file job download |
+| `internal/cloud/providers/azure/download.go` | Remove LargeFileThreshold guard on `StartPeriodicRefresh` |
+| `internal/cloud/providers/azure/streaming_concurrent.go` | Same |
+| `internal/cloud/providers/azure/pre_encrypt.go` | Same |
+| `internal/wailsapp/file_bindings.go` | Warmup before `ScanRemoteFolderStreaming`; pass `"FileBrowser"` sourceLabel |
+| `internal/wailsapp/job_bindings.go` | Warmup before `UploadFileSync` loop |
+| `internal/services/transfer_service.go` | Warmup in `StartTransfers`/`warmCredentialCache`; `sourceLabel` param + `PreRegisterBatch` call |
+| `internal/services/transfer_service_test.go` | Updated `StartStreamingDownloadBatch` call for new sourceLabel param |
+| `internal/daemon/daemon.go` | Store `appCfg`; warmup in `poll()` |
+| `internal/transfer/queue.go` | `preRegisteredBatches`, `PreRegisterBatch()`, merge in `GetAllBatchStats()`, cleanup, ticker fixes |
+| `internal/transfer/queue_test.go` | `TestPreRegisterBatch`, `TestPreRegisterBatchNoTasksAfterCleanup` |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Fix `isActive`/`isAllComplete`; indeterminate progress bar during scan |
+| `internal/wailsapp/version_bindings.go` | **NEW**: Version check logic, cache, policy gate, dedup |
+| `internal/wailsapp/version_bindings_test.go` | **NEW**: Unit tests (compareVersions, HTTP, cache TTL, policy, dedup) |
+| `internal/wailsapp/config_bindings.go` | Add `VersionCheck` to `AppInfoDTO`, update `GetAppInfo()` |
+| `frontend/src/App.tsx` | Add update check useEffect, yellow badge display |
+| `frontend/src/test/setup.ts` | Add mocks for `CheckForUpdates` and `BrowserOpenURL` |
+
+---
+
+## v4.8.1 - March 1, 2026
+
+### Transfer System Convergence
+
+Major refactoring of the transfer dispatching layer to eliminate ~1,200 lines of duplicated code and fix 5 concurrency bugs caused by copy-paste drift.
+
+### New Abstractions
+
+- **`RunBatch` / `RunBatchFromChannel`** (`internal/transfer/batch.go`): Shared batch executor replaces 10+ inline worker pool implementations. Generic over `WorkItem` interface. `RunBatch` handles known item sets; `RunBatchFromChannel` handles streaming mode with dynamic worker scaling (sample 20 items, resample every 50, scale up to 2x per interval). Both enforce adaptive concurrency via `ComputeBatchConcurrency`.
+- **`ConflictResolver[A]`** (`internal/cli/conflict.go`): Generic conflict state machine replaces 6 inline lock/switch/prompt/unlock patterns across download and upload helpers. Handles Once→All escalation, concurrent access, and abort propagation.
+- **Shared `ProgressReader` / `UploadProgressReader`** (`internal/cloud/transfer/progress.go`): Threshold-based progress reporting wrappers extracted from S3 and Azure providers. `UploadProgressReader` includes Seek rollback for SDK retry scenarios.
+
+### Bug Fixes
+
+- **Bug #1**: GUI streaming download used hardcoded 5 workers instead of adaptive concurrency. Now uses `RunBatchFromChannel` with `ResourceManager` for file-size-based worker scaling.
+- **Bug #2**: CLI pipelined folder upload computed adaptive worker count via `ComputeBatchConcurrency` but spawned workers using the raw `fileConcurrency` parameter. Now uses the computed `cliUploadWorkerCount`.
+- **Bug #3**: CLI sequential folder upload created a resource manager but never used it for batch concurrency. Now calls `ComputeBatchConcurrency` and uses the adaptive result.
+- **Bug #4**: Daemon created a new `TransferManager` per file, defeating resource pooling. Now creates one `TransferManager` per job and reuses it across all files.
+- **Bug #5**: Download shortcut enforced 1–10 max-concurrent range while all other commands used 1–20. Now uses `constants.MinMaxConcurrent`–`constants.MaxMaxConcurrent`.
+
+### Centralized Constants
+
+- `DispatchChannelBuffer = 256` and `WorkChannelBuffer = 100` replace magic numbers across 6 files.
+- `ProgressReaderThreshold = 1MB` shared between S3 and Azure providers.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/batch.go` | **NEW**: `RunBatch`, `RunBatchFromChannel`, `CollectErrors`, `ComputedWorkers` |
+| `internal/transfer/batch_test.go` | **NEW**: 20 tests with `-race` (empty, single, error, cancel, adaptive, streaming, scaling) |
+| `internal/cli/conflict.go` | **NEW**: `ConflictResolver[A]` with 4 convenience constructors |
+| `internal/cli/conflict_test.go` | **NEW**: 14 tests (concurrency, escalation, abort, all action types) |
+| `internal/cloud/transfer/progress.go` | **NEW**: `ProgressReader`, `UploadProgressReader`, `ProgressReaderThreshold` |
+| `internal/services/transfer_service.go` | Deleted 2 dead batch methods; migrated 3 methods to `RunBatch`/`RunBatchFromChannel` |
+| `internal/cli/download_helper.go` | Migrated 2 worker pools to `RunBatch`; conflict handling via `ConflictResolver` |
+| `internal/cli/folder_download_helper.go` | Migrated worker pool; conflict handling via `ConflictResolver` |
+| `internal/cli/folder_upload_helper.go` | Migrated 2 worker pools; conflict/error handling via `ConflictResolver`; Bugs #2, #3 fixed |
+| `internal/cli/folders.go` | Updated `uploadFiles` call site for `ConflictResolver` API |
+| `internal/cli/shortcuts.go` | Bug #5: max-concurrent range uses constants |
+| `internal/daemon/daemon.go` | Bug #4: `TransferManager` reused per job |
+| `internal/cloud/providers/s3/streaming_concurrent.go` | Use shared `ProgressReader` types |
+| `internal/cloud/providers/azure/streaming_concurrent.go` | Use shared `ProgressReader` types |
+| `internal/constants/app.go` | `DispatchChannelBuffer`, `WorkChannelBuffer` |
+
+---
+
+## v4.8.0 - March 1, 2026
+
+### Performance
+
+- **Adaptive concurrency**: Concurrent transfer count now scales dynamically based on file size distribution in each batch. Small files (<100MB) run up to 20 concurrent transfers, medium files (100MB–1GB) up to 10, and large files (>1GB) stay at 5. The resource manager validates the adaptive count against thread pool capacity and available memory before applying it. Works symmetrically across GUI and CLI, uploads and downloads.
+- **FileInfo enrichment / GetFileInfo elimination**: Folder listing API responses now parse full file metadata (encryption keys, storage info, checksums, path parts). Downloads use this pre-fetched metadata directly, eliminating per-file `GetFileInfo()` API calls. For a 13,000-file folder, this saves ~2 hours of rate-limited API overhead. Falls back gracefully when metadata is incomplete.
+- **page_size=1000 enforcement**: All folder listing API calls now enforce `page_size=1000`, including pagination URLs returned by the API (which default to 25). Reduces pagination calls ~40x for large folders (e.g., 83 calls instead of ~538 for 13,468 items).
+- **CLI TransferHandle wiring**: CLI download and upload paths now create a resource manager and pass `TransferHandle` to each transfer, enabling per-file multi-threading based on file size. Previously CLI transfers were always single-threaded regardless of file size.
+
+### GUI Features
+
+- **Streaming scan-to-download**: Folder downloads now use a streaming pipeline where 8 concurrent scanner workers discover files and downloads begin within seconds — no more waiting for the full scan to complete. For a 13,000-file folder, this eliminates the ~40-minute scan-then-download delay.
+- **Evolving batch totals**: During streaming folder downloads, the batch total increases as files are discovered. The UI shows "X completed, Y discovered..." during scan, switching to "X of Y files" once the scan completes. Works through both the WebSocket event path and the polling path.
+- **Queued count display**: Batch rows in the Transfers tab now show "X downloading, Y queued" instead of just "X active".
+- **Scan progress feedback**: Both CLI and GUI show real-time scan progress (folders found, files found, bytes discovered) during folder downloads.
+
+### Bug Fixes
+
+- **Synchronous pre-registration**: `StartTransfers()` now pre-registers all tasks in the queue synchronously before launching async workers. Previously, the batch entry could disappear from the Transfers tab because registration happened inside the async goroutine after the enumeration-completed event fired.
+- **Streaming cancel gate**: `CancelBatch()` now cancels the batch-level context, stopping the streaming scanner, the registration goroutine, and in-flight downloads. Previously, cancelling a streaming batch only affected already-registered tasks while the scanner kept pushing new ones.
+- **Adaptive concurrency CLI activation**: Fixed `--max-concurrent` flag default (5) capping the adaptive concurrency result. When the user doesn't explicitly set `--max-concurrent`, the adaptive system now uses the full range (up to 20). Explicit `--max-concurrent N` still works as a hard cap.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/api/client.go` | Extended `FileInfo` struct with encryption/storage fields; `ToCloudFile()` with nil-guard; `page_size=1000` enforcement on all pages |
+| `internal/cli/folder_download_helper.go` | `RemoteFileTask.CloudFile`; `TransferHandle` wiring; adaptive concurrency; scan progress callback; streaming scanner |
+| `internal/cli/folder_upload_helper.go` | `TransferHandle` wiring for pipelined and sequential modes; adaptive concurrency |
+| `internal/cli/folders.go` | Adaptive `--max-concurrent` default (use `MaxMaxConcurrent` when flag not explicitly set) |
+| `internal/services/transfer_service.go` | `TransferRequest.FileInfo`; adaptive concurrency in batch execution; synchronous pre-registration; `StartStreamingDownloadBatch` |
+| `internal/resources/manager.go` | `ComputeBatchConcurrency()` with thread pool and memory validation |
+| `internal/constants/app.go` | `MaxMaxConcurrent=20`; adaptive concurrency tier constants |
+| `internal/transfer/queue.go` | `batchCancelFuncs` for streaming cancel; `batchScanInProgress` + `TotalKnown`; `CleanupBatch()` |
+| `internal/events/events.go` | `TotalKnown` in `BatchProgressEvent` |
+| `internal/wailsapp/event_bridge.go` | `TotalKnown` in `BatchProgressEventDTO` + mapper |
+| `internal/wailsapp/transfer_bindings.go` | `TotalKnown` in `TransferBatchDTO` + polling mapper |
+| `internal/wailsapp/file_bindings.go` | Streaming `StartFolderDownload`; `FileInfo` wiring; updated return semantics |
+| `internal/version/version.go` | v4.7.8 → v4.8.0 |
+| `wails.json` | v4.8.0 |
+| `frontend/package.json` | v4.8.0 |
+| `frontend/src/types/events.ts` | `totalKnown` field |
+| `frontend/src/stores/transferStore.ts` | `totalKnown` in both event handler and polling path |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Queued count display; evolving total display |
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Updated status message for streaming return semantics |
+
+---
+
+## v4.7.8 - February 28, 2026
+
+### Internal
+
+- **Intermediate development version**: Internal version bump during v4.8.0 development. All changes from this version are included in and superseded by the v4.8.0 release. No separate release was made.
+
+---
+
+## v4.7.7 - February 27, 2026
+
+### GUI Performance for Bulk Transfers
+
+- **Transfer grouping**: Folder uploads/downloads, PUR pipelines, and Single-Job uploads now collapse into a single aggregate batch row in the Transfers tab instead of rendering 10,000+ individual rows. Batches show aggregate progress, speed, ETA, file count, and expand to show paginated individual tasks on demand.
+- **Backend event optimization**: Individual progress events for batched transfers are suppressed at the queue layer; a 1/sec aggregate `BatchProgressEvent` per active batch replaces the previous 20k events/sec flood. Terminal events (completed, failed, cancelled) still publish individually.
+- **Polling optimization**: Transfers tab now fetches lightweight batch aggregates + ungrouped tasks (~1KB/cycle) instead of serializing all 10k+ tasks (~2MB/cycle) over IPC every poll.
+- **New backend endpoints**: `GetTransferBatches`, `GetUngroupedTransferTasks`, `GetBatchTasks`, `CancelBatch`, `RetryFailedInBatch`.
+- **New frontend components**: `BatchRow` (collapsible with aggregate progress), `TransferRow` with `React.memo()`, grouped rendering (enumerations → batches → ungrouped tasks).
+
+### Rate Limit Validation
+
+- **End-to-end validation**: All 7 test scenarios pass against platform.rescale.com — coordinator auto-spawn, concurrent process sharing, rate enforcement under sustained load (200 concurrent processes), visibility messages, zero 429 errors, bucket state inspection.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/transfer/queue.go` | Batch grouping, `BatchProgressEvent` emission, batch-level cancel/retry |
+| `internal/services/transfer_service.go` | Batch ID propagation, batch-level worker pools |
+| `internal/wailsapp/transfer_bindings.go` | `GetTransferBatches`, `GetBatchTasks`, `CancelBatch`, `RetryFailedInBatch` endpoints |
+| `internal/wailsapp/event_bridge.go` | `BatchProgressEvent` forwarding |
+| `internal/events/events.go` | `BatchProgressEvent` type |
+| `frontend/src/stores/transferStore.ts` | Batch state management, enumeration-to-batch reconciliation |
+| `frontend/src/components/tabs/TransfersTab.tsx` | `BatchRow`, `TransferRow`, paginated batch expansion |
+| `internal/version/version.go` | v4.7.6 → v4.7.7 |
+
+---
+
+## v4.7.6 - February 26, 2026
+
+### Auto-Download Reliability Fixes
+
+- **Credential path fix (CRITICAL)**: Service-mode API key resolution now checks per-user token path before falling back to SYSTEM's AppData path. Fixes silent "no API key" failures when running as Windows Service.
+- **Token persistence**: GUI writes API key to token file before every daemon/service start, preventing token-file-missing races.
+- **Config propagation**: Every config save now triggers `ReloadDaemonConfig()`, which restarts the subprocess daemon or triggers a service rescan. No more stale config until next poll.
+- **IPC ReloadConfig protocol**: New `MsgReloadConfig` IPC command with active-download awareness. Subprocess mode defers restart during active downloads; service mode delegates to `TriggerRescan()`.
+- **Pre-flight validation**: Enable toggle now validates API key and download folder before enabling auto-download. Specific error messages on failure.
+- **Progressive pending state**: "Activating..." now shows time-based messages (0-10s, 10-30s, 30s+) with Open Logs and Retry buttons. Backend error codes surface real issues.
+- **Install & Start Service**: Combined idempotent `install-and-start` CLI subcommand and GUI button — single UAC prompt for both operations.
+- **Lookback fix**: `getJobCompletionTime()` retries once on failure; jobs with unknown completion time are included (not incorrectly skipped).
+- **IPC lifecycle**: IPC server starts before daemon on Windows to prevent brief IPC-unavailable window. Timeout increased from 2s to 5s.
+- **Skip-and-retry**: Users skipped for missing API key are retried on each service rescan when a key becomes available.
+- **Tray auto-launch**: GUI automatically launches the tray companion app on startup (Windows only).
+- **Daemon stderr surfacing**: IPC timeout errors now include the last 3 lines from daemon-stderr.log.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/daemon/daemon.go` | Credential path resolution, lookback fix, IPC lifecycle |
+| `internal/daemon/service_windows.go` | Install-and-start, service rescan, skip-and-retry |
+| `internal/ipc/handler.go` | `MsgReloadConfig` with active-download awareness |
+| `internal/wailsapp/daemon_bindings.go` | Pre-flight validation, progressive pending state, stderr surfacing |
+| `internal/cli/daemon.go` | `install-and-start` subcommand |
+| `internal/version/version.go` | v4.7.5 → v4.7.6 |
+
+---
+
+## v4.7.5 - February 25, 2026
+
+### Bug Fixes
+- **Empty file upload fix:** Fixed crash when uploading 0-byte files through the streaming
+  upload path. The encryption goroutine now correctly emits one encrypted empty part for
+  0-byte files instead of producing zero parts, which caused "upload incomplete: received
+  0 of 1 parts" errors.
+- **Empty file download fix:** Fixed download validation rejecting legitimate 0-byte files.
+  The post-download size check now allows 0-byte results when the expected `DecryptedSize`
+  is also 0.
+
+### Maintenance
+- **Dead code cleanup:** Removed unused ThroughputMonitor infrastructure from the resource
+  manager. Throughput data was being collected at 5 call sites but never read (the scaler
+  goroutines use timer-based TryAcquireMore instead). Also fixed a minor memory leak where
+  completed transfer samples were never cleaned up.
+- **Build artifact cleanup:** Excluded .wixpdb files from release workflow artifacts
+  (`.github/workflows/release.yml`).
+- **Repository hygiene:** Added `.github/commit-whitelist.md` to `.gitignore` (local-only
+  development file).
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/cloud/upload/upload.go` | Handle 0-byte files in encryption goroutine; guard progress NaN |
+| `internal/cloud/download/download.go` | Allow 0-byte download when DecryptedSize is 0 |
+| `internal/resources/manager.go` | Remove unused ThroughputMonitor |
+| `internal/constants/app.go` | Remove unused throughput constants |
+| `internal/transfer/manager.go` | Remove unused RecordThroughput method |
+| `internal/cloud/providers/s3/pre_encrypt.go` | Remove RecordThroughput call |
+| `internal/cloud/providers/azure/pre_encrypt.go` | Remove RecordThroughput call |
+| `internal/cloud/providers/s3/download.go` | Remove RecordThroughput call |
+| `internal/cloud/transfer/downloader.go` | Remove RecordThroughput calls (2 sites) |
+| `internal/resources/manager_test.go` | Remove throughput-related tests |
+| `.github/workflows/release.yml` | Exclude .wixpdb from artifact upload |
+| `.gitignore` | Add .github/commit-whitelist.md exclusion |
+| `internal/version/version.go` | v4.7.4 → v4.7.5 |
+| `installer/License.rtf` | Copyright year 2025 → 2026 |
+| `installer/build-installer.ps1` | Copyright year 2025 → 2026 (2 instances) |
+| `build/build_dist.ps1` | Copyright year 2025 → 2026 (1 instance) |
+| `internal/transfer/manager_test.go` | Remove TestRecordThroughput |
+
+---
+
+## v4.7.4 - February 23, 2026
+
+### Unified Transfer Architecture
+
+All uploads — PUR pipeline, Single-Job local files, and File Browser — now route through TransferService. Previously, PUR and Single-Job uploads bypassed TransferService entirely, making them invisible in the Transfers tab.
+
+- **PUR uploads visible in Transfers tab**: `uploadWorker()` and `ResolveSharedFiles()` delegate to `TransferService.UploadFileSync()` via a new `SyncUploader` interface. CLI mode falls back to direct upload.
+- **Single-Job uploads visible in Transfers tab**: Local file uploads (including folder expansion via `filepath.WalkDir`) now use `TransferService.UploadFileSync()` with proper error propagation (state manager update + CompleteEvent on failure).
+- **Unified concurrency**: All uploads share TransferService's semaphore, preventing overloading the API regardless of entry point.
+- **Source label badges**: Transfers tab shows origin context — "PUR" (blue) and "Job" (green) badges next to task names. FileBrowser transfers show no badge (default).
+- **Action button gating**: Cancel/Retry buttons are hidden for PUR and SingleJob transfers (pipeline manages its own retry/cancel). "Cancel All" only cancels FileBrowser-owned transfers.
+
+### Bug Fixes
+
+- **Cancel actually stops transfers**: `executeUpload()`, `executeDownload()`, and retry paths now create a derived `context.WithCancel()` and register the cancel function via `queue.SetCancel()`. Previously, cancel only updated task state while the underlying transfer kept running.
+- **Cancel-state race fixed**: After cancellation, the `context.Canceled` error is detected and `queue.Fail()` is skipped, preventing the cancelled state from being overwritten with "failed".
+- **TransferHandle leak fixed**: All execution paths (`executeUpload`, `executeDownload`, retries, `UploadFileSync`) now call `defer transferHandle.Complete()` after allocation. Previously, transfer handles were allocated but never completed in the File Browser upload/download paths.
+- **Single-Job folder expansion**: "Add Folder" in Single-Job local files mode now correctly expands directory paths to individual files before uploading. Previously, directory paths were passed directly to `upload.UploadFile()` which rejected them.
+- **Tar deletion safety**: `safeRemoveTar()` replaces raw `os.Remove()` with 5 guardrails: canonical path resolution (reject symlinks), path must be under pipeline's tempDir, regular file only, must end in `.tar.gz` or `.tar`, and filename must match the FNV hash suffix pattern from `GenerateTarPath()`.
+- **PUR/SingleJob transfer speed display**: Pipeline and Single-Job uploads now show transfer speed and ETA in the Transfers tab. Previously speed was always 0 because the task's file size wasn't set (the adapter didn't pass it). `UploadFileSync()` now updates the task size from `os.Stat` before progress callbacks fire.
+
+### GUI Improvements
+
+- **Tarball options in PUR tab**: New "Delete local tar files after successful upload" checkbox under Extra Input Files. Explanatory text clarifies how PUR handles folders (tar.gz, upload, auto-decompress).
+- **Single-Job input mode labels**: Renamed for clarity — "Directory" to "Archive Directory", "Local Files" to "Select Files", "Remote Files" to "Rescale Library". Each mode includes descriptive helper text.
+- **Tags on File Browser upload**: Upload confirmation dialog now includes an optional tags input (comma-separated) with live tag chip preview. Tags are applied after each file/folder upload (non-fatal on failure).
+
+### Tags During Upload (CLI + GUI)
+
+- **CLI `files upload --tags`**: Comma-separated tags applied after each successful file upload. Tag failure is non-fatal (logged as warning).
+- **CLI `folders upload-dir --tags`**: Tags applied to all uploaded files after folder upload completes.
+- **GUI tags**: File Browser upload dialog accepts tags, passed through to `TransferService` which applies them via `apiClient.AddFileTags()` after upload.
+- **Tag normalization**: Centralized `NormalizeTags()` and `ParseCommaSeparated()` in `internal/util/tags/` — trims whitespace, deduplicates, removes empty strings.
+
+### Architecture
+
+- **`SyncUploader` interface** (`internal/pur/pipeline/pipeline.go`): Abstracts synchronous file upload for the pipeline. Implemented by `syncUploaderAdapter` in the engine layer, backed by `TransferService.UploadFileSync()`.
+- **`RunOptions` struct** (`internal/core/engine.go`): Replaces individual parameters on `RunFromSpecsWithOptions()` with a struct containing `ExtraInputFiles`, `DecompressExtras`, `RmTarOnSuccess`.
+- **`UploadFileSync()`** (`internal/services/transfer_service.go`): New synchronous upload method — registers task in queue (immediately visible), acquires semaphore, uploads with dual progress callback (queue + external), applies tags, returns `*models.CloudFile`.
+- **Source label constants** (`internal/services/types.go`): `SourceLabelPUR`, `SourceLabelSingleJob`, `SourceLabelFileBrowser` — typed constants to prevent drift.
+- **`TrackTransferWithLabel()`** (`internal/transfer/queue.go`): New method that sets `SourceLabel` on created tasks for origin tracking.
+
+### Files Changed
+
+| File | Changes |
+|------|---------|
+| `internal/services/transfer_service.go` | Add `UploadFileSync()`, `applyTags()`; fix all execution paths with `transferHandle.Complete()`, cancel context, cancel-state race |
+| `internal/services/types.go` | Source label constants; `SourceLabel`, `Tags` on `TransferRequest`/`TransferTask`; `UploadFileSyncParams` |
+| `internal/transfer/task.go` | `SourceLabel` field, `NewTransferTaskWithLabel()`, `Clone()` update |
+| `internal/transfer/queue.go` | `TrackTransferWithLabel()`, `UpdateSize()` methods |
+| `internal/pur/pipeline/pipeline.go` | `SyncUploader` interface, `SyncUploadParams`, `SetSyncUploader()`; delegate in `uploadWorker()` + `ResolveSharedFiles()`; `safeRemoveTar()` |
+| `internal/core/engine.go` | `RunOptions` struct, `syncUploaderAdapter`, wired into all 3 pipeline creation sites |
+| `internal/wailsapp/job_bindings.go` | `PURRunOptionsDTO.RmTarOnSuccess`; Single-Job folder expansion + `UploadFileSync()`; `failSingleJob()` helper |
+| `internal/wailsapp/transfer_bindings.go` | `SourceLabel`, `Tags` on DTOs; `StartTransfers` passes both through |
+| `internal/wailsapp/file_bindings.go` | `StartFolderUpload` accepts `uploadTags` parameter; `SourceLabel`/`Tags` on `TransferRequest` |
+| `internal/pathutil/resolve.go` | `HasFNVSuffix()` for tar deletion safety |
+| `internal/util/tags/tags.go` | **NEW** — `NormalizeTags()`, `ParseCommaSeparated()` |
+| `internal/util/tags/tags_test.go` | **NEW** — Tests for tag normalization |
+| `internal/cli/files.go` | `--tags` flag on `upload` command |
+| `internal/cli/upload_helper.go` | Thread `uploadTags` through `executeFileUploadWithDuplicateCheck` and `UploadFilesWithIDs` |
+| `internal/cli/folders.go` | `--tags` flag on `upload-dir` command |
+| `internal/cli/folder_upload_helper.go` | `UploadedFileIDs` on `UploadResult`; collect IDs in success paths |
+| `internal/cli/jobs.go` | Updated `UploadFilesWithIDs` callers for new `tags` parameter |
+| `frontend/src/stores/jobStore.ts` | `rmTarOnSuccess` in `PURRunOptions` |
+| `frontend/src/stores/transferStore.ts` | `cancelAllTransfers` filters by sourceLabel (FileBrowser only) |
+| `frontend/src/components/tabs/PURTab.tsx` | rmTarOnSuccess checkbox; PUR folder handling explanatory text |
+| `frontend/src/components/tabs/TransfersTab.tsx` | Source label badges; cancel/retry button gating |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | Input mode label renames + helper text |
+| `frontend/src/components/tabs/FileBrowserTab.tsx` | Tags input in upload confirmation; `ConfirmDialog` children prop |
+| `frontend/wailsjs/go/models.ts` | `sourceLabel`, `tags`, `rmTarOnSuccess` on DTOs |
+| `frontend/wailsjs/go/wailsapp/App.js` | `StartFolderUpload` accepts 3rd arg |
+| `frontend/wailsjs/go/wailsapp/App.d.ts` | `StartFolderUpload` type updated |
+| `internal/version/version.go` | v4.7.4 |
+| `wails.json` | v4.7.4 |
+| `frontend/package.json` | v4.7.4 |
+
+---
+
+## v4.7.3 - February 22, 2026
+
+### Run Session Persistence and Monitoring
+
+Users can now navigate away from the PUR or Single Job tab during an active run and return without losing progress. Active runs also survive app restart.
+
+- **Tab navigation persistence**: Running PUR or Single Job submissions no longer lose state when switching tabs. The new `runStore` tracks active runs at the app level, and `singleJobStore` preserves Single Job form state.
+- **PUR view modes**: On return during an active PUR run, users see a choice screen with "Monitor Active Run" or "Prepare New Run". The chosen view persists across further tab switches.
+- **Run monitoring banner**: When preparing a new PUR run while one is active, a collapsible progress banner shows at the top of the tab.
+- **Job queue**: When a run is active, the submit button becomes "Queue Run" (PUR) or "Queue Job" (Single Job). Queued jobs auto-start with retry/backoff after the current run completes.
+- **App restart recovery**: Active run metadata is persisted to localStorage. On restart, historical state files from disk are loaded and classified (completed/failed/interrupted).
+- **Active run indicator**: Footer status bar shows live progress for the currently running PUR or single job.
+- **Run history in Activity tab**: Completed runs (session-level) displayed in a collapsible panel with expandable job tables. "Load from disk" loads historical runs from state files.
+- **Log field mapping fix (C5)**: Pipeline log entries now correctly use `data.jobName` and `data.stage` from `LogEventDTO` instead of the incorrect `data.detail` and `data.category`.
+- **Cancellation handling (C1)**: Frontend-optimistic cancel with 5-second reconciliation timeout prevents stale "running" state.
+- **Path traversal sanitization (C8)**: `GetHistoricalJobRows` validates run IDs to prevent directory traversal attacks.
+- **Event listener safety (C9)**: `runStore` uses unsub callbacks instead of `EventsOff` to prevent removing other stores' event listeners.
+- **PUR monitor view state sync (C10)**: `workflowState` in jobStore never transitioned from `'executing'` to `'completed'` on normal pipeline completion — only on cancel. Added `useEffect` in PURTab to sync `workflowState` from `activeRun.status`, making the executing view status-aware (header, cancel button, "View Results" button). All three "Prepare New Run" buttons now call `reset()` before `setPurViewMode('configure')` to ensure clean navigation back to the config form.
+- **SingleJob executing view state sync (C11)**: Same class of bug — `singleJobStore.state` stayed `'executing'` after normal completion. Added `useEffect` sync, status-aware executing view (header adapts, cancel/submit-another buttons conditional), fixed `handleCancel` race condition (only forces failed if run was actually cancelled), and fixed `handleStartOver` to call guarded `clearActiveRun()` before `sjStore.reset()`.
+
+### Architecture
+
+- **New stores**: `runStore.ts` (central run state manager), `singleJobStore.ts` (persistent Single Job form state)
+- **Shared types**: `types/jobs.ts` (extracted from jobStore to break import cycles), `types/run.ts` (ActiveRun, CompletedRun, QueuedJob discriminated union)
+- **Extracted widgets**: `JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge` moved to `widgets/` for reuse
+- **Extracted utilities**: `computeStageStats` (was duplicated in jobStore), `formatDuration`/`formatDurationMs`
+- **jobStore refactored**: Event subscriptions, polling, and runtime state moved to runStore. jobStore is now purely the PUR workflow configuration state machine.
+
+### Backend
+
+- **`GetRunHistory()`**: Lists state files from `~/.rescale-int/states/` sorted by modification time
+- **`GetHistoricalJobRows(runId)`**: Loads job rows from a historical state file with path-traversal sanitization
+
+### Files Changed
+| File | Changes |
+|------|---------|
+| `frontend/src/types/jobs.ts` | **NEW** — Shared domain types (JobRow, JobSpec, PipelineLogEntry, etc.) |
+| `frontend/src/types/run.ts` | **NEW** — Run types (ActiveRun, CompletedRun, QueuedJob) |
+| `frontend/src/types/index.ts` | Re-exports new type files |
+| `frontend/src/stores/runStore.ts` | **NEW** — Central run state manager |
+| `frontend/src/stores/singleJobStore.ts` | **NEW** — SingleJob persistent state |
+| `frontend/src/stores/jobStore.ts` | Remove event/polling/runtime state, delegate to runStore |
+| `frontend/src/stores/index.ts` | Add new store exports |
+| `frontend/src/components/widgets/JobsTable.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/StatsBar.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/PipelineStageSummary.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/PipelineLogPanel.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/ErrorSummary.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/StatusBadge.tsx` | **NEW** — Extracted from PURTab |
+| `frontend/src/components/widgets/index.ts` | Add new widget exports |
+| `frontend/src/utils/stageStats.ts` | **NEW** — computeStageStats extracted from jobStore |
+| `frontend/src/utils/formatDuration.ts` | **NEW** — Duration formatting utilities |
+| `frontend/src/components/tabs/PURTab.tsx` | View modes, monitor, banner, queue, use shared widgets; C10: useEffect sync, status-aware executing view, "Prepare New Run" reset fix |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | Use singleJobStore, runStore, queue mechanism; C11: useEffect sync, status-aware executing view, handleCancel race fix, handleStartOver clearActiveRun guard |
+| `frontend/src/components/tabs/ActivityTab.tsx` | Run history panel |
+| `frontend/src/App.tsx` | runStore event listeners, recovery, footer indicator |
+| `internal/wailsapp/job_bindings.go` | Add GetRunHistory, GetHistoricalJobRows |
+| `internal/wailsapp/job_bindings_test.go` | Tests for path traversal, missing files, empty dir |
+| `internal/version/version.go` | v4.7.3 |
+| `wails.json` | v4.7.3 |
+| `frontend/package.json` | v4.7.3 |
+| `main.go` | Version comment |
+
+---
+
+## v4.7.2 - February 21, 2026
+
+### Consistent Load/Save UI
+
+- **PUR "Load Existing Base Job Settings" dropdown**: PUR tab now has a dropdown matching SingleJob's pattern with CSV, JSON, and SGE format options (previously was a single button that only opened a JSON file dialog).
+- **PUR "Save As..." dropdown**: Template can now be saved as CSV, JSON, or SGE from the scan configuration step, matching SingleJob's save functionality.
+- **SingleJob label update**: "Load From..." button renamed to "Load Existing Job Settings" for clarity.
+
+### Label Improvements
+
+- **PUR subtitle**: "Parallel Upload and Run" subtitle added to the progress bar header area, visible in all workflow states.
+- **PUR label clarity**: "Configure Job Settings" → "Configure Base Job Settings", "Create New Settings" → "Configure New Base Job Settings", "Scan Directories" → "Scan to Create Jobs" throughout the PUR workflow (button text, progress bar step label, and headings).
+- **SetupTab inner card**: Renamed inner "Advanced Settings" card heading to "Logging Settings" to eliminate redundant naming with the outer collapsible section.
+
+### Bug Fixes
+
+- **orgCode preservation**: Fixed `loadJobFromJSON` and `loadJobFromSGE` in jobStore.ts to include `orgCode` in the returned object. Previously `orgCode` was silently dropped when loading templates via JSON or SGE in both SingleJob and PUR workflows.
+
+### Files Changed
+| File | Changes |
+|------|---------|
+| `frontend/src/components/tabs/PURTab.tsx` | Load dropdown, save dropdown, subtitle, label renames, new handlers, WORKFLOW_STEPS update |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | "Load From..." → "Load Existing Job Settings" |
+| `frontend/src/components/tabs/SetupTab.tsx` | Inner "Advanced Settings" → "Logging Settings" |
+| `frontend/src/stores/jobStore.ts` | Added `orgCode` to `loadJobFromJSON` and `loadJobFromSGE` return objects |
+| `internal/version/version.go` | Version bump to v4.7.2 |
+| `main.go` | Version comment |
+| `wails.json` | productVersion |
+| `frontend/package.json` | version |
+| `frontend/package-lock.json` | version |
+
+---
+
+## v4.7.1 - February 21, 2026
+
+### Disk Space Error UX
+
+- **Disk space error banner**: Downloads that fail due to insufficient disk space now trigger a prominent amber banner at the top of the Transfers tab showing the number of failed downloads, available space, and space needed. The banner persists after "Clear Completed" and requires explicit dismiss. New failures re-show the banner automatically.
+- **Short error labels**: Failed transfers with disk space errors show "No disk space" instead of a truncated long error string. Full error text is available via hover tooltip on all transfer rows.
+- **Error classification**: Added `classifyError()` and `extractDiskSpaceInfo()` utilities in `transferStore.ts` to detect disk space errors from backend error strings (matches `insufficient disk space`, `ENOSPC`, `disk quota exceeded`, etc.).
+
+### Settings Reorganization
+
+- **PUR-specific settings moved from Setup tab**: Worker Configuration (tar/upload/job workers), Tar Options (exclude/include patterns, compression, flatten), and Directory Scan Settings (scan prefix, validation pattern) have been removed from Setup tab's Advanced Settings.
+- **Pipeline Settings in PUR tab**: Workers and tar options now appear as "Pipeline Settings" in the PUR tab, visible in both the scan step and the jobs-validated step (ensuring CSV-loaded workflows also have access).
+- **Tar options in SingleJob directory mode**: When using directory input mode in SingleJob tab, tar options (exclude/include patterns, compression, flatten) are now visible inline below the directory selector.
+- **Scan option persistence**: Validation pattern and scan prefix are now persisted to config.csv when changed on the PUR tab, ensuring values survive app restarts.
+- **Compression normalization**: Legacy `gz` values in config.csv are normalized to `gzip` when loaded, ensuring consistent frontend display.
+- **Engine fallback removal**: `Scan()` and `ScanToSpecs()` in `engine.go` no longer fall back to `config.ValidationPattern` when the scan options don't specify one. The PUR tab is now the single source of truth for these values.
+
+### Files Changed
+| File | Changes |
+|------|---------|
+| `frontend/src/stores/transferStore.ts` | Error classification, `extractDiskSpaceInfo`, `errorType` on TransferTask |
+| `frontend/src/stores/index.ts` | Export new types and functions |
+| `frontend/src/components/tabs/TransfersTab.tsx` | DiskSpaceBanner, improved TransferRow error display, hover tooltips |
+| `frontend/src/components/tabs/SetupTab.tsx` | Removed Directory Scan Settings, Worker Configuration, Tar Options sections |
+| `frontend/src/components/tabs/PURTab.tsx` | PipelineSettings component, scan option persistence to config |
+| `frontend/src/components/tabs/SingleJobTab.tsx` | Tar options section for directory mode |
+| `internal/core/engine.go` | Removed validation pattern fallback to config in Scan/ScanToSpecs |
+| `internal/config/csv_config.go` | Updated TarCompression comment |
+| `internal/wailsapp/config_bindings.go` | Normalize `gz` to `gzip` in GetConfig() |
+
+---
+
+## v4.7.0 - February 21, 2026
+
+### PUR Performance & Reliability
+
+Major improvements to the PUR (Parallel Upload and Run) pipeline addressing directory scanning speed, startup latency, path reliability, and GUI log visibility.
+
+#### Directory Path Fix
+- **Absolute path normalization**: Replaced relative path generation in `Scan()` and `ScanToSpecs()` with `pathutil.ResolveAbsolutePath()`. Relative paths failed when CWD at tar-creation time differed from CWD at scan time (especially in GUI mode where CWD is the application install directory). Paths are now normalized to absolute at three points: engine scan output, pipeline ingress (`NewPipeline`), and tar worker (belt-and-suspenders for legacy CSV/state files).
+
+#### Directory Scanning Speed
+- **`filepath.WalkDir` migration**: Replaced `filepath.Walk` with `filepath.WalkDir` in `engine.go` (recursive scan) and `multipart.go` (`ValidateRunDirectory`). `WalkDir` avoids per-entry `os.Stat` syscalls, significantly reducing I/O on directories with many files.
+- **`SkipDir` after match**: When a directory matches the scan pattern (e.g., `Run_*`), the walker now returns `filepath.SkipDir` to avoid descending into matched directories. This is the primary source of slow recursive scans — without it, the walker traverses all files inside each matched run directory. Nested matches (e.g., `Run_1/sub/Run_2`) are intentionally not discovered; run directories are expected to be siblings.
+
+#### PUR Startup Speed
+- **Concurrent version resolution**: `resolveAnalysisVersions()` (which calls the paginated `GetAnalyses` API) now runs in a goroutine concurrent with tar and upload workers. Previously this was a blocking call that delayed pipeline start. Tar and upload workers start immediately; only job workers wait on the `versionsResolved` channel before creating jobs. Data race safe via single write before channel close.
+
+#### Activity Log Routing
+- **Log callback duplicate fix**: `p.logf()` previously called both the log callback AND `log.Printf`, causing duplicate stdout output when the Engine's `LogCallback` (which itself calls `log.Printf` via `publishLog`) was set. Now `logf` only calls `log.Printf` when no callback is set (CLI mode without Engine).
+- **Full pipeline log routing**: Converted ~35 `log.Printf` calls across `resolveAnalysisVersions`, `ResolveSharedFiles`, `tarWorker`, `uploadWorker`, `jobWorker`, `progressReporter`, and `Run` completion to use `p.logf()` with appropriate level/stage/jobName. All pipeline messages now flow through the EventBus callback to the GUI Activity Log.
+
+#### Phase Timing & Observability
+- Added `pipelineStart` timestamp and timing logs at shared file resolution, worker startup, first tarball creation (`sync.Once`), and pipeline completion for concrete before/after measurement of startup delay improvements.
+
+#### Test Infrastructure
+- **`AnalysisResolver` interface**: Added narrow interface for the `GetAnalyses` API call, enabling mock injection for deterministic pipeline testing without real API calls.
+- **New `pipeline_test.go`**: 5 tests covering path normalization at ingress, concurrent version resolution timing, log callback delivery, and version resolution map correctness. All pass with `-race`.
+- **Updated `engine_test.go`**: 3 new tests verifying scan output paths are absolute and that `SkipDir` prevents nested directory matches.
+
+#### Files Changed
+| File | Changes |
+|------|---------|
+| `internal/pur/pipeline/pipeline.go` | All changes: path normalization, concurrent version resolution, log routing, timing logs, `AnalysisResolver` interface |
+| `internal/core/engine.go` | Absolute paths in Scan/ScanToSpecs, WalkDir + SkipDir for recursive scan |
+| `internal/util/multipart/multipart.go` | WalkDir in ValidateRunDirectory |
+| `internal/core/engine_test.go` | 3 new tests for absolute paths and SkipDir |
+| `internal/pur/pipeline/pipeline_test.go` | New file: 5 tests for pipeline behavior |
+
+#### Known Issues (Fixed in v4.7.1)
+- **Download errors under low disk space**: Download failures due to insufficient disk space showed truncated error messages in the narrow status column, making the cause invisible. **Fixed in v4.7.1** with a prominent amber banner showing available/needed space, short "No disk space" labels, and hover tooltips for full error details.
+
+---
+
 ## v4.6.8 - February 18, 2026
 
 ### Bug Fixes
@@ -138,7 +1092,7 @@ Comprehensive gap analysis between old Python PUR (v0.7.6) and Interlink PUR, wi
 **Missing CLI Flags:** Exposed config-level features as CLI flags on `pur run` and `pur resume`:
 - `--include-pattern` / `--exclude-pattern` — Tar file filtering
 - `--flatten-tar` — Remove subdirectory structure in tarball
-- `--tar-compression` — "none" or "gz"
+- `--tar-compression` — "none" or "gzip" (accepts legacy "gz")
 - `--tar-workers` / `--upload-workers` / `--job-workers` — Worker pool sizes
 - `--rm-tar-on-success` — Delete local tar after successful upload
 

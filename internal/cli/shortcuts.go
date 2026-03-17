@@ -90,8 +90,10 @@ Examples:
 			logger := GetLogger()
 
 			// Validate max-concurrent
-			if maxConcurrent < 1 || maxConcurrent > 10 {
-				return fmt.Errorf("--max-concurrent must be between 1 and 10, got %d", maxConcurrent)
+			// v4.8.1: Use constants for range validation (was hardcoded 1-10, Bug #5)
+			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
+				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
+					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
 
 			// Get API client
@@ -116,7 +118,6 @@ Examples:
 // Shortcut for: jobs list
 func newLsShortcut() *cobra.Command {
 	var limit int
-	var status string
 
 	cmd := &cobra.Command{
 		Use:   "ls",
@@ -128,7 +129,7 @@ Equivalent to: rescale-int jobs list
 Examples:
   rescale-int ls
   rescale-int ls --limit 10
-  rescale-int ls --status Completed`,
+  rescale-int ls -n 20`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Directly call the jobs list logic instead of delegating to a new command
 			logger := GetLogger()
@@ -184,7 +185,6 @@ Examples:
 	}
 
 	cmd.Flags().IntVarP(&limit, "limit", "n", 10, "Maximum number of jobs to list")
-	cmd.Flags().StringVarP(&status, "status", "s", "", "Filter by job status")
 
 	return cmd
 }

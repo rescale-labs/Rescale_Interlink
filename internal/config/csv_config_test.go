@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -550,4 +551,35 @@ func TestMergeWithFlagsAndTokenFile(t *testing.T) {
 			t.Errorf("APIKey = %q, want 'env-key'", cfg.APIKey)
 		}
 	})
+}
+
+func TestGetConfigPathForProfile(t *testing.T) {
+	tests := []struct {
+		name        string
+		profilePath string
+		wantEmpty   bool
+		wantSuffix  string // platform-dependent suffix to check
+	}{
+		{"empty profile returns empty", "", true, ""},
+		{"non-empty profile returns path", "/home/testuser", false, "config.csv"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetConfigPathForProfile(tt.profilePath)
+			if tt.wantEmpty && result != "" {
+				t.Errorf("Expected empty, got %q", result)
+			}
+			if !tt.wantEmpty {
+				if result == "" {
+					t.Error("Expected non-empty path")
+				}
+				if !strings.HasSuffix(result, tt.wantSuffix) {
+					t.Errorf("Expected path ending in %q, got %q", tt.wantSuffix, result)
+				}
+				if !strings.Contains(result, tt.profilePath) {
+					t.Errorf("Expected path to contain profile path %q, got %q", tt.profilePath, result)
+				}
+			}
+		})
+	}
 }

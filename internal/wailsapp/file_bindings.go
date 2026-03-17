@@ -15,10 +15,14 @@ import (
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/validation"
 	"github.com/rescale/rescale-int/internal/pathutil"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
+	"github.com/rescale/rescale-int/internal/transfer/folder"
 )
 
 // translateAPIError converts common API errors to user-friendly messages.
@@ -314,6 +318,42 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 	return folderContentsToDTO(contents)
 }
 
+// ValidateRemoteFolder checks that a remote folder exists and is accessible.
+// v4.8.6: Lightweight preflight check — fetches a single item from the first page.
+// Does NOT use FolderCache.Get() (which fetches all pages).
+func (a *App) ValidateRemoteFolder(folderID string) error {
+	if a.engine == nil {
+		return ErrNoEngine
+	}
+	apiClient := a.engine.API()
+	if apiClient == nil {
+		return fmt.Errorf("API client not configured")
+	}
+	if folderID == "" {
+		return fmt.Errorf("no destination folder specified")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := apiClient.ListFolderContentsPage(ctx, folderID, "", 1)
+	if err != nil {
+		return fmt.Errorf("folder not found or inaccessible: %w", err)
+	}
+	return nil
+}
+
+// ValidateLocalDirectory checks that a local directory exists and is a directory.
+// v4.8.6: Lightweight preflight check for download destination.
+func (a *App) ValidateLocalDirectory(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("directory not found: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path is not a directory: %s", path)
+	}
+	return nil
+}
+
 // CreateRemoteFolder creates a new folder.
 func (a *App) CreateRemoteFolder(name string, parentID string) (string, error) {
 	if a.engine == nil {
@@ -435,9 +475,11 @@ type FolderDownloadResultDTO struct {
 // v4.0.0: Implements folder download in GUI using TransferService for progress tracking.
 // Scans remote folder, creates local structure, queues files to TransferService.
 // v4.0.8: Added enumeration events for real-time scanning progress in Transfers tab.
+// v4.7.7: Restructured enumeration events — emits EventEnumerationCompleted only after
+// StartTransfers succeeds, with deferred completion on all error paths.
 // folderName: the display name for the folder (used as the local folder name)
+// v4.8.0: Rewritten for streaming scan+download — returns immediately, downloads begin within seconds.
 func (a *App) StartFolderDownload(folderID string, folderName string, destPath string) FolderDownloadResultDTO {
-	// Helper to emit log events to Activity tab
 	displayName := folderName
 	if displayName == "" {
 		displayName = folderID
@@ -454,127 +496,231 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		}
 	}
 
-	// v4.0.8: Helper to emit enumeration events
 	enumID := fmt.Sprintf("enum_dl_%d", time.Now().UnixNano())
-	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string) {
+	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string, phase string) {
 		if a.engine != nil && a.engine.Events() != nil {
 			a.engine.Events().Publish(&events.EnumerationEvent{
-				BaseEvent:    events.BaseEvent{EventType: eventType, Time: time.Now()},
-				ID:           enumID,
-				FolderName:   displayName,
-				Direction:    "download",
-				FoldersFound: foldersFound,
-				FilesFound:   filesFound,
-				BytesFound:   bytesFound,
-				IsComplete:   isComplete,
-				Error:        errMsg,
+				BaseEvent:     events.BaseEvent{EventType: eventType, Time: time.Now()},
+				ID:            enumID,
+				FolderName:    displayName,
+				Direction:     "download",
+				FoldersFound:  foldersFound,
+				FilesFound:    filesFound,
+				BytesFound:    bytesFound,
+				IsComplete:    isComplete,
+				Error:         errMsg,
+				StatusMessage: statusMessage,
+				Phase:         phase,
 			})
 		}
 	}
 
-	emitLog(events.InfoLevel, fmt.Sprintf("Starting folder download: %s to %s", displayName, destPath))
+	// v4.8.3: Timing instrumentation for Issue #1 diagnosis
+	startTime := time.Now()
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] StartFolderDownload entry at %s — folder=%s dest=%s", startTime.Format("15:04:05.000"), displayName, destPath))
 
 	if a.engine == nil {
 		emitLog(events.ErrorLevel, "Engine not initialized")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoEngine.Error(), "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: ErrNoEngine.Error()}
 	}
 
-	// Get API client from engine
 	apiClient := a.engine.API()
 	if apiClient == nil {
 		emitLog(events.ErrorLevel, "API client not configured")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "API client not configured", "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: "API client not configured"}
 	}
 
-	// Get TransferService for queueing file downloads
 	ts := a.engine.TransferService()
 	if ts == nil {
 		emitLog(events.ErrorLevel, "TransferService not available")
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, ErrNoTransferService.Error(), "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: ErrNoTransferService.Error()}
 	}
 
-	ctx := context.Background()
+	// v4.8.2: Unified cancellable context — CancelBatch() → scanCancel() → stops everything
+	scanCtx, scanCancel := context.WithCancel(context.Background())
 
-	// v4.0.8: Emit enumeration started event
-	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "")
+	// Emit enumeration started
+	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "", events.EnumPhaseScanning)
 
-	// Scan remote folder structure using shared CLI function
-	// v4.0.5: Changed to InfoLevel so users see scanning progress (issue #19)
-	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
-	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, folderID, "")
-	if err != nil {
-		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to scan folder: %s", err.Error()))
-		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error())
-		return FolderDownloadResultDTO{Error: "Failed to scan remote folder: " + err.Error()}
+	// v4.8.6: Validate destination path exists before creating subdirectories
+	if info, err := os.Stat(destPath); err != nil {
+		scanCancel()
+		errMsg := fmt.Sprintf("Download destination not found: %s", err.Error())
+		emitLog(events.ErrorLevel, errMsg)
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, errMsg, "", events.EnumPhaseError)
+		return FolderDownloadResultDTO{Error: errMsg}
+	} else if !info.IsDir() {
+		scanCancel()
+		errMsg := fmt.Sprintf("Download destination is not a directory: %s", destPath)
+		emitLog(events.ErrorLevel, errMsg)
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, errMsg, "", events.EnumPhaseError)
+		return FolderDownloadResultDTO{Error: errMsg}
 	}
 
-	// v4.0.8: Calculate total bytes and emit enumeration completed event
-	var scanTotalBytes int64
-	for _, file := range allFiles {
-		scanTotalBytes += file.Size
-	}
-	emitEnumeration(events.EventEnumerationCompleted, len(allFolders), len(allFiles), scanTotalBytes, true, "")
-
-	emitLog(events.InfoLevel, fmt.Sprintf("Found %d folders, %d files", len(allFolders), len(allFiles)))
-
-	// Determine root folder name
+	// Create root output directory
 	rootFolderName := folderName
 	if rootFolderName == "" {
 		rootFolderName = folderID
 	}
+	// v4.8.7 RF1: Validate folder name from API to prevent path traversal
+	if err := validation.ValidateFilename(rootFolderName); err != nil {
+		scanCancel()
+		emitLog(events.ErrorLevel, fmt.Sprintf("Invalid folder name from API: %s", err.Error()))
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Invalid folder name: "+err.Error(), "", events.EnumPhaseError)
+		return FolderDownloadResultDTO{Error: "Invalid folder name: " + err.Error()}
+	}
 	rootOutputDir := filepath.Join(destPath, rootFolderName)
-
-	// Create root folder
 	if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
+		scanCancel() // Release context resources on early return
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to create root folder: %s", err.Error()))
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Failed to create root folder: "+err.Error(), "", events.EnumPhaseError)
 		return FolderDownloadResultDTO{Error: "Failed to create root folder: " + err.Error()}
 	}
-	foldersCreated := 1
 
-	// Create local directory structure
-	for _, folder := range allFolders {
-		localPath := filepath.Join(rootOutputDir, folder.RelativePath)
-		if err := os.MkdirAll(localPath, 0755); err != nil {
-			emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
-			continue
+	// v4.8.2: Warm proxy before first API call
+	inthttp.WarmupProxyIfNeeded(scanCtx, apiClient.GetConfig())
+
+	// v4.8.7: Pre-warm credentials synchronously before scan starts.
+	// This eliminates 2-5s of credential lock contention on the first download,
+	// since warmCredentialCache and executeDownloadTask both compete for credManager.mu.
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Starting credential pre-warm — elapsed=%s", time.Since(startTime)))
+	ts.WarmCredentialCache(scanCtx)
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Credential pre-warm complete — elapsed=%s", time.Since(startTime)))
+
+	// v4.8.0: Start streaming scan — files emitted as discovered
+	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
+	// v4.8.2: No enumeration progress during scan — batch row handles progress display.
+	// This eliminates phantom "Scanning" row flashing caused by EventEnumerationProgress
+	// re-creating the enumeration after reconciliation removes it.
+	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Starting ScanRemoteFolderStreaming — elapsed=%s", time.Since(startTime)))
+	scanEventCh, scanErrCh := cli.ScanRemoteFolderStreaming(scanCtx, apiClient, folderID, nil)
+
+	// Create request channel for streaming batch
+	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
+
+	// Mark scan in progress for TotalKnown tracking
+	ts.GetQueue().MarkBatchScanInProgress(enumID, true)
+
+	// Start streaming download batch (workers start consuming immediately)
+	// v4.8.2: Pass scanCancel so CancelBatch() → scanCancel() → cancels scanCtx → stops everything
+	if err := ts.StartStreamingDownloadBatch(scanCtx, requestCh, enumID, displayName, "FileBrowser", scanCancel); err != nil {
+		scanCancel() // Stop scan goroutines on batch start failure
+		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to start streaming batch: %s", err.Error()))
+		close(requestCh)
+		ts.GetQueue().MarkBatchScanInProgress(enumID, false)
+		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error(), "", events.EnumPhaseError)
+		return FolderDownloadResultDTO{Error: err.Error()}
+	}
+
+	// v4.8.0: Scan-consumer goroutine — owns requestCh, closes it on all exit paths
+	go func() {
+		defer close(requestCh)
+
+		var completionOnce sync.Once
+		emitCompletion := func(folders, files int, bytes int64, errMsg string) {
+			completionOnce.Do(func() {
+				phase := events.EnumPhaseComplete
+				if errMsg != "" {
+					phase = events.EnumPhaseError
+				}
+				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
+				emitEnumeration(events.EventEnumerationCompleted, folders, files, bytes, true, errMsg, "", phase)
+			})
 		}
-		foldersCreated++
-	}
-	emitLog(events.DebugLevel, fmt.Sprintf("Created %d local directories", foldersCreated))
+		// Safety net: ensure completion is emitted even on panic
+		defer emitCompletion(0, 0, 0, "scan goroutine exited unexpectedly")
 
-	// Build TransferRequests for each file
-	var totalBytes int64
-	var transferRequests []services.TransferRequest
+		var foldersCreated int
+		var filesQueued int
+		var totalBytes int64
+		firstScanEvent := true
+		firstFileQueued := true
 
-	for _, file := range allFiles {
-		localPath := filepath.Join(rootOutputDir, file.RelativePath)
-		transferRequests = append(transferRequests, services.TransferRequest{
-			Type:   services.TransferTypeDownload,
-			Source: file.FileID,    // Remote file ID
-			Dest:   localPath,      // Local file path
-			Name:   file.Name,
-			Size:   file.Size,
-		})
-		totalBytes += file.Size
-	}
-
-	// Queue downloads through TransferService
-	if len(transferRequests) > 0 {
-		if err := ts.StartTransfers(ctx, transferRequests); err != nil {
-			emitLog(events.ErrorLevel, fmt.Sprintf("Failed to queue downloads: %s", err.Error()))
-			return FolderDownloadResultDTO{
-				FoldersCreated: foldersCreated,
-				Error:          "Failed to queue file downloads: " + err.Error(),
+		for event := range scanEventCh {
+			if firstScanEvent {
+				emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] First scan event received — elapsed=%s", time.Since(startTime)))
+				firstScanEvent = false
+			}
+			if event.Folder != nil {
+				// v4.8.7 RF1: Validate folder path to prevent path traversal
+				if localPath, err := resolveSafeDownloadPath(event.Folder.RelativePath, rootOutputDir); err != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping folder with invalid path %q: %s", event.Folder.RelativePath, err.Error()))
+				} else if err := os.MkdirAll(localPath, 0755); err != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
+				} else {
+					foldersCreated++
+				}
+			}
+			if event.File != nil {
+				// v4.8.7 RF1: Validate file path to prevent path traversal
+				localPath, pathErr := resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
+				if pathErr != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", event.File.RelativePath, pathErr.Error()))
+					continue
+				}
+				req := services.TransferRequest{
+					Type:       services.TransferTypeDownload,
+					Source:     event.File.FileID,
+					Dest:       localPath,
+					Name:       event.File.Name,
+					Size:       event.File.Size,
+					BatchID:    enumID,
+					BatchLabel: displayName,
+					FileInfo:   event.File.CloudFile,
+				}
+				select {
+				case requestCh <- req:
+					if firstFileQueued {
+						emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] First file queued — elapsed=%s", time.Since(startTime)))
+						firstFileQueued = false
+					}
+					filesQueued++
+					totalBytes += event.File.Size
+					// v4.8.7: Update discovered totals immediately at file discovery
+					// for accurate progress denominator (symmetric with upload path).
+					ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
+				case <-scanCtx.Done():
+					emitCompletion(foldersCreated, filesQueued, totalBytes, "")
+					return
+				}
 			}
 		}
-	}
 
-	emitLog(events.InfoLevel, fmt.Sprintf("Queued %d files for download (%.2f MB)", len(transferRequests), float64(totalBytes)/(1024*1024)))
+		emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Scan loop exited — folders=%d files=%d elapsed=%s", foldersCreated, filesQueued, time.Since(startTime)))
 
+		// Check for scan errors
+		var scanErr error
+		select {
+		case scanErr = <-scanErrCh:
+		default:
+		}
+
+		// v4.8.2: Only report as error if we weren't cancelled — cancel is clean termination
+		if scanErr != nil && scanCtx.Err() == nil {
+			emitLog(events.ErrorLevel, fmt.Sprintf("Scan error: %s", scanErr.Error()))
+			emitCompletion(foldersCreated, filesQueued, totalBytes, scanErr.Error())
+			// v4.8.7: Report scan failure if no files were queued (total failure)
+			if filesQueued == 0 && a.reporter != nil {
+				a.reporter.Report(scanErr, reporting.CategoryTransfer, "folder_download", "")
+			}
+			return
+		}
+
+		// v4.8.7: Final discovered totals update (ensures exact count is set)
+		ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
+
+		emitLog(events.InfoLevel, fmt.Sprintf("Scan complete: %d folders, %d files (%.2f MB). Downloads in progress.",
+			foldersCreated, filesQueued, float64(totalBytes)/(1024*1024)))
+		emitCompletion(foldersCreated, filesQueued, totalBytes, "")
+	}()
+
+	// Return immediately — scan and downloads proceed in background
 	return FolderDownloadResultDTO{
-		FoldersCreated:  foldersCreated,
-		FilesDownloaded: len(transferRequests), // FilesQueued, will update as they complete
-		TotalBytes:      totalBytes,
+		FoldersCreated:  1, // Root folder created synchronously
+		FilesDownloaded: 0, // Streaming — files are being discovered/queued
 	}
 }
 
@@ -609,8 +755,8 @@ func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID strin
 		return FolderExistsCheckDTO{Error: "API client not configured"}
 	}
 
-	cache := cli.NewFolderCache()
-	folderID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, parentFolderID, folderName)
+	cache := folder.NewFolderCache()
+	folderID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, parentFolderID, folderName)
 	if err != nil {
 		return FolderExistsCheckDTO{Error: "Failed to check folder: " + err.Error()}
 	}
@@ -621,104 +767,237 @@ func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID strin
 	}
 }
 
+// CheckFoldersExistForUpload checks if multiple folders with the given names already exist
+// in the destination folder. v4.8.5 bugfix: Uses a shared FolderCache so that parent folder
+// contents are fetched once instead of once per folder, reducing the "Checking for existing
+// folders..." delay from 10-20s to <1s.
+func (a *App) CheckFoldersExistForUpload(folderNames []string, parentFolderID string) []FolderExistsCheckDTO {
+	ctx := context.Background()
+	results := make([]FolderExistsCheckDTO, len(folderNames))
+
+	if a.engine == nil {
+		for i := range results {
+			results[i] = FolderExistsCheckDTO{Error: ErrNoEngine.Error()}
+		}
+		return results
+	}
+
+	apiClient := a.engine.API()
+	if apiClient == nil {
+		for i := range results {
+			results[i] = FolderExistsCheckDTO{Error: "API client not configured"}
+		}
+		return results
+	}
+
+	// Single shared cache — parent folder contents fetched once for all checks
+	cache := folder.NewFolderCache()
+	for i, name := range folderNames {
+		folderID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, parentFolderID, name)
+		if err != nil {
+			results[i] = FolderExistsCheckDTO{Error: "Failed to check folder: " + err.Error()}
+		} else {
+			results[i] = FolderExistsCheckDTO{
+				Exists:   exists,
+				FolderID: folderID,
+			}
+		}
+	}
+
+	return results
+}
+
+// folderProgressWriter is an io.Writer that counts folder creation lines
+// and emits enumeration progress events to keep the UI updated during
+// the CreateFolderStructure phase. v4.7.7: Bridges folder creation to enumeration events.
+type folderProgressWriter struct {
+	enumID       string
+	folderName   string
+	direction    string
+	filesFound   int
+	foldersFound int
+	bytesFound   int64
+	totalDirs    int
+	dirsProcessed int
+	eventBus     *events.EventBus
+}
+
+func (w *folderProgressWriter) Write(p []byte) (n int, err error) {
+	w.dirsProcessed++
+	// Emit progress every folder (or every 3rd if >100 dirs, to reduce event volume)
+	if w.totalDirs <= 100 || w.dirsProcessed%3 == 0 || w.dirsProcessed == w.totalDirs {
+		if w.eventBus != nil {
+			w.eventBus.Publish(&events.EnumerationEvent{
+				BaseEvent:      events.BaseEvent{EventType: events.EventEnumerationProgress, Time: time.Now()},
+				ID:             w.enumID,
+				FolderName:     w.folderName,
+				Direction:      w.direction,
+				FoldersFound:   w.foldersFound,
+				FilesFound:     w.filesFound,
+				BytesFound:     w.bytesFound,
+				IsComplete:     false,
+				StatusMessage:  fmt.Sprintf("Creating folders... (%d of %d)", w.dirsProcessed, w.totalDirs),
+				Phase:          events.EnumPhaseCreatingFolders,
+				FoldersTotal:   w.totalDirs,
+				FoldersCreated: w.dirsProcessed,
+			})
+		}
+	}
+	return len(p), nil
+}
+
 // StartFolderUpload uploads a local folder recursively to the Rescale platform.
 // v4.0.0: Implements folder upload in GUI by creating folder structure and
 // queueing files to the TransferService for upload with progress events.
 // v4.0.8: Added enumeration events for real-time scanning progress in Transfers tab.
+// v4.7.4: Added tags parameter for post-upload tagging.
+// v4.7.7: Restructured enumeration events — keeps enumeration row alive through folder
+// creation phase, emits EventEnumerationCompleted only after StartTransfers succeeds.
 // Uses merge mode (reuse existing folders) and queues all files for upload.
-func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUploadResultDTO {
+func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTags []string) FolderUploadResultDTO {
 	displayName := filepath.Base(localPath)
 	a.logInfo("folder-upload", fmt.Sprintf("Starting folder upload: %s", displayName))
 
 	// v4.0.8: Helper to emit enumeration events
 	enumID := fmt.Sprintf("enum_ul_%d", time.Now().UnixNano())
-	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string) {
+	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string, phase string) {
 		if a.engine != nil && a.engine.Events() != nil {
 			a.engine.Events().Publish(&events.EnumerationEvent{
-				BaseEvent:    events.BaseEvent{EventType: eventType, Time: time.Now()},
-				ID:           enumID,
-				FolderName:   displayName,
-				Direction:    "upload",
-				FoldersFound: foldersFound,
-				FilesFound:   filesFound,
-				BytesFound:   bytesFound,
-				IsComplete:   isComplete,
-				Error:        errMsg,
+				BaseEvent:     events.BaseEvent{EventType: eventType, Time: time.Now()},
+				ID:            enumID,
+				FolderName:    displayName,
+				Direction:     "upload",
+				FoldersFound:  foldersFound,
+				FilesFound:    filesFound,
+				BytesFound:    bytesFound,
+				IsComplete:    isComplete,
+				Error:         errMsg,
+				StatusMessage: statusMessage,
+				Phase:         phase,
 			})
 		}
 	}
 
+	emitLog := func(level events.LogLevel, msg string) {
+		if a.engine != nil && a.engine.Events() != nil {
+			a.engine.Events().Publish(&events.LogEvent{
+				BaseEvent: events.BaseEvent{EventType: events.EventLog, Time: time.Now()},
+				Level:     level,
+				Message:   msg,
+				Stage:     "folder-upload",
+				JobName:   displayName,
+			})
+		}
+	}
+
+	// v4.7.7: Deferred completion — ensures EventEnumerationCompleted is emitted on ALL exit paths
+	completionEmitted := false
+	var deferredError string
+	defer func() {
+		if !completionEmitted {
+			phase := events.EnumPhaseComplete
+			if deferredError != "" {
+				phase = events.EnumPhaseError
+			}
+			emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, deferredError, "", phase)
+		}
+	}()
+
 	if a.engine == nil {
 		a.logError("folder-upload", "Engine not initialized")
+		deferredError = ErrNoEngine.Error()
 		return FolderUploadResultDTO{Error: ErrNoEngine.Error()}
 	}
 
 	// Get API client from engine
 	apiClient := a.engine.API()
 	if apiClient == nil {
+		deferredError = "API client not configured"
 		return FolderUploadResultDTO{Error: "API client not configured"}
 	}
 
 	// Get TransferService for queueing file uploads
 	ts := a.engine.TransferService()
 	if ts == nil {
+		deferredError = ErrNoTransferService.Error()
 		return FolderUploadResultDTO{Error: ErrNoTransferService.Error()}
 	}
 
 	// Validate local path
 	fileInfo, err := os.Stat(localPath)
 	if err != nil {
-		return FolderUploadResultDTO{Error: "Failed to access directory: " + err.Error()}
+		deferredError = "Failed to access directory: " + err.Error()
+		return FolderUploadResultDTO{Error: deferredError}
 	}
 	if !fileInfo.IsDir() {
-		return FolderUploadResultDTO{Error: "Path is not a directory: " + localPath}
+		deferredError = "Path is not a directory: " + localPath
+		return FolderUploadResultDTO{Error: deferredError}
+	}
+
+	// v4.8.8: Resolve symlinks in root path so WalkStream operates on the real directory.
+	// IMPORTANT: Do NOT overwrite localPath — it's used for display name (rootFolderName)
+	// and user-facing messages. Only use resolvedLocalPath for filesystem operations.
+	resolvedLocalPath, err := pathutil.ResolveAbsolutePath(localPath)
+	if err != nil {
+		deferredError = "Failed to resolve directory path: " + err.Error()
+		return FolderUploadResultDTO{Error: deferredError}
 	}
 
 	// Create logger for this upload
 	logger := logging.NewLogger("folder-upload", nil)
 	ctx := context.Background()
 
+	// v4.8.2: Warm proxy before first API call
+	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+
+	// v4.8.7: Pre-warm credentials synchronously before upload starts.
+	// Symmetric with download path — eliminates credential lock contention.
+	ts.WarmCredentialCache(ctx)
+
 	// v4.0.8: Emit enumeration started event
-	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "")
+	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "", events.EnumPhaseScanning)
 
 	// Get parent folder ID (default to My Library if empty)
 	parentID := destFolderID
 	if parentID == "" {
 		folders, err := apiClient.GetRootFolders(ctx)
 		if err != nil {
-			emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error())
+			deferredError = err.Error()
+			// v4.8.7: Report pre-transfer API failure
+			if a.reporter != nil {
+				a.reporter.Report(err, reporting.CategoryTransfer, "folder_upload", "")
+			}
 			return FolderUploadResultDTO{Error: "Failed to get root folders: " + err.Error()}
 		}
 		parentID = folders.MyLibrary
 	}
 
-	// Build directory tree (include hidden files for completeness)
-	directories, files, _, err := cli.BuildDirectoryTree(localPath, true)
-	if err != nil {
-		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, err.Error())
-		return FolderUploadResultDTO{Error: "Failed to scan directory: " + err.Error()}
-	}
-
-	// v4.0.8: Calculate total bytes from scanned files for enumeration event
-	var scanTotalBytes int64
-	for _, filePath := range files {
-		if info, err := os.Stat(filePath); err == nil {
-			scanTotalBytes += info.Size()
+	// v4.8.6: Validate destination folder exists before starting heavy work
+	if parentID != "" {
+		valCtx, valCancel := context.WithTimeout(ctx, 30*time.Second)
+		if _, err := apiClient.ListFolderContentsPage(valCtx, parentID, "", 1); err != nil {
+			valCancel()
+			deferredError = fmt.Sprintf("Destination folder not found or inaccessible: %s", err.Error())
+			// v4.8.7: Report pre-transfer API failure
+			if a.reporter != nil {
+				a.reporter.Report(err, reporting.CategoryTransfer, "folder_upload", "")
+			}
+			return FolderUploadResultDTO{Error: deferredError}
 		}
+		valCancel()
 	}
-	emitEnumeration(events.EventEnumerationCompleted, len(directories), len(files), scanTotalBytes, true, "")
-	a.logInfo("folder-upload", fmt.Sprintf("Scan complete: %d folders, %d files", len(directories), len(files)))
 
 	// Initialize folder cache for API call optimization
-	cache := cli.NewFolderCache()
+	cache := folder.NewFolderCache()
 
 	// Create or get root folder (merge mode: use existing if it exists)
 	rootFolderName := filepath.Base(localPath)
 	a.logInfo("folder-upload", fmt.Sprintf("Checking if folder '%s' exists in parent %s...", rootFolderName, parentID))
-	rootFolderID, exists, err := cli.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
+	rootFolderID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
 	if err != nil {
 		a.logError("folder-upload", fmt.Sprintf("Failed to check root folder: %v", err))
-		return FolderUploadResultDTO{Error: "Failed to check root folder: " + err.Error()}
+		deferredError = "Failed to check root folder: " + err.Error()
+		return FolderUploadResultDTO{Error: deferredError}
 	}
 	a.logInfo("folder-upload", fmt.Sprintf("Folder check complete: exists=%v, id=%s", exists, rootFolderID))
 
@@ -731,25 +1010,25 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 			// v4.0.8: Handle "folder already exists" error with clear user guidance
 			if api.IsFileExistsError(err) {
 				a.logWarn("folder-upload", fmt.Sprintf("Folder '%s' already exists, checking if visible...", rootFolderName))
-				// Invalidate cache and re-check to see if we can find it
 				cache.Invalidate(parentID)
-				existingID, found, findErr := cli.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
+				existingID, found, findErr := folder.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
 				if findErr != nil {
 					a.logError("folder-upload", fmt.Sprintf("Failed to find existing folder: %v", findErr))
+					deferredError = "A folder named '" + rootFolderName + "' already exists but couldn't be accessed"
 					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but couldn't be accessed. Please check your Rescale Trash and permanently delete it, then try again."}
 				}
 				if found {
-					// Folder exists and is visible - use it (merge mode)
 					rootFolderID = existingID
 					mergedIntoFolder = rootFolderName
 					a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
 				} else {
-					// Folder exists (duplicate error) but not visible - likely in Trash
 					a.logError("folder-upload", fmt.Sprintf("Folder '%s' exists but is not visible - may be in Trash", rootFolderName))
+					deferredError = "Folder exists but is not visible - may be in Trash"
 					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but is not visible. Please check your Rescale Trash and permanently delete it, then try again."}
 				}
 			} else {
 				a.logError("folder-upload", fmt.Sprintf("Failed to create root folder: %v", err))
+				deferredError = translateAPIError(err)
 				return FolderUploadResultDTO{Error: "Failed to create folder: " + translateAPIError(err)}
 			}
 		} else {
@@ -757,82 +1036,130 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string) FolderUpl
 			foldersCreated++
 		}
 	} else {
-		// Folder already exists and was found - use it (merge mode)
 		mergedIntoFolder = rootFolderName
 		a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
 	}
 
-	// Populate cache for root folder (v4.0.4: log warning if cache warming fails)
+	// Populate cache for root folder
 	if _, err := cache.Get(ctx, apiClient, rootFolderID); err != nil {
 		logger.Warn().Err(err).Str("folderID", rootFolderID).Msg("Failed to warm cache for root folder")
 	}
 
-	// Create folder structure with merge mode (skip existing folders)
-	folderConflictMode := cli.ConflictMergeAll
-	a.logInfo("folder-upload", "Creating folder structure on remote...")
-	mapping, created, err := cli.CreateFolderStructure(
-		ctx, apiClient, cache, localPath, directories, rootFolderID,
-		&folderConflictMode, 3, logger, nil, nil, // 3 = default folder concurrency
-	)
-	if err != nil {
-		a.logError("folder-upload", fmt.Sprintf("Failed to create folders: %v", err))
-		return FolderUploadResultDTO{Error: "Failed to create folder structure: " + err.Error()}
+	// v4.8.7 Plan 2b: Shared orchestrator replaces ~280 lines of inline pipeline.
+	uploadCtx, uploadCancel := context.WithCancel(context.Background())
+
+	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
+
+	// Mark scan in progress + start streaming upload batch
+	ts.GetQueue().MarkBatchScanInProgress(enumID, true)
+
+	if err := ts.StartStreamingUploadBatch(uploadCtx, requestCh, enumID, displayName, "FileBrowser", uploadCancel); err != nil {
+		uploadCancel()
+		close(requestCh)
+		ts.GetQueue().MarkBatchScanInProgress(enumID, false)
+		deferredError = "Failed to start streaming batch: " + err.Error()
+		return FolderUploadResultDTO{Error: deferredError}
 	}
-	foldersCreated += created
-	a.logInfo("folder-upload", fmt.Sprintf("Created %d folders on remote", foldersCreated))
 
-	// Queue files for upload using TransferService
-	var totalBytes int64
-	var transferRequests []services.TransferRequest
-
-	for _, filePath := range files {
-		// Get parent folder ID from mapping
-		dirPath := filepath.Dir(filePath)
-		remoteFolderID, ok := mapping[dirPath]
-		if !ok {
-			// Fallback to root if directory not in mapping
-			remoteFolderID = mapping[localPath]
-			if remoteFolderID == "" {
-				remoteFolderID = rootFolderID
+	var completionOnce sync.Once
+	emitCompletion := func(foldersFound, filesFound int, bytesFound int64, errMsg string) {
+		completionOnce.Do(func() {
+			phase := events.EnumPhaseComplete
+			if errMsg != "" {
+				phase = events.EnumPhaseError
 			}
-		}
-
-		// Get file info
-		info, err := os.Stat(filePath)
-		if err != nil {
-			logger.Warn().Str("file", filePath).Err(err).Msg("Skipping file")
-			continue
-		}
-
-		transferRequests = append(transferRequests, services.TransferRequest{
-			Type:   services.TransferTypeUpload,
-			Source: filePath,
-			Dest:   remoteFolderID,
-			Name:   filepath.Base(filePath),
-			Size:   info.Size(),
+			emitEnumeration(events.EventEnumerationCompleted,
+				foldersFound, filesFound, bytesFound, true, errMsg, "", phase)
 		})
-		totalBytes += info.Size()
 	}
 
-	// Start transfers
-	if len(transferRequests) > 0 {
-		a.logInfo("folder-upload", fmt.Sprintf("Queueing %d files for upload...", len(transferRequests)))
-		if err := ts.StartTransfers(ctx, transferRequests); err != nil {
-			a.logError("folder-upload", fmt.Sprintf("Failed to queue uploads: %v", err))
-			return FolderUploadResultDTO{
-				FoldersCreated: foldersCreated,
-				Error:          "Failed to queue file uploads: " + err.Error(),
-			}
-		}
-		a.logInfo("folder-upload", fmt.Sprintf("Queued %d files (%.2f MB) for upload", len(transferRequests), float64(totalBytes)/(1024*1024)))
-	} else {
-		a.logWarn("folder-upload", "No files to upload in folder")
-	}
+	_, _ = folder.RunOrchestrator(uploadCtx,
+		folder.OrchestratorConfig{
+			RootPath:          resolvedLocalPath, // v4.8.8: Use resolved path for filesystem walk
+			RootRemoteID:      rootFolderID,
+			IncludeHidden:     true,
+			FolderConcurrency: constants.DefaultFolderConcurrency,
+			ConflictMode:      folder.ConflictMergeAll,
+			ConflictPrompt:    nil, // GUI: always merge, no interactive prompt
+			Logger:            logger,
+			APIClient:         apiClient,
+			Cache:             cache,
+		},
+		folder.OrchestratorCallbacks[services.TransferRequest]{
+			OnFileDiscovered: func(snap folder.ProgressSnapshot) {
+				// v4.8.5 bugfix: Update discovered totals on every file so the polling
+				// path always has an accurate count.
+				ts.GetQueue().UpdateBatchDiscovered(enumID, snap.TotalFiles, snap.TotalBytes)
+				// Enumeration events emitted every 100 files to limit event volume.
+				if snap.TotalFiles%100 == 0 || snap.TotalFiles == 1 {
+					emitEnumeration(events.EventEnumerationProgress,
+						snap.TotalDirs, snap.TotalFiles, snap.TotalBytes, false, "",
+						fmt.Sprintf("Scanning local files... (%d found)", snap.TotalFiles),
+						events.EnumPhaseScanning)
+				}
+			},
+			OnFolderReady: func(snap folder.ProgressSnapshot, localPath, remoteID string) {
+				// v4.8.5: Emit folder creation progress every 3 folders
+				if snap.TotalDirs%3 == 0 || snap.TotalDirs == 1 {
+					emitEnumeration(events.EventEnumerationProgress,
+						snap.TotalDirs, snap.TotalFiles, snap.TotalBytes, false, "",
+						fmt.Sprintf("Creating remote folders... (%d created)", snap.TotalDirs),
+						events.EnumPhaseCreatingFolders)
+				}
+			},
+			BuildItem: func(file localfs.FileEntry, remoteFolderID, rootPath string) services.TransferRequest {
+				return services.TransferRequest{
+					Type:        services.TransferTypeUpload,
+					Source:      file.Path,
+					Dest:        remoteFolderID,
+					Name:        file.Name,
+					Size:        file.Size,
+					SourceLabel: services.SourceLabelFileBrowser,
+					BatchID:     enumID,
+					BatchLabel:  displayName,
+					Tags:        uploadTags,
+				}
+			},
+			OnUnmappedFiles: func(parentDir string, count int) {
+				emitLog(events.WarnLevel, fmt.Sprintf("Skipping %d files in unmapped folder: %s", count, parentDir))
+			},
+			OnOrchestratorDone: func(r *folder.OrchestratorResult) {
+				// v4.8.5 bugfix preserved: scan marked complete when discovery
+				// count is final, BEFORE dispatcher drains (which blocks for minutes).
+				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
 
+				// Final update of discovered totals
+				ts.GetQueue().UpdateBatchDiscovered(enumID, r.DiscoveredFiles, r.DiscoveredBytes)
+
+				errMsg := ""
+				if r.WalkError != nil {
+					emitLog(events.ErrorLevel, fmt.Sprintf("Walk error: %v", r.WalkError))
+					errMsg = r.WalkError.Error()
+				}
+				if r.FolderError != nil {
+					emitLog(events.ErrorLevel, fmt.Sprintf("Folder creation error: %v", r.FolderError))
+					if errMsg == "" {
+						errMsg = "Folder creation failed: " + r.FolderError.Error()
+					}
+				} else {
+					emitLog(events.InfoLevel, fmt.Sprintf("Created %d remote folders", r.FoldersCreated))
+				}
+				emitLog(events.InfoLevel, fmt.Sprintf("All files queued for upload (%d discovered)", r.DiscoveredFiles))
+				emitCompletion(r.DiscoveredDirs, r.DiscoveredFiles, r.DiscoveredBytes, errMsg)
+			},
+		},
+		requestCh,
+	)
+
+	// Orchestrator owns completion via OnOrchestratorDone — prevent deferred emitter
+	completionEmitted = true
+
+	// v4.8.5: Return immediately with FilesQueued=0 — files are discovered asynchronously.
+	// Frontend already handles !totalKnown state. Batch events drive UI updates.
 	return FolderUploadResultDTO{
 		FoldersCreated: foldersCreated,
-		FilesQueued:    len(transferRequests),
-		TotalBytes:     totalBytes,
+		FilesQueued:    0,
+		TotalBytes:     0,
 		MergedInto:     mergedIntoFolder,
 	}
 }

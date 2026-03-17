@@ -10,16 +10,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/filescan"
 	"github.com/rescale/rescale-int/internal/pur/parser"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/reporting"
+	"github.com/rescale/rescale-int/internal/services"
 )
 
 // emitScanProgress publishes a scan progress event for software/hardware catalog scanning.
@@ -496,6 +498,7 @@ func (a *App) GetAutomations() AutomationsResultDTO {
 type PURRunOptionsDTO struct {
 	ExtraInputFiles  string `json:"extraInputFiles"`  // Comma-separated paths and/or id:<fileId>
 	DecompressExtras bool   `json:"decompressExtras"` // Whether to decompress extra files on cluster
+	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`   // v4.7.4: Delete local tar files after successful upload
 }
 
 // StartBulkRunWithOptions starts a bulk job run with additional PUR options.
@@ -537,7 +540,11 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 
 	go func() {
 		defer a.engine.EndRun()
-		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, opts.ExtraInputFiles, opts.DecompressExtras)
+		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, core.RunOptions{
+			ExtraInputFiles:  opts.ExtraInputFiles,
+			DecompressExtras: opts.DecompressExtras,
+			RmTarOnSuccess:   opts.RmTarOnSuccess,
+		})
 		if err != nil && ctx.Err() == nil {
 			wailsLogger.Error().Err(err).Msg("Pipeline run failed")
 		}
@@ -678,16 +685,67 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	go func() {
 		defer a.engine.EndRun()
 
-		// v4.6.8: For localFiles mode, upload each file first, then create the job
+		// v4.7.4: For localFiles mode, expand folders and upload via TransferService.
+		// Fixes: (1) folders are now expanded to individual files, (2) uploads are visible
+		// in the Transfers tab, (3) failures are propagated to the GUI.
 		if input.InputMode == "localFiles" {
-			var fileIDs []string
+			// Expand folder paths to individual files
+			var expandedPaths []string
 			for _, localPath := range input.LocalFiles {
-				cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
-					LocalPath: localPath,
-					APIClient: a.engine.API(),
-				})
-				if err != nil {
-					wailsLogger.Error().Err(err).Str("file", localPath).Msg("File upload failed")
+				info, statErr := os.Stat(localPath)
+				if statErr != nil {
+					wailsLogger.Error().Err(statErr).Str("path", localPath).Msg("Cannot access file/folder")
+					a.failSingleJob(jobSpec.JobName, fmt.Sprintf("Cannot access %s: %v", localPath, statErr))
+					return
+				}
+				if info.IsDir() {
+					filepath.WalkDir(localPath, func(path string, d os.DirEntry, walkErr error) error {
+						if walkErr != nil {
+							return nil // skip errors
+						}
+						if !d.IsDir() {
+							expandedPaths = append(expandedPaths, path)
+						}
+						return nil
+					})
+				} else {
+					expandedPaths = append(expandedPaths, localPath)
+				}
+			}
+
+			if len(expandedPaths) == 0 {
+				a.failSingleJob(jobSpec.JobName, "No files found in the selected paths")
+				return
+			}
+
+			ts := a.engine.TransferService()
+			if ts == nil {
+				a.failSingleJob(jobSpec.JobName, "Transfer service not available")
+				return
+			}
+
+			// v4.8.2: Warm proxy before first API call
+			if apiClient := a.engine.API(); apiClient != nil {
+				inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+			}
+
+			// v4.7.7: Generate batch ID for grouping uploads in Transfers tab
+			jobBatchID := fmt.Sprintf("job_%d", time.Now().UnixNano())
+			jobBatchLabel := fmt.Sprintf("Job: %s", jobSpec.JobName)
+
+			var fileIDs []string
+			for _, filePath := range expandedPaths {
+				cloudFile, uploadErr := ts.UploadFileSync(ctx, services.TransferRequest{
+					Type:        services.TransferTypeUpload,
+					Source:      filePath,
+					Name:        filepath.Base(filePath),
+					SourceLabel: services.SourceLabelSingleJob,
+					BatchID:     jobBatchID,    // v4.7.7
+					BatchLabel:  jobBatchLabel, // v4.7.7
+				}, services.UploadFileSyncParams{})
+				if uploadErr != nil {
+					wailsLogger.Error().Err(uploadErr).Str("file", filePath).Msg("File upload failed")
+					a.failSingleJob(jobSpec.JobName, fmt.Sprintf("Upload failed: %v", uploadErr))
 					return
 				}
 				fileIDs = append(fileIDs, cloudFile.ID)
@@ -702,6 +760,36 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	}()
 
 	return runID, nil
+}
+
+// failSingleJob reports a single-job failure to backend state and the event bus.
+// v4.7.4: Extracted for consistent error propagation in the localFiles upload path.
+func (a *App) failSingleJob(jobName string, errMsg string) {
+	// Update backend state for polling fallback
+	if sm := a.engine.GetState(); sm != nil {
+		sm.UpdateState(&models.JobState{
+			Index:        0,
+			JobName:      jobName,
+			UploadStatus: "failed",
+			SubmitStatus: "failed",
+			ErrorMessage: errMsg,
+		})
+	}
+
+	// Publish completion event so the GUI transitions out of "executing"
+	if a.engine.Events() != nil {
+		a.engine.Events().Publish(&events.CompleteEvent{
+			BaseEvent:   events.BaseEvent{EventType: events.EventComplete, Time: time.Now()},
+			TotalJobs:   1,
+			SuccessJobs: 0,
+			FailedJobs:  1,
+		})
+	}
+
+	// v4.8.7: Report pre-pipeline single-job failure for error reporting (Plan 3).
+	if a.reporter != nil {
+		a.reporter.Report(fmt.Errorf("%s", errMsg), reporting.CategoryJobCreate, "single_job", "")
+	}
 }
 
 // CancelRun cancels the current run.
@@ -827,6 +915,138 @@ func (a *App) ResetRun() {
 		a.runCancel = nil
 	}
 	a.runMu.Unlock()
+}
+
+// v4.7.3: RunHistoryEntryDTO represents a historical run entry.
+type RunHistoryEntryDTO struct {
+	RunID    string `json:"runId"`
+	RunType  string `json:"runType"`  // "pur" or "single", derived from ID prefix
+	ModTime  string `json:"modTime"`
+	JobCount int    `json:"jobCount"`
+}
+
+// GetRunHistory lists historical run state files, sorted by modification time (newest first).
+// v4.7.3: Added for run session persistence.
+func (a *App) GetRunHistory() []RunHistoryEntryDTO {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return []RunHistoryEntryDTO{}
+	}
+	stateDir := filepath.Join(homeDir, ".rescale-int", "states")
+
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return []RunHistoryEntryDTO{}
+	}
+
+	var results []RunHistoryEntryDTO
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".state") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		runID := strings.TrimSuffix(entry.Name(), ".state")
+
+		// Derive run type from ID prefix
+		runType := "pur"
+		if strings.HasPrefix(runID, "single_") {
+			runType = "single"
+		}
+
+		// Count job rows by counting non-header lines
+		filePath := filepath.Join(stateDir, entry.Name())
+		jobCount := 0
+		data, err := os.ReadFile(filePath)
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) > 1 {
+				jobCount = len(lines) - 1 // Subtract header row
+			}
+		}
+		// Tolerate malformed files: skip if we can't parse, don't fail the list
+
+		results = append(results, RunHistoryEntryDTO{
+			RunID:    runID,
+			RunType:  runType,
+			ModTime:  info.ModTime().Format(time.RFC3339),
+			JobCount: jobCount,
+		})
+	}
+
+	// Sort by modification time descending (newest first)
+	for i := 0; i < len(results); i++ {
+		for j := i + 1; j < len(results); j++ {
+			ti, _ := time.Parse(time.RFC3339, results[i].ModTime)
+			tj, _ := time.Parse(time.RFC3339, results[j].ModTime)
+			if tj.After(ti) {
+				results[i], results[j] = results[j], results[i]
+			}
+		}
+	}
+
+	return results
+}
+
+// GetHistoricalJobRows loads job rows from a historical state file.
+// v4.7.3: Added for run session persistence. Includes path traversal sanitization (C8).
+func (a *App) GetHistoricalJobRows(runID string) ([]JobRowDTO, error) {
+	// Path traversal sanitization (C8)
+	clean := filepath.Base(runID)
+	if clean != runID || strings.Contains(runID, "..") {
+		return nil, fmt.Errorf("invalid run ID: %s", runID)
+	}
+
+	stateFile := generateStateFilePath(clean)
+
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("state file not found for run: %s", runID)
+		}
+		return nil, fmt.Errorf("failed to read state file: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) <= 1 {
+		return []JobRowDTO{}, nil // Header only or empty
+	}
+
+	// Parse CSV-like state file: header + data rows
+	// State file format: index,jobName,directory,tarStatus,uploadStatus,uploadProgress,submitStatus,jobId,errorMessage
+	var rows []JobRowDTO
+	for i, line := range lines[1:] { // Skip header
+		fields := strings.Split(line, ",")
+		if len(fields) < 9 {
+			continue // Skip malformed rows
+		}
+
+		uploadProgress := 0.0
+		if len(fields) > 5 {
+			fmt.Sscanf(fields[5], "%f", &uploadProgress)
+		}
+
+		rows = append(rows, JobRowDTO{
+			Index:          i,
+			JobName:        fields[1],
+			Directory:      fields[2],
+			TarStatus:      fields[3],
+			UploadStatus:   fields[4],
+			UploadProgress: uploadProgress,
+			CreateStatus:   "",
+			SubmitStatus:   fields[6],
+			Status:         fields[6], // Use submit status as overall
+			JobID:          fields[7],
+			Progress:       0,
+			Error:          fields[8],
+		})
+	}
+
+	return rows, nil
 }
 
 // ValidateJobSpec validates a job specification.

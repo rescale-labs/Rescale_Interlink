@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo } from 'react'
+import { useEffect, useCallback, useMemo, useState, memo } from 'react'
 import {
   ArrowUpIcon,
   ArrowDownIcon,
@@ -7,11 +7,14 @@ import {
   TrashIcon,
   CheckCircleIcon,
   ExclamationCircleIcon,
+  ExclamationTriangleIcon,
   ClockIcon,
   FolderOpenIcon,
+  ChevronRightIcon,
+  ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useTransferStore, TransferTask, Enumeration } from '../../stores'
+import { useTransferStore, TransferTask, TransferBatch, DaemonBatchStatus, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA } from '../../stores'
 
 // Format file size
 // v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
@@ -22,6 +25,11 @@ function formatSize(bytes: number): string {
   const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
   const size = bytes / Math.pow(1024, exp)
   return `${size.toFixed(exp > 0 ? 1 : 0)} ${units[exp]}`
+}
+
+// Format number with commas
+function formatNumber(n: number): string {
+  return n.toLocaleString()
 }
 
 // Get status icon and color
@@ -46,7 +54,36 @@ function getStatusInfo(state: string): { icon: typeof CheckCircleIcon; color: st
   }
 }
 
+// v4.8.8: Pre-upload check row — shown while CheckFoldersExistForUpload is running
+function FolderCheckRow({ folderName }: { folderName: string }) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20">
+      <div className="flex-shrink-0 w-6">
+        <ArrowUpIcon className="w-5 h-5 text-blue-500" />
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0 w-48">
+        <FolderOpenIcon className="w-5 h-5 text-yellow-500" />
+        <div>
+          <div className="text-sm font-medium truncate" title={folderName}>
+            {folderName.length > 25 ? folderName.slice(0, 22) + '...' : folderName}
+          </div>
+          <div className="text-xs text-gray-500">Preparing upload...</div>
+        </div>
+      </div>
+      <div className="flex-1 min-w-0 flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-600">Checking destination for conflicts...</span>
+        </div>
+      </div>
+      <div className="flex-shrink-0 w-40" />
+      <div className="flex-shrink-0 w-20" />
+    </div>
+  )
+}
+
 // v4.0.8: Enumeration row for folder scan progress
+// v4.7.7: Enhanced with statusMessage display for folder creation phase
 interface EnumerationRowProps {
   enumeration: Enumeration
 }
@@ -54,12 +91,24 @@ interface EnumerationRowProps {
 function EnumerationRow({ enumeration }: EnumerationRowProps) {
   const isComplete = enumeration.isComplete
   const hasError = !!enumeration.error
+  const statusMessage = enumeration.statusMessage
+  // v4.8.5: Use structured phase instead of substring matching
+  const isCreatingFolders = enumeration.phase === 'creating_folders'
+  const isUpload = enumeration.direction === 'upload'
+
+  // v4.8.5: Direction-aware subtitle
+  const subtitle = isCreatingFolders
+    ? 'Creating remote folders...'
+    : isUpload ? 'Preparing upload...' : 'Scanning remote folder...'
+
+  // v4.8.5: Direction-aware spinner text
+  const spinnerText = isUpload ? 'Preparing...' : 'Scanning...'
 
   return (
     <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20">
       {/* Direction icon */}
       <div className="flex-shrink-0 w-6">
-        {enumeration.direction === 'upload' ? (
+        {isUpload ? (
           <ArrowUpIcon className="w-5 h-5 text-blue-500" />
         ) : (
           <ArrowDownIcon className="w-5 h-5 text-green-500" />
@@ -68,7 +117,7 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
 
       {/* Folder icon and name */}
       <div className="flex items-center gap-2 flex-shrink-0 w-48">
-        <FolderOpenIcon className="w-5 h-5 text-yellow-500" />
+        <FolderOpenIcon className={clsx('w-5 h-5', isCreatingFolders ? 'text-blue-500' : 'text-yellow-500')} />
         <div>
           <div className="text-sm font-medium truncate" title={enumeration.folderName}>
             {enumeration.folderName.length > 25
@@ -76,23 +125,48 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
               : enumeration.folderName}
           </div>
           <div className="text-xs text-gray-500">
-            Scanning folder...
+            {subtitle}
           </div>
         </div>
       </div>
 
-      {/* Scanning indicator */}
+      {/* Scanning/progress indicator */}
       <div className="flex-1 min-w-0 flex items-center gap-3">
-        {!isComplete && !hasError && (
+        {!isComplete && !hasError && !statusMessage && !isCreatingFolders && (
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-sm text-blue-600">Scanning...</span>
+            <span className="text-sm text-blue-600">{spinnerText}</span>
+          </div>
+        )}
+        {!isComplete && !hasError && isCreatingFolders && (
+          <div className="flex items-center gap-2">
+            <FolderOpenIcon className="w-4 h-4 text-blue-500" />
+            <span className="text-sm text-blue-600">
+              {enumeration.foldersTotal && enumeration.foldersTotal > 0
+                ? `Creating remote folders... (${enumeration.foldersCreated ?? 0} of ${enumeration.foldersTotal})`
+                : 'Creating remote folders...'}
+            </span>
+            {/* v4.8.5: Sub-progress bar for folder creation */}
+            {enumeration.foldersTotal && enumeration.foldersTotal > 0 && (
+              <div className="w-24 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.min(100, ((enumeration.foldersCreated ?? 0) / enumeration.foldersTotal) * 100)}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+        {!isComplete && !hasError && statusMessage && !isCreatingFolders && (
+          <div className="flex items-center gap-2">
+            <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-sm text-blue-600">{statusMessage}</span>
           </div>
         )}
         {isComplete && !hasError && (
           <div className="flex items-center gap-2">
             <CheckCircleIcon className="w-4 h-4 text-green-500" />
-            <span className="text-sm text-green-600">Scan complete</span>
+            <span className="text-sm text-green-600">Complete</span>
           </div>
         )}
         {hasError && (
@@ -120,13 +194,473 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
   )
 }
 
+// v4.7.7: Batch row for grouped transfer display
+// v4.8.7: Added statusFilter and onFilterChange for 10D status filtering
+interface BatchRowProps {
+  batch: TransferBatch
+  isExpanded: boolean
+  expandedTasks: TransferTask[]
+  statusFilter: string
+  onToggle: () => void
+  onCancel: () => void
+  onRetryFailed: () => void
+  onLoadMore: () => void
+  onCancelTask: (taskId: string) => void
+  onRetryTask: (taskId: string) => void
+  onFilterChange: (filter: string) => void
+}
+
+const BatchRow = memo(function BatchRow({
+  batch, isExpanded, expandedTasks, statusFilter, onToggle, onCancel, onRetryFailed, onLoadMore, onCancelTask, onRetryTask, onFilterChange
+}: BatchRowProps) {
+  const isActive = batch.queued > 0 || batch.active > 0 || !batch.totalKnown
+  const isAllComplete = batch.totalKnown && batch.total > 0 && batch.completed === batch.total
+  const hasFailed = batch.failed > 0
+  const isFileBrowser = batch.sourceLabel === 'FileBrowser'
+
+  // v4.8.5: Use backend-computed ETA (smoothed, handles discovered bytes correctly)
+  const etaFormatted = batch.etaSeconds > 0 ? formatETA(batch.etaSeconds * 1000) : ''
+  const speedFormatted = formatSpeed(batch.speed)
+
+  // v4.8.7: Elapsed time display — 1s timer only while batch is active
+  const [elapsedTick, setElapsedTick] = useState(0)
+  useEffect(() => {
+    if (!isActive) return
+    const id = setInterval(() => setElapsedTick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [isActive])
+
+  const elapsedFormatted = useMemo(() => {
+    void elapsedTick // trigger re-computation on tick
+    if (!batch.startedAtUnix || batch.startedAtUnix <= 0) return ''
+    const elapsed = Math.floor(Date.now() / 1000) - batch.startedAtUnix
+    if (elapsed < 10) return '' // hide for first 10s
+    const minutes = Math.floor(elapsed / 60)
+    const seconds = elapsed % 60
+    if (minutes > 0) return `${minutes}m ${seconds}s`
+    return `${seconds}s`
+  }, [elapsedTick, batch.startedAtUnix])
+
+  // Status color for progress bar
+  const barColor = isAllComplete ? 'bg-green-500' :
+    hasFailed && !isActive ? 'bg-red-500' :
+    'bg-blue-500'
+
+  return (
+    <>
+      <div
+        className={clsx(
+          'flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 cursor-pointer',
+          'hover:bg-gray-50 dark:hover:bg-gray-800/50',
+          isExpanded && 'bg-gray-50 dark:bg-gray-800/30'
+        )}
+        onClick={onToggle}
+      >
+        {/* Expand/collapse chevron */}
+        <div className="flex-shrink-0 w-6">
+          {isExpanded ? (
+            <ChevronDownIcon className="w-4 h-4 text-gray-400" />
+          ) : (
+            <ChevronRightIcon className="w-4 h-4 text-gray-400" />
+          )}
+        </div>
+
+        {/* Folder icon and batch label */}
+        <div className="flex items-center gap-2 flex-shrink-0 w-48">
+          <FolderOpenIcon className="w-5 h-5 text-yellow-500" />
+          <div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-medium truncate" title={batch.batchLabel}>
+                {batch.batchLabel.length > 22 ? batch.batchLabel.slice(0, 19) + '...' : batch.batchLabel}
+              </span>
+              {batch.direction === 'upload' ? (
+                <ArrowUpIcon className="w-3 h-3 text-blue-500 flex-shrink-0" />
+              ) : (
+                <ArrowDownIcon className="w-3 h-3 text-green-500 flex-shrink-0" />
+              )}
+            </div>
+            <div className="text-xs text-gray-500">
+              {(() => {
+                if (batch.totalKnown) {
+                  // v4.8.7: 11A — Use discoveredTotal as progress denominator when it's the better estimate.
+                  // batch.total counts registered tasks (grows during streaming). discoveredTotal is the
+                  // true file count from the scan. For progress text, always use the higher value.
+                  const progressDenom = Math.max(batch.discoveredTotal, batch.total)
+                  return `Completed ${formatNumber(batch.completed)} of ${formatNumber(progressDenom)} files`
+                }
+                // 9A/9B: Use discoveredTotal as approximate denominator during scan
+                const scanCount = Math.max(batch.discoveredTotal, batch.total)
+                if (scanCount > 0) {
+                  return `Completed ${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files (discovering...)`
+                }
+                return batch.direction === 'upload' ? 'Preparing upload...' : 'Scanning...'
+              })()}
+              {(() => {
+                if (!batch.totalKnown && batch.totalBytes > 0) {
+                  const scanBytes = Math.max(batch.discoveredBytes || 0, batch.totalBytes)
+                  return ` — ~${formatSize(scanBytes)}`
+                }
+                if (batch.totalBytes > 0) {
+                  return ` — ${formatSize(batch.totalBytes)}`
+                }
+                return ''
+              })()}
+            </div>
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        <div className="flex-1 min-w-0">
+          <div className="relative h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+            {batch.totalKnown ? (
+              <div
+                className={clsx('absolute top-0 left-0 h-full rounded-full transition-all duration-300', barColor)}
+                style={{ width: `${batch.progress * 100}%` }}
+              />
+            ) : (
+              <div className="absolute top-0 left-0 h-full w-full rounded-full bg-blue-400 animate-pulse opacity-60" />
+            )}
+          </div>
+          {/* v4.8.5 bugfix: Fixed 3-column grid prevents layout jump when speed/ETA toggle */}
+          <div className="grid grid-cols-3 mt-1 text-xs text-gray-500">
+            <span>
+              {(() => {
+                if (batch.totalKnown) {
+                  // v4.8.7: 11A — Use discoveredTotal as progress denominator (same as subtitle)
+                  const progressDenom = Math.max(batch.discoveredTotal, batch.total)
+                  return `${Math.round(batch.progress * 100)}% — Completed ${formatNumber(batch.completed)} of ${formatNumber(progressDenom)} files`
+                }
+                // 9A: Use discoveredTotal during scan phase
+                const scanCount = Math.max(batch.discoveredTotal, batch.total)
+                if (batch.active > 0 && scanCount > 0) {
+                  return `Completed ${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files`
+                }
+                if (scanCount > 0) {
+                  return `~${formatNumber(scanCount)} files found`
+                }
+                return batch.direction === 'upload' ? 'Preparing...' : 'Scanning...'
+              })()}
+            </span>
+            <span className="text-center">
+              {speedFormatted || (batch.filesPerSec > 0 ? `${batch.filesPerSec.toFixed(1)} files/s` : '')}
+            </span>
+            <span className="text-right">
+              {(() => {
+                const parts: string[] = []
+                if (isActive && elapsedFormatted) {
+                  parts.push(elapsedFormatted)
+                }
+                if (batch.totalKnown && etaFormatted) {
+                  parts.push(`ETA ${etaFormatted}`)
+                }
+                return parts.join(' | ')
+              })()}
+            </span>
+          </div>
+        </div>
+
+        {/* Status */}
+        <div className="flex items-center gap-1 flex-shrink-0 w-32 text-sm">
+          {isActive && (
+            <span className="text-blue-500 flex items-center gap-1">
+              <ArrowPathIcon className="w-4 h-4 animate-spin" />
+              {batch.active} {batch.direction === 'download' ? 'downloading' : 'uploading'}{batch.queued > 0 ? `, ${batch.queued.toLocaleString()} queued` : ''}
+            </span>
+          )}
+          {isAllComplete && (
+            <span className="text-green-500 flex items-center gap-1">
+              <CheckCircleIcon className="w-4 h-4" />
+              Complete
+            </span>
+          )}
+          {hasFailed && !isActive && !isAllComplete && (
+            <span className="text-red-500 flex items-center gap-1">
+              <ExclamationCircleIcon className="w-4 h-4" />
+              {batch.failed} failed
+            </span>
+          )}
+        </div>
+
+        {/* Action buttons — only for FileBrowser source batches */}
+        <div className="flex-shrink-0 w-20" onClick={e => e.stopPropagation()}>
+          {isActive && isFileBrowser && (
+            <button
+              onClick={onCancel}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30 rounded"
+            >
+              <XMarkIcon className="w-4 h-4" />
+              Cancel
+            </button>
+          )}
+          {hasFailed && !isActive && isFileBrowser && (
+            <button
+              onClick={onRetryFailed}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"
+            >
+              <ArrowPathIcon className="w-4 h-4" />
+              Retry
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Expanded: show filter chips + paginated task rows */}
+      {isExpanded && (
+        <div className="bg-gray-50/50 dark:bg-gray-800/20">
+          {/* v4.8.7: Status filter chips (10D) */}
+          {batch.total > 0 && (
+            <div className="flex items-center gap-1.5 px-4 py-2 border-b border-gray-100 dark:border-gray-700/50" onClick={e => e.stopPropagation()}>
+              <span className="text-xs text-gray-500 mr-1">Filter:</span>
+              {/* All */}
+              <button
+                onClick={() => onFilterChange('')}
+                className={clsx(
+                  'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                  !statusFilter
+                    ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                    : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                )}
+              >
+                All ({formatNumber(batch.total)})
+              </button>
+              {/* v4.8.7: 11C — Split "Active" into "In Progress" + "Queued" */}
+              {batch.active > 0 && (
+                <button
+                  onClick={() => onFilterChange('inprogress')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'inprogress'
+                      ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  In Progress ({formatNumber(batch.active)})
+                </button>
+              )}
+              {batch.queued > 0 && (
+                <button
+                  onClick={() => onFilterChange('queued')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'queued'
+                      ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Queued ({formatNumber(batch.queued)})
+                </button>
+              )}
+              {/* Succeeded */}
+              {batch.completed > 0 && (
+                <button
+                  onClick={() => onFilterChange('completed')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'completed'
+                      ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 border-green-300 dark:border-green-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Succeeded ({formatNumber(batch.completed)})
+                </button>
+              )}
+              {/* Failed */}
+              {batch.failed > 0 && (
+                <button
+                  onClick={() => onFilterChange('failed')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'failed'
+                      ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 border-red-300 dark:border-red-700'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Failed ({formatNumber(batch.failed)})
+                  {/* Red badge when failed > 0 and not actively filtered */}
+                  {statusFilter !== 'failed' && (
+                    <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-red-500" />
+                  )}
+                </button>
+              )}
+              {/* Cancelled */}
+              {batch.cancelled > 0 && (
+                <button
+                  onClick={() => onFilterChange('cancelled')}
+                  className={clsx(
+                    'px-2 py-0.5 text-xs rounded-full border transition-colors',
+                    statusFilter === 'cancelled'
+                      ? 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-400 dark:border-gray-600'
+                      : 'text-gray-600 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                  )}
+                >
+                  Cancelled ({formatNumber(batch.cancelled)})
+                </button>
+              )}
+            </div>
+          )}
+          {expandedTasks.map(task => (
+            <TransferRow
+              key={task.id}
+              task={task}
+              onCancel={onCancelTask}
+              onRetry={onRetryTask}
+              indent
+            />
+          ))}
+          {(() => {
+            // v4.8.7: "Show more" count uses filtered total when filter is active (10D, 11C)
+            const filteredTotal = statusFilter === 'completed' ? batch.completed
+              : statusFilter === 'failed' ? batch.failed
+              : statusFilter === 'cancelled' ? batch.cancelled
+              : statusFilter === 'inprogress' ? batch.active
+              : statusFilter === 'queued' ? batch.queued
+              : statusFilter === 'active' ? (batch.active + batch.queued)
+              : batch.total
+            const remaining = filteredTotal - expandedTasks.length
+            if (remaining <= 0) return null
+            return (
+              <div className="px-4 py-2 text-center">
+                <button
+                  onClick={(e) => { e.stopPropagation(); onLoadMore() }}
+                  className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400"
+                >
+                  Show more ({formatNumber(remaining)} remaining)
+                </button>
+              </div>
+            )
+          })()}
+        </div>
+      )}
+    </>
+  )
+})
+
+// v4.7.1: Short error label for status column
+function getShortErrorLabel(task: TransferTask): string {
+  if (!task.error) return ''
+  if (task.errorType === 'disk_space') return 'No disk space'
+  return task.error
+}
+
+// v4.7.8: Read-only daemon auto-download batch row
+interface DaemonBatchRowProps {
+  batch: DaemonBatchStatus
+}
+
+const DaemonBatchRow = memo(function DaemonBatchRow({ batch }: DaemonBatchRowProps) {
+  const isActive = batch.completedAt === 0
+  const isAllComplete = batch.completed === batch.total && !isActive
+  const hasFailed = batch.failed > 0
+  const progress = batch.totalBytes > 0 ? batch.bytesDone / batch.totalBytes : 0
+
+  const remainingBytes = batch.totalBytes * (1 - progress)
+  const etaFormatted = batch.speed > 0 ? formatETA((remainingBytes / batch.speed) * 1000) : ''
+  const speedFormatted = formatSpeed(batch.speed)
+
+  const barColor = isAllComplete ? 'bg-green-500' :
+    hasFailed && !isActive ? 'bg-red-500' :
+    'bg-blue-500'
+
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/20">
+      {/* Spacer to align with batch rows (no expand chevron) */}
+      <div className="flex-shrink-0 w-6" />
+
+      {/* Icon and label */}
+      <div className="flex items-center gap-2 flex-shrink-0 w-48">
+        <ArrowDownIcon className="w-5 h-5 text-purple-500" />
+        <div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm font-medium truncate" title={batch.batchLabel}>
+              {batch.batchLabel.length > 22 ? batch.batchLabel.slice(0, 19) + '...' : batch.batchLabel}
+            </span>
+            <span className="text-[10px] px-1 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded">
+              Auto
+            </span>
+          </div>
+          <div className="text-xs text-gray-500">
+            {formatNumber(batch.completed)} / {formatNumber(batch.total)} files
+            {batch.totalBytes > 0 && ` — ${formatSize(batch.totalBytes)}`}
+          </div>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div className="flex-1 min-w-0">
+        <div className="relative h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+          <div
+            className={clsx('absolute top-0 left-0 h-full rounded-full transition-all duration-300', barColor)}
+            style={{ width: `${progress * 100}%` }}
+          />
+        </div>
+        {/* v4.8.5 bugfix: Fixed 3-column grid prevents layout jump when speed/ETA toggle */}
+        <div className="grid grid-cols-3 mt-1 text-xs text-gray-500">
+          <span>{Math.round(progress * 100)}%</span>
+          <span className="text-center">{speedFormatted || ''}</span>
+          <span className="text-right">{etaFormatted ? `ETA: ${etaFormatted}` : ''}</span>
+        </div>
+      </div>
+
+      {/* Status */}
+      <div className="flex items-center gap-1 flex-shrink-0 w-32 text-sm">
+        {isActive && (
+          <span className="text-blue-500 flex items-center gap-1">
+            <ArrowPathIcon className="w-4 h-4 animate-spin" />
+            Downloading
+          </span>
+        )}
+        {isAllComplete && (
+          <span className="text-green-500 flex items-center gap-1">
+            <CheckCircleIcon className="w-4 h-4" />
+            Complete
+          </span>
+        )}
+        {hasFailed && !isActive && !isAllComplete && (
+          <span className="text-red-500 flex items-center gap-1">
+            <ExclamationCircleIcon className="w-4 h-4" />
+            {batch.failed} failed
+          </span>
+        )}
+      </div>
+
+      {/* No actions — daemon manages its own lifecycle */}
+      <div className="flex-shrink-0 w-20" />
+    </div>
+  )
+})
+
+// v4.7.1: Disk space error banner
+function DiskSpaceBanner({ incident, onDismiss }: {
+  incident: { count: number; available: string; needed: string }
+  onDismiss: () => void
+}) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800">
+      <ExclamationTriangleIcon className="w-5 h-5 text-amber-600 flex-shrink-0" />
+      <div className="flex-1 text-sm text-amber-800 dark:text-amber-300">
+        <span className="font-medium">
+          {incident.count} download{incident.count !== 1 ? 's' : ''} failed: insufficient disk space.
+        </span>
+        {' '}
+        <span>{incident.available} available (latest failure needs {incident.needed}).</span>
+      </div>
+      <button onClick={onDismiss}
+        className="flex-shrink-0 text-amber-600 hover:text-amber-800 dark:hover:text-amber-200"
+        title="Dismiss">
+        <XMarkIcon className="w-4 h-4" />
+      </button>
+    </div>
+  )
+}
+
 interface TransferRowProps {
   task: TransferTask
   onCancel: (taskId: string) => void
   onRetry: (taskId: string) => void
+  indent?: boolean // v4.7.7: Indent for expanded batch children
 }
 
-function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
+const TransferRow = memo(function TransferRow({ task, onCancel, onRetry, indent }: TransferRowProps) {
   const statusInfo = getStatusInfo(task.state)
   const StatusIcon = statusInfo.icon
   const isActive = ['queued', 'initializing', 'active', 'paused'].includes(task.state)
@@ -136,7 +670,10 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
   const displayName = task.name.length > 30 ? task.name.slice(0, 27) + '...' : task.name
 
   return (
-    <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50">
+    <div className={clsx(
+      'flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50',
+      indent && 'pl-12' // v4.7.7: Extra padding for batch children
+    )}>
       {/* Direction icon */}
       <div className="flex-shrink-0 w-6">
         {task.type === 'upload' ? (
@@ -146,10 +683,19 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
         )}
       </div>
 
-      {/* Name and size */}
+      {/* Name, source label, and size */}
       <div className="flex-shrink-0 w-48">
-        <div className="text-sm font-medium truncate" title={task.name}>
-          {displayName}
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm font-medium truncate" title={task.name}>
+            {displayName}
+          </span>
+          {/* v4.7.4: Source label badge */}
+          {task.sourceLabel === 'PUR' && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 flex-shrink-0">PUR</span>
+          )}
+          {task.sourceLabel === 'SingleJob' && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 flex-shrink-0">Job</span>
+          )}
         </div>
         <div className="text-xs text-gray-500">
           {formatSize(task.size)}
@@ -178,14 +724,16 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
       </div>
 
       {/* Status */}
-      <div className={clsx('flex items-center gap-1 flex-shrink-0 w-28 text-sm', statusInfo.color)}>
-        <StatusIcon className={clsx('w-4 h-4', task.state === 'active' && 'animate-spin')} />
-        <span className="truncate">{task.error || statusInfo.label}</span>
+      <div className={clsx('flex items-center gap-1 flex-shrink-0 w-32 text-sm', statusInfo.color)}>
+        <StatusIcon className={clsx('w-4 h-4 flex-shrink-0', task.state === 'active' && 'animate-spin')} />
+        <span className="truncate" title={task.error || statusInfo.label}>
+          {task.error ? getShortErrorLabel(task) : statusInfo.label}
+        </span>
       </div>
 
-      {/* Action button */}
+      {/* v4.7.4: Action buttons — only for FileBrowser tasks (pipeline manages its own retry/cancel) */}
       <div className="flex-shrink-0 w-20">
-        {isActive && (
+        {isActive && (!task.sourceLabel || task.sourceLabel === 'FileBrowser') && (
           <button
             onClick={() => onCancel(task.id)}
             className="flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30 rounded"
@@ -194,7 +742,7 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
             Cancel
           </button>
         )}
-        {canRetry && (
+        {canRetry && (!task.sourceLabel || task.sourceLabel === 'FileBrowser') && (
           <button
             onClick={() => onRetry(task.id)}
             className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"
@@ -206,26 +754,82 @@ function TransferRow({ task, onCancel, onRetry }: TransferRowProps) {
       </div>
     </div>
   )
-}
+})
 
 export function TransfersTab() {
   const {
     tasks,
     stats,
     enumerations, // v4.0.8: folder scan progress
+    batches, // v4.7.7: batch aggregates
+    daemonBatches, // v4.7.8: daemon auto-download batches (read-only)
+    expandedBatches,
+    batchTasks,
+    batchStatusFilter,
+    folderCheckStatus, // v4.8.8: Pre-upload check visibility
     startPolling,
     stopPolling,
     cancelTransfer,
     cancelAllTransfers,
+    cancelBatch,
     retryTransfer,
+    retryFailedInBatch,
     clearCompletedTransfers,
+    toggleBatchExpanded,
+    fetchBatchTasks,
+    setBatchStatusFilter,
   } = useTransferStore()
+
+  // v4.7.1: State for disk space banner — independent of task list
+  const [diskSpaceIncident, setDiskSpaceIncident] = useState<{
+    count: number
+    available: string
+    needed: string
+    fingerprint: string
+  } | null>(null)
+  const [diskSpaceBannerDismissed, setDiskSpaceBannerDismissed] = useState(false)
+  const [lastFingerprint, setLastFingerprint] = useState('')
 
   // Start polling when tab is mounted
   useEffect(() => {
     startPolling()
     return () => stopPolling()
   }, [startPolling, stopPolling])
+
+  // v4.7.1: Scan tasks for disk space errors; update incident state
+  useEffect(() => {
+    const failedDiskSpace = tasks.filter(
+      t => t.state === 'failed' && t.errorType === 'disk_space' && t.type === 'download'
+    )
+    if (failedDiskSpace.length === 0) return // Don't clear incident — it persists after clear
+
+    // Extract info from most recent error
+    let info: { available: string; needed: string } | null = null
+    for (let i = failedDiskSpace.length - 1; i >= 0; i--) {
+      info = extractDiskSpaceInfo(failedDiskSpace[i].error || '')
+      if (info) break
+    }
+
+    // Fingerprint: use task ID + completedAt, which changes on each failure attempt
+    const sorted = [...failedDiskSpace].sort((a, b) =>
+      (b.completedAt || '').localeCompare(a.completedAt || '')
+    )
+    const latest = sorted[0]
+    const fingerprint = `${latest.id}:${latest.completedAt || Date.now()}`
+
+    setDiskSpaceIncident({
+      count: failedDiskSpace.length,
+      available: info?.available || 'unknown',
+      needed: info?.needed || 'unknown',
+      fingerprint,
+    })
+
+    // Re-show banner when fingerprint changes (new failure, even after clear)
+    if (fingerprint !== lastFingerprint) {
+      setDiskSpaceBannerDismissed(false)
+      setLastFingerprint(fingerprint)
+    }
+  }, [tasks, lastFingerprint])
 
   // Handle cancel
   const handleCancel = useCallback((taskId: string) => {
@@ -254,8 +858,8 @@ export function TransfersTab() {
     return stats.completed + stats.failed + stats.cancelled
   }, [stats])
 
-  // Empty state - v4.0.8: also check enumerations
-  const isEmpty = tasks.length === 0 && enumerations.length === 0
+  // Empty state - v4.0.8: also check enumerations, v4.7.7: check batches, v4.7.8: check daemon batches, v4.8.8: check folderCheckStatus
+  const isEmpty = tasks.length === 0 && enumerations.length === 0 && batches.length === 0 && daemonBatches.length === 0 && !folderCheckStatus
 
   return (
     <div className="flex flex-col h-full">
@@ -268,6 +872,11 @@ export function TransfersTab() {
           {stats.totalActive > 0 && (
             <span className="ml-2 text-blue-600">
               ({stats.totalActive} active)
+            </span>
+          )}
+          {batches.length > 0 && (
+            <span className="ml-2 text-gray-500">
+              in {batches.length} batch{batches.length !== 1 ? 'es' : ''}
             </span>
           )}
         </div>
@@ -294,6 +903,11 @@ export function TransfersTab() {
         </div>
       </div>
 
+      {/* v4.7.1: Disk space error banner */}
+      {diskSpaceIncident && !diskSpaceBannerDismissed && (
+        <DiskSpaceBanner incident={diskSpaceIncident} onDismiss={() => setDiskSpaceBannerDismissed(true)} />
+      )}
+
       {/* Transfer list */}
       <div className="flex-1 overflow-auto">
         {isEmpty ? (
@@ -307,14 +921,59 @@ export function TransfersTab() {
           </div>
         ) : (
           <div>
+            {/* v4.8.8: Pre-upload check row */}
+            {folderCheckStatus && <FolderCheckRow folderName={folderCheckStatus.folderName} />}
+
             {/* v4.0.8: Show enumeration rows at top */}
-            {enumerations.map((enumeration) => (
+            {/* v4.8.5: Filter non-complete upload enumerations past folder-creation phase.
+                Once folders are created and scanning starts, the BatchRow takes over.
+                The previous filter (batch exists → hide) left a 1-frame flash because
+                the batch doesn't exist yet on the first render after scanning starts.
+                Now: for uploads, only show during creating_folders phase (or completed/error). */}
+            {enumerations
+              .filter(e => {
+                if (e.isComplete) return true
+                if (batches.some(b => b.batchID === e.id)) return false
+                if (e.direction === 'upload' && e.phase !== 'creating_folders') return false
+                return true
+              })
+              .map((enumeration) => (
               <EnumerationRow
                 key={enumeration.id}
                 enumeration={enumeration}
               />
             ))}
-            {/* Transfer rows */}
+
+            {/* v4.7.7: Batch rows (collapsed by default) */}
+            {batches.map((batch) => (
+              <BatchRow
+                key={batch.batchID}
+                batch={batch}
+                isExpanded={expandedBatches.has(batch.batchID)}
+                expandedTasks={batchTasks.get(batch.batchID) || []}
+                statusFilter={batchStatusFilter.get(batch.batchID) || ''}
+                onToggle={() => toggleBatchExpanded(batch.batchID)}
+                onCancel={() => cancelBatch(batch.batchID)}
+                onRetryFailed={() => retryFailedInBatch(batch.batchID)}
+                onLoadMore={() => {
+                  const current = batchTasks.get(batch.batchID) || []
+                  fetchBatchTasks(batch.batchID, current.length, 50)
+                }}
+                onCancelTask={handleCancel}
+                onRetryTask={handleRetry}
+                onFilterChange={(filter) => setBatchStatusFilter(batch.batchID, filter)}
+              />
+            ))}
+
+            {/* v4.7.8: Daemon auto-download batch rows (read-only) */}
+            {daemonBatches.map((batch) => (
+              <DaemonBatchRow
+                key={`daemon_${batch.batchID}`}
+                batch={batch}
+              />
+            ))}
+
+            {/* Ungrouped transfer rows */}
             {tasks.map((task) => (
               <TransferRow
                 key={task.id}

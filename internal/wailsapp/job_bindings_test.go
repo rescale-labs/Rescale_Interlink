@@ -412,3 +412,50 @@ func TestSaveTemplateAtomicWrite(t *testing.T) {
 		t.Errorf("expected job name 'atomic-test', got '%s'", readJob.JobName)
 	}
 }
+
+// =============================================================================
+// Run history and historical job row tests (v4.7.3)
+// =============================================================================
+
+func TestGetHistoricalJobRows_PathTraversal(t *testing.T) {
+	app := &App{}
+
+	// Test various path traversal attempts
+	testCases := []string{
+		"../../../etc/passwd",
+		"../../secret",
+		"foo/../bar",
+		"/absolute/path",
+		"normal/../sneaky",
+	}
+
+	for _, tc := range testCases {
+		_, err := app.GetHistoricalJobRows(tc)
+		if err == nil {
+			t.Errorf("expected error for run ID %q, got nil", tc)
+		}
+		if err != nil && !strings.Contains(err.Error(), "invalid run ID") {
+			// Absolute paths will fail at filepath.Base check differently
+			// but still should not succeed
+			t.Logf("run ID %q correctly rejected: %v", tc, err)
+		}
+	}
+}
+
+func TestGetHistoricalJobRows_MissingFile(t *testing.T) {
+	app := &App{}
+	_, err := app.GetHistoricalJobRows("nonexistent_run_12345")
+	if err == nil {
+		t.Error("expected error for missing state file")
+	}
+}
+
+func TestGetRunHistory_EmptyDir(t *testing.T) {
+	app := &App{}
+	// This should return empty slice, not panic, even if states dir doesn't exist
+	results := app.GetRunHistory()
+	if results == nil {
+		// nil is acceptable too, but empty slice is preferred
+		t.Log("GetRunHistory returned nil for missing dir (acceptable)")
+	}
+}

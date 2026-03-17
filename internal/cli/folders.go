@@ -13,7 +13,10 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/diskspace"
+	"github.com/rescale/rescale-int/internal/pathutil"
+	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
 // newFoldersCmd creates the 'folders' command group.
@@ -136,8 +139,8 @@ Example:
 				logger.Info().Str("folder_id", folderID).Msg("Listing My Library")
 			}
 
-			// List folder contents
-			contents, err := apiClient.ListFolderContents(ctx, folderID)
+			// List folder contents (all pages)
+			contents, err := apiClient.ListFolderContentsAll(ctx, folderID)
 			if err != nil {
 				return fmt.Errorf("failed to list folder: %w", err)
 			}
@@ -186,6 +189,7 @@ func newFoldersUploadDirCmd() *cobra.Command {
 	var skipFolderConflicts bool
 	var mergeFolderConflicts bool
 	var checkConflicts bool
+	var tagsFlag string // v4.7.4: Comma-separated tags to apply after each file upload
 
 	cmd := &cobra.Command{
 		Use:   "upload-dir <directory>",
@@ -232,6 +236,11 @@ Examples:
 				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
+			// v4.8.0: If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
+			// so adaptive concurrency can scale up for small files (default of 5 would cap it)
+			if !cmd.Flags().Changed("max-concurrent") {
+				maxConcurrent = constants.MaxMaxConcurrent
+			}
 
 			// Validate folder-concurrency
 			if folderConcurrency < 1 || folderConcurrency > 30 {
@@ -275,6 +284,9 @@ Examples:
 
 			ctx := GetContext()
 
+			// v4.8.2: Warm proxy before first API call
+			inthttp.WarmupProxyIfNeeded(ctx, cfg)
+
 			// Get parent folder ID (default to My Library)
 			if parentID == "" {
 				folders, err := apiClient.GetRootFolders(ctx)
@@ -285,30 +297,23 @@ Examples:
 				logger.Info().Str("parent_id", parentID).Msg("Using My Library as parent")
 			}
 
-			// Build directory tree
-			fmt.Println("Scanning local directory...")
-			logger.Info().Str("path", localPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
-			directories, files, symlinks, err := BuildDirectoryTree(localPath, includeHidden)
-			if err != nil {
-				return fmt.Errorf("failed to scan directory: %w", err)
-			}
-
-			// Notify about skipped symlinks
-			if len(symlinks) > 0 {
-				fmt.Printf("\nℹ️  Skipped %d symbolic link(s):\n", len(symlinks))
-				for _, link := range symlinks {
-					relPath, _ := filepath.Rel(localPath, link)
-					fmt.Printf("  - %s\n", relPath)
+			// v4.8.7: Pipelined path uses WalkStream (no upfront scan needed).
+			// Sequential path still uses BuildDirectoryTree for full directory/file lists.
+			// Validate local path early for pipelined path to avoid remote side-effects.
+			if !sequential {
+				if info, err := os.Stat(localPath); err != nil {
+					return fmt.Errorf("cannot access local path: %w", err)
+				} else if !info.IsDir() {
+					return fmt.Errorf("local path is not a directory: %s", localPath)
 				}
 			}
 
-			fmt.Printf("\n📊 Scan complete:\n")
-			fmt.Printf("  Directories: %d\n", len(directories))
-			fmt.Printf("  Files: %d\n", len(files))
-			if len(symlinks) > 0 {
-				fmt.Printf("  Symlinks (skipped): %d\n", len(symlinks))
+			// v4.8.8: Resolve symlinks in root path so filesystem operations use the real directory.
+			// Keep original localPath for display name (rootFolderName) and user-facing messages.
+			resolvedLocalPath, err := pathutil.ResolveAbsolutePath(localPath)
+			if err != nil {
+				return fmt.Errorf("failed to resolve directory path: %w", err)
 			}
-			fmt.Println()
 
 			// Initialize folder cache for API call optimization
 			cache := NewFolderCache()
@@ -372,9 +377,37 @@ Examples:
 
 			var result *UploadResult
 			var foldersCreated int
+			var symlinks []string // populated by sequential path; pipelined path doesn't track symlinks
 
 			if sequential {
-				// Sequential mode: create all folders first, then upload all files
+				// Sequential mode: upfront scan, then create all folders, then upload all files
+				fmt.Println("Scanning local directory...")
+				logger.Info().Str("path", resolvedLocalPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
+				var directories, files []string
+				var err error
+				// v4.8.8: Use resolvedLocalPath for filesystem walk so paths are consistent
+				directories, files, symlinks, err = BuildDirectoryTree(resolvedLocalPath, includeHidden)
+				if err != nil {
+					return fmt.Errorf("failed to scan directory: %w", err)
+				}
+
+				// Notify about skipped symlinks
+				if len(symlinks) > 0 {
+					fmt.Printf("\nℹ️  Skipped %d symbolic link(s):\n", len(symlinks))
+					for _, link := range symlinks {
+						relPath, _ := filepath.Rel(resolvedLocalPath, link)
+						fmt.Printf("  - %s\n", relPath)
+					}
+				}
+
+				fmt.Printf("\n📊 Scan complete:\n")
+				fmt.Printf("  Directories: %d\n", len(directories))
+				fmt.Printf("  Files: %d\n", len(files))
+				if len(symlinks) > 0 {
+					fmt.Printf("  Symlinks (skipped): %d\n", len(symlinks))
+				}
+				fmt.Println()
+
 				fmt.Println("📂 Creating folder structure...")
 
 				// Determine folder conflict mode based on flags
@@ -387,8 +420,9 @@ Examples:
 					folderConflictMode = ConflictMergeOnce // Will prompt for each
 				}
 
+				// v4.8.8: Use resolvedLocalPath consistently — directories[] paths are under resolvedLocalPath
 				mapping, created, err := CreateFolderStructure(
-					ctx, apiClient, cache, localPath, directories, rootFolderID, &folderConflictMode, folderConcurrency, logger, nil, os.Stdout)
+					ctx, apiClient, cache, resolvedLocalPath, directories, rootFolderID, &folderConflictMode, folderConcurrency, logger, nil, os.Stdout)
 				if err != nil {
 					return fmt.Errorf("failed to create folder structure: %w", err)
 				}
@@ -401,38 +435,47 @@ Examples:
 				defer uploadUI.Wait()
 
 				// Cache folder paths for display
+				// v4.8.8: mapping keys are under resolvedLocalPath; use it for Rel
 				for localDir, folderID := range mapping {
-					relativePath, _ := filepath.Rel(localPath, localDir)
+					relativePath, _ := filepath.Rel(resolvedLocalPath, localDir)
 					if relativePath == "." {
-						relativePath = filepath.Base(localPath)
+						relativePath = filepath.Base(localPath) // display name from original
 					}
 					uploadUI.SetFolderPath(folderID, relativePath)
 				}
 
 				// File conflict mode: merge-folder-conflicts means skip existing files
-				fileConflictMode := FileOverwriteOnce
+				initialFileMode := FileOverwriteOnce
 				if mergeFolderConflicts {
-					fileConflictMode = FileSkipAll
+					initialFileMode = FileSkipAll
 				}
-				errorMode := ErrorContinueOnce
+				// v4.8.1: Use ConflictResolvers instead of raw pointers
+				fileConflictResolver := NewFileConflictResolver(initialFileMode)
+				errorResolver := NewErrorActionResolver(ErrorContinueOnce)
+				// v4.8.1: Pass resource manager from global CLI flags
+				uploadResourceMgr := CreateResourceManager()
+				// v4.8.8: Use resolvedLocalPath — files[] and mapping keys are both under it
 				uploadResult, err := uploadFiles(
-					ctx, localPath, files, mapping, apiClient, cache, uploadUI,
-					&fileConflictMode, &errorMode, continueOnError, maxConcurrent, cfg, logger)
+					ctx, resolvedLocalPath, files, mapping, apiClient, cache, uploadUI,
+					fileConflictResolver, errorResolver, continueOnError, maxConcurrent, cfg, logger, uploadResourceMgr)
 				if err != nil {
 					return err
 				}
 				result = uploadResult
 			} else {
-				// Pipelined mode (default): create folders and upload files in parallel
-				fmt.Println("📂 Starting pipelined folder creation and file upload...")
+				// v4.8.7: Pipelined mode (default) — streaming WalkStream, no upfront scan
+				fmt.Println("📂 Starting streaming pipelined upload...")
 
 				// Convert flags to single skipExisting for pipelined mode
 				// Note: pipelined mode currently only supports merge behavior
 				effectiveSkipExisting := mergeFolderConflicts || skipFolderConflicts
 
+				// v4.8.1: Pass resource manager from global CLI flags
+				pipelineResourceMgr := CreateResourceManager()
+				// v4.8.8: Use resolvedLocalPath for filesystem operations
 				uploadResult, created, err := uploadDirectoryPipelined(
-					ctx, apiClient, cache, localPath, directories, rootFolderID,
-					files, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger)
+					ctx, apiClient, cache, resolvedLocalPath, rootFolderID,
+					includeHidden, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
 				if err != nil {
 					return err
 				}
@@ -447,6 +490,23 @@ Examples:
 			result.FoldersCreated = foldersCreated
 
 			fmt.Println() // Add blank line after progress bars
+
+			// v4.7.4: Apply tags to uploaded files (non-fatal)
+			if uploadTags := tags.ParseCommaSeparated(tagsFlag); len(uploadTags) > 0 && len(result.UploadedFileIDs) > 0 {
+				fmt.Printf("🏷  Applying tags to %d file(s)...\n", len(result.UploadedFileIDs))
+				tagFailed := 0
+				for _, fileID := range result.UploadedFileIDs {
+					if err := apiClient.AddFileTags(ctx, fileID, uploadTags); err != nil {
+						tagFailed++
+						logger.Warn().Err(err).Str("fileID", fileID).Msg("Failed to apply tags (non-fatal)")
+					}
+				}
+				if tagFailed > 0 {
+					fmt.Printf("⚠️  Tagging failed for %d of %d files\n", tagFailed, len(result.UploadedFileIDs))
+				} else {
+					fmt.Printf("✓ Tags applied to %d file(s)\n", len(result.UploadedFileIDs))
+				}
+			}
 
 			// Save symlinks list to result
 			result.SymlinksSkipped = symlinks
@@ -540,6 +600,7 @@ Examples:
 	cmd.Flags().BoolVarP(&mergeFolderConflicts, "merge-folder-conflicts", "m", false, "Merge into existing folders (skip existing files)")
 	cmd.Flags().BoolVar(&skipExisting, "skip-existing", false, "DEPRECATED: Use --merge-folder-conflicts instead")
 	cmd.Flags().BoolVar(&checkConflicts, "check-conflicts", false, "Check for existing files before upload (slower but shows conflicts upfront)")
+	cmd.Flags().StringVar(&tagsFlag, "tags", "", "Comma-separated tags to apply after each file upload (e.g., \"simulation,cfd\")")
 	cmd.Flags().MarkHidden("skip-existing") // Hide deprecated flag
 
 	return cmd
@@ -668,6 +729,11 @@ Examples:
 				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
+			// v4.8.0: If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
+			// so adaptive concurrency can scale up for small files (default of 5 would cap it)
+			if !cmd.Flags().Changed("max-concurrent") {
+				maxConcurrent = constants.MaxMaxConcurrent
+			}
 
 			// Validate conflict flags (only one can be set)
 			conflictFlags := 0
@@ -692,11 +758,16 @@ Examples:
 
 			ctx := GetContext()
 
+			// v4.8.2: Warm proxy before first API call
+			inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+
 			// Use helper function for recursive download
 			// Note: folderName is empty, so it will use folderID as the folder name
 			// TODO: Add --name flag or fetch folder name from API
+			// v4.8.1: Create resource manager from global CLI flags and pass explicitly
+			downloadResourceMgr := CreateResourceManager()
 			result, err := DownloadFolderRecursive(
-				ctx, folderID, "", outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger)
+				ctx, folderID, "", outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger, downloadResourceMgr)
 			if err != nil {
 				return err
 			}

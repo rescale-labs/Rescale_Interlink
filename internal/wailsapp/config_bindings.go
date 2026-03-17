@@ -4,6 +4,7 @@ package wailsapp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,24 +15,43 @@ import (
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/config"
+	intfips "github.com/rescale/rescale-int/internal/fips"
 )
 
 // AppInfoDTO contains application version and status information.
 type AppInfoDTO struct {
-	Version     string `json:"version"`
-	BuildTime   string `json:"buildTime"`
-	FIPSEnabled bool   `json:"fipsEnabled"`
-	FIPSStatus  string `json:"fipsStatus"`
+	Version      string           `json:"version"`
+	BuildTime    string           `json:"buildTime"`
+	FIPSEnabled  bool             `json:"fipsEnabled"`
+	FIPSStatus   string           `json:"fipsStatus"`
+	VersionCheck *VersionCheckDTO `json:"versionCheck,omitempty"` // v4.8.2: cached update check result
 }
 
 // GetAppInfo returns version, build time, and FIPS status.
+// v4.8.2: Also includes cached version check result if available.
 func (a *App) GetAppInfo() AppInfoDTO {
-	return AppInfoDTO{
+	info := AppInfoDTO{
 		Version:     cli.Version,
 		BuildTime:   cli.BuildTime,
-		FIPSEnabled: cli.FIPSStatus() != "",
+		FIPSEnabled: intfips.Enabled,
 		FIPSStatus:  cli.FIPSStatus(),
 	}
+
+	// v4.8.2: Include cached version check if available and not expired
+	versionCheckCache.mu.RLock()
+	if versionCheckCache.cacheValid {
+		cacheTTL := successCacheDuration
+		if versionCheckCache.result.Error != "" {
+			cacheTTL = errorCacheDuration
+		}
+		if time.Since(versionCheckCache.lastCheck) < cacheTTL {
+			result := versionCheckCache.result
+			info.VersionCheck = &result
+		}
+	}
+	versionCheckCache.mu.RUnlock()
+
+	return info
 }
 
 // ConfigDTO is the JSON-safe configuration structure.
@@ -64,6 +84,11 @@ func (a *App) GetConfig() ConfigDTO {
 	if a.config == nil {
 		return ConfigDTO{}
 	}
+	// v4.7.1: Normalize legacy "gz" to "gzip" for consistent frontend display
+	compression := a.config.TarCompression
+	if compression == "gz" {
+		compression = "gzip"
+	}
 	return ConfigDTO{
 		APIBaseURL:        a.config.APIBaseURL,
 		TenantURL:         a.config.TenantURL,
@@ -81,7 +106,7 @@ func (a *App) GetConfig() ConfigDTO {
 		ExcludePatterns:   strings.Join(a.config.ExcludePatterns, ","),
 		IncludePatterns:   strings.Join(a.config.IncludePatterns, ","),
 		FlattenTar:        a.config.FlattenTar,
-		TarCompression:    a.config.TarCompression,
+		TarCompression:    compression,
 		ValidationPattern: a.config.ValidationPattern,
 		RunSubpath:        a.config.RunSubpath,
 		MaxRetries:        a.config.MaxRetries,
@@ -196,6 +221,16 @@ func (a *App) SaveConfig() error {
 			return fmt.Errorf("failed to save API key: %w", err)
 		}
 		a.logInfo("config", "API key saved successfully")
+	} else {
+		// v4.8.8: User cleared the API key — remove persisted token file
+		tokenPath := config.GetDefaultTokenPath()
+		if tokenPath != "" {
+			if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
+				a.logError("config", fmt.Sprintf("Failed to remove token file: %v", err))
+			} else if err == nil {
+				a.logInfo("config", "API key cleared, token file removed")
+			}
+		}
 	}
 
 	a.logInfo("config", "Config saved successfully")

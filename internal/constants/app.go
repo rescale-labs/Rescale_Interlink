@@ -62,6 +62,13 @@ const (
 	// LargeFileThreshold - files larger than this trigger periodic credential refresh (1 GB)
 	// Only applies to Azure backend (S3 uses AWS SDK automatic refresh)
 	LargeFileThreshold = 1 * 1024 * 1024 * 1024
+
+	// CredentialFreshnessThreshold - proactive refresh threshold (8 minutes)
+	// If credentials are older than this when a transfer is about to start,
+	// refresh proactively to prevent ExpiredToken errors after laptop sleep.
+	// Set 2 minutes below GlobalCredentialRefreshInterval for safety margin.
+	// v4.8.3
+	CredentialFreshnessThreshold = 8 * time.Minute
 )
 
 // Retry configuration
@@ -164,7 +171,20 @@ const (
 	MinMaxConcurrent = 1
 
 	// MaxMaxConcurrent - maximum concurrent operations allowed
-	MaxMaxConcurrent = 10
+	// v4.8.0: Increased from 10 to 20 for adaptive concurrency with small files
+	MaxMaxConcurrent = 20
+
+	// Adaptive concurrency tiers (used by resource manager)
+	// v4.8.0: Scale concurrency based on file size distribution in batch
+
+	// AdaptiveSmallFileConcurrency - for files < SmallFileThreshold (100MB): 1 thread each
+	AdaptiveSmallFileConcurrency = 20
+
+	// AdaptiveMediumFileConcurrency - for files 100MB - 1GB: 4 threads each
+	AdaptiveMediumFileConcurrency = 10
+
+	// AdaptiveLargeFileConcurrency - for files > 1GB: 8-16 threads each
+	AdaptiveLargeFileConcurrency = 5
 )
 
 // Resource Manager - Thread Limits
@@ -224,21 +244,6 @@ const (
 
 	// ThreadsFor10GBPlus - threads for files 10GB+
 	ThreadsFor10GBPlus = 16
-)
-
-// Resource Manager - Throughput Monitoring
-const (
-	// MaxThroughputSamples - keep last N samples for throughput analysis
-	MaxThroughputSamples = 10
-
-	// MinScaleUpThroughputMBps - minimum MB/s to consider scaling up
-	MinScaleUpThroughputMBps = 10.0
-
-	// MaxScaleUpVarianceMBps - maximum variance MB/s for scale-up eligibility
-	MaxScaleUpVarianceMBps = 2.0
-
-	// ScaleDownThresholdPercent - throughput drop percentage that triggers scale-down
-	ScaleDownThresholdPercent = 0.8
 )
 
 // System Memory Limits
@@ -335,18 +340,6 @@ const (
 	JobProgressLogInterval = 30 * time.Second
 )
 
-// Rate Limiter Timeouts
-const (
-	// RateLimitWarningThreshold - delay threshold to show warning (2 seconds)
-	RateLimitWarningThreshold = 2 * time.Second
-
-	// RateLimitWarningInterval - minimum interval between warnings (10 seconds)
-	RateLimitWarningInterval = 10 * time.Second
-
-	// RateLimitLogThreshold - delay threshold for logging (5 seconds)
-	RateLimitLogThreshold = 5 * time.Second
-)
-
 // Pagination Safety Limits
 const (
 	// MaxPaginationPages - maximum pages to fetch before stopping (prevents infinite loops)
@@ -370,4 +363,24 @@ const (
 	// SymlinkWorkerCount - number of parallel workers for symlink resolution (8)
 	// Used when a directory contains many symlinks that need os.Stat() calls
 	SymlinkWorkerCount = 8
+)
+
+// Folder Creation
+const (
+	// DefaultFolderConcurrency - default concurrent folder creation operations.
+	// Used by GUI and service-layer upload paths. CLI allows user override via --folder-concurrency flag.
+	// v4.8.3: Centralized from inconsistent values (was 3 in GUI, 15 in service layer).
+	DefaultFolderConcurrency = 8
+)
+
+// Channel Buffer Sizes (v4.8.1)
+// Centralized from hardcoded magic numbers across transfer/service code.
+const (
+	// DispatchChannelBuffer - buffer for high-throughput streaming dispatch channels.
+	// Used in: BatchExecutor dispatch, TransferService pre-reg dispatch, folder scan.
+	DispatchChannelBuffer = 256
+
+	// WorkChannelBuffer - buffer for bounded worker pool work channels.
+	// Used in: pipelined upload work items, folder-ready events, daemon log buffer.
+	WorkChannelBuffer = 100
 )

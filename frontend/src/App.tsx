@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext } from 'react'
+import { useState, useEffect, useRef, createContext, useContext } from 'react'
 import { Tab } from '@headlessui/react'
 import {
   Cog6ToothIcon,
@@ -20,11 +20,16 @@ import {
   PURTab,
 } from './components/tabs'
 import { ErrorBoundary } from './components/common'
+import ErrorReportModal from './components/ErrorReportModal'
 import * as App from '../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../wailsjs/go/models'
+import { BrowserOpenURL } from '../wailsjs/runtime/runtime'
 import { useConfigStore } from './stores/configStore'
+import { useFileBrowserStore } from './stores/fileBrowserStore'
 import { useLogStore } from './stores/logStore'
 import { useTransferStore } from './stores/transferStore'
+import { useRunStore } from './stores/runStore'
+import { useErrorReportStore } from './stores/errorReportStore'
 
 // Tab navigation context for switching tabs from other components
 interface TabNavigationContextType {
@@ -56,6 +61,12 @@ function AppComponent() {
   } = useConfigStore()
   const { overallMessage, overallProgress } = useLogStore()
   const { stats: transferStats, setupEventListeners: setupTransferEventListeners } = useTransferStore()
+  // v4.7.3: Run state manager for run session persistence
+  const { activeRun, setupEventListeners: setupRunEventListeners, recoverFromRestart } = useRunStore()
+  // v4.8.7: File browser event listeners for credential invalidation
+  const { setupEventListeners: setupFileBrowserEventListeners } = useFileBrowserStore()
+  // v4.8.7: Error report modal event listeners (Plan 3, 6A-6E)
+  const { setupEventListeners: setupErrorReportEventListeners } = useErrorReportStore()
 
   // v4.0.0: Set up log event listeners at app level so they're always active.
   // Previously these were set up in ActivityTab, which meant events were missed
@@ -72,6 +83,41 @@ function AppComponent() {
     const cleanup = setupTransferEventListeners()
     return cleanup
   }, [setupTransferEventListeners])
+
+  // v4.7.7: App-level stats polling so footer updates on all tabs.
+  // The Transfers tab's own 500ms polling also calls fetchStats(), giving faster
+  // updates when on that tab. Both are idempotent and harmless to overlap.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      useTransferStore.getState().fetchStats()
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // v4.7.3: Set up run event listeners at app level (same pattern as log/transfer stores).
+  // These track active runs, handle state changes, completion, and queued job auto-start.
+  useEffect(() => {
+    const cleanup = setupRunEventListeners()
+    return cleanup
+  }, [setupRunEventListeners])
+
+  // v4.8.7: Set up file browser event listeners for credential/config change invalidation.
+  useEffect(() => {
+    const cleanup = setupFileBrowserEventListeners()
+    return cleanup
+  }, [setupFileBrowserEventListeners])
+
+  // v4.8.7: Set up error report event listeners (Plan 3, 6A-6E).
+  useEffect(() => {
+    const cleanup = setupErrorReportEventListeners()
+    return cleanup
+  }, [setupErrorReportEventListeners])
+
+  // v4.7.3: Recover active run state after app restart.
+  // Checks localStorage for persisted run info and loads historical state from disk.
+  useEffect(() => {
+    recoverFromRestart()
+  }, [recoverFromRestart])
 
   // v4.0.4: Set up config event listeners and fetch config on mount
   useEffect(() => {
@@ -101,6 +147,23 @@ function AppComponent() {
     App.GetAppInfo().then(setAppInfo).catch(console.error)
   }, [])
 
+  // v4.8.2: Check for updates on startup (non-blocking, 2s delay)
+  const updateCheckRan = useRef(false)
+  useEffect(() => {
+    if (updateCheckRan.current) return
+    updateCheckRan.current = true
+    const timer = setTimeout(async () => {
+      try {
+        await App.CheckForUpdates()
+        const refreshedInfo = await App.GetAppInfo()
+        setAppInfo(refreshedInfo)
+      } catch (err) {
+        console.error('Failed to check for updates:', err)
+      }
+    }, 2000)
+    return () => clearTimeout(timer)
+  }, [])
+
   // Tab navigation function
   const switchToTab = (tabName: string) => {
     const index = tabs.findIndex(t => t.name === tabName)
@@ -111,6 +174,8 @@ function AppComponent() {
 
   return (
     <TabNavigationContext.Provider value={{ switchToTab }}>
+      {/* v4.8.7: Error report modal — always rendered, visibility controlled by store */}
+      <ErrorReportModal />
       <div className="h-screen flex flex-col bg-slate-50">
         {/* Header */}
         <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
@@ -138,17 +203,29 @@ function AppComponent() {
               </span>
             )}
           </div>
-          {/* Version and FIPS status (right) */}
-          <div className="flex items-center space-x-4 text-sm text-gray-500">
-            {appInfo && (
-              <>
-                <span>{appInfo.version}</span>
-                {appInfo.fipsEnabled && appInfo.fipsStatus && (
-                  <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
-                    {appInfo.fipsStatus}
-                  </span>
-                )}
-              </>
+          {/* Version, FIPS status, and update notification (right) */}
+          <div className="flex flex-col items-end text-sm text-gray-500">
+            <div className="flex items-center space-x-4">
+              {appInfo && (
+                <>
+                  <span>{appInfo.version}</span>
+                  {appInfo.fipsEnabled && appInfo.fipsStatus && (
+                    <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs font-medium">
+                      {appInfo.fipsStatus}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            {/* v4.8.2: Version update notification */}
+            {appInfo?.versionCheck?.hasUpdate && appInfo.versionCheck.releaseUrl && (
+              <button
+                onClick={() => BrowserOpenURL(appInfo.versionCheck!.releaseUrl!)}
+                className="text-xs px-2 py-0.5 bg-yellow-100 text-yellow-700 hover:bg-yellow-200 rounded font-medium cursor-pointer transition-colors"
+                title={`Update available: ${appInfo.versionCheck.latestVersion}`}
+              >
+                Update available: {appInfo.versionCheck.latestVersion} &rarr;
+              </button>
             )}
           </div>
         </header>
@@ -197,13 +274,22 @@ function AppComponent() {
               <span className="text-blue-600 font-medium">{overallProgress.toFixed(0)}%</span>
             )}
           </div>
-          {(transferStats.active > 0 || transferStats.queued > 0) && (
-            <span className="text-blue-600">
-              {transferStats.active > 0 && `${transferStats.active} active`}
-              {transferStats.active > 0 && transferStats.queued > 0 && ', '}
-              {transferStats.queued > 0 && `${transferStats.queued} queued`}
-            </span>
-          )}
+          <div className="flex items-center space-x-4">
+            {/* v4.7.3: Active run indicator */}
+            {activeRun && activeRun.status === 'active' && (
+              <span className="text-blue-600 font-medium">
+                {activeRun.runType === 'pur' ? 'PUR' : 'Job'} running:{' '}
+                {activeRun.completedJobs + activeRun.failedJobs}/{activeRun.totalJobs}
+              </span>
+            )}
+            {(transferStats.active > 0 || transferStats.queued > 0) && (
+              <span className="text-blue-600">
+                {transferStats.active > 0 && `${transferStats.active} active`}
+                {transferStats.active > 0 && transferStats.queued > 0 && ', '}
+                {transferStats.queued > 0 && `${transferStats.queued} queued`}
+              </span>
+            )}
+          </div>
         </footer>
       </div>
     </TabNavigationContext.Provider>

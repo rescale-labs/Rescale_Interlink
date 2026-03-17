@@ -37,6 +37,12 @@ const (
 
 	// v4.0.8: Scan progress events for software/hardware catalog scanning
 	EventScanProgress EventType = "scan_progress" // Catalog scan progress
+
+	// v4.7.7: Batch progress events for grouped transfer display
+	EventBatchProgress EventType = "batch_progress" // Aggregate batch progress
+
+	// v4.8.7: Reportable error events for safe error reporting
+	EventReportableError EventType = "reportable_error"
 )
 
 // LogLevel defines log severity levels
@@ -153,18 +159,30 @@ type ConfigChangedEvent struct {
 	Email  string // User email after successful auth (empty if auth failed)
 }
 
+// Enumeration phase constants (v4.8.5)
+const (
+	EnumPhaseScanning        = "scanning"
+	EnumPhaseCreatingFolders = "creating_folders"
+	EnumPhaseComplete        = "complete"
+	EnumPhaseError           = "error"
+)
+
 // EnumerationEvent represents folder enumeration progress (v4.0.8)
 // Published during folder download/upload to show scanning progress before transfers start.
 type EnumerationEvent struct {
 	BaseEvent
-	ID           string `json:"id"`           // Unique enumeration ID
-	FolderName   string `json:"folderName"`   // Folder being scanned
-	Direction    string `json:"direction"`    // "upload" or "download"
-	FoldersFound int    `json:"foldersFound"` // Folders discovered so far
-	FilesFound   int    `json:"filesFound"`   // Files discovered so far
-	BytesFound   int64  `json:"bytesFound"`   // Total bytes discovered
-	IsComplete   bool   `json:"isComplete"`   // True when enumeration finished
-	Error        string `json:"error"`        // Error if enumeration failed
+	ID             string `json:"id"`             // Unique enumeration ID
+	FolderName     string `json:"folderName"`     // Folder being scanned
+	Direction      string `json:"direction"`      // "upload" or "download"
+	FoldersFound   int    `json:"foldersFound"`   // Folders discovered so far
+	FilesFound     int    `json:"filesFound"`     // Files discovered so far
+	BytesFound     int64  `json:"bytesFound"`     // Total bytes discovered
+	IsComplete     bool   `json:"isComplete"`     // True when enumeration finished
+	Error          string `json:"error"`          // Error if enumeration failed
+	StatusMessage  string `json:"statusMessage"`  // v4.7.7: Human-readable status
+	Phase          string `json:"phase"`          // v4.8.5: "scanning", "creating_folders", "complete", "error"
+	FoldersTotal   int    `json:"foldersTotal"`   // v4.8.5: Total folders to create (0 if unknown)
+	FoldersCreated int    `json:"foldersCreated"` // v4.8.5: Folders created so far
 }
 
 // ScanProgressEvent represents catalog scan progress (v4.0.8)
@@ -179,6 +197,49 @@ type ScanProgressEvent struct {
 	Error      string `json:"error"`      // Error if scan failed
 }
 
+// SanitizedTimelineEntry is a redacted, JSON-safe event summary for error reports.
+// v4.8.7: Defined in the events package (not reporting) to avoid import cycles.
+type SanitizedTimelineEntry struct {
+	Timestamp string `json:"timestamp"` // ISO 8601
+	Type      string `json:"type"`      // "log", "state_change", "error", "transfer", etc.
+	Summary   string `json:"summary"`   // Redacted one-liner
+}
+
+// ReportableErrorEvent carries a fully classified error + pre-snapshotted timeline.
+// v4.8.7: Published by Reporter.Report() or ClassifyAndPublish() for GUI error reporting.
+type ReportableErrorEvent struct {
+	BaseEvent
+	ErrorID      string                  `json:"errorID"`
+	Category     string                  `json:"category"`     // "transfer", "job_create", "pur_pipeline", "auth"
+	Severity     string                  `json:"severity"`     // "critical", "error"
+	Operation    string                  `json:"operation"`    // "folder_upload", "file_download", etc.
+	Backend      string                  `json:"backend"`      // "s3", "azure", ""
+	ErrorMessage string                  `json:"errorMessage"` // Redacted
+	ErrorClass   string                  `json:"errorClass"`   // "network", "auth", "disk_space", "client_error", "server_error", "internal", "timeout"
+	Timeline     []SanitizedTimelineEntry `json:"timeline"`
+}
+
+// BatchProgressEvent represents aggregate batch progress (v4.7.7)
+// Published by the queue's batch ticker at 1/sec for each active batch.
+type BatchProgressEvent struct {
+	BaseEvent
+	BatchID         string  `json:"batchID"`
+	Label           string  `json:"label"`
+	Direction       string  `json:"direction"` // "upload" or "download"
+	Total           int     `json:"total"`
+	Active          int     `json:"active"`    // Currently transferring
+	Queued          int     `json:"queued"`    // Waiting for semaphore slot
+	Completed       int     `json:"completed"`
+	Failed          int     `json:"failed"`
+	Progress        float64 `json:"progress"`        // 0.0-1.0
+	Speed           float64 `json:"speed"`           // aggregate bytes/sec
+	TotalKnown      bool    `json:"totalKnown"`      // v4.8.0: True when scan complete, Total is final
+	FilesPerSec     float64 `json:"filesPerSec"`     // v4.8.5: file completion rate (windowed)
+	ETASeconds      float64 `json:"etaSeconds"`      // v4.8.5: estimated time remaining (-1 = unknown)
+	DiscoveredTotal int     `json:"discoveredTotal"` // v4.8.5: files discovered by scan
+	DiscoveredBytes int64   `json:"discoveredBytes"` // v4.8.5: bytes discovered by scan
+}
+
 // EventBus manages event subscriptions and publishing
 type EventBus struct {
 	subscribers   map[EventType][]chan Event
@@ -187,6 +248,7 @@ type EventBus struct {
 	bufferSize    int
 	closed        bool
 	droppedEvents atomic.Int64 // Count of dropped events due to full buffers
+	recentEvents  *RingBuffer  // v4.8.7: Ring buffer for timeline capture in error reports
 }
 
 // NewEventBus creates a new event bus with specified buffer size
@@ -198,9 +260,10 @@ func NewEventBus(bufferSize int) *EventBus {
 		bufferSize = constants.EventBusMaxBuffer // Cap at maximum
 	}
 	return &EventBus{
-		subscribers: make(map[EventType][]chan Event),
-		all:         make([]chan Event, 0),
-		bufferSize:  bufferSize,
+		subscribers:  make(map[EventType][]chan Event),
+		all:          make([]chan Event, 0),
+		bufferSize:   bufferSize,
+		recentEvents: NewRingBuffer(50), // v4.8.7: Timeline capture
 	}
 }
 
@@ -272,6 +335,10 @@ func (eb *EventBus) Publish(event Event) {
 			eb.droppedEvents.Add(1)
 		}
 	}
+
+	// v4.8.7: Record in ring buffer for timeline capture.
+	// The ring buffer uses its own internal mutex, independent of eb.mu.
+	eb.recentEvents.Add(event)
 }
 
 // Close shuts down the event bus and closes all channels
@@ -406,4 +473,10 @@ func (eb *EventBus) GetDroppedEventCount() int64 {
 // Useful for periodic monitoring windows
 func (eb *EventBus) ResetDroppedEventCount() int64 {
 	return eb.droppedEvents.Swap(0)
+}
+
+// RecentEvents returns a chronological snapshot of recent events from the ring buffer.
+// v4.8.7: Used by the reporting package to capture timeline context for error reports.
+func (eb *EventBus) RecentEvents() []Event {
+	return eb.recentEvents.Snapshot()
 }

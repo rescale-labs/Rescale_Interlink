@@ -136,6 +136,15 @@ func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiCli
 	}, nil
 }
 
+// CloseIdleConnections closes idle connections in the Azure HTTP transport pool.
+// Called by the stale-connection cleanup hook after sleep/wake gaps.
+// v4.8.7
+func (c *AzureClient) CloseIdleConnections() {
+	if c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
+}
+
 // buildSASURL constructs the Azure SAS URL from storage info and credentials.
 // For shared files, the API returns per-file SAS tokens in creds.Paths. When
 // fileInfo is provided and a matching per-file token exists, that token is used

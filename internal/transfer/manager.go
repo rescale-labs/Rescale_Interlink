@@ -101,11 +101,6 @@ func (t *Transfer) TryAcquireMore(maxWanted int) int {
 	return acquired
 }
 
-// RecordThroughput records throughput for this transfer
-func (t *Transfer) RecordThroughput(bytesPerSecond float64) {
-	t.resourceMgr.RecordThroughput(t.id, bytesPerSecond)
-}
-
 // Complete marks the transfer as complete and releases resources
 func (t *Transfer) Complete() {
 	t.mu.Lock()
