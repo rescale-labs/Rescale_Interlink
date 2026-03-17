@@ -155,6 +155,14 @@ jobs:
           # Import certificate from secrets
           echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
 
+          # Convert to legacy PKCS#12 format for Apple security import compatibility.
+          # OpenSSL 3.x exports .p12 with AES-256-CBC (PBES2) by default, which
+          # macOS security import doesn't support. Re-export with -legacy (3DES).
+          LEGACY_PATH=$RUNNER_TEMP/build_certificate_legacy.p12
+          openssl pkcs12 -in "$CERT_PATH" -nodes -passin pass:"$CERT_PASSWORD" 2>/dev/null | \
+            openssl pkcs12 -export -legacy -out "$LEGACY_PATH" -passout pass:"$CERT_PASSWORD" 2>/dev/null
+          mv "$LEGACY_PATH" "$CERT_PATH"
+
           # Setup keychain
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
