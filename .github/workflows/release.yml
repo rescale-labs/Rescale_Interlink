@@ -148,31 +148,59 @@ jobs:
           CERT_PASSWORD: ${{ secrets.MACOS_P12_PASSWORD }}
           KEYCHAIN_PASSWORD: "temporary-keychain-password"
         run: |
-          # Create temporary keychain
           CERT_PATH=$RUNNER_TEMP/build_certificate.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
 
-          # Import certificate from secrets
+          # Decode certificate
           echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
+          echo "Decoded .p12 file size: $(wc -c < $CERT_PATH) bytes"
 
-          # Convert to legacy PKCS#12 format for Apple security import compatibility.
-          # OpenSSL 3.x exports .p12 with AES-256-CBC (PBES2) by default, which
-          # macOS security import doesn't support. Re-export with -legacy (3DES).
-          LEGACY_PATH=$RUNNER_TEMP/build_certificate_legacy.p12
-          openssl pkcs12 -in "$CERT_PATH" -nodes -passin pass:"$CERT_PASSWORD" 2>/dev/null | \
-            openssl pkcs12 -export -legacy -out "$LEGACY_PATH" -passout pass:"$CERT_PASSWORD" 2>/dev/null
-          mv "$LEGACY_PATH" "$CERT_PATH"
+          # Diagnose environment
+          echo "=== OpenSSL version ==="
+          which openssl
+          openssl version
+          echo "=== Homebrew OpenSSL ==="
+          brew --prefix openssl@3 2>&1 || echo "openssl@3 not installed"
+          echo "=== .p12 info (algorithm check) ==="
+          openssl pkcs12 -in "$CERT_PATH" -info -noout -passin pass:"$CERT_PASSWORD" 2>&1 || echo "openssl pkcs12 -info failed with exit code $?"
+          echo "=== Password length check ==="
+          echo "Password length: ${#CERT_PASSWORD} characters"
 
-          # Setup keychain
+          # Try direct import first (no conversion)
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
 
-          # Import certificate to keychain
-          security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
+          echo "=== Attempting direct security import ==="
+          security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH 2>&1
+          IMPORT_EXIT=$?
+          echo "security import exit code: $IMPORT_EXIT"
 
-          # List identities to verify import and capture the signing identity
+          if [ $IMPORT_EXIT -ne 0 ]; then
+            echo "=== Direct import failed, trying legacy conversion ==="
+            # Try with Homebrew OpenSSL if available
+            OPENSSL=$(brew --prefix openssl@3 2>/dev/null)/bin/openssl
+            if [ -x "$OPENSSL" ]; then
+              echo "Using Homebrew OpenSSL: $($OPENSSL version)"
+            else
+              echo "Homebrew openssl@3 not found, installing..."
+              brew install openssl@3
+              OPENSSL=$(brew --prefix openssl@3)/bin/openssl
+              echo "Installed: $($OPENSSL version)"
+            fi
+
+            LEGACY_PATH=$RUNNER_TEMP/build_certificate_legacy.p12
+            echo "=== Converting .p12 to legacy format ==="
+            "$OPENSSL" pkcs12 -in "$CERT_PATH" -nodes -passin pass:"$CERT_PASSWORD" 2>&1 | \
+              "$OPENSSL" pkcs12 -export -legacy -out "$LEGACY_PATH" -passout pass:"$CERT_PASSWORD" 2>&1
+            echo "Legacy .p12 file size: $(wc -c < $LEGACY_PATH) bytes"
+
+            mv "$LEGACY_PATH" "$CERT_PATH"
+            echo "=== Attempting import after legacy conversion ==="
+            security import $CERT_PATH -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH 2>&1
+          fi
+
+          security list-keychain -d user -s $KEYCHAIN_PATH
           echo "Available signing identities:"
           security find-identity -v -p codesigning $KEYCHAIN_PATH
 
