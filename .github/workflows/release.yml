@@ -160,9 +160,14 @@ jobs:
           # Homebrew openssl@3 is pre-installed on the runner and has -legacy.
           OPENSSL=$(brew --prefix openssl@3)/bin/openssl
           echo "OpenSSL for conversion: $($OPENSSL version)"
+          PEM_PATH=$RUNNER_TEMP/build_certificate.pem
           LEGACY_PATH=$RUNNER_TEMP/build_certificate_legacy.p12
-          "$OPENSSL" pkcs12 -in "$CERT_PATH" -nodes -passin pass:"$CERT_PASSWORD" | \
-            "$OPENSSL" pkcs12 -export -legacy -out "$LEGACY_PATH" -passout pass:"$CERT_PASSWORD"
+          # Step 1: Decrypt .p12 to PEM (key + cert)
+          "$OPENSSL" pkcs12 -in "$CERT_PATH" -out "$PEM_PATH" -nodes -passin pass:"$CERT_PASSWORD"
+          # Step 2: Re-export PEM to legacy .p12 (3DES)
+          "$OPENSSL" pkcs12 -export -legacy -in "$PEM_PATH" -out "$LEGACY_PATH" -passout pass:"$CERT_PASSWORD"
+          # Clean up PEM (contains unencrypted private key)
+          rm -f "$PEM_PATH"
           mv "$LEGACY_PATH" "$CERT_PATH"
 
           # Setup keychain
