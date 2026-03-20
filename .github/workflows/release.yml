@@ -122,6 +122,21 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Select Xcode
+        run: |
+          # Use full Xcode SDK instead of CommandLineTools for proper Objective-C
+          # header resolution (NSUInteger, NSInteger, etc.) required by Wails/CGo.
+          # Find the latest Xcode installed on the runner.
+          XCODE_APP=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_APP" ]; then
+            echo "No Xcode found in /Applications" >&2
+            exit 1
+          fi
+          echo "Selecting: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          xcrun --show-sdk-path
+
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
