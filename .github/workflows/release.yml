@@ -147,6 +147,8 @@ jobs:
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
           LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          export SDKROOT=$(xcrun --show-sdk-path)
+          echo "Using SDK: $SDKROOT"
           GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             wails build -platform darwin/arm64 -ldflags "$LDFLAGS"
 
@@ -154,6 +156,7 @@ jobs:
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
           LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          export SDKROOT=$(xcrun --show-sdk-path)
           GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             go build -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
