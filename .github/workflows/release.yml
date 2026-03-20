@@ -148,7 +148,12 @@ jobs:
           BUILD_TIME=$(date +%Y-%m-%d)
           LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
           export SDKROOT=$(xcrun --show-sdk-path)
-          echo "Using SDK: $SDKROOT"
+          # Diagnose CGo environment
+          echo "SDKROOT=$SDKROOT"
+          echo "clang version: $(clang --version | head -1)"
+          echo "objc.h location: $(find $SDKROOT -name 'objc.h' -path '*/objc/*' 2>/dev/null | head -3)"
+          echo "NSObjCRuntime.h grep NSUInteger typedef:"
+          grep -n 'typedef.*NSUInteger\|#.*include.*objc' "$SDKROOT/System/Library/Frameworks/Foundation.framework/Headers/NSObjCRuntime.h" | head -5
           GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             wails build -platform darwin/arm64 -ldflags "$LDFLAGS"
 
