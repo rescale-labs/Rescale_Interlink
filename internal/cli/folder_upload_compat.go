@@ -1,6 +1,6 @@
 package cli
 
-// v4.8.7 Plan 2b: Compatibility layer preserving the old cli.* API surface.
+// Compatibility layer preserving the old cli.* API surface.
 // All folder-upload primitives now live in internal/transfer/folder/.
 // These aliases and wrappers keep existing callers (cli/folders.go, services/file_service.go,
 // wailsapp/file_bindings.go) compiling without changes during migration.

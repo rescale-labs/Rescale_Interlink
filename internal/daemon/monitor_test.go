@@ -240,7 +240,7 @@ func TestSanitizeDirectoryName(t *testing.T) {
 }
 
 // =============================================================================
-// Eligibility Engine Tests (v4.0.0 - Auto-Download Feature)
+// Eligibility Engine Tests
 // =============================================================================
 
 func TestDefaultEligibilityConfig(t *testing.T) {
@@ -250,7 +250,7 @@ func TestDefaultEligibilityConfig(t *testing.T) {
 		t.Fatal("DefaultEligibilityConfig() returned nil")
 	}
 
-	// v4.3.0: EligibilityConfig simplified - only AutoDownloadTag and LookbackDays
+	// EligibilityConfig has only AutoDownloadTag and LookbackDays
 	if cfg.AutoDownloadTag != "autoDownload" {
 		t.Errorf("AutoDownloadTag = %q, want %q", cfg.AutoDownloadTag, "autoDownload")
 	}
@@ -264,7 +264,7 @@ func TestDefaultEligibilityConfig(t *testing.T) {
 		got      string
 		expected string
 	}{
-		// All old fields (CorrectnessTag, AutoDownloadField, etc.) removed in v4.3.0
+		// Placeholder — no additional fields to check
 	}
 
 	for _, tt := range tests {
@@ -289,7 +289,7 @@ func TestNewMonitorWithEligibility_NilConfig(t *testing.T) {
 		t.Fatal("expected non-nil eligibility config when nil passed")
 	}
 
-	// Should have default values (v4.3.0: simplified config)
+	// Should have default values
 	if m.eligibility.AutoDownloadTag != "autoDownload" {
 		t.Errorf("expected default AutoDownloadTag, got %q", m.eligibility.AutoDownloadTag)
 	}
@@ -299,7 +299,7 @@ func TestNewMonitorWithEligibility_NilConfig(t *testing.T) {
 }
 
 func TestNewMonitorWithEligibility_CustomConfig(t *testing.T) {
-	// v4.3.0: Simplified EligibilityConfig - only AutoDownloadTag and LookbackDays
+	// EligibilityConfig has only AutoDownloadTag and LookbackDays
 	customCfg := &EligibilityConfig{
 		AutoDownloadTag: "custom:tag",
 		LookbackDays:    14,
@@ -360,20 +360,16 @@ func TestCheckEligibility_NilConfig(t *testing.T) {
 }
 
 func TestGetJobDownloadPath_NilClient(t *testing.T) {
-	// v4.3.0: This test was broken - GetJobDownloadPath requires apiClient to not be nil.
-	// The function now checks eligibility before calling API, so we skip this test.
-	// Original test tried to pass nil context and nil api client, which would panic.
+	// GetJobDownloadPath requires apiClient to not be nil; calling with nil would panic.
 	t.Skip("Test requires mock API client, skipping - GetJobDownloadPath cannot work with nil apiClient")
 }
 
 func TestGetJobDownloadPath_EmptyConfig(t *testing.T) {
-	// v4.3.0: This test was broken - GetJobDownloadPath requires apiClient to not be nil.
-	// The function calls apiClient.GetJobCustomFieldValue which would panic with nil client.
+	// GetJobDownloadPath calls apiClient.GetJobCustomFieldValue which would panic with nil client.
 	t.Skip("Test requires mock API client, skipping - GetJobDownloadPath cannot work with nil apiClient")
 }
 
 func TestEligibilityConfig_ZeroValue(t *testing.T) {
-	// v4.3.0: Zero-value EligibilityConfig should have empty strings and zero LookbackDays
 	cfg := &EligibilityConfig{}
 
 	if cfg.AutoDownloadTag != "" {

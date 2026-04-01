@@ -1,7 +1,7 @@
 //go:build !windows
 
 // Package elevation provides UAC elevation support for Windows.
-// v4.5.1: On non-Windows platforms, these functions return errors.
+// On non-Windows platforms, these functions return errors.
 package elevation
 
 import (

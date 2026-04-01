@@ -5,12 +5,10 @@
 // (required fields, positive values, submit mode) and hardware core types.
 //
 // Features:
-//   - ValidateJobSpec: shared job validation for CLI and GUI (v4.6.0)
+//   - ValidateJobSpec: shared job validation for CLI and GUI
 //   - CoreTypeValidator: API-based hardware validation with caching
-//   - Suggestions for typos (e.g., "emerld" → "emerald")
+//   - Suggestions for typos (e.g., "emerld" -> "emerald")
 //   - Thread-safe with concurrent access support
-//
-// Part of PUR (Parallel Uploader and Runner) v4.6.0
 package validation
 
 import (
@@ -26,8 +24,7 @@ import (
 )
 
 // ValidateJobSpec validates a job specification, returning a list of errors.
-// v4.6.0: Shared validation used by both CLI (plan command) and GUI (ValidateJobSpec binding).
-// This ensures architectural consistency — both modes apply the same validation rules.
+// Shared validation used by both CLI (plan command) and GUI (ValidateJobSpec binding).
 func ValidateJobSpec(job models.JobSpec) []string {
 	var errors []string
 

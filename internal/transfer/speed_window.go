@@ -1,5 +1,4 @@
 // Package transfer provides transfer queue management for uploads and downloads.
-// v4.8.5: speedWindow provides a sliding-window speed/rate calculator for batch-level metrics.
 package transfer
 
 import (
@@ -17,9 +16,9 @@ type speedSample struct {
 // Used for both bytes/sec (speed) and files/sec (completion rate).
 // Thread-safe via mutex.
 //
-// v4.8.5 bugfix: Grace period — when speed transiently drops to 0 between file
-// completions (no byte delta in the current window), the last non-zero speed is
-// held for up to 3 seconds. This prevents speed/ETA flashing in the UI.
+// Grace period: when speed transiently drops to 0 between file completions
+// (no byte delta in the current window), the last non-zero speed is held for
+// up to 3 seconds. This prevents speed/ETA flashing in the UI.
 type speedWindow struct {
 	mu              sync.Mutex
 	samples         []speedSample
@@ -69,9 +68,9 @@ const speedGracePeriod = 3 * time.Second
 // Speed returns the current rate (units per second) based on the sliding window.
 // Returns 0 if fewer than 2 samples or time span < 500ms.
 //
-// v4.8.5 bugfix: If the computed speed is 0 but a previous non-zero speed exists
-// and the last sample is within speedGracePeriod of lastNonZeroTime, the previous
-// non-zero value is returned. This prevents speed/ETA flashing between file completions.
+// If the computed speed is 0 but a previous non-zero speed exists and the last
+// sample is within speedGracePeriod of lastNonZeroTime, the previous non-zero
+// value is returned. This prevents speed/ETA flashing between file completions.
 func (sw *speedWindow) Speed() float64 {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()

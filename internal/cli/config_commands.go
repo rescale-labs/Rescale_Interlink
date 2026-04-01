@@ -84,7 +84,7 @@ Use --force to overwrite existing configuration.`,
 				}
 			}
 
-			// API Base URL — menu of valid platforms (v4.8.7: 11E security)
+			// API Base URL — menu of valid platforms
 			fmt.Println("\nRescale Platform:")
 			for i, p := range config.AllowedPlatformURLs {
 				fmt.Printf("  %d. %s (%s)\n", i+1, p.Label, p.URL)

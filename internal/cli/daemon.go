@@ -35,7 +35,7 @@ The daemon monitors your Rescale jobs and downloads results when they complete.
 This is useful for automated workflows where you want results downloaded
 without manual intervention.
 
-v4.2.0: The daemon reads settings from ~/.config/rescale/daemon.conf (Unix) or
+The daemon reads settings from ~/.config/rescale/daemon.conf (Unix) or
 %APPDATA%\Rescale\Interlink\daemon.conf (Windows). CLI flags override config
 file values. Use 'daemon config' commands to manage the config file.
 
@@ -98,7 +98,7 @@ func newDaemonRunCmd() *cobra.Command {
 		Short: "Run the daemon to auto-download completed jobs",
 		Long: `Start the daemon to auto-download completed jobs.
 
-v4.2.0: Settings are read from daemon.conf at startup. CLI flags override
+Settings are read from daemon.conf at startup. CLI flags override
 config file values. If no config file exists, defaults are used.
 
 By default, the daemon runs in foreground mode. Use --background to
@@ -127,8 +127,8 @@ Examples:
   # Run once and exit (useful for cron jobs)
   rescale-int daemon run --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// v4.3.8: Early startup logging for debugging Windows subprocess launch issues
-			// This writes to a file BEFORE the logger is fully initialized
+			// Early startup logging for debugging Windows subprocess launch issues.
+			// This writes to a file BEFORE the logger is fully initialized.
 			if runtime.GOOS == "windows" {
 				daemon.WriteStartupLog("=== DAEMON CLI STARTING ===")
 				daemon.WriteStartupLog("PID: %d", os.Getpid())
@@ -137,15 +137,14 @@ Examples:
 					daemon.WriteStartupLog("Working directory: %s", wd)
 				}
 
-				// v4.4.3: Detect Windows service context and delegate to service handler
-				// When SCM starts `daemon run`, we need to register with SCM properly
+				// Detect Windows service context and delegate to service handler.
+				// When SCM starts `daemon run`, we need to register with SCM properly.
 				if isService, err := service.IsWindowsService(); err == nil && isService {
 					daemon.WriteStartupLog("Detected Windows service context, starting multi-user service")
 					svcLogger := logging.NewLogger("service", nil)
 					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
 				}
 
-				// v4.5.5: Use unified detection instead of raw IsInstalled()
 				// Only blocks when service is RUNNING (not just installed)
 				if blocked, reason := service.ShouldBlockSubprocess(); blocked {
 					daemon.WriteStartupLog("Blocking subprocess: %s", reason)
@@ -154,9 +153,8 @@ Examples:
 				}
 			}
 
-			// v4.3.2: Create daemon-specific logger with log buffer for IPC streaming
-			// The logWriter captures logs for both console output and IPC retrieval
-			// v4.5.8: Pass --log-file through so daemon writes persistent logs
+			// Create daemon-specific logger with log buffer for IPC streaming.
+			// The logWriter captures logs for both console output and IPC retrieval.
 			logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
 				Console:    !daemon.IsDaemonChild(), // Console output only in foreground
 				BufferSize: 1000,                    // Keep 1000 log entries for IPC
@@ -164,7 +162,7 @@ Examples:
 			})
 			logger := logging.NewLoggerWithWriter(logWriter)
 
-			// Load daemon config file (v4.2.0+)
+			// Load daemon config file
 			daemonConf, err := config.LoadDaemonConfig("")
 			if err != nil {
 				logger.Warn().Err(err).Msg("Failed to load daemon.conf, using defaults")
@@ -287,7 +285,7 @@ Examples:
 				}
 			}
 
-			// v4.3.0: Simplified eligibility - mode is per-job, only tag and lookback configurable
+			// Simplified eligibility - mode is per-job, only tag and lookback configurable
 			daemonCfg.Eligibility = &daemon.EligibilityConfig{
 				AutoDownloadTag: daemonConf.Eligibility.AutoDownloadTag,
 				LookbackDays:    daemonConf.Daemon.LookbackDays,
@@ -319,7 +317,7 @@ Examples:
 
 			// Set up signal handling
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel() // v4.6.6: Ensure context is always released on all exit paths
+			defer cancel()
 			sigChan := make(chan os.Signal, 1)
 			signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -329,8 +327,7 @@ Examples:
 				close(shutdownRequested)
 			}
 
-			// Start IPC server if enabled
-			// v4.3.7: Enable IPC on Windows (previously excluded with runtime.GOOS != "windows")
+			// Start IPC server if enabled.
 			// Windows IPC uses named pipes (\\.\pipe\rescale-interlink) which work without admin.
 			// This allows GUI/tray to communicate with daemon running as subprocess.
 			var ipcServer *ipc.Server
@@ -339,7 +336,7 @@ Examples:
 					daemon.WriteStartupLog("Starting IPC server...")
 				}
 				ipcHandler := daemon.NewIPCHandler(d, shutdownFunc)
-				// v4.3.2: Connect log buffer for IPC log streaming
+				// Connect log buffer for IPC log streaming
 				ipcHandler.SetLogBuffer(logWriter.GetBuffer())
 				ipcServer = ipc.NewServer(ipcHandler, logger)
 				if err := ipcServer.Start(); err != nil {
@@ -351,8 +348,8 @@ Examples:
 				defer ipcServer.Stop()
 				logger.Info().Str("socket", ipcServer.GetSocketPath()).Msg("IPC server listening")
 
-				// v4.3.9: Log successful IPC start but DON'T clear startup log
-				// Keeping the log aids debugging - users can see the full startup sequence
+				// Log successful IPC start but DON'T clear startup log.
+				// Keeping the log aids debugging - users can see the full startup sequence.
 				if runtime.GOOS == "windows" {
 					daemon.WriteStartupLog("SUCCESS: IPC server started at %s", ipcServer.GetSocketPath())
 				}
@@ -457,8 +454,7 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
-			// v4.5.0: Query running daemon via IPC on all platforms
-			// Previously gated on runtime.GOOS != "windows", now enabled everywhere
+			// Query running daemon via IPC on all platforms
 			client := ipc.NewClient()
 			client.SetTimeout(2 * time.Second)
 
@@ -498,7 +494,6 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 				fmt.Println("Use 'rescale-int daemon stop' to stop the daemon.")
 				return nil
 			} else {
-				// v4.5.0: Warn if IPC unavailable
 				// On Windows, check if service is running but IPC not responding
 				if runtime.GOOS == "windows" && service.IsInstalled() {
 					if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
@@ -588,7 +583,7 @@ func newDaemonStopCmd() *cobra.Command {
 This sends a shutdown command via IPC to gracefully stop the daemon.
 The daemon must have been started with --ipc flag for this to work.
 
-v4.5.0: On Windows, behavior depends on mode:
+On Windows, behavior depends on mode:
   - Subprocess mode: Shuts down the daemon via IPC (like macOS/Linux)
   - Service mode: Pauses your user daemon via IPC (service stop requires admin)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -596,11 +591,11 @@ v4.5.0: On Windows, behavior depends on mode:
 			client := ipc.NewClient()
 			client.SetTimeout(5 * time.Second)
 
-			// v4.5.0: Windows subprocess uses IPC shutdown; service mode pauses user
+			// Windows subprocess uses IPC shutdown; service mode pauses user
 			if runtime.GOOS == "windows" && service.IsInstalled() {
 				if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
 					fmt.Println("Windows Service detected. Pausing your daemon...")
-					// v4.5.0: Pass empty userID - server infers caller SID
+					// Pass empty userID - server infers caller SID
 					if err := client.PauseUser(ctx, ""); err != nil {
 						return fmt.Errorf("failed to pause: %w", err)
 					}
@@ -615,7 +610,7 @@ v4.5.0: On Windows, behavior depends on mode:
 			// Check if daemon is running (subprocess mode)
 			pid := daemon.IsDaemonRunning()
 			if pid == 0 {
-				// v4.5.0: Also check via IPC in case PID file is missing
+				// Also check via IPC in case PID file is missing
 				if !client.IsServiceRunning(ctx) {
 					fmt.Println("No running daemon detected.")
 					return nil
@@ -1067,7 +1062,6 @@ Examples:
 				cfg.Filters.Exclude = value
 
 			// [eligibility] section
-			// v4.3.0: Simplified - only auto_download_tag is configurable
 			case "auto_download_tag":
 				cfg.Eligibility.AutoDownloadTag = value
 			case "correctness_tag": // backwards compatibility alias
@@ -1145,7 +1139,6 @@ Use 'daemon config edit' to modify an existing config.`,
 }
 
 // newDaemonConfigValidateCmd creates the 'daemon config validate' command.
-// v4.2.1: Added for workspace custom fields validation
 func newDaemonConfigValidateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate",

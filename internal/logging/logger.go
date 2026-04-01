@@ -57,7 +57,7 @@ func NewDefaultCLILogger() *Logger {
 }
 
 // NewLoggerWithWriter creates a logger that writes to the specified writer.
-// v4.3.2: Used by daemon to capture logs for IPC streaming.
+// Used by daemon to capture logs for IPC streaming.
 func NewLoggerWithWriter(writer io.Writer) *Logger {
 	logger := zerolog.New(writer).
 		With().

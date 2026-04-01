@@ -1,5 +1,4 @@
 // Package daemon provides background service functionality for auto-downloading completed jobs.
-// v4.3.2: Log buffer for IPC streaming and recent log retrieval.
 package daemon
 
 import (
@@ -10,7 +9,6 @@ import (
 )
 
 // LogBuffer maintains a circular buffer of recent log entries for IPC streaming.
-// v4.3.2: Allows GUI to fetch recent daemon logs and receive new entries.
 type LogBuffer struct {
 	mu       sync.RWMutex
 	entries  []ipc.LogEntryData

@@ -414,7 +414,7 @@ func TestSaveTemplateAtomicWrite(t *testing.T) {
 }
 
 // =============================================================================
-// Run history and historical job row tests (v4.7.3)
+// Run history and historical job row tests
 // =============================================================================
 
 func TestGetHistoricalJobRows_PathTraversal(t *testing.T) {

@@ -60,19 +60,16 @@ func (h *mockHandler) Shutdown() error {
 	return nil
 }
 
-// v4.5.0: GetRecentLogs returns mock log entries (updated signature with userID parameter)
 func (h *mockHandler) GetRecentLogs(userID string, count int) []LogEntryData {
 	return []LogEntryData{
 		{Timestamp: "2026-01-13T12:00:00Z", Level: "INFO", Stage: "test", Message: "Test log entry"},
 	}
 }
 
-// v4.7.6: ReloadConfig returns mock reload config data
 func (h *mockHandler) ReloadConfig(userID string) *ReloadConfigData {
 	return &ReloadConfigData{Applied: true}
 }
 
-// v4.7.8: GetTransferStatus returns mock transfer status data
 func (h *mockHandler) GetTransferStatus(userID string) (*TransferStatusData, error) {
 	return &TransferStatusData{}, nil
 }

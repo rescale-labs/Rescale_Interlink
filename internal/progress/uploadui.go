@@ -22,7 +22,7 @@ type UploadUI struct {
 	bars       sync.Map // filepath -> *FileBar
 	pathCache  sync.Map // folderID -> human path
 	isTerminal bool
-	totalFiles int32 // v4.8.7: atomic — streaming uploads increment as files are discovered
+	totalFiles int32 // atomic — streaming uploads increment as files are discovered
 	started    int32 // Atomic counter for file index (1, 2, 3, ...)
 	completed  int32
 }
@@ -70,7 +70,6 @@ func NewUploadUI(totalFiles int) *UploadUI {
 
 // IncrementTotal atomically increments the total file count.
 // Used by streaming uploads where the total is unknown at start and grows as files are discovered.
-// v4.8.7
 func (u *UploadUI) IncrementTotal() {
 	atomic.AddInt32(&u.totalFiles, 1)
 }
@@ -136,7 +135,6 @@ func (u *UploadUI) AddFileBar(localPath, folderID string, size int64) *FileBar {
 			mpb.AppendDecorators(
 				decor.CountersKibiByte("% .1f / % .1f", decor.WCSyncSpace),
 				decor.Name("  "),
-				// v3.2.2: Custom percentage with consistent 2 decimal places
 				decor.Any(func(s decor.Statistics) string {
 					pct := float64(s.Current) / float64(s.Total) * 100
 					if s.Total == 0 {
@@ -145,7 +143,6 @@ func (u *UploadUI) AddFileBar(localPath, folderID string, size int64) *FileBar {
 					return fmt.Sprintf("%6.2f%%", pct)
 				}, decor.WCSyncSpace),
 				decor.Name("  "),
-				// v3.2.2: Increased EWMA age from 30 to 60 for smoother speed display
 				decor.EwmaSpeed(decor.SizeB1024(0), "% .1f", 60, decor.WCSyncSpace),
 				decor.Name("  "),
 				decor.Name("ETA ", decor.WCSyncWidth),
@@ -275,7 +272,6 @@ func (u *UploadUI) Wait() {
 
 // WaitWithTimeout blocks until all progress bars complete or timeout expires.
 // Returns true if Wait completed normally, false if timeout occurred.
-// v4.0.0: Added to prevent indefinite blocking if a goroutine stalls.
 func (u *UploadUI) WaitWithTimeout(timeout time.Duration) bool {
 	if u.progress == nil {
 		return true

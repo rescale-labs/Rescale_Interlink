@@ -48,8 +48,8 @@ func ClassifyError(err error) ErrorType {
 		return ErrorTypeSuccess
 	}
 
-	// v4.5.4: Type-based checks for common error types (more robust than string matching)
-	// User cancellation should NOT be retried (avoids wasted backoff delay)
+	// Type-based checks for common error types (more robust than string matching).
+	// User cancellation should NOT be retried (avoids wasted backoff delay).
 	if errors.Is(err, context.Canceled) {
 		return ErrorTypeFatal
 	}
@@ -61,7 +61,7 @@ func ClassifyError(err error) ErrorType {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return ErrorTypeNetwork
 	}
-	// v4.8.7: DNS resolution errors — type-based check (preferred over string matching).
+	// DNS resolution errors — type-based check (preferred over string matching).
 	// Catches all DNS errors regardless of message format: "no such host",
 	// "server misbehaving", temporary failures, etc.
 	var dnsErr *net.DNSError
@@ -71,7 +71,7 @@ func ClassifyError(err error) ErrorType {
 
 	errStr := strings.ToLower(err.Error())
 
-	// v4.5.4: Proxy authentication failures - don't retry (must check before generic network errors)
+	// Proxy authentication failures should not be retried (must check before generic network errors).
 	if strings.Contains(errStr, "407") ||
 		strings.Contains(errStr, "proxy authentication required") ||
 		strings.Contains(errStr, "proxyauthenticationrequired") {
@@ -94,10 +94,10 @@ func ClassifyError(err error) ErrorType {
 		return ErrorTypeCredential
 	}
 
-	// Network errors - retryable with backoff
-	// v4.5.4: Added proxy/connection errors that occur mid-transfer
-	// v4.8.7: Added DNS resolution error string fallbacks for SDK-wrapped errors
-	// where errors.As won't unwrap to *net.DNSError
+	// Network errors - retryable with backoff.
+	// Includes proxy/connection errors that occur mid-transfer and DNS resolution
+	// error string fallbacks for SDK-wrapped errors where errors.As won't unwrap
+	// to *net.DNSError.
 	if strings.Contains(errStr, "tls handshake timeout") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "i/o timeout") ||

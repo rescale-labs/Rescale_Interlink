@@ -127,7 +127,7 @@ func (m *Manager) saveUnlocked() error {
 	}
 
 	// Write data rows (sorted by index)
-	// v4.0.8: Iterate over map keys properly to handle non-consecutive indices
+	// Iterate over map keys to handle non-consecutive indices
 	indices := make([]int, 0, len(m.states))
 	for idx := range m.states {
 		indices = append(indices, idx)
@@ -211,8 +211,7 @@ func (m *Manager) InitializeState(index int, jobName, directory string) *models.
 	return state
 }
 
-// GetAllStates returns all job states
-// v4.0.8: Fixed iteration to handle non-consecutive indices
+// GetAllStates returns all job states sorted by index
 func (m *Manager) GetAllStates() []*models.JobState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -257,7 +256,6 @@ func (m *Manager) CountByStatus(statusField string, status string) int {
 }
 
 // UpdateUploadProgress updates the upload progress for a job by index.
-// v4.0.6: Added to support real-time upload progress display in GUI.
 // This is a transient update - progress is not persisted to CSV (only status is).
 func (m *Manager) UpdateUploadProgress(index int, progress float64) {
 	m.mu.Lock()
@@ -269,7 +267,6 @@ func (m *Manager) UpdateUploadProgress(index int, progress float64) {
 }
 
 // UpdateUploadProgressByName updates the upload progress for a job by name.
-// v4.0.6: Added to support looking up jobs by name when index is not available.
 func (m *Manager) UpdateUploadProgressByName(jobName string, progress float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

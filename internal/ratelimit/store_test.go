@@ -153,7 +153,7 @@ type mockCoordClient struct {
 	acquireCalls    int
 	drainCalls      int
 	cooldownCalls   int
-	pingCalls       int // v4.8.4
+	pingCalls       int
 	acquireErr      error
 	lease           *LeaseInfo
 	pingErr         error
@@ -455,7 +455,7 @@ func (d *delayingMockCoordClient) Acquire(ctx context.Context, baseURL, keyHash 
 }
 
 // =============================================================================
-// v4.8.4: Coordinator self-healing tests
+// Coordinator self-healing tests
 // =============================================================================
 
 func TestIsDegraded(t *testing.T) {

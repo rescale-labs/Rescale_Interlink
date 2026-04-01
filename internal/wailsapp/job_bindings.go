@@ -25,7 +25,6 @@ import (
 )
 
 // emitScanProgress publishes a scan progress event for software/hardware catalog scanning.
-// v4.0.8: Added to provide feedback during potentially long API scans.
 func (a *App) emitScanProgress(scanType string, page int, itemsFound int, isComplete bool, isCached bool, errMsg string) {
 	if a.engine == nil || a.engine.Events() == nil {
 		return
@@ -66,16 +65,13 @@ type JobSpecDTO struct {
 	OrgCode               string   `json:"orgCode"`
 	Automations           []string `json:"automations"`
 
-	// v4.0.8: File-based job inputs (for file scanning mode)
 	// When InputFiles is non-empty, these files are uploaded instead of tarring Directory
 	InputFiles []string `json:"inputFiles,omitempty"`
 
-	// v4.6.0: Optional subdirectory within each Run_* to tar
 	TarSubpath string `json:"tarSubpath,omitempty"`
 }
 
 // SecondaryPatternDTO represents a secondary file pattern for file-based scanning.
-// v4.0.8: Added for PUR file scanning mode.
 type SecondaryPatternDTO struct {
 	Pattern  string `json:"pattern"`  // Glob pattern, may include subpath (e.g., "*.mesh", "../meshes/*.cfg")
 	Required bool   `json:"required"` // If true, skip job when file missing; if false, warn and continue
@@ -90,15 +86,12 @@ type ScanOptionsDTO struct {
 	Recursive         bool   `json:"recursive"`
 	IncludeHidden     bool   `json:"includeHidden"`
 
-	// v4.0.8: File scanning mode fields
 	ScanMode          string                `json:"scanMode"`          // "folders" (default) or "files"
 	PrimaryPattern    string                `json:"primaryPattern"`    // For file mode: e.g., "*.inp", "inputs/*.inp"
 	SecondaryPatterns []SecondaryPatternDTO `json:"secondaryPatterns"` // For file mode: secondary files to attach
 
-	// v4.6.0: Optional subdirectory within each matched Run_* to tar
 	TarSubpath string `json:"tarSubpath,omitempty"`
 
-	// v4.6.1: Iterate numeric patterns in command across directories
 	IteratePatterns bool `json:"iteratePatterns"`
 }
 
@@ -110,7 +103,6 @@ type ScanResultDTO struct {
 	InvalidDirs []string     `json:"invalidDirs"`
 	Error       string       `json:"error,omitempty"`
 
-	// v4.0.8: File scanning mode results
 	SkippedFiles []string `json:"skippedFiles,omitempty"` // Primary files skipped due to missing required secondaries
 	Warnings     []string `json:"warnings,omitempty"`     // Warnings for missing optional secondaries
 }
@@ -149,8 +141,6 @@ type AutomationDTO struct {
 	ExecuteOn   string `json:"executeOn"`
 	ScriptName  string `json:"scriptName"`
 }
-
-// v4.0.6: Result DTOs with error propagation to fix silent API failures
 
 // CoreTypesResultDTO wraps core type results with optional error.
 type CoreTypesResultDTO struct {
@@ -205,11 +195,7 @@ type SingleJobInputDTO struct {
 	RemoteFileIDs []string   `json:"remoteFileIds,omitempty"`
 }
 
-// v4.0.0: Removed runState package variable. Run state is now managed by Engine.
-// See core.RunContext for run metadata and state.Manager for job state.
-
 // ScanDirectory scans a directory for matching subdirectories or files.
-// v4.0.8: Added file scanning mode with secondary file support.
 func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResultDTO {
 	if a.engine == nil {
 		return ScanResultDTO{Error: ErrNoEngine.Error()}
@@ -224,14 +210,12 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: fmt.Sprintf("directory does not exist: %s", opts.RootDir)}
 	}
 
-	// v4.0.8: Handle file scanning mode
 	if opts.ScanMode == "files" {
 		return a.scanFilesMode(opts, template)
 	}
 
-	// Default: folder scanning mode
-	// v4.5.9: Pass RootDir as PartDirs[0] so ScanToSpecs uses the GUI-selected
-	// directory instead of falling back to os.Getwd() (the app install directory).
+	// Default: folder scanning mode. Pass RootDir as PartDirs[0] so ScanToSpecs
+	// uses the GUI-selected directory instead of falling back to os.Getwd().
 	scanOpts := core.ScanOptions{
 		Pattern:           opts.Pattern,
 		ValidationPattern: opts.ValidationPattern,
@@ -240,8 +224,8 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		IncludeHidden:     opts.IncludeHidden,
 		PartDirs:          []string{opts.RootDir},
 		StartIndex:        1, // Prevent job names starting at _0
-		TarSubpath:        opts.TarSubpath,        // v4.6.0
-		IteratePatterns:   opts.IteratePatterns,   // v4.6.1
+		TarSubpath:        opts.TarSubpath,
+		IteratePatterns:   opts.IteratePatterns,
 	}
 
 	templateSpec := dtoToJobSpec(template)
@@ -252,7 +236,7 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: err.Error()}
 	}
 
-	// v4.5.9: Return actionable error when no directories match in folder mode.
+	// Return actionable error when no directories match in folder mode.
 	// File mode has its own SkippedFiles/Warnings semantics and returns earlier.
 	if len(jobs) == 0 {
 		return ScanResultDTO{
@@ -274,7 +258,6 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 }
 
 // scanFilesMode handles file-based scanning for PUR.
-// v4.0.8: Now uses unified filescan package shared with CLI.
 func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResultDTO {
 	// Convert DTO patterns to filescan patterns
 	patterns := make([]filescan.SecondaryPattern, len(opts.SecondaryPatterns))
@@ -323,14 +306,11 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 }
 
 // GetCoreTypes returns available hardware core types.
-// v4.0.6: Changed to return CoreTypesResultDTO with error propagation.
-// v4.0.8: Added caching and scan progress events for better UX during slow scans.
 func (a *App) GetCoreTypes() CoreTypesResultDTO {
 	if a.engine == nil || a.engine.API() == nil {
 		return CoreTypesResultDTO{Error: "engine not initialized"}
 	}
 
-	// v4.0.8: Check cache first
 	a.catalogCacheMu.RLock()
 	if len(a.cachedCoreTypes) > 0 {
 		cached := a.cachedCoreTypes
@@ -365,7 +345,6 @@ func (a *App) GetCoreTypes() CoreTypesResultDTO {
 		}
 	}
 
-	// v4.0.8: Cache results
 	a.catalogCacheMu.Lock()
 	a.cachedCoreTypes = dtos
 	a.catalogCacheMu.Unlock()
@@ -377,15 +356,11 @@ func (a *App) GetCoreTypes() CoreTypesResultDTO {
 }
 
 // GetAnalysisCodes returns available software analysis codes.
-// v4.0.6: Changed to return AnalysisCodesResultDTO with error propagation.
-// v4.0.8: Added caching and scan progress events for better UX during slow scans.
 func (a *App) GetAnalysisCodes(search string) AnalysisCodesResultDTO {
 	if a.engine == nil {
 		return AnalysisCodesResultDTO{Error: "engine not initialized"}
 	}
 
-	// v4.0.8: Check cache first (only if no search filter)
-	// When search is empty, we can use the full cached list
 	a.catalogCacheMu.RLock()
 	hasCached := len(a.cachedAnalyses) > 0
 	cached := a.cachedAnalyses
@@ -434,7 +409,6 @@ func (a *App) GetAnalysisCodes(search string) AnalysisCodesResultDTO {
 		}
 	}
 
-	// v4.0.8: Cache results
 	a.catalogCacheMu.Lock()
 	a.cachedAnalyses = allDtos
 	a.catalogCacheMu.Unlock()
@@ -466,8 +440,6 @@ func filterAnalysisCodes(codes []AnalysisCodeDTO, search string) []AnalysisCodeD
 }
 
 // GetAutomations returns available automations.
-// v4.0.6: Changed to return AutomationsResultDTO with error propagation.
-// v4.0.8: Increased timeout to handle paginated API calls with rate limiting.
 func (a *App) GetAutomations() AutomationsResultDTO {
 	if a.engine == nil || a.engine.API() == nil {
 		return AutomationsResultDTO{Error: "engine not initialized"}
@@ -498,7 +470,7 @@ func (a *App) GetAutomations() AutomationsResultDTO {
 type PURRunOptionsDTO struct {
 	ExtraInputFiles  string `json:"extraInputFiles"`  // Comma-separated paths and/or id:<fileId>
 	DecompressExtras bool   `json:"decompressExtras"` // Whether to decompress extra files on cluster
-	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`   // v4.7.4: Delete local tar files after successful upload
+	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`
 }
 
 // StartBulkRunWithOptions starts a bulk job run with additional PUR options.
@@ -554,7 +526,6 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 }
 
 // StartBulkRun starts a bulk job run (PUR pipeline).
-// v4.0.0: Refactored to use Engine's run context for state synchronization.
 func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 	if a.engine == nil {
 		return "", ErrNoEngine
@@ -564,7 +535,6 @@ func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 		return "", fmt.Errorf("no jobs provided")
 	}
 
-	// Check if a run is already active (v4.0.0: use Engine)
 	if a.engine.IsRunActive() {
 		return "", fmt.Errorf("a run is already in progress")
 	}
@@ -579,13 +549,12 @@ func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 		jobSpecs[i] = dtoToJobSpec(job)
 	}
 
-	// Register run with Engine (v4.0.0)
 	if err := a.engine.StartRun(runID, stateFile, len(jobs)); err != nil {
 		return "", err
 	}
 
-	// v4.6.0: Pre-populate all jobs as "pending" in the state manager so the GUI
-	// sees them immediately (before the pipeline goroutine starts processing).
+	// Pre-populate all jobs as "pending" so the GUI sees them immediately
+	// (before the pipeline goroutine starts processing).
 	if st := a.engine.GetState(); st != nil {
 		for i, job := range jobSpecs {
 			st.InitializeState(i+1, job.JobName, job.Directory)
@@ -593,8 +562,7 @@ func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 		st.Save()
 	}
 
-	// Create cancellable context
-	// v4.0.5: Protected by runMu to prevent race conditions
+	// Protected by runMu to prevent race conditions with CancelRun
 	ctx, cancel := context.WithCancel(context.Background())
 	a.runMu.Lock()
 	a.runCancel = cancel
@@ -615,8 +583,6 @@ func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
 }
 
 // StartSingleJob starts a single job submission.
-// v4.0.0: Refactored to use Engine's run context for state synchronization.
-// v4.0.8: Added directory existence check to fail early with clear error.
 func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	if a.engine == nil {
 		return "", ErrNoEngine
@@ -628,7 +594,6 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 		if input.Directory == "" {
 			return "", fmt.Errorf("directory is required for directory input mode")
 		}
-		// v4.0.8: Verify directory exists before starting job
 		if _, err := os.Stat(input.Directory); os.IsNotExist(err) {
 			return "", fmt.Errorf("directory does not exist: %s", input.Directory)
 		}
@@ -644,7 +609,6 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 		return "", fmt.Errorf("invalid input mode: %s", input.InputMode)
 	}
 
-	// Check if a run is already active (v4.0.0: use Engine)
 	if a.engine.IsRunActive() {
 		return "", fmt.Errorf("a run is already in progress")
 	}
@@ -655,8 +619,8 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	// Convert DTO to job spec
 	jobSpec := dtoToJobSpec(input.Job)
 
-	// v4.6.8: Explicitly set mode-specific fields. Clear conflicting fields to prevent
-	// loaded templates or CSV carrying stale directory/InputFiles values.
+	// Clear conflicting fields to prevent loaded templates or CSV carrying
+	// stale directory/InputFiles values into the wrong input mode.
 	switch input.InputMode {
 	case "directory":
 		jobSpec.Directory = input.Directory
@@ -669,13 +633,11 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 		jobSpec.InputFiles = nil // Will be populated after upload in goroutine
 	}
 
-	// Register run with Engine (v4.0.0)
 	if err := a.engine.StartRun(runID, stateFile, 1); err != nil {
 		return "", err
 	}
 
-	// Create cancellable context
-	// v4.0.5: Protected by runMu to prevent race conditions
+	// Protected by runMu to prevent race conditions with CancelRun
 	ctx, cancel := context.WithCancel(context.Background())
 	a.runMu.Lock()
 	a.runCancel = cancel
@@ -685,9 +647,8 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	go func() {
 		defer a.engine.EndRun()
 
-		// v4.7.4: For localFiles mode, expand folders and upload via TransferService.
-		// Fixes: (1) folders are now expanded to individual files, (2) uploads are visible
-		// in the Transfers tab, (3) failures are propagated to the GUI.
+		// For localFiles mode, expand folders to individual files and upload via
+		// TransferService so uploads appear in the Transfers tab.
 		if input.InputMode == "localFiles" {
 			// Expand folder paths to individual files
 			var expandedPaths []string
@@ -724,12 +685,10 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 				return
 			}
 
-			// v4.8.2: Warm proxy before first API call
 			if apiClient := a.engine.API(); apiClient != nil {
 				inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 			}
 
-			// v4.7.7: Generate batch ID for grouping uploads in Transfers tab
 			jobBatchID := fmt.Sprintf("job_%d", time.Now().UnixNano())
 			jobBatchLabel := fmt.Sprintf("Job: %s", jobSpec.JobName)
 
@@ -740,8 +699,8 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 					Source:      filePath,
 					Name:        filepath.Base(filePath),
 					SourceLabel: services.SourceLabelSingleJob,
-					BatchID:     jobBatchID,    // v4.7.7
-					BatchLabel:  jobBatchLabel, // v4.7.7
+					BatchID:     jobBatchID,
+					BatchLabel:  jobBatchLabel,
 				}, services.UploadFileSyncParams{})
 				if uploadErr != nil {
 					wailsLogger.Error().Err(uploadErr).Str("file", filePath).Msg("File upload failed")
@@ -763,7 +722,6 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 }
 
 // failSingleJob reports a single-job failure to backend state and the event bus.
-// v4.7.4: Extracted for consistent error propagation in the localFiles upload path.
 func (a *App) failSingleJob(jobName string, errMsg string) {
 	// Update backend state for polling fallback
 	if sm := a.engine.GetState(); sm != nil {
@@ -786,15 +744,12 @@ func (a *App) failSingleJob(jobName string, errMsg string) {
 		})
 	}
 
-	// v4.8.7: Report pre-pipeline single-job failure for error reporting (Plan 3).
 	if a.reporter != nil {
 		a.reporter.Report(fmt.Errorf("%s", errMsg), reporting.CategoryJobCreate, "single_job", "")
 	}
 }
 
 // CancelRun cancels the current run.
-// v4.0.0: Refactored to use Engine's run context.
-// v4.0.5: Protected by runMu to prevent race conditions.
 func (a *App) CancelRun() error {
 	if a.engine == nil {
 		return ErrNoEngine
@@ -804,7 +759,7 @@ func (a *App) CancelRun() error {
 		return fmt.Errorf("no run in progress")
 	}
 
-	// Cancel the context (v4.0.5: protected by mutex)
+	// Protected by mutex to prevent race with StartBulkRun/StartSingleJob
 	a.runMu.Lock()
 	if a.runCancel != nil {
 		a.runCancel()
@@ -819,7 +774,6 @@ func (a *App) CancelRun() error {
 }
 
 // GetRunStatus returns the current run status.
-// v4.0.0: Refactored to read from Engine's state.
 func (a *App) GetRunStatus() RunStatusDTO {
 	if a.engine == nil {
 		return RunStatusDTO{State: "idle"}
@@ -845,7 +799,7 @@ func (a *App) GetRunStatus() RunStatusDTO {
 		if pending == 0 {
 			if failed > 0 {
 				status.State = "failed"
-				// v4.6.8: Populate error from job state so GUI can display
+				// Populate error from job state so GUI can display
 				// the actual API error instead of a generic message.
 				if st := a.engine.GetState(); st != nil {
 					for _, js := range st.GetAllStates() {
@@ -867,8 +821,6 @@ func (a *App) GetRunStatus() RunStatusDTO {
 }
 
 // GetJobRows returns the current job rows for the jobs table.
-// v4.0.0: Refactored to read from Engine's state manager.
-// v4.0.6: Now returns actual UploadProgress from state instead of 0.
 func (a *App) GetJobRows() []JobRowDTO {
 	if a.engine == nil {
 		return []JobRowDTO{}
@@ -888,7 +840,7 @@ func (a *App) GetJobRows() []JobRowDTO {
 			JobName:        state.JobName,
 			TarStatus:      state.TarStatus,
 			UploadStatus:   state.UploadStatus,
-			UploadProgress: state.UploadProgress, // v4.0.6: Use actual progress from state
+			UploadProgress: state.UploadProgress,
 			CreateStatus:   "",
 			SubmitStatus:   state.SubmitStatus,
 			Status:         state.SubmitStatus, // Use submit status as overall status
@@ -901,14 +853,12 @@ func (a *App) GetJobRows() []JobRowDTO {
 }
 
 // ResetRun clears the current run state.
-// v4.0.0: Refactored to use Engine's ResetRun.
-// v4.0.5: Protected by runMu to prevent race conditions.
 func (a *App) ResetRun() {
 	if a.engine != nil {
 		a.engine.ResetRun()
 	}
 
-	// Clear local cancel function (v4.0.5: protected by mutex)
+	// Protected by mutex to prevent race with CancelRun
 	a.runMu.Lock()
 	if a.runCancel != nil {
 		a.runCancel()
@@ -917,7 +867,7 @@ func (a *App) ResetRun() {
 	a.runMu.Unlock()
 }
 
-// v4.7.3: RunHistoryEntryDTO represents a historical run entry.
+// RunHistoryEntryDTO represents a historical run entry.
 type RunHistoryEntryDTO struct {
 	RunID    string `json:"runId"`
 	RunType  string `json:"runType"`  // "pur" or "single", derived from ID prefix
@@ -926,7 +876,6 @@ type RunHistoryEntryDTO struct {
 }
 
 // GetRunHistory lists historical run state files, sorted by modification time (newest first).
-// v4.7.3: Added for run session persistence.
 func (a *App) GetRunHistory() []RunHistoryEntryDTO {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -993,7 +942,6 @@ func (a *App) GetRunHistory() []RunHistoryEntryDTO {
 }
 
 // GetHistoricalJobRows loads job rows from a historical state file.
-// v4.7.3: Added for run session persistence. Includes path traversal sanitization (C8).
 func (a *App) GetHistoricalJobRows(runID string) ([]JobRowDTO, error) {
 	// Path traversal sanitization (C8)
 	clean := filepath.Base(runID)
@@ -1050,7 +998,6 @@ func (a *App) GetHistoricalJobRows(runID string) ([]JobRowDTO, error) {
 }
 
 // ValidateJobSpec validates a job specification.
-// v4.6.0: Delegates to shared validation.ValidateJobSpec for CLI/GUI consistency.
 func (a *App) ValidateJobSpec(job JobSpecDTO) []string {
 	return validation.ValidateJobSpec(dtoToJobSpec(job))
 }
@@ -1071,7 +1018,6 @@ type PatternInfoDTO struct {
 }
 
 // PreviewCommandPatterns shows how a command varies across directories.
-// v4.6.1: Added for GUI preview of --iterate-command-patterns behaviour.
 func (a *App) PreviewCommandPatterns(command string, dirNames []string) []CommandPreviewDTO {
 	patterns := pattern.DetectNumericPatterns(command)
 
@@ -1128,8 +1074,8 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		ProjectID:             j.ProjectID,
 		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
-		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
-		TarSubpath:            j.TarSubpath, // v4.6.0
+		InputFiles:            j.InputFiles,
+		TarSubpath:            j.TarSubpath,
 	}
 }
 
@@ -1155,8 +1101,8 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		ProjectID:             j.ProjectID,
 		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
-		InputFiles:            j.InputFiles, // v4.0.8: File-based inputs
-		TarSubpath:            j.TarSubpath, // v4.6.0
+		InputFiles:            j.InputFiles,
+		TarSubpath:            j.TarSubpath,
 	}
 }
 
@@ -1301,7 +1247,6 @@ func (a *App) SaveJobToSGE(path string, job JobSpecDTO) error {
 }
 
 // GetJobsStats calculates statistics for the current job rows.
-// v4.0.0: Refactored to use Engine's GetRunStats.
 func (a *App) GetJobsStats() JobsStatsDTO {
 	if a.engine == nil {
 		return JobsStatsDTO{}
@@ -1336,7 +1281,7 @@ type JobsStatsDTO struct {
 }
 
 // =============================================================================
-// v4.0.0 G3: Template Library Functions
+// Template Library Functions
 // =============================================================================
 
 // TemplateInfoDTO represents metadata about a saved template.

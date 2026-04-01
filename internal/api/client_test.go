@@ -184,7 +184,7 @@ func TestGetStorageCredentials_MalformedJSON(t *testing.T) {
 	}
 }
 
-// v4.8.0: FileInfo.ToCloudFile() tests
+// FileInfo.ToCloudFile() tests
 
 func TestToCloudFile_Complete(t *testing.T) {
 	fi := &FileInfo{
@@ -265,7 +265,7 @@ func TestToCloudFile_MissingStorage(t *testing.T) {
 	}
 }
 
-// v4.8.2: ListFolderContentsStreaming tests
+// ListFolderContentsStreaming tests
 
 // folderContentsPage builds a JSON response matching the API's folder contents format.
 func folderContentsPage(folders []map[string]string, files []map[string]interface{}, nextURL string) []byte {
@@ -428,7 +428,7 @@ func TestListFolderContentsStreaming_ContextCancellation(t *testing.T) {
 	}
 }
 
-// v4.8.7: 11E — NewClient rejects non-allowlisted platform URLs
+// NewClient rejects non-allowlisted platform URLs
 func TestNewClient_RejectsInvalidPlatformURL(t *testing.T) {
 	cfg := &config.Config{
 		APIBaseURL: "https://evil.example.com",

@@ -65,7 +65,7 @@ func TestSaveAndLoadAPIConfig(t *testing.T) {
 	if loadedCfg.PlatformURL != cfg.PlatformURL {
 		t.Errorf("PlatformURL mismatch: expected %s, got %s", cfg.PlatformURL, loadedCfg.PlatformURL)
 	}
-	// v4.8.7 RF3: API key is intentionally NOT written to file (security fix).
+	// API key is intentionally NOT written to file.
 	// SaveAPIConfig strips legacy keys on save.
 	if loadedCfg.APIKey != "" {
 		t.Errorf("APIKey should not be saved to file, but loaded as %q", loadedCfg.APIKey)
@@ -116,7 +116,7 @@ func TestLoadAPIConfig_EmptyPath(t *testing.T) {
 }
 
 func TestAPIConfig_Validate(t *testing.T) {
-	// v4.0.8: Validate() only checks auto-download settings when enabled.
+	// Validate() only checks auto-download settings when enabled.
 	// PlatformURL and APIKey are no longer validated here (use ResolveAPIKey() separately).
 	tests := []struct {
 		name    string
@@ -155,7 +155,7 @@ func TestAPIConfig_Validate(t *testing.T) {
 				PlatformURL: "",
 				APIKey:      "my-api-key",
 			},
-			wantErr: nil, // v4.0.8: Validate() no longer checks PlatformURL
+			wantErr: nil, // Validate() does not check PlatformURL
 		},
 		{
 			name: "missing API key — not checked by Validate",
@@ -163,7 +163,7 @@ func TestAPIConfig_Validate(t *testing.T) {
 				PlatformURL: "https://platform.rescale.com",
 				APIKey:      "",
 			},
-			wantErr: nil, // v4.0.8: Validate() no longer checks APIKey
+			wantErr: nil, // Validate() does not check APIKey
 		},
 		{
 			name: "enabled but missing download folder",
@@ -413,7 +413,7 @@ api_key = partial-key
 	}
 }
 
-// v4.8.7 RF3: Verify LoadAPIConfig still reads legacy api_key values for backwards compat.
+// Verify LoadAPIConfig still reads legacy api_key values for backwards compat.
 func TestLoadAPIConfig_LegacyAPIKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "apiconfig")
@@ -432,7 +432,7 @@ func TestLoadAPIConfig_LegacyAPIKey(t *testing.T) {
 	}
 }
 
-// v4.8.7 RF3: Verify SaveAPIConfig strips legacy api_key from disk.
+// Verify SaveAPIConfig strips legacy api_key from disk.
 func TestSaveAPIConfig_StripsLegacyKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "apiconfig")

@@ -20,16 +20,16 @@ type JobSpec struct {
 	SubmitMode            string // "yes", "no", or "draft"
 	IsLowPriority         bool
 	OnDemandLicenseSeller string
-	Tags                  []string // Job tags (added in v1.0.0)
-	ProjectID             string   // Project ID to assign job to (added in v1.0.0)
-	OrgCode               string   // Organization code for project assignment (v4.6.5)
-	Automations           []string // Automation IDs to attach (added in v3.6.1)
+	Tags                  []string // Job tags
+	ProjectID             string   // Project ID to assign job to
+	OrgCode               string   // Organization code for project assignment
+	Automations           []string // Automation IDs to attach
 
-	// v4.0.8: File-based job inputs (for file scanning mode in PUR)
-	// When InputFiles is non-empty, these files are uploaded individually instead of tarring Directory
+	// File-based job inputs (for file scanning mode in PUR).
+	// When InputFiles is non-empty, these files are uploaded individually instead of tarring Directory.
 	InputFiles []string
 
-	// v4.6.0: Optional subdirectory within each Run_* to tar instead of the full directory.
+	// Optional subdirectory within each Run_* to tar instead of the full directory.
 	// When set, only the contents of Directory/TarSubpath are archived.
 	TarSubpath string `json:"tarSubpath,omitempty"`
 }
@@ -43,7 +43,7 @@ type JobState struct {
 	TarStatus      string // "pending", "success", "failed"
 	FileID         string
 	UploadStatus   string  // "pending", "success", "failed"
-	UploadProgress float64 // v4.0.6: 0.0-100.0 upload percentage (transient, not persisted)
+	UploadProgress float64 // 0.0-100.0 upload percentage (transient, not persisted)
 	JobID          string
 	SubmitStatus   string // "pending", "success", "failed", "skipped"
 	ExtraFileIDs   string
@@ -58,7 +58,7 @@ type JobRequest struct {
 	IsLowPriority  bool                   `json:"isLowPriority"`
 	Tags           []string               `json:"tags,omitempty"`
 	ProjectID      string                 `json:"projectId,omitempty"`
-	JobAutomations []JobAutomationRequest `json:"jobAutomations,omitempty"` // v3.6.1
+	JobAutomations []JobAutomationRequest `json:"jobAutomations,omitempty"`
 }
 
 // JobAnalysisRequest represents an analysis within a job
@@ -196,7 +196,6 @@ func (jf *JobFile) ToCloudFile() *CloudFile {
 // Automation represents a Rescale automation entity.
 // Automations are pre-configured scripts that can be attached to jobs
 // to run before (pre) or after (post) job execution.
-// Added in v3.6.1.
 type Automation struct {
 	ID                   string   `json:"id"`
 	Name                 string   `json:"name"`
@@ -224,8 +223,8 @@ type AutomationRef struct {
 }
 
 // JobAutomationRequest is used when creating/updating a job with automations.
-// v4.6.8: Fixed to use nested AutomationRef struct matching API contract.
-// v4.6.8: Removed omitempty from EnvironmentVariables — API returns HTTP 500
+// Uses nested AutomationRef struct matching API contract.
+// EnvironmentVariables must not be omitempty — API returns HTTP 500
 // if the "environmentVariables" key is missing from the JSON payload.
 type JobAutomationRequest struct {
 	Automation           AutomationRef     `json:"automation"`

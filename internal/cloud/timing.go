@@ -1,9 +1,9 @@
 // Package cloud provides cloud storage transfer functionality.
-// timing.go - Transfer timing instrumentation for diagnostics (v3.6.2, v4.0.0)
+// timing.go - Transfer timing instrumentation for diagnostics
 //
 // Enable timing output by:
 //   - Setting RESCALE_TIMING=1 environment variable, OR
-//   - Enabling "Detailed Logging" in GUI Settings tab (v4.0.0)
+//   - Enabling "Detailed Logging" in GUI Settings tab
 //
 // Output format: [TIMING] phase_name: duration (optional_details)
 //
@@ -23,10 +23,10 @@ import (
 	"github.com/rescale/rescale-int/internal/events"
 )
 
-// Global state for GUI-mode detailed logging (v4.0.0)
+// Global state for GUI-mode detailed logging
 var (
 	detailedLoggingEnabled int32                           // atomic: 1 = enabled, 0 = disabled
-	globalEventBus         atomic.Pointer[events.EventBus] // v4.8.7 S3: atomic to prevent data race
+	globalEventBus         atomic.Pointer[events.EventBus] // atomic to prevent data race with concurrent S3 transfers
 )
 
 // SetDetailedLogging enables or disables detailed logging globally.
@@ -54,7 +54,7 @@ func TimingEnabled() bool {
 
 // TimingLog writes a timing message to the writer if detailed logging is enabled.
 // If writer is nil, os.Stderr is used.
-// v4.0.0: Also emits to EventBus for GUI Activity tab when available.
+// Also emits to EventBus for GUI Activity tab when available.
 // Format: [TIMING] message
 func TimingLog(w io.Writer, format string, args ...interface{}) {
 	if !TimingEnabled() {
@@ -69,7 +69,7 @@ func TimingLog(w io.Writer, format string, args ...interface{}) {
 	}
 	fmt.Fprintf(w, "%s\n", formattedMsg)
 
-	// v4.0.0: Also emit to EventBus for GUI Activity tab
+	// Also emit to EventBus for GUI Activity tab
 	if eb := globalEventBus.Load(); eb != nil {
 		eb.PublishLog(events.DebugLevel, formattedMsg, "timing", "", nil)
 	}
@@ -113,8 +113,6 @@ func (t *Timer) Stop() time.Duration {
 	}
 	return elapsed
 }
-
-// v4.0.4: Removed Timer.Elapsed() - was never used in production code.
 
 // StopWithThroughput logs elapsed time with throughput information.
 // Useful for transfer operations where bytes processed is known.

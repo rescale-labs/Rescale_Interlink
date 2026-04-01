@@ -67,7 +67,6 @@ const (
 	// If credentials are older than this when a transfer is about to start,
 	// refresh proactively to prevent ExpiredToken errors after laptop sleep.
 	// Set 2 minutes below GlobalCredentialRefreshInterval for safety margin.
-	// v4.8.3
 	CredentialFreshnessThreshold = 8 * time.Minute
 )
 
@@ -87,11 +86,9 @@ const (
 // Transfer operation timeouts
 const (
 	// PartOperationTimeout - timeout for individual part uploads/downloads (10 minutes)
-	// v4.0.4: Centralized from hardcoded values in S3/Azure providers
 	PartOperationTimeout = 10 * time.Minute
 
 	// ProgressUpdateInterval - how often progress updates are checked/emitted (500ms)
-	// v4.0.4: Centralized from hardcoded values in transfer code
 	ProgressUpdateInterval = 500 * time.Millisecond
 )
 
@@ -171,11 +168,9 @@ const (
 	MinMaxConcurrent = 1
 
 	// MaxMaxConcurrent - maximum concurrent operations allowed
-	// v4.8.0: Increased from 10 to 20 for adaptive concurrency with small files
 	MaxMaxConcurrent = 20
 
 	// Adaptive concurrency tiers (used by resource manager)
-	// v4.8.0: Scale concurrency based on file size distribution in batch
 
 	// AdaptiveSmallFileConcurrency - for files < SmallFileThreshold (100MB): 1 thread each
 	AdaptiveSmallFileConcurrency = 20
@@ -300,7 +295,7 @@ const (
 
 	// PaginatedAPITimeout - timeout for paginated API operations (5 minutes)
 	// Software/hardware scans can fetch 100+ pages with rate limiting at 0.5s/request.
-	// v4.0.8: Increased from 30s which caused "context deadline exceeded" on page 5+.
+	// Set high because 30s caused "context deadline exceeded" on page 5+.
 	PaginatedAPITimeout = 5 * time.Minute
 
 	// ValidationCacheTTL - time-to-live for cached validation results (5 minutes)
@@ -350,7 +345,7 @@ const (
 	PaginationWarningThreshold = 900
 )
 
-// Local File Browser (v4.0.3)
+// Local File Browser
 const (
 	// DirectoryReadTimeout - timeout for reading a local directory (30 seconds)
 	// Prevents UI freeze on hung network mounts (NFS/SMB)
@@ -369,12 +364,10 @@ const (
 const (
 	// DefaultFolderConcurrency - default concurrent folder creation operations.
 	// Used by GUI and service-layer upload paths. CLI allows user override via --folder-concurrency flag.
-	// v4.8.3: Centralized from inconsistent values (was 3 in GUI, 15 in service layer).
 	DefaultFolderConcurrency = 8
 )
 
-// Channel Buffer Sizes (v4.8.1)
-// Centralized from hardcoded magic numbers across transfer/service code.
+// Channel Buffer Sizes
 const (
 	// DispatchChannelBuffer - buffer for high-throughput streaming dispatch channels.
 	// Used in: BatchExecutor dispatch, TransferService pre-reg dispatch, folder scan.

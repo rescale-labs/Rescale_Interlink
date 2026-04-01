@@ -228,7 +228,7 @@ func shouldIncludeFile(fileName string, includePatterns, excludePatterns []strin
 }
 
 // GenerateTarPath generates a path for the tar file with correct extension based on compression.
-// v4.6.0: Produces human-readable names using last 1-2 path components with an FNV hash
+// Produces human-readable names using last 1-2 path components with an FNV hash
 // suffix for collision safety. Example: "Testing_Run_6_a1b2c3d4.tar.gz"
 func GenerateTarPath(directory, basePath, compression string) string {
 	absDir, err := filepath.Abs(directory)

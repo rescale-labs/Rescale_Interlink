@@ -1,11 +1,6 @@
 // Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
 // FIPS 140-3 Compliant Build Required
 //
-// v4.7.3: Run session persistence and monitoring — survive tab nav and app restart.
-// v4.7.2: Consistent Load/Save UI across SingleJob and PUR tabs, label improvements, orgCode bugfix.
-// v4.7.1: Disk space error UX (banner + short labels) and settings reorganization (workers/tar from Setup to PUR/SingleJob).
-// v4.6.8: Fix automation JSON format, single job all input modes, GTK warnings, terminology.
-// v4.0.3: True server-side pagination with page caching, status message fix.
 // - No args + display available → GUI mode
 // - No args + no display → CLI help
 // - --gui → GUI mode
@@ -45,7 +40,7 @@ func init() {
 	// Shared FIPS 140-3 compliance check (common to GUI and CLI binaries)
 	intfips.Init("wails")
 
-	// v4.5.1: Warn if NTLM proxy is configured in FIPS mode
+	// Warn if NTLM proxy is configured in FIPS mode —
 	// NTLM uses non-FIPS algorithms (MD4/MD5) which may violate compliance for FRM platforms
 	if intfips.Enabled {
 		cfg, err := config.LoadConfigCSV(config.GetDefaultConfigPath())
@@ -76,7 +71,6 @@ func main() {
 		os.Setenv("RESCALE_TIMING", "1")
 	}
 
-	// v4.0.1: Smart CLI vs GUI mode detection
 	if isCLIMode() {
 		// CLI mode - use the proper CLI root command with all persistent flags
 		if err := cli.Execute(); err != nil {
@@ -86,7 +80,7 @@ func main() {
 	}
 
 	// GUI mode - launch Wails GUI
-	// v4.6.8: Suppress GTK ibus input method warnings on Linux.
+	// Suppress GTK ibus input method warnings on Linux.
 	// Wails uses its own webview input handling; ibus is unnecessary.
 	if runtime.GOOS == "linux" && os.Getenv("GTK_IM_MODULE") == "" {
 		os.Setenv("GTK_IM_MODULE", "none")
@@ -99,7 +93,6 @@ func main() {
 }
 
 // isCLIMode determines whether to run in CLI mode based on arguments and environment.
-// v4.0.1: Smart detection for intuitive user experience.
 //
 // CLI mode when:
 // - --cli flag is present (force CLI mode)

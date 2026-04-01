@@ -97,7 +97,6 @@ func executeFileUpload(
 }
 
 // executeFileUploadWithDuplicateCheck handles file uploads with optional duplicate detection
-// v4.7.4: Added tags parameter for post-upload tagging.
 func executeFileUploadWithDuplicateCheck(
 	ctx context.Context,
 	filePatterns []string,
@@ -106,7 +105,7 @@ func executeFileUploadWithDuplicateCheck(
 	duplicateMode UploadDuplicateMode,
 	dryRun bool,
 	preEncrypt bool,
-	uploadTags []string, // v4.7.4: Tags to apply after upload
+	uploadTags []string,
 	apiClient *api.Client,
 	logger *logging.Logger,
 ) error {
@@ -271,21 +270,18 @@ func executeFileUploadWithDuplicateCheck(
 // Returns file IDs in the same order as input files.
 // If preEncrypt is true, uses legacy pre-encryption mode (creates temp file before upload).
 // If preEncrypt is false (default), uses streaming encryption (encrypts on-the-fly, no temp file).
-// v4.7.4: Added uploadTags parameter for post-upload tagging.
 func UploadFilesWithIDs(
 	ctx context.Context,
 	filePatterns []string,
 	folderID string,
 	maxConcurrent int,
 	preEncrypt bool,
-	uploadTags []string, // v4.7.4: Tags to apply after each upload (nil = no tags)
+	uploadTags []string,
 	apiClient *api.Client,
 	logger *logging.Logger,
 	silent bool, // If true, skip summary output (for use in job submission)
 ) ([]string, error) {
-	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
-	// v4.8.7: Unified credential warming
 	credentials.GetManager(apiClient).WarmAll(ctx)
 
 	// Expand glob patterns
@@ -349,7 +345,6 @@ func UploadFilesWithIDs(
 	resourceMgr := CreateResourceManager()
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.1: Build work items for BatchExecutor
 	items := make([]cliUploadItem, len(filePaths))
 	for i, fPath := range filePaths {
 		fileInfo, _ := os.Stat(fPath)
@@ -376,7 +371,6 @@ func UploadFilesWithIDs(
 			fmt.Fprintf(uploadUI.Writer(), "[%d/%d] Preparing to upload %s...\n", item.idx+1, len(filePaths), filepath.Base(fPath))
 		}
 
-		// v4.8.1: Pass adaptive worker count for correct per-file thread allocation
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
 
 		var fileBar *progress.FileBar

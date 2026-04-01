@@ -1,6 +1,4 @@
 // Package folder provides shared folder-upload primitives for both CLI and GUI paths.
-// v4.8.7 Plan 2b: Extracted from internal/cli/folder_upload_helper.go to fix layering
-// violation (GUI was importing internal/cli directly).
 package folder
 
 import (
@@ -70,7 +68,7 @@ func (fc *FolderCache) Get(ctx context.Context, apiClient *api.Client, folderID 
 }
 
 // Invalidate removes a folder from the cache, forcing a fresh fetch on next Get.
-// v4.0.8: Used to handle stale cache when folder creation fails with "already exists".
+// Needed when folder creation fails with "already exists" due to stale cache.
 func (fc *FolderCache) Invalidate(folderID string) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -78,17 +76,13 @@ func (fc *FolderCache) Invalidate(folderID string) {
 }
 
 // BuildDirectoryTree walks a local directory and returns lists of directories, files, and symlinks.
-// This function is exported for use by the GUI.
-//
-// v4.0.4: Refactored to use localfs.WalkCollect() for North Star alignment
-// (shared code between CLI and GUI for local filesystem operations).
 // Returns string slices for backward compatibility with existing callers.
 func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string, []string, error) {
 	// Use shared localfs.WalkCollect() for core directory walking
 	result, err := localfs.WalkCollect(rootPath, localfs.WalkOptions{
 		IncludeHidden:  includeHidden,
 		SkipHiddenDirs: true,  // Skip hidden directories entirely
-		FollowSymlinks: true,  // v4.8.8: Follow symlinks with cycle detection
+		FollowSymlinks: true,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -133,8 +127,6 @@ func CheckFolderExists(ctx context.Context, apiClient *api.Client, cache *Folder
 }
 
 // processFolderParams groups the shared parameters for per-folder processing.
-// v4.8.5: Extracted to enable code reuse between CreateFolderStructure and
-// CreateFolderStructureStreaming (North Star: maximum code reuse).
 type processFolderParams struct {
 	ctx                context.Context
 	apiClient          *api.Client
@@ -150,8 +142,6 @@ type processFolderParams struct {
 }
 
 // processFolder creates or merges a single folder, updating the mapping.
-// v4.8.5: Shared helper between CreateFolderStructure and CreateFolderStructureStreaming.
-// v4.8.7: Uses conflictPrompt callback instead of hardcoded promptFolderConflict.
 // Returns (remoteID, created, error). On skip, returns ("", false, nil).
 func processFolder(p processFolderParams, dirPath string) (string, bool, error) {
 	parentPath := filepath.Dir(dirPath)
@@ -256,8 +246,6 @@ func processFolder(p processFolderParams, dirPath string) (string, bool, error) 
 
 // CreateFolderStructure creates all folders recursively, handling conflicts.
 // If folderReadyChan is provided, sends events as folders become ready for file uploads.
-// v4.8.5: Refactored to use processFolder helper for North Star code reuse.
-// v4.8.7: Added conflictPrompt parameter to decouple from CLI prompting.
 func CreateFolderStructure(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -348,7 +336,6 @@ func CreateFolderStructure(
 		wg.Wait()
 		close(errChan)
 
-		// v4.8.7: Use unified error collection
 		errs := transfer.CollectErrors(errChan)
 		if len(errs) > 0 {
 			return nil, 0, errs[0]
@@ -362,12 +349,11 @@ func CreateFolderStructure(
 // Unlike CreateFolderStructure which requires all directories upfront, this processes
 // directories as they are discovered by WalkStream.
 //
-// v4.8.5: Uses parent-ready gating — a folder can be created as soon as its parent
-// exists in the mapping. filepath.WalkDir guarantees parents are visited before
-// children, so pending buffers stay small.
-// v4.8.7: Added conflictPrompt parameter to decouple from CLI prompting.
+// Uses parent-ready gating: a folder can be created as soon as its parent exists in
+// the mapping. filepath.WalkDir guarantees parents are visited before children, so
+// pending buffers stay small.
 //
-// Returns the mapping (localPath → remoteID), folders created count, and any error.
+// Returns the mapping (localPath -> remoteID), folders created count, and any error.
 func CreateFolderStructureStreaming(
 	ctx context.Context,
 	apiClient *api.Client,

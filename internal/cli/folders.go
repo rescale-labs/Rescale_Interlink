@@ -189,7 +189,7 @@ func newFoldersUploadDirCmd() *cobra.Command {
 	var skipFolderConflicts bool
 	var mergeFolderConflicts bool
 	var checkConflicts bool
-	var tagsFlag string // v4.7.4: Comma-separated tags to apply after each file upload
+	var tagsFlag string
 
 	cmd := &cobra.Command{
 		Use:   "upload-dir <directory>",
@@ -236,7 +236,7 @@ Examples:
 				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
-			// v4.8.0: If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
+			// If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
 			// so adaptive concurrency can scale up for small files (default of 5 would cap it)
 			if !cmd.Flags().Changed("max-concurrent") {
 				maxConcurrent = constants.MaxMaxConcurrent
@@ -284,7 +284,6 @@ Examples:
 
 			ctx := GetContext()
 
-			// v4.8.2: Warm proxy before first API call
 			inthttp.WarmupProxyIfNeeded(ctx, cfg)
 
 			// Get parent folder ID (default to My Library)
@@ -297,7 +296,7 @@ Examples:
 				logger.Info().Str("parent_id", parentID).Msg("Using My Library as parent")
 			}
 
-			// v4.8.7: Pipelined path uses WalkStream (no upfront scan needed).
+			// Pipelined path uses WalkStream (no upfront scan needed).
 			// Sequential path still uses BuildDirectoryTree for full directory/file lists.
 			// Validate local path early for pipelined path to avoid remote side-effects.
 			if !sequential {
@@ -308,7 +307,7 @@ Examples:
 				}
 			}
 
-			// v4.8.8: Resolve symlinks in root path so filesystem operations use the real directory.
+			// Resolve symlinks in root path so filesystem operations use the real directory.
 			// Keep original localPath for display name (rootFolderName) and user-facing messages.
 			resolvedLocalPath, err := pathutil.ResolveAbsolutePath(localPath)
 			if err != nil {
@@ -385,7 +384,6 @@ Examples:
 				logger.Info().Str("path", resolvedLocalPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
 				var directories, files []string
 				var err error
-				// v4.8.8: Use resolvedLocalPath for filesystem walk so paths are consistent
 				directories, files, symlinks, err = BuildDirectoryTree(resolvedLocalPath, includeHidden)
 				if err != nil {
 					return fmt.Errorf("failed to scan directory: %w", err)
@@ -420,7 +418,6 @@ Examples:
 					folderConflictMode = ConflictMergeOnce // Will prompt for each
 				}
 
-				// v4.8.8: Use resolvedLocalPath consistently — directories[] paths are under resolvedLocalPath
 				mapping, created, err := CreateFolderStructure(
 					ctx, apiClient, cache, resolvedLocalPath, directories, rootFolderID, &folderConflictMode, folderConcurrency, logger, nil, os.Stdout)
 				if err != nil {
@@ -435,7 +432,6 @@ Examples:
 				defer uploadUI.Wait()
 
 				// Cache folder paths for display
-				// v4.8.8: mapping keys are under resolvedLocalPath; use it for Rel
 				for localDir, folderID := range mapping {
 					relativePath, _ := filepath.Rel(resolvedLocalPath, localDir)
 					if relativePath == "." {
@@ -449,12 +445,9 @@ Examples:
 				if mergeFolderConflicts {
 					initialFileMode = FileSkipAll
 				}
-				// v4.8.1: Use ConflictResolvers instead of raw pointers
 				fileConflictResolver := NewFileConflictResolver(initialFileMode)
 				errorResolver := NewErrorActionResolver(ErrorContinueOnce)
-				// v4.8.1: Pass resource manager from global CLI flags
 				uploadResourceMgr := CreateResourceManager()
-				// v4.8.8: Use resolvedLocalPath — files[] and mapping keys are both under it
 				uploadResult, err := uploadFiles(
 					ctx, resolvedLocalPath, files, mapping, apiClient, cache, uploadUI,
 					fileConflictResolver, errorResolver, continueOnError, maxConcurrent, cfg, logger, uploadResourceMgr)
@@ -463,16 +456,13 @@ Examples:
 				}
 				result = uploadResult
 			} else {
-				// v4.8.7: Pipelined mode (default) — streaming WalkStream, no upfront scan
 				fmt.Println("📂 Starting streaming pipelined upload...")
 
 				// Convert flags to single skipExisting for pipelined mode
 				// Note: pipelined mode currently only supports merge behavior
 				effectiveSkipExisting := mergeFolderConflicts || skipFolderConflicts
 
-				// v4.8.1: Pass resource manager from global CLI flags
 				pipelineResourceMgr := CreateResourceManager()
-				// v4.8.8: Use resolvedLocalPath for filesystem operations
 				uploadResult, created, err := uploadDirectoryPipelined(
 					ctx, apiClient, cache, resolvedLocalPath, rootFolderID,
 					includeHidden, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
@@ -491,7 +481,6 @@ Examples:
 
 			fmt.Println() // Add blank line after progress bars
 
-			// v4.7.4: Apply tags to uploaded files (non-fatal)
 			if uploadTags := tags.ParseCommaSeparated(tagsFlag); len(uploadTags) > 0 && len(result.UploadedFileIDs) > 0 {
 				fmt.Printf("🏷  Applying tags to %d file(s)...\n", len(result.UploadedFileIDs))
 				tagFailed := 0
@@ -729,7 +718,7 @@ Examples:
 				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
 					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
 			}
-			// v4.8.0: If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
+			// If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
 			// so adaptive concurrency can scale up for small files (default of 5 would cap it)
 			if !cmd.Flags().Changed("max-concurrent") {
 				maxConcurrent = constants.MaxMaxConcurrent
@@ -758,13 +747,11 @@ Examples:
 
 			ctx := GetContext()
 
-			// v4.8.2: Warm proxy before first API call
 			inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 			// Use helper function for recursive download
 			// Note: folderName is empty, so it will use folderID as the folder name
 			// TODO: Add --name flag or fetch folder name from API
-			// v4.8.1: Create resource manager from global CLI flags and pass explicitly
 			downloadResourceMgr := CreateResourceManager()
 			result, err := DownloadFolderRecursive(
 				ctx, folderID, "", outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger, downloadResourceMgr)

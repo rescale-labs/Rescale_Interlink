@@ -139,7 +139,6 @@ Example:
 }
 
 // newServiceInstallAndStartCmd creates the 'service install-and-start' command.
-// v4.7.6: Combined idempotent install + start for single UAC prompt.
 func newServiceInstallAndStartCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install-and-start",

@@ -1,8 +1,4 @@
-// v4.8.1: Shared progress-reporting reader wrappers for S3 and Azure providers.
-//
-// Replaces duplicated progressReader, uploadProgressReader, and progressReadSeekCloser
-// types that were independently defined in both s3/streaming_concurrent.go and
-// azure/streaming_concurrent.go.
+// Shared progress-reporting reader wrappers for S3 and Azure providers.
 package transfer
 
 import (

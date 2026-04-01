@@ -31,7 +31,7 @@ type ServiceDetectionResult struct {
 
 // DetectDaemon performs multi-layer detection to determine daemon state.
 // Should be used by GUI, CLI, and Tray instead of raw IsInstalled() calls.
-// v4.5.5: Handles SCM access denied by falling back to IPC and pipe detection.
+// Falls back to IPC and pipe detection when SCM access is denied.
 func DetectDaemon() ServiceDetectionResult {
 	result := ServiceDetectionResult{}
 	debugLog("Starting detection...")
@@ -82,9 +82,8 @@ func DetectDaemon() ServiceDetectionResult {
 }
 
 // ShouldBlockSubprocess returns true if subprocess spawn should be blocked.
-// Returns (blocked, reason).
-// v4.5.5: Only blocks when service is RUNNING, not just installed.
-// This allows subprocess mode when service is installed but stopped.
+// Returns (blocked, reason). Only blocks when service is RUNNING, not just
+// installed — this allows subprocess mode when service is installed but stopped.
 func ShouldBlockSubprocess() (bool, string) {
 	d := DetectDaemon()
 	if d.ServiceMode {
@@ -97,7 +96,7 @@ func ShouldBlockSubprocess() (bool, string) {
 		return true, d.Error
 	}
 
-	// v4.5.5: Check if service is installed but stopped - warn but don't block
+	// Check if service is installed but stopped - warn but don't block
 	if installed, _ := IsInstalledWithReason(); installed {
 		if status, err := QueryStatus(); err == nil && status != StatusRunning {
 			// Service is installed but not running - allow subprocess but log warning

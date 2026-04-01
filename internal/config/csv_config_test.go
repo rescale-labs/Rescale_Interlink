@@ -467,7 +467,7 @@ tenant_url,https://kr.rescale.com
 	}
 }
 
-// TestIsFRMPlatform validates proper hostname-based FedRAMP URL detection (v4.6.6 R2).
+// TestIsFRMPlatform validates proper hostname-based FedRAMP URL detection.
 // Ensures substring spoofing attacks like "evil-rescale-gov.com" are rejected.
 func TestIsFRMPlatform(t *testing.T) {
 	tests := []struct {
@@ -514,7 +514,7 @@ func TestMergeWithFlagsAndTokenFile(t *testing.T) {
 		}
 	}()
 
-	// Test priority (v2.7.0): flag > env > token-file > default-token-file
+	// Test priority: flag > env > token-file > default-token-file
 	// This matches common CLI conventions and user expectations
 	t.Run("flag overrides env", func(t *testing.T) {
 		os.Setenv("RESCALE_API_KEY", "env-key")

@@ -235,7 +235,6 @@ func TestTeeWriter_NilEventBus(t *testing.T) {
 	}
 }
 
-// v4.8.7: 11D — Verify RATELIMIT is classified as DEBUG
 func TestClassifyLine_RATELIMIT_Level(t *testing.T) {
 	level, stage := classifyLine("[RATELIMIT] token bucket refill")
 	if level != events.DebugLevel {
@@ -246,7 +245,6 @@ func TestClassifyLine_RATELIMIT_Level(t *testing.T) {
 	}
 }
 
-// v4.8.7: 11D — Prove TIMING is throttled end-to-end at the Write() level
 func TestTeeWriter_ThrottleTIMING(t *testing.T) {
 	var buf bytes.Buffer
 	eb, collector := collectingEventBus(t)
@@ -267,7 +265,6 @@ func TestTeeWriter_ThrottleTIMING(t *testing.T) {
 	eb.Close()
 }
 
-// v4.8.7: 11D — Prove RATELIMIT is throttled end-to-end at the Write() level
 func TestTeeWriter_ThrottleRATELIMIT(t *testing.T) {
 	var buf bytes.Buffer
 	eb, collector := collectingEventBus(t)

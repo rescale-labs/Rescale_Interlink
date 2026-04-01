@@ -8,7 +8,6 @@ import (
 )
 
 // LogDirectory returns the unified log directory for all Interlink logs.
-// v4.4.2: Centralized log path used by GUI, daemon, and tray.
 //
 // Locations:
 //   - Windows: %LOCALAPPDATA%\Rescale\Interlink\logs
@@ -39,7 +38,6 @@ func LogDirectory() string {
 }
 
 // LogDirectoryForUser returns the log directory for a specific user profile.
-// v4.5.0: Used by multi-user service to store per-user daemon logs.
 //
 // On Windows, uses the user's profile path to construct the log directory:
 //   - profilePath\AppData\Local\Rescale\Interlink\logs
@@ -53,7 +51,6 @@ func LogDirectoryForUser(profilePath string) string {
 }
 
 // ReportDirectory returns the directory for error report files.
-// v4.8.7: Used by safe error reporting (Plan 3, 6A-6E).
 //
 // Locations:
 //   - Windows: %LOCALAPPDATA%\Rescale\Interlink\reports
@@ -83,7 +80,6 @@ func ReportDirectory() string {
 }
 
 // EnsureReportDirectory creates the report directory if it doesn't exist.
-// v4.8.7: Uses 0700 permissions to restrict access to owner only.
 func EnsureReportDirectory() error {
 	return os.MkdirAll(ReportDirectory(), 0700)
 }

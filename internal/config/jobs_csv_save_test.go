@@ -225,7 +225,6 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		}
 	}
 
-	// v4.6.0: TarSubpath round-trip
 	if reloaded.TarSubpath != originalJob.TarSubpath {
 		t.Errorf("TarSubpath = %s, want %s", reloaded.TarSubpath, originalJob.TarSubpath)
 	}

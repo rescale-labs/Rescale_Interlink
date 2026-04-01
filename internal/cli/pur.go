@@ -144,7 +144,6 @@ Examples:
 				Bool("iteratePatterns", iteratePatterns).
 				Msg("Generating jobs CSV from directories")
 
-			// v4.6.5: Use shared ScanDirectories() for both single and multi-part modes
 			baseJobName := strings.TrimSuffix(tmpl.JobName, "_1")
 			if baseJobName == "" {
 				baseJobName = "Job"
@@ -233,7 +232,6 @@ Examples:
 }
 
 // newScanFilesCmd creates the 'scan-files' command.
-// v4.0.8: Unified CLI for file-based scanning, shares logic with GUI.
 func newScanFilesCmd() *cobra.Command {
 	var rootDir string
 	var primaryPattern string
@@ -481,7 +479,6 @@ Example:
 				}
 			}
 
-			// v4.6.0: Shared validation — same rules as GUI ValidateJobSpec
 			hasErrors := false
 			for i, job := range jobs {
 				errs := validation.ValidateJobSpec(job)
@@ -596,7 +593,6 @@ Example:
 
 			logger.Info().Int("count", len(jobs)).Msg("Loaded jobs")
 
-			// v4.6.5: dry-run short-circuit — show plan without executing
 			if dryRun {
 				fmt.Printf("\n=== DRY RUN: %d jobs loaded ===\n\n", len(jobs))
 				fmt.Printf("%-5s %-30s %-20s %-10s %-8s %s\n", "#", "Job Name", "Directory", "CoreType", "Hours", "Command (preview)")
@@ -745,7 +741,6 @@ Example:
 
 			logger.Info().Int("count", len(jobs)).Msg("Loaded jobs")
 
-			// v4.6.5: dry-run short-circuit — analyze state without executing
 			if dryRun {
 				// Load state file to analyze what's remaining
 				stateMgr := state.NewManager(stateFile)
@@ -855,7 +850,6 @@ Example:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
-			// v4.6.5: --ids direct submission — skip CSV/pipeline entirely
 			if ids != "" && cmd.Flags().Changed("jobs-csv") {
 				return fmt.Errorf("cannot use both --ids and --jobs-csv")
 			}

@@ -138,19 +138,16 @@ func (s *MultiUserService) ResumeUser(identifier string) error {
 }
 
 // TriggerUserScan triggers a scan for a specific user (by SID or username).
-// v4.5.0: Added to support per-user scan triggering from IPC.
 func (s *MultiUserService) TriggerUserScan(identifier string) error {
 	return s.daemon.TriggerUserScan(identifier)
 }
 
 // GetUserLogs returns recent log entries for a specific user (by SID or username).
-// v4.5.0: Added to support per-user log retrieval via IPC.
 func (s *MultiUserService) GetUserLogs(identifier string, count int) []ipc.LogEntryData {
 	return s.daemon.GetUserLogs(identifier, count)
 }
 
 // GetUserTransferStatus returns daemon transfer batch status for a specific user.
-// v4.7.8: Added to support daemon auto-download visibility in GUI.
 func (s *MultiUserService) GetUserTransferStatus(identifier string) *ipc.TransferStatusData {
 	return s.daemon.GetUserTransferStatus(identifier)
 }

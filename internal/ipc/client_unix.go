@@ -229,7 +229,6 @@ func (c *Client) Ping(ctx context.Context) error {
 }
 
 // GetRecentLogs retrieves recent log entries from the daemon.
-// v4.3.2: Used for GUI to display daemon activity.
 func (c *Client) GetRecentLogs(ctx context.Context, count int) ([]LogEntryData, error) {
 	req := NewRequest(MsgGetRecentLogs)
 	// Note: count is not sent in current protocol - server uses default
@@ -267,7 +266,6 @@ func (c *Client) GetRecentLogs(ctx context.Context, count int) ([]LogEntryData, 
 }
 
 // GetTransferStatus retrieves daemon transfer batch status.
-// v4.7.8: Used by GUI to display daemon auto-download progress.
 func (c *Client) GetTransferStatus(ctx context.Context) (*TransferStatusData, error) {
 	req := NewRequest(MsgGetTransferStatus)
 	resp, err := c.sendRequest(ctx, req)
@@ -287,7 +285,6 @@ func (c *Client) GetTransferStatus(ctx context.Context) (*TransferStatusData, er
 }
 
 // ReloadConfig sends a config reload request to the daemon.
-// v4.7.6: Used by GUI to notify daemon of configuration changes.
 func (c *Client) ReloadConfig(ctx context.Context) (*ReloadConfigData, error) {
 	req := NewRequest(MsgReloadConfig)
 	resp, err := c.sendRequest(ctx, req)

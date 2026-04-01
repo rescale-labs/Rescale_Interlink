@@ -47,8 +47,8 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 
 	case "ntlm":
 		// NTLM authentication
-		// v4.5.3: Fall back to no-proxy if host is missing (incomplete saved config)
-		// This allows GUI to start so user can reconfigure proxy settings
+		// Fall back to no-proxy if host is missing (incomplete saved config).
+		// This allows GUI to start so user can reconfigure proxy settings.
 		if cfg.ProxyHost == "" {
 			fmt.Printf("[WARN] Proxy mode is NTLM but host is missing - falling back to no-proxy mode\n")
 			transport.Proxy = nil
@@ -69,8 +69,8 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			Timeout: 300 * time.Second,
 		}
 
-		// v3.4.0: Only perform warmup if credentials are complete and warmup is requested
-		// If password is missing, skip warmup - let the caller prompt for password
+		// Only perform warmup if credentials are complete and warmup is requested.
+		// If password is missing, skip warmup - let the caller prompt for password.
 		if cfg.ProxyWarmup && cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
 			if err := warmupProxy(client, cfg); err != nil {
 				return nil, fmt.Errorf("proxy warmup failed: %w", err)
@@ -81,8 +81,8 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 
 	case "basic":
 		// Basic authentication
-		// v4.5.3: Fall back to no-proxy if host is missing (incomplete saved config)
-		// This allows GUI to start so user can reconfigure proxy settings
+		// Fall back to no-proxy if host is missing (incomplete saved config).
+		// This allows GUI to start so user can reconfigure proxy settings.
 		if cfg.ProxyHost == "" {
 			fmt.Printf("[WARN] Proxy mode is basic but host is missing - falling back to no-proxy mode\n")
 			transport.Proxy = nil
@@ -95,8 +95,8 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		proxyURL := BuildProxyURL(cfg)
 		transport.Proxy = proxyFuncWithBypass(proxyURL, cfg.NoProxy)
 
-		// v4.5.3: Log warning when credentials incomplete (user set but password missing)
-		// This typically happens on startup when password wasn't saved for security
+		// Log warning when credentials incomplete (user set but password missing).
+		// This typically happens on startup when password wasn't saved for security.
 		if cfg.ProxyUser != "" && cfg.ProxyPassword == "" {
 			fmt.Printf("[WARN] Proxy user configured but password missing - proxy auth disabled until password is set\n")
 		}
@@ -106,9 +106,8 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			Timeout:   300 * time.Second,
 		}
 
-		// v3.4.3: Only perform warmup if ProxyWarmup is true AND credentials are complete
-		// Previously, basic mode always did warmup regardless of ProxyWarmup flag
-		// This was inconsistent with NTLM mode and could cause 30s delays on startup
+		// Only perform warmup if ProxyWarmup is true AND credentials are complete.
+		// Basic mode must mirror NTLM behavior to avoid 30s delays on startup.
 		if cfg.ProxyWarmup && cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
 			if err := warmupProxy(client, cfg); err != nil {
 				return nil, fmt.Errorf("proxy warmup failed: %w", err)
@@ -137,7 +136,6 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 }
 
 // BuildProxyURL constructs a proxy URL from config.
-// Exported in v4.6.5 for use by WarmupProxyConnection.
 func BuildProxyURL(cfg *config.Config) *url.URL {
 	scheme := "http"
 	host := cfg.ProxyHost
@@ -152,8 +150,8 @@ func BuildProxyURL(cfg *config.Config) *url.URL {
 		Host:   fmt.Sprintf("%s:%d", host, port),
 	}
 
-	// v4.5.3: Only embed credentials if both user AND password are provided
-	// Empty password in URL can cause auth failures with some proxies
+	// Only embed credentials if both user AND password are provided.
+	// Empty password in URL can cause auth failures with some proxies.
 	if cfg.ProxyUser != "" && cfg.ProxyPassword != "" {
 		proxyURL.User = url.UserPassword(cfg.ProxyUser, cfg.ProxyPassword)
 	}
@@ -161,8 +159,7 @@ func BuildProxyURL(cfg *config.Config) *url.URL {
 	return proxyURL
 }
 
-// warmupProxy performs a warmup request to establish proxy connection
-// v3.4.3: Reduced timeout from 30s to 15s to minimize UI blocking
+// warmupProxy performs a warmup request to establish proxy connection.
 func warmupProxy(client *nethttp.Client, cfg *config.Config) error {
 	// Use a lightweight endpoint for warmup
 	warmupURL := cfg.APIBaseURL
@@ -192,10 +189,10 @@ func warmupProxy(client *nethttp.Client, cfg *config.Config) error {
 }
 
 // WarmupProxyConnection performs a standalone proxy warmup using a temporary HTTP client.
-// v4.6.5: Called before each upload in Basic proxy mode to prevent proxy session expiry
-// during long batch runs (matching old PUR behavior). This is separate from the startup
-// warmup in ConfigureHTTPClient — it creates a fresh connection each time.
-// Scoped to Basic proxy mode only for v4.6.5 (NTLM requires full transport setup).
+// Called before each upload in Basic proxy mode to prevent proxy session expiry
+// during long batch runs. This is separate from the startup warmup in
+// ConfigureHTTPClient -- it creates a fresh connection each time.
+// Scoped to Basic proxy mode only (NTLM requires full transport setup).
 func WarmupProxyConnection(ctx context.Context, cfg *config.Config) error {
 	proxyURL := BuildProxyURL(cfg)
 
@@ -243,7 +240,7 @@ func WarmupProxyConnection(ctx context.Context, cfg *config.Config) error {
 	}
 	defer resp.Body.Close()
 
-	// v4.8.2: Validate response — 407/401 indicate proxy auth failure,
+	// Validate response — 407/401 indicate proxy auth failure,
 	// 5xx indicates proxy/server error. Non-fatal but improves observability.
 	if resp.StatusCode == 407 || resp.StatusCode == 401 {
 		return fmt.Errorf("proxy warmup: authentication error (HTTP %d)", resp.StatusCode)
@@ -256,7 +253,6 @@ func WarmupProxyConnection(ctx context.Context, cfg *config.Config) error {
 // WarmupProxyIfNeeded calls WarmupProxyConnection if the proxy mode is "basic".
 // Safe to call unconditionally — returns immediately for non-basic proxy modes.
 // Errors are logged but non-fatal (warmup failure should not block transfers).
-// v4.8.2: Convenience wrapper used by credential manager and transfer entry points.
 func WarmupProxyIfNeeded(ctx context.Context, cfg *config.Config) {
 	if cfg == nil || strings.ToLower(cfg.ProxyMode) != "basic" {
 		return
@@ -267,7 +263,7 @@ func WarmupProxyIfNeeded(ctx context.Context, cfg *config.Config) {
 }
 
 // proxyFuncWithBypass returns a proxy function that respects the NoProxy bypass list.
-// v4.5.9: If noProxy is empty, behaves identically to nethttp.ProxyURL.
+// If noProxy is empty, behaves identically to nethttp.ProxyURL.
 // When noProxy is set, uses golang.org/x/net/http/httpproxy to match hosts/CIDRs.
 func proxyFuncWithBypass(proxyURL *url.URL, noProxy string) func(*nethttp.Request) (*url.URL, error) {
 	if noProxy == "" {

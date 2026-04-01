@@ -13,7 +13,7 @@ import (
 )
 
 // APIConfig represents the auto-download service configuration.
-// v4.0.8: Unified configuration - API key comes from ResolveAPIKey(), not stored here.
+// API key comes from ResolveAPIKey(), not stored here.
 //
 // Config file location:
 //   - Windows: %APPDATA%\Rescale\Interlink\apiconfig
@@ -41,12 +41,12 @@ import (
 type APIConfig struct {
 	// PlatformURL is kept for backwards compatibility with existing apiconfig files.
 	// New code should use the main config's APIBaseURL instead.
-	// v4.0.8: Deprecated - will be removed in future version.
+	// Deprecated: will be removed in future version.
 	PlatformURL string `ini:"platform_url"`
 
 	// APIKey is kept for backwards compatibility with existing apiconfig files.
 	// New code should use config.ResolveAPIKey() instead.
-	// v4.0.8: Deprecated - will be removed in future version.
+	// Deprecated: will be removed in future version.
 	APIKey string `ini:"api_key"`
 
 	// Auto-download settings
@@ -111,7 +111,6 @@ func DefaultAPIConfigPath() (string, error) {
 	var configDir string
 
 	if runtime.GOOS == "windows" {
-		// v4.0.8: Use standard Windows %APPDATA% location
 		// This is C:\Users\<user>\AppData\Roaming\Rescale\Interlink
 		appData := os.Getenv("APPDATA")
 		if appData == "" {
@@ -141,7 +140,6 @@ func DefaultAPIConfigPath() (string, error) {
 // - Unix: <userProfileDir>/.config/rescale/apiconfig
 func APIConfigPathForUser(userProfileDir string) string {
 	if runtime.GOOS == "windows" {
-		// v4.0.8: Use standard Windows AppData location
 		return filepath.Join(userProfileDir, "AppData", "Roaming", "Rescale", "Interlink", "apiconfig")
 	}
 	return filepath.Join(userProfileDir, ".config", "rescale", "apiconfig")
@@ -243,7 +241,7 @@ func SaveAPIConfig(cfg *APIConfig, path string) error {
 		return fmt.Errorf("failed to create rescale section: %w", err)
 	}
 	rescaleSection.Key("platform_url").SetValue(cfg.PlatformURL)
-	// v4.8.7 RF3: API key intentionally NOT written — saves strip legacy plaintext keys
+	// API key intentionally NOT written — saves strip legacy plaintext keys from disk
 
 	// Write [interlink.autoDownload] section
 	autoSection, err := iniFile.NewSection("interlink.autoDownload")
@@ -290,7 +288,7 @@ func SaveAPIConfig(cfg *APIConfig, path string) error {
 }
 
 // Validate checks if the auto-download configuration is valid.
-// v4.0.8: No longer validates API key - use ResolveAPIKey() separately.
+// Does not validate API key — use ResolveAPIKey() separately.
 // Returns nil if valid, or an error describing what's wrong.
 func (cfg *APIConfig) Validate() error {
 	// Only validate auto-download settings if enabled
@@ -313,7 +311,6 @@ func (cfg *APIConfig) Validate() error {
 }
 
 // IsAutoDownloadEnabled returns true if auto-download is enabled and properly configured.
-// v4.0.4: Used by internal/service/multi_daemon.go to determine if a user daemon should start.
 func (cfg *APIConfig) IsAutoDownloadEnabled() bool {
 	return cfg.AutoDownload.Enabled && cfg.Validate() == nil
 }

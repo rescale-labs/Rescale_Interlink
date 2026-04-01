@@ -27,8 +27,8 @@ type JobFilter struct {
 }
 
 // EligibilityConfig defines criteria for auto-download eligibility.
-// v4.3.0: Simplified - mode is now per-job via the "Auto Download" custom field.
-// Only AutoDownloadTag and LookbackDays are configurable in Interlink.
+// Mode is per-job via the "Auto Download" custom field;
+// only AutoDownloadTag and LookbackDays are configurable in Interlink.
 type EligibilityConfig struct {
 	// AutoDownloadTag is the tag to check when a job's "Auto Download" field is "Conditional".
 	// Default: "autoDownload"
@@ -40,7 +40,6 @@ type EligibilityConfig struct {
 }
 
 // DefaultEligibilityConfig returns the default eligibility configuration.
-// v4.3.0: Simplified - only AutoDownloadTag and LookbackDays are configurable.
 func DefaultEligibilityConfig() *EligibilityConfig {
 	return &EligibilityConfig{
 		AutoDownloadTag: "autoDownload",
@@ -49,8 +48,6 @@ func DefaultEligibilityConfig() *EligibilityConfig {
 }
 
 // CheckEligibilityResult contains the eligibility check result.
-// v4.3.6: Added ShouldLog flag to distinguish between "not a candidate" (silent skip)
-// and "is a candidate but not eligible" (logged skip).
 type CheckEligibilityResult struct {
 	Eligible  bool   // Whether the job should be downloaded
 	Reason    string // Human-readable explanation
@@ -62,7 +59,7 @@ type Monitor struct {
 	apiClient   *api.Client
 	state       *State
 	filter      *JobFilter
-	eligibility *EligibilityConfig // v4.0.0: Auto-download eligibility config
+	eligibility *EligibilityConfig
 	logger      *logging.Logger
 }
 
@@ -77,7 +74,6 @@ func NewMonitor(client *api.Client, state *State, filter *JobFilter, logger *log
 }
 
 // NewMonitorWithEligibility creates a new job monitor with eligibility checking.
-// v4.0.0: Used by Windows Service auto-download feature.
 func NewMonitorWithEligibility(client *api.Client, state *State, filter *JobFilter, eligibility *EligibilityConfig, logger *logging.Logger) *Monitor {
 	if eligibility == nil {
 		eligibility = DefaultEligibilityConfig()
@@ -98,20 +94,21 @@ func (m *Monitor) SetEligibility(cfg *EligibilityConfig) {
 
 // CheckEligibility checks if a job is eligible for auto-download.
 // Returns CheckEligibilityResult with Eligible, Reason, and ShouldLog fields.
-// v4.3.6: CRITICAL FIX - Check custom field FIRST to minimize API calls and enable silent filtering.
-// - ShouldLog=false for "not set"/"disabled" → caller skips silently (not a real candidate)
-// - ShouldLog=true for everything else → caller logs the result
-// v4.3.0: Mode is now per-job via the "Auto Download" custom field.
-// - "Disabled" or empty → not eligible, ShouldLog=false (silent)
-// - "Enabled" → eligible (no tag check)
-// - "Conditional" → eligible only if job has the configured tag
+// Checks the custom field FIRST to minimize API calls and enable silent filtering:
+//   - ShouldLog=false for "not set"/"disabled" -- caller skips silently (not a real candidate)
+//   - ShouldLog=true for everything else -- caller logs the result
+//
+// Mode is per-job via the "Auto Download" custom field:
+//   - "Disabled" or empty -- not eligible, ShouldLog=false (silent)
+//   - "Enabled" -- eligible (no tag check)
+//   - "Conditional" -- eligible only if job has the configured tag
 func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligibilityResult {
 	if m.eligibility == nil {
 		return CheckEligibilityResult{Eligible: true, Reason: "eligibility checking disabled", ShouldLog: true}
 	}
 
-	// v4.3.6: Step 1 - Check custom field FIRST (determines if this is a real candidate)
-	// This saves API calls by not checking tags for jobs that will be silently skipped anyway
+	// Check custom field FIRST — saves API calls by not checking tags for
+	// jobs that will be silently skipped anyway
 	fieldValue, err := m.apiClient.GetJobCustomFieldValue(ctx, jobID, config.AutoDownloadFieldName)
 	if err != nil {
 		m.logger.Debug().Err(err).Str("job_id", jobID).Msg("Failed to get Auto Download field")
@@ -175,7 +172,6 @@ func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligi
 
 // GetJobDownloadPath returns the download path for a job.
 // If the job has a custom "Auto Download Path" field, uses that; otherwise returns empty string.
-// v4.3.0: Uses hardcoded field name from config package.
 func (m *Monitor) GetJobDownloadPath(ctx context.Context, jobID string) string {
 	path, err := m.apiClient.GetJobCustomFieldValue(ctx, jobID, config.AutoDownloadPathFieldName)
 	if err != nil {
@@ -192,17 +188,16 @@ type CompletedJob struct {
 	Status      string
 	Owner       string
 	Created     string
-	CompletedAt time.Time // v4.3.0: Actual completion time from status history
+	CompletedAt time.Time
 }
 
 // getJobCompletionTime retrieves the actual completion time from job status history.
-// v4.3.0: Used for accurate lookback filtering based on when the job finished,
-// not when it was created.
-// v4.7.6: Retries once on failure (500ms delay) before returning error.
+// Uses completion time (not creation time) for accurate lookback filtering.
+// Retries once on failure (500ms delay) before returning error.
 func (m *Monitor) getJobCompletionTime(ctx context.Context, jobID string) (time.Time, error) {
 	completionTime, err := m.getJobCompletionTimeOnce(ctx, jobID)
 	if err != nil {
-		// v4.7.6: Retry once after 500ms
+		// Retry once after 500ms
 		time.Sleep(500 * time.Millisecond)
 		completionTime, err = m.getJobCompletionTimeOnce(ctx, jobID)
 	}
@@ -246,13 +241,11 @@ type FindCompletedJobsResult struct {
 }
 
 // FindCompletedJobs returns jobs that are completed but not yet downloaded.
-// v4.3.5: Returns result struct with total scanned count for logging.
 func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResult, error) {
 	m.logger.Debug().Msg("Fetching job list")
 
-	// v4.3.0: Calculate lookback cutoff date if eligibility is configured
-	// This is now based on completion time, not creation time
-	// v4.7.6: Improved logging to distinguish completion cutoff from creation pre-filter
+	// Calculate lookback cutoff date if eligibility is configured.
+	// Based on completion time, not creation time.
 	var lookbackCutoff time.Time
 	if m.eligibility != nil && m.eligibility.LookbackDays > 0 {
 		lookbackCutoff = time.Now().AddDate(0, 0, -m.eligibility.LookbackDays)
@@ -262,9 +255,8 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 			Msg("Applying lookback filter (jobs completed before this date are skipped)")
 	}
 
-	// v4.3.4: Use optimized API call with early termination when lookback is configured
-	// This fetches jobs ordered by date (newest first) and stops when hitting old jobs
-	// v4.7.6: Improved logging to distinguish creation pre-filter from completion cutoff
+	// Use optimized API call with early termination when lookback is configured.
+	// Fetches jobs ordered by date (newest first) and stops when hitting old jobs.
 	var jobs []models.JobResponse
 	var err error
 	if !lookbackCutoff.IsZero() {
@@ -282,7 +274,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 		return nil, fmt.Errorf("failed to list jobs: %w", err)
 	}
 
-	// v4.3.5: Debug-level log for API job count (verbose stats not useful in GUI)
+	// Debug-level only — verbose stats not useful in GUI
 	m.logger.Debug().Int("jobs_to_scan", len(jobs)).Msg("Scanning jobs from API")
 
 	// Pre-filter buffer: Use creation date with extra buffer to reduce API calls
@@ -294,7 +286,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 
 	var completed []*CompletedJob
 
-	// v4.3.4: Track filtering statistics
+	// Track filtering statistics
 	var skippedNotCompleted, skippedAlreadyDownloaded, skippedTooOld, skippedNameFilter, skippedOutsideWindow int
 
 	for _, job := range jobs {
@@ -340,9 +332,9 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 			continue
 		}
 
-		// v4.3.0: Get actual completion time for accurate lookback filtering
-		// v4.7.6: On unknown completion time, include the job rather than falling back
-		// to creation time (which incorrectly skips long-running jobs)
+		// Get actual completion time for accurate lookback filtering.
+		// On unknown completion time, include the job rather than falling back
+		// to creation time (which would incorrectly skip long-running jobs).
 		var completedAt time.Time
 		if !lookbackCutoff.IsZero() {
 			var err error
@@ -353,13 +345,13 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 					Str("job_name", job.Name).
 					Err(err).
 					Msg("Could not get completion time after retry — including job (passed creation pre-filter)")
-				// v4.7.6: Don't fall back to creation time — job already passed the
+				// Don't fall back to creation time — job already passed the
 				// creation pre-filter so it's likely recent enough. Include it.
 				// completedAt stays zero, which skips the lookback filter below.
 			}
 
-			// Apply lookback filter based on completion time
-			// v4.7.6: Zero completedAt (unknown) is NOT filtered — include the job
+			// Apply lookback filter based on completion time.
+			// Zero completedAt (unknown) is NOT filtered — include the job.
 			if !completedAt.IsZero() && completedAt.Before(lookbackCutoff) {
 				skippedOutsideWindow++
 				m.logger.Debug().
@@ -382,7 +374,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 		})
 	}
 
-	// v4.3.5: Simplified log - detailed stats are at DEBUG level
+	// Detailed stats are at DEBUG level
 	m.logger.Debug().
 		Int("total_scanned", len(jobs)).
 		Int("skipped_not_completed", skippedNotCompleted).

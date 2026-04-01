@@ -13,8 +13,7 @@ import (
 )
 
 // PIDFilePath returns the path to the daemon PID file.
-// v4.5.8: Fixed to use %LOCALAPPDATA%\Rescale\Interlink\ (consistent with install/logs).
-// Previously used %APPDATA%\Rescale\daemon.pid (wrong parent, missing Interlink subdir).
+// Uses %LOCALAPPDATA%\Rescale\Interlink\ (consistent with install/logs paths).
 func PIDFilePath() string {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
@@ -33,7 +32,7 @@ func oldPIDFilePath() string {
 }
 
 // WritePIDFile writes the current process's PID to the PID file.
-// v4.5.8: Also cleans up old PID file from legacy path.
+// Also cleans up old PID file from legacy path.
 func WritePIDFile() error {
 	// Clean up old PID file if it exists
 	if oldPath := oldPIDFilePath(); oldPath != "" {
@@ -79,16 +78,14 @@ func ReadPIDFile() int {
 
 // IsDaemonRunning checks if a daemon process is already running.
 // Returns the PID if running, 0 if not.
-// v4.4.3: Properly validates PID on Windows using OpenProcess.
 func IsDaemonRunning() int {
 	pid := ReadPIDFile()
 	if pid == 0 {
 		return 0
 	}
 
-	// v4.4.3: Validate the process actually exists using Windows API
 	// os.FindProcess always succeeds on Windows even for non-existent PIDs,
-	// so we need to use Windows-specific API to verify the process is alive.
+	// so we use Windows-specific API to verify the process is alive.
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
 		// Process doesn't exist - clean up stale PID file

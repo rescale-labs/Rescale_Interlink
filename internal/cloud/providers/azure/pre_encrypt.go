@@ -65,8 +65,6 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 	}
 	encryptedSize := info.Size()
 
-	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
-	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
 	azureClient.StartPeriodicRefresh(ctx)
 	defer azureClient.StopPeriodicRefresh()
 
@@ -396,7 +394,7 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				blockDataToUpload := job.data
 				currentBlockID := job.blockID
 
-				// Create context with timeout for this specific block (v4.0.4: use centralized constant)
+				// Create context with timeout for this specific block
 				blockCtx, cancel := context.WithTimeout(opCtx, constants.PartOperationTimeout)
 
 				stageErr := azureClient.RetryWithBackoff(blockCtx, fmt.Sprintf("StageBlock %d/%d", job.blockIndex+1, totalBlocks), func() error {

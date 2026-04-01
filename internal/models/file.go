@@ -14,7 +14,7 @@ type CloudFile struct {
 	Storage              *CloudFileStorage   `json:"storage,omitempty"`
 	DecryptedSize        int64               `json:"decryptedSize,omitempty"`
 	FileChecksums        []FileChecksum      `json:"fileChecksums,omitempty"`
-	Tags                 []string            `json:"userTags,omitempty"` // v3.6.2: User-defined tags
+	Tags                 []string            `json:"userTags,omitempty"`
 }
 
 // CloudFilePathParts represents the storage path for a file
@@ -87,13 +87,12 @@ type RootFolders struct {
 type UserProfile struct {
 	Email          string        `json:"email"`
 	FullName       string        `json:"fullName"`
-	Company        CompanyInfo   `json:"company"`   // v4.2.1: Added for workspace custom fields API
+	Company        CompanyInfo   `json:"company"`
 	Workspace      WorkspaceInfo `json:"workspace"`
 	DefaultStorage StorageInfo   `json:"defaultStorage"`
 }
 
 // CompanyInfo represents organization/company details
-// v4.2.1: Added for workspace custom fields validation
 type CompanyInfo struct {
 	Code string `json:"code"` // Organization code used in API paths (e.g., "rescale")
 }

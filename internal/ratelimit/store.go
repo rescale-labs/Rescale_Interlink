@@ -14,7 +14,6 @@ import (
 // limiterEntry wraps a RateLimiter with recovery metadata needed to restore it
 // after a coordinator disconnect. The store needs the original baseURL, keyHash,
 // and scope to re-inject coordinator hooks during recovery.
-// v4.8.4: Added for coordinator self-healing.
 type limiterEntry struct {
 	limiter *RateLimiter
 	baseURL string
@@ -76,7 +75,7 @@ type CoordinatorEnsurer func() (CoordinatorClient, error)
 // recovery when the coordinator becomes available.
 type LimiterStore struct {
 	mu       sync.Mutex
-	limiters map[string]*limiterEntry // v4.8.4: changed from *RateLimiter for recovery metadata
+	limiters map[string]*limiterEntry
 	registry *Registry
 
 	// Coordinator state
@@ -87,16 +86,16 @@ type LimiterStore struct {
 	coordLastAttempt time.Time
 	coordEnsurer     CoordinatorEnsurer
 
-	// v4.8.4: Self-healing state
+	// Self-healing state
 	lastActivityTime   time.Time          // tracks last GetLimiter() call for gap detection
 	recoveryOnce       sync.Once          // ensures recovery loop starts at most once
 	staleConnCleanupFn func()             // called on wall-clock gap to close idle API HTTP connections
 
-	// v4.8.4: Coordinator keepalive during active transfers
+	// Coordinator keepalive during active transfers
 	keepaliveMu     sync.Mutex
 	keepaliveCount  int32              // number of active transfer batches
 	keepaliveCancel context.CancelFunc
-	sleepRelease    func()             // v4.8.7: release function for OS sleep inhibition
+	sleepRelease    func()             // release function for OS sleep inhibition
 }
 
 const coordRetryBackoff = 30 * time.Second
@@ -153,7 +152,7 @@ func (s *LimiterStore) SetCoordinatorEnsurer(fn CoordinatorEnsurer) {
 	defer s.coordMu.Unlock()
 	s.coordEnsurer = fn
 
-	// v4.8.4: Start background recovery loop when coordinator is configured
+	// Start background recovery loop when coordinator is configured
 	if fn != nil {
 		s.startRecoveryLoop()
 	}
@@ -177,7 +176,6 @@ func (s *LimiterStore) Registry() *Registry {
 //   - apiKey: the API key (hashed internally — never stored in plain text)
 //   - scope: the throttle scope (e.g., ScopeUser)
 func (s *LimiterStore) GetLimiter(baseURL, apiKey string, scope Scope) *RateLimiter {
-	// v4.8.4: Wall-clock gap detection — triggers recovery after sleep/wake or long idle
 	s.checkWallClockGap()
 
 	key := s.makeKey(baseURL, apiKey, scope)
@@ -205,7 +203,7 @@ func (s *LimiterStore) GetLimiter(baseURL, apiKey string, scope Scope) *RateLimi
 		emergencyRate, emergencyBurst := emergencyCap(cfg)
 		limiter = NewRateLimiter(emergencyRate, emergencyBurst)
 		limiter.mu.Lock()
-		limiter.degraded = true // v4.8.4: mark as degraded for recovery
+		limiter.degraded = true
 		limiter.mu.Unlock()
 	} else {
 		// No coordinator configured: full target rate (backwards-compatible)
@@ -350,7 +348,7 @@ func (s *LimiterStore) handleCoordinatorDisconnect(
 	// Clear coordinator hooks so subsequent Wait() calls go straight to local
 	limiter.ClearCoordinatorHook()
 
-	// v4.8.4: Mark limiter as degraded for self-healing recovery
+	// Mark limiter as degraded for self-healing recovery
 	limiter.mu.Lock()
 	limiter.degraded = true
 	limiter.mu.Unlock()
@@ -377,7 +375,6 @@ func emergencyCap(cfg ScopeConfig) (rate float64, burst float64) {
 
 // RecoverEmergencyLimiters attempts to restore degraded limiters to full rate.
 // Called periodically by the recovery loop and on wall-clock gap detection.
-// v4.8.4: Core self-healing mechanism.
 func (s *LimiterStore) RecoverEmergencyLimiters() int {
 	// 1. Collect degraded entries (under s.mu)
 	s.mu.Lock()
@@ -421,7 +418,7 @@ func (s *LimiterStore) RecoverEmergencyLimiters() int {
 // This handles the "stale hook" gap: a cached limiter may still hold dead coordinator hooks
 // after a long quiet period without being marked degraded (degradation only occurs on
 // coordinator failure during Wait()). Called after a wall-clock gap or coordinator reconnect.
-// v4.8.4: Addresses feedback #1 — prevents first request after gap from falling to emergency cap.
+// Prevents first request after gap from falling to emergency cap.
 func (s *LimiterStore) RefreshCoordinatorHooks() int {
 	coordClient, coordEnabled := s.tryCoordinator()
 	if !coordEnabled || coordClient == nil {
@@ -460,7 +457,6 @@ func (s *LimiterStore) RefreshCoordinatorHooks() int {
 
 // checkWallClockGap detects large gaps between GetLimiter() calls (e.g., laptop sleep,
 // App Nap, long S3 streaming phase) and triggers recovery.
-// v4.8.4: Called at the top of GetLimiter().
 func (s *LimiterStore) checkWallClockGap() {
 	s.mu.Lock()
 	now := time.Now()
@@ -483,7 +479,6 @@ func (s *LimiterStore) checkWallClockGap() {
 // resetCoordinatorBackoff clears the coordinator retry backoff so the next tryCoordinator()
 // attempt happens immediately. Called after a wall-clock gap where the coordinator
 // may have restarted.
-// v4.8.4
 func (s *LimiterStore) resetCoordinatorBackoff() {
 	s.coordMu.Lock()
 	s.coordLastAttempt = time.Time{}
@@ -493,7 +488,6 @@ func (s *LimiterStore) resetCoordinatorBackoff() {
 
 // startRecoveryLoop starts a background goroutine that periodically checks for
 // degraded limiters and attempts recovery. Only runs when a coordinator is configured.
-// v4.8.4
 func (s *LimiterStore) startRecoveryLoop() {
 	s.recoveryOnce.Do(func() {
 		go func() {
@@ -509,7 +503,6 @@ func (s *LimiterStore) startRecoveryLoop() {
 // SetStaleConnectionCleanup registers a function called on wall-clock gap to close
 // idle API HTTP connections. This only covers the API client pool — S3/Azure transport
 // pools are separate and not covered by this hook.
-// v4.8.4
 func (s *LimiterStore) SetStaleConnectionCleanup(fn func()) {
 	s.staleConnCleanupFn = fn
 }
@@ -517,13 +510,12 @@ func (s *LimiterStore) SetStaleConnectionCleanup(fn func()) {
 // BeginTransferActivity signals that a transfer batch is active.
 // Starts a coordinator keepalive if not already running.
 // Called from transfer.RunBatch/RunBatchFromChannel to cover both GUI and CLI paths.
-// v4.8.4
 func (s *LimiterStore) BeginTransferActivity() {
 	s.keepaliveMu.Lock()
 	defer s.keepaliveMu.Unlock()
 	s.keepaliveCount++
 	if s.keepaliveCount == 1 {
-		// v4.8.7: Inhibit OS sleep during active transfers.
+		// Inhibit OS sleep during active transfers.
 		release, err := platform.InhibitSleep("Rescale Interlink file transfer in progress")
 		if err != nil {
 			log.Printf("[RATELIMIT] Sleep inhibition failed (non-fatal): %v", err)
@@ -540,7 +532,6 @@ func (s *LimiterStore) BeginTransferActivity() {
 
 // EndTransferActivity signals that a transfer batch completed.
 // Stops the keepalive when no batches remain active.
-// v4.8.4
 func (s *LimiterStore) EndTransferActivity() {
 	s.keepaliveMu.Lock()
 	defer s.keepaliveMu.Unlock()
@@ -551,7 +542,7 @@ func (s *LimiterStore) EndTransferActivity() {
 			s.keepaliveCancel()
 			s.keepaliveCancel = nil
 		}
-		// v4.8.7: Release OS sleep inhibition when all transfers complete.
+		// Release OS sleep inhibition when all transfers complete.
 		if s.sleepRelease != nil {
 			s.sleepRelease()
 			s.sleepRelease = nil
@@ -561,7 +552,6 @@ func (s *LimiterStore) EndTransferActivity() {
 
 // keepaliveLoop pings the coordinator periodically during active transfers to prevent
 // the coordinator's 5-minute idle timeout. If ping fails, triggers recovery.
-// v4.8.4
 func (s *LimiterStore) keepaliveLoop(ctx context.Context) {
 	ticker := time.NewTicker(CoordinatorKeepaliveInterval)
 	defer ticker.Stop()
@@ -578,7 +568,6 @@ func (s *LimiterStore) keepaliveLoop(ctx context.Context) {
 				err := client.Ping(pingCtx)
 				cancel()
 				if err != nil {
-					// v4.8.4 feedback #2: Don't just ignore ping failures.
 					// Actively trigger recovery so limiters don't stay on dead hooks.
 					log.Printf("[RATELIMIT] Keepalive ping failed: %v — triggering recovery", err)
 					s.resetCoordinatorBackoff()
@@ -586,7 +575,7 @@ func (s *LimiterStore) keepaliveLoop(ctx context.Context) {
 					s.RefreshCoordinatorHooks()
 				}
 			} else if s.coordEnsurer != nil {
-				// v4.8.4 feedback #2: No client but ensurer configured — try to reconnect
+				// No client but ensurer configured — try to reconnect
 				s.resetCoordinatorBackoff()
 				s.RecoverEmergencyLimiters()
 				s.RefreshCoordinatorHooks()

@@ -143,7 +143,6 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 	blockIDStr := fmt.Sprintf("block-%010d", partIndex)
 	blockID := base64.StdEncoding.EncodeToString([]byte(blockIDStr))
 
-	// Create context with timeout (v4.0.4: use centralized constant)
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
@@ -199,7 +198,7 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 // UploadCiphertext uploads already-encrypted data to cloud storage.
 // Can be called concurrently with EncryptStreamingPart (pipelining).
 // Separated from encryption to enable pipelining.
-// v3.6.3: Now uses progressReadSeekCloser to track bytes in real-time via ByteProgressCallback.
+// Uses progressReadSeekCloser to track bytes in real-time via ByteProgressCallback.
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*azureProviderData)
 	if !ok {
@@ -210,7 +209,6 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	blockIDStr := fmt.Sprintf("block-%010d", partIndex)
 	blockID := base64.StdEncoding.EncodeToString([]byte(blockIDStr))
 
-	// Create context with timeout (v4.0.4: use centralized constant)
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
@@ -223,7 +221,7 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 		client := providerData.azureClient.Client()
 		blockBlobClient := client.ServiceClient().NewContainerClient(providerData.container).NewBlockBlobClient(providerData.blobPath)
 
-		// v3.6.3: Use progress-tracking reader if callback is set
+		// Use progress-tracking reader if callback is set
 		var reader io.ReadSeekCloser
 		if uploadState.ByteProgressCallback != nil {
 			reader = &transfer.UploadProgressReader{
@@ -273,7 +271,7 @@ func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *tra
 	metadata := map[string]*string{
 		"iv":              to.Ptr(encryption.EncodeBase64(uploadState.InitialIV)),
 		"streamingformat": to.Ptr("cbc"),                                      // Marks file as CBC-chained streaming
-		"partsize":        to.Ptr(fmt.Sprintf("%d", uploadState.PartSize)),    // v4.0.0: Store part size for correct download decryption
+		"partsize":        to.Ptr(fmt.Sprintf("%d", uploadState.PartSize)),    // Required for correct download decryption
 	}
 
 	// Commit block list using AzureClient
@@ -401,9 +399,6 @@ func (rsc *readSeekCloser) Close() error {
 	return nil
 }
 
-// v4.8.1: progressReader and progressReadSeekCloser moved to shared
-// internal/cloud/transfer/progress.go (transfer.ProgressReader, transfer.UploadProgressReader).
-
 // =============================================================================
 // StreamingConcurrentDownloader Interface Implementation
 // Supports both legacy (IV in metadata) and HKDF (formatVersion/fileId/partSize) formats.
@@ -499,7 +494,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 		if v, ok := metadata[key]; ok && v != nil && *v == "cbc" {
 			// CBC streaming format - uploaded by rescale-int v3.2.4+
 			// Can use streaming download (no temp file) with sequential part decryption
-			// v4.0.0: Read partSize from metadata. Return 0 if not present so downloader
+			// Read partSize from metadata. Return 0 if not present so downloader
 			// can calculate the correct size from file size (backward compatibility).
 			var partSize int64 = 0 // 0 means "calculate from file size"
 			for _, psKey := range []string{"partsize", "partSize", "PartSize", "Partsize"} {
@@ -602,8 +597,6 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 		}
 	}
 
-	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
-	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
 	azureClient.StartPeriodicRefresh(ctx)
 	defer azureClient.StopPeriodicRefresh()
 
@@ -625,8 +618,8 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 		}
 		rangeSize := endByte - startByte + 1
 
-		// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
-		// Uses DownloadRangeOnce to avoid nested retries
+		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
+		// Uses DownloadRangeOnce to avoid nested retries.
 		var ciphertext []byte
 		err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadPart %d", partIndex), func() error {
 			// Per-attempt timeout to prevent stalled reads from hanging
@@ -706,8 +699,8 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // DownloadEncryptedRange downloads a specific byte range of the encrypted blob from Azure.
 // This is used by the concurrent download orchestrator to download individual parts.
 // The range is: [offset, offset+length).
-// v4.0.0: progressCallback (optional) is called with bytes downloaded for smooth progress.
-// v4.5.4: Wraps request+read+close in single retry with progress rollback on failure.
+// progressCallback (optional) is called with bytes downloaded for smooth progress.
+// Wraps request+read+close in single retry with progress rollback on failure.
 func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
 	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
@@ -715,7 +708,7 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 		return nil, fmt.Errorf("failed to get Azure client: %w", err)
 	}
 
-	// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+	// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
 	// Uses DownloadRangeOnce to avoid nested retries. Progress is tracked per-attempt
 	// with rollback on failure to maintain accurate progress tracking.
 	var data []byte

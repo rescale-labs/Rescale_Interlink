@@ -716,7 +716,7 @@ func TestConcurrentCoordinatorHooks(t *testing.T) {
 }
 
 // TestWaitFIFOOrder verifies that Wait() grants tokens in FIFO order under contention.
-// v4.8.7: Drain the bucket, launch N goroutines with stagger, verify acquisition order.
+// Drain the bucket, launch N goroutines with stagger, verify acquisition order.
 func TestWaitFIFOOrder(t *testing.T) {
 	// Slow refill (1 token/sec) with 1-token bucket — forces sequential acquisition
 	rl := NewRateLimiter(1.0, 1.0)

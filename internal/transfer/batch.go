@@ -66,8 +66,7 @@ func RunBatch[T WorkItem](ctx context.Context, items []T, cfg BatchConfig, execu
 		panic("transfer.RunBatch: ResourceMgr is required")
 	}
 
-	// v4.8.4: Signal active transfer batch — prevents coordinator idle timeout.
-	// Covers both GUI (TransferService) and CLI (direct RunBatch) paths.
+	// Signal active transfer batch — prevents coordinator idle timeout.
 	ratelimit.GlobalStore().BeginTransferActivity()
 	defer ratelimit.GlobalStore().EndTransferActivity()
 
@@ -153,8 +152,7 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 		panic("transfer.RunBatchFromChannel: ResourceMgr is required")
 	}
 
-	// v4.8.4: Signal active transfer batch — prevents coordinator idle timeout.
-	// Covers both GUI (TransferService) and CLI (direct RunBatchFromChannel) paths.
+	// Signal active transfer batch — prevents coordinator idle timeout.
 	ratelimit.GlobalStore().BeginTransferActivity()
 	defer ratelimit.GlobalStore().EndTransferActivity()
 
@@ -174,7 +172,6 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 	adaptive := &AdaptiveWorkerCount{}
 	adaptive.value.Store(int32(initialWorkers))
 
-	// v4.8.6: Expose AdaptiveWorkerCount to callers for per-item thread allocation.
 	if cfg.AdaptiveCount != nil {
 		*cfg.AdaptiveCount = adaptive
 	}

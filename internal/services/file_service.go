@@ -1,5 +1,4 @@
 // Package services provides frontend-agnostic business logic for Rescale Interlink.
-// v3.6.4: FileService handles file/folder operations without framework dependencies.
 package services
 
 import (
@@ -116,7 +115,7 @@ func (fs *FileService) listFolderContents(ctx context.Context, apiClient *api.Cl
 }
 
 // ListLegacyFiles returns a flat list of all files (legacy mode).
-// v4.0.3: Added pageSize parameter - pass 0 for API default.
+// Pass pageSize=0 for API default.
 func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageSize int) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
@@ -244,7 +243,7 @@ func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string
 		return nil, fmt.Errorf("API client not configured")
 	}
 
-	// v4.8.7 Plan 2b: Use folder package directly (fixes layering — service shouldn't import cli)
+	// Use folder package directly (service layer shouldn't import cli)
 	cache := folder.NewFolderCache()
 
 	// Step 1: Scan local directory
@@ -447,8 +446,7 @@ func (fs *FileService) GetMyJobsFolderID(ctx context.Context) (string, error) {
 
 // ListFolderPage returns a single page of folder contents with pagination support.
 // Pass empty cursor for first page, or use NextCursor from previous response.
-// v4.0.2: Added for server-side pagination in File Browser.
-// v4.0.3: Added pageSize parameter - pass 0 for API default.
+// Pass pageSize=0 for API default.
 func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, cursor string, pageSize int) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient

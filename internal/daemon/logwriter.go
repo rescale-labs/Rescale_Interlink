@@ -1,5 +1,4 @@
 // Package daemon provides background service functionality for auto-downloading completed jobs.
-// v4.3.2: Custom log writer for daemon that captures logs for IPC streaming.
 package daemon
 
 import (

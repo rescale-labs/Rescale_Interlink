@@ -1,4 +1,4 @@
-// v4.8.7: TeeWriter intercepts stdlib log.Printf output and routes it to both
+// TeeWriter intercepts stdlib log.Printf output and routes it to both
 // the underlying writer (stderr) and the EventBus as LogEvents for GUI Activity Logs.
 package logging
 
@@ -26,9 +26,9 @@ var knownPrefixes = map[string]prefixInfo{
 	"SLOT":      {events.DebugLevel, "SLOT", true},
 	"DEBUG":     {events.DebugLevel, "DEBUG", true},
 	"CRED":      {events.WarnLevel, "CRED", false},
-	"RATELIMIT": {events.DebugLevel, "RATELIMIT", true},  // v4.8.7: 11D — DEBUG + throttled (floods during transfers)
+	"RATELIMIT": {events.DebugLevel, "RATELIMIT", true},  // DEBUG + throttled (floods during transfers)
 	"FIPS":      {events.InfoLevel, "FIPS", false},
-	"TIMING":    {events.DebugLevel, "TIMING", true},    // v4.8.7: 11D — DEBUG + throttled (floods during transfers)
+	"TIMING":    {events.DebugLevel, "TIMING", true},    // DEBUG + throttled (floods during transfers)
 }
 
 // TeeWriter intercepts log.Printf output and routes it to both

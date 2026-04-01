@@ -269,8 +269,6 @@ func TestMemoryDetection(t *testing.T) {
 	t.Logf("CPU cores: %d", runtime.NumCPU())
 }
 
-// v4.8.0: ComputeBatchConcurrency tests
-
 func TestComputeBatchConcurrency_AllSmallFiles(t *testing.T) {
 	mgr := NewManager(Config{MaxThreads: 32, AutoScale: true})
 	sizes := make([]int64, 100)

@@ -38,11 +38,9 @@ type DownloadError struct {
 	Error    error
 }
 
-// DownloadFolderRecursive recursively downloads a folder and all its contents
-// Exported for GUI reuse
+// DownloadFolderRecursive recursively downloads a folder and all its contents.
+// Exported for GUI reuse.
 // folderName: optional name for the downloaded folder. If empty, uses folderID.
-// v4.8.1: Added resourceMgr parameter — must be created via CreateResourceManager()
-// at the command entrypoint, not constructed internally. Passing nil will panic.
 func DownloadFolderRecursive(
 	ctx context.Context,
 	folderID string,
@@ -128,7 +126,6 @@ func DownloadFolderRecursive(
 		initialFolderMode = FolderDownloadSkipOnce
 	}
 
-	// v4.8.1: Use shared ConflictResolvers instead of inline state machines
 	fileConflictResolver := NewDownloadConflictResolver(initialFileMode)
 	folderConflictResolver := NewFolderDownloadConflictResolver(initialFolderMode)
 
@@ -252,7 +249,6 @@ func DownloadFolderRecursive(
 	defer cancelDownload()
 	var cancelled atomic.Bool
 
-	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
 	if resourceMgr == nil {
 		panic("DownloadFolderRecursive: resourceMgr is required (use CreateResourceManager())")
 	}
@@ -326,7 +322,6 @@ func DownloadFolderRecursive(
 
 		fileBar := downloadUI.AddFileBar(item.idx+1, task.FileID, task.Name, localPath, task.Size)
 
-		// v4.8.1: Pass adaptive worker count for correct per-file thread allocation
 		transferHandle := cliTransferMgr.AllocateTransfer(task.Size, numWorkers)
 
 		err := download.DownloadFile(ctx, download.DownloadParams{
@@ -398,7 +393,7 @@ type RemoteFileTask struct {
 	Name         string
 	RelativePath string
 	Size         int64
-	CloudFile    *models.CloudFile // v4.8.0: Pre-fetched full metadata (nil = fallback to GetFileInfo)
+	CloudFile    *models.CloudFile
 }
 
 // folderDownloadWorkItem wraps RemoteFileTask with index for BatchExecutor.
@@ -458,7 +453,7 @@ func ScanRemoteFolderRecursive(
 			Name:         file.Name,
 			RelativePath: fileRelPath,
 			Size:         file.DecryptedSize,
-			CloudFile:    file.ToCloudFile(), // v4.8.0: Pre-fetched metadata (nil if incomplete)
+			CloudFile:    file.ToCloudFile(),
 		})
 	}
 
@@ -467,7 +462,6 @@ func ScanRemoteFolderRecursive(
 
 // ScanRemoteFolderRecursiveWithProgress is like ScanRemoteFolderRecursive but calls
 // onProgress after each subfolder is scanned, enabling live scan feedback in CLI.
-// v4.8.0: Added for scan progress feedback (Phase 6).
 func ScanRemoteFolderRecursiveWithProgress(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -539,14 +533,12 @@ func scanRemoteFolderRecursiveImpl(
 }
 
 // ScanEvent represents a single discovery from the streaming scanner.
-// v4.8.0: Used by ScanRemoteFolderStreaming for incremental file discovery.
 type ScanEvent struct {
 	Folder *RemoteFolderInfo // Non-nil for folder discovery
 	File   *RemoteFileTask  // Non-nil for file discovery
 }
 
 // ScanProgress reports cumulative scan progress.
-// v4.8.0: Used by streaming scanner progress callback.
 type ScanProgress struct {
 	FoldersFound int
 	FilesFound   int
@@ -559,7 +551,6 @@ type ScanProgress struct {
 //
 // Returns a channel of ScanEvents (closed when scan completes) and an error channel.
 // The error channel receives at most one error, then is closed.
-// v4.8.0: Streaming scan architecture for immediate download start.
 func ScanRemoteFolderStreaming(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -604,13 +595,13 @@ func ScanRemoteFolderStreaming(
 					default:
 					}
 
-					// v4.8.2: Stream pages — emit files/folders as each API page arrives
+					// Stream pages — emit files/folders as each API page arrives
 					// instead of waiting for the entire folder to be enumerated.
 					err := apiClient.ListFolderContentsStreaming(ctx, work.folderID,
 						func(folders []api.FolderInfo, files []api.FileInfo) error {
 							// Emit folders first (so parent dirs can be created before files)
 							for _, folder := range folders {
-								// v4.8.7 RF1: Defense-in-depth — validate folder names from API
+								// Defense-in-depth — validate folder names from API
 								if err := validation.ValidateFilename(folder.Name); err != nil {
 									continue
 								}
@@ -671,7 +662,7 @@ func ScanRemoteFolderStreaming(
 						},
 					)
 					if err != nil {
-						// v4.8.2: Don't report context cancellation as a scan error — it's a clean cancel
+						// Don't report context cancellation as a scan error — it's a clean cancel
 						if ctx.Err() != nil {
 							wg.Done()
 							continue

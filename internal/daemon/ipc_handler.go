@@ -20,7 +20,6 @@ type IPCHandler struct {
 	// Shutdown callback
 	shutdownFunc func()
 
-	// v4.3.2: Log buffer for IPC streaming
 	logBuffer *LogBuffer
 }
 
@@ -34,7 +33,6 @@ func NewIPCHandler(daemon *Daemon, shutdownFunc func()) *IPCHandler {
 }
 
 // SetLogBuffer sets the log buffer for IPC log streaming.
-// v4.3.2: Called by daemon after creating the log writer.
 func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
 	h.logBuffer = buf
 }
@@ -56,12 +54,12 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 
 	return &ipc.StatusData{
 		ServiceState:    state,
-		Version:         version.Version, // v4.3.2: Use canonical version
+		Version:         version.Version,
 		LastScanTime:    lastPollPtr,
 		ActiveDownloads: h.daemon.GetActiveDownloads(),
 		ActiveUsers:     1, // Single-user mode on Unix
 		Uptime:          uptime,
-		ServiceMode:     false, // v4.5.2: Running as subprocess (single-user mode)
+		ServiceMode:     false,
 	}
 }
 
@@ -130,7 +128,6 @@ func (h *IPCHandler) OpenLogs(userID string) error {
 }
 
 // GetRecentLogs returns recent log entries from the buffer.
-// v4.5.0: Added userID parameter for interface compatibility.
 // In subprocess mode, userID is ignored (only one user).
 func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {
 	// userID ignored in subprocess mode - only one user
@@ -144,7 +141,6 @@ func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData 
 }
 
 // GetLogBuffer returns the log buffer for subscription.
-// v4.3.2: Used for real-time log streaming.
 func (h *IPCHandler) GetLogBuffer() *LogBuffer {
 	return h.logBuffer
 }
@@ -159,8 +155,8 @@ func (h *IPCHandler) Shutdown() error {
 }
 
 // ReloadConfig handles config reload for subprocess mode.
-// v4.7.6: Returns active download count so GUI can decide whether to restart now or defer.
-// The actual restart is managed by the GUI (stop + start) — simpler and avoids in-process mutation.
+// Returns active download count so GUI can decide whether to restart now or defer.
+// The actual restart is managed by the GUI (stop + start) -- simpler and avoids in-process mutation.
 func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	activeDownloads := h.daemon.GetActiveDownloads()
 	if activeDownloads > 0 {
@@ -179,7 +175,7 @@ func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 }
 
 // GetTransferStatus returns daemon transfer batch status.
-// v4.7.8: Subprocess mode — userID is ignored (single-user).
+// In subprocess mode, userID is ignored (single-user).
 func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
 	return h.daemon.GetTransferStatus(), nil
 }

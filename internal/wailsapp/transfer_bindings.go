@@ -16,10 +16,10 @@ type TransferRequestDTO struct {
 	Dest        string   `json:"dest"`                  // Folder ID (upload) or local path (download)
 	Name        string   `json:"name"`                  // Display name
 	Size        int64    `json:"size"`                  // File size in bytes
-	SourceLabel string   `json:"sourceLabel,omitempty"` // v4.7.4: "PUR", "SingleJob", "FileBrowser"
-	BatchID     string   `json:"batchID,omitempty"`     // v4.7.7: Batch grouping ID
-	BatchLabel  string   `json:"batchLabel,omitempty"`  // v4.7.7: Batch display label
-	Tags        []string `json:"tags,omitempty"`        // v4.7.4: Tags to apply after upload
+	SourceLabel string   `json:"sourceLabel,omitempty"` // "PUR", "SingleJob", "FileBrowser"
+	BatchID     string   `json:"batchID,omitempty"`
+	BatchLabel  string   `json:"batchLabel,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
 }
 
 // TransferTaskDTO is the JSON-safe version of services.TransferTask.
@@ -31,9 +31,9 @@ type TransferTaskDTO struct {
 	Source      string  `json:"source"`                // Source path or ID
 	Dest        string  `json:"dest"`                  // Destination path or ID
 	Size        int64   `json:"size"`                  // Total size in bytes
-	SourceLabel string  `json:"sourceLabel,omitempty"` // v4.7.4: "PUR", "SingleJob", "FileBrowser"
-	BatchID     string  `json:"batchID,omitempty"`     // v4.7.7: Batch grouping ID
-	BatchLabel  string  `json:"batchLabel,omitempty"`  // v4.7.7: Batch display label
+	SourceLabel string  `json:"sourceLabel,omitempty"` // "PUR", "SingleJob", "FileBrowser"
+	BatchID     string  `json:"batchID,omitempty"`
+	BatchLabel  string  `json:"batchLabel,omitempty"`
 	Progress    float64 `json:"progress"`              // 0.0 to 1.0
 	Speed       float64 `json:"speed"`                 // bytes/sec
 	Error       string  `json:"error,omitempty"`
@@ -75,10 +75,10 @@ func (a *App) StartTransfers(requests []TransferRequestDTO) error {
 			Dest:        r.Dest,
 			Name:        r.Name,
 			Size:        r.Size,
-			SourceLabel: r.SourceLabel, // v4.7.4
-			BatchID:     r.BatchID,     // v4.7.7
-			BatchLabel:  r.BatchLabel,  // v4.7.7
-			Tags:        r.Tags,        // v4.7.4
+			SourceLabel: r.SourceLabel,
+			BatchID:     r.BatchID,
+			BatchLabel:  r.BatchLabel,
+			Tags:        r.Tags,
 		}
 	}
 
@@ -154,7 +154,7 @@ func (a *App) GetTransferStats() TransferStatsDTO {
 }
 
 // GetTransferTasks returns all tracked transfers.
-// v4.0.4: Returns empty slice instead of nil to prevent frontend null errors.
+// Returns empty slice instead of nil to prevent frontend null errors.
 func (a *App) GetTransferTasks() []TransferTaskDTO {
 	if a.engine == nil {
 		return []TransferTaskDTO{}
@@ -188,7 +188,6 @@ func (a *App) ClearCompletedTransfers() {
 }
 
 // TransferBatchDTO is the JSON-safe aggregate view of a batch of transfers.
-// v4.7.7: Used for grouped display in Transfers tab.
 type TransferBatchDTO struct {
 	BatchID         string  `json:"batchID"`
 	BatchLabel      string  `json:"batchLabel"`
@@ -203,16 +202,16 @@ type TransferBatchDTO struct {
 	TotalBytes      int64   `json:"totalBytes"`
 	Progress        float64 `json:"progress"`               // byte-weighted 0.0-1.0
 	Speed           float64 `json:"speed"`                  // aggregate bytes/sec
-	TotalKnown      bool    `json:"totalKnown"`             // v4.8.0: True when scan complete
-	FilesPerSec     float64 `json:"filesPerSec"`            // v4.8.5: file completion rate (windowed)
-	ETASeconds      float64 `json:"etaSeconds"`             // v4.8.5: estimated time remaining (-1 = unknown)
-	DiscoveredTotal int     `json:"discoveredTotal"`        // v4.8.5: files discovered by scan
-	DiscoveredBytes int64   `json:"discoveredBytes"`        // v4.8.5: bytes discovered by scan
-	StartedAtUnix   int64   `json:"startedAtUnix"`          // v4.8.7: batch start time (Unix seconds)
+	TotalKnown      bool    `json:"totalKnown"`             // true when scan complete
+	FilesPerSec     float64 `json:"filesPerSec"`            // file completion rate (windowed)
+	ETASeconds      float64 `json:"etaSeconds"`             // estimated time remaining (-1 = unknown)
+	DiscoveredTotal int     `json:"discoveredTotal"`
+	DiscoveredBytes int64   `json:"discoveredBytes"`
+	StartedAtUnix   int64   `json:"startedAtUnix"`
 }
 
 // GetTransferBatches returns aggregate stats for each batch of transfers.
-// v4.7.7: Lightweight call for Transfers tab polling (returns ~200 bytes per batch).
+// Lightweight call for Transfers tab polling (returns ~200 bytes per batch).
 func (a *App) GetTransferBatches() []TransferBatchDTO {
 	if a.engine == nil {
 		return []TransferBatchDTO{}
@@ -240,20 +239,19 @@ func (a *App) GetTransferBatches() []TransferBatchDTO {
 			TotalBytes:      bs.TotalBytes,
 			Progress:        bs.Progress,
 			Speed:           bs.Speed,
-			TotalKnown:      bs.TotalKnown,      // v4.8.0
-			FilesPerSec:     bs.FilesPerSec,      // v4.8.5
-			ETASeconds:      bs.ETASeconds,       // v4.8.5
-			DiscoveredTotal: bs.DiscoveredTotal,   // v4.8.5
-			DiscoveredBytes: bs.DiscoveredBytes,   // v4.8.5
-			StartedAtUnix:   bs.StartedAt.Unix(),  // v4.8.7
+			TotalKnown:      bs.TotalKnown,
+			FilesPerSec:     bs.FilesPerSec,
+			ETASeconds:      bs.ETASeconds,
+			DiscoveredTotal: bs.DiscoveredTotal,
+			DiscoveredBytes: bs.DiscoveredBytes,
+			StartedAtUnix:   bs.StartedAt.Unix(),
 		}
 	}
 	return dtos
 }
 
 // GetUngroupedTransferTasks returns only tasks with no BatchID.
-// v4.7.7: Replaces GetTransferTasks() in polling path when batches exist,
-// avoiding the 10k-task IPC payload.
+// Used in polling path when batches exist, avoiding the full task list IPC payload.
 func (a *App) GetUngroupedTransferTasks() []TransferTaskDTO {
 	if a.engine == nil {
 		return []TransferTaskDTO{}
@@ -273,8 +271,6 @@ func (a *App) GetUngroupedTransferTasks() []TransferTaskDTO {
 }
 
 // GetBatchTasks returns paginated tasks for a specific batch.
-// v4.7.7: Used for expanded batch detail view in Transfers tab.
-// v4.8.7: Added stateFilter parameter for status filtering (10D).
 func (a *App) GetBatchTasks(batchID string, offset int, limit int, stateFilter string) []TransferTaskDTO {
 	if a.engine == nil {
 		return []TransferTaskDTO{}
@@ -294,7 +290,7 @@ func (a *App) GetBatchTasks(batchID string, offset int, limit int, stateFilter s
 }
 
 // CancelBatch cancels all non-terminal tasks in a batch.
-// v4.7.7: Handles queued tasks too (standard Cancel only handles active/initializing).
+// Also handles queued tasks (standard CancelTransfer only handles active/initializing).
 func (a *App) CancelBatch(batchID string) error {
 	if a.engine == nil {
 		return ErrNoEngine
@@ -309,7 +305,6 @@ func (a *App) CancelBatch(batchID string) error {
 }
 
 // RetryFailedInBatch retries all failed tasks in a batch.
-// v4.7.7: Batch retry for Transfers tab grouped view.
 func (a *App) RetryFailedInBatch(batchID string) error {
 	if a.engine == nil {
 		return ErrNoEngine
@@ -324,7 +319,7 @@ func (a *App) RetryFailedInBatch(batchID string) error {
 }
 
 // serviceTaskFromQueueTask converts a transfer.TransferTask to services.TransferTask.
-// v4.7.8: Takes pointer to avoid copying sync.RWMutex embedded in TransferTask.
+// Takes pointer to avoid copying sync.RWMutex embedded in TransferTask.
 func serviceTaskFromQueueTask(qt *transfer.TransferTask) services.TransferTask {
 	return services.TransferTask{
 		ID:          qt.ID,
@@ -356,9 +351,9 @@ func transferTaskToDTO(t services.TransferTask) TransferTaskDTO {
 		Source:      t.Source,
 		Dest:        t.Dest,
 		Size:        t.Size,
-		SourceLabel: t.SourceLabel, // v4.7.4
-		BatchID:     t.BatchID,     // v4.7.7
-		BatchLabel:  t.BatchLabel,  // v4.7.7
+		SourceLabel: t.SourceLabel,
+		BatchID:     t.BatchID,
+		BatchLabel:  t.BatchLabel,
 		Progress:    t.Progress,
 		Speed:       t.Speed,
 		CreatedAt:   t.CreatedAt.Format(time.RFC3339),

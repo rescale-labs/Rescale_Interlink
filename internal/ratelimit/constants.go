@@ -108,7 +108,7 @@ const (
 	NotifyMinInterval = 10 * time.Second
 )
 
-// v4.8.4: Coordinator self-healing constants
+// Coordinator self-healing constants
 const (
 	// RecoveryCheckInterval is how often the background goroutine checks for degraded limiters.
 	RecoveryCheckInterval = 30 * time.Second

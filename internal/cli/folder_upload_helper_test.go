@@ -15,8 +15,6 @@ import (
 // TestPipelinedUploadAdaptiveConcurrency verifies Bug #2 fix:
 // uploadDirectoryPipelined uses ComputeBatchConcurrency result (cliUploadWorkerCount)
 // for spawning workers, not the raw fileConcurrency parameter.
-// v4.8.1: Before the fix, the function computed adaptive concurrency via
-// ComputeBatchConcurrency but then used fileConcurrency to spawn workers.
 //
 // This test verifies the adaptive concurrency computation that the function
 // now uses. The function itself requires a full API client + credential cache
@@ -60,8 +58,6 @@ func TestPipelinedUploadAdaptiveConcurrency(t *testing.T) {
 // TestSequentialUploadAdaptiveConcurrency verifies Bug #3 fix:
 // uploadFiles uses ComputeBatchConcurrency result (adaptiveWorkers) for spawning
 // workers, not the raw maxConcurrent parameter.
-// v4.8.1: Before the fix, uploadFiles created a resource manager but never used it
-// for batch concurrency — workers were spawned using the raw maxConcurrent value.
 //
 // This test verifies:
 // 1. The adaptive computation produces different results for different file sizes

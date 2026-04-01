@@ -151,8 +151,6 @@ func TestTimerConcurrentStop(t *testing.T) {
 	}
 }
 
-// v4.0.4: TestTimerElapsed removed - Timer.Elapsed() method was removed as dead code.
-
 func TestTimerStopWithThroughput(t *testing.T) {
 	original := os.Getenv("RESCALE_TIMING")
 	defer os.Setenv("RESCALE_TIMING", original)

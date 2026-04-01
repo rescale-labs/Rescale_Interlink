@@ -29,7 +29,7 @@ func main() {
 		os.Setenv("RESCALE_TIMING", "1")
 	}
 
-	// v4.0.2: This is the standalone CLI binary.
+	// This is the standalone CLI binary.
 	// For GUI, use rescale-int-gui (or rescale-int-gui.AppImage on Linux).
 	if slices.Contains(os.Args, "--gui") {
 		fmt.Fprintf(os.Stderr, "Error: --gui is not available in the CLI-only binary.\n")

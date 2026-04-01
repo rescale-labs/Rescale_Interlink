@@ -8,7 +8,7 @@ import (
 )
 
 // ensureTokenPersisted writes the current API key to the token file if it's missing or stale.
-// v4.7.6: Called before daemon/service start to ensure the token file exists for the daemon to read.
+// Called before daemon/service start to ensure the token file exists for the daemon to read.
 // This is in an untagged file so both Windows and non-Windows builds can use it.
 func (a *App) ensureTokenPersisted() error {
 	if a.config == nil || a.config.APIKey == "" {

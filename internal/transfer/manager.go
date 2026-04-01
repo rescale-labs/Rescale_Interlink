@@ -76,7 +76,6 @@ func (t *Transfer) GetThreads() int {
 // Returns the number of additional threads acquired (0 if none available).
 // This is used for dynamic scaling - as other transfers complete, their threads
 // become available and can be claimed by active transfers to speed up.
-// v3.4.2: Added for dynamic thread reallocation
 func (t *Transfer) TryAcquireMore(maxWanted int) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

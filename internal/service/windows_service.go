@@ -122,8 +122,8 @@ func (ws *multiUserWindowsService) Execute(args []string, r <-chan svc.ChangeReq
 	// Report start pending
 	changes <- svc.Status{State: svc.StartPending}
 
-	// v4.7.6: Start IPC server BEFORE daemon so GUI can connect immediately
-	// when SCM reports "running" (fixes brief gap where IPC fails)
+	// Start IPC server BEFORE daemon so GUI can connect immediately
+	// when SCM reports "running"
 	if ws.ipcServer != nil {
 		if err := ws.ipcServer.Start(); err != nil {
 			ws.elog.Warning(1, fmt.Sprintf("Failed to start IPC server (tray communication unavailable): %v", err))
@@ -136,7 +136,7 @@ func (ws *multiUserWindowsService) Execute(args []string, r <-chan svc.ChangeReq
 	// Start the multi-user daemon
 	if err := ws.service.Start(); err != nil {
 		ws.elog.Error(1, fmt.Sprintf("Failed to start multi-user service: %v", err))
-		// v4.7.6: Clean up IPC server if daemon start fails
+		// Clean up IPC server if daemon start fails
 		if ws.ipcServer != nil {
 			ws.ipcServer.Stop()
 		}
@@ -204,9 +204,9 @@ func RunAsMultiUserService(s *MultiUserService) error {
 
 	elog.Info(1, "Starting service (multi-user mode)")
 
-	// Create IPC handler and server
-	// v4.5.0: Use service mode server for multi-user mode
-	// This relaxes owner-based auth since user-scoped routing handles isolation
+	// Create IPC handler and server.
+	// Use service mode server for multi-user mode —
+	// this relaxes owner-based auth since user-scoped routing handles isolation.
 	ipcHandler := NewServiceIPCHandler(s, logger)
 	ipcServer := ipc.NewServiceModeServer(ipcHandler, logger)
 
@@ -234,7 +234,6 @@ func IsWindowsService() (bool, error) {
 }
 
 // IsInstalledWithReason returns (installed, errReason) for better diagnostics.
-// v4.5.2: Added for UI to show meaningful status when SCM access is blocked.
 func IsInstalledWithReason() (bool, string) {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -251,7 +250,6 @@ func IsInstalledWithReason() (bool, string) {
 }
 
 // IsInstalled returns true if the service is installed in the Service Control Manager.
-// v4.3.6: Added for GUI to check service installation status.
 func IsInstalled() bool {
 	installed, _ := IsInstalledWithReason()
 	return installed
@@ -308,7 +306,7 @@ func Install(execPath string, configPath string) error {
 		fmt.Printf("Warning: failed to install event log: %v\n", err)
 	}
 
-	// v4.5.8: Set HKLM registry marker so GUI/tray can detect service installation
+	// Set HKLM registry marker so GUI/tray can detect service installation
 	// without needing SCM access (which may be blocked on restricted VMs).
 	// This runs in the elevated CLI process, so HKLM write is allowed.
 	if regKey, _, regErr := registry.CreateKey(registry.LOCAL_MACHINE,
@@ -367,7 +365,7 @@ func Uninstall() error {
 		fmt.Printf("Warning: failed to remove event log: %v\n", err)
 	}
 
-	// v4.5.8: Clear HKLM registry marker so GUI/tray knows service is no longer installed.
+	// Clear HKLM registry marker so GUI/tray knows service is no longer installed.
 	// This runs in the elevated CLI process, so HKLM write is allowed.
 	if regKey, regErr := registry.OpenKey(registry.LOCAL_MACHINE,
 		`SOFTWARE\Rescale\Interlink`, registry.SET_VALUE); regErr == nil {

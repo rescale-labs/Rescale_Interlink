@@ -11,7 +11,7 @@ import (
 )
 
 // fifoTicket represents a waiter's position in the FIFO queue.
-// v4.8.7: Ensures fair token acquisition under contention.
+// Ensures fair token acquisition under contention.
 type fifoTicket struct {
 	id uint64
 }
@@ -42,10 +42,10 @@ type RateLimiter struct {
 	coordinatorDrain    func()
 	coordinatorCooldown func(d time.Duration)
 
-	// v4.8.4: Self-healing state
+	// Self-healing state
 	degraded bool // true when at emergency cap after coordinator disconnect
 
-	// v4.8.7: FIFO wait queue — ensures fair token acquisition under contention.
+	// FIFO wait queue — ensures fair token acquisition under contention.
 	waitQueue []*fifoTicket
 
 	// Visibility: utilization-based notifications with hysteresis.
@@ -90,7 +90,7 @@ func (rl *RateLimiter) ClearCoordinatorHook() {
 }
 
 // IsDegraded returns whether this limiter is at emergency cap after a coordinator disconnect.
-// v4.8.4: Used by recovery to find limiters that need restoration.
+// Used by recovery to find limiters that need restoration.
 func (rl *RateLimiter) IsDegraded() bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -98,7 +98,7 @@ func (rl *RateLimiter) IsDegraded() bool {
 }
 
 // HasCoordinatorHooks returns whether this limiter has coordinator hooks installed.
-// v4.8.4: Used to detect stale hooks that need rebinding after a wall-clock gap.
+// Used to detect stale hooks that need rebinding after a wall-clock gap.
 func (rl *RateLimiter) HasCoordinatorHooks() bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -250,7 +250,7 @@ func (rl *RateLimiter) Wait(ctx context.Context) error {
 		}
 	}
 
-	// v4.8.7: FIFO queue — single locked decision point.
+	// FIFO queue — single locked decision point.
 	// If no one is waiting AND a token is available → acquire immediately.
 	// Otherwise → enqueue and only the front waiter may acquire.
 	rl.mu.Lock()
@@ -318,7 +318,6 @@ func (rl *RateLimiter) tryAcquire() bool {
 
 // tryAcquireUnlocked is the lock-free version of tryAcquire.
 // Caller MUST hold rl.mu.
-// v4.8.7: Extracted for FIFO queue where caller already holds the lock.
 func (rl *RateLimiter) tryAcquireUnlocked() bool {
 	// Refill tokens based on elapsed time
 	now := time.Now()
@@ -349,7 +348,6 @@ func (rl *RateLimiter) timeUntilNextToken() time.Duration {
 
 // timeUntilNextTokenUnlocked is the lock-free version of timeUntilNextToken.
 // Caller MUST hold rl.mu.
-// v4.8.7: Extracted for FIFO queue where caller already holds the lock.
 func (rl *RateLimiter) timeUntilNextTokenUnlocked() time.Duration {
 	tokensNeeded := 1.0 - rl.tokens
 	if tokensNeeded <= 0 {

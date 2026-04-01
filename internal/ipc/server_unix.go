@@ -46,18 +46,16 @@ type ServiceHandler interface {
 	Shutdown() error
 
 	// GetRecentLogs returns recent log entries from the daemon.
-	// v4.5.0: Added userID parameter for per-user routing in service mode.
+	// In service mode, userID routes to the correct per-user daemon.
 	// In subprocess mode, userID is ignored (only one user).
 	GetRecentLogs(userID string, count int) []LogEntryData
 
 	// ReloadConfig requests daemon config reload.
-	// v4.7.6: Added for GUI config propagation.
 	// In subprocess mode, returns active download count for GUI to decide restart timing.
 	// In service mode, delegates to TriggerRescan().
 	ReloadConfig(userID string) *ReloadConfigData
 
 	// GetTransferStatus returns daemon transfer batch status.
-	// v4.7.8: Added for GUI visibility into daemon auto-downloads.
 	GetTransferStatus(userID string) (*TransferStatusData, error)
 }
 
@@ -274,8 +272,6 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return NewOKResponse()
 
 	case MsgGetRecentLogs:
-		// v4.5.0: Return recent log entries for GUI display
-		// In subprocess mode, userID is ignored; in service mode, routes to calling user
 		logs := s.handler.GetRecentLogs(req.UserID, 100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
 
@@ -294,13 +290,11 @@ func (s *Server) handleRequest(req *Request) *Response {
 		return resp
 
 	case MsgReloadConfig:
-		// v4.7.6: Config reload request
 		userID := req.UserID
 		result := s.handler.ReloadConfig(userID)
 		return NewReloadConfigResponse(result)
 
 	case MsgGetTransferStatus:
-		// v4.7.8: Read-only — return daemon transfer batch status
 		data, err := s.handler.GetTransferStatus(req.UserID)
 		if err != nil {
 			return NewErrorResponse(err.Error())

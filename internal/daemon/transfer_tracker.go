@@ -8,7 +8,6 @@ import (
 )
 
 // DaemonBatchStatus tracks the progress of a single job's download batch.
-// v4.7.8: Used by the daemon transfer tracker to provide GUI visibility.
 type DaemonBatchStatus struct {
 	BatchID     string
 	BatchLabel  string
@@ -30,7 +29,7 @@ type DaemonBatchStatus struct {
 }
 
 // DaemonTransferTracker provides in-memory tracking of daemon download batches.
-// v4.7.8: Enables GUI visibility into daemon auto-downloads via IPC polling.
+// Enables GUI visibility into daemon auto-downloads via IPC polling.
 type DaemonTransferTracker struct {
 	mu        sync.RWMutex
 	active    map[string]*DaemonBatchStatus
@@ -189,7 +188,6 @@ func (t *DaemonTransferTracker) GetStatus() []DaemonBatchStatus {
 }
 
 // GetTransferStatus maps the tracker state to an IPC-native struct.
-// v4.7.8: Called by IPC handlers to respond to MsgGetTransferStatus.
 func (d *Daemon) GetTransferStatus() *ipc.TransferStatusData {
 	if d.tracker == nil {
 		return &ipc.TransferStatusData{}

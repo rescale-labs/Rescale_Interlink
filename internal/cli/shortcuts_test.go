@@ -155,7 +155,6 @@ func TestAddShortcuts(t *testing.T) {
 
 // TestDownloadShortcutMaxConcurrentRange verifies Bug #5 fix:
 // Download shortcut uses MaxMaxConcurrent (20), not hardcoded 10.
-// v4.8.1: The range validation was changed from 1-10 to constants.MinMaxConcurrent-MaxMaxConcurrent.
 func TestDownloadShortcutMaxConcurrentRange(t *testing.T) {
 	tests := []struct {
 		name        string

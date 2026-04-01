@@ -32,7 +32,6 @@ import (
 )
 
 // RunOptions groups PUR-specific pipeline options to avoid parameter creep.
-// v4.7.4: Introduced to replace individual parameters in RunFromSpecsWithOptions.
 type RunOptions struct {
 	ExtraInputFiles  string
 	DecompressExtras bool
@@ -40,7 +39,6 @@ type RunOptions struct {
 }
 
 // syncUploaderAdapter wraps TransferService to implement pipeline.SyncUploader.
-// v4.7.4: Bridges the pipeline package's interface to the services layer.
 type syncUploaderAdapter struct {
 	ts *services.TransferService
 }
@@ -52,8 +50,8 @@ func (a *syncUploaderAdapter) UploadFileSync(ctx context.Context, params pipelin
 		Dest:        params.FolderID,
 		Name:        params.Name,
 		SourceLabel: params.SourceLabel,
-		BatchID:     params.BatchID,    // v4.7.7
-		BatchLabel:  params.BatchLabel, // v4.7.7
+		BatchID:     params.BatchID,
+		BatchLabel:  params.BatchLabel,
 		Tags:        params.Tags,
 	}, services.UploadFileSyncParams{
 		ExtraProgressCallback: params.ExtraProgressCallback,
@@ -61,7 +59,6 @@ func (a *syncUploaderAdapter) UploadFileSync(ctx context.Context, params pipelin
 }
 
 // RunContext tracks metadata about an active pipeline run.
-// v4.0.0: Added for GUI job state synchronization.
 type RunContext struct {
 	RunID     string    // Unique identifier for this run
 	StartTime time.Time // When the run started
@@ -80,18 +77,16 @@ type Engine struct {
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
 
-	// v4.0.0: Run context for GUI state synchronization
 	runCtx   *RunContext
 	runCtxMu sync.RWMutex
 
-	// v3.6.4: Service layer for frontend-agnostic business logic
 	transferService *services.TransferService
 	fileService     *services.FileService
 
 	// Job monitoring
 	monitorTicker *time.Ticker
 	monitorStop   chan struct{}
-	monitorWg     sync.WaitGroup // v3.4.0: WaitGroup to ensure goroutine exits before restart
+	monitorWg     sync.WaitGroup
 
 	// Event publishing control (to prevent deadlocks)
 	publishEvents bool
@@ -118,7 +113,6 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 	// Create event bus
 	eventBus := events.NewEventBus(10000) // Increased buffer for rapid events
 
-	// v3.6.4: Create service layer
 	transferService := services.NewTransferService(apiClient, eventBus, services.TransferServiceConfig{})
 	fileService := services.NewFileService(apiClient, eventBus)
 
@@ -140,12 +134,10 @@ func (e *Engine) GetConfig() *config.Config {
 	return e.config
 }
 
-// UpdateConfig updates the engine configuration
-// v3.4.3: Fixed mutex contention - create API client BEFORE acquiring lock
-// Previously, the lock was held during api.NewClient() which can take 15+ seconds
-// for proxy warmup. This caused GUI freezes when other code tried to call
-// GetConfig() or API() while UpdateConfig was in progress.
-// v3.6.3: Now publishes EventConfigChanged to notify subscribers (e.g., File Browser)
+// UpdateConfig updates the engine configuration.
+// The API client is created before acquiring the lock because api.NewClient() can
+// take 15+ seconds for proxy warmup. Holding the lock during that period would
+// cause GUI freezes when other code calls GetConfig() or API().
 func (e *Engine) UpdateConfig(cfg *config.Config) error {
 	// Create new API client FIRST (this can be slow due to proxy warmup)
 	// Do NOT hold the mutex during this operation
@@ -158,7 +150,6 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 	e.mu.Lock()
 	e.config = cfg
 	e.apiClient = apiClient
-	// v3.6.4: Update services with new API client
 	if e.transferService != nil {
 		e.transferService.SetAPIClient(apiClient)
 	}
@@ -166,9 +157,7 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 		e.fileService.SetAPIClient(apiClient)
 	}
 
-	// v4.8.4: Register idle-connection cleanup for sleep/wake recovery.
 	// Re-registered on each config update so the hook always points at the current client.
-	// v4.8.7: Extended to cover S3/Azure provider transports via CloseAllIdleConnections.
 	ratelimit.GlobalStore().SetStaleConnectionCleanup(func() {
 		apiClient.CloseIdleConnections()    // API client transport
 		inthttp.CloseAllIdleConnections()   // S3 + Azure provider transports
@@ -178,7 +167,6 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 
 	e.publishLog(events.InfoLevel, "Configuration updated", "", "")
 
-	// v3.6.3: Publish config changed event so File Browser can refresh
 	// Try to get user email for the event (non-blocking, best effort)
 	var email string
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -213,7 +201,6 @@ func (e *Engine) API() *api.Client {
 }
 
 // TransferService returns the transfer service for upload/download operations.
-// v3.6.4: Added as part of service layer refactoring.
 func (e *Engine) TransferService() *services.TransferService {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -221,7 +208,6 @@ func (e *Engine) TransferService() *services.TransferService {
 }
 
 // FileService returns the file service for file/folder operations.
-// v3.6.4: Added as part of service layer refactoring.
 func (e *Engine) FileService() *services.FileService {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -303,7 +289,7 @@ type ScanOptions struct {
 	RunSubpath        string   // Subpath to navigate before finding runs (e.g., "Simcodes/Powerflow")
 	MultiPartMode     bool     // Enable multi-part mode (scan multiple project directories)
 	PartDirs          []string // Project directories for multi-part mode
-	TarSubpath        string   // v4.6.0: Subdirectory within each Run_* to tar (optional)
+	TarSubpath        string   // Subdirectory within each Run_* to tar (optional)
 }
 
 // Scan generates a jobs CSV from directory scan
@@ -324,7 +310,6 @@ func (e *Engine) Scan(opts ScanOptions) error {
 	template := jobs[0]
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Using template: %s", template.JobName), "scan", "")
 
-	// v4.7.1: Use validation pattern from scan options only (no config fallback)
 	validationPattern := opts.ValidationPattern
 
 	// Structure for directory entries
@@ -578,14 +563,12 @@ func (e *Engine) Scan(opts ScanOptions) error {
 	return nil
 }
 
-// ScanToSpecs generates job specs from directory scan without writing CSV
-// Returns job list directly for in-memory GUI use (v2.7.1)
-// This is the CSV-less alternative to Scan() for GUI workflows
+// ScanToSpecs generates job specs from directory scan without writing CSV.
+// This is the CSV-less alternative to Scan() for GUI workflows.
 func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]models.JobSpec, error) {
 	e.publishLog(events.InfoLevel, "Starting in-memory directory scan...", "scan", "")
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Using template: %s", template.JobName), "scan", "")
 
-	// v4.7.1: Use validation pattern from scan options only (no config fallback)
 	validationPattern := opts.ValidationPattern
 
 	// Structure for directory entries
@@ -788,7 +771,6 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 			job.Command = pattern.IterateCommandPatterns(template.Command, templateIdx, dirNum)
 		}
 
-		// v4.6.0: Set TarSubpath from scan options
 		if opts.TarSubpath != "" {
 			job.TarSubpath = opts.TarSubpath
 		}
@@ -910,7 +892,7 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Loaded %d jobs from %s", len(jobs), jobsCSVPath), "run", "")
 
-	// v4.6.0: Safety fallback — if state wasn't already initialized by StartRun()
+	// Safety fallback — if state wasn't already initialized by StartRun()
 	// (e.g., CLI callers that don't call StartRun), create it here.
 	if e.state == nil {
 		e.state = state.NewManager(stateFile)
@@ -924,7 +906,6 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 		return err
 	}
 
-	// v4.7.4: Wire sync uploader for TransferService integration
 	if e.transferService != nil {
 		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
 	}
@@ -968,7 +949,6 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 		e.publishLog(events.DebugLevel, fmt.Sprintf("[DEBUG] StateChangeCallback: job=%s, stage=%s, status=%s, progress=%.2f",
 			jobName, stage, newStatus, uploadProgress), "engine", "")
 
-		// v4.0.6: Update state manager with upload progress for GetJobRows to return
 		if stage == "upload" && uploadProgress > 0 {
 			e.state.UpdateUploadProgressByName(jobName, uploadProgress)
 		}
@@ -1012,7 +992,6 @@ func (e *Engine) Run(ctx context.Context, jobsCSVPath string, stateFile string) 
 		Duration:    duration,
 	})
 
-	// v4.8.7: Report total pipeline failure for error reporting (Plan 3).
 	// Only report if all jobs failed, not cancelled, and there were jobs to run.
 	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
 		derivedErr := err
@@ -1046,8 +1025,8 @@ func (e *Engine) Resume(ctx context.Context, jobsCSVPath string, stateFile strin
 	return e.Run(ctx, jobsCSVPath, stateFile)
 }
 
-// RunFromSpecs executes the pipeline from an in-memory job list
-// This is the primary GUI entry point for CSV-less operation (v2.7.1)
+// RunFromSpecs executes the pipeline from an in-memory job list.
+// This is the primary GUI entry point for CSV-less operation.
 func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateFile string) error {
 	// Check if API key is configured before starting pipeline
 	e.mu.RLock()
@@ -1070,7 +1049,7 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Starting pipeline with %d jobs (in-memory)...", len(jobs)), "run", "")
 
-	// v4.6.0: Safety fallback — if state wasn't already initialized by StartRun()
+	// Safety fallback — if state wasn't already initialized by StartRun()
 	// (e.g., CLI callers that don't call StartRun), create it here.
 	if e.state == nil {
 		e.state = state.NewManager(stateFile)
@@ -1084,7 +1063,6 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 		return err
 	}
 
-	// v4.7.4: Wire sync uploader for TransferService integration
 	if e.transferService != nil {
 		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
 	}
@@ -1128,7 +1106,6 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 		e.publishLog(events.DebugLevel, fmt.Sprintf("[DEBUG] StateChangeCallback: job=%s, stage=%s, status=%s, progress=%.2f",
 			jobName, stage, newStatus, uploadProgress), "engine", "")
 
-		// v4.0.6: Update state manager with upload progress for GetJobRows to return
 		if stage == "upload" && uploadProgress > 0 {
 			e.state.UpdateUploadProgressByName(jobName, uploadProgress)
 		}
@@ -1187,7 +1164,6 @@ func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateF
 
 // RunFromSpecsWithOptions executes the pipeline from an in-memory job list with
 // additional PUR options (extra input files, decompress flag, tar cleanup).
-// v4.7.4: Changed from individual parameters to RunOptions struct.
 func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobSpec, stateFile string, opts RunOptions) error {
 	// Check if API key is configured before starting pipeline
 	e.mu.RLock()
@@ -1223,7 +1199,6 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 		return err
 	}
 
-	// v4.7.4: Wire sync uploader and tar cleanup
 	if e.transferService != nil {
 		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
 	}
@@ -1311,7 +1286,7 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 		Duration:    duration,
 	})
 
-	// v4.8.7: Report total pipeline failure for error reporting (Plan 3).
+	// Only report if all jobs failed, not cancelled, and there were jobs to run.
 	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
 		derivedErr := err
 		if derivedErr == nil {
@@ -1358,7 +1333,6 @@ func (e *Engine) GetJobStatus(jobID string) (string, error) {
 }
 
 // StartJobMonitoring starts monitoring job statuses on Rescale
-// v3.4.0: Uses WaitGroup to ensure clean goroutine lifecycle management
 func (e *Engine) StartJobMonitoring(interval time.Duration) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1387,8 +1361,8 @@ func (e *Engine) StartJobMonitoring(interval time.Duration) {
 	e.publishLog(events.InfoLevel, fmt.Sprintf("Started job monitoring (interval: %v)", interval), "", "")
 }
 
-// StopJobMonitoring stops job status monitoring
-// v3.4.0: Waits for goroutine to exit before returning to prevent race conditions
+// StopJobMonitoring stops job status monitoring.
+// Waits for the goroutine to exit before returning to prevent race conditions.
 func (e *Engine) StopJobMonitoring() {
 	e.mu.Lock()
 	if e.monitorTicker == nil {
@@ -1401,8 +1375,8 @@ func (e *Engine) StopJobMonitoring() {
 	close(e.monitorStop)
 	e.mu.Unlock()
 
-	// v3.4.0: Wait for goroutine to actually exit before creating new channel
-	// This prevents race conditions when start is called immediately after stop
+	// Wait for goroutine to actually exit before creating new channel.
+	// This prevents race conditions when start is called immediately after stop.
 	e.monitorWg.Wait()
 
 	e.mu.Lock()
@@ -1443,15 +1417,14 @@ func (e *Engine) LoadState(stateFile string) ([]*models.JobState, error) {
 }
 
 // ============================================================================
-// Run Context Management (v4.0.0)
+// Run Context Management
 // These methods provide GUI state synchronization for pipeline runs.
 // ============================================================================
 
 // StartRun initializes a new run context. Returns error if a run is already active.
 // The caller is responsible for starting the actual pipeline execution.
-// v4.6.0: Also initializes the state manager here (before the goroutine) so that
-// GetState()/GetRunStats() is never nil while a run is active. This fixes the race
-// where polling started before the goroutine had set e.state.
+// Also initializes the state manager here (before the goroutine) so that
+// GetState()/GetRunStats() is never nil while a run is active.
 func (e *Engine) StartRun(runID, stateFile string, totalJobs int) error {
 	e.runCtxMu.Lock()
 	defer e.runCtxMu.Unlock()
@@ -1467,8 +1440,7 @@ func (e *Engine) StartRun(runID, stateFile string, totalJobs int) error {
 		TotalJobs: totalJobs,
 	}
 
-	// v4.6.0: Initialize state manager in StartRun so it's available before
-	// the pipeline goroutine starts. Prevents GetState() returning nil.
+	// Initialize state manager eagerly so it's available before the pipeline goroutine starts.
 	e.mu.Lock()
 	e.state = state.NewManager(stateFile)
 	e.mu.Unlock()
@@ -1538,7 +1510,6 @@ func (e *Engine) ResetRun() {
 
 // GetRunStats returns current job statistics for the active run.
 // Returns zeros if no run is active.
-// v4.6.0: Updated to handle upstream failures (tar/upload) and skipped jobs.
 func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
 	e.mu.RLock()
 	st := e.state
@@ -1575,9 +1546,8 @@ func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
 // Private helper methods
 
 func (e *Engine) publishLog(level events.LogLevel, message, stage, jobName string) {
-	// v4.8.7: Write to stdout directly (not log.Printf) to avoid double-publish
-	// when TeeWriter is active on stdlib log — the EventBus publish below is
-	// the intended path for GUI Activity Logs.
+	// Write to stdout directly (not log.Printf) to avoid double-publish
+	// when TeeWriter is active on stdlib log.
 	fmt.Printf("[%s] %s\n", level.String(), message)
 
 	// Only publish events if enabled (to prevent deadlocks)
@@ -1691,7 +1661,7 @@ type jobStats struct {
 	Pending   int
 }
 
-// v4.6.0: Aligned with GetRunStats() to use consistent SubmitStatus-based logic.
+// getJobStats returns pipeline job statistics using the same SubmitStatus-based logic as GetRunStats().
 func (e *Engine) getJobStats() jobStats {
 	e.mu.RLock()
 	st := e.state

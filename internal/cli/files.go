@@ -27,7 +27,7 @@ func newFilesCmd() *cobra.Command {
 	filesCmd.AddCommand(newFilesDownloadCmd())
 	filesCmd.AddCommand(newFilesListCmd())
 	filesCmd.AddCommand(newFilesDeleteCmd())
-	filesCmd.AddCommand(newFilesTagsCmd()) // v3.6.2
+	filesCmd.AddCommand(newFilesTagsCmd())
 
 	return filesCmd
 }
@@ -42,7 +42,7 @@ func newFilesUploadCmd() *cobra.Command {
 	var allowDuplicates bool
 	var dryRun bool
 	var preEncrypt bool
-	var tagsFlag string // v4.7.4: Comma-separated tags to apply after upload
+	var tagsFlag string
 
 	cmd := &cobra.Command{
 		Use:   "upload <file> [file...]",
@@ -142,7 +142,6 @@ Examples:
 				return err
 			}
 
-			// v4.7.4: Parse tags
 			var uploadTags []string
 			if tagsFlag != "" {
 				uploadTags = tags.ParseCommaSeparated(tagsFlag)
@@ -503,7 +502,6 @@ Example:
 }
 
 // newFilesTagsCmd creates the 'files tags' command group for managing file tags.
-// v3.6.2: File tag management
 func newFilesTagsCmd() *cobra.Command {
 	tagsCmd := &cobra.Command{
 		Use:   "tags",

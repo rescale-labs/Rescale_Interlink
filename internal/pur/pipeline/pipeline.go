@@ -32,7 +32,6 @@ type AnalysisResolver interface {
 }
 
 // SyncUploader abstracts synchronous file upload with transfer queue visibility.
-// v4.7.4: Implemented by TransferService adapter in the engine layer.
 // CLI mode passes nil (falls back to direct upload).
 type SyncUploader interface {
 	// UploadFileSync uploads a file synchronously and returns the cloud file result.
@@ -41,14 +40,14 @@ type SyncUploader interface {
 }
 
 // SyncUploadParams contains parameters for SyncUploader.UploadFileSync.
-// v4.7.4: Uses primitive types to keep the pipeline testable without importing services.
+// Uses primitive types to keep the pipeline testable without importing services.
 type SyncUploadParams struct {
 	LocalPath             string                 // Path to the local file
 	FolderID              string                 // Destination folder ID (empty = root)
 	Name                  string                 // Display name
 	SourceLabel           string                 // "PUR", "SingleJob", "FileBrowser"
-	BatchID               string                 // v4.7.7: Batch grouping ID
-	BatchLabel            string                 // v4.7.7: Batch display label
+	BatchID               string                 // Batch grouping ID
+	BatchLabel            string                 // Batch display label
 	ExtraProgressCallback func(progress float64) // Pipeline's own progress reporting
 	Tags                  []string               // Applied after upload (non-fatal on failure)
 }
@@ -120,12 +119,10 @@ type Pipeline struct {
 	onLog         LogCallback
 	onStateChange StateChangeCallback
 
-	// v4.7.4: Optional sync uploader for TransferService integration.
 	// When non-nil, uploadWorker and ResolveSharedFiles delegate uploads here
 	// instead of calling upload.UploadFile() directly.
 	syncUploader SyncUploader
 
-	// v4.7.7: Batch ID for grouping all uploads in this pipeline run
 	batchID    string
 	batchLabel string
 }
@@ -175,10 +172,8 @@ func findCommonParent(jobs []models.JobSpec) string {
 }
 
 // NewPipeline creates a new pipeline.
-// v4.6.0: Added existingState parameter. When non-nil, the pipeline shares
-// the caller's state manager instead of creating a duplicate. This fixes the
-// dual-state bug where GUI and pipeline each had their own state.Manager,
-// causing the GUI to always read empty state. CLI callers pass nil.
+// When existingState is non-nil, the pipeline shares the caller's state manager
+// instead of creating a duplicate. CLI callers pass nil.
 func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, extraInputFiles string, decompressExtras bool) (*Pipeline, error) {
 	// Normalize all job directories to absolute paths at ingress.
 	// This prevents CWD-dependent failures when paths were generated
@@ -282,7 +277,7 @@ func (p *Pipeline) SetRmTarOnSuccess(rm bool) {
 }
 
 // SetSyncUploader sets the sync uploader for TransferService integration.
-// v4.7.4: When set, uploads are routed through TransferService for queue visibility.
+// When set, uploads are routed through TransferService for queue visibility.
 func (p *Pipeline) SetSyncUploader(u SyncUploader) {
 	p.syncUploader = u
 }
@@ -415,20 +410,18 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 
 			p.logf("INFO", "pipeline", "", "Uploading shared file: %s", absPath)
 
-			// v4.7.4: Delegate to SyncUploader if available (TransferService integration)
 			var cloudFile *models.CloudFile
 			if p.syncUploader != nil {
 				cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
 					LocalPath:   absPath,
 					Name:        filepath.Base(absPath),
 					SourceLabel: "PUR",
-					BatchID:     p.batchID,    // v4.7.7
-					BatchLabel:  p.batchLabel, // v4.7.7
+					BatchID:     p.batchID,
+					BatchLabel:  p.batchLabel,
 				})
 			} else {
-				// CLI fallback: direct upload
-				// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
-				// CLI fallback bypasses RunBatch/RunBatchFromChannel, so must signal directly.
+				// CLI fallback: direct upload.
+				// Signal active transfer since CLI fallback bypasses RunBatch.
 				ratelimit.GlobalStore().BeginTransferActivity()
 				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 					LocalPath:    absPath,
@@ -452,7 +445,7 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 func (p *Pipeline) Run(ctx context.Context) error {
 	p.pipelineStart = time.Now()
 
-	// v4.7.7: Generate batch ID for grouping all uploads in this pipeline run
+	// Generate batch ID for grouping all uploads in this pipeline run
 	if p.syncUploader != nil {
 		p.batchID = fmt.Sprintf("pur_%d", p.pipelineStart.UnixNano())
 		p.batchLabel = fmt.Sprintf("PUR: %d jobs", p.totalJobs)
@@ -499,7 +492,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	stopProgress := make(chan struct{})
 	go p.progressReporter(stopProgress)
 
-	// Feed work items to tar queue (v4.6.0: context-aware to support cancellation)
+	// Feed work items to tar queue (context-aware to support cancellation)
 	go func() {
 		defer close(p.tarQueue)
 		defer close(p.feederDone)
@@ -519,7 +512,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				state:   state,
 			}
 
-			// v4.6.0: submit-existing mode — skip tar/upload, go directly to job creation
+			// Submit-existing mode — skip tar/upload, go directly to job creation
 			if p.skipTarUpload && state.TarStatus != "success" {
 				item.state.TarStatus = "skipped"
 				item.state.UploadStatus = "skipped"
@@ -534,7 +527,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				continue
 			}
 
-			// v4.6.8: If job has pre-specified input file IDs (single job remoteFiles/localFiles mode),
+			// If job has pre-specified input file IDs (single job remoteFiles/localFiles mode),
 			// skip tar/upload and go directly to job creation.
 			// Gated on Directory=="" to avoid interfering with file-scan mode where
 			// InputFiles contains local paths but Directory is also set.
@@ -598,7 +591,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 }
 
 // tarWorker processes tar operations.
-// v4.6.0: Rewritten with select on ctx.Done() to support cancellation.
 func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID int) {
 	defer wg.Done()
 
@@ -639,7 +631,7 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 			}
 
-			// v4.6.0: Resolve tar source directory, applying TarSubpath if set
+			// Resolve tar source directory, applying TarSubpath if set
 			tarSourceDir := item.jobSpec.Directory
 			if item.jobSpec.TarSubpath != "" {
 				tarSourceDir = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
@@ -741,7 +733,6 @@ shutdown:
 }
 
 // uploadWorker processes upload operations.
-// v4.6.0: Rewritten with select on ctx.Done() to support cancellation.
 func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerID int) {
 	defer wg.Done()
 
@@ -770,8 +761,8 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 			p.logf("INFO", "upload", item.state.JobName, "Uploading: %s", item.state.TarPath)
 			p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", 0.0)
 
-			// v4.6.5: Per-upload proxy warmup for Basic proxy mode.
-			// Prevents proxy session expiry during long batch runs (matching old PUR behavior).
+			// Per-upload proxy warmup for Basic proxy mode.
+			// Prevents proxy session expiry during long batch runs.
 			if strings.ToLower(p.cfg.ProxyMode) == "basic" {
 				if err := inthttp.WarmupProxyConnection(ctx, p.cfg); err != nil {
 					p.logf("WARN", "upload", item.state.JobName, "Proxy warmup failed: %v (continuing anyway)", err)
@@ -804,21 +795,18 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 					p.reportStateChange(item.state.JobName, "upload", "in_progress", "", "", progress)
 				}
 
-				// v4.7.4: Delegate to SyncUploader if available (TransferService integration).
-				// Each retry attempt creates a new transfer task for auditability.
 				if p.syncUploader != nil {
 					cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
 						LocalPath:             item.state.TarPath,
 						Name:                  filepath.Base(item.state.TarPath),
 						SourceLabel:           "PUR",
-						BatchID:               p.batchID,    // v4.7.7
-						BatchLabel:            p.batchLabel, // v4.7.7
+						BatchID:               p.batchID,
+						BatchLabel:            p.batchLabel,
 						ExtraProgressCallback: progressCallback,
 					})
 				} else {
-					// CLI fallback: direct upload
-					// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
-					// CLI fallback bypasses RunBatch/RunBatchFromChannel, so must signal directly.
+					// CLI fallback: direct upload.
+					// Signal active transfer since CLI fallback bypasses RunBatch.
 					ratelimit.GlobalStore().BeginTransferActivity()
 					cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 						LocalPath:        item.state.TarPath,
@@ -843,7 +831,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 
 				if isTimeout && attempt < maxRetries {
 					p.logf("WARN", "upload", item.state.JobName, "Detected proxy timeout, forcing fresh auth and retrying...")
-					// v4.6.5: Warmup proxy on retry to re-establish session
+					// Warmup proxy on retry to re-establish session
 					if strings.ToLower(p.cfg.ProxyMode) == "basic" {
 						_ = inthttp.WarmupProxyConnection(ctx, p.cfg)
 					}
@@ -881,7 +869,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 			p.reportStateChange(item.state.JobName, "upload", "completed", "", "", 1.0)
 			p.logf("INFO", "upload", item.state.JobName, "Success: File ID %s", cloudFile.ID)
 
-			// v4.7.4: Clean up tar file if requested, with safety guardrails
+			// Clean up tar file if requested
 			if p.rmTarOnSuccess && item.state.TarPath != "" {
 				if err := p.safeRemoveTar(item.state.TarPath, item.state.JobName); err != nil {
 					p.logf("WARN", "upload", item.state.JobName, "Tar cleanup skipped: %v", err)
@@ -912,7 +900,6 @@ shutdown:
 }
 
 // safeRemoveTar safely deletes a tar file with multiple guardrails.
-// v4.7.4: Prevents accidental deletion of non-tar files or files outside tempDir.
 func (p *Pipeline) safeRemoveTar(tarPath, jobName string) error {
 	// 1. Canonical path: resolve symlinks, get absolute path
 	canonical, err := filepath.EvalSymlinks(tarPath)
@@ -962,7 +949,6 @@ func (p *Pipeline) safeRemoveTar(tarPath, jobName string) error {
 func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID int) {
 	defer wg.Done()
 
-	// v4.6.0: Rewritten with select on ctx.Done() to support cancellation.
 	for {
 		select {
 		case <-ctx.Done():
@@ -1002,7 +988,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.logf("INFO", "job", item.state.JobName, "Creating job: %s", item.jobSpec.JobName)
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
-				// v4.6.8: When InputFiles are pre-specified (single job remoteFiles/localFiles mode),
+				// When InputFiles are pre-specified (single job remoteFiles/localFiles mode),
 				// use them directly instead of the FileID from upload stage.
 				var fileIDs []string
 				if item.jobSpec.Directory == "" && len(item.jobSpec.InputFiles) > 0 {
@@ -1037,7 +1023,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
 				p.logf("INFO", "job", item.state.JobName, "Created: Job ID %s", jobResp.ID)
 
-				// v4.6.5: OrgCode project assignment (org-scoped endpoint)
+				// Org-scoped project assignment
 				orgCode := item.jobSpec.OrgCode
 				if orgCode == "" {
 					orgCode = p.cfg.OrgCode
@@ -1183,7 +1169,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 		jobReq.JobAnalyses[0].OnDemandLicenseSeller = &spec.OnDemandLicenseSeller
 	}
 
-	// v3.6.1: Add automations from JobSpec
+	// Add automations from JobSpec
 	if len(spec.Automations) > 0 {
 		jobReq.JobAutomations = make([]models.JobAutomationRequest, len(spec.Automations))
 		for i, autoID := range spec.Automations {
@@ -1199,8 +1185,6 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 
 // NormalizeSubmitMode converts UI mode strings to canonical pipeline values.
 // Returns "submit", "create_only", or error for unrecognized modes.
-// v4.6.0: Single source of truth for mode normalization — used by both
-// the pipeline (shouldSubmit) and GUI validation (ValidateJobSpec).
 func NormalizeSubmitMode(mode string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "yes", "true", "submit", "create_and_submit":

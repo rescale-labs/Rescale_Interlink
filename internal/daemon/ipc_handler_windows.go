@@ -12,7 +12,6 @@ import (
 )
 
 // IPCHandler implements ipc.ServiceHandler for the Windows daemon subprocess.
-// v4.4.0: Fully implemented (was previously a stub).
 // This provides the bridge between IPC requests and daemon operations,
 // matching the Unix implementation for feature parity.
 type IPCHandler struct {
@@ -22,12 +21,10 @@ type IPCHandler struct {
 	// Shutdown callback
 	shutdownFunc func()
 
-	// v4.4.0: Log buffer for IPC streaming
 	logBuffer *LogBuffer
 }
 
 // NewIPCHandler creates a new IPC handler for the daemon.
-// v4.4.0: Now stores daemon reference for full functionality.
 func NewIPCHandler(daemon *Daemon, shutdownFunc func()) *IPCHandler {
 	return &IPCHandler{
 		daemon:       daemon,
@@ -37,13 +34,11 @@ func NewIPCHandler(daemon *Daemon, shutdownFunc func()) *IPCHandler {
 }
 
 // SetLogBuffer sets the log buffer for IPC log streaming.
-// v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
 	h.logBuffer = buf
 }
 
 // GetStatus returns the current daemon status.
-// v4.4.0: Now returns real data (was previously hardcoded stub).
 func (h *IPCHandler) GetStatus() *ipc.StatusData {
 	state := "running"
 	if h.daemon != nil && h.daemon.IsPaused() {
@@ -72,13 +67,12 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 		ActiveDownloads: activeDownloads,
 		ActiveUsers:     1, // Single-user subprocess mode
 		Uptime:          uptime,
-		ServiceMode:     false, // v4.5.2: Running as subprocess (single-user mode)
+		ServiceMode:     false,
 	}
 }
 
 // GetUserList returns the list of user daemon statuses.
 // On Windows subprocess mode, returns a single user (the current user).
-// v4.4.0: Now returns real data (was previously nil).
 func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 	state := "running"
 	if h.daemon != nil && h.daemon.IsPaused() {
@@ -127,7 +121,6 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 
 // PauseUser pauses auto-download.
 // On Windows subprocess mode, userID is ignored.
-// v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) PauseUser(userID string) error {
 	if h.daemon != nil {
 		h.daemon.SetPaused(true)
@@ -137,7 +130,6 @@ func (h *IPCHandler) PauseUser(userID string) error {
 
 // ResumeUser resumes auto-download.
 // On Windows subprocess mode, userID is ignored.
-// v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) ResumeUser(userID string) error {
 	if h.daemon != nil {
 		h.daemon.SetPaused(false)
@@ -146,7 +138,6 @@ func (h *IPCHandler) ResumeUser(userID string) error {
 }
 
 // TriggerScan triggers an immediate job scan.
-// v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) TriggerScan(userID string) error {
 	if h.daemon != nil && h.daemon.IsPaused() {
 		if h.daemon.logger != nil {
@@ -174,7 +165,6 @@ func (h *IPCHandler) OpenLogs(userID string) error {
 }
 
 // GetRecentLogs returns recent log entries from the buffer.
-// v4.5.0: Added userID parameter for interface compatibility.
 // In subprocess mode, userID is ignored (only one user).
 func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {
 	// userID ignored in subprocess mode - only one user
@@ -188,13 +178,11 @@ func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData 
 }
 
 // GetLogBuffer returns the log buffer for subscription.
-// v4.4.0: Now functional (was previously returning nil).
 func (h *IPCHandler) GetLogBuffer() *LogBuffer {
 	return h.logBuffer
 }
 
 // Shutdown gracefully stops the daemon.
-// v4.4.0: Now functional (was previously a no-op).
 func (h *IPCHandler) Shutdown() error {
 	if h.daemon != nil && h.daemon.logger != nil {
 		h.daemon.logger.Info().Msg("Shutdown requested via IPC")
@@ -206,8 +194,8 @@ func (h *IPCHandler) Shutdown() error {
 }
 
 // ReloadConfig handles config reload for subprocess mode.
-// v4.7.6: Returns active download count so GUI can decide whether to restart now or defer.
-// The actual restart is managed by the GUI (stop + start) — simpler and avoids in-process mutation.
+// Returns active download count so GUI can decide whether to restart now or defer.
+// The actual restart is managed by the GUI (stop + start) -- simpler and avoids in-process mutation.
 func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	activeDownloads := 0
 	if h.daemon != nil {
@@ -234,7 +222,7 @@ func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 }
 
 // GetTransferStatus returns daemon transfer batch status.
-// v4.7.8: Subprocess mode — userID is ignored (single-user).
+// In subprocess mode, userID is ignored (single-user).
 func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
 	if h.daemon == nil {
 		return &ipc.TransferStatusData{}, nil
@@ -243,7 +231,6 @@ func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, 
 }
 
 // IsPaused returns whether the daemon is currently paused.
-// v4.4.0: Now functional (was previously always returning false).
 func (h *IPCHandler) IsPaused() bool {
 	if h.daemon != nil {
 		return h.daemon.IsPaused()
@@ -253,7 +240,6 @@ func (h *IPCHandler) IsPaused() bool {
 
 // ShouldPoll returns whether the daemon should perform polling.
 // Returns false if paused.
-// v4.4.0: Now functional (was previously always returning true).
 func (h *IPCHandler) ShouldPoll() bool {
 	return !h.IsPaused()
 }
