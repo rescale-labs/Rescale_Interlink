@@ -7,7 +7,6 @@ package wailsapp
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -136,15 +135,4 @@ func GetLogFilePath() string {
 		return fileLogger.Filename
 	}
 	return ""
-}
-
-// GetFileLogWriter returns an io.Writer for zerolog integration.
-func GetFileLogWriter() io.Writer {
-	fileLoggerMu.RLock()
-	defer fileLoggerMu.RUnlock()
-
-	if fileLogger == nil || !fileLoggingEnabled {
-		return io.Discard
-	}
-	return fileLogger
 }

@@ -36,11 +36,11 @@ type Config struct {
 	TenantURL string
 
 	// Tarball options
-	ExcludePatterns []string // Patterns to exclude from tarballs (e.g., *.log, *.tmp)
-	IncludePatterns []string // Include-only patterns (mutually exclusive with exclude)
-	FlattenTar      bool     // Remove subdirectory structure in tarballs
-	RunSubpath      string   // Subpath to traverse before finding run directories (e.g., "Simcodes/Powerflow")
-	ValidationPattern string // Pattern to validate runs (e.g., "*.avg.fnc"), opt-in feature (default: disabled)
+	ExcludePatterns   []string // Patterns to exclude from tarballs (e.g., *.log, *.tmp)
+	IncludePatterns   []string // Include-only patterns (mutually exclusive with exclude)
+	FlattenTar        bool     // Remove subdirectory structure in tarballs
+	RunSubpath        string   // Subpath to traverse before finding run directories (e.g., "Simcodes/Powerflow")
+	ValidationPattern string   // Pattern to validate runs (e.g., "*.avg.fnc"), opt-in feature (default: disabled)
 
 	// Tar compression
 	TarCompression string // "none" or "gzip" (v4.7.1: normalized from legacy "gz")
@@ -88,8 +88,8 @@ func LoadConfigCSV(path string) (*Config, error) {
 		ValidationPattern: "", // validation is opt-in, disabled by default
 		TarCompression:    "none",
 		MaxRetries:        1,
-		SortField:         "name",  // v3.6.3: default sort by name
-		SortAscending:     true,    // v3.6.3: default ascending
+		SortField:         "name", // v3.6.3: default sort by name
+		SortAscending:     true,   // v3.6.3: default ascending
 	}
 
 	if path == "" {
@@ -295,8 +295,8 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"validation_pattern", cfg.ValidationPattern},
 		{"tar_compression", cfg.TarCompression},
 		{"max_retries", strconv.Itoa(cfg.MaxRetries)},
-		{"sort_field", cfg.SortField},                              // v3.6.3
-		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)},  // v3.6.3
+		{"sort_field", cfg.SortField},                                 // v3.6.3
+		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)},     // v3.6.3
 		{"detailed_logging", strconv.FormatBool(cfg.DetailedLogging)}, // v4.0.0
 		{"org_code", cfg.OrgCode},                                     // v4.6.5
 	}
@@ -599,17 +599,6 @@ func GetDefaultTokenPath() string {
 
 	// Neither exists - return new path (for new installations)
 	return newPath
-}
-
-// EnsureConfigDir creates the config directory if it doesn't exist
-// - Windows: Creates %APPDATA%\Rescale\Interlink (v4.0.8: standard Windows location)
-// - Unix: Creates ~/.config/rescale/ (XDG standard)
-func EnsureConfigDir() error {
-	configDir := getConfigDir()
-	if configDir == "" {
-		return fmt.Errorf("could not determine config directory")
-	}
-	return os.MkdirAll(configDir, 0700)
 }
 
 // ReadTokenFile reads an API token from a file

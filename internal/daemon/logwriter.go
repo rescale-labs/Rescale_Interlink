@@ -18,10 +18,10 @@ import (
 // 2. File (if configured)
 // 3. LogBuffer (for IPC streaming)
 type DaemonLogWriter struct {
-	mu         sync.RWMutex
-	console    io.Writer
-	file       *lumberjack.Logger
-	buffer     *LogBuffer
+	mu          sync.RWMutex
+	console     io.Writer
+	file        *lumberjack.Logger
+	buffer      *LogBuffer
 	fileEnabled bool
 }
 
@@ -151,20 +151,4 @@ func (w *DaemonLogWriter) SetFileLogging(enabled bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.fileEnabled = enabled
-}
-
-// CreateDaemonLogger creates a zerolog logger configured for daemon use.
-// Returns the logger and the writer (for accessing the log buffer).
-func CreateDaemonLogger(cfg DaemonLogConfig) (zerolog.Logger, *DaemonLogWriter) {
-	writer := NewDaemonLogWriter(cfg)
-
-	// Create zerolog with JSON output (for parsing)
-	// The writer will format for console/file appropriately
-	logger := zerolog.New(writer).
-		With().
-		Timestamp().
-		Str("stage", "daemon").
-		Logger()
-
-	return logger, writer
 }

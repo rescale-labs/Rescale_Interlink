@@ -29,12 +29,12 @@ var fifoTicketCounter uint64 // atomic, global counter for unique ticket IDs
 // delegate to the coordinator first. If the coordinator is unreachable, they fall through
 // to the local token bucket. See SetCoordinatorHook().
 type RateLimiter struct {
-	tokens       float64   // Current number of tokens available
-	maxTokens    float64   // Maximum bucket capacity
-	refillRate   float64   // Tokens added per second
-	lastRefill   time.Time // Last time tokens were refilled
-	cooldownEnd  time.Time // If set, Wait() blocks until this time (zero value = no cooldown)
-	mu           sync.Mutex
+	tokens      float64   // Current number of tokens available
+	maxTokens   float64   // Maximum bucket capacity
+	refillRate  float64   // Tokens added per second
+	lastRefill  time.Time // Last time tokens were refilled
+	cooldownEnd time.Time // If set, Wait() blocks until this time (zero value = no cooldown)
+	mu          sync.Mutex
 
 	// Coordinator hooks — set via SetCoordinatorHook().
 	// When non-nil, Wait/Drain/SetCooldown try the coordinator first.
@@ -67,71 +67,6 @@ func NewRateLimiter(tokensPerSecond float64, burstSize float64) *RateLimiter {
 		refillRate: tokensPerSecond,
 		lastRefill: time.Now(),
 	}
-}
-
-// NewUserScopeRateLimiter creates a rate limiter for Rescale's v3 API "user" scope.
-//
-// All v3 API endpoints (/api/v3/*) belong to the "user" scope with a limit of 7200/hour = 2 req/sec.
-//
-// Target Rate: 1.7 req/sec (85% of limit)
-//   - Provides 15% safety margin while maximizing throughput
-//   - 429 feedback system provides safety net if server rejects requests
-//   - See constants.UserScopeRatePerSec
-//
-// Burst Capacity: 150 tokens
-//   - Allows ~88 seconds of rapid operations at startup
-//   - Depletes faster with concurrent uploads/downloads, then refills at 1.7/sec
-//   - See constants.UserScopeBurstCapacity
-//
-// Implementation: Token bucket algorithm
-//   - Bucket starts with 150 tokens
-//   - Each API call consumes 1 token
-//   - Bucket refills at 1.7 tokens/second
-//   - Maximum capacity capped at 150 tokens
-//
-// 2025-11-19: Changed from separate file/folder/credential limiters to single user scope limiter
-// 2025-11-20: Reduced from 1.8 req/sec (90%) to 1.6 req/sec (80%) for better safety margin
-// 2026-02-26: Raised to 1.7 req/sec (85%) with cross-process coordinator + 429 feedback as safety net
-func NewUserScopeRateLimiter() *RateLimiter {
-	return NewRateLimiter(UserScopeRatePerSec, UserScopeBurstCapacity)
-}
-
-// NewJobSubmissionRateLimiter creates a rate limiter for job submission endpoints.
-//
-// Job submission endpoint (POST /api/v2/jobs/{id}/submit/) has a limit of 1000/hour = 0.278 req/sec.
-//
-// Target Rate: 0.236 req/sec (85% of limit)
-//   - With cross-process coordinator sharing the budget, 85% is safe
-//   - See constants.JobSubmissionRatePerSec
-//
-// Burst Capacity: 50 tokens
-//   - Allows ~212 seconds (~3.5 minutes) of rapid job submissions
-//   - See constants.JobSubmissionBurstCapacity
-//
-// 2025-11-20: Updated to use constants from constants.go
-// 2026-02-26: Raised from 50% to 85% with coordinator + 429 feedback as safety net
-func NewJobSubmissionRateLimiter() *RateLimiter {
-	return NewRateLimiter(JobSubmissionRatePerSec, JobSubmissionBurstCapacity)
-}
-
-// NewJobsUsageRateLimiter creates a rate limiter for v2 job query endpoints.
-//
-// Scope: jobs-usage (Rescale's throttle scope for v2 job read operations)
-//   - Hard Limit: 90000/hour = 25 req/sec
-//   - This is 12.5x faster than the user scope (2 req/sec)
-//
-// Target Rate: 21.25 req/sec (85% of limit)
-//   - 15% safety margin, consistent with other scopes
-//   - See constants.JobsUsageRatePerSec
-//
-// Burst Capacity: 300 tokens
-//   - Allows ~14 seconds of rapid operations
-//   - See constants.JobsUsageBurstCapacity
-//
-// 2025-11-20: Added to support faster job file downloads via v2 endpoint
-// 2026-02-26: Raised from 80% to 85% with coordinator + 429 feedback as safety net
-func NewJobsUsageRateLimiter() *RateLimiter {
-	return NewRateLimiter(JobsUsageRatePerSec, JobsUsageBurstCapacity)
 }
 
 // SetCoordinatorHook installs coordinator delegation functions.

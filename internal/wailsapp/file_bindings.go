@@ -18,11 +18,11 @@ import (
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
-	"github.com/rescale/rescale-int/internal/validation"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // translateAPIError converts common API errors to user-friendly messages.
@@ -736,9 +736,9 @@ type FolderUploadResultDTO struct {
 // FolderExistsCheckDTO returns info about whether a folder with the given name exists.
 // v4.0.8: Used for pre-upload check to prompt user about merge behavior.
 type FolderExistsCheckDTO struct {
-	Exists   bool   `json:"exists"`            // True if a visible folder with this name exists
+	Exists   bool   `json:"exists"`             // True if a visible folder with this name exists
 	FolderID string `json:"folderId,omitempty"` // ID of existing folder (if found)
-	Error    string `json:"error,omitempty"`   // Error message if check failed
+	Error    string `json:"error,omitempty"`    // Error message if check failed
 }
 
 // CheckFolderExistsForUpload checks if a folder with the given name already exists
@@ -805,45 +805,6 @@ func (a *App) CheckFoldersExistForUpload(folderNames []string, parentFolderID st
 	}
 
 	return results
-}
-
-// folderProgressWriter is an io.Writer that counts folder creation lines
-// and emits enumeration progress events to keep the UI updated during
-// the CreateFolderStructure phase. v4.7.7: Bridges folder creation to enumeration events.
-type folderProgressWriter struct {
-	enumID       string
-	folderName   string
-	direction    string
-	filesFound   int
-	foldersFound int
-	bytesFound   int64
-	totalDirs    int
-	dirsProcessed int
-	eventBus     *events.EventBus
-}
-
-func (w *folderProgressWriter) Write(p []byte) (n int, err error) {
-	w.dirsProcessed++
-	// Emit progress every folder (or every 3rd if >100 dirs, to reduce event volume)
-	if w.totalDirs <= 100 || w.dirsProcessed%3 == 0 || w.dirsProcessed == w.totalDirs {
-		if w.eventBus != nil {
-			w.eventBus.Publish(&events.EnumerationEvent{
-				BaseEvent:      events.BaseEvent{EventType: events.EventEnumerationProgress, Time: time.Now()},
-				ID:             w.enumID,
-				FolderName:     w.folderName,
-				Direction:      w.direction,
-				FoldersFound:   w.foldersFound,
-				FilesFound:     w.filesFound,
-				BytesFound:     w.bytesFound,
-				IsComplete:     false,
-				StatusMessage:  fmt.Sprintf("Creating folders... (%d of %d)", w.dirsProcessed, w.totalDirs),
-				Phase:          events.EnumPhaseCreatingFolders,
-				FoldersTotal:   w.totalDirs,
-				FoldersCreated: w.dirsProcessed,
-			})
-		}
-	}
-	return len(p), nil
 }
 
 // StartFolderUpload uploads a local folder recursively to the Rescale platform.

@@ -160,7 +160,7 @@ Examples:
 			logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
 				Console:    !daemon.IsDaemonChild(), // Console output only in foreground
 				BufferSize: 1000,                    // Keep 1000 log entries for IPC
-				LogFile:    logFile,                  // Persistent file logging (empty = disabled)
+				LogFile:    logFile,                 // Persistent file logging (empty = disabled)
 			})
 			logger := logging.NewLoggerWithWriter(logWriter)
 
@@ -355,7 +355,6 @@ Examples:
 				// Keeping the log aids debugging - users can see the full startup sequence
 				if runtime.GOOS == "windows" {
 					daemon.WriteStartupLog("SUCCESS: IPC server started at %s", ipcServer.GetSocketPath())
-					// Note: Previously called ClearStartupLog() here, removed in v4.3.9 for better diagnostics
 				}
 			}
 

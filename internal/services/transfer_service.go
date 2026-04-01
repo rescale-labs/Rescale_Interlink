@@ -600,16 +600,8 @@ func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRe
 	ts.logger.Info().Str("path", req.Source).Msg("File uploaded")
 }
 
-// executeUpload handles a single upload — composes registerUploadTask + executeUploadTask.
-// Used for non-batch single-file uploads.
-func (ts *TransferService) executeUpload(ctx context.Context, req TransferRequest, apiClient *api.Client) {
-	taskID := ts.registerUploadTask(req)
-	ts.executeUploadTask(ctx, req, taskID, apiClient, 1)
-}
-
 // UploadFileSync uploads a file synchronously with transfer queue visibility.
-// v4.7.4: Added for PUR pipeline and Single-Job integration. Unlike the async
-// executeUpload(), this blocks until the upload completes and returns the result.
+// Blocks until the upload completes and returns the result.
 //
 // Transfer handle ownership:
 //   - If params.TransferHandle is provided: used for upload, NOT completed (caller owns)
@@ -890,13 +882,6 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 		ts.queue.Complete(taskID)
 		ts.logger.Info().Str("file_id", req.Source).Str("local_path", req.Dest).Msg("File downloaded")
 	}
-}
-
-// executeDownload handles a single download — composes registerDownloadTask + executeDownloadTask.
-// Used for non-batch single-file downloads.
-func (ts *TransferService) executeDownload(ctx context.Context, req TransferRequest, apiClient *api.Client) {
-	taskID := ts.registerDownloadTask(req)
-	ts.executeDownloadTask(ctx, req, taskID, apiClient, 1)
 }
 
 // ExecuteRetry implements transfer.RetryExecutor.

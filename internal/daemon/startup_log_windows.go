@@ -43,9 +43,3 @@ func WriteStartupLog(format string, args ...interface{}) {
 	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, message))
 }
 
-// ClearStartupLog truncates the startup log.
-// v4.3.8: Called on successful daemon startup to clear old entries.
-func ClearStartupLog() {
-	logPath := StartupLogPath()
-	_ = os.Truncate(logPath, 0)
-}

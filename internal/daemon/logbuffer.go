@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/ipc"
 )
 
@@ -91,39 +90,4 @@ func (lb *LogBuffer) GetRecent(n int) []ipc.LogEntryData {
 	}
 
 	return result
-}
-
-// Subscribe creates a new subscription channel for real-time log streaming.
-// Returns subscription ID and channel. Caller must call Unsubscribe when done.
-func (lb *LogBuffer) Subscribe() (string, <-chan *ipc.LogEntryData) {
-	lb.subMu.Lock()
-	defer lb.subMu.Unlock()
-
-	lb.nextSubID++
-	id := string(rune(lb.nextSubID))
-	ch := make(chan *ipc.LogEntryData, constants.WorkChannelBuffer)
-
-	lb.subscribers[id] = ch
-	return id, ch
-}
-
-// Unsubscribe removes a subscription.
-func (lb *LogBuffer) Unsubscribe(id string) {
-	lb.subMu.Lock()
-	defer lb.subMu.Unlock()
-
-	if ch, ok := lb.subscribers[id]; ok {
-		close(ch)
-		delete(lb.subscribers, id)
-	}
-}
-
-// Clear removes all entries from the buffer.
-func (lb *LogBuffer) Clear() {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	lb.entries = make([]ipc.LogEntryData, lb.maxSize)
-	lb.writeIdx = 0
-	lb.count = 0
 }

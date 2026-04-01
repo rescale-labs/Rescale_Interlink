@@ -15,28 +15,26 @@ type MessageType string
 
 const (
 	// Request types (client -> server)
-	MsgGetStatus      MessageType = "GetStatus"
-	MsgPauseUser      MessageType = "PauseUser"
-	MsgResumeUser     MessageType = "ResumeUser"
-	MsgTriggerScan    MessageType = "TriggerScan"
-	MsgOpenLogs       MessageType = "OpenLogs"
-	MsgOpenGUI        MessageType = "OpenGUI"
-	MsgGetUserList    MessageType = "GetUserList"
-	MsgShutdown       MessageType = "Shutdown"
-	MsgSubscribeLogs  MessageType = "SubscribeLogs"  // v4.3.2: Subscribe to log stream
-	MsgGetRecentLogs  MessageType = "GetRecentLogs"  // v4.3.2: Get recent log entries
-	MsgReloadConfig        MessageType = "ReloadConfig"        // v4.7.6: Reload daemon config
-	MsgGetTransferStatus   MessageType = "GetTransferStatus"   // v4.7.8: Query daemon transfer batches
+	MsgGetStatus         MessageType = "GetStatus"
+	MsgPauseUser         MessageType = "PauseUser"
+	MsgResumeUser        MessageType = "ResumeUser"
+	MsgTriggerScan       MessageType = "TriggerScan"
+	MsgOpenLogs          MessageType = "OpenLogs"
+	MsgOpenGUI           MessageType = "OpenGUI"
+	MsgGetUserList       MessageType = "GetUserList"
+	MsgShutdown          MessageType = "Shutdown"
+	MsgGetRecentLogs     MessageType = "GetRecentLogs"     // v4.3.2: Get recent log entries
+	MsgReloadConfig      MessageType = "ReloadConfig"      // v4.7.6: Reload daemon config
+	MsgGetTransferStatus MessageType = "GetTransferStatus" // v4.7.8: Query daemon transfer batches
 
 	// Response types (server -> client)
-	MsgStatusResponse   MessageType = "StatusResponse"
-	MsgUserListResponse MessageType = "UserListResponse"
-	MsgOK               MessageType = "OK"
-	MsgError            MessageType = "Error"
-	MsgLogEntry             MessageType = "LogEntry"              // v4.3.2: Log entry push
-	MsgRecentLogs           MessageType = "RecentLogs"            // v4.3.2: Recent logs response
-	MsgReloadConfigResponse     MessageType = "ReloadConfigResponse"      // v4.7.6: Reload config response
-	MsgTransferStatusResponse   MessageType = "TransferStatusResponse"   // v4.7.8: Transfer status response
+	MsgStatusResponse         MessageType = "StatusResponse"
+	MsgUserListResponse       MessageType = "UserListResponse"
+	MsgOK                     MessageType = "OK"
+	MsgError                  MessageType = "Error"
+	MsgRecentLogs             MessageType = "RecentLogs"             // v4.3.2: Recent logs response
+	MsgReloadConfigResponse   MessageType = "ReloadConfigResponse"   // v4.7.6: Reload config response
+	MsgTransferStatusResponse MessageType = "TransferStatusResponse" // v4.7.8: Transfer status response
 )
 
 // Request represents an IPC request from client to server.
@@ -195,12 +193,6 @@ func NewStatusResponse(status *StatusData) *Response {
 // NewUserListResponse creates a user list response.
 func NewUserListResponse(users []UserStatus) *Response {
 	return &Response{Type: MsgUserListResponse, Success: true, Data: &UserListData{Users: users}}
-}
-
-// NewLogEntryResponse creates a log entry push response.
-// v4.3.2: Used for streaming logs from daemon to GUI.
-func NewLogEntryResponse(entry *LogEntryData) *Response {
-	return &Response{Type: MsgLogEntry, Success: true, Data: entry}
 }
 
 // NewRecentLogsResponse creates a recent logs response.
