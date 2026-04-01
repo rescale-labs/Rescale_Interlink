@@ -1,4 +1,4 @@
-// v4.7.3: Extracted from PURTab.tsx for reuse in RunMonitorView, CompletedResultsView.
+// Reusable pipeline stage progress summary for RunMonitorView, CompletedResultsView.
 import type { PipelineStageStats } from '../../types/jobs'
 
 export function PipelineStageSummary({ stats, total }: { stats: PipelineStageStats; total: number }) {

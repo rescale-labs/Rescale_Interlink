@@ -1,4 +1,4 @@
-// v4.7.3: Central run state manager — tracks active run, completed run history, and job queue.
+// Central run state manager — tracks active run, completed run history, and job queue.
 // Event listeners are app-level (set up from App.tsx), same pattern as logStore/transferStore.
 
 import { create } from 'zustand'

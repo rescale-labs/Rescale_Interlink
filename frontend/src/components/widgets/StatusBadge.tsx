@@ -1,4 +1,4 @@
-// v4.7.3: Extracted from PURTab.tsx for reuse across run monitoring views.
+// Reusable status badge for run monitoring views.
 import clsx from 'clsx'
 
 const STYLES: Record<string, string> = {

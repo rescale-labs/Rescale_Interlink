@@ -48,9 +48,9 @@ type TokenSource = 'environment' | 'file' | 'direct';
 
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
 
-// v4.6.6: Check if URL is a FedRAMP platform (requires FIPS compliance)
-// NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms
-// R2: Use proper URL hostname parsing instead of substring match to prevent spoofing
+// Check if URL is a FedRAMP platform (requires FIPS compliance).
+// NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms.
+// Uses URL hostname parsing instead of substring match to prevent spoofing.
 const isFRMPlatform = (url: string): boolean => {
   try {
     const normalized = url.includes('://') ? url : `https://${url}`;
@@ -59,8 +59,7 @@ const isFRMPlatform = (url: string): boolean => {
   } catch { return false; }
 };
 
-// v4.3.0: Platform URL options for dropdown
-// v4.8.7: This list must stay in sync with internal/config/platforms.go AllowedPlatformURLs
+// Must stay in sync with internal/config/platforms.go AllowedPlatformURLs
 const PLATFORM_URLS = [
   { value: 'https://platform.rescale.com', label: 'North America (platform.rescale.com)' },
   { value: 'https://kr.rescale.com', label: 'Korea (kr.rescale.com)' },
@@ -90,12 +89,10 @@ export function SetupTab() {
 
   const [tokenSource, setTokenSource] = useState<TokenSource>('direct');
   const [statusMessage, setStatusMessage] = useState('Ready');
-  const [showApiKey, setShowApiKey] = useState(false); // v4.0.1: API key visibility toggle
-  const [defaultConfigPath, setDefaultConfigPath] = useState<string>(''); // v4.0.8: Show config location
-  const [advancedExpanded, setAdvancedExpanded] = useState(false); // v4.3.0: Collapsible advanced settings
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [defaultConfigPath, setDefaultConfigPath] = useState<string>('');
+  const [advancedExpanded, setAdvancedExpanded] = useState(false);
 
-  // v4.3.1: Auto-download state unified with daemon config
-  // Old autoDownloadConfig removed - now use daemonConfig for all settings
   const [autoDownloadTestStatus, setAutoDownloadTestStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
   const [autoDownloadTestResult, setAutoDownloadTestResult] = useState<{
     success: boolean;
@@ -105,31 +102,25 @@ export function SetupTab() {
     error?: string;
   } | null>(null);
 
-  // Daemon control state (v4.1.0)
   const [daemonStatus, setDaemonStatus] = useState<wailsapp.DaemonStatusDTO | null>(null);
   const [isDaemonLoading, setIsDaemonLoading] = useState(false);
 
-  // Daemon config state (v4.2.0)
   const [daemonConfig, setDaemonConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
 
-  // Workspace validation state (v4.2.1)
   const [workspaceValidation, setWorkspaceValidation] = useState<wailsapp.AutoDownloadValidationDTO | null>(null);
   const [isValidating, setIsValidating] = useState(false);
 
-  // v4.3.2: File logging state
   const [fileLoggingEnabled, setFileLoggingEnabled] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
 
-  // v4.7.6: Track how long user has been in "pending" state for progressive messages
   const [pendingStartTime, setPendingStartTime] = useState<number | null>(null);
   const [pendingElapsed, setPendingElapsed] = useState(0);
 
-  // v4.5.1: Service status state (Windows SCM, separate from IPC-based daemon status)
+  // Windows SCM service status (separate from IPC-based daemon status)
   const [serviceStatus, setServiceStatus] = useState<wailsapp.ServiceStatusDTO | null>(null);
   const [isServiceLoading, setIsServiceLoading] = useState(false);
   const [showUACConfirmDialog, setShowUACConfirmDialog] = useState<'start' | 'stop' | null>(null);
 
-  // v4.5.8: Debounced auto-save state for daemon config
   const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
   const [lastSavedConfig, setLastSavedConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -140,12 +131,10 @@ export function SetupTab() {
     const cleanup = setupEventListeners();
     fetchConfig();
     fetchAppInfo();
-    // v4.0.8: Fetch default config path to show in UI
     GetDefaultConfigPath().then(setDefaultConfigPath).catch(console.error);
     return cleanup;
   }, []);
 
-  // v4.3.1: Listen for test connection result
   useEffect(() => {
     const handleTestResult = (result: {
       success: boolean;
@@ -165,7 +154,7 @@ export function SetupTab() {
     };
   }, []);
 
-  // Fetch daemon status on mount and periodically (v4.1.0)
+  // Fetch daemon status on mount and periodically
   useEffect(() => {
     const fetchDaemonStatus = async () => {
       try {
@@ -184,7 +173,7 @@ export function SetupTab() {
     return () => clearInterval(interval);
   }, []);
 
-  // v4.5.1: Fetch service status (Windows SCM) on mount and periodically
+  // Fetch service status (Windows SCM) on mount and periodically
   useEffect(() => {
     const fetchServiceStatus = async () => {
       try {
@@ -203,8 +192,7 @@ export function SetupTab() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch daemon config on mount (v4.2.0)
-  // v4.3.1: Pre-populate default download folder if empty
+  // Fetch daemon config on mount; pre-populate default download folder if empty
   useEffect(() => {
     const fetchDaemonConfig = async () => {
       try {
@@ -217,7 +205,6 @@ export function SetupTab() {
           }
         }
         setDaemonConfig(cfg);
-        // v4.5.8: Initialize lastSavedConfig when config loads
         setLastSavedConfig({ ...cfg });
         prevLookbackRef.current = cfg.lookbackDays;
       } catch (err) {
@@ -227,7 +214,7 @@ export function SetupTab() {
     fetchDaemonConfig();
   }, []);
 
-  // v4.5.8: Debounced auto-save for daemon config changes
+  // Debounced auto-save for daemon config changes
   const debouncedSaveDaemonConfig = useCallback((config: wailsapp.DaemonConfigDTO) => {
     // Cancel any pending debounce
     if (debounceTimeoutRef.current) {
@@ -240,7 +227,7 @@ export function SetupTab() {
         await SaveDaemonConfig(config);
         setLastSavedConfig({ ...config });
 
-        // v4.7.6: Notify daemon of config changes after every save
+        // Notify daemon of config changes after every save
         try {
           const result = await ReloadDaemonConfig();
           if (result.deferred) {
@@ -264,7 +251,7 @@ export function SetupTab() {
     }, 1000);
   }, []);
 
-  // v4.5.8: Trigger debounced save when daemon config changes (but not on initial load)
+  // Trigger debounced save when daemon config changes (but not on initial load)
   useEffect(() => {
     if (daemonConfig && lastSavedConfig) {
       const configChanged = JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig);
@@ -274,14 +261,12 @@ export function SetupTab() {
     }
   }, [daemonConfig, lastSavedConfig, debouncedSaveDaemonConfig]);
 
-  // v4.7.6: Lookback-specific rescan removed — debouncedSaveDaemonConfig now calls
-  // ReloadDaemonConfig() after every save, which handles all config propagation.
-  // Track prevLookbackRef for potential future use.
+  // ReloadDaemonConfig() is called after every debounced save, handling all config
+  // propagation including lookback changes. Track prevLookbackRef for potential future use.
   useEffect(() => {
     prevLookbackRef.current = daemonConfig?.lookbackDays ?? null;
   }, [daemonConfig?.lookbackDays]);
 
-  // v4.5.8: Cleanup debounce timeout on unmount
   useEffect(() => {
     return () => {
       if (debounceTimeoutRef.current) {
@@ -290,7 +275,7 @@ export function SetupTab() {
     };
   }, []);
 
-  // v4.7.6: Track pending state elapsed time for progressive messages
+  // Track pending state elapsed time for progressive messages
   useEffect(() => {
     if (daemonStatus?.userState === 'pending') {
       if (pendingStartTime === null) {
@@ -309,7 +294,6 @@ export function SetupTab() {
     }
   }, [daemonStatus?.userState, pendingStartTime]);
 
-  // v4.3.2: Fetch file logging settings on mount
   useEffect(() => {
     const fetchFileLoggingSettings = async () => {
       try {
@@ -323,7 +307,7 @@ export function SetupTab() {
     fetchFileLoggingSettings();
   }, []);
 
-  // v4.5.1: Auto-switch proxy mode when selecting FRM platform with NTLM
+  // Auto-switch proxy mode: NTLM uses non-FIPS algorithms (MD4/MD5) not allowed for FedRAMP
   useEffect(() => {
     if (config && config.proxyMode === 'ntlm' && isFRMPlatform(config.apiBaseUrl || '')) {
       // NTLM is not allowed for FRM platforms - switch to basic
@@ -332,7 +316,6 @@ export function SetupTab() {
     }
   }, [config?.apiBaseUrl]);
 
-  // v4.0.3: Sync statusMessage with connection test results
   useEffect(() => {
     if (connectionStatus === 'connected' && connectionEmail) {
       setStatusMessage(`Connected as ${connectionEmail}`);
@@ -371,10 +354,8 @@ export function SetupTab() {
     await testConnection();
   };
 
-  // v4.3.0: Unified save handler - saves all config sections at once
   const [isUnifiedSaving, setIsUnifiedSaving] = useState(false);
 
-  // v4.3.1: Unified save handler - saves main config and daemon config
   const handleSaveAllSettings = async () => {
     try {
       setIsUnifiedSaving(true);
@@ -396,7 +377,6 @@ export function SetupTab() {
     }
   };
 
-  // v4.0.8: Export config to custom location
   const handleExportConfig = async () => {
     try {
       const path = await SaveFile('Export Configuration');
@@ -409,7 +389,6 @@ export function SetupTab() {
     }
   };
 
-  // v4.3.1: Select download folder handler (uses daemon config)
   const handleSelectDownloadFolder = async () => {
     try {
       const path = await SelectDirectory('Select Download Folder');
@@ -421,14 +400,12 @@ export function SetupTab() {
     }
   };
 
-  // v4.3.1: Test connection handler (now takes folder from daemon config)
   const handleTestAutoDownloadConnection = async () => {
     setAutoDownloadTestStatus('testing');
     setAutoDownloadTestResult(null);
     await TestAutoDownloadConnection(daemonConfig?.downloadFolder || '');
   };
 
-  // Daemon control handlers (v4.1.0)
   const refreshDaemonStatus = async () => {
     try {
       const status = await GetDaemonStatus();
@@ -438,7 +415,7 @@ export function SetupTab() {
     }
   };
 
-  // v4.3.2: Auto-save daemon config before starting to prevent stale settings
+  // Auto-save daemon config before starting to prevent stale settings
   const handleStartDaemon = async () => {
     try {
       setIsDaemonLoading(true);
@@ -510,13 +487,12 @@ export function SetupTab() {
     }
   };
 
-  // v4.5.8: Handler for Enable Auto-Download checkbox with auto-save and rollback on failure
-  // Also cancels any pending debounced save to prevent race conditions
-  // v4.7.6: Added pre-flight validation on enable + ReloadDaemonConfig instead of TriggerProfileRescan
+  // Auto-save on toggle with rollback on failure.
+  // Cancels any pending debounced save to prevent race conditions.
+  // Runs pre-flight validation on enable before persisting.
   const handleAutoDownloadToggle = async (checked: boolean) => {
     if (!daemonConfig) return;
 
-    // v4.7.6: Pre-flight validation when enabling
     if (checked) {
       try {
         const preflight = await ValidateAutoDownloadPreFlight(daemonConfig.downloadFolder || '');
@@ -534,7 +510,7 @@ export function SetupTab() {
       }
     }
 
-    // v4.5.8: Cancel any pending debounced save
+    // Cancel any pending debounced save to avoid race with this immediate save
     if (debounceTimeoutRef.current) {
       clearTimeout(debounceTimeoutRef.current);
       debounceTimeoutRef.current = null;
@@ -550,11 +526,10 @@ export function SetupTab() {
       setIsDaemonConfigSaving(true);
       // Immediately save config to disk
       await SaveDaemonConfig(newConfig);
-      // v4.5.8: Update lastSavedConfig to prevent debounced save from re-triggering
+      // Sync lastSavedConfig to prevent the debounce watcher from re-triggering a save
       setLastSavedConfig({ ...newConfig });
 
       if (checked) {
-        // v4.7.6: Use ReloadDaemonConfig instead of TriggerProfileRescan
         try {
           await ReloadDaemonConfig();
           setStatusMessage('Auto-download enabled. Scanning for your jobs now...');
@@ -578,13 +553,11 @@ export function SetupTab() {
     }
   };
 
-  // v4.5.6: Helper to check if user can perform actions (Scan/Pause/Resume)
   const canUserPerformActions = () => {
     // User must be configured AND registered with service
     return daemonStatus?.userState === 'running' || daemonStatus?.userState === 'paused';
   };
 
-  // v4.5.6: Reason why buttons are disabled
   const getActionDisabledReason = () => {
     if (daemonStatus?.userState === 'not_configured') {
       return 'Enable auto-download first';
@@ -595,10 +568,6 @@ export function SetupTab() {
     return '';
   };
 
-  // v4.3.1: Daemon config changes now inline with setDaemonConfig
-  // handleDaemonConfigChange removed as unused after UI refactor
-
-  // v4.5.1: Elevated service control handlers
   const handleStartServiceElevated = async () => {
     try {
       setIsServiceLoading(true);
@@ -637,7 +606,6 @@ export function SetupTab() {
     }
   };
 
-  // v4.7.6: Combined install + start handler for when service is not installed
   const handleInstallAndStartServiceElevated = async () => {
     try {
       setIsServiceLoading(true);
@@ -713,7 +681,6 @@ export function SetupTab() {
     }
   };
 
-  // Workspace validation handler (v4.2.1)
   const handleValidateWorkspace = async () => {
     try {
       setIsValidating(true);
@@ -734,7 +701,6 @@ export function SetupTab() {
     }
   };
 
-  // v4.3.2: Toggle file logging
   const handleToggleFileLogging = async (enabled: boolean) => {
     try {
       await SetFileLoggingEnabled(enabled);
@@ -795,18 +761,15 @@ export function SetupTab() {
 
   const proxyEnabled = config?.proxyMode !== 'no-proxy' && config?.proxyMode !== 'system';
   const basicAuthEnabled = config?.proxyMode === 'basic';
-  // v4.5.1: Check if current platform is FRM (NTLM not allowed for FIPS compliance)
+  // NTLM not allowed for FedRAMP platforms (FIPS compliance)
   const isFRM = isFRMPlatform(config?.apiBaseUrl || '');
 
-  // v4.5.8: Check if there are unsaved daemon config changes
   const hasUnsavedDaemonChanges = daemonConfig && lastSavedConfig
     ? JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig)
     : false;
 
   return (
     <div className="tab-panel flex flex-col h-full">
-      {/* v4.3.0: Unified Action Bar - sticky at top */}
-      {/* v4.5.7: Updated save button shows saved state */}
       <div className="sticky top-0 z-10 bg-white flex items-center gap-2 mb-4 pb-4 border-b border-gray-200">
         <button
           onClick={handleSaveAllSettings}
@@ -847,7 +810,7 @@ export function SetupTab() {
         <div className="card">
           <h3 className="text-base font-semibold text-gray-900 mb-4">API Configuration</h3>
           <div className="space-y-4">
-            {/* Platform URL - v4.3.0: Changed to dropdown */}
+            {/* Platform URL */}
             <div>
               <label className="label">Platform Region</label>
               <select
@@ -964,7 +927,6 @@ export function SetupTab() {
           </div>
         </div>
 
-        {/* v4.3.0: Collapsible Advanced Settings Section */}
         <div className="border border-gray-200 rounded-lg overflow-hidden">
           <button
             onClick={() => setAdvancedExpanded(!advancedExpanded)}
@@ -1002,7 +964,6 @@ export function SetupTab() {
               Useful for diagnosing slow transfers or troubleshooting issues.
             </p>
 
-            {/* v4.3.2: File Logging */}
             <div className="flex items-center">
               <input
                 type="checkbox"
@@ -1036,7 +997,7 @@ export function SetupTab() {
                 className="input"
                 value={config?.proxyMode || 'no-proxy'}
                 onChange={(e) => {
-                  // v4.5.1: Prevent selecting NTLM for FRM platforms
+                  // NTLM uses non-FIPS algorithms — block for FedRAMP platforms
                   if (e.target.value === 'ntlm' && isFRM) {
                     setStatusMessage('NTLM is not available for FedRAMP platforms (non-FIPS algorithms)');
                     return;
@@ -1054,7 +1015,6 @@ export function SetupTab() {
                   </option>
                 ))}
               </select>
-              {/* v4.5.1: Warning when NTLM is disabled for FRM */}
               {isFRM && (
                 <p className="mt-1 text-xs text-amber-600">
                   NTLM proxy mode is unavailable for FedRAMP platforms (uses non-FIPS MD4/MD5 algorithms).
@@ -1110,7 +1070,6 @@ export function SetupTab() {
                 />
               </div>
             </div>
-            {/* v4.5.9: No Proxy bypass list */}
             {proxyEnabled && (
               <div>
                 <label className="label">No Proxy (bypass list)</label>
@@ -1131,7 +1090,6 @@ export function SetupTab() {
           </div>
         </div>
 
-        {/* v4.3.1: Unified Auto-Download Section - merged settings, eligibility, and service */}
         <div className="card">
           <h3 className="text-base font-semibold text-gray-900 mb-4">Auto-Download</h3>
           <div className="space-y-4">
@@ -1150,7 +1108,6 @@ export function SetupTab() {
               </p>
             </div>
 
-            {/* Enable Auto-Download - v4.5.6: Auto-save on toggle */}
             <div className="flex items-center">
               <input
                 type="checkbox"
@@ -1164,7 +1121,7 @@ export function SetupTab() {
               </label>
             </div>
 
-            {/* Download Folder - v4.5.7: Editable before checkbox is checked */}
+            {/* Download Folder */}
             <div>
               <label className="label">Download Folder</label>
               <div className="flex gap-2">
@@ -1185,7 +1142,6 @@ export function SetupTab() {
               </div>
             </div>
 
-            {/* Scan Interval and Lookback Days - v4.5.7: Editable before checkbox is checked */}
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="label">Scan Interval (minutes)</label>
@@ -1211,7 +1167,7 @@ export function SetupTab() {
               </div>
             </div>
 
-            {/* Tag for Conditional Jobs - v4.5.7: Editable before checkbox is checked */}
+            {/* Tag for Conditional Jobs */}
             <div>
               <label className="label">Tag for Conditional Jobs</label>
               <input
@@ -1338,10 +1294,7 @@ export function SetupTab() {
               </span>
             </div>
 
-            {/* v4.5.1: Service Control Section - Windows Service lifecycle (SCM-based, requires UAC) */}
-            {/* v4.5.2: Also show when SCM blocked but IPC indicates service mode */}
-            {/* v4.7.6: Also show "Install & Start" when not installed (on Windows) */}
-            {/* Show when Windows Service is installed OR when SCM blocked + IPC service mode OR when status is available */}
+            {/* Service Control: show when Windows Service is installed, SCM blocked + IPC service mode, or status is available */}
             {(serviceStatus?.installed || (serviceStatus?.scmBlocked && daemonStatus?.serviceMode) || (serviceStatus && !serviceStatus.installed && serviceStatus.status !== 'Not Available (Windows only)')) && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <div className="flex items-center gap-2 mb-3">
@@ -1351,7 +1304,6 @@ export function SetupTab() {
                     Admin
                   </span>
                 </div>
-                {/* v4.5.2: Show SCM blocked warning when applicable */}
                 {serviceStatus?.scmBlocked && (
                   <div className="mb-3 p-2 bg-amber-50 rounded text-xs text-amber-700">
                     SCM status unavailable (access denied). Run as administrator for full access.
@@ -1374,7 +1326,6 @@ export function SetupTab() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {/* v4.7.6: Not installed -> Install & Start button */}
                       {!serviceStatus?.installed && !serviceStatus?.running ? (
                         <button
                           onClick={() => setShowUACConfirmDialog('start')}
@@ -1415,13 +1366,11 @@ export function SetupTab() {
               </div>
             )}
 
-            {/* v4.5.6: My Downloads Section - Redesigned with separate service/user status */}
-            {/* Show when daemon is running (IPC connected or service mode) */}
+            {/* My Downloads: show when daemon is running (IPC connected or service mode) */}
             {(daemonStatus?.ipcConnected || daemonStatus?.running) && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-3">My Downloads</h4>
 
-                {/* v4.5.6: Your Auto-Download Status (user-level) */}
                 <div className={clsx(
                   'p-4 rounded-lg mb-4',
                   daemonStatus?.userState === 'running' ? 'bg-green-50' :
@@ -1459,7 +1408,6 @@ export function SetupTab() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {/* v4.5.6: Disable buttons when user is not configured/registered */}
                       {canUserPerformActions() ? (
                         <>
                           {daemonStatus?.userState === 'paused' ? (
@@ -1495,7 +1443,6 @@ export function SetupTab() {
                     </div>
                   </div>
 
-                  {/* v4.5.6: Status-specific guidance messages */}
                   {daemonStatus?.userState === 'not_configured' && (
                     <div className="mt-3 p-2 bg-yellow-100 rounded border border-yellow-300">
                       <p className="text-sm font-medium text-yellow-800">
@@ -1516,7 +1463,6 @@ export function SetupTab() {
                     <div className="mt-3 p-2 bg-blue-100 rounded border border-blue-300">
                       <p className="text-sm font-medium text-blue-800 flex items-center gap-2">
                         <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                        {/* v4.7.6: Progressive pending messages with backend error codes */}
                         {daemonStatus?.error && daemonStatus.error.toLowerCase().includes('api key')
                           ? 'Service cannot find your API key'
                           : daemonStatus?.error
@@ -1768,7 +1714,6 @@ export function SetupTab() {
               </div>
             )}
 
-            {/* v4.5.1: UAC Confirmation Dialog */}
             {showUACConfirmDialog && (
               <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
                 <div className="bg-white rounded-lg shadow-xl p-6 max-w-md mx-4">
@@ -1809,7 +1754,6 @@ export function SetupTab() {
         </div> {/* End collapsible container */}
       </div>
 
-      {/* v4.5.7: Floating saving indicator */}
       {isDaemonConfigSaving && (
         <div className="fixed bottom-4 right-4 bg-rescale-blue text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 z-50">
           <ArrowPathIcon className="h-4 w-4 animate-spin" />

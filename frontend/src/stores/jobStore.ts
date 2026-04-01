@@ -2,7 +2,6 @@ import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../wailsjs/go/models'
 
-// v4.7.3: Shared domain types imported from types/jobs.ts (breaks import cycles).
 // Re-exported here for backward compatibility with existing imports.
 import type {
   WorkflowState,
@@ -50,7 +49,7 @@ export interface Automation {
   scriptName: string
 }
 
-// Secondary pattern for file scanning mode (v4.0.8)
+// Secondary pattern for file scanning mode
 export interface SecondaryPattern {
   pattern: string   // Glob pattern, may include subpath (e.g., "*.mesh", "../meshes/*.cfg")
   required: boolean // If true, skip job when file missing; if false, warn and continue
@@ -60,7 +59,7 @@ export interface SecondaryPattern {
 export interface PURRunOptions {
   extraInputFiles: string   // Comma-separated paths and/or id:fileId
   decompressExtras: boolean
-  rmTarOnSuccess: boolean   // v4.7.4: Delete local tar files after successful upload
+  rmTarOnSuccess: boolean
 }
 
 // Scan options
@@ -72,15 +71,14 @@ export interface ScanOptions {
   recursive: boolean
   includeHidden: boolean
 
-  // v4.0.8: File scanning mode fields
   scanMode: 'folders' | 'files'
   primaryPattern: string           // For file mode: e.g., "*.inp", "inputs/*.inp"
   secondaryPatterns: SecondaryPattern[]
 
-  // v4.6.0: Subdirectory within each Run_* to tar
+  // Subdirectory within each Run_* to tar
   tarSubpath: string
 
-  // v4.6.1: Vary command across runs (iterate numeric patterns)
+  // Vary command across runs (iterate numeric patterns)
   iteratePatterns: boolean
 }
 
@@ -106,9 +104,6 @@ export const DEFAULT_JOB_TEMPLATE: JobSpec = {
   orgCode: '',
   automations: [],
 }
-
-// v4.7.3: PipelineLogEntry and PipelineStageStats are now defined in types/jobs.ts
-// and re-exported above for backward compatibility.
 
 // Workflow memory - persisted values between sessions
 export interface WorkflowMemory {
@@ -150,7 +145,6 @@ interface JobStore {
   isLoadingCoreTypes: boolean
   isLoadingAnalysisCodes: boolean
   isLoadingAutomations: boolean
-  // v4.0.6: Error states for API calls
   coreTypesError: string | null
   analysisCodesError: string | null
   automationsError: string | null
@@ -165,9 +159,6 @@ interface JobStore {
 
   // Workflow memory
   memory: WorkflowMemory
-
-  // v4.7.3: Pipeline diagnostics, event subscriptions, and polling moved to runStore.ts.
-  // pipelineLogs, pipelineStageStats, _eventUnsubs, startTime, isPolling, _pollInterval removed.
 
   // Actions - State Machine
   setWorkflowPath: (path: WorkflowPath) => void
@@ -189,7 +180,7 @@ interface JobStore {
   validateJobs: () => Promise<string[]>
   updateJobRow: (index: number, updates: Partial<JobRow>) => void
 
-  // Actions - Execution (v4.7.3: polling/events moved to runStore)
+  // Actions - Execution
   startBulkRun: () => Promise<string | null>
   cancelRun: () => Promise<void>
 
@@ -242,7 +233,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
   template: { ...DEFAULT_JOB_TEMPLATE },
   scannedJobs: [],
   jobRows: [],
-  // v4.7.3: runStatus and runId kept for pre-execution phases; during execution, use runStore.activeRun
+  // Pre-execution only; during execution, use runStore.activeRun
   runStatus: {
     state: 'idle',
     totalJobs: 0,
@@ -265,7 +256,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
   isLoadingCoreTypes: false,
   isLoadingAnalysisCodes: false,
   isLoadingAutomations: false,
-  // v4.0.6: Error states
   coreTypesError: null,
   analysisCodesError: null,
   automationsError: null,
@@ -273,7 +263,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
   purRunOptions: {
     extraInputFiles: '',
     decompressExtras: false,
-    rmTarOnSuccess: false, // v4.7.4
+    rmTarOnSuccess: false,
   },
 
   scanOptions: {
@@ -283,13 +273,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
     runSubpath: '',
     recursive: false,
     includeHidden: false,
-    // v4.0.8: File scanning mode defaults
     scanMode: 'folders' as const,
     primaryPattern: '*.inp',
     secondaryPatterns: [],
-    // v4.6.0
     tarSubpath: '',
-    // v4.6.1
     iteratePatterns: false,
   },
   isScanning: false,
@@ -303,9 +290,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
     lastAnalysisCode: '',
     lastProjectId: '',
   },
-
-  // v4.7.3: pipelineLogs, pipelineStageStats, _eventUnsubs, startTime, isPolling, _pollInterval
-  // removed — all live in runStore.ts now.
 
   // State Machine Actions
   setWorkflowPath: (path) => {
@@ -361,7 +345,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
 
   reset: () => {
-    // v4.7.3: Polling lifecycle now owned by runStore; stopPolling removed from here.
     set({
       workflowState: 'initial',
       workflowPath: 'unknown',
@@ -425,7 +408,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
     set({ isScanning: true, scanError: null })
 
     try {
-      // v4.0.8: Convert secondary patterns to DTO format
       const secondaryPatternsDTO = scanOptions.secondaryPatterns.map((sp) => ({
         pattern: sp.pattern,
         required: sp.required,
@@ -439,13 +421,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
           runSubpath: scanOptions.runSubpath,
           recursive: scanOptions.recursive,
           includeHidden: scanOptions.includeHidden,
-          // v4.0.8: File scanning mode fields
           scanMode: scanOptions.scanMode,
           primaryPattern: scanOptions.primaryPattern,
           secondaryPatterns: secondaryPatternsDTO,
-          // v4.6.0
           tarSubpath: scanOptions.tarSubpath,
-          // v4.6.1
           iteratePatterns: scanOptions.iteratePatterns,
         } as wailsapp.ScanOptionsDTO,
         template as wailsapp.JobSpecDTO
@@ -523,7 +502,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
 
   // Execution Actions
-  // v4.7.3: startBulkRun refactored — event subscriptions and polling moved to runStore.
   startBulkRun: async () => {
     const { scannedJobs, jobRows } = get()
 
@@ -575,15 +553,13 @@ export const useJobStore = create<JobStore>((set, get) => ({
     }
   },
 
-  // v4.7.3: cancelRun delegates to runStore
   cancelRun: async () => {
     const { useRunStore } = await import('./runStore')
     await useRunStore.getState().cancelRun()
     set({ workflowState: 'completed' })
   },
 
-  // v4.7.3: refreshRunStatus, startPolling, stopPolling removed — now in runStore.
-  // refreshJobsStats kept for pre-execution stat queries.
+  // Pre-execution stat queries only; polling lives in runStore.
 
   refreshJobsStats: async () => {
     try {
@@ -738,12 +714,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
 
   // API Cache Actions
-  // v4.0.6: Updated to handle new result DTOs with error propagation
   fetchCoreTypes: async () => {
     set({ isLoadingCoreTypes: true, coreTypesError: null })
     try {
       const result = await App.GetCoreTypes()
-      // v4.0.6: Check for error in result DTO
       if (result.error) {
         console.error('Failed to fetch core types:', result.error)
         set({ coreTypesError: result.error })
@@ -767,12 +741,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
     }
   },
 
-  // v4.0.6: Updated to handle new result DTOs with error propagation
   fetchAnalysisCodes: async (search = '') => {
     set({ isLoadingAnalysisCodes: true, analysisCodesError: null })
     try {
       const result = await App.GetAnalysisCodes(search)
-      // v4.0.6: Check for error in result DTO
       if (result.error) {
         console.error('Failed to fetch analysis codes:', result.error)
         set({ analysisCodesError: result.error })
@@ -801,12 +773,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
     }
   },
 
-  // v4.0.6: Updated to handle new result DTOs with error propagation
   fetchAutomations: async () => {
     set({ isLoadingAutomations: true, automationsError: null })
     try {
       const result = await App.GetAutomations()
-      // v4.0.6: Check for error in result DTO
       if (result.error) {
         console.error('Failed to fetch automations:', result.error)
         set({ automationsError: result.error })

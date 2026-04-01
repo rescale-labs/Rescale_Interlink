@@ -128,7 +128,7 @@ export function RemoteFilePicker({
     setError(null)
 
     try {
-      const contents = await App.ListRemoteLegacy(cursor ?? '', 0)  // v4.0.3: Added pageSize param
+      const contents = await App.ListRemoteLegacy(cursor ?? '', 0)
 
       const existingItems = cursor ? items : []
 

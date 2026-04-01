@@ -1,4 +1,4 @@
-// v4.7.3: Shared domain types extracted from jobStore.ts to break import cycles.
+// Shared domain types extracted from jobStore.ts to break import cycles.
 // Both runStore.ts and jobStore.ts import from here. jobStore.ts re-exports for backward compat.
 
 // Workflow state enum (matches Go JobsWorkflow)
@@ -64,7 +64,7 @@ export interface RunStatus {
   error?: string
 }
 
-// v4.6.0: Pipeline log entry for in-tab display
+// Pipeline log entry for in-tab display
 export interface PipelineLogEntry {
   timestamp: number
   level: string
@@ -73,7 +73,7 @@ export interface PipelineLogEntry {
   stage?: string
 }
 
-// v4.6.0: Per-stage stats for pipeline summary
+// Per-stage stats for pipeline summary
 export interface PipelineStageStats {
   tar: { completed: number; total: number; failed: number }
   upload: { completed: number; total: number; failed: number }

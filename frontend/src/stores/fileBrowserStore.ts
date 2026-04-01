@@ -7,11 +7,10 @@ import { EVENT_NAMES } from '../types/events'
 // Browse mode for remote browser (matching Go BrowseMode)
 export type BrowseMode = 'library' | 'jobs' | 'legacy'
 
-// v4.0.3: Page cache constants
 const PAGE_CACHE_TTL = 5 * 60 * 1000  // 5 minutes
 const MAX_CACHED_PAGES = 10           // Limit memory usage
 
-// v4.0.3: Cached page entry for fast back/forward navigation
+// Cached page entry for fast back/forward navigation without re-fetching
 export interface CachedPage {
   items: wailsapp.FileItemDTO[]
   hasMore: boolean
@@ -46,7 +45,7 @@ interface LocalBrowserState {
 interface RemoteBrowserState {
   mode: BrowseMode
   currentFolderId: string
-  items: wailsapp.FileItemDTO[]  // v4.0.3: Now holds just current page's items
+  items: wailsapp.FileItemDTO[]  // Current page's items only (not cumulative)
   isLoading: boolean
   error: string | null
   breadcrumb: BreadcrumbEntry[]
@@ -54,9 +53,8 @@ interface RemoteBrowserState {
   nextCursor: string
   myLibraryId: string | null
   myJobsId: string | null
-  navGeneration: number             // v4.8.6: bumped on every view-changing operation (navigation, mode switch)
+  navGeneration: number             // Bumped on every view-changing operation to discard stale in-flight responses
   selection: SelectionState
-  // v4.0.3: Server-side pagination state
   currentPage: number            // 0-indexed page number
   itemsPerPage: number           // User's selected page size (sent to server)
   pageCursors: string[]          // Cursor for each page: [page0='', page1='...', page2='...']
@@ -84,8 +82,8 @@ interface FileBrowserStore {
   // Remote browser actions
   initRemote: () => Promise<void>
   setRemoteMode: (mode: BrowseMode) => void
-  loadRemoteFolder: (folderId?: string, folderName?: string) => Promise<void>  // v4.0.3: Removed cursor param, uses internal state
-  loadRemoteLegacy: () => Promise<void>  // v4.0.3: Removed cursor param, uses internal state
+  loadRemoteFolder: (folderId?: string, folderName?: string) => Promise<void>
+  loadRemoteLegacy: () => Promise<void>
   navigateRemoteTo: (folderId: string, folderName: string) => void
   navigateRemoteToBreadcrumb: (index: number) => void
   goRemoteBack: () => void
@@ -94,7 +92,6 @@ interface FileBrowserStore {
   clearRemoteSelection: () => void
   createRemoteFolder: (name: string) => Promise<string | null>
   deleteRemoteItems: (items: wailsapp.FileItemDTO[]) => Promise<{ deleted: number; failed: number }>
-  // v4.0.3: Server-side pagination actions
   setRemoteItemsPerPage: (size: number) => void       // Change page size, reload page 0
   goToNextRemotePage: () => Promise<void>             // Navigate to next page (replaces items)
   goToPreviousRemotePage: () => Promise<void>         // Navigate to previous page (from cache)
@@ -130,7 +127,6 @@ const initialRemoteState: RemoteBrowserState = {
   myJobsId: null,
   navGeneration: 0,
   selection: { selectedIds: new Set(), lastSelectedId: null },
-  // v4.0.3: Server-side pagination initial state
   currentPage: 0,
   itemsPerPage: 25,            // Default page size
   pageCursors: [''],           // First page has empty cursor
@@ -295,8 +291,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   setRemoteMode: (mode: BrowseMode) => {
     const { myLibraryId, myJobsId } = get().remote
 
-    // v4.0.3: Reset all pagination state when changing modes
-    // v4.8.6: Bump navGeneration to discard stale in-flight responses
+    // Stale response guard: bump navGeneration so in-flight responses from the old mode are discarded
     set(state => ({
       remote: {
         ...state.remote,
@@ -325,10 +320,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }
   },
 
-  // v4.0.3: Rewritten for true server-side pagination
-  // - folderName triggers navigation (resets pagination)
-  // - Without folderName, uses current page state
-  // - REPLACES items (not appends)
+  // If folderName is provided, this is a new navigation (resets pagination).
+  // Otherwise, reloads the current page. Items are REPLACED, not appended.
   loadRemoteFolder: async (folderId?: string, folderName?: string) => {
     const state = get().remote
     const targetId = folderId ?? state.currentFolderId
@@ -340,10 +333,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     const pageCursors = isNewNavigation ? [''] : state.pageCursors
     const cursor = pageCursors[currentPage] ?? ''
 
-    // v4.0.3: Check cache first (for back navigation)
+    // Use cached page for back/forward navigation to avoid redundant API calls
     const cachedPage = state.pageCache.get(currentPage)
     if (!isNewNavigation && cachedPage && (Date.now() - cachedPage.timestamp) < PAGE_CACHE_TTL) {
-      // Use cached page
       set(state => ({
         remote: {
           ...state.remote,
@@ -357,7 +349,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       return
     }
 
-    // v4.8.6: Capture navGeneration before async call to detect stale responses
+    // Stale response guard: capture generation before async call
     const myGen = get().remote.navGeneration
 
     set(state => ({
@@ -365,10 +357,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }))
 
     try {
-      // v4.0.3: Pass itemsPerPage to API
       const contents = await App.ListRemoteFolderPage(targetId, cursor, itemsPerPage)
 
-      // v4.8.6: Discard stale response if navigation changed while loading
+      // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return
 
       // Update breadcrumb only on new navigation
@@ -382,13 +373,11 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }
       }
 
-      // v4.0.3: Store next cursor for future page navigation
       const newPageCursors = [...pageCursors]
       if (contents.hasMore && contents.nextCursor) {
         newPageCursors[currentPage + 1] = contents.nextCursor
       }
 
-      // v4.0.3: Update page cache
       const newCache = new Map(state.pageCache)
       newCache.set(currentPage, {
         items: contents.items,
@@ -404,7 +393,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }
       }
 
-      // v4.0.3: Update knownTotalPages
       let knownTotalPages = isNewNavigation ? 1 : state.knownTotalPages
       if (contents.hasMore && currentPage + 1 >= knownTotalPages) {
         knownTotalPages = currentPage + 2  // We know at least one more page exists
@@ -416,7 +404,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         remote: {
           ...state.remote,
           currentFolderId: targetId,
-          items: contents.items,  // v4.0.3: REPLACE items (not append)
+          items: contents.items,  // Replace (not append) — each page is a standalone view
           isLoading: false,
           error: null,
           hasMore: contents.hasMore,
@@ -429,7 +417,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }
       }))
 
-      // v4.0.3: Cache the current page after navigation
       if (isNewNavigation) {
         const freshCache = new Map<number, CachedPage>()
         freshCache.set(0, {
@@ -443,7 +430,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }))
       }
     } catch (error) {
-      // v4.8.6: Discard stale error if navigation changed while loading
+      // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return
       set(state => ({
         remote: {
@@ -455,14 +442,12 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }
   },
 
-  // v4.0.3: Rewritten for true server-side pagination (same as loadRemoteFolder)
   loadRemoteLegacy: async () => {
     const state = get().remote
     const currentPage = state.currentPage
     const itemsPerPage = state.itemsPerPage
     const cursor = state.pageCursors[currentPage] ?? ''
 
-    // v4.0.3: Check cache first
     const cachedPage = state.pageCache.get(currentPage)
     if (cachedPage && (Date.now() - cachedPage.timestamp) < PAGE_CACHE_TTL) {
       set(state => ({
@@ -478,7 +463,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       return
     }
 
-    // v4.8.6: Capture navGeneration before async call to detect stale responses
+    // Stale response guard: capture generation before async call
     const myGen = get().remote.navGeneration
 
     set(state => ({
@@ -486,19 +471,16 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }))
 
     try {
-      // v4.0.3: Pass itemsPerPage to API
       const contents = await App.ListRemoteLegacy(cursor, itemsPerPage)
 
-      // v4.8.6: Discard stale response if navigation changed while loading
+      // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return
 
-      // v4.0.3: Store next cursor for future page navigation
       const newPageCursors = [...state.pageCursors]
       if (contents.hasMore && contents.nextCursor) {
         newPageCursors[currentPage + 1] = contents.nextCursor
       }
 
-      // v4.0.3: Update page cache
       const newCache = new Map(state.pageCache)
       newCache.set(currentPage, {
         items: contents.items,
@@ -513,7 +495,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }
       }
 
-      // v4.0.3: Update knownTotalPages
       let knownTotalPages = state.knownTotalPages
       if (contents.hasMore && currentPage + 1 >= knownTotalPages) {
         knownTotalPages = currentPage + 2
@@ -525,7 +506,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         remote: {
           ...state.remote,
           currentFolderId: '',
-          items: contents.items,  // v4.0.3: REPLACE items (not append)
+          items: contents.items,  // Replace (not append) — each page is a standalone view
           isLoading: false,
           error: null,
           hasMore: contents.hasMore,
@@ -537,7 +518,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         }
       }))
     } catch (error) {
-      // v4.8.6: Discard stale error if navigation changed while loading
+      // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return
       set(state => ({
         remote: {
@@ -548,8 +529,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       }))
     }
   },
-
-  // v4.0.3: Set items per page and reload from page 0
   setRemoteItemsPerPage: (size: number) => {
     // Clamp to reasonable range
     const clampedSize = Math.max(10, Math.min(200, size))
@@ -575,7 +554,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }
   },
 
-  // v4.0.3: Navigate to next page (replaces items)
   goToNextRemotePage: async () => {
     const { hasMore, currentPage, pageCursors, mode } = get().remote
     if (!hasMore) return
@@ -597,7 +575,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }
   },
 
-  // v4.0.3: Navigate to previous page (from cache or cursor)
   goToPreviousRemotePage: async () => {
     const { currentPage, mode } = get().remote
     if (currentPage <= 0) return
@@ -616,8 +593,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   },
 
   navigateRemoteTo: (folderId: string, folderName: string) => {
-    // v4.0.3: Reset pagination state when navigating to a new folder
-    // v4.8.6: Bump navGeneration to discard stale in-flight responses
+    // Stale response guard: bump navGeneration so in-flight responses from the old folder are discarded
     set(state => ({
       remote: {
         ...state.remote,
@@ -637,8 +613,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     if (index < 0 || index >= breadcrumb.length) return
 
     const target = breadcrumb[index]
-    // v4.0.3: Reset pagination state when navigating via breadcrumb
-    // v4.8.6: Bump navGeneration to discard stale in-flight responses
+    // Stale response guard: bump navGeneration so in-flight responses from the old location are discarded
     set(state => ({
       remote: {
         ...state.remote,
@@ -666,7 +641,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   refreshRemote: () => {
     const { mode, currentPage } = get().remote
 
-    // v4.0.3: Clear cache for current page to force reload, keep current page
+    // Evict only the current page from cache to force a fresh fetch
     set(state => {
       const newCache = new Map(state.remote.pageCache)
       newCache.delete(currentPage)
@@ -740,7 +715,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
   // ===== EVENT LISTENERS =====
 
-  // v4.8.7: Subscribe to config changes so file browser resets when API key changes.
+  // Reset remote browser state when API config changes (e.g., different API key = different account)
   setupEventListeners: () => {
     const handleConfigChanged = () => {
       console.log('[FileBrowser] Config changed, invalidating remote cache')

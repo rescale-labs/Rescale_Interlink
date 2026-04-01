@@ -61,30 +61,26 @@ function AppComponent() {
   } = useConfigStore()
   const { overallMessage, overallProgress } = useLogStore()
   const { stats: transferStats, setupEventListeners: setupTransferEventListeners } = useTransferStore()
-  // v4.7.3: Run state manager for run session persistence
   const { activeRun, setupEventListeners: setupRunEventListeners, recoverFromRestart } = useRunStore()
-  // v4.8.7: File browser event listeners for credential invalidation
   const { setupEventListeners: setupFileBrowserEventListeners } = useFileBrowserStore()
-  // v4.8.7: Error report modal event listeners (Plan 3, 6A-6E)
   const { setupEventListeners: setupErrorReportEventListeners } = useErrorReportStore()
 
-  // v4.0.0: Set up log event listeners at app level so they're always active.
-  // Previously these were set up in ActivityTab, which meant events were missed
-  // when the user was on other tabs (like File Browser during downloads).
+  // App-level listener — persists across tab navigation
+  // (events would be missed if set up inside ActivityTab only)
   const { setupEventListeners } = useLogStore()
   useEffect(() => {
     const cleanup = setupEventListeners()
     return cleanup
   }, [setupEventListeners])
 
-  // v4.0.8: Set up transfer event listeners at app level so enumeration events
-  // persist when navigating away from the Transfers tab during a folder scan.
+  // App-level listener — persists across tab navigation
+  // (enumeration events would be lost if set up inside TransfersTab only)
   useEffect(() => {
     const cleanup = setupTransferEventListeners()
     return cleanup
   }, [setupTransferEventListeners])
 
-  // v4.7.7: App-level stats polling so footer updates on all tabs.
+  // App-level stats polling so footer updates on all tabs.
   // The Transfers tab's own 500ms polling also calls fetchStats(), giving faster
   // updates when on that tab. Both are idempotent and harmless to overlap.
   useEffect(() => {
@@ -94,43 +90,41 @@ function AppComponent() {
     return () => clearInterval(interval)
   }, [])
 
-  // v4.7.3: Set up run event listeners at app level (same pattern as log/transfer stores).
-  // These track active runs, handle state changes, completion, and queued job auto-start.
+  // App-level listener — persists across tab navigation
+  // (tracks active runs, state changes, completion, and queued job auto-start)
   useEffect(() => {
     const cleanup = setupRunEventListeners()
     return cleanup
   }, [setupRunEventListeners])
 
-  // v4.8.7: Set up file browser event listeners for credential/config change invalidation.
+  // App-level listener — persists across tab navigation
   useEffect(() => {
     const cleanup = setupFileBrowserEventListeners()
     return cleanup
   }, [setupFileBrowserEventListeners])
 
-  // v4.8.7: Set up error report event listeners (Plan 3, 6A-6E).
+  // App-level listener — persists across tab navigation
   useEffect(() => {
     const cleanup = setupErrorReportEventListeners()
     return cleanup
   }, [setupErrorReportEventListeners])
 
-  // v4.7.3: Recover active run state after app restart.
-  // Checks localStorage for persisted run info and loads historical state from disk.
+  // Recover active run state after app restart — checks localStorage for
+  // persisted run info and loads historical state from disk.
   useEffect(() => {
     recoverFromRestart()
   }, [recoverFromRestart])
 
-  // v4.0.4: Set up config event listeners and fetch config on mount
+  // Set up config event listeners and fetch config on mount
   useEffect(() => {
     const cleanup = setupConfigEventListeners()
     fetchConfig()
     return cleanup
   }, [setupConfigEventListeners, fetchConfig])
 
-  // v4.0.4: Auto-trigger workspace fetch when API key is present but workspace is null.
-  // This fixes the bug where env var API key users never see workspace info because
-  // TestConnection() was only called when clicking the "Test Connection" button.
-  // v4.0.8: Fixed infinite loop - must also skip if connection already failed or succeeded.
-  // Previously, when test failed (workspaceId stays null), this would re-trigger endlessly.
+  // Guard: skip if already testing/failed/connected to prevent re-trigger loop.
+  // Auto-trigger workspace fetch when API key is present but workspace is null,
+  // so env-var API key users see workspace info without clicking "Test Connection".
   useEffect(() => {
     // Only trigger if:
     // 1. Config is loaded and has an API key
@@ -147,7 +141,7 @@ function AppComponent() {
     App.GetAppInfo().then(setAppInfo).catch(console.error)
   }, [])
 
-  // v4.8.2: Check for updates on startup (non-blocking, 2s delay)
+  // Check for updates on startup (non-blocking, 2s delay)
   const updateCheckRan = useRef(false)
   useEffect(() => {
     if (updateCheckRan.current) return
@@ -174,7 +168,6 @@ function AppComponent() {
 
   return (
     <TabNavigationContext.Provider value={{ switchToTab }}>
-      {/* v4.8.7: Error report modal — always rendered, visibility controlled by store */}
       <ErrorReportModal />
       <div className="h-screen flex flex-col bg-slate-50">
         {/* Header */}
@@ -217,7 +210,7 @@ function AppComponent() {
                 </>
               )}
             </div>
-            {/* v4.8.2: Version update notification */}
+            {/* Update notification */}
             {appInfo?.versionCheck?.hasUpdate && appInfo.versionCheck.releaseUrl && (
               <button
                 onClick={() => BrowserOpenURL(appInfo.versionCheck!.releaseUrl!)}
@@ -254,7 +247,7 @@ function AppComponent() {
           ))}
         </Tab.List>
 
-        {/* Tab panels - wrapped in ErrorBoundary to catch rendering errors (v4.0.4) */}
+        {/* Tab panels — wrapped in ErrorBoundary to catch rendering errors */}
         <Tab.Panels className="flex-1 overflow-hidden">
           {tabs.map((tab) => (
             <Tab.Panel key={tab.name} className="h-full">
@@ -275,7 +268,7 @@ function AppComponent() {
             )}
           </div>
           <div className="flex items-center space-x-4">
-            {/* v4.7.3: Active run indicator */}
+            {/* Active run indicator */}
             {activeRun && activeRun.status === 'active' && (
               <span className="text-blue-600 font-medium">
                 {activeRun.runType === 'pur' ? 'PUR' : 'Job'} running:{' '}

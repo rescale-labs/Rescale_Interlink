@@ -16,10 +16,9 @@ import {
 import clsx from 'clsx'
 import { useTransferStore, TransferTask, TransferBatch, DaemonBatchStatus, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA } from '../../stores'
 
-// Format file size
-// v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
+// Format file size (issue #18)
 function formatSize(bytes: number): string {
-  // Handle undefined, NaN, or non-finite values
+  // Defensive: handle undefined/NaN values
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
@@ -54,7 +53,6 @@ function getStatusInfo(state: string): { icon: typeof CheckCircleIcon; color: st
   }
 }
 
-// v4.8.8: Pre-upload check row — shown while CheckFoldersExistForUpload is running
 function FolderCheckRow({ folderName }: { folderName: string }) {
   return (
     <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20">
@@ -82,8 +80,6 @@ function FolderCheckRow({ folderName }: { folderName: string }) {
   )
 }
 
-// v4.0.8: Enumeration row for folder scan progress
-// v4.7.7: Enhanced with statusMessage display for folder creation phase
 interface EnumerationRowProps {
   enumeration: Enumeration
 }
@@ -92,16 +88,14 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
   const isComplete = enumeration.isComplete
   const hasError = !!enumeration.error
   const statusMessage = enumeration.statusMessage
-  // v4.8.5: Use structured phase instead of substring matching
+  // Use structured phase instead of fragile substring matching on statusMessage
   const isCreatingFolders = enumeration.phase === 'creating_folders'
   const isUpload = enumeration.direction === 'upload'
 
-  // v4.8.5: Direction-aware subtitle
   const subtitle = isCreatingFolders
     ? 'Creating remote folders...'
     : isUpload ? 'Preparing upload...' : 'Scanning remote folder...'
 
-  // v4.8.5: Direction-aware spinner text
   const spinnerText = isUpload ? 'Preparing...' : 'Scanning...'
 
   return (
@@ -146,7 +140,6 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
                 ? `Creating remote folders... (${enumeration.foldersCreated ?? 0} of ${enumeration.foldersTotal})`
                 : 'Creating remote folders...'}
             </span>
-            {/* v4.8.5: Sub-progress bar for folder creation */}
             {enumeration.foldersTotal && enumeration.foldersTotal > 0 && (
               <div className="w-24 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
                 <div
@@ -194,8 +187,6 @@ function EnumerationRow({ enumeration }: EnumerationRowProps) {
   )
 }
 
-// v4.7.7: Batch row for grouped transfer display
-// v4.8.7: Added statusFilter and onFilterChange for 10D status filtering
 interface BatchRowProps {
   batch: TransferBatch
   isExpanded: boolean
@@ -218,11 +209,10 @@ const BatchRow = memo(function BatchRow({
   const hasFailed = batch.failed > 0
   const isFileBrowser = batch.sourceLabel === 'FileBrowser'
 
-  // v4.8.5: Use backend-computed ETA (smoothed, handles discovered bytes correctly)
+  // Use backend-computed ETA — smoothed and handles discovered-during-scan bytes correctly
   const etaFormatted = batch.etaSeconds > 0 ? formatETA(batch.etaSeconds * 1000) : ''
   const speedFormatted = formatSpeed(batch.speed)
 
-  // v4.8.7: Elapsed time display — 1s timer only while batch is active
   const [elapsedTick, setElapsedTick] = useState(0)
   useEffect(() => {
     if (!isActive) return
@@ -282,13 +272,13 @@ const BatchRow = memo(function BatchRow({
             <div className="text-xs text-gray-500">
               {(() => {
                 if (batch.totalKnown) {
-                  // v4.8.7: 11A — Use discoveredTotal as progress denominator when it's the better estimate.
+                  // Use discoveredTotal as progress denominator when it's the better estimate.
                   // batch.total counts registered tasks (grows during streaming). discoveredTotal is the
                   // true file count from the scan. For progress text, always use the higher value.
                   const progressDenom = Math.max(batch.discoveredTotal, batch.total)
                   return `Completed ${formatNumber(batch.completed)} of ${formatNumber(progressDenom)} files`
                 }
-                // 9A/9B: Use discoveredTotal as approximate denominator during scan
+                // Use discoveredTotal as approximate denominator during scan
                 const scanCount = Math.max(batch.discoveredTotal, batch.total)
                 if (scanCount > 0) {
                   return `Completed ${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files (discovering...)`
@@ -321,16 +311,16 @@ const BatchRow = memo(function BatchRow({
               <div className="absolute top-0 left-0 h-full w-full rounded-full bg-blue-400 animate-pulse opacity-60" />
             )}
           </div>
-          {/* v4.8.5 bugfix: Fixed 3-column grid prevents layout jump when speed/ETA toggle */}
+          {/* 3-column grid prevents layout jump when speed/ETA appear */}
           <div className="grid grid-cols-3 mt-1 text-xs text-gray-500">
             <span>
               {(() => {
                 if (batch.totalKnown) {
-                  // v4.8.7: 11A — Use discoveredTotal as progress denominator (same as subtitle)
+                  // Use discoveredTotal as progress denominator (same logic as subtitle above)
                   const progressDenom = Math.max(batch.discoveredTotal, batch.total)
                   return `${Math.round(batch.progress * 100)}% — Completed ${formatNumber(batch.completed)} of ${formatNumber(progressDenom)} files`
                 }
-                // 9A: Use discoveredTotal during scan phase
+                // Use discoveredTotal during scan phase
                 const scanCount = Math.max(batch.discoveredTotal, batch.total)
                 if (batch.active > 0 && scanCount > 0) {
                   return `Completed ${formatNumber(batch.completed)} of ~${formatNumber(scanCount)} files`
@@ -407,7 +397,6 @@ const BatchRow = memo(function BatchRow({
       {/* Expanded: show filter chips + paginated task rows */}
       {isExpanded && (
         <div className="bg-gray-50/50 dark:bg-gray-800/20">
-          {/* v4.8.7: Status filter chips (10D) */}
           {batch.total > 0 && (
             <div className="flex items-center gap-1.5 px-4 py-2 border-b border-gray-100 dark:border-gray-700/50" onClick={e => e.stopPropagation()}>
               <span className="text-xs text-gray-500 mr-1">Filter:</span>
@@ -423,7 +412,6 @@ const BatchRow = memo(function BatchRow({
               >
                 All ({formatNumber(batch.total)})
               </button>
-              {/* v4.8.7: 11C — Split "Active" into "In Progress" + "Queued" */}
               {batch.active > 0 && (
                 <button
                   onClick={() => onFilterChange('inprogress')}
@@ -508,7 +496,7 @@ const BatchRow = memo(function BatchRow({
             />
           ))}
           {(() => {
-            // v4.8.7: "Show more" count uses filtered total when filter is active (10D, 11C)
+            // "Show more" count uses the filtered total when a status filter is active
             const filteredTotal = statusFilter === 'completed' ? batch.completed
               : statusFilter === 'failed' ? batch.failed
               : statusFilter === 'cancelled' ? batch.cancelled
@@ -535,14 +523,12 @@ const BatchRow = memo(function BatchRow({
   )
 })
 
-// v4.7.1: Short error label for status column
 function getShortErrorLabel(task: TransferTask): string {
   if (!task.error) return ''
   if (task.errorType === 'disk_space') return 'No disk space'
   return task.error
 }
 
-// v4.7.8: Read-only daemon auto-download batch row
 interface DaemonBatchRowProps {
   batch: DaemonBatchStatus
 }
@@ -593,7 +579,7 @@ const DaemonBatchRow = memo(function DaemonBatchRow({ batch }: DaemonBatchRowPro
             style={{ width: `${progress * 100}%` }}
           />
         </div>
-        {/* v4.8.5 bugfix: Fixed 3-column grid prevents layout jump when speed/ETA toggle */}
+        {/* 3-column grid prevents layout jump when speed/ETA appear */}
         <div className="grid grid-cols-3 mt-1 text-xs text-gray-500">
           <span>{Math.round(progress * 100)}%</span>
           <span className="text-center">{speedFormatted || ''}</span>
@@ -629,7 +615,6 @@ const DaemonBatchRow = memo(function DaemonBatchRow({ batch }: DaemonBatchRowPro
   )
 })
 
-// v4.7.1: Disk space error banner
 function DiskSpaceBanner({ incident, onDismiss }: {
   incident: { count: number; available: string; needed: string }
   onDismiss: () => void
@@ -657,7 +642,7 @@ interface TransferRowProps {
   task: TransferTask
   onCancel: (taskId: string) => void
   onRetry: (taskId: string) => void
-  indent?: boolean // v4.7.7: Indent for expanded batch children
+  indent?: boolean
 }
 
 const TransferRow = memo(function TransferRow({ task, onCancel, onRetry, indent }: TransferRowProps) {
@@ -672,7 +657,7 @@ const TransferRow = memo(function TransferRow({ task, onCancel, onRetry, indent 
   return (
     <div className={clsx(
       'flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800/50',
-      indent && 'pl-12' // v4.7.7: Extra padding for batch children
+      indent && 'pl-12'
     )}>
       {/* Direction icon */}
       <div className="flex-shrink-0 w-6">
@@ -689,7 +674,6 @@ const TransferRow = memo(function TransferRow({ task, onCancel, onRetry, indent 
           <span className="text-sm font-medium truncate" title={task.name}>
             {displayName}
           </span>
-          {/* v4.7.4: Source label badge */}
           {task.sourceLabel === 'PUR' && (
             <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 flex-shrink-0">PUR</span>
           )}
@@ -731,7 +715,7 @@ const TransferRow = memo(function TransferRow({ task, onCancel, onRetry, indent 
         </span>
       </div>
 
-      {/* v4.7.4: Action buttons — only for FileBrowser tasks (pipeline manages its own retry/cancel) */}
+      {/* Action buttons — only for FileBrowser tasks (pipeline manages its own retry/cancel) */}
       <div className="flex-shrink-0 w-20">
         {isActive && (!task.sourceLabel || task.sourceLabel === 'FileBrowser') && (
           <button
@@ -760,13 +744,13 @@ export function TransfersTab() {
   const {
     tasks,
     stats,
-    enumerations, // v4.0.8: folder scan progress
-    batches, // v4.7.7: batch aggregates
-    daemonBatches, // v4.7.8: daemon auto-download batches (read-only)
+    enumerations,
+    batches,
+    daemonBatches, // read-only daemon auto-download batches
     expandedBatches,
     batchTasks,
     batchStatusFilter,
-    folderCheckStatus, // v4.8.8: Pre-upload check visibility
+    folderCheckStatus,
     startPolling,
     stopPolling,
     cancelTransfer,
@@ -780,7 +764,6 @@ export function TransfersTab() {
     setBatchStatusFilter,
   } = useTransferStore()
 
-  // v4.7.1: State for disk space banner — independent of task list
   const [diskSpaceIncident, setDiskSpaceIncident] = useState<{
     count: number
     available: string
@@ -796,7 +779,7 @@ export function TransfersTab() {
     return () => stopPolling()
   }, [startPolling, stopPolling])
 
-  // v4.7.1: Scan tasks for disk space errors; update incident state
+  // Scan tasks for disk space errors; update incident state
   useEffect(() => {
     const failedDiskSpace = tasks.filter(
       t => t.state === 'failed' && t.errorType === 'disk_space' && t.type === 'download'
@@ -858,7 +841,6 @@ export function TransfersTab() {
     return stats.completed + stats.failed + stats.cancelled
   }, [stats])
 
-  // Empty state - v4.0.8: also check enumerations, v4.7.7: check batches, v4.7.8: check daemon batches, v4.8.8: check folderCheckStatus
   const isEmpty = tasks.length === 0 && enumerations.length === 0 && batches.length === 0 && daemonBatches.length === 0 && !folderCheckStatus
 
   return (
@@ -903,7 +885,6 @@ export function TransfersTab() {
         </div>
       </div>
 
-      {/* v4.7.1: Disk space error banner */}
       {diskSpaceIncident && !diskSpaceBannerDismissed && (
         <DiskSpaceBanner incident={diskSpaceIncident} onDismiss={() => setDiskSpaceBannerDismissed(true)} />
       )}
@@ -921,15 +902,11 @@ export function TransfersTab() {
           </div>
         ) : (
           <div>
-            {/* v4.8.8: Pre-upload check row */}
             {folderCheckStatus && <FolderCheckRow folderName={folderCheckStatus.folderName} />}
 
-            {/* v4.0.8: Show enumeration rows at top */}
-            {/* v4.8.5: Filter non-complete upload enumerations past folder-creation phase.
-                Once folders are created and scanning starts, the BatchRow takes over.
-                The previous filter (batch exists → hide) left a 1-frame flash because
-                the batch doesn't exist yet on the first render after scanning starts.
-                Now: for uploads, only show during creating_folders phase (or completed/error). */}
+            {/* For uploads, only show enumeration row during creating_folders phase (or completed/error).
+                Once scanning starts the BatchRow takes over. Filtering by "batch exists" left a
+                1-frame flash because the batch doesn't exist on the first render after scan starts. */}
             {enumerations
               .filter(e => {
                 if (e.isComplete) return true
@@ -944,7 +921,6 @@ export function TransfersTab() {
               />
             ))}
 
-            {/* v4.7.7: Batch rows (collapsed by default) */}
             {batches.map((batch) => (
               <BatchRow
                 key={batch.batchID}
@@ -965,7 +941,6 @@ export function TransfersTab() {
               />
             ))}
 
-            {/* v4.7.8: Daemon auto-download batch rows (read-only) */}
             {daemonBatches.map((batch) => (
               <DaemonBatchRow
                 key={`daemon_${batch.batchID}`}

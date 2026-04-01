@@ -23,9 +23,9 @@ export type {
   PipelineStageStats,
 } from './jobStore';
 
-// v4.7.3: New stores for run session persistence
+// Run session persistence stores
 export { useRunStore } from './runStore';
 export { useSingleJobStore } from './singleJobStore';
 
-// v4.8.7: Error report store (Plan 3, 6A-6E)
+// Error report store
 export { useErrorReportStore } from './errorReportStore';

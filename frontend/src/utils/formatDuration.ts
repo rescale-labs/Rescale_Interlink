@@ -1,4 +1,4 @@
-// v4.7.3: Extracted from PURTab.tsx for reuse in RunMonitorView, CompletedResultsView, ActivityTab.
+// Duration formatting utilities for RunMonitorView, CompletedResultsView, ActivityTab.
 
 /**
  * Formats a duration in seconds into a human-readable string.

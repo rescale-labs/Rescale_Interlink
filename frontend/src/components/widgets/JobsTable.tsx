@@ -1,4 +1,4 @@
-// v4.7.3: Extracted from PURTab.tsx for reuse in RunMonitorView, CompletedResultsView, ActivityTab.
+// Reusable jobs table for RunMonitorView, CompletedResultsView, ActivityTab.
 import clsx from 'clsx'
 import type { JobRow } from '../../types/jobs'
 import { StatusBadge } from './StatusBadge'

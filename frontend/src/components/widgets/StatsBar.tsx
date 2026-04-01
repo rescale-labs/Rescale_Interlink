@@ -1,4 +1,4 @@
-// v4.7.3: Extracted from PURTab.tsx for reuse in RunMonitorView, CompletedResultsView.
+// Reusable job stats summary bar for RunMonitorView, CompletedResultsView.
 import type { JobRow } from '../../types/jobs'
 
 export function StatsBar({ jobs }: { jobs: JobRow[] }) {
