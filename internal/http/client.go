@@ -19,7 +19,6 @@ import (
 // lifetime. Each entry is a single *nethttp.Client pointer (~8 bytes). Even 10,000
 // transfers would consume <100KB. The transport itself is GC'd independently — calling
 // CloseIdleConnections on a client whose transport has been GC'd is a harmless no-op.
-// v4.8.7
 var (
 	transportMu      sync.Mutex
 	trackedTransports []*nethttp.Client
@@ -28,7 +27,6 @@ var (
 // CloseAllIdleConnections closes idle connections on all tracked optimized HTTP clients.
 // Called by the engine's stale-connection callback after sleep/wake wall-clock gaps.
 // Safe to call concurrently; idempotent.
-// v4.8.7
 func CloseAllIdleConnections() {
 	transportMu.Lock()
 	clients := make([]*nethttp.Client, len(trackedTransports))
@@ -78,10 +76,10 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 		// If transport is not *nethttp.Transport (e.g., wrapped by NTLM negotiator),
 		// we can't apply optimizations, so return the base client as-is
 		// This happens with NTLM proxy mode which uses ntlmssp.Negotiator wrapper
-		// v4.5.4: Clear the 300s timeout to allow long transfers
-		// Per-operation timeouts should be used via context instead
+		// Clear the 300s timeout to allow long transfers.
+		// Per-operation timeouts should be used via context instead.
 		baseClient.Timeout = 0
-		// v4.8.7: Track for sleep/wake cleanup even when transport is wrapped
+		// Track for sleep/wake cleanup even when transport is wrapped.
 		transportMu.Lock()
 		trackedTransports = append(trackedTransports, baseClient)
 		transportMu.Unlock()
@@ -115,7 +113,7 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) nethttp.RoundTripper)
 	}
 
-	// v4.5.4: Disable HTTP/2 when proxy is active to avoid stream errors
+	// Disable HTTP/2 when proxy is active to avoid stream errors.
 	// Proxies often have issues with HTTP/2 multiplexing, causing mid-transfer failures.
 	// Trust config proxy mode first; only check env vars for "system" mode or when no config.
 	var proxyActive bool
@@ -147,7 +145,7 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 	baseClient.Transport = tr
 	baseClient.Timeout = 0 // No overall timeout - each operation sets its own timeout
 
-	// v4.8.7: Track for sleep/wake stale-connection cleanup.
+	// Track for sleep/wake stale-connection cleanup.
 	transportMu.Lock()
 	trackedTransports = append(trackedTransports, baseClient)
 	transportMu.Unlock()

@@ -18,7 +18,7 @@ const (
 	EventError       EventType = "error"
 	EventComplete    EventType = "complete"
 
-	// v3.6.3: Transfer queue events
+	// Transfer queue events
 	EventTransferQueued       EventType = "transfer_queued"       // Task added to queue
 	EventTransferInitializing EventType = "transfer_initializing" // Acquired slot, initializing
 	EventTransferStarted      EventType = "transfer_started"      // Actual transfer began (bytes moving)
@@ -27,21 +27,21 @@ const (
 	EventTransferFailed       EventType = "transfer_failed"       // Failed with error
 	EventTransferCancelled    EventType = "transfer_cancelled"    // Cancelled by user
 
-	// v3.6.3: Configuration change events
+	// Configuration change events
 	EventConfigChanged EventType = "config_changed" // API key or config changed, caches should be invalidated
 
-	// v4.0.8: Enumeration events for folder download/upload progress
+	// Enumeration events for folder download/upload progress
 	EventEnumerationStarted   EventType = "enumeration_started"   // Folder scan began
 	EventEnumerationProgress  EventType = "enumeration_progress"  // Folder scan progress
 	EventEnumerationCompleted EventType = "enumeration_completed" // Folder scan completed
 
-	// v4.0.8: Scan progress events for software/hardware catalog scanning
+	// Scan progress events for software/hardware catalog scanning
 	EventScanProgress EventType = "scan_progress" // Catalog scan progress
 
-	// v4.7.7: Batch progress events for grouped transfer display
+	// Batch progress events for grouped transfer display
 	EventBatchProgress EventType = "batch_progress" // Aggregate batch progress
 
-	// v4.8.7: Reportable error events for safe error reporting
+	// Reportable error events for safe error reporting
 	EventReportableError EventType = "reportable_error"
 )
 
@@ -70,13 +70,12 @@ func (l LogLevel) String() string {
 	}
 }
 
-// Event is the base interface for all events
+// Event is implemented by every event type; EventBus dispatches based on the concrete type.
 type Event interface {
 	Type() EventType
 	Timestamp() time.Time
 }
 
-// BaseEvent provides common event fields
 type BaseEvent struct {
 	EventType EventType
 	Time      time.Time
@@ -138,7 +137,7 @@ type CompleteEvent struct {
 	Duration    time.Duration
 }
 
-// TransferEvent represents transfer queue events (v3.6.3)
+// TransferEvent represents transfer queue events.
 type TransferEvent struct {
 	BaseEvent
 	TaskID   string  // Unique task ID
@@ -150,7 +149,7 @@ type TransferEvent struct {
 	Error    error   // Error if failed
 }
 
-// ConfigChangedEvent represents configuration changes (v3.6.3)
+// ConfigChangedEvent represents configuration changes.
 // Published when API key or other identity-related config changes.
 // Subscribers should invalidate caches and re-authenticate.
 type ConfigChangedEvent struct {
@@ -159,7 +158,7 @@ type ConfigChangedEvent struct {
 	Email  string // User email after successful auth (empty if auth failed)
 }
 
-// Enumeration phase constants (v4.8.5)
+// Enumeration phase constants.
 const (
 	EnumPhaseScanning        = "scanning"
 	EnumPhaseCreatingFolders = "creating_folders"
@@ -167,7 +166,7 @@ const (
 	EnumPhaseError           = "error"
 )
 
-// EnumerationEvent represents folder enumeration progress (v4.0.8)
+// EnumerationEvent represents folder enumeration progress.
 // Published during folder download/upload to show scanning progress before transfers start.
 type EnumerationEvent struct {
 	BaseEvent
@@ -179,13 +178,13 @@ type EnumerationEvent struct {
 	BytesFound     int64  `json:"bytesFound"`     // Total bytes discovered
 	IsComplete     bool   `json:"isComplete"`     // True when enumeration finished
 	Error          string `json:"error"`          // Error if enumeration failed
-	StatusMessage  string `json:"statusMessage"`  // v4.7.7: Human-readable status
-	Phase          string `json:"phase"`          // v4.8.5: "scanning", "creating_folders", "complete", "error"
-	FoldersTotal   int    `json:"foldersTotal"`   // v4.8.5: Total folders to create (0 if unknown)
-	FoldersCreated int    `json:"foldersCreated"` // v4.8.5: Folders created so far
+	StatusMessage  string `json:"statusMessage"`  // Human-readable status
+	Phase          string `json:"phase"`          // "scanning", "creating_folders", "complete", "error"
+	FoldersTotal   int    `json:"foldersTotal"`   // Total folders to create (0 if unknown)
+	FoldersCreated int    `json:"foldersCreated"` // Folders created so far
 }
 
-// ScanProgressEvent represents catalog scan progress (v4.0.8)
+// ScanProgressEvent represents catalog scan progress.
 // Published during software/hardware catalog fetching to show progress.
 type ScanProgressEvent struct {
 	BaseEvent
@@ -198,7 +197,7 @@ type ScanProgressEvent struct {
 }
 
 // SanitizedTimelineEntry is a redacted, JSON-safe event summary for error reports.
-// v4.8.7: Defined in the events package (not reporting) to avoid import cycles.
+// Defined in the events package (not reporting) to avoid import cycles.
 type SanitizedTimelineEntry struct {
 	Timestamp string `json:"timestamp"` // ISO 8601
 	Type      string `json:"type"`      // "log", "state_change", "error", "transfer", etc.
@@ -206,7 +205,7 @@ type SanitizedTimelineEntry struct {
 }
 
 // ReportableErrorEvent carries a fully classified error + pre-snapshotted timeline.
-// v4.8.7: Published by Reporter.Report() or ClassifyAndPublish() for GUI error reporting.
+// Published by Reporter.Report() or ClassifyAndPublish() for GUI error reporting.
 type ReportableErrorEvent struct {
 	BaseEvent
 	ErrorID      string                  `json:"errorID"`
@@ -219,7 +218,7 @@ type ReportableErrorEvent struct {
 	Timeline     []SanitizedTimelineEntry `json:"timeline"`
 }
 
-// BatchProgressEvent represents aggregate batch progress (v4.7.7)
+// BatchProgressEvent represents aggregate batch progress.
 // Published by the queue's batch ticker at 1/sec for each active batch.
 type BatchProgressEvent struct {
 	BaseEvent
@@ -233,14 +232,14 @@ type BatchProgressEvent struct {
 	Failed          int     `json:"failed"`
 	Progress        float64 `json:"progress"`        // 0.0-1.0
 	Speed           float64 `json:"speed"`           // aggregate bytes/sec
-	TotalKnown      bool    `json:"totalKnown"`      // v4.8.0: True when scan complete, Total is final
-	FilesPerSec     float64 `json:"filesPerSec"`     // v4.8.5: file completion rate (windowed)
-	ETASeconds      float64 `json:"etaSeconds"`      // v4.8.5: estimated time remaining (-1 = unknown)
-	DiscoveredTotal int     `json:"discoveredTotal"` // v4.8.5: files discovered by scan
-	DiscoveredBytes int64   `json:"discoveredBytes"` // v4.8.5: bytes discovered by scan
+	TotalKnown      bool    `json:"totalKnown"`      // True when scan complete, Total is final
+	FilesPerSec     float64 `json:"filesPerSec"`     // file completion rate (windowed)
+	ETASeconds      float64 `json:"etaSeconds"`      // estimated time remaining (-1 = unknown)
+	DiscoveredTotal int     `json:"discoveredTotal"` // files discovered by scan
+	DiscoveredBytes int64   `json:"discoveredBytes"` // bytes discovered by scan
 }
 
-// EventBus manages event subscriptions and publishing
+// EventBus is a typed pub-sub hub; subscribers receive events matching their registered type.
 type EventBus struct {
 	subscribers   map[EventType][]chan Event
 	all           []chan Event // Subscribers to all events
@@ -248,7 +247,7 @@ type EventBus struct {
 	bufferSize    int
 	closed        bool
 	droppedEvents atomic.Int64 // Count of dropped events due to full buffers
-	recentEvents  *RingBuffer  // v4.8.7: Ring buffer for timeline capture in error reports
+	recentEvents  *RingBuffer  // Ring buffer for timeline capture in error reports
 }
 
 // NewEventBus creates a new event bus with specified buffer size
@@ -263,7 +262,7 @@ func NewEventBus(bufferSize int) *EventBus {
 		subscribers:  make(map[EventType][]chan Event),
 		all:          make([]chan Event, 0),
 		bufferSize:   bufferSize,
-		recentEvents: NewRingBuffer(50), // v4.8.7: Timeline capture
+		recentEvents: NewRingBuffer(50),
 	}
 }
 
@@ -336,7 +335,7 @@ func (eb *EventBus) Publish(event Event) {
 		}
 	}
 
-	// v4.8.7: Record in ring buffer for timeline capture.
+	// Record in ring buffer for timeline capture.
 	// The ring buffer uses its own internal mutex, independent of eb.mu.
 	eb.recentEvents.Add(event)
 }
@@ -476,7 +475,7 @@ func (eb *EventBus) ResetDroppedEventCount() int64 {
 }
 
 // RecentEvents returns a chronological snapshot of recent events from the ring buffer.
-// v4.8.7: Used by the reporting package to capture timeline context for error reports.
+// Used by the reporting package to capture timeline context for error reports.
 func (eb *EventBus) RecentEvents() []Event {
 	return eb.recentEvents.Snapshot()
 }

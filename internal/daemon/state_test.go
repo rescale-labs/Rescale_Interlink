@@ -76,7 +76,7 @@ func TestState_IsDownloaded(t *testing.T) {
 	}
 
 	// Test 3: Failed download within backoff period should be considered "downloaded" (skip)
-	// v4.8.8 Bug I: freshly failed jobs are suppressed during backoff
+	// Freshly failed jobs are suppressed during backoff
 	state.MarkFailed("job2", "Test Job 2", fmt.Errorf("network error"))
 	if !state.IsDownloaded("job2") {
 		t.Error("job2 should be suppressed during backoff period (just failed)")
@@ -219,7 +219,6 @@ func TestState_LastPoll(t *testing.T) {
 }
 
 // TestState_FilePermissions verifies that state files are created with secure permissions (0600).
-// v4.4.2: Security fix - state files should be owner-readable only to prevent information disclosure.
 func TestState_FilePermissions(t *testing.T) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "daemon-test-perms-*")
@@ -252,8 +251,6 @@ func TestState_FilePermissions(t *testing.T) {
 		t.Errorf("State file permissions should be %o, got %o", expectedPerm, perm)
 	}
 }
-
-// v4.8.8 Bug I: Retry backoff tests
 
 func TestState_RetryBackoff(t *testing.T) {
 	state := NewState("")

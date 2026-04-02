@@ -23,7 +23,6 @@ import (
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
-// Config holds daemon configuration.
 type Config struct {
 	// PollInterval is how often to check for completed jobs
 	PollInterval time.Duration
@@ -49,7 +48,6 @@ type Config struct {
 	// Verbose enables debug logging
 	Verbose bool
 
-	// v4.0.0: Eligibility configuration for auto-download feature
 	// When set, jobs must pass eligibility checks to be downloaded
 	Eligibility *EligibilityConfig
 }
@@ -68,7 +66,7 @@ func DefaultConfig() *Config {
 // Daemon is the background service for auto-downloading completed jobs.
 type Daemon struct {
 	cfg       *Config
-	appCfg    *config.Config // v4.8.2: App config for proxy warmup
+	appCfg    *config.Config
 	apiClient *api.Client
 	state     *State
 	monitor   *Monitor
@@ -80,24 +78,20 @@ type Daemon struct {
 	running  bool
 	mu       sync.RWMutex
 
-	// v4.8.8 Bug F: Prevents concurrent poll() execution
+	// Prevents concurrent poll() execution (Start, pollLoop, TriggerPoll can all invoke)
 	polling atomic.Bool
 
-	// v4.8.8 Bug F: Lifecycle context — created in Start(), cancelled in Stop()
+	// Lifecycle context — created in Start(), cancelled in Stop()
 	cancelFunc   context.CancelFunc
 	lifecycleCtx context.Context
 
-	// v4.8.8 Bug G: Centralized pause state, checked by pollLoop and TriggerPoll
+	// Centralized pause state, checked by pollLoop and TriggerPoll
 	paused atomic.Bool
 
-	// v4.0.8: Active download tracking for IPC status reporting
 	activeDownloads int32
-
-	// v4.7.8: Transfer tracker for GUI visibility of daemon downloads
-	tracker *DaemonTransferTracker
+	tracker         *DaemonTransferTracker
 }
 
-// New creates a new daemon instance.
 func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Daemon, error) {
 	if daemonCfg == nil {
 		daemonCfg = DefaultConfig()
@@ -115,7 +109,7 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 		return nil, fmt.Errorf("failed to load state: %w", err)
 	}
 
-	// Create monitor with eligibility checking if configured (v4.0.0)
+	// Create monitor with eligibility checking if configured
 	var monitor *Monitor
 	if daemonCfg.Eligibility != nil {
 		monitor = NewMonitorWithEligibility(apiClient, state, daemonCfg.Filter, daemonCfg.Eligibility, logger)
@@ -125,13 +119,13 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 
 	return &Daemon{
 		cfg:       daemonCfg,
-		appCfg:    appCfg, // v4.8.2: Store for proxy warmup
+		appCfg:    appCfg,
 		apiClient: apiClient,
 		state:     state,
 		monitor:   monitor,
 		logger:    logger,
 		stopChan:  make(chan struct{}),
-		tracker:   NewDaemonTransferTracker(), // v4.7.8: GUI visibility
+		tracker:   NewDaemonTransferTracker(),
 	}, nil
 }
 
@@ -172,7 +166,7 @@ func (d *Daemon) Stop() {
 	d.mu.Unlock()
 
 	d.logger.Info().Msg("Daemon stopping")
-	d.cancelFunc() // v4.8.8 Bug F: Cancel lifecycle context first
+	d.cancelFunc() // Cancel lifecycle context before closing stopChan
 	close(d.stopChan)
 	d.wg.Wait()
 
@@ -210,35 +204,27 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 }
 
 // poll checks for completed jobs and downloads them.
-// v4.3.4: Improved step-by-step logging for visibility
-// v4.3.5: Embed key info in message text (structured fields don't show in GUI)
-// v4.3.6: Silent filtering - only log jobs with Auto Download = Enabled/Conditional
-// v4.5.5: Added 10-minute scan timeout to prevent indefinite hangs
 func (d *Daemon) poll(ctx context.Context) {
-	// v4.8.8 Bug F: Prevent concurrent polls (Start, pollLoop, TriggerPoll can all invoke)
+	// Prevent concurrent polls (Start, pollLoop, TriggerPoll can all invoke)
 	if !d.polling.CompareAndSwap(false, true) {
 		d.logger.Debug().Msg("Poll already in progress, skipping")
 		return
 	}
 	defer d.polling.Store(false)
 
-	// v4.5.5: Add timeout to entire scan operation (10 minutes max)
-	// Must be longer than HTTP client timeout (300s) to allow retries
+	// Scan timeout must be longer than HTTP client timeout (300s) to allow retries
 	scanCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
 	scanStart := time.Now()
 	d.logger.Info().Msg("=== SCAN STARTED ===")
 
-	// v4.8.2: Warm proxy before first API call each poll cycle
 	inthttp.WarmupProxyIfNeeded(scanCtx, d.appCfg)
-	// v4.8.7: Unified credential warming
 	credentials.GetManager(d.apiClient).WarmAll(scanCtx)
 
 	// Find completed jobs that need downloading
 	result, err := d.monitor.FindCompletedJobs(scanCtx)
 	if err != nil {
-		// v4.5.5: Add timeout-specific error handling
 		if scanCtx.Err() == context.DeadlineExceeded {
 			d.logger.Error().Dur("duration", time.Since(scanStart)).Msg("Scan timed out after 10 minutes")
 		} else {
@@ -260,7 +246,6 @@ func (d *Daemon) poll(ctx context.Context) {
 
 	d.logger.Info().Msgf("Checking %d potential jobs...", len(completed))
 
-	// v4.3.6: Track statistics for summary - added filteredCount for silent skips
 	var downloadedCount, skippedCount, filteredCount int
 
 	// Check eligibility and download each job
@@ -275,9 +260,8 @@ func (d *Daemon) poll(ctx context.Context) {
 		default:
 		}
 
-		// v4.3.6: Check eligibility - result now includes ShouldLog flag
 		if d.cfg.Eligibility != nil {
-			// v4.8.8 Bug J: Per-call timeout for eligibility checks
+			// Per-call timeout prevents a single slow eligibility check from blocking the scan
 			eligCtx, eligCancel := context.WithTimeout(ctx, 2*time.Minute)
 			eligResult := d.monitor.CheckEligibility(eligCtx, job.ID)
 			eligCancel()
@@ -303,7 +287,6 @@ func (d *Daemon) poll(ctx context.Context) {
 		downloadedCount++
 	}
 
-	// v4.3.6: Log cycle summary with all counts
 	d.logger.Info().Msgf("=== SCAN COMPLETE === Scanned %d, filtered %d, downloaded %d, skipped %d (took %.1fs)",
 		totalScanned, filteredCount, downloadedCount, skippedCount, time.Since(scanStart).Seconds())
 
@@ -313,8 +296,7 @@ func (d *Daemon) poll(ctx context.Context) {
 	}
 }
 
-// daemonDownloadItem implements transfer.WorkItem for downloadJob RunBatch migration.
-// v4.8.6: Replaces hand-rolled sequential loop with transfer.RunBatch(ForceSequential).
+// daemonDownloadItem implements transfer.WorkItem for downloadJob's RunBatch usage.
 type daemonDownloadItem struct {
 	file models.JobFile
 }
@@ -323,7 +305,6 @@ func (d daemonDownloadItem) FileSize() int64 { return d.file.DecryptedSize }
 
 // downloadJob downloads all files from a completed job.
 func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
-	// v4.0.8: Track active downloads for IPC status
 	atomic.AddInt32(&d.activeDownloads, 1)
 	defer atomic.AddInt32(&d.activeDownloads, -1)
 
@@ -332,12 +313,12 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		Str("job_name", job.Name).
 		Msg("Downloading job")
 
-	// v4.0.0 (D2.4): Check for custom download path from eligibility config
+	// Check for custom download path from eligibility config
 	baseDir := d.cfg.DownloadDir
 	if d.cfg.Eligibility != nil {
 		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
-			// v4.8.8 Bug D: Custom path must resolve to within DownloadDir.
-			// This prevents arbitrary filesystem writes even when daemon runs as SYSTEM.
+			// Custom path must resolve to within DownloadDir to prevent
+			// arbitrary filesystem writes even when daemon runs as SYSTEM.
 			candidate := customPath
 			if !filepath.IsAbs(candidate) {
 				candidate = filepath.Join(d.cfg.DownloadDir, candidate)
@@ -405,7 +386,6 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		return
 	}
 
-	// v4.7.8: Compute total bytes for tracker and start batch tracking
 	var trackerTotalBytes int64
 	for _, f := range files {
 		trackerTotalBytes += f.DecryptedSize
@@ -423,10 +403,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		MaxThreads: d.cfg.MaxConcurrent,
 		AutoScale:  true,
 	})
-	// v4.8.1: Create TransferManager once per job, not per file (Bug #4)
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.6: Wire stopChan to context cancellation for RunBatch.
+	// Wire stopChan to context cancellation for RunBatch.
 	downloadCtx, downloadCancel := context.WithCancel(ctx)
 	defer downloadCancel()
 	go func() {
@@ -437,18 +416,17 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		}
 	}()
 
-	// v4.8.6: Build work items for RunBatch.
+	// Build work items for RunBatch.
 	items := make([]daemonDownloadItem, len(files))
 	for i := range files {
 		items[i] = daemonDownloadItem{file: files[i]}
 	}
 
-	// v4.8.6: Download files using transfer.RunBatch with ForceSequential.
 	// Note: We do NOT rely on BatchResult — all real outcomes are tracked
 	// by manual counters (downloadedCount, totalSize, tracker).
 	var totalSize int64
-	var failedCount int32  // v4.8.8 Bug B: Track per-file download failures
-	var skippedCount int32 // v4.8.8 Bug B: Track files skipped (invalid name, etc.)
+	var failedCount int32
+	var skippedCount int32
 	downloadedCount := 0
 	batchCfg := transfer.BatchConfig{
 		MaxWorkers:      d.cfg.MaxConcurrent,
@@ -467,7 +445,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Str("file_name", file.Name).
 				Err(err).
 				Msg("Skipping file with invalid name")
-			d.tracker.SkipFile(job.ID, file.DecryptedSize) // v4.7.8: adjust batch totals
+			d.tracker.SkipFile(job.ID, file.DecryptedSize)
 			atomic.AddInt32(&skippedCount, 1)
 			return nil
 		}
@@ -490,7 +468,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		// Ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			d.logger.Error().Err(err).Str("path", localPath).Msg("Failed to create file directory")
-			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
+			d.tracker.FailFile(job.ID, file.DecryptedSize)
 			atomic.AddInt32(&failedCount, 1)
 			return nil
 		}
@@ -500,7 +478,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				d.logger.Debug().Str("path", localPath).Msg("File already exists with correct size, skipping")
 				downloadedCount++
 				totalSize += file.DecryptedSize
-				d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8: counts as completed
+				d.tracker.CompleteFile(job.ID, file.DecryptedSize)
 				return nil
 			}
 			// File exists but wrong size — re-download
@@ -512,7 +490,6 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		}
 
 		// Allocate transfer handle (reuses single TransferManager per job)
-		// v4.8.6: Fix resource leak — defer Complete() (was never called in prior code)
 		transferHandle := transferMgr.AllocateTransfer(file.DecryptedSize, 1)
 		defer transferHandle.Complete()
 
@@ -528,7 +505,6 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 			LocalPath: localPath,
 			APIClient: d.apiClient,
 			ProgressCallback: func(fraction float64) {
-				// v4.7.8: Report progress to tracker for GUI visibility
 				d.tracker.UpdateFileProgress(job.ID, file.DecryptedSize, fraction)
 			},
 			TransferHandle: transferHandle,
@@ -541,18 +517,18 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 				Str("file_id", file.ID).
 				Str("file_name", file.Name).
 				Msg("Failed to download file")
-			d.tracker.FailFile(job.ID, file.DecryptedSize) // v4.7.8
+			d.tracker.FailFile(job.ID, file.DecryptedSize)
 			atomic.AddInt32(&failedCount, 1)
 			return nil
 		}
 
 		downloadedCount++
 		totalSize += file.DecryptedSize
-		d.tracker.CompleteFile(job.ID, file.DecryptedSize) // v4.7.8
+		d.tracker.CompleteFile(job.ID, file.DecryptedSize)
 		return nil
 	})
 
-	// v4.8.6: Check if download was interrupted (context cancelled by stopChan or parent)
+	// Check if download was interrupted (context cancelled by stopChan or parent)
 	if downloadCtx.Err() != nil {
 		downloadErr := downloadCtx.Err()
 		if ctx.Err() == nil {
@@ -568,7 +544,8 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 		return
 	}
 
-	// v4.8.8 Bug B: Only mark job as downloaded when ALL files succeeded
+	// Only mark job as downloaded when ALL files succeeded; partial success is treated
+	// as failure so the job is retried on the next poll cycle.
 	fc := atomic.LoadInt32(&failedCount)
 	sc := atomic.LoadInt32(&skippedCount)
 	if fc+sc > 0 {
@@ -583,9 +560,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 	} else {
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, downloadedCount, totalSize)
 
-		// v4.0.0: Tag the job as downloaded (D2.3)
-		// v4.3.0: Use hardcoded tag from config package
-		// This prevents the job from being downloaded again via eligibility checking
+		// Tag the job as downloaded to prevent re-download via eligibility checking
 		if d.cfg.Eligibility != nil {
 			if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
 				d.logger.Warn().
@@ -605,7 +580,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) {
 			job.Name, job.ID, downloadedCount, formatBytes(totalSize))
 	}
 
-	// v4.8.8 Bug K: Persist state after each job for crash safety
+	// Persist state after each job for crash safety
 	if saveErr := d.state.Save(); saveErr != nil {
 		d.logger.Error().Err(saveErr).Msg("Failed to persist state")
 	}
@@ -672,8 +647,6 @@ func (d *Daemon) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// v4.0.8: Stats methods for IPC status reporting
-
 // GetLastPollTime returns the time of the last successful poll cycle.
 func (d *Daemon) GetLastPollTime() time.Time {
 	return d.state.GetLastPoll()
@@ -688,8 +661,6 @@ func (d *Daemon) GetDownloadedCount() int {
 func (d *Daemon) GetActiveDownloads() int {
 	return int(atomic.LoadInt32(&d.activeDownloads))
 }
-
-// v4.8.8 Bug G: Centralized pause state methods
 
 func (d *Daemon) SetPaused(paused bool) {
 	d.paused.Store(paused)
@@ -706,8 +677,8 @@ func (d *Daemon) IsPaused() bool {
 
 // TriggerPoll manually triggers a poll cycle outside the normal schedule.
 // This is used by the tray app's "Trigger Scan Now" feature.
-// v4.8.8 Bug F: Hold lock through wg.Add to prevent race with Stop().
-// Uses stored lifecycleCtx instead of context.Background().
+// Holds RLock through wg.Add to prevent a race with Stop() (which holds
+// the write lock before calling wg.Wait).
 func (d *Daemon) TriggerPoll() {
 	d.mu.RLock()
 	if !d.running {

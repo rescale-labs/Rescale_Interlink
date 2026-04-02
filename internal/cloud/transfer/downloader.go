@@ -4,7 +4,7 @@
 // Format versions supported:
 //   - v0 (legacy): Download all → decrypt all, requires .encrypted temp file
 //   - v1 (HKDF): Per-part key derivation, parallel decryption, no temp file
-//   - v2 (CBC streaming): Parallel download + sequential CBC decryption, no temp file (v3.4.1+)
+//   - v2 (CBC streaming): Parallel download + sequential CBC decryption, no temp file
 package transfer
 
 import (
@@ -60,18 +60,18 @@ type DownloadPrep struct {
 	EncryptionKey []byte
 	IV            []byte // For legacy format only
 
-	// v4.4.2: Hash computed during download to avoid re-reading file for verification
+	// Hash computed during download to avoid re-reading file for verification
 	ComputedHash string
 
-	// v4.8.4: Cached encrypted size from verification probe, avoids redundant HEAD request in downloadCBCStreaming
+	// Cached encrypted size from verification probe, avoids redundant HEAD request in downloadCBCStreaming
 	EncryptedSize int64
 }
 
 // Download downloads and decrypts a file using the configured provider.
 // The download mode (legacy vs streaming) is automatically detected from cloud metadata.
 //
-// v4.4.2: Returns the computed SHA-512 hash of the downloaded file along with any error.
-// This eliminates the race condition where post-download verification re-reads the file
+// Returns the computed SHA-512 hash of the downloaded file along with any error.
+// This eliminates a race condition where post-download verification re-reads the file
 // and may get stale cache data. The caller should use this hash for verification instead
 // of re-reading the file.
 //
@@ -127,7 +127,6 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		}
 	}
 
-	// v3.6.2: Log thread allocation
 	threads := 1
 	if params.TransferHandle != nil {
 		threads = params.TransferHandle.GetThreads()
@@ -143,7 +142,6 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		}
 	}
 
-	// v3.6.2: Track format detection
 	formatTimer := cloud.StartTimer(params.OutputWriter, "Format detection")
 
 	// Check if provider supports format detection
@@ -165,7 +163,6 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 			}
 			formatTimer.StopWithMessage("fallback version=%d", formatVersion)
 		} else {
-			// v3.4.0: Show successful format detection result
 			if params.OutputWriter != nil {
 				fmt.Fprintf(params.OutputWriter, "Format detection successful: version=%d\n", formatVersion)
 			}
@@ -192,14 +189,13 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		// Route to appropriate download method based on format version
 		// v0: Legacy (download all → decrypt all → temp file)
 		// v1: HKDF streaming (per-part keys, parallel decryption possible)
-		// v2: CBC streaming (sequential decryption, no temp file) - v3.2.4+
-		// v3.4.0: Debug logging for download path selection
+		// v2: CBC streaming (sequential decryption, no temp file)
 		if params.OutputWriter != nil {
 			fmt.Fprintf(params.OutputWriter, "Format detection: version=%d (0=legacy, 1=HKDF, 2=CBC streaming)\n", formatVersion)
 		}
 		switch formatVersion {
 		case 2:
-			// v4.0.0: CBC streaming download with fast verification.
+			// CBC streaming download with fast verification:
 			// 1. Quick 32-byte probe verifies key/IV work BEFORE full download
 			// 2. If probe fails, return clear error immediately (no wasted bandwidth)
 			// 3. If probe passes, proceed with streaming download
@@ -212,7 +208,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 				// Get encrypted size for verification probe
 				encryptedSize, sizeErr := partDownloader.GetEncryptedSize(ctx, params.RemotePath)
 				if sizeErr == nil && encryptedSize > 0 {
-					prep.EncryptedSize = encryptedSize // v4.8.4: cache for downloadCBCStreaming
+					prep.EncryptedSize = encryptedSize // Cache for downloadCBCStreaming to avoid redundant HEAD
 					// Run quick 32-byte verification probe
 					verifyErr := d.verifyDecryptionQuick(ctx, partDownloader, params.RemotePath, encryptedSize, effectiveIV, encryptionKey)
 					if verifyErr != nil {
@@ -240,7 +236,6 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 					if outFile, openErr := os.Create(params.LocalPath); openErr == nil {
 						outFile.Close()
 					}
-					// v4.4.2: Return hash from legacy fallback
 					if legacyErr := d.downloadLegacy(ctx, prep); legacyErr != nil {
 						return "", legacyErr
 					}
@@ -281,8 +276,8 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 	}
 
 	// Delegate to provider's Download method
-	// v4.4.2: Provider's Download doesn't return hash, so return empty string
-	// (This legacy path is rarely used - most providers support format detection)
+	// Provider's Download doesn't return hash, so return empty string.
+	// This legacy path is rarely used - most providers support format detection.
 	if err := d.provider.Download(ctx, params); err != nil {
 		return "", err
 	}
@@ -330,7 +325,7 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		}
 	}
 
-	// v4.5.9: Retry cleanup of temp file with backoff for Windows file locking.
+	// Retry cleanup of temp file with backoff for Windows file locking.
 	// Log the actual error even when OutputWriter is nil.
 	defer func() {
 		var lastErr error
@@ -346,8 +341,7 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		log.Printf("Warning: Failed to cleanup encrypted temp file %s after 3 attempts: %v", encryptedPath, lastErr)
 	}()
 
-	// v4.0.0: Report 0% progress immediately before download starts.
-	// This matches upload behavior and shows users the transfer has started.
+	// Report 0% progress immediately so users see the transfer has started.
 	if prep.Params.ProgressCallback != nil {
 		prep.Params.ProgressCallback(0.0)
 	}
@@ -383,9 +377,9 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		fmt.Fprintf(prep.Params.OutputWriter, "Decrypting %s...\n", filepath.Base(localPath))
 	}
 
-	// v4.4.2: Use DecryptFileWithHash to compute hash during decryption.
-	// This avoids the race condition where post-download verification re-reads
-	// the file and may get stale cache data.
+	// Use DecryptFileWithHash to compute hash during decryption, avoiding a race
+	// condition where post-download verification re-reads the file and may get
+	// stale cache data.
 	computedHash, err := encryption.DecryptFileWithHash(encryptedPath, localPath, prep.EncryptionKey, prep.IV)
 	if err != nil {
 		// Check for disk full during decryption
@@ -422,15 +416,9 @@ type downloadResult struct {
 	err        error
 }
 
-// v4.0.4: Removed dead code - probeChunkSize() and formatSizeList() were replaced
-// by the deterministic ChunkSizeFromFileSize() approach in v3.2.4. See line 672.
-
 // verifyDecryptionQuick performs a fast 32-byte probe to verify the key/IV will produce
 // valid decrypted output. This catches wrong keys, corrupted files, or incompatible
-// encryption BEFORE downloading the full file.
-//
-// v4.0.0: Added to fail fast on undecryptable files without wasting bandwidth.
-//
+// encryption BEFORE downloading the full file, failing fast without wasting bandwidth.
 // Returns nil if decryption verification passes, error otherwise.
 func (d *Downloader) verifyDecryptionQuick(
 	ctx context.Context,
@@ -505,7 +493,6 @@ func (d *Downloader) verifyDecryptionQuick(
 
 // getExpectedSHA512 extracts the expected SHA-512 hash from FileChecksums.
 // Returns empty string if no SHA-512 checksum is available.
-// v4.4.1: Helper for checksum-during-write feature.
 func getExpectedSHA512(fileInfo *models.CloudFile) string {
 	if fileInfo == nil || len(fileInfo.FileChecksums) == 0 {
 		return ""
@@ -520,12 +507,10 @@ func getExpectedSHA512(fileInfo *models.CloudFile) string {
 }
 
 // downloadCBCStreaming downloads using CBC chaining format (v2) with parallel fetch.
-// v3.4.1: Parallel download architecture - downloads happen in parallel, but decryption
-// is sequential (CBC constraint) for 2-4x throughput improvement.
-//
-// The CBC decryption MUST be sequential because each part's IV is the last ciphertext block
-// of the previous part. However, downloading CAN be parallelized - we download ahead and
-// buffer parts, then decrypt in order as they become available.
+// Downloads happen in parallel, but decryption is sequential (CBC constraint) for
+// 2-4x throughput improvement. CBC decryption MUST be sequential because each part's IV
+// is the last ciphertext block of the previous part. Downloads are parallelized by
+// downloading ahead and buffering parts, then decrypting in order as they become available.
 func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPrep) error {
 	if prep.Params.OutputWriter != nil {
 		fmt.Fprintf(prep.Params.OutputWriter, "Using CBC streaming format (v2) download with parallel fetch - no temp file\n")
@@ -541,7 +526,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		return d.downloadLegacy(ctx, prep)
 	}
 
-	// v4.8.4: Use cached encrypted size from verification probe if available
+	// Use cached encrypted size from verification probe if available, avoiding a redundant HEAD request
 	encryptedSize := prep.EncryptedSize
 	if encryptedSize == 0 {
 		var err error
@@ -556,7 +541,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file.
+	// Track whether we successfully closed the file.
 	// We DON'T use defer outFile.Close() because that causes a race condition:
 	// the deferred Close() executes AFTER the function returns, but verifyChecksum()
 	// is called IMMEDIATELY after this function returns. On Windows, this can cause
@@ -576,15 +561,14 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		return fmt.Errorf("failed to create CBC decryptor: %w", err)
 	}
 
-	// v4.4.1: Create hasher to compute checksum during write.
-	// This eliminates the race condition where post-download verification
-	// could read stale data from filesystem cache.
+	// Create hasher to compute checksum during write, eliminating a race condition
+	// where post-download verification could read stale data from filesystem cache.
 	hasher := sha512.New()
 	expectedHash := getExpectedSHA512(prep.Params.FileInfo)
 
-	// v4.0.0: Use part size from metadata, or probe to detect correct size for old files.
-	// Files uploaded before v4.0.0 don't have partsize metadata, and the chunk size used
-	// during upload may vary based on file size and memory constraints at upload time.
+	// Use part size from metadata, or calculate for files that lack partsize metadata.
+	// Older uploads don't have partsize metadata, and the chunk size used during upload
+	// may vary based on file size and memory constraints at upload time.
 	// Wrong chunk size = wrong part boundaries = CBC decryption failure.
 	decryptedSize := int64(0)
 	if prep.Params.FileInfo != nil {
@@ -593,10 +577,8 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 
 	partSize := prep.PartSize
 	if partSize == 0 {
-		// v4.0.0: No partsize in metadata - use calculated size based on file size.
-		// This is FAST (no probe download needed) and works for 99%+ of files.
-		// The probe approach was slow (downloaded 64MB before starting) and unreliable
-		// (couldn't handle memory-constrained uploads with non-standard chunk sizes).
+		// No partsize in metadata - use calculated size based on file size.
+		// This is fast (no probe download needed) and works for the vast majority of files.
 		partSize = resources.ChunkSizeFromFileSize(decryptedSize)
 		if prep.Params.OutputWriter != nil {
 			fmt.Fprintf(prep.Params.OutputWriter, "Using calculated chunk size: %s (file missing partsize metadata)\n",
@@ -604,16 +586,15 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 	}
 
-	// v4.0.0 FIX: Calculate number of parts using encryptedSize (from S3), NOT decryptedSize!
-	// The API's decryptedSize may not match the actual encrypted data size (e.g., 832 MiB vs 800 MiB),
+	// Calculate number of parts using encryptedSize (from storage), NOT decryptedSize.
+	// The API's decryptedSize may not match the actual encrypted data size,
 	// especially if the file was compressed or if the metadata is stale.
-	// We must download what's actually IN S3, not what the API says "should" be there.
+	// We must download what's actually in storage, not what the API says "should" be there.
 	numParts := (encryptedSize + partSize - 1) / partSize
 	if numParts < 1 {
 		numParts = 1
 	}
 
-	// v3.4.1: Get download concurrency from TransferHandle (default to 4)
 	concurrency := 4
 	if prep.TransferHandle != nil && prep.TransferHandle.GetThreads() > 1 {
 		concurrency = prep.TransferHandle.GetThreads()
@@ -645,10 +626,9 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	}
 	close(jobChan)
 
-	// v3.4.2: Track worker count for dynamic scaling
 	var workerCount int32 = int32(concurrency)
 
-	// v4.0.0: Track download progress - declared before worker so closure can capture it
+	// Declared before worker function so the closure can capture it
 	var downloadedBytes int64 // Bytes downloaded from cloud (updated via streaming callback)
 
 	// Download worker function - shared by initial workers and dynamically spawned workers
@@ -661,9 +641,8 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			default:
 			}
 
-			// v4.0.0: Progress callback updates downloadedBytes atomically during the download.
-			// This provides smooth, byte-level progress (like uploads) instead of jumpy
-			// per-part progress updates.
+			// Progress callback updates downloadedBytes atomically during the download,
+			// providing smooth byte-level progress instead of jumpy per-part updates.
 			progressCallback := func(bytesRead int64) {
 				atomic.AddInt64(&downloadedBytes, bytesRead)
 			}
@@ -688,7 +667,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 	}
 
-	// v3.4.1: Start initial download worker pool - downloads parts in parallel
+	// Start initial download worker pool
 	var downloadWg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
 		downloadWg.Add(1)
@@ -698,8 +677,8 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}(i)
 	}
 
-	// v3.4.2: Background scaler - dynamically spawns additional workers when threads become available
-	// This handles the case where other concurrent transfers finish and release their threads
+	// Background scaler - dynamically spawns additional workers when threads become available.
+	// This handles the case where other concurrent transfers finish and release their threads.
 	scalerDone := make(chan struct{})
 	go func() {
 		defer close(scalerDone)
@@ -708,7 +687,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			return // No transfer handle, can't scale
 		}
 
-		ticker := time.NewTicker(constants.ProgressUpdateInterval) // v4.0.4: use centralized constant
+		ticker := time.NewTicker(constants.ProgressUpdateInterval)
 		defer ticker.Stop()
 
 		for {
@@ -733,9 +712,9 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 	}()
 
-	// v4.0.8: Ensure scaler goroutine is properly cleaned up on function exit.
+	// Ensure scaler goroutine is properly cleaned up on function exit.
 	// Cancel the context first (signals scaler to stop), then wait for it to finish.
-	// This prevents goroutine leaks, matching the upload pattern in upload.go.
+	// This prevents goroutine leaks.
 	defer func() {
 		cancelDownload()
 		<-scalerDone
@@ -757,9 +736,8 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	decryptedParts := int64(0)
 	nextPartToDecrypt := int64(0)
 
-	// v4.0.0: Progress ticker for smooth updates (v4.0.4: use centralized constant).
-	// Uses downloadedBytes (encrypted bytes downloaded) for smooth, byte-level progress.
-	// This matches upload behavior where progress reflects actual network I/O.
+	// Progress ticker for smooth updates using downloadedBytes (encrypted bytes downloaded)
+	// for byte-level progress. Progress reflects actual network I/O.
 	progressTicker := time.NewTicker(constants.ProgressUpdateInterval)
 	progressDone := make(chan struct{})
 	go func() {
@@ -768,9 +746,8 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			select {
 			case <-progressTicker.C:
 				if prep.Params.ProgressCallback != nil && encryptedSize > 0 {
-					// v4.0.0: Progress = bytes downloaded / total encrypted bytes
-					// downloadedBytes is updated in real-time via streaming callback,
-					// providing smooth progress like uploads.
+					// Progress = bytes downloaded / total encrypted bytes.
+					// downloadedBytes is updated in real-time via streaming callback.
 					currentBytes := atomic.LoadInt64(&downloadedBytes)
 					progress := float64(currentBytes) / float64(encryptedSize)
 					if progress > 1.0 {
@@ -785,9 +762,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	}()
 	defer close(progressDone)
 
-	// v4.0.0: Report 0% progress immediately after init completes.
-	// This matches upload behavior and shows users the transfer has started,
-	// even before the first part is downloaded and decrypted.
+	// Report 0% progress immediately so users see the transfer has started.
 	if prep.Params.ProgressCallback != nil {
 		prep.Params.ProgressCallback(0.0)
 	}
@@ -800,7 +775,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 
 		// Buffer this part
-		// v4.0.0: downloadedBytes is now updated via streaming progress callback,
+		// downloadedBytes is updated via streaming progress callback in the worker,
 		// so we don't add here (would double-count).
 		bufferMu.Lock()
 		partBuffer[result.partIndex] = result.ciphertext
@@ -828,25 +803,21 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 				break
 			}
 
-			// Write plaintext directly to output file AND hasher
-			// v4.4.1: Use MultiWriter to compute checksum during write
+			// Write plaintext directly to output file
 			bytesWritten, writeErr := outFile.Write(plaintext)
 			if writeErr != nil {
 				errOnce.Do(func() { firstErr = fmt.Errorf("failed to write part %d: %w", nextPartToDecrypt, writeErr) })
 				cancelDownload()
 				break
 			}
-			// v4.4.1: Also write to hasher for checksum-during-write
 			hasher.Write(plaintext)
 
-			// v3.6.3: Track actual bytes written for smooth progress
 			atomic.AddInt64(&decryptedBytes, int64(bytesWritten))
 			decryptedParts++
 			nextPartToDecrypt++
 
-			// v3.6.3: Removed per-part progress callback that caused jumpy progress.
-			// Progress is now reported only by the ticker using decryptedBytes.
-			// This prevents conflicts between two progress sources.
+			// Progress is reported only by the ticker using decryptedBytes,
+			// not per-part, to prevent jumpy progress from two conflicting sources.
 
 			bufferMu.Lock()
 		}
@@ -863,14 +834,12 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		return fmt.Errorf("incomplete download: processed %d of %d parts", decryptedParts, numParts)
 	}
 
-	// v4.4.2: Store computed hash for caller (eliminates need to re-read file).
-	// This hash was computed during write, so it's authoritative.
+	// Store computed hash for caller — this hash was computed during write, so it's authoritative.
 	actualHash := hex.EncodeToString(hasher.Sum(nil))
 	prep.ComputedHash = actualHash
 
-	// v4.4.1: Verify checksum using hash computed during write.
-	// This eliminates the race condition where post-download verification
-	// could read stale data from filesystem cache.
+	// Verify checksum using hash computed during write, eliminating a race condition
+	// where post-download verification could read stale data from filesystem cache.
 	if expectedHash != "" {
 		if !strings.EqualFold(actualHash, expectedHash) {
 			return fmt.Errorf("checksum mismatch (computed during write): expected SHA-512=%s, got %s", expectedHash, actualHash)
@@ -887,18 +856,18 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		prep.TransferHandle.Complete()
 	}
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written before
+	// checksum verification. Without this, sporadic checksum failures occur where
+	// the file is read as empty due to OS buffer not being flushed.
 	if err := outFile.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning to prevent race condition.
+	// Explicit Close() BEFORE returning to prevent race condition.
 	// verifyChecksum() is called immediately after this function returns,
 	// so we must ensure the file handle is fully closed before returning.
-	// This fixes sporadic checksum failures on Windows where the deferred Close()
-	// was still pending when verification tried to read the file.
+	// Without this, sporadic checksum failures occur on Windows where the
+	// deferred Close() was still pending when verification tried to read the file.
 	if err := outFile.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
@@ -1022,7 +991,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file (see downloadCBCStreaming for explanation)
+	// Track whether we successfully closed the file (see downloadCBCStreaming for explanation)
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
@@ -1077,7 +1046,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 		})
 	}
 
-	// Progress tracking - v3.6.3: Track decrypted bytes for accurate progress
+	// Progress tracking
 	var decryptedBytes int64
 	progressTicker := time.NewTicker(300 * time.Millisecond)
 	defer progressTicker.Stop()
@@ -1093,8 +1062,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 			select {
 			case <-progressTicker.C:
 				if prep.Params.ProgressCallback != nil && decryptedSize > 0 {
-					// v3.6.3: Use decrypted bytes for accurate progress
-					currentBytes := atomic.LoadInt64(&decryptedBytes)
+						currentBytes := atomic.LoadInt64(&decryptedBytes)
 					prep.Params.ProgressCallback(float64(currentBytes) / float64(decryptedSize))
 				}
 			case <-progressDone:
@@ -1104,9 +1072,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}()
 	defer close(progressDone)
 
-	// v4.0.0: Report 0% progress immediately after init completes.
-	// This matches upload behavior and shows users the transfer has started,
-	// even before the first part is downloaded and decrypted.
+	// Report 0% progress immediately so users see the transfer has started.
 	if prep.Params.ProgressCallback != nil {
 		prep.Params.ProgressCallback(0.0)
 	}
@@ -1136,7 +1102,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 					prep.Params.RemotePath,
 					job.encryptedStart,
 					job.encryptedEnd-job.encryptedStart,
-					nil, // v4.0.0: Progress callback - nil for legacy HKDF format
+					nil, // Progress callback not used for HKDF format
 				)
 				if err != nil {
 					setError(fmt.Errorf("failed to download part %d: %w", job.partIndex, err))
@@ -1163,7 +1129,6 @@ func (d *Downloader) downloadStreamingConcurrent(
 					return
 				}
 
-				// v3.6.3: Update progress using decrypted (plaintext) bytes for accuracy
 				atomic.AddInt64(&decryptedBytes, int64(len(plaintext)))
 
 				resultChan <- partResult{
@@ -1253,9 +1218,9 @@ func (d *Downloader) downloadStreamingConcurrent(
 		return fmt.Errorf("failed to truncate file to final size: %w", err)
 	}
 
-	// v4.4.2: Compute hash after all parts written (still open file handle).
-	// HKDF uses WriteAt for parallel writes, so we read sequentially to hash.
-	// This avoids the race condition where post-download verification re-reads
+	// Compute hash after all parts written (still open file handle).
+	// HKDF uses WriteAt for parallel writes, so we must read sequentially to hash.
+	// This avoids a race condition where post-download verification re-reads
 	// the file and may get stale cache data.
 	if _, err := outFile.Seek(0, 0); err != nil {
 		return fmt.Errorf("failed to seek to beginning for hash: %w", err)
@@ -1266,14 +1231,13 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}
 	prep.ComputedHash = hex.EncodeToString(hasher.Sum(nil))
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written before
+	// checksum verification (see downloadCBCStreaming for full explanation).
 	if err := outFile.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning (see downloadCBCStreaming for explanation)
+	// Explicit Close() BEFORE returning (see downloadCBCStreaming for explanation)
 	if err := outFile.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
@@ -1318,13 +1282,12 @@ type StreamingPartDownloader interface {
 	// DownloadEncryptedRange downloads a specific byte range of the encrypted file.
 	// Used by the concurrent download orchestrator to download individual parts.
 	// Returns the raw encrypted bytes for the specified range.
-	// v4.0.0: progressCallback (optional) is called with bytes downloaded for smooth progress.
+	// progressCallback (optional) is called with bytes downloaded for smooth progress.
 	// Pass nil if progress tracking is not needed (e.g., during chunk size probing).
 	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error)
 }
 
 // StreamingDownloadInitParams contains parameters for initializing a streaming download.
-// Used by concurrent streaming download implementation (v3.2.0).
 type StreamingDownloadInitParams struct {
 	RemotePath   string    // Cloud storage path
 	LocalPath    string    // Where to save the decrypted file
@@ -1335,7 +1298,6 @@ type StreamingDownloadInitParams struct {
 }
 
 // StreamingDownload represents an in-progress streaming download.
-// Used by concurrent streaming download implementation (v3.2.0).
 type StreamingDownload struct {
 	// Download identifiers
 	RemotePath  string // Path in cloud storage
@@ -1355,7 +1317,6 @@ type StreamingDownload struct {
 }
 
 // PartDownloadResult contains the result of downloading a single part.
-// Used by concurrent streaming download implementation (v3.2.0).
 type PartDownloadResult struct {
 	PartIndex int64  // 0-based part index
 	Plaintext []byte // Decrypted data for this part

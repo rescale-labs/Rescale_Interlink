@@ -131,7 +131,6 @@ func (m *Manager) ReleaseTransfer(transferID string) {
 // Returns the number of threads actually acquired (0 if none available).
 // This is used for dynamic scaling - when other transfers complete, their threads
 // become available and can be claimed by remaining active transfers.
-// v3.4.2: Added for dynamic thread reallocation
 func (m *Manager) TryAcquire(transferID string, count int) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -155,7 +154,6 @@ func (m *Manager) TryAcquire(transferID string, count int) int {
 
 // GetMaxForFileSize returns the maximum threads recommended for a file of the given size.
 // This is used for dynamic scaling to determine the upper bound for thread acquisition.
-// v3.4.2: Added for dynamic thread reallocation
 func (m *Manager) GetMaxForFileSize(fileSize int64) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -288,7 +286,6 @@ func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
 // ComputeBatchConcurrency determines optimal concurrent transfer count for a batch
 // based on the median file size, validated against thread pool capacity and memory.
 // maxAllowed is the upper cap (typically cap(semaphore)).
-// v4.8.0: Adaptive concurrency — small files get more workers, large files get fewer.
 func (m *Manager) ComputeBatchConcurrency(fileSizes []int64, maxAllowed int) int {
 	if len(fileSizes) == 0 {
 		return constants.DefaultMaxConcurrent
@@ -357,9 +354,9 @@ func (m *Manager) String() string {
 // This is a deterministic calculation based purely on file size - no memory or thread
 // constraints are applied.
 //
-// v4.0.0: This function is used during download to infer the chunk size for files
-// uploaded before v4.0.0 (which didn't store partsize in metadata). Since we can't know
-// the uploader's memory constraints, we use the file-size-based defaults which work
+// This function is used during download to infer the chunk size for files
+// that were uploaded without partsize metadata. Since we can't know the
+// uploader's memory constraints, we use the file-size-based defaults which work
 // for the vast majority of cases (machines with 1GB+ available memory).
 //
 // The returned values match the CalculateDynamicChunkSize defaults:

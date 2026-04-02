@@ -15,28 +15,26 @@ type MessageType string
 
 const (
 	// Request types (client -> server)
-	MsgGetStatus      MessageType = "GetStatus"
-	MsgPauseUser      MessageType = "PauseUser"
-	MsgResumeUser     MessageType = "ResumeUser"
-	MsgTriggerScan    MessageType = "TriggerScan"
-	MsgOpenLogs       MessageType = "OpenLogs"
-	MsgOpenGUI        MessageType = "OpenGUI"
-	MsgGetUserList    MessageType = "GetUserList"
-	MsgShutdown       MessageType = "Shutdown"
-	MsgSubscribeLogs  MessageType = "SubscribeLogs"  // v4.3.2: Subscribe to log stream
-	MsgGetRecentLogs  MessageType = "GetRecentLogs"  // v4.3.2: Get recent log entries
-	MsgReloadConfig        MessageType = "ReloadConfig"        // v4.7.6: Reload daemon config
-	MsgGetTransferStatus   MessageType = "GetTransferStatus"   // v4.7.8: Query daemon transfer batches
+	MsgGetStatus         MessageType = "GetStatus"
+	MsgPauseUser         MessageType = "PauseUser"
+	MsgResumeUser        MessageType = "ResumeUser"
+	MsgTriggerScan       MessageType = "TriggerScan"
+	MsgOpenLogs          MessageType = "OpenLogs"
+	MsgOpenGUI           MessageType = "OpenGUI"
+	MsgGetUserList       MessageType = "GetUserList"
+	MsgShutdown          MessageType = "Shutdown"
+	MsgGetRecentLogs     MessageType = "GetRecentLogs"
+	MsgReloadConfig      MessageType = "ReloadConfig"
+	MsgGetTransferStatus MessageType = "GetTransferStatus"
 
 	// Response types (server -> client)
-	MsgStatusResponse   MessageType = "StatusResponse"
-	MsgUserListResponse MessageType = "UserListResponse"
-	MsgOK               MessageType = "OK"
-	MsgError            MessageType = "Error"
-	MsgLogEntry             MessageType = "LogEntry"              // v4.3.2: Log entry push
-	MsgRecentLogs           MessageType = "RecentLogs"            // v4.3.2: Recent logs response
-	MsgReloadConfigResponse     MessageType = "ReloadConfigResponse"      // v4.7.6: Reload config response
-	MsgTransferStatusResponse   MessageType = "TransferStatusResponse"   // v4.7.8: Transfer status response
+	MsgStatusResponse         MessageType = "StatusResponse"
+	MsgUserListResponse       MessageType = "UserListResponse"
+	MsgOK                     MessageType = "OK"
+	MsgError                  MessageType = "Error"
+	MsgRecentLogs             MessageType = "RecentLogs"
+	MsgReloadConfigResponse   MessageType = "ReloadConfigResponse"
+	MsgTransferStatusResponse MessageType = "TransferStatusResponse"
 )
 
 // Request represents an IPC request from client to server.
@@ -79,7 +77,7 @@ type StatusData struct {
 	Uptime string `json:"uptime,omitempty"`
 
 	// ServiceMode indicates whether the daemon is running as a Windows Service (true)
-	// or as a subprocess (false). v4.5.2: Added to allow GUI to detect mode via IPC.
+	// or as a subprocess (false).
 	ServiceMode bool `json:"service_mode"`
 }
 
@@ -113,7 +111,6 @@ type UserListData struct {
 }
 
 // LogEntryData represents a single log entry for IPC streaming.
-// v4.3.2: Used for streaming logs from daemon to GUI.
 type LogEntryData struct {
 	// Timestamp is the log entry time in RFC3339 format
 	Timestamp string `json:"timestamp"`
@@ -137,7 +134,6 @@ type RecentLogsData struct {
 }
 
 // ReloadConfigData contains the result of a config reload request.
-// v4.7.6: Used to communicate whether config was applied immediately or deferred.
 type ReloadConfigData struct {
 	Applied         bool   `json:"applied"`
 	Deferred        bool   `json:"deferred"`
@@ -146,7 +142,7 @@ type ReloadConfigData struct {
 }
 
 // TransferBatchInfo represents a single daemon transfer batch in IPC format.
-// v4.7.8: IPC-native struct — NOT a Wails DTO. Wails bindings map separately.
+// This is an IPC-native struct, not a Wails DTO. Wails bindings map separately.
 type TransferBatchInfo struct {
 	BatchID     string  `json:"batchID"`
 	BatchLabel  string  `json:"batchLabel"`
@@ -162,7 +158,6 @@ type TransferBatchInfo struct {
 }
 
 // TransferStatusData contains daemon transfer batch information.
-// v4.7.8: Response payload for MsgGetTransferStatus.
 type TransferStatusData struct {
 	Batches []TransferBatchInfo `json:"batches"`
 }
@@ -197,26 +192,17 @@ func NewUserListResponse(users []UserStatus) *Response {
 	return &Response{Type: MsgUserListResponse, Success: true, Data: &UserListData{Users: users}}
 }
 
-// NewLogEntryResponse creates a log entry push response.
-// v4.3.2: Used for streaming logs from daemon to GUI.
-func NewLogEntryResponse(entry *LogEntryData) *Response {
-	return &Response{Type: MsgLogEntry, Success: true, Data: entry}
-}
-
 // NewRecentLogsResponse creates a recent logs response.
-// v4.3.2: Returns a batch of recent log entries.
 func NewRecentLogsResponse(entries []LogEntryData) *Response {
 	return &Response{Type: MsgRecentLogs, Success: true, Data: &RecentLogsData{Entries: entries}}
 }
 
 // NewReloadConfigResponse creates a reload config response.
-// v4.7.6: Added for config reload IPC support.
 func NewReloadConfigResponse(data *ReloadConfigData) *Response {
 	return &Response{Type: MsgReloadConfigResponse, Success: true, Data: data}
 }
 
 // NewTransferStatusResponse creates a transfer status response.
-// v4.7.8: Added for daemon transfer visibility in GUI.
 func NewTransferStatusResponse(data *TransferStatusData) *Response {
 	return &Response{Type: MsgTransferStatusResponse, Success: true, Data: data}
 }

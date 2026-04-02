@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-// v4.7.6: Auto-launch the tray companion app if it exists and isn't already running.
+// Auto-launch the tray companion app if it exists and isn't already running.
 // The tray provides system tray presence for daemon status and quick controls.
 
 var (

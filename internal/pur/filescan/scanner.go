@@ -1,5 +1,4 @@
 // Package filescan provides shared file scanning logic for PUR jobs.
-// v4.0.8: Unified backend for both GUI and CLI to scan primary/secondary files.
 package filescan
 
 import (

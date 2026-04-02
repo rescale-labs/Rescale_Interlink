@@ -3,7 +3,6 @@ package reporting
 import (
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/events"
@@ -141,19 +140,4 @@ func sanitizeFileName(name string) string {
 		}
 	}
 	return name
-}
-
-// SanitizeFilePaths replaces full paths with just basenames in a string.
-func SanitizeFilePaths(s string) string {
-	// Replace common absolute path patterns
-	s = homePathRe.ReplaceAllString(s, "[HOME]")
-
-	// Replace Windows-style paths
-	winPath := regexp.MustCompile(`[A-Z]:\\[^\s"']+`)
-	s = winPath.ReplaceAllStringFunc(s, func(match string) string {
-		parts := strings.Split(match, "\\")
-		return "[PATH]\\" + parts[len(parts)-1]
-	})
-
-	return s
 }

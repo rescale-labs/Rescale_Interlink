@@ -292,7 +292,7 @@ func DecryptFile(inputPath, outputPath string, key, iv []byte) error {
 }
 
 // DecryptFileWithHash decrypts a file using AES-256-CBC with PKCS7 padding and returns the SHA-512 hash.
-// v4.4.2: Computes hash during decryption to avoid re-reading file for verification.
+// Computes hash during decryption to avoid re-reading file for verification.
 // This eliminates the race condition where post-download verification could read stale cache data.
 func DecryptFileWithHash(inputPath, outputPath string, key, iv []byte) (string, error) {
 	if len(key) != KeySize {
@@ -332,7 +332,7 @@ func DecryptFileWithHash(inputPath, outputPath string, key, iv []byte) (string, 
 	defer outputFile.Close()
 
 	mode := cipher.NewCBCDecrypter(block, iv)
-	hasher := sha512.New() // v4.4.2: Compute hash during write
+	hasher := sha512.New()
 
 	// Use pooled buffer to reduce allocations
 	bufferPtr := buffers.GetSmallBuffer()
@@ -388,7 +388,7 @@ func DecryptFileWithHash(inputPath, outputPath string, key, iv []byte) (string, 
 				}
 			}
 
-			// v4.4.2: Write to both file and hasher
+			// Write to both file and hasher
 			if _, err := outputFile.Write(decrypted); err != nil {
 				return "", fmt.Errorf("failed to write decrypted data: %w", err)
 			}
@@ -396,7 +396,7 @@ func DecryptFileWithHash(inputPath, outputPath string, key, iv []byte) (string, 
 		}
 	}
 
-	// v4.4.2: Sync and close explicitly before returning
+	// Sync and close explicitly before returning
 	if err := outputFile.Sync(); err != nil {
 		return "", fmt.Errorf("failed to sync file: %w", err)
 	}

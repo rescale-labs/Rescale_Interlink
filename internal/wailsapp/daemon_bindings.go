@@ -58,10 +58,8 @@ type DaemonStatusDTO struct {
 	ManagedBy string `json:"managedBy,omitempty"`
 
 	// ServiceMode indicates if daemon is running as Windows Service (true) or subprocess (false)
-	// v4.5.2: Added for GUI to detect mode via IPC when SCM is inaccessible
 	ServiceMode bool `json:"serviceMode"`
 
-	// v4.5.6: User-specific status fields
 	// UserConfigured indicates if this user has daemon.conf with enabled=true
 	UserConfigured bool `json:"userConfigured"`
 
@@ -75,16 +73,14 @@ type DaemonStatusDTO struct {
 // GetDaemonStatus returns the current daemon status.
 // This is the primary method for the frontend to check if the daemon is running
 // and get its current state.
-// v4.3.1: Version always uses version.Version for consistency.
-// v4.5.6: Added user-specific status fields (UserConfigured, UserState, UserRegistered).
 func (a *App) GetDaemonStatus() DaemonStatusDTO {
 	result := DaemonStatusDTO{
 		State:     "stopped",
-		UserState: "not_configured", // v4.5.6: Default user state
-		Version:   version.Version,  // v4.3.1: Always show current version
+		UserState: "not_configured",
+		Version:   version.Version,
 	}
 
-	// v4.5.6: Check if daemon.conf exists and is enabled for current user
+	// Check if daemon.conf exists and is enabled for current user
 	configPath, _ := config.DefaultDaemonConfigPath()
 	if _, err := os.Stat(configPath); err == nil {
 		// Config file exists - check if enabled
@@ -106,10 +102,9 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 	if status, err := client.GetStatus(ctx); err == nil {
 		result.IPCConnected = true
 		result.State = status.ServiceState
-		// v4.3.1: Keep showing version.Version, not IPC version (which may be stale)
+		// Use version.Version rather than IPC-reported version, which may be stale
 		result.Uptime = status.Uptime
 		result.ActiveDownloads = status.ActiveDownloads
-		// v4.5.2: Propagate ServiceMode from IPC status
 		result.ServiceMode = status.ServiceMode
 
 		if status.LastScanTime != nil {
@@ -124,7 +119,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 			result.UserState = users[0].State
 		}
 
-		// v4.5.6: Determine user state based on configuration + registration
+		// Determine user state based on configuration + registration
 		if !result.UserConfigured {
 			result.UserState = "not_configured"
 		} else if !result.UserRegistered {
@@ -135,7 +130,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		// Process running but IPC not responding
 		result.State = "unknown"
 		result.Error = "Daemon process found but IPC not responding. It may not have been started with --ipc flag."
-		// v4.5.6: User state when daemon is running but IPC fails
+		// User state when daemon is running but IPC fails
 		if result.UserConfigured {
 			result.UserState = "pending"
 		}
@@ -146,19 +141,18 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 
 // StartDaemon starts the daemon process in background mode with IPC enabled.
 // This spawns a new process that survives the GUI closing.
-// v4.2.0: Reads settings from daemon.conf instead of apiconfig.
 func (a *App) StartDaemon() error {
 	// Check if already running
 	if pid := daemon.IsDaemonRunning(); pid != 0 {
 		return fmt.Errorf("daemon is already running (PID %d)", pid)
 	}
 
-	// v4.7.6: Ensure token file exists before daemon starts (Phase 0b)
+	// Ensure token file exists before daemon starts
 	if err := a.ensureTokenPersisted(); err != nil {
 		a.logWarn("Daemon", fmt.Sprintf("Token persistence warning: %v", err))
 	}
 
-	// v4.7.6: Pre-check API key availability (Phase 3a)
+	// Pre-check API key availability before launching daemon
 	apiKey := config.ResolveAPIKeyForCurrentUser("")
 	if apiKey == "" {
 		return fmt.Errorf("cannot start daemon: no API key configured. Set your API key in Connection settings and test the connection first")
@@ -170,9 +164,8 @@ func (a *App) StartDaemon() error {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// v4.2.0: Load daemon config from daemon.conf
-	// The daemon run command will also read this file, but we pass explicit
-	// flags so they're visible in the logs
+	// Load daemon config — the daemon run command also reads this file, but we
+	// pass explicit flags so they're visible in the logs
 	daemonCfg, err := config.LoadDaemonConfig("")
 	if err != nil {
 		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf, using defaults: %v", err))
@@ -184,7 +177,7 @@ func (a *App) StartDaemon() error {
 		downloadDir = config.DefaultDownloadFolder()
 	}
 
-	// v4.4.2: Resolve symlinks to physical paths for consistency
+	// Resolve symlinks to physical paths for consistency
 	if resolved, err := filepath.EvalSymlinks(downloadDir); err == nil {
 		downloadDir = resolved
 	}
@@ -335,8 +328,8 @@ func (a *App) ResumeDaemon() error {
 }
 
 // TriggerProfileRescan asks the daemon to re-enumerate user profiles.
-// v4.5.6: Called after saving daemon.conf so service picks up new users.
-// Uses existing TriggerScan("all") path - no new IPC message type needed.
+// Called after saving daemon.conf so the service picks up new users.
+// Uses existing TriggerScan("all") path.
 func (a *App) TriggerProfileRescan() error {
 	if daemon.IsDaemonRunning() == 0 {
 		return fmt.Errorf("daemon is not running")
@@ -347,7 +340,7 @@ func (a *App) TriggerProfileRescan() error {
 
 	ctx := context.Background()
 
-	// v4.5.6: Use "all" to trigger profile rescan (existing behavior)
+	// "all" triggers a profile rescan rather than a single-user scan
 	if err := client.TriggerScan(ctx, "all"); err != nil {
 		return fmt.Errorf("failed to trigger profile rescan: %w", err)
 	}
@@ -357,7 +350,6 @@ func (a *App) TriggerProfileRescan() error {
 }
 
 // ReloadConfigResultDTO represents the result of a config reload request from the frontend.
-// v4.7.6: Used for GUI to know if config was applied or deferred.
 type ReloadConfigResultDTO struct {
 	Applied         bool   `json:"applied"`
 	Deferred        bool   `json:"deferred"`
@@ -366,7 +358,6 @@ type ReloadConfigResultDTO struct {
 }
 
 // ReloadDaemonConfig notifies the running daemon to reload its configuration.
-// v4.7.6: Called after SaveDaemonConfig to propagate changes.
 // In subprocess mode, returns whether restart is needed.
 func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 	result := ReloadConfigResultDTO{}
@@ -408,7 +399,6 @@ func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 }
 
 // PreFlightResultDTO represents the result of auto-download pre-flight checks.
-// v4.7.6: Used by GUI before enabling auto-download.
 type PreFlightResultDTO struct {
 	APIKeyOK    bool   `json:"apiKeyOk"`
 	FolderOK    bool   `json:"folderOk"`
@@ -417,7 +407,7 @@ type PreFlightResultDTO struct {
 }
 
 // ValidateAutoDownloadPreFlight checks prerequisites before enabling auto-download.
-// v4.7.6: Only checks API key and folder (not service/IPC — user may configure first).
+// Only checks API key and folder — not service/IPC, since user may configure first.
 func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResultDTO {
 	result := PreFlightResultDTO{}
 
@@ -450,8 +440,6 @@ func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResu
 }
 
 // DaemonConfigDTO represents the daemon configuration for the frontend.
-// v4.2.0: Used for reading/writing daemon.conf from the GUI.
-// v4.3.0: Simplified - mode is per-job, only AutoDownloadTag configurable.
 type DaemonConfigDTO struct {
 	// Daemon core settings
 	Enabled             bool   `json:"enabled"`
@@ -467,7 +455,6 @@ type DaemonConfigDTO struct {
 	Exclude      string `json:"exclude"` // Comma-separated
 
 	// Eligibility
-	// v4.3.0: Simplified - mode is now per-job via custom field, not global
 	AutoDownloadTag string `json:"autoDownloadTag"` // Tag for "Conditional" jobs
 
 	// Notifications
@@ -480,7 +467,6 @@ type DaemonConfigDTO struct {
 }
 
 // GetDaemonConfig returns the current daemon configuration.
-// v4.2.0: Reads from daemon.conf instead of apiconfig.
 func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	result := DaemonConfigDTO{}
 
@@ -507,7 +493,6 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	result.NameContains = cfg.Filters.NameContains
 	result.Exclude = cfg.Filters.Exclude
 
-	// v4.3.0: Simplified - only AutoDownloadTag is configurable
 	result.AutoDownloadTag = cfg.Eligibility.AutoDownloadTag
 
 	result.NotificationsEnabled = cfg.Notifications.Enabled
@@ -518,7 +503,6 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 }
 
 // SaveDaemonConfig saves daemon configuration to daemon.conf.
-// v4.2.0: Writes to daemon.conf.
 func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	// Load existing config to preserve any fields not in DTO
 	cfg, err := config.LoadDaemonConfig("")
@@ -538,7 +522,6 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	cfg.Filters.NameContains = dto.NameContains
 	cfg.Filters.Exclude = dto.Exclude
 
-	// v4.3.0: Simplified - only AutoDownloadTag is configurable
 	cfg.Eligibility.AutoDownloadTag = dto.AutoDownloadTag
 
 	cfg.Notifications.Enabled = dto.NotificationsEnabled
@@ -565,7 +548,6 @@ func (a *App) GetDefaultDownloadFolder() string {
 }
 
 // TestAutoDownloadConnection tests API connectivity and folder access for auto-download.
-// v4.3.1: Moved from config_bindings.go as part of config unification.
 func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 	go func() {
 		result := struct {
@@ -626,7 +608,6 @@ func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 }
 
 // AutoDownloadValidationDTO represents the result of validating auto-download setup.
-// v4.2.1: Added for workspace custom fields validation
 type AutoDownloadValidationDTO struct {
 	CustomFieldsEnabled      bool     `json:"customFieldsEnabled"`
 	HasAutoDownloadField     bool     `json:"hasAutoDownloadField"`
@@ -639,7 +620,6 @@ type AutoDownloadValidationDTO struct {
 }
 
 // ValidateAutoDownloadSetup checks if the workspace has the required custom fields.
-// v4.2.1: Added for GUI auto-download setup validation
 func (a *App) ValidateAutoDownloadSetup() AutoDownloadValidationDTO {
 	result := AutoDownloadValidationDTO{
 		AvailableValues: []string{},
@@ -688,7 +668,7 @@ func (a *App) ValidateAutoDownloadSetup() AutoDownloadValidationDTO {
 }
 
 // =============================================================================
-// File Logging Settings (v4.3.2)
+// File Logging Settings
 // =============================================================================
 
 // FileLoggingSettingsDTO represents file logging configuration.
@@ -698,7 +678,6 @@ type FileLoggingSettingsDTO struct {
 }
 
 // GetFileLoggingSettings returns the current file logging configuration.
-// v4.3.2: Cross-platform file logging support.
 func (a *App) GetFileLoggingSettings() FileLoggingSettingsDTO {
 	return FileLoggingSettingsDTO{
 		Enabled:  IsFileLoggingEnabled(),
@@ -707,7 +686,6 @@ func (a *App) GetFileLoggingSettings() FileLoggingSettingsDTO {
 }
 
 // SetFileLoggingEnabled enables or disables file logging.
-// v4.3.2: User can toggle file logging from GUI settings.
 func (a *App) SetFileLoggingEnabled(enabled bool) error {
 	if err := EnableFileLogging(enabled); err != nil {
 		return fmt.Errorf("failed to set file logging: %w", err)
@@ -721,17 +699,15 @@ func (a *App) SetFileLoggingEnabled(enabled bool) error {
 }
 
 // GetLogFileLocation returns the current log file path (if logging to file).
-// v4.3.2: For displaying log file location in UI.
 func (a *App) GetLogFileLocation() string {
 	return GetLogFilePath()
 }
 
 // =============================================================================
-// Daemon Transfer Visibility (v4.7.8)
+// Daemon Transfer Visibility
 // =============================================================================
 
 // DaemonBatchStatusDTO represents a daemon auto-download batch for the frontend.
-// v4.7.8: Read-only visibility into daemon downloads.
 type DaemonBatchStatusDTO struct {
 	BatchID     string  `json:"batchID"`
 	BatchLabel  string  `json:"batchLabel"`
@@ -747,7 +723,6 @@ type DaemonBatchStatusDTO struct {
 }
 
 // GetDaemonTransfers retrieves daemon auto-download batch status via IPC.
-// v4.7.8: Called by frontend to display daemon downloads in Transfers tab.
 func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
 	if daemon.IsDaemonRunning() == 0 {
 		return nil
@@ -788,7 +763,7 @@ func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
 }
 
 // =============================================================================
-// Daemon Log Retrieval (v4.3.2)
+// Daemon Log Retrieval
 // =============================================================================
 
 // DaemonLogEntryDTO represents a log entry from the daemon.
@@ -801,7 +776,6 @@ type DaemonLogEntryDTO struct {
 }
 
 // GetDaemonLogs retrieves recent log entries from the running daemon.
-// v4.3.2: Fetches logs via IPC for display in Activity tab.
 func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 	if daemon.IsDaemonRunning() == 0 {
 		return nil
@@ -833,12 +807,11 @@ func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 }
 
 // =============================================================================
-// Logs Directory Access (v4.4.2)
+// Logs Directory Access
 // =============================================================================
 
 // OpenLogsDirectory opens the logs folder in the system file explorer.
-// v4.4.2: Added for GUI access to unified log directory.
-// v4.5.1: Uses 0700 permissions to restrict log access to owner only.
+// Uses 0700 permissions to restrict log access to owner only.
 func (a *App) OpenLogsDirectory() error {
 	logsDir := config.LogDirectory()
 
@@ -866,35 +839,31 @@ func (a *App) OpenLogsDirectory() error {
 }
 
 // GetLogsDirectory returns the unified logs directory path.
-// v4.4.2: For displaying log location in UI.
 func (a *App) GetLogsDirectory() string {
 	return config.LogDirectory()
 }
 
 // =============================================================================
-// Service Control Stubs for non-Windows (v4.5.1)
+// Service Control Stubs for non-Windows
 // =============================================================================
 
 // ElevatedServiceResultDTO represents the result of an elevated service operation.
-// v4.5.1: Windows-only feature, stub returns "not supported" on other platforms.
 type ElevatedServiceResultDTO struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
 }
 
 // ServiceStatusDTO represents detailed Windows Service status.
-// v4.5.1: Windows-only feature, stub returns "not installed" on other platforms.
-// v4.5.2: Added SCMBlocked/SCMError for IPC fallback when SCM access denied.
 type ServiceStatusDTO struct {
 	Installed  bool   `json:"installed"`
 	Running    bool   `json:"running"`
 	Status     string `json:"status"`
-	SCMBlocked bool   `json:"scmBlocked"` // v4.5.2: True if SCM access denied
-	SCMError   string `json:"scmError"`   // v4.5.2: Error message for debugging
+	SCMBlocked bool   `json:"scmBlocked"` // True if SCM access denied
+	SCMError   string `json:"scmError"`
 }
 
 // GetServiceStatus returns detailed Windows Service status.
-// v4.5.1: On non-Windows platforms, always returns "not installed".
+// On non-Windows platforms, always returns "not installed".
 func (a *App) GetServiceStatus() ServiceStatusDTO {
 	return ServiceStatusDTO{
 		Installed: false,
@@ -904,7 +873,7 @@ func (a *App) GetServiceStatus() ServiceStatusDTO {
 }
 
 // StartServiceElevated triggers UAC prompt to start Windows Service.
-// v4.5.1: On non-Windows platforms, returns error.
+// On non-Windows platforms, returns error.
 func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
 	return ElevatedServiceResultDTO{
 		Success: false,
@@ -913,7 +882,7 @@ func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
 }
 
 // StopServiceElevated triggers UAC prompt to stop Windows Service.
-// v4.5.1: On non-Windows platforms, returns error.
+// On non-Windows platforms, returns error.
 func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
 	return ElevatedServiceResultDTO{
 		Success: false,
@@ -922,7 +891,7 @@ func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
 }
 
 // InstallAndStartServiceElevated triggers UAC prompt to install + start Windows Service.
-// v4.7.6: On non-Windows platforms, returns error.
+// On non-Windows platforms, returns error.
 func (a *App) InstallAndStartServiceElevated() ElevatedServiceResultDTO {
 	return ElevatedServiceResultDTO{
 		Success: false,

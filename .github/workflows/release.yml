@@ -122,8 +122,23 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Select Xcode
+        run: |
+          # Use full Xcode SDK instead of CommandLineTools for proper Objective-C
+          # header resolution (NSUInteger, NSInteger, etc.) required by Wails/CGo.
+          # Find the latest Xcode installed on the runner.
+          XCODE_APP=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_APP" ]; then
+            echo "No Xcode found in /Applications" >&2
+            exit 1
+          fi
+          echo "Selecting: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          xcrun --show-sdk-path
+
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
 
       - name: Install frontend dependencies
         run: cd frontend && npm install
@@ -132,6 +147,13 @@ jobs:
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
           LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export CC="$(xcrun --find clang)"
+          export CXX="$(xcrun --find clang++)"
+          echo "CC=$CC"
+          echo "CXX=$CXX"
+          echo "which clang: $(which clang)"
+          echo "xcrun clang: $(xcrun --find clang)"
           GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             wails build -platform darwin/arm64 -ldflags "$LDFLAGS"
 
@@ -139,6 +161,9 @@ jobs:
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
           LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export CC="$(xcrun --find clang)"
+          export CXX="$(xcrun --find clang++)"
           GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             go build -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
@@ -148,19 +173,26 @@ jobs:
           CERT_PASSWORD: ${{ secrets.MACOS_P12_PASSWORD }}
           KEYCHAIN_PASSWORD: "temporary-keychain-password"
         run: |
-          # Create temporary keychain
           CERT_PATH=$RUNNER_TEMP/build_certificate.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
 
-          # Import certificate from secrets
+          # Decode certificate from secrets
           echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERT_PATH
 
-          # Convert to legacy PKCS#12 format for Apple security import compatibility.
-          # OpenSSL 3.x exports .p12 with AES-256-CBC (PBES2) by default, which
-          # macOS security import doesn't support. Re-export with -legacy (3DES).
+          # Convert .p12 from modern PKCS#12 format (AES-256-CBC/PBES2) to legacy
+          # format (3DES) that macOS security import understands.
+          # The system openssl (1.1.1) can read the file but doesn't have -legacy.
+          # Homebrew openssl@3 is pre-installed on the runner and has -legacy.
+          OPENSSL=$(brew --prefix openssl@3)/bin/openssl
+          echo "OpenSSL for conversion: $($OPENSSL version)"
+          PEM_PATH=$RUNNER_TEMP/build_certificate.pem
           LEGACY_PATH=$RUNNER_TEMP/build_certificate_legacy.p12
-          openssl pkcs12 -in "$CERT_PATH" -nodes -passin pass:"$CERT_PASSWORD" 2>/dev/null | \
-            openssl pkcs12 -export -legacy -out "$LEGACY_PATH" -passout pass:"$CERT_PASSWORD" 2>/dev/null
+          # Step 1: Decrypt .p12 to PEM (key + cert)
+          "$OPENSSL" pkcs12 -in "$CERT_PATH" -out "$PEM_PATH" -nodes -passin pass:"$CERT_PASSWORD"
+          # Step 2: Re-export PEM to legacy .p12 (3DES)
+          "$OPENSSL" pkcs12 -export -legacy -in "$PEM_PATH" -out "$LEGACY_PATH" -passout pass:"$CERT_PASSWORD"
+          # Clean up PEM (contains unencrypted private key)
+          rm -f "$PEM_PATH"
           mv "$LEGACY_PATH" "$CERT_PATH"
 
           # Setup keychain

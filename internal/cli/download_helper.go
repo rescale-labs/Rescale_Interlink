@@ -36,7 +36,7 @@ var (
 	}
 )
 
-// v4.8.7 S7: Precompiled regexes for sanitizeErrorString — avoids recompilation per call.
+// Precompiled regexes for sanitizeErrorString — avoids recompilation per call.
 var (
 	reSASToken       = regexp.MustCompile(`(sig|se|sp|sv|sr|spr|sip|srt|ss)=[^&\s"')]+`)
 	reAWSKey         = regexp.MustCompile(`(?i)(access.?key|secret.?key|session.?token)=\S+`)
@@ -60,11 +60,10 @@ type cliDownloadItem struct {
 // FileSize implements transfer.WorkItem.
 func (d cliDownloadItem) FileSize() int64 { return d.size }
 
-// executeFileDownload - Common download logic for both files download and download shortcut
-//
-// v3.2.3: Restructured to fix filename collision bug. Now fetches all file metadata
-// first, resolves collisions using shared paths.ResolveCollisions(), then downloads.
-// This ensures multiple files with the same name don't corrupt each other.
+// executeFileDownload - Common download logic for both files download and download shortcut.
+// Fetches all file metadata first, resolves collisions using shared
+// paths.ResolveCollisions(), then downloads. This ensures multiple files with
+// the same name don't corrupt each other.
 func executeFileDownload(
 	ctx context.Context,
 	fileIDs []string,
@@ -81,9 +80,7 @@ func executeFileDownload(
 		return fmt.Errorf("at least one file ID is required")
 	}
 
-	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
-	// v4.8.7: Unified credential warming
 	credentials.GetManager(apiClient).WarmAll(ctx)
 
 	if outputDir == "" {
@@ -102,7 +99,7 @@ func executeFileDownload(
 
 	fmt.Printf("Fetching metadata for %d file(s)...\n", len(fileIDs))
 
-	// PHASE 1: Fetch all file metadata first (v3.2.3 collision fix)
+	// PHASE 1: Fetch all file metadata first to detect filename collisions before downloading.
 	// This allows us to detect filename collisions before downloading.
 	type fileMetadata struct {
 		ID            string
@@ -176,7 +173,7 @@ func executeFileDownload(
 		}
 	}
 
-	// Resolve filename collisions (v3.2.3: uses shared utility for consistency with GUI)
+	// Resolve filename collisions using shared utility (consistent with GUI)
 	downloadFiles, collisionCount := paths.ResolveCollisions(downloadFiles)
 	if collisionCount > 0 {
 		fmt.Printf("⚠️  Found %d files with duplicate names. File IDs will be appended to ensure unique downloads.\n", collisionCount)
@@ -205,7 +202,6 @@ func executeFileDownload(
 	skippedFiles := make([]string, 0)
 	var downloadMutex sync.Mutex
 
-	// v4.8.1: Use shared ConflictResolver instead of inline state machine
 	initialConflictMode := DownloadSkipOnce
 	if overwriteAll {
 		initialConflictMode = DownloadOverwriteAll
@@ -220,7 +216,7 @@ func executeFileDownload(
 	resourceMgr := CreateResourceManager()
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.1: Build work items for BatchExecutor
+	// Build work items for BatchExecutor
 	items := make([]cliDownloadItem, len(downloadFiles))
 	for i, df := range downloadFiles {
 		meta := fileIDToMeta[df.FileID]
@@ -318,7 +314,6 @@ func executeFileDownload(
 
 		fmt.Fprintf(downloadUI.Writer(), "[%d/%d] Preparing to download %s...\n", item.idx+1, len(downloadFiles), item.name)
 
-		// v4.8.1: Pass adaptive worker count for correct per-file thread allocation
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
 
 		if transferHandle.GetThreads() > 1 && item.size > 100*1024*1024 {
@@ -400,31 +395,9 @@ func executeFileDownload(
 	return nil
 }
 
-// executeJobDownload - Common download logic for job output files
-//
-// Performance Characteristics (v2.4.8):
-//   - Concurrent downloads: maxConcurrent workers (default: 5)
-//   - API calls per job: 1 (ListJobFiles only, GetStorageCredentials cached 10min)
-//   - API calls per file: 0 (uses metadata from ListJobFiles, no GetFileInfo needed!)
-//
-// Rate Limiting (v2.4.8):
-//   - ListJobFiles: GET /api/v2/jobs/{id}/files/ (jobs-usage scope: 20 req/sec target)
-//   - 12.5x faster than v3 endpoint (was 1.6 req/sec in v2.4.6)
-//   - GetStorageCredentials: POST /api/v3/credentials/ (user scope, but cached 10min)
-//   - GetFileInfo: ELIMINATED (no longer called!)
-//
-// Performance Improvements over v2.4.6:
-//   - v2.4.7: Switched ListJobFiles to v2 endpoint (jobs-usage scope, 12.5x faster)
-//   - v2.4.8: Eliminated GetFileInfo calls entirely (saves 289 API calls for 289 files)
-//   - Combined improvement: ~3+ minutes saved for 289 files
-//   - ListJobFiles: instant (was 8+ seconds)
-//   - GetFileInfo: eliminated (was ~180 seconds = 289 calls ÷ 1.6 req/sec)
-//   - Total download time now limited primarily by S3/Azure transfer speed, not API calls!
-//
-// 2025-11-20: Switched ListJobFiles to v2 endpoint + eliminated GetFileInfo calls
-// 2025-12-09: Fixed filename collision bug - files with same name now get unique paths
-//
-// This mirrors executeFileDownload but fetches files from a job instead
+// executeJobDownload - Common download logic for job output files.
+// Uses v2 ListJobFiles endpoint (jobs-usage scope) for efficient metadata
+// retrieval — no per-file GetFileInfo calls needed.
 func executeJobDownload(
 	ctx context.Context,
 	jobID string,
@@ -441,9 +414,7 @@ func executeJobDownload(
 	apiClient *api.Client,
 	logger *logging.Logger,
 ) error {
-	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
-	// v4.8.7: Unified credential warming
 	credentials.GetManager(apiClient).WarmAll(ctx)
 
 	// List all job output files
@@ -485,7 +456,7 @@ func executeJobDownload(
 		outputDir = "."
 	}
 
-	// v3.2.3: Pre-compute output paths and detect filename collisions
+	// Pre-compute output paths and detect filename collisions
 	// Using shared paths.ResolveCollisions() utility for consistency with GUI and CLI.
 	// When multiple files have the same name (e.g., from different job runs), we must
 	// give them unique output paths to prevent concurrent download corruption.
@@ -549,7 +520,6 @@ func executeJobDownload(
 	skippedFiles := make([]string, 0)
 	var downloadMutex sync.Mutex
 
-	// v4.8.1: Use shared ConflictResolver instead of inline state machine
 	initialConflictMode := DownloadSkipOnce
 	if overwriteAll {
 		initialConflictMode = DownloadOverwriteAll
@@ -564,7 +534,7 @@ func executeJobDownload(
 	resourceMgr := CreateResourceManager()
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.1: Build work items for BatchExecutor
+	// Build work items for BatchExecutor
 	items := make([]cliDownloadItem, len(files))
 	for i, file := range files {
 		outputPath := fileOutputPaths[file.ID]
@@ -663,7 +633,6 @@ func executeJobDownload(
 			}
 		}
 
-		// v4.8.1: Pass adaptive worker count for correct per-file thread allocation
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
 
 		if transferHandle.GetThreads() > 1 && item.size > 100*1024*1024 {

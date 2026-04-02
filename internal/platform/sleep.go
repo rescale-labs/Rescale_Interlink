@@ -1,5 +1,4 @@
 // Package platform provides cross-platform OS integration for Rescale Interlink.
-// v4.8.7: Sleep prevention during active file transfers.
 package platform
 
 // InhibitSleep prevents the OS from sleeping/suspending while file transfers are active.

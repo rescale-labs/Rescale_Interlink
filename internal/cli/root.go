@@ -265,8 +265,7 @@ func Execute() error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start goroutine to handle signals
-	// v4.0.0: Loop to handle multiple signals (e.g., user pressing Ctrl+C multiple times)
+	// Loop to handle multiple signals (e.g., user pressing Ctrl+C multiple times)
 	go func() {
 		for sig := range sigChan {
 			// Only print cancellation message if we received an actual signal
@@ -283,7 +282,7 @@ func Execute() error {
 	AddCommands(rootCmd)
 	executedCmd, err := rootCmd.ExecuteC()
 
-	// v4.8.7: Safe error reporting — classify and auto-save report for blocking failures.
+	// Classify and auto-save report for blocking failures.
 	// ExecuteC returns the actual subcommand that ran, so we get a meaningful operation
 	// like "rescale-int folders upload-dir" instead of just "rescale-int".
 	if err != nil {
@@ -310,10 +309,10 @@ func AddCommands(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(newJobsCmd())
 	rootCmd.AddCommand(newHardwareCmd())
 	rootCmd.AddCommand(newSoftwareCmd())
-	rootCmd.AddCommand(newAutomationsCmd()) // v3.6.1: Automation discovery
+	rootCmd.AddCommand(newAutomationsCmd())
 	rootCmd.AddCommand(newConfigCmd())
-	rootCmd.AddCommand(newDaemonCmd())  // v3.4.0: Background service for auto-downloading completed jobs
-	rootCmd.AddCommand(newServiceCmd())      // v4.0.0: Windows service management
+	rootCmd.AddCommand(newDaemonCmd())
+	rootCmd.AddCommand(newServiceCmd())
 	rootCmd.AddCommand(newCoordinatorCmd()) // internal: cross-process rate limit coordinator
 
 	// Add shortcuts for convenience

@@ -285,7 +285,7 @@ func newJobsSubmitCmd() *cobra.Command {
 	var scriptFile string
 	var jobID string
 	var inputFiles []string
-	var automations []string // v3.6.1: Automation IDs to attach
+	var automations []string
 	var createOnly bool
 	var submitMode bool
 	var endToEnd bool
@@ -480,7 +480,6 @@ Examples:
 				}
 			}
 
-			// v3.6.1: Add CLI-specified automations to job request
 			if len(automations) > 0 {
 				for _, autoID := range automations {
 					jobReq.JobAutomations = append(jobReq.JobAutomations, models.JobAutomationRequest{
@@ -854,7 +853,6 @@ Examples:
 			// MODE 2: Download specific file
 			logger.Info().Str("file_id", fileID).Msg("Downloading specific file")
 
-			// v4.8.2: Warm proxy before first API call
 			inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
 			// Get file info
@@ -909,7 +907,7 @@ Examples:
 
 			// Download file with progress tracking and transfer manager
 			// Use strict checksum verification (skipChecksum=false) for job downloads
-			// v4.8.7: Signal active transfer for sleep inhibition + coordinator keepalive.
+			// Signal active transfer for sleep inhibition + coordinator keepalive.
 			// Single-file job download bypasses RunBatch/RunBatchFromChannel, so must signal directly.
 			ratelimit.GlobalStore().BeginTransferActivity()
 			defer ratelimit.GlobalStore().EndTransferActivity()

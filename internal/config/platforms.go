@@ -1,4 +1,4 @@
-// v4.8.7: 11E — Platform URL allowlist for credential exfiltration prevention.
+// Platform URL allowlist for credential exfiltration prevention.
 package config
 
 import (

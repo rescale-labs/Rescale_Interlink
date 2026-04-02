@@ -1,4 +1,4 @@
-// v4.7.3: Run session persistence and monitoring types.
+// Run session persistence and monitoring types.
 
 import type { JobRow, PipelineStageStats, PipelineLogEntry } from './jobs'
 import type { wailsapp } from '../../wailsjs/go/models'

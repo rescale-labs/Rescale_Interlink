@@ -1,6 +1,3 @@
-// v4.8.2: Automatic version update notification.
-// On GUI startup, checks GitHub releases for a newer version and surfaces
-// a yellow badge in the header. Based on community contribution by @roque-rescale (PR #14).
 package wailsapp
 
 import (

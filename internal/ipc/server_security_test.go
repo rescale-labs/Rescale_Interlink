@@ -20,7 +20,7 @@ type capturingHandler struct {
 	lastOpenLogsUserID       string
 	lastGetRecentLogsUserID  string
 	lastGetTransferStatusUID string
-	userList                 []UserStatus // v4.8.8 Bug N: configurable user list for filtering tests
+	userList                 []UserStatus // configurable user list for filtering tests
 }
 
 func (h *capturingHandler) GetStatus() *StatusData {
@@ -224,7 +224,7 @@ func TestSubprocessModeUnchanged(t *testing.T) {
 }
 
 // TestServiceModeGetUserListFilteredByCallerSID verifies that in service mode,
-// GetUserList only returns the caller's own entry (v4.8.8 Bug N).
+// GetUserList only returns the caller's own entry.
 func TestServiceModeGetUserListFilteredByCallerSID(t *testing.T) {
 	callerSID := "S-1-5-21-CALLER"
 	otherSID := "S-1-5-21-OTHER"
@@ -259,7 +259,7 @@ func TestServiceModeGetUserListFilteredByCallerSID(t *testing.T) {
 }
 
 // TestServiceModeGetUserListDeniedWithoutCallerSID verifies that in service mode,
-// GetUserList fails closed when callerSID is empty (v4.8.8 Bug N).
+// GetUserList fails closed when callerSID is empty.
 func TestServiceModeGetUserListDeniedWithoutCallerSID(t *testing.T) {
 	handler := &capturingHandler{}
 	server := newServiceModeServerForTest(handler)
@@ -275,7 +275,7 @@ func TestServiceModeGetUserListDeniedWithoutCallerSID(t *testing.T) {
 }
 
 // TestSubprocessModeGetUserListUnfiltered verifies that in non-service mode,
-// GetUserList returns all users unfiltered (v4.8.8 Bug N).
+// GetUserList returns all users unfiltered.
 func TestSubprocessModeGetUserListUnfiltered(t *testing.T) {
 	handler := &capturingHandler{
 		userList: []UserStatus{

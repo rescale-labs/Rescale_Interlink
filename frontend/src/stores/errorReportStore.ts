@@ -1,4 +1,4 @@
-// v4.8.7: Zustand store for safe error reporting (Plan 3, 6A-6E).
+// Zustand store for safe error reporting.
 // Manages the error report modal state and event subscription.
 
 import { create } from 'zustand'

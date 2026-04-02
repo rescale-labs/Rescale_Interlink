@@ -7,7 +7,6 @@ import { ProgressEventDTO, TransferEventDTO, EnumerationEventDTO, BatchProgressE
 // Transfer task state
 export type TransferState = 'queued' | 'initializing' | 'active' | 'completed' | 'failed' | 'cancelled' | 'paused'
 
-// v4.7.1: Error classification for disk space and other error types
 export type TransferErrorType = 'disk_space' | 'generic'
 
 export function classifyError(error: string | undefined): TransferErrorType {
@@ -32,8 +31,6 @@ export function extractDiskSpaceInfo(error: string): { available: string; needed
   return { available: availMatch[1], needed: needMatch ? needMatch[1] : 'unknown' }
 }
 
-// v4.0.8: Enumeration state for folder scan progress
-// v4.7.7: Added statusMessage, completedAt, lastEventAt for seamless batch transition
 export interface Enumeration {
   id: string
   folderName: string
@@ -43,15 +40,14 @@ export interface Enumeration {
   bytesFound: number
   isComplete: boolean
   error?: string
-  statusMessage?: string    // v4.7.7: Human-readable status
-  completedAt?: number      // v4.7.7: Timestamp when isComplete was set
-  lastEventAt: number       // v4.7.7: Timestamp of last event received (for staleness-based fallback)
-  phase?: string            // v4.8.5: "scanning", "creating_folders", "complete", "error"
-  foldersTotal?: number     // v4.8.5: total folders to create
-  foldersCreated?: number   // v4.8.5: folders created so far
+  statusMessage?: string
+  completedAt?: number      // Timestamp when isComplete was set
+  lastEventAt: number       // Timestamp of last event received (for staleness-based fallback)
+  phase?: string            // "scanning", "creating_folders", "complete", "error"
+  foldersTotal?: number     // Total folders to create
+  foldersCreated?: number   // Folders created so far
 }
 
-// v4.7.7: Transfer batch for grouped display
 export interface TransferBatch {
   batchID: string
   batchLabel: string
@@ -66,12 +62,12 @@ export interface TransferBatch {
   totalBytes: number
   progress: number
   speed: number
-  totalKnown: boolean // v4.8.0: True when scan complete, total is final
-  filesPerSec: number // v4.8.5: file completion rate (windowed)
-  etaSeconds: number // v4.8.5: estimated time remaining (-1 = unknown)
-  discoveredTotal: number // v4.8.5: files discovered by scan
-  discoveredBytes: number // v4.8.5: bytes discovered by scan
-  startedAtUnix: number // v4.8.7: batch start time (Unix seconds)
+  totalKnown: boolean // True when scan complete, total is final
+  filesPerSec: number // File completion rate (windowed)
+  etaSeconds: number // Estimated time remaining (-1 = unknown)
+  discoveredTotal: number // Files discovered by scan
+  discoveredBytes: number // Bytes discovered by scan
+  startedAtUnix: number // Batch start time (Unix seconds)
 }
 
 // Extended transfer task with UI state
@@ -80,7 +76,7 @@ export interface TransferTask extends wailsapp.TransferTaskDTO {
   displayProgress: number // Smoothed progress for display
   speedFormatted: string // Formatted speed string
   etaFormatted: string // Formatted ETA string
-  errorType?: TransferErrorType // v4.7.1: Classified error type
+  errorType?: TransferErrorType
 }
 
 // Transfer statistics
@@ -88,7 +84,7 @@ export interface TransferStats extends wailsapp.TransferStatsDTO {
   totalActive: number
 }
 
-// v4.7.8: Daemon auto-download batch (read-only, from IPC)
+// Daemon auto-download batch (read-only, from IPC)
 export interface DaemonBatchStatus {
   batchID: string
   batchLabel: string
@@ -107,14 +103,14 @@ interface TransferStore {
   // State
   tasks: TransferTask[]
   stats: TransferStats
-  enumerations: Enumeration[] // v4.0.8: Active folder scans
-  batches: TransferBatch[] // v4.7.7: Batch aggregates
-  daemonBatches: DaemonBatchStatus[] // v4.7.8: Daemon auto-download batches (read-only)
-  expandedBatches: Set<string> // v4.7.7: Which batches are expanded
-  batchTasks: Map<string, TransferTask[]> // v4.7.7: Lazily loaded expanded tasks
-  batchEpochs: Map<string, number> // v4.7.7: Epoch counter per batch for stale-response protection
-  batchStatusFilter: Map<string, string> // v4.8.7: Per-batch status filter ("" = all, "active", "completed", "failed", "cancelled")
-  folderCheckStatus: { folderName: string } | null  // v4.8.8: Pre-upload check visibility
+  enumerations: Enumeration[]
+  batches: TransferBatch[]
+  daemonBatches: DaemonBatchStatus[]
+  expandedBatches: Set<string>
+  batchTasks: Map<string, TransferTask[]>
+  batchEpochs: Map<string, number> // Epoch counter per batch for stale-response protection
+  batchStatusFilter: Map<string, string> // Per-batch status filter ("" = all, "active", "completed", "failed", "cancelled")
+  folderCheckStatus: { folderName: string } | null
   isLoading: boolean
   error: string | null
   isPolling: boolean
@@ -124,7 +120,7 @@ interface TransferStore {
   fetchTasks: () => Promise<void>
   fetchStats: () => Promise<void>
   fetchBatches: () => Promise<void>
-  fetchDaemonBatches: () => Promise<void> // v4.7.8
+  fetchDaemonBatches: () => Promise<void>
   fetchUngroupedTasks: () => Promise<void>
   fetchBatchTasks: (batchID: string, offset: number, limit: number) => Promise<void>
   startPolling: (intervalMs?: number) => void
@@ -136,27 +132,27 @@ interface TransferStore {
   retryFailedInBatch: (batchID: string) => Promise<void>
   clearCompletedTransfers: () => void
   toggleBatchExpanded: (batchID: string) => void
-  setBatchStatusFilter: (batchID: string, filter: string) => void // v4.8.7: 10D status filter
+  setBatchStatusFilter: (batchID: string, filter: string) => void
   handleProgressEvent: (event: ProgressEventDTO) => void
   handleTransferEvent: (event: TransferEventDTO) => void
-  handleEnumerationEvent: (event: EnumerationEventDTO) => void // v4.0.8
-  handleBatchProgressEvent: (event: BatchProgressEventDTO) => void // v4.7.7
-  setFolderCheckStatus: (status: { folderName: string } | null) => void  // v4.8.8
+  handleEnumerationEvent: (event: EnumerationEventDTO) => void
+  handleBatchProgressEvent: (event: BatchProgressEventDTO) => void
+  setFolderCheckStatus: (status: { folderName: string } | null) => void
 
-  // v4.0.8: App-level event listeners (always active, unlike polling which is tab-specific)
+  // App-level event listeners (always active, unlike polling which is tab-specific)
   setupEventListeners: () => () => void
 
   // Internal
   _pollInterval: ReturnType<typeof setInterval> | null
   _unsubscribeProgress: (() => void) | null
   _unsubscribeTransfer: (() => void) | null
-  _unsubscribeEnumeration: (() => void) | null // v4.0.8
-  _unsubscribeBatchProgress: (() => void) | null // v4.7.7
-  _appEventListenersSetup: boolean // v4.0.8: Track if app-level listeners are set up
+  _unsubscribeEnumeration: (() => void) | null
+  _unsubscribeBatchProgress: (() => void) | null
+  _appEventListenersSetup: boolean
 }
 
 // Format speed in bytes/sec to human readable
-// v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
+// Defensive: handle undefined/NaN values (issue #18)
 export function formatSpeed(bytesPerSec: number): string {
   // Handle undefined, NaN, or non-finite values
   if (typeof bytesPerSec !== 'number' || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return ''
@@ -167,7 +163,7 @@ export function formatSpeed(bytesPerSec: number): string {
 }
 
 // Format ETA in milliseconds to human readable
-// v4.0.5: Added defensive handling for undefined/NaN values (issue #18)
+// Defensive: handle undefined/NaN values (issue #18)
 export function formatETA(etaMs: number): string {
   // Handle undefined, NaN, or non-finite values
   if (typeof etaMs !== 'number' || !Number.isFinite(etaMs) || etaMs <= 0) return ''
@@ -209,14 +205,14 @@ const initialStats: TransferStats = {
 export const useTransferStore = create<TransferStore>((set, get) => ({
   tasks: [],
   stats: initialStats,
-  enumerations: [], // v4.0.8: Active folder scans
-  batches: [], // v4.7.7
-  daemonBatches: [], // v4.7.8: Daemon auto-download batches
-  expandedBatches: new Set<string>(), // v4.7.7
-  batchTasks: new Map<string, TransferTask[]>(), // v4.7.7
-  batchEpochs: new Map<string, number>(), // v4.7.7: epoch counter per batch for stale-response protection
-  batchStatusFilter: new Map<string, string>(), // v4.8.7: per-batch status filter
-  folderCheckStatus: null, // v4.8.8: Pre-upload check visibility
+  enumerations: [],
+  batches: [],
+  daemonBatches: [],
+  expandedBatches: new Set<string>(),
+  batchTasks: new Map<string, TransferTask[]>(),
+  batchEpochs: new Map<string, number>(), // Epoch counter per batch for stale-response protection
+  batchStatusFilter: new Map<string, string>(),
+  folderCheckStatus: null,
   isLoading: false,
   error: null,
   isPolling: false,
@@ -228,7 +224,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   _unsubscribeBatchProgress: null,
   _appEventListenersSetup: false,
 
-  // v4.7.7: Fetch only ungrouped tasks (no batchID) — lightweight for large batches
+  // Fetch only ungrouped tasks (no batchID) -- lightweight for large batches
   fetchUngroupedTasks: async () => {
     try {
       const tasks = await App.GetUngroupedTransferTasks()
@@ -242,11 +238,10 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // v4.7.7: Fetch batch aggregates + reconcile enumerations for seamless transition
   fetchBatches: async () => {
     try {
       const raw = await App.GetTransferBatches()
-      // v4.8.0: Map DTO to TransferBatch (totalKnown defaults true for non-streaming batches)
+      // Map DTO to TransferBatch (totalKnown defaults true for non-streaming batches)
       const batches: TransferBatch[] = (raw || []).map((b) => ({
         ...b,
         totalKnown: b.totalKnown ?? true,
@@ -264,7 +259,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         get().fetchBatchTasks(batchID, 0, 50)
       }
 
-      // v4.7.7: Enumeration-to-batch reconciliation (4-layer removal)
+      // Enumeration-to-batch reconciliation (4-layer removal)
       const currentBatches = batches || []
       const batchIDs = new Set(currentBatches.map(b => b.batchID))
       const now = Date.now()
@@ -305,7 +300,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // v4.7.8: Fetch daemon auto-download batch status via IPC
   fetchDaemonBatches: async () => {
     try {
       const batches = await App.GetDaemonTransfers()
@@ -315,12 +309,9 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // v4.7.7: Fetch paginated tasks for an expanded batch
-  // v4.7.7: Merge + dedupe + epoch guard to preserve "Show more" pagination across polling
-  // v4.8.7: Reads batchStatusFilter and passes to backend (10D)
+  // Merge + dedupe + epoch guard to preserve "Show more" pagination across polling
   fetchBatchTasks: async (batchID: string, offset: number, limit: number) => {
     try {
-      // v4.8.7: Read active status filter for this batch
       const stateFilter = get().batchStatusFilter.get(batchID) || ''
       // Capture epoch before the async call
       const epochBefore = get().batchEpochs.get(batchID) ?? 0
@@ -329,14 +320,15 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
       // After await: check if batch was invalidated while request was in flight
       const epochAfter = get().batchEpochs.get(batchID) ?? 0
-      if (epochAfter !== epochBefore) return // Stale response — drop it
+      // Stale response guard: discard if epoch changed during async call
+      if (epochAfter !== epochBefore) return
 
       set(state => {
         const newMap = new Map(state.batchTasks)
         const existing = newMap.get(batchID) || []
 
         if (offset === 0) {
-          // v4.8.7: When a status filter is active, always replace on offset-0 refresh.
+          // When a status filter is active, always replace on offset-0 refresh.
           // Tasks may have left the filter between polls (e.g., a retried task moves
           // from "failed" to "active") so stale entries must not survive.
           if (stateFilter) {
@@ -408,12 +400,11 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     // Already polling
     if (state.isPolling) return
 
-    // v4.7.7: Poll batches + ungrouped tasks instead of all tasks
     const pollInterval = setInterval(() => {
       get().fetchBatches()
       get().fetchUngroupedTasks()
       get().fetchStats()
-      get().fetchDaemonBatches() // v4.7.8: Daemon auto-download visibility
+      get().fetchDaemonBatches()
     }, intervalMs)
 
     // Subscribe to progress events for real-time updates (legacy PUR jobs)
@@ -421,14 +412,14 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       get().handleProgressEvent(event)
     })
 
-    // v4.0.8: Transfer and enumeration events are now subscribed at app level
+    // Transfer and enumeration events are subscribed at app level
     // via setupEventListeners() so they persist when navigating away
 
     // Initial fetch
     get().fetchBatches()
     get().fetchUngroupedTasks()
     get().fetchStats()
-    get().fetchDaemonBatches() // v4.7.8
+    get().fetchDaemonBatches()
 
     set({
       isPolling: true,
@@ -444,8 +435,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       clearInterval(_pollInterval)
     }
 
-    // v4.0.8: Only unsubscribe from progress events (legacy PUR)
-    // Transfer and enumeration events are now handled at app level
+    // Only unsubscribe from progress events (legacy PUR)
+    // Transfer and enumeration events are handled at app level
     if (_unsubscribeProgress) {
       _unsubscribeProgress()
     }
@@ -454,7 +445,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       isPolling: false,
       _pollInterval: null,
       _unsubscribeProgress: null,
-      // v4.0.8: Don't clear enumerations - they persist while scanning
+      // Don't clear enumerations - they persist while scanning
     })
   },
 
@@ -467,7 +458,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // v4.7.4: Only cancel FileBrowser-owned transfers (pipeline manages its own retry/cancel)
+  // Only cancel FileBrowser-owned transfers (pipeline manages its own retry/cancel)
   cancelAllTransfers: async () => {
     try {
       const activeTasks = get().tasks.filter(
@@ -483,7 +474,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // v4.7.7: Cancel all tasks in a batch
   cancelBatch: async (batchID: string) => {
     try {
       await App.CancelBatch(batchID)
@@ -511,7 +501,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // v4.7.7: Retry all failed tasks in a batch
   retryFailedInBatch: async (batchID: string) => {
     try {
       await App.RetryFailedInBatch(batchID)
@@ -542,7 +531,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     get().fetchUngroupedTasks()
   },
 
-  // v4.7.7: Toggle batch expanded/collapsed state
   toggleBatchExpanded: (batchID: string) => {
     const expanded = new Set(get().expandedBatches)
     if (expanded.has(batchID)) {
@@ -552,7 +540,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       newMap.delete(batchID)
       const newEpochs = new Map(get().batchEpochs)
       newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
-      // v4.8.7: Clear status filter on collapse (10D)
       const newFilters = new Map(get().batchStatusFilter)
       newFilters.delete(batchID)
       set({ expandedBatches: expanded, batchTasks: newMap, batchEpochs: newEpochs, batchStatusFilter: newFilters })
@@ -566,7 +553,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
   setFolderCheckStatus: (status) => set({ folderCheckStatus: status }),
 
-  // v4.8.7: Set status filter for a batch's expanded task view (10D).
   // Clears cached tasks, bumps epoch, and re-fetches page 0 with the new filter.
   setBatchStatusFilter: (batchID: string, filter: string) => {
     const newFilters = new Map(get().batchStatusFilter)
@@ -639,13 +625,12 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     })
   },
 
-  // v4.7.7: Handle batch progress events for real-time aggregate updates
   handleBatchProgressEvent: (event: BatchProgressEventDTO) => {
     set(state => {
       const batchIndex = state.batches.findIndex(b => b.batchID === event.batchID)
       if (batchIndex === -1) {
-        // v4.8.3: Upsert — create batch from PreRegisterBatch's immediate event
-        // v4.8.8: Clear pre-check row — batch row is now visible as replacement
+        // Upsert -- create batch from PreRegisterBatch's immediate event
+        // Clear pre-check row -- batch row is now visible as replacement
         const newBatch: TransferBatch = {
           batchID: event.batchID,
           batchLabel: event.label,
@@ -665,7 +650,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           etaSeconds: event.etaSeconds ?? -1,
           discoveredTotal: event.discoveredTotal ?? 0,
           discoveredBytes: event.discoveredBytes ?? 0,
-          startedAtUnix: 0, // v4.8.7: Will be populated on next fetchBatches
+          startedAtUnix: 0, // Will be populated on next fetchBatches
         }
         return { batches: [...state.batches, newBatch], lastUpdate: Date.now(), folderCheckStatus: null }
       }
@@ -673,30 +658,29 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       const updatedBatches = [...state.batches]
       updatedBatches[batchIndex] = {
         ...updatedBatches[batchIndex],
-        total: event.total,         // v4.8.0: Evolving total during streaming scan
+        total: event.total,         // Evolving total during streaming scan
         active: event.active,
         queued: event.queued,
         completed: event.completed,
         failed: event.failed,
         progress: event.progress,
         speed: event.speed,
-        totalKnown: event.totalKnown, // v4.8.0: True when scan complete
-        filesPerSec: event.filesPerSec ?? 0,       // v4.8.5
-        etaSeconds: event.etaSeconds ?? -1,         // v4.8.5
-        discoveredTotal: event.discoveredTotal ?? 0, // v4.8.5
-        discoveredBytes: event.discoveredBytes ?? 0, // v4.8.5
+        totalKnown: event.totalKnown,
+        filesPerSec: event.filesPerSec ?? 0,
+        etaSeconds: event.etaSeconds ?? -1,
+        discoveredTotal: event.discoveredTotal ?? 0,
+        discoveredBytes: event.discoveredBytes ?? 0,
       }
       return { batches: updatedBatches, lastUpdate: Date.now() }
     })
   },
 
-  // v4.0.8: Handle enumeration events for folder scan progress
-  // v4.7.7: No longer removes on completion — removal is handled by fetchBatches reconciliation
-  // v4.8.2: Ignore non-complete events for enumerations that already have a matching batch
-  // (prevents phantom "Scanning" row flash during active downloads)
+  // Does not remove on completion -- removal is handled by fetchBatches reconciliation.
+  // Ignores non-complete events for enumerations that already have a matching batch
+  // (prevents phantom "Scanning" row flash during active downloads).
   handleEnumerationEvent: (event: EnumerationEventDTO) => {
     set(state => {
-      // v4.8.2: Defense-in-depth — if a batch already exists for this enumeration,
+      // Defense-in-depth: if a batch already exists for this enumeration,
       // ignore non-complete progress events (batch row handles progress display)
       if (!event.isComplete) {
         const hasBatch = state.batches.some(b => b.batchID === event.id)
@@ -724,14 +708,12 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
             foldersTotal: event.foldersTotal,
             foldersCreated: event.foldersCreated,
           }
-          // v4.8.8: Clear pre-check row on completion/error
           return { enumerations: updated, folderCheckStatus: null }
         }
-        // v4.8.8: Clear pre-check row even if enumeration not tracked
         return { folderCheckStatus: null }
       }
 
-      // v4.8.8: Clear pre-check row when a visible replacement appears.
+      // Clear pre-check row when a visible replacement appears.
       // Upload enumerations in creating_folders phase are shown by TransfersTab filter,
       // so they provide visual continuity from the pre-check row.
       const clearPreCheck = event.phase === 'creating_folders'
@@ -778,8 +760,8 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     })
   },
 
-  // v4.0.8: Set up event listeners at app level (always active)
-  // This ensures enumeration and transfer events are captured even when not on Transfers tab
+  // Set up event listeners at app level (always active).
+  // This ensures enumeration and transfer events are captured even when not on Transfers tab.
   setupEventListeners: () => {
     const state = get()
     if (state._appEventListenersSetup) {
@@ -797,7 +779,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       get().handleEnumerationEvent(event)
     })
 
-    // v4.7.7: Subscribe to batch progress events
     const unsubscribeBatchProgress = EventsOn(EVENT_NAMES.BATCH_PROGRESS, (event: BatchProgressEventDTO) => {
       get().handleBatchProgressEvent(event)
     })

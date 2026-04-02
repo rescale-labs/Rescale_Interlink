@@ -16,8 +16,8 @@ interface State {
  * ErrorBoundary catches JavaScript errors anywhere in child component tree,
  * logs those errors, and displays a fallback UI instead of crashing the app.
  *
- * v4.0.4: Added to prevent blank screen when TemplateBuilder or other
- * components encounter errors (e.g., failed API calls, parsing errors).
+ * Prevents blank screen when TemplateBuilder or other components encounter
+ * errors (e.g., failed API calls, parsing errors).
  */
 class ErrorBoundary extends Component<Props, State> {
   constructor(props: Props) {

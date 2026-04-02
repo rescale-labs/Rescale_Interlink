@@ -13,7 +13,7 @@ import (
 )
 
 // Hardcoded auto-download constants (not user-configurable).
-// v4.3.0: Mode is now per-job via the "Auto Download" custom field, not global in Interlink.
+// Mode is per-job via the "Auto Download" custom field, not global in Interlink.
 const (
 	// AutoDownloadFieldName is the custom field name that controls per-job auto-download.
 	// Must exist in the Rescale workspace as an Option List field.
@@ -124,7 +124,7 @@ type FilterConfig struct {
 }
 
 // EligibilityConfig contains job eligibility requirements.
-// v4.3.0: Simplified - mode is now per-job, not global. Only AutoDownloadTag is configurable.
+// Mode is per-job (not global). Only AutoDownloadTag is configurable.
 type EligibilityConfig struct {
 	// AutoDownloadTag is the job tag to check when a job's "Auto Download" field is "Conditional".
 	// Jobs with "Conditional" mode must have this tag to be auto-downloaded.
@@ -179,8 +179,8 @@ func DaemonConfigPathForUser(userProfileDir string) string {
 }
 
 // StateFilePathForUser returns the autodownload state file path for a user.
-// v4.5.8: On Windows, uses AppData\Local\Rescale\Interlink\state\ (consistent with
-// install/logs paths). Previously used Unix-style .config\rescale-int\ on all platforms.
+// On Windows, uses AppData\Local\Rescale\Interlink\state\ (consistent with
+// install/logs paths).
 //   - Windows: <userProfileDir>\AppData\Local\Rescale\Interlink\state\daemon-state.json
 //   - Unix: <userProfileDir>/.config/rescale-int/daemon-state.json
 func StateFilePathForUser(userProfileDir string) string {
@@ -203,7 +203,6 @@ func DefaultDownloadFolder() string {
 }
 
 // NewDaemonConfig creates a new DaemonConfig with default values.
-// v4.3.0: Simplified eligibility - mode is now per-job via custom field.
 func NewDaemonConfig() *DaemonConfig {
 	return &DaemonConfig{
 		Daemon: DaemonCoreConfig{
@@ -273,7 +272,6 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 	cfg.Filters.Exclude = filtersSection.Key("exclude").String()
 
 	// Parse [eligibility] section
-	// v4.3.0: Simplified - only auto_download_tag is configurable. Mode is per-job.
 	eligSection := iniFile.Section("eligibility")
 	// Support both old "correctness_tag" and new "auto_download_tag" keys for migration
 	cfg.Eligibility.AutoDownloadTag = eligSection.Key("auto_download_tag").MustString("")
@@ -335,7 +333,6 @@ func SaveDaemonConfig(cfg *DaemonConfig, path string) error {
 	filtersSection.Key("exclude").SetValue(cfg.Filters.Exclude)
 
 	// Write [eligibility] section
-	// v4.3.0: Simplified - only auto_download_tag is configurable
 	eligSection, err := iniFile.NewSection("eligibility")
 	if err != nil {
 		return fmt.Errorf("failed to create eligibility section: %w", err)

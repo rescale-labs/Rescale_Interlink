@@ -13,7 +13,6 @@ import clsx from 'clsx'
 import { useJobStore, JobSpec, DEFAULT_JOB_TEMPLATE, AnalysisCode } from '../../stores'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 
-// v4.0.0 G3: Template info from backend
 interface TemplateInfo {
   name: string
   path: string
@@ -130,7 +129,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     isLoadingCoreTypes,
     isLoadingAnalysisCodes,
     isLoadingAutomations,
-    // v4.0.6: API error states
     coreTypesError,
     analysisCodesError,
     automationsError,
@@ -146,13 +144,11 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const [licenseValue, setLicenseValue] = useState('')
   const [errors, setErrors] = useState<string[]>([])
 
-  // v4.0.0 G3: Template library state
   const [savedTemplates, setSavedTemplates] = useState<TemplateInfo[]>([])
   const [showSavedTemplates, setShowSavedTemplates] = useState(false)
   const [saveTemplateName, setSaveTemplateName] = useState('')
   const [showSaveDialog, setShowSaveDialog] = useState(false)
 
-  // v4.0.0 G3: Load saved templates
   const loadSavedTemplates = useCallback(async () => {
     try {
       const templates = await App.ListSavedTemplates()
@@ -169,7 +165,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
   }, [isOpen, loadSavedTemplates])
 
-  // v4.0.0 G3: Load a saved template
   const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
     if (templateInfo.job) {
       setTemplate(templateInfo.job as JobSpec)
@@ -190,7 +185,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
   }, [])
 
-  // v4.0.0 G3: Save current template
   const handleSaveTemplate = useCallback(async () => {
     if (!saveTemplateName.trim()) return
     try {
@@ -203,7 +197,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
   }, [saveTemplateName, template, loadSavedTemplates])
 
-  // v4.0.0 G3: Delete a saved template
   const handleDeleteTemplate = useCallback(async (name: string) => {
     try {
       await App.DeleteTemplate(name)
@@ -261,7 +254,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return Array.from(versionMap.keys())
   }, [versionMap])
 
-  // v4.0.8: Calculate base unit for cores (max cores per node for selected hardware)
+  // Base unit for cores: max cores per node for selected hardware.
   // Users can enter multiples of this value (64, 128, 192, etc.)
   const coresBaseUnit = useMemo(() => {
     const ct = coreTypes.find((c) => c.code === template.coreType)
@@ -290,8 +283,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     [analysisCodes]
   )
 
-  // Handle core type change
-  // v4.0.8: Default to max cores (full node) instead of minimum
+  // Handle core type change — defaults to max cores (full node)
   const handleCoreTypeChange = useCallback(
     (coreType: string) => {
       const ct = coreTypes.find((c) => c.code === coreType)
@@ -312,7 +304,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     setTemplate((t) => ({ ...t, [key]: value }))
   }, [])
 
-  // v4.0.8: Handle cores change - allow any positive value, validation happens on save
+  // Allow any positive value — validation happens on save
   const handleCoresChange = useCallback(
     (value: number) => {
       if (value <= 0) {
@@ -325,8 +317,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     [coresBaseUnit, updateField]
   )
 
-  // Validate template
-  // v4.0.8: Updated cores validation to allow fractional nodes OR multi-node (multiples of max)
+  // Validate template — cores allow fractional nodes OR multi-node (multiples of max)
   const validate = useCallback((): string[] => {
     const errs: string[] = []
 
@@ -345,7 +336,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     if (template.coresPerSlot <= 0) {
       errs.push('Cores must be positive')
     } else {
-      // v4.0.8: Allow values in ct.cores array (fractional nodes) OR multiples of max (multi-node)
+      // Allow values in ct.cores array (fractional nodes) OR multiples of max (multi-node)
       const ct = coreTypes.find((c) => c.code === template.coreType)
       const maxCores = ct && ct.cores.length > 0 ? Math.max(...ct.cores) : 64
       const isValidFractional = ct?.cores.includes(template.coresPerSlot) ?? false
@@ -401,7 +392,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
           </button>
         </div>
 
-        {/* v4.0.0 G3: Saved Templates Section */}
         <div className="border-b border-gray-200 dark:border-gray-700">
           <button
             onClick={() => setShowSavedTemplates(!showSavedTemplates)}
@@ -502,7 +492,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     {isLoadingAnalysisCodes ? 'Scanning...' : 'Scan Software'}
                   </button>
                 </div>
-                {/* v4.0.8: Show hint that first scan may take a while */}
                 {isLoadingAnalysisCodes && analysisCodes.length === 0 && (
                   <p className="mb-1 text-xs text-gray-500 italic">
                     First scan may take up to several minutes...
@@ -519,7 +508,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                   placeholder={analysisCodes.length === 0 ? 'Click "Scan Software" to load' : 'Search software...'}
                   disabled={isLoadingAnalysisCodes || analysisCodes.length === 0}
                 />
-                {/* v4.0.6: Display API error */}
                 {analysisCodesError && (
                   <p className="mt-1 text-xs text-red-500">{analysisCodesError}</p>
                 )}
@@ -569,7 +557,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     {isLoadingCoreTypes ? 'Scanning...' : 'Scan Coretypes'}
                   </button>
                 </div>
-                {/* v4.0.8: Show hint that first scan may take a while */}
                 {isLoadingCoreTypes && coreTypes.length === 0 && (
                   <p className="mb-1 text-xs text-gray-500 italic">
                     First scan may take up to several minutes...
@@ -582,7 +569,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                   placeholder={coreTypes.length === 0 ? 'Click "Scan Coretypes" to load' : 'Search coretypes...'}
                   disabled={isLoadingCoreTypes || coreTypes.length === 0}
                 />
-                {/* v4.0.6: Display API error */}
                 {coreTypesError && (
                   <p className="mt-1 text-xs text-red-500">{coreTypesError}</p>
                 )}
@@ -689,7 +675,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                   {automations.length > 0 && `${automations.length} available`}
                 </span>
               </div>
-              {/* v4.0.6: Display API error */}
               {automationsError && (
                 <p className="mb-2 text-xs text-red-500">{automationsError}</p>
               )}
@@ -803,7 +788,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
 
         {/* Footer */}
         <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 dark:border-gray-700">
-          {/* v4.0.0 G3: Save as Template button */}
           <div className="flex items-center gap-2">
             {showSaveDialog ? (
               <div className="flex items-center gap-2">

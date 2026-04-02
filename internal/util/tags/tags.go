@@ -1,5 +1,4 @@
 // Package tags provides tag normalization utilities for Rescale file tagging.
-// v4.7.4: Created for centralized tag handling across CLI and GUI paths.
 package tags
 
 import "strings"

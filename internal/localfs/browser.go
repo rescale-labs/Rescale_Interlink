@@ -1,5 +1,4 @@
 // Package localfs provides local filesystem abstractions for shared use by CLI and GUI.
-// v4.0.4: Extended with symlink support and context-aware operations for North Star alignment.
 package localfs
 
 import (
@@ -12,7 +11,7 @@ import (
 	"time"
 )
 
-// v4.8.8: ancestryMap tracks the chain of real directory identities from root
+// ancestryMap tracks the chain of real directory identities from root
 // to the current walk position. It uses a depth-indexed map: when entering a
 // directory at depth D, entries at depth >= D are removed (they belong to a
 // previous sibling branch). This ensures only true ancestors are tracked,
@@ -107,7 +106,6 @@ func (a *ancestrySet) with(id dirIdentity) *ancestrySet {
 }
 
 // FileEntry represents a file or directory in the local filesystem.
-// v4.0.4: Added IsSymlink and LinkTarget for symlink support.
 type FileEntry struct {
 	Path       string      // Full path to the file
 	Name       string      // Base name of the file
@@ -118,12 +116,6 @@ type FileEntry struct {
 	IsSymlink  bool        // True if this is a symbolic link
 	LinkTarget string      // Target path for symlinks (empty if not a symlink or resolution failed)
 }
-
-// =============================================================================
-// v4.0.4: Extended API for North Star alignment (CLI/GUI code reuse)
-// Legacy functions (ListDirectory, Walk, WalkFiles) removed in v4.0.4 -
-// replaced by ListDirectoryEx and WalkCollect below.
-// =============================================================================
 
 // entryInfo is a helper struct for ListDirectoryEx internal use.
 type entryInfo struct {
@@ -153,7 +145,6 @@ type ListDirectoryExOptions struct {
 }
 
 // ListDirectoryEx returns the contents of a directory with extended options.
-// v4.0.4: Context-aware with timeout support and parallel symlink resolution.
 //
 // This function is the shared implementation for both CLI and GUI directory listing.
 // It handles:
@@ -320,9 +311,9 @@ func resolveSymlinksParallel(ctx context.Context, entries []entryInfo, symlinkIn
 // WalkStream enables pipelined processing where folder creation can begin while
 // the walk is still discovering files.
 //
-// v4.8.5: Added for streaming upload scalability — avoids loading all files into
-// memory before uploads start. Uses the same filtering logic as WalkCollect
-// (hidden handling, symlink skipping) for consistent behavior.
+// Avoids loading all files into memory before uploads start. Uses the same
+// filtering logic as WalkCollect (hidden handling, symlink skipping) for
+// consistent behavior.
 //
 // Key property: filepath.WalkDir visits parents before children (depth-first,
 // parent-first), so directories at depth N are emitted before files at depth N+1.
@@ -343,7 +334,7 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 		defer close(files)
 		defer close(errs)
 
-		// v4.8.8: Initialize ancestry tracking for symlink cycle detection.
+		// Initialize ancestry tracking for symlink cycle detection.
 		var ancestry *ancestryMap
 		if opts.FollowSymlinks {
 			ancestry = newAncestryMap()
@@ -395,14 +386,12 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 
 			if isSymlink {
 				if !opts.FollowSymlinks {
-					// v4.8.8: Original behavior — skip all symlinks
 					if d.IsDir() {
 						return filepath.SkipDir
 					}
 					return nil
 				}
 
-				// v4.8.8: Follow symlinks with cycle detection
 				realInfo, statErr := os.Stat(path)
 				if statErr != nil {
 					return nil // Broken symlink — skip silently
@@ -468,7 +457,6 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 			}
 
 			if d.IsDir() {
-				// v4.8.8: Track real directories in ancestry for cycle detection
 				if opts.FollowSymlinks && ancestry != nil {
 					depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
 					if realInfo, statErr := os.Stat(path); statErr == nil {
@@ -731,7 +719,6 @@ type WalkCollectResult struct {
 }
 
 // WalkCollect walks a directory tree and collects entries into categorized slices.
-// v4.0.4: Shared implementation for CLI folder uploads and similar operations.
 //
 // Unlike Walk which uses callbacks, WalkCollect returns all results at once.
 // This is useful when you need to process all files/directories after scanning.
@@ -746,7 +733,6 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 		Symlinks:    make([]FileEntry, 0),
 	}
 
-	// v4.8.8: Initialize ancestry tracking for symlink cycle detection.
 	var ancestry *ancestryMap
 	if opts.FollowSymlinks {
 		ancestry = newAncestryMap()
@@ -803,7 +789,6 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 				return nil
 			}
 
-			// v4.8.8: Follow symlinks with cycle detection
 			realInfo, statErr := os.Stat(path)
 			if statErr != nil {
 				return nil // Broken symlink
@@ -857,7 +842,6 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 		}
 
 		if d.IsDir() {
-			// v4.8.8: Track real directories in ancestry for cycle detection
 			if opts.FollowSymlinks && ancestry != nil {
 				depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
 				if realInfo, statErr := os.Stat(path); statErr == nil {

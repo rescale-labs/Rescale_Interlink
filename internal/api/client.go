@@ -105,9 +105,8 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	if cfg.APIBaseURL == "" {
 		return nil, fmt.Errorf("API base URL is empty — check configuration (config.csv api_base_url)")
 	}
-	// v4.8.7: 11E — Validate platform URL against allowlist (security hardening).
-	// This is the primary enforcement point — all call sites for NewClient() pass through here,
-	// including paths that bypass config.Validate() (engine startup, GUI test-connection, PUR, etc.).
+	// Validate platform URL against allowlist — this is the primary enforcement point,
+	// covering all call sites including paths that bypass config.Validate().
 	if err := config.ValidatePlatformURL(cfg.APIBaseURL); err != nil {
 		return nil, fmt.Errorf("invalid platform URL %q: %w", cfg.APIBaseURL, err)
 	}
@@ -131,12 +130,10 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	clientAPIKey := cfg.APIKey
 	store := ratelimit.GlobalStore()
 
-	// v4.6.8: Custom retry policy — don't retry non-idempotent job creation/submission
+	// Custom retry policy: don't retry non-idempotent job creation/submission
 	// on 5xx, and never retry 4xx (except 429 rate limiting).
-	//
-	// Phase 2: On 429, drain+cooldown through coordinator BEFORE returning (true, nil).
-	// This ensures the rate limiter learns about EVERY 429, not just the ones that
-	// exhaust all retries and flow through to doRequest(). Fixes H3.
+	// On 429, drain+cooldown through coordinator BEFORE returning (true, nil)
+	// so the rate limiter learns about every 429, not just those that exhaust retries.
 	retryClient.CheckRetry = func(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
 		// Don't retry on context cancellation
 		if ctx.Err() != nil {
@@ -212,9 +209,8 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return defaultBackoff
 	}
 
-	// v4.6.8: Custom error handler to preserve response body on retry exhaustion.
-	// Without this, go-retryablehttp drains the body and returns a generic
-	// "giving up after N attempt(s)" message, losing the actual API error.
+	// Preserve response body on retry exhaustion. Without this, go-retryablehttp
+	// drains the body and returns a generic "giving up after N attempt(s)" message.
 	retryClient.ErrorHandler = func(resp *nethttp.Response, err error, numTries int) (*nethttp.Response, error) {
 		return resp, err
 	}
@@ -249,7 +245,6 @@ func (c *Client) GetConfig() *config.Config {
 // CloseIdleConnections closes idle connections in the API HTTP client pool.
 // Called after sleep/wake or long idle periods to discard potentially stale connections.
 // Note: This only covers the API client pool. S3/Azure transport pools are separate.
-// v4.8.4
 func (c *Client) CloseIdleConnections() {
 	if c.httpClient != nil {
 		c.httpClient.CloseIdleConnections()
@@ -398,7 +393,6 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return resp, nil
 }
 
-// GetUserProfile gets the current user's profile
 func (c *Client) GetUserProfile(ctx context.Context) (*models.UserProfile, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v3/users/me/", nil)
 	if err != nil {
@@ -483,7 +477,6 @@ func (c *Client) GetStorageCredentials(ctx context.Context, fileInfo *models.Clo
 	}
 }
 
-// GetRootFolders gets the user's root folders
 func (c *Client) GetRootFolders(ctx context.Context) (*models.RootFolders, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v3/users/me/folders/", nil)
 	if err != nil {
@@ -504,7 +497,6 @@ func (c *Client) GetRootFolders(ctx context.Context) (*models.RootFolders, error
 	return &folders, nil
 }
 
-// RegisterFile registers an uploaded file with Rescale
 func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequest) (*models.CloudFile, error) {
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/files/", fileReq)
 	if err != nil {
@@ -540,7 +532,6 @@ func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequ
 	return nil, fmt.Errorf("register file failed: status %d: %s", resp.StatusCode, bodyStr)
 }
 
-// GetFileInfo retrieves file information by ID (v3 API)
 func (c *Client) GetFileInfo(ctx context.Context, fileID string) (*models.CloudFile, error) {
 	path := fmt.Sprintf("/api/v3/files/%s/", fileID)
 
@@ -563,7 +554,6 @@ func (c *Client) GetFileInfo(ctx context.Context, fileID string) (*models.CloudF
 	return &file, nil
 }
 
-// CreateJob creates a new job (v3 API)
 func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*models.JobResponse, error) {
 	jobReq.NormalizeAutomations() // Ensure environmentVariables is always present
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/jobs/", jobReq)
@@ -585,9 +575,7 @@ func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*mode
 	return &job, nil
 }
 
-// SubmitJob submits a job for execution (v2 API)
 func (c *Client) SubmitJob(ctx context.Context, jobID string) error {
-	// v2 API endpoint for submission
 	path := fmt.Sprintf("/api/v2/jobs/%s/submit/", jobID)
 
 	resp, err := c.doRequest(ctx, "POST", path, nil)
@@ -605,7 +593,6 @@ func (c *Client) SubmitJob(ctx context.Context, jobID string) error {
 }
 
 // AssignProjectToJob assigns a project to a job using the organization-scoped endpoint.
-// v4.6.5: Required by tenants that use org-scoped project assignment.
 func (c *Client) AssignProjectToJob(ctx context.Context, orgCode, jobID, projectID string) error {
 	path := fmt.Sprintf("/api/v2/organizations/%s/jobs/%s/project-assignment/", orgCode, jobID)
 	body := map[string]string{"projectId": projectID}
@@ -623,7 +610,6 @@ func (c *Client) AssignProjectToJob(ctx context.Context, orgCode, jobID, project
 	return nil
 }
 
-// GetJob retrieves job details
 func (c *Client) GetJob(ctx context.Context, jobID string) (*models.JobResponse, error) {
 	path := fmt.Sprintf("/api/v3/jobs/%s/", jobID)
 
@@ -646,7 +632,6 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*models.JobResponse,
 	return &job, nil
 }
 
-// ListJobs lists all jobs (with pagination)
 func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 	var allJobs []models.JobResponse
 	nextURL := "/api/v3/jobs/"
@@ -704,7 +689,6 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 // ListJobsWithCutoff lists jobs ordered by dateInserted (newest first) and stops
 // when hitting jobs older than the cutoff. This is more efficient for daemon scans
 // that only care about recent jobs within a lookback window.
-// v4.3.4: Added for daemon scan optimization
 func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]models.JobResponse, error) {
 	var allJobs []models.JobResponse
 	// Order by dateInserted descending (newest first) for early termination
@@ -826,8 +810,6 @@ func (c *Client) GetCoreTypes(ctx context.Context, includeInactive bool) ([]mode
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode core types response: %w", err)
 		}
-
-		// Close body immediately after reading - don't use defer in loop
 		resp.Body.Close()
 
 		allCoreTypes = append(allCoreTypes, result.Results...)
@@ -843,8 +825,6 @@ func (c *Client) GetCoreTypes(ctx context.Context, includeInactive bool) ([]mode
 	return allCoreTypes, nil
 }
 
-// GetAnalyses retrieves all available software analyses from Rescale.
-// Implements pagination to fetch all results.
 func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 	var allAnalyses []models.Analysis
 	nextURL := "/api/v3/analyses/"
@@ -881,8 +861,6 @@ func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode analyses response: %w", err)
 		}
-
-		// Close body immediately after reading - don't use defer in loop
 		resp.Body.Close()
 
 		allAnalyses = append(allAnalyses, result.Results...)
@@ -898,7 +876,6 @@ func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 	return allAnalyses, nil
 }
 
-// ListFiles retrieves a list of files from the user's library
 func (c *Client) ListFiles(ctx context.Context, limit int) ([]interface{}, error) {
 	if limit <= 0 {
 		limit = 20
@@ -928,8 +905,7 @@ func (c *Client) ListFiles(ctx context.Context, limit int) ([]interface{}, error
 	return result.Results, nil
 }
 
-// LegacyFilesPage represents a page of legacy files listing.
-// v3.6.3: Used for flat file list view (Legacy mode in File Browser).
+// LegacyFilesPage represents a page of legacy files listing (flat file list view).
 type LegacyFilesPage struct {
 	Files   []FileInfo
 	NextURL string // URL to fetch next page (empty if no more)
@@ -937,14 +913,13 @@ type LegacyFilesPage struct {
 }
 
 // ListFilesPage retrieves a page of files from the user's library (flat list).
-// v3.6.3: Used for Legacy mode in File Browser.
 // pageURL: pass "" for first page, or NextURL from previous response.
 // Orders by most recent first (-dateUploaded) to show newest files at top.
-// v4.0.3: Added pageSize parameter - pass 0 for default (25), or specify items per page.
+// pageSize: pass 0 for default (25), or specify items per page.
 func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int) (*LegacyFilesPage, error) {
 	url := pageURL
 	if url == "" {
-		// v4.0.3: Use specified page size or default to 25
+		// Use specified page size or default to 25
 		ps := 25
 		if pageSize > 0 {
 			ps = pageSize
@@ -1002,7 +977,6 @@ func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int
 	return page, nil
 }
 
-// DeleteFile deletes a file from the user's library
 func (c *Client) DeleteFile(ctx context.Context, fileID string) error {
 	path := fmt.Sprintf("/api/v3/files/%s/", fileID)
 
@@ -1040,14 +1014,13 @@ type FolderInfo struct {
 }
 
 // FileInfo represents file information from folder contents listing.
-// v4.8.0: Extended with full metadata to eliminate per-file GetFileInfo() API calls.
 type FileInfo struct {
 	ID            string
 	Name          string
 	DecryptedSize int64
 	DateUploaded  time.Time
 
-	// v4.8.0: Full metadata fields — when populated, downloads skip GetFileInfo()
+	// Full metadata fields — when populated, downloads skip GetFileInfo()
 	EncodedEncryptionKey string
 	IV                   string
 	PathParts            *models.CloudFilePathParts
@@ -1060,7 +1033,6 @@ type FileInfo struct {
 // ToCloudFile converts a FileInfo to a models.CloudFile for use by download.DownloadFile().
 // Returns nil if required fields are missing (encryption key, PathParts, Storage),
 // signaling the caller to fall back to GetFileInfo().
-// v4.8.0: Eliminates per-file API calls when folder listing returns full metadata.
 func (fi *FileInfo) ToCloudFile() *models.CloudFile {
 	if fi.EncodedEncryptionKey == "" || fi.PathParts == nil || fi.Storage == nil {
 		return nil
@@ -1079,7 +1051,6 @@ func (fi *FileInfo) ToCloudFile() *models.CloudFile {
 	}
 }
 
-// CreateFolder creates a new folder
 func (c *Client) CreateFolder(ctx context.Context, name, parentID string) (string, error) {
 	requestBody := map[string]interface{}{
 		"name": name,
@@ -1118,7 +1089,6 @@ func (c *Client) ListFolderContents(ctx context.Context, folderID string) (*Fold
 }
 
 // parsePathParts extracts CloudFilePathParts from raw JSON item data.
-// v4.8.0: Used to enrich FileInfo from folder listing to skip GetFileInfo().
 func parsePathParts(itemData map[string]interface{}) *models.CloudFilePathParts {
 	ppRaw, ok := itemData["pathParts"]
 	if !ok || ppRaw == nil {
@@ -1140,7 +1110,6 @@ func parsePathParts(itemData map[string]interface{}) *models.CloudFilePathParts 
 }
 
 // parseStorage extracts CloudFileStorage from raw JSON item data.
-// v4.8.0: Used to enrich FileInfo from folder listing to skip GetFileInfo().
 func parseStorage(itemData map[string]interface{}) *models.CloudFileStorage {
 	storRaw, ok := itemData["storage"]
 	if !ok || storRaw == nil {
@@ -1176,7 +1145,6 @@ func parseStorage(itemData map[string]interface{}) *models.CloudFileStorage {
 }
 
 // parseFileChecksums extracts []FileChecksum from raw JSON item data.
-// v4.8.0: Used to enrich FileInfo from folder listing to skip GetFileInfo().
 func parseFileChecksums(itemData map[string]interface{}) []models.FileChecksum {
 	csRaw, ok := itemData["fileChecksums"]
 	if !ok || csRaw == nil {
@@ -1209,7 +1177,7 @@ func parseFileChecksums(itemData map[string]interface{}) []models.FileChecksum {
 
 // ListFolderContentsPage fetches a specific page of folder contents.
 // Pass pageURL="" for the first page, or use NextURL/PrevURL from previous response.
-// v4.0.3: Added pageSize parameter - pass 0 for API default, or specify items per page.
+// pageSize: pass 0 for API default, or specify items per page.
 func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL string, pageSize int) (*FolderContents, error) {
 	contents := &FolderContents{
 		Folders: make([]FolderInfo, 0),
@@ -1219,7 +1187,7 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 	// Determine URL for this request
 	url := pageURL
 	if url == "" {
-		// v4.0.3: Include page_size in first page request if specified
+		// Include page_size in first page request if specified
 		if pageSize > 0 {
 			url = fmt.Sprintf("/api/v3/folders/%s/contents/?page_size=%d", folderID, pageSize)
 		} else {
@@ -1227,8 +1195,8 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 		}
 	}
 
-	// v4.8.0: Force page_size on ALL pagination URLs — replace existing value, not just append.
-	// The API's nextURL may carry page_size=25 (server default), reintroducing slow pagination.
+	// Force page_size on ALL pagination URLs — the API's nextURL may carry
+	// page_size=25 (server default), reintroducing slow pagination.
 	if pageSize > 0 && pageURL != "" {
 		if u, err := neturl.Parse(url); err == nil {
 			q := u.Query()
@@ -1297,9 +1265,8 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 			id := getStringField(itemData, "id", "file")
 			name := getStringField(itemData, "name", "file")
 			size := int64(0)
-			// v4.0.6: Handle multiple JSON number representations for large file sizes
-			// JSON numbers are float64 by default, which can lose precision for files > 2^53 bytes
-			// Also handle string representations and json.Number for robustness
+			// JSON numbers are float64 by default, which can lose precision for files > 2^53 bytes.
+			// Also handle string and json.Number representations for robustness.
 			if rawSize, ok := itemData["decryptedSize"]; ok {
 				switch v := rawSize.(type) {
 				case float64:
@@ -1319,7 +1286,7 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 				Name:          name,
 				DecryptedSize: size,
 			}
-			// v4.8.0: Parse full metadata to eliminate per-file GetFileInfo() calls
+			// Parse full metadata to eliminate per-file GetFileInfo() calls
 			file.EncodedEncryptionKey, _ = itemData["encodedEncryptionKey"].(string)
 			file.IV, _ = itemData["iv"].(string)
 			file.Owner, _ = itemData["owner"].(string)
@@ -1387,7 +1354,7 @@ func (c *Client) ListFolderContentsAll(ctx context.Context, folderID string) (*F
 				pageCount-1, len(contents.Folders)+len(contents.Files))
 		}
 
-		// v4.8.0: Use page_size=1000 (API max) to reduce pagination calls ~40x
+		// Use page_size=1000 (API max) to reduce pagination calls
 		page, err := c.ListFolderContentsPage(ctx, folderID, nextURL, 1000)
 		if err != nil {
 			return nil, err
@@ -1410,7 +1377,7 @@ func (c *Client) ListFolderContentsAll(ctx context.Context, folderID string) (*F
 // error, pagination stops and that error is returned. Context cancellation is
 // returned directly (not wrapped) so callers can distinguish cancel from real errors.
 //
-// v4.8.2: Streaming pagination for immediate download start.
+// Streaming pagination enables immediate download start as items are discovered.
 func (c *Client) ListFolderContentsStreaming(
 	ctx context.Context,
 	folderID string,
@@ -1466,14 +1433,12 @@ func (c *Client) MoveFileToFolder(ctx context.Context, fileID, folderID string) 
 }
 
 // FileTag represents a tag on a file
-// v3.6.2: File tag management
 type FileTag struct {
 	Name           string `json:"name"`
 	NormalizedName string `json:"normalizedName"`
 }
 
 // GetFileTags retrieves all tags for a file
-// v3.6.2: File tag management - uses dedicated /tags/ endpoint
 func (c *Client) GetFileTags(ctx context.Context, fileID string) ([]string, error) {
 	path := fmt.Sprintf("/api/v3/files/%s/tags/", fileID)
 
@@ -1502,7 +1467,6 @@ func (c *Client) GetFileTags(ctx context.Context, fileID string) ([]string, erro
 }
 
 // AddFileTags adds tags to a file (one POST per tag)
-// v3.6.2: File tag management - uses dedicated /tags/ endpoint
 func (c *Client) AddFileTags(ctx context.Context, fileID string, tagsToAdd []string) error {
 	path := fmt.Sprintf("/api/v3/files/%s/tags/", fileID)
 
@@ -1524,7 +1488,6 @@ func (c *Client) AddFileTags(ctx context.Context, fileID string, tagsToAdd []str
 }
 
 // RemoveFileTags removes specific tags from a file (one DELETE per tag)
-// v3.6.2: File tag management - uses dedicated /tags/ endpoint
 func (c *Client) RemoveFileTags(ctx context.Context, fileID string, tagsToRemove []string) error {
 	path := fmt.Sprintf("/api/v3/files/%s/tags/", fileID)
 
@@ -1546,7 +1509,6 @@ func (c *Client) RemoveFileTags(ctx context.Context, fileID string, tagsToRemove
 }
 
 // UpdateFileTags replaces all tags on a file with the given tags
-// v3.6.2: File tag management - clears existing tags and adds new ones
 func (c *Client) UpdateFileTags(ctx context.Context, fileID string, newTags []string) error {
 	// Get current tags
 	currentTags, err := c.GetFileTags(ctx, fileID)
@@ -1571,7 +1533,6 @@ func (c *Client) UpdateFileTags(ctx context.Context, fileID string, newTags []st
 	return nil
 }
 
-// DeleteFolder deletes a folder
 func (c *Client) DeleteFolder(ctx context.Context, folderID string) error {
 	path := fmt.Sprintf("/api/v3/folders/%s/", folderID)
 
@@ -1589,7 +1550,6 @@ func (c *Client) DeleteFolder(ctx context.Context, folderID string) error {
 	return nil
 }
 
-// StopJob stops a running job
 func (c *Client) StopJob(ctx context.Context, jobID string) error {
 	path := fmt.Sprintf("/api/v3/jobs/%s/stop/", jobID)
 
@@ -1607,7 +1567,6 @@ func (c *Client) StopJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// GetJobStatuses retrieves detailed status history for a job
 func (c *Client) GetJobStatuses(ctx context.Context, jobID string) ([]models.JobStatusEntry, error) {
 	path := fmt.Sprintf("/api/v3/jobs/%s/statuses/", jobID)
 
@@ -1633,9 +1592,9 @@ func (c *Client) GetJobStatuses(ctx context.Context, jobID string) ([]models.Job
 	return result.Results, nil
 }
 
-// ListJobFiles lists output files for a job (with pagination)
-// 2025-11-20: Switched from v3 to v2 endpoint for 12.5x faster rate limit
-// v2 uses jobs-usage scope (90000/hour = 25 req/sec) vs v3 user scope (7200/hour = 2 req/sec)
+// ListJobFiles lists output files for a job (with pagination).
+// Uses the v2 endpoint which has a much higher rate limit (jobs-usage scope)
+// compared to the v3 user scope.
 func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFile, error) {
 	var allFiles []models.JobFile
 	nextURL := fmt.Sprintf("/api/v2/jobs/%s/files/", jobID)
@@ -1672,8 +1631,6 @@ func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFi
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode job files response: %w", err)
 		}
-
-		// Close body immediately after reading - don't use defer in loop
 		resp.Body.Close()
 
 		allFiles = append(allFiles, result.Results...)
@@ -1689,7 +1646,6 @@ func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFi
 	return allFiles, nil
 }
 
-// DeleteJob deletes a job
 func (c *Client) DeleteJob(ctx context.Context, jobID string) error {
 	path := fmt.Sprintf("/api/v3/jobs/%s/", jobID)
 
@@ -1708,7 +1664,7 @@ func (c *Client) DeleteJob(ctx context.Context, jobID string) error {
 }
 
 // =============================================================================
-// Job Tags API (v4.0.0 - Auto-Download Eligibility Engine)
+// Job Tags API (Auto-Download Eligibility Engine)
 // =============================================================================
 
 // JobTag represents a tag on a job
@@ -1784,7 +1740,7 @@ func (c *Client) HasJobTag(ctx context.Context, jobID, tagName string) (bool, er
 }
 
 // =============================================================================
-// Job Custom Fields API (v4.0.0 - Auto-Download Eligibility Engine)
+// Job Custom Fields API (Auto-Download Eligibility Engine)
 // =============================================================================
 
 // JobCustomField represents a custom field on a job
@@ -1796,7 +1752,6 @@ type JobCustomField struct {
 
 // GetJobCustomFields retrieves all custom fields for a job.
 // Used by auto-download eligibility engine to check "Auto Download" field.
-// v4.3.2: Fixed to handle object format from API (not array).
 func (c *Client) GetJobCustomFields(ctx context.Context, jobID string) ([]JobCustomField, error) {
 	path := fmt.Sprintf("/api/v3/jobs/%s/custom-fields/", jobID)
 
@@ -1811,8 +1766,7 @@ func (c *Client) GetJobCustomFields(ctx context.Context, jobID string) ([]JobCus
 		return nil, fmt.Errorf("get job custom fields failed: status %d: %s", resp.StatusCode, body)
 	}
 
-	// v4.3.2: API returns object format: {"fieldName": {"meta": {...}, "value": "..."}, ...}
-	// Each field has: meta (field definition), user (who set it), value (actual value)
+	// API returns object format: {"fieldName": {"meta": {...}, "value": "..."}, ...}
 	type fieldData struct {
 		Meta struct {
 			Name string `json:"name"`
@@ -1846,7 +1800,7 @@ func (c *Client) GetJobCustomFieldValue(ctx context.Context, jobID, fieldName st
 
 	for _, f := range fields {
 		if f.Name == fieldName {
-			// v4.3.3: Handle nil/null values (field defined but not set)
+			// Handle nil/null values (field defined but not set)
 			if f.Value == nil {
 				return "", nil
 			}
@@ -1872,7 +1826,6 @@ func (c *Client) GetJobCustomFieldValue(ctx context.Context, jobID, fieldName st
 
 // WorkspaceCustomFieldsResponse represents the API response for workspace custom fields.
 // Endpoint: GET /api/v2/organizations/{company_code}/workspaces/{workspace_id}/custom-fields/
-// v4.2.1: Added for auto-download setup validation
 type WorkspaceCustomFieldsResponse struct {
 	// Fields is a map of jobType -> section -> list of fields
 	// Example: {"compute": {"Context": [{name: "Auto Download", ...}]}, "workstation": {}}
@@ -1881,7 +1834,6 @@ type WorkspaceCustomFieldsResponse struct {
 }
 
 // WorkspaceCustomField represents a custom field definition in a workspace.
-// v4.2.1: Used for validating auto-download setup
 type WorkspaceCustomField struct {
 	Name                 string   `json:"name"`
 	ValueType            string   `json:"valueType"`            // "text", "select", "number", "date", "file", "user"
@@ -1896,7 +1848,6 @@ type WorkspaceCustomField struct {
 }
 
 // AutoDownloadValidation contains the results of validating auto-download setup.
-// v4.2.1: Used by GUI and CLI to check workspace configuration
 type AutoDownloadValidation struct {
 	CustomFieldsEnabled      bool     `json:"customFieldsEnabled"`      // Is custom field collection active?
 	HasAutoDownloadField     bool     `json:"hasAutoDownloadField"`     // Is "Auto Download" field defined?
@@ -1911,7 +1862,6 @@ type AutoDownloadValidation struct {
 // GetWorkspaceCustomFields retrieves the list of custom fields defined for jobs in the workspace.
 // This requires the user's company code and workspace ID, which are obtained from GetUserProfile().
 // Endpoint: GET /api/v2/organizations/{company_code}/workspaces/{workspace_id}/custom-fields/
-// v4.2.1: Added for auto-download setup validation
 func (c *Client) GetWorkspaceCustomFields(ctx context.Context) (*WorkspaceCustomFieldsResponse, error) {
 	// First, get user profile to extract company code and workspace ID
 	profile, err := c.GetUserProfile(ctx)
@@ -1951,7 +1901,6 @@ func (c *Client) GetWorkspaceCustomFields(ctx context.Context) (*WorkspaceCustom
 
 // ValidateAutoDownloadSetup checks if the workspace has the required custom fields for auto-download.
 // Returns validation results including whether the "Auto Download" field exists and its configuration.
-// v4.2.1: Added for GUI/CLI auto-download setup validation
 func (c *Client) ValidateAutoDownloadSetup(ctx context.Context) (*AutoDownloadValidation, error) {
 	result := &AutoDownloadValidation{
 		Warnings: []string{},
@@ -2006,7 +1955,6 @@ func (c *Client) ValidateAutoDownloadSetup(ctx context.Context) (*AutoDownloadVa
 			fmt.Sprintf("Required custom field '%s' not found in workspace. Please create it in Workspace Settings > Custom Fields.",
 				autoDownloadFieldName))
 	} else {
-		// v4.3.1: Enhanced validation - verify field type and required options
 		// Field type must be "select" (Option List)
 		if result.AutoDownloadFieldType != "select" {
 			result.Errors = append(result.Errors,

@@ -21,7 +21,6 @@ type DownloadedJob struct {
 	TotalSize    int64     `json:"total_size"`
 	Error        string    `json:"error,omitempty"`
 
-	// v4.8.8 Bug I: Retry tracking for exponential backoff
 	RetryCount  int       `json:"retry_count,omitempty"`
 	LastAttempt time.Time `json:"last_attempt,omitempty"`
 }
@@ -54,12 +53,12 @@ func NewState(filePath string) *State {
 
 // Load reads state from the file system.
 // If the file doesn't exist, returns an empty state.
-// v4.5.8: Runs one-time migration from old Unix-style path on Windows.
+// On Windows, runs one-time migration from the old Unix-style path.
 func (s *State) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// v4.5.8: Migrate state file from old path if needed (Windows only)
+	// Migrate state file from old path if needed (Windows only)
 	if runtime.GOOS == "windows" {
 		if oldPath := oldStateFilePath(); oldPath != "" {
 			migrateStateFile(oldPath, s.filePath)
@@ -78,7 +77,7 @@ func (s *State) Load() error {
 	}
 
 	if err := json.Unmarshal(data, s); err != nil {
-		// v4.8.8: Corrupt state file — preserve and start fresh instead of failing.
+		// Corrupt state file — preserve and start fresh instead of failing.
 		// Use timestamped suffix to avoid overwriting previous .corrupt files.
 		corruptPath := fmt.Sprintf("%s.corrupt.%d", s.filePath, time.Now().Unix())
 		os.Rename(s.filePath, corruptPath) // best-effort, ignore error
@@ -128,7 +127,7 @@ func (s *State) Save() error {
 }
 
 // IsDownloaded checks if a job has already been downloaded or should be skipped.
-// v4.8.8 Bug I: Returns true (skip) for failed jobs that have exhausted retries
+// Returns true (skip) for failed jobs that have exhausted retries
 // or are still within their backoff window.
 func (s *State) IsDownloaded(jobID string) bool {
 	s.mu.RLock()
@@ -141,11 +140,11 @@ func (s *State) IsDownloaded(jobID string) bool {
 	if job.Error == "" {
 		return true
 	}
-	// v4.8.8: Give up after 5 failures
+	// Give up after 5 failures
 	if job.RetryCount >= 5 {
 		return true
 	}
-	// v4.8.8: Exponential backoff — 5min, 10min, 20min, 30min cap
+	// Exponential backoff: 5min, 10min, 20min, 30min cap
 	if job.RetryCount > 0 && !job.LastAttempt.IsZero() {
 		backoff := 5 * time.Minute * time.Duration(1<<(job.RetryCount-1))
 		if backoff > 30*time.Minute {
@@ -174,7 +173,7 @@ func (s *State) MarkDownloaded(jobID, jobName, outputDir string, fileCount int, 
 }
 
 // MarkFailed records a job download failure.
-// v4.8.8 Bug I: Preserves and increments retry count from existing failure entry.
+// Preserves and increments retry count from any existing failure entry.
 func (s *State) MarkFailed(jobID, jobName string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -290,8 +289,8 @@ func (s *State) GetFailedJobs() []*DownloadedJob {
 }
 
 // DefaultStateFilePath returns the default path for the daemon state file.
-// v4.5.8: On Windows, uses %LOCALAPPDATA%\Rescale\Interlink\state\ (consistent with
-// install/logs paths). Previously used Unix-style ~/.config/rescale-int/ on all platforms.
+// On Windows, uses %LOCALAPPDATA%\Rescale\Interlink\state\ (consistent with
+// install/logs paths). On Unix, uses ~/.config/rescale-int/.
 func DefaultStateFilePath() string {
 	if runtime.GOOS == "windows" {
 		localAppData := os.Getenv("LOCALAPPDATA")
@@ -316,7 +315,7 @@ func oldStateFilePath() string {
 }
 
 // migrateStateFile moves state file from old path to new path if needed.
-// v4.5.8: One-time migration from Unix-style path to Windows-native path.
+// One-time migration from Unix-style path to Windows-native path.
 func migrateStateFile(oldPath, newPath string) {
 	if oldPath == "" || newPath == "" || oldPath == newPath {
 		return

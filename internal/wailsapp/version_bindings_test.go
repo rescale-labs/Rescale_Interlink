@@ -1,4 +1,3 @@
-// v4.8.2: Tests for automatic version update notification.
 package wailsapp
 
 import (

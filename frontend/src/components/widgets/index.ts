@@ -6,7 +6,7 @@ export { RemoteBrowser } from './RemoteBrowser'
 export { RemoteFilePicker } from './RemoteFilePicker'
 export { TemplateBuilder } from './TemplateBuilder'
 
-// v4.7.3: Extracted shared pipeline widgets
+// Shared pipeline widgets
 export { StatusBadge } from './StatusBadge'
 export { StatsBar } from './StatsBar'
 export { JobsTable } from './JobsTable'

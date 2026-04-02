@@ -1,4 +1,4 @@
-// v4.7.3: Extracted from PURTab.tsx for reuse in CompletedResultsView.
+// Reusable error summary for CompletedResultsView.
 import { useState } from 'react'
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline'
 import type { JobRow } from '../../types/jobs'

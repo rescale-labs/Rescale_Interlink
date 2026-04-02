@@ -42,7 +42,6 @@ const STEPS = [
   { key: 'complete', label: 'Complete' },
 ]
 
-// v4.7.1: Compression options for tar
 const COMPRESSION_OPTIONS = ['gzip', 'none'] as const
 
 export function SingleJobTab() {
@@ -54,10 +53,8 @@ export function SingleJobTab() {
     saveJobToSGE,
   } = useJobStore()
 
-  // v4.7.1: Config store for tar options
   const { config, updateConfig, saveConfig } = useConfigStore()
 
-  // v4.7.3: Store-backed state (persists across tab navigation)
   const sjStore = useSingleJobStore()
   const {
     state,
@@ -74,7 +71,6 @@ export function SingleJobTab() {
     showRemoteFilePicker,
   } = sjStore
 
-  // v4.7.3: Run store for active run awareness and queue mechanism
   const activeRun = useRunStore((s) => s.activeRun)
   const queueStatus = useRunStore((s) => s.queueStatus)
   const cancelRun = useRunStore((s) => s.cancelRun)
@@ -88,9 +84,8 @@ export function SingleJobTab() {
     loadMemory()
   }, [loadMemory])
 
-  // v4.7.3 Fix: Sync singleJobStore.state when single-job run transitions to terminal state.
-  // sjStore.state is set to 'executing' (singleJobStore.ts submitJob) but never transitions
-  // to 'completed' on normal run completion — only on cancel. This bridges the gap.
+  // Bridge: sjStore.state is set to 'executing' by submitJob() but never transitions
+  // to 'completed' on normal run completion — only on cancel. This syncs the gap.
   useEffect(() => {
     if (activeRun && activeRun.runType === 'single' &&
         (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') &&
@@ -257,7 +252,6 @@ export function SingleJobTab() {
     }
   }, [sjStore, inputMode])
 
-  // v4.0.0 G1: Fetch file info for given paths
   const fetchFileInfo = useCallback(async (paths: string[]) => {
     if (paths.length === 0) return
     try {
@@ -280,7 +274,7 @@ export function SingleJobTab() {
     }
   }, [sjStore])
 
-  // Handle file selection - v4.0.0: Use multi-file selection + fetch info
+  // Handle file selection — uses multi-file picker + fetches info
   const handleSelectFiles = useCallback(async () => {
     try {
       const files = await App.SelectMultipleFiles('Select Input Files')
@@ -299,7 +293,7 @@ export function SingleJobTab() {
     }
   }, [sjStore, localFiles, fetchFileInfo])
 
-  // v4.0.0 G1: Handle folder selection - adds folder as a single item
+  // Handle folder selection — adds folder as a single item
   const handleSelectFolder = useCallback(async () => {
     try {
       const dir = await App.SelectDirectory('Select Folder to Add')
@@ -322,7 +316,7 @@ export function SingleJobTab() {
     sjStore.setInputMode(mode)
   }, [sjStore])
 
-  // v4.0.0 G1: Calculate total size from file info
+  // Calculate total size from file info
   const totalSize = useMemo(() => {
     return localFiles.reduce((sum, path) => {
       const info = fileInfoMap[path]
@@ -330,7 +324,7 @@ export function SingleJobTab() {
     }, 0)
   }, [localFiles, fileInfoMap])
 
-  // v4.0.0 G1: Count files and folders separately
+  // Count files and folders separately
   const { fileCount, folderCount } = useMemo(() => {
     let files = 0
     let folders = 0
@@ -354,7 +348,7 @@ export function SingleJobTab() {
     }
   }, [sjStore])
 
-  // v4.7.3: Handle job submission — delegates to store's submitJob() or queueJob()
+  // Handle job submission — delegates to store's submitJob() or queueJob()
   const handleSubmit = useCallback(async () => {
     if (!sjStore.isInputsValid()) return
 
@@ -367,7 +361,6 @@ export function SingleJobTab() {
     await sjStore.submitJob()
   }, [sjStore, isRunActive])
 
-  // v4.7.3: Handle cancel — delegates to runStore.cancelRun()
   // Guard: only cancel if the active run is actually a single-job run that's still active.
   // After cancel, only force failed state if the run was actually cancelled (not if it already completed).
   const handleCancel = useCallback(async () => {
@@ -387,7 +380,6 @@ export function SingleJobTab() {
     }
   }, [sjStore, cancelRun])
 
-  // v4.7.3: Handle start over — clears activeRun (if it's a terminal single-job run) + resets store.
   // Guard: only clear activeRun if it's a completed/failed/cancelled single-job run — never kill an active PUR run.
   const handleStartOver = useCallback(async () => {
     if (activeRun && activeRun.runType === 'single' &&
@@ -397,7 +389,7 @@ export function SingleJobTab() {
     sjStore.reset()
   }, [sjStore, activeRun, clearActiveRun])
 
-  // v4.7.3: Derive the submitted job ID from runStore's activeRun
+  // Derive the submitted job ID from runStore's activeRun
   const submittedJobId = activeRun?.runType === 'single' && activeRun.jobRows[0]?.jobId
     ? activeRun.jobRows[0].jobId
     : null
@@ -644,7 +636,6 @@ export function SingleJobTab() {
                   This directory will be archived (tar.gz), uploaded, and automatically decompressed on the Rescale cluster.
                 </p>
 
-                {/* v4.7.1: Tar Options for directory mode */}
                 <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">
                   <h5 className="text-xs font-medium text-gray-500 mb-2">Tar Options</h5>
                   <div className="space-y-3">
@@ -712,7 +703,6 @@ export function SingleJobTab() {
             {inputMode === 'localFiles' && (
               <div>
                 <label className="block text-sm font-medium mb-2">Input Files</label>
-                {/* v4.0.0 G1: Add Files and Add Folder buttons side by side */}
                 <div className="flex gap-2 mb-3">
                   <button
                     onClick={handleSelectFiles}
@@ -917,7 +907,6 @@ export function SingleJobTab() {
             </div>
           </div>
 
-          {/* v4.7.3: Queue status inline banner */}
           {queueStatus && (
             <div className={clsx(
               'mb-4 p-3 rounded text-sm',

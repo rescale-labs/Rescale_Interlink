@@ -1,5 +1,4 @@
 // Package services provides frontend-agnostic business logic for Rescale Interlink.
-// v3.6.4: FileService handles file/folder operations without framework dependencies.
 package services
 
 import (
@@ -10,10 +9,10 @@ import (
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
-	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
+	"github.com/rescale/rescale-int/internal/transfer/scan"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/util/paths"
 )
@@ -28,7 +27,6 @@ type FileService struct {
 	mu sync.RWMutex
 }
 
-// NewFileService creates a new FileService.
 func NewFileService(apiClient *api.Client, eventBus *events.EventBus) *FileService {
 	return &FileService{
 		apiClient: apiClient,
@@ -116,7 +114,7 @@ func (fs *FileService) listFolderContents(ctx context.Context, apiClient *api.Cl
 }
 
 // ListLegacyFiles returns a flat list of all files (legacy mode).
-// v4.0.3: Added pageSize parameter - pass 0 for API default.
+// Pass pageSize=0 for API default.
 func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageSize int) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
@@ -151,7 +149,6 @@ func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageS
 	}, nil
 }
 
-// CreateFolder creates a new folder.
 func (fs *FileService) CreateFolder(ctx context.Context, name string, parentID string) (string, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
@@ -169,7 +166,6 @@ func (fs *FileService) CreateFolder(ctx context.Context, name string, parentID s
 	return folderID, nil
 }
 
-// DeleteFile deletes a file by ID.
 func (fs *FileService) DeleteFile(ctx context.Context, fileID string) error {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
@@ -186,7 +182,6 @@ func (fs *FileService) DeleteFile(ctx context.Context, fileID string) error {
 	return nil
 }
 
-// DeleteFolder deletes a folder by ID.
 func (fs *FileService) DeleteFolder(ctx context.Context, folderID string) error {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
@@ -244,7 +239,7 @@ func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string
 		return nil, fmt.Errorf("API client not configured")
 	}
 
-	// v4.8.7 Plan 2b: Use folder package directly (fixes layering — service shouldn't import cli)
+	// Use folder package directly (service layer shouldn't import cli)
 	cache := folder.NewFolderCache()
 
 	// Step 1: Scan local directory
@@ -335,8 +330,7 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 
 	localFolderPath := filepath.Join(localPath, folderName)
 
-	// Use CLI's scan function
-	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, remoteFolderID, "")
+	allFolders, allFiles, err := scan.ScanRemoteFolderRecursive(ctx, apiClient, remoteFolderID, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan remote folder: %w", err)
 	}
@@ -447,8 +441,7 @@ func (fs *FileService) GetMyJobsFolderID(ctx context.Context) (string, error) {
 
 // ListFolderPage returns a single page of folder contents with pagination support.
 // Pass empty cursor for first page, or use NextCursor from previous response.
-// v4.0.2: Added for server-side pagination in File Browser.
-// v4.0.3: Added pageSize parameter - pass 0 for API default.
+// Pass pageSize=0 for API default.
 func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, cursor string, pageSize int) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient

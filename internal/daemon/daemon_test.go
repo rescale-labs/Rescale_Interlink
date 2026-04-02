@@ -7,17 +7,10 @@ import (
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
-// TestTransferManagerReuse verifies Bug #4 fix:
-// downloadJob creates a single TransferManager per job (outside the file loop),
-// not a new TransferManager per file.
-// v4.8.1: Before the fix, each file in downloadJob created its own TransferManager
-// via transfer.NewManager(resourceMgr), defeating resource pooling — each manager
-// saw only 1 active transfer and allocated threads independently.
-//
-// This test demonstrates the difference between the buggy pattern (new manager per file)
-// and the fixed pattern (single manager reused across files):
-// - Reused manager: resource pool tracks all active transfers, enabling proper sharing
-// - Per-file manager: each sees only its own transfer, over-allocating resources
+// TestTransferManagerReuse verifies that downloadJob creates a single TransferManager
+// per job (outside the file loop), not a new TransferManager per file.
+// A per-file manager would defeat resource pooling because each manager would see
+// only its own transfer and allocate threads independently.
 func TestTransferManagerReuse(t *testing.T) {
 	resourceMgr := resources.NewManager(resources.Config{
 		MaxThreads: 16,

@@ -2,12 +2,12 @@ import { create } from 'zustand';
 import { EventsOn } from '../../wailsjs/runtime/runtime';
 import type { LogEventDTO, LogLevel, ProgressEventDTO, StateChangeEventDTO } from '../types';
 
-// v4.8.7: Two-tier ring buffer — WARN/ERROR entries are never evicted by DEBUG/INFO volume.
+// Two-tier ring buffer: WARN/ERROR entries are never evicted by DEBUG/INFO volume.
 // Total capacity remains 10,000 entries (same memory footprint).
 const MAX_DEBUG_INFO = 8000;   // DEBUG + INFO entries
 const MAX_WARN_ERROR = 2000;   // WARN + ERROR entries (protected tier)
 
-// v4.8.7: Level severity for ">=" filtering (higher = more severe)
+// Level severity for ">=" filtering (higher = more severe)
 const LEVEL_SEVERITY: Record<string, number> = {
   DEBUG: 0,
   INFO: 1,
@@ -35,7 +35,7 @@ interface LogStats {
   uptime: number; // milliseconds
 }
 
-// v4.8.7: Merge two sorted-by-id arrays into one. O(n) merge.
+// Merge two sorted-by-id arrays into one. O(n) merge.
 function mergeSortedLogs(a: LogEntry[], b: LogEntry[]): LogEntry[] {
   if (a.length === 0) return b;
   if (b.length === 0) return a;
@@ -54,7 +54,7 @@ function mergeSortedLogs(a: LogEntry[], b: LogEntry[]): LogEntry[] {
 }
 
 interface LogState {
-  // v4.8.7: Two-tier storage
+  // Two-tier storage
   debugInfoLogs: LogEntry[];
   warnErrorLogs: LogEntry[];
   logVersion: number; // Increments on every addLog — lightweight change counter for useMemo
@@ -106,13 +106,13 @@ function formatLogEntry(entry: LogEventDTO): string {
   return parts.join(' ');
 }
 
-// v4.8.7: Check if a level is WARN or ERROR (routes to protected tier)
+// Check if a level is WARN or ERROR (routes to protected tier)
 function isWarnOrError(level: string): boolean {
   return level === 'WARN' || level === 'ERROR';
 }
 
 export const useLogStore = create<LogState>((set, get) => ({
-  // Initial state — v4.8.7: two-tier ring buffer
+  // Initial state — two-tier ring buffer
   debugInfoLogs: [],
   warnErrorLogs: [],
   logVersion: 0,
@@ -220,14 +220,14 @@ export const useLogStore = create<LogState>((set, get) => ({
     const { debugInfoLogs, warnErrorLogs, levelFilter, searchTerm } = get();
     const lowerSearch = searchTerm.toLowerCase();
 
-    // v4.8.7: Optimization — when filter >= WARN, skip DEBUG/INFO tier entirely
+    // Optimization: when filter >= WARN, skip DEBUG/INFO tier entirely
     const minSeverity = levelFilter ? (LEVEL_SEVERITY[levelFilter] ?? 0) : 0;
     const source = minSeverity >= 2
       ? warnErrorLogs
       : mergeSortedLogs(debugInfoLogs, warnErrorLogs);
 
     return source.filter((log) => {
-      // v4.8.7: Level filter uses ">=" semantics (e.g. INFO shows INFO+WARN+ERROR)
+      // Level filter uses ">=" semantics (e.g. INFO shows INFO+WARN+ERROR)
       if (levelFilter) {
         const logSeverity = LEVEL_SEVERITY[log.level] ?? 0;
         if (logSeverity < minSeverity) return false;
@@ -298,12 +298,12 @@ export const useLogStore = create<LogState>((set, get) => ({
       updateProgress(event);
     };
 
-    // v4.0.0: Handle state change events to update status bar
+    // Handle state change events to update status bar
     const handleStateChange = (event: StateChangeEventDTO) => {
       updateFromStateChange(event);
     };
 
-    // v4.0.0: Handle error events - these were previously ignored
+    // Handle error events as log entries
     const handleError = (event: { timestamp: string; jobName: string; stage: string; message: string }) => {
       addLog({
         timestamp: event.timestamp,
@@ -314,7 +314,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       });
     };
 
-    // v4.0.0: Handle transfer events with errors
+    // Handle transfer events with errors
     const handleTransfer = (event: { timestamp: string; taskId: string; taskType: string; name: string; size: number; progress: number; speed: number; error?: string }) => {
       if (event.error) {
         addLog({
@@ -327,7 +327,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       }
     };
 
-    // v4.8.7 RF9: Use unsub callbacks, NEVER EventsOff (would remove other stores' listeners)
+    // Use unsub callbacks, NEVER EventsOff (would remove other stores' listeners)
     const unsubLog = EventsOn('interlink:log', handleLog);
     const unsubProgress = EventsOn('interlink:progress', handleProgress);
     const unsubError = EventsOn('interlink:error', handleError);

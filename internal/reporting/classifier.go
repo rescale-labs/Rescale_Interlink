@@ -1,6 +1,4 @@
 // Package reporting provides safe serious-error reporting for Rescale Interlink.
-// v4.8.7: Plan 3 (6A-6E) — error classification, redaction, report building,
-// and transport for GUI/CLI/daemon error reporting.
 package reporting
 
 import (
@@ -133,7 +131,7 @@ func IsReportable(err error, category ErrorCategory) bool {
 }
 
 // ClassifyErrorClass maps error message patterns to an ErrorClass.
-// Exported in v4.8.7 for partial-batch failure gate in transfer_service.go.
+// Exported for use as a partial-batch failure gate in transfer_service.go.
 // Mirrors the pattern matching in translateAPIError (file_bindings.go)
 // and classifyError (transferStore.ts).
 func ClassifyErrorClass(msg string) ErrorClass {

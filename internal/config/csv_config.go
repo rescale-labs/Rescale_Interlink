@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-// Config represents the PUR configuration
+// Config represents the application configuration for Rescale Interlink.
 type Config struct {
 	// Worker settings
 	TarWorkers    int
@@ -36,19 +36,19 @@ type Config struct {
 	TenantURL string
 
 	// Tarball options
-	ExcludePatterns []string // Patterns to exclude from tarballs (e.g., *.log, *.tmp)
-	IncludePatterns []string // Include-only patterns (mutually exclusive with exclude)
-	FlattenTar      bool     // Remove subdirectory structure in tarballs
-	RunSubpath      string   // Subpath to traverse before finding run directories (e.g., "Simcodes/Powerflow")
-	ValidationPattern string // Pattern to validate runs (e.g., "*.avg.fnc"), opt-in feature (default: disabled)
+	ExcludePatterns   []string // Patterns to exclude from tarballs (e.g., *.log, *.tmp)
+	IncludePatterns   []string // Include-only patterns (mutually exclusive with exclude)
+	FlattenTar        bool     // Remove subdirectory structure in tarballs
+	RunSubpath        string   // Subpath to traverse before finding run directories (e.g., "Simcodes/Powerflow")
+	ValidationPattern string   // Pattern to validate runs (e.g., "*.avg.fnc"), opt-in feature (default: disabled)
 
 	// Tar compression
-	TarCompression string // "none" or "gzip" (v4.7.1: normalized from legacy "gz")
+	TarCompression string // "none" or "gzip" (normalized from legacy "gz")
 
 	// Retry settings
 	MaxRetries int // Maximum upload retry attempts (default: 1)
 
-	// Upload conflict detection mode (v2.4.6)
+	// Upload conflict detection mode
 	// CheckConflictsBeforeUpload controls how file upload conflicts are detected.
 	//
 	// When false (default - FAST MODE):
@@ -65,14 +65,14 @@ type Config struct {
 	//   - More predictable: user sees all conflicts upfront
 	CheckConflictsBeforeUpload bool
 
-	// v3.6.3: File browser sort preferences (persisted across sessions)
+	// File browser sort preferences (persisted across sessions)
 	SortField     string // "name", "size", "modified" (default: "name")
 	SortAscending bool   // true = ascending, false = descending (default: true)
 
-	// v4.0.0: Detailed logging toggle for timing/metrics in Activity tab
+	// Detailed logging toggle for timing/metrics in Activity tab
 	DetailedLogging bool
 
-	// v4.6.5: Organization code for org-scoped project assignment
+	// Organization code for org-scoped project assignment
 	OrgCode string
 }
 
@@ -88,8 +88,8 @@ func LoadConfigCSV(path string) (*Config, error) {
 		ValidationPattern: "", // validation is opt-in, disabled by default
 		TarCompression:    "none",
 		MaxRetries:        1,
-		SortField:         "name",  // v3.6.3: default sort by name
-		SortAscending:     true,    // v3.6.3: default ascending
+		SortField:         "name",
+		SortAscending:     true,
 	}
 
 	if path == "" {
@@ -208,13 +208,13 @@ func LoadConfigCSV(path string) (*Config, error) {
 			if v, err := strconv.Atoi(value); err == nil {
 				cfg.MaxRetries = v
 			}
-		case "sort_field": // v3.6.3
+		case "sort_field":
 			cfg.SortField = value
-		case "sort_ascending": // v3.6.3
+		case "sort_ascending":
 			cfg.SortAscending = strings.ToLower(value) == "true" || value == "1"
-		case "detailed_logging": // v4.0.0
+		case "detailed_logging":
 			cfg.DetailedLogging = strings.ToLower(value) == "true" || value == "1"
-		case "org_code": // v4.6.5
+		case "org_code":
 			cfg.OrgCode = value
 		}
 	}
@@ -295,13 +295,13 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"validation_pattern", cfg.ValidationPattern},
 		{"tar_compression", cfg.TarCompression},
 		{"max_retries", strconv.Itoa(cfg.MaxRetries)},
-		{"sort_field", cfg.SortField},                              // v3.6.3
-		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)},  // v3.6.3
-		{"detailed_logging", strconv.FormatBool(cfg.DetailedLogging)}, // v4.0.0
-		{"org_code", cfg.OrgCode},                                     // v4.6.5
+		{"sort_field", cfg.SortField},
+		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)},
+		{"detailed_logging", strconv.FormatBool(cfg.DetailedLogging)},
+		{"org_code", cfg.OrgCode},
 	}
 
-	// v4.5.8: Write ALL values unconditionally. The previous filter skipped "0", "false",
+	// Write ALL values unconditionally. A previous filter skipped "0", "false",
 	// and "" values, which silently reverted settings like sort_ascending=false,
 	// max_retries=0, and cleared proxy settings to defaults on reload.
 	for _, record := range records {
@@ -442,7 +442,7 @@ func (c *Config) Validate() error {
 	if c.APIBaseURL == "" {
 		return fmt.Errorf("API base URL is required")
 	}
-	// v4.8.7: 11E — Defense-in-depth: also validate in Validate() for paths that
+	// Defense-in-depth: also validate platform URL here for paths that
 	// check config validity before creating a client.
 	if err := ValidatePlatformURL(c.APIBaseURL); err != nil {
 		return fmt.Errorf("invalid platform URL %q: %w", c.APIBaseURL, err)
@@ -460,9 +460,9 @@ func (c *Config) Validate() error {
 }
 
 // IsFRMPlatform returns true if the URL is a FedRAMP-regulated platform.
-// v4.5.1: FRM platforms require strict FIPS 140-3 compliance.
+// FRM platforms require strict FIPS 140-3 compliance.
 // NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and must be disabled for these platforms.
-// v4.6.6 R2: Use proper URL hostname parsing instead of substring match to prevent spoofing
+// Uses proper URL hostname parsing instead of substring match to prevent spoofing
 // (e.g., "evil-rescale-gov.com" or "rescale-gov.com.evil.com" must not match).
 func IsFRMPlatform(urlStr string) bool {
 	normalized := urlStr
@@ -478,7 +478,6 @@ func IsFRMPlatform(urlStr string) bool {
 }
 
 // ValidateNTLMForFIPS checks if NTLM proxy mode is appropriate for the current configuration.
-// v4.5.1: Returns a warning message if NTLM is used with a FRM platform.
 func (c *Config) ValidateNTLMForFIPS() string {
 	if c.ProxyMode == "ntlm" && IsFRMPlatform(c.APIBaseURL) {
 		return "NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and is not compliant with FedRAMP requirements. Consider using 'basic' proxy mode over TLS."
@@ -497,7 +496,6 @@ const OldConfigDir = "rescale-int"
 // - Unix: ~/.config/rescale (XDG standard)
 func getConfigDir() string {
 	if runtime.GOOS == "windows" {
-		// v4.0.8: Use standard Windows %APPDATA% location
 		appData := os.Getenv("APPDATA")
 		if appData != "" {
 			return filepath.Join(appData, "Rescale", "Interlink")
@@ -523,7 +521,7 @@ func getOldConfigDir() string {
 }
 
 // GetDefaultConfigPath returns the default config file path
-// - Windows: %APPDATA%\Rescale\Interlink\config.csv (v4.0.8: standard Windows location)
+// - Windows: %APPDATA%\Rescale\Interlink\config.csv (standard Windows location)
 // - Unix: ~/.config/rescale/config.csv (XDG standard)
 // Falls back to old location ~/.config/rescale-int/config.csv if new location doesn't exist
 func GetDefaultConfigPath() string {
@@ -553,7 +551,7 @@ func GetDefaultConfigPath() string {
 }
 
 // GetConfigPathForProfile returns the config.csv path for a specific user profile.
-// v4.8.8 Bug C: Used by the Windows service to load per-user config.csv for correct
+// Used by the Windows service to load per-user config.csv for correct
 // APIBaseURL and proxy settings instead of hardcoding DefaultPlatformURL.
 //   - Windows: <userProfilePath>\AppData\Roaming\Rescale\Interlink\config.csv
 //   - Unix: <userProfilePath>/.config/rescale/config.csv
@@ -573,7 +571,7 @@ func GetConfigPathForProfile(userProfilePath string) string {
 }
 
 // GetDefaultTokenPath returns the default token file path
-// - Windows: %APPDATA%\Rescale\Interlink\token (v4.0.8: standard Windows location)
+// - Windows: %APPDATA%\Rescale\Interlink\token (standard Windows location)
 // - Unix: ~/.config/rescale/token (XDG standard)
 // Falls back to old location ~/.config/rescale-int/token if new location doesn't exist
 // This is where 'config init' saves the API key
@@ -599,17 +597,6 @@ func GetDefaultTokenPath() string {
 
 	// Neither exists - return new path (for new installations)
 	return newPath
-}
-
-// EnsureConfigDir creates the config directory if it doesn't exist
-// - Windows: Creates %APPDATA%\Rescale\Interlink (v4.0.8: standard Windows location)
-// - Unix: Creates ~/.config/rescale/ (XDG standard)
-func EnsureConfigDir() error {
-	configDir := getConfigDir()
-	if configDir == "" {
-		return fmt.Errorf("could not determine config directory")
-	}
-	return os.MkdirAll(configDir, 0700)
 }
 
 // ReadTokenFile reads an API token from a file

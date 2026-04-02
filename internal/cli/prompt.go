@@ -30,7 +30,7 @@ import (
 //
 // =============================================================================
 
-// ConflictAction type and constants moved to internal/transfer/folder/conflict.go (v4.8.7 Plan 2b).
+// ConflictAction type and constants live in internal/transfer/folder/conflict.go.
 // Aliases in folder_upload_compat.go preserve the cli.ConflictAction API surface.
 
 // promptFolderConflict asks user what to do when folder already exists

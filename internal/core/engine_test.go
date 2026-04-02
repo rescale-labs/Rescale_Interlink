@@ -488,7 +488,7 @@ func TestEngine_JobMonitoring(t *testing.T) {
 	// Should be able to stop without errors
 }
 
-// v4.0.0: Tests for Run Context Management
+// Tests for Run Context Management
 
 func TestEngine_RunContext_StartRun(t *testing.T) {
 	engine, _ := NewEngine(nil)

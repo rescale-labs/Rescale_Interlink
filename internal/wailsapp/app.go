@@ -49,18 +49,15 @@ type App struct {
 	// Event bridge for forwarding EventBus events to frontend
 	eventBridge *EventBridge
 
-	// v4.0.0: Run cancellation function for active pipeline runs
-	// v4.0.5: Protected by runMu to prevent race conditions
+	// Protected by runMu to prevent race conditions on concurrent cancel/start
 	runMu     sync.Mutex
 	runCancel context.CancelFunc
 
-	// v4.0.8: Caching for software/hardware catalogs to avoid repeated slow scans
 	catalogCacheMu    sync.RWMutex
 	cachedCoreTypes   []CoreTypeDTO
 	cachedAnalyses    []AnalysisCodeDTO
 	cachedAutomations []AutomationDTO
 
-	// v4.8.7: Safe error reporting (Plan 3, 6A-6E)
 	reporter *reporting.Reporter
 }
 
@@ -69,10 +66,7 @@ func NewApp() *App {
 	return &App{}
 }
 
-// v4.0.8: Unified logging helper that logs to terminal AND Activity Logs tab.
-// v4.3.0: Also logs to file on Windows (%LOCALAPPDATA%\Rescale\Interlink\logs)
-// This ensures users don't need to run from terminal to see detailed logs.
-// Levels: "DEBUG", "INFO", "WARN", "ERROR"
+// Unified logging helper that logs to terminal, Activity Logs tab, and log file.
 // Messages are truncated to 1000 chars to prevent unbounded log growth.
 const maxLogMessageLen = 1000
 
@@ -85,7 +79,6 @@ func (a *App) log(level string, stage string, message string) {
 	// Always log to terminal for debugging
 	fmt.Printf("[%s] %s: %s\n", level, stage, message)
 
-	// v4.3.0: Also log to file (Windows only, additive)
 	WriteToLogFile(level, stage, message)
 
 	// Also emit to EventBus if available (appears in Activity Logs tab)
@@ -135,7 +128,6 @@ func (a *App) logError(stage, message string) {
 }
 
 // ClearCatalogCache clears the cached software/hardware catalogs.
-// v4.0.8: Called when API key changes to ensure fresh data from new account.
 func (a *App) ClearCatalogCache() {
 	a.catalogCacheMu.Lock()
 	defer a.catalogCacheMu.Unlock()
@@ -156,17 +148,15 @@ func (a *App) startup(ctx context.Context) {
 			wailsLogger.Error().Err(err).Msg("Failed to start event bridge")
 		}
 
-		// v4.8.7: Initialize reporter for safe error reporting
 		a.reporter = reporting.NewReporter(a.engine.Events())
 
-		// v4.0.0: Set EventBus for timing infrastructure
-		// This allows timing logs to appear in Activity tab when DetailedLogging is enabled
+		// Set EventBus for timing infrastructure so timing logs appear in Activity tab
 		cloud.SetEventBus(a.engine.Events())
 
 		// Wire cross-process rate limit coordinator (lazy — only spawns when GetLimiter is called)
 		ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
 
-		// v4.8.7: Route backend log.Printf to GUI Activity Logs via TeeWriter.
+		// Route backend log.Printf to GUI Activity Logs via TeeWriter.
 		// This intercepts all stdlib log output and publishes to EventBus.
 		tee := logging.NewTeeWriter(os.Stderr, a.engine.Events())
 		log.SetOutput(tee)
@@ -174,7 +164,7 @@ func (a *App) startup(ctx context.Context) {
 		// Wire rate limit visibility notifications for GUI Activity Logs
 		eb := a.engine.Events()
 		ratelimit.SetGlobalNotifyFunc(func(level, message string) {
-			// v4.8.7: Use fmt.Printf instead of log.Printf to avoid double-publish
+			// Use fmt.Printf instead of log.Printf to avoid double-publish
 			// via TeeWriter — the explicit PublishLog below is the intended path.
 			fmt.Printf("%s\n", message)
 			if eb != nil {
@@ -187,12 +177,12 @@ func (a *App) startup(ctx context.Context) {
 		})
 	}
 
-	// v4.0.0: Initialize detailed logging from config
+	// Initialize detailed logging from config
 	if a.config != nil {
 		cloud.SetDetailedLogging(a.config.DetailedLogging)
 	}
 
-	// v4.7.6: Auto-launch tray companion if available (Windows only, no-op on other platforms)
+	// Auto-launch tray companion if available (Windows only, no-op on other platforms)
 	go a.launchTrayIfNeeded()
 
 	wailsLogger.Info().Msg("Wails application started")
@@ -224,14 +214,13 @@ func (a *App) shutdown(ctx context.Context) {
 
 // Run launches the Wails GUI application.
 func Run(args []string) error {
-	// v4.3.0: Single-instance enforcement (Windows only)
-	// Prevents multiple GUI instances from running simultaneously
+	// Single-instance enforcement (Windows only) — prevents multiple GUI instances
 	if !EnsureSingleInstance() {
 		// Another instance is running - exit silently (it was brought to foreground)
 		return nil
 	}
 
-	// v4.3.0: Initialize file logging (Windows only, additive to Activity tab)
+	// Initialize file logging (additive to Activity tab)
 	if err := InitFileLogger(); err != nil {
 		// Non-fatal - just log to console
 		fmt.Printf("[WARN] Failed to initialize file logging: %v\n", err)
@@ -319,13 +308,13 @@ func Run(args []string) error {
 			DisableWindowIcon:                 false,
 			DisableFramelessWindowDecorations: false,
 			WebviewUserDataPath:               "",
-			// v4.0.0: Use bundled WebView2 Fixed Version Runtime if present
-			// This allows running on Windows Server 2019 without installing WebView2 system-wide
+			// Use bundled WebView2 Fixed Version Runtime if present, allowing
+			// Windows Server 2019 to run without system-wide WebView2 installation
 			WebviewBrowserPath: getWebView2BrowserPath(),
 		},
 		Linux: &linux.Options{
 			WindowIsTranslucent: false,
-			WebviewGpuPolicy:    linux.WebviewGpuPolicyAlways,
+			WebviewGpuPolicy:    linux.WebviewGpuPolicyOnDemand,
 			ProgramName:         "rescale-int-gui",
 		},
 	})
@@ -384,8 +373,7 @@ func loadConfiguration(configFile string) (*config.Config, error) {
 		}
 	}
 
-	// v4.0.1: Also check RESCALE_API_KEY environment variable
-	// This enables Linux AppDir and other environments where env vars are the primary config method
+	// Also check RESCALE_API_KEY environment variable for Linux AppDir and similar environments
 	if cfg.APIKey == "" {
 		if envKey := os.Getenv("RESCALE_API_KEY"); envKey != "" {
 			cfg.APIKey = envKey
@@ -399,8 +387,8 @@ func loadConfiguration(configFile string) (*config.Config, error) {
 // getWebView2BrowserPath returns the path to a bundled WebView2 Fixed Version Runtime.
 // Returns empty string to use system-installed WebView2, or path to bundled runtime.
 //
-// v4.0.0: Enables running on Windows Server 2019 without system-wide WebView2 installation.
-// The portable distribution includes webview2/ folder with Fixed Version Runtime.
+// The portable distribution includes a webview2/ folder with Fixed Version Runtime,
+// enabling Windows Server 2019 to run without a system-wide WebView2 installation.
 func getWebView2BrowserPath() string {
 	if runtime.GOOS != "windows" {
 		return "" // Only relevant for Windows

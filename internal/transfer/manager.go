@@ -7,20 +7,17 @@ import (
 	"github.com/rescale/rescale-int/internal/resources"
 )
 
-// Manager coordinates all file transfers and manages resource allocation
+// Manager allocates per-file thread pools from a shared budget, enabling adaptive concurrency.
 type Manager struct {
 	resourceMgr *resources.Manager
 }
 
-// NewManager creates a new transfer manager
 func NewManager(resourceMgr *resources.Manager) *Manager {
 	return &Manager{
 		resourceMgr: resourceMgr,
 	}
 }
 
-// AllocateTransfer allocates resources for a new transfer
-// Returns a Transfer handle that should be used to manage the transfer
 func (m *Manager) AllocateTransfer(fileSize int64, totalFiles int) *Transfer {
 	// Generate unique transfer ID
 	transferID := generateTransferID()
@@ -36,7 +33,6 @@ func (m *Manager) AllocateTransfer(fileSize int64, totalFiles int) *Transfer {
 	}
 }
 
-// GetStats returns current transfer manager statistics
 func (m *Manager) GetStats() ManagerStats {
 	resourceStats := m.resourceMgr.GetStats()
 	return ManagerStats{
@@ -47,7 +43,7 @@ func (m *Manager) GetStats() ManagerStats {
 	}
 }
 
-// ManagerStats holds statistics about the transfer manager
+// ManagerStats reports pool utilization (available vs. in-use threads).
 type ManagerStats struct {
 	TotalThreads     int
 	ActiveThreads    int
@@ -55,7 +51,7 @@ type ManagerStats struct {
 	ActiveTransfers  int
 }
 
-// Transfer represents an active file transfer
+// Transfer is a handle returned by AllocateTransfer; call Complete() to release threads back to the pool.
 type Transfer struct {
 	id          string
 	fileSize    int64
@@ -65,7 +61,6 @@ type Transfer struct {
 	completed   bool
 }
 
-// GetThreads returns the number of threads allocated for this transfer
 func (t *Transfer) GetThreads() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -76,7 +71,6 @@ func (t *Transfer) GetThreads() int {
 // Returns the number of additional threads acquired (0 if none available).
 // This is used for dynamic scaling - as other transfers complete, their threads
 // become available and can be claimed by active transfers to speed up.
-// v3.4.2: Added for dynamic thread reallocation
 func (t *Transfer) TryAcquireMore(maxWanted int) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -101,7 +95,7 @@ func (t *Transfer) TryAcquireMore(maxWanted int) int {
 	return acquired
 }
 
-// Complete marks the transfer as complete and releases resources
+// Complete releases this transfer's threads back to the pool. Safe to call multiple times.
 func (t *Transfer) Complete() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -112,12 +106,10 @@ func (t *Transfer) Complete() {
 	}
 }
 
-// GetID returns the transfer ID
 func (t *Transfer) GetID() string {
 	return t.id
 }
 
-// String returns a string representation of the transfer
 func (t *Transfer) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -130,7 +122,6 @@ var (
 	transferMu      sync.Mutex
 )
 
-// generateTransferID generates a unique transfer ID
 func generateTransferID() string {
 	transferMu.Lock()
 	defer transferMu.Unlock()

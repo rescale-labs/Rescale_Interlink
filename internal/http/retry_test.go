@@ -92,18 +92,18 @@ func TestExecuteWithRetry_ContextCancelledDuringSleep(t *testing.T) {
 	}
 }
 
-// TestClassifyError verifies all error classification paths including DNS errors (v4.8.7).
+// TestClassifyError verifies all error classification paths including DNS errors.
 func TestClassifyError(t *testing.T) {
 	tests := []struct {
 		name     string
 		err      error
 		expected ErrorType
 	}{
-		// v4.8.7: DNS errors — type-based
+		// DNS errors — type-based
 		{"dns type-based", &net.DNSError{Err: "no such host", Name: "example.com"}, ErrorTypeNetwork},
 		{"dns temporary", &net.DNSError{Err: "server misbehaving", Name: "api.rescale.com", IsTemporary: true}, ErrorTypeNetwork},
 
-		// v4.8.7: DNS errors — string fallbacks (SDK-wrapped)
+		// DNS errors — string fallbacks (SDK-wrapped)
 		{"dns no such host string", fmt.Errorf("dial tcp: lookup prod-rescale-platform.s3.us-east-1.amazonaws.com: no such host"), ErrorTypeNetwork},
 		{"dns temporary failure string", fmt.Errorf("temporary failure in name resolution"), ErrorTypeNetwork},
 		{"dns server misbehaving string", fmt.Errorf("lookup api.rescale.com: server misbehaving"), ErrorTypeNetwork},
@@ -156,7 +156,7 @@ func (e *timeoutErr) Error() string   { return "i/o timeout" }
 func (e *timeoutErr) Timeout() bool   { return true }
 func (e *timeoutErr) Temporary() bool { return true }
 
-// TestExecuteWithRetry_DNSError verifies DNS errors re-enter the retry flow (v4.8.7).
+// TestExecuteWithRetry_DNSError verifies DNS errors re-enter the retry flow.
 func TestExecuteWithRetry_DNSError(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{
@@ -182,7 +182,7 @@ func TestExecuteWithRetry_DNSError(t *testing.T) {
 	}
 }
 
-// TestExecuteWithRetry_DNSErrorString verifies string-wrapped DNS errors also retry (v4.8.7).
+// TestExecuteWithRetry_DNSErrorString verifies string-wrapped DNS errors also retry.
 func TestExecuteWithRetry_DNSErrorString(t *testing.T) {
 	ctx := context.Background()
 	cfg := Config{

@@ -1,8 +1,8 @@
-// v4.8.1: Shared conflict resolution state machine.
+// Shared conflict resolution state machine.
 //
-// Replaces 6+ inline mutex+prompt+update patterns across download_helper.go,
+// Replaces inline mutex+prompt+update patterns across download_helper.go,
 // folder_download_helper.go, and folder_upload_helper.go with a single generic
-// implementation. See TRANSFER_CONVERGENCE_AUDIT.md for background.
+// implementation.
 package cli
 
 import "sync"

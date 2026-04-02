@@ -25,7 +25,7 @@ type EventBridge struct {
 	stopC   chan struct{}
 	wg      sync.WaitGroup
 	mu      sync.Mutex
-	started bool // v4.0.0: Track if bridge has been started to prevent double-start
+	started bool
 }
 
 // NewEventBridge creates a new event bridge.
@@ -40,8 +40,7 @@ func NewEventBridge(ctx context.Context, eventBus *events.EventBus) *EventBridge
 }
 
 // Start begins forwarding events.
-// v4.0.0: Added protection against double-start and nil subscription.
-// v4.0.5: Fixed race condition by holding lock during subscription.
+// Holds the lock during subscription to prevent a race with Stop.
 func (eb *EventBridge) Start() error {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
@@ -65,8 +64,7 @@ func (eb *EventBridge) Start() error {
 }
 
 // Stop stops forwarding events.
-// v4.0.0: Added protection against double-stop.
-// v4.0.5: Added cleanup of lastProgress map to prevent memory leak.
+// Resets lastProgress map to prevent memory leak from accumulated throttle keys.
 func (eb *EventBridge) Stop() {
 	eb.mu.Lock()
 	if !eb.started {
@@ -75,7 +73,6 @@ func (eb *EventBridge) Stop() {
 		return
 	}
 	eb.started = false
-	// v4.0.5: Clear lastProgress map to free memory
 	eb.lastProgress = make(map[string]time.Time)
 	sub := eb.subscription // Capture subscription under lock
 	eb.mu.Unlock()
@@ -125,7 +122,7 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		runtime.EventsEmit(eb.ctx, "interlink:complete", completeEventToDTO(e))
 
 	case *events.TransferEvent:
-		// v4.0.0: Only throttle PROGRESS events - never throttle terminal states
+		// Only throttle PROGRESS events — never throttle terminal states
 		// (failed, completed, cancelled). These must always be delivered to UI.
 		isTerminalState := e.Type() == events.EventTransferFailed ||
 			e.Type() == events.EventTransferCompleted ||
@@ -136,26 +133,23 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		runtime.EventsEmit(eb.ctx, "interlink:transfer", transferEventToDTO(e))
 
 	case *events.EnumerationEvent:
-		// v4.0.8: Enumeration events for folder scan progress
 		// Don't throttle these - they're infrequent and important for UX
 		runtime.EventsEmit(eb.ctx, "interlink:enumeration", enumerationEventToDTO(e))
 
 	case *events.ScanProgressEvent:
-		// v4.0.8: Scan progress events for software/hardware catalog scanning
 		// Don't throttle - these are infrequent and important for UX
 		runtime.EventsEmit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
 
 	case *events.BatchProgressEvent:
-		// v4.7.7: Batch progress events for grouped transfer display
 		// No throttling needed — ticker already limits to 1/sec per batch
 		runtime.EventsEmit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
 
 	case *events.ConfigChangedEvent:
-		// v4.8.7: Forward credential changes so file browser can invalidate cache
+		// Forward credential changes so file browser can invalidate cache
 		runtime.EventsEmit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
 
 	case *events.ReportableErrorEvent:
-		// v4.8.7: Reportable error events for safe error reporting — NOT throttled
+		// Reportable error events for safe error reporting — NOT throttled
 		runtime.EventsEmit(eb.ctx, "interlink:reportable_error", reportableErrorEventToDTO(e))
 	}
 }
@@ -320,7 +314,7 @@ func transferEventToDTO(e *events.TransferEvent) TransferEventDTO {
 	return dto
 }
 
-// EnumerationEventDTO is the JSON-safe version of events.EnumerationEvent (v4.0.8).
+// EnumerationEventDTO is the JSON-safe version of events.EnumerationEvent.
 type EnumerationEventDTO struct {
 	Timestamp      string `json:"timestamp"`
 	ID             string `json:"id"`
@@ -331,10 +325,10 @@ type EnumerationEventDTO struct {
 	BytesFound     int64  `json:"bytesFound"`
 	IsComplete     bool   `json:"isComplete"`
 	Error          string `json:"error,omitempty"`
-	StatusMessage  string `json:"statusMessage,omitempty"` // v4.7.7: Human-readable status
-	Phase          string `json:"phase,omitempty"`          // v4.8.5: structured phase
-	FoldersTotal   int    `json:"foldersTotal"`             // v4.8.5: total folders to create
-	FoldersCreated int    `json:"foldersCreated"`           // v4.8.5: folders created so far
+	StatusMessage  string `json:"statusMessage,omitempty"`
+	Phase          string `json:"phase,omitempty"`
+	FoldersTotal   int    `json:"foldersTotal"`
+	FoldersCreated int    `json:"foldersCreated"`
 }
 
 func enumerationEventToDTO(e *events.EnumerationEvent) EnumerationEventDTO {
@@ -355,7 +349,7 @@ func enumerationEventToDTO(e *events.EnumerationEvent) EnumerationEventDTO {
 	}
 }
 
-// ScanProgressEventDTO is the JSON-safe version of events.ScanProgressEvent (v4.0.8).
+// ScanProgressEventDTO is the JSON-safe version of events.ScanProgressEvent.
 type ScanProgressEventDTO struct {
 	Timestamp  string `json:"timestamp"`
 	ScanType   string `json:"scanType"`   // "software" or "hardware"
@@ -378,7 +372,7 @@ func scanProgressEventToDTO(e *events.ScanProgressEvent) ScanProgressEventDTO {
 	}
 }
 
-// BatchProgressEventDTO is the JSON-safe version of events.BatchProgressEvent (v4.7.7).
+// BatchProgressEventDTO is the JSON-safe version of events.BatchProgressEvent.
 type BatchProgressEventDTO struct {
 	Timestamp       string  `json:"timestamp"`
 	BatchID         string  `json:"batchID"`
@@ -391,11 +385,11 @@ type BatchProgressEventDTO struct {
 	Failed          int     `json:"failed"`
 	Progress        float64 `json:"progress"`
 	Speed           float64 `json:"speed"`
-	TotalKnown      bool    `json:"totalKnown"`      // v4.8.0: True when scan complete
-	FilesPerSec     float64 `json:"filesPerSec"`     // v4.8.5: file completion rate
-	ETASeconds      float64 `json:"etaSeconds"`      // v4.8.5: estimated time remaining
-	DiscoveredTotal int     `json:"discoveredTotal"` // v4.8.5: files discovered by scan
-	DiscoveredBytes int64   `json:"discoveredBytes"` // v4.8.5: bytes discovered by scan
+	TotalKnown      bool    `json:"totalKnown"`
+	FilesPerSec     float64 `json:"filesPerSec"`
+	ETASeconds      float64 `json:"etaSeconds"`
+	DiscoveredTotal int     `json:"discoveredTotal"`
+	DiscoveredBytes int64   `json:"discoveredBytes"`
 }
 
 func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO {
@@ -419,7 +413,7 @@ func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO
 	}
 }
 
-// ConfigChangedEventDTO is the JSON-safe version of events.ConfigChangedEvent (v4.8.7).
+// ConfigChangedEventDTO is the JSON-safe version of events.ConfigChangedEvent.
 type ConfigChangedEventDTO struct {
 	Timestamp string `json:"timestamp"`
 	Source    string `json:"source"`
@@ -434,7 +428,7 @@ func configChangedEventToDTO(e *events.ConfigChangedEvent) ConfigChangedEventDTO
 	}
 }
 
-// ReportableErrorEventDTO is the JSON-safe version of events.ReportableErrorEvent (v4.8.7).
+// ReportableErrorEventDTO is the JSON-safe version of events.ReportableErrorEvent.
 type ReportableErrorEventDTO struct {
 	Timestamp    string                          `json:"timestamp"`
 	ErrorID      string                          `json:"errorID"`

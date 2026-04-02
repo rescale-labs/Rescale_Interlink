@@ -11,13 +11,12 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
-	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/logging"
-	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/transfer/scan"
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
@@ -38,11 +37,9 @@ type DownloadError struct {
 	Error    error
 }
 
-// DownloadFolderRecursive recursively downloads a folder and all its contents
-// Exported for GUI reuse
+// DownloadFolderRecursive recursively downloads a folder and all its contents.
+// Exported for GUI reuse.
 // folderName: optional name for the downloaded folder. If empty, uses folderID.
-// v4.8.1: Added resourceMgr parameter — must be created via CreateResourceManager()
-// at the command entrypoint, not constructed internally. Passing nil will panic.
 func DownloadFolderRecursive(
 	ctx context.Context,
 	folderID string,
@@ -128,13 +125,12 @@ func DownloadFolderRecursive(
 		initialFolderMode = FolderDownloadSkipOnce
 	}
 
-	// v4.8.1: Use shared ConflictResolvers instead of inline state machines
 	fileConflictResolver := NewDownloadConflictResolver(initialFileMode)
 	folderConflictResolver := NewFolderDownloadConflictResolver(initialFolderMode)
 
 	// Scan the remote folder structure with live progress
 	fmt.Println("📡 Scanning remote folder structure...")
-	allFolders, allFiles, err := ScanRemoteFolderRecursiveWithProgress(ctx, apiClient, folderID, "",
+	allFolders, allFiles, err := scan.ScanRemoteFolderRecursiveWithProgress(ctx, apiClient, folderID, "",
 		func(foldersFound, filesFound int, bytesFound int64) {
 			fmt.Fprintf(os.Stderr, "\r  Scanning: %d folders, %d files (%.1f MB)...",
 				foldersFound, filesFound, float64(bytesFound)/(1024*1024))
@@ -252,7 +248,6 @@ func DownloadFolderRecursive(
 	defer cancelDownload()
 	var cancelled atomic.Bool
 
-	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
 	if resourceMgr == nil {
 		panic("DownloadFolderRecursive: resourceMgr is required (use CreateResourceManager())")
 	}
@@ -326,7 +321,6 @@ func DownloadFolderRecursive(
 
 		fileBar := downloadUI.AddFileBar(item.idx+1, task.FileID, task.Name, localPath, task.Size)
 
-		// v4.8.1: Pass adaptive worker count for correct per-file thread allocation
 		transferHandle := cliTransferMgr.AllocateTransfer(task.Size, numWorkers)
 
 		err := download.DownloadFile(ctx, download.DownloadParams{
@@ -385,330 +379,21 @@ func DownloadFolderRecursive(
 	return result, nil
 }
 
-// RemoteFolderInfo represents a folder in the remote structure
-type RemoteFolderInfo struct {
-	FolderID     string
-	Name         string
-	RelativePath string
-}
-
-// RemoteFileTask represents a file to download
-type RemoteFileTask struct {
-	FileID       string
-	Name         string
-	RelativePath string
-	Size         int64
-	CloudFile    *models.CloudFile // v4.8.0: Pre-fetched full metadata (nil = fallback to GetFileInfo)
-}
-
-// folderDownloadWorkItem wraps RemoteFileTask with index for BatchExecutor.
+// folderDownloadWorkItem wraps scan.RemoteFileTask with index for BatchExecutor.
 // Implements transfer.WorkItem.
 type folderDownloadWorkItem struct {
 	idx  int
-	task RemoteFileTask
+	task scan.RemoteFileTask
 }
 
 // FileSize implements transfer.WorkItem.
 func (f folderDownloadWorkItem) FileSize() int64 { return f.task.Size }
 
-// ScanRemoteFolderRecursive recursively scans a remote folder structure
-// Exported for GUI reuse
-func ScanRemoteFolderRecursive(
-	ctx context.Context,
-	apiClient *api.Client,
-	folderID string,
-	relativePath string,
-) ([]RemoteFolderInfo, []RemoteFileTask, error) {
-	folders := make([]RemoteFolderInfo, 0)
-	files := make([]RemoteFileTask, 0)
-
-	// Get folder contents (all pages — critical for folders with >2000 items)
-	contents, err := apiClient.ListFolderContentsAll(ctx, folderID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list folder contents: %w", err)
-	}
-
-	// Process subfolders
-	for _, folder := range contents.Folders {
-		folderRelPath := filepath.Join(relativePath, folder.Name)
-		folders = append(folders, RemoteFolderInfo{
-			FolderID:     folder.ID,
-			Name:         folder.Name,
-			RelativePath: folderRelPath,
-		})
-
-		// Recursively scan subfolder
-		subFolders, subFiles, err := ScanRemoteFolderRecursive(ctx, apiClient, folder.ID, folderRelPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		folders = append(folders, subFolders...)
-		files = append(files, subFiles...)
-	}
-
-	// Process files
-	for _, file := range contents.Files {
-		// Validate filename from API to prevent path traversal
-		if err := validation.ValidateFilename(file.Name); err != nil {
-			return nil, nil, fmt.Errorf("invalid filename from API: %w", err)
-		}
-		fileRelPath := filepath.Join(relativePath, file.Name)
-		files = append(files, RemoteFileTask{
-			FileID:       file.ID,
-			Name:         file.Name,
-			RelativePath: fileRelPath,
-			Size:         file.DecryptedSize,
-			CloudFile:    file.ToCloudFile(), // v4.8.0: Pre-fetched metadata (nil if incomplete)
-		})
-	}
-
-	return folders, files, nil
-}
-
-// ScanRemoteFolderRecursiveWithProgress is like ScanRemoteFolderRecursive but calls
-// onProgress after each subfolder is scanned, enabling live scan feedback in CLI.
-// v4.8.0: Added for scan progress feedback (Phase 6).
-func ScanRemoteFolderRecursiveWithProgress(
-	ctx context.Context,
-	apiClient *api.Client,
-	folderID string,
-	relativePath string,
-	onProgress func(foldersFound, filesFound int, bytesFound int64),
-) ([]RemoteFolderInfo, []RemoteFileTask, error) {
-	return scanRemoteFolderRecursiveImpl(ctx, apiClient, folderID, relativePath, onProgress)
-}
-
-// scanRemoteFolderRecursiveImpl is the shared implementation for both scan variants.
-func scanRemoteFolderRecursiveImpl(
-	ctx context.Context,
-	apiClient *api.Client,
-	folderID string,
-	relativePath string,
-	onProgress func(foldersFound, filesFound int, bytesFound int64),
-) ([]RemoteFolderInfo, []RemoteFileTask, error) {
-	folders := make([]RemoteFolderInfo, 0)
-	files := make([]RemoteFileTask, 0)
-
-	contents, err := apiClient.ListFolderContentsAll(ctx, folderID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list folder contents: %w", err)
-	}
-
-	// Process subfolders
-	for _, folder := range contents.Folders {
-		folderRelPath := filepath.Join(relativePath, folder.Name)
-		folders = append(folders, RemoteFolderInfo{
-			FolderID:     folder.ID,
-			Name:         folder.Name,
-			RelativePath: folderRelPath,
-		})
-
-		subFolders, subFiles, err := scanRemoteFolderRecursiveImpl(ctx, apiClient, folder.ID, folderRelPath, onProgress)
-		if err != nil {
-			return nil, nil, err
-		}
-		folders = append(folders, subFolders...)
-		files = append(files, subFiles...)
-	}
-
-	// Process files
-	for _, file := range contents.Files {
-		if err := validation.ValidateFilename(file.Name); err != nil {
-			return nil, nil, fmt.Errorf("invalid filename from API: %w", err)
-		}
-		fileRelPath := filepath.Join(relativePath, file.Name)
-		files = append(files, RemoteFileTask{
-			FileID:       file.ID,
-			Name:         file.Name,
-			RelativePath: fileRelPath,
-			Size:         file.DecryptedSize,
-			CloudFile:    file.ToCloudFile(),
-		})
-	}
-
-	// Report progress after processing this folder
-	if onProgress != nil {
-		var totalBytes int64
-		for _, f := range files {
-			totalBytes += f.Size
-		}
-		onProgress(len(folders), len(files), totalBytes)
-	}
-
-	return folders, files, nil
-}
-
-// ScanEvent represents a single discovery from the streaming scanner.
-// v4.8.0: Used by ScanRemoteFolderStreaming for incremental file discovery.
-type ScanEvent struct {
-	Folder *RemoteFolderInfo // Non-nil for folder discovery
-	File   *RemoteFileTask  // Non-nil for file discovery
-}
-
-// ScanProgress reports cumulative scan progress.
-// v4.8.0: Used by streaming scanner progress callback.
-type ScanProgress struct {
-	FoldersFound int
-	FilesFound   int
-	BytesFound   int64
-}
-
-// ScanRemoteFolderStreaming scans a remote folder structure concurrently,
-// emitting files and folders as they are discovered rather than waiting for
-// the entire scan to complete. Downloads can begin within seconds.
-//
-// Returns a channel of ScanEvents (closed when scan completes) and an error channel.
-// The error channel receives at most one error, then is closed.
-// v4.8.0: Streaming scan architecture for immediate download start.
-func ScanRemoteFolderStreaming(
-	ctx context.Context,
-	apiClient *api.Client,
-	folderID string,
-	onProgress func(ScanProgress),
-) (<-chan ScanEvent, <-chan error) {
-	eventCh := make(chan ScanEvent, constants.DispatchChannelBuffer)
-	errCh := make(chan error, 1)
-
-	go func() {
-		defer close(eventCh)
-		defer close(errCh)
-
-		var progress ScanProgress
-		var mu sync.Mutex // protects progress
-
-		// Work queue for subfolder scanning
-		type scanWork struct {
-			folderID     string
-			relativePath string
-		}
-
-		workCh := make(chan scanWork, constants.DispatchChannelBuffer)
-		var wg sync.WaitGroup
-
-		// Seed with root folder
-		wg.Add(1)
-		workCh <- scanWork{folderID: folderID, relativePath: ""}
-
-		// Bounded subfolder workers (8 concurrent scanners)
-		const numScanWorkers = 8
-		scanErrOnce := sync.Once{}
-
-		for i := 0; i < numScanWorkers; i++ {
-			go func() {
-				for work := range workCh {
-					// Check for cancellation
-					select {
-					case <-ctx.Done():
-						wg.Done()
-						continue
-					default:
-					}
-
-					// v4.8.2: Stream pages — emit files/folders as each API page arrives
-					// instead of waiting for the entire folder to be enumerated.
-					err := apiClient.ListFolderContentsStreaming(ctx, work.folderID,
-						func(folders []api.FolderInfo, files []api.FileInfo) error {
-							// Emit folders first (so parent dirs can be created before files)
-							for _, folder := range folders {
-								// v4.8.7 RF1: Defense-in-depth — validate folder names from API
-								if err := validation.ValidateFilename(folder.Name); err != nil {
-									continue
-								}
-								folderRelPath := filepath.Join(work.relativePath, folder.Name)
-								info := RemoteFolderInfo{
-									FolderID:     folder.ID,
-									Name:         folder.Name,
-									RelativePath: folderRelPath,
-								}
-
-								select {
-								case eventCh <- ScanEvent{Folder: &info}:
-								case <-ctx.Done():
-									return ctx.Err()
-								}
-
-								mu.Lock()
-								progress.FoldersFound++
-								mu.Unlock()
-
-								// Enqueue subfolder for scanning
-								wg.Add(1)
-								select {
-								case workCh <- scanWork{folderID: folder.ID, relativePath: folderRelPath}:
-								case <-ctx.Done():
-									wg.Add(-1) // Undo the Add since we won't process it
-									return ctx.Err()
-								}
-							}
-
-							// Emit files
-							for _, file := range files {
-								if err := validation.ValidateFilename(file.Name); err != nil {
-									continue // Skip invalid filenames
-								}
-								fileRelPath := filepath.Join(work.relativePath, file.Name)
-								task := RemoteFileTask{
-									FileID:       file.ID,
-									Name:         file.Name,
-									RelativePath: fileRelPath,
-									Size:         file.DecryptedSize,
-									CloudFile:    file.ToCloudFile(),
-								}
-
-								select {
-								case eventCh <- ScanEvent{File: &task}:
-								case <-ctx.Done():
-									return ctx.Err()
-								}
-
-								mu.Lock()
-								progress.FilesFound++
-								progress.BytesFound += file.DecryptedSize
-								mu.Unlock()
-							}
-
-							return nil
-						},
-					)
-					if err != nil {
-						// v4.8.2: Don't report context cancellation as a scan error — it's a clean cancel
-						if ctx.Err() != nil {
-							wg.Done()
-							continue
-						}
-						scanErrOnce.Do(func() {
-							errCh <- fmt.Errorf("failed to list folder %s: %w", work.folderID, err)
-						})
-						wg.Done()
-						continue
-					}
-
-					// Report progress after this folder
-					if onProgress != nil {
-						mu.Lock()
-						p := progress
-						mu.Unlock()
-						onProgress(p)
-					}
-
-					wg.Done()
-				}
-			}()
-		}
-
-		// Wait for all folder scanning to complete, then close work channel
-		wg.Wait()
-		close(workCh)
-	}()
-
-	return eventCh, errCh
-}
-
 // performDryRunAnalysis analyzes what would happen during download without actually downloading
 func performDryRunAnalysis(
 	rootOutputDir string,
-	allFolders []RemoteFolderInfo,
-	allFiles []RemoteFileTask,
+	allFolders []scan.RemoteFolderInfo,
+	allFiles []scan.RemoteFileTask,
 	overwriteAll bool,
 	skipAll bool,
 	mergeAll bool,

@@ -27,7 +27,7 @@ import (
 )
 
 // Windows process creation flag to hide console window.
-// v4.3.9: Required for subprocess mode to not show a blank console.
+// Required for subprocess mode to not show a blank console.
 const createNoWindow = 0x08000000
 
 // DaemonStatusDTO represents the daemon status for the frontend.
@@ -69,10 +69,8 @@ type DaemonStatusDTO struct {
 	ManagedBy string `json:"managedBy,omitempty"`
 
 	// ServiceMode indicates if daemon is running as Windows Service (true) or subprocess (false)
-	// v4.5.2: Added for GUI to detect mode via IPC when SCM is inaccessible
 	ServiceMode bool `json:"serviceMode"`
 
-	// v4.5.6: User-specific status fields
 	// UserConfigured indicates if this user has daemon.conf with enabled=true
 	UserConfigured bool `json:"userConfigured"`
 
@@ -84,18 +82,16 @@ type DaemonStatusDTO struct {
 }
 
 // GetDaemonStatus returns the current daemon status.
-// v4.3.7: Primary check is IPC (works for both subprocess and service modes).
+// Primary check is IPC (works for both subprocess and service modes).
 // SCM queries are skipped by default since they require admin privileges.
-// v4.3.1: Version always uses version.Version for consistency.
-// v4.5.6: Added user-specific status fields (UserConfigured, UserState, UserRegistered).
 func (a *App) GetDaemonStatus() DaemonStatusDTO {
 	result := DaemonStatusDTO{
 		State:     "stopped",
-		UserState: "not_configured", // v4.5.6: Default user state
-		Version:   version.Version,  // v4.3.1: Always show current version
+		UserState: "not_configured",
+		Version:   version.Version,
 	}
 
-	// v4.5.6: Check if daemon.conf exists and is enabled for current user
+	// Check if daemon.conf exists and is enabled for current user
 	configPath, _ := config.DefaultDaemonConfigPath()
 	if _, err := os.Stat(configPath); err == nil {
 		// Config file exists - check if enabled
@@ -104,8 +100,8 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		}
 	}
 
-	// v4.3.7: Primary method - check via IPC (works without admin)
-	// If daemon is running (as subprocess or service), IPC will respond
+	// Primary method - check via IPC (works without admin).
+	// If daemon is running (as subprocess or service), IPC will respond.
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
 
@@ -114,18 +110,15 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		result.IPCConnected = true
 		result.Running = true
 		result.State = status.ServiceState
-		// v4.3.1: Keep showing version.Version, not IPC version (which may be stale)
+		// Keep showing version.Version, not IPC version (which may be stale)
 		result.Uptime = status.Uptime
 		result.ActiveDownloads = status.ActiveDownloads
-		// v4.5.2: Propagate ServiceMode from IPC status
 		result.ServiceMode = status.ServiceMode
 
 		if status.LastScanTime != nil {
 			result.LastScan = status.LastScanTime.Format(time.RFC3339)
 		}
 
-		// v4.5.5: Get CURRENT user's status, not first user
-		// v4.5.6: Also track if user is registered with service
 		currentSID := getCurrentUserSID()
 		currentUsername := os.Getenv("USERNAME")
 		if users, err := client.GetUserList(ctx); err == nil {
@@ -133,10 +126,10 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 				if user.SID == currentSID || matchesWindowsUsername(user.Username, currentUsername) {
 					result.JobsDownloaded = user.JobsDownloaded
 					result.DownloadFolder = user.DownloadFolder
-					result.State = user.State // v4.5.5: Use USER's state, not service state
+					result.State = user.State // Use user's state, not service state
 					result.UserRegistered = true
-					result.UserState = user.State // v4.5.6: User-specific state
-					// v4.7.6: Propagate real error from daemon (e.g., "No API key configured")
+					result.UserState = user.State
+					// Propagate real error from daemon (e.g., "No API key configured")
 					if user.LastError != "" {
 						result.Error = user.LastError
 					}
@@ -155,7 +148,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 			}
 		}
 
-		// v4.5.6: Determine user state based on configuration + registration
+		// Determine user state based on configuration + registration
 		if !result.UserConfigured {
 			result.UserState = "not_configured"
 		} else if !result.UserRegistered {
@@ -163,8 +156,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		}
 		// Otherwise use the state from IPC (running/paused/stopped)
 
-		// v4.3.9: Only set ManagedBy for actual Windows Service mode
-		// v4.5.2: Use IPC ServiceMode flag as primary indicator
 		if status.ServiceMode {
 			result.ManagedBy = "Windows Service"
 		}
@@ -173,7 +164,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		return result
 	}
 
-	// v4.5.0: Better status when service running but IPC fails
 	// Check Windows Service status for better error messaging
 	if service.IsInstalled() {
 		if svcStatus, err := service.QueryStatus(); err == nil {
@@ -182,9 +172,8 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 				result.ManagedBy = "Windows Service"
 				result.Running = true       // Service IS running
 				result.State = "running"
-				result.IPCConnected = false // v4.5.0: Explicit IPC status
+				result.IPCConnected = false
 				result.Error = "Service running but IPC not responding - may be initializing"
-				// v4.5.6: User state when service is running but IPC fails
 				if result.UserConfigured {
 					result.UserState = "pending" // Config exists, service running, but can't confirm registration
 				}
@@ -203,25 +192,20 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 }
 
 // StartDaemon starts the daemon as a subprocess (no admin required).
-// v4.3.7: Uses subprocess mode by default instead of Windows Service (which requires admin).
-// v4.3.8: Added startup logging with clear log path in error messages.
-// v4.4.2: Uses centralized LogDirectory() for consistent log location.
-// v4.5.0: Blocks subprocess spawn if Windows Service is installed.
-// v4.5.5: Uses unified detection instead of raw IsInstalled() - only blocks when running.
-// Similar to tray's startService() in tray_windows.go.
+// Uses subprocess mode by default instead of Windows Service (which requires admin).
+// Blocks subprocess spawn if Windows Service is already running.
 func (a *App) StartDaemon() error {
-	// v4.7.6: Ensure token file exists before daemon starts (Phase 0b)
+	// Ensure token file exists before daemon starts
 	if err := a.ensureTokenPersisted(); err != nil {
 		a.logWarn("Daemon", fmt.Sprintf("Token persistence warning: %v", err))
 	}
 
-	// v4.7.6: Pre-check API key availability (Phase 3a)
+	// Pre-check API key availability
 	apiKey := config.ResolveAPIKeyForCurrentUser("")
 	if apiKey == "" {
 		return fmt.Errorf("cannot start daemon: no API key configured. Set your API key in Connection settings and test the connection first")
 	}
 
-	// v4.5.5: Use unified detection instead of raw IsInstalled()
 	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
 		return errors.New(reason)
 	}
@@ -235,8 +219,6 @@ func (a *App) StartDaemon() error {
 		return fmt.Errorf("daemon is already running")
 	}
 
-	// v4.3.8: Log startup log path for user reference
-	// v4.4.2: Use centralized log directory
 	logsDir := config.LogDirectory()
 	a.logInfo("Daemon", fmt.Sprintf("Starting daemon subprocess (logs: %s)", logsDir))
 
@@ -259,7 +241,7 @@ func (a *App) StartDaemon() error {
 		}
 	}
 
-	// v4.7.6: Read daemon-stderr for actual error message instead of generic timeout
+	// Read daemon-stderr for actual error message instead of generic timeout
 	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
 	errDetail := ""
 	if stderrData, readErr := os.ReadFile(stderrPath); readErr == nil && len(stderrData) > 0 {
@@ -283,8 +265,6 @@ func (a *App) StartDaemon() error {
 }
 
 // startDaemonSubprocess launches the daemon as a detached subprocess.
-// v4.3.7: Based on tray's startService() in tray_windows.go:242-321.
-// v4.3.8: Added startup logging, stderr capture, and SysProcAttr for proper detachment.
 func (a *App) startDaemonSubprocess() error {
 	// Find rescale-int.exe in the same directory as the GUI
 	exePath, err := os.Executable()
@@ -314,23 +294,21 @@ func (a *App) startDaemonSubprocess() error {
 		downloadDir = config.DefaultDownloadFolder()
 	}
 
-	// v4.4.3: Use shared path resolution logic for consistent behavior
-	// This handles Windows junction points (e.g., Downloads -> Z:\Downloads on Rescale VMs)
-	// The subprocess may not have access to the same drive mappings
+	// Resolve junction points (e.g., Downloads -> Z:\Downloads on Rescale VMs).
+	// The subprocess may not have access to the same drive mappings.
 	if resolved, err := pathutil.ResolveAbsolutePath(downloadDir); err == nil {
 		downloadDir = resolved
 	}
 
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
-	// v4.5.8: Add persistent log file for daemon subprocess
 	daemonLogPath := filepath.Join(config.LogDirectory(), "daemon.log")
 
 	// Build command arguments
 	args := []string{"daemon", "run", "--ipc",
 		"--download-dir", downloadDir,
 		"--poll-interval", pollInterval,
-		"--log-file", daemonLogPath, // v4.5.8: persistent daemon logging
+		"--log-file", daemonLogPath,
 	}
 
 	// Add filter flags if configured
@@ -347,14 +325,11 @@ func (a *App) startDaemonSubprocess() error {
 		args = append(args, "--max-concurrent", fmt.Sprintf("%d", daemonCfg.Daemon.MaxConcurrent))
 	}
 
-	// v4.3.8: Log startup attempt to help diagnose launch failures
 	daemon.WriteStartupLog("=== GUI STARTUP ATTEMPT ===")
 	daemon.WriteStartupLog("CLI path: %s", cliPath)
 	daemon.WriteStartupLog("Arguments: %v", args)
 
-	// v4.3.8: Create stderr capture file for subprocess diagnostics
-	// v4.4.2: Use centralized log directory
-	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
+	// Create stderr capture file for subprocess diagnostics (0700 to restrict access)
 	logsDir := config.LogDirectory()
 	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
@@ -368,7 +343,6 @@ func (a *App) startDaemonSubprocess() error {
 	// Start daemon with IPC enabled
 	cmd := exec.Command(cliPath, args...)
 
-	// v4.3.9: Windows process flags for proper subprocess detachment + hidden console
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | createNoWindow,
 	}
@@ -406,7 +380,7 @@ func (a *App) startDaemonSubprocess() error {
 }
 
 // StopDaemon stops the daemon via IPC shutdown command.
-// v4.3.7: Uses IPC to stop daemon (works for both subprocess and service modes, no admin required).
+// Uses IPC (works for both subprocess and service modes, no admin required).
 func (a *App) StopDaemon() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -437,7 +411,6 @@ func (a *App) StopDaemon() error {
 }
 
 // TriggerDaemonScan triggers an immediate job scan via IPC.
-// v4.5.5: Uses "current" user ID to route to current user in service mode.
 func (a *App) TriggerDaemonScan() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -448,7 +421,7 @@ func (a *App) TriggerDaemonScan() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	// v4.5.5: Use "current" to route to current user (server infers from caller SID)
+	// "current" routes to calling user (server infers from caller SID)
 	if err := client.TriggerScan(ctx, "current"); err != nil {
 		return fmt.Errorf("failed to trigger scan: %w", err)
 	}
@@ -458,7 +431,6 @@ func (a *App) TriggerDaemonScan() error {
 }
 
 // PauseDaemon pauses the daemon's auto-download polling via IPC.
-// v4.5.5: Uses "current" user ID to route to current user in service mode.
 func (a *App) PauseDaemon() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -469,7 +441,7 @@ func (a *App) PauseDaemon() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	// v4.5.5: Use "current" to route to current user (server infers from caller SID)
+	// "current" routes to calling user (server infers from caller SID)
 	if err := client.PauseUser(ctx, "current"); err != nil {
 		return fmt.Errorf("failed to pause daemon: %w", err)
 	}
@@ -479,7 +451,6 @@ func (a *App) PauseDaemon() error {
 }
 
 // ResumeDaemon resumes the daemon's auto-download polling via IPC.
-// v4.5.5: Uses "current" user ID to route to current user in service mode.
 func (a *App) ResumeDaemon() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -490,7 +461,7 @@ func (a *App) ResumeDaemon() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	// v4.5.5: Use "current" to route to current user (server infers from caller SID)
+	// "current" routes to calling user (server infers from caller SID)
 	if err := client.ResumeUser(ctx, "current"); err != nil {
 		return fmt.Errorf("failed to resume daemon: %w", err)
 	}
@@ -500,8 +471,8 @@ func (a *App) ResumeDaemon() error {
 }
 
 // TriggerProfileRescan asks the daemon to re-enumerate user profiles.
-// v4.5.6: Called after saving daemon.conf so service picks up new users.
-// Uses existing TriggerScan("all") path - no new IPC message type needed.
+// Called after saving daemon.conf so the service picks up new users.
+// Uses existing TriggerScan("all") path.
 func (a *App) TriggerProfileRescan() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -512,7 +483,7 @@ func (a *App) TriggerProfileRescan() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	// v4.5.6: Use "all" to trigger profile rescan (existing behavior)
+	// "all" triggers profile rescan across all users
 	if err := client.TriggerScan(ctx, "all"); err != nil {
 		return fmt.Errorf("failed to trigger profile rescan: %w", err)
 	}
@@ -522,7 +493,6 @@ func (a *App) TriggerProfileRescan() error {
 }
 
 // ReloadConfigResultDTO represents the result of a config reload request from the frontend.
-// v4.7.6: Used for GUI to know if config was applied or deferred.
 type ReloadConfigResultDTO struct {
 	Applied         bool   `json:"applied"`
 	Deferred        bool   `json:"deferred"`
@@ -531,7 +501,6 @@ type ReloadConfigResultDTO struct {
 }
 
 // ReloadDaemonConfig notifies the running daemon to reload its configuration.
-// v4.7.6: Called after SaveDaemonConfig to propagate changes.
 func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 	result := ReloadConfigResultDTO{}
 
@@ -581,7 +550,6 @@ func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 }
 
 // PreFlightResultDTO represents the result of auto-download pre-flight checks.
-// v4.7.6: Used by GUI before enabling auto-download.
 type PreFlightResultDTO struct {
 	APIKeyOK    bool   `json:"apiKeyOk"`
 	FolderOK    bool   `json:"folderOk"`
@@ -590,7 +558,7 @@ type PreFlightResultDTO struct {
 }
 
 // ValidateAutoDownloadPreFlight checks prerequisites before enabling auto-download.
-// v4.7.6: Only checks API key and folder (not service/IPC — user may configure first).
+// Only checks API key and folder (not service/IPC -- user may configure first).
 func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResultDTO {
 	result := PreFlightResultDTO{}
 
@@ -622,8 +590,6 @@ func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResu
 }
 
 // DaemonConfigDTO represents the daemon configuration for the frontend.
-// v4.2.0: Used for reading/writing daemon.conf from the GUI.
-// v4.3.0: Simplified - mode is per-job, only AutoDownloadTag configurable.
 type DaemonConfigDTO struct {
 	// Daemon core settings
 	Enabled             bool   `json:"enabled"`
@@ -638,8 +604,7 @@ type DaemonConfigDTO struct {
 	NameContains string `json:"nameContains"`
 	Exclude      string `json:"exclude"` // Comma-separated
 
-	// Eligibility
-	// v4.3.0: Simplified - mode is now per-job via custom field, not global
+	// Eligibility — mode is per-job via custom field, not global
 	AutoDownloadTag string `json:"autoDownloadTag"` // Tag for "Conditional" jobs
 
 	// Notifications
@@ -652,7 +617,6 @@ type DaemonConfigDTO struct {
 }
 
 // GetDaemonConfig returns the current daemon configuration.
-// v4.2.0: Reads from daemon.conf instead of apiconfig.
 func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	result := DaemonConfigDTO{}
 
@@ -679,7 +643,6 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	result.NameContains = cfg.Filters.NameContains
 	result.Exclude = cfg.Filters.Exclude
 
-	// v4.3.0: Simplified - only AutoDownloadTag is configurable
 	result.AutoDownloadTag = cfg.Eligibility.AutoDownloadTag
 
 	result.NotificationsEnabled = cfg.Notifications.Enabled
@@ -690,7 +653,6 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 }
 
 // SaveDaemonConfig saves daemon configuration to daemon.conf.
-// v4.2.0: Writes to daemon.conf.
 func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	// Load existing config to preserve any fields not in DTO
 	cfg, err := config.LoadDaemonConfig("")
@@ -710,7 +672,6 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	cfg.Filters.NameContains = dto.NameContains
 	cfg.Filters.Exclude = dto.Exclude
 
-	// v4.3.0: Simplified - only AutoDownloadTag is configurable
 	cfg.Eligibility.AutoDownloadTag = dto.AutoDownloadTag
 
 	cfg.Notifications.Enabled = dto.NotificationsEnabled
@@ -737,7 +698,6 @@ func (a *App) GetDefaultDownloadFolder() string {
 }
 
 // TestAutoDownloadConnection tests API connectivity and folder access for auto-download.
-// v4.3.1: Moved from config_bindings.go as part of config unification.
 func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 	go func() {
 		result := struct {
@@ -768,7 +728,6 @@ func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 		}
 
 		// Test folder access
-		// v4.5.8: Resolve junction points before testing folder access
 		if downloadFolder != "" {
 			if resolvedFolder, resolveErr := pathutil.ResolveAbsolutePath(downloadFolder); resolveErr == nil && resolvedFolder != "" {
 				downloadFolder = resolvedFolder
@@ -781,7 +740,7 @@ func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 					result.FolderOK = true
 				}
 			} else if err != nil {
-				// v4.5.8: Check if this is a mount-point / reparse-point error
+				// Check if this is a mount-point / reparse-point error
 				errStr := err.Error()
 				if strings.Contains(errStr, "mount point") || strings.Contains(errStr, "reparse point") ||
 					strings.Contains(errStr, "untrusted") {
@@ -809,7 +768,6 @@ func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 }
 
 // AutoDownloadValidationDTO represents the result of validating auto-download setup.
-// v4.2.1: Added for workspace custom fields validation
 type AutoDownloadValidationDTO struct {
 	CustomFieldsEnabled      bool     `json:"customFieldsEnabled"`
 	HasAutoDownloadField     bool     `json:"hasAutoDownloadField"`
@@ -822,7 +780,6 @@ type AutoDownloadValidationDTO struct {
 }
 
 // ValidateAutoDownloadSetup checks if the workspace has the required custom fields.
-// v4.2.1: Added for GUI auto-download setup validation
 func (a *App) ValidateAutoDownloadSetup() AutoDownloadValidationDTO {
 	result := AutoDownloadValidationDTO{
 		AvailableValues: []string{},
@@ -900,7 +857,6 @@ func (a *App) InstallService() error {
 }
 
 // InstallServiceElevated triggers UAC prompt to install Windows Service.
-// v4.5.8: Replaces non-elevated InstallService() as the primary install path.
 // The elevated CLI process handles SCM registration and sets HKLM registry marker.
 func (a *App) InstallServiceElevated() ElevatedServiceResultDTO {
 	a.logInfo("Service", "Installing Windows Service with UAC elevation...")
@@ -918,7 +874,6 @@ func (a *App) InstallServiceElevated() ElevatedServiceResultDTO {
 }
 
 // UninstallServiceElevated triggers UAC prompt to uninstall Windows Service.
-// v4.5.8: Added for GUI to cleanly remove the service before MSI uninstall.
 // The elevated CLI process handles SCM removal and clears HKLM registry marker.
 func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
 	a.logInfo("Service", "Uninstalling Windows Service with UAC elevation...")
@@ -936,7 +891,7 @@ func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
 }
 
 // =============================================================================
-// File Logging Settings (v4.3.2)
+// File Logging Settings
 // =============================================================================
 
 // FileLoggingSettingsDTO represents file logging configuration.
@@ -947,7 +902,6 @@ type FileLoggingSettingsDTO struct {
 }
 
 // GetFileLoggingSettings returns the current file logging configuration.
-// v4.3.2: Cross-platform file logging support.
 func (a *App) GetFileLoggingSettings() FileLoggingSettingsDTO {
 	return FileLoggingSettingsDTO{
 		Enabled:  IsFileLoggingEnabled(),
@@ -956,7 +910,6 @@ func (a *App) GetFileLoggingSettings() FileLoggingSettingsDTO {
 }
 
 // SetFileLoggingEnabled enables or disables file logging.
-// v4.3.2: User can toggle file logging from GUI settings.
 func (a *App) SetFileLoggingEnabled(enabled bool) error {
 	if err := EnableFileLogging(enabled); err != nil {
 		return fmt.Errorf("failed to set file logging: %w", err)
@@ -970,17 +923,15 @@ func (a *App) SetFileLoggingEnabled(enabled bool) error {
 }
 
 // GetLogFileLocation returns the current log file path (if logging to file).
-// v4.3.2: For displaying log file location in UI.
 func (a *App) GetLogFileLocation() string {
 	return GetLogFilePath()
 }
 
 // =============================================================================
-// Daemon Transfer Visibility (v4.7.8)
+// Daemon Transfer Visibility
 // =============================================================================
 
 // DaemonBatchStatusDTO represents a daemon auto-download batch for the frontend.
-// v4.7.8: Read-only visibility into daemon downloads.
 // NOTE: Duplicated here for Windows build (mutually exclusive with daemon_bindings.go).
 type DaemonBatchStatusDTO struct {
 	BatchID     string  `json:"batchID"`
@@ -997,7 +948,6 @@ type DaemonBatchStatusDTO struct {
 }
 
 // GetDaemonTransfers retrieves daemon auto-download batch status via IPC.
-// v4.7.8: Called by frontend to display daemon downloads in Transfers tab.
 func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
 	if daemon.IsDaemonRunning() == 0 {
 		return nil
@@ -1038,7 +988,7 @@ func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
 }
 
 // =============================================================================
-// Daemon Log Retrieval (v4.3.2)
+// Daemon Log Retrieval
 // =============================================================================
 
 // DaemonLogEntryDTO represents a log entry from the daemon.
@@ -1051,8 +1001,7 @@ type DaemonLogEntryDTO struct {
 	Fields    map[string]interface{} `json:"fields,omitempty"`
 }
 
-// GetDaemonLogs retrieves recent log entries from the running daemon.
-// v4.3.2: Fetches logs via IPC for display in Activity tab.
+// GetDaemonLogs retrieves recent log entries from the running daemon via IPC.
 func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 	// Check if service is running
 	status := a.GetDaemonStatus()
@@ -1086,12 +1035,10 @@ func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
 }
 
 // =============================================================================
-// Logs Directory Access (v4.4.2)
+// Logs Directory Access
 // =============================================================================
 
 // OpenLogsDirectory opens the logs folder in the system file explorer.
-// v4.4.2: Added for GUI access to unified log directory.
-// v4.5.1: Uses 0700 permissions to restrict log access to owner only.
 func (a *App) OpenLogsDirectory() error {
 	logsDir := config.LogDirectory()
 
@@ -1109,36 +1056,31 @@ func (a *App) OpenLogsDirectory() error {
 }
 
 // GetLogsDirectory returns the unified logs directory path.
-// v4.4.2: For displaying log location in UI.
 func (a *App) GetLogsDirectory() string {
 	return config.LogDirectory()
 }
 
 // =============================================================================
-// UAC-Elevated Service Control (v4.5.1)
+// UAC-Elevated Service Control
 // =============================================================================
 
 // ElevatedServiceResultDTO represents the result of an elevated service operation.
-// v4.5.1: Used for GUI to communicate UAC elevation results.
 type ElevatedServiceResultDTO struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
 }
 
 // ServiceStatusDTO represents detailed Windows Service status.
-// v4.5.1: Used for GUI to show service status independently of IPC.
-// v4.5.2: Added SCMBlocked/SCMError for IPC fallback when SCM access is denied.
 type ServiceStatusDTO struct {
 	Installed  bool   `json:"installed"`
 	Running    bool   `json:"running"`
 	Status     string `json:"status"`     // "Stopped", "Running", "Start Pending", etc.
-	SCMBlocked bool   `json:"scmBlocked"` // v4.5.2: True if SCM access denied
-	SCMError   string `json:"scmError"`   // v4.5.2: Error message for debugging
+	SCMBlocked bool   `json:"scmBlocked"` // True if SCM access denied
+	SCMError   string `json:"scmError"`   // Error message for debugging
 }
 
 // GetServiceStatus returns detailed Windows Service status.
-// v4.5.1: Always derives Installed explicitly from service.IsInstalled().
-// v4.5.2: Falls back to IPC ServiceMode when SCM access is blocked.
+// Falls back to IPC ServiceMode when SCM access is blocked.
 // NOTE: Do NOT infer installed from QueryStatus() because it returns "Stopped"
 // even when the service is not installed.
 func (a *App) GetServiceStatus() ServiceStatusDTO {
@@ -1150,7 +1092,7 @@ func (a *App) GetServiceStatus() ServiceStatusDTO {
 		client.SetTimeout(2 * time.Second)
 		ctx := context.Background()
 		if status, err := client.GetStatus(ctx); err == nil {
-			// Use ServiceMode (added in v4.5.2) to detect Windows Service
+			// Use ServiceMode flag to detect Windows Service
 			if status.ServiceMode {
 				return ServiceStatusDTO{
 					Installed:  true,  // Inferred from IPC ServiceMode flag
@@ -1196,9 +1138,7 @@ func (a *App) GetServiceStatus() ServiceStatusDTO {
 }
 
 // StartServiceElevated triggers UAC prompt to start Windows Service.
-// v4.5.1: Returns immediately after UAC approved (poll GetServiceStatus to confirm).
-// v4.5.8: Removed IsInstalled() pre-check that blocked elevation on restricted VMs
-// where SCM access is denied. The elevated process reports errors properly.
+// Returns immediately after UAC approved (poll GetServiceStatus to confirm).
 func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
 	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
 	// The elevated "rescale-int service start" will report errors properly.
@@ -1218,9 +1158,7 @@ func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
 }
 
 // StopServiceElevated triggers UAC prompt to stop Windows Service.
-// v4.5.1: Returns immediately after UAC approved (poll GetServiceStatus to confirm).
-// v4.5.8: Removed IsInstalled() pre-check that blocked elevation on restricted VMs
-// where SCM access is denied. The elevated process reports errors properly.
+// Returns immediately after UAC approved (poll GetServiceStatus to confirm).
 func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
 	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
 	// The elevated "rescale-int service stop" will report errors properly.
@@ -1240,7 +1178,7 @@ func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
 }
 
 // InstallAndStartServiceElevated triggers UAC prompt to install + start Windows Service.
-// v4.7.6: Combined operation — single UAC prompt for both install and start.
+// Combined operation -- single UAC prompt for both install and start.
 func (a *App) InstallAndStartServiceElevated() ElevatedServiceResultDTO {
 	a.logInfo("Service", "Installing and starting Windows Service with UAC elevation...")
 
@@ -1279,7 +1217,6 @@ func matchesWindowsUsername(ipcUsername, guiUsername string) bool {
 }
 
 // getCurrentUserSID returns the SID of the current process owner.
-// v4.5.5: Used for per-user status routing in service mode.
 func getCurrentUserSID() string {
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {

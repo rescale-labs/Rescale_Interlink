@@ -24,11 +24,10 @@ type AppInfoDTO struct {
 	BuildTime    string           `json:"buildTime"`
 	FIPSEnabled  bool             `json:"fipsEnabled"`
 	FIPSStatus   string           `json:"fipsStatus"`
-	VersionCheck *VersionCheckDTO `json:"versionCheck,omitempty"` // v4.8.2: cached update check result
+	VersionCheck *VersionCheckDTO `json:"versionCheck,omitempty"`
 }
 
 // GetAppInfo returns version, build time, and FIPS status.
-// v4.8.2: Also includes cached version check result if available.
 func (a *App) GetAppInfo() AppInfoDTO {
 	info := AppInfoDTO{
 		Version:     cli.Version,
@@ -37,7 +36,7 @@ func (a *App) GetAppInfo() AppInfoDTO {
 		FIPSStatus:  cli.FIPSStatus(),
 	}
 
-	// v4.8.2: Include cached version check if available and not expired
+	// Include cached version check if available and not expired
 	versionCheckCache.mu.RLock()
 	if versionCheckCache.cacheValid {
 		cacheTTL := successCacheDuration
@@ -76,7 +75,7 @@ type ConfigDTO struct {
 	ValidationPattern string `json:"validationPattern"`
 	RunSubpath        string `json:"runSubpath"`
 	MaxRetries        int    `json:"maxRetries"`
-	DetailedLogging   bool   `json:"detailedLogging"` // v4.0.0: Toggle for timing/metrics in Activity tab
+	DetailedLogging   bool   `json:"detailedLogging"`
 }
 
 // GetConfig returns the current configuration.
@@ -84,7 +83,7 @@ func (a *App) GetConfig() ConfigDTO {
 	if a.config == nil {
 		return ConfigDTO{}
 	}
-	// v4.7.1: Normalize legacy "gz" to "gzip" for consistent frontend display
+	// Normalize legacy "gz" to "gzip" for consistent frontend display
 	compression := a.config.TarCompression
 	if compression == "gz" {
 		compression = "gzip"
@@ -115,7 +114,6 @@ func (a *App) GetConfig() ConfigDTO {
 }
 
 // UpdateConfig applies a complete configuration update.
-// v4.0.1: Now properly updates the engine's API client when API-related settings change.
 func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	wailsLogger.Info().Msg("UpdateConfig: ENTER")
 	if a.config == nil {
@@ -123,9 +121,7 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 		return nil
 	}
 
-	// v4.0.1: Track if API-related settings changed
-	// These affect the API client and require engine update
-	// v4.5.9: Added NoProxy to trigger API client refresh when bypass list changes
+	// Track if API-related settings changed — these affect the API client and require engine update
 	apiSettingsChanged := a.config.APIKey != cfg.APIKey ||
 		a.config.APIBaseURL != cfg.APIBaseURL ||
 		a.config.TenantURL != cfg.TenantURL ||
@@ -174,12 +170,12 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 		a.config.APIBaseURL = a.config.TenantURL
 	}
 
-	// v4.0.0: Update timing system when DetailedLogging changes
+	// Update timing system when DetailedLogging changes
 	cloud.SetDetailedLogging(cfg.DetailedLogging)
 
-	// v4.0.1: Update engine's API client when API-related settings change
-	// This fixes the bug where typing a new API key and clicking "Test Connection"
-	// would fail because the engine still had the old API client from startup.
+	// Update engine's API client when API-related settings change.
+	// Without this, typing a new API key and clicking "Test Connection" would fail
+	// because the engine still had the old API client from startup.
 	if apiSettingsChanged && a.engine != nil {
 		wailsLogger.Info().Msg("UpdateConfig: API settings changed, starting background engine update")
 		// Run in background to avoid blocking UI during proxy warmup
@@ -196,7 +192,6 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 }
 
 // SaveConfig saves to the default location.
-// v4.0.8: Also saves API key to token file for persistence.
 // The API key is saved separately from config.csv for security (0600 permissions on token file).
 func (a *App) SaveConfig() error {
 	if a.config == nil {
@@ -211,8 +206,7 @@ func (a *App) SaveConfig() error {
 		return err
 	}
 
-	// v4.0.8: Also save API key to token file if set
-	// This ensures the API key persists across restarts when user saves from GUI
+	// Save API key to token file so it persists across restarts
 	if a.config.APIKey != "" {
 		tokenPath := config.GetDefaultTokenPath()
 		a.logDebug("config", fmt.Sprintf("Saving API key to token file %s", tokenPath))
@@ -222,7 +216,7 @@ func (a *App) SaveConfig() error {
 		}
 		a.logInfo("config", "API key saved successfully")
 	} else {
-		// v4.8.8: User cleared the API key — remove persisted token file
+		// User cleared the API key — remove persisted token file
 		tokenPath := config.GetDefaultTokenPath()
 		if tokenPath != "" {
 			if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
@@ -238,7 +232,6 @@ func (a *App) SaveConfig() error {
 }
 
 // SaveConfigAs saves to a user-specified location (export).
-// v4.0.8: Added for exporting config to custom locations.
 func (a *App) SaveConfigAs(path string) error {
 	if a.config == nil {
 		return nil
@@ -250,7 +243,6 @@ func (a *App) SaveConfigAs(path string) error {
 }
 
 // GetDefaultConfigPath returns the default config file location.
-// v4.0.8: Exposed so UI can show where config will be saved.
 func (a *App) GetDefaultConfigPath() string {
 	return config.GetDefaultConfigPath()
 }
@@ -280,8 +272,8 @@ var testConnectionMu sync.Mutex
 var testConnectionInProgress bool
 
 // TestConnection tests API connectivity with a guaranteed 7-second timeout.
-// v4.0.8: Uses goroutine with hard select/time.After timeout to guarantee return.
-// Also prevents concurrent calls which can cause UI confusion.
+// Uses goroutine with hard select/time.After to guarantee return even if the
+// underlying HTTP request hangs. Prevents concurrent calls which cause UI confusion.
 func (a *App) TestConnection() ConnectionResultDTO {
 	a.logInfo("connection", "Testing API connection...")
 
@@ -322,11 +314,9 @@ func (a *App) TestConnection() ConnectionResultDTO {
 		}
 	}
 
-	// v4.5.1: Removed API key fragment from log for security (no value in logging partial keys)
 	a.logDebug("connection", "Testing API connection...")
 
 	// Copy config values we need - avoid race conditions with concurrent config updates
-	// v4.5.9: Added NoProxy so test connection respects bypass rules
 	configCopy := &config.Config{
 		APIBaseURL:    a.config.APIBaseURL,
 		APIKey:        a.config.APIKey,
@@ -385,7 +375,7 @@ func (a *App) TestConnection() ConnectionResultDTO {
 	case result := <-resultChan:
 		if result.Success {
 			a.logInfo("connection", fmt.Sprintf("Connected successfully - %s (%s)", result.Email, result.WorkspaceName))
-			// v4.0.8: Clear catalog cache when connection succeeds - user may have switched accounts
+			// Clear catalog cache when connection succeeds - user may have switched accounts
 			a.ClearCatalogCache()
 		} else {
 			a.logError("connection", fmt.Sprintf("Connection failed: %s", result.Error))
@@ -423,6 +413,5 @@ func (a *App) SaveFile(title string) (string, error) {
 // =============================================================================
 // Auto-Download Configuration
 // =============================================================================
-// v4.3.1: DEPRECATED - Auto-download config is now unified in daemon.conf
+// DEPRECATED - Auto-download config is now unified in daemon.conf.
 // Use GetDaemonConfig() and SaveDaemonConfig() from daemon_bindings.go instead.
-// The old apiconfig file is no longer used.

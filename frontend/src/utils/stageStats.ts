@@ -1,4 +1,3 @@
-// v4.7.3: Extracted from jobStore.ts (was duplicated at lines 666-681 and 786-799).
 // Computes per-stage completion stats from job rows.
 
 import type { JobRow, PipelineStageStats } from '../types/jobs'

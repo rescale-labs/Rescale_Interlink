@@ -1,5 +1,4 @@
 // Package transfer provides transfer queue management for uploads and downloads.
-// v3.6.3: Added task types and queue for GUI transfers tab.
 package transfer
 
 import (
@@ -41,9 +40,9 @@ type TransferTask struct {
 	Source      string // Local path (upload) or remote file ID (download)
 	Dest        string // Remote folder ID (upload) or local path (download)
 	Size        int64  // File size in bytes
-	SourceLabel string // v4.7.4: Origin context ("PUR", "SingleJob", "FileBrowser")
-	BatchID     string // v4.7.7: Groups related transfers for bulk display
-	BatchLabel  string // v4.7.7: Display name for the batch (folder name, etc.)
+	SourceLabel string // Origin context ("PUR", "SingleJob", "FileBrowser")
+	BatchID     string // Groups related transfers for bulk display
+	BatchLabel  string // Display name for the batch (folder name, etc.)
 
 	// State tracking
 	State    TaskState // Current state
@@ -55,7 +54,7 @@ type TransferTask struct {
 	lastBytes      int64     // Bytes transferred at last update
 	lastUpdateTime time.Time // Time of last update
 
-	// v4.8.5: Batch-level byte tracking
+	// Batch-level byte tracking
 	lastBatchBytes int64 // Bytes already counted toward batch total
 
 	// Timestamps
@@ -90,7 +89,6 @@ func NewTransferTask(taskType TaskType, name, source, dest string, size int64) *
 }
 
 // NewTransferTaskWithLabel creates a new transfer task with a source label.
-// v4.7.4: Added for transfer origin tracking (PUR, SingleJob, FileBrowser).
 func NewTransferTaskWithLabel(taskType TaskType, name, source, dest string, size int64, sourceLabel string) *TransferTask {
 	task := NewTransferTask(taskType, name, source, dest, size)
 	task.SourceLabel = sourceLabel

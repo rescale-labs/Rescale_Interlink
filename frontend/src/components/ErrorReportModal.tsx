@@ -1,4 +1,4 @@
-// v4.8.7: Error report modal for safe error reporting (Plan 3, 6A-6E).
+// Error report modal for safe error reporting.
 // Appears when a reportable error event is received. Offers "Copy to Clipboard"
 // and "Save Report" options with an optional user note.
 

@@ -166,7 +166,7 @@ func TestTransferTaskCanRetry(t *testing.T) {
 	}
 }
 
-// Queue tests - v3.6.3 observer pattern
+// Queue tests
 
 func TestNewQueue(t *testing.T) {
 	eventBus := events.NewEventBus(100)
@@ -466,9 +466,8 @@ func TestQueueClearCompleted(t *testing.T) {
 }
 
 // mockRetryExecutor implements RetryExecutor for testing.
-// v4.6.6: Added sync.Mutex to protect m.executed from data race — ExecuteRetry
-// is called from a goroutine in Queue.Retry, while the test reads m.executed
-// from the main goroutine.
+// Mutex protects m.executed from data race — ExecuteRetry is called from a
+// goroutine in Queue.Retry, while the test reads m.executed from the main goroutine.
 type mockRetryExecutor struct {
 	mu       sync.Mutex
 	executed []*TransferTask
@@ -529,7 +528,6 @@ func TestQueueRetry(t *testing.T) {
 		t.Error("Retry should return new task ID")
 	}
 
-	// v4.6.6: Replace time.Sleep with proper synchronization to avoid data race
 	if !executor.waitForExecutions(1, 5*time.Second) {
 		t.Fatal("Timed out waiting for retry execution")
 	}
@@ -703,7 +701,7 @@ func TestQueueSpeedCalculation(t *testing.T) {
 
 	// First update
 	queue.UpdateProgress(task.ID, 0.1)
-	time.Sleep(400 * time.Millisecond) // v3.6.3: Must be > 300ms for speed calculation threshold
+	time.Sleep(400 * time.Millisecond) // Must be > 300ms for speed calculation threshold
 
 	// Second update - should calculate speed
 	queue.UpdateProgress(task.ID, 0.2)
@@ -713,8 +711,6 @@ func TestQueueSpeedCalculation(t *testing.T) {
 		t.Error("Speed should be calculated after progress updates")
 	}
 }
-
-// v4.7.7: Batch grouping tests
 
 func TestTrackTransferWithBatch(t *testing.T) {
 	queue := NewQueue(nil)
@@ -828,7 +824,6 @@ func TestGetBatchTasksPaginated(t *testing.T) {
 	}
 }
 
-// v4.8.7: Test stateFilter parameter for status-based task filtering (10D).
 func TestGetBatchTasksWithStateFilter(t *testing.T) {
 	queue := NewQueue(nil)
 
@@ -880,7 +875,6 @@ func TestGetBatchTasksWithStateFilter(t *testing.T) {
 	}
 }
 
-// v4.8.7: 11C — Test "inprogress" and "queued" filter values
 func TestGetBatchTasksWithInProgressAndQueuedFilters(t *testing.T) {
 	queue := NewQueue(nil)
 
@@ -1121,8 +1115,6 @@ func TestBatchProgressTickerPublishes(t *testing.T) {
 	queue.Complete(task.ID)
 }
 
-// v4.8.2: PreRegisterBatch tests
-
 // TestPreRegisterBatch verifies the pre-registration mechanism:
 // 1. Pre-registered batch appears in GetAllBatchStats() with Total=0, TotalKnown=false
 // 2. After TrackTransferWithBatch, pre-registered entry is shadowed (still 1 batch)
@@ -1214,7 +1206,6 @@ func TestPreRegisterBatchNoTasksAfterCleanup(t *testing.T) {
 	}
 }
 
-// v4.8.7 RF4: Verify Cancel() now accepts queued tasks.
 func TestCancel_QueuedTask(t *testing.T) {
 	queue := NewQueue(nil)
 
@@ -1232,7 +1223,6 @@ func TestCancel_QueuedTask(t *testing.T) {
 	}
 }
 
-// v4.8.7 RF4: Verify CancelAll includes queued tasks.
 func TestCancelAll_IncludesQueuedTasks(t *testing.T) {
 	queue := NewQueue(nil)
 
@@ -1257,7 +1247,7 @@ func TestCancelAll_IncludesQueuedTasks(t *testing.T) {
 	}
 }
 
-// v4.8.7 RF4: Deterministic TOCTOU repro for CancelAll.
+// Deterministic TOCTOU repro for CancelAll.
 // CancelAll calls cancel functions in the gap between its two lock sections.
 // We install a cancel function that calls Complete(taskID) — this fires
 // exactly in that gap, deterministically reproducing the race.
@@ -1298,7 +1288,7 @@ func TestCancelAll_NoFalseCancelledEvent(t *testing.T) {
 	}
 }
 
-// v4.8.7 RF4: Same TOCTOU repro for CancelBatch.
+// Same TOCTOU repro for CancelBatch.
 func TestCancelBatch_NoFalseCancelledEvent(t *testing.T) {
 	eb := events.NewEventBus(100)
 	defer eb.Close()

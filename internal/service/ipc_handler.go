@@ -43,9 +43,9 @@ func (h *ServiceIPCHandler) GetStatus() *ipc.StatusData {
 	for _, s := range statuses {
 		if s.Running {
 			activeUsers++
-			activeDownloads += s.ActiveDownloads // v4.0.8: Aggregate from daemon stats
+			activeDownloads += s.ActiveDownloads
 
-			// v4.0.8: Track most recent scan time across all users
+			// Track most recent scan time across all users
 			if !s.LastScanTime.IsZero() {
 				if lastScanTime == nil || s.LastScanTime.After(*lastScanTime) {
 					scanTime := s.LastScanTime
@@ -66,7 +66,7 @@ func (h *ServiceIPCHandler) GetStatus() *ipc.StatusData {
 		ActiveUsers:     activeUsers,
 		LastError:       "",
 		Uptime:          uptime,
-		ServiceMode:     true, // v4.5.2: Running as Windows Service (multi-user mode)
+		ServiceMode:     true,
 	}
 }
 
@@ -80,12 +80,11 @@ func (h *ServiceIPCHandler) GetUserList() []ipc.UserStatus {
 		if s.Running {
 			state = "running"
 		} else if s.LastError != "" {
-			state = "error" // v4.7.6: Skipped user with known error
+			state = "error"
 		} else if !s.Enabled {
 			state = "disabled"
 		}
 
-		// v4.0.8: Populate all fields from daemon stats
 		var lastScanTime *time.Time
 		if !s.LastScanTime.IsZero() {
 			t := s.LastScanTime
@@ -94,12 +93,12 @@ func (h *ServiceIPCHandler) GetUserList() []ipc.UserStatus {
 
 		users = append(users, ipc.UserStatus{
 			Username:       s.Username,
-			SID:            s.SID,            // v4.0.8: Now populated
+			SID:            s.SID,
 			State:          state,
 			DownloadFolder: s.DownloadFolder,
-			LastScanTime:   lastScanTime,     // v4.0.8: Now populated
-			JobsDownloaded: s.JobsDownloaded, // v4.0.8: Now populated
-			LastError:      s.LastError,       // v4.7.6: Propagate skip reason (e.g., "No API key configured")
+			LastScanTime:   lastScanTime,
+			JobsDownloaded: s.JobsDownloaded,
+			LastError:      s.LastError,
 		})
 	}
 
@@ -136,10 +135,8 @@ func (h *ServiceIPCHandler) ResumeUser(userID string) error {
 }
 
 // TriggerScan triggers an immediate job scan.
-// v4.5.0: Routes to specific user if SID/username provided.
-// v4.5.2: Added INFO logging for visibility in Activity tab.
+// Routes to specific user if SID/username provided; "all" triggers a full rescan.
 func (h *ServiceIPCHandler) TriggerScan(userID string) error {
-	// v4.5.0: Route to specific user if identifier provided
 	if userID == "" || userID == "all" {
 		// Trigger a full rescan of all profiles
 		h.logger.Info().Msg("Scan triggered via IPC for all users")
@@ -152,11 +149,9 @@ func (h *ServiceIPCHandler) TriggerScan(userID string) error {
 }
 
 // OpenLogs returns the log location path for the user or service.
-// v4.0.7 H3: This method should NOT try to open explorer.exe from SYSTEM context,
+// This method should NOT try to open explorer.exe from SYSTEM context,
 // as it will silently fail (GUI apps don't display when run as SYSTEM).
 // The tray app handles "View Logs" locally via viewLogs() which runs in user context.
-// v4.5.8: Replaced hand-built path logic with centralized config.LogDirectory*() functions
-// to ensure path consistency across the application.
 func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 	var logsDir string
 
@@ -193,10 +188,9 @@ func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 		Str("logsDir", logsDir).
 		Msg("OpenLogs request received")
 
-	// v4.0.7 H3: Do NOT try to run explorer.exe from SYSTEM context.
-	// It won't show on the user's desktop. The tray app handles this locally.
+	// Do NOT try to run explorer.exe from SYSTEM context —
+	// it won't show on the user's desktop. The tray app handles this locally.
 	// Just ensure the directory exists and return success.
-	// v4.5.1: Uses 0700 permissions to restrict log access to owner only.
 	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		h.logger.Warn().Err(err).Str("dir", logsDir).Msg("Failed to create logs directory")
 		return fmt.Errorf("failed to create logs directory: %w", err)
@@ -206,7 +200,6 @@ func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 }
 
 // Shutdown gracefully stops the multi-user daemon service.
-// v4.3.9: Added to allow stopping daemon via IPC (enables GUI Stop button on Windows).
 func (h *ServiceIPCHandler) Shutdown() error {
 	h.logger.Info().Msg("IPC shutdown requested")
 	h.service.Stop()
@@ -214,7 +207,7 @@ func (h *ServiceIPCHandler) Shutdown() error {
 }
 
 // ReloadConfig handles config reload for service mode.
-// v4.7.6: Delegates to TriggerRescan() which detects config changes and restarts per-user daemons.
+// Delegates to TriggerRescan() which detects config changes and restarts per-user daemons.
 func (h *ServiceIPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	h.logger.Info().Str("user_id", userID).Msg("Config reload requested via IPC — triggering rescan")
 	h.service.TriggerRescan()
@@ -224,15 +217,12 @@ func (h *ServiceIPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 }
 
 // GetTransferStatus returns daemon transfer batch status for a specific user.
-// v4.7.8: Routes to per-user daemon via MultiUserService.
 func (h *ServiceIPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
 	return h.service.GetUserTransferStatus(userID), nil
 }
 
 // GetRecentLogs returns recent log entries from the daemon.
-// v4.5.0: Now routes to per-user logs based on userID (SID or username).
 func (h *ServiceIPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {
-	// v4.5.0: Return logs for the specified user
 	if logs := h.service.GetUserLogs(userID, count); logs != nil {
 		return logs
 	}

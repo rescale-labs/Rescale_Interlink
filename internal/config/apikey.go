@@ -43,7 +43,6 @@ func ResolveAPIKey(apiKey string, userProfilePath string) string {
 	}
 
 	// 2. Per-user token file (for service mode where default path resolves to SYSTEM)
-	// v4.7.6: Check user-specific token path first when userProfilePath is provided
 	if userProfilePath != "" {
 		userTokenPath := GetUserTokenPath(userProfilePath)
 		if key, err := ReadTokenFile(userTokenPath); err == nil && key != "" {
@@ -113,7 +112,6 @@ func ResolveAPIKeySource(apiKey string, userProfilePath string) (string, string)
 	}
 
 	// 2. Per-user token file (for service mode where default path resolves to SYSTEM)
-	// v4.7.6: Check user-specific token path first when userProfilePath is provided
 	if userProfilePath != "" {
 		userTokenPath := GetUserTokenPath(userProfilePath)
 		if key, err := ReadTokenFile(userTokenPath); err == nil && key != "" {
@@ -154,7 +152,6 @@ func GetUserTokenPath(userProfilePath string) string {
 		return ""
 	}
 	if runtime.GOOS == "windows" {
-		// v4.0.8: Use standard Windows AppData location
 		return filepath.Join(userProfilePath, "AppData", "Roaming", "Rescale", "Interlink", "token")
 	}
 	return filepath.Join(userProfilePath, ".config", ConfigDir, "token")

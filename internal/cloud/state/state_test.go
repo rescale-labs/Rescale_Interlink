@@ -9,7 +9,6 @@ import (
 )
 
 // TestUploadState_FilePermissions verifies that upload state files are created with secure permissions (0600).
-// v4.4.2: Security fix - state files contain encryption keys and must be owner-readable only.
 func TestUploadState_FilePermissions(t *testing.T) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "upload-state-test-*")
@@ -59,7 +58,6 @@ func TestUploadState_FilePermissions(t *testing.T) {
 }
 
 // TestDownloadState_FilePermissions verifies that download state files are created with secure permissions (0600).
-// v4.4.2: Security fix - state files contain sensitive metadata and must be owner-readable only.
 func TestDownloadState_FilePermissions(t *testing.T) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "download-state-test-*")
@@ -102,7 +100,6 @@ func TestDownloadState_FilePermissions(t *testing.T) {
 }
 
 // TestUploadLock_FilePermissions verifies that upload lock files are created with secure permissions (0600).
-// v4.4.2: Security fix - lock files contain process metadata and should be owner-readable only.
 func TestUploadLock_FilePermissions(t *testing.T) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "upload-lock-test-*")

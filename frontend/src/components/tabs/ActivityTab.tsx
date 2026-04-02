@@ -17,7 +17,7 @@ import clsx from 'clsx';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
 const LOG_LEVELS: Array<LogLevel | null> = [null, 'DEBUG', 'INFO', 'WARN', 'ERROR'];
-// v4.8.7: Labels indicate ">=" semantics (e.g. INFO+ shows INFO, WARN, ERROR)
+// Labels indicate ">=" semantics (e.g. INFO+ shows INFO, WARN, ERROR)
 const LEVEL_LABELS: Record<string, string> = {
   '': 'All Levels',
   'DEBUG': 'DEBUG+',
@@ -26,7 +26,7 @@ const LEVEL_LABELS: Record<string, string> = {
   'ERROR': 'ERROR',
 };
 
-// v4.8.7: Level severity for ">=" filtering (higher = more severe)
+// Level severity for ">=" filtering (higher = more severe)
 const LEVEL_SEVERITY: Record<string, number> = {
   DEBUG: 0,
   INFO: 1,
@@ -77,7 +77,7 @@ export function ActivityTab() {
     levelFilter,
     searchTerm,
     autoScroll,
-    // v4.0.0: overallProgress/overallMessage hidden - was confusing users
+    // overallProgress/overallMessage hidden — was confusing users
     // overallProgress,
     // overallMessage,
     setLevelFilter,
@@ -86,10 +86,10 @@ export function ActivityTab() {
     clearLogs,
     getFilteredLogs,
     exportLogs,
-    // v4.0.0: setupEventListeners moved to App.tsx for global event listening
+    // setupEventListeners moved to App.tsx for global event listening
   } = useLogStore();
 
-  // v4.3.2: Daemon log state for IPC-based log streaming
+  // Daemon log state for IPC-based log streaming
   const [daemonLogs, setDaemonLogs] = useState<LogEntry[]>([]);
   const [daemonRunning, setDaemonRunning] = useState(false);
 
@@ -103,14 +103,14 @@ export function ActivityTab() {
 
   const logContainerRef = useRef<HTMLDivElement>(null);
 
-  // v4.3.2: Merge GUI logs and daemon logs with filtering
+  // Merge GUI logs and daemon logs with filtering
   const filteredLogs = useMemo(() => {
     const guiFiltered = getFilteredLogs();
     const lowerSearch = searchTerm.toLowerCase();
 
     // Filter daemon logs with same ">=" criteria
     const daemonFiltered = daemonLogs.filter((log) => {
-      // v4.8.7: ">=" semantics — INFO shows INFO+WARN+ERROR
+      // ">=" semantics: INFO shows INFO+WARN+ERROR
       if (levelFilter) {
         const minSev = LEVEL_SEVERITY[levelFilter] ?? 0;
         const logSev = LEVEL_SEVERITY[log.level] ?? 0;
@@ -134,9 +134,8 @@ export function ActivityTab() {
     overscan: 20,
   });
 
-  // v4.0.0: Event listeners are now set up at the app level (App.tsx)
-  // so they're active even when this tab isn't visible.
-  // No need to set them up here anymore.
+  // Event listeners are set up at the app level (App.tsx) so they're
+  // active even when this tab isn't visible.
 
   // Auto-scroll to bottom when new logs arrive
   useEffect(() => {
@@ -160,7 +159,7 @@ export function ActivityTab() {
     return () => clearInterval(interval);
   }, []);
 
-  // v4.3.2: Poll daemon logs when daemon is running
+  // Poll daemon logs when daemon is running
   useEffect(() => {
     const pollDaemonLogs = async () => {
       try {
@@ -357,7 +356,7 @@ export function ActivityTab() {
             {formatUptime(stats.uptime)}
           </span>
         </div>
-        {/* v4.3.2: Daemon connection status indicator */}
+        {/* Daemon connection status indicator */}
         {daemonRunning && (
           <div className="flex flex-col">
             <span className="text-xs font-medium text-gray-500 uppercase">Daemon</span>
@@ -565,7 +564,7 @@ export function ActivityTab() {
         )}
       </div>
 
-      {/* v4.0.0: Overall Progress indicator hidden - was confusing users.
+      {/* Overall Progress indicator hidden — was confusing users.
           TODO: Re-enable when tied to batch operations or remove entirely. */}
     </div>
   );

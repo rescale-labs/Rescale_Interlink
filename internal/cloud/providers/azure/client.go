@@ -138,7 +138,6 @@ func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiCli
 
 // CloseIdleConnections closes idle connections in the Azure HTTP transport pool.
 // Called by the stale-connection cleanup hook after sleep/wake gaps.
-// v4.8.7
 func (c *AzureClient) CloseIdleConnections() {
 	if c.httpClient != nil {
 		c.httpClient.CloseIdleConnections()
@@ -406,7 +405,7 @@ func (c *AzureClient) DownloadRange(ctx context.Context, blobPath string, offset
 }
 
 // DownloadRangeOnce downloads a range of bytes WITHOUT retry (for use in provider-level retry).
-// v4.5.4: This method allows the provider to wrap the full request+read+close cycle in a single
+// This allows the provider to wrap the full request+read+close cycle in a single
 // retry loop, avoiding nested retries that would occur if using DownloadRange within RetryWithBackoff.
 func (c *AzureClient) DownloadRangeOnce(ctx context.Context, blobPath string, offset, count int64) (azblob.DownloadStreamResponse, error) {
 	c.clientMu.Lock()

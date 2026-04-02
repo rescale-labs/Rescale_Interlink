@@ -73,7 +73,6 @@ function ConfirmDialog({
   )
 }
 
-// v4.0.8: Error dialog for critical errors that need user attention
 interface ErrorDialogProps {
   isOpen: boolean
   title: string
@@ -136,28 +135,26 @@ export function FileBrowserTab() {
   const [isDownloading, setIsDownloading] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
 
-  // Confirmation dialogs with optional warning
-  // v4.8.6: Frozen fields snapshot state at click time so confirm uses the original destination
+  // Confirmation dialogs with optional warning.
+  // Frozen fields snapshot state at click time so confirm uses the original destination.
   const [uploadConfirm, setUploadConfirm] = useState<{
     items: wailsapp.FileItemDTO[]
     destPath: string
     folderCount: number
-    frozenDestFolderId: string        // v4.8.6: snapshot at click time
-    frozenMode: string                // v4.8.6: browse mode at click time
-    frozenMyLibraryId: string | null  // v4.8.6: for legacy mode fallback
+    frozenDestFolderId: string        // Snapshot at click time to avoid stale navigation
+    frozenMode: string                // Browse mode at click time
+    frozenMyLibraryId: string | null  // For legacy mode fallback
   } | null>(null)
   const [downloadConfirm, setDownloadConfirm] = useState<{
     items: wailsapp.FileItemDTO[]
     destPath: string
     folderCount: number
-    frozenLocalPath: string           // v4.8.6: snapshot at click time
+    frozenLocalPath: string           // Snapshot at click time to avoid stale navigation
   } | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
 
-  // v4.0.8: Error dialog for critical errors
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null)
 
-  // v4.0.8: Merge confirmation dialog for existing folders
   const [mergeConfirm, setMergeConfirm] = useState<{
     existingFolders: string[]
     uploadData: {
@@ -168,7 +165,6 @@ export function FileBrowserTab() {
     }
   } | null>(null)
 
-  // v4.7.4: Upload tags
   const [uploadTagsInput, setUploadTagsInput] = useState('')
 
   // Status message
@@ -228,15 +224,14 @@ export function FileBrowserTab() {
     // Get destination path from breadcrumb
     const destPath = remote.breadcrumb.map(b => b.name).join(' > ') || 'My Library'
 
-    // v4.8.6: Resolve destination folder ID at snapshot time
+    // Resolve destination folder ID at snapshot time before async operations
     const resolvedDestFolderId = remote.currentFolderId || remote.myLibraryId || ''
     if (!resolvedDestFolderId) {
       setStatus('Please wait for folder to load before uploading.')
       return
     }
 
-    // v4.0.0: Support both files and folders
-    // v4.8.6: Snapshot destination state at click time
+    // Snapshot destination state at click time to prevent stale references
     setUploadConfirm({
       items: selectedItems,
       destPath,
@@ -247,8 +242,6 @@ export function FileBrowserTab() {
     })
   }, [uploadState.allowed, getLocalSelectedItems, remote.breadcrumb, remote.currentFolderId, remote.mode, remote.myLibraryId])
 
-  // v4.0.8: Helper function that performs the actual upload (called after merge confirmation if needed)
-  // v4.7.4: Added tags parameter for post-upload tagging
   const proceedWithUpload = useCallback(async (
     files: wailsapp.FileItemDTO[],
     folders: wailsapp.FileItemDTO[],
@@ -260,7 +253,7 @@ export function FileBrowserTab() {
     setStatus(`Uploading ${totalItems} item(s)...`)
 
     try {
-      // v4.8.6: Validate destination folder before any transfers
+      // Validate destination folder before any transfers — it may have been deleted during confirmation
       try {
         await App.ValidateRemoteFolder(destFolderId)
       } catch (err) {
@@ -299,8 +292,8 @@ export function FileBrowserTab() {
         }
       }
 
-      // Upload individual files using transfer queue
-      // v4.7.8: Batch grouping for 50+ files to collapse into single row in Transfers tab
+      // Upload individual files using transfer queue.
+      // Batch grouping for 50+ files to collapse into single row in Transfers tab.
       if (files.length > 0) {
         const batchID = files.length >= 50 ? `fb_upload_${Date.now()}` : undefined
         const batchLabel = files.length >= 50 ? `Upload: ${files.length} files` : undefined
@@ -338,13 +331,12 @@ export function FileBrowserTab() {
     }
   }, [clearLocalSelection, switchToTab, refreshRemote])
 
-  // v4.7.4: Parse comma-separated tags from input
   const parsedUploadTags = useMemo(() => {
     if (!uploadTagsInput.trim()) return []
     return uploadTagsInput.split(',').map(t => t.trim()).filter(Boolean)
   }, [uploadTagsInput])
 
-  // Confirm upload - v4.0.8: Now checks for existing folders first
+  // Confirm upload — checks for existing folders to offer merge before proceeding
   const confirmUpload = useCallback(async () => {
     if (!uploadConfirm) return
 
@@ -356,14 +348,13 @@ export function FileBrowserTab() {
     const files = uploadConfirm.items.filter(item => !item.isFolder)
     const folders = uploadConfirm.items.filter(item => item.isFolder)
 
-    // v4.8.6: Use frozen values from click time instead of live store state
+    // Use frozen values from click time instead of live store state
     const destFolderId = uploadConfirm.frozenMode === 'legacy'
       ? (uploadConfirm.frozenMyLibraryId || uploadConfirm.frozenDestFolderId)
       : uploadConfirm.frozenDestFolderId
 
-    // v4.0.8: Check if any folders already exist before uploading
-    // v4.8.5 bugfix: Use batch check with shared cache — single API paginate instead of N
-    // v4.8.8: Switch to Transfers tab immediately for visible feedback
+    // Check if any folders already exist before uploading.
+    // Uses batch check with shared cache (single API paginate instead of N calls).
     if (folders.length > 0) {
       const displayName = folders.length === 1
         ? folders[0].name
@@ -376,7 +367,6 @@ export function FileBrowserTab() {
         const folderNames = folders.map(f => f.name)
         const checks = await App.CheckFoldersExistForUpload(folderNames, destFolderId)
 
-        // v4.8.8: Check DTO-level errors
         const dtoError = checks.find(c => c?.error)
         if (dtoError) {
           useTransferStore.getState().setFolderCheckStatus(null)
@@ -391,7 +381,6 @@ export function FileBrowserTab() {
 
         existingFolders = folderNames.filter((_, i) => checks[i]?.exists)
       } catch (err) {
-        // v4.8.6: Surface folder-check errors instead of silently ignoring
         useTransferStore.getState().setFolderCheckStatus(null)
         switchToTab('File Browser')
         setErrorDialog({
@@ -424,7 +413,6 @@ export function FileBrowserTab() {
     await proceedWithUpload(files, folders, destFolderId, tags)
   }, [uploadConfirm, parsedUploadTags, proceedWithUpload])
 
-  // v4.0.8: Confirm merge and proceed with upload
   const confirmMerge = useCallback(async () => {
     if (!mergeConfirm) return
     const { files, folders, destFolderId, tags } = mergeConfirm.uploadData
@@ -432,7 +420,6 @@ export function FileBrowserTab() {
     await proceedWithUpload(files, folders, destFolderId, tags)
   }, [mergeConfirm, proceedWithUpload])
 
-  // v4.0.8: Cancel merge (cancel upload)
   const cancelMerge = useCallback(() => {
     setMergeConfirm(null)
     setStatus('Upload cancelled.')
@@ -445,13 +432,11 @@ export function FileBrowserTab() {
     const selectedItems = getRemoteSelectedItems()
     if (selectedItems.length === 0) return
 
-    // v4.0.0: Count folders for confirmation dialog info
     const folderCount = selectedItems.filter(item => item.isFolder).length
 
     const destPath = local.currentPath || 'Home'
 
-    // v4.0.0: Support both files and folders
-    // v4.8.6: Snapshot local path at click time
+    // Snapshot local path at click time to prevent stale references
     setDownloadConfirm({
       items: selectedItems,
       destPath,
@@ -464,13 +449,12 @@ export function FileBrowserTab() {
   const confirmDownload = useCallback(async () => {
     if (!downloadConfirm) return
 
-    // v4.8.6: Use frozen local path from click time instead of live store state
+    // Use frozen local path from click time instead of live store state
     const destLocalPath = downloadConfirm.frozenLocalPath
 
     setDownloadConfirm(null)
     setIsDownloading(true)
 
-    // v4.0.0: Separate files and folders for different download paths
     const files = downloadConfirm.items.filter(item => !item.isFolder)
     const folders = downloadConfirm.items.filter(item => item.isFolder)
 
@@ -478,7 +462,7 @@ export function FileBrowserTab() {
     setStatus(`Downloading ${totalItems} item(s)...`)
 
     try {
-      // v4.8.6: Validate local destination before starting downloads
+      // Validate local destination before starting — it may have been removed during confirmation
       try {
         await App.ValidateLocalDirectory(destLocalPath)
       } catch (err) {
@@ -490,28 +474,26 @@ export function FileBrowserTab() {
         return
       }
 
-      // v4.0.5: Switch to Transfers tab early so users can see Activity log (issue #19)
-      // This shows the scanning progress as log events in the Activity tab
+      // Switch to Transfers tab early so users can see scanning progress (issue #19)
       if (folders.length > 0) {
         switchToTab('Transfers')
       }
 
       // Download folders first using recursive folder download
       for (const folder of folders) {
-        // v4.0.5: Show "Scanning" status since that's what happens first (issue #19)
+        // Show "Scanning" status since recursive enumeration happens first (issue #19)
         setStatus(`Scanning folder: ${folder.name}...`)
         const result = await App.StartFolderDownload(folder.id, folder.name, destLocalPath)
         if (result.error) {
           console.error(`Folder download error for ${folder.name}:`, result.error)
           // Continue with other items
         } else {
-          // v4.8.0: Streaming — returns immediately, real-time progress in Transfers tab
           setStatus(`Downloading folder: ${folder.name}...`)
         }
       }
 
-      // Download individual files using transfer queue
-      // v4.7.8: Batch grouping for 50+ files + missing sourceLabel fix
+      // Download individual files using transfer queue.
+      // Batch grouping for 50+ files to collapse into single row in Transfers tab.
       if (files.length > 0) {
         const batchID = files.length >= 50 ? `fb_download_${Date.now()}` : undefined
         const batchLabel = files.length >= 50 ? `Download: ${files.length} files` : undefined
@@ -714,7 +696,6 @@ export function FileBrowserTab() {
         onConfirm={confirmUpload}
         onCancel={() => { setUploadConfirm(null); setUploadTagsInput('') }}
       >
-        {/* v4.7.4: Tags input */}
         <div className="mb-4">
           <label className="block text-xs font-medium text-gray-500 mb-1">Tags (optional)</label>
           <input
@@ -760,7 +741,6 @@ export function FileBrowserTab() {
         onCancel={() => setDeleteConfirm(null)}
       />
 
-      {/* v4.0.8: Merge confirmation dialog for existing folders */}
       <ConfirmDialog
         isOpen={mergeConfirm !== null}
         title="Folder Already Exists"
@@ -775,7 +755,6 @@ export function FileBrowserTab() {
         onCancel={cancelMerge}
       />
 
-      {/* v4.0.8: Error dialog for critical errors */}
       <ErrorDialog
         isOpen={errorDialog !== null}
         title={errorDialog?.title ?? 'Error'}

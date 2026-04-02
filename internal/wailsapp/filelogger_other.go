@@ -1,13 +1,10 @@
 //go:build !windows
 
 // Package wailsapp provides the Wails-based GUI for Rescale Interlink.
-// v4.3.2: Cross-platform file logging with rotation.
-// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 package wailsapp
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,8 +24,6 @@ var (
 )
 
 // InitFileLogger initializes file-based logging with rotation.
-// v4.3.2: Now works on all platforms (macOS, Linux, Windows).
-// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 // Location: ~/.config/rescale/logs/ (Unix) or %LOCALAPPDATA%\Rescale\Interlink\logs (Windows)
 func InitFileLogger() error {
 	fileLoggerMu.Lock()
@@ -38,8 +33,6 @@ func InitFileLogger() error {
 		return nil // Already initialized
 	}
 
-	// v4.4.2: Use centralized log directory
-	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
 	logDir := config.LogDirectory()
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		fileLoggerMu.Unlock()
@@ -67,7 +60,6 @@ func InitFileLogger() error {
 }
 
 // EnableFileLogging enables or disables file logging.
-// v4.3.2: User can toggle file logging from GUI settings.
 func EnableFileLogging(enabled bool) error {
 	if enabled {
 		// Initialize if not already done
@@ -136,15 +128,4 @@ func GetLogFilePath() string {
 		return fileLogger.Filename
 	}
 	return ""
-}
-
-// GetFileLogWriter returns an io.Writer for zerolog integration.
-func GetFileLogWriter() io.Writer {
-	fileLoggerMu.RLock()
-	defer fileLoggerMu.RUnlock()
-
-	if fileLogger == nil || !fileLoggingEnabled {
-		return io.Discard
-	}
-	return fileLogger
 }

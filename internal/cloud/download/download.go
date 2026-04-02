@@ -66,7 +66,6 @@ type DownloadParams struct {
 //
 // Returns nil on success, or an error on failure.
 func DownloadFile(ctx context.Context, params DownloadParams) error {
-	// v3.6.2: Track overall download timing
 	overallTimer := cloud.StartTimer(params.OutputWriter, "Download total")
 
 	// Validate required parameters
@@ -80,7 +79,6 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		return fmt.Errorf("either FileID or FileInfo is required")
 	}
 
-	// v3.6.2: Track initialization phase
 	initTimer := cloud.StartTimer(params.OutputWriter, "Download initialization")
 
 	// Get file metadata (if not already provided)
@@ -93,13 +91,12 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		}
 	}
 
-	// v3.6.2: Log file info
 	cloud.TimingLog(params.OutputWriter, "File: %s (%s)", fileInfo.Name, cloud.FormatBytes(fileInfo.DecryptedSize))
 
 	// Get the global credential manager (caches user profile and credentials)
 	credManager := credentials.GetManager(params.APIClient)
 
-	// v4.8.4: Skip GetUserProfile() when scan provided storage metadata in FileInfo.
+	// Skip GetUserProfile() when scan provided storage metadata in FileInfo.
 	// getStorageInfo() only needs profile as fallback when fileInfo.Storage is nil.
 	// This eliminates a cache-lookup per file and avoids cache-miss latency after sleep/wake.
 	var storageInfo *models.StorageInfo
@@ -146,10 +143,9 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		OutputWriter:     params.OutputWriter,
 	}
 
-	// v3.6.2: Track download transfer phase
 	transferTimer := cloud.StartTimer(params.OutputWriter, "Download transfer")
 
-	// v4.4.2: Get computed hash from download to avoid re-reading file for verification.
+	// Get computed hash from download to avoid re-reading file for verification.
 	// This eliminates the race condition where post-download verification re-reads
 	// the file and may get stale cache data.
 	computedHash, err := downloader.Download(ctx, downloadParams)
@@ -159,7 +155,7 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 
 	transferTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
-	// v4.4.0: Verify file exists and has expected size before checksum verification.
+	// Verify file exists and has expected size before checksum verification.
 	// This provides a clearer error message if the download failed silently (e.g., 0 bytes written).
 	fi, err := os.Stat(params.LocalPath)
 	if err != nil {
@@ -169,16 +165,15 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		return fmt.Errorf("download failed: file is empty (0 bytes) - possible write error or filesystem issue")
 	}
 
-	// v3.6.2: Track checksum verification phase
 	checksumTimer := cloud.StartTimer(params.OutputWriter, "Checksum verification")
 
-	// v4.4.2: Use computed hash from download if available (eliminates cache race condition).
+	// Use computed hash from download if available (eliminates cache race condition).
 	// Only fall back to file re-read verification if no computed hash is available.
 	expectedHash := getExpectedSHA512(fileInfo.FileChecksums)
 
 	var checksumErr error
 	if computedHash != "" && expectedHash != "" {
-		// v4.4.2: Compare using hash computed during download - no file re-read needed!
+		// Compare using hash computed during download - no file re-read needed
 		if !strings.EqualFold(computedHash, expectedHash) {
 			checksumErr = fmt.Errorf("checksum mismatch: expected SHA-512=%s, got %s", expectedHash, computedHash)
 		}
@@ -201,16 +196,15 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 
 	checksumTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
-	// v3.6.2: Log overall completion
 	overallTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
-	// v4.5.9: Safety net: clean up any leftover .encrypted temp file from legacy path.
-	// Only on success — failed downloads may need the .encrypted file for resume.
+	// Safety net: clean up any leftover .encrypted temp file from legacy path.
+	// Only on success -- failed downloads may need the .encrypted file for resume.
 	// This covers the case where the downloader's own defer ran but failed
 	// (e.g., Windows file locking released after a delay).
 	_ = os.Remove(params.LocalPath + ".encrypted")
 
-	// v4.0.0: Clean up resume state file on successful download.
+	// Clean up resume state file on successful download.
 	// This prevents stale resume state from accumulating and ensures
 	// future downloads of the same file don't erroneously attempt to resume.
 	state.DeleteDownloadState(params.LocalPath)
@@ -220,7 +214,6 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 
 // getExpectedSHA512 extracts the expected SHA-512 hash from checksums.
 // Returns empty string if no SHA-512 checksum is available.
-// v4.4.2: Helper for computed hash comparison.
 func getExpectedSHA512(checksums []models.FileChecksum) string {
 	for _, cs := range checksums {
 		switch cs.HashFunction {
@@ -259,7 +252,6 @@ func getStorageInfo(fileInfo *models.CloudFile, profile *models.UserProfile) *mo
 // verifyChecksum verifies the SHA-512 checksum of a downloaded file
 // Returns an error if the checksum verification fails
 // Note: This is called AFTER decryption, so it verifies the decrypted file
-// v4.4.1: Added retry logic to handle transient filesystem cache issues
 func verifyChecksum(localPath string, checksums []models.FileChecksum) error {
 	if len(checksums) == 0 {
 		return nil // No checksums to verify
@@ -289,7 +281,7 @@ checksumLoop:
 		return nil // No recognized checksum algorithm
 	}
 
-	// v4.4.1: Retry logic to handle transient filesystem cache issues.
+	// Retry to handle transient filesystem cache issues.
 	// On some systems (especially macOS), even after Sync()+Close(), the filesystem
 	// cache may not be fully coherent for subsequent reads. Retrying with a small
 	// delay usually resolves this.
@@ -324,7 +316,6 @@ checksumLoop:
 }
 
 // computeFileChecksum opens a file and computes its SHA-512 hash.
-// v4.4.1: Extracted to support retry logic in verifyChecksum.
 func computeFileChecksum(localPath string) (string, error) {
 	file, err := os.Open(localPath)
 	if err != nil {

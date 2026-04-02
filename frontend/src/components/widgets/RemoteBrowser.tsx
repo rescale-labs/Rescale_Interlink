@@ -20,7 +20,7 @@ export function RemoteBrowser() {
       myLibraryId,
       myJobsId,
       hasMore,
-      // v4.0.3: Server-side pagination state
+      // Server-side pagination state
       currentPage,
       itemsPerPage,
       knownTotalPages,
@@ -33,7 +33,7 @@ export function RemoteBrowser() {
     refreshRemote,
     setRemoteSelection,
     createRemoteFolder,
-    // v4.0.3: Server-side pagination actions
+    // Server-side pagination actions
     setRemoteItemsPerPage,
     goToNextRemotePage,
     goToPreviousRemotePage,
@@ -191,7 +191,7 @@ export function RemoteBrowser() {
               ? 'Loading legacy files (this may take a moment)...'
               : 'Loading...'
           }
-          // v4.0.3: Server-side pagination
+          // Server-side pagination
           useServerPagination={true}
           serverCurrentPage={currentPage}
           serverKnownTotalPages={knownTotalPages}

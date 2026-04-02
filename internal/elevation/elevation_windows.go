@@ -1,7 +1,6 @@
 //go:build windows
 
 // Package elevation provides UAC elevation support for Windows.
-// v4.5.1: Used to run service control commands with admin privileges.
 package elevation
 
 import (
@@ -45,7 +44,6 @@ const SEE_MASK_NOCLOSEPROCESS = 0x00000040
 
 // RunElevated executes a command with UAC elevation.
 // Uses ShellExecuteExW with "runas" verb to trigger UAC prompt.
-// v4.5.1: Added for GUI/tray to start/stop Windows Service.
 func RunElevated(executable string, args string, workingDir string) error {
 	verbPtr, err := syscall.UTF16PtrFromString("runas")
 	if err != nil {
@@ -99,7 +97,6 @@ func RunElevated(executable string, args string, workingDir string) error {
 }
 
 // getCliExecutablePath resolves the CLI executable path.
-// v4.5.1: Looks for rescale-int.exe in same directory as current executable.
 func getCliExecutablePath() (string, string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -121,7 +118,6 @@ func getCliExecutablePath() (string, string, error) {
 }
 
 // StartServiceElevated triggers UAC to run "rescale-int service start".
-// v4.5.1: Returns nil on success, error on failure or UAC cancelled.
 func StartServiceElevated() error {
 	cliPath, workDir, err := getCliExecutablePath()
 	if err != nil {
@@ -132,7 +128,6 @@ func StartServiceElevated() error {
 }
 
 // StopServiceElevated triggers UAC to run "rescale-int service stop".
-// v4.5.1: Returns nil on success, error on failure or UAC cancelled.
 func StopServiceElevated() error {
 	cliPath, workDir, err := getCliExecutablePath()
 	if err != nil {
@@ -143,7 +138,6 @@ func StopServiceElevated() error {
 }
 
 // InstallServiceElevated triggers UAC to run "rescale-int service install".
-// v4.5.8: Added for GUI/tray to install Windows Service with elevation.
 // The elevated CLI process handles SCM registration and sets HKLM registry marker.
 func InstallServiceElevated() error {
 	cliPath, workDir, err := getCliExecutablePath()
@@ -155,7 +149,7 @@ func InstallServiceElevated() error {
 }
 
 // InstallAndStartServiceElevated triggers UAC to run "rescale-int service install-and-start".
-// v4.7.6: Combined idempotent install + start with a single UAC prompt.
+// Combined idempotent install + start with a single UAC prompt.
 func InstallAndStartServiceElevated() error {
 	cliPath, workDir, err := getCliExecutablePath()
 	if err != nil {
@@ -166,7 +160,6 @@ func InstallAndStartServiceElevated() error {
 }
 
 // UninstallServiceElevated triggers UAC to run "rescale-int service uninstall".
-// v4.5.8: Added for GUI/tray to uninstall Windows Service with elevation.
 // The elevated CLI process handles SCM removal and clears HKLM registry marker.
 func UninstallServiceElevated() error {
 	cliPath, workDir, err := getCliExecutablePath()

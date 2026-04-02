@@ -119,7 +119,6 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 
 // CloseIdleConnections closes idle connections in the S3 HTTP transport pool.
 // Called by the stale-connection cleanup hook after sleep/wake gaps.
-// v4.8.7
 func (c *S3Client) CloseIdleConnections() {
 	if c.httpClient != nil {
 		c.httpClient.CloseIdleConnections()
@@ -302,7 +301,7 @@ func (c *S3Client) GetObjectRange(ctx context.Context, objectKey string, startBy
 }
 
 // GetObjectRangeOnce downloads a range of bytes WITHOUT retry (for use in provider-level retry).
-// v4.5.4: This method allows the provider to wrap the full request+read+close cycle in a single
+// This allows the provider to wrap the full request+read+close cycle in a single
 // retry loop, avoiding nested retries that would occur if using GetObjectRange within RetryWithBackoff.
 func (c *S3Client) GetObjectRangeOnce(ctx context.Context, objectKey string, startByte, endByte int64) (*s3.GetObjectOutput, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", startByte, endByte)

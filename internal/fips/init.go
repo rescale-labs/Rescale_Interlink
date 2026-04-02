@@ -1,7 +1,5 @@
 // Package fips provides shared FIPS 140-3 compliance initialization
 // for both the Wails GUI and standalone CLI entry points.
-//
-// v4.6.6: Extracted from duplicated init() logic in main.go and cmd/rescale-int/main.go
 package fips
 
 import (

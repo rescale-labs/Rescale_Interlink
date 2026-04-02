@@ -25,7 +25,6 @@ func TestNewTransferService(t *testing.T) {
 	}
 
 	// Semaphore should be initialized with default capacity (MaxMaxConcurrent=20)
-	// v4.8.0: Default changed from 5 to 20 for adaptive concurrency
 	if cap(ts.semaphore) != 20 {
 		t.Errorf("Semaphore capacity = %d, want 20", cap(ts.semaphore))
 	}
@@ -102,10 +101,9 @@ func TestCancelAllEmpty(t *testing.T) {
 	ts.CancelAll()
 }
 
-// TestStreamingDownloadBatchAdaptiveConcurrency verifies Bug #1 fix:
+// TestStreamingDownloadBatchAdaptiveConcurrency verifies that
 // StartStreamingDownloadBatch uses RunBatchFromChannel with adaptive concurrency
-// from the ResourceManager, not hardcoded 5 workers.
-// v4.8.1: The resource manager is wired through to BatchConfig.ResourceMgr.
+// from the ResourceManager, not hardcoded workers.
 func TestStreamingDownloadBatchAdaptiveConcurrency(t *testing.T) {
 	eventBus := events.NewEventBus(100)
 	ts := NewTransferService(nil, eventBus, TransferServiceConfig{
@@ -158,8 +156,6 @@ func TestStreamingDownloadBatchAdaptiveConcurrency(t *testing.T) {
 			smallWorkers, largeWorkers)
 	}
 }
-
-// v4.8.7: checkBatchCompletion tests (Plan 5, 10B)
 
 // TestCheckBatchCompletion_TotalWipeout verifies that a batch where ALL tasks failed
 // triggers a report via the standard ClassifyAndPublish path.

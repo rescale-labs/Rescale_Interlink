@@ -132,7 +132,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         await App.UpdateConfig(config);
       }
 
-      // v4.0.8: TestConnection now returns result directly (synchronous call)
+      // TestConnection returns result directly (synchronous call)
       const result = await App.TestConnection();
 
       if (result.success) {

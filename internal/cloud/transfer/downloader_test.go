@@ -299,8 +299,6 @@ func TestPartDownloadResult(t *testing.T) {
 	}
 }
 
-// v4.5.9: Tests for .encrypted temp file cleanup behavior.
-
 // TestEncryptedTempFileCleanupOnSuccess verifies that the .encrypted file cleanup
 // pattern (retry with backoff) works correctly when the file exists.
 func TestEncryptedTempFileCleanupOnSuccess(t *testing.T) {

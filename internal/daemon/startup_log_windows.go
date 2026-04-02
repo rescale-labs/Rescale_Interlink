@@ -13,21 +13,19 @@ import (
 )
 
 // StartupLogPath returns the path to the daemon startup log.
-// v4.3.8: This log captures early startup errors BEFORE IPC is available,
+// This log captures early startup errors BEFORE IPC is available,
 // allowing diagnosis of subprocess launch failures from GUI/tray.
-// v4.4.2: Uses centralized LogDirectory() for consistent log location.
 func StartupLogPath() string {
 	return filepath.Join(config.LogDirectory(), "daemon-startup.log")
 }
 
 // WriteStartupLog appends a message to the startup log.
-// v4.3.8: Used for debugging daemon launch failures from GUI/tray.
-// This writes to a predictable file location that users can check.
+// Writes to a predictable file location that users can check for launch failures.
 func WriteStartupLog(format string, args ...interface{}) {
 	logPath := StartupLogPath()
 
 	// Ensure directory exists
-	// v4.5.1: Uses 0700 permissions to restrict log access to owner only
+	// 0700 restricts directory access to owner only
 	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
 		return
 	}
@@ -43,9 +41,3 @@ func WriteStartupLog(format string, args ...interface{}) {
 	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, message))
 }
 
-// ClearStartupLog truncates the startup log.
-// v4.3.8: Called on successful daemon startup to clear old entries.
-func ClearStartupLog() {
-	logPath := StartupLogPath()
-	_ = os.Truncate(logPath, 0)
-}

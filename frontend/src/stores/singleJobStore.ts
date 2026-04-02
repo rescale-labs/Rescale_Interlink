@@ -1,4 +1,4 @@
-// v4.7.3: SingleJob state store — extracts local state from SingleJobTab.tsx
+// SingleJob state store — extracts local state from SingleJobTab.tsx
 // so it persists across tab navigation.
 
 import { create } from 'zustand'
@@ -19,7 +19,7 @@ export type SingleJobState =
 // Input mode for single job
 export type InputMode = 'directory' | 'localFiles' | 'remoteFiles'
 
-// v4.0.0 G1: File info for displaying sizes
+// File info for displaying sizes
 export interface FileInfo {
   path: string
   name: string

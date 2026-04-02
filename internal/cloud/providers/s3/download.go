@@ -105,7 +105,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	// Track whether we successfully closed the file to avoid double-close from defer
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
@@ -119,7 +119,6 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 		if err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
 		}
-		// v4.4.0: Sync and close before returning
 		if err := file.Sync(); err != nil {
 			return fmt.Errorf("failed to sync file to disk: %w", err)
 		}
@@ -160,14 +159,15 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 
 	progressCallback(1.0)
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Without this, sporadic checksum failures
+	// occur because the OS buffer may not be flushed yet.
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	// Explicit Close() before returning so the file handle is released
+	// before the caller reads the file for checksum verification.
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
@@ -178,14 +178,14 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 
 // downloadChunkedWithProgress downloads a file in chunks with progress callback.
 // Uses S3Client directly.
-// v4.5.4: Wraps request+read+close in single retry to handle mid-transfer proxy failures.
+// Wraps request+read+close in single retry to handle mid-transfer proxy failures.
 func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3Client, objectKey, localPath string, totalSize int64, progressCallback func(float64)) error {
 	// Create output file
 	file, err := os.Create(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	// Track whether we successfully closed the file to avoid double-close from defer
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
@@ -203,8 +203,8 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 			currentChunkSize = totalSize - offset
 		}
 
-		// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
-		// Uses GetObjectRangeOnce to avoid nested retries (GetObjectRange already retries internally)
+		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
+		// Uses GetObjectRangeOnce to avoid nested retries (GetObjectRange already retries internally).
 		var chunkData []byte
 		err := s3Client.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk offset=%d", offset), func() error {
 			// Per-attempt timeout to prevent stalled reads from hanging
@@ -241,14 +241,15 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 		}
 	}
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Without this, sporadic checksum failures
+	// occur because the OS buffer may not be flushed yet.
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	// Explicit Close() before returning so the file handle is released
+	// before the caller reads the file for checksum verification.
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
@@ -348,7 +349,7 @@ func (p *Provider) downloadChunkedConcurrent(
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	// Track whether we successfully closed the file to avoid double-close from defer
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
@@ -408,8 +409,8 @@ func (p *Provider) downloadChunkedConcurrent(
 				default:
 				}
 
-				// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
-				// Uses GetObjectRangeOnce to avoid nested retries (GetObjectRange already retries internally)
+				// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
+				// Uses GetObjectRangeOnce to avoid nested retries (GetObjectRange already retries internally).
 				var chunkData []byte
 				downloadErr := s3Client.RetryWithBackoff(opCtx, fmt.Sprintf("DownloadChunk %d", job.chunkIndex), func() error {
 					// Per-attempt timeout to prevent stalled reads from hanging
@@ -551,14 +552,15 @@ func (p *Provider) downloadChunkedConcurrent(
 		}
 	}
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Without this, sporadic checksum failures
+	// occur because the OS buffer may not be flushed yet.
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	// Explicit Close() before returning so the file handle is released
+	// before the caller reads the file for checksum verification.
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}

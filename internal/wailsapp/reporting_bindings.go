@@ -1,4 +1,3 @@
-// v4.8.7: Wails bindings for safe error reporting (Plan 3, 6A-6E).
 package wailsapp
 
 import (
@@ -103,7 +102,7 @@ func (a *App) SaveErrorReport(reportJSON string) (string, error) {
 }
 
 // SaveLogExport opens a native save dialog and writes log text to the selected path.
-// v4.8.7: Replaces blob URL download which doesn't work in Wails WebView.
+// Uses native file dialog because blob URL downloads don't work in Wails WebView.
 func (a *App) SaveLogExport(content string) (string, error) {
 	suggestedName := fmt.Sprintf("interlink-activity-%s.log", time.Now().Format("2006-01-02"))
 

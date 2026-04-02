@@ -24,7 +24,6 @@ import { formatDuration } from '../../utils/formatDuration'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import * as Runtime from '../../../wailsjs/runtime/runtime'
 
-// v4.0.0 G2: Improved workflow steps with user-friendly labels
 const WORKFLOW_STEPS: { state: WorkflowState; label: string; shortLabel: string }[] = [
   { state: 'initial', label: 'Choose Source', shortLabel: 'Source' },
   { state: 'pathChosen', label: 'Configure', shortLabel: 'Config' },
@@ -35,10 +34,6 @@ const WORKFLOW_STEPS: { state: WorkflowState; label: string; shortLabel: string 
   { state: 'completed', label: 'Complete', shortLabel: 'Done' },
 ]
 
-// v4.7.3: StatusBadge, StatsBar, JobsTable, PipelineStageSummary, PipelineLogPanel,
-// ErrorSummary extracted to widgets/ for reuse. Imported above.
-
-// v4.0.0 G2: Improved progress bar with numbered steps and checkmarks
 function WorkflowProgressBar({ currentState }: { currentState: WorkflowState }) {
   const currentIndex = WORKFLOW_STEPS.findIndex((s) => s.state === currentState)
 
@@ -96,7 +91,6 @@ function WorkflowProgressBar({ currentState }: { currentState: WorkflowState }) 
   )
 }
 
-// v4.7.1: Shared Pipeline Settings component for workers + tar options
 const COMPRESSION_OPTIONS = ['gzip', 'none'] as const
 
 function PipelineSettings({ config, updateConfig, saveConfig }: {
@@ -247,7 +241,6 @@ export function PURTab() {
     setPURRunOptions,
   } = useJobStore()
 
-  // v4.7.3: Run store for run session persistence
   const {
     activeRun,
     queuedJob,
@@ -259,7 +252,6 @@ export function PURTab() {
     cancelRun: cancelActiveRun,
   } = useRunStore()
 
-  // v4.7.1: Config store for Pipeline Settings
   const { config, updateConfig, saveConfig } = useConfigStore()
 
   // Template builder dialog state
@@ -271,7 +263,6 @@ export function PURTab() {
   const [loadSaveError, setLoadSaveError] = useState<string | null>(null)
   const [monitorBannerCollapsed, setMonitorBannerCollapsed] = useState(false)
 
-  // v4.7.3: Compute effective view mode
   const effectiveView = useMemo(() => {
     if (purViewMode === 'monitor' || purViewMode === 'configure') return purViewMode
 
@@ -297,8 +288,8 @@ export function PURTab() {
     loadMemory()
   }, [loadMemory])
 
-  // v4.7.3 Fix: Sync jobStore.workflowState when run transitions to terminal state.
-  // workflowState is set to 'executing' (jobStore.ts startBulkRun) but never transitions
+  // Sync jobStore.workflowState when run transitions to terminal state.
+  // workflowState is set to 'executing' by startBulkRun but never transitions
   // to 'completed' on normal pipeline completion — only on cancel. This bridges the gap.
   useEffect(() => {
     if (activeRun && activeRun.runType === 'pur' &&
@@ -308,7 +299,7 @@ export function PURTab() {
     }
   }, [activeRun?.status, workflowState])
 
-  // v4.7.1: Initialize scan options from persisted config
+  // Initialize scan options from persisted config
   useEffect(() => {
     if (config) {
       setScanOptions({
@@ -351,7 +342,6 @@ export function PURTab() {
     setWorkflowPath('createNew')
   }, [setWorkflowPath])
 
-  // v4.7.2: Map a loaded job DTO to template format
   const mapDTOToTemplate = useCallback((loaded: wailsapp.JobSpecDTO) => {
     setTemplate({
       directory: loaded.directory || '',
@@ -376,7 +366,6 @@ export function PURTab() {
     })
   }, [setTemplate])
 
-  // v4.7.2: Load template from CSV file
   const handleLoadTemplateFromCSV = useCallback(async () => {
     setShowLoadMenu(false)
     try {
@@ -393,7 +382,6 @@ export function PURTab() {
     }
   }, [mapDTOToTemplate])
 
-  // v4.7.2: Load template from JSON file
   const handleLoadTemplateFromJSON = useCallback(async () => {
     setShowLoadMenu(false)
     try {
@@ -410,7 +398,6 @@ export function PURTab() {
     }
   }, [mapDTOToTemplate])
 
-  // v4.7.2: Load template from SGE script
   const handleLoadTemplateFromSGE = useCallback(async () => {
     setShowLoadMenu(false)
     try {
@@ -427,7 +414,6 @@ export function PURTab() {
     }
   }, [loadJobFromSGE, setTemplate])
 
-  // v4.7.2: Save template to CSV
   const handleSaveTemplateToCSV = useCallback(async () => {
     setShowSaveMenu(false)
     try {
@@ -441,7 +427,6 @@ export function PURTab() {
     }
   }, [template])
 
-  // v4.7.2: Save template to JSON
   const handleSaveTemplateToJSON = useCallback(async () => {
     setShowSaveMenu(false)
     try {
@@ -455,7 +440,6 @@ export function PURTab() {
     }
   }, [template, saveJobToJSON])
 
-  // v4.7.2: Save template to SGE script
   const handleSaveTemplateToSGE = useCallback(async () => {
     setShowSaveMenu(false)
     try {
@@ -527,14 +511,12 @@ export function PURTab() {
     }
   }, [saveJobsToCSV])
 
-  // v4.7.3: Handle cancel delegates to runStore
   const handleCancel = useCallback(async () => {
     await cancelActiveRun()
     // Also transition jobStore workflow state
     cancelRun()
   }, [cancelActiveRun, cancelRun])
 
-  // v4.7.3: Handle start over clears both stores
   const handleStartOver = useCallback(async () => {
     await clearActiveRun()
     reset()
@@ -542,7 +524,7 @@ export function PURTab() {
     setPurViewMode('auto')
   }, [clearActiveRun, reset, setPurViewMode])
 
-  // v4.7.3: Handle queue - deep-copies current config and stores in runStore
+  // Deep-copy current config so the queued run is isolated from further edits
   const handleQueueRun = useCallback(() => {
     const jobsSnapshot = structuredClone(scannedJobs) as wailsapp.JobSpecDTO[]
     const optsSnapshot = structuredClone(purRunOptions) as wailsapp.PURRunOptionsDTO
@@ -668,7 +650,6 @@ export function PURTab() {
               <FolderPlusIcon className="w-5 h-5" />
               Configure New Base Job Settings
             </button>
-            {/* v4.7.2: Load dropdown with CSV, JSON, SGE */}
             <div className="relative">
               <button
                 onClick={() => setShowLoadMenu(!showLoadMenu)}
@@ -717,7 +698,6 @@ export function PURTab() {
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold">Scan to Create Jobs</h3>
-            {/* v4.7.2: Save As dropdown for template */}
             <div className="relative">
               <button
                 onClick={() => setShowSaveMenu(!showSaveMenu)}
@@ -757,7 +737,6 @@ export function PURTab() {
             </div>
           )}
 
-          {/* v4.0.8: Scan Mode Toggle */}
           <div className="mb-4">
             <label className="block text-sm font-medium mb-2">Scan Mode</label>
             <div className="flex gap-4">
@@ -852,7 +831,6 @@ export function PURTab() {
                     className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
-                {/* v4.6.0: Clarified label from "Run Subpath" to "Scan Prefix" */}
                 <div>
                   <label className="block text-sm font-medium mb-1">
                     Scan Prefix (optional)
@@ -870,7 +848,6 @@ export function PURTab() {
                   />
                   <p className="mt-1 text-xs text-gray-500">Navigate into a subpath before scanning for Run_* directories</p>
                 </div>
-                {/* v4.6.0: New TarSubpath field */}
                 <div>
                   <label className="block text-sm font-medium mb-1">
                     Tar Subpath (optional)
@@ -888,7 +865,6 @@ export function PURTab() {
             )}
           </div>
 
-          {/* v4.0.8: Secondary Patterns (File mode only) */}
           {scanOptions.scanMode === 'files' && (
             <div className="mb-6">
               <label className="block text-sm font-medium mb-2">
@@ -971,7 +947,7 @@ export function PURTab() {
             )}
           </div>
 
-          {/* v4.6.1: Command Pattern Iteration - only in folder mode */}
+          {/* Command Pattern Iteration - only in folder mode */}
           {scanOptions.scanMode === 'folders' && (
             <div className="mb-4">
               <label className="flex items-center gap-2 text-sm">
@@ -1010,7 +986,6 @@ export function PURTab() {
 
           {/* Extra Input Files Section */}
           <div className="border-t pt-4 mt-4 mb-6">
-            {/* v4.7.4: Explanatory text about how PUR handles folders */}
             <p className="text-xs text-gray-500 mb-3">
               <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
               automatically decompressed on the cluster. Extra input files below are shared files uploaded once and
@@ -1062,7 +1037,6 @@ export function PURTab() {
                 Use &quot;id:fileId&quot; for already-uploaded files.
               </p>
             </div>
-            {/* v4.7.4: Tar cleanup option */}
             <div className="mt-3">
               <label className="flex items-center gap-2 text-sm text-gray-600">
                 <input
@@ -1079,7 +1053,6 @@ export function PURTab() {
             </div>
           </div>
 
-          {/* v4.7.1: Pipeline Settings — workers + tar options */}
           <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
 
           {scanError && (
@@ -1183,7 +1156,6 @@ export function PURTab() {
                 <DocumentArrowDownIcon className="w-5 h-5" />
                 Export CSV
               </button>
-              {/* v4.7.3: Queue button when a run is active */}
               {activeRun?.status === 'active' ? (
                 <button
                   onClick={handleQueueRun}
@@ -1210,7 +1182,6 @@ export function PURTab() {
             </div>
           </div>
 
-          {/* v4.7.3: Queue status banner */}
           {queueStatus && (
             <div className={clsx(
               'mb-3 p-2 text-sm rounded',
@@ -1228,13 +1199,11 @@ export function PURTab() {
 
           <JobsTable jobs={jobRows} />
 
-          {/* v4.7.1: Pipeline Settings — also visible in CSV-loaded workflow */}
           <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
         </div>
       )
     }
 
-    // v4.7.3: Executing — reads from runStore.activeRun for live data
     if (workflowState === 'executing') {
       // If runStore has an active PUR run, use its data; otherwise fall back
       const runData = activeRun && activeRun.runType === 'pur' ? activeRun : null
@@ -1331,7 +1300,6 @@ export function PURTab() {
       )
     }
 
-    // v4.7.3: Completed — reads from runStore.activeRun for final snapshot
     if (workflowState === 'completed') {
       const runData = activeRun && activeRun.runType === 'pur' ? activeRun : null
       const displayRows = runData ? runData.jobRows : jobRows
@@ -1391,7 +1359,6 @@ export function PURTab() {
     return null
   }
 
-  // v4.7.3: ChoiceScreen — shown when returning to PUR during active run
   const renderChoiceScreen = () => {
     if (!activeRun) return null
     const doneJobs = activeRun.completedJobs + activeRun.failedJobs
@@ -1426,7 +1393,6 @@ export function PURTab() {
     )
   }
 
-  // v4.7.3: RunMonitorView — read-only dashboard from runStore.activeRun
   const renderMonitorView = () => {
     if (!activeRun) return null
     const doneJobs = activeRun.completedJobs + activeRun.failedJobs
@@ -1508,7 +1474,6 @@ export function PURTab() {
     )
   }
 
-  // v4.7.3: CompletedResultsView — shown for completed/failed/cancelled runs
   const renderResultsView = () => {
     if (!activeRun) return null
     const allSuccess = activeRun.failedJobs === 0
@@ -1556,7 +1521,6 @@ export function PURTab() {
     )
   }
 
-  // v4.7.3: RunMonitoringBanner — thin bar during configure mode with active run
   const renderMonitoringBanner = () => {
     if (!activeRun || activeRun.status !== 'active' || activeRun.runType !== 'pur') return null
     if (monitorBannerCollapsed) {
@@ -1605,7 +1569,6 @@ export function PURTab() {
     )
   }
 
-  // v4.7.3: View mode rendering
   if (effectiveView === 'choice') {
     return (
       <div className="h-full flex flex-col">
@@ -1643,7 +1606,6 @@ export function PURTab() {
   // effectiveView === 'configure' — normal workflow with optional monitoring banner
   return (
     <div className="h-full flex flex-col">
-      {/* v4.7.3: Monitoring banner when configuring during active run */}
       {renderMonitoringBanner()}
 
       {/* Progress bar */}

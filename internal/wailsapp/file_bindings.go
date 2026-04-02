@@ -12,21 +12,20 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
-	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
-	"github.com/rescale/rescale-int/internal/validation"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
+	"github.com/rescale/rescale-int/internal/transfer/scan"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // translateAPIError converts common API errors to user-friendly messages.
-// v4.0.8: Unified error translation for better UX across CLI and GUI.
 func translateAPIError(err error) string {
 	if err == nil {
 		return ""
@@ -71,15 +70,14 @@ type FileItemDTO struct {
 }
 
 // FolderContentsDTO is the JSON-safe version of services.FolderContents.
-// v4.0.3: Added IsSlowPath and Warning fields for robustness feedback.
 type FolderContentsDTO struct {
 	FolderID   string        `json:"folderId"`
 	FolderPath string        `json:"folderPath"`
 	Items      []FileItemDTO `json:"items"`
 	HasMore    bool          `json:"hasMore"`
 	NextCursor string        `json:"nextCursor,omitempty"`
-	IsSlowPath bool          `json:"isSlowPath,omitempty"` // v4.0.3: True if directory took >5s to read
-	Warning    string        `json:"warning,omitempty"`    // v4.0.3: Timeout or error message
+	IsSlowPath bool          `json:"isSlowPath,omitempty"` // True if directory took >5s to read
+	Warning    string        `json:"warning,omitempty"`    // Timeout or error message
 }
 
 // DeleteResultDTO contains the result of a delete operation.
@@ -99,24 +97,15 @@ var localDirCancelFunc context.CancelFunc
 // Used to avoid clearing a newer operation's cancel function.
 var localDirGeneration int64
 
-// v4.0.4: localEntryInfo and resolveSymlinks were moved to internal/localfs/browser.go
-// for North Star alignment (shared code between CLI and GUI).
-
 // ListLocalDirectory returns the contents of a local directory.
-// v4.0.3: Now calls ListLocalDirectoryEx with default options (includeHidden=false).
 func (a *App) ListLocalDirectory(path string) FolderContentsDTO {
 	return a.ListLocalDirectoryEx(path, false)
 }
 
 // ListLocalDirectoryEx returns the contents of a local directory with options.
-// v4.0.3: Added robustness features:
-//   - Timeout protection: 30 second timeout prevents UI freeze on hung mounts
-//   - Hidden file filtering: Pass includeHidden=false to filter dot files (server-side)
-//   - Cancellation support: Previous operation is cancelled when new one starts
-//   - Parallel symlink resolution: Symlinks are resolved in parallel (8 workers)
-//
-// v4.0.4: Refactored to use localfs.ListDirectoryEx() for North Star alignment
-// (shared code between CLI and GUI for local filesystem operations).
+// Features: timeout protection (prevents UI freeze on hung mounts), hidden file
+// filtering, cancellation support (previous operation cancelled when new one starts),
+// and parallel symlink resolution.
 func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderContentsDTO {
 	// Default to home directory if path is empty
 	if path == "" {
@@ -152,16 +141,15 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 	// Track start time for slow path detection (GUI-specific)
 	startTime := time.Now()
 
-	// v4.5.8: Resolve junction points before listing to handle Windows cloud VM
-	// environments where user folders are junction points to mapped network drives.
+	// Resolve junction points before listing to handle Windows cloud VM environments
+	// where user folders are junction points to mapped network drives.
 	// If resolution fails (junction target inaccessible), fall back to the raw path.
 	resolvedPath, resolveErr := pathutil.ResolveAbsolutePath(path)
 	if resolveErr != nil {
 		resolvedPath = path // Fallback to original if resolution fails
 	}
 
-	// v4.0.4: Use shared localfs.ListDirectoryEx() for core directory reading
-	// This handles timeout, hidden filtering, and parallel symlink resolution
+	// Core directory reading — handles timeout, hidden filtering, and parallel symlink resolution
 	entries, err := localfs.ListDirectoryEx(ctx, resolvedPath, localfs.ListDirectoryExOptions{
 		IncludeHidden:   includeHidden,
 		ResolveSymlinks: true,
@@ -169,7 +157,7 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 		Timeout:         constants.DirectoryReadTimeout,
 	})
 
-	// v4.5.8: If resolved path failed and it differs from original, try original path
+	// If resolved path failed and it differs from original, try original path
 	if err != nil && resolvedPath != path {
 		entries, err = localfs.ListDirectoryEx(ctx, path, localfs.ListDirectoryExOptions{
 			IncludeHidden:   includeHidden,
@@ -190,7 +178,7 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 			warning = "Operation cancelled"
 		} else if strings.Contains(warning, "mount point") || strings.Contains(warning, "reparse point") ||
 			strings.Contains(warning, "untrusted") {
-			// v4.5.8: Provide user-friendly error for junction/reparse-point failures
+			// User-friendly error for junction/reparse-point failures
 			warning = fmt.Sprintf("Cannot access directory (may be a junction to an inaccessible drive): %v", err)
 		}
 		return FolderContentsDTO{
@@ -243,7 +231,6 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 
 // CancelLocalDirectoryRead cancels the current local directory read operation.
 // Call this when the user navigates away before the directory listing completes.
-// v4.0.3: Exposed for frontend cancellation support.
 func (a *App) CancelLocalDirectoryRead() {
 	localDirCancelMu.Lock()
 	defer localDirCancelMu.Unlock()
@@ -270,8 +257,7 @@ func (a *App) ListRemoteFolder(folderID string) FolderContentsDTO {
 
 // ListRemoteFolderPage returns a single page of remote folder contents.
 // Pass empty cursor for first page, or use nextCursor from previous response.
-// v4.0.2: Added for proper server-side pagination in File Browser.
-// v4.0.3: Added pageSize parameter - pass 0 for API default.
+// Pass pageSize=0 for API default.
 func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int) FolderContentsDTO {
 	if a.engine == nil {
 		return FolderContentsDTO{}
@@ -295,7 +281,7 @@ func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int)
 }
 
 // ListRemoteLegacy returns a flat list of all files (legacy mode).
-// v4.0.3: Added pageSize parameter - pass 0 for API default.
+// Pass pageSize=0 for API default.
 func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 	if a.engine == nil {
 		return FolderContentsDTO{}
@@ -319,7 +305,7 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 }
 
 // ValidateRemoteFolder checks that a remote folder exists and is accessible.
-// v4.8.6: Lightweight preflight check — fetches a single item from the first page.
+// Lightweight preflight check — fetches a single item from the first page.
 // Does NOT use FolderCache.Get() (which fetches all pages).
 func (a *App) ValidateRemoteFolder(folderID string) error {
 	if a.engine == nil {
@@ -342,7 +328,6 @@ func (a *App) ValidateRemoteFolder(folderID string) error {
 }
 
 // ValidateLocalDirectory checks that a local directory exists and is a directory.
-// v4.8.6: Lightweight preflight check for download destination.
 func (a *App) ValidateLocalDirectory(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -472,13 +457,9 @@ type FolderDownloadResultDTO struct {
 }
 
 // StartFolderDownload downloads a remote folder recursively to the local filesystem.
-// v4.0.0: Implements folder download in GUI using TransferService for progress tracking.
-// Scans remote folder, creates local structure, queues files to TransferService.
-// v4.0.8: Added enumeration events for real-time scanning progress in Transfers tab.
-// v4.7.7: Restructured enumeration events — emits EventEnumerationCompleted only after
-// StartTransfers succeeds, with deferred completion on all error paths.
-// folderName: the display name for the folder (used as the local folder name)
-// v4.8.0: Rewritten for streaming scan+download — returns immediately, downloads begin within seconds.
+// Scans remote folder via streaming, creates local directory structure, and queues files
+// to TransferService. Returns immediately — downloads begin within seconds as files are discovered.
+// folderName: the display name for the folder (used as the local folder name).
 func (a *App) StartFolderDownload(folderID string, folderName string, destPath string) FolderDownloadResultDTO {
 	displayName := folderName
 	if displayName == "" {
@@ -515,7 +496,6 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		}
 	}
 
-	// v4.8.3: Timing instrumentation for Issue #1 diagnosis
 	startTime := time.Now()
 	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] StartFolderDownload entry at %s — folder=%s dest=%s", startTime.Format("15:04:05.000"), displayName, destPath))
 
@@ -539,13 +519,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: ErrNoTransferService.Error()}
 	}
 
-	// v4.8.2: Unified cancellable context — CancelBatch() → scanCancel() → stops everything
+	// CancelBatch() invokes scanCancel(), which cancels scanCtx and stops both scan and downloads.
 	scanCtx, scanCancel := context.WithCancel(context.Background())
 
 	// Emit enumeration started
 	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "", events.EnumPhaseScanning)
 
-	// v4.8.6: Validate destination path exists before creating subdirectories
 	if info, err := os.Stat(destPath); err != nil {
 		scanCancel()
 		errMsg := fmt.Sprintf("Download destination not found: %s", err.Error())
@@ -565,7 +544,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	if rootFolderName == "" {
 		rootFolderName = folderID
 	}
-	// v4.8.7 RF1: Validate folder name from API to prevent path traversal
+	// Validate folder name from API to prevent path traversal
 	if err := validation.ValidateFilename(rootFolderName); err != nil {
 		scanCancel()
 		emitLog(events.ErrorLevel, fmt.Sprintf("Invalid folder name from API: %s", err.Error()))
@@ -580,23 +559,21 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: "Failed to create root folder: " + err.Error()}
 	}
 
-	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(scanCtx, apiClient.GetConfig())
 
-	// v4.8.7: Pre-warm credentials synchronously before scan starts.
-	// This eliminates 2-5s of credential lock contention on the first download,
-	// since warmCredentialCache and executeDownloadTask both compete for credManager.mu.
+	// Pre-warm credentials synchronously before scan starts. This eliminates 2-5s of
+	// credential lock contention on the first download, since warmCredentialCache and
+	// executeDownloadTask both compete for credManager.mu.
 	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Starting credential pre-warm — elapsed=%s", time.Since(startTime)))
 	ts.WarmCredentialCache(scanCtx)
 	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Credential pre-warm complete — elapsed=%s", time.Since(startTime)))
 
-	// v4.8.0: Start streaming scan — files emitted as discovered
 	emitLog(events.InfoLevel, fmt.Sprintf("Scanning folder '%s' for files to download...", displayName))
-	// v4.8.2: No enumeration progress during scan — batch row handles progress display.
-	// This eliminates phantom "Scanning" row flashing caused by EventEnumerationProgress
-	// re-creating the enumeration after reconciliation removes it.
+	// No enumeration progress events during scan — the batch row handles progress display.
+	// Emitting EventEnumerationProgress here would cause a phantom "Scanning" row flash
+	// when reconciliation removes the enumeration and the event re-creates it.
 	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Starting ScanRemoteFolderStreaming — elapsed=%s", time.Since(startTime)))
-	scanEventCh, scanErrCh := cli.ScanRemoteFolderStreaming(scanCtx, apiClient, folderID, nil)
+	scanEventCh, scanErrCh := scan.ScanRemoteFolderStreaming(scanCtx, apiClient, folderID, nil)
 
 	// Create request channel for streaming batch
 	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
@@ -605,7 +582,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	ts.GetQueue().MarkBatchScanInProgress(enumID, true)
 
 	// Start streaming download batch (workers start consuming immediately)
-	// v4.8.2: Pass scanCancel so CancelBatch() → scanCancel() → cancels scanCtx → stops everything
+	// Pass scanCancel so CancelBatch() cancels scanCtx, stopping both scan and downloads.
 	if err := ts.StartStreamingDownloadBatch(scanCtx, requestCh, enumID, displayName, "FileBrowser", scanCancel); err != nil {
 		scanCancel() // Stop scan goroutines on batch start failure
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to start streaming batch: %s", err.Error()))
@@ -615,7 +592,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: err.Error()}
 	}
 
-	// v4.8.0: Scan-consumer goroutine — owns requestCh, closes it on all exit paths
+	// Scan-consumer goroutine — owns requestCh, closes it on all exit paths.
 	go func() {
 		defer close(requestCh)
 
@@ -645,7 +622,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				firstScanEvent = false
 			}
 			if event.Folder != nil {
-				// v4.8.7 RF1: Validate folder path to prevent path traversal
+				// Validate folder path to prevent path traversal
 				if localPath, err := resolveSafeDownloadPath(event.Folder.RelativePath, rootOutputDir); err != nil {
 					emitLog(events.WarnLevel, fmt.Sprintf("Skipping folder with invalid path %q: %s", event.Folder.RelativePath, err.Error()))
 				} else if err := os.MkdirAll(localPath, 0755); err != nil {
@@ -655,7 +632,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				}
 			}
 			if event.File != nil {
-				// v4.8.7 RF1: Validate file path to prevent path traversal
+				// Validate file path to prevent path traversal
 				localPath, pathErr := resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
 				if pathErr != nil {
 					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", event.File.RelativePath, pathErr.Error()))
@@ -679,7 +656,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 					}
 					filesQueued++
 					totalBytes += event.File.Size
-					// v4.8.7: Update discovered totals immediately at file discovery
+					// Update discovered totals immediately at file discovery
 					// for accurate progress denominator (symmetric with upload path).
 					ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
 				case <-scanCtx.Done():
@@ -698,18 +675,18 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		default:
 		}
 
-		// v4.8.2: Only report as error if we weren't cancelled — cancel is clean termination
+		// Only report as error if we weren't cancelled — cancel is clean termination
 		if scanErr != nil && scanCtx.Err() == nil {
 			emitLog(events.ErrorLevel, fmt.Sprintf("Scan error: %s", scanErr.Error()))
 			emitCompletion(foldersCreated, filesQueued, totalBytes, scanErr.Error())
-			// v4.8.7: Report scan failure if no files were queued (total failure)
+			// Report scan failure if no files were queued (total failure)
 			if filesQueued == 0 && a.reporter != nil {
 				a.reporter.Report(scanErr, reporting.CategoryTransfer, "folder_download", "")
 			}
 			return
 		}
 
-		// v4.8.7: Final discovered totals update (ensures exact count is set)
+		// Final discovered totals update (ensures exact count is set)
 		ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
 
 		emitLog(events.InfoLevel, fmt.Sprintf("Scan complete: %d folders, %d files (%.2f MB). Downloads in progress.",
@@ -729,20 +706,19 @@ type FolderUploadResultDTO struct {
 	FoldersCreated int    `json:"foldersCreated"`
 	FilesQueued    int    `json:"filesQueued"`
 	TotalBytes     int64  `json:"totalBytes"`
-	MergedInto     string `json:"mergedInto,omitempty"` // v4.0.8: Name of existing folder we merged into (empty if new folder created)
+	MergedInto     string `json:"mergedInto,omitempty"` // Name of existing folder we merged into (empty if new folder created)
 	Error          string `json:"error,omitempty"`
 }
 
 // FolderExistsCheckDTO returns info about whether a folder with the given name exists.
-// v4.0.8: Used for pre-upload check to prompt user about merge behavior.
 type FolderExistsCheckDTO struct {
-	Exists   bool   `json:"exists"`            // True if a visible folder with this name exists
+	Exists   bool   `json:"exists"`             // True if a visible folder with this name exists
 	FolderID string `json:"folderId,omitempty"` // ID of existing folder (if found)
-	Error    string `json:"error,omitempty"`   // Error message if check failed
+	Error    string `json:"error,omitempty"`    // Error message if check failed
 }
 
 // CheckFolderExistsForUpload checks if a folder with the given name already exists
-// in the destination folder. v4.0.8: Used to show merge confirmation dialog before upload.
+// in the destination folder. Used to show merge confirmation dialog before upload.
 func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID string) FolderExistsCheckDTO {
 	ctx := context.Background()
 
@@ -768,9 +744,8 @@ func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID strin
 }
 
 // CheckFoldersExistForUpload checks if multiple folders with the given names already exist
-// in the destination folder. v4.8.5 bugfix: Uses a shared FolderCache so that parent folder
-// contents are fetched once instead of once per folder, reducing the "Checking for existing
-// folders..." delay from 10-20s to <1s.
+// in the destination folder. Uses a shared FolderCache so that parent folder contents are
+// fetched once instead of once per folder.
 func (a *App) CheckFoldersExistForUpload(folderNames []string, parentFolderID string) []FolderExistsCheckDTO {
 	ctx := context.Background()
 	results := make([]FolderExistsCheckDTO, len(folderNames))
@@ -807,58 +782,14 @@ func (a *App) CheckFoldersExistForUpload(folderNames []string, parentFolderID st
 	return results
 }
 
-// folderProgressWriter is an io.Writer that counts folder creation lines
-// and emits enumeration progress events to keep the UI updated during
-// the CreateFolderStructure phase. v4.7.7: Bridges folder creation to enumeration events.
-type folderProgressWriter struct {
-	enumID       string
-	folderName   string
-	direction    string
-	filesFound   int
-	foldersFound int
-	bytesFound   int64
-	totalDirs    int
-	dirsProcessed int
-	eventBus     *events.EventBus
-}
-
-func (w *folderProgressWriter) Write(p []byte) (n int, err error) {
-	w.dirsProcessed++
-	// Emit progress every folder (or every 3rd if >100 dirs, to reduce event volume)
-	if w.totalDirs <= 100 || w.dirsProcessed%3 == 0 || w.dirsProcessed == w.totalDirs {
-		if w.eventBus != nil {
-			w.eventBus.Publish(&events.EnumerationEvent{
-				BaseEvent:      events.BaseEvent{EventType: events.EventEnumerationProgress, Time: time.Now()},
-				ID:             w.enumID,
-				FolderName:     w.folderName,
-				Direction:      w.direction,
-				FoldersFound:   w.foldersFound,
-				FilesFound:     w.filesFound,
-				BytesFound:     w.bytesFound,
-				IsComplete:     false,
-				StatusMessage:  fmt.Sprintf("Creating folders... (%d of %d)", w.dirsProcessed, w.totalDirs),
-				Phase:          events.EnumPhaseCreatingFolders,
-				FoldersTotal:   w.totalDirs,
-				FoldersCreated: w.dirsProcessed,
-			})
-		}
-	}
-	return len(p), nil
-}
-
 // StartFolderUpload uploads a local folder recursively to the Rescale platform.
-// v4.0.0: Implements folder upload in GUI by creating folder structure and
-// queueing files to the TransferService for upload with progress events.
-// v4.0.8: Added enumeration events for real-time scanning progress in Transfers tab.
-// v4.7.4: Added tags parameter for post-upload tagging.
-// v4.7.7: Restructured enumeration events — keeps enumeration row alive through folder
-// creation phase, emits EventEnumerationCompleted only after StartTransfers succeeds.
-// Uses merge mode (reuse existing folders) and queues all files for upload.
+// Creates remote folder structure (merge mode: reuses existing folders), scans local
+// files, and queues them to TransferService. Returns immediately — scan and uploads
+// proceed in background.
 func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTags []string) FolderUploadResultDTO {
 	displayName := filepath.Base(localPath)
 	a.logInfo("folder-upload", fmt.Sprintf("Starting folder upload: %s", displayName))
 
-	// v4.0.8: Helper to emit enumeration events
 	enumID := fmt.Sprintf("enum_ul_%d", time.Now().UnixNano())
 	emitEnumeration := func(eventType events.EventType, foldersFound, filesFound int, bytesFound int64, isComplete bool, errMsg string, statusMessage string, phase string) {
 		if a.engine != nil && a.engine.Events() != nil {
@@ -890,7 +821,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		}
 	}
 
-	// v4.7.7: Deferred completion — ensures EventEnumerationCompleted is emitted on ALL exit paths
+	// Deferred completion — ensures EventEnumerationCompleted is emitted on ALL exit paths
 	completionEmitted := false
 	var deferredError string
 	defer func() {
@@ -934,7 +865,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		return FolderUploadResultDTO{Error: deferredError}
 	}
 
-	// v4.8.8: Resolve symlinks in root path so WalkStream operates on the real directory.
+	// Resolve symlinks in root path so WalkStream operates on the real directory.
 	// IMPORTANT: Do NOT overwrite localPath — it's used for display name (rootFolderName)
 	// and user-facing messages. Only use resolvedLocalPath for filesystem operations.
 	resolvedLocalPath, err := pathutil.ResolveAbsolutePath(localPath)
@@ -947,14 +878,11 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	logger := logging.NewLogger("folder-upload", nil)
 	ctx := context.Background()
 
-	// v4.8.2: Warm proxy before first API call
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 
-	// v4.8.7: Pre-warm credentials synchronously before upload starts.
-	// Symmetric with download path — eliminates credential lock contention.
+	// Pre-warm credentials synchronously — eliminates credential lock contention.
 	ts.WarmCredentialCache(ctx)
 
-	// v4.0.8: Emit enumeration started event
 	emitEnumeration(events.EventEnumerationStarted, 0, 0, 0, false, "", "", events.EnumPhaseScanning)
 
 	// Get parent folder ID (default to My Library if empty)
@@ -963,7 +891,6 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		folders, err := apiClient.GetRootFolders(ctx)
 		if err != nil {
 			deferredError = err.Error()
-			// v4.8.7: Report pre-transfer API failure
 			if a.reporter != nil {
 				a.reporter.Report(err, reporting.CategoryTransfer, "folder_upload", "")
 			}
@@ -972,13 +899,12 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		parentID = folders.MyLibrary
 	}
 
-	// v4.8.6: Validate destination folder exists before starting heavy work
+	// Validate destination folder exists before starting heavy work
 	if parentID != "" {
 		valCtx, valCancel := context.WithTimeout(ctx, 30*time.Second)
 		if _, err := apiClient.ListFolderContentsPage(valCtx, parentID, "", 1); err != nil {
 			valCancel()
 			deferredError = fmt.Sprintf("Destination folder not found or inaccessible: %s", err.Error())
-			// v4.8.7: Report pre-transfer API failure
 			if a.reporter != nil {
 				a.reporter.Report(err, reporting.CategoryTransfer, "folder_upload", "")
 			}
@@ -1002,12 +928,12 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	a.logInfo("folder-upload", fmt.Sprintf("Folder check complete: exists=%v, id=%s", exists, rootFolderID))
 
 	foldersCreated := 0
-	mergedIntoFolder := "" // v4.0.8: Track if we merged into existing folder
+	mergedIntoFolder := ""
 	if !exists {
 		a.logInfo("folder-upload", fmt.Sprintf("Creating root folder '%s'...", rootFolderName))
 		rootFolderID, err = apiClient.CreateFolder(ctx, rootFolderName, parentID)
 		if err != nil {
-			// v4.0.8: Handle "folder already exists" error with clear user guidance
+			// Handle "folder already exists" error with clear user guidance
 			if api.IsFileExistsError(err) {
 				a.logWarn("folder-upload", fmt.Sprintf("Folder '%s' already exists, checking if visible...", rootFolderName))
 				cache.Invalidate(parentID)
@@ -1045,7 +971,6 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		logger.Warn().Err(err).Str("folderID", rootFolderID).Msg("Failed to warm cache for root folder")
 	}
 
-	// v4.8.7 Plan 2b: Shared orchestrator replaces ~280 lines of inline pipeline.
 	uploadCtx, uploadCancel := context.WithCancel(context.Background())
 
 	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)
@@ -1075,7 +1000,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 
 	_, _ = folder.RunOrchestrator(uploadCtx,
 		folder.OrchestratorConfig{
-			RootPath:          resolvedLocalPath, // v4.8.8: Use resolved path for filesystem walk
+			RootPath:          resolvedLocalPath, // Use resolved path for filesystem walk
 			RootRemoteID:      rootFolderID,
 			IncludeHidden:     true,
 			FolderConcurrency: constants.DefaultFolderConcurrency,
@@ -1087,8 +1012,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		},
 		folder.OrchestratorCallbacks[services.TransferRequest]{
 			OnFileDiscovered: func(snap folder.ProgressSnapshot) {
-				// v4.8.5 bugfix: Update discovered totals on every file so the polling
-				// path always has an accurate count.
+				// Update discovered totals on every file so the polling path always has an accurate count.
 				ts.GetQueue().UpdateBatchDiscovered(enumID, snap.TotalFiles, snap.TotalBytes)
 				// Enumeration events emitted every 100 files to limit event volume.
 				if snap.TotalFiles%100 == 0 || snap.TotalFiles == 1 {
@@ -1099,7 +1023,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 				}
 			},
 			OnFolderReady: func(snap folder.ProgressSnapshot, localPath, remoteID string) {
-				// v4.8.5: Emit folder creation progress every 3 folders
+				// Emit folder creation progress every 3 folders
 				if snap.TotalDirs%3 == 0 || snap.TotalDirs == 1 {
 					emitEnumeration(events.EventEnumerationProgress,
 						snap.TotalDirs, snap.TotalFiles, snap.TotalBytes, false, "",
@@ -1124,8 +1048,8 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 				emitLog(events.WarnLevel, fmt.Sprintf("Skipping %d files in unmapped folder: %s", count, parentDir))
 			},
 			OnOrchestratorDone: func(r *folder.OrchestratorResult) {
-				// v4.8.5 bugfix preserved: scan marked complete when discovery
-				// count is final, BEFORE dispatcher drains (which blocks for minutes).
+				// Mark scan complete when discovery count is final, BEFORE dispatcher
+				// drains (which blocks for minutes).
 				ts.GetQueue().MarkBatchScanInProgress(enumID, false)
 
 				// Final update of discovered totals
@@ -1154,7 +1078,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	// Orchestrator owns completion via OnOrchestratorDone — prevent deferred emitter
 	completionEmitted = true
 
-	// v4.8.5: Return immediately with FilesQueued=0 — files are discovered asynchronously.
+	// Return immediately — files are discovered asynchronously.
 	// Frontend already handles !totalKnown state. Batch events drive UI updates.
 	return FolderUploadResultDTO{
 		FoldersCreated: foldersCreated,
@@ -1163,10 +1087,6 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		MergedInto:     mergedIntoFolder,
 	}
 }
-
-// =============================================================================
-// v4.0.0: G1 - Local File Info Bindings for Single Job Input UX
-// =============================================================================
 
 // LocalFileInfoDTO contains information about a local file or directory.
 type LocalFileInfoDTO struct {

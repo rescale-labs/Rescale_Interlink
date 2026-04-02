@@ -46,7 +46,7 @@ type UploadResult struct {
 	TotalBytes      int64
 	Errors          []UploadError
 	SymlinksSkipped []string
-	UploadedFileIDs []string // v4.7.4: Collected file IDs for post-upload tagging
+	UploadedFileIDs []string
 }
 
 // UploadError tracks failed uploads
@@ -56,9 +56,8 @@ type UploadError struct {
 }
 
 // FolderReadyEvent, FolderCache, NewFolderCache, BuildDirectoryTree, CheckFolderExists,
-// CreateFolderStructure, CreateFolderStructureStreaming, and related helpers moved to
-// internal/transfer/folder/ (v4.8.7 Plan 2b). Aliases in folder_upload_compat.go
-// preserve the cli.* API surface.
+// CreateFolderStructure, CreateFolderStructureStreaming, and related helpers live in
+// internal/transfer/folder/. Aliases in folder_upload_compat.go preserve the cli.* API surface.
 
 // checkFileExists checks if a file with the given name exists in the folder
 func checkFileExists(ctx context.Context, apiClient *api.Client, cache *FolderCache, folderID, fileName string) (string, bool, error) {
@@ -78,7 +77,6 @@ func checkFileExists(ctx context.Context, apiClient *api.Client, cache *FolderCa
 }
 
 // cliPipelinedUploadItem implements transfer.WorkItem for uploadDirectoryPipelined.
-// v4.8.6: Replaces hand-rolled worker pool with transfer.RunBatchFromChannel.
 type cliPipelinedUploadItem struct {
 	fpath          string
 	remoteFolderID string
@@ -89,10 +87,8 @@ type cliPipelinedUploadItem struct {
 func (p cliPipelinedUploadItem) FileSize() int64 { return p.size }
 
 // uploadDirectoryPipelined coordinates streaming pipelined folder creation and file uploads.
-// v4.8.7: Uses WalkStream for streaming discovery — files start uploading before scan completes.
-// v4.8.7 Plan 2b: Uses shared folder.RunOrchestrator for the three-part streaming pipeline.
-// v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
-// v4.8.6: Migrated file upload worker pool to transfer.RunBatchFromChannel.
+// Uses WalkStream for streaming discovery — files start uploading before scan completes.
+// Uses shared folder.RunOrchestrator for the three-part streaming pipeline.
 func uploadDirectoryPipelined(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -113,7 +109,7 @@ func uploadDirectoryPipelined(
 	foldersCreated := 0
 	var foldersCreatedMutex sync.Mutex
 
-	// v4.8.7: Streaming progress UI — total starts at 0, increments as files are discovered.
+	// Streaming progress UI — total starts at 0, increments as files are discovered.
 	uploadUI := progress.NewUploadUI(0)
 
 	// NOTE: Do NOT redirect zerolog through uploadUI.Writer()
@@ -121,7 +117,6 @@ func uploadDirectoryPipelined(
 	// when mixed with ANSI escape codes from mpb progress bars.
 	defer uploadUI.Wait()
 
-	// v4.8.7: Unified credential warming — session + provider + metadata caches.
 	logger.Debug().Msg("Pre-warming credential caches")
 	credManager := credentials.GetManager(apiClient)
 	credManager.WarmAll(ctx)
@@ -143,7 +138,7 @@ func uploadDirectoryPipelined(
 	}
 	cliUploadTransferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.6: Use RunBatchFromChannel with AdaptiveCount for dynamic worker scaling.
+	// Use RunBatchFromChannel with AdaptiveCount for dynamic worker scaling.
 	var adaptive *transfer.AdaptiveWorkerCount
 	batchCfg := transfer.BatchConfig{
 		MaxWorkers:    fileConcurrency,
@@ -152,7 +147,6 @@ func uploadDirectoryPipelined(
 		AdaptiveCount: &adaptive,
 	}
 
-	// v4.8.7 Plan 2b: Shared orchestrator feeds batchCh for RunBatchFromChannel.
 	batchCh := make(chan cliPipelinedUploadItem, constants.WorkChannelBuffer)
 
 	// Start RunBatchFromChannel consumer (unchanged from pre-2b)
@@ -264,8 +258,7 @@ func uploadDirectoryPipelined(
 			})
 	}()
 
-	// v4.8.7 Plan 2b: Shared orchestrator replaces inline Parts A/B/C.
-	// v4.8.8: rootPath is already resolved by caller (folders.go) — no need to double-resolve.
+	// rootPath is already resolved by caller (folders.go) — no need to double-resolve.
 	dispatchDone, orchResult := folder.RunOrchestrator(ctx,
 		folder.OrchestratorConfig{
 			RootPath:          rootPath,
@@ -283,7 +276,6 @@ func uploadDirectoryPipelined(
 		},
 		folder.OrchestratorCallbacks[cliPipelinedUploadItem]{
 			OnFileDiscovered: func(snap folder.ProgressSnapshot) {
-				// v4.8.7: Streaming total increment
 				uploadUI.IncrementTotal()
 			},
 			OnFolderReady:      nil, // CLI: no folder progress events
@@ -329,8 +321,7 @@ func uploadDirectoryPipelined(
 	return result, foldersCreated, nil
 }
 
-// cliUploadWorkItem implements transfer.WorkItem for uploadFiles RunBatch migration.
-// v4.8.6: Replaces hand-rolled worker pool with transfer.RunBatch.
+// cliUploadWorkItem implements transfer.WorkItem for uploadFiles RunBatch.
 type cliUploadWorkItem struct {
 	fpath string
 	size  int64
@@ -339,9 +330,6 @@ type cliUploadWorkItem struct {
 func (u cliUploadWorkItem) FileSize() int64 { return u.size }
 
 // uploadFiles uploads all files with progress tracking and conflict/error handling.
-// v4.8.1: Uses ConflictResolver instead of raw pointer-based state machines.
-// v4.8.1: Added resourceMgr parameter — must be from CreateResourceManager().
-// v4.8.6: Migrated from hand-rolled worker pool to transfer.RunBatch.
 func uploadFiles(
 	ctx context.Context,
 	rootPath string,
@@ -365,18 +353,14 @@ func uploadFiles(
 	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
 	// when mixed with ANSI escape codes from mpb progress bars.
 
-	// v4.8.7: Unified credential warming — session + provider + metadata caches.
 	logger.Debug().Msg("Pre-warming credential caches")
 	credManager := credentials.GetManager(apiClient)
 	credManager.WarmAll(ctx)
-
-	// v4.8.1: Use passed-in resource manager (must be from CreateResourceManager())
 	if resourceMgr == nil {
 		panic("uploadFiles: resourceMgr is required (use CreateResourceManager())")
 	}
 	seqTransferMgr := transfer.NewManager(resourceMgr)
 
-	// v4.8.6: Build work items with file sizes for adaptive concurrency.
 	items := make([]cliUploadWorkItem, len(files))
 	for i, f := range files {
 		var sz int64
@@ -386,7 +370,6 @@ func uploadFiles(
 		items[i] = cliUploadWorkItem{fpath: f, size: sz}
 	}
 
-	// v4.8.6: Compute adaptive worker count for AllocateTransfer (same count RunBatch will use).
 	batchCfg := transfer.BatchConfig{
 		MaxWorkers:  maxConcurrent,
 		ResourceMgr: resourceMgr,
@@ -394,7 +377,6 @@ func uploadFiles(
 	}
 	adaptiveWorkers := transfer.ComputedWorkers(items, batchCfg)
 
-	// v4.8.6: Use transfer.RunBatch instead of hand-rolled worker pool.
 	// Note: We do NOT rely on BatchResult.Completed — many nil returns are
 	// skips/conflicts. All real outcomes are tracked by manual counters.
 	transfer.RunBatch(ctx, items, batchCfg, func(ctx context.Context, item cliUploadWorkItem) error {
@@ -434,7 +416,6 @@ func uploadFiles(
 				logger.Error().Str("file", fpath).Err(checkErr).Msg("Error checking file existence")
 				return nil
 			}
-			// v4.8.1: Use shared error resolver instead of inline state machine
 			action, promptErr := errorResolver.Resolve(func() (ErrorAction, error) {
 				return promptUploadError(fileName, checkErr)
 			})
@@ -455,7 +436,6 @@ func uploadFiles(
 
 		// SAFE MODE: Handle conflicts BEFORE upload
 		if cfg.CheckConflictsBeforeUpload && exists {
-			// v4.8.1: Use shared ConflictResolver instead of inline state machine
 			action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
 				folderPath := filepath.Dir(relativePath)
 				if folderPath == "." {
@@ -517,8 +497,6 @@ func uploadFiles(
 		// Create progress bar for this file
 		fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
 
-		// v4.8.0: Allocate transfer handle for per-file multi-threading
-		// v4.8.1: Pass adaptive worker count (was maxConcurrent, Bug #3)
 		seqHandle := seqTransferMgr.AllocateTransfer(fileInfo.Size(), adaptiveWorkers)
 
 		// Upload with progress callback
@@ -596,7 +574,6 @@ func uploadFiles(
 					return nil
 				}
 
-				// v4.8.1: Use shared ConflictResolver for post-upload conflict
 				action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
 					folderPath := filepath.Dir(relativePath)
 					if folderPath == "." {

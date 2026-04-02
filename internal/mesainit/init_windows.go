@@ -51,7 +51,7 @@ func init() {
 		return
 	}
 
-	// Self-extract and re-exec if needed (v3.4.13+)
+	// Self-extract and re-exec if needed
 	// This happens before EnsureSoftwareRendering() because by the time
 	// that function runs, CGO has already loaded opengl32.dll.
 	if os.Getenv(reexecEnvVar) != "1" {

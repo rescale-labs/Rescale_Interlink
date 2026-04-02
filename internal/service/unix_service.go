@@ -31,7 +31,6 @@ func IsWindowsService() (bool, error) {
 }
 
 // IsInstalled always returns false on non-Windows platforms.
-// v4.3.6: Added for GUI to check service installation status.
 func IsInstalled() bool {
 	return false
 }

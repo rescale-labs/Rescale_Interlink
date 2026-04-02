@@ -1,5 +1,4 @@
 // Package cli provides automation discovery commands.
-// Added in v3.6.1.
 package cli
 
 import (

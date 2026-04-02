@@ -52,8 +52,6 @@ func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.Le
 		fileSize = props.ContentLength
 	}
 
-	// v4.8.2: Start periodic refresh for all Azure transfers, not just >1GB.
-	// Lightweight — goroutine cancelled by StopPeriodicRefresh when transfer completes.
 	azureClient.StartPeriodicRefresh(ctx)
 	defer azureClient.StopPeriodicRefresh()
 
@@ -114,7 +112,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	// Track whether we successfully closed the file to avoid double-close from defer
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
@@ -128,7 +126,6 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 		if err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
 		}
-		// v4.4.0: Sync and close before returning
 		if err := file.Sync(); err != nil {
 			return fmt.Errorf("failed to sync file to disk: %w", err)
 		}
@@ -170,14 +167,15 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 	// Ensure 100% is reported
 	progressCallback(1.0)
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Without this, sporadic checksum failures
+	// occur because the OS buffer may not be flushed yet.
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	// Explicit Close() before returning so the file handle is released
+	// before the caller reads the file for checksum verification.
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
@@ -188,7 +186,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 
 // downloadChunkedWithProgress downloads a blob in chunks with progress callback.
 // Uses AzureClient directly.
-// v4.5.4: Wraps request+read+close in single retry to handle mid-transfer proxy failures.
+// Wraps request+read+close in single retry to handle mid-transfer proxy failures.
 func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient *AzureClient, remotePath, localPath string, totalSize int64, progressCallback func(float64)) error {
 	// Report 0% at start
 	if progressCallback != nil {
@@ -200,7 +198,7 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	// Track whether we successfully closed the file to avoid double-close from defer
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
@@ -217,8 +215,8 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 			chunkSize = totalSize - offset
 		}
 
-		// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
-		// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally)
+		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
+		// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally).
 		var chunkData []byte
 		err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk offset=%d", offset), func() error {
 			// Per-attempt timeout to prevent stalled reads from hanging
@@ -255,14 +253,15 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 		}
 	}
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Without this, sporadic checksum failures
+	// occur because the OS buffer may not be flushed yet.
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	// Explicit Close() before returning so the file handle is released
+	// before the caller reads the file for checksum verification.
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
@@ -312,7 +311,7 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 	if err != nil {
 		return fmt.Errorf("failed to create/open file: %w", err)
 	}
-	// v4.4.0: Track whether we successfully closed the file (see downloader.go for explanation)
+	// Track whether we successfully closed the file to avoid double-close from defer
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
@@ -393,8 +392,8 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 				}
 				rangeSize := endByte - startByte
 
-				// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
-				// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally)
+				// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
+				// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally).
 				var chunkData []byte
 				err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk %d", chunkIdx), func() error {
 					// Per-attempt timeout to prevent stalled reads from hanging
@@ -464,7 +463,6 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 	wg.Wait()
 	close(errChan)
 
-	// v4.8.7: Use unified error collection
 	errs := internaltransfer.CollectErrors(errChan)
 	if len(errs) > 0 {
 		return errs[0]
@@ -479,14 +477,15 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// v4.3.7: Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Fixes sporadic checksum failures where file
-	// was read as empty due to OS buffer not being flushed.
+	// Sync file to disk before returning to ensure all data is written
+	// before checksum verification. Without this, sporadic checksum failures
+	// occur because the OS buffer may not be flushed yet.
 	if err := file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
-	// v4.4.0: Explicit Close() BEFORE returning (see downloader.go for explanation)
+	// Explicit Close() before returning so the file handle is released
+	// before the caller reads the file for checksum verification.
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}

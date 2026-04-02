@@ -36,9 +36,6 @@ var _ transfer.StreamingConcurrentUploader = (*Provider)(nil)
 var _ transfer.StreamingConcurrentDownloader = (*Provider)(nil)
 var _ transfer.StreamingPartDownloader = (*Provider)(nil)
 
-// v4.8.1: progressReader and uploadProgressReader moved to shared
-// internal/cloud/transfer/progress.go (transfer.ProgressReader, transfer.UploadProgressReader).
-
 // InitStreamingUpload initializes a multipart upload with streaming encryption.
 // Uses CBC chaining format compatible with Rescale platform.
 // Metadata stores `iv` (base64) for Rescale decryption compatibility.
@@ -90,7 +87,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 			Metadata: map[string]string{
 				"iv":              encryption.EncodeBase64(encryptState.GetInitialIV()),
 				"streamingformat": "cbc",                       // Marks file as CBC-chained streaming
-				"partsize":        fmt.Sprintf("%d", partSize), // v4.0.0: Store part size for correct download decryption
+				"partsize":        fmt.Sprintf("%d", partSize), // Required for correct download decryption
 			},
 		})
 		return err
@@ -156,7 +153,6 @@ func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfe
 	// S3 uses 1-based part numbers
 	partNumber := int32(partIndex + 1)
 
-	// Create context with timeout (v4.0.4: use centralized constant)
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
@@ -214,9 +210,8 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 // UploadCiphertext uploads already-encrypted data to cloud storage.
 // Can be called concurrently with EncryptStreamingPart (pipelining).
 // Separated from encryption to enable pipelining.
-// v3.6.3: Now uses progressReader to track bytes in real-time via ByteProgressCallback.
-// v4.6.3: Reader created inside retry closure with io.ReadSeeker support to fix
-// "stream not seekable" failures during AWS SDK retries.
+// Reader is created inside the retry closure with io.ReadSeeker support so the
+// AWS SDK can rewind the stream on transient errors (fixes "stream not seekable" failures).
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
 	if !ok {
@@ -228,15 +223,14 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	uploadStart := time.Now()
 	fileName := filepath.Base(uploadState.LocalPath)
 
-	// Create context with timeout (v4.0.4: use centralized constant)
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
 
 	// Add HTTP tracing if DEBUG_HTTP is enabled
 	partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d", partNumber))
 
-	// Upload the part using S3Client
-	// v4.6.3: Reader created inside closure so each retry attempt gets a fresh reader.
+	// Upload the part using S3Client.
+	// Reader created inside closure so each retry attempt gets a fresh reader.
 	// Uses uploadProgressReader (io.ReadSeeker) so AWS SDK can rewind on transient errors.
 	var uploadResp *s3.UploadPartOutput
 	err := providerData.s3Client.RetryWithBackoff(partCtx, fmt.Sprintf("UploadPart %d", partNumber), func() error {
@@ -494,7 +488,7 @@ func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, st
 	if sf, ok := headResp.Metadata["streamingformat"]; ok && sf == "cbc" {
 		// CBC streaming format - uploaded by rescale-int v3.2.4+
 		// Can use streaming download (no temp file) with sequential part decryption
-		// v4.0.0: Read partSize from metadata. Return 0 if not present so downloader
+		// Read partSize from metadata. Return 0 if not present so downloader
 		// can calculate the correct size from file size (backward compatibility).
 		var partSize int64 = 0 // 0 means "calculate from file size"
 		if ps, ok := headResp.Metadata["partsize"]; ok && ps != "" {
@@ -586,8 +580,8 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 			endByte = encryptedSize - 1
 		}
 
-		// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
-		// Uses GetObjectRangeOnce to avoid nested retries
+		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
+		// Uses GetObjectRangeOnce to avoid nested retries.
 		var ciphertext []byte
 		err := s3Client.RetryWithBackoff(ctx, fmt.Sprintf("DownloadPart %d", partIndex), func() error {
 			// Per-attempt timeout to prevent stalled reads from hanging
@@ -667,8 +661,8 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // DownloadEncryptedRange downloads a specific byte range of the encrypted file from S3.
 // This is used by the concurrent download orchestrator to download individual parts.
 // The range is inclusive: [offset, offset+length).
-// v4.0.0: progressCallback (optional) is called with bytes downloaded for smooth progress.
-// v4.5.4: Wraps request+read+close in single retry with progress rollback on failure.
+// progressCallback (optional) is called with bytes downloaded for smooth progress.
+// Wraps request+read+close in single retry with progress rollback on failure.
 func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
@@ -676,7 +670,7 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 		return nil, fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// v4.5.4: Wrap request+read+close in single retry to handle mid-transfer proxy failures
+	// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
 	// Uses GetObjectRangeOnce to avoid nested retries. Progress is tracked per-attempt
 	// with rollback on failure to maintain accurate progress tracking.
 	var data []byte

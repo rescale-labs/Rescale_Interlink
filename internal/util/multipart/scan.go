@@ -1,5 +1,4 @@
 // Package multipart provides shared directory scanning for multi-part PUR operations.
-// v4.6.5: Added ScanDirectories() shared helper to unify CLI and GUI scan logic.
 package multipart
 
 import (

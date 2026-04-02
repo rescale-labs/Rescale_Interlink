@@ -1,4 +1,3 @@
-// v4.8.7: Ring buffer for timeline capture in error reports.
 package events
 
 import "sync"

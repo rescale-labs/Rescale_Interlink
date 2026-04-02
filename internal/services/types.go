@@ -2,7 +2,6 @@
 // This layer sits between the GUI/CLI and the core backend, providing a clean API
 // that any frontend can use without framework-specific dependencies.
 //
-// v3.6.4: Created as part of Fyne -> Wails migration preparation.
 package services
 
 import (
@@ -34,7 +33,6 @@ const (
 )
 
 // Source label constants for transfer origin tracking.
-// v4.7.4: Centralized constants to prevent string drift.
 const (
 	SourceLabelPUR         = "PUR"
 	SourceLabelSingleJob   = "SingleJob"
@@ -64,23 +62,22 @@ type TransferRequest struct {
 	Size int64
 
 	// SourceLabel identifies the origin ("PUR", "SingleJob", "FileBrowser").
-	// v4.7.4: Used for Transfers tab badges and cancel/retry gating.
+	// Used for Transfers tab badges and cancel/retry gating.
 	SourceLabel string
 
 	// BatchID groups related transfers (e.g., all files in a folder upload).
-	// v4.7.7: Used for transfer grouping in Transfers tab to collapse bulk operations.
+	// Used for transfer grouping in Transfers tab to collapse bulk operations.
 	BatchID string
 
 	// BatchLabel is the display name for the batch (e.g., folder name, "PUR: <run>").
-	// v4.7.7: Shown as the collapsed row label in Transfers tab.
+	// Shown as the collapsed row label in Transfers tab.
 	BatchLabel string
 
-	// Tags to apply after successful upload.
-	// v4.7.4: Tagging failure is non-fatal (logged as warning).
+	// Tags to apply after successful upload. Tagging failure is non-fatal (logged as warning).
 	Tags []string
 
 	// FileInfo is optional pre-fetched file metadata for downloads.
-	// v4.8.0: When set, DownloadFile() skips the GetFileInfo() API call.
+	// When set, DownloadFile() skips the GetFileInfo() API call.
 	// Nil means download will fetch metadata via API (safe degradation).
 	FileInfo *models.CloudFile
 }
@@ -110,15 +107,13 @@ type TransferTask struct {
 	Size int64
 
 	// SourceLabel identifies the origin ("PUR", "SingleJob", "FileBrowser").
-	// v4.7.4: Used for Transfers tab badges and cancel/retry gating.
+	// Used for Transfers tab badges and cancel/retry gating.
 	SourceLabel string
 
 	// BatchID groups related transfers (e.g., all files in a folder upload).
-	// v4.7.7: Used for transfer grouping in Transfers tab.
 	BatchID string
 
 	// BatchLabel is the display name for the batch (e.g., folder name).
-	// v4.7.7: Shown as the collapsed row label in Transfers tab.
 	BatchLabel string
 
 	// Progress is 0.0 to 1.0
@@ -141,7 +136,6 @@ type TransferTask struct {
 }
 
 // UploadFileSyncParams contains additional parameters for synchronous uploads.
-// v4.7.4: Used by UploadFileSync() for pipeline and single-job integration.
 type UploadFileSyncParams struct {
 	// ExtraProgressCallback is an additional callback for the caller's own tracking
 	// (e.g., pipeline's reportStateChange). Called in addition to queue progress.
