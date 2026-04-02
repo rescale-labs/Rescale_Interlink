@@ -314,7 +314,7 @@ func Run(args []string) error {
 		},
 		Linux: &linux.Options{
 			WindowIsTranslucent: false,
-			WebviewGpuPolicy:    linux.WebviewGpuPolicyAlways,
+			WebviewGpuPolicy:    linux.WebviewGpuPolicyOnDemand,
 			ProgramName:         "rescale-int-gui",
 		},
 	})
