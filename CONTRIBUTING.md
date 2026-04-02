@@ -1,6 +1,6 @@
 # Contributing to Rescale Interlink
 
-**Version**: 4.7.5
+**Version**: 4.8.8
 **Last Updated**: February 25, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
@@ -187,7 +187,6 @@ rescale-int/
 │   ├── core/           # Core engine
 │   ├── crypto/         # Encryption (HKDF, AES-256-CBC)
 │   ├── events/         # Event bus system
-│   ├── _archive_fyne_gui/  # Legacy Fyne GUI components (archived, reference only)
 │   ├── wailsapp/       # Wails v2 Go bindings
 │   │   ├── app.go            # Main Wails app struct
 │   │   ├── config_bindings.go    # Config methods

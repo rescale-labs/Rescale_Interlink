@@ -70,13 +70,12 @@ func (l LogLevel) String() string {
 	}
 }
 
-// Event is the base interface for all events
+// Event is implemented by every event type; EventBus dispatches based on the concrete type.
 type Event interface {
 	Type() EventType
 	Timestamp() time.Time
 }
 
-// BaseEvent provides common event fields
 type BaseEvent struct {
 	EventType EventType
 	Time      time.Time
@@ -240,7 +239,7 @@ type BatchProgressEvent struct {
 	DiscoveredBytes int64   `json:"discoveredBytes"` // bytes discovered by scan
 }
 
-// EventBus manages event subscriptions and publishing
+// EventBus is a typed pub-sub hub; subscribers receive events matching their registered type.
 type EventBus struct {
 	subscribers   map[EventType][]chan Event
 	all           []chan Event // Subscribers to all events

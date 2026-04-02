@@ -445,7 +445,7 @@ time ./bin/rescale-int folders upload --folder-id $FOLDER_ID \
 
 **Launch Test**:
 ```bash
-./bin/rescale-int --gui &
+./bin/rescale-int-gui &
 GUI_PID=$!
 sleep 2
 ps -p $GUI_PID  # Should show running process
@@ -553,7 +553,7 @@ kill $GUI_PID   # Should terminate cleanly
 **Deadlock Test** (Stress Test):
 ```bash
 # Launch GUI
-./bin/rescale-int --gui
+./bin/rescale-int-gui
 
 # Load CSV with 50+ jobs
 # Click Run

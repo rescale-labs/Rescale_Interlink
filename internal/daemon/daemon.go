@@ -23,7 +23,6 @@ import (
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
-// Config holds daemon configuration.
 type Config struct {
 	// PollInterval is how often to check for completed jobs
 	PollInterval time.Duration
@@ -93,7 +92,6 @@ type Daemon struct {
 	tracker         *DaemonTransferTracker
 }
 
-// New creates a new daemon instance.
 func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Daemon, error) {
 	if daemonCfg == nil {
 		daemonCfg = DefaultConfig()

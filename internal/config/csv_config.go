@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-// Config represents the PUR configuration
+// Config represents the application configuration for Rescale Interlink.
 type Config struct {
 	// Worker settings
 	TarWorkers    int

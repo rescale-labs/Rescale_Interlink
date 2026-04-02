@@ -1,4 +1,4 @@
-// Rescale Interlink - Unified CLI and GUI Tool for Rescale platform
+// Rescale Interlink - CLI-only binary for the Rescale platform
 // FIPS 140-3 Compliant Build Required
 package main
 

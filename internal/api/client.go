@@ -393,7 +393,6 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return resp, nil
 }
 
-// GetUserProfile gets the current user's profile
 func (c *Client) GetUserProfile(ctx context.Context) (*models.UserProfile, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v3/users/me/", nil)
 	if err != nil {
@@ -478,7 +477,6 @@ func (c *Client) GetStorageCredentials(ctx context.Context, fileInfo *models.Clo
 	}
 }
 
-// GetRootFolders gets the user's root folders
 func (c *Client) GetRootFolders(ctx context.Context) (*models.RootFolders, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v3/users/me/folders/", nil)
 	if err != nil {
@@ -499,7 +497,6 @@ func (c *Client) GetRootFolders(ctx context.Context) (*models.RootFolders, error
 	return &folders, nil
 }
 
-// RegisterFile registers an uploaded file with Rescale
 func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequest) (*models.CloudFile, error) {
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/files/", fileReq)
 	if err != nil {
@@ -535,7 +532,6 @@ func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequ
 	return nil, fmt.Errorf("register file failed: status %d: %s", resp.StatusCode, bodyStr)
 }
 
-// GetFileInfo retrieves file information by ID
 func (c *Client) GetFileInfo(ctx context.Context, fileID string) (*models.CloudFile, error) {
 	path := fmt.Sprintf("/api/v3/files/%s/", fileID)
 
@@ -558,7 +554,6 @@ func (c *Client) GetFileInfo(ctx context.Context, fileID string) (*models.CloudF
 	return &file, nil
 }
 
-// CreateJob creates a new job on Rescale
 func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*models.JobResponse, error) {
 	jobReq.NormalizeAutomations() // Ensure environmentVariables is always present
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/jobs/", jobReq)
@@ -580,7 +575,6 @@ func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*mode
 	return &job, nil
 }
 
-// SubmitJob submits a job for execution
 func (c *Client) SubmitJob(ctx context.Context, jobID string) error {
 	path := fmt.Sprintf("/api/v2/jobs/%s/submit/", jobID)
 
@@ -616,7 +610,6 @@ func (c *Client) AssignProjectToJob(ctx context.Context, orgCode, jobID, project
 	return nil
 }
 
-// GetJob retrieves job details
 func (c *Client) GetJob(ctx context.Context, jobID string) (*models.JobResponse, error) {
 	path := fmt.Sprintf("/api/v3/jobs/%s/", jobID)
 
@@ -639,7 +632,6 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*models.JobResponse,
 	return &job, nil
 }
 
-// ListJobs lists all jobs (with pagination)
 func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 	var allJobs []models.JobResponse
 	nextURL := "/api/v3/jobs/"
@@ -818,8 +810,6 @@ func (c *Client) GetCoreTypes(ctx context.Context, includeInactive bool) ([]mode
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode core types response: %w", err)
 		}
-
-		// Close body immediately after reading - don't use defer in loop
 		resp.Body.Close()
 
 		allCoreTypes = append(allCoreTypes, result.Results...)
@@ -835,8 +825,6 @@ func (c *Client) GetCoreTypes(ctx context.Context, includeInactive bool) ([]mode
 	return allCoreTypes, nil
 }
 
-// GetAnalyses retrieves all available software analyses from Rescale.
-// Implements pagination to fetch all results.
 func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 	var allAnalyses []models.Analysis
 	nextURL := "/api/v3/analyses/"
@@ -873,8 +861,6 @@ func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode analyses response: %w", err)
 		}
-
-		// Close body immediately after reading - don't use defer in loop
 		resp.Body.Close()
 
 		allAnalyses = append(allAnalyses, result.Results...)
@@ -890,7 +876,6 @@ func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 	return allAnalyses, nil
 }
 
-// ListFiles retrieves a list of files from the user's library
 func (c *Client) ListFiles(ctx context.Context, limit int) ([]interface{}, error) {
 	if limit <= 0 {
 		limit = 20
@@ -992,7 +977,6 @@ func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int
 	return page, nil
 }
 
-// DeleteFile deletes a file from the user's library
 func (c *Client) DeleteFile(ctx context.Context, fileID string) error {
 	path := fmt.Sprintf("/api/v3/files/%s/", fileID)
 
@@ -1067,7 +1051,6 @@ func (fi *FileInfo) ToCloudFile() *models.CloudFile {
 	}
 }
 
-// CreateFolder creates a new folder
 func (c *Client) CreateFolder(ctx context.Context, name, parentID string) (string, error) {
 	requestBody := map[string]interface{}{
 		"name": name,
@@ -1550,7 +1533,6 @@ func (c *Client) UpdateFileTags(ctx context.Context, fileID string, newTags []st
 	return nil
 }
 
-// DeleteFolder deletes a folder
 func (c *Client) DeleteFolder(ctx context.Context, folderID string) error {
 	path := fmt.Sprintf("/api/v3/folders/%s/", folderID)
 
@@ -1568,7 +1550,6 @@ func (c *Client) DeleteFolder(ctx context.Context, folderID string) error {
 	return nil
 }
 
-// StopJob stops a running job
 func (c *Client) StopJob(ctx context.Context, jobID string) error {
 	path := fmt.Sprintf("/api/v3/jobs/%s/stop/", jobID)
 
@@ -1586,7 +1567,6 @@ func (c *Client) StopJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// GetJobStatuses retrieves detailed status history for a job
 func (c *Client) GetJobStatuses(ctx context.Context, jobID string) ([]models.JobStatusEntry, error) {
 	path := fmt.Sprintf("/api/v3/jobs/%s/statuses/", jobID)
 
@@ -1651,8 +1631,6 @@ func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFi
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decode job files response: %w", err)
 		}
-
-		// Close body immediately after reading - don't use defer in loop
 		resp.Body.Close()
 
 		allFiles = append(allFiles, result.Results...)
@@ -1668,7 +1646,6 @@ func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFi
 	return allFiles, nil
 }
 
-// DeleteJob deletes a job
 func (c *Client) DeleteJob(ctx context.Context, jobID string) error {
 	path := fmt.Sprintf("/api/v3/jobs/%s/", jobID)
 

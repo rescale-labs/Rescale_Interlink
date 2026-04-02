@@ -86,7 +86,6 @@ func (a *App) StartTransfers(requests []TransferRequestDTO) error {
 	return ts.StartTransfers(ctx, reqs)
 }
 
-// CancelTransfer cancels an active transfer.
 func (a *App) CancelTransfer(taskID string) error {
 	if a.engine == nil {
 		return ErrNoEngine
@@ -100,7 +99,6 @@ func (a *App) CancelTransfer(taskID string) error {
 	return ts.CancelTransfer(taskID)
 }
 
-// CancelAllTransfers cancels all active transfers.
 func (a *App) CancelAllTransfers() {
 	if a.engine == nil {
 		return
@@ -129,7 +127,6 @@ func (a *App) RetryTransfer(taskID string) (string, error) {
 	return ts.RetryTransfer(taskID)
 }
 
-// GetTransferStats returns current transfer statistics.
 func (a *App) GetTransferStats() TransferStatsDTO {
 	if a.engine == nil {
 		return TransferStatsDTO{}

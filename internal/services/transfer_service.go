@@ -58,7 +58,6 @@ type TransferServiceConfig struct {
 	MaxConcurrent int
 }
 
-// NewTransferService creates a new TransferService.
 func NewTransferService(apiClient *api.Client, eventBus *events.EventBus, config TransferServiceConfig) *TransferService {
 	if config.MaxConcurrent <= 0 {
 		// Default to MaxMaxConcurrent (20) as the global cap.
@@ -911,22 +910,18 @@ func (ts *TransferService) executeDownloadRetry(ctx context.Context, req Transfe
 	ts.executeDownloadTask(ctx, req, taskID, apiClient, 1)
 }
 
-// CancelTransfer cancels an active transfer.
 func (ts *TransferService) CancelTransfer(taskID string) error {
 	return ts.queue.Cancel(taskID)
 }
 
-// CancelAll cancels all active transfers.
 func (ts *TransferService) CancelAll() {
 	ts.queue.CancelAll()
 }
 
-// RetryTransfer retries a failed or cancelled transfer.
 func (ts *TransferService) RetryTransfer(taskID string) (string, error) {
 	return ts.queue.Retry(taskID)
 }
 
-// GetStats returns current transfer statistics.
 func (ts *TransferService) GetStats() TransferStats {
 	qStats := ts.queue.GetStats()
 	return TransferStats{
@@ -940,7 +935,6 @@ func (ts *TransferService) GetStats() TransferStats {
 	}
 }
 
-// GetTasks returns all tracked transfers.
 func (ts *TransferService) GetTasks() []TransferTask {
 	qTasks := ts.queue.GetTasks()
 	tasks := make([]TransferTask, len(qTasks))

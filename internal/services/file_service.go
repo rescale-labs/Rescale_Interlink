@@ -27,7 +27,6 @@ type FileService struct {
 	mu sync.RWMutex
 }
 
-// NewFileService creates a new FileService.
 func NewFileService(apiClient *api.Client, eventBus *events.EventBus) *FileService {
 	return &FileService{
 		apiClient: apiClient,
@@ -150,7 +149,6 @@ func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageS
 	}, nil
 }
 
-// CreateFolder creates a new folder.
 func (fs *FileService) CreateFolder(ctx context.Context, name string, parentID string) (string, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
@@ -168,7 +166,6 @@ func (fs *FileService) CreateFolder(ctx context.Context, name string, parentID s
 	return folderID, nil
 }
 
-// DeleteFile deletes a file by ID.
 func (fs *FileService) DeleteFile(ctx context.Context, fileID string) error {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
@@ -185,7 +182,6 @@ func (fs *FileService) DeleteFile(ctx context.Context, fileID string) error {
 	return nil
 }
 
-// DeleteFolder deletes a folder by ID.
 func (fs *FileService) DeleteFolder(ctx context.Context, folderID string) error {
 	fs.mu.RLock()
 	apiClient := fs.apiClient

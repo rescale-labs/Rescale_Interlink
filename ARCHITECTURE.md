@@ -1,6 +1,6 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.8.1
+**Version**: 4.8.8
 **Last Updated**: March 1, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.7.5                 |
+|                 Rescale Interlink v4.8.8                 |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -69,6 +69,8 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
     | API     |          | Files   |        | Terminal |
     +---------+          +---------+        +----------+
 ```
+
+**Binaries**: `rescale-int` (CLI-only, from `cmd/rescale-int/`) and `rescale-int-gui` (unified GUI+CLI, from root `main.go`). The `--gui` flag shown above applies only to `rescale-int-gui`.
 
 ---
 
@@ -175,15 +177,11 @@ rescale-int/
 │   │   └── ipc_handler.go     # Service-mode IPC handler
 │   ├── ratelimit/             # Rate limiting (token bucket + cross-process coordinator)
 │   │   └── coordinator/      # Cross-process rate limit coordinator (Unix socket / named pipe)
-│   ├── state/                 # State manager
-│   ├── trace/                 # Tracing
 │   └── validation/            # Path validation
 │
-├── _archive_fyne_gui/         # Archived Fyne code (reference only)
 ├── bin/                       # Pre-built binaries (organized by version/platform)
 ├── build/                     # Wails build assets (icons, manifests)
-├── testdata/                  # Test fixtures
-└── assets/                    # Application assets
+└── testdata/                  # Test fixtures
 ```
 
 ### Import Dependencies

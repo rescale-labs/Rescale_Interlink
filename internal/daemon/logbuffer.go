@@ -15,26 +15,18 @@ type LogBuffer struct {
 	maxSize  int
 	writeIdx int
 	count    int
-
-	// Subscribers for real-time streaming
-	subMu       sync.RWMutex
-	subscribers map[string]chan *ipc.LogEntryData
-	nextSubID   int
 }
 
-// NewLogBuffer creates a new log buffer with the specified capacity.
 func NewLogBuffer(maxSize int) *LogBuffer {
 	if maxSize <= 0 {
 		maxSize = 1000 // Default to 1000 entries
 	}
 	return &LogBuffer{
-		entries:     make([]ipc.LogEntryData, maxSize),
-		maxSize:     maxSize,
-		subscribers: make(map[string]chan *ipc.LogEntryData),
+		entries: make([]ipc.LogEntryData, maxSize),
+		maxSize: maxSize,
 	}
 }
 
-// Add adds a log entry to the buffer and notifies subscribers.
 func (lb *LogBuffer) Add(level, stage, message string, fields map[string]interface{}) {
 	entry := ipc.LogEntryData{
 		Timestamp: time.Now().Format(time.RFC3339Nano),
@@ -52,20 +44,8 @@ func (lb *LogBuffer) Add(level, stage, message string, fields map[string]interfa
 		lb.count++
 	}
 	lb.mu.Unlock()
-
-	// Notify subscribers (non-blocking)
-	lb.subMu.RLock()
-	for _, ch := range lb.subscribers {
-		select {
-		case ch <- &entry:
-		default:
-			// Channel full, skip (subscriber is slow)
-		}
-	}
-	lb.subMu.RUnlock()
 }
 
-// GetRecent returns the most recent N log entries.
 func (lb *LogBuffer) GetRecent(n int) []ipc.LogEntryData {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
