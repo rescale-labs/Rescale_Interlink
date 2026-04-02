@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
-	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	inthttp "github.com/rescale/rescale-int/internal/http"
@@ -22,6 +21,7 @@ import (
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
+	"github.com/rescale/rescale-int/internal/transfer/scan"
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
@@ -573,7 +573,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 	// Emitting EventEnumerationProgress here would cause a phantom "Scanning" row flash
 	// when reconciliation removes the enumeration and the event re-creates it.
 	emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] Starting ScanRemoteFolderStreaming — elapsed=%s", time.Since(startTime)))
-	scanEventCh, scanErrCh := cli.ScanRemoteFolderStreaming(scanCtx, apiClient, folderID, nil)
+	scanEventCh, scanErrCh := scan.ScanRemoteFolderStreaming(scanCtx, apiClient, folderID, nil)
 
 	// Create request channel for streaming batch
 	requestCh := make(chan services.TransferRequest, constants.DispatchChannelBuffer)

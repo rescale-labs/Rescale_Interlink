@@ -9,10 +9,10 @@ import (
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
-	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
+	"github.com/rescale/rescale-int/internal/transfer/scan"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/util/paths"
 )
@@ -330,8 +330,7 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 
 	localFolderPath := filepath.Join(localPath, folderName)
 
-	// Use CLI's scan function
-	allFolders, allFiles, err := cli.ScanRemoteFolderRecursive(ctx, apiClient, remoteFolderID, "")
+	allFolders, allFiles, err := scan.ScanRemoteFolderRecursive(ctx, apiClient, remoteFolderID, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan remote folder: %w", err)
 	}
