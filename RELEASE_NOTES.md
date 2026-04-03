@@ -1,5 +1,38 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.0 - April 2, 2026
+
+### Bug Fix: GUI Folder Download Deadlock
+
+Fixed a deadlock in `ScanRemoteFolderStreaming` that caused GUI folder downloads to hang permanently on deeply nested folders with many files (tens of thousands). The download would reach a variable file count (130–210) then freeze. Reproduced on macOS and Linux.
+
+**Root cause**: The 8 scanner worker goroutines both consumed from and produced to the same bounded channel (`workCh`, buffered 256). When all workers discovered subfolders simultaneously and the channel filled, all 8 blocked on send with no consumer available to drain — classic self-enqueue deadlock.
+
+**Fix**: Replaced bounded self-enqueue with an unbounded work backlog (mutex-protected slice) drained by a dedicated dispatcher goroutine into the bounded worker channel. Workers now append to the backlog without blocking. Three-layer cancellation accounting (append rejection, backlog abandonment, in-flight worker cleanup) coordinated under a shared mutex prevents WaitGroup leaks. This mirrors the proven pattern already used by the upload orchestrator (`internal/transfer/folder/orchestrator.go`).
+
+Only the GUI streaming download path was affected. CLI downloads, all uploads (GUI + CLI), and single-file operations use different code paths.
+
+Four regression tests added covering: wide fan-out deadlock reproduction (410 folders, 820 files), mid-scan cancellation with goroutine leak detection, pre-cancelled context, and partial scan error handling.
+
+### Code Cleanup (Plans 1–5)
+
+Five-plan code quality initiative reducing maintenance burden and improving consistency:
+
+- **Dead code removal**: Deleted 20 unreachable functions/types and the orphaned `internal/pur/state` package.
+- **Version-comment cleanup (Go)**: Removed 1,596 inline changelog comments (e.g., `// v4.2.0: Added X`) across 150 Go files. Version history belongs in git, not source comments.
+- **Version-comment cleanup (frontend)**: Removed 509 inline changelog comments across 34 TypeScript/TSX files.
+- **Comment quality cleanup**: Improved comment precision, removed restated-the-obvious comments, fixed doc inconsistencies, removed dead `LogBuffer` code.
+- **Scan package extraction**: Moved `ScanRemoteFolderRecursive`, `ScanRemoteFolderStreaming`, and related types from `internal/cli/` to `internal/transfer/scan/` — fixes a layering violation where the GUI depended on the CLI package.
+
+### Test Infrastructure
+
+- Added `ratelimit.NewTestStore()` for high-throughput test scenarios (bypasses production rate limits).
+- Converged duplicate test client helpers in `internal/api/` to use the shared `NewClientForTest`.
+
+### Linux Blank Window Fix (v4.8.9)
+
+Fixed a Linux-specific issue where the GUI window appeared blank/gray on systems with broken GPU, Mesa, or DRI stacks. Changed `WebviewGpuPolicy` from `Always` to `OnDemand`, allowing WebKitGTK to probe GL capabilities at startup and fall back to CPU rendering when the GPU path fails, while preserving GPU acceleration on systems that support it.
+
 ## v4.8.7 - March 11, 2026
 
 ### Foundations & Quick Wins (Plan 1)
