@@ -144,6 +144,26 @@ func ResetGlobalStore() {
 	globalStore = nil
 }
 
+// NewTestStore creates a LimiterStore with very high rate limits (10000 req/sec,
+// 100000 burst) so tests can run hundreds of API calls without throttling.
+// Only for use in tests — never call this in production code.
+func NewTestStore() *LimiterStore {
+	reg := NewRegistry()
+	// Override all scope configs with very high limits
+	for scope := range reg.scopeConfigs {
+		reg.scopeConfigs[scope] = ScopeConfig{
+			Scope:         scope,
+			HardLimitPerS: 10000,
+			TargetRate:    10000,
+			BurstCapacity: 100000,
+		}
+	}
+	return &LimiterStore{
+		limiters: make(map[string]*limiterEntry),
+		registry: reg,
+	}
+}
+
 // SetCoordinatorEnsurer registers a function that the store calls to connect
 // to the cross-process rate limit coordinator. This should be called once at
 // startup (e.g., from main or init code) before any API calls are made.

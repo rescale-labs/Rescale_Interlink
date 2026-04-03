@@ -172,6 +172,11 @@ func scanRemoteFolderRecursiveImpl(
 // emitting files and folders as they are discovered rather than waiting for
 // the entire scan to complete. Downloads can begin within seconds.
 //
+// Uses an unbounded work backlog to prevent self-enqueue deadlock: scanner
+// workers discover subfolders and append them to the backlog without blocking.
+// A separate dispatcher goroutine drains the backlog into a bounded worker
+// channel. This mirrors the proven pattern in folder/orchestrator.go.
+//
 // Returns a channel of ScanEvents (closed when scan completes) and an error channel.
 // The error channel receives at most one error, then is closed.
 func ScanRemoteFolderStreaming(
@@ -199,9 +204,101 @@ func ScanRemoteFolderStreaming(
 		workCh := make(chan scanWork, constants.DispatchChannelBuffer)
 		var wg sync.WaitGroup
 
+		// Unbounded work backlog — eliminates self-enqueue deadlock.
+		// Workers append via appendWork (never blocks); dispatcher drains into workCh.
+		// acceptingWork and workBacklog are coordinated under backlogMu to prevent
+		// a TOCTOU race: without this, a worker could append after the dispatcher
+		// has already abandoned the backlog and decremented wg, leaking a wg count.
+		var workBacklog []scanWork
+		var backlogMu sync.Mutex
+		acceptingWork := true
+		backlogReady := make(chan struct{}, 1)
+		backlogDone := make(chan struct{})
+
+		// appendWork enqueues subfolder work without blocking.
+		// Returns false if the dispatcher has shut down (cancelled or done),
+		// in which case the caller must undo any wg.Add(1).
+		appendWork := func(item scanWork) bool {
+			backlogMu.Lock()
+			if !acceptingWork {
+				backlogMu.Unlock()
+				return false
+			}
+			workBacklog = append(workBacklog, item)
+			backlogMu.Unlock()
+			select {
+			case backlogReady <- struct{}{}:
+			default:
+			}
+			return true
+		}
+
+		// abandonBacklog sets acceptingWork=false under backlogMu, clears the
+		// backlog, and decrements wg for each abandoned item. Must be called
+		// exactly once on the cancellation path.
+		abandonBacklog := func() {
+			backlogMu.Lock()
+			acceptingWork = false
+			abandoned := len(workBacklog)
+			workBacklog = nil
+			backlogMu.Unlock()
+			if abandoned > 0 {
+				wg.Add(-abandoned)
+			}
+		}
+
 		// Seed with root folder
 		wg.Add(1)
-		workCh <- scanWork{folderID: folderID, relativePath: ""}
+		if !appendWork(scanWork{folderID: folderID, relativePath: ""}) {
+			wg.Add(-1)
+			return
+		}
+
+		// Dispatcher goroutine: sole writer to workCh, sole closer of workCh.
+		// Drains unbounded backlog into bounded workCh.
+		go func() {
+			defer close(workCh)
+			for {
+				backlogMu.Lock()
+				if len(workBacklog) == 0 {
+					backlogMu.Unlock()
+					select {
+					case <-backlogReady:
+						continue
+					case <-backlogDone:
+						// All scan work processed — drain any final items.
+						backlogMu.Lock()
+						acceptingWork = false
+						remaining := workBacklog
+						workBacklog = nil
+						backlogMu.Unlock()
+						for len(remaining) > 0 {
+							select {
+							case workCh <- remaining[0]:
+								remaining = remaining[1:]
+							case <-ctx.Done():
+								wg.Add(-len(remaining))
+								return
+							}
+						}
+						return
+					case <-ctx.Done():
+						abandonBacklog()
+						return
+					}
+				}
+				item := workBacklog[0]
+				workBacklog = workBacklog[1:]
+				backlogMu.Unlock()
+				select {
+				case workCh <- item:
+				case <-ctx.Done():
+					abandonBacklog()
+					wg.Add(-1) // for the item we popped but couldn't send
+					return
+				}
+			}
+		}()
 
 		// Bounded subfolder workers (8 concurrent scanners)
 		const numScanWorkers = 8
@@ -245,12 +342,10 @@ func ScanRemoteFolderStreaming(
 								progress.FoldersFound++
 								mu.Unlock()
 
-								// Enqueue subfolder for scanning
+								// Enqueue subfolder for scanning (never blocks)
 								wg.Add(1)
-								select {
-								case workCh <- scanWork{folderID: folder.ID, relativePath: folderRelPath}:
-								case <-ctx.Done():
-									wg.Add(-1) // Undo the Add since we won't process it
+								if !appendWork(scanWork{folderID: folder.ID, relativePath: folderRelPath}) {
+									wg.Add(-1)
 									return ctx.Err()
 								}
 							}
@@ -310,9 +405,9 @@ func ScanRemoteFolderStreaming(
 			}()
 		}
 
-		// Wait for all folder scanning to complete, then close work channel
+		// Wait for all folder scanning to complete, then signal dispatcher
 		wg.Wait()
-		close(workCh)
+		close(backlogDone)
 	}()
 
 	return eventCh, errCh

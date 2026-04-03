@@ -8,11 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/models"
-	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
 // TestNewClientRejectsEmptyBaseURL verifies that NewClient fails with a clear error
@@ -53,28 +51,14 @@ func TestNewClientAcceptsValidBaseURL(t *testing.T) {
 }
 
 // newTestClient creates a Client pointing at the given test server URL.
-// Constructs the Client struct directly to bypass platform URL validation —
-// httptest URLs (http://127.0.0.1:XXXXX) are not in the allowlist.
+// Delegates to NewClientForTest to avoid duplicating Client construction.
 func newTestClient(t *testing.T, serverURL string) *Client {
 	t.Helper()
-	cfg := &config.Config{
+	return NewClientForTest(&config.Config{
 		APIBaseURL: serverURL,
 		APIKey:     "test-key",
 		ProxyMode:  "no-proxy",
-	}
-	return &Client{
-		httpClient: &http.Client{},
-		config:     cfg,
-		baseURL:    strings.TrimSuffix(serverURL, "/"),
-		apiKey:     "test-key",
-		store:      ratelimit.GlobalStore(),
-		metrics: &apiMetrics{
-			callsByPath:   make(map[string]int64),
-			callsByScope:  make(map[ratelimit.Scope]int64),
-			windowStart:   time.Now(),
-			scopeInWindow: make(map[ratelimit.Scope]int64),
-		},
-	}
+	})
 }
 
 // TestGetStorageCredentials_AzureSharedFile verifies that the credentials endpoint

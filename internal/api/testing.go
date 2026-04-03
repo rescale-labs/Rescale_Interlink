@@ -19,7 +19,7 @@ func NewClientForTest(cfg *config.Config) *Client {
 		config:     cfg,
 		baseURL:    strings.TrimSuffix(cfg.APIBaseURL, "/"),
 		apiKey:     cfg.APIKey,
-		store:      ratelimit.GlobalStore(),
+		store:      ratelimit.NewTestStore(),
 		metrics: &apiMetrics{
 			callsByPath:   make(map[string]int64),
 			callsByScope:  make(map[ratelimit.Scope]int64),
