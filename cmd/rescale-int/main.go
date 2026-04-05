@@ -10,6 +10,7 @@ import (
 	intfips "github.com/rescale/rescale-int/internal/fips"
 
 	"github.com/rescale/rescale-int/internal/cli"
+	"github.com/rescale/rescale-int/internal/cli/compat"
 	"github.com/rescale/rescale-int/internal/version"
 )
 
@@ -35,6 +36,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: --gui is not available in the CLI-only binary.\n")
 		fmt.Fprintf(os.Stderr, "Use rescale-int-gui for the graphical interface.\n")
 		os.Exit(1)
+	}
+
+	// Compat mode detection (before native CLI)
+	if compat.IsCompatMode(os.Args) {
+		os.Args = compat.FilterCompatFlag(os.Args)
+		err, exitCode := compat.ExecuteCompat()
+		if err != nil {
+			os.Exit(exitCode)
+		}
+		return
 	}
 
 	// CLI mode - use the proper CLI root command with all persistent flags

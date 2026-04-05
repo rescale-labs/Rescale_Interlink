@@ -26,6 +26,7 @@ import (
 	_ "github.com/rescale/rescale-int/internal/mesainit"
 
 	"github.com/rescale/rescale-int/internal/cli"
+	"github.com/rescale/rescale-int/internal/cli/compat"
 	"github.com/rescale/rescale-int/internal/config"
 	intfips "github.com/rescale/rescale-int/internal/fips"
 	"github.com/rescale/rescale-int/internal/mesa"
@@ -69,6 +70,16 @@ func main() {
 	// Enable timing output (works with both GUI and CLI)
 	if slices.Contains(os.Args, "--timing") {
 		os.Setenv("RESCALE_TIMING", "1")
+	}
+
+	// Compat mode detection (before GUI/CLI mode check)
+	if compat.IsCompatMode(os.Args) {
+		os.Args = compat.FilterCompatFlag(os.Args)
+		err, exitCode := compat.ExecuteCompat()
+		if err != nil {
+			os.Exit(exitCode)
+		}
+		return
 	}
 
 	if isCLIMode() {
