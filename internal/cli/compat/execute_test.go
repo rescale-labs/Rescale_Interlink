@@ -11,8 +11,6 @@ func TestExitCodeConstant(t *testing.T) {
 }
 
 func TestExecuteCompat_VersionExitsZero(t *testing.T) {
-	// Save and restore os.Args since ExecuteCompat creates a new root cmd
-	// that reads from the args passed to it.
 	rootCmd := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"--version"})
 
@@ -25,16 +23,15 @@ func TestExecuteCompat_VersionExitsZero(t *testing.T) {
 func TestExecuteCompat_PlaceholderReturnsError(t *testing.T) {
 	rootCmd := NewCompatRootCmd()
 
-	// Placeholder commands have DisableFlagParsing, so all args go through.
-	// The command itself returns an error about not being implemented.
-	rootCmd.SetArgs([]string{"status"})
+	// 'sync' is still a placeholder command
+	rootCmd.SetArgs([]string{"sync"})
 
 	err := rootCmd.Execute()
 	if err == nil {
 		t.Fatal("expected error from placeholder command, got nil")
 	}
-	if err.Error() != "compat command 'status' is not yet implemented" {
-		t.Errorf("error = %q, want 'compat command 'status' is not yet implemented'", err.Error())
+	if err.Error() != "compat command 'sync' is not yet implemented" {
+		t.Errorf("error = %q, want 'compat command 'sync' is not yet implemented'", err.Error())
 	}
 }
 

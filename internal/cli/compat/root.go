@@ -35,6 +35,11 @@ Exit codes:
 			// Store compat context in command context for subcommands
 			SetCompatContext(cmd, cc)
 
+			// Skip auth for commands that don't need it (e.g., check-for-update)
+			if cmd.Annotations != nil && cmd.Annotations["skipAuth"] == "true" {
+				return nil
+			}
+
 			// Create API client eagerly so auth errors surface before command execution
 			client, err := cc.GetAPIClient(cmd.Context())
 			if err != nil {
@@ -74,7 +79,17 @@ Exit codes:
 	rootCmd.Version = version.Version
 	rootCmd.Flags().BoolP("version", "v", false, "Print version and exit")
 
-	// Add placeholder commands
+	// Add implemented commands
+	rootCmd.AddCommand(newStatusCmd())
+	rootCmd.AddCommand(newStopCmd())
+	rootCmd.AddCommand(newDeleteCmd())
+	rootCmd.AddCommand(newCheckForUpdateCmd())
+	rootCmd.AddCommand(newListInfoCmd())
+	rootCmd.AddCommand(newUploadCmd())
+	rootCmd.AddCommand(newDownloadFileCmd())
+	rootCmd.AddCommand(newSubmitCmd())
+
+	// Add remaining placeholder commands (not yet implemented)
 	addPlaceholderCommands(rootCmd)
 
 	return rootCmd

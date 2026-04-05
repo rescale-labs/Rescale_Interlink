@@ -20,10 +20,11 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
-	"github.com/rescale/rescale-int/internal/ratelimit"
-	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/pur/parser"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/util/analysis"
+	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
@@ -1236,46 +1237,9 @@ func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.C
 	}
 }
 
-// resolveAnalysisVersion resolves a version name (like "CPU") to its versionCode (like "0").
-// The Rescale API accepts versionCode in the "version" field for job creation.
-// This function queries the API to look up the correct versionCode.
-// If the version is already a valid versionCode or if resolution fails, returns the original value.
+// resolveAnalysisVersion delegates to the shared analysis.ResolveVersion utility.
 func resolveAnalysisVersion(ctx context.Context, apiClient *api.Client, analysisCode, versionInput string) string {
-	if versionInput == "" {
-		return versionInput
-	}
-
-	// Fetch analyses from API
-	analyses, err := apiClient.GetAnalyses(ctx)
-	if err != nil {
-		// If we can't fetch analyses, return the original value and let the API handle it
-		return versionInput
-	}
-
-	// Find the matching analysis by code
-	for _, analysis := range analyses {
-		if analysis.Code == analysisCode {
-			// Search versions for a match
-			for _, v := range analysis.Versions {
-				// Match by version name (e.g., "CPU")
-				if v.Version == versionInput {
-					// Return versionCode if available, otherwise keep the version name
-					if v.VersionCode != "" {
-						return v.VersionCode
-					}
-					return versionInput
-				}
-				// Also match by versionCode directly (in case user already used the correct format)
-				if v.VersionCode == versionInput {
-					return versionInput // Already correct
-				}
-			}
-			break // Found the analysis, no need to continue
-		}
-	}
-
-	// No match found, return original value
-	return versionInput
+	return analysis.ResolveVersion(ctx, apiClient, analysisCode, versionInput)
 }
 
 // downloadJobResults downloads all output files from a completed job

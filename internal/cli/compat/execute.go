@@ -25,6 +25,9 @@ func ExecuteCompat() (error, int) {
 		}
 	}()
 
+	// Normalize multi-char short flags and multi-value -f before Cobra parses
+	rootCmd.SetArgs(NormalizeCompatArgs(os.Args[1:]))
+
 	executedCmd, err := rootCmd.ExecuteC()
 
 	// Clean up signal handler

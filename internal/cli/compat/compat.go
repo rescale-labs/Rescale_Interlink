@@ -166,3 +166,81 @@ func (cc *CompatContext) Printf(format string, args ...interface{}) {
 	}
 	fmt.Fprintf(os.Stdout, format, args...)
 }
+
+// NormalizeCompatArgs rewrites args to fix Cobra-incompatible conventions:
+//  1. Multi-char short flags: -fid -> --file-id, -lh -> --load-hours
+//  2. Multi-value -f: "upload -f a b c" -> "upload -f a -f b -f c"
+//     (command-aware: only for upload and submit where -f is multi-value)
+func NormalizeCompatArgs(args []string) []string {
+	// Phase 1: Multi-char short flag substitution
+	result := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case "-fid":
+			result = append(result, "--file-id")
+		case "-lh":
+			result = append(result, "--load-hours")
+		default:
+			result = append(result, arg)
+		}
+	}
+
+	// Phase 2: Multi-value -f expansion for upload and submit
+	cmd := detectSubcommand(result)
+	if cmd == "upload" || cmd == "submit" {
+		result = expandMultiValueFlag(result, "-f")
+		result = expandMultiValueFlag(result, "--files")
+		result = expandMultiValueFlag(result, "--file-matcher")
+	}
+	return result
+}
+
+// detectSubcommand finds the first non-flag, non-flag-value argument.
+// It skips known root flags that consume a following value (-p TOKEN, -X URL).
+func detectSubcommand(args []string) string {
+	rootValueFlags := map[string]bool{
+		"-p": true, "--api-token": true,
+		"-X": true, "--api-base-url": true,
+	}
+	for i, arg := range args {
+		if rootValueFlags[arg] {
+			continue
+		}
+		if i > 0 && rootValueFlags[args[i-1]] {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return ""
+}
+
+// expandMultiValueFlag rewrites "flag a b c -d DIR" to "flag a flag b flag c -d DIR".
+// Collects non-flag args following the flag until the next flag or end-of-args.
+func expandMultiValueFlag(args []string, flag string) []string {
+	result := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] != flag {
+			result = append(result, args[i])
+			continue
+		}
+		// Found the flag — collect its values
+		result = append(result, args[i])
+		i++
+		if i >= len(args) {
+			break // flag at end of args, leave for Cobra to error
+		}
+		// First value (required by Cobra)
+		result = append(result, args[i])
+		i++
+		// Collect additional non-flag values
+		for i < len(args) && !strings.HasPrefix(args[i], "-") {
+			result = append(result, flag, args[i])
+			i++
+		}
+		i-- // outer loop will increment
+	}
+	return result
+}

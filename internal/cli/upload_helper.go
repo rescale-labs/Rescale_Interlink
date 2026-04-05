@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/util/glob"
 )
 
 // cliUploadItem wraps a file for upload with index info.
@@ -30,54 +31,10 @@ type cliUploadItem struct {
 // FileSize implements transfer.WorkItem.
 func (u cliUploadItem) FileSize() int64 { return u.size }
 
-// expandGlobPatterns expands glob patterns like *.zip, even when quoted
-// Returns deduplicated list of file paths
+// expandGlobPatterns expands glob patterns like *.zip, even when quoted.
+// Delegates to the shared glob.ExpandPatterns utility.
 func expandGlobPatterns(patterns []string) ([]string, error) {
-	var expandedFiles []string
-	seenFiles := make(map[string]bool)
-
-	for _, pattern := range patterns {
-		// Check if pattern contains glob characters
-		hasGlob := strings.ContainsAny(pattern, "*?[]")
-
-		if hasGlob {
-			// Expand glob pattern
-			matches, err := filepath.Glob(pattern)
-			if err != nil {
-				return nil, fmt.Errorf("invalid pattern '%s': %w", pattern, err)
-			}
-
-			if len(matches) == 0 {
-				return nil, fmt.Errorf("no files match pattern: %s", pattern)
-			}
-
-			// Add matches (deduplicated)
-			for _, match := range matches {
-				absPath, err := filepath.Abs(match)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get absolute path for %s: %w", match, err)
-				}
-
-				if !seenFiles[absPath] {
-					expandedFiles = append(expandedFiles, absPath)
-					seenFiles[absPath] = true
-				}
-			}
-		} else {
-			// Not a glob pattern, use as-is
-			absPath, err := filepath.Abs(pattern)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get absolute path for %s: %w", pattern, err)
-			}
-
-			if !seenFiles[absPath] {
-				expandedFiles = append(expandedFiles, absPath)
-				seenFiles[absPath] = true
-			}
-		}
-	}
-
-	return expandedFiles, nil
+	return glob.ExpandPatterns(patterns)
 }
 
 // executeFileUpload - Common upload logic for both files upload and upload shortcut
