@@ -193,6 +193,22 @@ func (jf *JobFile) ToCloudFile() *CloudFile {
 	}
 }
 
+// JobRun represents a run record for a job from the v2 API.
+// A job may have multiple runs; an "active" run has dateStarted set but dateCompleted empty.
+type JobRun struct {
+	ID            string `json:"id"`
+	DateStarted   string `json:"dateStarted,omitempty"`
+	DateCompleted string `json:"dateCompleted,omitempty"`
+}
+
+// RunFile represents a file from a running cluster, returned by the v2 runs files endpoint.
+type RunFile struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Size         int64  `json:"size,omitempty"`
+	RelativePath string `json:"relativePath,omitempty"`
+}
+
 // Automation represents a Rescale automation entity.
 // Automations are pre-configured scripts that can be attached to jobs
 // to run before (pre) or after (post) job execution.

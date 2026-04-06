@@ -2,10 +2,12 @@ package compat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -44,9 +46,6 @@ func newDownloadFileCmd() *cobra.Command {
 		Use:   "download-file",
 		Short: "Download job output files",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if extendedOutput {
-				return fmt.Errorf("'-e' (extended output) is not yet implemented in compat mode (planned for Plan 3)")
-			}
 			if runID != "" {
 				return fmt.Errorf("'-r' (run-id) is not yet implemented in compat mode (planned for Plan 4)")
 			}
@@ -64,10 +63,17 @@ func newDownloadFileCmd() *cobra.Command {
 				return err
 			}
 
+			if extendedOutput {
+				if jobID != "" {
+					return fmt.Errorf("download-file -e -j is not supported (broken in rescale-cli due to Java NPE)")
+				}
+				return compatDownloadExtended(cmd.Context(), fileID, client)
+			}
+
 			if fileID != "" {
 				return compatDownloadByFileID(cmd.Context(), fileID, outputPath, client, cc)
 			}
-			return compatDownloadByJobID(cmd.Context(), jobID, fileName, outputPath, client, cc)
+			return compatDownloadByJobID(cmd.Context(), jobID, compatDownloadOpts{FileName: fileName, OutputDir: outputPath}, client, cc)
 		},
 	}
 
@@ -84,6 +90,21 @@ func newDownloadFileCmd() *cobra.Command {
 	cmd.Flags().MarkHidden("run-id")
 
 	return cmd
+}
+
+// compatDownloadExtended handles download-file -e -fid: metadata query, no download.
+func compatDownloadExtended(ctx context.Context, fileID string, apiClient *api.Client) error {
+	startTime := time.Now()
+
+	rawFile, err := apiClient.GetFileInfoRaw(ctx, fileID)
+	if err != nil {
+		endTime := time.Now()
+		writeTransferEnvelopeRaw(os.Stdout, false, startTime, endTime, []json.RawMessage{})
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	endTime := time.Now()
+	return writeTransferEnvelopeRaw(os.Stdout, true, startTime, endTime, []json.RawMessage{rawFile})
 }
 
 // compatDownloadByFileID downloads a single file by its file ID.
@@ -162,8 +183,17 @@ func compatDownloadByFileID(ctx context.Context, fileID, outputPath string, apiC
 	return nil
 }
 
-// compatDownloadByJobID downloads output files for a job, optionally filtered by filename.
-func compatDownloadByJobID(ctx context.Context, jobID, fileName, outputDir string, apiClient *api.Client, cc *CompatContext) error {
+// compatDownloadOpts configures file filtering for job downloads.
+type compatDownloadOpts struct {
+	FileName     string   // exact match (for download-file -f)
+	OutputDir    string
+	FileMatchers []string // glob include patterns (for sync -f)
+	ExcludeTerm  string   // exclude pattern (for sync --exclude)
+	SearchTerm   string   // search substring (for sync -s)
+}
+
+// compatDownloadByJobID downloads output files for a job, optionally filtered by filename or glob patterns.
+func compatDownloadByJobID(ctx context.Context, jobID string, opts compatDownloadOpts, apiClient *api.Client, cc *CompatContext) error {
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 	credentials.GetManager(apiClient).WarmAll(ctx)
 
@@ -179,21 +209,30 @@ func compatDownloadByJobID(ctx context.Context, jobID, fileName, outputDir strin
 		return nil
 	}
 
-	// Filter by filename if specified
+	// Filter by exact filename or glob patterns
 	files := allFiles
-	if fileName != "" {
+	if opts.FileName != "" {
 		var matched []models.JobFile
 		for _, f := range allFiles {
-			if f.Name == fileName {
+			if f.Name == opts.FileName {
 				matched = append(matched, f)
 			}
 		}
 		files = matched
 		if len(files) == 0 {
-			return fmt.Errorf("no files matching '%s' found in job %s", fileName, jobID)
+			return fmt.Errorf("no files matching '%s' found in job %s", opts.FileName, jobID)
 		}
+	} else if len(opts.FileMatchers) > 0 || opts.ExcludeTerm != "" || opts.SearchTerm != "" {
+		var filtered []models.JobFile
+		for _, f := range allFiles {
+			if matchesE2EFilters(f.Name, opts.FileMatchers, opts.ExcludeTerm, opts.SearchTerm) {
+				filtered = append(filtered, f)
+			}
+		}
+		files = filtered
 	}
 
+	outputDir := opts.OutputDir
 	if outputDir == "" {
 		outputDir = "."
 	}

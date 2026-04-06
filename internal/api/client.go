@@ -1646,6 +1646,101 @@ func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFi
 	return allFiles, nil
 }
 
+// GetJobRuns lists runs for a job via the v2 API.
+// Returns all run records; the caller checks for an active run (dateStarted set, dateCompleted empty).
+func (c *Client) GetJobRuns(ctx context.Context, jobID string) ([]models.JobRun, error) {
+	var allRuns []models.JobRun
+	nextURL := fmt.Sprintf("/api/v2/jobs/%s/runs/", jobID)
+	pageCount := 0
+
+	for nextURL != "" {
+		pageCount++
+		if pageCount > constants.MaxPaginationPages {
+			break
+		}
+
+		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != nethttp.StatusOK {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("list job runs failed: status %d: %s", resp.StatusCode, body)
+		}
+
+		var result struct {
+			Count   int              `json:"count"`
+			Next    *string          `json:"next"`
+			Results []models.JobRun  `json:"results"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode job runs response: %w", err)
+		}
+		resp.Body.Close()
+
+		allRuns = append(allRuns, result.Results...)
+
+		if result.Next != nil && *result.Next != "" {
+			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+		} else {
+			nextURL = ""
+		}
+	}
+
+	return allRuns, nil
+}
+
+// GetRunFiles lists files for a run via the v2 API.
+func (c *Client) GetRunFiles(ctx context.Context, runID string) ([]models.RunFile, error) {
+	var allFiles []models.RunFile
+	nextURL := fmt.Sprintf("/api/v2/runs/%s/files/", runID)
+	pageCount := 0
+
+	for nextURL != "" {
+		pageCount++
+		if pageCount > constants.MaxPaginationPages {
+			break
+		}
+
+		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != nethttp.StatusOK {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("list run files failed: status %d: %s", resp.StatusCode, body)
+		}
+
+		var result struct {
+			Count   int              `json:"count"`
+			Next    *string          `json:"next"`
+			Results []models.RunFile `json:"results"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode run files response: %w", err)
+		}
+		resp.Body.Close()
+
+		allFiles = append(allFiles, result.Results...)
+
+		if result.Next != nil && *result.Next != "" {
+			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+		} else {
+			nextURL = ""
+		}
+	}
+
+	return allFiles, nil
+}
+
 func (c *Client) DeleteJob(ctx context.Context, jobID string) error {
 	path := fmt.Sprintf("/api/v3/jobs/%s/", jobID)
 

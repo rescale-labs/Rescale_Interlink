@@ -88,8 +88,10 @@ Exit codes:
 	rootCmd.AddCommand(newUploadCmd())
 	rootCmd.AddCommand(newDownloadFileCmd())
 	rootCmd.AddCommand(newSubmitCmd())
+	rootCmd.AddCommand(newListFilesCmd())
+	rootCmd.AddCommand(newSyncCmd())
 
-	// Add remaining placeholder commands (not yet implemented)
+	// Add remaining placeholder commands (SPUB — deferred to v5.0.0)
 	addPlaceholderCommands(rootCmd)
 
 	return rootCmd

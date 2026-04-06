@@ -19,15 +19,17 @@ func TestStatusCmd_RequiresJobID(t *testing.T) {
 	}
 }
 
-func TestStatusCmd_DeferredExtendedOutput(t *testing.T) {
+func TestStatusCmd_ExtendedOutputRequiresAPI(t *testing.T) {
+	// status -e now attempts real API calls — should fail without valid API key,
+	// NOT return "not yet implemented"
 	rootCmd := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"status", "-e", "-j", "TEST123"})
 	err := rootCmd.Execute()
 	if err == nil {
-		t.Fatal("expected error for deferred -e flag")
+		t.Fatal("expected error (no API key configured)")
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' error, got: %v", err)
+	if strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("status -e should no longer be deferred, got: %v", err)
 	}
 }
 
@@ -181,7 +183,6 @@ func TestUploadCmd_DeferredFlags(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"extended output", []string{"upload", "-e", "-f", "a.txt"}},
 		{"report", []string{"upload", "-r", "report.txt", "-f", "a.txt"}},
 		{"copy-to-cfs", []string{"upload", "--copy-to-cfs", "-f", "a.txt"}},
 	}
@@ -198,6 +199,18 @@ func TestUploadCmd_DeferredFlags(t *testing.T) {
 				t.Errorf("expected 'not yet implemented' error, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestUploadCmd_ExtendedOutputRequiresAPI(t *testing.T) {
+	rootCmd := NewCompatRootCmd()
+	rootCmd.SetArgs([]string{"upload", "-e", "-f", "a.txt"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error (no API key configured)")
+	}
+	if strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("upload -e should no longer be deferred, got: %v", err)
 	}
 }
 
@@ -226,26 +239,38 @@ func TestDownloadFileCmd_MutualExclusion(t *testing.T) {
 }
 
 func TestDownloadFileCmd_DeferredFlags(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"extended output", []string{"download-file", "-e", "-j", "JOB1"}},
-		{"run-id", []string{"download-file", "-r", "RUN1", "-j", "JOB1"}},
+	rootCmd := NewCompatRootCmd()
+	rootCmd.SetArgs([]string{"download-file", "-r", "RUN1", "-j", "JOB1"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for deferred flag")
 	}
+	if !strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("expected 'not yet implemented' error, got: %v", err)
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rootCmd := NewCompatRootCmd()
-			rootCmd.SetArgs(tt.args)
-			err := rootCmd.Execute()
-			if err == nil {
-				t.Fatal("expected error for deferred flag")
-			}
-			if !strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("expected 'not yet implemented' error, got: %v", err)
-			}
-		})
+func TestDownloadFileCmd_ExtendedJobIDNotSupported(t *testing.T) {
+	rootCmd := NewCompatRootCmd()
+	rootCmd.SetArgs([]string{"download-file", "-e", "-j", "JOB1"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for -e -j combination")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("expected 'not supported' error about rescale-cli bug, got: %v", err)
+	}
+}
+
+func TestDownloadFileCmd_ExtendedFileIDRequiresAPI(t *testing.T) {
+	rootCmd := NewCompatRootCmd()
+	rootCmd.SetArgs([]string{"download-file", "-e", "--file-id", "FILE1"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error (no API key configured)")
+	}
+	if strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("download-file -e -fid should no longer be deferred, got: %v", err)
 	}
 }
 
@@ -273,14 +298,28 @@ func TestSubmitCmd_RequiresScript(t *testing.T) {
 	}
 }
 
+func TestSubmitCmd_ExtendedOutputRequiresScript(t *testing.T) {
+	// submit -e without a valid script file should fail on file validation,
+	// not "not yet implemented"
+	rootCmd := NewCompatRootCmd()
+	rootCmd.SetArgs([]string{"submit", "-e", "-i", "nonexistent_script.sh"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for nonexistent script file")
+	}
+	if strings.Contains(err.Error(), "not yet implemented") {
+		t.Errorf("submit -e should no longer be deferred, got: %v", err)
+	}
+}
+
 func TestSubmitCmd_DeferredFlags(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
+		name      string
+		args      []string
+		wantMatch string
 	}{
-		{"extended output", []string{"submit", "-e", "-i", "script.sh"}},
-		{"p-cluster", []string{"submit", "--p-cluster", "CL1", "-i", "script.sh"}},
-		{"waive-sla", []string{"submit", "--waive-sla", "-i", "script.sh"}},
+		{"p-cluster", []string{"submit", "--p-cluster", "CL1", "-i", "script.sh"}, "not yet implemented"},
+		{"waive-sla", []string{"submit", "--waive-sla", "-i", "script.sh"}, "not yet implemented"},
 	}
 
 	for _, tt := range tests {
@@ -291,8 +330,8 @@ func TestSubmitCmd_DeferredFlags(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error for deferred flag")
 			}
-			if !strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("expected 'not yet implemented' error, got: %v", err)
+			if !strings.Contains(err.Error(), tt.wantMatch) {
+				t.Errorf("expected error containing %q, got: %v", tt.wantMatch, err)
 			}
 		})
 	}

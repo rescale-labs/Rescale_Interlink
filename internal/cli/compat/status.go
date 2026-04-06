@@ -1,6 +1,7 @@
 package compat
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -16,11 +17,8 @@ func newStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Check job status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if extendedOutput {
-				return fmt.Errorf("'-e' (extended output) is not yet implemented in compat mode (planned for Plan 3)")
-			}
 			if cmd.Flags().Changed("load-hours") {
-				return fmt.Errorf("'--load-hours' is not yet implemented in compat mode (planned for Plan 3)")
+				return fmt.Errorf("'--load-hours' is not yet implemented in compat mode")
 			}
 
 			if jobID == "" {
@@ -33,7 +31,36 @@ func newStatusCmd() *cobra.Command {
 				return err
 			}
 
-			statuses, err := client.GetJobStatuses(cmd.Context(), jobID)
+			ctx := cmd.Context()
+
+			if extendedOutput {
+				// Fetch raw statuses (preserves notify, preventDuplicates)
+				rawStatuses, err := client.GetJobStatusesRaw(ctx, jobID)
+				if err != nil {
+					return fmt.Errorf("failed to get job status: %w", err)
+				}
+				if len(rawStatuses) == 0 {
+					return fmt.Errorf("no status found for job %s", jobID)
+				}
+
+				// Fetch raw connection details
+				rawConnDetails, err := client.GetJobConnectionDetailsRaw(ctx, jobID)
+				if err != nil {
+					return fmt.Errorf("failed to get connection details: %w", err)
+				}
+
+				// Compose the status -e output:
+				// {"lastStatus": ..., "connectionDetails": ..., "loadMeasurements": []}
+				composite := map[string]json.RawMessage{
+					"lastStatus":        rawStatuses[0],
+					"connectionDetails": rawConnDetails,
+					"loadMeasurements":  json.RawMessage("[]"),
+				}
+
+				return writeJSON(os.Stdout, composite)
+			}
+
+			statuses, err := client.GetJobStatuses(ctx, jobID)
 			if err != nil {
 				return fmt.Errorf("failed to get job status: %w", err)
 			}

@@ -32,9 +32,6 @@ func newSubmitCmd() *cobra.Command {
 		Short: "Submit a job from an SGE script",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if extendedOutput {
-				return fmt.Errorf("'-e' (extended output) is not yet implemented in compat mode (planned for Plan 3)")
-			}
 			if pCluster != "" {
 				return fmt.Errorf("'--p-cluster' is not yet implemented in compat mode")
 			}
@@ -116,6 +113,15 @@ func newSubmitCmd() *cobra.Command {
 				return fmt.Errorf("failed to submit job: %w", err)
 			}
 
+			// Extended JSON output: raw job JSON after submission
+			if extendedOutput {
+				rawJob, err := client.GetJobRaw(ctx, jobResp.ID)
+				if err != nil {
+					return fmt.Errorf("failed to get job details: %w", err)
+				}
+				return writeJSON(os.Stdout, rawJob)
+			}
+
 			// Data output (not suppressed by -q)
 			fmt.Fprintf(os.Stdout, "The job has been created with the id: %s\n", jobResp.ID)
 			fmt.Fprintln(os.Stdout, "The job has been submitted")
@@ -143,9 +149,9 @@ func newSubmitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&excludeTerm, "exclude", "", "Exclude files matching term (E2E mode)")
 	cmd.Flags().StringVarP(&searchTerm, "search", "s", "", "Search term for file filtering (E2E mode)")
 
-	// Deferred flags
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
-	cmd.Flags().MarkHidden("extended-output")
+
+	// Deferred flags
 	cmd.Flags().StringVar(&pCluster, "p-cluster", "", "Persistent cluster ID")
 	cmd.Flags().MarkHidden("p-cluster")
 	cmd.Flags().BoolVar(&waiveSLA, "waive-sla", false, "Waive SLA")
@@ -213,7 +219,7 @@ func compatE2EDownload(ctx context.Context, jobID string, fileMatchers []string,
 	}
 
 	cc.Printf("Downloading %d output file(s)...\n", len(files))
-	return compatDownloadByJobID(ctx, jobID, "", ".", apiClient, cc)
+	return compatDownloadByJobID(ctx, jobID, compatDownloadOpts{OutputDir: "."}, apiClient, cc)
 }
 
 // matchesE2EFilters checks if a filename passes the E2E download filters.

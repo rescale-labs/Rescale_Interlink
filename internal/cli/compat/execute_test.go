@@ -20,18 +20,17 @@ func TestExecuteCompat_VersionExitsZero(t *testing.T) {
 	}
 }
 
-func TestExecuteCompat_PlaceholderReturnsError(t *testing.T) {
+func TestExecuteCompat_SyncRequiresJobID(t *testing.T) {
 	rootCmd := NewCompatRootCmd()
 
-	// 'sync' is still a placeholder command
 	rootCmd.SetArgs([]string{"sync"})
 
 	err := rootCmd.Execute()
 	if err == nil {
-		t.Fatal("expected error from placeholder command, got nil")
+		t.Fatal("expected error for missing --job-id, got nil")
 	}
-	if err.Error() != "compat command 'sync' is not yet implemented" {
-		t.Errorf("error = %q, want 'compat command 'sync' is not yet implemented'", err.Error())
+	if err.Error() != "--job-id is required" {
+		t.Errorf("error = %q, want '--job-id is required'", err.Error())
 	}
 }
 

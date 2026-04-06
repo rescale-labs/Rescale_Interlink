@@ -84,11 +84,25 @@ func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
 		Automations:  []string{},
 	}
 
+	var scriptBodyLines []string
 	scanner := bufio.NewScanner(file)
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
+
+		// SGE qsub format: #$ -l key=value[,key=value,...]
+		// #RESCALE_* directives take precedence if both are present.
+		if strings.HasPrefix(line, "#$ -l ") {
+			p.parseQsubDirective(line[6:], metadata)
+			continue
+		}
+
+		// Collect non-comment, non-empty, non-shebang lines as potential script body
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			scriptBodyLines = append(scriptBodyLines, trimmed)
+		}
 
 		// Parse each metadata field
 		if matches := p.patterns["name"].FindStringSubmatch(line); matches != nil {
@@ -153,12 +167,57 @@ func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
 		return nil, fmt.Errorf("error reading script: %w", err)
 	}
 
+	// Script body as command fallback: if #RESCALE_COMMAND is absent,
+	// use the collected non-comment script body as the command.
+	if metadata.Command == "" && len(scriptBodyLines) > 0 {
+		metadata.Command = strings.Join(scriptBodyLines, "\n")
+	}
+
 	// Validate required fields
 	if err := p.validate(metadata); err != nil {
 		return nil, err
 	}
 
 	return metadata, nil
+}
+
+// parseQsubDirective parses a #$ -l directive value like "rescale_code=openfoam,rescale_cores=4".
+// #RESCALE_* directives take precedence: qsub values only fill empty fields.
+func (p *SGEParser) parseQsubDirective(directive string, m *SGEMetadata) {
+	pairs := strings.Split(directive, ",")
+	for _, pair := range pairs {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+		switch key {
+		case "rescale_code":
+			if m.Analysis == "" {
+				m.Analysis = val
+			}
+		case "rescale_coretype":
+			if m.CoreType == "" {
+				m.CoreType = val
+			}
+		case "rescale_cores":
+			if m.CoresPerSlot == 0 {
+				if v, err := strconv.Atoi(val); err == nil && v > 0 {
+					m.CoresPerSlot = v
+				}
+			}
+		case "rescale_walltime":
+			if m.Walltime == 0 {
+				if v, err := strconv.Atoi(val); err == nil && v > 0 {
+					m.Walltime = v
+				}
+			}
+		case "rescale_name":
+			if m.Name == "" {
+				m.Name = val
+			}
+		}
+	}
 }
 
 // validate checks that required metadata fields are present

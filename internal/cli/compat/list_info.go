@@ -1,7 +1,6 @@
 package compat
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -37,34 +36,25 @@ func newListInfoCmd() *cobra.Command {
 			ctx := cmd.Context()
 
 			if coreTypes {
-				types, err := client.GetCoreTypes(ctx, false)
+				items, err := client.GetCoreTypesRaw(ctx, false)
 				if err != nil {
 					return fmt.Errorf("failed to list core types: %w", err)
 				}
 
-				// Per-object JSON output matching rescale-cli format
-				for _, ct := range types {
-					data, err := json.Marshal(ct)
-					if err != nil {
-						return fmt.Errorf("failed to marshal core type: %w", err)
-					}
-					fmt.Fprintln(os.Stdout, string(data))
+				for _, raw := range items {
+					fmt.Fprintln(os.Stdout, string(raw))
 				}
 				return nil
 			}
 
 			// analyses
-			analysisList, err := client.GetAnalyses(ctx)
+			items, err := client.GetAnalysesRaw(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to list analyses: %w", err)
 			}
 
-			for _, a := range analysisList {
-				data, err := json.Marshal(a)
-				if err != nil {
-					return fmt.Errorf("failed to marshal analysis: %w", err)
-				}
-				fmt.Fprintln(os.Stdout, string(data))
+			for _, raw := range items {
+				fmt.Fprintln(os.Stdout, string(raw))
 			}
 			return nil
 		},

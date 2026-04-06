@@ -192,8 +192,6 @@ echo "Running simulation"
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 16
 #RESCALE_WALLTIME 3600
-
-./run.sh
 `,
 			wantErr:     true,
 			errContains: "RESCALE_COMMAND",
@@ -327,6 +325,153 @@ echo "Running simulation"
 				tt.validate(t, metadata)
 			}
 		})
+	}
+}
+
+func TestSGEParser_QsubFormat(t *testing.T) {
+	script := `#!/bin/bash
+#$ -l rescale_name=qsub_job,rescale_code=openfoam
+#$ -l rescale_coretype=emerald
+#$ -l rescale_cores=16,rescale_walltime=3600
+
+./run.sh --input data.txt
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "qsub.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
+		t.Fatalf("failed to create test script: %v", err)
+	}
+
+	p := NewSGEParser()
+	m, err := p.Parse(scriptPath)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if m.Name != "qsub_job" {
+		t.Errorf("Name = %q, want %q", m.Name, "qsub_job")
+	}
+	if m.Analysis != "openfoam" {
+		t.Errorf("Analysis = %q, want %q", m.Analysis, "openfoam")
+	}
+	if m.CoreType != "emerald" {
+		t.Errorf("CoreType = %q, want %q", m.CoreType, "emerald")
+	}
+	if m.CoresPerSlot != 16 {
+		t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 16)
+	}
+	if m.Walltime != 3600 {
+		t.Errorf("Walltime = %d, want %d", m.Walltime, 3600)
+	}
+	// Command should be the script body (no #RESCALE_COMMAND)
+	if m.Command != "./run.sh --input data.txt" {
+		t.Errorf("Command = %q, want %q", m.Command, "./run.sh --input data.txt")
+	}
+}
+
+func TestSGEParser_MixedFormat(t *testing.T) {
+	// #RESCALE_* directives take precedence over #$ -l
+	script := `#!/bin/bash
+#RESCALE_NAME override_name
+#RESCALE_COMMAND ./override.sh
+#$ -l rescale_name=qsub_name,rescale_code=openfoam
+#RESCALE_ANALYSIS fluent
+#RESCALE_CORES emerald
+#RESCALE_CORES_PER_SLOT 32
+#RESCALE_WALLTIME 7200
+
+./override.sh
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "mixed.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
+		t.Fatalf("failed to create test script: %v", err)
+	}
+
+	p := NewSGEParser()
+	m, err := p.Parse(scriptPath)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	// #RESCALE_* takes precedence
+	if m.Name != "override_name" {
+		t.Errorf("Name = %q, want %q (RESCALE_NAME should win)", m.Name, "override_name")
+	}
+	if m.Analysis != "fluent" {
+		t.Errorf("Analysis = %q, want %q (RESCALE_ANALYSIS should win)", m.Analysis, "fluent")
+	}
+	if m.Command != "./override.sh" {
+		t.Errorf("Command = %q, want %q", m.Command, "./override.sh")
+	}
+}
+
+func TestSGEParser_ScriptBodyAsCommand(t *testing.T) {
+	// No #RESCALE_COMMAND — script body becomes the command
+	script := `#!/bin/bash
+#RESCALE_NAME body_cmd_test
+#RESCALE_ANALYSIS openfoam
+#RESCALE_CORES emerald
+#RESCALE_CORES_PER_SLOT 8
+#RESCALE_WALLTIME 3600
+
+echo "Setting up"
+./run.sh --verbose
+echo "Done"
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "body.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
+		t.Fatalf("failed to create test script: %v", err)
+	}
+
+	p := NewSGEParser()
+	m, err := p.Parse(scriptPath)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	expected := "echo \"Setting up\"\n./run.sh --verbose\necho \"Done\""
+	if m.Command != expected {
+		t.Errorf("Command = %q, want %q", m.Command, expected)
+	}
+}
+
+func TestSGEParser_QsubMultiPair(t *testing.T) {
+	// All key-value pairs on a single #$ -l line
+	script := `#!/bin/bash
+#$ -l rescale_name=multi_test,rescale_code=star-ccm,rescale_coretype=emerald,rescale_cores=24,rescale_walltime=7200
+#RESCALE_COMMAND ./star.sh
+`
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "multi.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
+		t.Fatalf("failed to create test script: %v", err)
+	}
+
+	p := NewSGEParser()
+	m, err := p.Parse(scriptPath)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if m.Name != "multi_test" {
+		t.Errorf("Name = %q, want %q", m.Name, "multi_test")
+	}
+	if m.Analysis != "star-ccm" {
+		t.Errorf("Analysis = %q, want %q", m.Analysis, "star-ccm")
+	}
+	if m.CoreType != "emerald" {
+		t.Errorf("CoreType = %q, want %q", m.CoreType, "emerald")
+	}
+	if m.CoresPerSlot != 24 {
+		t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 24)
+	}
+	if m.Walltime != 7200 {
+		t.Errorf("Walltime = %d, want %d", m.Walltime, 7200)
+	}
+	if m.Command != "./star.sh" {
+		t.Errorf("Command = %q, want %q", m.Command, "./star.sh")
 	}
 }
 
