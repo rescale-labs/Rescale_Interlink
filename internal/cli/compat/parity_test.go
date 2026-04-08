@@ -17,7 +17,7 @@ import (
 // runCompat executes the compat command tree in-process and captures stdout.
 func runCompat(t *testing.T, args ...string) (stdout string, exitCode int) {
 	t.Helper()
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
 	rootCmd.SetErr(&buf)
@@ -246,7 +246,7 @@ func TestParity_ListFilesRunning(t *testing.T) {
 func TestParity_ExitCode33(t *testing.T) {
 	// Verify that errors produce exit code 33
 	// We can test this without API key by using a command that fails before auth
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"status"}) // missing -j
 	err := rootCmd.Execute()
 	if err == nil {

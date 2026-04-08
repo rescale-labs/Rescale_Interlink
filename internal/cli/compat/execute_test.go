@@ -11,7 +11,7 @@ func TestExitCodeConstant(t *testing.T) {
 }
 
 func TestExecuteCompat_VersionExitsZero(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"--version"})
 
 	err := rootCmd.Execute()
@@ -21,7 +21,7 @@ func TestExecuteCompat_VersionExitsZero(t *testing.T) {
 }
 
 func TestExecuteCompat_SyncRequiresJobID(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	rootCmd.SetArgs([]string{"sync"})
 
@@ -35,7 +35,7 @@ func TestExecuteCompat_SyncRequiresJobID(t *testing.T) {
 }
 
 func TestExecuteCompat_SpubPlaceholder(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	rootCmd.SetArgs([]string{"spub", "register"})
 
@@ -49,7 +49,7 @@ func TestExecuteCompat_SpubPlaceholder(t *testing.T) {
 }
 
 func TestExecuteCompat_HelpExitsZero(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"--help"})
 
 	err := rootCmd.Execute()
@@ -59,7 +59,7 @@ func TestExecuteCompat_HelpExitsZero(t *testing.T) {
 }
 
 func TestExecuteCompat_UnknownCommand(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"nonexistent"})
 
 	err := rootCmd.Execute()

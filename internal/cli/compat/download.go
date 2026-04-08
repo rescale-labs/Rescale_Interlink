@@ -2,7 +2,6 @@ package compat
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,6 +72,14 @@ func newDownloadFileCmd() *cobra.Command {
 			if fileID != "" {
 				return compatDownloadByFileID(cmd.Context(), fileID, outputPath, client, cc)
 			}
+
+			if fileName == "" {
+				// Rescale-cli prints this as SLF4J INFO (not error) and exits 0.
+				if !cc.Quiet {
+					fmt.Fprintf(os.Stdout, "%s - Please provide a file name to download\n", FormatSLF4JTimestamp(time.Now()))
+				}
+				return nil
+			}
 			return compatDownloadByJobID(cmd.Context(), jobID, compatDownloadOpts{FileName: fileName, OutputDir: outputPath}, client, cc)
 		},
 	}
@@ -93,18 +100,21 @@ func newDownloadFileCmd() *cobra.Command {
 }
 
 // compatDownloadExtended handles download-file -e -fid: metadata query, no download.
+// Uses typed GetFileInfo + toCompatFileEntry to produce exactly the 9-field set
+// matching rescale-cli's output (not raw API passthrough which has 17+ fields).
 func compatDownloadExtended(ctx context.Context, fileID string, apiClient *api.Client) error {
 	startTime := time.Now()
 
-	rawFile, err := apiClient.GetFileInfoRaw(ctx, fileID)
+	fileInfo, err := apiClient.GetFileInfo(ctx, fileID)
 	if err != nil {
 		endTime := time.Now()
-		writeTransferEnvelopeRaw(os.Stdout, false, startTime, endTime, []json.RawMessage{})
+		writeTransferEnvelope(os.Stdout, false, startTime, endTime, []compatFileEntry{})
 		return fmt.Errorf("failed to get file info: %w", err)
 	}
 
 	endTime := time.Now()
-	return writeTransferEnvelopeRaw(os.Stdout, true, startTime, endTime, []json.RawMessage{rawFile})
+	entry := toCompatFileEntry(fileInfo)
+	return writeTransferEnvelope(os.Stdout, true, startTime, endTime, []compatFileEntry{entry})
 }
 
 // compatDownloadByFileID downloads a single file by its file ID.

@@ -43,6 +43,12 @@ func newStatusCmd() *cobra.Command {
 					return fmt.Errorf("no status found for job %s", jobID)
 				}
 
+				// Transform lastStatus: remove id/jobId/substatus, add notify/preventDuplicates
+				lastStatus, err := transformLastStatus(rawStatuses[0])
+				if err != nil {
+					return fmt.Errorf("failed to transform status: %w", err)
+				}
+
 				// Fetch raw connection details
 				rawConnDetails, err := client.GetJobConnectionDetailsRaw(ctx, jobID)
 				if err != nil {
@@ -52,7 +58,7 @@ func newStatusCmd() *cobra.Command {
 				// Compose the status -e output:
 				// {"lastStatus": ..., "connectionDetails": ..., "loadMeasurements": []}
 				composite := map[string]json.RawMessage{
-					"lastStatus":        rawStatuses[0],
+					"lastStatus":        lastStatus,
 					"connectionDetails": rawConnDetails,
 					"loadMeasurements":  json.RawMessage("[]"),
 				}
@@ -84,4 +90,24 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().MarkHidden("load-hours")
 
 	return cmd
+}
+
+// transformLastStatus adjusts the raw API status JSON to match rescale-cli's
+// output: removes id/jobId/substatus (not in CLI output), adds notify and
+// preventDuplicates defaults (present in CLI output as client-side defaults).
+func transformLastStatus(raw json.RawMessage) (json.RawMessage, error) {
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	delete(m, "id")
+	delete(m, "jobId")
+	delete(m, "substatus")
+	if _, ok := m["notify"]; !ok {
+		m["notify"] = false
+	}
+	if _, ok := m["preventDuplicates"]; !ok {
+		m["preventDuplicates"] = false
+	}
+	return json.Marshal(m)
 }

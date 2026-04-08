@@ -57,7 +57,7 @@ func newListFilesCmd() *cobra.Command {
 			}
 
 			// List files from the active run
-			runFiles, err := client.GetRunFiles(ctx, activeRunID)
+			runFiles, err := client.GetRunFiles(ctx, jobID, activeRunID)
 			if err != nil {
 				return fmt.Errorf("failed to list run files: %w", err)
 			}

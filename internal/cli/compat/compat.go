@@ -3,7 +3,7 @@
 // flag syntax, exit codes, and output format while using Interlink's
 // backend services.
 //
-// Architecture: compat imports config, api, models, version, and reporting
+// Architecture: compat imports config, api, models, and version
 // directly — it does NOT import the cli package, avoiding import cycles.
 package compat
 

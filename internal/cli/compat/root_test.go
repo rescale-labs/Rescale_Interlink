@@ -8,7 +8,7 @@ import (
 )
 
 func TestNewCompatRootCmd_GlobalFlags(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	// Verify global flags are registered
 	flags := []struct {
@@ -35,7 +35,7 @@ func TestNewCompatRootCmd_GlobalFlags(t *testing.T) {
 }
 
 func TestNewCompatRootCmd_EnableErrorTrackingHidden(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	f := rootCmd.PersistentFlags().Lookup("enableErrorTracking")
 	if f == nil {
 		t.Fatal("enableErrorTracking flag not registered")
@@ -46,7 +46,7 @@ func TestNewCompatRootCmd_EnableErrorTrackingHidden(t *testing.T) {
 }
 
 func TestNewCompatRootCmd_FlagParsing(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	// Parse -p TOKEN -q
 	rootCmd.SetArgs([]string{"-p", "my-token", "-q", "--version"})
@@ -68,7 +68,7 @@ func TestNewCompatRootCmd_FlagParsing(t *testing.T) {
 }
 
 func TestNewCompatRootCmd_VersionOutput(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	// -v should trigger version output (not verbose)
 	var out strings.Builder
@@ -87,7 +87,7 @@ func TestNewCompatRootCmd_VersionOutput(t *testing.T) {
 }
 
 func TestNewCompatRootCmd_VersionFlag(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	var out strings.Builder
 	rootCmd.SetOut(&out)
@@ -105,7 +105,7 @@ func TestNewCompatRootCmd_VersionFlag(t *testing.T) {
 }
 
 func TestNewCompatRootCmd_HelpExitZero(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	rootCmd.SetArgs([]string{"--help"})
 	err := rootCmd.Execute()
@@ -115,7 +115,7 @@ func TestNewCompatRootCmd_HelpExitZero(t *testing.T) {
 }
 
 func TestNewCompatRootCmd_PlaceholderCommands(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	expectedCmds := []string{
 		"status", "stop", "delete", "submit", "upload",
@@ -138,7 +138,7 @@ func TestNewCompatRootCmd_PlaceholderCommands(t *testing.T) {
 }
 
 func TestNewCompatRootCmd_PlaceholderHelp(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	// Subcommand --help should not error (Cobra intercepts --help)
 	rootCmd.SetArgs([]string{"status", "--help"})
@@ -151,7 +151,7 @@ func TestNewCompatRootCmd_PlaceholderHelp(t *testing.T) {
 func TestNewCompatRootCmd_FlagPlacement(t *testing.T) {
 	// Verify global flags work when placed before subcommand.
 	// We can't fully test execution without a server, but we can test parsing.
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	// Replace the status command with one that succeeds to test flag propagation
 	for _, cmd := range rootCmd.Commands() {

@@ -2,6 +2,7 @@ package compat
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -27,6 +28,7 @@ func newStopCmd() *cobra.Command {
 				return fmt.Errorf("failed to stop job: %w", err)
 			}
 
+			fmt.Fprintf(os.Stdout, "Job %s is stopping.\n", jobID)
 			return nil
 		},
 	}

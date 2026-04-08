@@ -12,7 +12,10 @@ import (
 
 // NewCompatRootCmd creates the root Cobra command for compat mode.
 // This mirrors rescale-cli's flag interface while using Interlink's backend.
-func NewCompatRootCmd() *cobra.Command {
+// Returns both the command and the CompatContext so ExecuteCompat can access
+// cc.Quiet for error output gating (cc is populated by Cobra flag parsing
+// before any RunE fires).
+func NewCompatRootCmd() (*cobra.Command, *CompatContext) {
 	cc := &CompatContext{}
 
 	rootCmd := &cobra.Command{
@@ -94,5 +97,5 @@ Exit codes:
 	// Add remaining placeholder commands (SPUB — deferred to v5.0.0)
 	addPlaceholderCommands(rootCmd)
 
-	return rootCmd
+	return rootCmd, cc
 }

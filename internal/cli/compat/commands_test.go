@@ -8,7 +8,7 @@ import (
 )
 
 func TestStatusCmd_RequiresJobID(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"status"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -22,7 +22,7 @@ func TestStatusCmd_RequiresJobID(t *testing.T) {
 func TestStatusCmd_ExtendedOutputRequiresAPI(t *testing.T) {
 	// status -e now attempts real API calls — should fail without valid API key,
 	// NOT return "not yet implemented"
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"status", "-e", "-j", "TEST123"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -34,7 +34,7 @@ func TestStatusCmd_ExtendedOutputRequiresAPI(t *testing.T) {
 }
 
 func TestStatusCmd_DeferredLoadHours(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"status", "--load-hours", "24", "-j", "TEST123"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -74,7 +74,7 @@ func TestStatusCmd_Flags(t *testing.T) {
 }
 
 func TestStopCmd_RequiresJobID(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"stop"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -86,7 +86,7 @@ func TestStopCmd_RequiresJobID(t *testing.T) {
 }
 
 func TestDeleteCmd_RequiresJobID(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"delete"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -106,7 +106,7 @@ func TestCheckForUpdateCmd_SkipAuth(t *testing.T) {
 }
 
 func TestCheckForUpdateCmd_RunsWithoutAPIKey(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	var out strings.Builder
 	rootCmd.SetOut(&out)
@@ -119,7 +119,7 @@ func TestCheckForUpdateCmd_RunsWithoutAPIKey(t *testing.T) {
 }
 
 func TestCheckForUpdateCmd_DeferredInstallFlag(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"check-for-update", "-i"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -131,7 +131,7 @@ func TestCheckForUpdateCmd_DeferredInstallFlag(t *testing.T) {
 }
 
 func TestListInfoCmd_RequiresFlag(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"list-info"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -143,7 +143,7 @@ func TestListInfoCmd_RequiresFlag(t *testing.T) {
 }
 
 func TestListInfoCmd_MutualExclusion(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"list-info", "-c", "-a"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -155,7 +155,7 @@ func TestListInfoCmd_MutualExclusion(t *testing.T) {
 }
 
 func TestListInfoCmd_DeferredDesktopsFlag(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"list-info", "-d"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -167,7 +167,7 @@ func TestListInfoCmd_DeferredDesktopsFlag(t *testing.T) {
 }
 
 func TestUploadCmd_RequiresFiles(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"upload"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -189,7 +189,7 @@ func TestUploadCmd_DeferredFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rootCmd := NewCompatRootCmd()
+			rootCmd, _ := NewCompatRootCmd()
 			rootCmd.SetArgs(tt.args)
 			err := rootCmd.Execute()
 			if err == nil {
@@ -203,7 +203,7 @@ func TestUploadCmd_DeferredFlags(t *testing.T) {
 }
 
 func TestUploadCmd_ExtendedOutputRequiresAPI(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"upload", "-e", "-f", "a.txt"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -215,7 +215,7 @@ func TestUploadCmd_ExtendedOutputRequiresAPI(t *testing.T) {
 }
 
 func TestDownloadFileCmd_RequiresIDFlag(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"download-file"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -227,7 +227,7 @@ func TestDownloadFileCmd_RequiresIDFlag(t *testing.T) {
 }
 
 func TestDownloadFileCmd_MutualExclusion(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"download-file", "-j", "JOB1", "--file-id", "FILE1"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -239,7 +239,7 @@ func TestDownloadFileCmd_MutualExclusion(t *testing.T) {
 }
 
 func TestDownloadFileCmd_DeferredFlags(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"download-file", "-r", "RUN1", "-j", "JOB1"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -251,7 +251,7 @@ func TestDownloadFileCmd_DeferredFlags(t *testing.T) {
 }
 
 func TestDownloadFileCmd_ExtendedJobIDNotSupported(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"download-file", "-e", "-j", "JOB1"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -263,7 +263,7 @@ func TestDownloadFileCmd_ExtendedJobIDNotSupported(t *testing.T) {
 }
 
 func TestDownloadFileCmd_ExtendedFileIDRequiresAPI(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"download-file", "-e", "--file-id", "FILE1"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -287,7 +287,7 @@ func TestDownloadFileCmd_FileIdFlag(t *testing.T) {
 }
 
 func TestSubmitCmd_RequiresScript(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"submit"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -301,7 +301,7 @@ func TestSubmitCmd_RequiresScript(t *testing.T) {
 func TestSubmitCmd_ExtendedOutputRequiresScript(t *testing.T) {
 	// submit -e without a valid script file should fail on file validation,
 	// not "not yet implemented"
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"submit", "-e", "-i", "nonexistent_script.sh"})
 	err := rootCmd.Execute()
 	if err == nil {
@@ -324,7 +324,7 @@ func TestSubmitCmd_DeferredFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rootCmd := NewCompatRootCmd()
+			rootCmd, _ := NewCompatRootCmd()
 			rootCmd.SetArgs(tt.args)
 			err := rootCmd.Execute()
 			if err == nil {
@@ -338,7 +338,7 @@ func TestSubmitCmd_DeferredFlags(t *testing.T) {
 }
 
 func TestAllCommandsRegistered(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	expectedCmds := []string{
 		"status", "stop", "delete", "submit", "upload",
@@ -414,7 +414,7 @@ func TestUploadCmd_FlagShorthand(t *testing.T) {
 }
 
 func TestRootCmd_AuthSkipAnnotation(t *testing.T) {
-	rootCmd := NewCompatRootCmd()
+	rootCmd, _ := NewCompatRootCmd()
 
 	// Find check-for-update command and verify annotation
 	var checkCmd *cobra.Command

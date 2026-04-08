@@ -1,6 +1,7 @@
 package compat
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -40,11 +41,7 @@ func newListInfoCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("failed to list core types: %w", err)
 				}
-
-				for _, raw := range items {
-					fmt.Fprintln(os.Stdout, string(raw))
-				}
-				return nil
+				return printPrettyJSON(items)
 			}
 
 			// analyses
@@ -52,11 +49,7 @@ func newListInfoCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to list analyses: %w", err)
 			}
-
-			for _, raw := range items {
-				fmt.Fprintln(os.Stdout, string(raw))
-			}
-			return nil
+			return printPrettyJSON(items)
 		},
 	}
 
@@ -68,4 +61,19 @@ func newListInfoCmd() *cobra.Command {
 	cmd.Flags().MarkHidden("desktops")
 
 	return cmd
+}
+
+func printPrettyJSON(items []json.RawMessage) error {
+	for _, raw := range items {
+		var obj interface{}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return err
+		}
+		pretty, err := json.MarshalIndent(obj, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, string(pretty))
+	}
+	return nil
 }

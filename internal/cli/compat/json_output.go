@@ -38,17 +38,36 @@ type compatFileStorage struct {
 	StorageType        string                      `json:"storageType"`
 	ID                 string                      `json:"id"`
 	EncryptionType     string                      `json:"encryptionType"`
-	ConnectionSettings models.ConnectionSettings   `json:"connectionSettings"`
+	ConnectionSettings compatConnectionSettings    `json:"connectionSettings"`
+}
+
+// compatConnectionSettings mirrors models.ConnectionSettings but with omitempty on
+// all string fields. Rescale-cli (Jackson @JsonInclude(NON_EMPTY)) omits empty strings;
+// the shared models.ConnectionSettings can't add omitempty without affecting native code.
+type compatConnectionSettings struct {
+	Region         string `json:"region,omitempty"`
+	Container      string `json:"container,omitempty"`
+	PathBase       string `json:"pathBase,omitempty"`
+	PathPartsBase  string `json:"pathPartsBase,omitempty"`
+	StorageAccount string `json:"storageAccount,omitempty"`
+	AccountName    string `json:"accountName,omitempty"`
 }
 
 func toCompatFileEntry(cf *models.CloudFile) compatFileEntry {
 	var storage *compatFileStorage
 	if cf.Storage != nil {
 		storage = &compatFileStorage{
-			StorageType:        cf.Storage.StorageType,
-			ID:                 cf.Storage.ID,
-			EncryptionType:     cf.Storage.EncryptionType,
-			ConnectionSettings: cf.Storage.ConnectionSettings,
+			StorageType:    cf.Storage.StorageType,
+			ID:             cf.Storage.ID,
+			EncryptionType: cf.Storage.EncryptionType,
+			ConnectionSettings: compatConnectionSettings{
+				Region:         cf.Storage.ConnectionSettings.Region,
+				Container:      cf.Storage.ConnectionSettings.Container,
+				PathBase:       cf.Storage.ConnectionSettings.PathBase,
+				PathPartsBase:  cf.Storage.ConnectionSettings.PathPartsBase,
+				StorageAccount: cf.Storage.ConnectionSettings.StorageAccount,
+				AccountName:    cf.Storage.ConnectionSettings.AccountName,
+			},
 		}
 	}
 	checksums := cf.FileChecksums

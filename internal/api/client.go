@@ -1695,9 +1695,10 @@ func (c *Client) GetJobRuns(ctx context.Context, jobID string) ([]models.JobRun,
 }
 
 // GetRunFiles lists files for a run via the v2 API.
-func (c *Client) GetRunFiles(ctx context.Context, runID string) ([]models.RunFile, error) {
+// The endpoint is /api/v2/jobs/{jobID}/runs/{runID}/files/ (compound path).
+func (c *Client) GetRunFiles(ctx context.Context, jobID, runID string) ([]models.RunFile, error) {
 	var allFiles []models.RunFile
-	nextURL := fmt.Sprintf("/api/v2/runs/%s/files/", runID)
+	nextURL := fmt.Sprintf("/api/v2/jobs/%s/runs/%s/files/", jobID, runID)
 	pageCount := 0
 
 	for nextURL != "" {

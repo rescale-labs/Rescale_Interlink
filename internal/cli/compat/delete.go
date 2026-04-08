@@ -2,6 +2,7 @@ package compat
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 )
@@ -27,6 +28,7 @@ func newDeleteCmd() *cobra.Command {
 				return fmt.Errorf("failed to delete job: %w", err)
 			}
 
+			fmt.Fprintf(os.Stdout, "Deleted job %s\n", jobID)
 			return nil
 		},
 	}

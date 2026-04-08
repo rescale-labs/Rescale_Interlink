@@ -109,20 +109,32 @@ func compatUploadExtended(ctx context.Context, filePatterns []string, folderID s
 }
 
 // compatUploadFiles handles the upload logic for compat mode (text output).
+// Rescale-cli outputs a JSON summary even in text mode: {success, startTime, endTime}.
 func compatUploadFiles(ctx context.Context, filePatterns []string, folderID string, apiClient *api.Client, cc *CompatContext) error {
-	cloudFiles, err := compatUploadCore(ctx, filePatterns, folderID, apiClient, cc)
+	startTime := time.Now()
+
+	// Suppress informational output during upload — rescale-cli's text mode
+	// outputs only the auth line + JSON summary, no progress or status lines.
+	savedQuiet := cc.Quiet
+	cc.Quiet = true
+	_, err := compatUploadCore(ctx, filePatterns, folderID, apiClient, cc)
+	cc.Quiet = savedQuiet
+	endTime := time.Now()
+
 	if err != nil {
 		return err
 	}
 
-	cc.Printf("Successfully uploaded %d file(s)\n", len(cloudFiles))
-	for _, cf := range cloudFiles {
-		if cf.ID != "" {
-			fmt.Fprintln(os.Stdout, cf.ID)
-		}
+	env := struct {
+		Success   bool   `json:"success"`
+		StartTime string `json:"startTime"`
+		EndTime   string `json:"endTime"`
+	}{
+		Success:   true,
+		StartTime: formatRescaleTime(startTime),
+		EndTime:   formatRescaleTime(endTime),
 	}
-
-	return nil
+	return writeJSON(os.Stdout, env)
 }
 
 // compatUploadFilesReturnIDs uploads pre-validated file paths and returns file IDs.

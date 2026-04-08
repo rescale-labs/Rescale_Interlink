@@ -63,17 +63,21 @@ func (c *Client) paginateRaw(ctx context.Context, startURL string) ([]json.RawMe
 }
 
 // GetCoreTypesRaw returns core types as raw JSON, preserving all API fields.
+// Uses v2 endpoint which includes price/lowPriorityPrice/walltimeRequired fields
+// absent from v3. Only called from compat-mode list-info.
 func (c *Client) GetCoreTypesRaw(ctx context.Context, includeInactive bool) ([]json.RawMessage, error) {
-	url := "/api/v3/coretypes/"
+	url := "/api/v2/coretypes/"
 	if !includeInactive {
-		url = "/api/v3/coretypes/?isActive=true"
+		url = "/api/v2/coretypes/?isActive=true"
 	}
 	return c.paginateRaw(ctx, url)
 }
 
 // GetAnalysesRaw returns analyses as raw JSON, preserving all API fields.
+// Uses v2 endpoint which includes supportDesks field absent from v3.
+// Only called from compat-mode list-info.
 func (c *Client) GetAnalysesRaw(ctx context.Context) ([]json.RawMessage, error) {
-	return c.paginateRaw(ctx, "/api/v3/analyses/")
+	return c.paginateRaw(ctx, "/api/v2/analyses/")
 }
 
 // GetJobStatusesRaw returns job statuses as raw JSON, preserving fields like
