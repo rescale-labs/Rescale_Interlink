@@ -246,9 +246,9 @@ func matchesE2EFilters(name string, fileMatchers []string, excludeTerm, searchTe
 		}
 	}
 
-	// Exclude filter
+	// Exclude filter (substring match, not glob — matches rescale-cli behavior)
 	if excludeTerm != "" {
-		if ok, _ := matchGlob(excludeTerm, name); ok {
+		if containsInsensitive(name, excludeTerm) {
 			return false
 		}
 	}

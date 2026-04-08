@@ -220,9 +220,15 @@ func TestMatchesE2EFilters(t *testing.T) {
 		t.Error("expected *.dat to not match output.log")
 	}
 
-	// Exclude filter
-	if matchesE2EFilters("debug.log", nil, "debug*", "") {
-		t.Error("expected debug* exclude to filter debug.log")
+	// Exclude filter (substring match, not glob)
+	if matchesE2EFilters("debug.log", nil, "debug", "") {
+		t.Error("expected 'debug' exclude to filter debug.log")
+	}
+	if matchesE2EFilters("build.log", nil, "log", "") {
+		t.Error("expected 'log' exclude to filter build.log")
+	}
+	if !matchesE2EFilters("results.dat", nil, "log", "") {
+		t.Error("expected 'log' exclude to NOT filter results.dat")
 	}
 
 	// Search filter
