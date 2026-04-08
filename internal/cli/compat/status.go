@@ -83,9 +83,7 @@ func newStatusCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required)")
 
-	// Deferred flags (accepted but not implemented)
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
-	cmd.Flags().MarkHidden("extended-output")
 	cmd.Flags().IntVar(&loadHours, "load-hours", 0, "Load hours")
 	cmd.Flags().MarkHidden("load-hours")
 

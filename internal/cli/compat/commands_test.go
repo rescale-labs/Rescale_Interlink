@@ -54,7 +54,7 @@ func TestStatusCmd_Flags(t *testing.T) {
 		hidden    bool
 	}{
 		{"job-id", "j", false},
-		{"extended-output", "e", true},
+		{"extended-output", "e", false},
 		{"load-hours", "", true},
 	}
 

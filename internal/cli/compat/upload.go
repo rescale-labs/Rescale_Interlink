@@ -74,9 +74,7 @@ func newUploadCmd() *cobra.Command {
 	cmd.Flags().StringSliceVarP(&files, "files", "f", nil, "Files to upload (supports globs)")
 	cmd.Flags().StringVarP(&directoryID, "directory-id", "d", "", "Destination directory ID")
 
-	// Deferred flags
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
-	cmd.Flags().MarkHidden("extended-output")
 	cmd.Flags().StringVarP(&report, "report", "r", "", "Report file")
 	cmd.Flags().MarkHidden("report")
 	cmd.Flags().StringSliceVarP(&targets, "Target", "T", nil, "Target storage")

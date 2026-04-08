@@ -157,6 +157,14 @@ func newSubmitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&waiveSLA, "waive-sla", false, "Waive SLA")
 	cmd.Flags().MarkHidden("waive-sla")
 
+	// Accepted-but-ignored flags (rescale-cli has these, scripts may pass them)
+	var verify string
+	var maxConcurrent int
+	cmd.Flags().StringVar(&verify, "verify", "true", "Verify file integrity (accepted, ignored)")
+	cmd.Flags().MarkHidden("verify")
+	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 5, "Max concurrent downloads (accepted, ignored)")
+	cmd.Flags().MarkHidden("max-concurrent")
+
 	return cmd
 }
 

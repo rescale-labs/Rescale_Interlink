@@ -75,6 +75,14 @@ func newSyncCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&newerThanJobID, "newer-than-job-id", "n", "", "Only sync files newer than this job")
 	cmd.Flags().MarkHidden("newer-than-job-id")
 
+	// Accepted-but-ignored flags (rescale-cli has these, scripts may pass them)
+	var verify string
+	var maxConcurrent int
+	cmd.Flags().StringVar(&verify, "verify", "true", "Verify file integrity (accepted, ignored)")
+	cmd.Flags().MarkHidden("verify")
+	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 5, "Max concurrent downloads (accepted, ignored)")
+	cmd.Flags().MarkHidden("max-concurrent")
+
 	return cmd
 }
 

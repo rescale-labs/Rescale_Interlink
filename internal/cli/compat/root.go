@@ -74,8 +74,11 @@ Exit codes:
 
 	// Hidden flags accepted for compatibility but ignored
 	var enableErrorTracking bool
+	var profile string
 	rootCmd.PersistentFlags().BoolVar(&enableErrorTracking, "enableErrorTracking", false, "Enable error tracking (ignored)")
 	rootCmd.PersistentFlags().MarkHidden("enableErrorTracking")
+	rootCmd.PersistentFlags().StringVar(&profile, "profile", "", "CLI configuration profile (accepted, ignored)")
+	rootCmd.PersistentFlags().MarkHidden("profile")
 
 	// Version output: set rootCmd.Version so Cobra's automatic --version works.
 	// Also register -v as a shorthand for --version (rescale-cli uses -v for version, not verbose).
@@ -96,6 +99,9 @@ Exit codes:
 
 	// Add remaining placeholder commands (SPUB — deferred to v5.0.0)
 	addPlaceholderCommands(rootCmd)
+
+	// Use argparse4j-style help format to match rescale-cli's look and feel
+	installArgparseHelp(rootCmd)
 
 	return rootCmd, cc
 }

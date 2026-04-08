@@ -90,9 +90,7 @@ func newDownloadFileCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&fileName, "file-name", "f", "", "Filter by filename (exact match)")
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output path or directory")
 
-	// Deferred flags
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
-	cmd.Flags().MarkHidden("extended-output")
 	cmd.Flags().StringVarP(&runID, "run-id", "r", "", "Run ID")
 	cmd.Flags().MarkHidden("run-id")
 
