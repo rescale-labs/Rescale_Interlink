@@ -40,6 +40,11 @@ type SGEMetadata struct {
 	InputFiles []string
 }
 
+// ParseOptions controls optional behavior during SGE script parsing.
+type ParseOptions struct {
+	CompatDefaults bool // Fill missing fields with CLI-compatible defaults before validation
+}
+
 // SGEParser parses SGE-style scripts with #RESCALE_* metadata comments
 type SGEParser struct {
 	patterns map[string]*regexp.Regexp
@@ -69,8 +74,13 @@ func NewSGEParser() *SGEParser {
 	}
 }
 
-// Parse reads an SGE script and extracts metadata
+// Parse reads an SGE script and extracts metadata.
 func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
+	return p.ParseWithOptions(scriptPath, ParseOptions{})
+}
+
+// ParseWithOptions reads an SGE script and extracts metadata with configurable behavior.
+func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGEMetadata, error) {
 	file, err := os.Open(scriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open script: %w", err)
@@ -95,6 +105,24 @@ func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
 		// #RESCALE_* directives take precedence if both are present.
 		if strings.HasPrefix(line, "#$ -l ") {
 			p.parseQsubDirective(line[6:], metadata)
+			continue
+		}
+
+		// #$ -N NAME: SGE job name directive (only sets if not already set by #RESCALE_NAME)
+		if strings.HasPrefix(line, "#$ -N ") {
+			if name := strings.TrimSpace(line[6:]); name != "" && metadata.Name == "" {
+				metadata.Name = name
+			}
+			continue
+		}
+
+		// #$ -pe smp N: SGE parallel environment cores per slot (only sets if not already set)
+		if strings.HasPrefix(line, "#$ -pe smp ") {
+			if val := strings.TrimSpace(line[11:]); val != "" && metadata.CoresPerSlot == 0 {
+				if v, err := strconv.Atoi(val); err == nil && v > 0 {
+					metadata.CoresPerSlot = v
+				}
+			}
 			continue
 		}
 
@@ -171,6 +199,26 @@ func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
 	// use the collected non-comment script body as the command.
 	if metadata.Command == "" && len(scriptBodyLines) > 0 {
 		metadata.Command = strings.Join(scriptBodyLines, "\n")
+	}
+
+	// Apply CLI-compatible defaults for fields not set by any directive.
+	// Only active when called from compat submit path.
+	if opts.CompatDefaults {
+		if metadata.Name == "" {
+			metadata.Name = "Unnamed Job"
+		}
+		if metadata.CoreType == "" {
+			metadata.CoreType = "emerald"
+		}
+		if metadata.CoresPerSlot == 0 {
+			metadata.CoresPerSlot = 1
+		}
+		if metadata.Walltime == 0 {
+			metadata.Walltime = 48
+		}
+		if metadata.Analysis == "" {
+			metadata.Analysis = "user_included"
+		}
 	}
 
 	// Validate required fields

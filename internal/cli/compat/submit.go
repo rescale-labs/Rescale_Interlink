@@ -72,7 +72,7 @@ func newSubmitCmd() *cobra.Command {
 
 			// Parse SGE script
 			sgeParser := parser.NewSGEParser()
-			metadata, err := sgeParser.Parse(scriptFile)
+			metadata, err := sgeParser.ParseWithOptions(scriptFile, parser.ParseOptions{CompatDefaults: true})
 			if err != nil {
 				return fmt.Errorf("failed to parse script: %w", err)
 			}
