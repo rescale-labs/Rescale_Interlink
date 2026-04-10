@@ -3,21 +3,14 @@ package compat
 import (
 	"context"
 	"fmt"
-	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/watch"
 )
-
-// terminalStatuses are job statuses that indicate the job has finished.
-var terminalStatuses = map[string]bool{
-	"Completed":     true,
-	"Failed":        true,
-	"Stopped":       true,
-	"Force Stopped": true,
-}
 
 func newSyncCmd() *cobra.Command {
 	var jobID string
@@ -33,7 +26,7 @@ func newSyncCmd() *cobra.Command {
 		Short: "Download and optionally poll for job output files",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if newerThanJobID != "" {
-				return fmt.Errorf("'-n' (newer-than-job-id) is not yet implemented in compat mode")
+				return runCompatNewerThan(cmd, newerThanJobID, outputDir, syncInterval)
 			}
 			if jobID == "" {
 				return fmt.Errorf("--job-id is required")
@@ -59,8 +52,8 @@ func newSyncCmd() *cobra.Command {
 				return compatDownloadByJobID(ctx, jobID, opts, client, cc)
 			}
 
-			// Polling mode: download, sleep, check status, repeat
-			return syncPollLoop(ctx, jobID, opts, syncInterval, client, cc)
+			// Polling mode: delegate to watch engine
+			return runCompatWatchPoll(ctx, jobID, opts, syncInterval, client, cc)
 		},
 	}
 
@@ -70,10 +63,7 @@ func newSyncCmd() *cobra.Command {
 	cmd.Flags().StringSliceVarP(&fileMatchers, "file-matcher", "f", nil, "Glob patterns to include")
 	cmd.Flags().StringVar(&excludeTerm, "exclude", "", "Exclude files matching pattern")
 	cmd.Flags().StringVarP(&searchTerm, "search", "s", "", "Search term for file filtering")
-
-	// Deferred flags
-	cmd.Flags().StringVarP(&newerThanJobID, "newer-than-job-id", "n", "", "Only sync files newer than this job")
-	cmd.Flags().MarkHidden("newer-than-job-id")
+	cmd.Flags().StringVarP(&newerThanJobID, "newer-than-job-id", "n", "", "Sync files for all jobs newer than this job")
 
 	// Accepted-but-ignored flags (rescale-cli has these, scripts may pass them)
 	var verify string
@@ -86,39 +76,149 @@ func newSyncCmd() *cobra.Command {
 	return cmd
 }
 
-// syncPollLoop repeatedly downloads files and checks job status until the job reaches a terminal state.
-func syncPollLoop(ctx context.Context, jobID string, opts compatDownloadOpts, intervalSec int, client *api.Client, cc *CompatContext) error {
-	ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
-	defer ticker.Stop()
+// runCompatWatchPoll delegates polling-mode sync to the shared watch engine.
+func runCompatWatchPoll(ctx context.Context, jobID string, opts compatDownloadOpts, intervalSec int, client *api.Client, cc *CompatContext) error {
+	cfg := watch.Config{
+		Interval: time.Duration(intervalSec) * time.Second,
+	}
 
-	for {
-		// Download pass (skip-existing is already built into compatDownloadByJobID)
-		if err := compatDownloadByJobID(ctx, jobID, opts, client, cc); err != nil {
-			// Log download errors but continue polling
-			log.Printf("sync download error: %v", err)
-		}
-
-		// Check job status
-		statuses, err := client.GetJobStatuses(ctx, jobID)
+	statusFn := func(ctx context.Context, jID string) (string, error) {
+		statuses, err := client.GetJobStatuses(ctx, jID)
 		if err != nil {
-			log.Printf("sync status check error: %v", err)
-		} else if len(statuses) > 0 {
-			currentStatus := statuses[0].Status
-			if terminalStatuses[currentStatus] {
-				// One final download sweep to catch any last files
-				if dlErr := compatDownloadByJobID(ctx, jobID, opts, client, cc); dlErr != nil {
-					log.Printf("sync final download error: %v", dlErr)
-				}
-				cc.Printf("Job %s reached terminal status: %s\n", jobID, currentStatus)
-				return nil
+			return "", err
+		}
+		if len(statuses) == 0 {
+			return "", fmt.Errorf("no status entries for job %s", jID)
+		}
+		return statuses[0].Status, nil
+	}
+
+	downloadFn := func(ctx context.Context, jID string) error {
+		return compatDownloadByJobID(ctx, jID, opts, client, cc)
+	}
+
+	cb := &watch.Callbacks{
+		OnStatusChange: func(jID, oldStatus, newStatus string) {
+			cc.Printf("%s - Job %s: %s -> %s\n",
+				FormatSLF4JTimestamp(time.Now()), jID, oldStatus, newStatus)
+		},
+		OnDownloadPass: func(jID string, err error) {
+			if err != nil {
+				cc.Printf("%s - sync download error for %s: %v\n",
+					FormatSLF4JTimestamp(time.Now()), jID, err)
 			}
+		},
+		OnTerminal: func(jID, finalStatus string) {
+			cc.Printf("Job %s reached terminal status: %s\n", jID, finalStatus)
+		},
+		OnError: func(jID string, err error) {
+			cc.Printf("%s - sync status check error for %s: %v\n",
+				FormatSLF4JTimestamp(time.Now()), jID, err)
+		},
+	}
+
+	return watch.WatchJob(ctx, jobID, cfg, statusFn, downloadFn, cb)
+}
+
+// runCompatNewerThan delegates newer-than-job-id sync to the shared watch engine.
+func runCompatNewerThan(cmd *cobra.Command, refJobID, outputDir string, syncInterval int) error {
+	cc := GetCompatContext(cmd)
+	client, err := cc.GetAPIClient(cmd.Context())
+	if err != nil {
+		return err
+	}
+
+	ctx := cmd.Context()
+
+	if outputDir == "" {
+		outputDir = "."
+	}
+
+	cfg := watch.Config{
+		Interval: time.Duration(syncInterval) * time.Second,
+	}
+	// For single-run newer-than (syncInterval=0), use a minimal interval.
+	// WatchNewerThan will process all jobs once and exit if all are terminal.
+	if cfg.Interval <= 0 {
+		cfg.Interval = 5 * time.Second
+	}
+
+	statusFn := func(ctx context.Context, jID string) (string, error) {
+		statuses, err := client.GetJobStatuses(ctx, jID)
+		if err != nil {
+			return "", err
+		}
+		if len(statuses) == 0 {
+			return "", fmt.Errorf("no status entries for job %s", jID)
+		}
+		return statuses[0].Status, nil
+	}
+
+	lister := func(ctx context.Context, refID string) ([]watch.JobInfo, error) {
+		refJob, err := client.GetJob(ctx, refID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get reference job %s: %w", refID, err)
+		}
+		if refJob.CreatedAt == "" {
+			return nil, fmt.Errorf("reference job %s has no creation date", refID)
+		}
+		cutoff, parseErr := time.Parse(time.RFC3339, refJob.CreatedAt)
+		if parseErr != nil {
+			return nil, fmt.Errorf("failed to parse reference job creation date: %w", parseErr)
 		}
 
-		// Wait for next interval
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
+		allJobs, err := client.ListJobsWithCutoff(ctx, cutoff)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list jobs: %w", err)
+		}
+
+		var result []watch.JobInfo
+		for _, j := range allJobs {
+			if j.ID == refID {
+				continue
+			}
+			if j.CreatedAt != "" {
+				jTime, pe := time.Parse(time.RFC3339, j.CreatedAt)
+				if pe == nil && jTime.Before(cutoff) {
+					continue
+				}
+			}
+			result = append(result, watch.JobInfo{
+				ID:     j.ID,
+				Name:   j.Name,
+				Status: j.JobStatus.Status,
+			})
+		}
+		return result, nil
+	}
+
+	dlFactory := func(jID string) watch.DownloadFunc {
+		jobOutdir := filepath.Join(outputDir, fmt.Sprintf("rescale_job_%s", jID))
+		return func(ctx context.Context, _ string) error {
+			opts := compatDownloadOpts{OutputDir: jobOutdir}
+			return compatDownloadByJobID(ctx, jID, opts, client, cc)
 		}
 	}
+
+	cb := &watch.Callbacks{
+		OnStatusChange: func(jID, oldStatus, newStatus string) {
+			cc.Printf("%s - Job %s: %s -> %s\n",
+				FormatSLF4JTimestamp(time.Now()), jID, oldStatus, newStatus)
+		},
+		OnDownloadPass: func(jID string, err error) {
+			if err != nil {
+				cc.Printf("%s - sync download error for %s: %v\n",
+					FormatSLF4JTimestamp(time.Now()), jID, err)
+			}
+		},
+		OnTerminal: func(jID, finalStatus string) {
+			cc.Printf("Job %s reached terminal status: %s\n", jID, finalStatus)
+		},
+		OnError: func(jID string, err error) {
+			cc.Printf("%s - sync error for %s: %v\n",
+				FormatSLF4JTimestamp(time.Now()), jID, err)
+		},
+	}
+
+	return watch.WatchNewerThan(ctx, refJobID, cfg, lister, statusFn, dlFactory, cb)
 }

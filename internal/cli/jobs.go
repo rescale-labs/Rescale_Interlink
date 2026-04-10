@@ -32,7 +32,7 @@ import (
 func newJobsCmd() *cobra.Command {
 	jobsCmd := &cobra.Command{
 		Use:   "jobs",
-		Short: "Job operations (list, get, stop, tail, download, listfiles)",
+		Short: "Job operations (list, get, stop, tail, watch, download, listfiles)",
 		Long:  `Commands for managing jobs on the Rescale platform.`,
 	}
 
@@ -44,6 +44,7 @@ func newJobsCmd() *cobra.Command {
 	jobsCmd.AddCommand(newJobsStopCmd())
 	jobsCmd.AddCommand(newJobsTailCmd())
 	jobsCmd.AddCommand(newJobsListFilesCmd())
+	jobsCmd.AddCommand(newJobsWatchCmd())
 	jobsCmd.AddCommand(newJobsDownloadCmd())
 
 	return jobsCmd

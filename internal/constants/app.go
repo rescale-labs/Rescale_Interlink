@@ -157,6 +157,12 @@ const (
 
 	// HealthCheckInterval - interval for system health checks (60 seconds)
 	HealthCheckInterval = 60 * time.Second
+
+	// MinWatchInterval - minimum watch polling interval (prevent API abuse)
+	MinWatchInterval = 5 * time.Second
+
+	// MaxConsecutiveWatchErrors - abort watch after this many consecutive status check failures
+	MaxConsecutiveWatchErrors = 5
 )
 
 // CLI Concurrency Limits

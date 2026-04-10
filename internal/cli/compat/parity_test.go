@@ -324,6 +324,114 @@ func TestParity_SyncSingleRun(t *testing.T) {
 	t.Logf("sync downloaded %d file(s)", len(entries))
 }
 
+func TestParity_SyncSingleRunSkipExisting(t *testing.T) {
+	requireAPIKey(t)
+	jobID := getTestJobID(t)
+
+	tmpDir := t.TempDir()
+
+	// First run: download files
+	out, code := runCompat(t, "-q", "sync", "-j", jobID, "-o", tmpDir)
+	if code != 0 {
+		t.Fatalf("sync first run exited %d: %s", code, out)
+	}
+
+	entries1, _ := os.ReadDir(tmpDir)
+	if len(entries1) == 0 {
+		t.Skip("no files downloaded — cannot test skip-existing")
+	}
+
+	// Second run: should skip existing files
+	out2, code2 := runCompat(t, "-q", "sync", "-j", jobID, "-o", tmpDir)
+	if code2 != 0 {
+		t.Fatalf("sync second run exited %d: %s", code2, out2)
+	}
+
+	entries2, _ := os.ReadDir(tmpDir)
+	if len(entries2) != len(entries1) {
+		t.Errorf("expected same file count after skip-existing: first=%d, second=%d", len(entries1), len(entries2))
+	}
+}
+
+func TestParity_SyncPolling(t *testing.T) {
+	requireAPIKey(t)
+	jobID := getTestJobID(t) // completed job
+
+	tmpDir := t.TempDir()
+	// Polling mode on a completed job: should download once, detect terminal, exit
+	out, code := runCompat(t, "-q", "sync", "-j", jobID, "-d", "5", "-o", tmpDir)
+	if code != 0 {
+		t.Fatalf("sync polling exited %d: %s", code, out)
+	}
+
+	entries, _ := os.ReadDir(tmpDir)
+	t.Logf("sync polling downloaded %d file(s)", len(entries))
+
+	// H2H note: rescale-cli sync -j JOB -d 5 on a completed job never exits
+	// (confirmed manually 2026-04-10 — it keeps polling indefinitely even after
+	// downloading all files from a Completed job). INT correctly detects terminal
+	// status on first tick and exits. Not calling runRescaleCLI here because
+	// the CLI hangs forever. This is an INT improvement over CLI behavior.
+}
+
+func TestParity_SyncNewerThan(t *testing.T) {
+	requireAPIKey(t)
+	refJobID := getReferenceJobID(t)
+
+	tmpDir := t.TempDir()
+	out, code := runCompat(t, "-q", "sync", "-n", refJobID, "-o", tmpDir)
+	if code != 0 {
+		t.Fatalf("sync -n exited %d: %s", code, out)
+	}
+
+	// Verify per-job subdirectories were created with rescale_job_ prefix
+	entries, _ := os.ReadDir(tmpDir)
+	jobDirCount := 0
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "rescale_job_") {
+			jobDirCount++
+		}
+	}
+	t.Logf("sync -n created %d job directories", jobDirCount)
+
+	// Reference job directory should NOT exist
+	refDir := fmt.Sprintf("rescale_job_%s", refJobID)
+	for _, e := range entries {
+		if e.Name() == refDir {
+			t.Errorf("reference job directory %s should not be created", refDir)
+		}
+	}
+
+	// H2H: compare directory structure
+	if cliPath := os.Getenv("RESCALE_CLI_PATH"); cliPath != "" {
+		cliDir := t.TempDir()
+		_, _ = runRescaleCLI(t, "-q", "sync", "-n", refJobID, "-o", cliDir)
+
+		cliEntries, _ := os.ReadDir(cliDir)
+		cliJobDirs := 0
+		for _, e := range cliEntries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "rescale_job_") {
+				cliJobDirs++
+			}
+		}
+		t.Logf("H2H: CLI created %d job dirs, INT created %d job dirs", cliJobDirs, jobDirCount)
+		// CLI creates dirs for ALL newer jobs (even empty ones), INT only for jobs with files.
+		// CLI also creates reference job dir. These are known divergences (metadata-based vs file-based).
+		if jobDirCount > cliJobDirs {
+			t.Errorf("INT has more job dirs than CLI: INT=%d CLI=%d", jobDirCount, cliJobDirs)
+		}
+	}
+}
+
+func getReferenceJobID(t *testing.T) string {
+	t.Helper()
+	id := os.Getenv("RESCALE_REFERENCE_JOB_ID")
+	if id == "" {
+		t.Skip("RESCALE_REFERENCE_JOB_ID not set (need an older job with newer jobs after it)")
+	}
+	return id
+}
+
 func TestParity_DownloadFileExactName(t *testing.T) {
 	requireAPIKey(t)
 	jobID := getTestJobID(t)
