@@ -35,6 +35,7 @@ type CompatContext struct {
 	APIBaseURL string
 	Quiet      bool
 	NoPrompt   bool
+	Profile    string      // CLI configuration profile name
 	AuthEmail  string      // cached from GetUserProfile after auth
 	apiClient  *api.Client // lazily created, cached
 }
@@ -107,34 +108,53 @@ func GetCompatContext(cmd *cobra.Command) *CompatContext {
 }
 
 // GetAPIClient returns a configured API client, creating one lazily on first call.
-// Credential resolution follows compat precedence: -p flag > RESCALE_API_KEY env > default token file.
-// Profile/apiconfig support is deferred to Plan 2+.
+// Credential resolution follows compat precedence:
+//  1. -p flag (explicit)
+//  2. RESCALE_API_KEY env var
+//  3. apiconfig INI file (--profile section or [default])
 func (cc *CompatContext) GetAPIClient(ctx context.Context) (*api.Client, error) {
 	if cc.apiClient != nil {
 		return cc.apiClient, nil
 	}
 
-	// Compat credential chain: flag > env > default token file
+	var profileBaseURL string
+
+	// Compat credential chain: flag > env > apiconfig profile
 	apiKey := cc.APIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("RESCALE_API_KEY")
 	}
+
+	// Profile credentials (explicit --profile or implicit [default])
 	if apiKey == "" {
-		if tokenPath := config.GetDefaultTokenPath(); tokenPath != "" {
-			if key, err := config.ReadTokenFile(tokenPath); err == nil && key != "" {
-				apiKey = key
-			}
+		profileName := cc.Profile
+		if profileName == "" {
+			profileName = "default"
+		}
+		pKey, pURL, err := config.LoadCompatProfile("", profileName)
+		if err != nil && cc.Profile != "" {
+			// Explicit --profile with missing section is a hard error
+			return nil, fmt.Errorf("failed to load profile %q: %w", cc.Profile, err)
+		}
+		if pKey != "" {
+			apiKey = pKey
+		}
+		if pURL != "" {
+			profileBaseURL = pURL
 		}
 	}
 
 	if apiKey == "" {
-		return nil, fmt.Errorf("no API key provided: use -p flag, RESCALE_API_KEY env var, or run 'rescale-int config init'")
+		return nil, fmt.Errorf("no API key provided: use -p flag, RESCALE_API_KEY env var, or configure apiconfig profile")
 	}
 
-	// Base URL chain: flag > env > default
+	// Base URL chain: flag > env > profile > default
 	baseURL := cc.APIBaseURL
 	if baseURL == "" {
 		baseURL = os.Getenv("RESCALE_API_URL")
+	}
+	if baseURL == "" && profileBaseURL != "" {
+		baseURL = profileBaseURL
 	}
 	if baseURL == "" {
 		baseURL = "https://platform.rescale.com"
@@ -201,6 +221,7 @@ func detectSubcommand(args []string) string {
 	rootValueFlags := map[string]bool{
 		"-p": true, "--api-token": true,
 		"-X": true, "--api-base-url": true,
+		"--profile": true,
 	}
 	for i, arg := range args {
 		if rootValueFlags[arg] {

@@ -18,9 +18,6 @@ func newListFilesCmd() *cobra.Command {
 		Use:   "list-files",
 		Short: "List files from a running job's cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if runID != "" {
-				return fmt.Errorf("'-r' (run-id) is not yet implemented in compat mode")
-			}
 			if jobID == "" {
 				return fmt.Errorf("--job-id is required")
 			}
@@ -32,6 +29,18 @@ func newListFilesCmd() *cobra.Command {
 			}
 
 			ctx := cmd.Context()
+
+			// Explicit run-id: list files from that specific run
+			if runID != "" {
+				runFiles, err := client.GetRunFiles(ctx, jobID, runID)
+				if err != nil {
+					return fmt.Errorf("failed to list run files: %w", err)
+				}
+				for _, f := range runFiles {
+					fmt.Fprintln(os.Stdout, f.Name)
+				}
+				return nil
+			}
 
 			// Check for active run — the presence of a run is the source of truth,
 			// not the job status. A job in Queued/Pending may not have a run yet.
@@ -71,7 +80,6 @@ func newListFilesCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required)")
 	cmd.Flags().StringVarP(&runID, "run-id", "r", "", "Run ID")
-	cmd.Flags().MarkHidden("run-id")
 
 	return cmd
 }

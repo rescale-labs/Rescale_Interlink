@@ -45,10 +45,6 @@ func newDownloadFileCmd() *cobra.Command {
 		Use:   "download-file",
 		Short: "Download job output files",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if runID != "" {
-				return fmt.Errorf("'-r' (run-id) is not yet implemented in compat mode (planned for Plan 4)")
-			}
-
 			if jobID == "" && fileID == "" {
 				return fmt.Errorf("one of -j (--job-id) or --file-id is required")
 			}
@@ -73,6 +69,12 @@ func newDownloadFileCmd() *cobra.Command {
 				return compatDownloadByFileID(cmd.Context(), fileID, outputPath, client, cc)
 			}
 
+			// Run-id download: list files from specific run, resolve via GetFileInfo, batch download
+			if runID != "" {
+				return compatDownloadByRunFiles(cmd.Context(), jobID, runID,
+					compatDownloadOpts{FileName: fileName, OutputDir: outputPath}, client, cc)
+			}
+
 			if fileName == "" {
 				// Rescale-cli prints this as SLF4J INFO (not error) and exits 0.
 				if !cc.Quiet {
@@ -92,7 +94,6 @@ func newDownloadFileCmd() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
 	cmd.Flags().StringVarP(&runID, "run-id", "r", "", "Run ID")
-	cmd.Flags().MarkHidden("run-id")
 
 	return cmd
 }
@@ -320,6 +321,158 @@ func compatDownloadByJobID(ctx context.Context, jobID string, opts compatDownloa
 
 		dlErr := download.DownloadFile(ctx, download.DownloadParams{
 			FileInfo:         cloudFile,
+			LocalPath:        outputPath,
+			APIClient:        apiClient,
+			ProgressCallback: progressCB,
+			TransferHandle:   transferHandle,
+		})
+
+		if downloadUI != nil {
+			if fileBar == nil {
+				fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
+			}
+			if dlErr != nil {
+				fileBar.Complete(dlErr)
+			} else {
+				fileBar.Complete(nil)
+			}
+		}
+
+		if dlErr != nil {
+			return fmt.Errorf("failed to download %s: %w", item.name, dlErr)
+		}
+		return nil
+	})
+
+	if len(batchResult.Errors) > 0 {
+		cc.Printf("Downloaded %d file(s), %d failed\n", batchResult.Completed, batchResult.Failed)
+		return batchResult.Errors[0]
+	}
+
+	cc.Printf("Successfully downloaded %d file(s)\n", batchResult.Completed)
+	return nil
+}
+
+// compatDownloadByRunFiles downloads files from a specific job run.
+// Lists files via GetRunFiles, resolves each via GetFileInfo for full download metadata,
+// then uses the same batch download pattern as compatDownloadByJobID.
+func compatDownloadByRunFiles(ctx context.Context, jobID, runID string, opts compatDownloadOpts, apiClient *api.Client, cc *CompatContext) error {
+	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
+	credentials.GetManager(apiClient).WarmAll(ctx)
+
+	runFiles, err := apiClient.GetRunFiles(ctx, jobID, runID)
+	if err != nil {
+		return fmt.Errorf("failed to list run files: %w", err)
+	}
+
+	if len(runFiles) == 0 {
+		cc.Printf("No files found for job %s run %s\n", jobID, runID)
+		return nil
+	}
+
+	// Filter by filename if specified
+	if opts.FileName != "" {
+		var matched []models.RunFile
+		for _, f := range runFiles {
+			if f.Name == opts.FileName {
+				matched = append(matched, f)
+			}
+		}
+		if len(matched) == 0 {
+			return fmt.Errorf("no files matching '%s' found in job %s run %s", opts.FileName, jobID, runID)
+		}
+		runFiles = matched
+	}
+
+	outputDir := opts.OutputDir
+	if outputDir == "" {
+		outputDir = "."
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	cc.Printf("Downloading %d file(s) from job %s run %s\n", len(runFiles), jobID, runID)
+
+	// Resolve each RunFile via GetFileInfo to get full download metadata
+	type resolvedFile struct {
+		cloudFile *models.CloudFile
+		runFile   models.RunFile
+	}
+	var resolved []resolvedFile
+	for _, rf := range runFiles {
+		fileInfo, err := apiClient.GetFileInfo(ctx, rf.ID)
+		if err != nil {
+			return fmt.Errorf("failed to get file info for %s: %w", rf.Name, err)
+		}
+		resolved = append(resolved, resolvedFile{cloudFile: fileInfo, runFile: rf})
+	}
+
+	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
+	transferMgr := transfer.NewManager(resourceMgr)
+
+	items := make([]compatDownloadItem, len(resolved))
+	for i, r := range resolved {
+		localPath := filepath.Join(outputDir, r.runFile.Name)
+		if r.runFile.RelativePath != "" {
+			candidate := filepath.Join(outputDir, r.runFile.RelativePath)
+			if validation.ValidatePathInDirectory(candidate, outputDir) == nil {
+				localPath = candidate
+			}
+		}
+		items[i] = compatDownloadItem{
+			idx:       i,
+			fileID:    r.runFile.ID,
+			name:      r.runFile.Name,
+			size:      r.cloudFile.DecryptedSize,
+			localPath: localPath,
+		}
+	}
+
+	cfg := transfer.BatchConfig{
+		MaxWorkers:  constants.DefaultMaxConcurrent,
+		ResourceMgr: resourceMgr,
+		Label:       "COMPAT-RUN-DOWNLOAD",
+	}
+	numWorkers := transfer.ComputedWorkers(items, cfg)
+
+	var downloadUI *progress.DownloadUI
+	if !cc.Quiet {
+		downloadUI = progress.NewDownloadUI(len(resolved))
+		defer downloadUI.Wait()
+	}
+
+	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item compatDownloadItem) error {
+		outputPath := item.localPath
+
+		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+			return fmt.Errorf("failed to create directory for %s: %w", item.name, err)
+		}
+
+		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
+			cc.Printf("Skipping existing: %s\n", item.name)
+			return nil
+		}
+
+		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
+
+		var fileBar *progress.DownloadFileBar
+		var barOnce sync.Once
+
+		var progressCB func(float64)
+		if downloadUI != nil {
+			progressCB = func(fraction float64) {
+				barOnce.Do(func() {
+					fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
+				})
+				if fileBar != nil {
+					fileBar.UpdateProgress(fraction)
+				}
+			}
+		}
+
+		dlErr := download.DownloadFile(ctx, download.DownloadParams{
+			FileInfo:         resolved[item.idx].cloudFile,
 			LocalPath:        outputPath,
 			APIClient:        apiClient,
 			ProgressCallback: progressCB,

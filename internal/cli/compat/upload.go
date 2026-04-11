@@ -2,6 +2,7 @@ package compat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,9 +44,6 @@ func newUploadCmd() *cobra.Command {
 		Use:   "upload",
 		Short: "Upload files",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if report != "" {
-				return fmt.Errorf("'-r' (report) is not yet implemented in compat mode")
-			}
 			if len(targets) > 0 {
 				return fmt.Errorf("'-T' (target) is not yet implemented in compat mode")
 			}
@@ -64,10 +62,10 @@ func newUploadCmd() *cobra.Command {
 			}
 
 			if extendedOutput {
-				return compatUploadExtended(cmd.Context(), files, directoryID, client, cc)
+				return compatUploadExtended(cmd.Context(), files, directoryID, report, client, cc)
 			}
 
-			return compatUploadFiles(cmd.Context(), files, directoryID, client, cc)
+			return compatUploadFiles(cmd.Context(), files, directoryID, report, client, cc)
 		},
 	}
 
@@ -75,8 +73,7 @@ func newUploadCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&directoryID, "directory-id", "d", "", "Destination directory ID")
 
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
-	cmd.Flags().StringVarP(&report, "report", "r", "", "Report file")
-	cmd.Flags().MarkHidden("report")
+	cmd.Flags().StringVarP(&report, "report", "r", "", "Write upload report to file (use - for stdout)")
 	cmd.Flags().StringSliceVarP(&targets, "Target", "T", nil, "Target storage")
 	cmd.Flags().MarkHidden("Target")
 	cmd.Flags().BoolVar(&copyToCFS, "copy-to-cfs", false, "Copy to CFS after upload")
@@ -86,7 +83,7 @@ func newUploadCmd() *cobra.Command {
 }
 
 // compatUploadExtended handles upload with -e (extended JSON output).
-func compatUploadExtended(ctx context.Context, filePatterns []string, folderID string, apiClient *api.Client, cc *CompatContext) error {
+func compatUploadExtended(ctx context.Context, filePatterns []string, folderID, report string, apiClient *api.Client, cc *CompatContext) error {
 	startTime := time.Now()
 
 	cloudFiles, err := compatUploadCore(ctx, filePatterns, folderID, apiClient, cc)
@@ -103,24 +100,36 @@ func compatUploadExtended(ctx context.Context, filePatterns []string, folderID s
 		entries[i] = toCompatFileEntry(cf)
 	}
 
+	if report != "" {
+		if err := writeUploadReport(report, cloudFiles); err != nil {
+			return err
+		}
+	}
+
 	return writeTransferEnvelope(os.Stdout, true, startTime, endTime, entries)
 }
 
 // compatUploadFiles handles the upload logic for compat mode (text output).
 // Rescale-cli outputs a JSON summary even in text mode: {success, startTime, endTime}.
-func compatUploadFiles(ctx context.Context, filePatterns []string, folderID string, apiClient *api.Client, cc *CompatContext) error {
+func compatUploadFiles(ctx context.Context, filePatterns []string, folderID, report string, apiClient *api.Client, cc *CompatContext) error {
 	startTime := time.Now()
 
 	// Suppress informational output during upload — rescale-cli's text mode
 	// outputs only the auth line + JSON summary, no progress or status lines.
 	savedQuiet := cc.Quiet
 	cc.Quiet = true
-	_, err := compatUploadCore(ctx, filePatterns, folderID, apiClient, cc)
+	cloudFiles, err := compatUploadCore(ctx, filePatterns, folderID, apiClient, cc)
 	cc.Quiet = savedQuiet
 	endTime := time.Now()
 
 	if err != nil {
 		return err
+	}
+
+	if report != "" {
+		if err := writeUploadReport(report, cloudFiles); err != nil {
+			return err
+		}
 	}
 
 	env := struct {
@@ -267,4 +276,29 @@ func compatUploadCoreValidated(ctx context.Context, filePaths []string, folderID
 	}
 
 	return cloudFiles, nil
+}
+
+// writeUploadReport writes a JSON report of uploaded files to the specified path.
+// Use "-" to write to stdout.
+func writeUploadReport(report string, cloudFiles []*models.CloudFile) error {
+	entries := make([]compatFileEntry, len(cloudFiles))
+	for i, cf := range cloudFiles {
+		entries[i] = toCompatFileEntry(cf)
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal upload report: %w", err)
+	}
+	data = append(data, '\n')
+	if report == "-" {
+		_, err = os.Stdout.Write(data)
+		if err != nil {
+			return fmt.Errorf("failed to write report to stdout: %w", err)
+		}
+		return nil
+	}
+	if err := os.WriteFile(report, data, 0644); err != nil {
+		return fmt.Errorf("failed to write report file %s: %w", report, err)
+	}
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -17,10 +18,6 @@ func newStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Check job status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().Changed("load-hours") {
-				return fmt.Errorf("'--load-hours' is not yet implemented in compat mode")
-			}
-
 			if jobID == "" {
 				return fmt.Errorf("--job-id is required")
 			}
@@ -55,12 +52,24 @@ func newStatusCmd() *cobra.Command {
 					return fmt.Errorf("failed to get connection details: %w", err)
 				}
 
-				// Compose the status -e output:
-				// {"lastStatus": ..., "connectionDetails": ..., "loadMeasurements": []}
+				// Fetch load measurements if requested
+				var loadMeasurements json.RawMessage = json.RawMessage("[]")
+				if loadHours > 0 {
+					raw, err := client.GetJobLoadMeasurementsRaw(ctx, jobID, loadHours)
+					if err != nil {
+						// Only swallow "endpoint not found" (404/405). Surface auth, network, and server errors.
+						if !isNotFoundOrMethodNotAllowed(err) {
+							return fmt.Errorf("failed to get load measurements: %w", err)
+						}
+					} else if raw != nil {
+						loadMeasurements = raw
+					}
+				}
+
 				composite := map[string]json.RawMessage{
 					"lastStatus":        lastStatus,
 					"connectionDetails": rawConnDetails,
-					"loadMeasurements":  json.RawMessage("[]"),
+					"loadMeasurements":  loadMeasurements,
 				}
 
 				return writeJSON(os.Stdout, composite)
@@ -84,10 +93,15 @@ func newStatusCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required)")
 
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
-	cmd.Flags().IntVar(&loadHours, "load-hours", 0, "Load hours")
-	cmd.Flags().MarkHidden("load-hours")
+	cmd.Flags().IntVar(&loadHours, "load-hours", 0, "Hours of load measurement data to include")
 
 	return cmd
+}
+
+// isNotFoundOrMethodNotAllowed checks if an error contains a 404 or 405 status code.
+func isNotFoundOrMethodNotAllowed(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "status 404") || strings.Contains(msg, "status 405")
 }
 
 // transformLastStatus adjusts the raw API status JSON to match rescale-cli's

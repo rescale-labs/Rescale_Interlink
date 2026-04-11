@@ -133,6 +133,30 @@ func (c *Client) GetJobRaw(ctx context.Context, jobID string) (json.RawMessage, 
 	return json.RawMessage(data), nil
 }
 
+// GetJobLoadMeasurementsRaw returns cluster load measurements for a job as raw JSON.
+// Uses the v2 cluster-load-measurements endpoint with the specified time window.
+func (c *Client) GetJobLoadMeasurementsRaw(ctx context.Context, jobID string, hours int) (json.RawMessage, error) {
+	path := fmt.Sprintf("/api/v2/jobs/%s/cluster-load-measurements/?hours=%d", jobID, hours)
+
+	resp, err := c.doRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("get load measurements failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read load measurements response: %w", err)
+	}
+
+	return json.RawMessage(data), nil
+}
+
 // GetFileInfoRaw returns file metadata as raw JSON, preserving all API fields.
 func (c *Client) GetFileInfoRaw(ctx context.Context, fileID string) (json.RawMessage, error) {
 	path := fmt.Sprintf("/api/v3/files/%s/", fileID)

@@ -72,13 +72,13 @@ Exit codes:
 	rootCmd.PersistentFlags().BoolVarP(&cc.Quiet, "quiet", "q", false, "Suppress informational output")
 	rootCmd.PersistentFlags().BoolVar(&cc.NoPrompt, "no-prompt", false, "Disable interactive prompts (default behavior)")
 
+	// Profile flag — selects apiconfig INI section for credentials
+	rootCmd.PersistentFlags().StringVar(&cc.Profile, "profile", "", "CLI configuration profile name")
+
 	// Hidden flags accepted for compatibility but ignored
 	var enableErrorTracking bool
-	var profile string
 	rootCmd.PersistentFlags().BoolVar(&enableErrorTracking, "enableErrorTracking", false, "Enable error tracking (ignored)")
 	rootCmd.PersistentFlags().MarkHidden("enableErrorTracking")
-	rootCmd.PersistentFlags().StringVar(&profile, "profile", "", "CLI configuration profile (accepted, ignored)")
-	rootCmd.PersistentFlags().MarkHidden("profile")
 
 	// Version output: set rootCmd.Version so Cobra's automatic --version works.
 	// Also register -v as a shorthand for --version (rescale-cli uses -v for version, not verbose).

@@ -287,6 +287,53 @@ func SaveAPIConfig(cfg *APIConfig, path string) error {
 	return nil
 }
 
+// LoadCompatProfile reads API credentials from an INI config file's named profile section.
+// This supports rescale-cli's --profile flag and multi-profile apiconfig files.
+//
+// Config file resolution: configPath > RESCALE_CONFIG_FILE env > DefaultAPIConfigPath()
+// Returns ("", "", nil) if the file doesn't exist (not an error if simply absent).
+// Returns an error if the file exists but the named section is missing.
+func LoadCompatProfile(configPath, profileName string) (apiKey, baseURL string, err error) {
+	if configPath == "" {
+		configPath = os.Getenv("RESCALE_CONFIG_FILE")
+	}
+	if configPath == "" {
+		var pathErr error
+		configPath, pathErr = DefaultAPIConfigPath()
+		if pathErr != nil {
+			return "", "", nil
+		}
+	}
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return "", "", nil
+	}
+
+	iniFile, err := ini.Load(configPath)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to load config file %s: %w", configPath, err)
+	}
+
+	section, err := iniFile.GetSection(profileName)
+	if err != nil {
+		return "", "", fmt.Errorf("profile section [%s] not found in %s", profileName, configPath)
+	}
+
+	// Try CLI key name first, fall back to INT key name
+	apiKey = section.Key("apikey").String()
+	if apiKey == "" {
+		apiKey = section.Key("api_key").String()
+	}
+
+	// Try CLI URL key first, fall back to INT URL key
+	baseURL = section.Key("apibaseurl").String()
+	if baseURL == "" {
+		baseURL = section.Key("platform_url").String()
+	}
+
+	return apiKey, baseURL, nil
+}
+
 // Validate checks if the auto-download configuration is valid.
 // Does not validate API key — use ResolveAPIKey() separately.
 // Returns nil if valid, or an error describing what's wrong.

@@ -2,6 +2,8 @@ package compat
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,6 +12,13 @@ import (
 // ExecuteCompat runs the compat-mode command tree.
 // Returns (error, exitCode) where exitCode is 0 on success or 33 on error.
 func ExecuteCompat() (error, int) {
+	// Suppress [BATCH]/[DEBUG] log.Printf output in compat mode.
+	// These use Go's standard log package and pollute CLI output.
+	// RESCALE_DEBUG restores debug output for troubleshooting.
+	if os.Getenv("RESCALE_DEBUG") == "" {
+		log.SetOutput(io.Discard)
+	}
+
 	rootCmd, cc := NewCompatRootCmd()
 
 	// Signal handling — same pattern as cli.Execute()

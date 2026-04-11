@@ -36,13 +36,6 @@ func newSubmitCmd() *cobra.Command {
 		Short: "Submit a job from an SGE script",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if pCluster != "" {
-				return fmt.Errorf("'--p-cluster' is not yet implemented in compat mode")
-			}
-			if waiveSLA {
-				return fmt.Errorf("'--waive-sla' is not yet implemented in compat mode")
-			}
-
 			// Accept and ignore -t/--type (rescale-cli uses this for job type, always "script")
 			_ = jobType
 
@@ -78,6 +71,12 @@ func newSubmitCmd() *cobra.Command {
 			}
 
 			jobReq := metadata.ToJobRequest()
+
+			// Apply compat flags
+			jobReq.IsLowPriority = waiveSLA
+			if pCluster != "" {
+				jobReq.ClusterID = pCluster
+			}
 
 			// Resolve analysis versions
 			for i := range jobReq.JobAnalyses {
@@ -197,11 +196,9 @@ func newSubmitCmd() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&extendedOutput, "extended-output", "e", false, "Extended JSON output")
 
-	// Deferred flags
 	cmd.Flags().StringVar(&pCluster, "p-cluster", "", "Persistent cluster ID")
-	cmd.Flags().MarkHidden("p-cluster")
-	cmd.Flags().BoolVar(&waiveSLA, "waive-sla", false, "Waive SLA")
-	cmd.Flags().MarkHidden("waive-sla")
+	cmd.Flags().BoolVar(&waiveSLA, "waive-sla", false, "Waive SLA (low priority)")
+
 
 	// Accepted-but-ignored flags (rescale-cli has these, scripts may pass them)
 	var verify string

@@ -58,6 +58,7 @@ type JobRequest struct {
 	IsLowPriority  bool                   `json:"isLowPriority"`
 	Tags           []string               `json:"tags,omitempty"`
 	ProjectID      string                 `json:"projectId,omitempty"`
+	ClusterID      string                 `json:"clusterId,omitempty"`
 	JobAutomations []JobAutomationRequest `json:"jobAutomations,omitempty"`
 }
 
