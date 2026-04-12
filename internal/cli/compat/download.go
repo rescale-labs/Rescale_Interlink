@@ -132,6 +132,8 @@ func compatDownloadByFileID(ctx context.Context, fileID, outputPath string, apiC
 
 	if outputPath == "" {
 		outputPath = filepath.Join(".", fileInfo.Name)
+	} else if info, err := os.Stat(outputPath); (err == nil && info.IsDir()) || outputPath[len(outputPath)-1] == filepath.Separator {
+		outputPath = filepath.Join(outputPath, fileInfo.Name)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {

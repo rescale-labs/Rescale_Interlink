@@ -80,6 +80,10 @@ Exit codes:
 	rootCmd.PersistentFlags().BoolVar(&enableErrorTracking, "enableErrorTracking", false, "Enable error tracking (ignored)")
 	rootCmd.PersistentFlags().MarkHidden("enableErrorTracking")
 
+	var noSSLVerify bool
+	rootCmd.PersistentFlags().BoolVar(&noSSLVerify, "no-ssl-verify", false, "Disable SSL verification (ignored)")
+	rootCmd.PersistentFlags().MarkHidden("no-ssl-verify")
+
 	// Version output: set rootCmd.Version so Cobra's automatic --version works.
 	// Also register -v as a shorthand for --version (rescale-cli uses -v for version, not verbose).
 	rootCmd.Version = version.Version
