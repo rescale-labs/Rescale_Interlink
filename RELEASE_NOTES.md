@@ -1,5 +1,82 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.1 - April 12, 2026
+
+### CLI Compatibility Mode
+
+New `internal/cli/compat/` package provides drop-in replacement for `rescale-cli`, the legacy Java-based Rescale CLI. Existing scripts and automation workflows can migrate to Interlink without modification.
+
+**10 implemented commands:**
+- `status` — check job status (`-j`, `-e` for extended JSON with connection details and load measurements, `--load-hours`)
+- `stop` — stop a running job (`-j`)
+- `delete` — delete a job (`-j`)
+- `check-for-update` — print current version and releases URL (skips authentication)
+- `list-info` — list hardware (`-c`) or software (`-a`) as JSON
+- `upload` — upload files (`-f`, `-d` directory ID, `-e` extended JSON, `-r` report file)
+- `download-file` — download by job ID (`-j`, `-f` filename filter) or file ID (`--file-id`), with run-specific download (`-r`), output path (`-o` file or directory), and extended JSON (`-e`)
+- `submit` — parse SGE script (`-i`), upload inputs, create and submit job; end-to-end mode (`-E`) monitors and downloads; supports `--p-cluster`, `--waive-sla`, `-f` file matchers, `-e` extended JSON
+- `list-files` — list files from a running job's cluster (`-j`, `-r` run ID); detects active run automatically
+- `sync` — download job output files with optional polling (`-j`, `-d` interval, `-o` output dir, `-f` glob include, `--exclude`, `-s` search, `-n` newer-than-job-id)
+
+**Activation:**
+- `--compat` flag: `rescale-int --compat status -j JOB_ID`
+- Symlink/rename detection: name or symlink the binary as `rescale-cli` and it activates automatically
+
+**Global flags:**
+- `-p/--api-token` — API token for authentication
+- `-X/--api-base-url` — Rescale API base URL
+- `-q/--quiet` — suppress informational output
+- `--no-prompt` — disable interactive prompts (default behavior)
+- `--profile` — CLI configuration profile name (apiconfig INI section)
+- `-v/--version` — print version and exit
+- `--enableErrorTracking` — accepted and ignored (hidden)
+- `--no-ssl-verify` — accepted and ignored (hidden)
+
+**Credential resolution chain:** `-p` flag > `RESCALE_API_KEY` env var > apiconfig INI profile (`--profile` or `[default]`). Base URL chain: `-X` flag > `RESCALE_API_URL` env > profile > `https://platform.rescale.com`.
+
+**Behavioral fidelity:**
+- Exit code 33 on error (matches rescale-cli convention)
+- SLF4J-style timestamp format: `2006-01-02 15:04:05,000`
+- Argument normalization: `-fid` → `--file-id`, `-lh` → `--load-hours`, multi-value `-f` expansion for upload and submit
+- JSON output for `status -e`, `list-info`, `list-files`, `upload -e`, `download-file -e`, `submit -e`
+- `submit -e` transforms v3 API response to match rescale-cli's client-side JSON structure
+- `download-file -o DIR` detects directories and appends the filename automatically
+- Quiet mode (`-q`) suppresses informational output but not data output or errors
+- Debug log suppression: `log.Printf` output is discarded unless `RESCALE_DEBUG` is set
+
+**Deferred commands:** `spub` (software publisher) subcommands (`register`, `upload`, `validate`, `list`, `status`) return a clear error indicating deferral to v5.0.0.
+
+### `jobs watch` Command
+
+New native CLI command for monitoring running jobs and incrementally downloading output files as they become available.
+
+**Two modes:**
+- **Single-job** (`-j JOB_ID`): Watch one job, download files into the output directory. Supports `--filter`, `--exclude`, `--search` for file filtering.
+- **Newer-than** (`--newer-than REF_JOB_ID`): Watch all jobs created after a reference job, downloading each job's files into per-job subdirectories (`OUTDIR/job_ID/`). Re-discovers newly-created jobs each polling tick.
+
+**Flags:**
+- `-j/--job-id` — job ID to watch (mutually exclusive with `--newer-than`)
+- `-n/--newer-than` — reference job ID for newer-than mode
+- `-i/--interval` — polling interval in seconds (default 30, minimum 5)
+- `-d/--outdir` — output directory (default `.`)
+- `--filter` — include globs, comma-separated
+- `-x/--exclude` — exclude globs, comma-separated
+- `-s/--search` — search terms, comma-separated
+- `-m/--max-concurrent` — maximum concurrent downloads
+
+Both modes use the shared `internal/watch/` engine, which is also used by compat `sync -d` for polling mode. The engine handles status polling, incremental download passes (skip-existing semantics), terminal status detection (Completed, Failed, Stopped, Force Stopped, Terminated), consecutive error thresholds, and context cancellation.
+
+### Compat Mode Audit & Fix-Forward
+
+164-test end-to-end audit comparing compat mode output against rescale-cli across all 10 commands:
+- 136 PASS, 0 FAIL after fix-forward
+- 28 SKIP (tests requiring live infrastructure or deferred features)
+- Fix-forward items included: `--no-ssl-verify` hidden flag acceptance, directory detection for `download-file -o DIR`, run-based file listing for `list-files`, and `submit -e` JSON shape transformation
+
+### Version Bump
+
+- v4.9.0 → v4.9.1
+
 ## v4.9.0 - April 2, 2026
 
 ### Bug Fix: GUI Folder Download Deadlock
@@ -1784,9 +1861,9 @@ This release includes critical security hardening based on comprehensive securit
 - Daemon state files (`daemon-state.json`)
 
 **Files Modified**:
-- `internal/cloud/state/upload.go` (lines 75, 226)
-- `internal/cloud/state/download.go` (line 60)
-- `internal/daemon/state.go` (line 97)
+- `internal/cloud/state/upload.go`
+- `internal/cloud/state/download.go`
+- `internal/daemon/state.go`
 
 #### Security Fix 2: Windows IPC Authorization (High)
 
@@ -1989,7 +2066,7 @@ This release fixes two critical issues discovered during v4.3.6 testing.
 - Neither GUI nor tray could communicate with daemon
 
 **Root Causes**:
-1. IPC was **explicitly disabled on Windows** in `daemon.go:298` (the daemon couldn't communicate with GUI/tray even when running)
+1. IPC was **explicitly disabled on Windows** in `daemon.go` (the daemon couldn't communicate with GUI/tray even when running)
 2. GUI tried to use Windows Service Control Manager (SCM) which requires Administrator privileges
 3. Tray stored errors but never displayed them to user
 
@@ -2474,33 +2551,33 @@ Following the Wails migration, these bugs were discovered and fixed:
    - **Problem**: Downloads failed with "is a directory" when a remote folder contained both a file and subdirectory with the same name
    - **Root Cause**: After creating a subdirectory `layer3_dir3/`, attempting to download file `layer3_dir3` failed because the path existed as a directory
    - **Fix**: Added directory conflict detection before download; files are automatically renamed with `.file` suffix when conflicting with existing directories
-   - **Files Modified**: `internal/cli/folder_download_helper.go:290-302`, `internal/cli/download_helper.go:195-203, 589-597`
+   - **Files Modified**: `internal/cli/folder_download_helper.go`, `internal/cli/download_helper.go`
 
 2. **Download Path Missing Filename (GUI)**
    - **Problem**: GUI file browser passed only the directory path to downloads, not the full file path
    - **Fix**: `FileBrowserTab.tsx` now constructs full path with filename; `transfer_service.go` adds safety check
-   - **Files Modified**: `frontend/src/components/tabs/FileBrowserTab.tsx:253-263`, `internal/services/transfer_service.go:350-359`
+   - **Files Modified**: `frontend/src/components/tabs/FileBrowserTab.tsx`, `internal/services/transfer_service.go`
 
 #### GUI Improvements
 
 3. **Checkboxes Added to File Browser**
    - **Problem**: File selection only indicated by subtle background color change
    - **Fix**: Added explicit checkbox column to FileList component for clear selection indication
-   - **File Modified**: `frontend/src/components/widgets/FileList.tsx:195-196, 245-262`
+   - **File Modified**: `frontend/src/components/widgets/FileList.tsx`
 
 4. **Version Display Fixed**
    - **Problem**: Version showed "dev" instead of "v4.0.0-dev"
    - **Fix**: Changed default Version in cli/root.go from "dev" to "v4.0.0-dev"
-   - **File Modified**: `internal/cli/root.go:44`
+   - **File Modified**: `internal/cli/root.go`
 
 5. **Workspace Info in Header**
    - **Feature**: Display connected workspace name and ID in header after successful API connection
-   - **Files Modified**: `internal/models/file.go:86-98`, `internal/wailsapp/config_bindings.go:140-178`, `frontend/src/App.tsx`, `frontend/src/stores/configStore.ts`, `frontend/src/types/events.ts`
+   - **Files Modified**: `internal/models/file.go`, `internal/wailsapp/config_bindings.go`, `frontend/src/App.tsx`, `frontend/src/stores/configStore.ts`, `frontend/src/types/events.ts`
 
 6. **Auto-switch to Transfers Tab**
    - **Feature**: After starting upload or download, automatically switch to Transfers tab to show progress
    - **Implementation**: Added `TabNavigationContext` in `App.tsx`, consumed in `FileBrowserTab.tsx`
-   - **Files Modified**: `frontend/src/App.tsx:26-31, 52-58`, `frontend/src/components/tabs/FileBrowserTab.tsx:12, 86-87, 210-211, 277-278`
+   - **Files Modified**: `frontend/src/App.tsx`, `frontend/src/components/tabs/FileBrowserTab.tsx`
 
 #### Dead Code Removal
 
@@ -3600,7 +3677,7 @@ Fixed potential information leakage in `config show` command:
 - **After**: Displays only `<set (40 chars)>` with no key content
 - Addresses CodeQL security alert for clear-text logging
 
-**File Modified:** `internal/cli/config_commands.go:265-271`
+**File Modified:** `internal/cli/config_commands.go`
 
 **4. API Key Precedence with Warnings**
 
@@ -3612,7 +3689,7 @@ Added clear warnings when multiple API key sources are detected:
   4. Default token file (`~/.config/rescale-int/token`)
 - Warning shows all detected sources and which one is being used
 
-**File Modified:** `internal/config/csv_config.go:267-360`
+**File Modified:** `internal/config/csv_config.go`
 
 **5. Dependency Security Update**
 
@@ -3640,7 +3717,7 @@ GUI now checks if API key is configured before making API calls:
 - File Browser shows "API key not configured. Set up your API key in the Setup tab."
 - No more error popups when opening GUI without configured credentials
 
-**File Modified:** `internal/gui/remote_browser.go:154-165`
+**File Modified:** `internal/gui/remote_browser.go`
 
 **8. Auto-Load Configuration on GUI Launch**
 
@@ -3649,7 +3726,7 @@ GUI automatically loads configuration from default location if it exists:
 - Also auto-loads API key from `~/.config/rescale-int/token`
 - GUI "just works" after first-time setup
 
-**File Modified:** `internal/gui/gui.go:75-122`
+**File Modified:** `internal/gui/gui.go`
 
 **9. Save to Default Location Button**
 
@@ -3660,8 +3737,8 @@ Added "Save to Default" button in Setup tab:
 - Shows confirmation that config and API key will auto-load next time
 
 **Files Modified:**
-- `internal/gui/setup_tab.go:251, 537-589`
-- `internal/config/csv_config.go:475-495` (added `WriteTokenFile` function)
+- `internal/gui/setup_tab.go`
+- `internal/config/csv_config.go` (added `WriteTokenFile` function)
 
 **10. Auto-Apply Configuration on Tab Change**
 
@@ -3671,8 +3748,8 @@ Configuration is automatically applied when navigating away from Setup tab:
 - User can still manually apply and see success dialog
 
 **Files Modified:**
-- `internal/gui/gui.go:196-212`
-- `internal/gui/setup_tab.go:569-572`
+- `internal/gui/gui.go`
+- `internal/gui/setup_tab.go`
 
 #### License Update
 
@@ -4079,13 +4156,13 @@ Fixed ignored error return from `ValidateTarExists()` in the pipeline TAR worker
 
 - **Before**: File system errors (permissions, etc.) were silently ignored
 - **After**: Errors are logged as warnings and the tar is recreated as a safe fallback
-- **File**: `internal/pur/pipeline/pipeline.go:294`
+- **File**: `internal/pur/pipeline/pipeline.go`
 
 **3. Debug Logging Cleanup**
 
 Removed stray `fmt.Println("DEBUG: ...")` statement that was outputting to stdout during scan operations.
 
-- **File**: `cmd/rescale-int/jobs_workflow_ui.go:559`
+- **File**: `cmd/rescale-int/jobs_workflow_ui.go`
 
 **4. Goroutine Leak Prevention in Concurrent Uploads**
 
@@ -4889,7 +4966,7 @@ if encryptedSize >= minEncryptedSize && encryptedSize <= maxEncryptedSize {
 - No unnecessary re-downloads
 - Enhanced error messages show expected size range on mismatch
 
-**Files Modified**: `internal/cli/download_helper.go` (lines 163-186, 437-461)
+**Files Modified**: `internal/cli/download_helper.go`
 
 ---
 
@@ -4909,8 +4986,8 @@ fmt.Fprintf(out, "Decrypting %s (this may take several minutes for large files).
 - User knows the process is working
 
 **Files Modified**:
-- `internal/cloud/download/s3_concurrent.go:458-459`
-- `internal/cloud/download/azure_concurrent.go:483-484`
+- `internal/cloud/download/s3_concurrent.go`
+- `internal/cloud/download/azure_concurrent.go`
 
 ---
 
@@ -4944,12 +5021,12 @@ fmt.Fprintf(out, "Uploading file...\n")  // Goes through mpb
 **Streaming Decryption**:
 - Rewrote `encryption.DecryptFile()` to stream in 16KB chunks instead of loading entire file into memory
 - Prevents memory exhaustion on large files (60GB file no longer causes memory pressure/swapping)
-- **File**: `internal/crypto/encryption.go:175-264`
+- **File**: `internal/crypto/encryption.go`
 
 **Disk Space Checks**:
 - Reduced safety buffer from 15% to 5%
 - Added disk space check before decryption (need space for both encrypted + decrypted files)
-- **Files**: `internal/cloud/download/s3_concurrent.go:408-456`, `azure_concurrent.go:433-481`
+- **Files**: `internal/cloud/download/s3_concurrent.go`, `azure_concurrent.go`
 
 ---
 
@@ -5643,7 +5720,7 @@ sudo mv rescale-int-darwin-arm64 /usr/local/bin/rescale-int
 - For GUI mode: Platform-specific graphics libraries
 
 ```bash
-git clone https://github.com/rescale/rescale-int.git
+git clone https://github.com/rescale-labs/Rescale_Interlink.git
 cd rescale-int
 go build -o rescale-int ./cmd/rescale-int
 ```
@@ -5661,7 +5738,7 @@ GUI components require native builds due to OpenGL/CGo dependencies:
 
 ## Support
 
-- **GitHub Issues**: https://github.com/rescale/rescale-int/issues
+- **GitHub Issues**: https://github.com/rescale-labs/Rescale_Interlink/issues
 - **Documentation**: See CLI_GUIDE.md
 - **Rescale Support**: Contact support team
 

@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.8.0.
+Complete command-line interface reference for `rescale-int` v4.9.1.
 
-**Version:** 4.8.0
-**Build Date:** March 1, 2026
+**Version:** 4.9.1
+**Build Date:** April 12, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -23,8 +23,10 @@ For a comprehensive list of all features with source code references, see [FEATU
   - [Daemon Commands](#daemon-commands)
   - [Hardware Commands](#hardware-commands)
   - [Software Commands](#software-commands)
+  - [Automations Commands](#automations-commands)
   - [PUR (Parallel Upload and Run) Commands](#pur-parallel-upload-and-run-commands)
   - [Shortcuts](#shortcuts)
+- [Compatibility Mode](#compatibility-mode)
 - [Shell Completion](#shell-completion)
 - [Examples](#examples)
 
@@ -71,7 +73,7 @@ This will prompt you for:
 - Worker settings (tar, upload, job workers)
 - Proxy configuration (optional)
 
-**Note (v4.7.1):** Worker and tar settings are also configurable from the GUI PUR tab's Pipeline Settings section. Settings in config.csv are shared between CLI and GUI modes.
+**Note:** Worker and tar settings are also configurable from the GUI PUR tab's Pipeline Settings section. Settings in config.csv are shared between CLI and GUI modes.
 
 Configuration is saved to `~/.config/rescale/config.csv`
 
@@ -90,7 +92,7 @@ job_workers,4
 proxy_mode,no-proxy
 ```
 
-**Note:** API keys and proxy passwords are NOT stored in config files for security reasons (v2.4.9+).
+**Note:** API keys and proxy passwords are NOT stored in config files for security reasons.
 
 ### API Key Configuration
 
@@ -144,7 +146,7 @@ proxy_user,username
 **Notes:**
 - Proxy passwords are prompted at runtime for security (not stored in config files)
 - All traffic (API calls + S3/Azure storage) routes through the configured proxy
-- Use `no_proxy` config key for bypass rules (comma-separated hostnames, wildcards, CIDRs). As of v4.5.9, `no_proxy` is fully wired to the HTTP transport and configurable from the GUI Setup tab.
+- Use `no_proxy` config key for bypass rules (comma-separated hostnames, wildcards, CIDRs). `no_proxy` is fully wired to the HTTP transport and configurable from the GUI Setup tab.
 
 ### Advanced Configuration Options
 
@@ -163,7 +165,7 @@ Additional configuration options for specialized use cases:
 | `tar_compression` | Compression type: `none` or `gzip` (legacy `gz` is auto-normalized to `gzip`) | none |
 | `max_retries` | Maximum upload retry attempts | 1 |
 
-**v4.7.1 Note:** In the GUI, worker and tar settings are configured via the **PUR tab's Pipeline Settings** section (visible in both the scan step and the jobs-validated step). Tar options are also available in the **SingleJob tab** when using directory input mode. The `run_subpath` and `validation_pattern` are configured on the **PUR tab** scan step and persist to `config.csv` automatically. These settings are no longer in the Setup tab's Advanced Settings.
+**Note:** In the GUI, worker and tar settings are configured via the **PUR tab's Pipeline Settings** section (visible in both the scan step and the jobs-validated step). Tar options are also available in the **SingleJob tab** when using directory input mode. The `run_subpath` and `validation_pattern` are configured on the **PUR tab** scan step and persist to `config.csv` automatically. These settings are no longer in the Setup tab's Advanced Settings.
 
 ## Global Flags
 
@@ -211,7 +213,7 @@ rescale-int pur run --config myconfig.csv --jobs jobs.csv --state state.csv
 rescale-int files list --api-key your-api-key-here
 ```
 
-**`--token-file PATH`** - Read API key from file (v2.4.9+)
+**`--token-file PATH`** - Read API key from file
 ```bash
 rescale-int files list --token-file ~/.config/rescale/token
 ```
@@ -334,6 +336,7 @@ rescale-int files upload <file> [file...] [flags]
 - `--skip-duplicates` - Check and automatically skip files that already exist
 - `--allow-duplicates` - Check but upload anyway (explicitly allows duplicates)
 - `--dry-run` - Preview what would be uploaded without actually uploading
+- `--pre-encrypt` - Use legacy pre-encryption mode (pre-encrypts entire file to temp file before upload, for compatibility with older Rescale clients)
 
 **Duplicate Detection Modes:**
 - **Interactive mode (no flags)**: Prompts for duplicate handling mode at start
@@ -375,13 +378,11 @@ Download files from Rescale
 rescale-int files download <file-id> [file-id...] [flags]
 ```
 
-**Features (v2.3.0):**
+**Features:**
 - Automatic decryption after download
 - Chunked download for large files (>100MB, 32MB chunks)
 - Progress bars during download and decryption
 - Resume capability for interrupted downloads (state saved to `.rescale-download-state`)
-- **v2.3.0 Fix:** Correct PKCS7 padding handling (1-16 bytes) in resume logic
-- **v2.3.0 Enhancement:** Progress message before large file decryption
 - Streaming decryption using 16KB chunks (prevents memory exhaustion)
 - Concurrent chunk downloads for large files
 
@@ -408,12 +409,7 @@ rescale-int files download large-file-id -o output.dat
 rescale-int files download abc123 -o result.tar.gz
 ```
 
-**v2.3.0 Improvements:**
-- Resume now correctly validates encrypted file size accounting for PKCS7 padding
-- Decryption progress message prevents confusion during long operations (40+ minutes for 60GB files)
-- Streaming decryption maintains constant ~16KB memory footprint regardless of file size
-
-**Note on Resume (v2.5.0):** The `--resume` flag supports full byte-offset resume for encrypted file downloads. Interrupted downloads continue from the exact byte position using HTTP Range requests. Resume state is tracked via `.download.resume` JSON sidecar files. Decryption starts from the beginning (AES-CBC mode constraint) but happens automatically once the encrypted file is complete.
+**Note on Resume:** The `--resume` flag supports full byte-offset resume for encrypted file downloads. Interrupted downloads continue from the exact byte position using HTTP Range requests. Resume state is tracked via `.download.resume` JSON sidecar files. Decryption starts from the beginning (AES-CBC mode constraint) but happens automatically once the encrypted file is complete.
 
 #### files list
 List files
@@ -505,11 +501,6 @@ rescale-int folders upload-dir <directory> [flags]
 - **Interactive mode (no flags)**: Prompts for conflict handling mode when folder exists
 
 **Performance Note:** Concurrent uploads (max 5 simultaneous) with connection reuse for maximum throughput.
-
-**New in v2.0.1**:
-- Folder caching reduces API calls by 99.8% for repeated operations
-- Disk space pre-checking prevents mid-operation failures
-- Multi-progress bars for concurrent uploads
 
 **Examples:**
 ```bash
@@ -737,6 +728,50 @@ rescale-int jobs download -j WfbQa -d ./results
 rescale-int jobs download -j WfbQa --file-id xyz789 -o result.tar.gz
 ```
 
+#### jobs watch
+Watch a job and incrementally download output files
+
+```bash
+rescale-int jobs watch -j <job-id> [flags]
+rescale-int jobs watch --newer-than <ref-job-id> [flags]
+```
+
+Monitor a running job's status and incrementally download output files as they become available. Exits when the job reaches a terminal state (Completed, Failed, Stopped, Force Stopped, Terminated).
+
+**Two modes:**
+- **Single-job** (`-j`): Watch one job, downloading files into the output directory. Supports file filtering.
+- **Newer-than** (`--newer-than`): Watch all jobs created after a reference job. Downloads each job's files into per-job subdirectories (`OUTDIR/job_ID/`). Re-discovers newly-created jobs each polling tick.
+
+**Flags:**
+- `-j, --job-id string` - Job ID to watch (mutually exclusive with `--newer-than`)
+- `-n, --newer-than string` - Reference job ID — watch all jobs created after this one
+- `-i, --interval int` - Polling interval in seconds (default 30, minimum 5)
+- `-d, --outdir string` - Output directory (default `.`)
+- `--filter string` - Include globs, comma-separated (single-job mode only)
+- `-x, --exclude string` - Exclude globs, comma-separated (single-job mode only)
+- `-s, --search string` - Search terms, comma-separated (single-job mode only)
+- `-m, --max-concurrent int` - Maximum concurrent downloads
+
+**Examples:**
+```bash
+# Watch a single job and download output files
+rescale-int jobs watch -j XxYyZz -d ./results
+
+# Watch with faster polling (every 10 seconds)
+rescale-int jobs watch -j XxYyZz -i 10
+
+# Watch and download only specific file types
+rescale-int jobs watch -j XxYyZz --filter "*.dat,*.log"
+
+# Exclude large files
+rescale-int jobs watch -j XxYyZz -x "*.tar.gz,*.zip"
+
+# Watch all jobs newer than a reference job
+rescale-int jobs watch --newer-than OlDjOb -d ./results
+```
+
+Downloads use skip-existing semantics — files already present in the output directory are not re-downloaded. Press Ctrl+C to stop watching.
+
 #### jobs delete
 Delete jobs
 
@@ -796,9 +831,9 @@ rescale-int jobs submit --job-file job_spec.json --automation aB1cD2 --automatio
 
 ### Daemon Commands
 
-Background service for automatically downloading completed jobs. Added in v3.4.0.
+Background service for automatically downloading completed jobs.
 
-**Configuration (v4.2.0):** The daemon reads settings from `daemon.conf` by default. CLI flags override config file values. See [daemon config](#daemon-config) commands below.
+The daemon reads settings from `daemon.conf` by default. CLI flags override config file values. See [daemon config](#daemon-config) commands below.
 
 #### daemon run
 
@@ -851,7 +886,7 @@ rescale-int daemon run --once
 
 #### daemon config
 
-Manage daemon configuration file (`daemon.conf`). Added in v4.2.0.
+Manage daemon configuration file (`daemon.conf`).
 
 ##### daemon config show
 
@@ -975,7 +1010,7 @@ rescale-int daemon config init
 
 ##### daemon config validate
 
-**Added in v4.2.1.** Validate that your Rescale workspace is configured for auto-download.
+Validate that your Rescale workspace is configured for auto-download.
 
 ```bash
 rescale-int daemon config validate
@@ -1009,6 +1044,105 @@ Custom Fields Enabled: true
    [eligibility]
    auto_download_value = Enable
    ```
+
+#### Auto-Start on Login
+
+On **Windows with MSI installer**, the service must be started from the GUI Setup tab ("Install & Start Service") or via `rescale-int service install-and-start` from an elevated command prompt.
+
+On **Mac and Linux**, configure auto-start using the system's init system:
+
+<details>
+<summary><b>macOS (launchd)</b></summary>
+
+Create `~/Library/LaunchAgents/com.rescale.interlink.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rescale.interlink.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/rescale-int</string>
+        <string>daemon</string>
+        <string>run</string>
+        <string>--download-dir</string>
+        <string>/Users/USERNAME/Downloads/rescale-jobs</string>
+        <string>--ipc</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/Library/Logs/rescale-interlink.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/Library/Logs/rescale-interlink.error.log</string>
+</dict>
+</plist>
+```
+
+**Note:** Do NOT use `--background` with launchd. Launchd expects the process to stay in the foreground;
+`--background` forks and exits, causing launchd to think the daemon crashed.
+
+**Commands:**
+```bash
+# Replace USERNAME with your actual username in the plist file
+
+# Install (enable auto-start)
+launchctl load ~/Library/LaunchAgents/com.rescale.interlink.daemon.plist
+
+# Uninstall (disable auto-start)
+launchctl unload ~/Library/LaunchAgents/com.rescale.interlink.daemon.plist
+
+# Check status
+launchctl list | grep rescale
+```
+</details>
+
+<details>
+<summary><b>Linux (systemd)</b></summary>
+
+Create `~/.config/systemd/user/rescale-interlink.service`:
+
+```ini
+[Unit]
+Description=Rescale Interlink Auto-Download Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rescale-int daemon run --download-dir %h/Downloads/rescale-jobs --ipc
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+**Note:** Do NOT use `--background` with systemd. Systemd expects `Type=simple` services to stay in the foreground;
+`--background` forks and exits, causing systemd to think the daemon crashed.
+
+**Commands:**
+```bash
+# Install (enable auto-start)
+systemctl --user daemon-reload
+systemctl --user enable rescale-interlink
+systemctl --user start rescale-interlink
+
+# Check status
+systemctl --user status rescale-interlink
+
+# View logs
+journalctl --user -u rescale-interlink -f
+
+# Disable auto-start
+systemctl --user disable rescale-interlink
+```
+</details>
 
 #### daemon status
 
@@ -1112,7 +1246,7 @@ rescale-int hardware list -s emerald
 rescale-int hardware list -J
 ```
 
-**Migration Note (v2.5.0):** The `--active` flag was removed. Active hardware is now shown by default; use `-a/--all` to include inactive types.
+Active hardware is shown by default; use `-a/--all` to include inactive types.
 
 ### Software Commands
 
@@ -1142,6 +1276,49 @@ rescale-int software list --search openfoam
 rescale-int software list --json --versions
 ```
 
+### Automations Commands
+
+Commands for discovering available automations on the Rescale platform. Automations are pre-configured scripts that run before (pre) or after (post) job execution.
+
+#### automations list
+List available automations
+
+```bash
+rescale-int automations list [flags]
+```
+
+**Flags:**
+- `-J, --json` - Output as JSON
+
+**Examples:**
+```bash
+# List all automations (table format)
+rescale-int automations list
+
+# Get JSON output
+rescale-int automations list --json
+```
+
+#### automations get
+Get details about a specific automation
+
+```bash
+rescale-int automations get --id <automation-id> [flags]
+```
+
+**Flags:**
+- `--id string` - Automation ID (required)
+- `-J, --json` - Output as JSON
+
+**Examples:**
+```bash
+# Get automation details
+rescale-int automations get --id YYnVk
+
+# Get JSON output
+rescale-int automations get --id YYnVk --json
+```
+
 ### PUR (Parallel Upload and Run) Commands
 
 PUR (Parallel Upload and Run) provides batch job submission with pipeline management.
@@ -1158,13 +1335,13 @@ rescale-int pur make-dirs-csv --template TEMPLATE --output OUTPUT --pattern PATT
 - `-o, --output string` - Output jobs CSV file (required unless `--command-pattern-test`)
 - `-p, --pattern string` - Directory pattern, e.g., 'Run_*' (required)
 - `--overwrite` - Overwrite existing output file
-- `--iterate-command-patterns` - Vary command across runs by iterating numeric patterns (v4.6.4)
-- `--command-pattern-test` - Preview pattern detection without generating CSV (v4.6.4)
-- `--cwd string` - Working directory (default: current directory) (v4.6.4)
-- `--run-subpath string` - Subdirectory path to navigate before finding runs (v4.6.4)
-- `--validation-pattern string` - File pattern to validate directories (v4.6.4)
-- `--start-index int` - Starting index for job numbering (default: 1) (v4.6.4)
-- `--part-dirs strings` - Project directories for multi-part mode (v4.6.5)
+- `--iterate-command-patterns` - Vary command across runs by iterating numeric patterns
+- `--command-pattern-test` - Preview pattern detection without generating CSV
+- `--cwd string` - Working directory (default: current directory)
+- `--run-subpath string` - Subdirectory path to navigate before finding runs
+- `--validation-pattern string` - File pattern to validate directories
+- `--start-index int` - Starting index for job numbering (default: 1)
+- `--part-dirs strings` - Project directories for multi-part mode
 
 **Example:**
 ```bash
@@ -1186,8 +1363,7 @@ rescale-int pur make-dirs-csv \
   --pattern "Run_*" \
   --iterate-command-patterns
 
-# Multi-part mode: scan multiple project directories (v4.6.5)
-rescale-int pur make-dirs-csv \
+# Multi-part mode: scan multiple project directoriesrescale-int pur make-dirs-csv \
   --template template.csv \
   --output jobs.csv \
   --pattern "Run_*" \
@@ -1228,17 +1404,17 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file for resume capability
 - `--multipart` - Enable multi-part mode
-- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs (v4.6.4)
-- `--decompress-extras` - Decompress extra input files on cluster (default: false) (v4.6.4)
-- `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
-- `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
-- `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
-- `--tar-compression string` - Tar compression: "none" or "gzip" (v4.6.4, v4.7.1: normalized)
-- `--tar-workers int` - Parallel tar workers (default from config) (v4.6.4)
-- `--upload-workers int` - Parallel upload workers (default from config) (v4.6.4)
-- `--job-workers int` - Parallel job creation workers (default from config) (v4.6.4)
-- `--rm-tar-on-success` - Delete local tar after successful upload (v4.6.4)
-- `--dry-run` - Validate and show plan without executing (v4.6.5)
+- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs
+- `--decompress-extras` - Decompress extra input files on cluster (default: false)
+- `--include-pattern strings` - Only tar files matching glob (repeatable)
+- `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
+- `--flatten-tar` - Remove subdirectory structure in tarball
+- `--tar-compression string` - Tar compression: "none" or "gzip"
+- `--tar-workers int` - Parallel tar workers (default from config)
+- `--upload-workers int` - Parallel upload workers (default from config)
+- `--job-workers int` - Parallel job creation workers (default from config)
+- `--rm-tar-on-success` - Delete local tar after successful upload
+- `--dry-run` - Validate and show plan without executing
 
 **Example:**
 ```bash
@@ -1252,7 +1428,7 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv \
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
   --exclude-pattern "*.log" --exclude-pattern "*.tmp"
 
-# Dry-run: validate and preview without executing (v4.6.5)
+# Dry-run: validate and preview without executing
 rescale-int pur run --jobs-csv jobs.csv --dry-run
 ```
 
@@ -1267,23 +1443,23 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file (required)
 - `--multipart` - Enable multi-part mode
-- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>` (v4.6.4)
-- `--decompress-extras` - Decompress extra input files on cluster (v4.6.4)
-- `--include-pattern strings` - Only tar files matching glob (repeatable) (v4.6.4)
-- `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable) (v4.6.4)
-- `--flatten-tar` - Remove subdirectory structure in tarball (v4.6.4)
-- `--tar-compression string` - Tar compression: "none" or "gzip" (v4.6.4, v4.7.1: normalized)
-- `--tar-workers int` - Parallel tar workers (v4.6.4)
-- `--upload-workers int` - Parallel upload workers (v4.6.4)
-- `--job-workers int` - Parallel job creation workers (v4.6.4)
-- `--rm-tar-on-success` - Delete local tar after successful upload (v4.6.4)
-- `--dry-run` - Show what would be resumed without executing (v4.6.5)
+- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>`
+- `--decompress-extras` - Decompress extra input files on cluster
+- `--include-pattern strings` - Only tar files matching glob (repeatable)
+- `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
+- `--flatten-tar` - Remove subdirectory structure in tarball
+- `--tar-compression string` - Tar compression: "none" or "gzip"
+- `--tar-workers int` - Parallel tar workers
+- `--upload-workers int` - Parallel upload workers
+- `--job-workers int` - Parallel job creation workers
+- `--rm-tar-on-success` - Delete local tar after successful upload
+- `--dry-run` - Show what would be resumed without executing
 
 **Example:**
 ```bash
 rescale-int pur resume --jobs-csv jobs.csv --state state.csv
 
-# Dry-run: analyze state and show remaining work (v4.6.5)
+# Dry-run: analyze state and show remaining work
 rescale-int pur resume --jobs-csv jobs.csv --state state.csv --dry-run
 ```
 
@@ -1300,14 +1476,14 @@ Skips tar and upload phases. Use when files are already uploaded to Rescale.
 **Flags:**
 - `--jobs-csv string` - Jobs CSV file with extrainputfileids column
 - `--state string` - State file
-- `--ids string` - Comma-separated job IDs to submit directly (v4.6.5, mutually exclusive with --jobs-csv)
+- `--ids string` - Comma-separated job IDs to submit directly (mutually exclusive with --jobs-csv)
 
 **Example:**
 ```bash
 # Submit from CSV (existing behavior):
 rescale-int pur submit-existing --jobs-csv jobs_with_fileids.csv
 
-# Submit specific job IDs directly (v4.6.5):
+# Submit specific job IDs directly:
 rescale-int pur submit-existing --ids "abc123,def456,ghi789"
 ```
 
@@ -1399,6 +1575,134 @@ rescale-int completion fish > ~/.config/fish/completions/rescale-int.fish
 ```powershell
 rescale-int completion powershell > rescale-int.ps1
 ```
+
+## Compatibility Mode
+
+Rescale Interlink includes a compatibility layer that provides drop-in replacement for `rescale-cli`, the legacy Java-based Rescale CLI. Existing scripts and automation workflows can migrate to Interlink without modification.
+
+### Activation
+
+**Flag activation:**
+```bash
+rescale-int --compat status -j JOB_ID
+```
+
+**Symlink activation:** Name or symlink the binary as `rescale-cli` and it activates automatically:
+```bash
+ln -s /usr/local/bin/rescale-int /usr/local/bin/rescale-cli
+rescale-cli status -j JOB_ID
+```
+
+### Global Flags
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--api-token` | `-p` | API token for authentication |
+| `--api-base-url` | `-X` | Rescale API base URL |
+| `--quiet` | `-q` | Suppress informational output |
+| `--no-prompt` | | Disable interactive prompts (default behavior) |
+| `--profile` | | CLI configuration profile name (apiconfig INI section) |
+| `--version` | `-v` | Print version and exit |
+| `--enableErrorTracking` | | Accepted and ignored (hidden) |
+| `--no-ssl-verify` | | Accepted and ignored (hidden) |
+
+### Credential Resolution
+
+Credentials are resolved in this order:
+1. `-p` flag (explicit)
+2. `RESCALE_API_KEY` environment variable
+3. apiconfig INI file (`--profile` section or `[default]`)
+
+Base URL resolution: `-X` flag > `RESCALE_API_URL` env > profile > `https://platform.rescale.com`
+
+### Exit Codes
+
+- `0` — Success
+- `33` — Error (matches rescale-cli convention)
+
+### Commands
+
+**`status`** — Check job status
+```
+rescale-cli status -j JOB_ID [-e] [--load-hours N]
+```
+
+**`stop`** — Stop a running job
+```
+rescale-cli stop -j JOB_ID
+```
+
+**`delete`** — Delete a job
+```
+rescale-cli delete -j JOB_ID
+```
+
+**`check-for-update`** — Print current version and releases URL (skips authentication)
+```
+rescale-cli check-for-update
+```
+
+**`list-info`** — List hardware or software as JSON
+```
+rescale-cli list-info -c    # core types
+rescale-cli list-info -a    # analyses
+```
+
+**`upload`** — Upload files
+```
+rescale-cli upload -f file1.txt -f file2.txt [-d FOLDER_ID] [-e] [-r REPORT]
+```
+
+**`download-file`** — Download job output files
+```
+rescale-cli download-file -j JOB_ID -f FILENAME [-o OUTPUT]
+rescale-cli download-file --file-id FILE_ID [-o OUTPUT]
+rescale-cli download-file -j JOB_ID -r RUN_ID [-f FILENAME] [-o OUTPUT]
+```
+
+**`submit`** — Parse SGE script, upload inputs, create and submit job
+```
+rescale-cli submit -i SCRIPT [FILE...] [-E] [-f GLOB] [--p-cluster ID] [--waive-sla]
+```
+
+**`list-files`** — List files from a running job's cluster
+```
+rescale-cli list-files -j JOB_ID [-r RUN_ID]
+```
+
+**`sync`** — Download job output files with optional polling
+```
+rescale-cli sync -j JOB_ID [-d INTERVAL] [-o DIR] [-f GLOB] [--exclude TERM] [-s SEARCH]
+rescale-cli sync -n NEWER_THAN_JOB_ID [-d INTERVAL] [-o DIR]
+```
+
+### Argument Normalization
+
+Compat mode normalizes rescale-cli's argument conventions for Cobra compatibility:
+- `-fid VALUE` → `--file-id VALUE`
+- `-lh VALUE` → `--load-hours VALUE`
+- Multi-value `-f`: `upload -f a b c` → `upload -f a -f b -f c` (for upload and submit)
+
+### Deferred Commands
+
+Software publisher (`spub`) commands are not yet supported and return a clear error:
+- `spub register`, `spub upload`, `spub validate`, `spub list`, `spub status`
+
+### Migration from rescale-cli
+
+1. **Symlink approach** (recommended): Create a symlink so existing scripts work unchanged:
+   ```bash
+   ln -s /usr/local/bin/rescale-int /usr/local/bin/rescale-cli
+   ```
+
+2. **Flag approach**: Add `--compat` to your Interlink invocations:
+   ```bash
+   rescale-int --compat status -j JOB_ID
+   ```
+
+3. **Credential setup**: Compat mode reads the same `apiconfig` INI file as rescale-cli. If you have an existing `~/.config/rescale/apiconfig`, it will work automatically.
+
+4. **Known differences**: `spub` commands are not yet supported. The `list-info -d` (desktops) and `check-for-update -i` (install) flags return "not yet implemented" errors.
 
 ## Examples
 
@@ -1538,7 +1842,7 @@ done
 
 ## Performance Tips
 
-### Multi-Threaded Transfers (v2.2.0)
+### Multi-Threaded Transfers
 
 **Automatic (recommended for most users)**:
 ```bash
@@ -1576,7 +1880,7 @@ rescale-int files upload file.tar.gz --no-auto-scale
 - `--no-auto-scale`: Disable adaptive thread allocation
 - `--max-concurrent N`: Override adaptive file-level concurrency with a fixed value
 
-**Adaptive concurrency (v4.8.0)**:
+**Adaptive concurrency:**
 Folder uploads and downloads automatically scale concurrent transfers based on file size distribution:
 - Many small files (<100MB): up to 20 concurrent transfers
 - Medium files (100MB–1GB): up to 10 concurrent transfers
@@ -1591,7 +1895,7 @@ The adaptive count is validated against available system memory and thread pool 
 3. **PUR pipeline**: Efficiently manage dozens or hundreds of jobs
 4. **State files**: Resume interrupted operations without starting over
 5. **Thread tuning**: Use `--max-threads` for large files on fast connections
-6. **Adaptive concurrency**: For folders with many small files, the default adaptive mode (v4.8.0) provides the best throughput automatically
+6. **Adaptive concurrency**: For folders with many small files, the default adaptive mode provides the best throughput automatically
 
 ## Troubleshooting
 
@@ -1636,144 +1940,13 @@ rescale-int jobs listfiles --job-id WfbQa
 ## Support
 
 For issues and feature requests:
-- GitHub Issues: https://github.com/rescale/rescale-int/issues
+- GitHub Issues: https://github.com/rescale-labs/Rescale_Interlink/issues
 - Documentation: https://docs.rescale.com
 
-## Version & Release Notes
+## Version
 
-This guide is for `rescale-int` v4.7.5 (February 25, 2026)
-
-View version:
 ```bash
 rescale-int --version
-# Output: rescale-int version v4.7.5 (2026-02-25) [FIPS 140-3]
 ```
-
-### v4.2.1 Enhanced Eligibility Configuration (January 9, 2026)
-
-Enhanced auto-download eligibility settings and workspace validation:
-
-1. **Configurable eligibility settings** - New config keys in `daemon.conf`:
-   - `eligibility.auto_download_value` - Required value for "Auto Download" field (default: "Enable")
-   - `eligibility.downloaded_tag` - Tag added after download (default: "autoDownloaded:true")
-
-2. **Workspace validation** - New `daemon config validate` command:
-   - Checks if required "Auto Download" custom field exists in workspace
-   - Reports field type and available values
-   - Provides setup instructions if field is missing
-
-3. **API validation method** - New `ValidateAutoDownloadSetup()` API method:
-   - Used by GUI and CLI to validate workspace configuration
-   - Returns detailed information about custom field setup
-
-### v4.2.0 Unified Daemon Configuration (January 8, 2026)
-
-Unified daemon configuration with new `daemon.conf` file:
-
-1. **Unified daemon.conf** - Single INI config file for all daemon settings
-   - Location: `~/.config/rescale/daemon.conf` (Unix) or `%APPDATA%\Rescale\Interlink\daemon.conf` (Windows)
-   - Replaces scattered config settings with one organized file
-   - Includes daemon, filters, eligibility, and notification settings
-
-2. **CLI config commands** - New `daemon config` subcommands
-   - `daemon config show` - Display current configuration
-   - `daemon config path` - Show config file location
-   - `daemon config edit` - Open in default editor
-   - `daemon config set <key> <value>` - Set individual values
-   - `daemon config init` - Interactive setup wizard
-
-3. **Config file + CLI flags** - Flexible configuration model
-   - Daemon reads from config file by default
-   - CLI flags override config file values
-   - Allows testing without modifying config
-
-4. **Windows tray improvements**
-   - "Configure..." menu opens GUI to daemon settings
-   - "Start Service" reads from daemon.conf
-
-### v3.0.1 Streaming Encryption (November 28, 2025)
-
-Major release with streaming encryption and mandatory FIPS compliance:
-
-1. **Streaming Encryption** - Per-part AES-256-CBC encryption during upload
-   - No temporary encrypted file (saves disk space for large files)
-   - HKDF-SHA256 key derivation per part (FIPS 140-3 compliant)
-   - Format detection on download (backward compatible)
-
-2. **--pre-encrypt Flag** - Legacy encryption mode for compatibility
-   - Pre-encrypts entire file before upload
-   - Compatible with older Rescale clients and Python client
-
-3. **Mandatory FIPS 140-3** - Non-FIPS binaries refuse to run
-   - Exit code 2 if FIPS not enabled
-   - Development opt-out: `RESCALE_ALLOW_NON_FIPS=true`
-
-### v2.7.0 FIPS 140-3 Compliance (November 26, 2025)
-
-Security and compliance improvements:
-
-1. **FIPS 140-3 Compliance** - Built with Go 1.24's native FIPS module for FedRAMP Moderate
-   - All cryptographic operations use FIPS-validated algorithms
-   - Build with `GOFIPS140=latest` (automatic via Makefile)
-   - Verify with `--version` (shows `[FIPS 140-3]`)
-
-2. **API Key Precedence** - Clear warnings when multiple API key sources detected
-   - Priority: `--api-key` > `RESCALE_API_KEY` env > `--token-file` > default token file
-   - Warning message shows which source is being used
-
-3. **Security Fix** - API key display now shows length only, not partial key
-   - `config show` displays `<set (40 chars)>` instead of partial key
-
-4. **Dependency Update** - Updated `golang.org/x/crypto` to fix SSH vulnerabilities
-
-### v2.5.0 CLI Usability Improvements (November 22, 2025)
-
-Short flags and improved defaults:
-
-1. **Short Flags** - All commands now support single-letter flags
-   - `-s` for `--search`, `-j` for `--job-id`, `-o` for `--outdir`, etc.
-   - Aligned with `rescale-cli` conventions where applicable
-   - Examples: `hardware list -s emerald -J`, `jobs download -j WfbQa -d ./results -w`
-
-2. **Hardware List Default** - Now shows active hardware only by default
-   - Use `-a/--all` to include inactive/deprecated types
-   - Before: `--active` flag filtered to active; After: active is default
-
-### v2.4.9 Security Improvements (November 22, 2025)
-
-Security enhancements and bug fixes:
-
-1. **Credential Security** - API keys and proxy passwords no longer stored in config files
-   - Use `RESCALE_API_KEY` environment variable or `--token-file` flag
-   - Existing config files with credentials are silently ignored (backward compatible)
-
-2. **Token File Support** - New `--token-file` flag for secure API key storage
-   - Create file with `chmod 600` permissions
-   - Recommended for scripts and automation
-
-3. **Secure Proxy Authentication** - Passwords prompted at runtime
-   - Not stored in config files
-   - Not echoed to terminal during input
-
-4. **Bug Fixes** - Pipeline resource leak, S3 context leak, PKCS7 verification
-
-### v2.3.0 Bug Fixes (November 17, 2025)
-
-Three critical bug fixes completed:
-
-1. **Resume Logic Fix** - Resume now correctly handles PKCS7 padding (1-16 bytes) when checking encrypted file sizes
-   - Prevents unnecessary re-downloads of complete files
-   - Enhanced error messages show expected size range on mismatch
-   - **Source:** `internal/cli/download_helper.go:163-186`
-
-2. **Decryption Progress Feedback** - Added progress message before large file decryption
-   - Prevents confusion during long decryption operations (40+ minutes for 60GB files)
-   - Message: "Decrypting filename.dat (this may take several minutes for large files)..."
-   - **Source:** `internal/cloud/download/s3_concurrent.go:458`, `azure_concurrent.go:483`
-
-3. **Progress Bar Corruption Fix** - Routed all output through mpb io.Writer
-   - Prevents progress bar corruption and "ghost bars"
-   - All print statements now use proper output writer
-   - **Fixed across 17 files**
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history and [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md) for comprehensive feature details.

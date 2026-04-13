@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.8.2
-**Last Updated:** 2026-03-02
+**Version:** 4.9.1
+**Last Updated:** 2026-04-12
 
 ## Overview
 
@@ -128,7 +128,7 @@ API keys should be stored securely:
 
 ---
 
-## Platform URL Allowlist (v4.8.7)
+## Platform URL Allowlist
 
 Rescale Interlink restricts API communication to a fixed set of known Rescale platform URLs.
 This prevents credential exfiltration to arbitrary endpoints via `--api-url` or configuration files.
@@ -150,7 +150,7 @@ This prevents credential exfiltration to arbitrary endpoints via `--api-url` or 
 
 ---
 
-## Update Checks (v4.8.2)
+## Update Checks
 
 Rescale Interlink can check GitHub for newer releases on GUI startup. This makes a single
 unauthenticated HTTPS request to `api.github.com`.
@@ -220,6 +220,102 @@ All API communication uses TLS 1.2+ with FIPS-approved cipher suites when FIPS m
 
 ---
 
+## API Key Resolution Priority
+
+Rescale Interlink resolves API credentials through a priority chain that differs between native and compat modes.
+
+### Native CLI / GUI
+
+1. `--api-key` command-line flag (highest priority)
+2. Per-user token file (service mode: `<userProfile>/.config/rescale/token`)
+3. `apiconfig` INI file (service mode: legacy compatibility)
+4. Default token file (`~/.config/rescale/token`)
+5. `RESCALE_API_KEY` environment variable (lowest priority)
+
+**Source:** `internal/config/apikey.go`
+
+### Compat Mode (rescale-cli compatibility)
+
+1. `-p/--api-token` flag (highest priority)
+2. `RESCALE_API_KEY` environment variable
+3. `apiconfig` INI profile (`--profile` section, or `[default]`)
+
+**Source:** `internal/cli/compat/compat.go`
+
+### Base URL Resolution (compat mode)
+
+1. `-X/--api-base-url` flag
+2. `RESCALE_API_URL` environment variable
+3. Profile URL from apiconfig
+4. Default: `https://platform.rescale.com`
+
+---
+
+## Error Reporting Privacy Model
+
+The `internal/reporting/` package provides safe serious-error reporting. Reports are generated only for genuine server-side failures — never for user-fixable problems.
+
+### What Gets Reported
+
+Only errors where the user cannot self-diagnose are reportable:
+- **Server errors** (HTTP 5xx) — the server broke
+- **Unclassified internal errors** — something unexpected happened
+
+The following are **not reportable** (users can fix these themselves):
+- Authentication errors (401/403)
+- Network/DNS errors
+- Timeout errors
+- Disk space errors
+- Client errors (400/404)
+- User cancellation
+- Rate limit responses (429)
+
+**Source:** `internal/reporting/classifier.go` — `IsReportable()` function
+
+### Redaction
+
+All error messages are redacted before inclusion in reports:
+- Hex tokens >20 characters → `[REDACTED]`
+- URL query parameters → `?[REDACTED]`
+- Email addresses → `[EMAIL]`
+- Bearer/authorization tokens → `[REDACTED]`
+- Home directory paths → `[HOME]`
+- File paths reduced to basename only
+- Job names replaced with `job-N` placeholders
+
+**Source:** `internal/reporting/redactor.go`
+
+### Report Delivery
+
+- **GUI:** Modal dialog with "Copy to Clipboard" and "Save Report" options. Duplicate suppression while modal is open.
+- **CLI/Daemon:** Auto-saved to the report directory with path printed to stderr.
+- Reports include workspace name, workspace ID, and platform URL for support context.
+- Reports **do not** contain API keys, passwords, file contents, or full file paths.
+
+---
+
+## Sleep Prevention
+
+During file transfers, Rescale Interlink prevents the operating system from sleeping or suspending, which would interrupt active transfers.
+
+### Cross-Platform Implementation
+
+| Platform | Mechanism |
+|----------|-----------|
+| macOS | `IOPMAssertionCreateWithName` (IOKit, via CGO) |
+| Windows | `SetThreadExecutionState` |
+| Linux | `systemd-inhibit` |
+
+### Integration
+
+Sleep prevention is ref-counted in the rate limiter store (`internal/ratelimit/store.go`). An assertion is acquired when a transfer batch starts and released when the batch completes, covering all transfer paths (CLI, GUI, and daemon).
+
+Each platform's release function is idempotent (safe to call multiple times) via `sync.Once`.
+
+**Source:** `internal/platform/sleep.go`, `internal/platform/sleep_darwin.go`, `internal/platform/sleep_linux.go`, `internal/platform/sleep_windows.go`
+
+---
+
 ## Reporting Security Issues
 
 If you discover a security vulnerability, please report it to:
@@ -233,13 +329,14 @@ Do not disclose security issues publicly until a fix is available.
 
 ## Version History
 
-| Version | Date | Changes |
-|---------|------|---------|
+| Version | Date | Security-Relevant Changes |
+|---------|------|---------------------------|
+| 4.9.1 | 2026-04-12 | CLI compat mode with independent credential chain; `jobs watch` command |
+| 4.9.0 | 2026-03-25 | Error reporting privacy model (redaction, reportability filtering); sleep prevention |
 | 4.8.7 | 2026-03-11 | Platform URL allowlist — strict origin enforcement, credential exfiltration prevention |
 | 4.8.2 | 2026-03-02 | Automatic update check with policy gate (FedRAMP, env var), trusted URL enforcement |
-| 4.7.5 | 2026-02-25 | Empty file upload fix, ThroughputMonitor dead code cleanup, build artifact exclusions |
-| 4.7.3 | 2026-02-22 | Path traversal sanitization in GetHistoricalJobRows, event listener isolation (unsub callbacks) |
-| 4.5.7 | 2026-02-03 | Auto-download settings auto-save fix, debounced config save |
+| 4.7.5 | 2026-02-25 | Empty file upload fix |
+| 4.7.3 | 2026-02-22 | Path traversal sanitization in GetHistoricalJobRows, event listener isolation |
 | 4.5.1 | 2026-01-28 | Log permissions hardened (0700), NTLM/FIPS safeguards, fail-closed IPC auth |
-| 4.4.2 | 2025-12-XX | Centralized log directory |
+| 4.4.2 | 2025-12-XX | Centralized log directory, file permissions security (0600 for sensitive state) |
 | 4.0.0 | 2025-XX-XX | Initial FIPS 140-3 compliance |

@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 4.9.0
-**Last Updated**: February 25, 2026
+**Version**: 4.9.1
+**Last Updated**: April 12, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -22,8 +22,8 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
 ```bash
 # Clone the repository (use your fork URL if contributing)
-git clone https://github.com/rescale/rescale-int.git
-cd rescale-int
+git clone https://github.com/rescale-labs/Rescale_Interlink.git
+cd Rescale_Interlink
 
 # Install Go dependencies
 go mod download
@@ -155,50 +155,90 @@ Types:
 
 ```
 rescale-int/
-├── cmd/rescale-int/    # Entry point
-│   └── main.go         # Application bootstrap
-├── frontend/           # Wails GUI (React/TypeScript)
+├── cmd/
+│   ├── rescale-int/           # CLI-only binary entry point
+│   │   └── main.go
+│   └── rescale-int-tray/      # Windows system tray companion
+│       └── main.go
+│
+├── frontend/                  # Wails GUI (React/TypeScript)
 │   ├── src/
-│   │   ├── components/ # React components
-│   │   │   ├── tabs/   # Tab components (Setup, SingleJob, PUR, etc.)
-│   │   │   ├── widgets/# Shared reusable widgets (JobsTable, StatsBar, etc.)
-│   │   │   └── common/ # Common components (ErrorBoundary, etc.)
-│   │   ├── stores/     # Zustand state stores (jobStore, runStore, etc.)
-│   │   ├── types/      # TypeScript type definitions (jobs, run, events)
-│   │   └── utils/      # Shared utilities (stageStats, formatDuration)
-│   ├── package.json    # Node.js dependencies
-│   └── wailsjs/        # Generated Wails bindings
+│   │   ├── components/        # React components
+│   │   │   ├── tabs/          # Tab components (Setup, SingleJob, PUR, etc.)
+│   │   │   ├── widgets/       # Shared reusable widgets (JobsTable, StatsBar, etc.)
+│   │   │   └── common/        # Common components (ErrorBoundary, etc.)
+│   │   ├── stores/            # Zustand state stores (jobStore, runStore, etc.)
+│   │   ├── types/             # TypeScript type definitions (jobs, run, events)
+│   │   └── utils/             # Shared utilities (stageStats, formatDuration)
+│   ├── package.json           # Node.js dependencies
+│   └── wailsjs/               # Generated Wails bindings
+│
 ├── internal/
-│   ├── api/            # Rescale API client
-│   ├── cli/            # CLI commands (Cobra)
-│   ├── cloud/          # Cloud storage operations
-│   │   ├── credentials/  # Credential management
-│   │   ├── download/     # Download entry point
-│   │   ├── providers/    # Provider implementations
-│   │   │   ├── s3/         # S3 provider (upload, download, streaming)
-│   │   │   └── azure/      # Azure provider (upload, download, streaming)
-│   │   ├── state/        # Resume state management
-│   │   ├── storage/      # Common interfaces
-│   │   ├── transfer/     # Unified transfer orchestration
-│   │   ├── upload/       # Upload entry point
-│   │   └── interfaces.go # CloudTransfer interface
-│   ├── config/         # Configuration management
-│   ├── constants/      # Application constants (chunk sizes, etc.)
-│   ├── core/           # Core engine
-│   ├── crypto/         # Encryption (HKDF, AES-256-CBC)
-│   ├── events/         # Event bus system
-│   ├── wailsapp/       # Wails v2 Go bindings
-│   │   ├── app.go            # Main Wails app struct
-│   │   ├── config_bindings.go    # Config methods
-│   │   ├── transfer_bindings.go  # Transfer methods
-│   │   ├── file_bindings.go      # File operations
-│   │   ├── job_bindings.go       # Job operations
-│   │   └── event_bridge.go       # EventBus to Wails events
-│   ├── http/           # HTTP client and retry logic
-│   ├── pur/            # PUR pipeline integration
-│   ├── trace/          # Debugging/tracing
-│   └── transfer/       # Transfer handles & progress tracking
-└── testdata/           # Test fixtures
+│   ├── api/                   # Rescale API client (v3 + v2)
+│   ├── cli/                   # CLI commands (Cobra)
+│   │   └── compat/            # rescale-cli compatibility mode (24 files)
+│   ├── cloud/                 # Cloud storage operations
+│   │   ├── credentials/       # Credential management + warming
+│   │   ├── download/          # Download entry point
+│   │   ├── providers/         # Provider implementations
+│   │   │   ├── s3/            # S3 provider
+│   │   │   └── azure/         # Azure provider
+│   │   ├── state/             # Resume state management
+│   │   ├── storage/           # Common interfaces and errors
+│   │   ├── transfer/          # Unified transfer orchestration
+│   │   └── upload/            # Upload entry point
+│   ├── config/                # Configuration, CSV parsing, API key resolution
+│   ├── constants/             # Application-wide constants
+│   ├── core/                  # Core engine (job pipeline orchestration)
+│   ├── crypto/                # Encryption (AES-256-CBC, HKDF, streaming)
+│   ├── daemon/                # Auto-download daemon (background service)
+│   ├── diskspace/             # Cross-platform disk space checking
+│   ├── elevation/             # Windows UAC / Unix privilege elevation
+│   ├── events/                # Event bus system (pub/sub + ring buffer)
+│   ├── fips/                  # FIPS 140-3 init
+│   ├── http/                  # HTTP client, proxy, and retry logic
+│   ├── ipc/                   # Cross-process IPC (daemon ↔ GUI)
+│   ├── localfs/               # Local filesystem browser (WalkStream)
+│   ├── logging/               # Logger and TeeWriter (log → EventBus)
+│   ├── mesa/                  # Mesa/OpenGL setup (Windows/Linux GPU)
+│   ├── mesainit/              # Mesa early initialization
+│   ├── models/                # Data models (jobs, files, credentials)
+│   ├── pathutil/              # Path resolution utilities
+│   ├── platform/              # Cross-platform sleep prevention
+│   ├── progress/              # Progress bar UI (mpb wrapper)
+│   ├── pur/                   # PUR (Parallel Upload and Run)
+│   │   ├── filescan/          # File scanning
+│   │   ├── parser/            # SGE script parsing
+│   │   ├── pattern/           # Pattern detection for batch jobs
+│   │   ├── pipeline/          # Pipeline orchestration
+│   │   ├── state/             # PUR state management
+│   │   └── validation/        # Core type validation
+│   ├── ratelimit/             # Token bucket rate limiting
+│   │   └── coordinator/       # Cross-process rate limit coordinator
+│   ├── reporting/             # Error reporting (classify → redact → report)
+│   ├── resources/             # Resource management (threads, memory)
+│   ├── service/               # Windows service mode (multi-user daemon)
+│   ├── services/              # GUI-agnostic services (TransferService, FileService)
+│   ├── transfer/              # Transfer coordination and batch abstraction
+│   │   ├── folder/            # Folder creation and orchestration
+│   │   └── scan/              # Remote folder scanning
+│   ├── util/                  # General utilities
+│   │   ├── analysis/          # Analysis utilities
+│   │   ├── buffers/           # Buffer pooling
+│   │   ├── filter/            # File filtering
+│   │   ├── glob/              # Glob pattern matching
+│   │   ├── multipart/         # Multipart upload and scan utilities
+│   │   ├── paths/             # Path collision detection
+│   │   ├── sanitize/          # String sanitization
+│   │   ├── tags/              # File tag utilities
+│   │   └── tar/               # TAR archive creation
+│   ├── validation/            # Path validation
+│   ├── version/               # Version constant
+│   ├── wailsapp/              # Wails v2 Go bindings
+│   └── watch/                 # Job watch engine (polling + download)
+│
+├── build/                     # Wails build assets (icons, manifests)
+└── testdata/                  # Test fixtures
 ```
 
 ## Key Patterns
@@ -245,14 +285,17 @@ cd frontend && npm run build
 
 ## Debugging
 
-The application includes instrumentation:
-
 ```bash
-# Run with profiling enabled
-./rescale-int
+# Run any command with verbose logging
+rescale-int --verbose files list
 
-# Access profiler at http://localhost:6060
-go tool pprof http://localhost:6060/debug/pprof/profile
+# Logs are written to:
+#   macOS/Linux: ~/.config/rescale/logs/
+#   Windows:     %LOCALAPPDATA%\Rescale\Interlink\logs\
+
+# Test profiling for specific packages
+go test -cpuprofile=cpu.prof -memprofile=mem.prof ./internal/transfer/
+go tool pprof cpu.prof
 ```
 
 ## Documentation
