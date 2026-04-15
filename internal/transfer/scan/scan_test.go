@@ -117,7 +117,8 @@ func TestScanProgress_Accumulation(t *testing.T) {
 // --- Streaming scan regression tests ---
 
 // folderContentsJSON builds a folder contents API response.
-// Mirrors the format from api/client_test.go:folderContentsPage.
+// Loosely follows the format from api/client_test.go:folderContentsPage,
+// with simplified file items for scan tests.
 func folderContentsJSON(folders []map[string]string, files []map[string]interface{}, nextURL string) []byte {
 	results := make([]map[string]interface{}, 0, len(folders)+len(files))
 	for _, f := range folders {

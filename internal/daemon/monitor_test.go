@@ -257,28 +257,6 @@ func TestDefaultEligibilityConfig(t *testing.T) {
 	if cfg.LookbackDays != 7 {
 		t.Errorf("LookbackDays = %d, want %d", cfg.LookbackDays, 7)
 	}
-
-	// Placeholder to keep structure compatible (removed tests for deprecated fields)
-	tests := []struct {
-		name     string
-		got      string
-		expected string
-	}{
-		// Placeholder — no additional fields to check
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.got != tt.expected {
-				t.Errorf("%s = %q, want %q", tt.name, tt.got, tt.expected)
-			}
-		})
-	}
-
-	// Test LookbackDays default
-	if cfg.LookbackDays != 7 {
-		t.Errorf("LookbackDays = %d, want 7", cfg.LookbackDays)
-	}
 }
 
 func TestNewMonitorWithEligibility_NilConfig(t *testing.T) {

@@ -234,7 +234,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 						fmt.Fprintf(params.OutputWriter, "CBC streaming failed, falling back to legacy download...\n")
 					}
 					if outFile, openErr := os.Create(params.LocalPath); openErr == nil {
-						outFile.Close()
+						_ = outFile.Close()
 					}
 					if legacyErr := d.downloadLegacy(ctx, prep); legacyErr != nil {
 						return "", legacyErr
@@ -551,7 +551,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
-			outFile.Close()
+			_ = outFile.Close()
 		}
 	}()
 
@@ -995,7 +995,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
-			outFile.Close()
+			_ = outFile.Close()
 		}
 	}()
 

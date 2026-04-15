@@ -38,6 +38,13 @@ import (
 var assets embed.FS
 
 func init() {
+	// Suppress GTK ibus input method warnings on Linux.
+	// Set before any GTK initialization to ensure the value is picked up.
+	// Harmless on non-GUI paths (GTK_IM_MODULE is only read by GTK).
+	if runtime.GOOS == "linux" && os.Getenv("GTK_IM_MODULE") == "" {
+		os.Setenv("GTK_IM_MODULE", "none")
+	}
+
 	// Shared FIPS 140-3 compliance check (common to GUI and CLI binaries)
 	intfips.Init("wails")
 
@@ -91,11 +98,6 @@ func main() {
 	}
 
 	// GUI mode - launch Wails GUI
-	// Suppress GTK ibus input method warnings on Linux.
-	// Wails uses its own webview input handling; ibus is unnecessary.
-	if runtime.GOOS == "linux" && os.Getenv("GTK_IM_MODULE") == "" {
-		os.Setenv("GTK_IM_MODULE", "none")
-	}
 	wailsapp.Assets = assets
 	if err := wailsapp.Run(os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

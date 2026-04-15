@@ -109,7 +109,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
-			file.Close()
+			_ = file.Close()
 		}
 	}()
 
@@ -189,7 +189,7 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
-			file.Close()
+			_ = file.Close()
 		}
 	}()
 
@@ -353,7 +353,7 @@ func (p *Provider) downloadChunkedConcurrent(
 	fileClosed := false
 	defer func() {
 		if !fileClosed {
-			file.Close()
+			_ = file.Close()
 		}
 	}()
 
