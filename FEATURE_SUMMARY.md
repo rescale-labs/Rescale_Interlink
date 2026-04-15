@@ -1,7 +1,7 @@
 # Rescale Interlink — Feature Summary
 
-**Version:** 4.9.1
-**Last Updated:** April 12, 2026
+**Version:** 4.9.3
+**Last Updated:** April 15, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document catalogs what Rescale Interlink can do. For full command syntax, see [CLI_GUIDE.md](CLI_GUIDE.md). For architecture internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For version history, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
@@ -335,6 +335,9 @@ Thread-safe `ConflictResolver[A comparable]` generic type with automatic escalat
 
 ### Proxy Support
 Four modes: `no-proxy`, `system`, `basic`, `ntlm` (NTLM not FIPS-compliant, auto-disabled on FedRAMP). Proxy warmup for authentication. `NO_PROXY` bypass rules fully wired.
+
+### S3 FIPS Endpoints
+ITAR platforms (`itar.rescale.com`, `itar.rescale-gov.com`) automatically route S3 traffic through AWS FIPS-validated endpoints. No user configuration required.
 
 ### Platform URL Allowlist
 API communication restricted to 6 known Rescale platform URLs. Prevents credential exfiltration via `--api-url`.

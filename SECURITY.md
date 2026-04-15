@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.9.1
-**Last Updated:** 2026-04-12
+**Version:** 4.9.3
+**Last Updated:** 2026-04-15
 
 ## Overview
 
@@ -35,6 +35,17 @@ RESCALE_ALLOW_NON_FIPS=true ./rescale-int
 ```
 
 **Warning:** Never use non-FIPS builds in production or with FedRAMP platforms.
+
+### S3 FIPS Endpoints (ITAR Platforms)
+
+For ITAR platforms (`itar.rescale.com` and `itar.rescale-gov.com`), Interlink automatically routes S3 API traffic through AWS FIPS-validated endpoints. This is detected at runtime by `shouldUseFIPSEndpoint()` in `internal/cloud/providers/s3/client.go` and applied via `aws.FIPSEndpointStateEnabled` in the AWS SDK configuration.
+
+- **Scope**: All S3 operations (upload, download, multipart, credential refresh)
+- **Trigger**: Platform URL contains `itar.rescale-gov.com` or `itar.rescale.com`
+- **Effect**: AWS SDK resolves to FIPS 140-2 validated S3 endpoints (e.g., `s3-fips.us-east-1.amazonaws.com`)
+- **No user configuration required**: Enabled automatically based on the configured platform URL
+
+This satisfies FedRAMP Moderate requirements for FIPS-validated data-in-transit to S3 storage.
 
 ---
 
@@ -331,6 +342,8 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Security-Relevant Changes |
 |---------|------|---------------------------|
+| 4.9.3 | 2026-04-15 | AWS SDK security bump (eventstream DoS fix); CodeQL quality cleanup |
+| 4.9.2 | 2026-04-13 | S3 FIPS endpoints for ITAR platforms; Windows service credential isolation |
 | 4.9.1 | 2026-04-12 | CLI compat mode with independent credential chain; `jobs watch` command |
 | 4.9.0 | 2026-03-25 | Error reporting privacy model (redaction, reportability filtering); sleep prevention |
 | 4.8.7 | 2026-03-11 | Platform URL allowlist — strict origin enforcement, credential exfiltration prevention |

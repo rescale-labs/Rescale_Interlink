@@ -1,5 +1,39 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.3 - April 15, 2026
+
+### Dependency Security Updates
+
+- **AWS SDK bump**: `aws/protocol/eventstream` v1.7.1→v1.7.8, `aws/service/s3` v1.88.3→v1.99.0. Fixes a DoS vulnerability in the eventstream protocol handler.
+- **Dev toolchain bumps**: vite 5→6, @typescript-eslint 6→8.
+
+### Code Quality
+
+- CodeQL quality findings resolved: bare `.Close()` calls on error cleanup paths now explicitly discard errors (`_ = file.Close()`).
+- Dead test code removed from `monitor_test.go`; clarified comment in `scan_test.go`.
+- `GTK_IM_MODULE` environment variable moved to `init()` for earlier initialization on Linux.
+
+## v4.9.2 - April 13, 2026
+
+### S3 FIPS Endpoints for ITAR
+
+New `shouldUseFIPSEndpoint()` function in `internal/cloud/providers/s3/client.go` automatically enables AWS FIPS-validated S3 endpoints when the platform URL is `itar.rescale-gov.com` or `itar.rescale.com`. This routes all S3 API traffic through FIPS 140-2 validated endpoints, satisfying FedRAMP Moderate requirements for data-in-transit to S3. Applied to both initial client creation (`NewS3Client()`) and credential refresh (`EnsureFreshCredentials()`).
+
+### Windows Service Credential Isolation
+
+`ResolveAPIKey` now skips the default token file and environment variable when `serviceMode=true`, preventing the SYSTEM account's credentials from leaking into per-user daemon sessions.
+
+### GUI Cancel/Conflict Fixes
+
+- Backend transfer dispatcher now selects on `ctx.Done()` for immediate cancellation response.
+- Frontend `cancelAllTransfers` rewritten for reliability.
+- Cancelled and failed batches display correct status.
+- Folder download conflict dialog added.
+
+### Frontend Security
+
+- `npm audit fix`: 5 transitive dependency vulnerabilities resolved.
+
 ## v4.9.1 - April 12, 2026
 
 ### CLI Compatibility Mode

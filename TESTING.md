@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: April 12, 2026
-**Version**: 4.9.1
+**Last Updated**: April 15, 2026
+**Version**: 4.9.3
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -457,9 +457,9 @@ GitHub Actions workflows run on tag push for release builds:
 - **v4.6.8**: 8 automation serialization unit tests; E2E validation for single/multiple/no automations
 - **v4.8.x**: Transfer system convergence validated — `RunBatch`/`RunBatchFromChannel` abstraction, conflict resolver, adaptive concurrency, FileInfo enrichment
 
-### Current State (v4.9.1)
+### Current State (v4.9.3)
 
-- **Unit Tests**: 90 test files across 46 packages
+- **Unit Tests**: 92 test files across 46 packages
 - **Coverage**: All core packages tested
 - **Known Bugs**: 0
 - **Quality Gates**:

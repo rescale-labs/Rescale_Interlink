@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.9.1-green)
+![Status](https://img.shields.io/badge/status-v4.9.3-green)
 
 ---
 
@@ -21,10 +21,12 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ---
 
-## What's New in v4.9.1
+## What's New in v4.9.3
 
-- **CLI Compatibility Mode**: Drop-in replacement for `rescale-cli` — activate with `--compat` or symlink. See [CLI_GUIDE.md](CLI_GUIDE.md#compatibility-mode).
+- **CLI Compatibility Mode**: Drop-in replacement for `rescale-cli` — activate with `--compat` or symlink. See [CLI_GUIDE.md](CLI_GUIDE.md#compatibility-mode) and [Compatibility Reference](CLI_GUIDE.md#compatibility-reference).
 - **`jobs watch` Command**: Monitor running jobs and download output files as they appear.
+- **S3 FIPS Endpoints for ITAR** (v4.9.2): Automatic FIPS-validated S3 endpoints for ITAR platforms (`itar.rescale.com`, `itar.rescale-gov.com`).
+- **Security Hardening** (v4.9.2–v4.9.3): AWS SDK security bump, Windows service credential isolation, dependency vulnerability remediation.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -367,6 +369,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.9.1
+**Version**: 4.9.3
 **Status**: Production Ready
-**Last Updated**: April 12, 2026
+**Last Updated**: April 15, 2026

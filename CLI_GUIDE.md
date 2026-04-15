@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.9.1.
+Complete command-line interface reference for `rescale-int` v4.9.3.
 
-**Version:** 4.9.1
-**Build Date:** April 12, 2026
+**Version:** 4.9.3
+**Build Date:** April 15, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -27,6 +27,7 @@ For a comprehensive list of all features with source code references, see [FEATU
   - [PUR (Parallel Upload and Run) Commands](#pur-parallel-upload-and-run-commands)
   - [Shortcuts](#shortcuts)
 - [Compatibility Mode](#compatibility-mode)
+- [Compatibility Reference](#compatibility-reference)
 - [Shell Completion](#shell-completion)
 - [Examples](#examples)
 
@@ -1703,6 +1704,106 @@ Software publisher (`spub`) commands are not yet supported and return a clear er
 3. **Credential setup**: Compat mode reads the same `apiconfig` INI file as rescale-cli. If you have an existing `~/.config/rescale/apiconfig`, it will work automatically.
 
 4. **Known differences**: `spub` commands are not yet supported. The `list-info -d` (desktops) and `check-for-update -i` (install) flags return "not yet implemented" errors.
+
+## Compatibility Reference
+
+This section documents the compatibility status between Interlink's compat mode and `rescale-cli`. This is a living document — as capabilities are added, these tables will be updated.
+
+**Tested against**: rescale-cli versions 1.1.271 and 1.1.349, on both S3 and Azure storage backends.
+
+### Input Compatibility
+
+Compat mode accepts the same arguments as rescale-cli. All 56 per-command flag registrations are handled:
+
+| Category | Count | Details |
+|----------|------:|---------|
+| Fully implemented | 45 | Flag accepted and behavior matches rescale-cli |
+| Accepted, ignored | 7 | `--enableErrorTracking`, `--no-ssl-verify`, `--no-prompt`, `-t`/`--type`, `--verify` (submit), `--verify` (sync), `--max-concurrent` (submit/sync) |
+| Deferred (clean error, exit 33) | 4 | `-T`/`--Target`, `--copy-to-cfs`, `-d`/`--desktops`, `-i`/`--install-available` |
+
+**Argument normalization**: Compat mode automatically normalizes rescale-cli's non-standard argument patterns:
+- Multi-char short flags: `-fid VALUE` → `--file-id VALUE`, `-lh VALUE` → `--load-hours VALUE`
+- Multi-value `-f`: `upload -f a b c` → `upload -f a -f b -f c` (for upload and submit)
+
+**Credential resolution chain** (independent from native CLI):
+1. `-p/--api-token` flag (highest priority)
+2. `RESCALE_API_KEY` environment variable
+3. `apiconfig` INI profile (`--profile` section or `[default]`)
+
+**Base URL resolution**: `-X` flag > `RESCALE_API_URL` env > profile > `https://platform.rescale.com`
+
+No unknown-flag errors are possible — every rescale-cli flag is registered in Interlink. Unrecognized flags produce a standard Cobra error with exit code 33.
+
+### Behavioral Compatibility
+
+All 10 user-facing commands are implemented. Behavior was verified via head-to-head comparison across 30 parity items:
+
+| Status | Count | Description |
+|--------|------:|-------------|
+| Pass/Fixed | 25 | Behavior matches rescale-cli or is strictly better |
+| Intentional divergence | 5 | Interlink behavior is correct where rescale-cli crashes or is wrong |
+
+**Intentional divergences** (Interlink is better in all 5 cases):
+- `status -j BAD_ID`: Interlink shows a clean error; rescale-cli shows a Java stack trace.
+- `download-file -j -f` on completed job: Interlink works correctly; rescale-cli crashes (Java NPE).
+- `sync` metadata: Same files downloaded with same exit code. Different internal bookkeeping mechanism (file-existence vs `.rescale` metadata).
+- `check-for-update`: Different tools checking for their own updates — matching would be incorrect.
+- Help text: Custom argparse4j-style renderer in Interlink provides structural match with minor formatting differences.
+
+**Per-command status**:
+
+| Command | Status | Notes |
+|---------|--------|-------|
+| `status` | Implemented | Text and JSON (`-e`) modes, `--load-hours` (see Known Gaps) |
+| `stop` | Implemented | Output matches including `-q` quirk |
+| `delete` | Implemented | |
+| `submit` | Implemented | SGE parsing, tarball flow, `-E` end-to-end, `-e` JSON transformation |
+| `upload` | Implemented | Multi-file, `-e` JSON, `-r` report |
+| `download-file` | Implemented | By job+filename, by file-id, by run-id, `-e` metadata |
+| `list-info` | Implemented | Core types (`-c`) and analyses (`-a`) as JSON |
+| `list-files` | Implemented | Run-specific listing supported |
+| `sync` | Implemented | Single-job, polling (`-d`), newer-than (`-n`), file filtering |
+| `check-for-update` | Implemented | Prints Interlink version and releases URL |
+| `spub` | Deferred | Returns clear error indicating deferral to v5.0.0 |
+
+### Output Compatibility
+
+Compat mode reproduces rescale-cli's output format:
+
+- **Exit codes**: 0 on success, 33 on error (matches rescale-cli convention).
+- **Timestamps**: SLF4J-style format (`2006-01-02 15:04:05,000`).
+- **JSON output** (`-e` flag): Field sets verified head-to-head for `status`, `upload`, `download-file`, `submit`, `list-info`.
+- **`submit -e` JSON**: `transformSubmitJSON` reshapes the v3 API response to match rescale-cli's client-side JSON structure (26 top-level, 22 jobanalysis, 11 input-file keys).
+- **`download-file -e`**: Filtered to 9-field set matching rescale-cli (`decryptedSize`, `encodedEncryptionKey`, `fileChecksums`, `id`, `isUploaded`, `name`, `pathParts`, `storage`, `typeId`).
+- **Quiet mode** (`-q`): Suppresses informational output but preserves data output and errors. Matches rescale-cli's behavior including the `-q stop` quirk (unconditional status message).
+- **Debug suppression**: `log.Printf` output is discarded in compat mode unless `RESCALE_DEBUG` is set.
+
+### Testing Status
+
+164 end-to-end tests across all commands, both S3 and Azure backends, flag combinations, edge cases, help text, and spub placeholders:
+
+| Disposition | Count | Description |
+|-------------|------:|-------------|
+| PASS | 136 | Behavior matches or is strictly better than rescale-cli |
+| FAIL | 0 | All resolved (Plan 7.5 fix-forward) |
+| KNOWN-GAP | 9 | Documented, not release-blocking (see below) |
+| CLI-BUG | 5 | rescale-cli crashes; Interlink works correctly |
+| SKIP | 14 | Long-running E2E or long-form aliases verified elsewhere |
+
+**Known gaps** (9 items, none release-blocking):
+- `--load-hours` returns empty data — Interlink's v2 `cluster-load-measurements` endpoint returns 404; rescale-cli uses an undiscovered endpoint. Interlink correctly returns `[]`.
+- `upload -d` with invalid folder ID cannot be end-to-end tested (no folder creation API in compat mode); flag wiring verified in code.
+- 4 hidden deferred flags not shown in help text (by design — they produce clean errors).
+- `spub` subcommand tree is flat (5 placeholders) vs rescale-cli's hierarchical `tile`/`sandbox` tree (9 subcommands). All produce deferral messages.
+
+**CLI bugs found in rescale-cli** (5 items where Interlink works correctly):
+- `--enableErrorTracking` without `=true` breaks rescale-cli's argparse
+- `download-file -j -f` on completed job: Java NPE
+- `download-file -r RUN_ID`: Java NPE
+- `list-files -r RUN_ID`: Java NPE
+- `sync -d` on completed job: hangs indefinitely (never exits)
+
+Full audit details: `old-reference/PLAN7_AUDIT_REPORT.md` and `old-reference/COMPAT_PARITY_STATUS.md`.
 
 ## Examples
 
