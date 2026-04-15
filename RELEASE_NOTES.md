@@ -100,12 +100,12 @@ New native CLI command for monitoring running jobs and incrementally downloading
 
 Both modes use the shared `internal/watch/` engine, which is also used by compat `sync -d` for polling mode. The engine handles status polling, incremental download passes (skip-existing semantics), terminal status detection (Completed, Failed, Stopped, Force Stopped, Terminated), consecutive error thresholds, and context cancellation.
 
-### Compat Mode Audit & Fix-Forward
+### Compat Mode Audit
 
 164-test end-to-end audit comparing compat mode output against rescale-cli across all 10 commands:
-- 136 PASS, 0 FAIL after fix-forward
+- 136 PASS, 0 FAIL
 - 28 SKIP (tests requiring live infrastructure or deferred features)
-- Fix-forward items included: `--no-ssl-verify` hidden flag acceptance, directory detection for `download-file -o DIR`, run-based file listing for `list-files`, and `submit -e` JSON shape transformation
+- Fixes included: `--no-ssl-verify` hidden flag acceptance, directory detection for `download-file -o DIR`, run-based file listing for `list-files`, and `submit -e` JSON shape transformation
 
 ### Version Bump
 

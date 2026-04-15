@@ -1785,7 +1785,7 @@ Compat mode reproduces rescale-cli's output format:
 | Disposition | Count | Description |
 |-------------|------:|-------------|
 | PASS | 136 | Behavior matches or is strictly better than rescale-cli |
-| FAIL | 0 | All resolved (Plan 7.5 fix-forward) |
+| FAIL | 0 | All resolved prior to release |
 | KNOWN-GAP | 9 | Documented, not release-blocking (see below) |
 | CLI-BUG | 5 | rescale-cli crashes; Interlink works correctly |
 | SKIP | 14 | Long-running E2E or long-form aliases verified elsewhere |
@@ -1803,7 +1803,7 @@ Compat mode reproduces rescale-cli's output format:
 - `list-files -r RUN_ID`: Java NPE
 - `sync -d` on completed job: hangs indefinitely (never exits)
 
-Full audit details: `old-reference/PLAN7_AUDIT_REPORT.md` and `old-reference/COMPAT_PARITY_STATUS.md`.
+Full audit details are maintained in the repository's `old-reference/` directory.
 
 ## Examples
 
