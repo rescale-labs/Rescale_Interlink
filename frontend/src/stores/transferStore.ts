@@ -458,16 +458,25 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // Only cancel FileBrowser-owned transfers (pipeline manages its own retry/cancel)
   cancelAllTransfers: async () => {
     try {
+      // Cancel all active batches
+      const activeBatches = get().batches.filter(
+        b => b.queued > 0 || b.active > 0 || !b.totalKnown
+      )
+      for (const batch of activeBatches) {
+        await App.CancelBatch(batch.batchID)
+      }
+
+      // Cancel remaining ungrouped active tasks
       const activeTasks = get().tasks.filter(
-        t => ['queued', 'initializing', 'active', 'paused'].includes(t.state) &&
-             (!t.sourceLabel || t.sourceLabel === 'FileBrowser')
+        t => ['queued', 'initializing', 'active', 'paused'].includes(t.state)
       )
       for (const task of activeTasks) {
         await App.CancelTransfer(task.id)
       }
+
+      get().fetchBatches()
       get().fetchUngroupedTasks()
     } catch (error) {
       console.error('Failed to cancel transfers:', error)

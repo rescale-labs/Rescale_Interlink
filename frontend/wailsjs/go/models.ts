@@ -835,6 +835,20 @@ export namespace wailsapp {
 	        this.error = source["error"];
 	    }
 	}
+	export class LocalFolderExistsCheckDTO {
+	    exists: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LocalFolderExistsCheckDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.exists = source["exists"];
+	        this.error = source["error"];
+	    }
+	}
 	export class PURRunOptionsDTO {
 	    extraInputFiles: string;
 	    decompressExtras: boolean;

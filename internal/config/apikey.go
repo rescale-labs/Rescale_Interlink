@@ -29,14 +29,19 @@ func warnLegacyAPIKeyOnce() {
 //  4. Default token file (~/.config/rescale/token) - created by 'config init' or GUI
 //  5. RESCALE_API_KEY environment variable
 //
+// In service mode (serviceMode=true), steps 4-5 are skipped to prevent the Windows
+// service from falling back to SYSTEM-level credentials, which would violate per-user
+// isolation. Only per-user sources (steps 1-3) are checked.
+//
 // Parameters:
 //   - apiKey: Explicitly provided API key (e.g., from command line flag)
 //   - userProfilePath: User's profile directory for loading per-user token and apiconfig
 //     (Windows: C:\Users\username, Unix: /home/username)
 //     If empty, per-user token and apiconfig checks are skipped (subprocess mode).
+//   - serviceMode: When true, truncates fallback after per-user sources (steps 1-3).
 //
 // Returns empty string if no API key found in any source.
-func ResolveAPIKey(apiKey string, userProfilePath string) string {
+func ResolveAPIKey(apiKey string, userProfilePath string, serviceMode bool) string {
 	// 1. If explicitly provided, use it (highest priority)
 	if apiKey != "" {
 		return apiKey
@@ -57,6 +62,12 @@ func ResolveAPIKey(apiKey string, userProfilePath string) string {
 			warnLegacyAPIKeyOnce()
 			return cfg.APIKey
 		}
+	}
+
+	// In service mode, stop here — do not fall through to default token file or env var,
+	// which resolve to SYSTEM credentials on Windows services.
+	if serviceMode {
+		return ""
 	}
 
 	// 4. Try default token file (~/.config/rescale/token)
@@ -86,9 +97,9 @@ func ResolveAPIKeyForCurrentUser(apiKey string) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fall back to checking without apiconfig
-		return ResolveAPIKey(apiKey, "")
+		return ResolveAPIKey(apiKey, "", false)
 	}
-	return ResolveAPIKey(apiKey, homeDir)
+	return ResolveAPIKey(apiKey, homeDir, false)
 }
 
 // ResolveAPIKeySource returns the API key and its source for debugging/logging.
@@ -98,14 +109,14 @@ func ResolveAPIKeyForCurrentUser(apiKey string) string {
 //  1. flag (explicitly provided apiKey parameter)
 //  2. user-token-file (per-user token, service mode only)
 //  3. apiconfig (INI file, service mode only)
-//  4. token-file (default token path)
-//  5. environment (RESCALE_API_KEY env var)
+//  4. token-file (default token path) — skipped in service mode
+//  5. environment (RESCALE_API_KEY env var) — skipped in service mode
 //
 // Returns:
 //   - apiKey: The resolved API key (empty if not found)
 //   - source: Description of where the key was found
 //     "flag", "user-token-file", "apiconfig", "token-file", "environment", or "" if not found
-func ResolveAPIKeySource(apiKey string, userProfilePath string) (string, string) {
+func ResolveAPIKeySource(apiKey string, userProfilePath string, serviceMode bool) (string, string) {
 	// 1. If explicitly provided, use it
 	if apiKey != "" {
 		return apiKey, "flag"
@@ -126,6 +137,11 @@ func ResolveAPIKeySource(apiKey string, userProfilePath string) (string, string)
 			warnLegacyAPIKeyOnce()
 			return cfg.APIKey, "apiconfig"
 		}
+	}
+
+	// In service mode, stop here — do not fall through to SYSTEM-level sources.
+	if serviceMode {
+		return "", ""
 	}
 
 	// 4. Try default token file

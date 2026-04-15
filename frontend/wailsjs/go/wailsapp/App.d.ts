@@ -20,6 +20,8 @@ export function CheckFoldersExistForUpload(arg1:Array<string>,arg2:string):Promi
 
 export function CheckForUpdates():Promise<wailsapp.VersionCheckDTO>;
 
+export function CheckLocalFolderExists(arg1:string,arg2:string):Promise<wailsapp.LocalFolderExistsCheckDTO>;
+
 export function ClearCatalogCache():Promise<void>;
 
 export function ClearCompletedTransfers():Promise<void>;
@@ -170,7 +172,7 @@ export function StartBulkRunWithOptions(arg1:Array<wailsapp.JobSpecDTO>,arg2:wai
 
 export function StartDaemon():Promise<void>;
 
-export function StartFolderDownload(arg1:string,arg2:string,arg3:string):Promise<wailsapp.FolderDownloadResultDTO>;
+export function StartFolderDownload(arg1:string,arg2:string,arg3:string,arg4:string):Promise<wailsapp.FolderDownloadResultDTO>;
 
 export function StartFolderUpload(arg1:string,arg2:string,arg3:Array<string>):Promise<wailsapp.FolderUploadResultDTO>;
 

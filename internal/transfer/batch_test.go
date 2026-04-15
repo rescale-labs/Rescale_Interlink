@@ -497,6 +497,76 @@ func TestRunBatchFromChannel_AdaptiveCountNilIgnored(t *testing.T) {
 	}
 }
 
+func TestRunBatchFromChannel_CancelWhileBlocked(t *testing.T) {
+	// Verify that cancelling context while dispatcher is blocked on an empty
+	// input channel causes prompt return (not waiting for next item).
+	cfg := BatchConfig{
+		MaxWorkers:  5,
+		ResourceMgr: newTestResourceMgr(),
+		Label:       "TEST-CANCEL-BLOCKED",
+	}
+
+	ch := make(chan testItem) // Unbuffered, never sent to — dispatcher will block
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		RunBatchFromChannel(ctx, ch, cfg, func(ctx context.Context, item testItem) error {
+			t.Error("execute should not be called — no items were sent")
+			return nil
+		})
+		close(done)
+	}()
+
+	// Cancel after 100ms
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	// RunBatchFromChannel should return within 200ms of cancel
+	select {
+	case <-done:
+		// Success — returned promptly after cancel
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunBatchFromChannel did not return within 2s of context cancellation (dispatcher blocked on empty channel)")
+	}
+}
+
+func TestRunBatchFromChannel_CancelMidStream(t *testing.T) {
+	// Send some items, cancel context, verify not all items were processed.
+	cfg := BatchConfig{
+		MaxWorkers:  2,
+		ResourceMgr: newTestResourceMgr(),
+		Label:       "TEST-CANCEL-MID",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan testItem)
+
+	go func() {
+		defer close(ch)
+		for i := 0; i < 100; i++ {
+			select {
+			case ch <- testItem{size: 1024, id: "file"}:
+			case <-ctx.Done():
+				return
+			}
+			if i == 5 {
+				cancel()
+			}
+		}
+	}()
+
+	result, _ := RunBatchFromChannel(ctx, ch, cfg, func(ctx context.Context, item testItem) error {
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	})
+
+	total := result.Completed + result.Failed
+	if total >= 50 {
+		t.Errorf("expected fewer than 50 items processed after cancel at item 5, got %d", total)
+	}
+}
+
 // --- CollectErrors tests ---
 
 func TestCollectErrors_Empty(t *testing.T) {

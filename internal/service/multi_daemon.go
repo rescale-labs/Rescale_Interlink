@@ -153,7 +153,7 @@ func (m *MultiUserDaemon) scanAndUpdateProfiles() error {
 		if entry, exists := m.daemons[profile.ProfilePath]; exists {
 			// Check if previously skipped user now has an API key
 			if entry.skipReason == "no_api_key" {
-				apiKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath)
+				apiKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath, true)
 				if apiKey != "" {
 					m.logger.Info().Str("user", profile.Username).
 						Msg("API key now available — starting previously skipped user daemon")
@@ -244,11 +244,11 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	userLogger := logging.NewLoggerWithWriter(logWriter)
 
 	// Resolve API key with fallback chain: token file -> environment variable
-	apiKey, apiKeySource := config.ResolveAPIKeySource("", profile.ProfilePath)
+	apiKey, apiKeySource := config.ResolveAPIKeySource("", profile.ProfilePath, true)
 	if apiKey == "" {
 		logWriter.Close() // Close before early return
 		m.logger.Error().Str("user", profile.Username).
-			Msg("No API key found (checked user-token-file, apiconfig, token-file, env var), skipping")
+			Msg("No API key found (checked user-token-file, apiconfig), skipping")
 		m.daemons[profile.ProfilePath] = &userDaemonEntry{
 			profile:    profile,
 			config:     daemonConf,
@@ -427,7 +427,7 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 	}
 
 	// Detect API key rotation
-	currentKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath)
+	currentKey, _ := config.ResolveAPIKeySource("", profile.ProfilePath, true)
 	if currentKey != entry.apiKey {
 		m.logger.Info().Str("user", profile.Username).
 			Msg("API key changed (rotation detected)")

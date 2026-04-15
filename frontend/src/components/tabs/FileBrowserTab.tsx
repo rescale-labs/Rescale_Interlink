@@ -154,6 +154,12 @@ export function FileBrowserTab() {
   const [deleteConfirm, setDeleteConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
 
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null)
+  const [folderConflict, setFolderConflict] = useState<{
+    conflictingFolders: string[]  // Names of folders that already exist locally
+    allFolders: wailsapp.FileItemDTO[]
+    files: wailsapp.FileItemDTO[]
+    destLocalPath: string
+  } | null>(null)
 
   const [mergeConfirm, setMergeConfirm] = useState<{
     existingFolders: string[]
@@ -474,32 +480,71 @@ export function FileBrowserTab() {
         return
       }
 
-      // Switch to Transfers tab early so users can see scanning progress (issue #19)
+      // Check for folder conflicts before downloading
+      if (folders.length > 0) {
+        const conflicting: string[] = []
+        for (const folder of folders) {
+          const check = await App.CheckLocalFolderExists(folder.name, destLocalPath)
+          if (check.exists) {
+            conflicting.push(folder.name)
+          }
+        }
+
+        if (conflicting.length > 0) {
+          // Show conflict dialog — download will resume from the chosen handler
+          setFolderConflict({
+            conflictingFolders: conflicting,
+            allFolders: folders,
+            files,
+            destLocalPath,
+          })
+          setIsDownloading(false)
+          return
+        }
+      }
+
+      await startFolderDownloads(folders, files, destLocalPath, 'merge')
+    } catch (error) {
+      console.error('Download failed:', error)
+      setStatus(`Download failed: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setIsDownloading(false)
+    }
+  }, [downloadConfirm])
+
+  // Execute folder downloads with the given conflict mode.
+  // Extracted so both confirmDownload and conflict dialog handlers can call it.
+  const startFolderDownloads = useCallback(async (
+    folders: wailsapp.FileItemDTO[],
+    files: wailsapp.FileItemDTO[],
+    destLocalPath: string,
+    conflictMode: string,
+  ) => {
+    setIsDownloading(true)
+    try {
+      // Switch to Transfers tab early so users can see scanning progress
       if (folders.length > 0) {
         switchToTab('Transfers')
       }
 
-      // Download folders first using recursive folder download
+      // Download folders using recursive folder download
       for (const folder of folders) {
-        // Show "Scanning" status since recursive enumeration happens first (issue #19)
         setStatus(`Scanning folder: ${folder.name}...`)
-        const result = await App.StartFolderDownload(folder.id, folder.name, destLocalPath)
+        const result = await App.StartFolderDownload(folder.id, folder.name, destLocalPath, conflictMode)
         if (result.error) {
           console.error(`Folder download error for ${folder.name}:`, result.error)
-          // Continue with other items
         } else {
           setStatus(`Downloading folder: ${folder.name}...`)
         }
       }
 
-      // Download individual files using transfer queue.
-      // Batch grouping for 50+ files to collapse into single row in Transfers tab.
+      // Download individual files using transfer queue
       if (files.length > 0) {
         const batchID = files.length >= 50 ? `fb_download_${Date.now()}` : undefined
         const batchLabel = files.length >= 50 ? `Download: ${files.length} files` : undefined
         const requests = files.map(item => ({
           type: 'download',
-          source: item.id, // Remote file ID
+          source: item.id,
           dest: destLocalPath.endsWith('/')
             ? destLocalPath + item.name
             : destLocalPath + '/' + item.name,
@@ -509,38 +554,61 @@ export function FileBrowserTab() {
           batchID,
           batchLabel,
         }))
-
         await App.StartTransfers(requests)
       }
 
       clearRemoteSelection()
 
-      // Build status message
       const statusParts = []
-      if (folders.length > 0) {
-        statusParts.push(`${folders.length} folder(s)`)
-      }
-      if (files.length > 0) {
-        statusParts.push(`${files.length} file(s)`)
-      }
+      if (folders.length > 0) statusParts.push(`${folders.length} folder(s)`)
+      if (files.length > 0) statusParts.push(`${files.length} file(s)`)
       setStatus(`Download started: ${statusParts.join(' and ')}.`)
 
-      // Switch to Transfers tab to show progress
       if (files.length > 0 || folders.length > 0) {
         switchToTab('Transfers')
       }
 
-      // Refresh local after a delay to show downloaded files
-      setTimeout(() => {
-        refreshLocal()
-      }, 2000)
+      setTimeout(() => { refreshLocal() }, 2000)
     } catch (error) {
       console.error('Download failed:', error)
       setStatus(`Download failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setIsDownloading(false)
     }
-  }, [downloadConfirm, clearRemoteSelection, refreshLocal, switchToTab])
+  }, [clearRemoteSelection, refreshLocal, switchToTab])
+
+  // Conflict dialog handlers
+  const handleConflictMerge = useCallback(() => {
+    if (!folderConflict) return
+    const { allFolders, files, destLocalPath } = folderConflict
+    setFolderConflict(null)
+    startFolderDownloads(allFolders, files, destLocalPath, 'merge')
+  }, [folderConflict, startFolderDownloads])
+
+  const handleConflictOverwrite = useCallback(() => {
+    if (!folderConflict) return
+    const { allFolders, files, destLocalPath } = folderConflict
+    setFolderConflict(null)
+    startFolderDownloads(allFolders, files, destLocalPath, 'overwrite')
+  }, [folderConflict, startFolderDownloads])
+
+  const handleConflictSkip = useCallback(() => {
+    if (!folderConflict) return
+    const { conflictingFolders, allFolders, files, destLocalPath } = folderConflict
+    setFolderConflict(null)
+    // Skip conflicting folders, download non-conflicting ones
+    const nonConflicting = allFolders.filter(f => !conflictingFolders.includes(f.name))
+    if (nonConflicting.length > 0 || files.length > 0) {
+      startFolderDownloads(nonConflicting, files, destLocalPath, 'merge')
+    } else {
+      setStatus('All folders skipped — nothing to download.')
+    }
+  }, [folderConflict, startFolderDownloads])
+
+  const handleConflictCancel = useCallback(() => {
+    setFolderConflict(null)
+    setStatus('Download cancelled.')
+  }, [])
 
   // Handle delete button click
   const handleDelete = useCallback(() => {
@@ -724,7 +792,7 @@ export function FileBrowserTab() {
         confirmText="Download"
         warning={
           downloadConfirm && downloadConfirm.folderCount > 0
-            ? `${downloadConfirm.folderCount} folder(s) will be downloaded recursively (merge mode: skip existing files).`
+            ? `${downloadConfirm.folderCount} folder(s) will be downloaded recursively.`
             : undefined
         }
         onConfirm={confirmDownload}
@@ -754,6 +822,58 @@ export function FileBrowserTab() {
         onConfirm={confirmMerge}
         onCancel={cancelMerge}
       />
+
+      {/* Folder download conflict dialog */}
+      {folderConflict && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-4 w-96 max-w-[90vw]">
+            <h3 className="text-lg font-medium mb-2">Folder Already Exists</h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+              {folderConflict.conflictingFolders.length === 1
+                ? `The folder "${folderConflict.conflictingFolders[0]}" already exists locally.`
+                : `${folderConflict.conflictingFolders.length} folders already exist locally:`}
+            </p>
+            {folderConflict.conflictingFolders.length > 1 && (
+              <ul className="text-sm text-gray-600 dark:text-gray-400 mb-3 ml-4 list-disc">
+                {folderConflict.conflictingFolders.map(name => (
+                  <li key={name}>{name}</li>
+                ))}
+              </ul>
+            )}
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              How would you like to proceed?
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={handleConflictMerge}
+                className="w-full px-4 py-2 text-sm text-white bg-blue-500 hover:bg-blue-600 rounded"
+              >
+                Merge — skip existing files
+              </button>
+              <button
+                onClick={handleConflictOverwrite}
+                className="w-full px-4 py-2 text-sm text-white bg-red-500 hover:bg-red-600 rounded"
+              >
+                Overwrite — delete and re-download
+              </button>
+              {folderConflict.allFolders.length > folderConflict.conflictingFolders.length && (
+                <button
+                  onClick={handleConflictSkip}
+                  className="w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded"
+                >
+                  Skip conflicting — download only new folders
+                </button>
+              )}
+              <button
+                onClick={handleConflictCancel}
+                className="w-full px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ErrorDialog
         isOpen={errorDialog !== null}

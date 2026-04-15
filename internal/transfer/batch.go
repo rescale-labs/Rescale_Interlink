@@ -251,8 +251,15 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 		var sampled []int64
 		itemsSinceSample := 0
 
-		for item := range ch {
-			if ctx.Err() != nil {
+		for {
+			var item T
+			var ok bool
+			select {
+			case item, ok = <-ch:
+				if !ok {
+					goto postLoop
+				}
+			case <-ctx.Done():
 				return
 			}
 
@@ -307,6 +314,7 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 				}
 			}
 		}
+	postLoop:
 
 		// Channel closed — if we never hit sample size, still compute adaptive
 		// from whatever we collected.

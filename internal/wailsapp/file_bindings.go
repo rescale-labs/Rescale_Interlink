@@ -460,7 +460,8 @@ type FolderDownloadResultDTO struct {
 // Scans remote folder via streaming, creates local directory structure, and queues files
 // to TransferService. Returns immediately — downloads begin within seconds as files are discovered.
 // folderName: the display name for the folder (used as the local folder name).
-func (a *App) StartFolderDownload(folderID string, folderName string, destPath string) FolderDownloadResultDTO {
+// conflictMode: "merge" (skip existing files), "overwrite" (delete existing folder first), or "" (default, same as merge).
+func (a *App) StartFolderDownload(folderID string, folderName string, destPath string, conflictMode string) FolderDownloadResultDTO {
 	displayName := folderName
 	if displayName == "" {
 		displayName = folderID
@@ -552,6 +553,22 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: "Invalid folder name: " + err.Error()}
 	}
 	rootOutputDir := filepath.Join(destPath, rootFolderName)
+
+	// Handle conflict mode for existing directories
+	if conflictMode == "overwrite" {
+		if _, err := os.Stat(rootOutputDir); err == nil {
+			emitLog(events.InfoLevel, fmt.Sprintf("Overwrite mode: removing existing folder %s", rootOutputDir))
+			if err := os.RemoveAll(rootOutputDir); err != nil {
+				scanCancel()
+				emitLog(events.ErrorLevel, fmt.Sprintf("Failed to remove existing folder: %s", err.Error()))
+				emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "Failed to remove existing folder: "+err.Error(), "", events.EnumPhaseError)
+				return FolderDownloadResultDTO{Error: "Failed to remove existing folder: " + err.Error()}
+			}
+		}
+	}
+
+	mergeMode := conflictMode == "merge" || conflictMode == ""
+
 	if err := os.MkdirAll(rootOutputDir, 0755); err != nil {
 		scanCancel() // Release context resources on early return
 		emitLog(events.ErrorLevel, fmt.Sprintf("Failed to create root folder: %s", err.Error()))
@@ -638,6 +655,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", event.File.RelativePath, pathErr.Error()))
 					continue
 				}
+				// In merge mode, skip files that already exist locally
+				if mergeMode {
+					if _, err := os.Stat(localPath); err == nil {
+						continue
+					}
+				}
 				req := services.TransferRequest{
 					Type:       services.TransferTypeDownload,
 					Source:     event.File.FileID,
@@ -715,6 +738,29 @@ type FolderExistsCheckDTO struct {
 	Exists   bool   `json:"exists"`             // True if a visible folder with this name exists
 	FolderID string `json:"folderId,omitempty"` // ID of existing folder (if found)
 	Error    string `json:"error,omitempty"`    // Error message if check failed
+}
+
+// LocalFolderExistsCheckDTO returns info about whether a local folder exists.
+type LocalFolderExistsCheckDTO struct {
+	Exists bool   `json:"exists"`
+	Error  string `json:"error,omitempty"`
+}
+
+// CheckLocalFolderExists checks if a local folder with the given name already exists
+// at the destination path. Used to show conflict dialog before folder download.
+func (a *App) CheckLocalFolderExists(folderName string, destPath string) LocalFolderExistsCheckDTO {
+	fullPath := filepath.Join(destPath, folderName)
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return LocalFolderExistsCheckDTO{Exists: false}
+		}
+		return LocalFolderExistsCheckDTO{Error: fmt.Sprintf("Failed to check path: %s", err.Error())}
+	}
+	if !info.IsDir() {
+		return LocalFolderExistsCheckDTO{Error: fmt.Sprintf("Path exists but is a file, not a folder: %s", fullPath)}
+	}
+	return LocalFolderExistsCheckDTO{Exists: true}
 }
 
 // CheckFolderExistsForUpload checks if a folder with the given name already exists

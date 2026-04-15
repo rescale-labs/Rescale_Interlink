@@ -207,7 +207,8 @@ const BatchRow = memo(function BatchRow({
   const isActive = batch.queued > 0 || batch.active > 0 || !batch.totalKnown
   const isAllComplete = batch.totalKnown && batch.total > 0 && batch.completed === batch.total
   const hasFailed = batch.failed > 0
-  const isFileBrowser = batch.sourceLabel === 'FileBrowser'
+  const hasCancelled = batch.cancelled > 0
+  const isPartial = !isActive && !isAllComplete && batch.completed > 0 && (hasFailed || hasCancelled)
 
   // Use backend-computed ETA — smoothed and handles discovered-during-scan bytes correctly
   const etaFormatted = batch.etaSeconds > 0 ? formatETA(batch.etaSeconds * 1000) : ''
@@ -233,7 +234,9 @@ const BatchRow = memo(function BatchRow({
 
   // Status color for progress bar
   const barColor = isAllComplete ? 'bg-green-500' :
+    isPartial ? 'bg-yellow-500' :
     hasFailed && !isActive ? 'bg-red-500' :
+    hasCancelled && !isActive ? 'bg-gray-400' :
     'bg-blue-500'
 
   return (
@@ -363,17 +366,29 @@ const BatchRow = memo(function BatchRow({
               Complete
             </span>
           )}
-          {hasFailed && !isActive && !isAllComplete && (
+          {isPartial && (
+            <span className="text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
+              <ExclamationTriangleIcon className="w-4 h-4" />
+              {batch.completed} done{hasFailed ? `, ${batch.failed} failed` : ''}{hasCancelled ? `, ${batch.cancelled} cancelled` : ''}
+            </span>
+          )}
+          {hasFailed && !isActive && !isAllComplete && !isPartial && (
             <span className="text-red-500 flex items-center gap-1">
               <ExclamationCircleIcon className="w-4 h-4" />
               {batch.failed} failed
             </span>
           )}
+          {hasCancelled && !isActive && !isAllComplete && !isPartial && !hasFailed && (
+            <span className="text-gray-500 flex items-center gap-1">
+              <XMarkIcon className="w-4 h-4" />
+              Cancelled
+            </span>
+          )}
         </div>
 
-        {/* Action buttons — only for FileBrowser source batches */}
+        {/* Action buttons */}
         <div className="flex-shrink-0 w-20" onClick={e => e.stopPropagation()}>
-          {isActive && isFileBrowser && (
+          {isActive && (
             <button
               onClick={onCancel}
               className="flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30 rounded"
@@ -382,7 +397,7 @@ const BatchRow = memo(function BatchRow({
               Cancel
             </button>
           )}
-          {hasFailed && !isActive && isFileBrowser && (
+          {hasFailed && !isActive && (
             <button
               onClick={onRetryFailed}
               className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"
@@ -715,9 +730,9 @@ const TransferRow = memo(function TransferRow({ task, onCancel, onRetry, indent 
         </span>
       </div>
 
-      {/* Action buttons — only for FileBrowser tasks (pipeline manages its own retry/cancel) */}
+      {/* Action buttons */}
       <div className="flex-shrink-0 w-20">
-        {isActive && (!task.sourceLabel || task.sourceLabel === 'FileBrowser') && (
+        {isActive && (
           <button
             onClick={() => onCancel(task.id)}
             className="flex items-center gap-1 px-2 py-1 text-xs text-red-600 hover:bg-red-100 dark:hover:bg-red-900/30 rounded"
@@ -726,7 +741,7 @@ const TransferRow = memo(function TransferRow({ task, onCancel, onRetry, indent 
             Cancel
           </button>
         )}
-        {canRetry && (!task.sourceLabel || task.sourceLabel === 'FileBrowser') && (
+        {canRetry && (
           <button
             onClick={() => onRetry(task.id)}
             className="flex items-center gap-1 px-2 py-1 text-xs text-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"

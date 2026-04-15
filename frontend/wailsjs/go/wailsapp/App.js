@@ -38,6 +38,10 @@ export function CheckForUpdates() {
   return window['go']['wailsapp']['App']['CheckForUpdates']();
 }
 
+export function CheckLocalFolderExists(arg1, arg2) {
+  return window['go']['wailsapp']['App']['CheckLocalFolderExists'](arg1, arg2);
+}
+
 export function ClearCatalogCache() {
   return window['go']['wailsapp']['App']['ClearCatalogCache']();
 }
@@ -338,8 +342,8 @@ export function StartDaemon() {
   return window['go']['wailsapp']['App']['StartDaemon']();
 }
 
-export function StartFolderDownload(arg1, arg2, arg3) {
-  return window['go']['wailsapp']['App']['StartFolderDownload'](arg1, arg2, arg3);
+export function StartFolderDownload(arg1, arg2, arg3, arg4) {
+  return window['go']['wailsapp']['App']['StartFolderDownload'](arg1, arg2, arg3, arg4);
 }
 
 export function StartFolderUpload(arg1, arg2, arg3) {

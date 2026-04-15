@@ -13,6 +13,7 @@ import (
 	nethttp "net/http"
 	"net/http/httptrace"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,14 @@ import (
 	"github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 )
+
+// shouldUseFIPSEndpoint returns true if the platform URL is an ITAR/GovCloud
+// deployment that requires FIPS 140-validated S3 endpoints.
+func shouldUseFIPSEndpoint(platformURL string) bool {
+	lower := strings.ToLower(platformURL)
+	return strings.Contains(lower, "itar.rescale-gov.com") ||
+		strings.Contains(lower, "itar.rescale.com")
+}
 
 // S3Client wraps the AWS S3 client with auto-refreshing credentials and connection pooling.
 // This is the core S3 client used by all provider operations (streaming, pre-encrypt, download).
@@ -91,11 +100,16 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 
 	// Load AWS config with custom HTTP client and auto-refreshing credentials
 	t2 := time.Now()
-	cfg, err := config.LoadDefaultConfig(ctx,
+	configOpts := []func(*config.LoadOptions) error{
 		config.WithRegion(storageInfo.ConnectionSettings.Region),
 		config.WithHTTPClient(httpClient),
 		config.WithCredentialsProvider(credCache),
-	)
+	}
+	if shouldUseFIPSEndpoint(purCfg.APIBaseURL) {
+		configOpts = append(configOpts, config.WithUseFIPSEndpoint(aws.FIPSEndpointStateEnabled))
+		log.Printf("[S3] FIPS endpoint enabled for ITAR platform: %s", purCfg.APIBaseURL)
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, configOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
@@ -184,7 +198,7 @@ func (c *S3Client) EnsureFreshCredentials(ctx context.Context) error {
 
 	// IMPORTANT: Reuse existing HTTP client instead of creating new one
 	// This preserves the connection pool and prevents TLS handshake overhead
-	cfg, err := config.LoadDefaultConfig(ctx,
+	configOpts := []func(*config.LoadOptions) error{
 		config.WithRegion(c.storageInfo.ConnectionSettings.Region),
 		config.WithHTTPClient(c.httpClient), // Reuse existing HTTP client!
 		config.WithCredentialsProvider(awscreds.NewStaticCredentialsProvider(
@@ -192,7 +206,11 @@ func (c *S3Client) EnsureFreshCredentials(ctx context.Context) error {
 			s3Creds.SecretKey,
 			s3Creds.SessionToken,
 		)),
-	)
+	}
+	if c.apiClient != nil && shouldUseFIPSEndpoint(c.apiClient.GetConfig().APIBaseURL) {
+		configOpts = append(configOpts, config.WithUseFIPSEndpoint(aws.FIPSEndpointStateEnabled))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, configOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
