@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.9.3-green)
+![Status](https://img.shields.io/badge/status-v4.9.4-green)
 
 ---
 
@@ -21,12 +21,14 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ---
 
-## What's New in v4.9.3
+## What's New in v4.9.4
 
-- **CLI Compatibility Mode**: Drop-in replacement for `rescale-cli` — activate with `--compat` or symlink. See [CLI_GUIDE.md](CLI_GUIDE.md#compatibility-mode) and [Compatibility Reference](CLI_GUIDE.md#compatibility-reference).
-- **`jobs watch` Command**: Monitor running jobs and download output files as they appear.
-- **S3 FIPS Endpoints for ITAR** (v4.9.2): Automatic FIPS-validated S3 endpoints for ITAR platforms (`itar.rescale.com`, `itar.rescale-gov.com`).
-- **Security Hardening** (v4.9.2–v4.9.3): AWS SDK security bump, Windows service credential isolation, dependency vulnerability remediation.
+- **Unified Transfers tab**: Auto-download transfers now appear alongside GUI transfers with a `Daemon` badge, and per-row Cancel/Retry works across both engines.
+- **Tag-based re-download**: Removing the `downloaded` tag on a job in the Rescale web UI triggers a fresh download on the next poll. Tag-apply failures are retried without re-downloading the files.
+- **Adaptive daemon concurrency**: Auto-download now transfers multi-file jobs in parallel using the same engine as the GUI, not one file at a time.
+- **Save-time path validation**: Mapped-drive and UNC download paths are rejected at save time on Windows with a clear error.
+- **Security hardening**: Explicit Windows DACL on the API token file; tightened IPC authorization for all user-scoped operations.
+- **Cross-platform clarity**: macOS/Linux Auto-Download tab now makes the session-scoped lifecycle explicit; tray is documented as Windows-MSI-only.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -236,7 +238,7 @@ rescale-int daemon status
 rescale-int daemon stop
 ```
 
-In the GUI, the Setup tab provides start/stop/pause/resume buttons, status indicators, and "Scan Now" for immediate job checks. On Windows (MSI), a tray icon provides the same controls.
+In the GUI, the Setup tab provides start/stop/pause/resume buttons, status indicators, and "Scan Now" for immediate job checks. On **Windows MSI installs only**, a tray icon provides the same controls; the portable Windows distribution, macOS, and Linux do not include a tray — the main GUI and (on Windows) toast notifications fill that role.
 
 For auto-start on login (macOS launchd, Linux systemd), see [CLI_GUIDE.md](CLI_GUIDE.md#auto-start-on-login).
 
@@ -267,7 +269,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system design and code organ
 rescale-int/
 ├── cmd/
 │   ├── rescale-int/          # CLI binary entry point
-│   └── rescale-int-tray/     # Windows system tray companion
+│   └── rescale-int-tray/     # Windows system tray companion (MSI install only)
 │
 ├── frontend/                 # Wails React frontend
 │   ├── src/
@@ -366,9 +368,10 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Developer onboarding guide
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Version history and release details
 - **[FEATURE_SUMMARY.md](FEATURE_SUMMARY.md)** - Comprehensive feature list with source references
+- **[docs/LOG_LOCATIONS.md](docs/LOG_LOCATIONS.md)** - Where Interlink writes logs, per platform
 
 ---
 
-**Version**: 4.9.3
+**Version**: 4.9.4
 **Status**: Production Ready
-**Last Updated**: April 15, 2026
+**Last Updated**: April 19, 2026

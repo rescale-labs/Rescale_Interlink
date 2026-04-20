@@ -179,15 +179,14 @@ func DaemonConfigPathForUser(userProfileDir string) string {
 }
 
 // StateFilePathForUser returns the autodownload state file path for a user.
-// On Windows, uses AppData\Local\Rescale\Interlink\state\ (consistent with
-// install/logs paths).
 //   - Windows: <userProfileDir>\AppData\Local\Rescale\Interlink\state\daemon-state.json
-//   - Unix: <userProfileDir>/.config/rescale-int/daemon-state.json
+//   - Unix: <userProfileDir>/.config/rescale/daemon-state.json (pre-Plan-2
+//     this was rescale-int/; Load() migrates on first read).
 func StateFilePathForUser(userProfileDir string) string {
 	if runtime.GOOS == "windows" {
 		return filepath.Join(userProfileDir, "AppData", "Local", "Rescale", "Interlink", "state", "daemon-state.json")
 	}
-	return filepath.Join(userProfileDir, ".config", "rescale-int", "daemon-state.json")
+	return filepath.Join(userProfileDir, ".config", "rescale", "daemon-state.json")
 }
 
 // DefaultDownloadFolder returns the platform-specific default download folder.

@@ -287,6 +287,10 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 		ts.queue.RegisterBatchCancel(batchID, batchCancel)
 	}
 
+	// PreRegisterBatch implicitly marks scan-in-progress so BatchStats
+	// reports TotalKnown=false until registration finishes. Paired with
+	// MarkBatchScanInProgress(false) in the registration goroutine — this
+	// is what WaitForBatch polls on.
 	ts.queue.PreRegisterBatch(batchID, batchLabel, "download", sourceLabel)
 
 	// Dispatch channel: registration goroutine → RunBatchFromChannel
@@ -297,6 +301,9 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 	go func() {
 		defer close(dispatchCh)
 		defer ts.queue.CleanupBatch(batchID)
+		// Registration finished: flip TotalKnown=true so WaitForBatch callers
+		// know the task count is final. Must fire before CleanupBatch.
+		defer ts.queue.MarkBatchScanInProgress(batchID, false)
 
 		for {
 			select {
@@ -916,6 +923,52 @@ func (ts *TransferService) CancelTransfer(taskID string) error {
 
 func (ts *TransferService) CancelAll() {
 	ts.queue.CancelAll()
+}
+
+// CancelBatch cancels all non-terminal tasks in a specific batch. Mirrors
+// the GUI's per-batch cancel action. Used by the daemon's IPC cancel
+// handler and by daemon shutdown.
+func (ts *TransferService) CancelBatch(batchID string) error {
+	return ts.queue.CancelBatch(batchID)
+}
+
+// RetryFailedInBatch retries all failed tasks in a batch. Mirrors the GUI
+// retry-failed action. Used by the daemon's IPC retry handler.
+func (ts *TransferService) RetryFailedInBatch(batchID string) error {
+	return ts.queue.RetryFailedInBatch(batchID)
+}
+
+// WaitForBatch blocks until the batch's registration phase is finished
+// (TotalKnown=true) AND all its tasks are in terminal state, or until ctx
+// is cancelled. Correctly handles the empty-batch case (Total=0 with
+// TotalKnown=true returns immediately after registration closes) and
+// registration gaps (WaitForBatch never returns while the registration
+// goroutine is still running).
+//
+// Used by the daemon to know when a download batch is finished so it can
+// decide OutcomeDownloaded vs. OutcomePartialFailure and apply the
+// downloaded tag.
+func (ts *TransferService) WaitForBatch(ctx context.Context, batchID string) (transfer.BatchStats, error) {
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return transfer.BatchStats{}, ctx.Err()
+		case <-t.C:
+			bs, ok := ts.queue.GetBatchStats(batchID)
+			if !ok {
+				continue // batch not yet registered, or already cleaned up
+			}
+			if !bs.TotalKnown {
+				continue // registration still running
+			}
+			nonTerminal := bs.Queued + bs.Active
+			if nonTerminal == 0 {
+				return bs, nil
+			}
+		}
+	}
 }
 
 func (ts *TransferService) RetryTransfer(taskID string) (string, error) {

@@ -237,6 +237,18 @@ func LoadConfigCSV(path string) (*Config, error) {
 }
 
 // SaveConfigCSV saves configuration to a CSV file
+// Secrets registry (spec §4.3, §11.2):
+//
+//	Persisted to disk (strict permissions):
+//	  - API key → token file (owner-only ACL via WriteTokenFile).
+//	Never persisted, prompted per-session:
+//	  - Proxy password.
+//
+// Before adding a new field that holds a secret, decide which list it
+// belongs in and document it here. Persisting a new secret is a security
+// decision (threat-model change), not an implementation convenience —
+// revisit spec §11 before choosing the persisted list.
+//
 // CSV format: key,value pairs
 func SaveConfigCSV(cfg *Config, path string) error {
 	// Ensure parent directory exists (fixes Windows issue where directory may not exist)
@@ -492,30 +504,51 @@ const ConfigDir = "rescale"
 const OldConfigDir = "rescale-int"
 
 // getConfigDir returns the platform-appropriate config directory.
-// - Windows: %APPDATA%\Rescale\Interlink (standard Windows location)
-// - Unix: ~/.config/rescale (XDG standard)
+//   - Windows: %LOCALAPPDATA%\Rescale\Interlink — Roaming was used until
+//     Plan 2 moved it to Local per spec §3.2. Credentials no longer sync
+//     between machines.
+//   - Unix: ~/.config/rescale (XDG standard)
 func getConfigDir() string {
 	if runtime.GOOS == "windows" {
-		appData := os.Getenv("APPDATA")
-		if appData != "" {
-			return filepath.Join(appData, "Rescale", "Interlink")
+		if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+			return filepath.Join(localAppData, "Rescale", "Interlink")
 		}
-		// Fallback to USERPROFILE if APPDATA not set
+		// Fallback to USERPROFILE if LOCALAPPDATA not set.
 		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
-			return filepath.Join(userProfile, "AppData", "Roaming", "Rescale", "Interlink")
+			return filepath.Join(userProfile, "AppData", "Local", "Rescale", "Interlink")
 		}
 	}
-	// Unix: use XDG standard ~/.config/rescale
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".config", ConfigDir)
 	}
 	return ""
 }
 
-// getOldConfigDir returns legacy config directory for migration checking.
-func getOldConfigDir() string {
+// getOldConfigDirs returns legacy config directories for read-side fallback
+// during the transition window. Order: first-match-wins on read.
+//   - Windows: %APPDATA%\Rescale\Interlink (Roaming — pre-Plan-2 location).
+//   - Unix: ~/.config/rescale-int (pre-rename — only state/PID ever lived here).
+func getOldConfigDirs() []string {
+	if runtime.GOOS == "windows" {
+		if appData := os.Getenv("APPDATA"); appData != "" {
+			return []string{filepath.Join(appData, "Rescale", "Interlink")}
+		}
+		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
+			return []string{filepath.Join(userProfile, "AppData", "Roaming", "Rescale", "Interlink")}
+		}
+		return nil
+	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".config", OldConfigDir)
+		return []string{filepath.Join(home, ".config", OldConfigDir)}
+	}
+	return nil
+}
+
+// getOldConfigDir is retained for callers using the single-old-dir API.
+// Returns the first legacy dir; empty if none.
+func getOldConfigDir() string {
+	if dirs := getOldConfigDirs(); len(dirs) > 0 {
+		return dirs[0]
 	}
 	return ""
 }
@@ -550,22 +583,30 @@ func GetDefaultConfigPath() string {
 	return newPath
 }
 
-// GetConfigPathForProfile returns the config.csv path for a specific user profile.
-// Used by the Windows service to load per-user config.csv for correct
-// APIBaseURL and proxy settings instead of hardcoding DefaultPlatformURL.
-//   - Windows: <userProfilePath>\AppData\Roaming\Rescale\Interlink\config.csv
-//   - Unix: <userProfilePath>/.config/rescale/config.csv
+// GetConfigPathForProfile returns the config.csv path for a specific user
+// profile. Used by the Windows service to load per-user config.csv for
+// correct APIBaseURL and proxy settings instead of hardcoding
+// DefaultPlatformURL.
 //
-// This is a direct path construction, not a migration-aware lookup.
-// GetDefaultConfigPath() has old-path fallback logic, but that depends on
-// os.UserHomeDir() which resolves to SYSTEM's home in service mode.
+//   - Windows: <userProfilePath>\AppData\Local\Rescale\Interlink\config.csv.
+//     Falls back to the Roaming location for the transition window when
+//     Local is missing but Roaming exists — so the per-profile migration
+//     (see migrations.go) can run before the first read.
+//   - Unix: <userProfilePath>/.config/rescale/config.csv.
 func GetConfigPathForProfile(userProfilePath string) string {
 	if userProfilePath == "" {
 		return ""
 	}
 	if runtime.GOOS == "windows" {
-		appData := filepath.Join(userProfilePath, "AppData", "Roaming")
-		return filepath.Join(appData, "Rescale", "Interlink", "config.csv")
+		newPath := filepath.Join(userProfilePath, "AppData", "Local", "Rescale", "Interlink", "config.csv")
+		if _, err := os.Stat(newPath); err == nil {
+			return newPath
+		}
+		oldPath := filepath.Join(userProfilePath, "AppData", "Roaming", "Rescale", "Interlink", "config.csv")
+		if _, err := os.Stat(oldPath); err == nil {
+			return oldPath
+		}
+		return newPath
 	}
 	return filepath.Join(userProfilePath, ".config", ConfigDir, "config.csv")
 }
@@ -643,9 +684,28 @@ func WriteTokenFile(path, token string) error {
 		return fmt.Errorf("failed to create token directory: %w", err)
 	}
 
-	// Write token with secure permissions (0600 = owner read/write only)
+	// Write token with secure permissions (0600 = owner read/write only).
+	// On Windows, 0600 is honored via a coarser ACL — applyTokenFileACL
+	// below tightens it to the explicit (owner, Administrators, SYSTEM)
+	// model required by spec §11.2.
 	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
+	}
+
+	// Best-effort explicit-ACL tightening on Windows. A failure here does
+	// NOT block the write — the file has already been written with Go's
+	// default permissions, which is no worse than pre-Plan-4 behavior.
+	sid, sidErr := currentUserSID()
+	if sidErr != nil {
+		log.Printf("[WARN] could not capture current user SID for token ACL: %v", sidErr)
+		return nil
+	}
+	if sid == "" {
+		// Non-Windows: no-op by design.
+		return nil
+	}
+	if aclErr := applyTokenFileACL(path, sid); aclErr != nil {
+		log.Printf("[WARN] could not apply explicit ACL to token file %s: %v", path, aclErr)
 	}
 
 	return nil

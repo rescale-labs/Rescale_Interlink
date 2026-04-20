@@ -11,7 +11,9 @@ import (
 //
 // Locations:
 //   - Windows: %LOCALAPPDATA%\Rescale\Interlink\logs
-//   - Unix: ~/.config/rescale/logs
+//   - macOS and Linux: ~/.config/rescale/logs (spec §9.1 target; pinned
+//     explicitly so macOS does not resolve to ~/Library/Application Support/
+//     via os.UserConfigDir()).
 func LogDirectory() string {
 	if runtime.GOOS == "windows" {
 		localAppData := os.Getenv("LOCALAPPDATA")
@@ -25,14 +27,23 @@ func LogDirectory() string {
 		return filepath.Join(localAppData, "Rescale", "Interlink", "logs")
 	}
 
-	// Unix: Use XDG config directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "rescale-interlink-logs")
+	}
+	return filepath.Join(homeDir, ".config", "rescale", "logs")
+}
+
+// MacOSLegacyLogDirectory returns the pre-Plan-2 macOS log directory
+// (~/Library/Application Support/rescale/logs), used only by the one-time
+// log-file migration in RunStartupMigrations.
+func MacOSLegacyLogDirectory() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Join(os.TempDir(), "rescale-interlink-logs")
-		}
-		return filepath.Join(homeDir, ".config", "rescale", "logs")
+		return ""
 	}
 	return filepath.Join(configDir, "rescale", "logs")
 }

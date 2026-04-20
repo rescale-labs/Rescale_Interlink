@@ -26,6 +26,11 @@ const (
 	MsgGetRecentLogs     MessageType = "GetRecentLogs"
 	MsgReloadConfig      MessageType = "ReloadConfig"
 	MsgGetTransferStatus MessageType = "GetTransferStatus"
+	// Plan 3: per-row cancel/retry actions on daemon-initiated transfers.
+	// Payload carries BatchID or TaskID via Request extension below.
+	MsgCancelDaemonBatch      MessageType = "CancelDaemonBatch"
+	MsgCancelDaemonTransfer   MessageType = "CancelDaemonTransfer"
+	MsgRetryFailedInDaemonBatch MessageType = "RetryFailedInDaemonBatch"
 
 	// Response types (server -> client)
 	MsgStatusResponse         MessageType = "StatusResponse"
@@ -43,6 +48,10 @@ type Request struct {
 	// UserID is the user identifier (SID or username) for user-specific operations.
 	// Use "all" for operations that should affect all users.
 	UserID string `json:"user_id,omitempty"`
+	// BatchID is carried on CancelDaemonBatch / RetryFailedInDaemonBatch.
+	BatchID string `json:"batch_id,omitempty"`
+	// TaskID is carried on CancelDaemonTransfer.
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // Response represents an IPC response from server to client.
@@ -70,8 +79,13 @@ type StatusData struct {
 	// ActiveUsers is the number of users with running daemons
 	ActiveUsers int `json:"active_users"`
 
-	// LastError is the most recent error message (if any)
+	// LastError is the most recent error message (if any), as canonical
+	// English text (see CanonicalText in errors.go).
 	LastError string `json:"last_error,omitempty"`
+
+	// LastErrorCode is the machine-readable ErrorCode for LastError. Optional
+	// for backwards compatibility.
+	LastErrorCode ErrorCode `json:"last_error_code,omitempty"`
 
 	// Uptime is how long the service has been running
 	Uptime string `json:"uptime,omitempty"`
@@ -101,8 +115,14 @@ type UserStatus struct {
 	// JobsDownloaded is the total count of jobs downloaded for this user
 	JobsDownloaded int `json:"jobs_downloaded"`
 
-	// LastError is the most recent error for this user (if any)
+	// LastError is the most recent error for this user (if any), as canonical
+	// English text (see CanonicalText in errors.go).
 	LastError string `json:"last_error,omitempty"`
+
+	// ErrorCode is the machine-readable ErrorCode corresponding to LastError.
+	// Optional for backwards compatibility: older servers omit it, older
+	// clients ignore it. New code should prefer comparing on ErrorCode.
+	ErrorCode ErrorCode `json:"error_code,omitempty"`
 }
 
 // UserListData contains the list of user statuses.
@@ -141,25 +161,56 @@ type ReloadConfigData struct {
 	Error           string `json:"error,omitempty"`
 }
 
-// TransferBatchInfo represents a single daemon transfer batch in IPC format.
-// This is an IPC-native struct, not a Wails DTO. Wails bindings map separately.
-type TransferBatchInfo struct {
-	BatchID     string  `json:"batchID"`
-	BatchLabel  string  `json:"batchLabel"`
-	Total       int     `json:"total"`
-	Completed   int     `json:"completed"`
-	Failed      int     `json:"failed"`
-	Active      int     `json:"active"`
-	TotalBytes  int64   `json:"totalBytes"`
-	BytesDone   int64   `json:"bytesDone"`
+// TransferTaskInfo is the per-task projection of a daemon transfer task for
+// IPC. Mirrors services.TransferTask so the frontend renders daemon rows
+// with the same component as GUI rows.
+type TransferTaskInfo struct {
+	ID          string  `json:"id"`
+	Type        string  `json:"type"` // "download"
+	State       string  `json:"state"`
+	Name        string  `json:"name"`
+	Source      string  `json:"source"`
+	Dest        string  `json:"dest"`
+	Size        int64   `json:"size"`
+	Progress    float64 `json:"progress"`
 	Speed       float64 `json:"speed"`
-	StartedAt   int64   `json:"startedAt"`   // unix millis
-	CompletedAt int64   `json:"completedAt"` // zero if active
+	Error       string  `json:"error,omitempty"`
+	SourceLabel string  `json:"sourceLabel"` // always "Daemon"
+	BatchID     string  `json:"batchId"`
+	BatchLabel  string  `json:"batchLabel"`
+	CreatedAt   int64   `json:"createdAt"`
+	StartedAt   int64   `json:"startedAt,omitempty"`
+	CompletedAt int64   `json:"completedAt,omitempty"`
 }
 
-// TransferStatusData contains daemon transfer batch information.
-type TransferStatusData struct {
-	Batches []TransferBatchInfo `json:"batches"`
+// BatchStatsInfo is the per-batch projection for IPC; mirrors the GUI's
+// transfer.BatchStats shape. Used by the unified Transfers tab.
+type BatchStatsInfo struct {
+	BatchID      string  `json:"batchId"`
+	BatchLabel   string  `json:"batchLabel"`
+	Direction    string  `json:"direction"` // "download"
+	SourceLabel  string  `json:"sourceLabel"` // "Daemon"
+	Total        int     `json:"total"`
+	Queued       int     `json:"queued"`
+	Active       int     `json:"active"`
+	Completed    int     `json:"completed"`
+	Failed       int     `json:"failed"`
+	Cancelled    int     `json:"cancelled"`
+	TotalBytes   int64   `json:"totalBytes"`
+	Progress     float64 `json:"progress"`
+	Speed        float64 `json:"speed"`
+	TotalKnown   bool    `json:"totalKnown"`
+	StartedAt    int64   `json:"startedAt,omitempty"`
+}
+
+// DaemonTransferSnapshot is a point-in-time view of the daemon's transfer
+// queue, filtered to SourceLabel=Daemon. Replaces the earlier
+// TransferStatusData/TransferBatchInfo shape. Frontend merges this into
+// its unified tasks/batches arrays so daemon transfers render alongside
+// GUI transfers in one list.
+type DaemonTransferSnapshot struct {
+	Tasks   []TransferTaskInfo `json:"tasks"`
+	Batches []BatchStatsInfo   `json:"batches"`
 }
 
 // NewRequest creates a new IPC request.
@@ -202,29 +253,29 @@ func NewReloadConfigResponse(data *ReloadConfigData) *Response {
 	return &Response{Type: MsgReloadConfigResponse, Success: true, Data: data}
 }
 
-// NewTransferStatusResponse creates a transfer status response.
-func NewTransferStatusResponse(data *TransferStatusData) *Response {
+// NewDaemonTransferSnapshotResponse creates a transfer snapshot response.
+func NewDaemonTransferSnapshotResponse(data *DaemonTransferSnapshot) *Response {
 	return &Response{Type: MsgTransferStatusResponse, Success: true, Data: data}
 }
 
-// GetTransferStatusData extracts TransferStatusData from a response.
-// Returns nil if the response doesn't contain transfer status data.
-func (r *Response) GetTransferStatusData() *TransferStatusData {
+// GetDaemonTransferSnapshot extracts a DaemonTransferSnapshot from a
+// response. Returns nil if the response doesn't contain snapshot data.
+func (r *Response) GetDaemonTransferSnapshot() *DaemonTransferSnapshot {
 	if r.Data == nil {
 		return nil
 	}
 
 	switch v := r.Data.(type) {
-	case *TransferStatusData:
+	case *DaemonTransferSnapshot:
 		return v
-	case TransferStatusData:
+	case DaemonTransferSnapshot:
 		return &v
 	case map[string]interface{}:
 		data, err := json.Marshal(v)
 		if err != nil {
 			return nil
 		}
-		var result TransferStatusData
+		var result DaemonTransferSnapshot
 		if err := json.Unmarshal(data, &result); err != nil {
 			return nil
 		}

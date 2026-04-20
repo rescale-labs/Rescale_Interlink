@@ -61,8 +61,18 @@ type ServiceHandler interface {
 	// ReloadConfig requests daemon config reload.
 	ReloadConfig(userID string) *ReloadConfigData
 
-	// GetTransferStatus returns daemon transfer batch status.
-	GetTransferStatus(userID string) (*TransferStatusData, error)
+	// GetTransferStatus returns a snapshot of the daemon's transfer queue
+	// filtered to SourceLabel=Daemon.
+	GetTransferStatus(userID string) (*DaemonTransferSnapshot, error)
+
+	// CancelDaemonBatch cancels non-terminal tasks in a daemon batch.
+	CancelDaemonBatch(userID, batchID string) error
+
+	// CancelDaemonTransfer cancels one daemon task.
+	CancelDaemonTransfer(userID, taskID string) error
+
+	// RetryFailedInDaemonBatch retries failed tasks in a daemon batch.
+	RetryFailedInDaemonBatch(userID, batchID string) error
 }
 
 // Server handles IPC requests from clients via named pipe.
@@ -370,6 +380,57 @@ func getProcessOwnerSID(pid uint32) (string, error) {
 	return user.User.Sid.String(), nil
 }
 
+// resolveUserScope centralizes the spec §11.3 IPC authorization policy
+// so that every user-scoped handler inherits the same behavior:
+//
+//   - In service mode the returned userID is ALWAYS callerSID (req.UserID
+//     is ignored — a client cannot ask the service to act on another
+//     user's daemon).
+//   - In service mode, an empty callerSID fails-closed with an audit-log
+//     line and an error response. Silent scoping to userID="" violates
+//     §11.3 ("modify requests from an unidentifiable caller are rejected")
+//     and makes SID-based filtering of read responses meaningless.
+//   - When mustAuthorizeModify is true, authorizeModifyRequest gates the
+//     request regardless of mode (subprocess mode enforces owner match).
+//
+// In subprocess mode the returned userID is simply req.UserID — the
+// handler decides how to interpret an empty value. A handler that has a
+// sensible subprocess-mode default passes subprocessFallback; others
+// treat empty as an error after the helper returns.
+//
+// The policy is enforced over the full user-scoped message catalog by
+// TestServiceMode_UserScopedMessages_FailClosedWithoutCallerSID in
+// server_security_test.go — new handler types must be registered there
+// or the test will fail.
+func (s *Server) resolveUserScope(
+	operation string,
+	callerSID string,
+	reqUserID string,
+	subprocessFallback string,
+	mustAuthorizeModify bool,
+) (userID string, errResp *Response) {
+	if s.serviceMode {
+		if callerSID == "" {
+			s.logger.Info().
+				Str("operation", operation).
+				Msg("IPC request denied: could not identify caller")
+			return "", NewErrorResponse("unauthorized: could not identify caller")
+		}
+		userID = callerSID
+	} else {
+		userID = reqUserID
+		if userID == "" {
+			userID = subprocessFallback
+		}
+	}
+	if mustAuthorizeModify {
+		if err := s.authorizeModifyRequest(callerSID, operation); err != nil {
+			return "", NewErrorResponse(err.Error())
+		}
+	}
+	return userID, nil
+}
+
 // handleRequest processes a request and returns a response.
 func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 	switch req.Type {
@@ -397,16 +458,12 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewUserListResponse(users)
 
 	case MsgPauseUser:
-		// In service mode, always use callerSID to prevent cross-user operations
-		userID := req.UserID
-		if s.serviceMode {
-			userID = callerSID // Always scope to caller's daemon
+		userID, errResp := s.resolveUserScope("PauseUser", callerSID, req.UserID, "", true)
+		if errResp != nil {
+			return errResp
 		}
 		if userID == "" {
 			return NewErrorResponse("user_id required for PauseUser")
-		}
-		if err := s.authorizeModifyRequest(callerSID, "PauseUser"); err != nil {
-			return NewErrorResponse(err.Error())
 		}
 		if err := s.handler.PauseUser(userID); err != nil {
 			return NewErrorResponse(err.Error())
@@ -414,16 +471,12 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgResumeUser:
-		// In service mode, always use callerSID to prevent cross-user operations
-		userID := req.UserID
-		if s.serviceMode {
-			userID = callerSID // Always scope to caller's daemon
+		userID, errResp := s.resolveUserScope("ResumeUser", callerSID, req.UserID, "", true)
+		if errResp != nil {
+			return errResp
 		}
 		if userID == "" {
 			return NewErrorResponse("user_id required for ResumeUser")
-		}
-		if err := s.authorizeModifyRequest(callerSID, "ResumeUser"); err != nil {
-			return NewErrorResponse(err.Error())
 		}
 		if err := s.handler.ResumeUser(userID); err != nil {
 			return NewErrorResponse(err.Error())
@@ -431,15 +484,9 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgTriggerScan:
-		userID := req.UserID
-		// In service mode, always use callerSID to prevent cross-user operations
-		if s.serviceMode {
-			userID = callerSID // Always scope to caller's daemon
-		} else if userID == "" {
-			userID = "all"
-		}
-		if err := s.authorizeModifyRequest(callerSID, "TriggerScan"); err != nil {
-			return NewErrorResponse(err.Error())
+		userID, errResp := s.resolveUserScope("TriggerScan", callerSID, req.UserID, "all", true)
+		if errResp != nil {
+			return errResp
 		}
 		if err := s.handler.TriggerScan(userID); err != nil {
 			return NewErrorResponse(err.Error())
@@ -447,16 +494,18 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgOpenLogs:
-		// Scope to callerSID in service mode, fail-closed on missing SID
-		userID := req.UserID
-		if s.serviceMode && userID != "service" {
-			if callerSID == "" {
-				return NewErrorResponse("unauthorized: could not identify caller")
+		// OpenLogs has a service-scope bypass: a client may pass userID="service"
+		// to open the service's own logs in service mode. Any other value goes
+		// through the standard user-scope helper.
+		if s.serviceMode && req.UserID == "service" {
+			if err := s.handler.OpenLogs("service"); err != nil {
+				return NewErrorResponse(err.Error())
 			}
-			userID = callerSID // Scope to caller in service mode
+			return NewOKResponse()
 		}
-		if userID == "" {
-			userID = "service"
+		userID, errResp := s.resolveUserScope("OpenLogs", callerSID, req.UserID, "service", false)
+		if errResp != nil {
+			return errResp
 		}
 		if err := s.handler.OpenLogs(userID); err != nil {
 			return NewErrorResponse(err.Error())
@@ -482,37 +531,61 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgGetRecentLogs:
-		// In service mode, always use callerSID to prevent cross-user log access
-		userID := req.UserID
-		if s.serviceMode {
-			userID = callerSID // Always scope to caller's logs
+		userID, errResp := s.resolveUserScope("GetRecentLogs", callerSID, req.UserID, "", false)
+		if errResp != nil {
+			return errResp
 		}
 		logs := s.handler.GetRecentLogs(userID, 100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
 
 	case MsgReloadConfig:
-		// In service mode, always use callerSID for logging/scoping
-		userID := req.UserID
-		if s.serviceMode {
-			userID = callerSID
-		}
-		if err := s.authorizeModifyRequest(callerSID, "ReloadConfig"); err != nil {
-			return NewErrorResponse(err.Error())
+		userID, errResp := s.resolveUserScope("ReloadConfig", callerSID, req.UserID, "", true)
+		if errResp != nil {
+			return errResp
 		}
 		result := s.handler.ReloadConfig(userID)
 		return NewReloadConfigResponse(result)
 
 	case MsgGetTransferStatus:
-		// In service mode, always use callerSID to prevent cross-user status access
-		userID := req.UserID
-		if s.serviceMode {
-			userID = callerSID // Always scope to caller's transfers
+		userID, errResp := s.resolveUserScope("GetTransferStatus", callerSID, req.UserID, "", false)
+		if errResp != nil {
+			return errResp
 		}
 		data, err := s.handler.GetTransferStatus(userID)
 		if err != nil {
 			return NewErrorResponse(err.Error())
 		}
-		return NewTransferStatusResponse(data)
+		return NewDaemonTransferSnapshotResponse(data)
+
+	case MsgCancelDaemonBatch:
+		userID, errResp := s.resolveUserScope("CancelDaemonBatch", callerSID, req.UserID, "", true)
+		if errResp != nil {
+			return errResp
+		}
+		if err := s.handler.CancelDaemonBatch(userID, req.BatchID); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewOKResponse()
+
+	case MsgCancelDaemonTransfer:
+		userID, errResp := s.resolveUserScope("CancelDaemonTransfer", callerSID, req.UserID, "", true)
+		if errResp != nil {
+			return errResp
+		}
+		if err := s.handler.CancelDaemonTransfer(userID, req.TaskID); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewOKResponse()
+
+	case MsgRetryFailedInDaemonBatch:
+		userID, errResp := s.resolveUserScope("RetryFailedInDaemonBatch", callerSID, req.UserID, "", true)
+		if errResp != nil {
+			return errResp
+		}
+		if err := s.handler.RetryFailedInDaemonBatch(userID, req.BatchID); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewOKResponse()
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))

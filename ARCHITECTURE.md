@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.9.3
-**Last Updated**: April 15, 2026
+**Version**: 4.9.4
+**Last Updated**: April 19, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.9.3                     |
+|                 Rescale Interlink v4.9.4                     |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -73,7 +73,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 **Binaries:**
 - `rescale-int` (from `cmd/rescale-int/`): CLI-only. Rejects `--gui` with an error directing users to `rescale-int-gui`. Also serves as the compat-mode entry point when invoked as `rescale-cli`.
 - `rescale-int-gui` (from root `main.go`): Unified GUI+CLI. The `--gui` flag launches the Wails GUI.
-- `rescale-int-tray` (from `cmd/rescale-int-tray/`): Windows system tray companion for daemon status.
+- `rescale-int-tray` (from `cmd/rescale-int-tray/`): Windows system tray companion for daemon status. **Windows MSI installs only** — not shipped with the portable Windows distribution, macOS, or Linux builds.
 
 ---
 
@@ -85,7 +85,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 rescale-int/
 ├── cmd/
 │   ├── rescale-int/               # CLI-only binary entry point
-│   └── rescale-int-tray/          # Windows system tray companion
+│   └── rescale-int-tray/          # Windows system tray companion (MSI install only)
 │
 ├── frontend/                      # Wails React frontend
 │   ├── src/
@@ -534,10 +534,10 @@ Named pipe authorization with per-user SID matching. See SECURITY.md for details
 
 ### Daemon Transfer Visibility
 
-The daemon auto-download process provides GUI visibility via IPC-based observation:
-- `DaemonTransferTracker` (`internal/daemon/transfer_tracker.go`): In-memory tracker with per-file accounting and progress.
-- IPC polling: `MsgGetTransferStatus` → `DaemonTransferTracker.GetStatus()` → GUI displays read-only batch rows.
-- Works in both subprocess mode (macOS/Linux) and Windows service mode.
+The daemon auto-download process routes all downloads through the same `TransferService` the GUI uses; there is no parallel transfer implementation inside `internal/daemon/`. GUI visibility is via IPC-based observation:
+- `Daemon.TransferService()` + `Daemon.Queue()` expose the shared machinery. IPC polling reads live task and batch state via `MsgGetTransferStatus` → `DaemonTransferSnapshot{Tasks, Batches}`.
+- The main Transfers tab renders daemon rows alongside GUI rows with a `Daemon` badge; per-row Cancel/Retry routes by `sourceLabel` through IPC commands (`MsgCancelDaemonBatch`, `MsgCancelDaemonTransfer`, `MsgRetryFailedInDaemonBatch`).
+- Works in both subprocess mode (macOS/Linux) and Windows service mode; service-mode routing goes through `MultiUserDaemon.userDaemon(...)` to the correct per-user daemon.
 
 ---
 
@@ -690,13 +690,13 @@ Transfer concurrency uses two layers sharing a single global thread pool (`resou
                                    │
               ┌────────────────────┼────────────────────┐
               │                    │                     │
-    ┌─────────▼─────────┐  ┌──────▼──────┐  ┌──────────▼─────────┐
-    │   RunBatch         │  │RunBatchFrom-│  │  ForceSequential   │
-    │   (known items)    │  │ Channel     │  │  (daemon mode)     │
-    │   adaptive workers │  │ (streaming) │  │  1 worker          │
-    └─────────┬─────────┘  └──────┬──────┘  └──────────┬─────────┘
-              │                    │                     │
-              └────────────────────┼────────────────────┘
+    ┌─────────▼─────────┐  ┌──────▼──────────────┐
+    │   RunBatch         │  │ StartStreamingDownloadBatch│
+    │   (known items)    │  │ (streaming — GUI folder    │
+    │   adaptive workers │  │  download AND daemon)      │
+    └─────────┬─────────┘  └──────┬──────────────┘
+              │                    │
+              └────────────────────┘
                                    │ per file
                         ┌──────────▼──────────┐
                         │  AllocateTransfer    │

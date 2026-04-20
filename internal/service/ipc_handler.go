@@ -99,6 +99,7 @@ func (h *ServiceIPCHandler) GetUserList() []ipc.UserStatus {
 			LastScanTime:   lastScanTime,
 			JobsDownloaded: s.JobsDownloaded,
 			LastError:      s.LastError,
+			ErrorCode:      s.ErrorCode,
 		})
 	}
 
@@ -148,28 +149,17 @@ func (h *ServiceIPCHandler) TriggerScan(userID string) error {
 	return h.service.TriggerUserScan(userID)
 }
 
-// OpenLogs returns the log location path for the user or service.
-// This method should NOT try to open explorer.exe from SYSTEM context,
-// as it will silently fail (GUI apps don't display when run as SYSTEM).
-// The tray app handles "View Logs" locally via viewLogs() which runs in user context.
+// OpenLogs ensures the log directory for the caller (or service) exists.
+// The tray app handles the actual "View Logs" open from user context, because
+// the service runs as SYSTEM and explorer.exe launched from SYSTEM does not
+// surface on the user's desktop.
 func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 	var logsDir string
 
-	if userID == "service" {
-		// Service logs are in the system-wide location
-		programData := os.Getenv("ProgramData")
-		if programData == "" {
-			programData = filepath.Join(os.Getenv("SystemDrive"), "ProgramData")
-			if programData == "ProgramData" {
-				programData = `C:\ProgramData`
-			}
-		}
-		logsDir = filepath.Join(programData, "Rescale", "Interlink", "logs")
-	} else if userID == "current" {
-		// Use centralized log directory for current user
+	switch userID {
+	case "service", "current", "":
 		logsDir = config.LogDirectory()
-	} else {
-		// Per-user: use centralized path function
+	default:
 		profileRoot := os.Getenv("PUBLIC")
 		if profileRoot != "" {
 			profileRoot = filepath.Dir(profileRoot)
@@ -182,15 +172,11 @@ func (h *ServiceIPCHandler) OpenLogs(userID string) error {
 		logsDir = config.LogDirectoryForUser(filepath.Join(profileRoot, userID))
 	}
 
-	// Log the path for debugging
 	h.logger.Debug().
 		Str("userID", userID).
 		Str("logsDir", logsDir).
 		Msg("OpenLogs request received")
 
-	// Do NOT try to run explorer.exe from SYSTEM context —
-	// it won't show on the user's desktop. The tray app handles this locally.
-	// Just ensure the directory exists and return success.
 	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		h.logger.Warn().Err(err).Str("dir", logsDir).Msg("Failed to create logs directory")
 		return fmt.Errorf("failed to create logs directory: %w", err)
@@ -216,9 +202,25 @@ func (h *ServiceIPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	}
 }
 
-// GetTransferStatus returns daemon transfer batch status for a specific user.
-func (h *ServiceIPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
+// GetTransferStatus returns a snapshot of the per-user daemon's transfer
+// queue filtered to SourceLabel=Daemon.
+func (h *ServiceIPCHandler) GetTransferStatus(userID string) (*ipc.DaemonTransferSnapshot, error) {
 	return h.service.GetUserTransferStatus(userID), nil
+}
+
+// CancelDaemonBatch cancels non-terminal tasks in a per-user daemon batch.
+func (h *ServiceIPCHandler) CancelDaemonBatch(userID, batchID string) error {
+	return h.service.CancelUserDaemonBatch(userID, batchID)
+}
+
+// CancelDaemonTransfer cancels one task in a per-user daemon.
+func (h *ServiceIPCHandler) CancelDaemonTransfer(userID, taskID string) error {
+	return h.service.CancelUserDaemonTransfer(userID, taskID)
+}
+
+// RetryFailedInDaemonBatch retries failed tasks in a per-user daemon batch.
+func (h *ServiceIPCHandler) RetryFailedInDaemonBatch(userID, batchID string) error {
+	return h.service.RetryFailedInUserDaemonBatch(userID, batchID)
 }
 
 // GetRecentLogs returns recent log entries from the daemon.

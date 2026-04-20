@@ -40,7 +40,7 @@ func InitFileLogger() error {
 	}
 
 	// Configure rotating file logger
-	logPath := filepath.Join(logDir, "interlink.log")
+	logPath := filepath.Join(logDir, config.InterlinkLogName)
 	fileLogger = &lumberjack.Logger{
 		Filename:   logPath,
 		MaxSize:    10, // MB per file

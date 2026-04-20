@@ -265,8 +265,8 @@ func (c *Client) GetRecentLogs(ctx context.Context, count int) ([]LogEntryData, 
 	return []LogEntryData{}, nil
 }
 
-// GetTransferStatus retrieves daemon transfer batch status.
-func (c *Client) GetTransferStatus(ctx context.Context) (*TransferStatusData, error) {
+// GetTransferStatus retrieves a snapshot of the daemon's transfer queue.
+func (c *Client) GetTransferStatus(ctx context.Context) (*DaemonTransferSnapshot, error) {
 	req := NewRequest(MsgGetTransferStatus)
 	resp, err := c.sendRequest(ctx, req)
 	if err != nil {
@@ -277,11 +277,55 @@ func (c *Client) GetTransferStatus(ctx context.Context) (*TransferStatusData, er
 		return nil, fmt.Errorf("server error: %s", resp.Error)
 	}
 
-	data := resp.GetTransferStatusData()
+	data := resp.GetDaemonTransferSnapshot()
 	if data == nil {
-		return &TransferStatusData{}, nil
+		return &DaemonTransferSnapshot{}, nil
 	}
 	return data, nil
+}
+
+// CancelDaemonBatch asks the daemon to cancel all non-terminal tasks in a
+// specific batch. userID is used in service mode to route to the correct
+// per-user daemon; subprocess mode ignores it.
+func (c *Client) CancelDaemonBatch(ctx context.Context, userID, batchID string) error {
+	req := NewRequestWithUser(MsgCancelDaemonBatch, userID)
+	req.BatchID = batchID
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
+}
+
+// CancelDaemonTransfer asks the daemon to cancel a single task.
+func (c *Client) CancelDaemonTransfer(ctx context.Context, userID, taskID string) error {
+	req := NewRequestWithUser(MsgCancelDaemonTransfer, userID)
+	req.TaskID = taskID
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
+}
+
+// RetryFailedInDaemonBatch asks the daemon to retry all failed tasks in a batch.
+func (c *Client) RetryFailedInDaemonBatch(ctx context.Context, userID, batchID string) error {
+	req := NewRequestWithUser(MsgRetryFailedInDaemonBatch, userID)
+	req.BatchID = batchID
+	resp, err := c.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("server error: %s", resp.Error)
+	}
+	return nil
 }
 
 // ReloadConfig sends a config reload request to the daemon.

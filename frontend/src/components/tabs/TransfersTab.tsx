@@ -14,7 +14,7 @@ import {
   ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useTransferStore, TransferTask, TransferBatch, DaemonBatchStatus, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA } from '../../stores'
+import { useTransferStore, TransferTask, TransferBatch, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA } from '../../stores'
 
 // Format file size (issue #18)
 function formatSize(bytes: number): string {
@@ -270,6 +270,14 @@ const BatchRow = memo(function BatchRow({
                 <ArrowUpIcon className="w-3 h-3 text-blue-500 flex-shrink-0" />
               ) : (
                 <ArrowDownIcon className="w-3 h-3 text-green-500 flex-shrink-0" />
+              )}
+              {batch.sourceLabel === 'Daemon' && (
+                <span
+                  className="text-[10px] px-1 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded flex-shrink-0"
+                  title="Auto-download (daemon)"
+                >
+                  Daemon
+                </span>
               )}
             </div>
             <div className="text-xs text-gray-500">
@@ -544,91 +552,8 @@ function getShortErrorLabel(task: TransferTask): string {
   return task.error
 }
 
-interface DaemonBatchRowProps {
-  batch: DaemonBatchStatus
-}
-
-const DaemonBatchRow = memo(function DaemonBatchRow({ batch }: DaemonBatchRowProps) {
-  const isActive = batch.completedAt === 0
-  const isAllComplete = batch.completed === batch.total && !isActive
-  const hasFailed = batch.failed > 0
-  const progress = batch.totalBytes > 0 ? batch.bytesDone / batch.totalBytes : 0
-
-  const remainingBytes = batch.totalBytes * (1 - progress)
-  const etaFormatted = batch.speed > 0 ? formatETA((remainingBytes / batch.speed) * 1000) : ''
-  const speedFormatted = formatSpeed(batch.speed)
-
-  const barColor = isAllComplete ? 'bg-green-500' :
-    hasFailed && !isActive ? 'bg-red-500' :
-    'bg-blue-500'
-
-  return (
-    <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/20">
-      {/* Spacer to align with batch rows (no expand chevron) */}
-      <div className="flex-shrink-0 w-6" />
-
-      {/* Icon and label */}
-      <div className="flex items-center gap-2 flex-shrink-0 w-48">
-        <ArrowDownIcon className="w-5 h-5 text-purple-500" />
-        <div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium truncate" title={batch.batchLabel}>
-              {batch.batchLabel.length > 22 ? batch.batchLabel.slice(0, 19) + '...' : batch.batchLabel}
-            </span>
-            <span className="text-[10px] px-1 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 rounded">
-              Auto
-            </span>
-          </div>
-          <div className="text-xs text-gray-500">
-            {formatNumber(batch.completed)} / {formatNumber(batch.total)} files
-            {batch.totalBytes > 0 && ` — ${formatSize(batch.totalBytes)}`}
-          </div>
-        </div>
-      </div>
-
-      {/* Progress bar */}
-      <div className="flex-1 min-w-0">
-        <div className="relative h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-          <div
-            className={clsx('absolute top-0 left-0 h-full rounded-full transition-all duration-300', barColor)}
-            style={{ width: `${progress * 100}%` }}
-          />
-        </div>
-        {/* 3-column grid prevents layout jump when speed/ETA appear */}
-        <div className="grid grid-cols-3 mt-1 text-xs text-gray-500">
-          <span>{Math.round(progress * 100)}%</span>
-          <span className="text-center">{speedFormatted || ''}</span>
-          <span className="text-right">{etaFormatted ? `ETA: ${etaFormatted}` : ''}</span>
-        </div>
-      </div>
-
-      {/* Status */}
-      <div className="flex items-center gap-1 flex-shrink-0 w-32 text-sm">
-        {isActive && (
-          <span className="text-blue-500 flex items-center gap-1">
-            <ArrowPathIcon className="w-4 h-4 animate-spin" />
-            Downloading
-          </span>
-        )}
-        {isAllComplete && (
-          <span className="text-green-500 flex items-center gap-1">
-            <CheckCircleIcon className="w-4 h-4" />
-            Complete
-          </span>
-        )}
-        {hasFailed && !isActive && !isAllComplete && (
-          <span className="text-red-500 flex items-center gap-1">
-            <ExclamationCircleIcon className="w-4 h-4" />
-            {batch.failed} failed
-          </span>
-        )}
-      </div>
-
-      {/* No actions — daemon manages its own lifecycle */}
-      <div className="flex-shrink-0 w-20" />
-    </div>
-  )
-})
+// Plan 3: DaemonBatchRow removed. Daemon-initiated transfers now render in
+// the unified batch list with a Daemon badge (see BatchRow).
 
 function DiskSpaceBanner({ incident, onDismiss }: {
   incident: { count: number; available: string; needed: string }
@@ -761,7 +686,6 @@ export function TransfersTab() {
     stats,
     enumerations,
     batches,
-    daemonBatches, // read-only daemon auto-download batches
     expandedBatches,
     batchTasks,
     batchStatusFilter,
@@ -856,7 +780,7 @@ export function TransfersTab() {
     return stats.completed + stats.failed + stats.cancelled
   }, [stats])
 
-  const isEmpty = tasks.length === 0 && enumerations.length === 0 && batches.length === 0 && daemonBatches.length === 0 && !folderCheckStatus
+  const isEmpty = tasks.length === 0 && enumerations.length === 0 && batches.length === 0 && !folderCheckStatus
 
   return (
     <div className="flex flex-col h-full">
@@ -956,12 +880,8 @@ export function TransfersTab() {
               />
             ))}
 
-            {daemonBatches.map((batch) => (
-              <DaemonBatchRow
-                key={`daemon_${batch.batchID}`}
-                batch={batch}
-              />
-            ))}
+            {/* Plan 3: daemon batches are merged into `batches` above and
+                rendered via BatchRow with a Daemon badge. */}
 
             {/* Ungrouped transfer rows */}
             {tasks.map((task) => (

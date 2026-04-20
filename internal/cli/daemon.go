@@ -127,6 +127,10 @@ Examples:
   # Run once and exit (useful for cron jobs)
   rescale-int daemon run --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Plan 2 path migrations (idempotent). Must run before any file
+			// I/O that reads credentials / state / logs.
+			config.RunStartupMigrations(nil, config.ScopeCurrentUser, nil)
+
 			// Early startup logging for debugging Windows subprocess launch issues.
 			// This writes to a file BEFORE the logger is fully initialized.
 			if runtime.GOOS == "windows" {
@@ -458,27 +462,32 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 			client := ipc.NewClient()
 			client.SetTimeout(2 * time.Second)
 
-			if status, err := client.GetStatus(ctx); err == nil {
-				// Daemon is running - show live status
+			// Derive live state via the shared service.Computer so the CLI,
+			// GUI, and Tray all speak the same vocabulary.
+			comp := service.DefaultComputer(client)
+			live := comp.Compute(ctx, service.State{})
+			pres := live.Presentation()
+
+			if live.IPCConnected {
 				fmt.Println("======================================================================")
 				fmt.Println("  DAEMON STATUS (Live)")
 				fmt.Println("======================================================================")
-				fmt.Printf("Status: %s\n", status.ServiceState)
-				fmt.Printf("Version: %s\n", status.Version)
-				fmt.Printf("Uptime: %s\n", status.Uptime)
-				fmt.Printf("Active Downloads: %d\n", status.ActiveDownloads)
-				if status.LastScanTime != nil {
+				fmt.Println(pres.CLIStatusLine)
+				fmt.Printf("Version: %s\n", live.Version)
+				fmt.Printf("Uptime: %s\n", live.Uptime)
+				fmt.Printf("Active Downloads: %d\n", live.ActiveDownloads)
+				if live.LastScanTime != nil {
 					fmt.Printf("Last Scan: %s (%s ago)\n",
-						status.LastScanTime.Format(time.RFC3339),
-						time.Since(*status.LastScanTime).Round(time.Second))
+						live.LastScanTime.Format(time.RFC3339),
+						time.Since(*live.LastScanTime).Round(time.Second))
 				} else {
 					fmt.Println("Last Scan: Never")
 				}
-				if status.LastError != "" {
-					fmt.Printf("Last Error: %s\n", status.LastError)
+				if live.LastError != "" {
+					fmt.Printf("Last Error: %s\n", live.LastError)
 				}
 
-				// Also show user list
+				// Per-user detail straight from IPC for the full view.
 				if users, err := client.GetUserList(ctx); err == nil && len(users) > 0 {
 					fmt.Println("----------------------------------------------------------------------")
 					fmt.Println("User Status:")
@@ -493,7 +502,10 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 				fmt.Println()
 				fmt.Println("Use 'rescale-int daemon stop' to stop the daemon.")
 				return nil
-			} else {
+			}
+
+			// IPC not responding — fall through to the state-file view.
+			{
 				// On Windows, check if service is running but IPC not responding
 				if runtime.GOOS == "windows" && service.IsInstalled() {
 					if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {

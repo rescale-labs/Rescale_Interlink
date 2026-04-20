@@ -148,6 +148,21 @@ func (s *MultiUserService) GetUserLogs(identifier string, count int) []ipc.LogEn
 }
 
 // GetUserTransferStatus returns daemon transfer batch status for a specific user.
-func (s *MultiUserService) GetUserTransferStatus(identifier string) *ipc.TransferStatusData {
+func (s *MultiUserService) GetUserTransferStatus(identifier string) *ipc.DaemonTransferSnapshot {
 	return s.daemon.GetUserTransferStatus(identifier)
+}
+
+// CancelUserDaemonBatch cancels non-terminal tasks in a per-user daemon batch.
+func (s *MultiUserService) CancelUserDaemonBatch(identifier, batchID string) error {
+	return s.daemon.CancelUserDaemonBatch(identifier, batchID)
+}
+
+// CancelUserDaemonTransfer cancels one task in a per-user daemon.
+func (s *MultiUserService) CancelUserDaemonTransfer(identifier, taskID string) error {
+	return s.daemon.CancelUserDaemonTransfer(identifier, taskID)
+}
+
+// RetryFailedInUserDaemonBatch retries failed tasks in a per-user daemon batch.
+func (s *MultiUserService) RetryFailedInUserDaemonBatch(identifier, batchID string) error {
+	return s.daemon.RetryFailedInUserDaemonBatch(identifier, batchID)
 }

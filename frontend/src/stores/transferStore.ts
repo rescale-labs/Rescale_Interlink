@@ -84,20 +84,9 @@ export interface TransferStats extends wailsapp.TransferStatsDTO {
   totalActive: number
 }
 
-// Daemon auto-download batch (read-only, from IPC)
-export interface DaemonBatchStatus {
-  batchID: string
-  batchLabel: string
-  total: number
-  completed: number
-  failed: number
-  active: number
-  totalBytes: number
-  bytesDone: number
-  speed: number
-  startedAt: number   // unix millis
-  completedAt: number // zero if active
-}
+// Plan 3: daemon transfers are merged into the unified tasks/batches arrays
+// with sourceLabel='Daemon'. No separate daemonBatches array. The legacy
+// DaemonBatchStatus type is intentionally removed.
 
 interface TransferStore {
   // State
@@ -105,7 +94,6 @@ interface TransferStore {
   stats: TransferStats
   enumerations: Enumeration[]
   batches: TransferBatch[]
-  daemonBatches: DaemonBatchStatus[]
   expandedBatches: Set<string>
   batchTasks: Map<string, TransferTask[]>
   batchEpochs: Map<string, number> // Epoch counter per batch for stale-response protection
@@ -120,7 +108,7 @@ interface TransferStore {
   fetchTasks: () => Promise<void>
   fetchStats: () => Promise<void>
   fetchBatches: () => Promise<void>
-  fetchDaemonBatches: () => Promise<void>
+  fetchDaemonSnapshot: () => Promise<void>
   fetchUngroupedTasks: () => Promise<void>
   fetchBatchTasks: (batchID: string, offset: number, limit: number) => Promise<void>
   startPolling: (intervalMs?: number) => void
@@ -207,7 +195,6 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   stats: initialStats,
   enumerations: [],
   batches: [],
-  daemonBatches: [],
   expandedBatches: new Set<string>(),
   batchTasks: new Map<string, TransferTask[]>(),
   batchEpochs: new Map<string, number>(), // Epoch counter per batch for stale-response protection
@@ -300,12 +287,66 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  fetchDaemonBatches: async () => {
+  // Plan 3: fetch the daemon's snapshot (tasks + batches) and merge into
+  // the unified arrays. Daemon-labeled rows render with a Daemon badge in
+  // the main Transfers tab; per-row cancel/retry routes to the daemon-side
+  // Wails methods (see cancelBatch/cancelTransfer/retryFailedInBatch).
+  fetchDaemonSnapshot: async () => {
     try {
-      const batches = await App.GetDaemonTransfers()
-      set({ daemonBatches: batches || [] })
+      const snapshot = await App.GetDaemonTransferSnapshot()
+      if (!snapshot) return
+
+      const daemonTasks = (snapshot.tasks || []).map((t): TransferTask => {
+        const base: wailsapp.TransferTaskDTO = {
+          id: t.id,
+          type: t.type,
+          state: t.state,
+          name: t.name,
+          source: t.source,
+          dest: t.dest,
+          size: t.size,
+          progress: t.progress,
+          speed: t.speed,
+          error: t.error || '',
+          sourceLabel: t.sourceLabel,
+          batchID: t.batchId,
+          batchLabel: t.batchLabel,
+          createdAt: t.createdAt,
+          startedAt: t.startedAt || 0,
+          completedAt: t.completedAt || 0,
+        } as unknown as wailsapp.TransferTaskDTO
+        return enhanceTask(base)
+      })
+
+      const daemonBatches: TransferBatch[] = (snapshot.batches || []).map((b) => ({
+        batchID: b.batchId,
+        batchLabel: b.batchLabel,
+        direction: b.direction,
+        sourceLabel: b.sourceLabel,
+        total: b.total,
+        queued: b.queued,
+        active: b.active,
+        completed: b.completed,
+        failed: b.failed,
+        cancelled: b.cancelled,
+        totalBytes: b.totalBytes,
+        progress: b.progress,
+        speed: b.speed,
+        totalKnown: b.totalKnown,
+        startedAt: b.startedAt || 0,
+      } as unknown as TransferBatch))
+
+      set(state => {
+        // Remove any existing Daemon-labeled entries, then append fresh.
+        const keepBatches = state.batches.filter(b => b.sourceLabel !== 'Daemon')
+        const keepTasks = state.tasks.filter(t => t.sourceLabel !== 'Daemon')
+        return {
+          batches: [...keepBatches, ...daemonBatches],
+          tasks: [...keepTasks, ...daemonTasks],
+        }
+      })
     } catch {
-      // Silent fail — daemon may not be running or may not support this
+      // Silent fail — daemon may not be running.
     }
   },
 
@@ -404,7 +445,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       get().fetchBatches()
       get().fetchUngroupedTasks()
       get().fetchStats()
-      get().fetchDaemonBatches()
+      get().fetchDaemonSnapshot()
     }, intervalMs)
 
     // Subscribe to progress events for real-time updates (legacy PUR jobs)
@@ -419,7 +460,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     get().fetchBatches()
     get().fetchUngroupedTasks()
     get().fetchStats()
-    get().fetchDaemonBatches()
+    get().fetchDaemonSnapshot()
 
     set({
       isPolling: true,
@@ -449,10 +490,19 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     })
   },
 
+  // Plan 3: per-row actions route to the daemon when sourceLabel === 'Daemon',
+  // otherwise the local engine. Daemon rows talk to the daemon over IPC via
+  // CancelDaemon* / RetryFailedInDaemonBatch Wails bindings.
   cancelTransfer: async (taskId: string) => {
     try {
-      await App.CancelTransfer(taskId)
+      const task = get().tasks.find(t => t.id === taskId)
+      if (task?.sourceLabel === 'Daemon') {
+        await App.CancelDaemonTransfer(taskId)
+      } else {
+        await App.CancelTransfer(taskId)
+      }
       get().fetchUngroupedTasks()
+      get().fetchDaemonSnapshot()
     } catch (error) {
       console.error('Failed to cancel transfer:', error)
     }
@@ -460,24 +510,33 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
   cancelAllTransfers: async () => {
     try {
-      // Cancel all active batches
+      // Cancel all active batches — route by sourceLabel.
       const activeBatches = get().batches.filter(
         b => b.queued > 0 || b.active > 0 || !b.totalKnown
       )
       for (const batch of activeBatches) {
-        await App.CancelBatch(batch.batchID)
+        if (batch.sourceLabel === 'Daemon') {
+          await App.CancelDaemonBatch(batch.batchID)
+        } else {
+          await App.CancelBatch(batch.batchID)
+        }
       }
 
-      // Cancel remaining ungrouped active tasks
+      // Cancel remaining ungrouped active tasks.
       const activeTasks = get().tasks.filter(
         t => ['queued', 'initializing', 'active', 'paused'].includes(t.state)
       )
       for (const task of activeTasks) {
-        await App.CancelTransfer(task.id)
+        if (task.sourceLabel === 'Daemon') {
+          await App.CancelDaemonTransfer(task.id)
+        } else {
+          await App.CancelTransfer(task.id)
+        }
       }
 
       get().fetchBatches()
       get().fetchUngroupedTasks()
+      get().fetchDaemonSnapshot()
     } catch (error) {
       console.error('Failed to cancel transfers:', error)
     }
@@ -485,7 +544,12 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
   cancelBatch: async (batchID: string) => {
     try {
-      await App.CancelBatch(batchID)
+      const batch = get().batches.find(b => b.batchID === batchID)
+      if (batch?.sourceLabel === 'Daemon') {
+        await App.CancelDaemonBatch(batchID)
+      } else {
+        await App.CancelBatch(batchID)
+      }
       set(state => {
         const newMap = new Map(state.batchTasks)
         newMap.delete(batchID)
@@ -494,6 +558,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         return { batchTasks: newMap, batchEpochs: newEpochs }
       })
       get().fetchBatches()
+      get().fetchDaemonSnapshot()
     } catch (error) {
       console.error('Failed to cancel batch:', error)
     }
@@ -501,6 +566,14 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
   retryTransfer: async (taskId: string) => {
     try {
+      // Daemon retry is batch-scoped; individual task retry falls back to local
+      // engine only. Daemon-initiated tasks retry via the daemon's batch retry
+      // mechanism (next poll cycle reruns failed jobs) rather than per-task.
+      const task = get().tasks.find(t => t.id === taskId)
+      if (task?.sourceLabel === 'Daemon') {
+        // No daemon-side single-task retry; no-op for now.
+        return null
+      }
       const newTaskId = await App.RetryTransfer(taskId)
       get().fetchUngroupedTasks()
       return newTaskId
@@ -512,7 +585,12 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
   retryFailedInBatch: async (batchID: string) => {
     try {
-      await App.RetryFailedInBatch(batchID)
+      const batch = get().batches.find(b => b.batchID === batchID)
+      if (batch?.sourceLabel === 'Daemon') {
+        await App.RetryFailedInDaemonBatch(batchID)
+      } else {
+        await App.RetryFailedInBatch(batchID)
+      }
       set(state => {
         const newMap = new Map(state.batchTasks)
         newMap.delete(batchID)
@@ -521,6 +599,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         return { batchTasks: newMap, batchEpochs: newEpochs }
       })
       get().fetchBatches()
+      get().fetchDaemonSnapshot()
     } catch (error) {
       console.error('Failed to retry failed in batch:', error)
     }

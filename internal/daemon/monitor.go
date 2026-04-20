@@ -47,11 +47,131 @@ func DefaultEligibilityConfig() *EligibilityConfig {
 	}
 }
 
+// SkipReasonCode is a stable machine-readable identifier for why a job was
+// skipped (or never considered) by the daemon. Codes drive the per-poll scan
+// summary buckets (ScanSummary) and the silent-vs-logged decision for the
+// per-job log line.
+type SkipReasonCode string
+
+const (
+	// ReasonNone is the zero value; used when a job was downloaded or is still
+	// under consideration.
+	ReasonNone SkipReasonCode = ""
+
+	// ReasonNotCompleted — job status is not "Completed".
+	ReasonNotCompleted SkipReasonCode = "not_completed"
+
+	// ReasonAlreadyDownloadedLocal — local state.json says the job is already
+	// downloaded. Cross-session bookkeeping (the "downloaded" tag on the
+	// Rescale side) is ReasonHasDownloadedTag.
+	ReasonAlreadyDownloadedLocal SkipReasonCode = "already_downloaded_local"
+
+	// ReasonTooOldCreationPrefilter — creation date older than the API
+	// pre-filter cutoff (lookback_days + 30); short-circuits the lookback
+	// check without an extra API call.
+	ReasonTooOldCreationPrefilter SkipReasonCode = "too_old_creation_prefilter"
+
+	// ReasonNameFilter — job excluded by configured name filters.
+	ReasonNameFilter SkipReasonCode = "name_filter"
+
+	// ReasonOutsideLookbackWindow — completion time is before the configured
+	// lookback window.
+	ReasonOutsideLookbackWindow SkipReasonCode = "outside_lookback_window"
+
+	// ReasonAutoDownloadUnset — "Auto Download" custom field is empty. Silent.
+	ReasonAutoDownloadUnset SkipReasonCode = "auto_download_unset"
+
+	// ReasonAutoDownloadDisabled — "Auto Download" custom field is Disabled.
+	// Silent.
+	ReasonAutoDownloadDisabled SkipReasonCode = "auto_download_disabled"
+
+	// ReasonAutoDownloadUnrecognized — "Auto Download" field has a value
+	// that is not Enabled / Disabled / Conditional. Silent (treated as
+	// opt-out).
+	ReasonAutoDownloadUnrecognized SkipReasonCode = "auto_download_unrecognized"
+
+	// ReasonHasDownloadedTag — job already carries the "downloaded" tag on
+	// the Rescale side. Logged (useful diagnostic when users expect
+	// re-download after tag removal).
+	ReasonHasDownloadedTag SkipReasonCode = "has_downloaded_tag"
+
+	// ReasonConditionalMissingTag — "Auto Download" is Conditional but the
+	// job lacks the configured auto-download tag.
+	ReasonConditionalMissingTag SkipReasonCode = "conditional_missing_tag"
+
+	// ReasonFieldCheckAPIError — fetching the "Auto Download" custom field
+	// failed. Silent, matching current behavior at monitor.go when field
+	// lookup errors; a workspace without the field returns an error here
+	// rather than a value, which would otherwise spam WARN for every job.
+	ReasonFieldCheckAPIError SkipReasonCode = "field_check_api_error"
+
+	// ReasonDownloadedTagCheckAPIError — checking whether the "downloaded"
+	// tag is present failed. Logged.
+	ReasonDownloadedTagCheckAPIError SkipReasonCode = "downloaded_tag_check_api_error"
+
+	// ReasonConditionalTagCheckAPIError — checking the conditional
+	// auto-download tag failed. Logged.
+	ReasonConditionalTagCheckAPIError SkipReasonCode = "conditional_tag_check_api_error"
+
+	// ReasonCompletionTimeAPIError — fetching the job's completion time
+	// failed. Logged.
+	ReasonCompletionTimeAPIError SkipReasonCode = "completion_time_api_error"
+
+	// ReasonInRetryBackoff — job previously failed and is in exponential
+	// backoff; not retried yet. Silent.
+	ReasonInRetryBackoff SkipReasonCode = "in_retry_backoff"
+
+	// ReasonPendingTagApply — job's files are on disk but the downloaded
+	// tag API call failed; daemon retries the tag call separately. Silent
+	// (transient, recovers on its own). Added by Plan 3 so pending-tag jobs
+	// are not re-downloaded while the tag retry is still pending.
+	ReasonPendingTagApply SkipReasonCode = "pending_tag_apply"
+)
+
+// IsSilent reports whether this skip reason should be omitted from the
+// per-job INFO log line. Silent reasons still participate in the per-poll
+// scan summary.
+func (c SkipReasonCode) IsSilent() bool {
+	switch c {
+	case ReasonNone,
+		ReasonNotCompleted,
+		ReasonAlreadyDownloadedLocal,
+		ReasonTooOldCreationPrefilter,
+		ReasonNameFilter,
+		ReasonAutoDownloadUnset,
+		ReasonAutoDownloadDisabled,
+		ReasonAutoDownloadUnrecognized,
+		ReasonFieldCheckAPIError,
+		ReasonInRetryBackoff,
+		ReasonPendingTagApply,
+		ReasonHasDownloadedTag:
+		return true
+	default:
+		return false
+	}
+}
+
+// SkipReason is a machine-readable code plus human-readable detail for why a
+// job was skipped. The code drives log level and per-bucket counts; the
+// detail is shown in the per-job log line when logged.
+type SkipReason struct {
+	Code   SkipReasonCode
+	Detail string
+}
+
 // CheckEligibilityResult contains the eligibility check result.
 type CheckEligibilityResult struct {
-	Eligible  bool   // Whether the job should be downloaded
-	Reason    string // Human-readable explanation
-	ShouldLog bool   // False for "not set"/"disabled" - caller should skip silently
+	// EligibleForDownload is true when the job should be downloaded.
+	EligibleForDownload bool
+
+	// Reason carries the skip reason when EligibleForDownload is false.
+	// When eligible, Reason.Code == ReasonNone.
+	Reason SkipReason
+
+	// Detail is a human-readable explanation: a positive reason when the
+	// job is eligible ("Auto Download is Enabled"), otherwise the skip
+	// detail (same string as Reason.Detail).
+	Detail string
 }
 
 // Monitor watches for completed jobs and triggers downloads.
@@ -93,81 +213,114 @@ func (m *Monitor) SetEligibility(cfg *EligibilityConfig) {
 }
 
 // CheckEligibility checks if a job is eligible for auto-download.
-// Returns CheckEligibilityResult with Eligible, Reason, and ShouldLog fields.
-// Checks the custom field FIRST to minimize API calls and enable silent filtering:
-//   - ShouldLog=false for "not set"/"disabled" -- caller skips silently (not a real candidate)
-//   - ShouldLog=true for everything else -- caller logs the result
 //
-// Mode is per-job via the "Auto Download" custom field:
-//   - "Disabled" or empty -- not eligible, ShouldLog=false (silent)
-//   - "Enabled" -- eligible (no tag check)
-//   - "Conditional" -- eligible only if job has the configured tag
+// Plan 3 tag-first order:
+//   1. `downloaded` tag present  → skip silently (common case every poll)
+//   2. `Auto Download` custom field check (Disabled/empty → silent skip)
+//   3. Conditional tag check (when field is Conditional)
+//
+// The tag check is step 1 so a user who revokes the `downloaded` tag in
+// the Rescale web UI triggers a re-download on the next poll — spec §7.6.
+// Field lookup failures are silent (workspaces without the Auto Download
+// field error here for every job, so logging each would be noise).
 func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligibilityResult {
 	if m.eligibility == nil {
-		return CheckEligibilityResult{Eligible: true, Reason: "eligibility checking disabled", ShouldLog: true}
+		return CheckEligibilityResult{EligibleForDownload: true, Detail: "eligibility checking disabled"}
 	}
 
-	// Check custom field FIRST — saves API calls by not checking tags for
-	// jobs that will be silently skipped anyway
+	// Step 1: downloaded tag is authoritative over local state (Plan 3 F9).
+	hasDownloadedTag, err := m.apiClient.HasJobTag(ctx, jobID, config.DownloadedTag)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check downloaded tag")
+		detail := fmt.Sprintf("failed to check 'downloaded' tag: %v", err)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonDownloadedTagCheckAPIError, Detail: detail},
+			Detail: detail,
+		}
+	}
+	if hasDownloadedTag {
+		detail := fmt.Sprintf("already has '%s' tag", config.DownloadedTag)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonHasDownloadedTag, Detail: detail},
+			Detail: detail,
+		}
+	}
+
+	// Step 2: check custom field.
 	fieldValue, err := m.apiClient.GetJobCustomFieldValue(ctx, jobID, config.AutoDownloadFieldName)
 	if err != nil {
 		m.logger.Debug().Err(err).Str("job_id", jobID).Msg("Failed to get Auto Download field")
-		return CheckEligibilityResult{Eligible: false, Reason: fmt.Sprintf("failed to check field: %v", err), ShouldLog: false}
+		detail := fmt.Sprintf("failed to check field: %v", err)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonFieldCheckAPIError, Detail: detail},
+			Detail: detail,
+		}
 	}
 
 	fieldLower := strings.ToLower(strings.TrimSpace(fieldValue))
 
-	// Step 2: If not set or disabled → NOT a real candidate, skip silently
+	// If not set or disabled → NOT a real candidate, skip silently
 	if fieldLower == "" || fieldLower == "disabled" {
-		reason := "disabled"
+		code := ReasonAutoDownloadDisabled
+		label := "disabled"
 		if fieldValue == "" {
-			reason = "not set"
+			code = ReasonAutoDownloadUnset
+			label = "not set"
 		}
+		detail := fmt.Sprintf("Auto Download is %s", label)
 		m.logger.Debug().
 			Str("job_id", jobID).
 			Str("field_value", fieldValue).
-			Msgf("Auto Download is %s - silent skip", reason)
-		return CheckEligibilityResult{Eligible: false, Reason: fmt.Sprintf("Auto Download is %s", reason), ShouldLog: false}
+			Msgf("Auto Download is %s - silent skip", label)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: code, Detail: detail},
+			Detail: detail,
+		}
 	}
 
-	// Step 3: This IS a real candidate (Enabled or Conditional) - now check downloaded tag
-	hasDownloadedTag, err := m.apiClient.HasJobTag(ctx, jobID, config.DownloadedTag)
-	if err != nil {
-		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check downloaded tag")
-		return CheckEligibilityResult{Eligible: false, Reason: fmt.Sprintf("failed to check tag: %v", err), ShouldLog: true}
-	}
-	if hasDownloadedTag {
-		return CheckEligibilityResult{Eligible: false, Reason: fmt.Sprintf("already has '%s' tag", config.DownloadedTag), ShouldLog: true}
-	}
-
-	// Step 4: Handle Enabled
+	// Step 3: Handle Enabled
 	if fieldLower == "enabled" {
 		m.logger.Debug().Str("job_id", jobID).Msg("Auto Download is Enabled - eligible")
-		return CheckEligibilityResult{Eligible: true, Reason: "Auto Download is Enabled", ShouldLog: true}
+		return CheckEligibilityResult{EligibleForDownload: true, Detail: "Auto Download is Enabled"}
 	}
 
-	// Step 5: Handle Conditional - check conditional tag
+	// Step 5: Handle Conditional
 	if fieldLower == "conditional" {
 		if m.eligibility.AutoDownloadTag == "" {
 			m.logger.Debug().Str("job_id", jobID).Msg("Auto Download is Conditional but no tag configured - eligible")
-			return CheckEligibilityResult{Eligible: true, Reason: "Auto Download is Conditional (no tag configured)", ShouldLog: true}
+			return CheckEligibilityResult{EligibleForDownload: true, Detail: "Auto Download is Conditional (no tag configured)"}
 		}
 		hasTag, err := m.apiClient.HasJobTag(ctx, jobID, m.eligibility.AutoDownloadTag)
 		if err != nil {
 			m.logger.Warn().Err(err).Str("job_id", jobID).Str("tag", m.eligibility.AutoDownloadTag).Msg("Failed to check conditional tag")
-			return CheckEligibilityResult{Eligible: false, Reason: fmt.Sprintf("failed to check tag '%s': %v", m.eligibility.AutoDownloadTag, err), ShouldLog: true}
+			detail := fmt.Sprintf("failed to check conditional tag %q: %v", m.eligibility.AutoDownloadTag, err)
+			return CheckEligibilityResult{
+				Reason: SkipReason{Code: ReasonConditionalTagCheckAPIError, Detail: detail},
+				Detail: detail,
+			}
 		}
 		if !hasTag {
 			m.logger.Debug().Str("job_id", jobID).Str("required_tag", m.eligibility.AutoDownloadTag).Msg("Conditional but missing tag")
-			return CheckEligibilityResult{Eligible: false, Reason: fmt.Sprintf("Auto Download is Conditional but missing tag '%s'", m.eligibility.AutoDownloadTag), ShouldLog: true}
+			detail := fmt.Sprintf("Auto Download is Conditional but missing tag %q", m.eligibility.AutoDownloadTag)
+			return CheckEligibilityResult{
+				Reason: SkipReason{Code: ReasonConditionalMissingTag, Detail: detail},
+				Detail: detail,
+			}
 		}
 		m.logger.Debug().Str("job_id", jobID).Str("tag", m.eligibility.AutoDownloadTag).Msg("Conditional with required tag - eligible")
-		return CheckEligibilityResult{Eligible: true, Reason: fmt.Sprintf("Auto Download is Conditional with tag '%s'", m.eligibility.AutoDownloadTag), ShouldLog: true}
+		return CheckEligibilityResult{
+			EligibleForDownload: true,
+			Detail:              fmt.Sprintf("Auto Download is Conditional with tag %q", m.eligibility.AutoDownloadTag),
+		}
 	}
 
 	// Unknown value - treat as not a candidate (silent skip)
 	m.logger.Warn().Str("job_id", jobID).Str("field_value", fieldValue).Msg("Unrecognized Auto Download value")
-	return CheckEligibilityResult{Eligible: false, Reason: fmt.Sprintf("unrecognized value: '%s'", fieldValue), ShouldLog: false}
+	detail := fmt.Sprintf("unrecognized value: %q", fieldValue)
+	return CheckEligibilityResult{
+		Reason: SkipReason{Code: ReasonAutoDownloadUnrecognized, Detail: detail},
+		Detail: detail,
+	}
 }
 
 // GetJobDownloadPath returns the download path for a job.
@@ -234,14 +387,68 @@ func (m *Monitor) getJobCompletionTimeOnce(ctx context.Context, jobID string) (t
 	return time.Time{}, fmt.Errorf("no completion time found in status history")
 }
 
+// ScanSummary aggregates per-reason and per-outcome counts for a single poll
+// cycle. FindCompletedJobs populates the pre-eligibility skip buckets; the
+// caller (daemon.poll) extends it with per-job eligibility skips and
+// download outcomes before emitting the single canonical scan-summary INFO
+// line.
+type ScanSummary struct {
+	// TotalScanned is the raw number of jobs returned by the API for this
+	// scan (before any filtering).
+	TotalScanned int
+
+	// EligibilityChecked is the number of jobs that actually reached the
+	// CheckEligibility call — i.e., they passed Completed + not-already-
+	// downloaded + creation-prefilter + name-filter + lookback. This is the
+	// correct denominator for "all unset" predicates.
+	EligibilityChecked int
+
+	// SkipBuckets counts skips keyed by SkipReasonCode. Includes both
+	// pre-eligibility skips (from FindCompletedJobs) and per-job eligibility
+	// skips (added by the poll loop).
+	SkipBuckets map[SkipReasonCode]int
+
+	// DownloadOutcomes counts jobs keyed by DownloadOutcome. Only populated
+	// by the poll loop.
+	DownloadOutcomes map[string]int
+}
+
+// AddSkip increments the count for a skip reason.
+func (s *ScanSummary) AddSkip(code SkipReasonCode) {
+	if s.SkipBuckets == nil {
+		s.SkipBuckets = make(map[SkipReasonCode]int)
+	}
+	s.SkipBuckets[code]++
+}
+
+// AddOutcome increments the count for a download outcome. The outcome arg
+// is typed as any string-like so daemon.poll can pass DownloadOutcome
+// without importing a circular dependency.
+func (s *ScanSummary) AddOutcome(outcome string) {
+	if s.DownloadOutcomes == nil {
+		s.DownloadOutcomes = make(map[string]int)
+	}
+	s.DownloadOutcomes[outcome]++
+}
+
 // FindCompletedJobsResult contains the results of scanning for completed jobs.
 type FindCompletedJobsResult struct {
 	Candidates   []*CompletedJob
 	TotalScanned int
+
+	// Summary carries the pre-eligibility skip buckets. The poll loop
+	// extends this in place with per-job eligibility skips and download
+	// outcomes before emitting the single canonical INFO line.
+	Summary *ScanSummary
 }
 
-// FindCompletedJobs returns jobs that are completed but not yet downloaded.
-func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResult, error) {
+// FindCompletedJobs returns jobs that are completed and warrant an
+// eligibility check. The pendingSet (job IDs whose files are on disk but
+// whose downloaded tag call has not yet succeeded) are skipped
+// pre-eligibility so the tag-first check (Plan 3) cannot re-enqueue them
+// for re-download while their tag is still being retried by the poll
+// loop's separate tag-retry pass.
+func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]struct{}) (*FindCompletedJobsResult, error) {
 	m.logger.Debug().Msg("Fetching job list")
 
 	// Calculate lookback cutoff date if eligibility is configured.
@@ -285,25 +492,28 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 	}
 
 	var completed []*CompletedJob
-
-	// Track filtering statistics
-	var skippedNotCompleted, skippedAlreadyDownloaded, skippedTooOld, skippedNameFilter, skippedOutsideWindow int
+	summary := &ScanSummary{
+		TotalScanned:     len(jobs),
+		SkipBuckets:      make(map[SkipReasonCode]int),
+		DownloadOutcomes: make(map[string]int),
+	}
 
 	for _, job := range jobs {
 		// Check if job status is "Completed"
 		if job.JobStatus.Status != "Completed" {
-			skippedNotCompleted++
+			summary.AddSkip(ReasonNotCompleted)
 			continue
 		}
 
-		// Check if already downloaded
-		if m.state.IsDownloaded(job.ID) {
-			skippedAlreadyDownloaded++
-			m.logger.Debug().
-				Str("job_id", job.ID).
-				Str("job_name", job.Name).
-				Msg("Skipping already downloaded job")
-			continue
+		// Plan 3: jobs whose files are on disk but whose downloaded tag
+		// call has not yet succeeded are suppressed pre-eligibility so
+		// they are not re-downloaded during the poll loop's tag-retry
+		// pass (see Daemon.poll). Silent — this is a transient state.
+		if pendingSet != nil {
+			if _, pending := pendingSet[job.ID]; pending {
+				summary.AddSkip(ReasonPendingTagApply)
+				continue
+			}
 		}
 
 		// Pre-filter: Skip jobs created too long ago (can't have completed within window)
@@ -311,7 +521,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 		if !creationCutoff.IsZero() && job.CreatedAt != "" {
 			if createdAt, err := time.Parse(time.RFC3339, job.CreatedAt); err == nil {
 				if createdAt.Before(creationCutoff) {
-					skippedTooOld++
+					summary.AddSkip(ReasonTooOldCreationPrefilter)
 					m.logger.Debug().
 						Str("job_id", job.ID).
 						Str("job_name", job.Name).
@@ -324,7 +534,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 
 		// Apply name filters
 		if !m.matchesFilter(job) {
-			skippedNameFilter++
+			summary.AddSkip(ReasonNameFilter)
 			m.logger.Debug().
 				Str("job_id", job.ID).
 				Str("job_name", job.Name).
@@ -340,6 +550,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 			var err error
 			completedAt, err = m.getJobCompletionTime(ctx, job.ID)
 			if err != nil {
+				summary.AddSkip(ReasonCompletionTimeAPIError)
 				m.logger.Debug().
 					Str("job_id", job.ID).
 					Str("job_name", job.Name).
@@ -353,7 +564,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 			// Apply lookback filter based on completion time.
 			// Zero completedAt (unknown) is NOT filtered — include the job.
 			if !completedAt.IsZero() && completedAt.Before(lookbackCutoff) {
-				skippedOutsideWindow++
+				summary.AddSkip(ReasonOutsideLookbackWindow)
 				m.logger.Debug().
 					Str("job_id", job.ID).
 					Str("job_name", job.Name).
@@ -374,18 +585,18 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context) (*FindCompletedJobsResu
 		})
 	}
 
-	// Detailed stats are at DEBUG level
+	// Detailed pre-eligibility stats are at DEBUG level; the canonical scan
+	// summary INFO line is emitted by daemon.poll after extending the buckets
+	// with per-job eligibility skips and download outcomes.
 	m.logger.Debug().
 		Int("total_scanned", len(jobs)).
-		Int("skipped_not_completed", skippedNotCompleted).
-		Int("skipped_already_downloaded", skippedAlreadyDownloaded).
-		Int("skipped_too_old", skippedTooOld).
-		Int("skipped_outside_window", skippedOutsideWindow).
-		Msg("Scan filter statistics")
+		Int("candidates", len(completed)).
+		Msg("Pre-eligibility scan complete")
 
 	return &FindCompletedJobsResult{
 		Candidates:   completed,
 		TotalScanned: len(jobs),
+		Summary:      summary,
 	}, nil
 }
 

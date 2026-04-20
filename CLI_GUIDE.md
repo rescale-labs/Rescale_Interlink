@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.9.3.
+Complete command-line interface reference for `rescale-int` v4.9.4.
 
-**Version:** 4.9.3
-**Build Date:** April 15, 2026
+**Version:** 4.9.4
+**Build Date:** April 19, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -1050,7 +1050,7 @@ Custom Fields Enabled: true
 
 On **Windows with MSI installer**, the service must be started from the GUI Setup tab ("Install & Start Service") or via `rescale-int service install-and-start` from an elevated command prompt.
 
-On **Mac and Linux**, configure auto-start using the system's init system:
+On **Mac and Linux**, configure auto-start using the system's init system. Interlink does not ship a built-in provisioning flow for launchd or systemd-user in the current round (see `AUTO_DOWNLOAD_SPEC.md` Appendix F); the instructions below are for users who want to wire this up themselves:
 
 <details>
 <summary><b>macOS (launchd)</b></summary>

@@ -42,6 +42,10 @@ import {
   InstallAndStartServiceElevated,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
+import {
+  CodeNoAPIKey,
+  CodeTransientTimeout,
+} from '../../lib/errors';
 
 // Token source options matching Fyne
 type TokenSource = 'environment' | 'file' | 'direct';
@@ -78,6 +82,7 @@ export function SetupTab() {
     lastConnectionTest,
     isLoading,
     isSaving,
+    appInfo,
     fetchConfig,
     fetchAppInfo,
     updateConfig,
@@ -113,8 +118,10 @@ export function SetupTab() {
   const [fileLoggingEnabled, setFileLoggingEnabled] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
 
-  const [pendingStartTime, setPendingStartTime] = useState<number | null>(null);
-  const [pendingElapsed, setPendingElapsed] = useState(0);
+  // pendingStartTime / pendingElapsed were replaced by the shared
+  // service.Computer, which flips userState to 'error' after the 10s
+  // transient-pending timeout. The frontend just renders whatever userState
+  // + userStateDetail the DTO says.
 
   // Windows SCM service status (separate from IPC-based daemon status)
   const [serviceStatus, setServiceStatus] = useState<wailsapp.ServiceStatusDTO | null>(null);
@@ -275,24 +282,7 @@ export function SetupTab() {
     };
   }, []);
 
-  // Track pending state elapsed time for progressive messages
-  useEffect(() => {
-    if (daemonStatus?.userState === 'pending') {
-      if (pendingStartTime === null) {
-        setPendingStartTime(Date.now());
-      }
-      const timer = setInterval(() => {
-        setPendingElapsed(Math.floor((Date.now() - (pendingStartTime ?? Date.now())) / 1000));
-      }, 1000);
-      return () => clearInterval(timer);
-    } else {
-      // Reset when no longer pending
-      if (pendingStartTime !== null) {
-        setPendingStartTime(null);
-        setPendingElapsed(0);
-      }
-    }
-  }, [daemonStatus?.userState, pendingStartTime]);
+  // Pending-elapsed tracking lives in the Go-side service.Computer now.
 
   useEffect(() => {
     const fetchFileLoggingSettings = async () => {
@@ -506,6 +496,32 @@ export function SetupTab() {
         }
       } catch (err) {
         setStatusMessage(`Pre-flight check failed: ${err}`);
+        return;
+      }
+
+      // Workspace-setup gate (Plan 1 D1): before enabling auto-download,
+      // verify the Rescale workspace has the required Auto Download custom
+      // field. Block on any validation error, not only the missing-field
+      // case — wrong field type and missing options are also runtime
+      // blockers.
+      try {
+        const validation = await ValidateAutoDownloadSetup();
+        setWorkspaceValidation(validation);
+        if (!validation.hasAutoDownloadField) {
+          setStatusMessage(
+            "Cannot enable: workspace is missing the 'Auto Download' custom field. " +
+              "A workspace administrator must add it in Rescale workspace settings."
+          );
+          return;
+        }
+        if (validation.errors && validation.errors.length > 0) {
+          // Any validator error (wrong type, missing enum options) blocks
+          // enabling. Surface the first error directly.
+          setStatusMessage(`Cannot enable: ${validation.errors[0]}`);
+          return;
+        }
+      } catch (err) {
+        setStatusMessage(`Workspace validation failed: ${err}`);
         return;
       }
     }
@@ -1093,6 +1109,16 @@ export function SetupTab() {
         <div className="card">
           <h3 className="text-base font-semibold text-gray-900 mb-4">Auto-Download</h3>
           <div className="space-y-4">
+            {appInfo?.sessionScopedDaemon && (
+              <div className="p-3 rounded-md bg-amber-50 text-amber-900 text-sm border border-amber-200">
+                <p className="font-medium">Session-scoped on macOS/Linux</p>
+                <p className="mt-1 text-xs">
+                  Auto-download runs only while you are logged in. The daemon stops
+                  when you log out or reboot. Logging back in does not auto-restart it —
+                  open Interlink to re-enable.
+                </p>
+              </div>
+            )}
             {/* Info Banner explaining per-job mode - evergreen, no version refs */}
             <div className="p-3 rounded-md bg-blue-50 text-blue-800 text-sm">
               <p>
@@ -1440,6 +1466,16 @@ export function SetupTab() {
                           {getActionDisabledReason()}
                         </span>
                       )}
+                      {/* Persistent "Show Logs" affordance (Plan 1 A8) —
+                          always available, not gated on being in an error
+                          state. */}
+                      <button
+                        onClick={() => { OpenLogsDirectory().catch(() => {}); }}
+                        className="btn-outline text-sm"
+                        title="Open the Interlink log directory in your file browser"
+                      >
+                        Show Logs
+                      </button>
                     </div>
                   </div>
 
@@ -1459,54 +1495,80 @@ export function SetupTab() {
                     </div>
                   )}
 
+                  {/* Pending panel: driven by the shared service.Computer.
+                      Message text comes from userStateDetail so GUI/Tray/CLI
+                      all render the same wording. The 10s transient-to-error
+                      timeout lives in service.Computer and flips userState
+                      to 'error' automatically. */}
                   {daemonStatus?.userState === 'pending' && (
                     <div className="mt-3 p-2 bg-blue-100 rounded border border-blue-300">
                       <p className="text-sm font-medium text-blue-800 flex items-center gap-2">
                         <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                        {daemonStatus?.error && daemonStatus.error.toLowerCase().includes('api key')
+                        {daemonStatus?.userStateDetail || 'Activating...'}
+                      </p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <button
+                          onClick={() => { OpenLogsDirectory().catch(() => {}); }}
+                          className="text-xs text-blue-700 underline hover:text-blue-900"
+                        >
+                          Open Logs
+                        </button>
+                        <button
+                          onClick={async () => {
+                            try {
+                              await ReloadDaemonConfig();
+                              setStatusMessage('Retry triggered');
+                            } catch {
+                              try { await TriggerProfileRescan(); } catch { /* silent */ }
+                            }
+                          }}
+                          className="text-xs text-blue-700 underline hover:text-blue-900"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Error panel: canonical error text from the backend,
+                      compared on errorCode (not on substring matches of
+                      wording). */}
+                  {daemonStatus?.userState === 'error' && (
+                    <div className="mt-3 p-2 bg-red-100 rounded border border-red-300">
+                      <p className="text-sm font-medium text-red-800 flex items-center gap-2">
+                        <XCircleIcon className="w-4 h-4" />
+                        {daemonStatus?.errorCode === CodeNoAPIKey
                           ? 'Service cannot find your API key'
-                          : daemonStatus?.error
-                            ? daemonStatus.error
-                            : pendingElapsed < 10
-                              ? 'Activating...'
-                              : pendingElapsed < 30
-                                ? 'Still waiting for service...'
-                                : 'Taking longer than expected.'}
+                          : daemonStatus?.userStateDetail || 'Error'}
                       </p>
-                      <p className="text-xs text-blue-700 mt-1">
-                        {daemonStatus?.error && daemonStatus.error.toLowerCase().includes('api key')
+                      <p className="text-xs text-red-700 mt-1">
+                        {daemonStatus?.errorCode === CodeNoAPIKey
                           ? 'Ensure Connection settings are saved and Test Connection succeeds.'
-                          : pendingElapsed < 10
-                            ? 'The service is detecting your configuration. This usually takes a few seconds.'
-                            : pendingElapsed < 30
-                              ? 'The service may still be initializing. Please wait...'
-                              : 'The service may have encountered an issue.'}
+                          : daemonStatus?.errorCode === CodeTransientTimeout
+                            ? 'If this persists, click Retry or Open Logs.'
+                            : daemonStatus?.error || ''}
                       </p>
-                      {pendingElapsed >= 30 && (
-                        <div className="mt-2 flex items-center gap-2">
-                          <button
-                            onClick={() => { OpenLogsDirectory().catch(() => {}); }}
-                            className="text-xs text-blue-700 underline hover:text-blue-900"
-                          >
-                            Open Logs
-                          </button>
-                          <button
-                            onClick={async () => {
-                              try {
-                                await ReloadDaemonConfig();
-                                setPendingStartTime(Date.now());
-                                setPendingElapsed(0);
-                                setStatusMessage('Retry triggered');
-                              } catch {
-                                try { await TriggerProfileRescan(); } catch { /* silent */ }
-                              }
-                            }}
-                            className="text-xs text-blue-700 underline hover:text-blue-900"
-                          >
-                            Retry
-                          </button>
-                        </div>
-                      )}
+                      <div className="mt-2 flex items-center gap-2">
+                        <button
+                          onClick={() => { OpenLogsDirectory().catch(() => {}); }}
+                          className="text-xs text-red-700 underline hover:text-red-900"
+                        >
+                          Open Logs
+                        </button>
+                        <button
+                          onClick={async () => {
+                            try {
+                              await ReloadDaemonConfig();
+                              setStatusMessage('Retry triggered');
+                            } catch {
+                              try { await TriggerProfileRescan(); } catch { /* silent */ }
+                            }
+                          }}
+                          className="text-xs text-red-700 underline hover:text-red-900"
+                        >
+                          Retry
+                        </button>
+                      </div>
                     </div>
                   )}
 

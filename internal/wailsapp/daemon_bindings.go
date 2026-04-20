@@ -16,6 +16,8 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/pathutil"
+	"github.com/rescale/rescale-int/internal/service"
 	"github.com/rescale/rescale-int/internal/version"
 )
 
@@ -51,8 +53,13 @@ type DaemonStatusDTO struct {
 	// DownloadFolder is the configured download directory
 	DownloadFolder string `json:"downloadFolder"`
 
-	// Error message if status query failed
+	// Error carries the canonical English error text when an error state
+	// is active. Empty when no error.
 	Error string `json:"error,omitempty"`
+
+	// ErrorCode is the stable machine-readable ipc.ErrorCode corresponding
+	// to Error. Frontend compares on this, not on Error text.
+	ErrorCode string `json:"errorCode,omitempty"`
 
 	// ManagedBy indicates if daemon is managed externally ("Windows Service", "", etc.)
 	ManagedBy string `json:"managedBy,omitempty"`
@@ -63,80 +70,98 @@ type DaemonStatusDTO struct {
 	// UserConfigured indicates if this user has daemon.conf with enabled=true
 	UserConfigured bool `json:"userConfigured"`
 
-	// UserState is the user-specific state: "not_configured", "pending", "running", "paused", "stopped"
+	// UserState is the user-specific state: "not_configured", "pending", "running", "paused", "stopped", "error"
 	UserState string `json:"userState"`
+
+	// UserStateDetail is the canonical long-form presentation string for this
+	// user's state, suitable for rendering verbatim in the GUI. Same across
+	// every surface via service.Presentation.
+	UserStateDetail string `json:"userStateDetail,omitempty"`
 
 	// UserRegistered indicates if service has this user registered (daemon.conf was found by service)
 	UserRegistered bool `json:"userRegistered"`
 }
 
-// GetDaemonStatus returns the current daemon status.
-// This is the primary method for the frontend to check if the daemon is running
-// and get its current state.
+// GetDaemonStatus returns the current daemon status, derived from the
+// shared service.Computer (see internal/service/state.go). This is the
+// primary method for the frontend to check daemon state.
 func (a *App) GetDaemonStatus() DaemonStatusDTO {
-	result := DaemonStatusDTO{
-		State:     "stopped",
-		UserState: "not_configured",
-		Version:   version.Version,
-	}
+	comp := a.ensureStateComputer()
 
-	// Check if daemon.conf exists and is enabled for current user
-	configPath, _ := config.DefaultDaemonConfigPath()
-	if _, err := os.Stat(configPath); err == nil {
-		// Config file exists - check if enabled
-		if cfg, err := config.LoadDaemonConfig(""); err == nil {
-			result.UserConfigured = cfg.Daemon.Enabled
-		}
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
 
-	// Check if daemon process is running via PID file
+	a.stateMu.Lock()
+	prior := a.priorState
+	a.stateMu.Unlock()
+
+	st := comp.Compute(ctx, prior)
+
+	a.stateMu.Lock()
+	a.priorState = st
+	a.stateMu.Unlock()
+
+	pres := st.Presentation()
 	pid := daemon.IsDaemonRunning()
-	result.PID = pid
-	result.Running = pid != 0
 
-	// Try to connect via IPC for live status
-	client := ipc.NewClient()
-	client.SetTimeout(5 * time.Second)
+	configured := st.PerUser != service.PerUserNotConfigured
 
-	ctx := context.Background()
-	if status, err := client.GetStatus(ctx); err == nil {
-		result.IPCConnected = true
-		result.State = status.ServiceState
-		// Use version.Version rather than IPC-reported version, which may be stale
-		result.Uptime = status.Uptime
-		result.ActiveDownloads = status.ActiveDownloads
-		result.ServiceMode = status.ServiceMode
-
-		if status.LastScanTime != nil {
-			result.LastScan = status.LastScanTime.Format(time.RFC3339)
-		}
-
-		// Get user-specific info
-		if users, err := client.GetUserList(ctx); err == nil && len(users) > 0 {
-			result.JobsDownloaded = users[0].JobsDownloaded
-			result.DownloadFolder = users[0].DownloadFolder
-			result.UserRegistered = true
-			result.UserState = users[0].State
-		}
-
-		// Determine user state based on configuration + registration
-		if !result.UserConfigured {
-			result.UserState = "not_configured"
-		} else if !result.UserRegistered {
-			result.UserState = "pending" // Config exists but not yet picked up by service
-		}
-		// Otherwise use the state from IPC (running/paused/stopped)
-	} else if pid != 0 {
-		// Process running but IPC not responding
-		result.State = "unknown"
-		result.Error = "Daemon process found but IPC not responding. It may not have been started with --ipc flag."
-		// User state when daemon is running but IPC fails
-		if result.UserConfigured {
-			result.UserState = "pending"
-		}
+	userState := "not_configured"
+	switch st.PerUser {
+	case service.PerUserPending:
+		userState = "pending"
+	case service.PerUserRunning:
+		userState = "running"
+	case service.PerUserPaused:
+		userState = "paused"
+	case service.PerUserError:
+		userState = "error"
 	}
 
-	return result
+	// Legacy State field: keep "running"/"paused"/"stopped"/"unknown" vocab
+	// for any frontend code still reading it during Plan 1 rollout.
+	legacyState := "stopped"
+	switch st.PerUser {
+	case service.PerUserRunning:
+		legacyState = "running"
+	case service.PerUserPaused:
+		legacyState = "paused"
+	case service.PerUserError:
+		legacyState = "error"
+	case service.PerUserPending:
+		legacyState = "pending"
+	}
+
+	managedBy := ""
+	if st.ServiceMode {
+		managedBy = "Windows Service"
+	}
+
+	lastScan := ""
+	if st.LastScanTime != nil && !st.LastScanTime.IsZero() {
+		lastScan = st.LastScanTime.Format(time.RFC3339)
+	}
+
+	return DaemonStatusDTO{
+		Running:         st.IPCConnected || pid != 0,
+		PID:             pid,
+		IPCConnected:    st.IPCConnected,
+		State:           legacyState,
+		Version:         version.Version,
+		Uptime:          st.Uptime,
+		LastScan:        lastScan,
+		ActiveDownloads: st.ActiveDownloads,
+		JobsDownloaded:  st.JobsDownloaded,
+		DownloadFolder:  st.DownloadFolder,
+		Error:           st.LastError,
+		ErrorCode:       string(st.LastErrorCode),
+		ManagedBy:       managedBy,
+		ServiceMode:     st.ServiceMode,
+		UserConfigured:  configured,
+		UserState:       userState,
+		UserStateDetail: pres.GUILongForm,
+		UserRegistered:  st.PerUser == service.PerUserRunning || st.PerUser == service.PerUserPaused,
+	}
 }
 
 // StartDaemon starts the daemon process in background mode with IPC enabled.
@@ -147,9 +172,10 @@ func (a *App) StartDaemon() error {
 		return fmt.Errorf("daemon is already running (PID %d)", pid)
 	}
 
-	// Ensure token file exists before daemon starts
-	if err := a.ensureTokenPersisted(); err != nil {
-		a.logWarn("Daemon", fmt.Sprintf("Token persistence warning: %v", err))
+	// Ensure config.csv and token file are on disk before the subprocess
+	// reads them. Per AUTO_DOWNLOAD_SPEC.md §4.3.
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return fmt.Errorf("cannot start daemon: %w", err)
 	}
 
 	// Pre-check API key availability before launching daemon
@@ -362,6 +388,12 @@ type ReloadConfigResultDTO struct {
 func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 	result := ReloadConfigResultDTO{}
 
+	// Persist in-memory config to disk before the daemon reloads it.
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
 	ctx := context.Background()
@@ -416,7 +448,7 @@ func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResu
 	if apiKey != "" {
 		result.APIKeyOK = true
 	} else {
-		result.APIKeyError = "No API key configured. Set your API key in Connection settings and test the connection first."
+		result.APIKeyError = ipc.CanonicalText[ipc.CodeNoAPIKey] + ". " + ipc.HintFor(ipc.CodeNoAPIKey)
 	}
 
 	// Check download folder
@@ -504,6 +536,14 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 
 // SaveDaemonConfig saves daemon configuration to daemon.conf.
 func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
+	// Refuse save when the download folder is not writable from the
+	// current-user identity. The Windows-strict branch is in the
+	// _windows.go sibling; this file only builds on macOS/Linux.
+	if result := pathutil.ValidateWritablePath(dto.DownloadFolder, pathutil.ConsumerCurrentUser); !result.Reachable {
+		return fmt.Errorf("%s: %s",
+			ipc.CanonicalText[result.ErrorCode], result.Reason)
+	}
+
 	// Load existing config to preserve any fields not in DTO
 	cfg, err := config.LoadDaemonConfig("")
 	if err != nil {
@@ -533,12 +573,33 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Save
+	// Persist config.csv + token alongside daemon.conf so every identity
+	// that later reads any of these files sees consistent state.
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return err
+	}
+
+	// Save daemon.conf.
 	if err := config.SaveDaemonConfig(cfg, ""); err != nil {
 		return fmt.Errorf("failed to save daemon.conf: %w", err)
 	}
 
 	a.logInfo("Daemon", "Configuration saved to daemon.conf")
+
+	// If the daemon is running (subprocess OR Windows Service), trigger a
+	// profile rescan so the new state is picked up within seconds instead
+	// of waiting for the 5-minute rescan tick. IPC-based check works for
+	// both modes; a PID check would miss the service case.
+	if dto.Enabled {
+		client := ipc.NewClient()
+		client.SetTimeout(3 * time.Second)
+		ctx := context.Background()
+		if client.IsServiceRunning(ctx) {
+			if err := a.TriggerProfileRescan(); err != nil {
+				a.logWarn("Daemon", fmt.Sprintf("Profile rescan after save failed (non-fatal): %v", err))
+			}
+		}
+	}
 	return nil
 }
 
@@ -704,62 +765,150 @@ func (a *App) GetLogFileLocation() string {
 }
 
 // =============================================================================
-// Daemon Transfer Visibility
+// Daemon Transfer Visibility (Plan 3: unified with GUI Transfers tab)
 // =============================================================================
 
-// DaemonBatchStatusDTO represents a daemon auto-download batch for the frontend.
-type DaemonBatchStatusDTO struct {
-	BatchID     string  `json:"batchID"`
-	BatchLabel  string  `json:"batchLabel"`
-	Total       int     `json:"total"`
-	Completed   int     `json:"completed"`
-	Failed      int     `json:"failed"`
-	Active      int     `json:"active"`
-	TotalBytes  int64   `json:"totalBytes"`
-	BytesDone   int64   `json:"bytesDone"`
+// DaemonTransferTaskDTO mirrors ipc.TransferTaskInfo for the frontend.
+// Rendered in the main Transfers tab with a Daemon badge.
+type DaemonTransferTaskDTO struct {
+	ID          string  `json:"id"`
+	Type        string  `json:"type"`
+	State       string  `json:"state"`
+	Name        string  `json:"name"`
+	Source      string  `json:"source"`
+	Dest        string  `json:"dest"`
+	Size        int64   `json:"size"`
+	Progress    float64 `json:"progress"`
 	Speed       float64 `json:"speed"`
-	StartedAt   int64   `json:"startedAt"`
-	CompletedAt int64   `json:"completedAt"`
+	Error       string  `json:"error,omitempty"`
+	SourceLabel string  `json:"sourceLabel"`
+	BatchID     string  `json:"batchId"`
+	BatchLabel  string  `json:"batchLabel"`
+	CreatedAt   int64   `json:"createdAt"`
+	StartedAt   int64   `json:"startedAt,omitempty"`
+	CompletedAt int64   `json:"completedAt,omitempty"`
 }
 
-// GetDaemonTransfers retrieves daemon auto-download batch status via IPC.
-func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
-	if daemon.IsDaemonRunning() == 0 {
-		return nil
+// DaemonBatchStatsDTO mirrors ipc.BatchStatsInfo.
+type DaemonBatchStatsDTO struct {
+	BatchID     string  `json:"batchId"`
+	BatchLabel  string  `json:"batchLabel"`
+	Direction   string  `json:"direction"`
+	SourceLabel string  `json:"sourceLabel"`
+	Total       int     `json:"total"`
+	Queued      int     `json:"queued"`
+	Active      int     `json:"active"`
+	Completed   int     `json:"completed"`
+	Failed      int     `json:"failed"`
+	Cancelled   int     `json:"cancelled"`
+	TotalBytes  int64   `json:"totalBytes"`
+	Progress    float64 `json:"progress"`
+	Speed       float64 `json:"speed"`
+	TotalKnown  bool    `json:"totalKnown"`
+	StartedAt   int64   `json:"startedAt,omitempty"`
+}
+
+// DaemonTransferSnapshotDTO is the unified tasks+batches projection of
+// daemon transfers, returned by GetDaemonTransferSnapshot.
+type DaemonTransferSnapshotDTO struct {
+	Tasks   []DaemonTransferTaskDTO `json:"tasks"`
+	Batches []DaemonBatchStatsDTO   `json:"batches"`
+}
+
+// daemonReachable reports whether there's a daemon we can talk to via IPC
+// — either a subprocess PID (non-service) or the Windows service, when
+// applicable. Unified helper used by all Plan 3 daemon bindings so service
+// mode no longer gets short-circuited by daemon.IsDaemonRunning()==0.
+func (a *App) daemonReachable(ctx context.Context, client *ipc.Client) bool {
+	if daemon.IsDaemonRunning() != 0 {
+		return true
+	}
+	return client.IsServiceRunning(ctx)
+}
+
+// GetDaemonTransferSnapshot retrieves a point-in-time view of daemon
+// transfers (tasks + batches) via IPC. Frontend merges these into the
+// main Transfers tab's unified tasks/batches arrays; daemon rows render
+// with a Daemon badge.
+func (a *App) GetDaemonTransferSnapshot() *DaemonTransferSnapshotDTO {
+	client := ipc.NewClient()
+	client.SetTimeout(3 * time.Second)
+	ctx := context.Background()
+
+	if !a.daemonReachable(ctx, client) {
+		return &DaemonTransferSnapshotDTO{}
 	}
 
-	client := ipc.NewClient()
-	client.SetTimeout(3 * time.Second) // Short timeout for polling
-
-	ctx := context.Background()
 	data, err := client.GetTransferStatus(ctx)
 	if err != nil {
-		// Silent fail — daemon may not support this message yet
-		return nil
+		// Without this log line, an IPC auth regression looks like an
+		// empty Transfers tab in the UI. Surface the failure to the file
+		// logger + Activity tab so it is diagnosable.
+		a.logWarn("daemon", "GetTransferStatus failed: "+err.Error())
+		return &DaemonTransferSnapshotDTO{}
+	}
+	if data == nil {
+		return &DaemonTransferSnapshotDTO{}
 	}
 
-	if data == nil || len(data.Batches) == 0 {
-		return nil
+	out := &DaemonTransferSnapshotDTO{
+		Tasks:   make([]DaemonTransferTaskDTO, 0, len(data.Tasks)),
+		Batches: make([]DaemonBatchStatsDTO, 0, len(data.Batches)),
 	}
-
-	result := make([]DaemonBatchStatusDTO, len(data.Batches))
-	for i, b := range data.Batches {
-		result[i] = DaemonBatchStatusDTO{
-			BatchID:     b.BatchID,
-			BatchLabel:  b.BatchLabel,
-			Total:       b.Total,
-			Completed:   b.Completed,
-			Failed:      b.Failed,
-			Active:      b.Active,
-			TotalBytes:  b.TotalBytes,
-			BytesDone:   b.BytesDone,
-			Speed:       b.Speed,
-			StartedAt:   b.StartedAt,
-			CompletedAt: b.CompletedAt,
-		}
+	for _, t := range data.Tasks {
+		out.Tasks = append(out.Tasks, DaemonTransferTaskDTO{
+			ID: t.ID, Type: t.Type, State: t.State, Name: t.Name,
+			Source: t.Source, Dest: t.Dest, Size: t.Size,
+			Progress: t.Progress, Speed: t.Speed, Error: t.Error,
+			SourceLabel: t.SourceLabel, BatchID: t.BatchID, BatchLabel: t.BatchLabel,
+			CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, CompletedAt: t.CompletedAt,
+		})
 	}
+	for _, b := range data.Batches {
+		out.Batches = append(out.Batches, DaemonBatchStatsDTO{
+			BatchID: b.BatchID, BatchLabel: b.BatchLabel, Direction: b.Direction,
+			SourceLabel: b.SourceLabel,
+			Total:       b.Total, Queued: b.Queued, Active: b.Active,
+			Completed: b.Completed, Failed: b.Failed, Cancelled: b.Cancelled,
+			TotalBytes: b.TotalBytes, Progress: b.Progress, Speed: b.Speed,
+			TotalKnown: b.TotalKnown, StartedAt: b.StartedAt,
+		})
+	}
+	return out
+}
 
-	return result
+// CancelDaemonBatch cancels all non-terminal tasks in a daemon-initiated
+// batch. Routed by the frontend based on sourceLabel === 'Daemon'.
+func (a *App) CancelDaemonBatch(batchID string) error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon not reachable")
+	}
+	return client.CancelDaemonBatch(ctx, "", batchID)
+}
+
+// CancelDaemonTransfer cancels a single daemon-initiated task.
+func (a *App) CancelDaemonTransfer(taskID string) error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon not reachable")
+	}
+	return client.CancelDaemonTransfer(ctx, "", taskID)
+}
+
+// RetryFailedInDaemonBatch retries all failed tasks in a daemon batch.
+func (a *App) RetryFailedInDaemonBatch(batchID string) error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon not reachable")
+	}
+	return client.RetryFailedInDaemonBatch(ctx, "", batchID)
 }
 
 // =============================================================================

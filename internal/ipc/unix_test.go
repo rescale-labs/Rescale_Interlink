@@ -70,8 +70,14 @@ func (h *mockHandler) ReloadConfig(userID string) *ReloadConfigData {
 	return &ReloadConfigData{Applied: true}
 }
 
-func (h *mockHandler) GetTransferStatus(userID string) (*TransferStatusData, error) {
-	return &TransferStatusData{}, nil
+func (h *mockHandler) GetTransferStatus(userID string) (*DaemonTransferSnapshot, error) {
+	return &DaemonTransferSnapshot{}, nil
+}
+
+func (h *mockHandler) CancelDaemonBatch(userID, batchID string) error    { return nil }
+func (h *mockHandler) CancelDaemonTransfer(userID, taskID string) error  { return nil }
+func (h *mockHandler) RetryFailedInDaemonBatch(userID, batchID string) error {
+	return nil
 }
 
 func TestUnixIPCClientServer(t *testing.T) {

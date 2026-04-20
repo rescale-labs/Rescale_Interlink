@@ -23,6 +23,13 @@ type DownloadedJob struct {
 
 	RetryCount  int       `json:"retry_count,omitempty"`
 	LastAttempt time.Time `json:"last_attempt,omitempty"`
+
+	// PendingTagApply is true when the files downloaded successfully but the
+	// 'downloaded' tag API call failed. The poll loop retries the tag call
+	// on subsequent polls without re-downloading files; on success the flag
+	// is cleared. Jobs with this flag set are skipped pre-eligibility so
+	// they never re-enter the download path.
+	PendingTagApply bool `json:"pending_tag_apply,omitempty"`
 }
 
 // State maintains the daemon's persistent state.
@@ -53,16 +60,15 @@ func NewState(filePath string) *State {
 
 // Load reads state from the file system.
 // If the file doesn't exist, returns an empty state.
-// On Windows, runs one-time migration from the old Unix-style path.
+// Runs one-time migration from the legacy Unix-style path on any OS:
+// Windows was already doing this; Plan 2 also consolidates Unix/macOS from
+// ~/.config/rescale-int/ to ~/.config/rescale/.
 func (s *State) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Migrate state file from old path if needed (Windows only)
-	if runtime.GOOS == "windows" {
-		if oldPath := oldStateFilePath(); oldPath != "" {
-			migrateStateFile(oldPath, s.filePath)
-		}
+	if oldPath := oldStateFilePath(); oldPath != "" && oldPath != s.filePath {
+		migrateStateFile(oldPath, s.filePath)
 	}
 
 	data, err := os.ReadFile(s.filePath)
@@ -170,6 +176,44 @@ func (s *State) MarkDownloaded(jobID, jobName, outputDir string, fileCount int, 
 		FileCount:    fileCount,
 		TotalSize:    totalSize,
 	}
+}
+
+// MarkPendingTagApply sets the pending-tag-apply flag on an existing
+// downloaded-job entry. Called when AddJobTag fails after a successful
+// download. The poll loop's tag-retry pass will retry the tag call on
+// subsequent polls; on success ClearPendingTagApply flips the flag off.
+// If the job is not in the Downloaded map (e.g. state was lost), this is
+// a no-op.
+func (s *State) MarkPendingTagApply(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry, ok := s.Downloaded[jobID]; ok {
+		entry.PendingTagApply = true
+	}
+}
+
+// ClearPendingTagApply clears the pending-tag-apply flag after a successful
+// tag retry.
+func (s *State) ClearPendingTagApply(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry, ok := s.Downloaded[jobID]; ok {
+		entry.PendingTagApply = false
+	}
+}
+
+// PendingTagApplyJobs returns the IDs of downloaded jobs whose tag call
+// has not yet succeeded. Order is not guaranteed.
+func (s *State) PendingTagApplyJobs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var ids []string
+	for id, entry := range s.Downloaded {
+		if entry != nil && entry.PendingTagApply {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // MarkFailed records a job download failure.
@@ -290,7 +334,8 @@ func (s *State) GetFailedJobs() []*DownloadedJob {
 
 // DefaultStateFilePath returns the default path for the daemon state file.
 // On Windows, uses %LOCALAPPDATA%\Rescale\Interlink\state\ (consistent with
-// install/logs paths). On Unix, uses ~/.config/rescale-int/.
+// install/logs paths). On Unix, uses ~/.config/rescale/ (was rescale-int/
+// pre-Plan-2; migrated by Load()).
 func DefaultStateFilePath() string {
 	if runtime.GOOS == "windows" {
 		localAppData := os.Getenv("LOCALAPPDATA")
@@ -302,10 +347,12 @@ func DefaultStateFilePath() string {
 	if err != nil {
 		return ".rescale-daemon-state.json"
 	}
-	return filepath.Join(homeDir, ".config", "rescale-int", "daemon-state.json")
+	return filepath.Join(homeDir, ".config", "rescale", "daemon-state.json")
 }
 
-// oldStateFilePath returns the legacy state file path for migration (Unix-style).
+// oldStateFilePath returns the legacy state file path used prior to Plan 2
+// (Unix-style under ~/.config/rescale-int/). Returns empty when it is
+// identical to DefaultStateFilePath (meaning no migration is applicable).
 func oldStateFilePath() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

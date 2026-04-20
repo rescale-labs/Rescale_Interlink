@@ -16,7 +16,7 @@ import (
 // This log captures early startup errors BEFORE IPC is available,
 // allowing diagnosis of subprocess launch failures from GUI/tray.
 func StartupLogPath() string {
-	return filepath.Join(config.LogDirectory(), "daemon-startup.log")
+	return filepath.Join(config.LogDirectory(), config.StartupLogName)
 }
 
 // WriteStartupLog appends a message to the startup log.

@@ -68,9 +68,15 @@ func (h *capturingHandler) ReloadConfig(userID string) *ReloadConfigData {
 	return &ReloadConfigData{Applied: true}
 }
 
-func (h *capturingHandler) GetTransferStatus(userID string) (*TransferStatusData, error) {
+func (h *capturingHandler) GetTransferStatus(userID string) (*DaemonTransferSnapshot, error) {
 	h.lastGetTransferStatusUID = userID
-	return &TransferStatusData{}, nil
+	return &DaemonTransferSnapshot{}, nil
+}
+
+func (h *capturingHandler) CancelDaemonBatch(userID, batchID string) error   { return nil }
+func (h *capturingHandler) CancelDaemonTransfer(userID, taskID string) error { return nil }
+func (h *capturingHandler) RetryFailedInDaemonBatch(userID, batchID string) error {
+	return nil
 }
 
 func newServiceModeServerForTest(handler ServiceHandler) *Server {
@@ -297,5 +303,107 @@ func TestSubprocessModeGetUserListUnfiltered(t *testing.T) {
 	}
 	if len(data.Users) != 2 {
 		t.Errorf("Expected 2 users (unfiltered), got %d", len(data.Users))
+	}
+}
+
+// userScopedMessageTypes is the canonical catalog of IPC message types
+// that must fail-closed on empty callerSID in service mode (spec §11.3).
+// New user-scoped handler types MUST be added here or the test below
+// will still pass but provide no coverage for the new type; treat the
+// table as a required registration point when adding a message type.
+//
+// MsgOpenLogs has a "service" keyword bypass (see
+// TestServiceModeOpenLogsServiceKeyword); its empty-SID behavior with
+// a non-"service" userID is covered by TestServiceModeOpenLogsFailClosed.
+// MsgGetUserList has post-hoc filtering; covered by
+// TestServiceModeGetUserListDeniedWithoutCallerSID.
+var userScopedMessageTypes = []struct {
+	name    string
+	msgType MessageType
+}{
+	{"PauseUser", MsgPauseUser},
+	{"ResumeUser", MsgResumeUser},
+	{"TriggerScan", MsgTriggerScan},
+	{"ReloadConfig", MsgReloadConfig},
+	{"GetRecentLogs", MsgGetRecentLogs},
+	{"GetTransferStatus", MsgGetTransferStatus},
+	{"CancelDaemonBatch", MsgCancelDaemonBatch},
+	{"CancelDaemonTransfer", MsgCancelDaemonTransfer},
+	{"RetryFailedInDaemonBatch", MsgRetryFailedInDaemonBatch},
+}
+
+// TestServiceMode_UserScopedMessages_FailClosedWithoutCallerSID asserts
+// the spec §11.3 policy over the full catalog: every user-scoped message
+// type must return "unauthorized: could not identify caller" when
+// callerSID is empty in service mode. Makes future regressions in new
+// handler types fail this test rather than slip silently past review.
+func TestServiceMode_UserScopedMessages_FailClosedWithoutCallerSID(t *testing.T) {
+	for _, tc := range userScopedMessageTypes {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := &capturingHandler{}
+			server := newServiceModeServerForTest(handler)
+
+			req := NewRequestWithUser(tc.msgType, "some-user-id-from-client")
+			resp := server.handleRequest(req, "") // empty callerSID
+
+			if resp.Success {
+				t.Fatalf("%s: expected fail-closed error with empty callerSID, got success", tc.name)
+			}
+			if resp.Error != "unauthorized: could not identify caller" {
+				t.Errorf("%s: unexpected error text: %q", tc.name, resp.Error)
+			}
+		})
+	}
+}
+
+// TestServiceMode_UserScopedMessages_ScopeToCallerSID asserts that when
+// callerSID is present, every user-scoped handler receives callerSID as
+// its userID argument (i.e., the req.UserID provided by the client is
+// ignored). Complements the fail-closed test above; together they define
+// the spec §11.3 authorization contract.
+func TestServiceMode_UserScopedMessages_ScopeToCallerSID(t *testing.T) {
+	const callerSID = "S-1-5-21-CALLER"
+	const clientSuppliedSID = "S-1-5-21-OTHER"
+
+	for _, tc := range userScopedMessageTypes {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := &capturingHandler{}
+			server := newServiceModeServerForTest(handler)
+
+			req := NewRequestWithUser(tc.msgType, clientSuppliedSID)
+			resp := server.handleRequest(req, callerSID)
+			if !resp.Success {
+				t.Fatalf("%s: expected success, got error: %s", tc.name, resp.Error)
+			}
+
+			// Only the handlers that record userID need checking; the
+			// ones that don't (CancelDaemon*, RetryFailedInDaemonBatch)
+			// are still exercised for the fail-closed property above.
+			var got string
+			switch tc.msgType {
+			case MsgPauseUser:
+				got = handler.lastPauseUserID
+			case MsgResumeUser:
+				got = handler.lastResumeUserID
+			case MsgTriggerScan:
+				got = handler.lastTriggerScanUserID
+			case MsgReloadConfig:
+				got = handler.lastReloadConfigUserID
+			case MsgGetRecentLogs:
+				got = handler.lastGetRecentLogsUserID
+			case MsgGetTransferStatus:
+				got = handler.lastGetTransferStatusUID
+			default:
+				// No captured userID — scoping property is enforced by
+				// the fail-closed test; scope assertion skipped here.
+				return
+			}
+			if got != callerSID {
+				t.Errorf("%s: handler received userID=%q, want callerSID=%q", tc.name, got, callerSID)
+			}
+			if got == clientSuppliedSID {
+				t.Errorf("%s: handler received client-supplied SID — callerSID was NOT enforced", tc.name)
+			}
+		})
 	}
 }

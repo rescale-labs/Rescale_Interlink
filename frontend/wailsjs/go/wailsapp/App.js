@@ -14,6 +14,14 @@ export function CancelBatch(arg1) {
   return window['go']['wailsapp']['App']['CancelBatch'](arg1);
 }
 
+export function CancelDaemonBatch(arg1) {
+  return window['go']['wailsapp']['App']['CancelDaemonBatch'](arg1);
+}
+
+export function CancelDaemonTransfer(arg1) {
+  return window['go']['wailsapp']['App']['CancelDaemonTransfer'](arg1);
+}
+
 export function CancelLocalDirectoryRead() {
   return window['go']['wailsapp']['App']['CancelLocalDirectoryRead']();
 }
@@ -98,8 +106,8 @@ export function GetDaemonStatus() {
   return window['go']['wailsapp']['App']['GetDaemonStatus']();
 }
 
-export function GetDaemonTransfers() {
-  return window['go']['wailsapp']['App']['GetDaemonTransfers']();
+export function GetDaemonTransferSnapshot() {
+  return window['go']['wailsapp']['App']['GetDaemonTransferSnapshot']();
 }
 
 export function GetDefaultConfigPath() {
@@ -256,6 +264,10 @@ export function ResumeDaemon() {
 
 export function RetryFailedInBatch(arg1) {
   return window['go']['wailsapp']['App']['RetryFailedInBatch'](arg1);
+}
+
+export function RetryFailedInDaemonBatch(arg1) {
+  return window['go']['wailsapp']['App']['RetryFailedInDaemonBatch'](arg1);
 }
 
 export function RetryTransfer(arg1) {

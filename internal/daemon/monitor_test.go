@@ -326,14 +326,52 @@ func TestCheckEligibility_NilConfig(t *testing.T) {
 
 	result := m.CheckEligibility(nil, "test-job-id")
 
-	if !result.Eligible {
-		t.Errorf("expected Eligible=true for nil eligibility config, got false")
+	if !result.EligibleForDownload {
+		t.Errorf("expected EligibleForDownload=true for nil eligibility config, got false")
 	}
-	if result.Reason != "eligibility checking disabled" {
-		t.Errorf("expected 'eligibility checking disabled', got %q", result.Reason)
+	if result.Detail != "eligibility checking disabled" {
+		t.Errorf("expected 'eligibility checking disabled', got %q", result.Detail)
 	}
-	if !result.ShouldLog {
-		t.Errorf("expected ShouldLog=true for nil eligibility config, got false")
+	if result.Reason.Code != ReasonNone {
+		t.Errorf("expected Reason.Code=ReasonNone for eligible result, got %q", result.Reason.Code)
+	}
+}
+
+// TestSkipReasonCodeIsSilent asserts that every SkipReasonCode used by the
+// daemon has a deterministic silent-vs-logged classification. If a new code
+// is added and not classified in IsSilent, add it here and in the switch.
+func TestSkipReasonCodeIsSilent(t *testing.T) {
+	silent := map[SkipReasonCode]bool{
+		ReasonNotCompleted:                true,
+		ReasonAlreadyDownloadedLocal:      true,
+		ReasonTooOldCreationPrefilter:     true,
+		ReasonNameFilter:                  true,
+		ReasonAutoDownloadUnset:           true,
+		ReasonAutoDownloadDisabled:        true,
+		ReasonAutoDownloadUnrecognized:    true,
+		ReasonFieldCheckAPIError:          true,
+		ReasonInRetryBackoff:              true,
+		ReasonOutsideLookbackWindow:       false,
+		// Plan 3: tag-first semantics make ReasonHasDownloadedTag the common
+		// case every poll (N per-poll API calls), so it is silent to avoid
+		// log noise. Also new in Plan 3: ReasonPendingTagApply (transient
+		// retry state).
+		ReasonHasDownloadedTag:            true,
+		ReasonPendingTagApply:             true,
+		ReasonConditionalMissingTag:       false,
+		ReasonDownloadedTagCheckAPIError:  false,
+		ReasonConditionalTagCheckAPIError: false,
+		ReasonCompletionTimeAPIError:      false,
+	}
+	for code, want := range silent {
+		if got := code.IsSilent(); got != want {
+			t.Errorf("SkipReasonCode(%q).IsSilent() = %v, want %v", code, got, want)
+		}
+	}
+	// ReasonNone is the zero value; classify it as silent (no reason = nothing
+	// to log about).
+	if !ReasonNone.IsSilent() {
+		t.Errorf("ReasonNone.IsSilent() = false, want true")
 	}
 }
 

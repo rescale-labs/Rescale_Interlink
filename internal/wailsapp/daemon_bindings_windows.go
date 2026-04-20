@@ -62,8 +62,13 @@ type DaemonStatusDTO struct {
 	// DownloadFolder is the configured download directory
 	DownloadFolder string `json:"downloadFolder"`
 
-	// Error message if status query failed
+	// Error carries the canonical English error text when an error state
+	// is active. Empty when no error.
 	Error string `json:"error,omitempty"`
+
+	// ErrorCode is the stable machine-readable ipc.ErrorCode corresponding
+	// to Error. Frontend compares on this, not on Error text.
+	ErrorCode string `json:"errorCode,omitempty"`
 
 	// ManagedBy indicates if daemon is managed externally ("Windows Service", "", etc.)
 	ManagedBy string `json:"managedBy,omitempty"`
@@ -74,130 +79,106 @@ type DaemonStatusDTO struct {
 	// UserConfigured indicates if this user has daemon.conf with enabled=true
 	UserConfigured bool `json:"userConfigured"`
 
-	// UserState is the user-specific state: "not_configured", "pending", "running", "paused", "stopped"
+	// UserState is the user-specific state: "not_configured", "pending", "running", "paused", "stopped", "error"
 	UserState string `json:"userState"`
+
+	// UserStateDetail is the canonical long-form presentation string for this
+	// user's state, suitable for rendering verbatim in the GUI. Same across
+	// every surface via service.Presentation.
+	UserStateDetail string `json:"userStateDetail,omitempty"`
 
 	// UserRegistered indicates if service has this user registered (daemon.conf was found by service)
 	UserRegistered bool `json:"userRegistered"`
 }
 
-// GetDaemonStatus returns the current daemon status.
-// Primary check is IPC (works for both subprocess and service modes).
-// SCM queries are skipped by default since they require admin privileges.
+// GetDaemonStatus returns the current daemon status, derived from the
+// shared service.Computer (see internal/service/state.go). Same
+// implementation as the non-Windows variant; the SCM detection that used
+// to live here now happens inside service.Compute.
 func (a *App) GetDaemonStatus() DaemonStatusDTO {
-	result := DaemonStatusDTO{
-		State:     "stopped",
-		UserState: "not_configured",
-		Version:   version.Version,
+	comp := a.ensureStateComputer()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	a.stateMu.Lock()
+	prior := a.priorState
+	a.stateMu.Unlock()
+
+	st := comp.Compute(ctx, prior)
+
+	a.stateMu.Lock()
+	a.priorState = st
+	a.stateMu.Unlock()
+
+	pres := st.Presentation()
+	pid := daemon.IsDaemonRunning()
+
+	configured := st.PerUser != service.PerUserNotConfigured
+
+	userState := "not_configured"
+	switch st.PerUser {
+	case service.PerUserPending:
+		userState = "pending"
+	case service.PerUserRunning:
+		userState = "running"
+	case service.PerUserPaused:
+		userState = "paused"
+	case service.PerUserError:
+		userState = "error"
 	}
 
-	// Check if daemon.conf exists and is enabled for current user
-	configPath, _ := config.DefaultDaemonConfigPath()
-	if _, err := os.Stat(configPath); err == nil {
-		// Config file exists - check if enabled
-		if cfg, err := config.LoadDaemonConfig(""); err == nil {
-			result.UserConfigured = cfg.Daemon.Enabled
-		}
+	legacyState := "stopped"
+	switch st.PerUser {
+	case service.PerUserRunning:
+		legacyState = "running"
+	case service.PerUserPaused:
+		legacyState = "paused"
+	case service.PerUserError:
+		legacyState = "error"
+	case service.PerUserPending:
+		legacyState = "pending"
 	}
 
-	// Primary method - check via IPC (works without admin).
-	// If daemon is running (as subprocess or service), IPC will respond.
-	client := ipc.NewClient()
-	client.SetTimeout(5 * time.Second)
-
-	ctx := context.Background()
-	if status, err := client.GetStatus(ctx); err == nil {
-		result.IPCConnected = true
-		result.Running = true
-		result.State = status.ServiceState
-		// Keep showing version.Version, not IPC version (which may be stale)
-		result.Uptime = status.Uptime
-		result.ActiveDownloads = status.ActiveDownloads
-		result.ServiceMode = status.ServiceMode
-
-		if status.LastScanTime != nil {
-			result.LastScan = status.LastScanTime.Format(time.RFC3339)
-		}
-
-		currentSID := getCurrentUserSID()
-		currentUsername := os.Getenv("USERNAME")
-		if users, err := client.GetUserList(ctx); err == nil {
-			for _, user := range users {
-				if user.SID == currentSID || matchesWindowsUsername(user.Username, currentUsername) {
-					result.JobsDownloaded = user.JobsDownloaded
-					result.DownloadFolder = user.DownloadFolder
-					result.State = user.State // Use user's state, not service state
-					result.UserRegistered = true
-					result.UserState = user.State
-					// Propagate real error from daemon (e.g., "No API key configured")
-					if user.LastError != "" {
-						result.Error = user.LastError
-					}
-					break
-				}
-			}
-			// Subprocess hardening: in single-user mode, if exactly 1 user returned
-			// and no SID/username match was found, treat it as the current user.
-			// This prevents format drift from causing permanent "Activating..." state.
-			if !result.UserRegistered && !status.ServiceMode && len(users) == 1 {
-				result.JobsDownloaded = users[0].JobsDownloaded
-				result.DownloadFolder = users[0].DownloadFolder
-				result.State = users[0].State
-				result.UserRegistered = true
-				result.UserState = users[0].State
-			}
-		}
-
-		// Determine user state based on configuration + registration
-		if !result.UserConfigured {
-			result.UserState = "not_configured"
-		} else if !result.UserRegistered {
-			result.UserState = "pending" // Config exists but not yet picked up by service
-		}
-		// Otherwise use the state from IPC (running/paused/stopped)
-
-		if status.ServiceMode {
-			result.ManagedBy = "Windows Service"
-		}
-		// Otherwise leave ManagedBy empty - subprocess mode allows GUI control
-
-		return result
+	managedBy := ""
+	if st.ServiceMode {
+		managedBy = "Windows Service"
 	}
 
-	// Check Windows Service status for better error messaging
-	if service.IsInstalled() {
-		if svcStatus, err := service.QueryStatus(); err == nil {
-			if svcStatus == service.StatusRunning {
-				// Windows Service is running but IPC not responding
-				result.ManagedBy = "Windows Service"
-				result.Running = true       // Service IS running
-				result.State = "running"
-				result.IPCConnected = false
-				result.Error = "Service running but IPC not responding - may be initializing"
-				if result.UserConfigured {
-					result.UserState = "pending" // Config exists, service running, but can't confirm registration
-				}
-			} else if svcStatus == service.StatusStopped {
-				// Windows Service installed but stopped
-				result.ManagedBy = "Windows Service"
-				result.Running = false
-				result.State = "stopped"
-				result.Error = "Windows Service installed but stopped. Start via Services.msc."
-			}
-		}
+	lastScan := ""
+	if st.LastScanTime != nil && !st.LastScanTime.IsZero() {
+		lastScan = st.LastScanTime.Format(time.RFC3339)
 	}
-	// For subprocess mode: if IPC fails, daemon is NOT running (default state is correct)
 
-	return result
+	return DaemonStatusDTO{
+		Running:         st.IPCConnected || pid != 0,
+		PID:             pid,
+		IPCConnected:    st.IPCConnected,
+		State:           legacyState,
+		Version:         version.Version,
+		Uptime:          st.Uptime,
+		LastScan:        lastScan,
+		ActiveDownloads: st.ActiveDownloads,
+		JobsDownloaded:  st.JobsDownloaded,
+		DownloadFolder:  st.DownloadFolder,
+		Error:           st.LastError,
+		ErrorCode:       string(st.LastErrorCode),
+		ManagedBy:       managedBy,
+		ServiceMode:     st.ServiceMode,
+		UserConfigured:  configured,
+		UserState:       userState,
+		UserStateDetail: pres.GUILongForm,
+		UserRegistered:  st.PerUser == service.PerUserRunning || st.PerUser == service.PerUserPaused,
+	}
 }
 
 // StartDaemon starts the daemon as a subprocess (no admin required).
 // Uses subprocess mode by default instead of Windows Service (which requires admin).
 // Blocks subprocess spawn if Windows Service is already running.
 func (a *App) StartDaemon() error {
-	// Ensure token file exists before daemon starts
-	if err := a.ensureTokenPersisted(); err != nil {
-		a.logWarn("Daemon", fmt.Sprintf("Token persistence warning: %v", err))
+	// Per AUTO_DOWNLOAD_SPEC.md §4.3: persist before handoff to another process.
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return fmt.Errorf("cannot start daemon: %w", err)
 	}
 
 	// Pre-check API key availability
@@ -242,7 +223,7 @@ func (a *App) StartDaemon() error {
 	}
 
 	// Read daemon-stderr for actual error message instead of generic timeout
-	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
+	stderrPath := filepath.Join(logsDir, config.DaemonStderrLogName)
 	errDetail := ""
 	if stderrData, readErr := os.ReadFile(stderrPath); readErr == nil && len(stderrData) > 0 {
 		lines := strings.Split(strings.TrimSpace(string(stderrData)), "\n")
@@ -302,7 +283,7 @@ func (a *App) startDaemonSubprocess() error {
 
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
-	daemonLogPath := filepath.Join(config.LogDirectory(), "daemon.log")
+	daemonLogPath := filepath.Join(config.LogDirectory(), config.DaemonLogName)
 
 	// Build command arguments
 	args := []string{"daemon", "run", "--ipc",
@@ -334,7 +315,7 @@ func (a *App) startDaemonSubprocess() error {
 	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
 	}
-	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
+	stderrPath := filepath.Join(logsDir, config.DaemonStderrLogName)
 	stderrFile, stderrErr := os.Create(stderrPath)
 	if stderrErr != nil {
 		daemon.WriteStartupLog("WARNING: Could not create stderr capture file: %v", stderrErr)
@@ -504,6 +485,11 @@ type ReloadConfigResultDTO struct {
 func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 	result := ReloadConfigResultDTO{}
 
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
 	ctx := context.Background()
@@ -567,7 +553,7 @@ func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResu
 	if apiKey != "" {
 		result.APIKeyOK = true
 	} else {
-		result.APIKeyError = "No API key configured. Set your API key in Connection settings and test the connection first."
+		result.APIKeyError = ipc.CanonicalText[ipc.CodeNoAPIKey] + ". " + ipc.HintFor(ipc.CodeNoAPIKey)
 	}
 
 	// Check download folder
@@ -654,6 +640,15 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 
 // SaveDaemonConfig saves daemon configuration to daemon.conf.
 func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
+	// Refuse save when the download folder is unreachable. On Windows the
+	// validator always applies the service-SYSTEM strictness regardless of
+	// current runtime mode — the user may install the service later, so
+	// the save-time gate must be conservative.
+	if result := pathutil.ValidateWritablePath(dto.DownloadFolder, pathutil.ConsumerWindowsService); !result.Reachable {
+		return fmt.Errorf("%s: %s",
+			ipc.CanonicalText[result.ErrorCode], result.Reason)
+	}
+
 	// Load existing config to preserve any fields not in DTO
 	cfg, err := config.LoadDaemonConfig("")
 	if err != nil {
@@ -683,12 +678,26 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Save
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return err
+	}
+
 	if err := config.SaveDaemonConfig(cfg, ""); err != nil {
 		return fmt.Errorf("failed to save daemon.conf: %w", err)
 	}
 
 	a.logInfo("Daemon", "Configuration saved to daemon.conf")
+
+	if dto.Enabled {
+		client := ipc.NewClient()
+		client.SetTimeout(3 * time.Second)
+		ctx := context.Background()
+		if client.IsServiceRunning(ctx) {
+			if err := a.TriggerProfileRescan(); err != nil {
+				a.logWarn("Daemon", fmt.Sprintf("Profile rescan after save failed (non-fatal): %v", err))
+			}
+		}
+	}
 	return nil
 }
 
@@ -861,6 +870,10 @@ func (a *App) InstallService() error {
 func (a *App) InstallServiceElevated() ElevatedServiceResultDTO {
 	a.logInfo("Service", "Installing Windows Service with UAC elevation...")
 
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return ElevatedServiceResultDTO{Success: false, Error: err.Error()}
+	}
+
 	if err := elevation.InstallServiceElevated(); err != nil {
 		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
 		return ElevatedServiceResultDTO{
@@ -928,63 +941,147 @@ func (a *App) GetLogFileLocation() string {
 }
 
 // =============================================================================
-// Daemon Transfer Visibility
+// Daemon Transfer Visibility (Plan 3: Windows variant)
 // =============================================================================
+//
+// The DTO types (DaemonTransferTaskDTO, DaemonBatchStatsDTO, DaemonTransferSnapshotDTO)
+// and the daemonReachable helper are defined in daemon_bindings.go with a
+// !windows tag and are duplicated here for the Windows build (mutually
+// exclusive files). The core IPC-to-DTO marshalling logic matches across
+// both platforms.
 
-// DaemonBatchStatusDTO represents a daemon auto-download batch for the frontend.
-// NOTE: Duplicated here for Windows build (mutually exclusive with daemon_bindings.go).
-type DaemonBatchStatusDTO struct {
-	BatchID     string  `json:"batchID"`
-	BatchLabel  string  `json:"batchLabel"`
-	Total       int     `json:"total"`
-	Completed   int     `json:"completed"`
-	Failed      int     `json:"failed"`
-	Active      int     `json:"active"`
-	TotalBytes  int64   `json:"totalBytes"`
-	BytesDone   int64   `json:"bytesDone"`
+// DaemonTransferTaskDTO mirrors ipc.TransferTaskInfo for the frontend.
+type DaemonTransferTaskDTO struct {
+	ID          string  `json:"id"`
+	Type        string  `json:"type"`
+	State       string  `json:"state"`
+	Name        string  `json:"name"`
+	Source      string  `json:"source"`
+	Dest        string  `json:"dest"`
+	Size        int64   `json:"size"`
+	Progress    float64 `json:"progress"`
 	Speed       float64 `json:"speed"`
-	StartedAt   int64   `json:"startedAt"`
-	CompletedAt int64   `json:"completedAt"`
+	Error       string  `json:"error,omitempty"`
+	SourceLabel string  `json:"sourceLabel"`
+	BatchID     string  `json:"batchId"`
+	BatchLabel  string  `json:"batchLabel"`
+	CreatedAt   int64   `json:"createdAt"`
+	StartedAt   int64   `json:"startedAt,omitempty"`
+	CompletedAt int64   `json:"completedAt,omitempty"`
 }
 
-// GetDaemonTransfers retrieves daemon auto-download batch status via IPC.
-func (a *App) GetDaemonTransfers() []DaemonBatchStatusDTO {
-	if daemon.IsDaemonRunning() == 0 {
-		return nil
+// DaemonBatchStatsDTO mirrors ipc.BatchStatsInfo.
+type DaemonBatchStatsDTO struct {
+	BatchID     string  `json:"batchId"`
+	BatchLabel  string  `json:"batchLabel"`
+	Direction   string  `json:"direction"`
+	SourceLabel string  `json:"sourceLabel"`
+	Total       int     `json:"total"`
+	Queued      int     `json:"queued"`
+	Active      int     `json:"active"`
+	Completed   int     `json:"completed"`
+	Failed      int     `json:"failed"`
+	Cancelled   int     `json:"cancelled"`
+	TotalBytes  int64   `json:"totalBytes"`
+	Progress    float64 `json:"progress"`
+	Speed       float64 `json:"speed"`
+	TotalKnown  bool    `json:"totalKnown"`
+	StartedAt   int64   `json:"startedAt,omitempty"`
+}
+
+// DaemonTransferSnapshotDTO is the unified tasks+batches projection.
+type DaemonTransferSnapshotDTO struct {
+	Tasks   []DaemonTransferTaskDTO `json:"tasks"`
+	Batches []DaemonBatchStatsDTO   `json:"batches"`
+}
+
+// daemonReachable reports whether there's a daemon to talk to — either the
+// Windows service (SYSTEM-owned) or a subprocess daemon (PID-tracked).
+// Plan 3 removed the subprocess-only short-circuit so service mode works.
+func (a *App) daemonReachable(ctx context.Context, client *ipc.Client) bool {
+	if daemon.IsDaemonRunning() != 0 {
+		return true
+	}
+	return client.IsServiceRunning(ctx)
+}
+
+// GetDaemonTransferSnapshot retrieves a point-in-time view of daemon
+// transfers via IPC. Works in both subprocess and service modes.
+func (a *App) GetDaemonTransferSnapshot() *DaemonTransferSnapshotDTO {
+	client := ipc.NewClient()
+	client.SetTimeout(3 * time.Second)
+	ctx := context.Background()
+
+	if !a.daemonReachable(ctx, client) {
+		return &DaemonTransferSnapshotDTO{}
 	}
 
-	client := ipc.NewClient()
-	client.SetTimeout(3 * time.Second) // Short timeout for polling
-
-	ctx := context.Background()
 	data, err := client.GetTransferStatus(ctx)
 	if err != nil {
-		// Silent fail — daemon may not support this message yet
-		return nil
+		a.logWarn("daemon", "GetTransferStatus failed: "+err.Error())
+		return &DaemonTransferSnapshotDTO{}
+	}
+	if data == nil {
+		return &DaemonTransferSnapshotDTO{}
 	}
 
-	if data == nil || len(data.Batches) == 0 {
-		return nil
+	out := &DaemonTransferSnapshotDTO{
+		Tasks:   make([]DaemonTransferTaskDTO, 0, len(data.Tasks)),
+		Batches: make([]DaemonBatchStatsDTO, 0, len(data.Batches)),
 	}
-
-	result := make([]DaemonBatchStatusDTO, len(data.Batches))
-	for i, b := range data.Batches {
-		result[i] = DaemonBatchStatusDTO{
-			BatchID:     b.BatchID,
-			BatchLabel:  b.BatchLabel,
-			Total:       b.Total,
-			Completed:   b.Completed,
-			Failed:      b.Failed,
-			Active:      b.Active,
-			TotalBytes:  b.TotalBytes,
-			BytesDone:   b.BytesDone,
-			Speed:       b.Speed,
-			StartedAt:   b.StartedAt,
-			CompletedAt: b.CompletedAt,
-		}
+	for _, t := range data.Tasks {
+		out.Tasks = append(out.Tasks, DaemonTransferTaskDTO{
+			ID: t.ID, Type: t.Type, State: t.State, Name: t.Name,
+			Source: t.Source, Dest: t.Dest, Size: t.Size,
+			Progress: t.Progress, Speed: t.Speed, Error: t.Error,
+			SourceLabel: t.SourceLabel, BatchID: t.BatchID, BatchLabel: t.BatchLabel,
+			CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, CompletedAt: t.CompletedAt,
+		})
 	}
+	for _, b := range data.Batches {
+		out.Batches = append(out.Batches, DaemonBatchStatsDTO{
+			BatchID: b.BatchID, BatchLabel: b.BatchLabel, Direction: b.Direction,
+			SourceLabel: b.SourceLabel,
+			Total:       b.Total, Queued: b.Queued, Active: b.Active,
+			Completed: b.Completed, Failed: b.Failed, Cancelled: b.Cancelled,
+			TotalBytes: b.TotalBytes, Progress: b.Progress, Speed: b.Speed,
+			TotalKnown: b.TotalKnown, StartedAt: b.StartedAt,
+		})
+	}
+	return out
+}
 
-	return result
+// CancelDaemonBatch cancels all non-terminal tasks in a daemon batch.
+func (a *App) CancelDaemonBatch(batchID string) error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon not reachable")
+	}
+	return client.CancelDaemonBatch(ctx, "", batchID)
+}
+
+// CancelDaemonTransfer cancels a single daemon task.
+func (a *App) CancelDaemonTransfer(taskID string) error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon not reachable")
+	}
+	return client.CancelDaemonTransfer(ctx, "", taskID)
+}
+
+// RetryFailedInDaemonBatch retries all failed tasks in a daemon batch.
+func (a *App) RetryFailedInDaemonBatch(batchID string) error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon not reachable")
+	}
+	return client.RetryFailedInDaemonBatch(ctx, "", batchID)
 }
 
 // =============================================================================
@@ -1144,6 +1241,10 @@ func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
 	// The elevated "rescale-int service start" will report errors properly.
 	a.logInfo("Service", "Starting Windows Service with UAC elevation...")
 
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return ElevatedServiceResultDTO{Success: false, Error: err.Error()}
+	}
+
 	// Trigger UAC elevation
 	if err := elevation.StartServiceElevated(); err != nil {
 		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
@@ -1181,6 +1282,10 @@ func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
 // Combined operation -- single UAC prompt for both install and start.
 func (a *App) InstallAndStartServiceElevated() ElevatedServiceResultDTO {
 	a.logInfo("Service", "Installing and starting Windows Service with UAC elevation...")
+
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return ElevatedServiceResultDTO{Success: false, Error: err.Error()}
+	}
 
 	if err := elevation.InstallAndStartServiceElevated(); err != nil {
 		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))

@@ -160,15 +160,25 @@ func ResolveAPIKeySource(apiKey string, userProfilePath string, serviceMode bool
 }
 
 // GetUserTokenPath returns the token file path for a specific user profile.
-// This is used by the Windows service to find per-user token files.
-// - Windows: <userProfilePath>\AppData\Roaming\Rescale\Interlink\token
-// - Unix: <userProfilePath>/.config/rescale/token
+// Used by the Windows service to find per-user token files.
+//
+//   - Windows: <userProfilePath>\AppData\Local\Rescale\Interlink\token. Falls
+//     back to the Roaming location during the Plan 2 transition window.
+//   - Unix: <userProfilePath>/.config/rescale/token.
 func GetUserTokenPath(userProfilePath string) string {
 	if userProfilePath == "" {
 		return ""
 	}
 	if runtime.GOOS == "windows" {
-		return filepath.Join(userProfilePath, "AppData", "Roaming", "Rescale", "Interlink", "token")
+		newPath := filepath.Join(userProfilePath, "AppData", "Local", "Rescale", "Interlink", "token")
+		if _, err := os.Stat(newPath); err == nil {
+			return newPath
+		}
+		oldPath := filepath.Join(userProfilePath, "AppData", "Roaming", "Rescale", "Interlink", "token")
+		if _, err := os.Stat(oldPath); err == nil {
+			return oldPath
+		}
+		return newPath
 	}
 	return filepath.Join(userProfilePath, ".config", ConfigDir, "token")
 }

@@ -4,6 +4,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os/user"
 	"time"
 
@@ -221,13 +222,38 @@ func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	}
 }
 
-// GetTransferStatus returns daemon transfer batch status.
-// In subprocess mode, userID is ignored (single-user).
-func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.TransferStatusData, error) {
+// GetTransferStatus returns a snapshot of the daemon's transfer queue
+// filtered to SourceLabel=Daemon. In subprocess mode, userID is ignored.
+func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.DaemonTransferSnapshot, error) {
 	if h.daemon == nil {
-		return &ipc.TransferStatusData{}, nil
+		return &ipc.DaemonTransferSnapshot{}, nil
 	}
-	return h.daemon.GetTransferStatus(), nil
+	return h.daemon.DaemonTransferSnapshot(), nil
+}
+
+// CancelDaemonBatch cancels non-terminal tasks in a daemon batch.
+// In subprocess mode, userID is ignored.
+func (h *IPCHandler) CancelDaemonBatch(userID, batchID string) error {
+	if h.daemon == nil || h.daemon.TransferService() == nil {
+		return fmt.Errorf("daemon transfer service unavailable")
+	}
+	return h.daemon.TransferService().CancelBatch(batchID)
+}
+
+// CancelDaemonTransfer cancels one daemon task.
+func (h *IPCHandler) CancelDaemonTransfer(userID, taskID string) error {
+	if h.daemon == nil || h.daemon.TransferService() == nil {
+		return fmt.Errorf("daemon transfer service unavailable")
+	}
+	return h.daemon.TransferService().CancelTransfer(taskID)
+}
+
+// RetryFailedInDaemonBatch retries failed tasks in a daemon batch.
+func (h *IPCHandler) RetryFailedInDaemonBatch(userID, batchID string) error {
+	if h.daemon == nil || h.daemon.TransferService() == nil {
+		return fmt.Errorf("daemon transfer service unavailable")
+	}
+	return h.daemon.TransferService().RetryFailedInBatch(batchID)
 }
 
 // IsPaused returns whether the daemon is currently paused.

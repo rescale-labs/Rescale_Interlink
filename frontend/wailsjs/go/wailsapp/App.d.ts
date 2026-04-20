@@ -8,6 +8,10 @@ export function CancelAllTransfers():Promise<void>;
 
 export function CancelBatch(arg1:string):Promise<void>;
 
+export function CancelDaemonBatch(arg1:string):Promise<void>;
+
+export function CancelDaemonTransfer(arg1:string):Promise<void>;
+
 export function CancelLocalDirectoryRead():Promise<void>;
 
 export function CancelRun():Promise<void>;
@@ -50,7 +54,7 @@ export function GetDaemonLogs(arg1:number):Promise<Array<wailsapp.DaemonLogEntry
 
 export function GetDaemonStatus():Promise<wailsapp.DaemonStatusDTO>;
 
-export function GetDaemonTransfers():Promise<Array<wailsapp.DaemonBatchStatusDTO>>;
+export function GetDaemonTransferSnapshot():Promise<wailsapp.DaemonTransferSnapshotDTO>;
 
 export function GetDefaultConfigPath():Promise<string>;
 
@@ -129,6 +133,8 @@ export function ResetRun():Promise<void>;
 export function ResumeDaemon():Promise<void>;
 
 export function RetryFailedInBatch(arg1:string):Promise<void>;
+
+export function RetryFailedInDaemonBatch(arg1:string):Promise<void>;
 
 export function RetryTransfer(arg1:string):Promise<string>;
 

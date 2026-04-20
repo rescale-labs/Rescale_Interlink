@@ -1,5 +1,35 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.4 - April 19, 2026
+
+### Auto-Download: Unified Transfers + Tag as Source of Truth
+
+- **Unified Transfers tab**: Auto-download transfers now appear alongside GUI-initiated transfers in the main Transfers tab, distinguished by a `Daemon` badge. Per-row Cancel/Retry works across both engines; `Cancel All` cancels both.
+- **Tag-first eligibility**: The `downloaded` tag on the Rescale platform is now the authoritative source of truth for "already handled." Removing the tag via the Rescale web UI triggers a re-download on the next poll cycle.
+- **Pending-tag-apply retry**: If a download succeeds but the tag-apply call fails (network blip), the daemon retries the tag application on later polls without re-downloading the files.
+- **Adaptive concurrency**: Daemon downloads now use the same adaptive worker pool as GUI folder downloads; multi-file jobs download in parallel rather than one-file-at-a-time.
+
+### Persistence + Save-Time Validation
+
+- **Centralized persistence on handoff**: The GUI now automatically writes the token file, `config.csv`, and `daemon.conf` to disk before any operation that hands off to another process (subprocess daemon, Windows Service install/start, reload). Eliminates a class of "GUI had the right value but the daemon couldn't see it" bugs.
+- **Mapped-drive rejection**: Save-time path validation refuses mapped-drive and UNC download paths on Windows with a clear error, preventing the silent failure pattern reported by enterprise users.
+- **Path migrations**: One-time migrations move the Windows token and `config.csv` from Roaming to Local (per-user isolation) and consolidate macOS/Linux paths under `~/.config/rescale/`. Migrations are idempotent and log a WARN rather than blocking startup on failure.
+
+### Security Hardening
+
+- **Explicit Windows ACLs on token file**: The per-user API token file now gets an explicit DACL granting access to only the owner, `BUILTIN\Administrators`, and `NT AUTHORITY\SYSTEM` — no inheritance. Applied on GUI save, CLI `config init`, and both Windows credential migrations.
+- **IPC authorization tightened**: All user-scoped IPC handlers (including the new Cancel/Retry operations) now fail closed when the caller cannot be identified in service mode. A single `resolveUserScope` helper enforces the policy; a table-driven catalog test covers every user-scoped message type so future additions inherit the fix.
+
+### Observability
+
+- **Scan summary**: The auto-download daemon emits a single INFO line per poll summarizing scanned jobs, skip reasons, and download outcomes — previously silent skips are now visible.
+- **Canonical error strings**: GUI, Tray, and CLI now render the same error text for the same condition (missing API key, workspace not configured, path validation failure, etc.).
+
+### Cross-Platform
+
+- **macOS/Linux session-scoped messaging**: The Auto-Download tab now shows a banner on macOS and Linux making clear that auto-download runs only while the user is logged in and stops on logout/reboot.
+- **Tray scope clarified**: Documentation in README and ARCHITECTURE now calls out that the tray ships with the Windows MSI installer only (not portable Windows, macOS, or Linux).
+
 ## v4.9.3 - April 15, 2026
 
 ### Dependency Security Updates

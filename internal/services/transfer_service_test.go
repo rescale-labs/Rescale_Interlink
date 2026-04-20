@@ -332,3 +332,104 @@ func TestCheckBatchCompletion_PartialServerError(t *testing.T) {
 		t.Fatal("expected ReportableErrorEvent for partial server error, got none")
 	}
 }
+
+// TestWaitForBatch_ContextCancel — WaitForBatch returns ctx.Err() when the
+// context is cancelled before the batch finishes.
+func TestWaitForBatch_ContextCancel(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := ts.WaitForBatch(ctx, "missing-batch")
+	if err != context.Canceled {
+		t.Errorf("WaitForBatch err = %v, want context.Canceled", err)
+	}
+}
+
+// TestWaitForBatch_EmptyBatch — batch pre-registered with no tasks;
+// MarkBatchScanInProgress(false) flips TotalKnown=true; WaitForBatch
+// returns the empty-batch stats (Total=0).
+func TestWaitForBatch_EmptyBatch(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+
+	batchID := "empty-batch"
+	ts.queue.PreRegisterBatch(batchID, "Empty", "download", SourceLabelDaemon)
+	ts.queue.MarkBatchScanInProgress(batchID, true)
+	// Before flipping scan-in-progress off, WaitForBatch must NOT return.
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	done := make(chan transfer.BatchStats, 1)
+	go func() {
+		bs, _ := ts.WaitForBatch(ctx, batchID)
+		done <- bs
+	}()
+
+	// Leave scan-in-progress true for a beat; WaitForBatch should still be waiting.
+	time.Sleep(400 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("WaitForBatch returned early while TotalKnown=false")
+	default:
+	}
+
+	// Flip TotalKnown=true: empty batch — WaitForBatch returns.
+	ts.queue.MarkBatchScanInProgress(batchID, false)
+	select {
+	case bs := <-done:
+		if bs.Total != 0 {
+			t.Errorf("WaitForBatch Total = %d, want 0", bs.Total)
+		}
+		if !bs.TotalKnown {
+			t.Error("WaitForBatch returned with TotalKnown=false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForBatch did not return after TotalKnown flipped true")
+	}
+}
+
+// TestWaitForBatch_FastFirstTask — a fast-completing first task must not
+// cause WaitForBatch to return early while scan-in-progress is still true.
+func TestWaitForBatch_FastFirstTask(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+
+	batchID := "fast-first"
+	ts.queue.PreRegisterBatch(batchID, "Fast", "download", SourceLabelDaemon)
+	ts.queue.MarkBatchScanInProgress(batchID, true)
+
+	// Register + complete one task while scan is still in progress.
+	task := ts.queue.TrackTransferWithBatch(
+		"f1.dat", 10, transfer.TaskTypeDownload, "fid", "/tmp/f1",
+		SourceLabelDaemon, batchID, "Fast",
+	)
+	ts.queue.Complete(task.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan transfer.BatchStats, 1)
+	go func() {
+		bs, _ := ts.WaitForBatch(ctx, batchID)
+		done <- bs
+	}()
+
+	// Even though the task is done, scan-in-progress prevents early return.
+	time.Sleep(400 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("WaitForBatch returned while TotalKnown=false (fast-first task)")
+	default:
+	}
+
+	ts.queue.MarkBatchScanInProgress(batchID, false)
+	select {
+	case bs := <-done:
+		if bs.Completed != 1 {
+			t.Errorf("WaitForBatch Completed = %d, want 1", bs.Completed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForBatch did not return after scan flip")
+	}
+}

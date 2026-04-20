@@ -35,15 +35,16 @@ const (
 // trayApp manages the system tray application state.
 type trayApp struct {
 	client *ipc.Client
+	comp   *service.Computer
 	mu     sync.RWMutex
 
-	// Current status
-	serviceRunning   bool
-	lastStatus       *ipc.StatusData
-	lastError        string
-	ipcConnected     bool // Track IPC availability separately from service running
-	serviceInstalled bool // Track Windows Service installation status
-	userConfigured   bool // Track if user has daemon.conf with enabled=true
+	// Current derived state from service.Computer. prior is the last
+	// computed State, carried across refreshes so the 10s transient-pending
+	// timeout fires consistently with the GUI.
+	prior       service.State
+	lastState   service.State
+	lastPresent service.Presentation
+	lastError   string
 
 	// Menu items (for dynamic updates)
 	mStatus            *systray.MenuItem
@@ -78,6 +79,7 @@ func onReady() {
 		done:   make(chan struct{}),
 	}
 	app.client.SetTimeout(2 * time.Second)
+	app.comp = service.DefaultComputer(app.client)
 
 	// Set initial tray icon and tooltip
 	systray.SetIcon(iconData)
@@ -156,205 +158,81 @@ func (a *trayApp) refreshLoop() {
 	}
 }
 
-// refreshStatus fetches current status from the service via IPC.
-// Also tracks user configuration status for "Setup Required" indicator.
+// refreshStatus composes the current service.State via the shared Computer
+// and updates the tray's UI from the resulting Presentation. All state
+// vocabulary comes from service.Presentation; this function never invents
+// its own strings.
 func (a *trayApp) refreshStatus() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Check if daemon.conf exists and is enabled for current user
-	configPath, _ := config.DefaultDaemonConfigPath()
-	userConfigured := false
-	if _, err := os.Stat(configPath); err == nil {
-		if cfg, err := config.LoadDaemonConfig(""); err == nil {
-			userConfigured = cfg.Daemon.Enabled
-		}
-	}
+	a.mu.RLock()
+	prior := a.prior
+	a.mu.RUnlock()
 
-	// Try IPC first (remains source of truth when available)
-	status, err := a.client.GetStatus(ctx)
+	st := a.comp.Compute(ctx, prior)
+	pres := st.Presentation()
 
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.prior = st
+	a.lastState = st
+	a.lastPresent = pres
+	a.lastError = st.LastError
+	a.mu.Unlock()
 
-	a.userConfigured = userConfigured
-
-	if err != nil {
-		// IPC failed - use unified detection as fallback.
-		// This handles SCM-denied scenarios where IPC may also be slow.
-		detection := service.DetectDaemon()
-		a.serviceInstalled = detection.ServiceMode || service.IsInstalled()
-		a.serviceRunning = detection.ServiceMode || detection.SubprocessPID > 0 || detection.PipeInUse
-		a.lastError = translateError(err)
-		a.lastStatus = nil
-		a.ipcConnected = false
-
-		// Fallback to SCM when IPC fails
-		if a.serviceInstalled {
-			if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
-				a.serviceRunning = true
-				a.lastError = "Service running but IPC not responding"
-			}
-		}
-		a.updateUI()
-		return
-	}
-
-	// IPC succeeded - use IPC data (source of truth)
-	a.serviceRunning = true
-	a.lastStatus = status
-	a.lastError = ""
-	a.ipcConnected = true
-	a.serviceInstalled = status.ServiceMode || service.IsInstalled()
 	a.updateUI()
 }
 
-// updateUI updates the tray icon, tooltip, and menu items based on current state.
-// Must be called with a.mu held.
+// updateUI renders the tray tooltip, status menu item, and menu-item
+// enabled/visible state from service.Presentation. The canonical state
+// vocabulary lives entirely in service/state.go; this function is a view.
 func (a *trayApp) updateUI() {
-	if a.serviceInstalled {
-		// Windows Service installed - show admin controls, hide subprocess controls
-		a.mStartService.Hide()
-		a.mInstallServiceAdmin.Hide() // Already installed
+	a.mu.RLock()
+	st := a.lastState
+	pres := a.lastPresent
+	a.mu.RUnlock()
 
-		if a.serviceRunning {
-			// Service running - show stop option, hide uninstall (must stop first)
-			a.mStartServiceAdmin.Hide()
-			a.mStopServiceAdmin.Show()
-			a.mStopServiceAdmin.Enable()
-			a.mUninstallServiceAdmin.Hide()
-		} else {
-			// Service stopped - show start and uninstall options
-			a.mStartServiceAdmin.Show()
-			a.mStartServiceAdmin.Enable()
-			a.mStopServiceAdmin.Hide()
-			a.mUninstallServiceAdmin.Show()
-			a.mUninstallServiceAdmin.Enable()
-		}
-	} else {
-		// No Windows Service - hide admin controls, show subprocess controls and install option
-		a.mStartServiceAdmin.Hide()
-		a.mStopServiceAdmin.Hide()
-		a.mUninstallServiceAdmin.Hide()
-		a.mInstallServiceAdmin.Show()
-		a.mInstallServiceAdmin.Enable()
+	// Tooltip: version + canonical tooltip.
+	systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\n%s", version.Version, pres.TrayTooltip))
+	a.mStatus.SetTitle(pres.TrayStatusLine)
+
+	// Menu item visibility is driven by allowed actions.
+	allowed := map[service.Action]bool{}
+	for _, a := range pres.AllowedActions {
+		allowed[a] = true
 	}
+	setMenuItem(a.mInstallServiceAdmin, allowed[service.ActionInstallService])
+	setMenuItem(a.mUninstallServiceAdmin, allowed[service.ActionUninstallService])
+	setMenuItem(a.mStartServiceAdmin, allowed[service.ActionStartService])
+	setMenuItem(a.mStopServiceAdmin, allowed[service.ActionStopService])
+	setMenuItem(a.mPause, allowed[service.ActionPause])
+	setMenuItem(a.mResume, allowed[service.ActionResume])
+	setMenuItem(a.mTriggerScan, allowed[service.ActionTriggerScan])
 
-	// Show/hide setup required menu item based on user configuration
-	if !a.userConfigured && a.serviceRunning {
+	// Setup-required shortcut: visible when the user is running under the
+	// service but not configured.
+	if st.PerUser == service.PerUserNotConfigured && st.Installation == service.InstallationRunning {
 		a.mSetupRequired.Show()
 	} else {
 		a.mSetupRequired.Hide()
 	}
 
-	if !a.serviceRunning {
-		// Check if this is first-time setup (no daemon.conf exists)
-		configPath, _ := config.DefaultDaemonConfigPath()
-		if _, err := os.Stat(configPath); os.IsNotExist(err) {
-			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nFirst-time setup: Click 'Configure...' to set download folder", version.Version))
-			a.mStatus.SetTitle("Status: Not Configured")
-			a.mSetupRequired.Show()
-			if !a.serviceInstalled {
-				a.mStartService.Enable()
-				a.mStartService.Show()
-			}
-			a.mPause.Disable()
-			a.mResume.Disable()
-			a.mTriggerScan.Disable()
-			return
-		}
+	// Start Service (subprocess) option: visible on non-service installations
+	// when we have no running daemon.
+	canStartSubprocess := st.Installation == service.InstallationSubprocessOnly && !st.IPCConnected
+	setMenuItem(a.mStartService, canStartSubprocess)
+}
 
-		if a.lastError != "" {
-			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running\nError: %s", version.Version, a.lastError))
-			a.mStatus.SetTitle(fmt.Sprintf("Error: %s", truncate(a.lastError, 40)))
-		} else {
-			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Not Running", version.Version))
-			a.mStatus.SetTitle("Status: Service Not Running")
-		}
-		if !a.serviceInstalled {
-			a.mStartService.Enable()
-			a.mStartService.Show()
-		}
-		a.mPause.Disable()
-		a.mResume.Disable()
-		a.mTriggerScan.Disable()
+// setMenuItem shows+enables or hides a systray menu item.
+func setMenuItem(mi *systray.MenuItem, enabled bool) {
+	if mi == nil {
 		return
 	}
-
-	// Service is running - hide Start Service button (subprocess mode)
-	a.mStartService.Disable()
-	a.mStartService.Hide()
-
-	if !a.ipcConnected {
-		// Service running but IPC unavailable - disable controls
-		systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running (IPC unavailable)", version.Version))
-		a.mStatus.SetTitle("Status: Running (IPC unavailable)")
-		a.mPause.Disable()
-		a.mResume.Disable()
-		a.mTriggerScan.Disable()
-		return
-	}
-
-	// Service is running with IPC available
-	if a.lastStatus != nil {
-		var userStatusLine string
-		if !a.userConfigured {
-			userStatusLine = "\nYour Auto-Download: Setup Required"
-		} else {
-			userStatusLine = "\nYour Auto-Download: Active"
-		}
-
-		tooltip := fmt.Sprintf("Rescale Interlink v%s\nService: %s%s\nActive Users: %d\nActive Downloads: %d",
-			version.Version,
-			a.lastStatus.ServiceState,
-			userStatusLine,
-			a.lastStatus.ActiveUsers,
-			a.lastStatus.ActiveDownloads,
-		)
-		if a.lastStatus.LastScanTime != nil {
-			tooltip += fmt.Sprintf("\nLast Scan: %s", a.lastStatus.LastScanTime.Format("15:04:05"))
-		}
-		if a.lastStatus.LastError != "" {
-			tooltip += fmt.Sprintf("\nLast Error: %s", truncate(a.lastStatus.LastError, 50))
-		}
-		systray.SetTooltip(tooltip)
-
-		var statusText string
-		if !a.userConfigured {
-			statusText = "Status: Setup Required"
-		} else {
-			statusText = fmt.Sprintf("Status: %s | %d users, %d downloads",
-				a.lastStatus.ServiceState,
-				a.lastStatus.ActiveUsers,
-				a.lastStatus.ActiveDownloads,
-			)
-		}
-		a.mStatus.SetTitle(statusText)
-
-		if !a.userConfigured {
-			a.mPause.Disable()
-			a.mResume.Disable()
-			a.mTriggerScan.Disable()
-		} else {
-			// Enable/disable pause/resume based on state
-			a.mPause.Enable()
-			a.mResume.Enable()
-			a.mTriggerScan.Enable()
-		}
+	if enabled {
+		mi.Show()
+		mi.Enable()
 	} else {
-		if !a.userConfigured {
-			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running\nYour Auto-Download: Setup Required", version.Version))
-			a.mStatus.SetTitle("Status: Setup Required")
-			a.mPause.Disable()
-			a.mResume.Disable()
-			a.mTriggerScan.Disable()
-		} else {
-			systray.SetTooltip(fmt.Sprintf("Rescale Interlink v%s\nService: Running", version.Version))
-			a.mStatus.SetTitle("Status: Running")
-			a.mPause.Enable()
-			a.mResume.Enable()
-			a.mTriggerScan.Enable()
-		}
+		mi.Hide()
 	}
 }
 
@@ -424,7 +302,6 @@ func (a *trayApp) startService() {
 	if err != nil {
 		a.mu.Lock()
 		a.lastError = translateError(fmt.Errorf("executable path: %w", err))
-		a.serviceRunning = false
 		a.updateUI()
 		a.mu.Unlock()
 		return
@@ -437,7 +314,6 @@ func (a *trayApp) startService() {
 	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
 		a.mu.Lock()
 		a.lastError = translateError(fmt.Errorf("CLI not found: rescale-int.exe"))
-		a.serviceRunning = false
 		a.updateUI()
 		a.mu.Unlock()
 		return
@@ -447,7 +323,6 @@ func (a *trayApp) startService() {
 	if err != nil {
 		a.mu.Lock()
 		a.lastError = "Configuration error. Open Interlink to configure."
-		a.serviceRunning = false
 		a.updateUI()
 		a.mu.Unlock()
 		return
@@ -463,7 +338,6 @@ func (a *trayApp) startService() {
 	if err := os.MkdirAll(downloadDir, 0755); err != nil {
 		a.mu.Lock()
 		a.lastError = fmt.Sprintf("Cannot create download folder: %s", err)
-		a.serviceRunning = false
 		a.updateUI()
 		a.mu.Unlock()
 		return
@@ -478,7 +352,7 @@ func (a *trayApp) startService() {
 
 	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
 
-	daemonLogPath := filepath.Join(config.LogDirectory(), "daemon.log")
+	daemonLogPath := filepath.Join(config.LogDirectory(), config.DaemonLogName)
 
 	// Build command arguments
 	args := []string{"daemon", "run", "--ipc",
@@ -511,7 +385,7 @@ func (a *trayApp) startService() {
 	if err := os.MkdirAll(logsDir, 0700); err != nil {
 		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
 	}
-	stderrPath := filepath.Join(logsDir, "daemon-stderr.log")
+	stderrPath := filepath.Join(logsDir, config.DaemonStderrLogName)
 	stderrFile, stderrErr := os.Create(stderrPath)
 	if stderrErr != nil {
 		daemon.WriteStartupLog("WARNING: Could not create stderr capture file: %v", stderrErr)
@@ -541,7 +415,6 @@ func (a *trayApp) startService() {
 		}
 		a.mu.Lock()
 		a.lastError = translateError(err)
-		a.serviceRunning = false
 		a.updateUI()
 		a.mu.Unlock()
 		return
@@ -775,37 +648,47 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// translateError converts technical errors to user-friendly messages.
+// translateError maps a raw error from an action (elevation, subprocess
+// launch, IPC call) to canonical user-facing text. Uses ipc.ErrorCode so
+// the tray and the GUI agree on wording, and appends the actionable hint
+// when one is defined.
 func translateError(err error) string {
 	if err == nil {
 		return ""
 	}
 	errStr := err.Error()
 
+	var code ipc.ErrorCode
 	switch {
 	case strings.Contains(errStr, "pipe\\rescale-interlink") ||
 		strings.Contains(errStr, "The system cannot find the file specified"):
-		return "Service not running. Click 'Start Service' to begin."
-	case strings.Contains(errStr, "CLI not found"):
-		return "Interlink CLI not found. Please reinstall."
+		code = ipc.CodeIPCNotResponding
+	case strings.Contains(errStr, "CLI not found") || strings.Contains(errStr, "executable path"):
+		code = ipc.CodeCLINotFound
 	case strings.Contains(errStr, "failed to load daemon.conf"):
-		return "Configuration not found. Using defaults."
+		code = ipc.CodeConfigInvalid
 	case strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline exceeded"):
-		return "Service not responding. Try restarting."
+		code = ipc.CodeIPCNotResponding
 	case strings.Contains(errStr, "access denied") || strings.Contains(errStr, "Access is denied") ||
 		strings.Contains(errStr, "permission"):
-		return "Permission denied. Run as administrator."
+		code = ipc.CodePermissionDenied
 	case strings.Contains(errStr, "already running"):
-		return "Service is already running."
-	case strings.Contains(errStr, "executable path"):
-		return "Cannot find Interlink executable."
-	default:
-		// Keep short errors, truncate long ones intelligently
-		if len(errStr) > 60 {
-			return errStr[:57] + "..."
-		}
-		return errStr
+		code = ipc.CodeServiceAlreadyRunning
 	}
+
+	if code != "" {
+		text := ipc.CanonicalText[code]
+		if hint := ipc.HintFor(code); hint != "" {
+			return text + ". " + hint
+		}
+		return text
+	}
+
+	// No canonical mapping — show a truncated raw error.
+	if len(errStr) > 60 {
+		return errStr[:57] + "..."
+	}
+	return errStr
 }
 
 // getCurrentUsername returns the current Windows username for IPC calls.

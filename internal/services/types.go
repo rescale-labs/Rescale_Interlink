@@ -37,6 +37,11 @@ const (
 	SourceLabelPUR         = "PUR"
 	SourceLabelSingleJob   = "SingleJob"
 	SourceLabelFileBrowser = "FileBrowser"
+	// SourceLabelDaemon identifies auto-download transfers initiated by the
+	// daemon's polling loop. Rendered with a Daemon badge in the main
+	// Transfers tab; filtered by IPC handlers when returning
+	// DaemonTransferSnapshot.
+	SourceLabelDaemon = "Daemon"
 )
 
 // TransferRequest specifies a single transfer to be executed.

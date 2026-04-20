@@ -25,10 +25,12 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
 	"github.com/rescale/rescale-int/internal/reporting"
+	"github.com/rescale/rescale-int/internal/service"
 )
 
 // Assets holds the embedded frontend files, passed in from main package.
@@ -59,6 +61,24 @@ type App struct {
 	cachedAutomations []AutomationDTO
 
 	reporter *reporting.Reporter
+
+	// State helper shared with Tray and CLI; owns the canonical (installation,
+	// per-user) state model plus the 10s transient-pending timeout.
+	stateMu     sync.Mutex
+	stateComp   *service.Computer
+	priorState  service.State
+}
+
+// ensureStateComputer lazily constructs the shared service.Computer. Called
+// from GetDaemonStatus so tests and early-startup callers that don't need
+// status never pay the cost of an IPC client.
+func (a *App) ensureStateComputer() *service.Computer {
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	if a.stateComp == nil {
+		a.stateComp = service.DefaultComputer(ipc.NewClient())
+	}
+	return a.stateComp
 }
 
 // NewApp creates a new Wails application instance.
@@ -182,10 +202,52 @@ func (a *App) startup(ctx context.Context) {
 		cloud.SetDetailedLogging(a.config.DetailedLogging)
 	}
 
+	// Plan 2 path migrations (idempotent; current-user scope in GUI).
+	config.RunStartupMigrations(wailsLogger, config.ScopeCurrentUser, nil)
+
 	// Auto-launch tray companion if available (Windows only, no-op on other platforms)
 	go a.launchTrayIfNeeded()
 
+	// If an API key was resolved from the environment but no token file
+	// exists, persist it now so a later daemon/service handoff can read it.
+	// This closes the env-var→service gap that previously required an
+	// explicit Save click.
+	a.autoPersistFromEnv()
+
 	wailsLogger.Info().Msg("Wails application started")
+}
+
+// autoPersistFromEnv writes the token file on GUI startup when the active
+// API key came from the RESCALE_API_KEY environment variable and the token
+// file is missing.
+func (a *App) autoPersistFromEnv() {
+	if a.config == nil || a.config.APIKey == "" {
+		return
+	}
+	_, source := config.ResolveAPIKeySource("", getHomeDir(), false)
+	if source != "environment" {
+		return
+	}
+	tokenPath := config.GetDefaultTokenPath()
+	if tokenPath == "" {
+		return
+	}
+	if _, err := os.Stat(tokenPath); err == nil {
+		return // Token already on disk.
+	}
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		wailsLogger.Warn().Err(err).Msg("Startup auto-persist failed")
+		return
+	}
+	wailsLogger.Info().Msg("Persisted env-var API key to token file on startup")
+}
+
+func getHomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }
 
 // domReady is called after the frontend DOM is ready.

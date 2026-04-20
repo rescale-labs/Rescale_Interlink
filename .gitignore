@@ -119,6 +119,12 @@ Terminal_*.txt
 *.key
 !*.tsx
 !*.ts
+# Explicit exceptions: source files that manage token-file permissions
+# (not token files themselves) — matched by *token* above but must be
+# tracked.
+!internal/config/token_acl_windows.go
+!internal/config/token_acl_other.go
+!internal/config/token_acl_windows_test.go
 
 # Claude Code artifacts that may contain sensitive data
 *.compact

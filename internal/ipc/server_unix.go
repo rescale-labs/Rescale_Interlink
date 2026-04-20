@@ -55,8 +55,19 @@ type ServiceHandler interface {
 	// In service mode, delegates to TriggerRescan().
 	ReloadConfig(userID string) *ReloadConfigData
 
-	// GetTransferStatus returns daemon transfer batch status.
-	GetTransferStatus(userID string) (*TransferStatusData, error)
+	// GetTransferStatus returns a snapshot of the daemon's transfer queue
+	// filtered to SourceLabel=Daemon. Replaces the old TransferStatusData
+	// shape with a GUI-aligned tasks+batches projection.
+	GetTransferStatus(userID string) (*DaemonTransferSnapshot, error)
+
+	// CancelDaemonBatch cancels non-terminal tasks in a daemon batch.
+	CancelDaemonBatch(userID, batchID string) error
+
+	// CancelDaemonTransfer cancels one daemon task.
+	CancelDaemonTransfer(userID, taskID string) error
+
+	// RetryFailedInDaemonBatch retries failed tasks in a daemon batch.
+	RetryFailedInDaemonBatch(userID, batchID string) error
 }
 
 // Server handles IPC requests from clients via Unix domain socket.
@@ -299,7 +310,25 @@ func (s *Server) handleRequest(req *Request) *Response {
 		if err != nil {
 			return NewErrorResponse(err.Error())
 		}
-		return NewTransferStatusResponse(data)
+		return NewDaemonTransferSnapshotResponse(data)
+
+	case MsgCancelDaemonBatch:
+		if err := s.handler.CancelDaemonBatch(req.UserID, req.BatchID); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewOKResponse()
+
+	case MsgCancelDaemonTransfer:
+		if err := s.handler.CancelDaemonTransfer(req.UserID, req.TaskID); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewOKResponse()
+
+	case MsgRetryFailedInDaemonBatch:
+		if err := s.handler.RetryFailedInDaemonBatch(req.UserID, req.BatchID); err != nil {
+			return NewErrorResponse(err.Error())
+		}
+		return NewOKResponse()
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))

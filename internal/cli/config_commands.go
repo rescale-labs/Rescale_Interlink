@@ -201,10 +201,11 @@ Use --force to overwrite existing configuration.`,
 				return fmt.Errorf("failed to create config directory: %w", err)
 			}
 
-			// Save API key to a separate token file (for security, not in config CSV)
-			// Use the same filename that GetDefaultTokenPath() expects ("token")
+			// Save API key to a separate token file (for security, not in config CSV).
+			// Use config.WriteTokenFile so the file picks up the Windows
+			// explicit-ACL tightening (spec §11.2) on par with the GUI path.
 			tokenFilePath := filepath.Join(configDir, "token")
-			if err := os.WriteFile(tokenFilePath, []byte(apiKeyInput), 0600); err != nil {
+			if err := config.WriteTokenFile(tokenFilePath, apiKeyInput); err != nil {
 				return fmt.Errorf("failed to save API token file: %w", err)
 			}
 			logger.Info().Str("path", tokenFilePath).Msg("API token saved")

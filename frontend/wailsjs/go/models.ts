@@ -116,6 +116,8 @@ export namespace wailsapp {
 	    buildTime: string;
 	    fipsEnabled: boolean;
 	    fipsStatus: string;
+	    os: string;
+	    sessionScopedDaemon: boolean;
 	    versionCheck?: VersionCheckDTO;
 	
 	    static createFrom(source: any = {}) {
@@ -128,6 +130,8 @@ export namespace wailsapp {
 	        this.buildTime = source["buildTime"];
 	        this.fipsEnabled = source["fipsEnabled"];
 	        this.fipsStatus = source["fipsStatus"];
+	        this.os = source["os"];
+	        this.sessionScopedDaemon = source["sessionScopedDaemon"];
 	        this.versionCheck = this.convertValues(source["versionCheck"], VersionCheckDTO);
 	    }
 	
@@ -405,36 +409,44 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
-	export class DaemonBatchStatusDTO {
-	    batchID: string;
+	export class DaemonBatchStatsDTO {
+	    batchId: string;
 	    batchLabel: string;
+	    direction: string;
+	    sourceLabel: string;
 	    total: number;
+	    queued: number;
+	    active: number;
 	    completed: number;
 	    failed: number;
-	    active: number;
+	    cancelled: number;
 	    totalBytes: number;
-	    bytesDone: number;
+	    progress: number;
 	    speed: number;
-	    startedAt: number;
-	    completedAt: number;
+	    totalKnown: boolean;
+	    startedAt?: number;
 	
 	    static createFrom(source: any = {}) {
-	        return new DaemonBatchStatusDTO(source);
+	        return new DaemonBatchStatsDTO(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.batchID = source["batchID"];
+	        this.batchId = source["batchId"];
 	        this.batchLabel = source["batchLabel"];
+	        this.direction = source["direction"];
+	        this.sourceLabel = source["sourceLabel"];
 	        this.total = source["total"];
+	        this.queued = source["queued"];
+	        this.active = source["active"];
 	        this.completed = source["completed"];
 	        this.failed = source["failed"];
-	        this.active = source["active"];
+	        this.cancelled = source["cancelled"];
 	        this.totalBytes = source["totalBytes"];
-	        this.bytesDone = source["bytesDone"];
+	        this.progress = source["progress"];
 	        this.speed = source["speed"];
+	        this.totalKnown = source["totalKnown"];
 	        this.startedAt = source["startedAt"];
-	        this.completedAt = source["completedAt"];
 	    }
 	}
 	export class DaemonConfigDTO {
@@ -507,10 +519,12 @@ export namespace wailsapp {
 	    jobsDownloaded: number;
 	    downloadFolder: string;
 	    error?: string;
+	    errorCode?: string;
 	    managedBy?: string;
 	    serviceMode: boolean;
 	    userConfigured: boolean;
 	    userState: string;
+	    userStateDetail?: string;
 	    userRegistered: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -530,13 +544,90 @@ export namespace wailsapp {
 	        this.jobsDownloaded = source["jobsDownloaded"];
 	        this.downloadFolder = source["downloadFolder"];
 	        this.error = source["error"];
+	        this.errorCode = source["errorCode"];
 	        this.managedBy = source["managedBy"];
 	        this.serviceMode = source["serviceMode"];
 	        this.userConfigured = source["userConfigured"];
 	        this.userState = source["userState"];
+	        this.userStateDetail = source["userStateDetail"];
 	        this.userRegistered = source["userRegistered"];
 	    }
 	}
+	export class DaemonTransferTaskDTO {
+	    id: string;
+	    type: string;
+	    state: string;
+	    name: string;
+	    source: string;
+	    dest: string;
+	    size: number;
+	    progress: number;
+	    speed: number;
+	    error?: string;
+	    sourceLabel: string;
+	    batchId: string;
+	    batchLabel: string;
+	    createdAt: number;
+	    startedAt?: number;
+	    completedAt?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonTransferTaskDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.type = source["type"];
+	        this.state = source["state"];
+	        this.name = source["name"];
+	        this.source = source["source"];
+	        this.dest = source["dest"];
+	        this.size = source["size"];
+	        this.progress = source["progress"];
+	        this.speed = source["speed"];
+	        this.error = source["error"];
+	        this.sourceLabel = source["sourceLabel"];
+	        this.batchId = source["batchId"];
+	        this.batchLabel = source["batchLabel"];
+	        this.createdAt = source["createdAt"];
+	        this.startedAt = source["startedAt"];
+	        this.completedAt = source["completedAt"];
+	    }
+	}
+	export class DaemonTransferSnapshotDTO {
+	    tasks: DaemonTransferTaskDTO[];
+	    batches: DaemonBatchStatsDTO[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonTransferSnapshotDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.tasks = this.convertValues(source["tasks"], DaemonTransferTaskDTO);
+	        this.batches = this.convertValues(source["batches"], DaemonBatchStatsDTO);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class DeleteResultDTO {
 	    deleted: number;
 	    failed: number;

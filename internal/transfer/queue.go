@@ -669,10 +669,17 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		}
 	}
 
-	// Include pre-registered batches that have no tasks yet
+	// Include pre-registered batches that have no tasks yet. Clone to avoid
+	// mutating the preRegisteredBatches map; flip TotalKnown based on the
+	// current scan-in-progress state (a pre-registered batch that finished
+	// registration with zero tasks — e.g. a daemon batch where every file
+	// was already present locally — reports TotalKnown=true so WaitForBatch
+	// can return the empty-batch result).
 	for batchID, preBatch := range q.preRegisteredBatches {
 		if _, exists := batchMap[batchID]; !exists {
-			batchMap[batchID] = preBatch
+			clone := *preBatch
+			clone.TotalKnown = !q.batchScanInProgress[batchID]
+			batchMap[batchID] = &clone
 			batchOrder = append(batchOrder, batchID)
 		}
 	}
@@ -713,6 +720,20 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		result = append(result, *bs)
 	}
 	return result
+}
+
+// GetBatchStats returns the BatchStats for a single batch. Second return
+// is false when the batch is neither present in the task list nor
+// pre-registered. Implemented in terms of GetAllBatchStats to share the
+// byte-weighted progress + ETA logic — callers like daemon WaitForBatch
+// need the exact same numbers the UI sees.
+func (q *Queue) GetBatchStats(batchID string) (BatchStats, bool) {
+	for _, bs := range q.GetAllBatchStats() {
+		if bs.BatchID == batchID {
+			return bs, true
+		}
+	}
+	return BatchStats{}, false
 }
 
 // GetBatchTasks returns paginated tasks for a specific batch.
@@ -882,6 +903,12 @@ func (q *Queue) PreRegisterBatch(batchID, batchLabel, direction, sourceLabel str
 		StartedAt:   now,
 	}
 	q.batchStartedAt[batchID] = now
+	// Default scan-in-progress until a caller clears it. Keeps existing
+	// streaming batches reporting TotalKnown=false (matches their discovery
+	// phase) without requiring every caller to set this explicitly. Paired
+	// with a MarkBatchScanInProgress(batchID, false) call when registration
+	// is complete.
+	q.batchScanInProgress[batchID] = true
 	q.mu.Unlock()
 
 	// Fire immediate batch progress event so the batch row appears

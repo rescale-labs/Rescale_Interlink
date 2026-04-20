@@ -3,6 +3,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,9 +44,10 @@ type userDaemonEntry struct {
 	config     *config.DaemonConfig
 	cancel     context.CancelFunc
 	running    bool
-	logBuffer  *daemon.LogBuffer      // Per-user log buffer for IPC GetRecentLogs
+	logBuffer  *daemon.LogBuffer       // Per-user log buffer for IPC GetRecentLogs
 	logWriter  *daemon.DaemonLogWriter // Track for Close() on shutdown
 	apiKey     string                  // Track for rotation detection
+	configHash string                  // Hash of per-user config.csv fields; changes trigger restart (F2)
 	skipReason string                  // Reason user was skipped (e.g., "no_api_key")
 }
 
@@ -64,6 +67,24 @@ func NewMultiUserDaemon(logger *logging.Logger) *MultiUserDaemon {
 // It scans for user profiles and starts daemons for each user with valid config.
 func (m *MultiUserDaemon) Start() error {
 	m.logger.Info().Msg("Starting multi-user auto-download daemon")
+
+	// Plan 2 path migrations (service scope: iterate every enumerable
+	// profile so per-profile config.csv / token files move to Local on
+	// Windows even when the user hasn't launched the GUI yet).
+	if profiles, err := EnumerateUserProfiles(); err == nil {
+		targets := make([]config.ProfileMigrationTarget, 0, len(profiles))
+		for _, p := range profiles {
+			targets = append(targets, config.ProfileMigrationTarget{
+				Username:    p.Username,
+				SID:         p.SID,
+				ProfilePath: p.ProfilePath,
+			})
+		}
+		config.RunStartupMigrations(m.logger, config.ScopeAllProfiles, targets)
+	} else {
+		m.logger.Warn().Err(err).Msg("Could not enumerate profiles for migration; running current-user-only migrations")
+		config.RunStartupMigrations(m.logger, config.ScopeCurrentUser, nil)
+	}
 
 	// Initial profile scan
 	if err := m.scanAndUpdateProfiles(); err != nil {
@@ -238,7 +259,7 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 	}
 	logWriter := daemon.NewDaemonLogWriter(daemon.DaemonLogConfig{
 		Console:    false, // Service mode - no console
-		LogFile:    filepath.Join(logDir, "daemon.log"),
+		LogFile:    filepath.Join(logDir, config.DaemonLogName),
 		BufferSize: 1000,
 	})
 	userLogger := logging.NewLoggerWithWriter(logWriter)
@@ -341,14 +362,15 @@ func (m *MultiUserDaemon) startUserDaemon(profile UserProfile) error {
 
 	// Track the daemon
 	m.daemons[profile.ProfilePath] = &userDaemonEntry{
-		profile:   profile,
-		daemon:    d,
-		config:    daemonConf,
-		cancel:    cancel,
-		running:   true,
-		logBuffer: logBuffer,
-		logWriter: logWriter, // Track for Close() on shutdown
-		apiKey:    apiKey,    // Track for rotation detection
+		profile:    profile,
+		daemon:     d,
+		config:     daemonConf,
+		cancel:     cancel,
+		running:    true,
+		logBuffer:  logBuffer,
+		logWriter:  logWriter,
+		apiKey:     apiKey,
+		configHash: hashUserConfig(appCfg),
 	}
 
 	m.logger.Info().Str("user", profile.Username).Msg("User daemon started successfully")
@@ -434,7 +456,42 @@ func (m *MultiUserDaemon) configChanged(entry *userDaemonEntry, profile UserProf
 		return true
 	}
 
+	// F2: detect changes to the per-user config.csv (APIBaseURL, proxy).
+	// A missing or unreadable file returns an empty hash; if entry.configHash
+	// is also empty the compare is a no-op, so a missing file is not itself
+	// a false-positive restart trigger.
+	userCfgPath := config.GetConfigPathForProfile(profile.ProfilePath)
+	if userCfg, err := config.LoadConfigCSV(userCfgPath); err == nil {
+		if h := hashUserConfig(userCfg); h != entry.configHash {
+			m.logger.Info().Str("user", profile.Username).
+				Msg("Per-user config.csv changed (platform URL or proxy)")
+			return true
+		}
+	}
+
 	return false
+}
+
+// hashUserConfig returns a SHA-256 hex digest over the config.Config fields
+// that influence the per-user daemon's network behavior. APIKey and
+// ProxyPassword are intentionally excluded: rotation is tracked by
+// entry.apiKey, and the proxy password is never persisted.
+func hashUserConfig(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%s|%s|%t",
+		cfg.APIBaseURL,
+		cfg.TenantURL,
+		cfg.ProxyMode,
+		cfg.ProxyHost,
+		cfg.ProxyPort,
+		cfg.ProxyUser,
+		cfg.NoProxy,
+		cfg.ProxyWarmup,
+	)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // GetStatus returns the current status of all user daemons.
@@ -459,8 +516,13 @@ func (m *MultiUserDaemon) GetStatus() []UserDaemonStatus {
 			status.ActiveDownloads = entry.daemon.GetActiveDownloads()
 		}
 
-		if entry.skipReason == "no_api_key" {
-			status.LastError = "No API key configured"
+		switch entry.skipReason {
+		case "no_api_key":
+			status.LastError = ipc.CanonicalText[ipc.CodeNoAPIKey]
+			status.ErrorCode = ipc.CodeNoAPIKey
+		case "download_folder_inaccessible":
+			status.LastError = ipc.CanonicalText[ipc.CodeDownloadFolderInaccessible]
+			status.ErrorCode = ipc.CodeDownloadFolderInaccessible
 		}
 
 		statuses = append(statuses, status)
@@ -481,6 +543,7 @@ type UserDaemonStatus struct {
 	JobsDownloaded  int
 	ActiveDownloads int
 	LastError       string
+	ErrorCode       ipc.ErrorCode
 }
 
 // RunningCount returns the number of currently running user daemons.
@@ -705,7 +768,7 @@ func (m *MultiUserDaemon) GetUserLogs(identifier string, count int) []ipc.LogEnt
 }
 
 // GetUserTransferStatus returns daemon transfer batch status for a specific user.
-func (m *MultiUserDaemon) GetUserTransferStatus(identifier string) *ipc.TransferStatusData {
+func (m *MultiUserDaemon) GetUserTransferStatus(identifier string) *ipc.DaemonTransferSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -714,9 +777,9 @@ func (m *MultiUserDaemon) GetUserTransferStatus(identifier string) *ipc.Transfer
 		if entry.profile.SID == identifier ||
 			strings.EqualFold(entry.profile.Username, identifier) {
 			if entry.daemon != nil {
-				return entry.daemon.GetTransferStatus()
+				return entry.daemon.DaemonTransferSnapshot()
 			}
-			return &ipc.TransferStatusData{}
+			return &ipc.DaemonTransferSnapshot{}
 		}
 	}
 
@@ -726,12 +789,72 @@ func (m *MultiUserDaemon) GetUserTransferStatus(identifier string) *ipc.Transfer
 			for _, entry := range m.daemons {
 				if strings.EqualFold(entry.profile.Username, resolved) {
 					if entry.daemon != nil {
-						return entry.daemon.GetTransferStatus()
+						return entry.daemon.DaemonTransferSnapshot()
 					}
 				}
 			}
 		}
 	}
 
-	return &ipc.TransferStatusData{}
+	return &ipc.DaemonTransferSnapshot{}
+}
+
+// userDaemon returns the running per-user daemon for the given SID or
+// username. Returns nil when no matching running daemon is found. Routes
+// daemon-action IPC calls (CancelDaemonBatch, RetryFailedInDaemonBatch,
+// CancelDaemonTransfer) in service mode.
+func (m *MultiUserDaemon) userDaemon(identifier string) *daemon.Daemon {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, entry := range m.daemons {
+		if entry.profile.SID == identifier ||
+			strings.EqualFold(entry.profile.Username, identifier) {
+			if entry.running && entry.daemon != nil {
+				return entry.daemon
+			}
+			return nil
+		}
+	}
+	if strings.HasPrefix(identifier, "S-1-5-") {
+		if resolved := ResolveSIDToUsername(identifier); resolved != "" {
+			for _, entry := range m.daemons {
+				if strings.EqualFold(entry.profile.Username, resolved) {
+					if entry.running && entry.daemon != nil {
+						return entry.daemon
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// CancelUserDaemonBatch cancels non-terminal tasks in a daemon batch for
+// the specific user.
+func (m *MultiUserDaemon) CancelUserDaemonBatch(identifier, batchID string) error {
+	d := m.userDaemon(identifier)
+	if d == nil || d.TransferService() == nil {
+		return fmt.Errorf("daemon for %s is not running", identifier)
+	}
+	return d.TransferService().CancelBatch(batchID)
+}
+
+// CancelUserDaemonTransfer cancels a single task for the specific user.
+func (m *MultiUserDaemon) CancelUserDaemonTransfer(identifier, taskID string) error {
+	d := m.userDaemon(identifier)
+	if d == nil || d.TransferService() == nil {
+		return fmt.Errorf("daemon for %s is not running", identifier)
+	}
+	return d.TransferService().CancelTransfer(taskID)
+}
+
+// RetryFailedInUserDaemonBatch retries failed tasks in a daemon batch for
+// the specific user.
+func (m *MultiUserDaemon) RetryFailedInUserDaemonBatch(identifier, batchID string) error {
+	d := m.userDaemon(identifier)
+	if d == nil || d.TransferService() == nil {
+		return fmt.Errorf("daemon for %s is not running", identifier)
+	}
+	return d.TransferService().RetryFailedInBatch(batchID)
 }

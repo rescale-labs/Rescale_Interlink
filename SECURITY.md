@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.9.3
-**Last Updated:** 2026-04-15
+**Version:** 4.9.4
+**Last Updated:** 2026-04-19
 
 ## Overview
 
@@ -186,23 +186,32 @@ The Windows daemon uses named pipes for IPC with a two-tier security model:
 
 ### Modify Operations (Protected)
 
-These require the caller's SID to match the daemon owner:
+These require the caller's SID to match the daemon owner (subprocess mode), or any authenticated caller with a captured SID (service mode, scoped to the caller's own daemon):
 - `PauseUser`
 - `ResumeUser`
 - `TriggerScan`
+- `ReloadConfig`
 - `Shutdown`
+- `CancelDaemonBatch`
+- `CancelDaemonTransfer`
+- `RetryFailedInDaemonBatch`
 
-### Read Operations (Open)
+### User-Scoped Read Operations
 
-These are available to any authenticated user:
-- `GetStatus`
-- `GetUserList`
-- `GetRecentLogs`
-- `OpenLogs`
+These return data scoped to the caller's SID in service mode. An unidentifiable caller (empty SID) is **rejected** rather than receiving another user's data or a silently-empty response:
+- `GetUserList` (filtered to the caller's own entry in service mode)
+- `GetRecentLogs` (scoped to the caller's per-user daemon)
+- `GetTransferStatus` (scoped to the caller's transfers)
+- `OpenLogs` (scoped; the special `"service"` keyword opens service-level logs)
+
+### Service-Level Read Operations
+
+These return only non-user-scoped information and are available to any authenticated caller:
+- `GetStatus` (overall service state and version)
 
 ### Fail-Closed Authorization
 
-If the daemon cannot capture the owner SID at startup, all modify operations are denied. This prevents potential authorization bypass.
+If the daemon cannot capture the owner SID at startup, all modify operations are denied. If a service-mode request arrives with an unidentifiable caller (SID capture failed at the pipe layer), both modify operations and user-scoped read operations are rejected rather than silently succeeding with an empty scope. This policy is enforced by a single `resolveUserScope` helper in `internal/ipc/server.go` and is covered by a table-driven catalog test (`TestServiceMode_UserScopedMessages_FailClosedWithoutCallerSID`) so that new message types inherit the policy or fail the test.
 
 ---
 
@@ -342,6 +351,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Security-Relevant Changes |
 |---------|------|---------------------------|
+| 4.9.4 | 2026-04-19 | Explicit Windows DACL on token file (owner + Administrators + SYSTEM, no inheritance); IPC caller-SID scoping consolidated behind one helper with catalog-wide fail-closed enforcement |
 | 4.9.3 | 2026-04-15 | AWS SDK security bump (eventstream DoS fix); CodeQL quality cleanup |
 | 4.9.2 | 2026-04-13 | S3 FIPS endpoints for ITAR platforms; Windows service credential isolation |
 | 4.9.1 | 2026-04-12 | CLI compat mode with independent credential chain; `jobs watch` command |

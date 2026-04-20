@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -18,22 +19,32 @@ import (
 	intfips "github.com/rescale/rescale-int/internal/fips"
 )
 
-// AppInfoDTO contains application version and status information.
+// AppInfoDTO contains application version, FIPS, and platform information.
+//
+// OS and SessionScopedDaemon describe the runtime's auto-download lifecycle
+// posture per spec §2.2/§2.3: on macOS and Linux the daemon is a detached
+// subprocess scoped to the user's login session (dies on logout/reboot, not
+// on GUI close). The frontend uses SessionScopedDaemon to render an
+// informational banner on non-Windows.
 type AppInfoDTO struct {
-	Version      string           `json:"version"`
-	BuildTime    string           `json:"buildTime"`
-	FIPSEnabled  bool             `json:"fipsEnabled"`
-	FIPSStatus   string           `json:"fipsStatus"`
-	VersionCheck *VersionCheckDTO `json:"versionCheck,omitempty"`
+	Version             string           `json:"version"`
+	BuildTime           string           `json:"buildTime"`
+	FIPSEnabled         bool             `json:"fipsEnabled"`
+	FIPSStatus          string           `json:"fipsStatus"`
+	OS                  string           `json:"os"`
+	SessionScopedDaemon bool             `json:"sessionScopedDaemon"`
+	VersionCheck        *VersionCheckDTO `json:"versionCheck,omitempty"`
 }
 
-// GetAppInfo returns version, build time, and FIPS status.
+// GetAppInfo returns version, build time, FIPS status, and platform info.
 func (a *App) GetAppInfo() AppInfoDTO {
 	info := AppInfoDTO{
-		Version:     cli.Version,
-		BuildTime:   cli.BuildTime,
-		FIPSEnabled: intfips.Enabled,
-		FIPSStatus:  cli.FIPSStatus(),
+		Version:             cli.Version,
+		BuildTime:           cli.BuildTime,
+		FIPSEnabled:         intfips.Enabled,
+		FIPSStatus:          cli.FIPSStatus(),
+		OS:                  goruntime.GOOS,
+		SessionScopedDaemon: goruntime.GOOS == "darwin" || goruntime.GOOS == "linux",
 	}
 
 	// Include cached version check if available and not expired
