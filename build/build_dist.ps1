@@ -89,7 +89,7 @@ Write-Host "[4/7] Installing WiX Toolset v4..."
 # Temporarily allow errors since dotnet outputs info to stderr
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-dotnet tool install --global wix 2>&1 | Out-Host
+dotnet tool install --global wix --version 6.0.2 2>&1 | Out-Host
 $wixInstallExitCode = $LASTEXITCODE
 $ErrorActionPreference = $prevErrorAction
 

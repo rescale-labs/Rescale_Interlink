@@ -44,6 +44,13 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
     hasMore: false,
     nextCursor: '',
   })),
+  ListLocalDirectoryEx: vi.fn(() => Promise.resolve({
+    folderId: '/home/user',
+    folderPath: '/home/user',
+    items: [],
+    hasMore: false,
+    nextCursor: '',
+  })),
   GetHomeDirectory: vi.fn(() => Promise.resolve('/home/user')),
   ListRemoteFolder: vi.fn(() => Promise.resolve({
     folderId: 'folder-123',

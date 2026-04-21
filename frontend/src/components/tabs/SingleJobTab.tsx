@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   FolderIcon,
   DocumentIcon,
@@ -54,6 +54,11 @@ export function SingleJobTab() {
   } = useJobStore()
 
   const { config, updateConfig, saveConfig } = useConfigStore()
+
+  // UX-only gate: prevents double-clicks from stacking native dialog calls.
+  // The correctness layer is the Go-side dialogMu in config_bindings.go —
+  // missing the gate is safe (user sees a clean "already open" error).
+  const [dialogInFlight, setDialogInFlight] = useState(false)
 
   const sjStore = useSingleJobStore()
   const {
@@ -276,6 +281,8 @@ export function SingleJobTab() {
 
   // Handle file selection — uses multi-file picker + fetches info
   const handleSelectFiles = useCallback(async () => {
+    if (dialogInFlight) return
+    setDialogInFlight(true)
     try {
       const files = await App.SelectMultipleFiles('Select Input Files')
       if (files && files.length > 0) {
@@ -290,11 +297,15 @@ export function SingleJobTab() {
       }
     } catch (err) {
       console.error('Failed to select files:', err)
+    } finally {
+      setDialogInFlight(false)
     }
-  }, [sjStore, localFiles, fetchFileInfo])
+  }, [sjStore, localFiles, fetchFileInfo, dialogInFlight])
 
   // Handle folder selection — adds folder as a single item
   const handleSelectFolder = useCallback(async () => {
+    if (dialogInFlight) return
+    setDialogInFlight(true)
     try {
       const dir = await App.SelectDirectory('Select Folder to Add')
       if (dir && !localFiles.includes(dir)) {
@@ -303,8 +314,10 @@ export function SingleJobTab() {
       }
     } catch (err) {
       console.error('Failed to select folder:', err)
+    } finally {
+      setDialogInFlight(false)
     }
-  }, [sjStore, localFiles, fetchFileInfo])
+  }, [sjStore, localFiles, fetchFileInfo, dialogInFlight])
 
   // Remove a single file from the list
   const handleRemoveFile = useCallback((index: number) => {
@@ -706,14 +719,16 @@ export function SingleJobTab() {
                 <div className="flex gap-2 mb-3">
                   <button
                     onClick={handleSelectFiles}
-                    className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+                    disabled={dialogInFlight}
+                    className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <PlusIcon className="w-5 h-5" />
                     Add Files
                   </button>
                   <button
                     onClick={handleSelectFolder}
-                    className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+                    disabled={dialogInFlight}
+                    className="flex items-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <FolderPlusIcon className="w-5 h-5" />
                     Add Folder

@@ -401,24 +401,128 @@ func (a *App) TestConnection() ConnectionResultDTO {
 	}
 }
 
+// dialogMu serializes all native file/folder dialog calls so we never invoke
+// two GTK dialog runs concurrently. Wails's Linux dialog path uses a shared
+// unbuffered result channel that deadlocks under overlap. This also lets
+// the GVFS / WebKit stack finish one dialog's teardown before the next
+// starts. Frontend button-gating is best-effort UX; this is the correctness
+// layer.
+//
+// dialogPanicMessage is the error returned to callers when a panic inside
+// the CGo dialog call is recovered. Upstream wailsapp/wails#3965 explains
+// why panics here were historically fatal on Linux (WebKit's signal handler
+// setup); v2.12.0 + per-call ResetSignalHandlers() mitigates the class, but
+// we keep the recovery as a belt-and-suspenders guard.
+var dialogMu sync.Mutex
+
+const (
+	dialogBusyMessage = "a file dialog is already open"
+	appNotReadyError  = "application not ready"
+)
+
+// Runtime indirection for tests. Production code uses the real Wails runtime;
+// tests swap these to stubs that panic or return fixed values to verify the
+// wrapper's mutex, recovery, and error-handling contract.
+var (
+	openDirectoryDialog      = runtime.OpenDirectoryDialog
+	openFileDialog           = runtime.OpenFileDialog
+	openMultipleFilesDialog  = runtime.OpenMultipleFilesDialog
+	saveFileDialog           = runtime.SaveFileDialog
+)
+
+func recoverDialogPanic(binding string, err *error) {
+	if r := recover(); r != nil {
+		wailsLogger.Error().Interface("panic", r).Str("binding", binding).Msg("recovered panic in dialog binding")
+		*err = fmt.Errorf("dialog call failed: %v", r)
+	}
+}
+
 // SelectDirectory opens a directory dialog.
-func (a *App) SelectDirectory(title string) (string, error) {
-	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+func (a *App) SelectDirectory(title string) (result string, err error) {
+	if !dialogMu.TryLock() {
+		return "", fmt.Errorf(dialogBusyMessage)
+	}
+	defer dialogMu.Unlock()
+	defer recoverDialogPanic("SelectDirectory", &err)
+	if a.ctx == nil {
+		wailsLogger.Error().Str("binding", "SelectDirectory").Msg("dialog binding invoked before context ready")
+		return "", fmt.Errorf(appNotReadyError)
+	}
+	wailsLogger.Debug().Str("binding", "SelectDirectory").Str("title", title).Msg("opening dialog")
+	resetLinuxSignalHandlers()
+	result, err = openDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+	if err != nil {
+		wailsLogger.Error().Err(err).Str("binding", "SelectDirectory").Msg("dialog returned error")
+	} else {
+		wailsLogger.Debug().Str("binding", "SelectDirectory").Str("result", result).Msg("dialog returned")
+	}
+	return
 }
 
 // SelectFile opens a file dialog.
-func (a *App) SelectFile(title string) (string, error) {
-	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+func (a *App) SelectFile(title string) (result string, err error) {
+	if !dialogMu.TryLock() {
+		return "", fmt.Errorf(dialogBusyMessage)
+	}
+	defer dialogMu.Unlock()
+	defer recoverDialogPanic("SelectFile", &err)
+	if a.ctx == nil {
+		wailsLogger.Error().Str("binding", "SelectFile").Msg("dialog binding invoked before context ready")
+		return "", fmt.Errorf(appNotReadyError)
+	}
+	wailsLogger.Debug().Str("binding", "SelectFile").Str("title", title).Msg("opening dialog")
+	resetLinuxSignalHandlers()
+	result, err = openFileDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+	if err != nil {
+		wailsLogger.Error().Err(err).Str("binding", "SelectFile").Msg("dialog returned error")
+	} else {
+		wailsLogger.Debug().Str("binding", "SelectFile").Str("result", result).Msg("dialog returned")
+	}
+	return
 }
 
 // SelectMultipleFiles opens a file dialog that allows selecting multiple files.
-func (a *App) SelectMultipleFiles(title string) ([]string, error) {
-	return runtime.OpenMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+func (a *App) SelectMultipleFiles(title string) (result []string, err error) {
+	if !dialogMu.TryLock() {
+		return nil, fmt.Errorf(dialogBusyMessage)
+	}
+	defer dialogMu.Unlock()
+	defer recoverDialogPanic("SelectMultipleFiles", &err)
+	if a.ctx == nil {
+		wailsLogger.Error().Str("binding", "SelectMultipleFiles").Msg("dialog binding invoked before context ready")
+		return nil, fmt.Errorf(appNotReadyError)
+	}
+	wailsLogger.Debug().Str("binding", "SelectMultipleFiles").Str("title", title).Msg("opening dialog")
+	resetLinuxSignalHandlers()
+	result, err = openMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+	if err != nil {
+		wailsLogger.Error().Err(err).Str("binding", "SelectMultipleFiles").Msg("dialog returned error")
+	} else {
+		wailsLogger.Debug().Str("binding", "SelectMultipleFiles").Int("count", len(result)).Msg("dialog returned")
+	}
+	return
 }
 
 // SaveFile opens a save file dialog.
-func (a *App) SaveFile(title string) (string, error) {
-	return runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{Title: title})
+func (a *App) SaveFile(title string) (result string, err error) {
+	if !dialogMu.TryLock() {
+		return "", fmt.Errorf(dialogBusyMessage)
+	}
+	defer dialogMu.Unlock()
+	defer recoverDialogPanic("SaveFile", &err)
+	if a.ctx == nil {
+		wailsLogger.Error().Str("binding", "SaveFile").Msg("dialog binding invoked before context ready")
+		return "", fmt.Errorf(appNotReadyError)
+	}
+	wailsLogger.Debug().Str("binding", "SaveFile").Str("title", title).Msg("opening dialog")
+	resetLinuxSignalHandlers()
+	result, err = saveFileDialog(a.ctx, runtime.SaveDialogOptions{Title: title})
+	if err != nil {
+		wailsLogger.Error().Err(err).Str("binding", "SaveFile").Msg("dialog returned error")
+	} else {
+		wailsLogger.Debug().Str("binding", "SaveFile").Str("result", result).Msg("dialog returned")
+	}
+	return
 }
 
 // =============================================================================

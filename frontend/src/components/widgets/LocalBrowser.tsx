@@ -5,13 +5,14 @@ import {
   ArrowPathIcon,
   EyeSlashIcon,
   EyeIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
 import { useFileBrowserStore } from '../../stores'
 import { FileList } from './FileList'
 
 export function LocalBrowser() {
   const {
-    local: { currentPath, items, isLoading, error, showHidden, history, selection },
+    local: { currentPath, items, isLoading, error, warning, showHidden, history, selection },
     navigateLocalTo,
     goLocalBack,
     goLocalHome,
@@ -116,6 +117,15 @@ export function LocalBrowser() {
           <ArrowPathIcon className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {/* Non-fatal warning banner (e.g. slow directory read). Fatal errors
+          are surfaced by FileList's error branch below. */}
+      {warning && (
+        <div className="flex items-start gap-2 px-3 py-2 bg-yellow-50 dark:bg-yellow-900/20 border-b border-yellow-200 dark:border-yellow-800 text-sm text-yellow-700 dark:text-yellow-400">
+          <ExclamationTriangleIcon className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>{warning}</span>
+        </div>
+      )}
 
       {/* File list */}
       <div className="flex-1 overflow-hidden">

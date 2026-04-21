@@ -44,8 +44,23 @@ const LICENSE_TYPES = [
   { key: 'LSTC_LICENSE_SERVER', displayName: 'LS-DYNA License', placeholder: 'port@license-server' },
   { key: 'CDLMD_LICENSE_FILE', displayName: 'STAR-CCM+ License', placeholder: 'port@license-server' },
   { key: 'LM_LICENSE_FILE', displayName: 'Generic FlexLM', placeholder: 'port@license-server' },
+  { key: 'RLM_LICENSE', displayName: 'RLM License', placeholder: 'port@license-server' },
   { key: 'CUSTOM', displayName: 'Custom', placeholder: 'LICENSE_VAR=value' },
 ]
+
+const PRESET_LICENSE_KEYS = new Set(
+  LICENSE_TYPES.map((lt) => lt.key).filter((k) => k && k !== 'CUSTOM')
+)
+
+function parseCustomLicenseEntry(input: string): { key: string; value: string } | null {
+  const eq = input.indexOf('=')
+  if (eq <= 0) return null
+  const key = input.slice(0, eq).trim()
+  const value = input.slice(eq + 1).trim()
+  if (!key || !value) return null
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return null
+  return { key, value }
+}
 
 // Searchable select component
 interface SearchableSelectProps {
@@ -165,17 +180,28 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
   }, [isOpen, loadSavedTemplates])
 
+  // Load coretype metadata on open so validation of saved templates works without a manual Scan.
+  useEffect(() => {
+    if (isOpen && coreTypes.length === 0 && !coreTypesError && !isLoadingCoreTypes) {
+      fetchCoreTypes()
+    }
+  }, [isOpen, coreTypes.length, coreTypesError, isLoadingCoreTypes, fetchCoreTypes])
+
   const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
     if (templateInfo.job) {
       setTemplate(templateInfo.job as JobSpec)
-      // Parse license settings if present
       if (templateInfo.job.licenseSettings) {
         try {
           const parsed = JSON.parse(templateInfo.job.licenseSettings)
           const key = Object.keys(parsed)[0]
           if (key) {
-            setLicenseType(key)
-            setLicenseValue(parsed[key] || '')
+            if (PRESET_LICENSE_KEYS.has(key)) {
+              setLicenseType(key)
+              setLicenseValue(parsed[key] || '')
+            } else {
+              setLicenseType('CUSTOM')
+              setLicenseValue(`${key}=${parsed[key] || ''}`)
+            }
           }
         } catch {
           // Invalid JSON, ignore
@@ -219,8 +245,13 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
           const parsed = JSON.parse(initialTemplate.licenseSettings)
           const key = Object.keys(parsed)[0]
           if (key) {
-            setLicenseType(key)
-            setLicenseValue(parsed[key] || '')
+            if (PRESET_LICENSE_KEYS.has(key)) {
+              setLicenseType(key)
+              setLicenseValue(parsed[key] || '')
+            } else {
+              setLicenseType('CUSTOM')
+              setLicenseValue(`${key}=${parsed[key] || ''}`)
+            }
           }
         } catch {
           // Invalid JSON, ignore
@@ -261,8 +292,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     if (ct && ct.cores.length > 0) {
       return Math.max(...ct.cores)
     }
-    return 64 // Default to 64 if no core type selected
-  }, [coreTypes, template.coreType])
+    // Metadata not loaded yet — fall back to the stored value so +/- increments stay sensible.
+    if (template.coresPerSlot > 0) {
+      return template.coresPerSlot
+    }
+    return 64
+  }, [coreTypes, template.coreType, template.coresPerSlot])
 
   // Handle analysis code change
   const handleAnalysisChange = useCallback(
@@ -336,23 +371,32 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     if (template.coresPerSlot <= 0) {
       errs.push('Cores must be positive')
     } else {
-      // Allow values in ct.cores array (fractional nodes) OR multiples of max (multi-node)
+      // Only enforce the combinations check once coretype metadata is loaded.
+      // Without metadata, trust the stored value — the platform API is the ultimate validator.
       const ct = coreTypes.find((c) => c.code === template.coreType)
-      const maxCores = ct && ct.cores.length > 0 ? Math.max(...ct.cores) : 64
-      const isValidFractional = ct?.cores.includes(template.coresPerSlot) ?? false
-      const isValidMultiNode = template.coresPerSlot % maxCores === 0
-
-      if (!isValidFractional && !isValidMultiNode) {
-        const validOptions = ct?.cores.length ? ct.cores.join(', ') : coresBaseUnit.toString()
-        errs.push(`Cores must be ${validOptions} or a multiple of ${maxCores}`)
+      if (ct && ct.cores.length > 0) {
+        const maxCores = Math.max(...ct.cores)
+        const isValidFractional = ct.cores.includes(template.coresPerSlot)
+        const isValidMultiNode = template.coresPerSlot % maxCores === 0
+        if (!isValidFractional && !isValidMultiNode) {
+          const validOptions = ct.cores.join(', ')
+          errs.push(
+            `Cores ${template.coresPerSlot} not valid for coretype '${template.coreType}'. Valid values: ${validOptions} or a multiple of ${maxCores}.`
+          )
+        }
       }
     }
     if (template.walltimeHours <= 0) {
       errs.push('Walltime must be positive')
     }
+    if (licenseType === 'CUSTOM' && licenseValue.trim()) {
+      if (!parseCustomLicenseEntry(licenseValue)) {
+        errs.push('Custom license must be formatted as KEY=value (e.g. RLM_LICENSE=port@server)')
+      }
+    }
 
     return errs
-  }, [template, coresBaseUnit, coreTypes])
+  }, [template, coreTypes, licenseType, licenseValue])
 
   // Handle save
   const handleSave = useCallback(() => {
@@ -362,10 +406,16 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
       return
     }
 
-    // Build license JSON if set
     let licenseSettings = ''
     if (licenseType && licenseValue) {
-      licenseSettings = JSON.stringify({ [licenseType]: licenseValue })
+      if (licenseType === 'CUSTOM') {
+        const parsed = parseCustomLicenseEntry(licenseValue)
+        if (parsed) {
+          licenseSettings = JSON.stringify({ [parsed.key]: parsed.value })
+        }
+      } else {
+        licenseSettings = JSON.stringify({ [licenseType]: licenseValue })
+      }
     }
 
     const finalTemplate = {

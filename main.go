@@ -38,11 +38,25 @@ import (
 var assets embed.FS
 
 func init() {
-	// Suppress GTK ibus input method warnings on Linux.
-	// Set before any GTK initialization to ensure the value is picked up.
-	// Harmless on non-GUI paths (GTK_IM_MODULE is only read by GTK).
-	if runtime.GOOS == "linux" && os.Getenv("GTK_IM_MODULE") == "" {
-		os.Setenv("GTK_IM_MODULE", "none")
+	// Linux-only environment mitigations. Must be set before GTK / WebKit
+	// initialization so the underlying libraries pick them up on first use.
+	if runtime.GOOS == "linux" {
+		if os.Getenv("GTK_IM_MODULE") == "" {
+			os.Setenv("GTK_IM_MODULE", "none")
+		}
+		// Disable GVFS remote-backend enumeration in the file chooser. Interlink
+		// does not use GVFS remote paths; on some VDIs (notably RHEL 9) a broken
+		// GVFS / D-Bus setup can crash the chooser during widget construction.
+		// Opt out with RESCALE_ENABLE_GVFS=1 if a user relies on GVFS.
+		if os.Getenv("RESCALE_ENABLE_GVFS") != "1" && os.Getenv("GIO_USE_VFS") == "" {
+			os.Setenv("GIO_USE_VFS", "local")
+		}
+		// Force WebKitGTK off the DMA-BUF rendering path, which is known-broken
+		// on RHEL 9 and contributes to GPU-related modal-dialog instability.
+		// Opt out with RESCALE_GPU_ACCEL=1 if a user wants accelerated rendering.
+		if os.Getenv("RESCALE_GPU_ACCEL") != "1" && os.Getenv("WEBKIT_DISABLE_DMABUF_RENDERER") == "" {
+			os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+		}
 	}
 
 	// Shared FIPS 140-3 compliance check (common to GUI and CLI binaries)

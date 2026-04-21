@@ -36,10 +36,23 @@ interface LocalBrowserState {
   items: wailsapp.FileItemDTO[]
   isLoading: boolean
   error: string | null
+  warning: string | null
   showHidden: boolean
   history: string[]
+  // Bumped on every new local-nav operation to discard stale in-flight
+  // responses. Mirrors remote pane's navGeneration so rapid navigation
+  // doesn't show spurious "Operation cancelled" errors from superseded
+  // backend calls.
+  navGeneration: number
   selection: SelectionState
 }
+
+// Cancellation sentinel emitted by ListLocalDirectoryEx when a prior read
+// is cancelled by a newer one. Kept in lockstep with the Go constant in
+// internal/wailsapp/file_bindings.go (context.Canceled branch). Do not
+// surface as a user-facing error — the cancelled call is by definition
+// the one the user no longer cares about.
+const LOCAL_CANCELLED_WARNING = 'Operation cancelled'
 
 // Remote browser state
 interface RemoteBrowserState {
@@ -109,8 +122,10 @@ const initialLocalState: LocalBrowserState = {
   items: [],
   isLoading: false,
   error: null,
+  warning: null,
   showHidden: false,
   history: [],
+  navGeneration: 0,
   selection: { selectedIds: new Set(), lastSelectedId: null },
 }
 
@@ -142,35 +157,68 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
   loadLocalDirectory: async (path?: string) => {
     const targetPath = path ?? get().local.currentPath
+    const showHidden = get().local.showHidden
+    // Bump generation; a stale response from a superseded call will see
+    // this advance and bail out instead of writing to the store.
+    const myGen = get().local.navGeneration + 1
     set(state => ({
-      local: { ...state.local, isLoading: true, error: null }
+      local: {
+        ...state.local,
+        isLoading: true,
+        error: null,
+        warning: null,
+        navGeneration: myGen,
+      },
     }))
 
-    try {
-      const contents = await App.ListLocalDirectory(targetPath)
+    const isStale = () => get().local.navGeneration !== myGen
 
-      // Filter hidden files if needed
-      const showHidden = get().local.showHidden
-      const filteredItems = showHidden
-        ? contents.items
-        : contents.items.filter(item => !item.name.startsWith('.'))
+    try {
+      const contents = await App.ListLocalDirectoryEx(targetPath, showHidden)
+      if (isStale()) return
+
+      const warning = (contents as { warning?: string }).warning ?? ''
+      const isSlowPath = (contents as { isSlowPath?: boolean }).isSlowPath ?? false
+
+      // Backend cancelled us because a newer call started; the newer call
+      // will surface the real result. Drop silently.
+      if (warning === LOCAL_CANCELLED_WARNING) return
+
+      if (warning && !isSlowPath) {
+        // Hard error: path not found, permission denied, etc. Go has already
+        // returned empty items and a humanized message.
+        set(state => ({
+          local: {
+            ...state.local,
+            currentPath: contents.folderPath,
+            items: [],
+            isLoading: false,
+            error: warning,
+            warning: null,
+          },
+        }))
+        return
+      }
 
       set(state => ({
         local: {
           ...state.local,
           currentPath: contents.folderPath,
-          items: filteredItems,
+          items: contents.items,
           isLoading: false,
           error: null,
-        }
+          warning: warning && isSlowPath ? warning : null,
+        },
       }))
     } catch (error) {
+      if (isStale()) return
       set(state => ({
         local: {
           ...state.local,
           isLoading: false,
           error: error instanceof Error ? error.message : String(error),
-        }
+          warning: null,
+        },
       }))
     }
   },

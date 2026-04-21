@@ -1,5 +1,33 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.5 - April 21, 2026
+
+### File Browser: Typed-path errors are surfaced (#37)
+
+- When a user types a path into the File Browser and the underlying directory read fails (permission denied, path not found, timeout), the OS-level error message is now displayed as a red banner instead of silently showing an empty list.
+- Slow directory reads (over 5s) now show an amber warning banner above the file list rather than appearing as a long unexplained load.
+- Rapid navigation no longer leaks "Operation cancelled" errors to the UI; the local pane now has a generation guard that discards stale responses, matching the remote pane's existing behavior.
+
+### File Browser: Hidden-files toggle now actually fetches hidden files
+
+- The "show hidden" toggle was previously a client-side filter only; the backend was always called with `includeHidden=false`, so hidden files were never returned. Fixed by switching to `ListLocalDirectoryEx(path, showHidden)`. Toggling now produces the expected result.
+
+### Linux: Addresses a known WebKitGTK signal-handler crash class (#41)
+
+- **Upgraded embedded Wails runtime to v2.12.0.** Upstream (wailsapp/wails#3965, fixes in wailsapp/wails#4855 and wailsapp/wails#4921) documents a long-standing Linux crash where WebKit2GTK's signal handler installation lacked the `SA_ONSTACK` flag, causing Go-side panics in JS-bound methods to terminate the process with `signal 11 received but handler not on signal stack`. Some Rescale VDI users reported hard-crashes when opening file/folder pickers on RHEL 9; the symptom matches this class.
+- **Defense-in-depth layers added** to reduce residual crash modes:
+  - Per-call `runtime.ResetSignalHandlers()` immediately before each native dialog call on Linux. A one-shot startup call is insufficient — WebKit can re-install its handlers at any time — so the reset runs right before the CGo boundary.
+  - Process-wide dialog mutex: a second concurrent picker attempt now returns a clean "dialog already open" error instead of stacking and deadlocking the GTK main loop.
+  - Named return values plus panic-recovery inside each dialog binding, so a recovered panic returns a real error rather than a false-success zero value.
+  - Structured logging around each dialog invocation so that if a crash still occurs, the last log line shows exactly which binding was active when the process died.
+- **Linux environment mitigations** for known-fragile subsystems, set at early init and opt-out-able:
+  - `GIO_USE_VFS=local` — disables GVFS remote-backend enumeration in the file chooser. Interlink does not use GVFS remote paths; on some VDIs a broken GVFS/D-Bus setup crashes the chooser during widget construction. Opt out with `RESCALE_ENABLE_GVFS=1`.
+  - `WEBKIT_DISABLE_DMABUF_RENDERER=1` — forces WebKitGTK off the DMA-BUF rendering path, which is known-broken on RHEL 9 and is a suspected trigger for GPU-state-dependent dialog instability. Opt out with `RESCALE_GPU_ACCEL=1`.
+
+If you have experienced a hard crash when opening a file or folder picker on a Linux VDI, please update and let us know whether it persists.
+
+---
+
 ## v4.9.4 - April 19, 2026
 
 ### Auto-Download: Unified Transfers + Tag as Source of Truth
