@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.9.4-green)
+![Status](https://img.shields.io/badge/status-v4.9.5-green)
 
 ---
 
@@ -21,14 +21,12 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ---
 
-## What's New in v4.9.4
+## What's New in v4.9.5
 
-- **Unified Transfers tab**: Auto-download transfers now appear alongside GUI transfers with a `Daemon` badge, and per-row Cancel/Retry works across both engines.
-- **Tag-based re-download**: Removing the `downloaded` tag on a job in the Rescale web UI triggers a fresh download on the next poll. Tag-apply failures are retried without re-downloading the files.
-- **Adaptive daemon concurrency**: Auto-download now transfers multi-file jobs in parallel using the same engine as the GUI, not one file at a time.
-- **Save-time path validation**: Mapped-drive and UNC download paths are rejected at save time on Windows with a clear error.
-- **Security hardening**: Explicit Windows DACL on the API token file; tightened IPC authorization for all user-scoped operations.
-- **Cross-platform clarity**: macOS/Linux Auto-Download tab now makes the session-scoped lifecycle explicit; tray is documented as Windows-MSI-only.
+- **File Browser errors are visible.** When a typed path fails (permission denied, not found, timeout), the OS-level reason shows as a red banner; slow reads show an amber warning. Rapid navigation no longer leaks spurious "Operation cancelled" errors.
+- **Hidden-files toggle actually works.** The "show hidden" switch now fetches hidden entries from the backend (previously a no-op client-side filter).
+- **Job template improvements.** Coretype validation works out of the box on saved templates — no more "Scan Coretypes" prerequisite. CUSTOM and RLM license types are now first-class, with clearer error messages.
+- **Linux picker stability.** Addresses a known WebKitGTK signal-handler crash class by upgrading to Wails v2.12.0 and adding defense-in-depth layers (per-call signal-handler reset, process-wide dialog mutex, panic-safe return contracts, opt-out-able renderer/VFS environment mitigations).
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -372,6 +370,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.9.4
+**Version**: 4.9.5
 **Status**: Production Ready
 **Last Updated**: April 19, 2026
