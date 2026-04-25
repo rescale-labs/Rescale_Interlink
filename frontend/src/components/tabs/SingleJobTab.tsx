@@ -21,7 +21,7 @@ import { useJobStore, useConfigStore } from '../../stores'
 import type { JobSpec } from '../../stores'
 import { useSingleJobStore } from '../../stores/singleJobStore'
 import { useRunStore } from '../../stores/runStore'
-import { TemplateBuilder, RemoteFilePicker } from '../widgets'
+import { TemplateBuilder, RemoteFilePicker, JobsTable } from '../widgets'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../../wailsjs/go/models'
 
@@ -992,6 +992,11 @@ export function SingleJobTab() {
               : activeRun.status === 'cancelled' ? 'Job was cancelled by user'
               : 'Job submission encountered an error'}
           </p>
+          {activeRun?.runType === 'single' && activeRun.jobRows.length > 0 && (
+            <div className="w-full max-w-3xl mb-6">
+              <JobsTable jobs={activeRun.jobRows} />
+            </div>
+          )}
           {activeRun?.runType === 'single' && activeRun?.status === 'active' && (
             <button
               onClick={handleCancel}

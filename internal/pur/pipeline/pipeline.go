@@ -296,6 +296,21 @@ func (p *Pipeline) logf(level, stage, jobName, format string, args ...interface{
 	}
 }
 
+// nextSkipStatus returns the new status value for the pre-specified
+// InputFiles feeder branch: unless the current status is already
+// terminal, the branch marks it skipped. Preserves upload "success" /
+// "failed" set out-of-band by Engine.ReportUploadProgress for Single Job
+// localFiles uploads, while still flipping "pending" → "skipped" for the
+// remoteFiles case (no local upload ever happens).
+func nextSkipStatus(current string) string {
+	switch current {
+	case "success", "failed", "skipped":
+		return current
+	default:
+		return "skipped"
+	}
+}
+
 // reportStateChange reports a state change, using callback if available
 func (p *Pipeline) reportStateChange(jobName, stage, newStatus, jobID, errorMessage string, uploadProgress float64) {
 	log.Printf("[DEBUG] reportStateChange called: job=%s, stage=%s, status=%s, jobID=%s, err=%s, progress=%.2f",
@@ -531,12 +546,20 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			// skip tar/upload and go directly to job creation.
 			// Gated on Directory=="" to avoid interfering with file-scan mode where
 			// InputFiles contains local paths but Directory is also set.
+			//
+			// Use nextSkipStatus so a terminal status already written by the
+			// engine (Single Job localFiles uploads via ReportUploadProgress)
+			// is preserved — only non-terminal statuses flip to "skipped".
 			if jobSpec.Directory == "" && len(jobSpec.InputFiles) > 0 {
-				item.state.TarStatus = "skipped"
-				item.state.UploadStatus = "skipped"
+				item.state.TarStatus = nextSkipStatus(item.state.TarStatus)
+				item.state.UploadStatus = nextSkipStatus(item.state.UploadStatus)
 				p.stateMgr.UpdateState(item.state)
-				p.reportStateChange(item.state.JobName, "tar", "skipped", "", "", 0.0)
-				p.reportStateChange(item.state.JobName, "upload", "skipped", "", "", 0.0)
+				if item.state.TarStatus == "skipped" {
+					p.reportStateChange(item.state.JobName, "tar", "skipped", "", "", 0.0)
+				}
+				if item.state.UploadStatus == "skipped" {
+					p.reportStateChange(item.state.JobName, "upload", "skipped", "", "", 0.0)
+				}
 				select {
 				case <-ctx.Done():
 					return

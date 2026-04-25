@@ -70,11 +70,22 @@ func (a *App) BuildErrorReport(requestJSON string) (string, error) {
 
 // SaveErrorReport opens a native save dialog and writes the report JSON to the
 // selected path. Returns the saved path, or an error if the user cancelled or
-// the write failed.
-func (a *App) SaveErrorReport(reportJSON string) (string, error) {
-	suggestedName := fmt.Sprintf("rescale-error-report-%s.json", time.Now().Format("2006-01-02T150405"))
+// the write failed. Routed through portalAwareSaveFile under the shared
+// dialogMu + recoverDialogPanic guards so the binding survives the Linux
+// #41 GTK SIGTRAP and portal-unavailability conditions.
+func (a *App) SaveErrorReport(reportJSON string) (path string, err error) {
+	if !dialogMu.TryLock() {
+		return "", fmt.Errorf(dialogBusyMessage)
+	}
+	defer dialogMu.Unlock()
+	defer recoverDialogPanic("SaveErrorReport", &err)
+	if a.ctx == nil {
+		wailsLogger.Error().Str("binding", "SaveErrorReport").Msg("dialog binding invoked before context ready")
+		return "", fmt.Errorf(appNotReadyError)
+	}
 
-	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+	suggestedName := fmt.Sprintf("rescale-error-report-%s.json", time.Now().Format("2006-01-02T150405"))
+	path, err = portalAwareSaveFile(a.ctx, "SaveErrorReport", runtime.SaveDialogOptions{
 		DefaultFilename: suggestedName,
 		Title:           "Save Error Report",
 		Filters: []runtime.FileFilter{
@@ -103,10 +114,21 @@ func (a *App) SaveErrorReport(reportJSON string) (string, error) {
 
 // SaveLogExport opens a native save dialog and writes log text to the selected path.
 // Uses native file dialog because blob URL downloads don't work in Wails WebView.
-func (a *App) SaveLogExport(content string) (string, error) {
-	suggestedName := fmt.Sprintf("interlink-activity-%s.log", time.Now().Format("2006-01-02"))
+// Routed through portalAwareSaveFile under the shared dialogMu +
+// recoverDialogPanic guards.
+func (a *App) SaveLogExport(content string) (path string, err error) {
+	if !dialogMu.TryLock() {
+		return "", fmt.Errorf(dialogBusyMessage)
+	}
+	defer dialogMu.Unlock()
+	defer recoverDialogPanic("SaveLogExport", &err)
+	if a.ctx == nil {
+		wailsLogger.Error().Str("binding", "SaveLogExport").Msg("dialog binding invoked before context ready")
+		return "", fmt.Errorf(appNotReadyError)
+	}
 
-	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+	suggestedName := fmt.Sprintf("interlink-activity-%s.log", time.Now().Format("2006-01-02"))
+	path, err = portalAwareSaveFile(a.ctx, "SaveLogExport", runtime.SaveDialogOptions{
 		DefaultFilename: suggestedName,
 		Title:           "Export Activity Logs",
 		Filters: []runtime.FileFilter{

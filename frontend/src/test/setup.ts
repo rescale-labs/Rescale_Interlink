@@ -88,4 +88,26 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
   })),
   GetTransferTasks: vi.fn(() => Promise.resolve([])),
   ClearCompletedTransfers: vi.fn(() => Promise.resolve()),
+
+  // Template bindings (TemplateBuilder)
+  ListSavedTemplates: vi.fn(() => Promise.resolve([])),
+  SaveTemplate: vi.fn(() => Promise.resolve()),
+  DeleteTemplate: vi.fn(() => Promise.resolve()),
+
+  // Run bindings (runStore polling + reset)
+  GetRunStatus: vi.fn(() => Promise.resolve({
+    runID: '',
+    active: false,
+    totalJobs: 0,
+    completedJobs: 0,
+    failedJobs: 0,
+    status: 'idle',
+  })),
+  GetJobRows: vi.fn(() => Promise.resolve([])),
+  ResetRun: vi.fn(() => Promise.resolve()),
+
+  // Job-spec metadata (reachable via jobStore when TemplateBuilder opens)
+  GetCoreTypes: vi.fn(() => Promise.resolve([])),
+  GetAnalysisCodes: vi.fn(() => Promise.resolve([])),
+  GetAutomations: vi.fn(() => Promise.resolve([])),
 }))

@@ -27,6 +27,43 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * Merge a polled JobRow snapshot into the store's existing row. Exported
+ * for unit testing.
+ *
+ * Upload status downgrade guard: the backend state manager keeps
+ * UploadStatus="pending" during an in-progress upload (both Single Job
+ * localFiles and PUR only persist UploadStatus on terminal
+ * success/failure). StateChangeEvent handling flips the store to
+ * "in_progress" as progress comes in. This merge must not let a
+ * subsequent poll overwrite that event-derived "in_progress" with the
+ * backend's still-"pending" value while uploadProgress > 0 — doing so
+ * would hide the percentage badge rendered by JobsTable.
+ */
+export function mergePolledJobRow(existing: JobRow | undefined, polled: JobRow): JobRow {
+  if (!existing) return polled
+  const uploadDowngradeBlocked =
+    existing.uploadStatus === 'in_progress' &&
+    existing.uploadProgress > 0 &&
+    polled.uploadStatus === 'pending'
+  return {
+    ...existing,
+    tarStatus: polled.tarStatus || existing.tarStatus,
+    uploadStatus: uploadDowngradeBlocked
+      ? existing.uploadStatus
+      : (polled.uploadStatus || existing.uploadStatus),
+    submitStatus: polled.submitStatus || existing.submitStatus,
+    jobId: polled.jobId || existing.jobId,
+    error: polled.error || existing.error,
+    createStatus: existing.createStatus || polled.createStatus,
+    uploadProgress: polled.uploadProgress > 0
+      ? polled.uploadProgress * 100
+      : existing.uploadProgress,
+    status: existing.status === 'failed' ? 'failed'
+      : (polled.submitStatus === 'success' ? 'completed' : existing.status),
+  }
+}
+
 interface RunStore {
   activeRun: ActiveRun | null
   completedRuns: CompletedRun[]
@@ -453,24 +490,9 @@ export const useRunStore = create<RunStore>((set, get) => ({
             return prev
           }
 
-          const mergedRows = polledRows.map((polled) => {
-            const existing = prev.activeRun!.jobRows.find((r) => r.jobName === polled.jobName)
-            if (!existing) return polled
-            return {
-              ...existing,
-              tarStatus: polled.tarStatus || existing.tarStatus,
-              uploadStatus: polled.uploadStatus || existing.uploadStatus,
-              submitStatus: polled.submitStatus || existing.submitStatus,
-              jobId: polled.jobId || existing.jobId,
-              error: polled.error || existing.error,
-              createStatus: existing.createStatus || polled.createStatus,
-              uploadProgress: polled.uploadProgress > 0
-                ? polled.uploadProgress * 100
-                : existing.uploadProgress,
-              status: existing.status === 'failed' ? 'failed'
-                : (polled.submitStatus === 'success' ? 'completed' : existing.status),
-            }
-          })
+          const mergedRows = polledRows.map((polled) =>
+            mergePolledJobRow(prev.activeRun!.jobRows.find((r) => r.jobName === polled.jobName), polled)
+          )
 
           const stageStats = computeStageStats(mergedRows)
           const completedJobs = mergedRows.filter((j) =>

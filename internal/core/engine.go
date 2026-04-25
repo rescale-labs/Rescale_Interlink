@@ -1393,6 +1393,80 @@ func (e *Engine) GetState() *state.Manager {
 	return e.state
 }
 
+// EnsureSingleJobState idempotently creates the single-job state row at
+// index 1. Callers use this before driving upload progress outside the
+// pipeline loop (e.g. Single Job localFiles mode, where files are uploaded
+// via TransferService before RunFromSpecs is invoked). The pipeline
+// feeder's state==nil check will see the existing row and skip its own
+// InitializeState call.
+func (e *Engine) EnsureSingleJobState(jobName string) {
+	e.mu.RLock()
+	sm := e.state
+	e.mu.RUnlock()
+	if sm == nil {
+		return
+	}
+	if sm.GetState(1) == nil {
+		sm.InitializeState(1, jobName, "")
+	}
+}
+
+// ReportUploadProgress publishes per-job upload progress/state for uploads
+// that run outside the pipeline loop (Single Job localFiles). Caller must
+// have called EnsureSingleJobState first for terminal statuses to persist.
+//
+// status "in_progress" updates only transient UploadProgress; the state
+// manager's UploadStatus stays at its initialized value ("pending"). The
+// UI sees the transition to "in_progress" via the published
+// StateChangeEvent, and the runStore polling merge is guarded against
+// pending-over-in_progress downgrade. This mirrors PUR's existing pattern.
+//
+// Terminal statuses "success"/"failed" persist UploadStatus + error via
+// UpdateState so the pipeline InputFiles skip branch preserves them
+// instead of overwriting to "skipped".
+func (e *Engine) ReportUploadProgress(jobName string, fraction float64, status, errMsg string) {
+	e.mu.RLock()
+	sm := e.state
+	e.mu.RUnlock()
+	if sm != nil {
+		if status == "in_progress" {
+			sm.UpdateUploadProgressByName(jobName, fraction)
+		} else {
+			found := false
+			for _, js := range sm.GetAllStates() {
+				if js.JobName == jobName {
+					js.UploadStatus = status
+					js.UploadProgress = fraction
+					if errMsg != "" {
+						js.ErrorMessage = errMsg
+					}
+					sm.UpdateState(js)
+					found = true
+					break
+				}
+			}
+			if !found {
+				e.publishLog(events.WarnLevel,
+					fmt.Sprintf("ReportUploadProgress: no state row for %q (missing EnsureSingleJobState?)", jobName),
+					"upload", jobName)
+			}
+		}
+	}
+	if e.eventBus != nil {
+		e.eventBus.Publish(&events.StateChangeEvent{
+			BaseEvent: events.BaseEvent{
+				EventType: events.EventStateChange,
+				Time:      time.Now(),
+			},
+			JobName:        jobName,
+			Stage:          "upload",
+			NewStatus:      status,
+			UploadProgress: fraction,
+			ErrorMessage:   errMsg,
+		})
+	}
+}
+
 // LoadState loads jobs from a state file
 func (e *Engine) LoadState(stateFile string) ([]*models.JobState, error) {
 	st := state.NewManager(stateFile)

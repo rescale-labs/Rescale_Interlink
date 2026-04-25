@@ -430,6 +430,112 @@ var (
 	saveFileDialog           = runtime.SaveFileDialog
 )
 
+// dialogPathLogged ensures we log the selected dialog path (portal or
+// GTK fallback) once per binding, not per invocation. Useful for field
+// debugging without flooding the logs.
+var dialogPathLogged sync.Map
+
+func logDialogPathOnce(binding, result string, fallback bool) {
+	if _, loaded := dialogPathLogged.LoadOrStore(binding, true); loaded {
+		return
+	}
+	wailsLogger.Info().
+		Str("binding", binding).
+		Str("result", result).
+		Bool("fallback", fallback).
+		Msg("dialog path selected")
+}
+
+// portalAwareOpenDirectory routes directory-picker calls through
+// xdg-desktop-portal when available; falls back to the Wails GTK path on
+// errPortalUnavailable (missing D-Bus/portal service). Callers must hold
+// dialogMu and install the recover + resetLinuxSignalHandlers guards, as
+// the fallback path still invokes a GTK CGo call.
+func portalAwareOpenDirectory(ctx context.Context, opts runtime.OpenDialogOptions) (string, error) {
+	if portalEnabledFunc() {
+		result, err := portalOpenDirectoryFunc("", opts.Title)
+		if err == nil {
+			logDialogPathOnce("SelectDirectory", "portal", false)
+			return result, nil
+		}
+		if !isPortalUnavailableFunc(err) {
+			// Real portal error (timeout, response-code-2, etc.): surface it.
+			return "", err
+		}
+		// Fall through to GTK.
+	}
+	resetLinuxSignalHandlers()
+	result, err := openDirectoryDialog(ctx, opts)
+	if err == nil {
+		logDialogPathOnce("SelectDirectory", "gtk", true)
+	}
+	return result, err
+}
+
+// portalAwareOpenFile routes single-file open calls through the portal
+// when available; falls back to GTK on errPortalUnavailable.
+func portalAwareOpenFile(ctx context.Context, opts runtime.OpenDialogOptions) (string, error) {
+	if portalEnabledFunc() {
+		result, err := portalOpenFileFunc("", opts.Title)
+		if err == nil {
+			logDialogPathOnce("SelectFile", "portal", false)
+			return result, nil
+		}
+		if !isPortalUnavailableFunc(err) {
+			return "", err
+		}
+	}
+	resetLinuxSignalHandlers()
+	result, err := openFileDialog(ctx, opts)
+	if err == nil {
+		logDialogPathOnce("SelectFile", "gtk", true)
+	}
+	return result, err
+}
+
+// portalAwareOpenMultipleFiles routes multi-file open calls through the
+// portal when available; falls back to GTK on errPortalUnavailable.
+func portalAwareOpenMultipleFiles(ctx context.Context, opts runtime.OpenDialogOptions) ([]string, error) {
+	if portalEnabledFunc() {
+		result, err := portalOpenMultipleFilesFunc("", opts.Title)
+		if err == nil {
+			logDialogPathOnce("SelectMultipleFiles", "portal", false)
+			return result, nil
+		}
+		if !isPortalUnavailableFunc(err) {
+			return nil, err
+		}
+	}
+	resetLinuxSignalHandlers()
+	result, err := openMultipleFilesDialog(ctx, opts)
+	if err == nil {
+		logDialogPathOnce("SelectMultipleFiles", "gtk", true)
+	}
+	return result, err
+}
+
+// portalAwareSaveFile routes save-file calls through the portal when
+// available; falls back to GTK on errPortalUnavailable. Preserves
+// DefaultFilename + Filters across both paths.
+func portalAwareSaveFile(ctx context.Context, binding string, opts runtime.SaveDialogOptions) (string, error) {
+	if portalEnabledFunc() {
+		result, err := portalSaveFileFunc("", opts.Title, opts.DefaultFilename, opts.Filters)
+		if err == nil {
+			logDialogPathOnce(binding, "portal", false)
+			return result, nil
+		}
+		if !isPortalUnavailableFunc(err) {
+			return "", err
+		}
+	}
+	resetLinuxSignalHandlers()
+	result, err := saveFileDialog(ctx, opts)
+	if err == nil {
+		logDialogPathOnce(binding, "gtk", true)
+	}
+	return result, err
+}
+
 func recoverDialogPanic(binding string, err *error) {
 	if r := recover(); r != nil {
 		wailsLogger.Error().Interface("panic", r).Str("binding", binding).Msg("recovered panic in dialog binding")
@@ -437,7 +543,8 @@ func recoverDialogPanic(binding string, err *error) {
 	}
 }
 
-// SelectDirectory opens a directory dialog.
+// SelectDirectory opens a directory dialog, preferring xdg-desktop-portal
+// on Linux to avoid GTK file chooser crashes (#41 SIGTRAP on RHEL 9 VDI).
 func (a *App) SelectDirectory(title string) (result string, err error) {
 	if !dialogMu.TryLock() {
 		return "", fmt.Errorf(dialogBusyMessage)
@@ -449,8 +556,7 @@ func (a *App) SelectDirectory(title string) (result string, err error) {
 		return "", fmt.Errorf(appNotReadyError)
 	}
 	wailsLogger.Debug().Str("binding", "SelectDirectory").Str("title", title).Msg("opening dialog")
-	resetLinuxSignalHandlers()
-	result, err = openDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+	result, err = portalAwareOpenDirectory(a.ctx, runtime.OpenDialogOptions{Title: title})
 	if err != nil {
 		wailsLogger.Error().Err(err).Str("binding", "SelectDirectory").Msg("dialog returned error")
 	} else {
@@ -459,7 +565,7 @@ func (a *App) SelectDirectory(title string) (result string, err error) {
 	return
 }
 
-// SelectFile opens a file dialog.
+// SelectFile opens a file dialog, preferring xdg-desktop-portal on Linux.
 func (a *App) SelectFile(title string) (result string, err error) {
 	if !dialogMu.TryLock() {
 		return "", fmt.Errorf(dialogBusyMessage)
@@ -471,8 +577,7 @@ func (a *App) SelectFile(title string) (result string, err error) {
 		return "", fmt.Errorf(appNotReadyError)
 	}
 	wailsLogger.Debug().Str("binding", "SelectFile").Str("title", title).Msg("opening dialog")
-	resetLinuxSignalHandlers()
-	result, err = openFileDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+	result, err = portalAwareOpenFile(a.ctx, runtime.OpenDialogOptions{Title: title})
 	if err != nil {
 		wailsLogger.Error().Err(err).Str("binding", "SelectFile").Msg("dialog returned error")
 	} else {
@@ -481,7 +586,8 @@ func (a *App) SelectFile(title string) (result string, err error) {
 	return
 }
 
-// SelectMultipleFiles opens a file dialog that allows selecting multiple files.
+// SelectMultipleFiles opens a file dialog that allows selecting multiple
+// files, preferring xdg-desktop-portal on Linux.
 func (a *App) SelectMultipleFiles(title string) (result []string, err error) {
 	if !dialogMu.TryLock() {
 		return nil, fmt.Errorf(dialogBusyMessage)
@@ -493,8 +599,7 @@ func (a *App) SelectMultipleFiles(title string) (result []string, err error) {
 		return nil, fmt.Errorf(appNotReadyError)
 	}
 	wailsLogger.Debug().Str("binding", "SelectMultipleFiles").Str("title", title).Msg("opening dialog")
-	resetLinuxSignalHandlers()
-	result, err = openMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
+	result, err = portalAwareOpenMultipleFiles(a.ctx, runtime.OpenDialogOptions{Title: title})
 	if err != nil {
 		wailsLogger.Error().Err(err).Str("binding", "SelectMultipleFiles").Msg("dialog returned error")
 	} else {
@@ -503,7 +608,7 @@ func (a *App) SelectMultipleFiles(title string) (result []string, err error) {
 	return
 }
 
-// SaveFile opens a save file dialog.
+// SaveFile opens a save file dialog, preferring xdg-desktop-portal on Linux.
 func (a *App) SaveFile(title string) (result string, err error) {
 	if !dialogMu.TryLock() {
 		return "", fmt.Errorf(dialogBusyMessage)
@@ -515,8 +620,7 @@ func (a *App) SaveFile(title string) (result string, err error) {
 		return "", fmt.Errorf(appNotReadyError)
 	}
 	wailsLogger.Debug().Str("binding", "SaveFile").Str("title", title).Msg("opening dialog")
-	resetLinuxSignalHandlers()
-	result, err = saveFileDialog(a.ctx, runtime.SaveDialogOptions{Title: title})
+	result, err = portalAwareSaveFile(a.ctx, "SaveFile", runtime.SaveDialogOptions{Title: title})
 	if err != nil {
 		wailsLogger.Error().Err(err).Str("binding", "SaveFile").Msg("dialog returned error")
 	} else {

@@ -21,6 +21,11 @@ func testLogger(t *testing.T) {
 
 // stubDialogs replaces the package-level runtime indirection with
 // test-controlled functions. Returns a restore closure for defer.
+//
+// Because portalEnabled() defaults to true on Linux, the helper also
+// forces portalEnabledFunc to return false so the portalAware* routing
+// falls straight through to the GTK indirection the test set up. Tests
+// that want to exercise the portal path explicitly re-enable it.
 func stubDialogs(
 	dir func(context.Context, runtime.OpenDialogOptions) (string, error),
 	file func(context.Context, runtime.OpenDialogOptions) (string, error),
@@ -31,6 +36,7 @@ func stubDialogs(
 	origFile := openFileDialog
 	origMulti := openMultipleFilesDialog
 	origSave := saveFileDialog
+	origPortalEnabled := portalEnabledFunc
 	if dir != nil {
 		openDirectoryDialog = dir
 	}
@@ -43,11 +49,13 @@ func stubDialogs(
 	if save != nil {
 		saveFileDialog = save
 	}
+	portalEnabledFunc = func() bool { return false }
 	return func() {
 		openDirectoryDialog = origDir
 		openFileDialog = origFile
 		openMultipleFilesDialog = origMulti
 		saveFileDialog = origSave
+		portalEnabledFunc = origPortalEnabled
 	}
 }
 

@@ -157,7 +157,36 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const [selectedAnalysis, setSelectedAnalysis] = useState<AnalysisCode | null>(null)
   const [licenseType, setLicenseType] = useState('')
   const [licenseValue, setLicenseValue] = useState('')
+  // Shown when the user types a preset KEY=value into a CUSTOM license
+  // field and we auto-switch them to the matching preset dropdown.
+  const [licenseAutoSwitchHint, setLicenseAutoSwitchHint] = useState<string | null>(null)
+  // Shown when a saved template's license was originally stored as a
+  // preset key (e.g. {"RLM_LICENSE":"..."}) and we auto-classify it to the
+  // preset on load. Explains to the user why the value appears without
+  // the KEY= prefix they may remember typing.
+  const [licenseLoadHint, setLicenseLoadHint] = useState<string | null>(null)
   const [errors, setErrors] = useState<string[]>([])
+
+  // Type-time classification: if the user is in CUSTOM mode and types a
+  // preset key with an = sign, auto-switch the dropdown to the preset and
+  // strip the prefix from the value. Prevents the "license value changes
+  // on reload" surprise for all future edits.
+  const handleLicenseValueChange = useCallback((raw: string) => {
+    if (licenseType === 'CUSTOM' && raw.includes('=')) {
+      const parsed = parseCustomLicenseEntry(raw)
+      if (parsed && PRESET_LICENSE_KEYS.has(parsed.key)) {
+        setLicenseType(parsed.key)
+        setLicenseValue(parsed.value)
+        setLicenseAutoSwitchHint(
+          `Switched to ${parsed.key} preset — the KEY= prefix isn't needed when a license type is selected.`
+        )
+        setLicenseLoadHint(null)
+        return
+      }
+    }
+    setLicenseValue(raw)
+    setLicenseAutoSwitchHint(null)
+  }, [licenseType])
 
   const [savedTemplates, setSavedTemplates] = useState<TemplateInfo[]>([])
   const [showSavedTemplates, setShowSavedTemplates] = useState(false)
@@ -190,6 +219,8 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
     if (templateInfo.job) {
       setTemplate(templateInfo.job as JobSpec)
+      setLicenseAutoSwitchHint(null)
+      setLicenseLoadHint(null)
       if (templateInfo.job.licenseSettings) {
         try {
           const parsed = JSON.parse(templateInfo.job.licenseSettings)
@@ -198,6 +229,11 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
             if (PRESET_LICENSE_KEYS.has(key)) {
               setLicenseType(key)
               setLicenseValue(parsed[key] || '')
+              // Explain to the user why the value no longer shows the
+              // KEY= prefix they may have originally typed.
+              setLicenseLoadHint(
+                `This template was saved with ${key}=… — loaded as the ${key} preset with the bare value.`
+              )
             } else {
               setLicenseType('CUSTOM')
               setLicenseValue(`${key}=${parsed[key] || ''}`)
@@ -239,6 +275,8 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   useEffect(() => {
     if (initialTemplate) {
       setTemplate(initialTemplate)
+      setLicenseAutoSwitchHint(null)
+      setLicenseLoadHint(null)
       // Parse license settings if present
       if (initialTemplate.licenseSettings) {
         try {
@@ -248,6 +286,9 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
             if (PRESET_LICENSE_KEYS.has(key)) {
               setLicenseType(key)
               setLicenseValue(parsed[key] || '')
+              setLicenseLoadHint(
+                `This template was saved with ${key}=… — loaded as the ${key} preset with the bare value.`
+              )
             } else {
               setLicenseType('CUSTOM')
               setLicenseValue(`${key}=${parsed[key] || ''}`)
@@ -391,7 +432,10 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
     if (licenseType === 'CUSTOM' && licenseValue.trim()) {
       if (!parseCustomLicenseEntry(licenseValue)) {
-        errs.push('Custom license must be formatted as KEY=value (e.g. RLM_LICENSE=port@server)')
+        errs.push(
+          'Custom license value must be in KEY=value form (e.g. FOO_LICENSE=port@server). ' +
+          'If your key matches a listed preset (ANSYS, RLM, etc.), pick it from the dropdown instead.'
+        )
       }
     }
 
@@ -774,7 +818,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 <label className="block text-sm font-medium mb-1">License Type</label>
                 <select
                   value={licenseType}
-                  onChange={(e) => setLicenseType(e.target.value)}
+                  onChange={(e) => {
+                    setLicenseType(e.target.value)
+                    // User made an explicit choice — both hint states are stale.
+                    setLicenseAutoSwitchHint(null)
+                    setLicenseLoadHint(null)
+                  }}
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                   {LICENSE_TYPES.map((lt) => (
@@ -789,7 +838,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 <input
                   type="text"
                   value={licenseValue}
-                  onChange={(e) => setLicenseValue(e.target.value)}
+                  onChange={(e) => handleLicenseValueChange(e.target.value)}
                   placeholder={
                     LICENSE_TYPES.find((lt) => lt.key === licenseType)?.placeholder ||
                     'port@license-server'
@@ -797,6 +846,16 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                   disabled={!licenseType}
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 dark:disabled:bg-gray-700"
                 />
+                {licenseAutoSwitchHint && (
+                  <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">
+                    {licenseAutoSwitchHint}
+                  </p>
+                )}
+                {licenseLoadHint && !licenseAutoSwitchHint && (
+                  <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">
+                    {licenseLoadHint}
+                  </p>
+                )}
               </div>
             </div>
           </section>

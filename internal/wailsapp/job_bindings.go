@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
@@ -692,6 +693,19 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 			jobBatchID := fmt.Sprintf("job_%d", time.Now().UnixNano())
 			jobBatchLabel := fmt.Sprintf("Job: %s", jobSpec.JobName)
 
+			// Pre-initialize the state row so ReportUploadProgress terminal
+			// writes land on a real row. The pipeline feeder's state==nil
+			// check will see this and skip re-initialization.
+			a.engine.EnsureSingleJobState(jobSpec.JobName)
+
+			perFileCB, _ := buildLocalFilesProgressCallbacks(expandedPaths, func(total float64) {
+				a.engine.ReportUploadProgress(jobSpec.JobName, total, "in_progress", "")
+			})
+
+			// Emit initial event so the UI transitions to "in_progress" before
+			// the first per-file byte is uploaded.
+			a.engine.ReportUploadProgress(jobSpec.JobName, 0, "in_progress", "")
+
 			var fileIDs []string
 			for _, filePath := range expandedPaths {
 				cloudFile, uploadErr := ts.UploadFileSync(ctx, services.TransferRequest{
@@ -701,7 +715,9 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 					SourceLabel: services.SourceLabelSingleJob,
 					BatchID:     jobBatchID,
 					BatchLabel:  jobBatchLabel,
-				}, services.UploadFileSyncParams{})
+				}, services.UploadFileSyncParams{
+					ExtraProgressCallback: perFileCB(filePath),
+				})
 				if uploadErr != nil {
 					wailsLogger.Error().Err(uploadErr).Str("file", filePath).Msg("File upload failed")
 					a.failSingleJob(jobSpec.JobName, fmt.Sprintf("Upload failed: %v", uploadErr))
@@ -710,6 +726,11 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 				fileIDs = append(fileIDs, cloudFile.ID)
 			}
 			jobSpec.InputFiles = fileIDs
+
+			// Persist terminal success so the pipeline's InputFiles skip
+			// branch (patched to use nextSkipStatus) preserves it instead
+			// of overwriting UploadStatus to "skipped".
+			a.engine.ReportUploadProgress(jobSpec.JobName, 1.0, "success", "")
 		}
 
 		err := a.engine.RunFromSpecs(ctx, []models.JobSpec{jobSpec}, stateFile)
@@ -722,16 +743,34 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 }
 
 // failSingleJob reports a single-job failure to backend state and the event bus.
+//
+// If EnsureSingleJobState has already created the row (localFiles upload
+// path), update it in place instead of creating a duplicate at Index 0.
+// Pre-expansion failures (stat error, empty paths) happen before the row
+// exists; fall back to creating it at Index 1 so polling still shows a
+// failed state.
 func (a *App) failSingleJob(jobName string, errMsg string) {
-	// Update backend state for polling fallback
 	if sm := a.engine.GetState(); sm != nil {
-		sm.UpdateState(&models.JobState{
-			Index:        0,
-			JobName:      jobName,
-			UploadStatus: "failed",
-			SubmitStatus: "failed",
-			ErrorMessage: errMsg,
-		})
+		updated := false
+		for _, js := range sm.GetAllStates() {
+			if js.JobName == jobName {
+				js.UploadStatus = "failed"
+				js.SubmitStatus = "failed"
+				js.ErrorMessage = errMsg
+				sm.UpdateState(js)
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			sm.UpdateState(&models.JobState{
+				Index:        1,
+				JobName:      jobName,
+				UploadStatus: "failed",
+				SubmitStatus: "failed",
+				ErrorMessage: errMsg,
+			})
+		}
 	}
 
 	// Publish completion event so the GUI transitions out of "executing"
@@ -747,6 +786,57 @@ func (a *App) failSingleJob(jobName string, errMsg string) {
 	if a.reporter != nil {
 		a.reporter.Report(fmt.Errorf("%s", errMsg), reporting.CategoryJobCreate, "single_job", "")
 	}
+}
+
+// buildLocalFilesProgressCallbacks returns a per-file factory that produces
+// ExtraProgressCallbacks aggregating byte-weighted per-file fractions into
+// a single job-level fraction passed to publish. Returns totalBytes too so
+// callers can short-circuit empty-upload cases.
+//
+// Each per-file callback receives a 0..1 fraction (matching
+// services.UploadFileSyncParams.ExtraProgressCallback's contract) and
+// updates a shared map under progressMu. The aggregate is clamped to 1.0.
+func buildLocalFilesProgressCallbacks(paths []string, publish func(total float64)) (func(string) func(float64), int64) {
+	fileSizes := make(map[string]int64, len(paths))
+	var totalBytes int64
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			fileSizes[p] = fi.Size()
+			totalBytes += fi.Size()
+		}
+	}
+
+	var progressMu sync.Mutex
+	perFileDone := make(map[string]float64, len(paths))
+
+	make := func(filePath string) func(float64) {
+		return func(fileFraction float64) {
+			if fileFraction < 0 {
+				fileFraction = 0
+			}
+			if fileFraction > 1 {
+				fileFraction = 1
+			}
+			progressMu.Lock()
+			perFileDone[filePath] = fileFraction
+			var uploaded float64
+			for p, frac := range perFileDone {
+				uploaded += frac * float64(fileSizes[p])
+			}
+			total := 0.0
+			if totalBytes > 0 {
+				total = uploaded / float64(totalBytes)
+				if total > 1 {
+					total = 1
+				}
+			}
+			progressMu.Unlock()
+			if publish != nil {
+				publish(total)
+			}
+		}
+	}
+	return make, totalBytes
 }
 
 // CancelRun cancels the current run.
