@@ -54,6 +54,17 @@ func (l *retryLogger) Warn(msg string, keysAndValues ...interface{}) {
 	}
 }
 
+// authScheme picks the Authorization scheme for a Rescale API key.
+// Legacy long-lived API tokens use "Token"; short-lived session JWTs
+// (three dot-separated base64url segments starting with "ey") use "Bearer".
+func authScheme(apiKey string) string {
+	parts := strings.Split(apiKey, ".")
+	if len(parts) == 3 && strings.HasPrefix(parts[0], "ey") {
+		return "Bearer"
+	}
+	return "Token"
+}
+
 // getStringField safely extracts a string value from a map[string]interface{}
 // Returns empty string and logs a warning if the key is missing or not a string
 func getStringField(m map[string]interface{}, key string, context string) string {
@@ -329,7 +340,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	}
 
 	// Add headers
-	req.Header.Set("Authorization", "Token "+c.apiKey)
+	req.Header.Set("Authorization", authScheme(c.apiKey)+" "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	// Note: Go's http.Transport automatically handles Accept-Encoding: gzip
