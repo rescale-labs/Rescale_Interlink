@@ -23,6 +23,8 @@ var AllowedPlatformURLs = []PlatformURL{
 	{URL: "https://eu.rescale.com", Label: "Europe"},
 	{URL: "https://itar.rescale.com", Label: "US ITAR"},
 	{URL: "https://itar.rescale-gov.com", Label: "US ITAR FRM"},
+	{URL: "https://platform-stage.rescale.com", Label: "Staging"},
+	{URL: "https://platform-dev.rescale.com", Label: "Dev"},
 }
 
 // DefaultPlatformURL is the default platform for new configurations.

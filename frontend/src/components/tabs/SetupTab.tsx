@@ -71,6 +71,8 @@ const PLATFORM_URLS = [
   { value: 'https://eu.rescale.com', label: 'Europe (eu.rescale.com)' },
   { value: 'https://itar.rescale.com', label: 'US ITAR (itar.rescale.com)' },
   { value: 'https://itar.rescale-gov.com', label: 'US ITAR FRM (itar.rescale-gov.com)' },
+  { value: 'https://platform-stage.rescale.com', label: 'Staging (platform-stage.rescale.com)' },
+  { value: 'https://platform-dev.rescale.com', label: 'Dev (platform-dev.rescale.com)' },
 ] as const;
 
 export function SetupTab() {
