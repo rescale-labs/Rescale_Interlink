@@ -63,7 +63,10 @@ const isFRMPlatform = (url: string): boolean => {
   } catch { return false; }
 };
 
-// Must stay in sync with internal/config/platforms.go AllowedPlatformURLs
+// Must stay in sync with internal/config/platforms.go AllowedPlatformURLs.
+// Dev/staging entries are gated behind VITE_INCLUDE_INTERNAL_URLS (set only
+// by Vite's `internal` mode); production bundles exclude them via dead-code
+// elimination so they never appear in a release-shipped dropdown.
 const PLATFORM_URLS = [
   { value: 'https://platform.rescale.com', label: 'North America (platform.rescale.com)' },
   { value: 'https://kr.rescale.com', label: 'Korea (kr.rescale.com)' },
@@ -71,8 +74,12 @@ const PLATFORM_URLS = [
   { value: 'https://eu.rescale.com', label: 'Europe (eu.rescale.com)' },
   { value: 'https://itar.rescale.com', label: 'US ITAR (itar.rescale.com)' },
   { value: 'https://itar.rescale-gov.com', label: 'US ITAR FRM (itar.rescale-gov.com)' },
-  { value: 'https://platform-stage.rescale.com', label: 'Staging (platform-stage.rescale.com)' },
-  { value: 'https://platform-dev.rescale.com', label: 'Dev (platform-dev.rescale.com)' },
+  ...(import.meta.env.VITE_INCLUDE_INTERNAL_URLS === 'true'
+    ? [
+        { value: 'https://platform-stage.rescale.com', label: 'Staging (platform-stage.rescale.com)' },
+        { value: 'https://platform-dev.rescale.com', label: 'Dev (platform-dev.rescale.com)' },
+      ]
+    : []),
 ] as const;
 
 export function SetupTab() {
