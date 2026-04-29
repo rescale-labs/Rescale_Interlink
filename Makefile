@@ -36,6 +36,19 @@ LINUX_AMD64_DIR := $(BIN_DIR)/linux-amd64
 WINDOWS_AMD64_DIR := $(BIN_DIR)/windows-amd64
 WINDOWS_AMD64_MESA_DIR := $(BIN_DIR)/windows-amd64-mesa
 
+# Internal-build output directories (dev/staging platform URLs enabled).
+# These live alongside production output under bin/$(VERSION)/ with an
+# -internal suffix so they cannot be mistaken for release artifacts and
+# are never packaged by `make package`.
+DARWIN_ARM64_INTERNAL_DIR := $(BIN_DIR)/darwin-arm64-internal
+LINUX_AMD64_INTERNAL_DIR := $(BIN_DIR)/linux-amd64-internal
+WINDOWS_AMD64_INTERNAL_DIR := $(BIN_DIR)/windows-amd64-internal
+
+# Internal-build ldflags: same as LDFLAGS but appends "-internal" to the
+# reported version so `rescale-int --version` self-identifies as a non-
+# production build.
+LDFLAGS_INTERNAL := -ldflags "-s -w -X github.com/rescale/rescale-int/internal/version.Version=$(VERSION)-internal -X github.com/rescale/rescale-int/internal/version.BuildTime=$(BUILD_TIME)"
+
 # Default target
 .PHONY: all
 all: build
@@ -94,6 +107,35 @@ build-windows-amd64-mesa:
 	@cp cmd/rescale-int/rescale-int.manifest $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.manifest 2>/dev/null || true
 	@cp cmd/rescale-int/rescale-int.exe.local $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.local 2>/dev/null || true
 	@echo "✅ Built: $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe [FIPS 140-3] (Mesa software rendering)"
+
+# =============================================================================
+# Internal builds (dev/staging platform URLs enabled, -internal version tag)
+# =============================================================================
+# Internal builds compile with `-tags internal` (Go) and `--mode internal`
+# (Vite) so the dev/staging platform URLs are reachable in the allowlist
+# and the GUI dropdown. Use for hand-distributed builds to contributors
+# testing against non-production tenants. NEVER package or release.
+
+.PHONY: build-internal-darwin-arm64
+build-internal-darwin-arm64:
+	@echo "Building macOS Apple Silicon INTERNAL binary [FIPS 140-3] (tags=internal)..."
+	@mkdir -p $(DARWIN_ARM64_INTERNAL_DIR)
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build -tags internal $(LDFLAGS_INTERNAL) -o $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@echo "✅ Built: $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) [FIPS 140-3, INTERNAL]"
+
+.PHONY: build-internal-linux-amd64
+build-internal-linux-amd64:
+	@echo "Building Linux AMD64 INTERNAL binary [FIPS 140-3] (tags=internal)..."
+	@mkdir -p $(LINUX_AMD64_INTERNAL_DIR)
+	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build -tags internal $(LDFLAGS_INTERNAL) -o $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@echo "✅ Built: $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) [FIPS 140-3, INTERNAL]"
+
+.PHONY: build-internal-windows-amd64
+build-internal-windows-amd64:
+	@echo "Building Windows AMD64 INTERNAL binary [FIPS 140-3] (tags=internal)..."
+	@mkdir -p $(WINDOWS_AMD64_INTERNAL_DIR)
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -tags internal $(LDFLAGS_INTERNAL) -o $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@echo "✅ Built: $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe [FIPS 140-3, INTERNAL]"
 
 # Build all Windows variants
 .PHONY: build-windows-all
@@ -293,6 +335,11 @@ help:
 	@echo "  build-windows-amd64-mesa Build Windows AMD64 binary (Mesa software rendering)"
 	@echo "  build-windows-all       Build both Windows variants"
 	@echo "  build-all               Build all platform binaries (including both Windows variants)"
+	@echo ""
+	@echo "Internal Build Targets (dev/staging URLs enabled — NEVER release):"
+	@echo "  build-internal-darwin-arm64    macOS Apple Silicon internal binary"
+	@echo "  build-internal-linux-amd64     Linux AMD64 internal binary"
+	@echo "  build-internal-windows-amd64   Windows AMD64 internal binary"
 	@echo ""
 	@echo "Release Targets:"
 	@echo "  package                 Create release archives in dist/"

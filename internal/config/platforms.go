@@ -16,6 +16,8 @@ type PlatformURL struct {
 // AllowedPlatformURLs is the authoritative list of valid Rescale platform URLs.
 // This list must stay in sync with the GUI dropdown in
 // frontend/src/components/tabs/SetupTab.tsx (PLATFORM_URLS constant).
+// Additional non-production endpoints may be appended by build-tagged files
+// (see platforms_internal.go, gated by `//go:build internal`).
 var AllowedPlatformURLs = []PlatformURL{
 	{URL: "https://platform.rescale.com", Label: "North America"},
 	{URL: "https://kr.rescale.com", Label: "Korea"},

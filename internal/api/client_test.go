@@ -50,6 +50,66 @@ func TestNewClientAcceptsValidBaseURL(t *testing.T) {
 	}
 }
 
+// TestAuthScheme_TokenForLegacyKeys verifies legacy API tokens continue to use "Token".
+func TestAuthScheme_TokenForLegacyKeys(t *testing.T) {
+	cases := []string{
+		"abc123def456",
+		"legacy-api-key-no-dots",
+		"two.segment.key-but-not-ey-prefixed",
+		"",
+	}
+	for _, k := range cases {
+		if got := authScheme(k); got != "Token" {
+			t.Errorf("authScheme(%q) = %q, want Token", k, got)
+		}
+	}
+}
+
+// TestAuthScheme_BearerForJWT verifies JWT-shaped keys switch to "Bearer".
+// Rescale session JWTs are three dot-separated base64url segments with the
+// header starting with "ey" (base64 of '{"').
+func TestAuthScheme_BearerForJWT(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature"
+	if got := authScheme(jwt); got != "Bearer" {
+		t.Errorf("authScheme(jwt) = %q, want Bearer", got)
+	}
+}
+
+// TestDoRequest_AuthorizationHeader verifies the request actually sends the
+// correct scheme end-to-end for both key shapes.
+func TestDoRequest_AuthorizationHeader(t *testing.T) {
+	cases := []struct {
+		name   string
+		apiKey string
+		want   string
+	}{
+		{"legacy token", "abc123", "Token abc123"},
+		{"jwt bearer", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sig", "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sig"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAuth string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("{}"))
+			}))
+			defer server.Close()
+
+			client := NewClientForTest(&config.Config{
+				APIBaseURL: server.URL,
+				APIKey:     tc.apiKey,
+				ProxyMode:  "no-proxy",
+			})
+			_, _ = client.doRequest(context.Background(), "GET", "/api/v3/ping/", nil)
+
+			if gotAuth != tc.want {
+				t.Errorf("Authorization header = %q, want %q", gotAuth, tc.want)
+			}
+		})
+	}
+}
+
 // newTestClient creates a Client pointing at the given test server URL.
 // Delegates to NewClientForTest to avoid duplicating Client construction.
 func newTestClient(t *testing.T, serverURL string) *Client {
