@@ -106,6 +106,8 @@ export function ListRemoteFolderPage(arg1:string,arg2:string,arg3:number):Promis
 
 export function ListRemoteLegacy(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
 
+export function ListRemoteTrash(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
+
 export function ListSavedTemplates():Promise<Array<wailsapp.TemplateInfoDTO>>;
 
 export function LoadConfigFromPath(arg1:string):Promise<void>;
@@ -125,6 +127,10 @@ export function OpenLogsDirectory():Promise<void>;
 export function PauseDaemon():Promise<void>;
 
 export function PreviewCommandPatterns(arg1:string,arg2:Array<string>):Promise<Array<wailsapp.CommandPreviewDTO>>;
+
+export function PurgeTrashItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
+
+export function RecoverTrashItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
 
 export function ReloadDaemonConfig():Promise<wailsapp.ReloadConfigResultDTO>;
 

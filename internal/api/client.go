@@ -1031,6 +1031,10 @@ type FileInfo struct {
 	DecryptedSize int64
 	DateUploaded  time.Time
 
+	// SymlinkID is the top-level filesymlink id from trash listings (entry.id).
+	// Empty for non-trash listings.
+	SymlinkID string
+
 	// Full metadata fields — when populated, downloads skip GetFileInfo()
 	EncodedEncryptionKey string
 	IV                   string
@@ -1190,15 +1194,8 @@ func parseFileChecksums(itemData map[string]interface{}) []models.FileChecksum {
 // Pass pageURL="" for the first page, or use NextURL/PrevURL from previous response.
 // pageSize: pass 0 for API default, or specify items per page.
 func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL string, pageSize int) (*FolderContents, error) {
-	contents := &FolderContents{
-		Folders: make([]FolderInfo, 0),
-		Files:   make([]FileInfo, 0),
-	}
-
-	// Determine URL for this request
 	url := pageURL
 	if url == "" {
-		// Include page_size in first page request if specified
 		if pageSize > 0 {
 			url = fmt.Sprintf("/api/v3/folders/%s/contents/?page_size=%d", folderID, pageSize)
 		} else {
@@ -1215,6 +1212,18 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 			u.RawQuery = q.Encode()
 			url = u.String()
 		}
+	}
+
+	return c.fetchFolderContentsPage(ctx, url)
+}
+
+// fetchFolderContentsPage issues a GET to the given URL and parses the
+// standard folder-contents response shape (results / next / previous).
+// Shared by folder listings and trash-bin listings.
+func (c *Client) fetchFolderContentsPage(ctx context.Context, url string) (*FolderContents, error) {
+	contents := &FolderContents{
+		Folders: make([]FolderInfo, 0),
+		Files:   make([]FileInfo, 0),
 	}
 
 	resp, err := c.doRequest(ctx, "GET", url, nil)
@@ -1240,7 +1249,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 	}
 	resp.Body.Close()
 
-	// Process items from this page
 	for _, entry := range result.Results {
 		itemType := getStringField(entry, "type", "folderContents")
 		itemData, ok := entry["item"].(map[string]interface{})
@@ -1255,7 +1263,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 						ID:   id,
 						Name: name,
 					}
-					// Parse date: try dateUploaded (library), dateInserted (jobs), dateCreated
 					if dateStr, ok := itemData["dateUploaded"].(string); ok {
 						if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
 							folder.DateUploaded = t
@@ -1272,12 +1279,10 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 					contents.Folders = append(contents.Folders, folder)
 				}
 			}
-		} else if itemType == "file" {
+		} else if itemType == "file" || itemType == "filesymlink" {
 			id := getStringField(itemData, "id", "file")
 			name := getStringField(itemData, "name", "file")
 			size := int64(0)
-			// JSON numbers are float64 by default, which can lose precision for files > 2^53 bytes.
-			// Also handle string and json.Number representations for robustness.
 			if rawSize, ok := itemData["decryptedSize"]; ok {
 				switch v := rawSize.(type) {
 				case float64:
@@ -1296,8 +1301,8 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 				ID:            id,
 				Name:          name,
 				DecryptedSize: size,
+				SymlinkID:     id,
 			}
-			// Parse full metadata to eliminate per-file GetFileInfo() calls
 			file.EncodedEncryptionKey, _ = itemData["encodedEncryptionKey"].(string)
 			file.IV, _ = itemData["iv"].(string)
 			file.Owner, _ = itemData["owner"].(string)
@@ -1306,7 +1311,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 			file.Storage = parseStorage(itemData)
 			file.FileChecksums = parseFileChecksums(itemData)
 
-			// Parse date: try dateUploaded (library), dateInserted (jobs), dateCreated
 			if dateStr, ok := itemData["dateUploaded"].(string); ok {
 				if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
 					file.DateUploaded = t
@@ -1324,7 +1328,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 		}
 	}
 
-	// Set pagination info
 	contents.PageSize = len(result.Results)
 	if result.Next != nil && *result.Next != "" {
 		contents.NextURL = extractAPIPath(*result.Next)
@@ -1335,6 +1338,71 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 	}
 
 	return contents, nil
+}
+
+// ListTrashBinPage fetches a page of the user's trash bin.
+// Trash contains both files (identified by entry.id / SymlinkID) and
+// folder-like items (job outputs, identified by item.id / FolderInfo.ID).
+// Pass pageURL="" for the first page; use NextURL from the previous response for subsequent pages.
+func (c *Client) ListTrashBinPage(ctx context.Context, pageURL string, pageSize int) (*FolderContents, error) {
+	url := pageURL
+	if url == "" {
+		if pageSize > 0 {
+			url = fmt.Sprintf("/api/v3/users/me/folders/trash-bin/?page_size=%d", pageSize)
+		} else {
+			url = "/api/v3/users/me/folders/trash-bin/"
+		}
+	}
+
+	if pageSize > 0 && pageURL != "" {
+		if u, err := neturl.Parse(url); err == nil {
+			q := u.Query()
+			q.Set("page_size", strconv.Itoa(pageSize))
+			u.RawQuery = q.Encode()
+			url = u.String()
+		}
+	}
+
+	return c.fetchFolderContentsPage(ctx, url)
+}
+
+// PostTrashBinAction POSTs a bulk recover or permanent-delete to the trash-bin endpoint.
+// action must be "recover" or "delete". Both take the same payload:
+//
+//	{"folderIds": [...], "filesymlink_ids": [...]}
+//
+// The endpoint returns 201 Created on success and is all-or-nothing.
+func (c *Client) PostTrashBinAction(ctx context.Context, action string, fileSymlinkIDs []string, folderIDs []string) error {
+	if action != "recover" && action != "delete" {
+		return fmt.Errorf("invalid trash-bin action %q (must be \"recover\" or \"delete\")", action)
+	}
+
+	// Ensure JSON encodes empty lists as [] rather than null.
+	if fileSymlinkIDs == nil {
+		fileSymlinkIDs = []string{}
+	}
+	if folderIDs == nil {
+		folderIDs = []string{}
+	}
+
+	body := map[string]interface{}{
+		"filesymlink_ids": fileSymlinkIDs,
+		"folderIds":       folderIDs,
+	}
+
+	url := fmt.Sprintf("/api/v3/users/me/folders/trash-bin/%s/", action)
+	resp, err := c.doRequest(ctx, "POST", url, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusCreated && resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusNoContent {
+		respBody := readResponseBody(resp.Body)
+		return fmt.Errorf("trash-bin %s failed with status %d: %s", action, resp.StatusCode, respBody)
+	}
+
+	return nil
 }
 
 // extractAPIPath extracts the API path from a full URL or returns the path as-is.

@@ -200,6 +200,10 @@ type FileItem struct {
 
 	// ParentID is the parent folder ID (for remote files)
 	ParentID string
+
+	// SymlinkID is the filesymlink id for trash-bin entries (files only).
+	// Populated only by trash listings; empty otherwise.
+	SymlinkID string
 }
 
 // BrowseMode indicates the remote browsing context.
@@ -209,6 +213,7 @@ const (
 	BrowseModeLibrary BrowseMode = "library" // My Library (folders)
 	BrowseModeJobs    BrowseMode = "jobs"    // My Jobs
 	BrowseModeLegacy  BrowseMode = "legacy"  // Legacy flat file list
+	BrowseModeTrash   BrowseMode = "trash"   // Trash bin
 )
 
 // FolderContents represents the contents of a folder.

@@ -2,13 +2,20 @@ import { useEffect, useCallback, useState } from 'react'
 import {
   ArrowLeftIcon,
   ArrowPathIcon,
+  ArrowUturnLeftIcon,
   FolderPlusIcon,
   ChevronRightIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline'
 import { useFileBrowserStore, BrowseMode } from '../../stores'
 import { FileList } from './FileList'
 
-export function RemoteBrowser() {
+interface RemoteBrowserProps {
+  onTrashRecover?: () => void
+  onTrashPurge?: () => void
+}
+
+export function RemoteBrowser({ onTrashRecover, onTrashPurge }: RemoteBrowserProps = {}) {
   const {
     remote: {
       mode,
@@ -39,6 +46,9 @@ export function RemoteBrowser() {
     goToPreviousRemotePage,
   } = useFileBrowserStore()
 
+  const isTrash = mode === 'trash'
+  const hasSelection = selection.selectedIds.size > 0
+
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
@@ -57,12 +67,15 @@ export function RemoteBrowser() {
     }
   }, [mode, setRemoteMode])
 
-  // Handle folder open from FileList
+  // Handle folder open from FileList.
+  // In trash mode, folder-like entries are non-navigable — they represent
+  // whole trashed job outputs and are treated as opaque items.
   const handleFolderOpen = useCallback((item: { id: string; name: string; isFolder: boolean }) => {
+    if (isTrash) return
     if (item.isFolder && item.id) {
       navigateRemoteTo(item.id, item.name)
     }
-  }, [navigateRemoteTo])
+  }, [isTrash, navigateRemoteTo])
 
   // Handle selection change
   const handleSelectionChange = useCallback((ids: Set<string>, lastId: string | null) => {
@@ -105,17 +118,18 @@ export function RemoteBrowser() {
 
         {/* Mode toggle */}
         <div className="flex items-center bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded overflow-hidden">
-          {(['library', 'jobs', 'legacy'] as BrowseMode[]).map((m) => (
+          {(['library', 'jobs', 'legacy', 'trash'] as BrowseMode[]).map((m) => (
             <button
               key={m}
               onClick={() => handleModeChange(m)}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${
+              className={`px-3 py-1 text-xs font-medium transition-colors flex items-center gap-1 ${
                 mode === m
                   ? 'bg-blue-500 text-white'
                   : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
               }`}
             >
-              {m === 'library' ? 'My Library' : m === 'jobs' ? 'My Jobs' : 'Legacy'}
+              {m === 'trash' && <TrashIcon className="w-3.5 h-3.5" />}
+              {m === 'library' ? 'My Library' : m === 'jobs' ? 'My Jobs' : m === 'legacy' ? 'Legacy' : 'Trash'}
             </button>
           ))}
         </div>
@@ -124,7 +138,7 @@ export function RemoteBrowser() {
         <div className="flex-1" />
 
         {/* New folder button (only in My Library) */}
-        {canCreateFolder && (
+        {canCreateFolder && !isTrash && (
           <button
             onClick={() => setShowNewFolderDialog(true)}
             className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
@@ -143,6 +157,38 @@ export function RemoteBrowser() {
         >
           <ArrowPathIcon className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
         </button>
+
+        {/* Trash-only actions */}
+        {isTrash && (
+          <>
+            <button
+              onClick={onTrashRecover}
+              disabled={!hasSelection || !onTrashRecover}
+              title="Recover selected items to their original location"
+              className={`flex items-center gap-1 px-3 py-1 text-xs rounded ${
+                hasSelection && onTrashRecover
+                  ? 'bg-blue-500 text-white hover:bg-blue-600'
+                  : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+              }`}
+            >
+              <ArrowUturnLeftIcon className="w-3.5 h-3.5" />
+              Recover
+            </button>
+            <button
+              onClick={onTrashPurge}
+              disabled={!hasSelection || !onTrashPurge}
+              title="Permanently delete selected items — cannot be undone"
+              className={`flex items-center gap-1 px-3 py-1 text-xs rounded ${
+                hasSelection && onTrashPurge
+                  ? 'bg-red-500 text-white hover:bg-red-600'
+                  : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+              }`}
+            >
+              <TrashIcon className="w-3.5 h-3.5" />
+              Delete Permanently
+            </button>
+          </>
+        )}
       </div>
 
       {/* Breadcrumb */}
@@ -184,6 +230,8 @@ export function RemoteBrowser() {
               ? 'Your library is empty'
               : mode === 'jobs'
               ? 'No job files found'
+              : mode === 'trash'
+              ? 'Trash is empty'
               : 'No files found'
           }
           loadingMessage={
