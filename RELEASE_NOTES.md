@@ -1,5 +1,25 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.6 - May 9, 2026
+
+### Linux file picker reliability on restricted desktop environments (#41)
+
+File and folder picker dialogs on Linux now route through the freedesktop xdg-desktop-portal D-Bus interface, bypassing the WebKitGTK code path that caused a reproducible hard crash on some RHEL 9 VDIs. All dialog entry points (single-file, multi-file, folder, save-file, error-report, log-export) share the portal path, so the fix applies uniformly across Setup, Single Job, PUR, File Browser, and Transfers. Falls back to the previous GTK path when xdg-desktop-portal is unavailable; set `RESCALE_DISABLE_PORTAL=1` to force the legacy path. Behavior on macOS and Windows is unchanged.
+
+### Template license values now survive a round-trip cleanly (#39)
+
+Saving a template with a CUSTOM license value of the form `KEY=value` and reloading it no longer silently reclassifies the entry as a preset with a shortened value — a bug that looked like Interlink had corrupted the value on load. New hints also guide the experience: a type-time nudge when a CUSTOM value matches a known preset, a load-time explanation for pre-existing templates saved in the old state, and a sharper validation error for CUSTOM values that aren't in `KEY=value` form.
+
+### Upload progress is always visible in Single Job and PUR (#42)
+
+Single Job uploads now show live per-file progress in a job-rows table while the upload runs; previously the table didn't render in the executing state and the GUI looked frozen during long uploads. PUR uploads no longer briefly "lose" their progress display mid-upload — a state-merge issue could show an in-progress upload as pending while bytes were actively flowing.
+
+### Short-lived JWT credentials
+
+The API client now accepts short-lived session JWTs in addition to long-lived API tokens, selecting the correct `Authorization` scheme automatically based on the credential shape. Useful for agent-style integrations. See [#48](https://github.com/rescale-labs/Rescale_Interlink/issues/48) for the follow-up on automatic refresh for transfers that outlive the token.
+
+---
+
 ## v4.9.5 - April 21, 2026
 
 ### File Browser: Typed-path errors are surfaced (#37)

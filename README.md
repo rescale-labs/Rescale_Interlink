@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.9.5-green)
+![Status](https://img.shields.io/badge/status-v4.9.6-green)
 
 ---
 
@@ -21,12 +21,12 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ---
 
-## What's New in v4.9.5
+## What's New in v4.9.6
 
-- **File Browser errors are visible.** When a typed path fails (permission denied, not found, timeout), the OS-level reason shows as a red banner; slow reads show an amber warning. Rapid navigation no longer leaks spurious "Operation cancelled" errors.
-- **Hidden-files toggle actually works.** The "show hidden" switch now fetches hidden entries from the backend (previously a no-op client-side filter).
-- **Job template improvements.** Coretype validation works out of the box on saved templates — no more "Scan Coretypes" prerequisite. CUSTOM and RLM license types are now first-class, with clearer error messages.
-- **Linux picker stability.** Addresses a known WebKitGTK signal-handler crash class by upgrading to Wails v2.12.0 and adding defense-in-depth layers (per-call signal-handler reset, process-wide dialog mutex, panic-safe return contracts, opt-out-able renderer/VFS environment mitigations).
+- **Linux file picker reliability.** File and folder pickers on Linux now route through the freedesktop xdg-desktop-portal D-Bus interface, bypassing the WebKitGTK code path that caused a reproducible hard crash on some RHEL 9 VDIs. Falls back to the previous GTK path when xdg-desktop-portal is unavailable.
+- **Templates round-trip license values cleanly.** Saving a template with a CUSTOM license value of the form `KEY=value` and reloading it no longer silently reclassifies the entry. New hints guide the experience: type-time nudges when a CUSTOM value matches a known preset, load-time explanations for pre-existing templates saved in the old state, and a sharper validation error.
+- **Upload progress is always visible.** Single Job uploads now show live per-file progress while the upload runs; previously the GUI looked frozen during long uploads. PUR uploads no longer briefly lose their progress display mid-upload.
+- **Short-lived JWT credentials supported.** The API client now accepts short-lived session JWTs in addition to long-lived API tokens, selecting the correct `Authorization` scheme automatically.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -370,6 +370,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.9.5
+**Version**: 4.9.6
 **Status**: Production Ready
-**Last Updated**: April 21, 2026
+**Last Updated**: May 9, 2026
