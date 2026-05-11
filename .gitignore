@@ -43,6 +43,9 @@ go.work
 .DS_Store
 Thumbs.db
 
+# Agent tooling state directory (local only)
+.agentbridge/
+
 # Build artifacts (binaries distributed via GitHub Releases)
 bin/
 dist/

@@ -1,7 +1,7 @@
 # Rescale Interlink — Feature Summary
 
-**Version:** 4.9.4
-**Last Updated:** April 19, 2026
+**Version:** 4.9.6
+**Last Updated:** May 9, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document catalogs what Rescale Interlink can do. For full command syntax, see [CLI_GUIDE.md](CLI_GUIDE.md). For architecture internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For version history, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
