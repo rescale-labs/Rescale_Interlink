@@ -666,6 +666,7 @@ export namespace wailsapp {
 	    modTime: string;
 	    path?: string;
 	    parentId?: string;
+	    symlinkId?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new FileItemDTO(source);
@@ -680,6 +681,7 @@ export namespace wailsapp {
 	        this.modTime = source["modTime"];
 	        this.path = source["path"];
 	        this.parentId = source["parentId"];
+	        this.symlinkId = source["symlinkId"];
 	    }
 	}
 	export class FileLoggingSettingsDTO {
