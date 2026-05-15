@@ -306,14 +306,23 @@ export function SetupTab() {
     fetchFileLoggingSettings();
   }, []);
 
-  // Auto-switch proxy mode: NTLM uses non-FIPS algorithms (MD4/MD5) not allowed for FedRAMP
+  // NTLM can be unavailable either by build policy or by selected platform policy.
   useEffect(() => {
-    if (config && config.proxyMode === 'ntlm' && isFRMPlatform(config.apiBaseUrl || '')) {
-      // NTLM is not allowed for FRM platforms - switch to basic
-      updateConfig({ proxyMode: 'basic' });
-      setStatusMessage('Proxy mode switched to "basic": NTLM uses non-FIPS algorithms not allowed for FedRAMP');
+    if (!config || config.proxyMode !== 'ntlm') {
+      return;
     }
-  }, [config?.apiBaseUrl]);
+
+    const disabledByBuild = appInfo?.ntlmProxySupported === false;
+    const disabledByPlatform = isFRMPlatform(config.apiBaseUrl || '');
+    if (disabledByBuild || disabledByPlatform) {
+      updateConfig({ proxyMode: 'basic' });
+      setStatusMessage(
+        disabledByBuild
+          ? 'Proxy mode switched to "basic": NTLM is unavailable in this FIPS build'
+          : 'Proxy mode switched to "basic": NTLM uses non-FIPS algorithms not allowed for FedRAMP'
+      );
+    }
+  }, [config?.apiBaseUrl, config?.proxyMode, appInfo?.ntlmProxySupported]);
 
   useEffect(() => {
     if (connectionStatus === 'connected' && connectionEmail) {
@@ -786,8 +795,12 @@ export function SetupTab() {
 
   const proxyEnabled = config?.proxyMode !== 'no-proxy' && config?.proxyMode !== 'system';
   const basicAuthEnabled = config?.proxyMode === 'basic';
-  // NTLM not allowed for FedRAMP platforms (FIPS compliance)
   const isFRM = isFRMPlatform(config?.apiBaseUrl || '');
+  const ntlmProxySupported = appInfo?.ntlmProxySupported ?? true;
+  const ntlmUnavailable = !ntlmProxySupported || isFRM;
+  const ntlmUnavailableReason = !ntlmProxySupported
+    ? 'unavailable in FIPS build'
+    : 'unavailable for FRM';
 
   const hasUnsavedDaemonChanges = daemonConfig && lastSavedConfig
     ? JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig)
@@ -1022,9 +1035,12 @@ export function SetupTab() {
                 className="input"
                 value={config?.proxyMode || 'no-proxy'}
                 onChange={(e) => {
-                  // NTLM uses non-FIPS algorithms — block for FedRAMP platforms
-                  if (e.target.value === 'ntlm' && isFRM) {
-                    setStatusMessage('NTLM is not available for FedRAMP platforms (non-FIPS algorithms)');
+                  if (e.target.value === 'ntlm' && ntlmUnavailable) {
+                    setStatusMessage(
+                      !ntlmProxySupported
+                        ? 'NTLM is not available in this FIPS build'
+                        : 'NTLM is not available for FedRAMP platforms (non-FIPS algorithms)'
+                    );
                     return;
                   }
                   updateConfig({ proxyMode: e.target.value });
@@ -1034,18 +1050,12 @@ export function SetupTab() {
                   <option
                     key={mode}
                     value={mode}
-                    disabled={mode === 'ntlm' && isFRM}
+                    disabled={mode === 'ntlm' && ntlmUnavailable}
                   >
-                    {mode}{mode === 'ntlm' && isFRM ? ' (unavailable for FRM)' : ''}
+                    {mode}{mode === 'ntlm' && ntlmUnavailable ? ` (${ntlmUnavailableReason})` : ''}
                   </option>
                 ))}
               </select>
-              {isFRM && (
-                <p className="mt-1 text-xs text-amber-600">
-                  NTLM proxy mode is unavailable for FedRAMP platforms (uses non-FIPS MD4/MD5 algorithms).
-                  Use 'basic' proxy mode over TLS instead.
-                </p>
-              )}
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>

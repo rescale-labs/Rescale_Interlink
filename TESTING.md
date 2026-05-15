@@ -252,7 +252,7 @@ ln -s ./bin/rescale-int ./rescale-cli
 
 ```bash
 # Install Wails CLI (one-time setup)
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
 # Install frontend dependencies
 cd frontend && npm install && cd ..
@@ -268,7 +268,7 @@ wails dev
 CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
 
 # FIPS-compliant production build
-GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
+GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
 
 # Test production build
 open build/bin/rescale-int.app

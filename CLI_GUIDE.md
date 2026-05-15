@@ -142,10 +142,11 @@ proxy_user,username
 - `no-proxy` - Direct connection (default)
 - `system` - Use system proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` environment variables)
 - `basic` - HTTP Basic authentication
-- `ntlm` - NTLM authentication for corporate proxies
+- `ntlm` - NTLM authentication for corporate proxies, available only in builds that support NTLM
 
 **Notes:**
 - Proxy passwords are prompted at runtime for security (not stored in config files)
+- FIPS-tagged builds reject `proxy_mode=ntlm` because NTLM requires non-FIPS MD4/MD5 algorithms
 - All traffic (API calls + S3/Azure storage) routes through the configured proxy
 - Use `no_proxy` config key for bypass rules (comma-separated hostnames, wildcards, CIDRs). `no_proxy` is fully wired to the HTTP transport and configurable from the GUI Setup tab.
 

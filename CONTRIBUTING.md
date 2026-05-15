@@ -12,7 +12,7 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
 ### Prerequisites
 
-- Go 1.24 or later (minimum required)
+- Go 1.26.3 (minimum required)
 - Node.js 18+ (for GUI development)
 - Wails v2 CLI (for GUI builds)
 - macOS, Linux, or Windows development environment
@@ -39,7 +39,7 @@ go test ./...
 
 ```bash
 # Install Wails CLI (if not already installed)
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
 # Install frontend dependencies
 cd frontend && npm install && cd ..
@@ -67,7 +67,7 @@ make build-all                # Build for all platforms
 # Example: bin/v4.0.0/darwin-arm64/rescale-int
 
 # Production GUI build
-GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -platform darwin/arm64
+GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -tags fips -platform darwin/arm64
 
 # Development only (not for production releases)
 # Note: Output to bin/dev/ to avoid polluting project root

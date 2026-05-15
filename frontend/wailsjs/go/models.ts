@@ -118,6 +118,7 @@ export namespace wailsapp {
 	    fipsStatus: string;
 	    os: string;
 	    sessionScopedDaemon: boolean;
+	    ntlmProxySupported: boolean;
 	    versionCheck?: VersionCheckDTO;
 	
 	    static createFrom(source: any = {}) {
@@ -132,6 +133,7 @@ export namespace wailsapp {
 	        this.fipsStatus = source["fipsStatus"];
 	        this.os = source["os"];
 	        this.sessionScopedDaemon = source["sessionScopedDaemon"];
+	        this.ntlmProxySupported = source["ntlmProxySupported"];
 	        this.versionCheck = this.convertValues(source["versionCheck"], VersionCheckDTO);
 	    }
 	

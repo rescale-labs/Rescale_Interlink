@@ -18,7 +18,7 @@ Rescale Interlink REQUIRES FIPS 140-3 compliant builds for production use. This 
 All production builds must be compiled with:
 
 ```bash
-GOFIPS140=latest wails build
+GOFIPS140=latest wails build -tags fips
 # or
 make build
 ```
@@ -64,13 +64,20 @@ This satisfies FedRAMP Moderate requirements for FIPS-validated data-in-transit 
 
 NTLM proxy authentication (`proxy_mode=ntlm`) uses the Azure/go-ntlmssp library which requires MD4 and MD5 hashing algorithms. These algorithms are **not FIPS 140-3 approved**.
 
+#### For FIPS-Tagged Builds
+
+- **NTLM proxy mode is disabled by build policy** on all platforms
+- The NTLM transport implementation is excluded from FIPS-tagged builds
+- Backend config validation and HTTP client setup reject `proxy_mode=ntlm`
+- The GUI hides/disables NTLM when the running build reports that it is unavailable
+
 #### For FedRAMP Environments (`rescale-gov.com`)
 
 - **NTLM proxy mode is automatically disabled** in the GUI when a FedRAMP platform is selected
 - If NTLM is configured when switching to a FedRAMP platform, it automatically switches to `basic`
 - A warning is displayed explaining the restriction
 
-#### For Commercial Rescale Platforms
+#### For Non-FIPS Commercial Builds
 
 - NTLM proxy mode is available and supported
 - The FIPS boundary is the Rescale API communication, not the proxy
@@ -79,10 +86,10 @@ NTLM proxy authentication (`proxy_mode=ntlm`) uses the Azure/go-ntlmssp library 
 ### Recommendations
 
 1. **Always prefer `basic` authentication over TLS** for maximum compatibility
-2. If your proxy requires NTLM and you're targeting FedRAMP:
+2. If your proxy requires NTLM and you're using a FIPS-tagged or FedRAMP build:
    - Contact your IT team for proxy alternatives
    - Consider using a FIPS-compliant proxy gateway
-3. The startup warning will alert you if NTLM is configured in a FIPS build
+3. A FIPS-tagged build rejects `proxy_mode=ntlm` before creating an API client
 
 ---
 

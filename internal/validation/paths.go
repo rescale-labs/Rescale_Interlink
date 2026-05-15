@@ -56,11 +56,18 @@ func ValidateFilename(filename string) error {
 //	ValidatePathInDirectory("../../etc/passwd", "/tmp/uploads") // Error: escapes base dir
 //	ValidatePathInDirectory("subdir/file.txt", "/tmp/uploads")   // OK: within base dir
 func ValidatePathInDirectory(path string, baseDir string) error {
+	_, err := ResolvePathInDirectory(path, baseDir)
+	return err
+}
+
+// ResolvePathInDirectory validates that a path stays within baseDir and returns
+// the resolved path to use for local filesystem operations.
+func ResolvePathInDirectory(path string, baseDir string) (string, error) {
 	if path == "" {
-		return fmt.Errorf("path cannot be empty")
+		return "", fmt.Errorf("path cannot be empty")
 	}
 	if baseDir == "" {
-		return fmt.Errorf("base directory cannot be empty")
+		return "", fmt.Errorf("base directory cannot be empty")
 	}
 
 	// Clean both paths
@@ -72,7 +79,7 @@ func ValidatePathInDirectory(path string, baseDir string) error {
 	if !filepath.IsAbs(cleanBase) {
 		cleanBase, err = filepath.Abs(cleanBase)
 		if err != nil {
-			return fmt.Errorf("failed to resolve base directory: %w", err)
+			return "", fmt.Errorf("failed to resolve base directory: %w", err)
 		}
 	}
 
@@ -91,13 +98,13 @@ func ValidatePathInDirectory(path string, baseDir string) error {
 	// Use filepath.Rel to check containment
 	relPath, err := filepath.Rel(cleanBase, resolvedPath)
 	if err != nil {
-		return fmt.Errorf("failed to compute relative path: %w", err)
+		return "", fmt.Errorf("failed to compute relative path: %w", err)
 	}
 
 	// If the relative path starts with "..", it's outside the base directory
 	if strings.HasPrefix(relPath, ".."+string(filepath.Separator)) || relPath == ".." {
-		return fmt.Errorf("path escapes base directory: %s (base: %s)", path, baseDir)
+		return "", fmt.Errorf("path escapes base directory: %s (base: %s)", path, baseDir)
 	}
 
-	return nil
+	return resolvedPath, nil
 }

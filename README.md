@@ -5,7 +5,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Rescale Interlink](./logo.png)
 
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)
-![Go Version](https://img.shields.io/badge/go-1.24+-blue)
+![Go Version](https://img.shields.io/badge/go-1.26.3-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/status-v4.9.6-green)
@@ -14,7 +14,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 > **FIPS 140-3 Compliance (FedRAMP Moderate)**
 >
-> Built with FIPS 140-3 compliant cryptography using Go 1.24's native FIPS module.
+> Built with FIPS 140-3 compliant cryptography using Go 1.26.3 native FIPS module.
 > Use `make build` which includes FIPS automatically. Verify FIPS status with `rescale-int --version`.
 >
 > See [Go FIPS 140-3 Documentation](https://go.dev/doc/security/fips140) for details.
@@ -98,7 +98,7 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 
 - macOS, Linux, or Windows
 - Rescale API key
-- For building from source: Go 1.24+, Node.js 18+
+- For building from source: Go 1.26.3, Node.js 18+
 
 ### Installation
 

@@ -24,6 +24,7 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
     version: '4.0.0-dev',
     fipsEnabled: true,
     fipsStatus: 'FIPS 140-3',
+    ntlmProxySupported: true,
   })),
   CheckForUpdates: vi.fn(() => Promise.resolve({
     hasUpdate: false,

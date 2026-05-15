@@ -11,6 +11,7 @@
 
 # Extract version from Go source (single source of truth)
 VERSION := $(shell grep 'var Version' internal/version/version.go | sed 's/.*"\(.*\)"/\1/')
+VERSION_CLEAN := $(shell echo $(VERSION) | sed 's/^v//')
 BINARY_NAME := rescale-int
 BUILD_TIME := $(shell date +%Y-%m-%d)
 
@@ -24,6 +25,10 @@ LDFLAGS := -ldflags "-s -w -X github.com/rescale/rescale-int/internal/version.Ve
 # FIPS 140-3 compliance: Use Go's native FIPS crypto module
 # See: https://go.dev/doc/security/fips140
 GOFIPS := GOFIPS140=latest
+FIPS_TAGS := fips
+FIPS_BUILD_TAGS := -tags $(FIPS_TAGS)
+FIPS_INTERNAL_BUILD_TAGS := -tags $(FIPS_TAGS),internal
+FIPS_MESA_BUILD_TAGS := -tags $(FIPS_TAGS),mesa
 
 # Suppress macOS linker warning about duplicate libraries
 CGO_LDFLAGS_MACOS := CGO_LDFLAGS="-Wl,-no_warn_duplicate_libraries"
@@ -61,7 +66,7 @@ DETECTED_EXE_SUFFIX := $(if $(filter windows,$(DETECTED_GOOS)),.exe,)
 build:
 	@echo "Building FIPS 140-3 compliant binary for $(DETECTED_GOOS)/$(DETECTED_GOARCH)..."
 	@mkdir -p $(DETECTED_BUILD_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) go build $(LDFLAGS) -o $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) ./cmd/rescale-int
 	@echo "✅ Built: $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) [FIPS 140-3]"
 
 # Build macOS Apple Silicon binary (FIPS 140-3 compliant)
@@ -69,7 +74,7 @@ build:
 build-darwin-arm64:
 	@echo "Building macOS Apple Silicon binary [FIPS 140-3]..."
 	@mkdir -p $(DARWIN_ARM64_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(DARWIN_ARM64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DARWIN_ARM64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(DARWIN_ARM64_DIR)/$(BINARY_NAME) [FIPS 140-3]"
 
 # Build macOS Intel binary (FIPS 140-3 compliant)
@@ -77,7 +82,7 @@ build-darwin-arm64:
 build-darwin-amd64:
 	@echo "Building macOS Intel binary [FIPS 140-3]..."
 	@mkdir -p $(DARWIN_AMD64_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(DARWIN_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=amd64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DARWIN_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(DARWIN_AMD64_DIR)/$(BINARY_NAME) [FIPS 140-3]"
 
 # Build Linux binary (FIPS 140-3 compliant)
@@ -85,7 +90,7 @@ build-darwin-amd64:
 build-linux-amd64:
 	@echo "Building Linux AMD64 binary [FIPS 140-3]..."
 	@mkdir -p $(LINUX_AMD64_DIR)
-	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(LINUX_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(LINUX_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(LINUX_AMD64_DIR)/$(BINARY_NAME) [FIPS 140-3]"
 
 # Build Windows binary - standard (smaller, requires GPU)
@@ -93,7 +98,7 @@ build-linux-amd64:
 build-windows-amd64:
 	@echo "Building Windows AMD64 binary [FIPS 140-3] (standard, no Mesa)..."
 	@mkdir -p $(WINDOWS_AMD64_DIR)
-	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
 	@echo "✅ Built: $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe [FIPS 140-3] (requires GPU)"
 
 # Build Windows binary with Mesa (larger, software rendering for VMs/RDP)
@@ -102,7 +107,7 @@ build-windows-amd64:
 build-windows-amd64-mesa:
 	@echo "Building Windows AMD64 binary [FIPS 140-3] (with Mesa software rendering)..."
 	@mkdir -p $(WINDOWS_AMD64_MESA_DIR)
-	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -tags mesa $(LDFLAGS) -o $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(FIPS_MESA_BUILD_TAGS) $(LDFLAGS) -o $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
 	@echo "Copying manifest and .local file for DLL redirection..."
 	@cp cmd/rescale-int/rescale-int.manifest $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.manifest 2>/dev/null || true
 	@cp cmd/rescale-int/rescale-int.exe.local $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.local 2>/dev/null || true
@@ -111,30 +116,31 @@ build-windows-amd64-mesa:
 # =============================================================================
 # Internal builds (dev/staging platform URLs enabled, -internal version tag)
 # =============================================================================
-# Internal builds compile with `-tags internal` (Go) and `--mode internal`
-# (Vite) so the dev/staging platform URLs are reachable in the allowlist
-# and the GUI dropdown. Use for hand-distributed builds to contributors
-# testing against non-production tenants. NEVER package or release.
+# Internal builds compile with `-tags fips,internal` (Go) and
+# `--mode internal` (Vite) so the dev/staging platform URLs are reachable in
+# the allowlist and the GUI dropdown while keeping production FIPS policy.
+# Use for hand-distributed builds to contributors testing against
+# non-production tenants. NEVER package or release.
 
 .PHONY: build-internal-darwin-arm64
 build-internal-darwin-arm64:
-	@echo "Building macOS Apple Silicon INTERNAL binary [FIPS 140-3] (tags=internal)..."
+	@echo "Building macOS Apple Silicon INTERNAL binary [FIPS 140-3] (tags=fips,internal)..."
 	@mkdir -p $(DARWIN_ARM64_INTERNAL_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build -tags internal $(LDFLAGS_INTERNAL) -o $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) [FIPS 140-3, INTERNAL]"
 
 .PHONY: build-internal-linux-amd64
 build-internal-linux-amd64:
-	@echo "Building Linux AMD64 INTERNAL binary [FIPS 140-3] (tags=internal)..."
+	@echo "Building Linux AMD64 INTERNAL binary [FIPS 140-3] (tags=fips,internal)..."
 	@mkdir -p $(LINUX_AMD64_INTERNAL_DIR)
-	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build -tags internal $(LDFLAGS_INTERNAL) -o $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) [FIPS 140-3, INTERNAL]"
 
 .PHONY: build-internal-windows-amd64
 build-internal-windows-amd64:
-	@echo "Building Windows AMD64 INTERNAL binary [FIPS 140-3] (tags=internal)..."
+	@echo "Building Windows AMD64 INTERNAL binary [FIPS 140-3] (tags=fips,internal)..."
 	@mkdir -p $(WINDOWS_AMD64_INTERNAL_DIR)
-	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -tags internal $(LDFLAGS_INTERNAL) -o $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
 	@echo "✅ Built: $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe [FIPS 140-3, INTERNAL]"
 
 # Build all Windows variants
@@ -190,13 +196,13 @@ clean-version:
 .PHONY: test
 test:
 	@echo "Running tests [FIPS 140-3]..."
-	@$(GOFIPS) go test -v ./...
+	@$(GOFIPS) go test $(FIPS_BUILD_TAGS) -v ./...
 
 # Run tests with coverage (FIPS 140-3 mode)
 .PHONY: test-coverage
 test-coverage:
 	@echo "Running tests with coverage [FIPS 140-3]..."
-	@$(GOFIPS) go test -v -coverprofile=coverage.out ./...
+	@$(GOFIPS) go test $(FIPS_BUILD_TAGS) -v -coverprofile=coverage.out ./...
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "✅ Coverage report: coverage.html"
 
@@ -205,7 +211,7 @@ test-coverage:
 .PHONY: check
 check:
 	@echo "Checking build [FIPS 140-3]..."
-	@$(GOFIPS) go build -o /dev/null ./cmd/rescale-int
+	@$(GOFIPS) go build $(FIPS_BUILD_TAGS) -o /dev/null ./cmd/rescale-int
 	@echo "✅ Build OK"
 
 # Format code
@@ -234,19 +240,26 @@ version:
 	@echo "Version: $(VERSION)"
 	@echo "Build Time: $(BUILD_TIME)"
 
-# Sync version from Go source to all config files (wails.json, package.json)
+# Sync version from Go source to all config files (wails.json, package metadata, macOS plist)
 # Run this after changing internal/version/version.go
 .PHONY: sync-version
 sync-version:
 	@echo "Syncing version $(VERSION) to all config files..."
 	@# Update wails.json productVersion (strip 'v' prefix for semver format)
-	@sed -i '' 's/"productVersion": "[^"]*"/"productVersion": "$(shell echo $(VERSION) | sed 's/^v//')"/' wails.json
+	@sed -i '' 's/"productVersion": "[^"]*"/"productVersion": "$(VERSION_CLEAN)"/' wails.json
 	@# Update frontend/package.json version (strip 'v' prefix for semver format)
-	@sed -i '' 's/"version": "[^"]*"/"version": "$(shell echo $(VERSION) | sed 's/^v//')"/' frontend/package.json
+	@sed -i '' 's/"version": "[^"]*"/"version": "$(VERSION_CLEAN)"/' frontend/package.json
+	@# Update frontend/package-lock.json package versions.
+	@node -e 'const fs=require("fs"); const p="frontend/package-lock.json"; const version="$(VERSION_CLEAN)"; const data=JSON.parse(fs.readFileSync(p,"utf8")); data.version=version; if (data.packages && data.packages[""]) data.packages[""].version=version; fs.writeFileSync(p, JSON.stringify(data, null, 2) + "\n");'
+	@# Update macOS app bundle version fields (strip 'v' prefix for semver format)
+	@sed -i '' '/<key>CFBundleVersion<\/key>/{n;s/<string>[^<]*<\/string>/<string>$(VERSION_CLEAN)<\/string>/;}' build/darwin/Info.plist
+	@sed -i '' '/<key>CFBundleShortVersionString<\/key>/{n;s/<string>[^<]*<\/string>/<string>$(VERSION_CLEAN)<\/string>/;}' build/darwin/Info.plist
 	@echo "✅ Version synced to:"
 	@echo "   - internal/version/version.go: $(VERSION) (source of truth)"
-	@echo "   - wails.json: $(shell echo $(VERSION) | sed 's/^v//')"
-	@echo "   - frontend/package.json: $(shell echo $(VERSION) | sed 's/^v//')"
+	@echo "   - wails.json: $(VERSION_CLEAN)"
+	@echo "   - frontend/package.json: $(VERSION_CLEAN)"
+	@echo "   - frontend/package-lock.json: $(VERSION_CLEAN)"
+	@echo "   - build/darwin/Info.plist: $(VERSION_CLEAN)"
 
 # =============================================================================
 # STRAY BINARY PREVENTION
@@ -304,11 +317,17 @@ check-version:
 	@GO_VERSION=$(VERSION); \
 	WAILS_VERSION=$$(grep '"productVersion"' wails.json | sed 's/.*: *"\([^"]*\)".*/\1/'); \
 	PKG_VERSION=$$(grep '"version"' frontend/package.json | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/'); \
+	PKG_LOCK_VERSION=$$(node -e 'const p=require("./frontend/package-lock.json"); console.log(p.version)'); \
+	PKG_LOCK_ROOT_VERSION=$$(node -e 'const p=require("./frontend/package-lock.json"); console.log(p.packages[""].version)'); \
+	PLIST_BUNDLE_VERSION=$$(awk '/<key>CFBundleVersion<\/key>/ { getline; gsub(/.*<string>|<\/string>.*/, ""); print; exit }' build/darwin/Info.plist); \
+	PLIST_SHORT_VERSION=$$(awk '/<key>CFBundleShortVersionString<\/key>/ { getline; gsub(/.*<string>|<\/string>.*/, ""); print; exit }' build/darwin/Info.plist); \
 	GO_VERSION_CLEAN=$$(echo $$GO_VERSION | sed 's/^v//'); \
 	echo "  Go source:     $$GO_VERSION"; \
 	echo "  wails.json:    $$WAILS_VERSION"; \
 	echo "  package.json:  $$PKG_VERSION"; \
-	if [ "$$GO_VERSION_CLEAN" = "$$WAILS_VERSION" ] && [ "$$GO_VERSION_CLEAN" = "$$PKG_VERSION" ]; then \
+	echo "  package-lock:  $$PKG_LOCK_VERSION ($$PKG_LOCK_ROOT_VERSION)"; \
+	echo "  Info.plist:    $$PLIST_SHORT_VERSION ($$PLIST_BUNDLE_VERSION)"; \
+	if [ "$$GO_VERSION_CLEAN" = "$$WAILS_VERSION" ] && [ "$$GO_VERSION_CLEAN" = "$$PKG_VERSION" ] && [ "$$GO_VERSION_CLEAN" = "$$PKG_LOCK_VERSION" ] && [ "$$GO_VERSION_CLEAN" = "$$PKG_LOCK_ROOT_VERSION" ] && [ "$$GO_VERSION_CLEAN" = "$$PLIST_BUNDLE_VERSION" ] && [ "$$GO_VERSION_CLEAN" = "$$PLIST_SHORT_VERSION" ]; then \
 		echo "✅ All versions in sync!"; \
 	else \
 		echo "❌ Version mismatch! Run 'make sync-version' to fix."; \

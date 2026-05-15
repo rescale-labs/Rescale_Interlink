@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"path/filepath"
 	"testing"
 )
 
@@ -236,6 +237,22 @@ func TestValidatePathInDirectory(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestResolvePathInDirectory(t *testing.T) {
+	baseDir := t.TempDir()
+
+	resolved, err := ResolvePathInDirectory("subdir/file.txt", baseDir)
+	if err != nil {
+		t.Fatalf("ResolvePathInDirectory returned error for valid path: %v", err)
+	}
+	if want := filepath.Join(baseDir, "subdir", "file.txt"); resolved != want {
+		t.Fatalf("resolved path = %q, want %q", resolved, want)
+	}
+
+	if _, err := ResolvePathInDirectory("../escape.txt", baseDir); err == nil {
+		t.Fatal("expected traversal path to be rejected")
 	}
 }
 

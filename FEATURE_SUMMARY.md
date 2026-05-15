@@ -38,7 +38,7 @@ This document catalogs what Rescale Interlink can do. For full command syntax, s
 - Windows (amd64)
 
 ### FIPS 140-3 Compliance
-All production builds are compiled with `GOFIPS140=latest`. Non-FIPS builds refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. Mandatory for FedRAMP environments.
+All production builds are compiled with `GOFIPS140=latest` and the `fips` build tag. Non-FIPS builds refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. Mandatory for FedRAMP environments.
 
 ---
 
@@ -336,7 +336,7 @@ Thread-safe `ConflictResolver[A comparable]` generic type with automatic escalat
 - **TLS**: 1.2+ with FIPS-approved cipher suites
 
 ### Proxy Support
-Four modes: `no-proxy`, `system`, `basic`, `ntlm` (NTLM not FIPS-compliant, auto-disabled on FedRAMP). Proxy warmup for authentication. `NO_PROXY` bypass rules fully wired.
+Modes: `no-proxy`, `system`, `basic`, and `ntlm` where supported. FIPS-tagged builds disable NTLM at build and backend-validation time; FedRAMP platforms also disable NTLM in the GUI. Proxy warmup for authentication. `NO_PROXY` bypass rules fully wired.
 
 ### S3 FIPS Endpoints
 ITAR platforms (`itar.rescale.com`, `itar.rescale-gov.com`) automatically route S3 traffic through AWS FIPS-validated endpoints. No user configuration required.

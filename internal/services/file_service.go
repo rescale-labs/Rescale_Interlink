@@ -11,10 +11,11 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
 	"github.com/rescale/rescale-int/internal/transfer/scan"
-	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/util/paths"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // FileService handles file and folder operations.
@@ -328,7 +329,14 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 		return nil, fmt.Errorf("API client not configured")
 	}
 
-	localFolderPath := filepath.Join(localPath, folderName)
+	rootFolderName := folderName
+	if rootFolderName == "" {
+		rootFolderName = remoteFolderID
+	}
+	if err := validation.ValidateFilename(rootFolderName); err != nil {
+		return nil, fmt.Errorf("invalid folder name %q: %w", rootFolderName, err)
+	}
+	localFolderPath := filepath.Join(localPath, rootFolderName)
 
 	allFolders, allFiles, err := scan.ScanRemoteFolderRecursive(ctx, apiClient, remoteFolderID, "")
 	if err != nil {
@@ -342,7 +350,10 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 
 	// Create local directories for all subfolders
 	for _, folder := range allFolders {
-		dirPath := filepath.Join(localFolderPath, folder.RelativePath)
+		dirPath, err := validation.ResolvePathInDirectory(folder.RelativePath, localFolderPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid folder path %q: %w", folder.RelativePath, err)
+		}
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create folder %s: %w", folder.RelativePath, err)
 		}
@@ -351,10 +362,14 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 	// Build download file list
 	downloadFiles := make([]DownloadFileSpec, 0, len(allFiles))
 	for _, f := range allFiles {
+		localFilePath, err := validation.ResolvePathInDirectory(f.RelativePath, localFolderPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid file path %q: %w", f.RelativePath, err)
+		}
 		downloadFiles = append(downloadFiles, DownloadFileSpec{
 			FileID:    f.FileID,
 			Name:      f.Name,
-			LocalPath: filepath.Join(localFolderPath, f.RelativePath),
+			LocalPath: localFilePath,
 			Size:      f.Size,
 		})
 	}
