@@ -64,9 +64,9 @@ type App struct {
 
 	// State helper shared with Tray and CLI; owns the canonical (installation,
 	// per-user) state model plus the 10s transient-pending timeout.
-	stateMu     sync.Mutex
-	stateComp   *service.Computer
-	priorState  service.State
+	stateMu    sync.Mutex
+	stateComp  *service.Computer
+	priorState service.State
 }
 
 // ensureStateComputer lazily constructs the shared service.Computer. Called
@@ -208,38 +208,7 @@ func (a *App) startup(ctx context.Context) {
 	// Auto-launch tray companion if available (Windows only, no-op on other platforms)
 	go a.launchTrayIfNeeded()
 
-	// If an API key was resolved from the environment but no token file
-	// exists, persist it now so a later daemon/service handoff can read it.
-	// This closes the env-var→service gap that previously required an
-	// explicit Save click.
-	a.autoPersistFromEnv()
-
 	wailsLogger.Info().Msg("Wails application started")
-}
-
-// autoPersistFromEnv writes the token file on GUI startup when the active
-// API key came from the RESCALE_API_KEY environment variable and the token
-// file is missing.
-func (a *App) autoPersistFromEnv() {
-	if a.config == nil || a.config.APIKey == "" {
-		return
-	}
-	_, source := config.ResolveAPIKeySource("", getHomeDir(), false)
-	if source != "environment" {
-		return
-	}
-	tokenPath := config.GetDefaultTokenPath()
-	if tokenPath == "" {
-		return
-	}
-	if _, err := os.Stat(tokenPath); err == nil {
-		return // Token already on disk.
-	}
-	if err := a.ensureAllConfigPersisted(); err != nil {
-		wailsLogger.Warn().Err(err).Msg("Startup auto-persist failed")
-		return
-	}
-	wailsLogger.Info().Msg("Persisted env-var API key to token file on startup")
 }
 
 func getHomeDir() string {
@@ -426,20 +395,19 @@ func loadConfiguration(configFile string) (*config.Config, error) {
 		}
 	}
 
-	// Also try to load API key from default token file if not already set
+	// Load the GUI-supported credential source when config.csv did not
+	// provide an in-memory key.
 	if cfg.APIKey == "" {
-		defaultTokenPath := config.GetDefaultTokenPath()
-		if tokenKey, tokenErr := config.ReadTokenFile(defaultTokenPath); tokenErr == nil && tokenKey != "" {
-			cfg.APIKey = tokenKey
-			wailsLogger.Info().Str("path", defaultTokenPath).Msg("Loaded API key from default token file")
-		}
-	}
-
-	// Also check RESCALE_API_KEY environment variable for Linux AppDir and similar environments
-	if cfg.APIKey == "" {
-		if envKey := os.Getenv("RESCALE_API_KEY"); envKey != "" {
-			cfg.APIKey = envKey
-			wailsLogger.Info().Msg("Loaded API key from RESCALE_API_KEY environment variable")
+		if apiKey, source := resolveGUIAPIKeySource(); apiKey != "" {
+			cfg.APIKey = apiKey
+			switch source {
+			case "token-file":
+				wailsLogger.Info().Msg("Loaded API key from saved token file")
+			case "environment":
+				wailsLogger.Info().Msg("Loaded API key from RESCALE_API_KEY environment variable")
+			default:
+				wailsLogger.Info().Str("source", source).Msg("Loaded API key")
+			}
 		}
 	}
 

@@ -58,6 +58,10 @@ export function ClearCompletedTransfers() {
   return window['go']['wailsapp']['App']['ClearCompletedTransfers']();
 }
 
+export function ClearSavedAPIKey() {
+  return window['go']['wailsapp']['App']['ClearSavedAPIKey']();
+}
+
 export function CreateRemoteFolder(arg1, arg2) {
   return window['go']['wailsapp']['App']['CreateRemoteFolder'](arg1, arg2);
 }
@@ -92,6 +96,10 @@ export function GetConfig() {
 
 export function GetCoreTypes() {
   return window['go']['wailsapp']['App']['GetCoreTypes']();
+}
+
+export function GetCredentialSource() {
+  return window['go']['wailsapp']['App']['GetCredentialSource']();
 }
 
 export function GetDaemonConfig() {

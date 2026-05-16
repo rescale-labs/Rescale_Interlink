@@ -30,6 +30,8 @@ export function ClearCatalogCache():Promise<void>;
 
 export function ClearCompletedTransfers():Promise<void>;
 
+export function ClearSavedAPIKey():Promise<wailsapp.ClearSavedAPIKeyResultDTO>;
+
 export function CreateRemoteFolder(arg1:string,arg2:string):Promise<string>;
 
 export function DeleteRemoteItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
@@ -47,6 +49,8 @@ export function GetBatchTasks(arg1:string,arg2:number,arg3:number,arg4:string):P
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
 
 export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
+
+export function GetCredentialSource():Promise<wailsapp.CredentialSourceDTO>;
 
 export function GetDaemonConfig():Promise<wailsapp.DaemonConfigDTO>;
 

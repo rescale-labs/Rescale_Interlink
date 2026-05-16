@@ -11,6 +11,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   ShieldCheckIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { ClipboardGetText, EventsOn, EventsOff } from '../../../wailsjs/runtime/runtime';
@@ -47,9 +48,6 @@ import {
   CodeTransientTimeout,
 } from '../../lib/errors';
 
-// Token source options matching Fyne
-type TokenSource = 'environment' | 'file' | 'direct';
-
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
 
 // Check if URL is a FedRAMP platform (requires FIPS compliance).
@@ -85,6 +83,7 @@ const PLATFORM_URLS = [
 export function SetupTab() {
   const {
     config,
+    credentialSource,
     connectionStatus,
     connectionEmail,
     connectionError,
@@ -96,12 +95,10 @@ export function SetupTab() {
     fetchAppInfo,
     updateConfig,
     saveConfig,
+    clearSavedAPIKey,
     testConnection,
-    selectFile,
-    setupEventListeners,
   } = useConfigStore();
 
-  const [tokenSource, setTokenSource] = useState<TokenSource>('direct');
   const [statusMessage, setStatusMessage] = useState('Ready');
   const [showApiKey, setShowApiKey] = useState(false);
   const [defaultConfigPath, setDefaultConfigPath] = useState<string>('');
@@ -142,13 +139,11 @@ export function SetupTab() {
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevLookbackRef = useRef<number | null>(null);
 
-  // Setup event listeners and fetch initial data
+  // Fetch initial data
   useEffect(() => {
-    const cleanup = setupEventListeners();
     fetchConfig();
     fetchAppInfo();
     GetDefaultConfigPath().then(setDefaultConfigPath).catch(console.error);
-    return cleanup;
   }, []);
 
   useEffect(() => {
@@ -345,21 +340,19 @@ export function SetupTab() {
     }
   };
 
-  const handleSelectTokenFile = async () => {
-    try {
-      const path = await selectFile('Select Token File');
-      if (path) {
-        // Load token from file would be handled by backend
-        setStatusMessage(`Token file selected: ${path}`);
-      }
-    } catch (err) {
-      console.error('Failed to select file:', err);
-    }
-  };
-
   const handleTestConnection = async () => {
     setStatusMessage('Testing connection...');
     await testConnection();
+  };
+
+  const handleClearSavedAPIKey = async () => {
+    try {
+      setStatusMessage('Removing saved API key...');
+      const result = await clearSavedAPIKey();
+      setStatusMessage(result.message);
+    } catch (err) {
+      setStatusMessage(`Failed to remove saved API key: ${err}`);
+    }
   };
 
   const [isUnifiedSaving, setIsUnifiedSaving] = useState(false);
@@ -862,43 +855,6 @@ export function SetupTab() {
               </select>
             </div>
 
-            {/* Token Source */}
-            <div>
-              <label className="label">Token Source</label>
-              <div className="flex flex-col space-y-2">
-                {[
-                  { value: 'environment', label: 'Environment Variable (RESCALE_API_KEY)' },
-                  { value: 'file', label: 'Token File' },
-                  { value: 'direct', label: 'Direct Input' },
-                ].map((option) => (
-                  <label key={option.value} className="flex items-center">
-                    <input
-                      type="radio"
-                      name="tokenSource"
-                      value={option.value}
-                      checked={tokenSource === option.value}
-                      onChange={(e) => setTokenSource(e.target.value as TokenSource)}
-                      className="h-4 w-4 text-rescale-blue focus:ring-rescale-blue"
-                    />
-                    <span className="ml-2 text-sm text-gray-700">{option.label}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            {/* Token File Button */}
-            {tokenSource === 'file' && (
-              <div>
-                <button
-                  onClick={handleSelectTokenFile}
-                  className="btn-secondary flex items-center"
-                >
-                  <FolderOpenIcon className="w-4 h-4 mr-2" />
-                  Select Token File...
-                </button>
-              </div>
-            )}
-
             {/* API Key */}
             <div>
               <label className="label">API Key</label>
@@ -909,7 +865,6 @@ export function SetupTab() {
                   placeholder="API Key"
                   value={config?.apiKey || ''}
                   onChange={(e) => updateConfig({ apiKey: e.target.value })}
-                  disabled={tokenSource !== 'direct'}
                 />
                 <button
                   onClick={() => setShowApiKey(!showApiKey)}
@@ -926,12 +881,42 @@ export function SetupTab() {
                   onClick={handlePasteApiKey}
                   className="btn-secondary p-2"
                   title="Paste from clipboard"
-                  disabled={tokenSource !== 'direct'}
                 >
                   <ClipboardDocumentIcon className="w-5 h-5" />
                 </button>
               </div>
             </div>
+
+            {credentialSource && (
+              <div className="space-y-2 text-sm">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div>
+                      <span className="font-medium text-gray-700">API key source: </span>
+                      <span className="text-gray-900">{credentialSource.label}</span>
+                    </div>
+                    {credentialSource.detail && (
+                      <div className="mt-1 text-xs text-gray-500">{credentialSource.detail}</div>
+                    )}
+                    {connectionEmail && (
+                      <div className="mt-1 text-xs text-gray-500">Connected account: {connectionEmail}</div>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleClearSavedAPIKey}
+                    className="btn-secondary flex items-center justify-center"
+                    title="Remove saved API key token file"
+                    disabled={!credentialSource.hasSavedToken || isSaving || isUnifiedSaving}
+                  >
+                    <TrashIcon className="w-4 h-4 mr-2" />
+                    Remove saved key
+                  </button>
+                </div>
+                {credentialSource.warning && (
+                  <div className="text-xs text-amber-700">{credentialSource.warning}</div>
+                )}
+              </div>
+            )}
 
             {/* Test Connection */}
             <div className="flex items-center gap-4">
@@ -956,12 +941,6 @@ export function SetupTab() {
               </div>
             </div>
 
-            {/* Active Source */}
-            {connectionEmail && (
-              <div className="text-sm text-gray-600">
-                Active Source: {tokenSource} ({connectionEmail})
-              </div>
-            )}
           </div>
         </div>
 

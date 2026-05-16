@@ -625,10 +625,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 	select {
 	case ts.semaphore <- struct{}{}:
 	case <-uploadCtx.Done():
-		if errors.Is(uploadCtx.Err(), context.Canceled) {
-			return nil, uploadCtx.Err()
-		}
-		ts.queue.Fail(taskID, uploadCtx.Err())
+		ts.queue.FailIfNotTerminal(taskID, uploadCtx.Err())
 		return nil, uploadCtx.Err()
 	}
 	atomic.AddInt32(&ts.activeSlots, 1)
@@ -643,7 +640,13 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 		atomic.AddInt32(&ts.activeSlots, -1)
 	}()
 
-	ts.queue.Activate(taskID)
+	if !ts.queue.Activate(taskID) {
+		ts.queue.ClearCancel(taskID)
+		if err := uploadCtx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
+	}
 
 	// Get file info for transfer handle allocation
 	fileInfo, err := os.Stat(req.Source)
@@ -681,6 +684,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			ts.queue.FailIfNotTerminal(taskID, err)
 			return nil, err
 		}
 		ts.queue.Fail(taskID, err)

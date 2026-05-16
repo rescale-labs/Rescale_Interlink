@@ -3,7 +3,6 @@ package wailsapp
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -46,11 +45,10 @@ func (a *App) ensureAllConfigPersisted() error {
 	}
 
 	if a.config.APIKey == "" {
-		if _, err := os.Stat(tokenPath); err == nil {
-			if removeErr := os.Remove(tokenPath); removeErr != nil && !os.IsNotExist(removeErr) {
-				return fmt.Errorf("%s: failed to remove stale token file: %w",
-					ipc.CanonicalText[ipc.CodeConfigInvalid], removeErr)
-			}
+		if removed, err := removeSavedAPIKeyTokenFiles(); err != nil {
+			return fmt.Errorf("%s: failed to remove stale token file: %w",
+				ipc.CanonicalText[ipc.CodeConfigInvalid], err)
+		} else if removed > 0 {
 			a.logInfo("config", "API key cleared, token file removed")
 		}
 		return nil

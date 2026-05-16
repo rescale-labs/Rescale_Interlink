@@ -222,6 +222,7 @@ func compatUploadCoreValidated(ctx context.Context, filePaths []string, folderID
 		fileInfo, _ := os.Stat(fPath)
 
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
+		defer transferHandle.Complete()
 
 		var fileBar *progress.FileBar
 		var barOnce sync.Once
