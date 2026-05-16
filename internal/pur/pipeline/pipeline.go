@@ -437,13 +437,20 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 			} else {
 				// CLI fallback: direct upload.
 				// Signal active transfer since CLI fallback bypasses RunBatch.
+				fileInfo, statErr := os.Stat(absPath)
+				if statErr != nil {
+					return fmt.Errorf("failed to stat shared file %s: %w", item, statErr)
+				}
+				transferHandle := p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
 				ratelimit.GlobalStore().BeginTransferActivity()
 				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
-					LocalPath:    absPath,
-					APIClient:    p.apiClient,
-					OutputWriter: io.Discard,
+					LocalPath:      absPath,
+					APIClient:      p.apiClient,
+					TransferHandle: transferHandle,
+					OutputWriter:   io.Discard,
 				})
 				ratelimit.GlobalStore().EndTransferActivity()
+				transferHandle.Complete()
 			}
 			if err != nil {
 				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
@@ -811,7 +818,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				continue
 			}
 
-			transferHandle := p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+			var transferHandle *transfer.Transfer
 
 			for attempt := 1; attempt <= maxRetries; attempt++ {
 				progressCallback := func(progress float64) {
@@ -830,6 +837,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				} else {
 					// CLI fallback: direct upload.
 					// Signal active transfer since CLI fallback bypasses RunBatch.
+					if transferHandle == nil {
+						transferHandle = p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+					}
 					ratelimit.GlobalStore().BeginTransferActivity()
 					cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 						LocalPath:        item.state.TarPath,
@@ -881,7 +891,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
 				p.setActiveWorker("upload", -1)
-				transferHandle.Complete()
+				if transferHandle != nil {
+					transferHandle.Complete()
+				}
 				continue
 			}
 
@@ -899,7 +911,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				}
 			}
 
-			transferHandle.Complete()
+			if transferHandle != nil {
+				transferHandle.Complete()
+			}
 
 			p.setActiveWorker("upload", -1)
 			select {

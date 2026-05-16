@@ -1,11 +1,9 @@
 // Package services provides frontend-agnostic business logic for Rescale Interlink.
 // This layer sits between the GUI/CLI and the core backend, providing a clean API
 // that any frontend can use without framework-specific dependencies.
-//
 package services
 
 import (
-	"context"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/models"
@@ -254,55 +252,4 @@ type DownloadFileSpec struct {
 	Name      string
 	LocalPath string
 	Size      int64
-}
-
-// TransferServiceInterface defines the transfer service API.
-// Implementations handle upload/download orchestration without framework dependencies.
-type TransferServiceInterface interface {
-	// StartTransfers initiates one or more transfers.
-	// Returns immediately; progress is published via events.
-	StartTransfers(ctx context.Context, requests []TransferRequest) error
-
-	// CancelTransfer cancels an active transfer.
-	CancelTransfer(taskID string) error
-
-	// CancelAll cancels all active transfers.
-	CancelAll()
-
-	// RetryTransfer retries a failed or cancelled transfer.
-	RetryTransfer(taskID string) (string, error)
-
-	// GetStats returns current transfer statistics.
-	GetStats() TransferStats
-
-	// GetTasks returns all tracked transfers.
-	GetTasks() []TransferTask
-
-	// ClearCompleted removes completed/failed/cancelled transfers from tracking.
-	ClearCompleted()
-}
-
-// FileServiceInterface defines the file service API.
-// Implementations handle file/folder operations without framework dependencies.
-type FileServiceInterface interface {
-	// ListFolder returns the contents of a folder.
-	ListFolder(ctx context.Context, folderID string) (*FolderContents, error)
-
-	// ListFolderPage returns a page of folder contents (for pagination).
-	ListFolderPage(ctx context.Context, folderID string, cursor string) (*FolderContents, error)
-
-	// CreateFolder creates a new folder.
-	CreateFolder(ctx context.Context, name string, parentID string) (string, error)
-
-	// DeleteFile deletes a file by ID.
-	DeleteFile(ctx context.Context, fileID string) error
-
-	// DeleteFolder deletes a folder by ID.
-	DeleteFolder(ctx context.Context, folderID string) error
-
-	// PrepareUploadFolder creates the remote folder structure for a local folder.
-	PrepareUploadFolder(ctx context.Context, localPath string, remoteFolderID string) (*UploadFolderResult, error)
-
-	// PrepareDownloadFolder scans a remote folder and prepares download specs.
-	PrepareDownloadFolder(ctx context.Context, remoteFolderID string, localPath string) ([]DownloadFileSpec, error)
 }
