@@ -60,13 +60,14 @@ func translateAPIError(err error) string {
 
 // FileItemDTO is the JSON-safe version of services.FileItem.
 type FileItemDTO struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	IsFolder bool   `json:"isFolder"`
-	Size     int64  `json:"size"`
-	ModTime  string `json:"modTime"`
-	Path     string `json:"path,omitempty"`
-	ParentID string `json:"parentId,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsFolder  bool   `json:"isFolder"`
+	Size      int64  `json:"size"`
+	ModTime   string `json:"modTime"`
+	Path      string `json:"path,omitempty"`
+	ParentID  string `json:"parentId,omitempty"`
+	SymlinkID string `json:"symlinkId,omitempty"`
 }
 
 // FolderContentsDTO is the JSON-safe version of services.FolderContents.
@@ -304,6 +305,84 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 	return folderContentsToDTO(contents)
 }
 
+// ListRemoteTrash returns a single page of the user's trash bin.
+// Items include both files (with SymlinkID populated) and folder-like entries.
+// Pass pageSize=0 for API default.
+func (a *App) ListRemoteTrash(cursor string, pageSize int) FolderContentsDTO {
+	if a.engine == nil {
+		return FolderContentsDTO{}
+	}
+
+	fs := a.engine.FileService()
+	if fs == nil {
+		return FolderContentsDTO{}
+	}
+
+	ctx := context.Background()
+	contents, err := fs.ListTrashBinPage(ctx, cursor, pageSize)
+	if err != nil {
+		return FolderContentsDTO{
+			FolderID:   "trash",
+			FolderPath: "Trash",
+			Items:      []FileItemDTO{},
+			Warning:    translateAPIError(err),
+		}
+	}
+
+	dto := folderContentsToDTO(contents)
+	dto.FolderID = "trash"
+	return dto
+}
+
+// RecoverTrashItems restores selected trash items to their original locations.
+func (a *App) RecoverTrashItems(items []FileItemDTO) DeleteResultDTO {
+	return a.postTrashItems(items, true)
+}
+
+// PurgeTrashItems permanently deletes selected trash items. Irreversible.
+func (a *App) PurgeTrashItems(items []FileItemDTO) DeleteResultDTO {
+	return a.postTrashItems(items, false)
+}
+
+func (a *App) postTrashItems(items []FileItemDTO, recover bool) DeleteResultDTO {
+	if a.engine == nil {
+		return DeleteResultDTO{Error: ErrNoEngine.Error(), Failed: len(items)}
+	}
+
+	fs := a.engine.FileService()
+	if fs == nil {
+		return DeleteResultDTO{Error: ErrNoFileService.Error(), Failed: len(items)}
+	}
+
+	serviceItems := make([]services.FileItem, len(items))
+	for i, item := range items {
+		serviceItems[i] = services.FileItem{
+			ID:        item.ID,
+			Name:      item.Name,
+			IsFolder:  item.IsFolder,
+			SymlinkID: item.SymlinkID,
+		}
+	}
+
+	ctx := context.Background()
+	var count, failed int
+	var err error
+	if recover {
+		count, failed, err = fs.RecoverTrashItems(ctx, serviceItems)
+	} else {
+		count, failed, err = fs.PurgeTrashItems(ctx, serviceItems)
+	}
+
+	result := DeleteResultDTO{
+		Deleted: count,
+		Failed:  failed,
+	}
+	if err != nil {
+		result.Error = translateAPIError(err)
+	}
+	return result
+}
+
 // ValidateRemoteFolder checks that a remote folder exists and is accessible.
 // Lightweight preflight check — fetches a single item from the first page.
 // Does NOT use FolderCache.Get() (which fetches all pages).
@@ -427,13 +506,14 @@ func folderContentsToDTO(contents *services.FolderContents) FolderContentsDTO {
 	items := make([]FileItemDTO, len(contents.Items))
 	for i, item := range contents.Items {
 		items[i] = FileItemDTO{
-			ID:       item.ID,
-			Name:     item.Name,
-			IsFolder: item.IsFolder,
-			Size:     item.Size,
-			ModTime:  item.ModTime.Format(time.RFC3339),
-			Path:     item.Path,
-			ParentID: item.ParentID,
+			ID:        item.ID,
+			Name:      item.Name,
+			IsFolder:  item.IsFolder,
+			Size:      item.Size,
+			ModTime:   item.ModTime.Format(time.RFC3339),
+			Path:      item.Path,
+			ParentID:  item.ParentID,
+			SymlinkID: item.SymlinkID,
 		}
 	}
 

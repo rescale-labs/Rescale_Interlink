@@ -4,6 +4,7 @@ import {
   ArrowPathIcon,
   FolderPlusIcon,
   ChevronRightIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline'
 import { useFileBrowserStore, BrowseMode } from '../../stores'
 import { FileList } from './FileList'
@@ -39,6 +40,8 @@ export function RemoteBrowser() {
     goToPreviousRemotePage,
   } = useFileBrowserStore()
 
+  const isTrash = mode === 'trash'
+
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
@@ -57,12 +60,15 @@ export function RemoteBrowser() {
     }
   }, [mode, setRemoteMode])
 
-  // Handle folder open from FileList
+  // Handle folder open from FileList.
+  // In trash mode, folder-like entries are non-navigable; they represent
+  // whole trashed job outputs and are treated as opaque items.
   const handleFolderOpen = useCallback((item: { id: string; name: string; isFolder: boolean }) => {
+    if (isTrash) return
     if (item.isFolder && item.id) {
       navigateRemoteTo(item.id, item.name)
     }
-  }, [navigateRemoteTo])
+  }, [isTrash, navigateRemoteTo])
 
   // Handle selection change
   const handleSelectionChange = useCallback((ids: Set<string>, lastId: string | null) => {
@@ -92,42 +98,46 @@ export function RemoteBrowser() {
   return (
     <div className="flex flex-col h-full">
       {/* Navigation bar */}
-      <div className="flex items-center gap-2 p-2 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+      <div className="flex items-center gap-2 p-2 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 min-w-0">
         {/* Back button */}
         <button
           onClick={goRemoteBack}
           disabled={!canGoBack}
-          className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
           title="Go up"
         >
           <ArrowLeftIcon className="w-4 h-4" />
         </button>
 
         {/* Mode toggle */}
-        <div className="flex items-center bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded overflow-hidden">
-          {(['library', 'jobs', 'legacy'] as BrowseMode[]).map((m) => (
+        <div className="flex items-center bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded overflow-hidden min-w-0">
+          {(['library', 'jobs', 'legacy', 'trash'] as BrowseMode[]).map((m) => (
             <button
               key={m}
               onClick={() => handleModeChange(m)}
-              className={`px-3 py-1 text-xs font-medium transition-colors ${
+              className={`px-3 py-1 text-xs font-medium transition-colors flex items-center gap-1 min-w-0 whitespace-nowrap ${
                 mode === m
                   ? 'bg-blue-500 text-white'
                   : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
               }`}
+              title={m === 'library' ? 'My Library' : m === 'jobs' ? 'My Jobs' : m === 'legacy' ? 'Legacy' : 'Trash'}
             >
-              {m === 'library' ? 'My Library' : m === 'jobs' ? 'My Jobs' : 'Legacy'}
+              {m === 'trash' && <TrashIcon className="w-3.5 h-3.5 flex-shrink-0" />}
+              <span className="truncate">
+                {m === 'library' ? 'My Library' : m === 'jobs' ? 'My Jobs' : m === 'legacy' ? 'Legacy' : 'Trash'}
+              </span>
             </button>
           ))}
         </div>
 
         {/* Spacer */}
-        <div className="flex-1" />
+        <div className="flex-1 min-w-0" />
 
         {/* New folder button (only in My Library) */}
-        {canCreateFolder && (
+        {canCreateFolder && !isTrash && (
           <button
             onClick={() => setShowNewFolderDialog(true)}
-            className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+            className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 flex-shrink-0"
             title="Create new folder"
           >
             <FolderPlusIcon className="w-4 h-4" />
@@ -138,7 +148,7 @@ export function RemoteBrowser() {
         <button
           onClick={refreshRemote}
           disabled={isLoading}
-          className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50"
+          className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-50 flex-shrink-0"
           title="Refresh"
         >
           <ArrowPathIcon className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
@@ -184,6 +194,8 @@ export function RemoteBrowser() {
               ? 'Your library is empty'
               : mode === 'jobs'
               ? 'No job files found'
+              : mode === 'trash'
+              ? 'Trash is empty'
               : 'No files found'
           }
           loadingMessage={

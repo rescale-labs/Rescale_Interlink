@@ -121,6 +121,160 @@ func newTestClient(t *testing.T, serverURL string) *Client {
 	})
 }
 
+func TestListFilesPage_NormalizesFullNextURLAndCursor(t *testing.T) {
+	var server *httptest.Server
+	fullNext := ""
+	seenPage2 := false
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/files/" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Query().Get("page") {
+		case "":
+			fullNext = server.URL + "/api/v3/files/?page=2&page_size=25"
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"count":    2,
+				"next":     fullNext,
+				"previous": "",
+				"results":  []map[string]interface{}{},
+			})
+		case "2":
+			seenPage2 = true
+			if got := r.URL.Query().Get("page_size"); got != "25" {
+				t.Errorf("page_size = %q, want 25", got)
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"count":    2,
+				"next":     "",
+				"previous": "",
+				"results":  []map[string]interface{}{},
+			})
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	page, err := client.ListFilesPage(context.Background(), "", 25)
+	if err != nil {
+		t.Fatalf("ListFilesPage(first page) error = %v", err)
+	}
+	if page.NextURL != "/api/v3/files/?page=2&page_size=25" {
+		t.Fatalf("NextURL = %q, want normalized API path", page.NextURL)
+	}
+
+	if _, err := client.ListFilesPage(context.Background(), fullNext, 25); err != nil {
+		t.Fatalf("ListFilesPage(full cursor) error = %v", err)
+	}
+	if !seenPage2 {
+		t.Fatal("server did not receive normalized page 2 request")
+	}
+}
+
+func TestListTrashBinPage_ParsesFilesymlinkID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/users/me/folders/trash-bin/" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if got := r.URL.Query().Get("page_size"); got != "50" {
+			t.Errorf("page_size = %q, want 50", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": []map[string]interface{}{
+				{
+					"id":   "filesymlink-123",
+					"type": "filesymlink",
+					"item": map[string]interface{}{
+						"id":            "file-456",
+						"name":          "result.dat",
+						"decryptedSize": "12345",
+						"dateCreated":   "2026-05-01T12:00:00Z",
+					},
+				},
+				{
+					"type": "folder",
+					"item": map[string]interface{}{
+						"id":          "folder-789",
+						"name":        "job-output",
+						"dateCreated": "2026-05-02T12:00:00Z",
+					},
+				},
+			},
+			"next": nil,
+		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	contents, err := client.ListTrashBinPage(context.Background(), "", 50)
+	if err != nil {
+		t.Fatalf("ListTrashBinPage() error = %v", err)
+	}
+	if len(contents.Files) != 1 {
+		t.Fatalf("len(Files) = %d, want 1", len(contents.Files))
+	}
+	if contents.Files[0].ID != "file-456" {
+		t.Errorf("Files[0].ID = %q, want file-456", contents.Files[0].ID)
+	}
+	if contents.Files[0].SymlinkID != "filesymlink-123" {
+		t.Errorf("Files[0].SymlinkID = %q, want filesymlink-123", contents.Files[0].SymlinkID)
+	}
+	if len(contents.Folders) != 1 || contents.Folders[0].ID != "folder-789" {
+		t.Fatalf("Folders = %#v, want folder-789", contents.Folders)
+	}
+}
+
+func TestPostTrashBinAction_SendsMixedPayload(t *testing.T) {
+	var gotPayload map[string][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v3/users/me/folders/trash-bin/recover/" {
+			t.Errorf("path = %s, want recover trash endpoint", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	err := client.PostTrashBinAction(
+		context.Background(),
+		"recover",
+		[]string{"filesymlink-123"},
+		[]string{"folder-789"},
+	)
+	if err != nil {
+		t.Fatalf("PostTrashBinAction() error = %v", err)
+	}
+	if got := gotPayload["filesymlink_ids"]; len(got) != 1 || got[0] != "filesymlink-123" {
+		t.Errorf("filesymlink_ids = %#v, want filesymlink-123", got)
+	}
+	if got := gotPayload["folderIds"]; len(got) != 1 || got[0] != "folder-789" {
+		t.Errorf("folderIds = %#v, want folder-789", got)
+	}
+}
+
+func TestPostTrashBinAction_RejectsInvalidAction(t *testing.T) {
+	client := newTestClient(t, "https://platform.rescale.com")
+	err := client.PostTrashBinAction(context.Background(), "empty", nil, nil)
+	if err == nil {
+		t.Fatal("PostTrashBinAction() should reject invalid actions")
+	}
+	if !strings.Contains(err.Error(), "invalid trash-bin action") {
+		t.Errorf("error = %q, want invalid action message", err.Error())
+	}
+}
+
 // TestGetStorageCredentials_AzureSharedFile verifies that the credentials endpoint
 // correctly parses a shared-file Azure response with per-file SAS tokens in paths.
 func TestGetStorageCredentials_AzureSharedFile(t *testing.T) {
@@ -272,9 +426,9 @@ func TestToCloudFile_Complete(t *testing.T) {
 
 func TestToCloudFile_MissingEncryptionKey(t *testing.T) {
 	fi := &FileInfo{
-		ID:            "file123",
-		PathParts:     &models.CloudFilePathParts{Container: "bucket", Path: "user/file"},
-		Storage:       &models.CloudFileStorage{ID: "stor1", StorageType: "S3"},
+		ID:        "file123",
+		PathParts: &models.CloudFilePathParts{Container: "bucket", Path: "user/file"},
+		Storage:   &models.CloudFileStorage{ID: "stor1", StorageType: "S3"},
 		// EncodedEncryptionKey is empty
 	}
 	cf := fi.ToCloudFile()
@@ -353,7 +507,7 @@ func TestListFolderContentsStreaming_EmitsPerPage(t *testing.T) {
 					{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
 						"encodedEncryptionKey": "key1", "iv": "iv1",
 						"owner": "u1", "path": "/p",
-						"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+						"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 						"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 					},
 				},
@@ -366,7 +520,7 @@ func TestListFolderContentsStreaming_EmitsPerPage(t *testing.T) {
 					{"id": "f2", "name": "file2.txt", "decryptedSize": json.Number("200"),
 						"encodedEncryptionKey": "key2", "iv": "iv2",
 						"owner": "u1", "path": "/p",
-						"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+						"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 						"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 					},
 				},
@@ -415,7 +569,7 @@ func TestListFolderContentsStreaming_CallbackErrorAbortsPagination(t *testing.T)
 				{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
 					"encodedEncryptionKey": "key1", "iv": "iv1",
 					"owner": "u1", "path": "/p",
-					"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+					"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 					"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 				},
 			},
@@ -449,7 +603,7 @@ func TestListFolderContentsStreaming_ContextCancellation(t *testing.T) {
 				{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
 					"encodedEncryptionKey": "key1", "iv": "iv1",
 					"owner": "u1", "path": "/p",
-					"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+					"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 					"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 				},
 			},

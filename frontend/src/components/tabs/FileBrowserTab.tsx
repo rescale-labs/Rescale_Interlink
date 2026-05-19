@@ -2,6 +2,7 @@ import { useCallback, useState, useMemo } from 'react'
 import {
   ArrowUpTrayIcon,
   ArrowDownTrayIcon,
+  ArrowUturnLeftIcon,
   TrashIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
@@ -121,7 +122,11 @@ export function FileBrowserTab() {
     refreshLocal,
     refreshRemote,
     deleteRemoteItems,
+    recoverTrashItems,
+    purgeTrashItems,
   } = useFileBrowserStore()
+
+  const isTrashMode = remote.mode === 'trash'
 
   // Tab navigation for switching to Transfers after starting transfers
   const { switchToTab } = useTabNavigation()
@@ -152,6 +157,8 @@ export function FileBrowserTab() {
     frozenLocalPath: string           // Snapshot at click time to avoid stale navigation
   } | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
+  const [recoverConfirm, setRecoverConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
+  const [purgeConfirm, setPurgeConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
 
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null)
   const [folderConflict, setFolderConflict] = useState<{
@@ -644,6 +651,47 @@ export function FileBrowserTab() {
     }
   }, [deleteConfirm, deleteRemoteItems])
 
+  // Trash: recover / purge handlers
+  const handleRecover = useCallback(() => {
+    const selected = getRemoteSelectedItems()
+    if (selected.length === 0) return
+    setRecoverConfirm(selected)
+  }, [getRemoteSelectedItems])
+
+  const handlePurge = useCallback(() => {
+    const selected = getRemoteSelectedItems()
+    if (selected.length === 0) return
+    setPurgeConfirm(selected)
+  }, [getRemoteSelectedItems])
+
+  const confirmRecover = useCallback(async () => {
+    if (!recoverConfirm) return
+    const items = recoverConfirm
+    setRecoverConfirm(null)
+    setStatus(`Recovering ${items.length} item(s)...`)
+    const result = await recoverTrashItems(items)
+    if (result.error) {
+      setErrorDialog({ title: 'Recover Failed', message: result.error })
+      setStatus('Recover failed')
+    } else {
+      setStatus(`Recovered ${result.recovered} item(s) to their original location`)
+    }
+  }, [recoverConfirm, recoverTrashItems])
+
+  const confirmPurge = useCallback(async () => {
+    if (!purgeConfirm) return
+    const items = purgeConfirm
+    setPurgeConfirm(null)
+    setStatus(`Permanently deleting ${items.length} item(s)...`)
+    const result = await purgeTrashItems(items)
+    if (result.error) {
+      setErrorDialog({ title: 'Delete Failed', message: result.error })
+      setStatus('Permanent delete failed')
+    } else {
+      setStatus(`Permanently deleted ${result.deleted} item(s)`)
+    }
+  }, [purgeConfirm, purgeTrashItems])
+
   // Upload button text
   const uploadButtonText = useMemo(() => {
     if (!uploadState.allowed && uploadState.reason) {
@@ -705,36 +753,71 @@ export function FileBrowserTab() {
           style={{ width: `${100 - leftPaneWidth}%` }}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-            <span className="font-medium text-sm">Rescale Files</span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleDownload}
-                disabled={remoteSelectedCount === 0 || isDownloading}
-                title="Download selected files to local"
-                className={`flex items-center gap-1 px-3 py-1 text-sm rounded ${
-                  remoteSelectedCount > 0 && !isDownloading
-                    ? 'bg-blue-500 text-white hover:bg-blue-600'
-                    : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-                }`}
-              >
-                <span className="text-xs">&larr;</span>
-                <ArrowDownTrayIcon className="w-4 h-4" />
-                {remoteSelectedCount > 0 ? `Download ${remoteSelectedCount}` : 'Download'}
-              </button>
-              <button
-                onClick={handleDelete}
-                disabled={remoteSelectedCount === 0 || isDeleting}
-                title="Delete selected items from Rescale"
-                className={`flex items-center gap-1 px-3 py-1 text-sm rounded ${
-                  remoteSelectedCount > 0 && !isDeleting
-                    ? 'bg-red-500 text-white hover:bg-red-600'
-                    : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-                }`}
-              >
-                <TrashIcon className="w-4 h-4" />
-                Delete
-              </button>
+          <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 min-w-0">
+            <span className="font-medium text-sm flex-shrink-0">Rescale Files</span>
+            <div className="flex items-center justify-end gap-2 min-w-0">
+              {isTrashMode ? (
+                <>
+                  <button
+                    onClick={handleRecover}
+                    disabled={remoteSelectedCount === 0}
+                    title="Recover selected items to their original location"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[10rem] ${
+                      remoteSelectedCount > 0
+                        ? 'bg-blue-500 text-white hover:bg-blue-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <ArrowUturnLeftIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">Recover</span>
+                  </button>
+                  <button
+                    onClick={handlePurge}
+                    disabled={remoteSelectedCount === 0}
+                    title="Permanently delete selected items - cannot be undone"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[12rem] ${
+                      remoteSelectedCount > 0
+                        ? 'bg-red-500 text-white hover:bg-red-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <TrashIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">Delete Permanently</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={handleDownload}
+                    disabled={remoteSelectedCount === 0 || isDownloading}
+                    title="Download selected files to local"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[11rem] ${
+                      remoteSelectedCount > 0 && !isDownloading
+                        ? 'bg-blue-500 text-white hover:bg-blue-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <span className="text-xs flex-shrink-0">&larr;</span>
+                    <ArrowDownTrayIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">
+                      {remoteSelectedCount > 0 ? `Download ${remoteSelectedCount}` : 'Download'}
+                    </span>
+                  </button>
+                  <button
+                    onClick={handleDelete}
+                    disabled={remoteSelectedCount === 0 || isDeleting}
+                    title="Delete selected items from Rescale"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[8rem] ${
+                      remoteSelectedCount > 0 && !isDeleting
+                        ? 'bg-red-500 text-white hover:bg-red-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <TrashIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">Delete</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -807,6 +890,26 @@ export function FileBrowserTab() {
         isDanger
         onConfirm={confirmDelete}
         onCancel={() => setDeleteConfirm(null)}
+      />
+
+      <ConfirmDialog
+        isOpen={recoverConfirm !== null}
+        title="Recover from Trash"
+        message={`Recover ${recoverConfirm?.length ?? 0} item(s) to their original location?`}
+        confirmText="Recover"
+        onConfirm={confirmRecover}
+        onCancel={() => setRecoverConfirm(null)}
+      />
+
+      <ConfirmDialog
+        isOpen={purgeConfirm !== null}
+        title="Delete Permanently"
+        message={`Permanently delete ${purgeConfirm?.length ?? 0} item(s) from your trash?`}
+        confirmText="Delete Permanently"
+        isDanger
+        warning="This action is permanent and cannot be undone."
+        onConfirm={confirmPurge}
+        onCancel={() => setPurgeConfirm(null)}
       />
 
       <ConfirmDialog

@@ -454,6 +454,98 @@ func (fs *FileService) GetMyJobsFolderID(ctx context.Context) (string, error) {
 	return roots.MyJobs, nil
 }
 
+// ListTrashBinPage returns a single page of trash-bin contents.
+// Files in the result have SymlinkID populated (needed for recover/purge).
+// Folder-like items use FileItem.ID (which is the folder id).
+func (fs *FileService) ListTrashBinPage(ctx context.Context, cursor string, pageSize int) (*FolderContents, error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return nil, fmt.Errorf("API client not configured")
+	}
+
+	contents, err := apiClient.ListTrashBinPage(ctx, cursor, pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list trash: %w", err)
+	}
+
+	items := make([]FileItem, 0, len(contents.Folders)+len(contents.Files))
+
+	for _, f := range contents.Folders {
+		items = append(items, FileItem{
+			ID:       f.ID,
+			Name:     f.Name,
+			IsFolder: true,
+			ModTime:  f.DateUploaded,
+		})
+	}
+
+	for _, f := range contents.Files {
+		items = append(items, FileItem{
+			ID:        f.ID,
+			Name:      f.Name,
+			IsFolder:  false,
+			Size:      f.DecryptedSize,
+			ModTime:   f.DateUploaded,
+			SymlinkID: f.SymlinkID,
+		})
+	}
+
+	return &FolderContents{
+		FolderID:   "trash",
+		FolderPath: "Trash",
+		Items:      items,
+		HasMore:    contents.HasMore,
+		NextCursor: contents.NextURL,
+	}, nil
+}
+
+// RecoverTrashItems restores a mix of trashed files and folders to their
+// original locations via a single bulk POST. The endpoint is all-or-nothing.
+func (fs *FileService) RecoverTrashItems(ctx context.Context, items []FileItem) (recovered int, failed int, err error) {
+	return fs.postTrashAction(ctx, "recover", items)
+}
+
+// PurgeTrashItems permanently deletes a mix of trashed files and folders via
+// a single bulk POST. This is irreversible. The endpoint is all-or-nothing.
+func (fs *FileService) PurgeTrashItems(ctx context.Context, items []FileItem) (deleted int, failed int, err error) {
+	return fs.postTrashAction(ctx, "delete", items)
+}
+
+func (fs *FileService) postTrashAction(ctx context.Context, action string, items []FileItem) (int, int, error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return 0, len(items), fmt.Errorf("API client not configured")
+	}
+	if len(items) == 0 {
+		return 0, 0, nil
+	}
+
+	fileSymlinkIDs := make([]string, 0, len(items))
+	folderIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.IsFolder {
+			folderIDs = append(folderIDs, item.ID)
+		} else {
+			if item.SymlinkID == "" {
+				return 0, len(items), fmt.Errorf("trash file item %q is missing SymlinkID", item.Name)
+			}
+			fileSymlinkIDs = append(fileSymlinkIDs, item.SymlinkID)
+		}
+	}
+
+	if err := apiClient.PostTrashBinAction(ctx, action, fileSymlinkIDs, folderIDs); err != nil {
+		fs.logger.Error().Err(err).Str("action", action).Int("count", len(items)).Msg("Trash bulk action failed")
+		return 0, len(items), err
+	}
+	return len(items), 0, nil
+}
+
 // ListFolderPage returns a single page of folder contents with pagination support.
 // Pass empty cursor for first page, or use NextCursor from previous response.
 // Pass pageSize=0 for API default.

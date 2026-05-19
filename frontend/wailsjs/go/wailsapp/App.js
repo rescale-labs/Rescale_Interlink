@@ -218,6 +218,10 @@ export function ListRemoteLegacy(arg1, arg2) {
   return window['go']['wailsapp']['App']['ListRemoteLegacy'](arg1, arg2);
 }
 
+export function ListRemoteTrash(arg1, arg2) {
+  return window['go']['wailsapp']['App']['ListRemoteTrash'](arg1, arg2);
+}
+
 export function ListSavedTemplates() {
   return window['go']['wailsapp']['App']['ListSavedTemplates']();
 }
@@ -256,6 +260,14 @@ export function PauseDaemon() {
 
 export function PreviewCommandPatterns(arg1, arg2) {
   return window['go']['wailsapp']['App']['PreviewCommandPatterns'](arg1, arg2);
+}
+
+export function PurgeTrashItems(arg1) {
+  return window['go']['wailsapp']['App']['PurgeTrashItems'](arg1);
+}
+
+export function RecoverTrashItems(arg1) {
+  return window['go']['wailsapp']['App']['RecoverTrashItems'](arg1);
 }
 
 export function ReloadDaemonConfig() {
