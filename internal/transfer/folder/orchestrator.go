@@ -46,6 +46,13 @@ type OrchestratorCallbacks[T any] struct {
 	// OnUnmappedFiles: called at shutdown for files whose parent was never created.
 	OnUnmappedFiles func(parentDir string, count int)
 
+	// OnSkippedEntry: called for each filesystem entry the walker chose to
+	// skip rather than upload — for example, Windows reparse-point junctions
+	// whose target identity could not be determined. Useful for surfacing
+	// "missing files" cases in the UI / log so users know why a folder
+	// upload didn't include certain children.
+	OnSkippedEntry func(entry localfs.FileEntry)
+
 	// OnOrchestratorDone: called when Part C (orchestrator) exits,
 	// BEFORE Part B (dispatcher) finishes draining.
 	// GUI: MarkBatchScanInProgress(false) + emitCompletion.
@@ -105,11 +112,29 @@ func RunOrchestrator[T any](
 	orchResult := &OrchestratorResult{}
 
 	// Start streaming walk — directories and files arrive as they're discovered.
-	dirChan, fileChan, walkErrChan := localfs.WalkStream(ctx, cfg.RootPath, localfs.WalkOptions{
+	dirChan, fileChan, skippedChan, walkErrChan := localfs.WalkStream(ctx, cfg.RootPath, localfs.WalkOptions{
 		IncludeHidden:  cfg.IncludeHidden,
 		SkipHiddenDirs: true,
 		FollowSymlinks: true,
 	})
+
+	// Drain skippedChan to surface entries the walker chose to skip.
+	// Always drain (even when no callback is wired) so the walker is not
+	// blocked by a full channel.
+	go func() {
+		for entry := range skippedChan {
+			if cfg.Logger != nil {
+				cfg.Logger.Warn().
+					Str("path", entry.Path).
+					Bool("isSymlink", entry.IsSymlink).
+					Bool("isDir", entry.IsDir).
+					Msg("Skipped during folder upload (unrecognized reparse point or unidentifiable target)")
+			}
+			if callbacks.OnSkippedEntry != nil {
+				callbacks.OnSkippedEntry(entry)
+			}
+		}
+	}()
 
 	// Create folder ready channel (buffered to prevent blocking)
 	folderReadyChan := make(chan FolderReadyEvent, constants.WorkChannelBuffer)

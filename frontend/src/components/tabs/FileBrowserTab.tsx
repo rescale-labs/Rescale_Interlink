@@ -189,11 +189,15 @@ export function FileBrowserTab() {
 
   // Upload availability and reason
   // Jobs mode: Uploads disabled (job outputs are read-only)
+  // Trash mode: Uploads disabled (trash is for recovery/permanent delete only)
   // Library mode: Uploads allowed
   // Legacy mode: Uploads allowed (files upload to user's library and appear in Legacy view)
   const uploadState = useMemo(() => {
     if (remote.mode === 'jobs') {
       return { allowed: false, reason: 'N/A in Jobs view', hasSelection: localSelectedCount > 0 }
+    }
+    if (remote.mode === 'trash') {
+      return { allowed: false, reason: 'N/A in Trash view', hasSelection: localSelectedCount > 0 }
     }
     if (localSelectedCount === 0) {
       return { allowed: false, reason: 'Select files', hasSelection: false }
