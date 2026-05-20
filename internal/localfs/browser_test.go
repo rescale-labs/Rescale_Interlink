@@ -716,6 +716,29 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+func TestShouldProbeResolvedDirectory(t *testing.T) {
+	tests := []struct {
+		name string
+		mode os.FileMode
+		dir  bool
+		want bool
+	}{
+		{name: "regular_file", mode: 0o644, want: false},
+		{name: "directory", mode: os.ModeDir | 0o755, dir: true, want: false},
+		{name: "irregular_file", mode: os.ModeIrregular, want: true},
+		{name: "named_pipe", mode: os.ModeNamedPipe, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldProbeResolvedDirectory(tc.mode, tc.dir)
+			if got != tc.want {
+				t.Fatalf("shouldProbeResolvedDirectory(%v, %v) = %v, want %v", tc.mode, tc.dir, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWalkStream_SkippedChannelDrainsCleanly verifies that the streaming
 // walker's "skipped" channel is closed when the walk completes, even when
 // no entries are emitted onto it. Regression guard for the orchestrator's

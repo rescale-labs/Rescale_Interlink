@@ -121,6 +121,12 @@ func emitSkipped(ctx context.Context, skipped chan<- FileEntry, entry FileEntry)
 	}
 }
 
+func shouldProbeResolvedDirectory(mode fs.FileMode, isDir bool) bool {
+	// Windows junctions can appear as non-directories with irregular mode bits.
+	// Regular files should stay on the hot path without an extra Stat call.
+	return !isDir && !mode.IsRegular()
+}
+
 // FileEntry represents a file or directory in the local filesystem.
 type FileEntry struct {
 	Path       string      // Full path to the file
@@ -485,7 +491,7 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 			// legacy junctions are tagged ModeIrregular instead). Emitting it
 			// as a file would propagate to UploadFile and fail with
 			// "cannot upload a directory". Detect, skip, and surface.
-			if !d.IsDir() {
+			if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
 				if realInfo, statErr := os.Stat(path); statErr == nil && realInfo.IsDir() {
 					emitSkipped(ctx, skipped, FileEntry{
 						Path: path, Name: name, IsDir: true, IsSymlink: true,
@@ -644,7 +650,7 @@ func walkSymlinkedDir(
 		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
 		// a directory (Windows junction with ModeIrregular) must not be
 		// emitted as a file.
-		if !d.IsDir() {
+		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
 			if realInfo, statErr := os.Stat(resolvedPath); statErr == nil && realInfo.IsDir() {
 				emitSkipped(ctx, skipped, FileEntry{
 					Path: originalPath, Name: name, IsDir: true, IsSymlink: true,
@@ -761,7 +767,7 @@ func collectSymlinkedDir(
 		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
 		// a directory (Windows junction with ModeIrregular) must not be
 		// emitted as a file.
-		if !d.IsDir() {
+		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
 			if realInfo, statErr := os.Stat(resolvedPath); statErr == nil && realInfo.IsDir() {
 				result.Symlinks = append(result.Symlinks, FileEntry{
 					Path: originalPath, Name: name, IsDir: true, IsSymlink: true,
@@ -914,7 +920,7 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
 		// a directory (Windows junction with ModeIrregular) must not be
 		// emitted as a file.
-		if !d.IsDir() {
+		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
 			if realInfo, statErr := os.Stat(path); statErr == nil && realInfo.IsDir() {
 				result.Symlinks = append(result.Symlinks, FileEntry{
 					Path: path, Name: name, IsDir: true, IsSymlink: true,
