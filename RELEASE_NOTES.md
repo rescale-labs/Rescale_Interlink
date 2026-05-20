@@ -1,5 +1,41 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.8 - May 20, 2026
+
+### File Browser: Trash Bin (#30)
+
+A new **Trash** mode joins **My Library**, **My Jobs**, and **Legacy** as a fourth view in the File Browser's remote pane. Files and folders deleted via the Rescale platform now flow through a soft-delete model — they appear in Trash where they can be restored or permanently removed, instead of disappearing immediately. The Upload control is greyed out in Trash view (label: "N/A in Trash view"), mirroring the existing My Jobs treatment so users get a clear reason rather than a silent failure when uploads aren't possible. Contributed by Roque ([PR #47](https://github.com/rescale-labs/Rescale_Interlink/pull/47)).
+
+### Folder uploads no longer fail on Windows reparse-point junctions
+
+A folder upload of `C:\Users\Public` (or any tree containing legacy "My Music" / "My Pictures" style junctions) previously aborted mid-batch with `cannot upload a directory: …`. Root cause: `os.Lstat` does not always tag those junctions with `ModeSymlink` — some are tagged `ModeIrregular` instead — so the upload walker emitted them as files, and the per-file uploader later rejected them as directories. The fix is in the streaming walker (`internal/localfs/browser.go`): when an entry that is not a directory according to `Lstat` resolves to a directory through `Stat`, it is now skipped as a reparse point rather than emitted as a file. All four walker code paths (`WalkStream`, `walkSymlinkedDir`, `WalkCollect`, `collectSymlinkedDir`) handle the case identically, and previously-silent "can't identify target on Windows" branches now also surface through the same skip path.
+
+Skipped entries are now visible to users: a new `skippedChan` flows out of `WalkStream`, drained by the folder-upload orchestrator, which logs a WARN line per skipped entry — `Skipped during folder upload (unrecognized reparse point or unidentifiable target)` with `path`, `isSymlink`, and `isDir` fields. A new `OnSkippedEntry` orchestrator callback is available for future GUI consumers; for v4.9.8 the WARN log is the primary signal so users can see which entries were skipped and why instead of having uploads silently lose files.
+
+The defensive Stat probe is gated on `!fileInfo.Mode().IsRegular()`, so regular files keep the original `filepath.WalkDir` fast path with no extra syscall — important for large trees on network filesystems (NFS, SMB, mapped drives) where each `Stat` round-trip costs 1–10ms.
+
+### File Browser: Upload disabled in Trash view
+
+When the remote pane is in Trash mode, the Upload button is now disabled with the reason "N/A in Trash view" (uploading directly into the trash makes no sense). This mirrors the existing My Jobs treatment in `frontend/src/components/tabs/FileBrowserTab.tsx` so users get a clear reason rather than a no-op click.
+
+### FIPS hardening and security dependency updates
+
+The FIPS 140-3 build path was tightened and security-relevant dependencies were refreshed to clear advisories. The mandatory FIPS toolchain remains `GOFIPS140=latest` with the `fips` build tag; non-FIPS builds continue to refuse to run unless `RESCALE_ALLOW_NON_FIPS=true` is set (development only).
+
+### Cleaner credential source reporting
+
+Internal handling of "where did this credential come from" was tightened so the GUI and CLI both report the same authoritative source DTO, reducing the ways a non-authoritative value could be picked up between token files, environment variables, and config.
+
+### PUR transfer accounting cleanup
+
+Counters in the parallel/PUR pipeline were aligned so the GUI and CLI report the same totals. Removes a small class of "the numbers don't quite match" bugs in long-running batch runs.
+
+### Build infrastructure
+
+The Linux release build script's Go installation was hardened against system-Go interference: the script now prepends `/usr/local/go/bin` to `PATH` (instead of appending), no longer suppresses `wget` output, and verifies the Go version before invoking `wails build`. This addresses an RC1 build failure where the Rescale build node's system Go (1.25.9) won the `PATH` race against the freshly-installed Go 1.26.3 and aborted the Wails build with `go.mod requires go >= 1.26.3 (running go 1.25.9)`. Internal-only — release engineering, no user-visible behavior change.
+
+---
+
 ## v4.9.6 - May 9, 2026
 
 ### Linux file picker reliability on restricted desktop environments (#41)

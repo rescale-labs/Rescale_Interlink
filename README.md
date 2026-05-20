@@ -8,7 +8,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Go Version](https://img.shields.io/badge/go-1.26.3-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.9.6-green)
+![Status](https://img.shields.io/badge/status-v4.9.8-green)
 
 ---
 
@@ -21,12 +21,13 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ---
 
-## What's New in v4.9.6
+## What's New in v4.9.8
 
-- **Linux file picker reliability.** File and folder pickers on Linux now route through the freedesktop xdg-desktop-portal D-Bus interface, bypassing the WebKitGTK code path that caused a reproducible hard crash on some RHEL 9 VDIs. Falls back to the previous GTK path when xdg-desktop-portal is unavailable.
-- **Templates round-trip license values cleanly.** Saving a template with a CUSTOM license value of the form `KEY=value` and reloading it no longer silently reclassifies the entry. New hints guide the experience: type-time nudges when a CUSTOM value matches a known preset, load-time explanations for pre-existing templates saved in the old state, and a sharper validation error.
-- **Upload progress is always visible.** Single Job uploads now show live per-file progress while the upload runs; previously the GUI looked frozen during long uploads. PUR uploads no longer briefly lose their progress display mid-upload.
-- **Short-lived JWT credentials supported.** The API client now accepts short-lived session JWTs in addition to long-lived API tokens, selecting the correct `Authorization` scheme automatically.
+- **File Browser Trash Bin.** Soft-deleted files now flow through a new **Trash** mode in the remote pane (alongside My Library, My Jobs, and Legacy), where they can be restored or permanently removed. The Upload button is disabled in Trash view ("N/A in Trash view") for clarity.
+- **Folder uploads work cleanly through Windows junctions.** A folder upload of `C:\Users\Public` or any tree containing legacy "My Music" / "My Pictures" reparse-point junctions no longer fails mid-batch with `cannot upload a directory`. The walker now correctly identifies these entries and skips them with a WARN log so users can see what was excluded and why.
+- **Walker performance gate restored.** The defensive directory probe added to fix the junction case is now narrowed to non-regular entries, so regular files keep their original fast path — important for large folder uploads from NFS, SMB, or mapped drives.
+- **FIPS hardening + security dependency updates.** Tightened FIPS 140-3 build path; refreshed security-relevant dependencies to clear advisories.
+- **Cleaner credential source reporting.** Single authoritative DTO for "where did this credential come from" across GUI and CLI.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -78,10 +79,10 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 
 - **File Browser**:
   - Two-pane layout (local left, remote right)
-  - My Library / My Jobs / Legacy browse modes
+  - My Library / My Jobs / Legacy / Trash browse modes
   - Multi-file selection with checkboxes and Shift/Ctrl
   - Upload/download with concurrent transfers
-  - Delete remote files/folders
+  - Delete remote files/folders (deleted entries are visible and recoverable in Trash)
 
 - **Job Management**:
   - Template builder with searchable software/hardware selection
@@ -366,10 +367,9 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Developer onboarding guide
 - **[RELEASE_NOTES.md](RELEASE_NOTES.md)** - Version history and release details
 - **[FEATURE_SUMMARY.md](FEATURE_SUMMARY.md)** - Comprehensive feature list with source references
-- **[docs/LOG_LOCATIONS.md](docs/LOG_LOCATIONS.md)** - Where Interlink writes logs, per platform
 
 ---
 
-**Version**: 4.9.6
+**Version**: 4.9.8
 **Status**: Production Ready
-**Last Updated**: May 9, 2026
+**Last Updated**: May 20, 2026

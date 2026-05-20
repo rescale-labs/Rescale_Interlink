@@ -1,7 +1,7 @@
 # Rescale Interlink — Feature Summary
 
-**Version:** 4.9.6
-**Last Updated:** May 9, 2026
+**Version:** 4.9.8
+**Last Updated:** May 20, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document catalogs what Rescale Interlink can do. For full command syntax, see [CLI_GUIDE.md](CLI_GUIDE.md). For architecture internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For version history, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
@@ -266,7 +266,7 @@ Batch job submission pipeline for parallel computational studies.
 1. **Setup Tab**: API configuration, proxy settings, logging configuration, auto-download daemon management
 2. **Single Job Tab**: Job template builder with three input modes (directory, local files, remote files). Tar options for directory mode. Form state persists across tab navigation.
 3. **PUR Tab**: Batch job pipeline with view modes (choice screen, monitoring, configuration), pipeline settings, run queue
-4. **File Browser Tab**: Two-pane local/remote browser with upload, download, and delete operations
+4. **File Browser Tab**: Two-pane local/remote browser with upload, download, and delete operations. The remote pane offers four browse modes — My Library, My Jobs, Legacy, and Trash. Trash shows soft-deleted entries with restore/purge actions; Upload is disabled in Trash and My Jobs with an explicit "N/A in this view" reason.
 5. **Transfers Tab**: Transfer progress with batch grouping (folder ops, PUR, single-job collapse into single rows), cancel/retry, filter chips, disk space error banner. Daemon auto-download rows appear inline with a `Daemon` badge and support per-row Cancel/Retry via IPC.
 6. **Activity Tab**: Logs with level filtering (DEBUG/INFO/WARN/ERROR), run history with expandable job tables
 

@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 4.9.6
-**Last Updated**: May 9, 2026
+**Version**: 4.9.8
+**Last Updated**: May 20, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -64,7 +64,7 @@ make build-darwin-arm64       # Build for macOS ARM64
 make build-all                # Build for all platforms
 
 # Output goes to: bin/{VERSION}/{PLATFORM}/rescale-int
-# Example: bin/v4.0.0/darwin-arm64/rescale-int
+# Example: bin/v4.9.8/darwin-arm64/rescale-int
 
 # Production GUI build
 GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -tags fips -platform darwin/arm64

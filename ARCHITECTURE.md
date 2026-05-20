@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.9.6
-**Last Updated**: May 9, 2026
+**Version**: 4.9.8
+**Last Updated**: May 20, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.9.6                     |
+|                 Rescale Interlink v4.9.8                     |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -110,7 +110,7 @@ rescale-int/
 │   │
 │   │  ── CLI & Commands ──
 │   ├── cli/                       # Native CLI commands (Cobra)
-│   │   └── compat/                # rescale-cli compatibility mode (24 files)
+│   │   └── compat/                # rescale-cli compatibility mode (25 files)
 │   ├── watch/                     # Job watch engine (shared by native + compat)
 │   │
 │   │  ── Core ──
@@ -290,11 +290,12 @@ The `Client` struct manages HTTP transport with connection pooling, API token, b
 
 The `EventBus` struct manages per-type subscriber channels, an "all events" subscriber list, a ring buffer for timeline capture in error reports, and a dropped-event counter. See `internal/events/events.go` for the full definition.
 
-**Event Types** (16 total):
+**Event Types** (20 total):
 - Core pipeline: `EventProgress`, `EventLog`, `EventStateChange`, `EventError`, `EventComplete`
 - Transfer queue: `EventTransferQueued`, `EventTransferInitializing`, `EventTransferStarted`, `EventTransferProgress`, `EventTransferCompleted`, `EventTransferFailed`, `EventTransferCancelled`
 - Configuration: `EventConfigChanged`
 - Enumeration: `EventEnumerationStarted`, `EventEnumerationProgress`, `EventEnumerationCompleted`
+- Catalog scan: `EventScanProgress`
 - Batch display: `EventBatchProgress`
 - Error reporting: `EventReportableError`
 
@@ -401,7 +402,7 @@ CLI uses `mpb` (multi-progress bars) with per-file bars showing speed and ETA. G
 
 ## CLI Compatibility Mode
 
-**Package**: `internal/cli/compat/` (24 files)
+**Package**: `internal/cli/compat/` (25 files)
 
 Provides drop-in compatibility with `rescale-cli` (the legacy Java-based Rescale CLI). Existing scripts and automation workflows can migrate to Interlink without modification.
 
@@ -490,7 +491,7 @@ All behavior is injected:
 
 ### Frontend Components (`frontend/src/components/tabs/`)
 
-1. **FileBrowserTab** — Two-pane local/remote file browser
+1. **FileBrowserTab** — Two-pane local/remote file browser. Remote pane has four browse modes: My Library, My Jobs, Legacy, and Trash (soft-deleted entries with restore/purge actions). Upload is disabled in Trash and My Jobs modes with an explicit reason.
 2. **TransfersTab** — Transfer progress with batch grouping, cancel/retry, disk space error banner
 3. **SingleJobTab** — Job template builder with three input modes (directory, local files, remote files)
 4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration)

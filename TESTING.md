@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: May 9, 2026
-**Version**: 4.9.6
+**Last Updated**: May 20, 2026
+**Version**: 4.9.8
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -65,7 +65,7 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-90 test files across 46 directories. Grouped by functional area:
+113 Go test files across the `internal/` tree, plus the frontend test suites (currently 3 vitest files: TemplateBuilder, plus existing setup). Grouped by functional area:
 
 #### CLI & Commands
 
@@ -457,9 +457,12 @@ GitHub Actions workflows run on tag push for release builds:
 - **v4.6.8**: 8 automation serialization unit tests; E2E validation for single/multiple/no automations
 - **v4.8.x**: Transfer system convergence validated — `RunBatch`/`RunBatchFromChannel` abstraction, conflict resolver, adaptive concurrency, FileInfo enrichment
 
-### Current State (v4.9.6)
+### Current State (v4.9.8)
 
-- **Unit Tests**: 109 Go test files across 46 packages, plus 3 frontend test suites (v4.9.6 adds xdg-desktop-portal fallback/options tests, TemplateBuilder license-reload vitest suite, Engine upload-progress tests, pipeline skip-status tests, job-bindings progress + failure-path tests, runStore polling-merge regression test, Bearer-scheme auth tests, and platform-URL allowlist validation tests)
+- **Unit Tests**: 113 Go test files across the `internal/` tree, plus 3 frontend vitest suites. v4.9.8 adds:
+  - `TestShouldProbeResolvedDirectory` — predicate gating the walker's defensive Stat to non-regular entries (covers regular file, directory, irregular file, named pipe).
+  - `TestWalkStream_SkippedChannelDrainsCleanly` — regression guard for the new `skippedChan` ensuring it closes cleanly when no entries are emitted.
+  - `TestWalkCollect_SymlinkSliceContainsBrokenSymlinks` — documents the `Symlinks` slice contract for `WalkCollect` after the junction-skip refactor.
 - **Coverage**: All core packages tested
 - **Known Bugs**: 0
 - **Quality Gates**:

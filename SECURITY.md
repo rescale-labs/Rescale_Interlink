@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.9.6
-**Last Updated:** 2026-05-09
+**Version:** 4.9.8
+**Last Updated:** 2026-05-20
 
 ## Overview
 
@@ -358,6 +358,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Security-Relevant Changes |
 |---------|------|---------------------------|
+| 4.9.8 | 2026-05-20 | FIPS 140-3 build path tightening; security dependency refresh to clear advisories; cleaner credential source DTO across GUI and CLI |
 | 4.9.4 | 2026-04-19 | Explicit Windows DACL on token file (owner + Administrators + SYSTEM, no inheritance); IPC caller-SID scoping consolidated behind one helper with catalog-wide fail-closed enforcement |
 | 4.9.3 | 2026-04-15 | AWS SDK security bump (eventstream DoS fix); CodeQL quality cleanup |
 | 4.9.2 | 2026-04-13 | S3 FIPS endpoints for ITAR platforms; Windows service credential isolation |
