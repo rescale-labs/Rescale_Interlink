@@ -22,6 +22,6 @@ type WalkOptions struct {
 	// When true, symlinked directories and files are followed (resolved to their targets).
 	// Cycle detection uses device+inode ancestry tracking on Unix.
 	// On Windows, symlinks are NOT followed (getDirIdentity returns false).
-	// Default is false (symlinks are skipped entirely, matching pre-v4.8.8 behavior).
+	// Default is false: symlinks are skipped entirely.
 	FollowSymlinks bool
 }

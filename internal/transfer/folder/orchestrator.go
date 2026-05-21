@@ -349,10 +349,11 @@ func RunOrchestrator[T any](
 		close(backlogDone)
 		backlogDoneClosed = true
 
-		// Call OnOrchestratorDone AFTER closing backlogDone but BEFORE
-		// dispatcher finishes draining. This preserves the v4.8.5 bugfix
-		// timing: GUI's MarkBatchScanInProgress(false) fires when discovery
-		// count is final, not after all items are sent through outputCh.
+		// Call OnOrchestratorDone AFTER closing backlogDone but BEFORE the
+		// dispatcher finishes draining. The GUI's MarkBatchScanInProgress(false)
+		// must fire when the discovery count is final — not after all items
+		// have been sent through outputCh — otherwise the progress UI shows a
+		// stuck "scanning" state until the very last item dispatches.
 		if callbacks.OnOrchestratorDone != nil {
 			callbacks.OnOrchestratorDone(orchResult)
 		}

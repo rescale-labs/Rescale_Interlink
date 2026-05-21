@@ -10,12 +10,11 @@ import (
 
 // ensureAllConfigPersisted writes the current in-memory Config and API key to
 // disk before handing off to a different-identity process (Windows Service
-// via UAC, or a subprocess daemon). Per AUTO_DOWNLOAD_SPEC.md §4.3, in-memory
-// state must reach disk before the handoff — otherwise the consuming process
-// reads stale or missing files.
+// via UAC, or a subprocess daemon). In-memory state must reach disk before
+// the handoff — otherwise the consuming process reads stale or missing files.
 //
-// Idempotent: calling with unchanged state is a no-op. Secrets that spec §4.3
-// marks as never-persist (currently the proxy password) are filtered out by
+// Idempotent: calling with unchanged state is a no-op. Secrets that should
+// never be persisted (currently the proxy password) are filtered out by
 // config.SaveConfigCSV; this helper does not touch them.
 //
 // Token file handling:

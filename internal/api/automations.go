@@ -1,5 +1,4 @@
 // Package api provides automation-related API methods.
-// Added in v3.6.1.
 package api
 
 import (

@@ -173,7 +173,7 @@ func (a *App) StartDaemon() error {
 	}
 
 	// Ensure config.csv and token file are on disk before the subprocess
-	// reads them. Per AUTO_DOWNLOAD_SPEC.md §4.3.
+	// reads them.
 	if err := a.ensureAllConfigPersisted(); err != nil {
 		return fmt.Errorf("cannot start daemon: %w", err)
 	}
