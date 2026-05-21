@@ -3,6 +3,8 @@ package wailsapp
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/config"
@@ -55,6 +57,25 @@ func TestClearSavedAPIKeyFallsBackToEnvironment(t *testing.T) {
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Fatalf("expected token file to be removed, stat err: %v", err)
+	}
+}
+
+func TestCredentialSourceWarning_NotShownOnNonWindows(t *testing.T) {
+	setIsolatedUserConfigEnv(t)
+	t.Setenv("RESCALE_API_KEY", "env-key")
+
+	app := &App{config: &config.Config{APIKey: "env-key"}}
+	dto := app.GetCredentialSource()
+
+	if runtime.GOOS == "windows" {
+		if !strings.Contains(dto.Warning, "Windows") {
+			t.Fatalf("on Windows, expected Windows-specific env-var warning, got %q", dto.Warning)
+		}
+		return
+	}
+
+	if strings.Contains(dto.Warning, "Windows") {
+		t.Fatalf("on %s, did not expect Windows-specific warning, got %q", runtime.GOOS, dto.Warning)
 	}
 }
 

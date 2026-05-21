@@ -3,6 +3,7 @@ package wailsapp
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/rescale/rescale-int/internal/config"
@@ -113,7 +114,9 @@ func (a *App) credentialSource() CredentialSourceDTO {
 	case "environment":
 		dto.Label = "RESCALE_API_KEY environment variable"
 		dto.Detail = "Read from the current process environment."
-		dto.Warning = "On Windows, environment variables may be user-scoped or machine-scoped. Interlink reads this value but does not save it at startup."
+		if runtime.GOOS == "windows" {
+			dto.Warning = "On Windows, environment variables may be user-scoped or machine-scoped. Interlink reads this value but does not save it at startup."
+		}
 	case "direct-input":
 		dto.Label = "Direct input"
 		dto.Detail = "Current value has not been saved to the token file."
