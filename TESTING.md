@@ -71,16 +71,16 @@ go test -v ./internal/watch/...
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/cli` | 6 | Command parsing, helpers, conflict resolution |
+| `internal/cli` | 6 | Command parsing, helpers, conflict resolution, shortcut concurrency |
 | `internal/cli/compat` | 8 | Compat mode detection, arg normalization, commands, parity |
 
 #### Core Infrastructure
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/core` | 1 | Engine pipeline orchestration |
+| `internal/core` | 2 | Engine pipeline orchestration, upload-progress reporting |
 | `internal/events` | 1 | EventBus pub/sub, ring buffer |
-| `internal/config` | 7 | CSV config, API config, jobs CSV, daemon config, platforms |
+| `internal/config` | 14 | CSV config, API config, jobs CSV, daemon config, platforms (incl. internal- and production-tagged variants), proxy features (FIPS / non-FIPS), token ACL on Windows |
 | `internal/models` | 2 | Job serialization, credential models |
 | `internal/validation` | 1 | Path validation |
 
@@ -103,7 +103,7 @@ go test -v ./internal/watch/...
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/wailsapp` | 4 | Job bindings, path helpers, version bindings, daemon bindings |
+| `internal/wailsapp` | 11 | Job bindings, path helpers, version bindings, daemon bindings, config bindings, API key source bindings, progress + failure-path tests |
 | `internal/services` | 1 | Transfer service |
 
 #### PUR (Parallel Upload and Run)
@@ -128,8 +128,8 @@ go test -v ./internal/watch/...
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
 | `internal/daemon` | 4 | Daemon lifecycle, monitor, state, transfer tracker |
-| `internal/service` | 2 | Windows service, detection |
-| `internal/ipc` | 5 | Client/server, messages, pipe, security |
+| `internal/service` | 4 | Windows service, detection, install/uninstall flows |
+| `internal/ipc` | 7 | Client/server, messages, pipe, security, user-scope catalog tests |
 
 #### Security & Crypto
 

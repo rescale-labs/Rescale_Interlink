@@ -187,10 +187,14 @@ Background service for automatically downloading completed jobs.
 - **Unified Transfers tab**: Daemon transfers appear alongside GUI transfers with a `Daemon` badge. Per-row Cancel/Retry works on daemon rows, routed via IPC; `Cancel All` cancels both engines.
 
 ### Subcommands
-- `run` — Start the daemon
-- `status` — Show daemon state
-- `list` — List downloaded or failed jobs
-- `retry` — Mark failed jobs for retry
+- `run` — Start the daemon (foreground or `--background`, optional `--ipc`)
+- `stop` — Send a clean shutdown request to a running daemon
+- `status` — Show daemon state and statistics
+- `list [--failed]` — List downloaded or failed jobs
+- `retry [--all | -j ID...]` — Mark failed jobs for retry on the next poll
+- `config show` / `config path` / `config edit` / `config set <key> <value>` / `config init` / `config validate` — Manage `daemon.conf`
+
+On Windows MSI installs, the daemon is fronted by the Windows Service. See the **Service Commands** section in [CLI_GUIDE.md](CLI_GUIDE.md) for `service install`, `start`, `stop`, `install-and-start`, and `status`.
 
 ### Platform Support
 - macOS/Linux: subprocess mode with Unix domain socket IPC
@@ -218,6 +222,7 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Additional Commands
 - `make-dirs-csv` — Auto-generate jobs CSV from directory structure
+- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, summarize the matches, and optionally generate a jobs CSV from a template
 - `plan` — Validate pipeline (dry-run)
 - `resume` — Resume interrupted pipeline from state file
 - `submit-existing` — Submit jobs using previously uploaded files
@@ -251,11 +256,9 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Hardware
 - `rescale-int hardware list [--search TERM]` — List available core types
-- `rescale-int hardware get <code>` — Get core type details
 
 ### Software
 - `rescale-int software list [--search TERM]` — List available software packages
-- `rescale-int software get <code>` — Get software version details
 
 ---
 

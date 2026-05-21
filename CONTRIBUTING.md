@@ -176,7 +176,7 @@ rescale-int/
 ├── internal/
 │   ├── api/                   # Rescale API client (v3 + v2)
 │   ├── cli/                   # CLI commands (Cobra)
-│   │   └── compat/            # rescale-cli compatibility mode (24 files)
+│   │   └── compat/            # rescale-cli compatibility mode (25 files)
 │   ├── cloud/                 # Cloud storage operations
 │   │   ├── credentials/       # Credential management + warming
 │   │   ├── download/          # Download entry point
