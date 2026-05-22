@@ -905,13 +905,20 @@ export function SetupTab() {
                   <button
                     onClick={handleClearSavedAPIKey}
                     className="btn-secondary flex items-center justify-center"
-                    title="Remove saved API key token file"
+                    title={credentialSource.source === 'token-file'
+                      ? 'Remove the saved API key token file'
+                      : "An on-disk token file exists but isn't the active key source. Click to delete the stale file."}
                     disabled={!credentialSource.hasSavedToken || isSaving || isUnifiedSaving}
                   >
                     <TrashIcon className="w-4 h-4 mr-2" />
-                    Remove saved key
+                    {credentialSource.source === 'token-file' ? 'Remove saved key' : 'Delete stale token file'}
                   </button>
                 </div>
+                {credentialSource.hasSavedToken && credentialSource.source !== 'token-file' && credentialSource.source !== '' && (
+                  <div className="text-xs text-gray-500">
+                    A saved token file also exists on disk but is not the active key source ({credentialSource.label} takes precedence).
+                  </div>
+                )}
                 {credentialSource.warning && (
                   <div className="text-xs text-amber-700">{credentialSource.warning}</div>
                 )}
