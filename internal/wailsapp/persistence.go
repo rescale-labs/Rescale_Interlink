@@ -57,10 +57,11 @@ func (a *App) ensureAllConfigPersisted() error {
 	if existing == a.config.APIKey {
 		return nil
 	}
+	a.logInfo("config", fmt.Sprintf("DIAG ensureAllConfigPersisted: about to write token file at %s (existing differs from in-memory)", tokenPath))
 	if err := config.WriteTokenFile(tokenPath, a.config.APIKey); err != nil {
 		return fmt.Errorf("%s: failed to write API key to token file: %w",
 			ipc.CanonicalText[ipc.CodeNoTokenFile], err)
 	}
-	a.logInfo("config", "API key written to token file")
+	a.logInfo("config", fmt.Sprintf("DIAG ensureAllConfigPersisted: wrote token file at %s", tokenPath))
 	return nil
 }

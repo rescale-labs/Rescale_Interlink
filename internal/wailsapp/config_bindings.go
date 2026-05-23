@@ -225,12 +225,12 @@ func (a *App) SaveConfig() error {
 	// Save API key to token file so it persists across restarts
 	if a.config.APIKey != "" {
 		tokenPath := config.GetDefaultTokenPath()
-		a.logDebug("config", fmt.Sprintf("Saving API key to token file %s", tokenPath))
+		a.logInfo("config", fmt.Sprintf("DIAG SaveConfig: about to write token file at %s", tokenPath))
 		if err := config.WriteTokenFile(tokenPath, a.config.APIKey); err != nil {
 			a.logError("config", fmt.Sprintf("Failed to save token file: %v", err))
 			return fmt.Errorf("failed to save API key: %w", err)
 		}
-		a.logInfo("config", "API key saved successfully")
+		a.logInfo("config", fmt.Sprintf("DIAG SaveConfig: wrote token file at %s", tokenPath))
 	} else {
 		// User cleared the API key — remove persisted token file
 		removed, err := removeSavedAPIKeyTokenFiles()

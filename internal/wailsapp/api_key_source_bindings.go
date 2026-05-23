@@ -5,9 +5,14 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"github.com/rescale/rescale-int/internal/config"
 )
+
+// credSourceDiagSeq tags each credentialSource() invocation so we can correlate
+// the GUI-visible state with the resolution path. Diagnostic only.
+var credSourceDiagSeq atomic.Uint64
 
 // CredentialSourceDTO describes where the Setup screen's active API key came
 // from without exposing the key value.
@@ -87,24 +92,63 @@ func (a *App) ClearSavedAPIKey() (ClearSavedAPIKeyResultDTO, error) {
 }
 
 func (a *App) credentialSource() CredentialSourceDTO {
+	seq := credSourceDiagSeq.Add(1)
+
 	activeKey := ""
 	if a.config != nil {
 		activeKey = strings.TrimSpace(a.config.APIKey)
 	}
 
+	tokenPath := config.GetDefaultTokenPath()
+	tokenStat := "missing"
+	tokenSize := int64(-1)
+	if tokenPath != "" {
+		if info, statErr := os.Stat(tokenPath); statErr == nil {
+			tokenStat = "exists"
+			tokenSize = info.Size()
+		} else if os.IsNotExist(statErr) {
+			tokenStat = "missing"
+		} else {
+			tokenStat = fmt.Sprintf("stat-error: %v", statErr)
+		}
+	}
+
 	resolvedKey, source := resolveGUIAPIKeySource()
+	resolvedSource := source
+	resolvedHasKey := resolvedKey != ""
+
 	if activeKey == "" {
 		source = ""
 	} else if resolvedKey == "" || activeKey != resolvedKey {
 		source = "direct-input"
 	}
 
+	hasSaved := savedAPIKeyTokenPresent()
+	envPresent := os.Getenv("RESCALE_API_KEY") != ""
+	legacyPresent := legacyAPIKeyPresent()
+
 	dto := CredentialSourceDTO{
 		Source:              source,
 		HasAPIKey:           activeKey != "",
-		HasSavedToken:       savedAPIKeyTokenPresent(),
-		EnvironmentPresent:  os.Getenv("RESCALE_API_KEY") != "",
-		LegacyConfigPresent: legacyAPIKeyPresent(),
+		HasSavedToken:       hasSaved,
+		EnvironmentPresent:  envPresent,
+		LegacyConfigPresent: legacyPresent,
+	}
+
+	if wailsLogger != nil {
+		wailsLogger.Info().
+			Uint64("seq", seq).
+			Str("tokenPath", tokenPath).
+			Str("tokenStat", tokenStat).
+			Int64("tokenSize", tokenSize).
+			Str("resolvedSource", resolvedSource).
+			Bool("resolvedHasKey", resolvedHasKey).
+			Bool("activeKeyPresent", activeKey != "").
+			Str("finalSource", source).
+			Bool("HasSavedToken", hasSaved).
+			Bool("EnvironmentPresent", envPresent).
+			Bool("LegacyConfigPresent", legacyPresent).
+			Msg("DIAG credentialSource")
 	}
 
 	switch source {
