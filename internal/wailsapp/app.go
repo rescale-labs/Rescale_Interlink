@@ -205,27 +205,6 @@ func (a *App) startup(ctx context.Context) {
 	// Plan 2 path migrations (idempotent; current-user scope in GUI).
 	config.RunStartupMigrations(wailsLogger, config.ScopeCurrentUser, nil)
 
-	// DIAGNOSTIC: snapshot the on-disk token file state BEFORE any further GUI work.
-	// We're investigating a "stale token file" report on a fresh-machine first-launch.
-	// If the file exists at this point, the GUI is observing pre-existing state, not
-	// creating it; if it does not exist now and exists later, something the GUI runs
-	// is creating it.
-	if tokenPath := config.GetDefaultTokenPath(); tokenPath != "" {
-		state := "missing"
-		size := int64(-1)
-		if info, err := os.Stat(tokenPath); err == nil {
-			state = "exists"
-			size = info.Size()
-		} else if !os.IsNotExist(err) {
-			state = fmt.Sprintf("stat-error: %v", err)
-		}
-		wailsLogger.Info().
-			Str("tokenPath", tokenPath).
-			Str("state", state).
-			Int64("size", size).
-			Msg("DIAG startup token-file snapshot")
-	}
-
 	// Auto-launch tray companion if available (Windows only, no-op on other platforms)
 	go a.launchTrayIfNeeded()
 

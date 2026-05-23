@@ -902,23 +902,18 @@ export function SetupTab() {
                       <div className="mt-1 text-xs text-gray-500">Connected account: {connectionEmail}</div>
                     )}
                   </div>
-                  <button
-                    onClick={handleClearSavedAPIKey}
-                    className="btn-secondary flex items-center justify-center"
-                    title={credentialSource.source === 'token-file'
-                      ? 'Remove the saved API key token file'
-                      : "An on-disk token file exists but isn't the active key source. Click to delete the stale file."}
-                    disabled={!credentialSource.hasSavedToken || isSaving || isUnifiedSaving}
-                  >
-                    <TrashIcon className="w-4 h-4 mr-2" />
-                    {credentialSource.source === 'token-file' ? 'Remove saved key' : 'Delete stale token file'}
-                  </button>
+                  {credentialSource.hasSavedToken && (
+                    <button
+                      onClick={handleClearSavedAPIKey}
+                      className="btn-secondary flex items-center justify-center"
+                      title="Remove the saved API key token file"
+                      disabled={isSaving || isUnifiedSaving}
+                    >
+                      <TrashIcon className="w-4 h-4 mr-2" />
+                      Remove saved key
+                    </button>
+                  )}
                 </div>
-                {credentialSource.hasSavedToken && credentialSource.source !== 'token-file' && credentialSource.source !== '' && (
-                  <div className="text-xs text-gray-500">
-                    A saved token file also exists on disk but is not the active key source ({credentialSource.label} takes precedence).
-                  </div>
-                )}
                 {credentialSource.warning && (
                   <div className="text-xs text-amber-700">{credentialSource.warning}</div>
                 )}
