@@ -68,6 +68,7 @@ export interface TransferBatch {
   discoveredTotal: number // Files discovered by scan
   discoveredBytes: number // Bytes discovered by scan
   startedAtUnix: number // Batch start time (Unix seconds)
+  skipped: number // Entries the walker skipped (junctions, unresolvable links)
 }
 
 // Extended transfer task with UI state
@@ -237,6 +238,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         discoveredTotal: (b as TransferBatch).discoveredTotal ?? 0,
         discoveredBytes: (b as TransferBatch).discoveredBytes ?? 0,
         startedAtUnix: (b as TransferBatch).startedAtUnix ?? 0,
+        skipped: (b as TransferBatch).skipped ?? 0,
       }))
       set({ batches })
 
@@ -739,6 +741,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           discoveredTotal: event.discoveredTotal ?? 0,
           discoveredBytes: event.discoveredBytes ?? 0,
           startedAtUnix: 0, // Will be populated on next fetchBatches
+          skipped: event.skipped ?? 0,
         }
         return { batches: [...state.batches, newBatch], lastUpdate: Date.now(), folderCheckStatus: null }
       }
@@ -758,6 +761,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         etaSeconds: event.etaSeconds ?? -1,
         discoveredTotal: event.discoveredTotal ?? 0,
         discoveredBytes: event.discoveredBytes ?? 0,
+        skipped: event.skipped ?? 0,
       }
       return { batches: updatedBatches, lastUpdate: Date.now() }
     })

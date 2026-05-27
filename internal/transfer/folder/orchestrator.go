@@ -120,8 +120,12 @@ func RunOrchestrator[T any](
 
 	// Drain skippedChan to surface entries the walker chose to skip.
 	// Always drain (even when no callback is wired) so the walker is not
-	// blocked by a full channel.
+	// blocked by a full channel. Tracked by skipDrainWG so OnOrchestratorDone
+	// can wait for the final skip count before deciding upload outcome.
+	var skipDrainWG sync.WaitGroup
+	skipDrainWG.Add(1)
 	go func() {
+		defer skipDrainWG.Done()
 		for entry := range skippedChan {
 			if cfg.Logger != nil {
 				cfg.Logger.Warn().
@@ -306,6 +310,7 @@ func RunOrchestrator[T any](
 				}
 
 			case <-ctx.Done():
+				skipDrainWG.Wait()
 				close(backlogDone)
 				backlogDoneClosed = true
 				if callbacks.OnOrchestratorDone != nil {
@@ -344,6 +349,19 @@ func RunOrchestrator[T any](
 		orchResult.DiscoveredFiles = discoveredFiles
 		orchResult.DiscoveredBytes = discoveredBytes
 		orchResult.DiscoveredDirs = discoveredDirs
+
+		// Wait for the skip-drain goroutine to fully process skippedChan before
+		// signaling completion. Without this, OnOrchestratorDone could fire while
+		// the drain goroutine still has buffered entries to process — a skipped-
+		// only upload could be misclassified as "empty folder" because the skip
+		// counter hasn't been fully incremented yet. WalkStream always closes
+		// skippedChan via defer, so this Wait cannot deadlock.
+		//
+		// Wait BEFORE close(backlogDone) so OnOrchestratorDone still fires while
+		// the dispatcher has work left to do — otherwise the dispatcher could
+		// race ahead and close dispatchDone before the GUI's
+		// MarkBatchScanInProgress(false) callback runs.
+		skipDrainWG.Wait()
 
 		// Signal dispatcher to drain remaining items and close outputCh
 		close(backlogDone)

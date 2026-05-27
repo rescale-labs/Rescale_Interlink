@@ -440,6 +440,34 @@ func (ts *TransferService) StartStreamingUploadBatch(
 	return nil
 }
 
+// RegisterSkipPlaceholderTask creates a single completed synthetic task to anchor
+// a folder-upload batch whose walker skipped every entry (e.g. a Windows folder
+// of junctions). Without this anchor, CleanupBatch would delete the pre-registered
+// metadata and the Transfers row would vanish, hiding the upload transaction
+// from the user.
+//
+// The placeholder task carries Size=0 and a name like "(skipped: Public)" so it
+// renders distinctly from a real file transfer. Frontend code keys off Skipped>0
+// and Total==1 to render the appropriate "0 files uploaded — N items skipped"
+// summary.
+func (ts *TransferService) RegisterSkipPlaceholderTask(batchID, displayName string, skipCount int) {
+	if batchID == "" {
+		return
+	}
+	taskName := fmt.Sprintf("(skipped: %s)", displayName)
+	task := ts.queue.TrackTransferWithBatch(
+		taskName,
+		0,
+		transfer.TaskTypeUpload,
+		"",
+		"",
+		SourceLabelFileBrowser,
+		batchID,
+		"",
+	)
+	ts.queue.Complete(task.ID)
+}
+
 // registerUploadTask registers an upload task in the queue (starts as Queued).
 // Returns the task ID. No context or cancel fn is set — that happens in executeUploadTask.
 func (ts *TransferService) registerUploadTask(req TransferRequest) string {

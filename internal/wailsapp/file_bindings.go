@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -1124,6 +1125,12 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		})
 	}
 
+	// Skip-entry counter shared between OnSkippedEntry (drain goroutine) and
+	// OnOrchestratorDone (Part C). Atomic for memory safety; the orchestrator's
+	// skipDrainWG.Wait() before OnOrchestratorDone guarantees this is the final
+	// count by the time the post-walk decision logic runs.
+	var skipCount atomic.Int64
+
 	_, _ = folder.RunOrchestrator(uploadCtx,
 		folder.OrchestratorConfig{
 			RootPath:          resolvedLocalPath, // Use resolved path for filesystem walk
@@ -1137,6 +1144,23 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 			Cache:             cache,
 		},
 		folder.OrchestratorCallbacks[services.TransferRequest]{
+			OnSkippedEntry: func(entry localfs.FileEntry) {
+				n := skipCount.Add(1)
+				ts.GetQueue().IncrementBatchSkipped(enumID, 1)
+
+				msg := fmt.Sprintf("Skipped %s (isSymlink=%v isDir=%v; reparse point or unidentifiable target)",
+					entry.Path, entry.IsSymlink, entry.IsDir)
+				switch {
+				case n <= 10:
+					a.logWarn("folder-upload", msg)
+				case n == 11:
+					a.logWarn("folder-upload",
+						"Further skip messages suppressed in Activity Logs — see interlink.log for full list (best-effort).")
+					WriteToLogFile("WARN", "folder-upload", msg)
+				default:
+					WriteToLogFile("WARN", "folder-upload", msg)
+				}
+			},
 			OnFileDiscovered: func(snap folder.ProgressSnapshot) {
 				// Update discovered totals on every file so the polling path always has an accurate count.
 				ts.GetQueue().UpdateBatchDiscovered(enumID, snap.TotalFiles, snap.TotalBytes)
@@ -1195,6 +1219,33 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 					emitLog(events.InfoLevel, fmt.Sprintf("Created %d remote folders", r.FoldersCreated))
 				}
 				emitLog(events.InfoLevel, fmt.Sprintf("All files queued for upload (%d discovered)", r.DiscoveredFiles))
+
+				// Finish bookend: a.logInfo writes to BOTH Activity tab AND interlink.log,
+				// giving customer support an authoritative file-log record of every folder
+				// upload outcome (including skip-only and empty-folder cases).
+				skips := int(skipCount.Load())
+				switch {
+				case r.DiscoveredFiles > 0 && skips > 0:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — %d files queued, %d items skipped",
+						displayName, r.DiscoveredFiles, skips))
+				case r.DiscoveredFiles > 0:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — %d files queued",
+						displayName, r.DiscoveredFiles))
+				case skips > 0:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — 0 files queued, %d items skipped",
+						displayName, skips))
+					// Anchor the batch with a placeholder task so the Transfers row
+					// survives CleanupBatch and the user can see the transaction.
+					ts.RegisterSkipPlaceholderTask(enumID, displayName, skips)
+				default:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — empty folder, no files to upload",
+						displayName))
+				}
+
 				emitCompletion(r.DiscoveredDirs, r.DiscoveredFiles, r.DiscoveredBytes, errMsg)
 			},
 		},

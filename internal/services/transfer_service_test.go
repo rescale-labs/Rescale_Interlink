@@ -433,3 +433,40 @@ func TestWaitForBatch_FastFirstTask(t *testing.T) {
 		t.Fatal("WaitForBatch did not return after scan flip")
 	}
 }
+
+func TestRegisterSkipPlaceholderTask(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+
+	const batchID = "skip-batch"
+	ts.queue.PreRegisterBatch(batchID, "Public", "upload", SourceLabelFileBrowser)
+	ts.queue.IncrementBatchSkipped(batchID, 17)
+
+	ts.RegisterSkipPlaceholderTask(batchID, "Public", 17)
+
+	stats := ts.queue.GetAllBatchStats()
+	var found *transfer.BatchStats
+	for i := range stats {
+		if stats[i].BatchID == batchID {
+			found = &stats[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("placeholder-anchored batch not found")
+	}
+	if found.Total != 1 {
+		t.Errorf("Total = %d, want 1 (the placeholder)", found.Total)
+	}
+	if found.Completed != 1 {
+		t.Errorf("Completed = %d, want 1 (placeholder is created completed)", found.Completed)
+	}
+	if found.Skipped != 17 {
+		t.Errorf("Skipped = %d, want 17", found.Skipped)
+	}
+	if found.TotalBytes != 0 {
+		t.Errorf("TotalBytes = %d, want 0 (placeholder has size=0)", found.TotalBytes)
+	}
+
+	// Empty batchID is a no-op (defensive — caller should never pass it).
+	ts.RegisterSkipPlaceholderTask("", "Foo", 1)
+}

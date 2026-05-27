@@ -79,6 +79,7 @@ type Queue struct {
 	batchFileRateWindows  map[string]*speedWindow // 10s sliding window (files)
 	batchDiscoveredTotal  map[string]int         // total files discovered (may exceed registered tasks)
 	batchDiscoveredBytes  map[string]int64       // total bytes discovered
+	batchSkipped          map[string]int         // entries skipped by walker (junctions, unresolvable links)
 	batchPrevETA          map[string]float64     // smoothed ETA state
 	batchLastETA          map[string]float64     // last computed ETA (for polling DTO)
 	batchStartedAt        map[string]time.Time   // batch start time for elapsed display
@@ -100,6 +101,7 @@ func NewQueue(eventBus *events.EventBus) *Queue {
 		batchFileRateWindows:  make(map[string]*speedWindow),
 		batchDiscoveredTotal:  make(map[string]int),
 		batchDiscoveredBytes:  make(map[string]int64),
+		batchSkipped:          make(map[string]int),
 		batchPrevETA:          make(map[string]float64),
 		batchLastETA:          make(map[string]float64),
 		batchStartedAt:        make(map[string]time.Time),
@@ -483,14 +485,27 @@ func (q *Queue) ClearCompleted() {
 	defer q.mu.Unlock()
 
 	filtered := make([]*TransferTask, 0, len(q.tasks))
+	survivingBatches := make(map[string]struct{})
 	for _, task := range q.tasks {
 		if !task.IsTerminal() {
 			filtered = append(filtered, task)
+			if task.BatchID != "" {
+				survivingBatches[task.BatchID] = struct{}{}
+			}
 		} else {
 			delete(q.tasksByID, task.ID)
 		}
 	}
 	q.tasks = filtered
+
+	// Drop skip counts for batches with no surviving tasks. Without this,
+	// a placeholder-task batch that's been Cleared would leak its skip
+	// metadata in batchSkipped indefinitely.
+	for batchID := range q.batchSkipped {
+		if _, ok := survivingBatches[batchID]; !ok {
+			delete(q.batchSkipped, batchID)
+		}
+	}
 }
 
 // GetStats returns current queue statistics.
@@ -595,6 +610,7 @@ type BatchStats struct {
 	DiscoveredTotal int       // files discovered by scan (may > Total during queueing)
 	DiscoveredBytes int64     // bytes discovered by scan
 	StartedAt       time.Time // batch start time for elapsed display
+	Skipped         int       // entries the walker skipped (junctions, unresolvable links)
 }
 
 // GetAllBatchStats returns aggregate stats for all batches in a single pass.
@@ -663,6 +679,9 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		if t, exists := q.batchStartedAt[batchID]; exists {
 			bs.StartedAt = t
 		}
+		if sk, exists := q.batchSkipped[batchID]; exists {
+			bs.Skipped = sk
+		}
 		// Return last ticker-computed ETA so polling DTO doesn't zero it out
 		if eta, exists := q.batchLastETA[batchID]; exists {
 			bs.ETASeconds = eta
@@ -679,6 +698,9 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		if _, exists := batchMap[batchID]; !exists {
 			clone := *preBatch
 			clone.TotalKnown = !q.batchScanInProgress[batchID]
+			if sk, ok := q.batchSkipped[batchID]; ok {
+				clone.Skipped = sk
+			}
 			batchMap[batchID] = &clone
 			batchOrder = append(batchOrder, batchID)
 		}
@@ -951,6 +973,15 @@ func (q *Queue) UpdateBatchDiscovered(batchID string, totalFiles int, totalBytes
 	q.batchDiscoveredBytes[batchID] = totalBytes
 }
 
+// IncrementBatchSkipped increments the batch-level count of entries the walker
+// chose to skip (Windows junctions, unresolvable links). Surfaced through
+// BatchStats.Skipped so the UI can show "N items skipped" alongside completion.
+func (q *Queue) IncrementBatchSkipped(batchID string, n int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.batchSkipped[batchID] += n
+}
+
 // CleanupBatch removes all streaming batch metadata for deterministic cleanup.
 // Prevents long-session map growth from stale batch entries.
 func (q *Queue) CleanupBatch(batchID string) {
@@ -1131,6 +1162,7 @@ func (q *Queue) batchTickerLoop() {
 					ETASeconds:      bs.ETASeconds,
 					DiscoveredTotal: bs.DiscoveredTotal,
 					DiscoveredBytes: bs.DiscoveredBytes,
+					Skipped:         bs.Skipped,
 				})
 			}
 		}
@@ -1161,4 +1193,9 @@ func (q *Queue) cleanupBatchMetrics(batchID string) {
 	delete(q.batchPrevETA, batchID)
 	delete(q.batchLastETA, batchID)
 	delete(q.batchStartedAt, batchID)
+	// Note: batchSkipped is intentionally NOT cleared here. The skip count is
+	// upload-permanent metadata, not a live metric. It must remain readable as
+	// long as any task with this BatchID exists (e.g., the placeholder task in
+	// an all-skipped folder upload). ClearCompleted clears the count via
+	// removeBatchSkippedIfNoTasks, called when no tasks remain for this batch.
 }

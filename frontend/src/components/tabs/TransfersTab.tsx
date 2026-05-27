@@ -282,6 +282,12 @@ const BatchRow = memo(function BatchRow({
             </div>
             <div className="text-xs text-gray-500">
               {(() => {
+                // Skipped-only folder upload: anchored by a single placeholder task,
+                // total === 1 and completed === 1. Render a distinct summary so the
+                // user understands the upload produced no files.
+                if (batch.totalKnown && batch.skipped > 0 && batch.total <= 1) {
+                  return `0 files uploaded — ${formatNumber(batch.skipped)} item${batch.skipped === 1 ? '' : 's'} skipped (see Activity Logs)`
+                }
                 if (batch.totalKnown) {
                   // Use discoveredTotal as progress denominator when it's the better estimate.
                   // batch.total counts registered tasks (grows during streaming). discoveredTotal is the
@@ -306,6 +312,12 @@ const BatchRow = memo(function BatchRow({
                 }
                 return ''
               })()}
+              {/* Append skip count to the normal completion summary when files
+                  were also uploaded (mixed-outcome case). The skipped-only branch
+                  above handles the all-skipped case with its own message. */}
+              {batch.skipped > 0 && batch.total > 1 && (
+                <span> ({formatNumber(batch.skipped)} skipped)</span>
+              )}
             </div>
           </div>
         </div>

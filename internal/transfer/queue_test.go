@@ -1319,3 +1319,110 @@ func TestCancelBatch_NoFalseCancelledEvent(t *testing.T) {
 		// Good
 	}
 }
+
+func TestIncrementBatchSkipped(t *testing.T) {
+	queue := NewQueue(nil)
+	queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FB", "batch-skip", "Test")
+
+	queue.IncrementBatchSkipped("batch-skip", 3)
+	queue.IncrementBatchSkipped("batch-skip", 5)
+
+	stats := queue.GetAllBatchStats()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(stats))
+	}
+	if stats[0].Skipped != 8 {
+		t.Errorf("expected Skipped=8, got %d", stats[0].Skipped)
+	}
+}
+
+func TestIncrementBatchSkippedConcurrent(t *testing.T) {
+	queue := NewQueue(nil)
+	queue.TrackTransferWithBatch("a.txt", 100, TaskTypeUpload, "/a", "f", "FB", "batch-concurrent", "Test")
+
+	const goroutines = 50
+	const incrementsPerGoroutine = 100
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < incrementsPerGoroutine; j++ {
+				queue.IncrementBatchSkipped("batch-concurrent", 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	stats := queue.GetAllBatchStats()
+	if stats[0].Skipped != goroutines*incrementsPerGoroutine {
+		t.Errorf("expected Skipped=%d, got %d", goroutines*incrementsPerGoroutine, stats[0].Skipped)
+	}
+}
+
+func TestSkippedReportedForPreRegisteredBatch(t *testing.T) {
+	queue := NewQueue(nil)
+	queue.PreRegisterBatch("prereg-batch", "Empty Folder", "upload", "FB")
+	queue.IncrementBatchSkipped("prereg-batch", 4)
+
+	stats := queue.GetAllBatchStats()
+	var found *BatchStats
+	for i := range stats {
+		if stats[i].BatchID == "prereg-batch" {
+			found = &stats[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("pre-registered batch not found in stats")
+	}
+	if found.Skipped != 4 {
+		t.Errorf("expected Skipped=4 on pre-registered batch, got %d", found.Skipped)
+	}
+}
+
+func TestSkippedSurvivesCleanupBatch(t *testing.T) {
+	queue := NewQueue(nil)
+	// Simulate placeholder-task-anchored batch: register + complete a task,
+	// add skip count, then call CleanupBatch.
+	task := queue.TrackTransferWithBatch("(skipped: Public)", 0, TaskTypeUpload, "", "", "FB", "skip-only", "")
+	queue.Complete(task.ID)
+	queue.IncrementBatchSkipped("skip-only", 17)
+
+	queue.CleanupBatch("skip-only")
+
+	stats := queue.GetAllBatchStats()
+	var found *BatchStats
+	for i := range stats {
+		if stats[i].BatchID == "skip-only" {
+			found = &stats[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("placeholder-anchored batch should survive CleanupBatch (task still in queue)")
+	}
+	if found.Skipped != 17 {
+		t.Errorf("expected Skipped=17 to persist after CleanupBatch, got %d", found.Skipped)
+	}
+}
+
+func TestClearCompletedRemovesPlaceholderBatchSkip(t *testing.T) {
+	queue := NewQueue(nil)
+	task := queue.TrackTransferWithBatch("(skipped: X)", 0, TaskTypeUpload, "", "", "FB", "to-clear", "")
+	queue.Complete(task.ID)
+	queue.IncrementBatchSkipped("to-clear", 9)
+
+	// Verify present before clear.
+	if got := queue.GetAllBatchStats(); len(got) != 1 || got[0].Skipped != 9 {
+		t.Fatalf("pre-clear state unexpected: %+v", got)
+	}
+
+	queue.ClearCompleted()
+
+	// After clearing the only task in the batch, batchSkipped should also be dropped.
+	stats := queue.GetAllBatchStats()
+	for _, bs := range stats {
+		if bs.BatchID == "to-clear" {
+			t.Errorf("expected 'to-clear' batch to be gone after ClearCompleted, got %+v", bs)
+		}
+	}
+}
