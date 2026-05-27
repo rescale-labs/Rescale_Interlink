@@ -31,11 +31,19 @@ import { useTransferStore } from './stores/transferStore'
 import { useRunStore } from './stores/runStore'
 import { useErrorReportStore } from './stores/errorReportStore'
 
-// Tab navigation context for switching tabs from other components
+// Tab navigation context for switching tabs from other components.
+// activeTabName lets components like TransfersTab gate work (e.g. 500ms polling)
+// to "this tab is currently active" — necessary now that Tab.Panel uses
+// unmount={false}, which keeps every visited panel mounted for the rest of the
+// session so component state survives tab navigation.
 interface TabNavigationContextType {
   switchToTab: (tabName: string) => void;
+  activeTabName: string;
 }
-const TabNavigationContext = createContext<TabNavigationContextType>({ switchToTab: () => {} });
+const TabNavigationContext = createContext<TabNavigationContextType>({
+  switchToTab: () => {},
+  activeTabName: '',
+});
 export const useTabNavigation = () => useContext(TabNavigationContext);
 
 const tabs = [
@@ -166,8 +174,10 @@ function AppComponent() {
     }
   }
 
+  const activeTabName = tabs[selectedTabIndex]?.name ?? ''
+
   return (
-    <TabNavigationContext.Provider value={{ switchToTab }}>
+    <TabNavigationContext.Provider value={{ switchToTab, activeTabName }}>
       <ErrorReportModal />
       <div className="h-screen flex flex-col bg-slate-50">
         {/* Header */}
@@ -247,10 +257,14 @@ function AppComponent() {
           ))}
         </Tab.List>
 
-        {/* Tab panels — wrapped in ErrorBoundary to catch rendering errors */}
+        {/* Tab panels — wrapped in ErrorBoundary to catch rendering errors.
+            unmount={false} keeps every visited panel mounted so React useState
+            slots (e.g. FileBrowserTab's mergeConfirm/errorDialog) survive tab
+            navigation during a folder upload. Without this, switching to
+            Transfers mid-preflight would silently drop a pending merge dialog. */}
         <Tab.Panels className="flex-1 overflow-hidden">
           {tabs.map((tab) => (
-            <Tab.Panel key={tab.name} className="h-full">
+            <Tab.Panel key={tab.name} className="h-full" unmount={false}>
               <ErrorBoundary>
                 <tab.component />
               </ErrorBoundary>

@@ -99,7 +99,7 @@ interface TransferStore {
   batchTasks: Map<string, TransferTask[]>
   batchEpochs: Map<string, number> // Epoch counter per batch for stale-response protection
   batchStatusFilter: Map<string, string> // Per-batch status filter ("" = all, "active", "completed", "failed", "cancelled")
-  folderCheckStatus: { folderName: string } | null
+  folderCheckStatus: { folderName: string; message?: string } | null
   isLoading: boolean
   error: string | null
   isPolling: boolean
@@ -126,7 +126,7 @@ interface TransferStore {
   handleTransferEvent: (event: TransferEventDTO) => void
   handleEnumerationEvent: (event: EnumerationEventDTO) => void
   handleBatchProgressEvent: (event: BatchProgressEventDTO) => void
-  setFolderCheckStatus: (status: { folderName: string } | null) => void
+  setFolderCheckStatus: (status: { folderName: string; message?: string } | null) => void
 
   // App-level event listeners (always active, unlike polling which is tab-specific)
   setupEventListeners: () => () => void

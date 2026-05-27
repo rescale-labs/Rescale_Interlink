@@ -373,16 +373,24 @@ export function FileBrowserTab() {
     // Check if any folders already exist before uploading.
     // Uses batch check with shared cache (single API paginate instead of N calls).
     //
-    // Stay on File Browser through this preflight phase. Switching tabs here would
-    // unmount FileBrowserTab (Tab.Panel default), discarding the local mergeConfirm
-    // state slot that the merge dialog relies on, and silently dropping the upload
-    // if a destination conflict is detected.
+    // Tab.Panel is configured with unmount={false} (App.tsx) so component state
+    // survives tab navigation. If the user navigates to another tab during the
+    // preflight check and a modal needs to open (merge prompt or error dialog),
+    // we explicitly snap back to File Browser first — otherwise the modal would
+    // render inside a hidden panel and never reach the user.
     if (folders.length > 0) {
       const displayName = folders.length === 1
         ? folders[0].name
         : `${folders.length} folders`
-      useTransferStore.getState().setFolderCheckStatus({ folderName: displayName })
-      setStatus(`Checking destination for existing folder${folders.length === 1 ? '' : 's'}…`)
+      const startMs = Date.now()
+      const updateCheckStatus = () => {
+        const elapsed = Math.floor((Date.now() - startMs) / 1000)
+        const msg = `Checking destination — ${elapsed}s… (this may take some time)`
+        setStatus(msg)
+        useTransferStore.getState().setFolderCheckStatus({ folderName: displayName, message: msg })
+      }
+      updateCheckStatus() // immediate first tick at 0s
+      const intervalID = window.setInterval(updateCheckStatus, 1000)
 
       let existingFolders: string[] = []
       try {
@@ -392,6 +400,7 @@ export function FileBrowserTab() {
         const dtoError = checks.find(c => c?.error)
         if (dtoError) {
           useTransferStore.getState().setFolderCheckStatus(null)
+          switchToTab('File Browser')
           setErrorDialog({
             title: 'Upload Error',
             message: `Failed to check for existing folders: ${dtoError.error}`
@@ -403,17 +412,21 @@ export function FileBrowserTab() {
         existingFolders = folderNames.filter((_, i) => checks[i]?.exists)
       } catch (err) {
         useTransferStore.getState().setFolderCheckStatus(null)
+        switchToTab('File Browser')
         setErrorDialog({
           title: 'Upload Error',
           message: `Failed to check for existing folders: ${err instanceof Error ? err.message : String(err)}`
         })
         setStatus('')
         return
+      } finally {
+        clearInterval(intervalID)
       }
 
       // If any folders exist, show merge confirmation dialog
       if (existingFolders.length > 0) {
         useTransferStore.getState().setFolderCheckStatus(null)
+        switchToTab('File Browser')
         setMergeConfirm({
           existingFolders,
           uploadData: { files, folders, destFolderId, tags }
@@ -430,7 +443,7 @@ export function FileBrowserTab() {
 
     // No existing folders - proceed directly
     await proceedWithUpload(files, folders, destFolderId, tags)
-  }, [uploadConfirm, parsedUploadTags, proceedWithUpload])
+  }, [uploadConfirm, parsedUploadTags, proceedWithUpload, switchToTab])
 
   const confirmMerge = useCallback(async () => {
     if (!mergeConfirm) return
