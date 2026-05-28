@@ -22,9 +22,13 @@ DETECTED_GOARCH := $(shell go env GOARCH)
 # ldflags target the version package for consistency across all binaries
 LDFLAGS := -ldflags "-s -w -X github.com/rescale/rescale-int/internal/version.Version=$(VERSION) -X github.com/rescale/rescale-int/internal/version.BuildTime=$(BUILD_TIME)"
 
-# FIPS 140-3 compliance: Use Go's native FIPS crypto module
+# FIPS 140-3 compliance: Use Go's native FIPS crypto module.
+# 'certified' selects the latest Go Cryptographic Module version that has
+# obtained a CMVP validation certificate, which is the audit-grade choice
+# for FedRAMP. (The alternative 'latest' tracks the toolchain-bundled module
+# which may not yet be CMVP-validated.)
 # See: https://go.dev/doc/security/fips140
-GOFIPS := GOFIPS140=latest
+GOFIPS := GOFIPS140=certified
 FIPS_TAGS := fips
 FIPS_BUILD_TAGS := -tags $(FIPS_TAGS)
 FIPS_INTERNAL_BUILD_TAGS := -tags $(FIPS_TAGS),internal
@@ -339,7 +343,7 @@ check-version:
 help:
 	@echo "Rescale Interlink Build System (FIPS 140-3 Compliant)"
 	@echo ""
-	@echo "All builds use GOFIPS140=latest for FedRAMP/FIPS compliance."
+	@echo "All builds use GOFIPS140=certified for FedRAMP/FIPS compliance."
 	@echo "See: https://go.dev/doc/security/fips140"
 	@echo ""
 	@echo "Usage:"
