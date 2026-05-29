@@ -64,9 +64,9 @@ type App struct {
 
 	// State helper shared with Tray and CLI; owns the canonical (installation,
 	// per-user) state model plus the 10s transient-pending timeout.
-	stateMu     sync.Mutex
-	stateComp   *service.Computer
-	priorState  service.State
+	stateMu    sync.Mutex
+	stateComp  *service.Computer
+	priorState service.State
 }
 
 // ensureStateComputer lazily constructs the shared service.Computer. Called
@@ -84,6 +84,60 @@ func (a *App) ensureStateComputer() *service.Computer {
 // NewApp creates a new Wails application instance.
 func NewApp() *App {
 	return &App{}
+}
+
+func initWailsLogger(name string) {
+	wailsLogger = logging.NewLogger(name, nil)
+	if os.Getenv("RESCALE_DEBUG") != "" {
+		logging.SetGlobalLevel(zerolog.DebugLevel)
+		wailsLogger.Info().Msg("Debug logging enabled via RESCALE_DEBUG")
+	} else {
+		logging.SetGlobalLevel(zerolog.WarnLevel)
+	}
+}
+
+func newConfiguredApp(configFile string) (*App, error) {
+	cfg, err := loadConfiguration(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	engine, err := core.NewEngine(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create engine: %w", err)
+	}
+
+	app := NewApp()
+	app.engine = engine
+	app.config = cfg
+	return app, nil
+}
+
+func (a *App) startSharedBackend(ctx context.Context) {
+	a.ctx = ctx
+
+	if a.engine != nil {
+		a.reporter = reporting.NewReporter(a.engine.Events())
+		cloud.SetEventBus(a.engine.Events())
+		ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
+	}
+
+	if a.config != nil {
+		cloud.SetDetailedLogging(a.config.DetailedLogging)
+	}
+	config.RunStartupMigrations(wailsLogger, config.ScopeCurrentUser, nil)
+	a.autoPersistFromEnv()
+}
+
+func newEmbeddedApp() (*App, error) {
+	initWailsLogger("wails-embedded")
+	app, err := newConfiguredApp("")
+	if err != nil {
+		return nil, err
+	}
+	app.startSharedBackend(context.Background())
+	wailsLogger.Info().Msg("Embedded application started")
+	return app, nil
 }
 
 // Unified logging helper that logs to terminal, Activity Logs tab, and log file.
@@ -159,7 +213,7 @@ func (a *App) ClearCatalogCache() {
 // startup is called when the app starts. The context is saved
 // so we can call the Wails runtime methods.
 func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+	a.startSharedBackend(ctx)
 
 	// Initialize event bridge if engine exists
 	if a.engine != nil {
@@ -167,14 +221,6 @@ func (a *App) startup(ctx context.Context) {
 		if err := a.eventBridge.Start(); err != nil {
 			wailsLogger.Error().Err(err).Msg("Failed to start event bridge")
 		}
-
-		a.reporter = reporting.NewReporter(a.engine.Events())
-
-		// Set EventBus for timing infrastructure so timing logs appear in Activity tab
-		cloud.SetEventBus(a.engine.Events())
-
-		// Wire cross-process rate limit coordinator (lazy — only spawns when GetLimiter is called)
-		ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
 
 		// Route backend log.Printf to GUI Activity Logs via TeeWriter.
 		// This intercepts all stdlib log output and publishes to EventBus.
@@ -197,22 +243,8 @@ func (a *App) startup(ctx context.Context) {
 		})
 	}
 
-	// Initialize detailed logging from config
-	if a.config != nil {
-		cloud.SetDetailedLogging(a.config.DetailedLogging)
-	}
-
-	// Plan 2 path migrations (idempotent; current-user scope in GUI).
-	config.RunStartupMigrations(wailsLogger, config.ScopeCurrentUser, nil)
-
 	// Auto-launch tray companion if available (Windows only, no-op on other platforms)
 	go a.launchTrayIfNeeded()
-
-	// If an API key was resolved from the environment but no token file
-	// exists, persist it now so a later daemon/service handoff can read it.
-	// This closes the env-var→service gap that previously required an
-	// explicit Save click.
-	a.autoPersistFromEnv()
 
 	wailsLogger.Info().Msg("Wails application started")
 }
@@ -263,7 +295,7 @@ func (a *App) beforeClose(ctx context.Context) bool {
 
 // shutdown is called at application termination.
 func (a *App) shutdown(ctx context.Context) {
-	wailsLogger.Info().Msg("Wails application shutting down")
+	wailsLogger.Info().Msg("Interlink application shutting down")
 
 	if a.eventBridge != nil {
 		a.eventBridge.Stop()
@@ -289,16 +321,7 @@ func Run(args []string) error {
 	}
 	defer CloseFileLogger()
 
-	// Initialize Wails logger
-	wailsLogger = logging.NewLogger("wails", nil)
-
-	// Set log level based on RESCALE_DEBUG environment variable
-	if os.Getenv("RESCALE_DEBUG") != "" {
-		logging.SetGlobalLevel(zerolog.DebugLevel)
-		wailsLogger.Info().Msg("Debug logging enabled via RESCALE_DEBUG")
-	} else {
-		logging.SetGlobalLevel(zerolog.WarnLevel)
-	}
+	initWailsLogger("wails")
 
 	// Check for display on Linux
 	if runtime.GOOS == "linux" {
@@ -309,22 +332,10 @@ func Run(args []string) error {
 		}
 	}
 
-	// Load configuration
-	cfg, err := loadConfiguration("")
+	app, err := newConfiguredApp("")
 	if err != nil {
-		return fmt.Errorf("failed to load configuration: %w", err)
+		return err
 	}
-
-	// Create engine
-	engine, err := core.NewEngine(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create engine: %w", err)
-	}
-
-	// Create application
-	app := NewApp()
-	app.engine = engine
-	app.config = cfg
 
 	// Window title
 	windowTitle := fmt.Sprintf("Rescale Interlink %s", cli.Version)
