@@ -211,20 +211,27 @@ type RunFile struct {
 }
 
 // Automation represents a Rescale automation entity.
+// AutomationEnvVar is one configurable environment variable on an automation.
+// The API returns defaultValue as null for some entries, which decodes to "".
+type AutomationEnvVar struct {
+	Name         string `json:"name"`
+	DefaultValue string `json:"defaultValue"`
+}
+
 // Automations are pre-configured scripts that can be attached to jobs
 // to run before (pre) or after (post) job execution.
 type Automation struct {
-	ID                   string   `json:"id"`
-	Name                 string   `json:"name"`
-	ExecuteOn            string   `json:"executeOn"` // "pre" or "post"
-	ScriptName           string   `json:"scriptName"`
-	ExecutionFrequency   int      `json:"executionFrequency"`
-	EnvironmentVariables []string `json:"environmentVariables,omitempty"`
-	Description          string   `json:"description,omitempty"`
-	ThumbnailURL         string   `json:"thumbnailUrl,omitempty"`
-	OSFamily             string   `json:"osFamily,omitempty"`
-	AnalysisDependencies []string `json:"analysisDependencies,omitempty"`
-	Command              string   `json:"command,omitempty"`
+	ID                   string             `json:"id"`
+	Name                 string             `json:"name"`
+	ExecuteOn            string             `json:"executeOn"` // "pre" or "post"
+	ScriptName           string             `json:"scriptName"`
+	ExecutionFrequency   int                `json:"executionFrequency"`
+	EnvironmentVariables []AutomationEnvVar `json:"environmentVariables,omitempty"`
+	Description          string             `json:"description,omitempty"`
+	ThumbnailURL         string             `json:"thumbnailUrl,omitempty"`
+	OSFamily             string             `json:"osFamily,omitempty"`
+	AnalysisDependencies []string           `json:"analysisDependencies,omitempty"`
+	Command              string             `json:"command,omitempty"`
 }
 
 // JobAutomation represents an automation attached to a job (from API response).

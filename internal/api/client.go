@@ -575,6 +575,14 @@ func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*mode
 
 	if resp.StatusCode != nethttp.StatusCreated && resp.StatusCode != nethttp.StatusOK {
 		body := readResponseBody(resp.Body)
+		bodyLower := strings.ToLower(body)
+		if strings.Contains(bodyLower, "interactive") && strings.Contains(bodyLower, "flag must be present") {
+			return nil, fmt.Errorf("create job failed: status %d: %s\n\n"+
+				"Hint: this analysis requires the 'interactive' keyword at the end of its "+
+				"command (e.g. \"abaqus job=... double=both interactive\"). Add it to the "+
+				"command and resubmit. The Rescale platform lists each analysis's example commands.",
+				resp.StatusCode, body)
+		}
 		return nil, fmt.Errorf("create job failed: status %d: %s", resp.StatusCode, body)
 	}
 
@@ -1291,7 +1299,9 @@ func (c *Client) fetchFolderContentsPage(ctx context.Context, url string) (*Fold
 			name := getStringField(itemData, "name", "file")
 			symlinkID := ""
 			if itemType == "filesymlink" {
-				symlinkID = getStringField(entry, "id", "folderContents")
+				// Trash filesymlink entries carry only {type, item}; the id the
+				// bulk recover/delete API expects in filesymlink_ids is item.id.
+				symlinkID = id
 			}
 			size := int64(0)
 			if rawSize, ok := itemData["decryptedSize"]; ok {

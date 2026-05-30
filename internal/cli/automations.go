@@ -150,7 +150,11 @@ Examples:
 				fmt.Printf("  Command:     %s\n", automation.Command)
 			}
 			if len(automation.EnvironmentVariables) > 0 {
-				fmt.Printf("  Env Vars:    %s\n", strings.Join(automation.EnvironmentVariables, ", "))
+				names := make([]string, len(automation.EnvironmentVariables))
+				for i, ev := range automation.EnvironmentVariables {
+					names[i] = ev.Name
+				}
+				fmt.Printf("  Env Vars:    %s\n", strings.Join(names, ", "))
 			}
 
 			return nil

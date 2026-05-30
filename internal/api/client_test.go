@@ -185,16 +185,18 @@ func TestListTrashBinPage_ParsesFilesymlinkID(t *testing.T) {
 			t.Errorf("page_size = %q, want 50", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// Mirrors a real captured trash-bin response: filesymlink entries carry
+		// only {type, item} with no top-level id. The id used for recover/delete
+		// (SymlinkID) is item.id.
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"results": []map[string]interface{}{
 				{
-					"id":   "filesymlink-123",
 					"type": "filesymlink",
 					"item": map[string]interface{}{
-						"id":            "file-456",
+						"id":            "tqmdnn",
 						"name":          "result.dat",
 						"decryptedSize": "12345",
-						"dateCreated":   "2026-05-01T12:00:00Z",
+						"dateInserted":  "2026-05-01T12:00:00Z",
 					},
 				},
 				{
@@ -219,11 +221,11 @@ func TestListTrashBinPage_ParsesFilesymlinkID(t *testing.T) {
 	if len(contents.Files) != 1 {
 		t.Fatalf("len(Files) = %d, want 1", len(contents.Files))
 	}
-	if contents.Files[0].ID != "file-456" {
-		t.Errorf("Files[0].ID = %q, want file-456", contents.Files[0].ID)
+	if contents.Files[0].ID != "tqmdnn" {
+		t.Errorf("Files[0].ID = %q, want tqmdnn", contents.Files[0].ID)
 	}
-	if contents.Files[0].SymlinkID != "filesymlink-123" {
-		t.Errorf("Files[0].SymlinkID = %q, want filesymlink-123", contents.Files[0].SymlinkID)
+	if contents.Files[0].SymlinkID != "tqmdnn" {
+		t.Errorf("Files[0].SymlinkID = %q, want tqmdnn", contents.Files[0].SymlinkID)
 	}
 	if len(contents.Folders) != 1 || contents.Folders[0].ID != "folder-789" {
 		t.Fatalf("Folders = %#v, want folder-789", contents.Folders)
@@ -654,5 +656,44 @@ func TestNewClient_RejectsLocalhostURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid platform URL") {
 		t.Errorf("error = %q, want 'invalid platform URL'", err.Error())
+	}
+}
+
+func TestCreateJob_AppendsHintForInteractiveFlagError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"jobanalyses":[{"command":["the 'interactive' flag must be present"]}]}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.CreateJob(context.Background(), models.JobRequest{Name: "t"})
+	if err == nil {
+		t.Fatal("CreateJob() should return error on 400")
+	}
+	if !strings.Contains(err.Error(), "interactive' flag must be present") {
+		t.Errorf("error should preserve original body, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "Hint:") {
+		t.Errorf("error should append actionable hint, got %q", err.Error())
+	}
+}
+
+func TestCreateJob_NoHintForGenericError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"name":["This field is required."]}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.CreateJob(context.Background(), models.JobRequest{Name: "t"})
+	if err == nil {
+		t.Fatal("CreateJob() should return error on 400")
+	}
+	if strings.Contains(err.Error(), "Hint:") {
+		t.Errorf("generic error should not append interactive hint, got %q", err.Error())
 	}
 }
