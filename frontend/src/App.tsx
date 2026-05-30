@@ -31,7 +31,6 @@ import { useTransferStore } from './stores/transferStore'
 import { useRunStore } from './stores/runStore'
 import { useErrorReportStore } from './stores/errorReportStore'
 import { useRateLimitStore } from './stores/rateLimitStore'
-import RateLimitBanner from './components/RateLimitBanner'
 
 // Tab navigation context for switching tabs from other components.
 // activeTabName lets components like TransfersTab gate work (e.g. 500ms polling)
@@ -85,7 +84,7 @@ function AppComponent() {
 
   // App-level rate-limit banner listener — must be global so it shows
   // regardless of which tab the user is on during a throttled operation.
-  const { setupEventListeners: setupRateLimitListeners } = useRateLimitStore()
+  const { active: rateLimited, setupEventListeners: setupRateLimitListeners } = useRateLimitStore()
   useEffect(() => {
     const cleanup = setupRateLimitListeners()
     return cleanup
@@ -269,9 +268,6 @@ function AppComponent() {
           </div>
         </header>
 
-        {/* Global rate-limit banner — visible from any tab while throttled */}
-        <RateLimitBanner />
-
         {/* Main Content with Tabs */}
         <Tab.Group as="div" className="flex-1 flex overflow-hidden" selectedIndex={selectedTabIndex} onChange={setSelectedTabIndex}>
         {/* Sidebar with tabs */}
@@ -350,6 +346,14 @@ function AppComponent() {
                 {transferStats.active > 0 && `${transferStats.active} active`}
                 {transferStats.active > 0 && transferStats.queued > 0 && ', '}
                 {transferStats.queued > 0 && `${transferStats.queued} queued`}
+              </span>
+            )}
+            {rateLimited && (
+              <span
+                className="text-gray-400"
+                title="Interlink is pacing requests to stay within Rescale's API limits. This is normal and just means requests are being spaced out."
+              >
+                Pacing requests to stay within Rescale limits
               </span>
             )}
           </div>
