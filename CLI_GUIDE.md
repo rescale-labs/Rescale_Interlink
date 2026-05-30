@@ -865,6 +865,12 @@ rescale-int jobs submit --job-id <id>
 - `-m, --max-concurrent int` - Maximum concurrent file uploads
 - `--automation strings` - Automation ID(s) to attach (comma-separated or repeated)
 
+**Job tags:** Tags are applied to the created job from the `tags` column of a
+jobs CSV or the `#RESCALE_TAGS` directive of an SGE script. In both cases tags
+are **comma-separated** (e.g. `simulation, cfd, v2`); surrounding whitespace is
+trimmed. A space alone is not a separator — `cfd run` is a single tag named
+`cfd run`. Each tag is applied to the job individually after it is created.
+
 **Examples:**
 ```bash
 # Submit job from JSON spec

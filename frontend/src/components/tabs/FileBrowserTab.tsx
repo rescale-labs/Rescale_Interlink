@@ -875,7 +875,7 @@ export function FileBrowserTab() {
         onCancel={() => { setUploadConfirm(null); setUploadTagsInput('') }}
       >
         <div className="mb-4">
-          <label className="block text-xs font-medium text-gray-500 mb-1">Tags (optional)</label>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Tags (optional, comma-separated)</label>
           <input
             type="text"
             value={uploadTagsInput}
