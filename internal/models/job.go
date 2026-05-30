@@ -158,9 +158,8 @@ type JobStatusEntry struct {
 	StatusReason string `json:"statusReason,omitempty"`
 }
 
-// JobFile represents an output file from a job
-// 2025-11-20: Enhanced to include full metadata from v2 endpoint
-// This allows downloading without separate GetFileInfo API call
+// JobFile represents an output file from a job. It carries full metadata from
+// the v2 endpoint so downloads need no separate GetFileInfo call.
 type JobFile struct {
 	ID                   string              `json:"id"`
 	Name                 string              `json:"name"`
@@ -210,7 +209,6 @@ type RunFile struct {
 	RelativePath string `json:"relativePath,omitempty"`
 }
 
-// Automation represents a Rescale automation entity.
 // AutomationEnvVar is one configurable environment variable on an automation.
 // The API returns defaultValue as null for some entries, which decodes to "".
 type AutomationEnvVar struct {

@@ -463,7 +463,7 @@ func (ts *TransferService) RegisterSkipPlaceholderTask(batchID, displayName stri
 		"",
 		SourceLabelFileBrowser,
 		batchID,
-		"",
+		displayName,
 	)
 	ts.queue.Complete(task.ID)
 }

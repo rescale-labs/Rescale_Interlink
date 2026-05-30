@@ -30,6 +30,8 @@ import { useLogStore } from './stores/logStore'
 import { useTransferStore } from './stores/transferStore'
 import { useRunStore } from './stores/runStore'
 import { useErrorReportStore } from './stores/errorReportStore'
+import { useRateLimitStore } from './stores/rateLimitStore'
+import RateLimitBanner from './components/RateLimitBanner'
 
 // Tab navigation context for switching tabs from other components.
 // activeTabName lets components like TransfersTab gate work (e.g. 500ms polling)
@@ -80,6 +82,14 @@ function AppComponent() {
     const cleanup = setupEventListeners()
     return cleanup
   }, [setupEventListeners])
+
+  // App-level rate-limit banner listener — must be global so it shows
+  // regardless of which tab the user is on during a throttled operation.
+  const { setupEventListeners: setupRateLimitListeners } = useRateLimitStore()
+  useEffect(() => {
+    const cleanup = setupRateLimitListeners()
+    return cleanup
+  }, [setupRateLimitListeners])
 
   // App-level listener — persists across tab navigation
   // (enumeration events would be lost if set up inside TransfersTab only)
@@ -232,6 +242,9 @@ function AppComponent() {
             )}
           </div>
         </header>
+
+        {/* Global rate-limit banner — visible from any tab while throttled */}
+        <RateLimitBanner />
 
         {/* Main Content with Tabs */}
         <Tab.Group as="div" className="flex-1 flex overflow-hidden" selectedIndex={selectedTabIndex} onChange={setSelectedTabIndex}>

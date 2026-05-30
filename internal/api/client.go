@@ -1046,7 +1046,8 @@ type FileInfo struct {
 	DecryptedSize int64
 	DateUploaded  time.Time
 
-	// SymlinkID is the top-level filesymlink id from trash listings (entry.id).
+	// SymlinkID is the filesymlink id from trash listings, taken from item.id.
+	// It is the value the bulk recover/delete API expects in filesymlink_ids.
 	// Empty for non-trash listings.
 	SymlinkID string
 
@@ -1362,8 +1363,8 @@ func (c *Client) fetchFolderContentsPage(ctx context.Context, url string) (*Fold
 }
 
 // ListTrashBinPage fetches a page of the user's trash bin.
-// Trash contains both files (identified by entry.id / SymlinkID) and
-// folder-like items (job outputs, identified by item.id / FolderInfo.ID).
+// Trash contains both files (filesymlink entries; SymlinkID is taken from item.id)
+// and folder-like items (job outputs, identified by item.id / FolderInfo.ID).
 // Pass pageURL="" for the first page; use NextURL from the previous response for subsequent pages.
 func (c *Client) ListTrashBinPage(ctx context.Context, pageURL string, pageSize int) (*FolderContents, error) {
 	url := pageURL

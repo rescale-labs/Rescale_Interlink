@@ -466,6 +466,27 @@ func TestRegisterSkipPlaceholderTask(t *testing.T) {
 	if found.TotalBytes != 0 {
 		t.Errorf("TotalBytes = %d, want 0 (placeholder has size=0)", found.TotalBytes)
 	}
+	if found.BatchLabel != "Public" {
+		t.Errorf("BatchLabel = %q, want \"Public\"", found.BatchLabel)
+	}
+
+	// The label must survive cleanup of the pre-registered metadata: after
+	// CleanupBatch removes the pre-registered entry, the row is derived solely
+	// from the placeholder task, which must carry the label itself.
+	ts.queue.CleanupBatch(batchID)
+	stats = ts.queue.GetAllBatchStats()
+	found = nil
+	for i := range stats {
+		if stats[i].BatchID == batchID {
+			found = &stats[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("batch row vanished after CleanupBatch — placeholder task should anchor it")
+	}
+	if found.BatchLabel != "Public" {
+		t.Errorf("after cleanup, BatchLabel = %q, want \"Public\" (label must live on the placeholder task)", found.BatchLabel)
+	}
 
 	// Empty batchID is a no-op (defensive — caller should never pass it).
 	ts.RegisterSkipPlaceholderTask("", "Foo", 1)
