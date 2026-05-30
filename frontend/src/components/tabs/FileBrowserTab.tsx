@@ -730,6 +730,13 @@ export function FileBrowserTab() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Status bar (above the panes; only shown when there's a message) */}
+      {status && (
+        <div className="px-3 py-1 text-sm text-gray-600 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+          {status}
+        </div>
+      )}
+
       {/* Two-pane layout */}
       <div
         id="file-browser-container"
@@ -743,7 +750,7 @@ export function FileBrowserTab() {
         >
           {/* Header */}
           <div className="flex items-center justify-between px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-            <span className="font-medium text-sm">Local Files</span>
+            <span className="font-bold text-sm">Local Files</span>
             <button
               onClick={handleUpload}
               disabled={!uploadState.allowed || isUploading}
@@ -779,7 +786,7 @@ export function FileBrowserTab() {
         >
           {/* Header */}
           <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 min-w-0">
-            <span className="font-medium text-sm flex-shrink-0">Rescale Files</span>
+            <span className="font-bold text-sm flex-shrink-0">Rescale Files</span>
             <div className="flex items-center justify-end gap-2 min-w-0">
               {isTrashMode ? (
                 <>
@@ -851,11 +858,6 @@ export function FileBrowserTab() {
             <RemoteBrowser />
           </div>
         </div>
-      </div>
-
-      {/* Status bar */}
-      <div className="px-3 py-1 text-sm text-gray-600 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-        {status}
       </div>
 
       {/* Confirmation dialogs */}
