@@ -436,21 +436,25 @@ rescale-int files list --include "*.csv" --exclude "*backup*"
 ```
 
 #### files delete
-Delete files. IDs are passed via repeated `-i/--fileid` flags (not positional arguments).
+Move files to the Trash (recoverable) or, with `--permanent`, delete them irreversibly. IDs are passed via repeated `-i/--fileid` flags (not positional arguments). By default files go to Trash, matching the web UI; recover them from the GUI Trash view.
 
 ```bash
-rescale-int files delete -i <file-id> [-i <file-id>...] [-y]
+rescale-int files delete -i <file-id> [-i <file-id>...] [-y] [--permanent]
 ```
 
 **Flags:**
 - `-i, --fileid strings` - File ID(s) to delete (repeat the flag for multiple files)
 - `-y, --confirm` - Skip confirmation prompt
+- `--permanent` - Permanently delete instead of moving to Trash (irreversible)
 
 **Example:**
 ```bash
-rescale-int files delete -i abc123 -i def456
+rescale-int files delete -i abc123 -i def456            # move to Trash (recoverable)
+rescale-int files delete -i abc123 --permanent          # permanent delete
 rescale-int files delete -i abc123 --confirm
 ```
+
+Note: moving to Trash looks up each file's parent folder automatically. If a file cannot be located under your library (e.g. it lives in a job folder), use `--permanent` to delete it by ID.
 
 #### files tags
 
@@ -629,19 +633,21 @@ rescale-int folders download-dir abc123 --continue-on-error --merge
 ```
 
 #### folders delete
-Delete a folder. The folder ID is supplied via `--folder-id` (not a positional argument).
+Move a folder to the Trash (recoverable) or, with `--permanent`, delete it irreversibly. The folder ID is supplied via `--folder-id` (not a positional argument). By default the folder goes to Trash, matching the web UI.
 
 ```bash
-rescale-int folders delete --folder-id <folder-id> [--confirm]
+rescale-int folders delete --folder-id <folder-id> [--confirm] [--permanent]
 ```
 
 **Flags:**
 - `--folder-id string` - Folder ID to delete (required)
 - `--confirm` - Skip confirmation prompt
+- `--permanent` - Permanently delete instead of moving to Trash (irreversible)
 
 **Example:**
 ```bash
-rescale-int folders delete --folder-id abc123
+rescale-int folders delete --folder-id abc123              # move to Trash (recoverable)
+rescale-int folders delete --folder-id abc123 --permanent  # permanent delete
 rescale-int folders delete --folder-id abc123 --confirm
 ```
 

@@ -66,8 +66,8 @@ export function CreateRemoteFolder(arg1, arg2) {
   return window['go']['wailsapp']['App']['CreateRemoteFolder'](arg1, arg2);
 }
 
-export function DeleteRemoteItems(arg1) {
-  return window['go']['wailsapp']['App']['DeleteRemoteItems'](arg1);
+export function DeleteRemoteItems(arg1, arg2) {
+  return window['go']['wailsapp']['App']['DeleteRemoteItems'](arg1, arg2);
 }
 
 export function DeleteTemplate(arg1) {

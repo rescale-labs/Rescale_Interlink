@@ -508,6 +508,66 @@ func (c *Client) GetRootFolders(ctx context.Context) (*models.RootFolders, error
 	return &folders, nil
 }
 
+// FindItemParentFolder locates the parent folder of a file or folder by walking
+// the user's library tree (breadth-first from MyLibrary). It is used by the CLI
+// archive (move-to-trash) path, where only a bare item ID is supplied but the
+// archive endpoint requires the parent folder ID.
+//
+// isFolder selects whether to match against folders or files at each level.
+// Returns the parent folder ID, or an error if the item is not found anywhere
+// under the library (e.g. it lives under MyJobs, or the ID is wrong). Callers
+// should surface that error rather than guessing a parent.
+func (c *Client) FindItemParentFolder(ctx context.Context, itemID string, isFolder bool) (string, error) {
+	if itemID == "" {
+		return "", fmt.Errorf("item ID is required")
+	}
+
+	roots, err := c.GetRootFolders(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve library root: %w", err)
+	}
+
+	// BFS over the library folder tree.
+	queue := []string{roots.MyLibrary}
+	visited := map[string]bool{}
+	for len(queue) > 0 {
+		folderID := queue[0]
+		queue = queue[1:]
+		if folderID == "" || visited[folderID] {
+			continue
+		}
+		visited[folderID] = true
+
+		contents, err := c.ListFolderContentsAll(ctx, folderID)
+		if err != nil {
+			return "", fmt.Errorf("failed to list folder %s: %w", folderID, err)
+		}
+
+		if isFolder {
+			for _, f := range contents.Folders {
+				if f.ID == itemID {
+					return folderID, nil
+				}
+			}
+		} else {
+			for _, f := range contents.Files {
+				if f.ID == itemID {
+					return folderID, nil
+				}
+			}
+		}
+
+		// Descend into subfolders.
+		for _, sub := range contents.Folders {
+			if !visited[sub.ID] {
+				queue = append(queue, sub.ID)
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not locate item %s under the library — it may be in a job folder or the ID is incorrect", itemID)
+}
+
 func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequest) (*models.CloudFile, error) {
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/files/", fileReq)
 	if err != nil {
@@ -1386,6 +1446,48 @@ func (c *Client) ListTrashBinPage(ctx context.Context, pageURL string, pageSize 
 	}
 
 	return c.fetchFolderContentsPage(ctx, url)
+}
+
+// ArchiveContents moves files and/or folders to the user's Trash (soft delete),
+// matching the web UI's delete behavior. This is distinct from DeleteFile/
+// DeleteFolder, which permanently delete.
+//
+// The endpoint is folder-scoped: folderID must be the parent folder the items
+// currently live in, and the IDs are the items' library IDs (NOT trash symlink
+// IDs). Passing the wrong parent returns HTTP 400. Recovering a trashed item
+// uses the separate trash symlink ID via PostTrashBinAction.
+func (c *Client) ArchiveContents(ctx context.Context, folderID string, fileIDs, folderIDs []string) error {
+	if folderID == "" {
+		return fmt.Errorf("archive requires a parent folder ID")
+	}
+
+	// Ensure JSON encodes empty lists as [] rather than null.
+	if fileIDs == nil {
+		fileIDs = []string{}
+	}
+	if folderIDs == nil {
+		folderIDs = []string{}
+	}
+
+	body := map[string]interface{}{
+		"fileIds":   fileIDs,
+		"folderIds": folderIDs,
+	}
+
+	url := fmt.Sprintf("/api/v3/folders/%s/contents/archive/", folderID)
+	resp, err := c.doRequest(ctx, "POST", url, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusCreated && resp.StatusCode != nethttp.StatusOK &&
+		resp.StatusCode != nethttp.StatusAccepted && resp.StatusCode != nethttp.StatusNoContent {
+		respBody := readResponseBody(resp.Body)
+		return fmt.Errorf("archive (move to trash) failed with status %d: %s", resp.StatusCode, respBody)
+	}
+
+	return nil
 }
 
 // PostTrashBinAction POSTs a bulk recover or permanent-delete to the trash-bin endpoint.

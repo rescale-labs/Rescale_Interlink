@@ -658,19 +658,19 @@ export function FileBrowserTab() {
 
     setDeleteConfirm(null)
     setIsDeleting(true)
-    setStatus(`Deleting ${deleteConfirm.length} item(s)...`)
+    setStatus(`Moving ${deleteConfirm.length} item(s) to Trash...`)
 
     try {
       const result = await deleteRemoteItems(deleteConfirm)
 
       if (result.failed > 0) {
-        setStatus(`Deleted ${result.deleted} item(s), ${result.failed} failed`)
+        setStatus(`Moved ${result.deleted} item(s) to Trash, ${result.failed} failed`)
       } else {
-        setStatus(`Deleted ${result.deleted} item(s)`)
+        setStatus(`Moved ${result.deleted} item(s) to Trash`)
       }
     } catch (error) {
-      console.error('Delete failed:', error)
-      setStatus(`Delete failed: ${error instanceof Error ? error.message : String(error)}`)
+      console.error('Move to Trash failed:', error)
+      setStatus(`Move to Trash failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setIsDeleting(false)
     }
@@ -838,7 +838,7 @@ export function FileBrowserTab() {
                   <button
                     onClick={handleDelete}
                     disabled={remoteSelectedCount === 0 || isDeleting}
-                    title="Delete selected items from Rescale"
+                    title="Move selected items to Trash (recoverable)"
                     className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[8rem] ${
                       remoteSelectedCount > 0 && !isDeleting
                         ? 'bg-red-500 text-white hover:bg-red-600'
@@ -911,10 +911,9 @@ export function FileBrowserTab() {
 
       <ConfirmDialog
         isOpen={deleteConfirm !== null}
-        title="Confirm Delete"
-        message={`Delete ${deleteConfirm?.length ?? 0} item(s) from Rescale?\n\nThis cannot be undone.`}
-        confirmText="Delete"
-        isDanger
+        title="Move to Trash"
+        message={`Move ${deleteConfirm?.length ?? 0} item(s) to Trash?\n\nYou can recover them from the Trash view.`}
+        confirmText="Move to Trash"
         onConfirm={confirmDelete}
         onCancel={() => setDeleteConfirm(null)}
       />

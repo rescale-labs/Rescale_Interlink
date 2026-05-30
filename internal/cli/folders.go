@@ -599,16 +599,22 @@ Examples:
 func newFoldersDeleteCmd() *cobra.Command {
 	var folderID string
 	var confirm bool
+	var permanent bool
 
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete a folder",
-		Long: `Delete a folder and optionally its contents.
+		Short: "Move a folder to Trash (or permanently delete with --permanent)",
+		Long: `Move a folder to the Rescale Trash, where it can be recovered.
 
-WARNING: This operation cannot be undone!
+By default the folder is moved to Trash (recoverable). Use --permanent to
+delete it immediately and irreversibly.
 
 Example:
-  rescale-int folders delete --folder-id XxYyZz`,
+  # Move a folder to Trash (recoverable)
+  rescale-int folders delete --folder-id XxYyZz
+
+  # Permanently delete (cannot be undone)
+  rescale-int folders delete --folder-id XxYyZz --permanent`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
@@ -618,19 +624,20 @@ Example:
 
 			// Confirmation prompt
 			if !confirm {
-				fmt.Printf("You are about to delete folder %s. This cannot be undone.\n", folderID)
+				if permanent {
+					fmt.Printf("You are about to PERMANENTLY delete folder %s. This cannot be undone.\n", folderID)
+				} else {
+					fmt.Printf("You are about to move folder %s to Trash (recoverable).\n", folderID)
+				}
 				fmt.Print("Are you sure? (yes/no): ")
 				var response string
 				fmt.Scanln(&response)
 				if response != "yes" {
-					fmt.Println("Deletion cancelled")
+					fmt.Println("Cancelled")
 					return nil
 				}
 			}
 
-			logger.Info().Str("folder_id", folderID).Msg("Deleting folder")
-
-			// Get API client
 			apiClient, err := getAPIClient()
 			if err != nil {
 				return err
@@ -638,13 +645,25 @@ Example:
 
 			ctx := GetContext()
 
-			// Delete folder
-			if err := apiClient.DeleteFolder(ctx, folderID); err != nil {
-				return fmt.Errorf("failed to delete folder: %w", err)
+			if permanent {
+				logger.Info().Str("folder_id", folderID).Msg("Permanently deleting folder")
+				if err := apiClient.DeleteFolder(ctx, folderID); err != nil {
+					return fmt.Errorf("failed to delete folder: %w", err)
+				}
+				fmt.Printf("✓ Folder permanently deleted\n")
+				return nil
 			}
 
-			logger.Info().Str("folder_id", folderID).Msg("Folder deleted")
-			fmt.Printf("✓ Folder deleted successfully\n")
+			// Move to Trash: resolve the folder's parent (archive is folder-scoped).
+			logger.Info().Str("folder_id", folderID).Msg("Moving folder to Trash")
+			parentFolderID, err := apiClient.FindItemParentFolder(ctx, folderID, true)
+			if err != nil {
+				return fmt.Errorf("failed to locate parent of folder %s: %w (use --permanent to delete by ID without trashing)", folderID, err)
+			}
+			if err := apiClient.ArchiveContents(ctx, parentFolderID, nil, []string{folderID}); err != nil {
+				return fmt.Errorf("failed to move folder to Trash: %w", err)
+			}
+			fmt.Printf("✓ Folder moved to Trash (recover it from the Trash view)\n")
 
 			return nil
 		},
@@ -652,6 +671,7 @@ Example:
 
 	cmd.Flags().StringVar(&folderID, "folder-id", "", "Folder ID to delete (required)")
 	cmd.Flags().BoolVar(&confirm, "confirm", false, "Skip confirmation prompt")
+	cmd.Flags().BoolVar(&permanent, "permanent", false, "Permanently delete instead of moving to Trash (irreversible)")
 
 	cmd.MarkFlagRequired("folder-id")
 

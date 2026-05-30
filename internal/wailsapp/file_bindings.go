@@ -434,8 +434,12 @@ func (a *App) CreateRemoteFolder(name string, parentID string) (string, error) {
 	return fs.CreateFolder(ctx, name, parentID)
 }
 
-// DeleteRemoteItems deletes multiple files and/or folders.
-func (a *App) DeleteRemoteItems(items []FileItemDTO) DeleteResultDTO {
+// DeleteRemoteItems moves multiple files and/or folders to the user's Trash
+// (soft delete), matching the web UI. parentFolderID is the folder currently
+// being viewed (the items' parent), required by the folder-scoped archive
+// endpoint. Items can be recovered from the Trash view. Permanent deletion is
+// handled separately by the Trash view's purge action.
+func (a *App) DeleteRemoteItems(parentFolderID string, items []FileItemDTO) DeleteResultDTO {
 	if a.engine == nil {
 		return DeleteResultDTO{Error: ErrNoEngine.Error(), Failed: len(items)}
 	}
@@ -456,10 +460,10 @@ func (a *App) DeleteRemoteItems(items []FileItemDTO) DeleteResultDTO {
 	}
 
 	ctx := context.Background()
-	deleted, failed, err := fs.DeleteItems(ctx, serviceItems)
+	archived, failed, err := fs.ArchiveItems(ctx, parentFolderID, serviceItems)
 
 	result := DeleteResultDTO{
-		Deleted: deleted,
+		Deleted: archived,
 		Failed:  failed,
 	}
 	if err != nil {

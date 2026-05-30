@@ -852,7 +852,10 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
   deleteRemoteItems: async (items: wailsapp.FileItemDTO[]) => {
     try {
-      const result = await App.DeleteRemoteItems(items)
+      // Move-to-Trash is folder-scoped: pass the currently-viewed folder as the
+      // items' parent. The archive endpoint rejects a mismatched parent.
+      const parentFolderId = get().remote.currentFolderId
+      const result = await App.DeleteRemoteItems(parentFolderId, items)
       if (result.deleted > 0) {
         // Refresh to show updated list
         get().refreshRemote()

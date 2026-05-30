@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -695,5 +696,61 @@ func TestCreateJob_NoHintForGenericError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "Hint:") {
 		t.Errorf("generic error should not append interactive hint, got %q", err.Error())
+	}
+}
+
+func TestArchiveContents_PostsCorrectURLAndBody(t *testing.T) {
+	var gotPath string
+	var gotBody map[string][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	err := client.ArchiveContents(context.Background(), "QWGjp", []string{"f1", "f2"}, []string{"d1"})
+	if err != nil {
+		t.Fatalf("ArchiveContents() error = %v", err)
+	}
+	if gotPath != "/api/v3/folders/QWGjp/contents/archive/" {
+		t.Errorf("path = %q, want folder-scoped archive endpoint", gotPath)
+	}
+	if len(gotBody["fileIds"]) != 2 || gotBody["fileIds"][0] != "f1" {
+		t.Errorf("fileIds = %v, want [f1 f2]", gotBody["fileIds"])
+	}
+	if len(gotBody["folderIds"]) != 1 || gotBody["folderIds"][0] != "d1" {
+		t.Errorf("folderIds = %v, want [d1]", gotBody["folderIds"])
+	}
+}
+
+func TestArchiveContents_RequiresParentFolder(t *testing.T) {
+	client := newTestClient(t, "http://example.invalid")
+	if err := client.ArchiveContents(context.Background(), "", []string{"f1"}, nil); err == nil {
+		t.Fatal("ArchiveContents() should error when folderID is empty")
+	}
+}
+
+func TestArchiveContents_EncodesEmptyListsNotNull(t *testing.T) {
+	var raw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw = string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	if err := client.ArchiveContents(context.Background(), "QWGjp", []string{"f1"}, nil); err != nil {
+		t.Fatalf("ArchiveContents() error = %v", err)
+	}
+	if strings.Contains(raw, "null") {
+		t.Errorf("body should encode empty lists as [], not null: %s", raw)
 	}
 }

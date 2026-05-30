@@ -34,7 +34,7 @@ export function ClearSavedAPIKey():Promise<wailsapp.ClearSavedAPIKeyResultDTO>;
 
 export function CreateRemoteFolder(arg1:string,arg2:string):Promise<string>;
 
-export function DeleteRemoteItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
+export function DeleteRemoteItems(arg1:string,arg2:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
 
 export function DeleteTemplate(arg1:string):Promise<void>;
 

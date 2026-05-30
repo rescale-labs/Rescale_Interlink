@@ -229,6 +229,44 @@ func (fs *FileService) DeleteItems(ctx context.Context, items []FileItem) (delet
 	return deleted, failed, nil
 }
 
+// ArchiveItems moves files and/or folders to the user's Trash (soft delete),
+// matching the web UI's delete behavior. parentFolderID is the folder the items
+// currently live in (the archive endpoint is folder-scoped and rejects a
+// mismatched parent). Items can be recovered from the Trash view afterward.
+//
+// This is the default delete path for user-initiated deletes. Permanent
+// deletion uses DeleteItems.
+func (fs *FileService) ArchiveItems(ctx context.Context, parentFolderID string, items []FileItem) (archived int, failed int, err error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return 0, len(items), fmt.Errorf("API client not configured")
+	}
+	if parentFolderID == "" {
+		return 0, len(items), fmt.Errorf("a parent folder is required to move items to Trash")
+	}
+
+	fileIDs := make([]string, 0, len(items))
+	folderIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.IsFolder {
+			folderIDs = append(folderIDs, item.ID)
+		} else {
+			fileIDs = append(fileIDs, item.ID)
+		}
+	}
+
+	if err := apiClient.ArchiveContents(ctx, parentFolderID, fileIDs, folderIDs); err != nil {
+		fs.logger.Error().Err(err).Str("parentFolder", parentFolderID).Int("count", len(items)).Msg("Move to Trash failed")
+		// The archive endpoint is all-or-nothing, so on error none were archived.
+		return 0, len(items), err
+	}
+
+	return len(items), 0, nil
+}
+
 // PrepareUploadFolder creates the remote folder structure for a local folder.
 // Returns the mapping of local directories to remote folder IDs and the list of files to upload.
 func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string, remoteFolderID string) (*UploadFolderResult, error) {

@@ -428,22 +428,27 @@ func matchesFileFilter(filename string, config filter.Config) bool {
 func newFilesDeleteCmd() *cobra.Command {
 	var fileIDs []string
 	var confirm bool
+	var permanent bool
 
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete files from Rescale",
-		Long: `Delete one or more files from Rescale cloud storage.
+		Short: "Move files to Trash (or permanently delete with --permanent)",
+		Long: `Move one or more files to the Rescale Trash, where they can be recovered.
 
-WARNING: This operation cannot be undone!
+By default files are moved to Trash (recoverable). Use --permanent to delete
+them immediately and irreversibly.
 
 Example:
-  # Delete single file (will prompt for confirmation)
+  # Move a file to Trash (recoverable)
   rescale-int files delete --fileid XxYyZz
 
-  # Delete multiple files
+  # Move multiple files to Trash
   rescale-int files delete --fileid ABC123 --fileid DEF456
 
-  # Delete without confirmation prompt
+  # Permanently delete (cannot be undone)
+  rescale-int files delete --fileid XxYyZz --permanent
+
+  # Skip the confirmation prompt
   rescale-int files delete --fileid XxYyZz --confirm`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
@@ -454,21 +459,20 @@ Example:
 
 			// Confirmation prompt if not using --confirm flag
 			if !confirm {
-				fmt.Printf("You are about to delete %d file(s). This cannot be undone.\n", len(fileIDs))
+				if permanent {
+					fmt.Printf("You are about to PERMANENTLY delete %d file(s). This cannot be undone.\n", len(fileIDs))
+				} else {
+					fmt.Printf("You are about to move %d file(s) to Trash (recoverable).\n", len(fileIDs))
+				}
 				fmt.Print("Are you sure? (yes/no): ")
 				var response string
 				fmt.Scanln(&response)
 				if response != "yes" {
-					fmt.Println("Deletion cancelled")
+					fmt.Println("Cancelled")
 					return nil
 				}
 			}
 
-			logger.Info().
-				Int("count", len(fileIDs)).
-				Msg("Deleting files")
-
-			// Get API client
 			apiClient, err := getAPIClient()
 			if err != nil {
 				return err
@@ -476,20 +480,37 @@ Example:
 
 			ctx := GetContext()
 
-			// Delete each file
 			for i, fileID := range fileIDs {
-				fmt.Printf("[%d/%d] Deleting file %s...\n", i+1, len(fileIDs), fileID)
-
-				if err := apiClient.DeleteFile(ctx, fileID); err != nil {
-					logger.Error().Str("file_id", fileID).Err(err).Msg("Failed to delete file")
-					return fmt.Errorf("failed to delete %s: %w", fileID, err)
+				if permanent {
+					fmt.Printf("[%d/%d] Permanently deleting file %s...\n", i+1, len(fileIDs), fileID)
+					if err := apiClient.DeleteFile(ctx, fileID); err != nil {
+						logger.Error().Str("file_id", fileID).Err(err).Msg("Failed to delete file")
+						return fmt.Errorf("failed to delete %s: %w", fileID, err)
+					}
+					fmt.Printf("✓ Permanently deleted\n")
+					continue
 				}
 
-				logger.Info().Str("file_id", fileID).Msg("File deleted")
-				fmt.Printf("✓ Deleted successfully\n")
+				// Move to Trash: the archive endpoint is folder-scoped, so resolve
+				// the file's parent folder first.
+				fmt.Printf("[%d/%d] Moving file %s to Trash...\n", i+1, len(fileIDs), fileID)
+				parentFolderID, err := apiClient.FindItemParentFolder(ctx, fileID, false)
+				if err != nil {
+					logger.Error().Str("file_id", fileID).Err(err).Msg("Failed to locate file's folder")
+					return fmt.Errorf("failed to locate folder for %s: %w (use --permanent to delete by ID without trashing)", fileID, err)
+				}
+				if err := apiClient.ArchiveContents(ctx, parentFolderID, []string{fileID}, nil); err != nil {
+					logger.Error().Str("file_id", fileID).Err(err).Msg("Failed to move file to Trash")
+					return fmt.Errorf("failed to move %s to Trash: %w", fileID, err)
+				}
+				fmt.Printf("✓ Moved to Trash\n")
 			}
 
-			fmt.Printf("\n✓ Successfully deleted %d file(s)\n", len(fileIDs))
+			if permanent {
+				fmt.Printf("\n✓ Permanently deleted %d file(s)\n", len(fileIDs))
+			} else {
+				fmt.Printf("\n✓ Moved %d file(s) to Trash (recover them from the Trash view)\n", len(fileIDs))
+			}
 
 			return nil
 		},
@@ -497,6 +518,7 @@ Example:
 
 	cmd.Flags().StringArrayVarP(&fileIDs, "fileid", "i", []string{}, "File ID to delete (can be specified multiple times)")
 	cmd.Flags().BoolVarP(&confirm, "confirm", "y", false, "Skip confirmation prompt")
+	cmd.Flags().BoolVar(&permanent, "permanent", false, "Permanently delete instead of moving to Trash (irreversible)")
 
 	return cmd
 }
