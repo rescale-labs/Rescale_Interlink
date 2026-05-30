@@ -382,6 +382,12 @@ export function FileBrowserTab() {
       const displayName = folders.length === 1
         ? folders[0].name
         : `${folders.length} folders`
+      // Switch to Transfers immediately so the user sees their action is being
+      // worked on. The destination check can take many seconds; the progress
+      // counter lives on the Transfers tab via folderCheckStatus. If the check
+      // later needs a modal (merge/error), the handlers below snap back to
+      // File Browser so the dialog renders in an active panel.
+      switchToTab('Transfers')
       const startMs = Date.now()
       const updateCheckStatus = () => {
         const elapsed = Math.floor((Date.now() - startMs) / 1000)
