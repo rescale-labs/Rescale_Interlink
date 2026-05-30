@@ -354,7 +354,7 @@ func (m *SGEMetadata) String() string {
 	}
 	sb.WriteString(fmt.Sprintf("\nHardware: %s (%d cores/slot, %d slots)\n",
 		m.CoreType, m.CoresPerSlot, m.Slots))
-	sb.WriteString(fmt.Sprintf("Walltime: %d seconds\n", m.Walltime))
+	sb.WriteString(fmt.Sprintf("Walltime: %d hours\n", m.Walltime))
 
 	if len(m.Tags) > 0 {
 		sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(m.Tags, ", ")))
@@ -442,10 +442,14 @@ func (m *SGEMetadata) ToSGEScript() string {
 // JobSpecToSGEMetadata converts a JobSpec to SGEMetadata for script generation.
 // This enables saving job configurations as SGE scripts.
 func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
-	// Convert walltime from hours to seconds
-	walltimeSeconds := int(job.WalltimeHours * 3600)
-	if walltimeSeconds <= 0 {
-		walltimeSeconds = 3600 // Default to 1 hour
+	// Walltime is in hours (the Rescale API unit). Round fractional hours up,
+	// minimum 1.
+	walltimeHours := int(job.WalltimeHours)
+	if float64(walltimeHours) < job.WalltimeHours {
+		walltimeHours++
+	}
+	if walltimeHours <= 0 {
+		walltimeHours = 1
 	}
 
 	// Set default slots if not specified
@@ -462,7 +466,7 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		CoreType:        job.CoreType,
 		CoresPerSlot:    job.CoresPerSlot,
 		Slots:           slots,
-		Walltime:        walltimeSeconds,
+		Walltime:        walltimeHours,
 		Tags:            job.Tags,
 		ProjectID:       job.ProjectID,
 		Automations:     job.Automations,
@@ -475,8 +479,8 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 // SGEMetadataToJobSpec converts SGEMetadata to JobSpec for GUI use.
 // This enables loading SGE scripts into the job configuration UI.
 func SGEMetadataToJobSpec(m *SGEMetadata) models.JobSpec {
-	// Convert walltime from seconds to hours
-	walltimeHours := float64(m.Walltime) / 3600.0
+	// Walltime is already in hours (the Rescale API unit).
+	walltimeHours := float64(m.Walltime)
 	if walltimeHours <= 0 {
 		walltimeHours = 1.0 // Default to 1 hour
 	}

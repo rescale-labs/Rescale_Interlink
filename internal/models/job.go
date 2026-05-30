@@ -85,7 +85,7 @@ type HardwareRequest struct {
 	CoreType     CoreTypeRequest `json:"coreType"`
 	CoresPerSlot int             `json:"coresPerSlot"`
 	Slots        int             `json:"slots,omitempty"`
-	Walltime     int             `json:"walltime,omitempty"` // in seconds
+	Walltime     int             `json:"walltime,omitempty"` // in hours (Rescale API unit)
 }
 
 // CoreTypeRequest represents core type in v3 format

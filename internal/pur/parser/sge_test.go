@@ -574,7 +574,7 @@ func TestSGEMetadata_String(t *testing.T) {
 		"emerald",
 		"16 cores/slot",
 		"2 slots",
-		"86400 seconds",
+		"86400 hours",
 		"simulation, cfd",
 		"proj_123",
 		"OMP_NUM_THREADS=16",
@@ -712,8 +712,8 @@ func TestJobSpecToSGEMetadata(t *testing.T) {
 	if metadata.Slots != job.Slots {
 		t.Errorf("Slots = %d, want %d", metadata.Slots, job.Slots)
 	}
-	// Walltime should be converted from hours to seconds
-	expectedWalltime := int(job.WalltimeHours * 3600)
+	// Walltime is in hours (the Rescale API unit), not seconds.
+	expectedWalltime := int(job.WalltimeHours)
 	if metadata.Walltime != expectedWalltime {
 		t.Errorf("Walltime = %d, want %d", metadata.Walltime, expectedWalltime)
 	}
@@ -734,7 +734,7 @@ func TestSGEMetadataToJobSpec(t *testing.T) {
 		CoreType:        "emerald_max",
 		CoresPerSlot:    32,
 		Slots:           4,
-		Walltime:        86400, // 24 hours in seconds
+		Walltime:        24, // 24 hours (Rescale API unit)
 		Tags:            []string{"production", "cfd"},
 		ProjectID:       "proj_xyz",
 	}
@@ -762,8 +762,8 @@ func TestSGEMetadataToJobSpec(t *testing.T) {
 	if job.Slots != metadata.Slots {
 		t.Errorf("Slots = %d, want %d", job.Slots, metadata.Slots)
 	}
-	// WalltimeHours should be converted from seconds to hours
-	expectedWalltimeHours := float64(metadata.Walltime) / 3600.0
+	// Walltime is in hours; no unit conversion.
+	expectedWalltimeHours := float64(metadata.Walltime)
 	if job.WalltimeHours != expectedWalltimeHours {
 		t.Errorf("WalltimeHours = %f, want %f", job.WalltimeHours, expectedWalltimeHours)
 	}
@@ -785,7 +785,7 @@ func TestJobSpecSGEMetadataRoundTrip(t *testing.T) {
 		CoreType:        "emerald",
 		CoresPerSlot:    16,
 		Slots:           2,
-		WalltimeHours:   12.5,
+		WalltimeHours:   12.0, // whole hours; SGE walltime is an integer-hour field
 		Tags:            []string{"test", "roundtrip"},
 		ProjectID:       "proj_rt",
 	}

@@ -1060,6 +1060,19 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
 				p.logf("INFO", "job", item.state.JobName, "Created: Job ID %s", jobResp.ID)
 
+				// Apply user tags. The job-creation body's "tags" field is ignored
+				// by the platform; tags must be POSTed one at a time to the
+				// per-job tags endpoint. Non-fatal: a tag failure does not fail
+				// the job.
+				for _, tag := range item.jobSpec.Tags {
+					if tag == "" {
+						continue
+					}
+					if err := p.apiClient.AddJobTag(ctx, jobResp.ID, tag); err != nil {
+						p.logf("WARN", "job", item.state.JobName, "Failed to apply tag %q: %v", tag, err)
+					}
+				}
+
 				// Org-scoped project assignment
 				orgCode := item.jobSpec.OrgCode
 				if orgCode == "" {
@@ -1188,7 +1201,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 					},
 					CoresPerSlot: spec.CoresPerSlot,
 					Slots:        spec.Slots,
-					Walltime:     int(spec.WalltimeHours * 3600), // Convert hours to seconds
+					Walltime:     walltimeHoursToAPI(spec.WalltimeHours),
 				},
 				InputFiles:                 inputFiles,
 				EnvVars:                    licenseEnv,
@@ -1218,6 +1231,21 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 	}
 
 	return jobReq, nil
+}
+
+// walltimeHoursToAPI converts a user-specified walltime in hours to the value
+// the Rescale job API expects, which is also in hours (NOT seconds). Rounds up
+// to the next whole hour and enforces a minimum of 1 so a job never submits
+// with a zero walltime.
+func walltimeHoursToAPI(hours float64) int {
+	if hours <= 1 {
+		return 1
+	}
+	whole := int(hours)
+	if float64(whole) < hours {
+		whole++ // round fractional hours up
+	}
+	return whole
 }
 
 // NormalizeSubmitMode converts UI mode strings to canonical pipeline values.
