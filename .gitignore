@@ -55,6 +55,9 @@ _build/
 node_modules/
 frontend/node_modules/
 
+# Frontend build cache (regenerated on each build)
+frontend/package.json.md5
+
 # Test data (user-specific)
 *.csv
 *.state
