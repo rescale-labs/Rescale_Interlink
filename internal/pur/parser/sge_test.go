@@ -69,7 +69,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS ansys-fluent
 #RESCALE_CORES emerald_max
 #RESCALE_CORES_PER_SLOT 32
-#RESCALE_WALLTIME 7200
+#RESCALE_WALLTIME 7
 #RESCALE_TAGS simulation,cfd,production
 #RESCALE_PROJECT_ID proj_abc123
 
@@ -99,7 +99,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS custom-solver
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 8
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 #RESCALE_ENV_OMP_NUM_THREADS 8
 #RESCALE_ENV_LD_LIBRARY_PATH /opt/lib
 #RESCALE_ENV_CUSTOM_VAR myvalue
@@ -130,7 +130,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS matlab
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 4
-#RESCALE_WALLTIME 1800
+#RESCALE_WALLTIME 2
 #RESCALE_INBOUND_SSH_CIDR 0.0.0.0/0
 #RESCALE_PUBLIC_KEY ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDexample
 
@@ -154,7 +154,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS ansys
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 #USE_RESCALE_LICENSE true
 #RESCALE_USER_DEFINED_LICENSE_SETTINGS port=1234@server.example.com
 
@@ -177,7 +177,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS openfoam
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 
 ./run.sh
 `,
@@ -191,7 +191,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS openfoam
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 `,
 			wantErr:     true,
 			errContains: "RESCALE_COMMAND",
@@ -203,7 +203,7 @@ echo "Running simulation"
 #RESCALE_COMMAND ./run.sh
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 
 ./run.sh
 `,
@@ -217,7 +217,7 @@ echo "Running simulation"
 #RESCALE_COMMAND ./run.sh
 #RESCALE_ANALYSIS openfoam
 #RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 
 ./run.sh
 `,
@@ -231,7 +231,7 @@ echo "Running simulation"
 #RESCALE_COMMAND ./run.sh
 #RESCALE_ANALYSIS openfoam
 #RESCALE_CORES emerald
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 
 ./run.sh
 `,
@@ -260,7 +260,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS openfoam
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT invalid
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 
 ./run.sh
 `,
@@ -275,7 +275,7 @@ echo "Running simulation"
 #RESCALE_ANALYSIS openfoam
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 8
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 #RESCALE_TAGS  tag1  ,  tag2  ,  tag3
 
 ./run.sh
@@ -332,7 +332,7 @@ func TestSGEParser_QsubFormat(t *testing.T) {
 	script := `#!/bin/bash
 #$ -l rescale_name=qsub_job,rescale_code=openfoam
 #$ -l rescale_coretype=emerald
-#$ -l rescale_cores=16,rescale_walltime=3600
+#$ -l rescale_cores=16,rescale_walltime=3
 
 ./run.sh --input data.txt
 `
@@ -360,8 +360,8 @@ func TestSGEParser_QsubFormat(t *testing.T) {
 	if m.CoresPerSlot != 16 {
 		t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 16)
 	}
-	if m.Walltime != 3600 {
-		t.Errorf("Walltime = %d, want %d", m.Walltime, 3600)
+	if m.Walltime != 3 {
+		t.Errorf("Walltime = %d, want %d", m.Walltime, 3)
 	}
 	// Command should be the script body (no #RESCALE_COMMAND)
 	if m.Command != "./run.sh --input data.txt" {
@@ -378,7 +378,7 @@ func TestSGEParser_MixedFormat(t *testing.T) {
 #RESCALE_ANALYSIS fluent
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 32
-#RESCALE_WALLTIME 7200
+#RESCALE_WALLTIME 7
 
 ./override.sh
 `
@@ -413,7 +413,7 @@ func TestSGEParser_ScriptBodyAsCommand(t *testing.T) {
 #RESCALE_ANALYSIS openfoam
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 8
-#RESCALE_WALLTIME 3600
+#RESCALE_WALLTIME 3
 
 echo "Setting up"
 ./run.sh --verbose
@@ -440,7 +440,7 @@ echo "Done"
 func TestSGEParser_QsubMultiPair(t *testing.T) {
 	// All key-value pairs on a single #$ -l line
 	script := `#!/bin/bash
-#$ -l rescale_name=multi_test,rescale_code=star-ccm,rescale_coretype=emerald,rescale_cores=24,rescale_walltime=7200
+#$ -l rescale_name=multi_test,rescale_code=star-ccm,rescale_coretype=emerald,rescale_cores=24,rescale_walltime=7
 #RESCALE_COMMAND ./star.sh
 `
 	tmpDir := t.TempDir()
@@ -467,8 +467,8 @@ func TestSGEParser_QsubMultiPair(t *testing.T) {
 	if m.CoresPerSlot != 24 {
 		t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 24)
 	}
-	if m.Walltime != 7200 {
-		t.Errorf("Walltime = %d, want %d", m.Walltime, 7200)
+	if m.Walltime != 7 {
+		t.Errorf("Walltime = %d, want %d", m.Walltime, 7)
 	}
 	if m.Command != "./star.sh" {
 		t.Errorf("Command = %q, want %q", m.Command, "./star.sh")
@@ -484,7 +484,7 @@ func TestSGEMetadata_ToJobRequest(t *testing.T) {
 		CoreType:        "emerald",
 		CoresPerSlot:    16,
 		Slots:           2,
-		Walltime:        86400,
+		Walltime:        24,
 		Tags:            []string{"simulation", "cfd"},
 		ProjectID:       "proj_123",
 	}
@@ -539,7 +539,7 @@ func TestSGEMetadata_ToJobRequest_DefaultSlots(t *testing.T) {
 		CoreType:     "emerald",
 		CoresPerSlot: 16,
 		Slots:        0, // Not specified
-		Walltime:     3600,
+		Walltime:     3,
 	}
 
 	jobReq := metadata.ToJobRequest()
@@ -558,7 +558,7 @@ func TestSGEMetadata_String(t *testing.T) {
 		CoreType:        "emerald",
 		CoresPerSlot:    16,
 		Slots:           2,
-		Walltime:        86400,
+		Walltime:        24,
 		Tags:            []string{"simulation", "cfd"},
 		ProjectID:       "proj_123",
 		EnvVariables:    map[string]string{"OMP_NUM_THREADS": "16"},
@@ -574,7 +574,7 @@ func TestSGEMetadata_String(t *testing.T) {
 		"emerald",
 		"16 cores/slot",
 		"2 slots",
-		"86400 hours",
+		"24 hours",
 		"simulation, cfd",
 		"proj_123",
 		"OMP_NUM_THREADS=16",
@@ -596,7 +596,7 @@ func TestSGEMetadata_ToSGEScript(t *testing.T) {
 		CoreType:        "emerald",
 		CoresPerSlot:    16,
 		Slots:           2,
-		Walltime:        86400,
+		Walltime:        24,
 		Tags:            []string{"simulation", "cfd"},
 		ProjectID:       "proj_123",
 		UseLicense:      true,
@@ -614,7 +614,7 @@ func TestSGEMetadata_ToSGEScript(t *testing.T) {
 		"#RESCALE_CORES emerald",
 		"#RESCALE_CORES_PER_SLOT 16",
 		"#RESCALE_SLOTS 2",
-		"#RESCALE_WALLTIME 86400",
+		"#RESCALE_WALLTIME 24",
 		"#RESCALE_TAGS simulation,cfd",
 		"#RESCALE_PROJECT_ID proj_123",
 		"#USE_RESCALE_LICENSE true",
@@ -637,7 +637,7 @@ func TestSGEMetadata_ToSGEScript_MinimalFields(t *testing.T) {
 		Analysis:     "openfoam",
 		CoreType:     "emerald",
 		CoresPerSlot: 8,
-		Walltime:     3600,
+		Walltime:     3,
 	}
 
 	script := metadata.ToSGEScript()
@@ -650,7 +650,7 @@ func TestSGEMetadata_ToSGEScript_MinimalFields(t *testing.T) {
 		"#RESCALE_ANALYSIS openfoam",
 		"#RESCALE_CORES emerald",
 		"#RESCALE_CORES_PER_SLOT 8",
-		"#RESCALE_WALLTIME 3600",
+		"#RESCALE_WALLTIME 3",
 	}
 
 	for _, expected := range expectedContains {
@@ -832,7 +832,7 @@ func TestJobSpecSGEMetadataRoundTrip(t *testing.T) {
 func TestSGEParser_QsubNameDirective(t *testing.T) {
 	script := `#!/bin/bash
 #$ -N MyTestJob
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_cores=4,rescale_walltime=3600
+#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_cores=4,rescale_walltime=3
 
 ./run.sh
 `
@@ -857,7 +857,7 @@ func TestSGEParser_QsubPeSmpDirective(t *testing.T) {
 	script := `#!/bin/bash
 #$ -N PeTest
 #$ -pe smp 8
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3600
+#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3
 
 ./run.sh
 `
@@ -889,7 +889,7 @@ func TestSGEParser_RescaleNamePrecedenceOverQsub(t *testing.T) {
 			script: `#!/bin/bash
 #RESCALE_NAME RescaleWins
 #$ -N QsubName
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_cores=4,rescale_walltime=3600
+#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_cores=4,rescale_walltime=3
 
 ./run.sh
 `,
@@ -899,7 +899,7 @@ func TestSGEParser_RescaleNamePrecedenceOverQsub(t *testing.T) {
 			script: `#!/bin/bash
 #$ -N QsubName
 #RESCALE_NAME RescaleWins
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_cores=4,rescale_walltime=3600
+#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_cores=4,rescale_walltime=3
 
 ./run.sh
 `,
@@ -938,7 +938,7 @@ func TestSGEParser_RescaleCoresPrecedenceOverQsub(t *testing.T) {
 #RESCALE_NAME PrecTest
 #RESCALE_CORES_PER_SLOT 16
 #$ -pe smp 8
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3600
+#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3
 
 ./run.sh
 `,
@@ -949,7 +949,7 @@ func TestSGEParser_RescaleCoresPrecedenceOverQsub(t *testing.T) {
 #RESCALE_NAME PrecTest
 #$ -pe smp 8
 #RESCALE_CORES_PER_SLOT 16
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3600
+#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3
 
 ./run.sh
 `,
@@ -1040,7 +1040,7 @@ func TestSGEParser_CompatDefaultsDoNotOverride(t *testing.T) {
 	script := `#!/bin/bash
 #$ -N ExplicitName
 #$ -pe smp 4
-#$ -l rescale_code=star-ccm,rescale_coretype=beryl,rescale_walltime=7200
+#$ -l rescale_code=star-ccm,rescale_coretype=beryl,rescale_walltime=7
 
 ./solve.sh
 `
@@ -1069,8 +1069,8 @@ func TestSGEParser_CompatDefaultsDoNotOverride(t *testing.T) {
 	if m.CoreType != "beryl" {
 		t.Errorf("CoreType = %q, want %q", m.CoreType, "beryl")
 	}
-	if m.Walltime != 7200 {
-		t.Errorf("Walltime = %d, want %d", m.Walltime, 7200)
+	if m.Walltime != 7 {
+		t.Errorf("Walltime = %d, want %d", m.Walltime, 7)
 	}
 }
 
@@ -1083,7 +1083,7 @@ func TestSGEParser_IgnoredQsubDirectives(t *testing.T) {
 #$ -S /bin/bash
 #$ -N TestJob
 #$ -pe smp 2
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3600
+#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3
 
 ./run.sh
 `
@@ -1117,7 +1117,7 @@ func TestSGEScriptParseRoundTrip(t *testing.T) {
 		CoreType:        "emerald",
 		CoresPerSlot:    16,
 		Slots:           2,
-		Walltime:        7200,
+		Walltime:        7,
 		Tags:            []string{"test", "roundtrip"},
 		ProjectID:       "proj_srt",
 		EnvVariables:    make(map[string]string),
@@ -1169,5 +1169,47 @@ func TestSGEScriptParseRoundTrip(t *testing.T) {
 	}
 	if len(parsed.Tags) != len(original.Tags) {
 		t.Errorf("Tags length = %d, want %d", len(parsed.Tags), len(original.Tags))
+	}
+}
+
+// TestSGEParser_RejectsLegacySecondsWalltime verifies the guard that rejects
+// implausibly large walltime values (in hours) that are almost certainly legacy
+// seconds-style input. 3600 (1h), 7200 (2h), and 86400 (24h) as seconds become
+// 150/300/3650-day jobs if interpreted as hours.
+func TestSGEParser_RejectsLegacySecondsWalltime(t *testing.T) {
+	parseWalltime := func(t *testing.T, wt int) error {
+		t.Helper()
+		script := fmt.Sprintf(`#!/bin/bash
+#RESCALE_NAME wt_test
+#RESCALE_COMMAND ./run.sh
+#RESCALE_ANALYSIS openfoam
+#RESCALE_CORES emerald
+#RESCALE_CORES_PER_SLOT 8
+#RESCALE_WALLTIME %d
+
+./run.sh
+`, wt)
+		path := filepath.Join(t.TempDir(), "wt.sh")
+		if err := os.WriteFile(path, []byte(script), 0644); err != nil {
+			t.Fatalf("write script: %v", err)
+		}
+		_, err := NewSGEParser().Parse(path)
+		return err
+	}
+
+	for _, wt := range []int{3600, 7200, 86400, 337} {
+		err := parseWalltime(t, wt)
+		if err == nil {
+			t.Errorf("walltime %d should be rejected (looks like legacy seconds), but parsed OK", wt)
+			continue
+		}
+		if !strings.Contains(err.Error(), "HOURS") {
+			t.Errorf("walltime %d error = %q, want a 'HOURS not seconds' message", wt, err.Error())
+		}
+	}
+
+	// Boundary: 336 (2 weeks) is the max allowed and must still parse.
+	if err := parseWalltime(t, 336); err != nil {
+		t.Errorf("walltime 336 (boundary) should parse, got error: %v", err)
 	}
 }
