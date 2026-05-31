@@ -289,6 +289,12 @@ const BatchRow = memo(function BatchRow({
                 if (batch.totalKnown && batch.skipped > 0 && batch.total <= 1) {
                   return `0 files uploaded — ${formatNumber(batch.skipped)} item${batch.skipped === 1 ? '' : 's'} skipped (see Activity Logs)`
                 }
+                // Empty folder transfer: anchored by a single placeholder task with no
+                // skips and nothing discovered. The operation succeeded; there were simply
+                // no files to move. Render a distinct summary instead of a phantom file row.
+                if (batch.totalKnown && batch.skipped === 0 && batch.total <= 1 && batch.discoveredTotal === 0 && batch.completed >= batch.total) {
+                  return batch.direction === 'upload' ? 'No files to upload' : 'No files to download'
+                }
                 if (batch.totalKnown) {
                   // Use discoveredTotal as progress denominator when it's the better estimate.
                   // batch.total counts registered tasks (grows during streaming). discoveredTotal is the

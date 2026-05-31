@@ -797,6 +797,14 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		// Final discovered totals update (ensures exact count is set)
 		ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
 
+		// Anchor a zero-file download so the Transfers row survives CleanupBatch.
+		// The scan succeeded; the folder simply had no files. Without this, the
+		// batch would vanish from the Transfers tab, unlike every other completed
+		// transfer (see RegisterEmptyBatchPlaceholder).
+		if filesQueued == 0 {
+			ts.RegisterEmptyBatchPlaceholder(enumID, displayName, "download")
+		}
+
 		emitLog(events.InfoLevel, fmt.Sprintf("Scan complete: %d folders, %d files (%.2f MB). Downloads in progress.",
 			foldersCreated, filesQueued, float64(totalBytes)/(1024*1024)))
 		emitCompletion(foldersCreated, filesQueued, totalBytes, "")
@@ -1248,6 +1256,9 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 					a.logInfo("folder-upload", fmt.Sprintf(
 						"Folder upload finished: %s — empty folder, no files to upload",
 						displayName))
+					// Anchor the empty upload so its Transfers row survives CleanupBatch,
+					// symmetric with the empty-download case (see RegisterEmptyBatchPlaceholder).
+					ts.RegisterEmptyBatchPlaceholder(enumID, displayName, "upload")
 				}
 
 				emitCompletion(r.DiscoveredDirs, r.DiscoveredFiles, r.DiscoveredBytes, errMsg)

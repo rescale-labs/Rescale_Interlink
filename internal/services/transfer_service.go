@@ -451,14 +451,38 @@ func (ts *TransferService) StartStreamingUploadBatch(
 // and Total==1 to render the appropriate "0 files uploaded — N items skipped"
 // summary.
 func (ts *TransferService) RegisterSkipPlaceholderTask(batchID, displayName string, skipCount int) {
+	ts.registerPlaceholderTask(batchID, displayName, fmt.Sprintf("(skipped: %s)", displayName), transfer.TaskTypeUpload)
+}
+
+// RegisterEmptyBatchPlaceholder anchors a streaming batch that completed with zero
+// real tasks and no error — e.g. downloading a remote folder that contains no files,
+// or uploading an empty local folder. Without an anchor, CleanupBatch deletes the
+// pre-registered metadata and the Transfers row vanishes, so the user loses the record
+// of a transfer that did happen (the operation succeeded; there was simply nothing to
+// move). Every transfer, in either direction, should leave a persistent record.
+//
+// The placeholder carries Size=0 and the name "(no files)" so the frontend can render
+// a distinct "No files to transfer" summary instead of a phantom file row. direction
+// determines whether the row reads as an upload or a download.
+func (ts *TransferService) RegisterEmptyBatchPlaceholder(batchID, displayName, direction string) {
+	taskType := transfer.TaskTypeDownload
+	if direction == "upload" {
+		taskType = transfer.TaskTypeUpload
+	}
+	ts.registerPlaceholderTask(batchID, displayName, "(no files)", taskType)
+}
+
+// registerPlaceholderTask creates a single completed synthetic task to anchor a batch
+// whose pre-registered metadata would otherwise be removed by CleanupBatch, leaving no
+// trace in the Transfers tab. Shared by the skip-only and empty-batch cases.
+func (ts *TransferService) registerPlaceholderTask(batchID, displayName, taskName string, taskType transfer.TaskType) {
 	if batchID == "" {
 		return
 	}
-	taskName := fmt.Sprintf("(skipped: %s)", displayName)
 	task := ts.queue.TrackTransferWithBatch(
 		taskName,
 		0,
-		transfer.TaskTypeUpload,
+		taskType,
 		"",
 		"",
 		SourceLabelFileBrowser,
