@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
 **Version:** 4.9.8
-**Last Updated:** 2026-05-20
+**Last Updated:** 2026-05-31
 
 ## Overview
 

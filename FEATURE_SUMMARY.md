@@ -1,7 +1,7 @@
 # Rescale Interlink — Feature Summary
 
 **Version:** 4.9.8
-**Last Updated:** May 20, 2026
+**Last Updated:** May 31, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document catalogs what Rescale Interlink can do. For full command syntax, see [CLI_GUIDE.md](CLI_GUIDE.md). For architecture internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For version history, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
@@ -242,10 +242,9 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Commands
 - `config init` — Interactive setup with numbered platform menu
-- `config set <key> <value>` — Set configuration value
-- `config get [key]` — View current configuration
-- `config list` — List all settings
+- `config show` — Display current configuration
 - `config test` — Test API connection
+- `config path` — Show the configuration file path
 
 ### Storage
 `config.csv` is the single source of truth for all persistent settings. API keys are stored in a separate token file (`~/.config/rescale/token`) with `0600` permissions. Keys are never written to `config.csv`.

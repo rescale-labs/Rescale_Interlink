@@ -3,7 +3,7 @@
 Complete command-line interface reference for `rescale-int` v4.9.8.
 
 **Version:** 4.9.8
-**Build Date:** May 20, 2026
+**Build Date:** May 31, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -1102,13 +1102,9 @@ Custom Fields Enabled: true
 1. Go to Rescale Platform → Workspace Settings → Custom Fields
 2. Create a new Job custom field:
    - **Name**: `Auto Download` (exact spelling required)
-   - **Type**: Select (dropdown) or Text
-   - **Values** (if Select): `Enable`, `Disable` (or your preferred values)
-3. Configure the expected value in `daemon.conf`:
-   ```ini
-   [eligibility]
-   auto_download_value = Enable
-   ```
+   - **Type**: Select (dropdown)
+   - **Values**: `Enabled`, `Disabled`, and optionally `Conditional`
+3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`).
 
 #### Auto-Start on Login
 
@@ -1668,7 +1664,7 @@ rescale-int download <file-id> [file-id...] [flags]
 
 **Example:**
 ```bash
-rescale-int download abc123 --output result.tar.gz
+rescale-int download abc123 --outdir ./downloads
 ```
 
 #### ls
@@ -1977,7 +1973,7 @@ rescale-int files delete -i old_file_id1 -i old_file_id2
 
 ```bash
 # Create project folder
-rescale-int folders create "CFD Project Q1 2025"
+rescale-int folders create --name "CFD Project Q1 2025"
 
 # Upload entire simulation directory (5-10x faster than individual uploads)
 rescale-int folders upload-dir ./simulation_cases --parent-id abc123

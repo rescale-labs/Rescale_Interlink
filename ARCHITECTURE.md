@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
 **Version**: 4.9.8
-**Last Updated**: May 20, 2026
+**Last Updated**: May 31, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 

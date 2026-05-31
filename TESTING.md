@@ -1,6 +1,6 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: May 20, 2026
+**Last Updated**: May 31, 2026
 **Version**: 4.9.8
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -185,10 +185,10 @@ export RESCALE_API_KEY=$(cat /path/to/rescale_token.txt)
 echo "Test content" > /tmp/test.txt
 
 # Upload
-./bin/rescale-int files upload --filepath /tmp/test.txt
+./bin/rescale-int files upload /tmp/test.txt
 
 # Note the file ID from output, then download
-./bin/rescale-int files download --fileid <FILE_ID> --outdir /tmp
+./bin/rescale-int files download <FILE_ID> --outdir /tmp
 
 # Verify
 cat /tmp/test.txt
@@ -205,7 +205,7 @@ echo "file2" > /tmp/test_upload/subdir/file2.txt
 FOLDER_ID=$(./bin/rescale-int folders create --name "Test_$(date +%s)" | grep -oE '[a-zA-Z0-9]{6}')
 
 # Upload directory
-./bin/rescale-int folders upload-dir --folder-id $FOLDER_ID --dir /tmp/test_upload -r
+./bin/rescale-int folders upload-dir /tmp/test_upload --parent-id $FOLDER_ID
 
 # Verify
 ./bin/rescale-int folders list --folder-id $FOLDER_ID
@@ -235,13 +235,13 @@ ln -s ./bin/rescale-int ./rescale-cli
 
 ```bash
 # Single-job watch
-./bin/rescale-int jobs watch -j JOB_ID -o ./output -i 30
+./bin/rescale-int jobs watch -j JOB_ID -d ./output -i 30
 
 # Newer-than watch (all jobs after reference)
-./bin/rescale-int jobs watch --newer-than REF_JOB_ID -o ./output
+./bin/rescale-int jobs watch --newer-than REF_JOB_ID -d ./output
 
 # Watch with file filtering
-./bin/rescale-int jobs watch -j JOB_ID -o ./output --filter "*.dat" --exclude "debug*"
+./bin/rescale-int jobs watch -j JOB_ID -d ./output --filter "*.dat" --exclude "debug*"
 ```
 
 ---
