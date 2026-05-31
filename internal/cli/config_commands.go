@@ -153,12 +153,19 @@ Use --force to overwrite existing configuration.`,
 				fmt.Println()
 				fmt.Println("Proxy Configuration")
 				fmt.Println("-------------------")
-				fmt.Println("Proxy modes: no-proxy, system, basic, ntlm")
+				proxyModes := "no-proxy, system, basic"
+				if config.NTLMProxySupported() {
+					proxyModes += ", ntlm"
+				}
+				fmt.Printf("Proxy modes: %s\n", proxyModes)
 				fmt.Print("Proxy mode [system]: ")
 				proxyModeInput, _ := reader.ReadString('\n')
 				proxyMode = strings.TrimSpace(proxyModeInput)
 				if proxyMode == "" {
 					proxyMode = "system"
+				}
+				if err := config.ValidateProxyModeForBuild(proxyMode); err != nil {
+					return err
 				}
 
 				if proxyMode != "no-proxy" {

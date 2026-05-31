@@ -288,8 +288,23 @@ func (p *SGEParser) validate(m *SGEMetadata) error {
 	if m.Walltime <= 0 {
 		return fmt.Errorf("missing or invalid field: RESCALE_WALLTIME must be > 0")
 	}
+	// RESCALE_WALLTIME is in HOURS. Reject implausibly large values, which almost
+	// always mean a legacy seconds-style script. The common seconds values —
+	// 3600 (1h), 7200 (2h), 86400 (24h) — all far exceed any realistic single-job
+	// walltime, so they are caught here and surfaced with a clear error instead
+	// of silently submitting a job of thousands of hours.
+	if m.Walltime > maxWalltimeHours {
+		return fmt.Errorf("RESCALE_WALLTIME=%d is too large — this value is in HOURS, not seconds. "+
+			"Values like 3600, 7200, or 86400 look like a legacy seconds-based script; convert to hours "+
+			"(e.g. 3600 seconds = 1, 86400 seconds = 24)", m.Walltime)
+	}
 	return nil
 }
+
+// maxWalltimeHours is the upper bound for a plausible single-job walltime in
+// hours (2 weeks). Larger values are rejected as almost-certain legacy
+// seconds-based input (3600, 7200, 86400, ...).
+const maxWalltimeHours = 336
 
 // ToJobRequest converts SGE metadata to a Rescale API JobRequest
 func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
@@ -354,7 +369,7 @@ func (m *SGEMetadata) String() string {
 	}
 	sb.WriteString(fmt.Sprintf("\nHardware: %s (%d cores/slot, %d slots)\n",
 		m.CoreType, m.CoresPerSlot, m.Slots))
-	sb.WriteString(fmt.Sprintf("Walltime: %d seconds\n", m.Walltime))
+	sb.WriteString(fmt.Sprintf("Walltime: %d hours\n", m.Walltime))
 
 	if len(m.Tags) > 0 {
 		sb.WriteString(fmt.Sprintf("Tags: %s\n", strings.Join(m.Tags, ", ")))
@@ -442,10 +457,14 @@ func (m *SGEMetadata) ToSGEScript() string {
 // JobSpecToSGEMetadata converts a JobSpec to SGEMetadata for script generation.
 // This enables saving job configurations as SGE scripts.
 func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
-	// Convert walltime from hours to seconds
-	walltimeSeconds := int(job.WalltimeHours * 3600)
-	if walltimeSeconds <= 0 {
-		walltimeSeconds = 3600 // Default to 1 hour
+	// Walltime is in hours (the Rescale API unit). Round fractional hours up,
+	// minimum 1.
+	walltimeHours := int(job.WalltimeHours)
+	if float64(walltimeHours) < job.WalltimeHours {
+		walltimeHours++
+	}
+	if walltimeHours <= 0 {
+		walltimeHours = 1
 	}
 
 	// Set default slots if not specified
@@ -462,7 +481,7 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		CoreType:        job.CoreType,
 		CoresPerSlot:    job.CoresPerSlot,
 		Slots:           slots,
-		Walltime:        walltimeSeconds,
+		Walltime:        walltimeHours,
 		Tags:            job.Tags,
 		ProjectID:       job.ProjectID,
 		Automations:     job.Automations,
@@ -475,8 +494,8 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 // SGEMetadataToJobSpec converts SGEMetadata to JobSpec for GUI use.
 // This enables loading SGE scripts into the job configuration UI.
 func SGEMetadataToJobSpec(m *SGEMetadata) models.JobSpec {
-	// Convert walltime from seconds to hours
-	walltimeHours := float64(m.Walltime) / 3600.0
+	// Walltime is already in hours (the Rescale API unit).
+	walltimeHours := float64(m.Walltime)
 	if walltimeHours <= 0 {
 		walltimeHours = 1.0 // Default to 1 hour
 	}

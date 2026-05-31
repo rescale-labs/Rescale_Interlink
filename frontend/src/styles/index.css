@@ -1,4 +1,4 @@
-/* v4.5.3: Force light color scheme to prevent OS dark mode from affecting native controls */
+/* Force light color scheme so OS dark mode does not affect native controls. */
 html {
   color-scheme: light;
 }
@@ -34,7 +34,7 @@ html {
 /* Component styles */
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2;
+    @apply inline-flex items-center justify-center px-4 py-2 text-sm font-medium rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-inherit;
   }
 
   .btn-primary {

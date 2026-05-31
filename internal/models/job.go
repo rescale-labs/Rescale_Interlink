@@ -85,7 +85,7 @@ type HardwareRequest struct {
 	CoreType     CoreTypeRequest `json:"coreType"`
 	CoresPerSlot int             `json:"coresPerSlot"`
 	Slots        int             `json:"slots,omitempty"`
-	Walltime     int             `json:"walltime,omitempty"` // in seconds
+	Walltime     int             `json:"walltime,omitempty"` // in hours (Rescale API unit)
 }
 
 // CoreTypeRequest represents core type in v3 format
@@ -158,9 +158,8 @@ type JobStatusEntry struct {
 	StatusReason string `json:"statusReason,omitempty"`
 }
 
-// JobFile represents an output file from a job
-// 2025-11-20: Enhanced to include full metadata from v2 endpoint
-// This allows downloading without separate GetFileInfo API call
+// JobFile represents an output file from a job. It carries full metadata from
+// the v2 endpoint so downloads need no separate GetFileInfo call.
 type JobFile struct {
 	ID                   string              `json:"id"`
 	Name                 string              `json:"name"`
@@ -210,21 +209,27 @@ type RunFile struct {
 	RelativePath string `json:"relativePath,omitempty"`
 }
 
-// Automation represents a Rescale automation entity.
+// AutomationEnvVar is one configurable environment variable on an automation.
+// The API returns defaultValue as null for some entries, which decodes to "".
+type AutomationEnvVar struct {
+	Name         string `json:"name"`
+	DefaultValue string `json:"defaultValue"`
+}
+
 // Automations are pre-configured scripts that can be attached to jobs
 // to run before (pre) or after (post) job execution.
 type Automation struct {
-	ID                   string   `json:"id"`
-	Name                 string   `json:"name"`
-	ExecuteOn            string   `json:"executeOn"` // "pre" or "post"
-	ScriptName           string   `json:"scriptName"`
-	ExecutionFrequency   int      `json:"executionFrequency"`
-	EnvironmentVariables []string `json:"environmentVariables,omitempty"`
-	Description          string   `json:"description,omitempty"`
-	ThumbnailURL         string   `json:"thumbnailUrl,omitempty"`
-	OSFamily             string   `json:"osFamily,omitempty"`
-	AnalysisDependencies []string `json:"analysisDependencies,omitempty"`
-	Command              string   `json:"command,omitempty"`
+	ID                   string             `json:"id"`
+	Name                 string             `json:"name"`
+	ExecuteOn            string             `json:"executeOn"` // "pre" or "post"
+	ScriptName           string             `json:"scriptName"`
+	ExecutionFrequency   int                `json:"executionFrequency"`
+	EnvironmentVariables []AutomationEnvVar `json:"environmentVariables,omitempty"`
+	Description          string             `json:"description,omitempty"`
+	ThumbnailURL         string             `json:"thumbnailUrl,omitempty"`
+	OSFamily             string             `json:"osFamily,omitempty"`
+	AnalysisDependencies []string           `json:"analysisDependencies,omitempty"`
+	Command              string             `json:"command,omitempty"`
 }
 
 // JobAutomation represents an automation attached to a job (from API response).

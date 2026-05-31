@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.9.6.
+Complete command-line interface reference for `rescale-int` v4.9.8.
 
-**Version:** 4.9.6
-**Build Date:** May 9, 2026
+**Version:** 4.9.8
+**Build Date:** May 31, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -21,6 +21,7 @@ For a comprehensive list of all features with source code references, see [FEATU
   - [Folder Commands](#folder-commands)
   - [Job Commands](#job-commands)
   - [Daemon Commands](#daemon-commands)
+  - [Service Commands (Windows only)](#service-commands-windows-only)
   - [Hardware Commands](#hardware-commands)
   - [Software Commands](#software-commands)
   - [Automations Commands](#automations-commands)
@@ -142,10 +143,11 @@ proxy_user,username
 - `no-proxy` - Direct connection (default)
 - `system` - Use system proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` environment variables)
 - `basic` - HTTP Basic authentication
-- `ntlm` - NTLM authentication for corporate proxies
+- `ntlm` - NTLM authentication for corporate proxies, available only in builds that support NTLM
 
 **Notes:**
 - Proxy passwords are prompted at runtime for security (not stored in config files)
+- FIPS-tagged builds reject `proxy_mode=ntlm` because NTLM requires non-FIPS MD4/MD5 algorithms
 - All traffic (API calls + S3/Azure storage) routes through the configured proxy
 - Use `no_proxy` config key for bypass rules (comma-separated hostnames, wildcards, CIDRs). `no_proxy` is fully wired to the HTTP transport and configurable from the GUI Setup tab.
 
@@ -177,7 +179,7 @@ These flags are available on all commands:
 **`--verbose, -v`** - Enable verbose/debug output
 ```bash
 rescale-int files upload myfile.txt --verbose
-rescale-int pur run --config config.csv --jobs jobs.csv --state state.csv -v
+rescale-int pur run --config config.csv --jobs-csv jobs.csv --state state.csv -v
 ```
 
 **`--debug`** - Enable debug output (same as `--verbose`)
@@ -206,7 +208,7 @@ rescale-int files upload large_file.dat --no-auto-scale --max-threads 4
 
 **`--config, -c PATH`** - Use specific configuration file
 ```bash
-rescale-int pur run --config myconfig.csv --jobs jobs.csv --state state.csv
+rescale-int pur run --config myconfig.csv --jobs-csv jobs.csv --state state.csv
 ```
 
 **`--api-key KEY`** - Override API key from all other sources
@@ -331,7 +333,8 @@ rescale-int files upload <file> [file...] [flags]
 
 **Flags:**
 - `-d, --folder-id string` - Target folder ID
-- `-m, --max-concurrent int` - Maximum concurrent uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `--max-concurrent int` - Maximum concurrent uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `--tags string` - Comma-separated tags to apply to each uploaded file (e.g. `"simulation,cfd,v2"`)
 - `--check-duplicates` - Check for existing files before uploading (prompts for each duplicate)
 - `--no-check-duplicates` - Skip duplicate checking (fast mode, may create duplicates)
 - `--skip-duplicates` - Check and automatically skip files that already exist
@@ -393,6 +396,7 @@ rescale-int files download <file-id> [file-id...] [flags]
 - `-w, --overwrite` - Overwrite existing files without prompting
 - `-S, --skip` - Skip existing files without prompting
 - `-r, --resume` - Resume interrupted downloads without prompting
+- `--skip-checksum` - Skip post-download checksum verification (not recommended)
 
 **Examples:**
 ```bash
@@ -416,48 +420,88 @@ rescale-int files download abc123 -o result.tar.gz
 List files
 
 ```bash
-rescale-int files list [--limit N]
+rescale-int files list [flags]
 ```
 
 **Flags:**
 - `-n, --limit int` - Maximum number of files to list (default 20)
+- `--include strings` - Include only files matching these glob patterns (comma-separated or repeated)
+- `-x, --exclude strings` - Exclude files matching these glob patterns (comma-separated or repeated)
+- `-s, --search string` - Free-text search across file names
 
 **Example:**
 ```bash
 rescale-int files list --limit 50
+rescale-int files list --include "*.csv" --exclude "*backup*"
 ```
 
 #### files delete
-Delete files
+Move files to the Trash (recoverable) or, with `--permanent`, delete them irreversibly. IDs are passed via repeated `-i/--fileid` flags (not positional arguments). By default files go to Trash, matching the web UI; recover them from the GUI Trash view.
 
 ```bash
-rescale-int files delete <file-id> [file-id...]
+rescale-int files delete -i <file-id> [-i <file-id>...] [-y] [--permanent]
 ```
+
+**Flags:**
+- `-i, --fileid strings` - File ID(s) to delete (repeat the flag for multiple files)
+- `-y, --confirm` - Skip confirmation prompt
+- `--permanent` - Permanently delete instead of moving to Trash (irreversible)
 
 **Example:**
 ```bash
-rescale-int files delete abc123 def456
+rescale-int files delete -i abc123 -i def456            # move to Trash (recoverable)
+rescale-int files delete -i abc123 --permanent          # permanent delete
+rescale-int files delete -i abc123 --confirm
+```
+
+Note: moving to Trash looks up each file's parent folder automatically. If a file cannot be located under your library (e.g. it lives in a job folder), use `--permanent` to delete it by ID.
+
+#### files tags
+
+Manage file-level tags. Tags are arbitrary strings attached to a file's metadata, useful for organization, filtering, and downstream automation.
+
+```bash
+rescale-int files tags list <file-id>
+rescale-int files tags add <file-id> <tag> [tag...]
+rescale-int files tags remove <file-id> <tag> [tag...]
+rescale-int files tags set <file-id> [tag...]
+```
+
+**Subcommands:**
+- `list` — List the current tags on a file
+- `add` — Add one or more tags (existing tags preserved)
+- `remove` — Remove specific tags
+- `set` — Replace all tags with the supplied list (pass no tags to clear)
+
+**Examples:**
+```bash
+rescale-int files tags list abc123
+rescale-int files tags add abc123 production validated
+rescale-int files tags remove abc123 draft
+rescale-int files tags set abc123 final v2  # replaces all existing tags
+rescale-int files tags set abc123            # clears all tags
 ```
 
 ### Folder Commands
 
 #### folders create
-Create a new folder
+Create a new folder. The folder name is supplied via `-n/--name` (not as a positional argument).
 
 ```bash
-rescale-int folders create <name> [--parent-id ID]
+rescale-int folders create -n <name> [--parent-id ID]
 ```
 
 **Flags:**
-- `--parent-id string` - Parent folder ID (optional)
+- `-n, --name string` - Folder name (required)
+- `--parent-id string` - Parent folder ID (optional; omit for root)
 
 **Examples:**
 ```bash
 # Create root-level folder
-rescale-int folders create "My Simulations"
+rescale-int folders create --name "My Simulations"
 
 # Create subfolder
-rescale-int folders create "CFD Cases" --parent-id abc123
+rescale-int folders create --name "CFD Cases" --parent-id abc123
 ```
 
 #### folders list
@@ -489,7 +533,9 @@ rescale-int folders upload-dir <directory> [flags]
 **Flags:**
 - `--parent-id string` - Parent folder ID (default: My Library root)
 - `--max-concurrent int` - Maximum concurrent file uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `--folder-concurrency int` - Maximum concurrent folder-creation API calls (default 15, range 1-30)
 - `--include-hidden` - Include hidden files (starting with .)
+- `--tags string` - Comma-separated tags to apply to each uploaded file (e.g. `"simulation,cfd,v2"`)
 - `--sequential` - Use sequential mode (create all folders, then upload all files)
 - `--continue-on-error` - Continue uploading on errors without prompting
 - `-S, --skip-folder-conflicts` - Skip folders that already exist on Rescale
@@ -587,15 +633,22 @@ rescale-int folders download-dir abc123 --continue-on-error --merge
 ```
 
 #### folders delete
-Delete a folder
+Move a folder to the Trash (recoverable) or, with `--permanent`, delete it irreversibly. The folder ID is supplied via `--folder-id` (not a positional argument). By default the folder goes to Trash, matching the web UI.
 
 ```bash
-rescale-int folders delete <folder-id>
+rescale-int folders delete --folder-id <folder-id> [--confirm] [--permanent]
 ```
+
+**Flags:**
+- `--folder-id string` - Folder ID to delete (required)
+- `--confirm` - Skip confirmation prompt
+- `--permanent` - Permanently delete instead of moving to Trash (irreversible)
 
 **Example:**
 ```bash
-rescale-int folders delete abc123
+rescale-int folders delete --folder-id abc123              # move to Trash (recoverable)
+rescale-int folders delete --folder-id abc123 --permanent  # permanent delete
+rescale-int folders delete --folder-id abc123 --confirm
 ```
 
 ### Job Commands
@@ -608,21 +661,18 @@ rescale-int jobs list [flags]
 ```
 
 **Flags:**
-- `-n, --limit int` - Maximum number of jobs to list (default 10)
-- `-s, --status string` - Filter by job status
+- `-n, --limit int` - Maximum number of jobs to list (`0` returns all; default `0`)
 
 **Examples:**
 ```bash
-# List recent jobs
+# List all jobs
 rescale-int jobs list
 
-# List more jobs
+# Cap the listing to 50 most recent
 rescale-int jobs list --limit 50
-
-# Filter by status
-rescale-int jobs list --status Completed
-rescale-int jobs list --status Running
 ```
+
+There is no server-side status filter — Rescale's `/jobs/` endpoint accepts the parameter but ignores it. Filter client-side with `grep`/`jq` against the listing output if needed.
 
 #### jobs get
 Get job details
@@ -716,6 +766,9 @@ rescale-int jobs download -j <job-id> [flags]
 - `-r, --resume` - Resume interrupted downloads
 - `-s, --search string` - Filter files by search term
 - `-x, --exclude string` - Exclude files matching pattern
+- `--filter string` - Include only files matching glob pattern(s); comma-separated
+- `--path-filter string` - Match `--filter` against the full path rather than just the filename
+- `--skip-checksum` - Skip post-download checksum verification (not recommended)
 
 **Examples:**
 ```bash
@@ -818,6 +871,12 @@ rescale-int jobs submit --job-id <id>
 - `-m, --max-concurrent int` - Maximum concurrent file uploads
 - `--automation strings` - Automation ID(s) to attach (comma-separated or repeated)
 
+**Job tags:** Tags are applied to the created job from the `tags` column of a
+jobs CSV or the `#RESCALE_TAGS` directive of an SGE script. In both cases tags
+are **comma-separated** (e.g. `simulation, cfd, v2`); surrounding whitespace is
+trimmed. A space alone is not a separator — `cfd run` is a single tag named
+`cfd run`. Each tag is applied to the job individually after it is created.
+
 **Examples:**
 ```bash
 # Submit job from JSON spec
@@ -849,7 +908,7 @@ rescale-int daemon run [flags]
 The daemon automatically loads settings from the config file. CLI flags override config file values, allowing you to test different settings without modifying the config file.
 
 **Flags:**
-- `-d, --download-dir string` - Directory to download job outputs to (default ".")
+- `-d, --download-dir string` - Directory to download job outputs to (default: value from `daemon.conf` `download_folder`, falling back to the platform default at `~/Downloads/rescale-jobs` on Unix or `%USERPROFILE%\Downloads\rescale-jobs` on Windows)
 - `--poll-interval string` - How often to check for completed jobs (default "5m")
 - `--name-prefix string` - Only download jobs with names starting with this prefix
 - `--name-contains string` - Only download jobs with names containing this string
@@ -885,6 +944,16 @@ rescale-int daemon run --poll-interval 2m
 rescale-int daemon run --once
 ```
 
+#### daemon stop
+
+Send a clean shutdown request to a running daemon over IPC.
+
+```bash
+rescale-int daemon stop
+```
+
+Returns once the daemon has acknowledged the request. If no daemon is running (no IPC socket), prints a clear message and exits non-zero. To stop all per-user daemons in Windows service mode, use `rescale-int service stop` instead.
+
 #### daemon config
 
 Manage daemon configuration file (`daemon.conf`).
@@ -918,15 +987,15 @@ name_contains =
 exclude = test,debug
 
 [eligibility]
-correctness_tag = isCorrect:true
-auto_download_value = Enable
-downloaded_tag = autoDownloaded:true
+auto_download_tag = autoDownload
 
 [notifications]
 enabled = true
 show_download_complete = true
 show_download_failed = true
 ```
+
+The eligibility model was simplified in v4.3.0 to a single `auto_download_tag`; the older `correctness_tag` / `auto_download_value` / `downloaded_tag` keys are no longer settable.
 
 ##### daemon config path
 
@@ -954,54 +1023,49 @@ Uses `$EDITOR` environment variable (falls back to `vi` on Unix, `notepad` on Wi
 
 ##### daemon config set
 
-Set a configuration value.
+Set a configuration value. Keys are bare names (no `section.` prefix).
 
 ```bash
 rescale-int daemon config set <key> <value>
 ```
 
 **Available keys:**
-- `daemon.enabled` - Enable/disable daemon (true/false)
-- `daemon.download_folder` - Download directory path
-- `daemon.poll_interval_minutes` - Poll interval in minutes (1-60)
-- `daemon.use_job_name_dir` - Use job name for subdirectories (true/false)
-- `daemon.max_concurrent` - Max concurrent downloads (1-20)
-- `daemon.lookback_days` - How many days back to check for jobs (1-30)
-- `filters.name_prefix` - Job name prefix filter
-- `filters.name_contains` - Job name contains filter
-- `filters.exclude` - Comma-separated exclude patterns
-- `eligibility.correctness_tag` - Tag for job correctness
-- `eligibility.auto_download_value` - Required value for "Auto Download" field (default: Enable)
-- `eligibility.downloaded_tag` - Tag added after download (default: autoDownloaded:true)
-- `notifications.enabled` - Enable notifications (true/false)
+- `enabled` - Enable/disable daemon (true/false)
+- `download_folder` - Download directory path
+- `poll_interval_minutes` - Poll interval in minutes (1-60)
+- `use_job_name_dir` - Use job name for subdirectories (true/false)
+- `max_concurrent` - Max concurrent downloads (1-20)
+- `lookback_days` - How many days back to check for jobs (1-30)
+- `name_prefix` - Job name prefix filter
+- `name_contains` - Job name contains filter
+- `exclude` - Comma-separated exclude patterns
+- `auto_download_tag` - Job tag that opts a job into auto-download
+- `notifications_enabled` - Enable notifications (true/false)
 
 **Examples:**
 ```bash
 # Set download folder
-rescale-int daemon config set daemon.download_folder ~/Downloads/rescale-jobs
+rescale-int daemon config set download_folder ~/Downloads/rescale-jobs
 
 # Set poll interval to 10 minutes
-rescale-int daemon config set daemon.poll_interval_minutes 10
+rescale-int daemon config set poll_interval_minutes 10
 
 # Set exclude patterns
-rescale-int daemon config set filters.exclude "test,debug,scratch"
+rescale-int daemon config set exclude "test,debug,scratch"
 
 # Enable the daemon
-rescale-int daemon config set daemon.enabled true
+rescale-int daemon config set enabled true
 ```
 
 ##### daemon config init
 
-Interactive daemon configuration setup.
+Interactive daemon configuration setup. Refuses to overwrite an existing `daemon.conf` — use `daemon config edit` to modify one in place.
 
 ```bash
-rescale-int daemon config init [--force]
+rescale-int daemon config init
 ```
 
-**Flags:**
-- `-f, --force` - Overwrite existing configuration
-
-Prompts for common settings and creates a `daemon.conf` file.
+Prompts for common settings and creates a fresh `daemon.conf`.
 
 **Example:**
 ```bash
@@ -1038,19 +1102,15 @@ Custom Fields Enabled: true
 1. Go to Rescale Platform → Workspace Settings → Custom Fields
 2. Create a new Job custom field:
    - **Name**: `Auto Download` (exact spelling required)
-   - **Type**: Select (dropdown) or Text
-   - **Values** (if Select): `Enable`, `Disable` (or your preferred values)
-3. Configure the expected value in `daemon.conf`:
-   ```ini
-   [eligibility]
-   auto_download_value = Enable
-   ```
+   - **Type**: Select (dropdown)
+   - **Values**: `Enabled`, `Disabled`, and optionally `Conditional`
+3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`).
 
 #### Auto-Start on Login
 
 On **Windows with MSI installer**, the service must be started from the GUI Setup tab ("Install & Start Service") or via `rescale-int service install-and-start` from an elevated command prompt.
 
-On **Mac and Linux**, configure auto-start using the system's init system. Interlink does not ship a built-in provisioning flow for launchd or systemd-user in the current round (see `AUTO_DOWNLOAD_SPEC.md` Appendix F); the instructions below are for users who want to wire this up themselves:
+On **Mac and Linux**, configure auto-start using the system's init system. Interlink does not ship a built-in provisioning flow for launchd or systemd-user; the instructions below are for users who want to wire this up themselves:
 
 <details>
 <summary><b>macOS (launchd)</b></summary>
@@ -1216,6 +1276,62 @@ rescale-int daemon retry --job-id XxYyZz
 
 ---
 
+### Service Commands (Windows only)
+
+Manage the Rescale Interlink Windows service. The service is the multi-user auto-download daemon used in MSI-installer deployments. These commands are no-ops on macOS and Linux — auto-download on those platforms uses the subprocess daemon (`daemon run`).
+
+All `service` commands require an elevated (Administrator) command prompt.
+
+#### service install
+
+Register the Interlink service with Windows Service Control Manager. After install, use `service start` to bring it up.
+
+```bash
+rescale-int service install
+```
+
+#### service uninstall
+
+Stop and unregister the Interlink service.
+
+```bash
+rescale-int service uninstall
+```
+
+#### service start
+
+Start the registered service.
+
+```bash
+rescale-int service start
+```
+
+#### service stop
+
+Stop the running service. This stops every per-user daemon under it.
+
+```bash
+rescale-int service stop
+```
+
+#### service install-and-start
+
+Idempotent install + start in a single invocation. Used by the GUI Setup tab's "Install & Start Service" button. Safe to re-run if the service is already installed and/or running.
+
+```bash
+rescale-int service install-and-start
+```
+
+#### service status
+
+Show whether the service is installed and currently running.
+
+```bash
+rescale-int service status
+```
+
+---
+
 ### Hardware Commands
 
 Commands for discovering available hardware types (core types) on the Rescale platform.
@@ -1372,6 +1488,36 @@ rescale-int pur make-dirs-csv \
   --validation-pattern "*.avg.fnc"
 ```
 
+#### pur scan-files
+Scan a directory tree for primary input files, optionally attaching secondary files to each, and emit either a printed summary or a generated jobs CSV. Useful for setting up a PUR pipeline when each job is keyed off a single solver input file with an associated mesh, config, etc.
+
+```bash
+rescale-int pur scan-files --primary <pattern> [flags]
+```
+
+**Flags:**
+- `-r, --root string` - Root directory to scan (default: current directory)
+- `--primary string` - Primary file pattern, e.g., `*.inp` (required)
+- `--secondary strings` - Secondary file pattern; repeat for multiple. Each entry may end with `:required` (default) or `:optional`. Wildcard `*` is replaced with the primary file's basename.
+- `-t, --template string` - Template CSV used as the row prototype when generating jobs CSV
+- `-o, --output string` - Output jobs CSV path (must be combined with `--template`)
+- `--overwrite` - Overwrite an existing output file
+- `--json` - Emit the scan result as JSON instead of a printed summary
+
+**Examples:**
+```bash
+# Print a summary of matched primary/secondary files
+rescale-int pur scan-files --root /data --primary "*.inp" --secondary "*.mesh"
+
+# Optional secondary from a sibling directory
+rescale-int pur scan-files --root /data --primary "inputs/*.inp" \
+  --secondary "*.mesh:required" --secondary "../common.cfg:optional"
+
+# Generate jobs.csv from a template
+rescale-int pur scan-files --root /data --primary "*.inp" \
+  --template template.csv --output jobs.csv
+```
+
 #### pur plan
 Validate job pipeline without executing
 
@@ -1518,19 +1664,19 @@ rescale-int download <file-id> [file-id...] [flags]
 
 **Example:**
 ```bash
-rescale-int download abc123 --output result.tar.gz
+rescale-int download abc123 --outdir ./downloads
 ```
 
 #### ls
-Shortcut for `jobs list`
+Shortcut for `jobs list`. Default limit is `10`; pass `--limit 0` to list all jobs.
 
 ```bash
-rescale-int ls [--limit N] [--status STATUS]
+rescale-int ls [--limit N]
 ```
 
 **Example:**
 ```bash
-rescale-int ls --limit 20
+rescale-int ls --limit 50
 ```
 
 ## Shell Completion
@@ -1819,15 +1965,15 @@ rescale-int files list --limit 50
 # Download file
 rescale-int download abc123 -o model_output.tar.gz
 
-# Delete old files
-rescale-int files delete old_file_id1 old_file_id2
+# Delete old files (moved to Trash; add --permanent to delete irreversibly)
+rescale-int files delete -i old_file_id1 -i old_file_id2
 ```
 
 ### Folder Management
 
 ```bash
 # Create project folder
-rescale-int folders create "CFD Project Q1 2025"
+rescale-int folders create --name "CFD Project Q1 2025"
 
 # Upload entire simulation directory (5-10x faster than individual uploads)
 rescale-int folders upload-dir ./simulation_cases --parent-id abc123
@@ -1839,8 +1985,8 @@ rescale-int folders list --folder-id abc123
 ### Job Management
 
 ```bash
-# List running jobs
-rescale-int ls --status Running
+# List recent jobs
+rescale-int ls --limit 20
 
 # Get job details
 rescale-int jobs get -j WfbQa
@@ -1920,7 +2066,11 @@ done
 
 **Download all completed jobs:**
 ```bash
-rescale-int jobs list --status Completed --limit 100 | \
+# Rescale's API doesn't filter by status server-side, so we filter client-side.
+# Each job appears as a multi-line block; pipe through `grep -B`/`-A` to keep
+# only Completed entries, then extract IDs.
+rescale-int jobs list --limit 100 | \
+  grep -B1 "Status: Completed" | \
   grep "ID:" | \
   awk '{print $2}' | \
   while read job_id; do

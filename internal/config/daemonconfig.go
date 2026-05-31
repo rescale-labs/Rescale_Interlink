@@ -36,7 +36,6 @@ const (
 )
 
 // DaemonConfig represents the unified daemon configuration.
-// This is the v4.3.0+ configuration format.
 //
 // Config file location:
 //   - Windows: %APPDATA%\Rescale\Interlink\daemon.conf

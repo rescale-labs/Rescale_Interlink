@@ -1,12 +1,12 @@
 module github.com/rescale/rescale-int
 
-go 1.24.2
+go 1.26.3
 
 require (
 	fyne.io/systray v1.12.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.2
-	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358
+	github.com/Azure/go-ntlmssp v0.1.1
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.31.20
@@ -20,9 +20,9 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/vbauerster/mpb/v8 v8.11.2
 	github.com/wailsapp/wails/v2 v2.12.0
-	golang.org/x/net v0.47.0
-	golang.org/x/sys v0.39.0
-	golang.org/x/term v0.37.0
+	golang.org/x/net v0.53.0
+	golang.org/x/sys v0.43.0
+	golang.org/x/term v0.42.0
 	gopkg.in/ini.v1 v1.67.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -72,6 +72,6 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	golang.org/x/crypto v0.45.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 )

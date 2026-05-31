@@ -30,12 +30,21 @@ import { useLogStore } from './stores/logStore'
 import { useTransferStore } from './stores/transferStore'
 import { useRunStore } from './stores/runStore'
 import { useErrorReportStore } from './stores/errorReportStore'
+import { useRateLimitStore } from './stores/rateLimitStore'
 
-// Tab navigation context for switching tabs from other components
+// Tab navigation context for switching tabs from other components.
+// activeTabName lets components like TransfersTab gate work (e.g. 500ms polling)
+// to "this tab is currently active" — necessary now that Tab.Panel uses
+// unmount={false}, which keeps every visited panel mounted for the rest of the
+// session so component state survives tab navigation.
 interface TabNavigationContextType {
   switchToTab: (tabName: string) => void;
+  activeTabName: string;
 }
-const TabNavigationContext = createContext<TabNavigationContextType>({ switchToTab: () => {} });
+const TabNavigationContext = createContext<TabNavigationContextType>({
+  switchToTab: () => {},
+  activeTabName: '',
+});
 export const useTabNavigation = () => useContext(TabNavigationContext);
 
 const tabs = [
@@ -72,6 +81,14 @@ function AppComponent() {
     const cleanup = setupEventListeners()
     return cleanup
   }, [setupEventListeners])
+
+  // App-level rate-limit banner listener — must be global so it shows
+  // regardless of which tab the user is on during a throttled operation.
+  const { active: rateLimited, setupEventListeners: setupRateLimitListeners } = useRateLimitStore()
+  useEffect(() => {
+    const cleanup = setupRateLimitListeners()
+    return cleanup
+  }, [setupRateLimitListeners])
 
   // App-level listener — persists across tab navigation
   // (enumeration events would be lost if set up inside TransfersTab only)
@@ -166,8 +183,36 @@ function AppComponent() {
     }
   }
 
+  const activeTabName = tabs[selectedTabIndex]?.name ?? ''
+
+  // Transfers tab indicators:
+  //  - "active": a pulsing dot while transfers are in progress or queued.
+  //  - "unseen": after transfers finish, a dot persists until the user opens
+  //    the Transfers tab (green for all-success, red if any failed/cancelled).
+  const transfersActive = transferStats.active > 0 || transferStats.queued > 0
+  const [transfersUnseen, setTransfersUnseen] = useState<null | 'success' | 'error'>(null)
+  const lastFinishedRef = useRef({ completed: 0, failed: 0, cancelled: 0 })
+  useEffect(() => {
+    const prev = lastFinishedRef.current
+    const completedGrew = transferStats.completed > prev.completed
+    const failedGrew = transferStats.failed > prev.failed || transferStats.cancelled > prev.cancelled
+    lastFinishedRef.current = {
+      completed: transferStats.completed,
+      failed: transferStats.failed,
+      cancelled: transferStats.cancelled,
+    }
+    // Only raise the badge when a finish happens while the user is elsewhere.
+    if ((completedGrew || failedGrew) && activeTabName !== 'Transfers') {
+      setTransfersUnseen((cur) => (failedGrew || cur === 'error' ? 'error' : 'success'))
+    }
+  }, [transferStats.completed, transferStats.failed, transferStats.cancelled, activeTabName])
+  // Clear the unseen badge once the user is looking at the Transfers tab.
+  useEffect(() => {
+    if (activeTabName === 'Transfers') setTransfersUnseen(null)
+  }, [activeTabName])
+
   return (
-    <TabNavigationContext.Provider value={{ switchToTab }}>
+    <TabNavigationContext.Provider value={{ switchToTab, activeTabName }}>
       <ErrorReportModal />
       <div className="h-screen flex flex-col bg-slate-50">
         {/* Header */}
@@ -243,14 +288,35 @@ function AppComponent() {
             >
               <tab.icon className="w-5 h-5 mr-3" />
               {tab.name}
+              {tab.name === 'Transfers' && transfersActive && (
+                <span
+                  className="ml-2 h-2 w-2 rounded-full bg-blue-500 animate-pulse"
+                  title="Transfers in progress"
+                  aria-label="Transfers in progress"
+                />
+              )}
+              {tab.name === 'Transfers' && !transfersActive && transfersUnseen && (
+                <span
+                  className={clsx(
+                    'ml-2 h-2 w-2 rounded-full',
+                    transfersUnseen === 'error' ? 'bg-red-500' : 'bg-green-500'
+                  )}
+                  title={transfersUnseen === 'error' ? 'Recent transfers finished with errors' : 'Recent transfers completed'}
+                  aria-label={transfersUnseen === 'error' ? 'Recent transfers finished with errors' : 'Recent transfers completed'}
+                />
+              )}
             </Tab>
           ))}
         </Tab.List>
 
-        {/* Tab panels — wrapped in ErrorBoundary to catch rendering errors */}
+        {/* Tab panels — wrapped in ErrorBoundary to catch rendering errors.
+            unmount={false} keeps every visited panel mounted so React useState
+            slots (e.g. FileBrowserTab's mergeConfirm/errorDialog) survive tab
+            navigation during a folder upload. Without this, switching to
+            Transfers mid-preflight would silently drop a pending merge dialog. */}
         <Tab.Panels className="flex-1 overflow-hidden">
           {tabs.map((tab) => (
-            <Tab.Panel key={tab.name} className="h-full">
+            <Tab.Panel key={tab.name} className="h-full" unmount={false}>
               <ErrorBoundary>
                 <tab.component />
               </ErrorBoundary>
@@ -280,6 +346,14 @@ function AppComponent() {
                 {transferStats.active > 0 && `${transferStats.active} active`}
                 {transferStats.active > 0 && transferStats.queued > 0 && ', '}
                 {transferStats.queued > 0 && `${transferStats.queued} queued`}
+              </span>
+            )}
+            {rateLimited && (
+              <span
+                className="text-gray-400"
+                title="Interlink is pacing requests to stay within Rescale's API limits. This is normal and just means requests are being spaced out."
+              >
+                Pacing requests to stay within Rescale limits
               </span>
             )}
           </div>

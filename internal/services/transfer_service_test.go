@@ -433,3 +433,119 @@ func TestWaitForBatch_FastFirstTask(t *testing.T) {
 		t.Fatal("WaitForBatch did not return after scan flip")
 	}
 }
+
+func TestRegisterSkipPlaceholderTask(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+
+	const batchID = "skip-batch"
+	ts.queue.PreRegisterBatch(batchID, "Public", "upload", SourceLabelFileBrowser)
+	ts.queue.IncrementBatchSkipped(batchID, 17)
+
+	ts.RegisterSkipPlaceholderTask(batchID, "Public", 17)
+
+	stats := ts.queue.GetAllBatchStats()
+	var found *transfer.BatchStats
+	for i := range stats {
+		if stats[i].BatchID == batchID {
+			found = &stats[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("placeholder-anchored batch not found")
+	}
+	if found.Total != 1 {
+		t.Errorf("Total = %d, want 1 (the placeholder)", found.Total)
+	}
+	if found.Completed != 1 {
+		t.Errorf("Completed = %d, want 1 (placeholder is created completed)", found.Completed)
+	}
+	if found.Skipped != 17 {
+		t.Errorf("Skipped = %d, want 17", found.Skipped)
+	}
+	if found.TotalBytes != 0 {
+		t.Errorf("TotalBytes = %d, want 0 (placeholder has size=0)", found.TotalBytes)
+	}
+	if found.BatchLabel != "Public" {
+		t.Errorf("BatchLabel = %q, want \"Public\"", found.BatchLabel)
+	}
+
+	// The label must survive cleanup of the pre-registered metadata: after
+	// CleanupBatch removes the pre-registered entry, the row is derived solely
+	// from the placeholder task, which must carry the label itself.
+	ts.queue.CleanupBatch(batchID)
+	stats = ts.queue.GetAllBatchStats()
+	found = nil
+	for i := range stats {
+		if stats[i].BatchID == batchID {
+			found = &stats[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("batch row vanished after CleanupBatch — placeholder task should anchor it")
+	}
+	if found.BatchLabel != "Public" {
+		t.Errorf("after cleanup, BatchLabel = %q, want \"Public\" (label must live on the placeholder task)", found.BatchLabel)
+	}
+
+	// Empty batchID is a no-op (defensive — caller should never pass it).
+	ts.RegisterSkipPlaceholderTask("", "Foo", 1)
+}
+
+func TestRegisterEmptyBatchPlaceholder(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		direction string
+		wantType  transfer.TaskType
+	}{
+		{"download", "download", transfer.TaskTypeDownload},
+		{"upload", "upload", transfer.TaskTypeUpload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eventBus := events.NewEventBus(100)
+			ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+
+			const batchID = "empty-batch"
+			ts.queue.PreRegisterBatch(batchID, "EmptyDir", tc.direction, SourceLabelFileBrowser)
+			ts.queue.MarkBatchScanInProgress(batchID, false)
+
+			ts.RegisterEmptyBatchPlaceholder(batchID, "EmptyDir", tc.direction)
+
+			// The batch row must survive CleanupBatch, which removes the pre-registered
+			// metadata. Without the placeholder anchoring it in q.tasks, the row would
+			// vanish — the bug this fix addresses.
+			ts.queue.CleanupBatch(batchID)
+
+			stats := ts.queue.GetAllBatchStats()
+			var found *transfer.BatchStats
+			for i := range stats {
+				if stats[i].BatchID == batchID {
+					found = &stats[i]
+				}
+			}
+			if found == nil {
+				t.Fatal("empty batch row vanished after CleanupBatch — placeholder should anchor it")
+			}
+			if found.Total != 1 || found.Completed != 1 {
+				t.Errorf("Total=%d Completed=%d, want 1/1 (single completed placeholder)", found.Total, found.Completed)
+			}
+			if found.Skipped != 0 {
+				t.Errorf("Skipped = %d, want 0 (empty, not skipped)", found.Skipped)
+			}
+			if found.TotalBytes != 0 {
+				t.Errorf("TotalBytes = %d, want 0", found.TotalBytes)
+			}
+			if found.DiscoveredTotal != 0 {
+				t.Errorf("DiscoveredTotal = %d, want 0 (frontend keys off this to render the empty summary)", found.DiscoveredTotal)
+			}
+			if found.BatchLabel != "EmptyDir" {
+				t.Errorf("BatchLabel = %q, want \"EmptyDir\"", found.BatchLabel)
+			}
+		})
+	}
+
+	// Empty batchID is a no-op.
+	eventBus := events.NewEventBus(10)
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+	ts.RegisterEmptyBatchPlaceholder("", "Foo", "download")
+}

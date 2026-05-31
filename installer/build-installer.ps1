@@ -1,5 +1,5 @@
 # Rescale Interlink Windows Installer Build Script
-# Requires: WiX Toolset v4+, Go 1.24+
+# Requires: WiX Toolset v4+, Go 1.26.3
 #
 # Usage:
 #   .\installer\build-installer.ps1
@@ -35,18 +35,18 @@ Write-Host "`n[1/5] Building Go binaries..." -ForegroundColor Yellow
 Write-Host "  Building rescale-int.exe..."
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-$env:GOFIPS140 = "latest"
+$env:GOFIPS140 = "certified"
 $env:CGO_ENABLED = "1"
 
 Push-Location $ProjectRoot
 try {
     # Build main CLI/GUI
-    go build -ldflags "-s -w" -o "$BuildDir\rescale-int.exe" .\cmd\rescale-int
+    go build -tags fips -ldflags "-s -w" -o "$BuildDir\rescale-int.exe" .\cmd\rescale-int
     if ($LASTEXITCODE -ne 0) { throw "Failed to build rescale-int.exe" }
 
     # Build tray companion
     Write-Host "  Building rescale-int-tray.exe..."
-    go build -ldflags "-s -w -H=windowsgui" -o "$BuildDir\rescale-int-tray.exe" .\cmd\rescale-int-tray
+    go build -tags fips -ldflags "-s -w -H=windowsgui" -o "$BuildDir\rescale-int-tray.exe" .\cmd\rescale-int-tray
     if ($LASTEXITCODE -ne 0) { throw "Failed to build rescale-int-tray.exe" }
 }
 finally {

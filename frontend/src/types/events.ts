@@ -125,6 +125,7 @@ export interface BatchProgressEventDTO {
   etaSeconds: number; // estimated time remaining (-1 = unknown)
   discoveredTotal: number;
   discoveredBytes: number;
+  skipped: number;
 }
 
 export interface ConnectionResultDTO {

@@ -2,6 +2,7 @@ import { useCallback, useState, useMemo } from 'react'
 import {
   ArrowUpTrayIcon,
   ArrowDownTrayIcon,
+  ArrowUturnLeftIcon,
   TrashIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
@@ -121,7 +122,11 @@ export function FileBrowserTab() {
     refreshLocal,
     refreshRemote,
     deleteRemoteItems,
+    recoverTrashItems,
+    purgeTrashItems,
   } = useFileBrowserStore()
+
+  const isTrashMode = remote.mode === 'trash'
 
   // Tab navigation for switching to Transfers after starting transfers
   const { switchToTab } = useTabNavigation()
@@ -152,6 +157,8 @@ export function FileBrowserTab() {
     frozenLocalPath: string           // Snapshot at click time to avoid stale navigation
   } | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
+  const [recoverConfirm, setRecoverConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
+  const [purgeConfirm, setPurgeConfirm] = useState<wailsapp.FileItemDTO[] | null>(null)
 
   const [errorDialog, setErrorDialog] = useState<{ title: string; message: string } | null>(null)
   const [folderConflict, setFolderConflict] = useState<{
@@ -182,11 +189,15 @@ export function FileBrowserTab() {
 
   // Upload availability and reason
   // Jobs mode: Uploads disabled (job outputs are read-only)
+  // Trash mode: Uploads disabled (trash is for recovery/permanent delete only)
   // Library mode: Uploads allowed
   // Legacy mode: Uploads allowed (files upload to user's library and appear in Legacy view)
   const uploadState = useMemo(() => {
     if (remote.mode === 'jobs') {
       return { allowed: false, reason: 'N/A in Jobs view', hasSelection: localSelectedCount > 0 }
+    }
+    if (remote.mode === 'trash') {
+      return { allowed: false, reason: 'N/A in Trash view', hasSelection: localSelectedCount > 0 }
     }
     if (localSelectedCount === 0) {
       return { allowed: false, reason: 'Select files', hasSelection: false }
@@ -361,12 +372,31 @@ export function FileBrowserTab() {
 
     // Check if any folders already exist before uploading.
     // Uses batch check with shared cache (single API paginate instead of N calls).
+    //
+    // Tab.Panel is configured with unmount={false} (App.tsx) so component state
+    // survives tab navigation. If the user navigates to another tab during the
+    // preflight check and a modal needs to open (merge prompt or error dialog),
+    // we explicitly snap back to File Browser first — otherwise the modal would
+    // render inside a hidden panel and never reach the user.
     if (folders.length > 0) {
       const displayName = folders.length === 1
         ? folders[0].name
         : `${folders.length} folders`
-      useTransferStore.getState().setFolderCheckStatus({ folderName: displayName })
+      // Switch to Transfers immediately so the user sees their action is being
+      // worked on. The destination check can take many seconds; the progress
+      // counter lives on the Transfers tab via folderCheckStatus. If the check
+      // later needs a modal (merge/error), the handlers below snap back to
+      // File Browser so the dialog renders in an active panel.
       switchToTab('Transfers')
+      const startMs = Date.now()
+      const updateCheckStatus = () => {
+        const elapsed = Math.floor((Date.now() - startMs) / 1000)
+        const msg = `Checking destination — ${elapsed}s… (this may take some time)`
+        setStatus(msg)
+        useTransferStore.getState().setFolderCheckStatus({ folderName: displayName, message: msg })
+      }
+      updateCheckStatus() // immediate first tick at 0s
+      const intervalID = window.setInterval(updateCheckStatus, 1000)
 
       let existingFolders: string[] = []
       try {
@@ -395,6 +425,8 @@ export function FileBrowserTab() {
         })
         setStatus('')
         return
+      } finally {
+        clearInterval(intervalID)
       }
 
       // If any folders exist, show merge confirmation dialog
@@ -405,7 +437,7 @@ export function FileBrowserTab() {
           existingFolders,
           uploadData: { files, folders, destFolderId, tags }
         })
-        setStatus('Waiting for merge confirmation...')
+        setStatus('Waiting for merge confirmation…')
         return
       }
 
@@ -417,7 +449,7 @@ export function FileBrowserTab() {
 
     // No existing folders - proceed directly
     await proceedWithUpload(files, folders, destFolderId, tags)
-  }, [uploadConfirm, parsedUploadTags, proceedWithUpload])
+  }, [uploadConfirm, parsedUploadTags, proceedWithUpload, switchToTab])
 
   const confirmMerge = useCallback(async () => {
     if (!mergeConfirm) return
@@ -626,23 +658,64 @@ export function FileBrowserTab() {
 
     setDeleteConfirm(null)
     setIsDeleting(true)
-    setStatus(`Deleting ${deleteConfirm.length} item(s)...`)
+    setStatus(`Moving ${deleteConfirm.length} item(s) to Trash...`)
 
     try {
       const result = await deleteRemoteItems(deleteConfirm)
 
       if (result.failed > 0) {
-        setStatus(`Deleted ${result.deleted} item(s), ${result.failed} failed`)
+        setStatus(`Moved ${result.deleted} item(s) to Trash, ${result.failed} failed`)
       } else {
-        setStatus(`Deleted ${result.deleted} item(s)`)
+        setStatus(`Moved ${result.deleted} item(s) to Trash`)
       }
     } catch (error) {
-      console.error('Delete failed:', error)
-      setStatus(`Delete failed: ${error instanceof Error ? error.message : String(error)}`)
+      console.error('Move to Trash failed:', error)
+      setStatus(`Move to Trash failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       setIsDeleting(false)
     }
   }, [deleteConfirm, deleteRemoteItems])
+
+  // Trash: recover / purge handlers
+  const handleRecover = useCallback(() => {
+    const selected = getRemoteSelectedItems()
+    if (selected.length === 0) return
+    setRecoverConfirm(selected)
+  }, [getRemoteSelectedItems])
+
+  const handlePurge = useCallback(() => {
+    const selected = getRemoteSelectedItems()
+    if (selected.length === 0) return
+    setPurgeConfirm(selected)
+  }, [getRemoteSelectedItems])
+
+  const confirmRecover = useCallback(async () => {
+    if (!recoverConfirm) return
+    const items = recoverConfirm
+    setRecoverConfirm(null)
+    setStatus(`Recovering ${items.length} item(s)...`)
+    const result = await recoverTrashItems(items)
+    if (result.error) {
+      setErrorDialog({ title: 'Recover Failed', message: result.error })
+      setStatus('Recover failed')
+    } else {
+      setStatus(`Recovered ${result.recovered} item(s) to their original location`)
+    }
+  }, [recoverConfirm, recoverTrashItems])
+
+  const confirmPurge = useCallback(async () => {
+    if (!purgeConfirm) return
+    const items = purgeConfirm
+    setPurgeConfirm(null)
+    setStatus(`Permanently deleting ${items.length} item(s)...`)
+    const result = await purgeTrashItems(items)
+    if (result.error) {
+      setErrorDialog({ title: 'Delete Failed', message: result.error })
+      setStatus('Permanent delete failed')
+    } else {
+      setStatus(`Permanently deleted ${result.deleted} item(s)`)
+    }
+  }, [purgeConfirm, purgeTrashItems])
 
   // Upload button text
   const uploadButtonText = useMemo(() => {
@@ -657,6 +730,13 @@ export function FileBrowserTab() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Status bar (above the panes; only shown when there's a message) */}
+      {status && (
+        <div className="px-3 py-1 text-sm text-gray-600 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+          {status}
+        </div>
+      )}
+
       {/* Two-pane layout */}
       <div
         id="file-browser-container"
@@ -670,7 +750,7 @@ export function FileBrowserTab() {
         >
           {/* Header */}
           <div className="flex items-center justify-between px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-            <span className="font-medium text-sm">Local Files</span>
+            <span className="font-bold text-sm">Local Files</span>
             <button
               onClick={handleUpload}
               disabled={!uploadState.allowed || isUploading}
@@ -705,36 +785,71 @@ export function FileBrowserTab() {
           style={{ width: `${100 - leftPaneWidth}%` }}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-            <span className="font-medium text-sm">Rescale Files</span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={handleDownload}
-                disabled={remoteSelectedCount === 0 || isDownloading}
-                title="Download selected files to local"
-                className={`flex items-center gap-1 px-3 py-1 text-sm rounded ${
-                  remoteSelectedCount > 0 && !isDownloading
-                    ? 'bg-blue-500 text-white hover:bg-blue-600'
-                    : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-                }`}
-              >
-                <span className="text-xs">&larr;</span>
-                <ArrowDownTrayIcon className="w-4 h-4" />
-                {remoteSelectedCount > 0 ? `Download ${remoteSelectedCount}` : 'Download'}
-              </button>
-              <button
-                onClick={handleDelete}
-                disabled={remoteSelectedCount === 0 || isDeleting}
-                title="Delete selected items from Rescale"
-                className={`flex items-center gap-1 px-3 py-1 text-sm rounded ${
-                  remoteSelectedCount > 0 && !isDeleting
-                    ? 'bg-red-500 text-white hover:bg-red-600'
-                    : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-                }`}
-              >
-                <TrashIcon className="w-4 h-4" />
-                Delete
-              </button>
+          <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 min-w-0">
+            <span className="font-bold text-sm flex-shrink-0">Rescale Files</span>
+            <div className="flex items-center justify-end gap-2 min-w-0">
+              {isTrashMode ? (
+                <>
+                  <button
+                    onClick={handleRecover}
+                    disabled={remoteSelectedCount === 0}
+                    title="Recover selected items to their original location"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[10rem] ${
+                      remoteSelectedCount > 0
+                        ? 'bg-blue-500 text-white hover:bg-blue-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <ArrowUturnLeftIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">Recover</span>
+                  </button>
+                  <button
+                    onClick={handlePurge}
+                    disabled={remoteSelectedCount === 0}
+                    title="Permanently delete selected items - cannot be undone"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[12rem] ${
+                      remoteSelectedCount > 0
+                        ? 'bg-red-500 text-white hover:bg-red-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <TrashIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">Delete Permanently</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={handleDownload}
+                    disabled={remoteSelectedCount === 0 || isDownloading}
+                    title="Download selected files to local"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[11rem] ${
+                      remoteSelectedCount > 0 && !isDownloading
+                        ? 'bg-blue-500 text-white hover:bg-blue-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <span className="text-xs flex-shrink-0">&larr;</span>
+                    <ArrowDownTrayIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">
+                      {remoteSelectedCount > 0 ? `Download ${remoteSelectedCount}` : 'Download'}
+                    </span>
+                  </button>
+                  <button
+                    onClick={handleDelete}
+                    disabled={remoteSelectedCount === 0 || isDeleting}
+                    title="Move selected items to Trash (recoverable)"
+                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded min-w-0 max-w-[8rem] ${
+                      remoteSelectedCount > 0 && !isDeleting
+                        ? 'bg-red-500 text-white hover:bg-red-600'
+                        : 'bg-gray-300 dark:bg-gray-600 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                    }`}
+                  >
+                    <TrashIcon className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">Delete</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -743,11 +858,6 @@ export function FileBrowserTab() {
             <RemoteBrowser />
           </div>
         </div>
-      </div>
-
-      {/* Status bar */}
-      <div className="px-3 py-1 text-sm text-gray-600 dark:text-gray-400 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-        {status}
       </div>
 
       {/* Confirmation dialogs */}
@@ -765,7 +875,7 @@ export function FileBrowserTab() {
         onCancel={() => { setUploadConfirm(null); setUploadTagsInput('') }}
       >
         <div className="mb-4">
-          <label className="block text-xs font-medium text-gray-500 mb-1">Tags (optional)</label>
+          <label className="block text-xs font-medium text-gray-500 mb-1">Tags (optional, comma-separated)</label>
           <input
             type="text"
             value={uploadTagsInput}
@@ -801,12 +911,31 @@ export function FileBrowserTab() {
 
       <ConfirmDialog
         isOpen={deleteConfirm !== null}
-        title="Confirm Delete"
-        message={`Delete ${deleteConfirm?.length ?? 0} item(s) from Rescale?\n\nThis cannot be undone.`}
-        confirmText="Delete"
-        isDanger
+        title="Move to Trash"
+        message={`Move ${deleteConfirm?.length ?? 0} item(s) to Trash?\n\nYou can recover them from the Trash view.`}
+        confirmText="Move to Trash"
         onConfirm={confirmDelete}
         onCancel={() => setDeleteConfirm(null)}
+      />
+
+      <ConfirmDialog
+        isOpen={recoverConfirm !== null}
+        title="Recover from Trash"
+        message={`Recover ${recoverConfirm?.length ?? 0} item(s) to their original location?`}
+        confirmText="Recover"
+        onConfirm={confirmRecover}
+        onCancel={() => setRecoverConfirm(null)}
+      />
+
+      <ConfirmDialog
+        isOpen={purgeConfirm !== null}
+        title="Delete Permanently"
+        message={`Permanently delete ${purgeConfirm?.length ?? 0} item(s) from your trash?`}
+        confirmText="Delete Permanently"
+        isDanger
+        warning="This action is permanent and cannot be undone."
+        onConfirm={confirmPurge}
+        onCancel={() => setPurgeConfirm(null)}
       />
 
       <ConfirmDialog

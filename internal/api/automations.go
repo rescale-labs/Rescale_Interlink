@@ -1,5 +1,4 @@
 // Package api provides automation-related API methods.
-// Added in v3.6.1.
 package api
 
 import (
@@ -7,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/rescale/rescale-int/internal/models"
 )
@@ -34,13 +34,18 @@ func (c *Client) ListAutomations(ctx context.Context) ([]models.Automation, erro
 
 	// Try decoding as array first (some API versions return array directly)
 	var automations []models.Automation
-	if err := json.Unmarshal(body, &automations); err == nil {
+	arrErr := json.Unmarshal(body, &automations)
+	if arrErr == nil {
 		return automations, nil
 	}
 
 	// Try paginated response format
 	var paginated paginatedAutomationsResponse
 	if err := json.Unmarshal(body, &paginated); err != nil {
+		// Both decodes failed. Surface the array-decode error too — it is the
+		// more informative one when the response is an array whose element
+		// shape has drifted from models.Automation.
+		log.Printf("Warning: automations array decode failed (%v); paginated decode also failed (%v)", arrErr, err)
 		return nil, fmt.Errorf("failed to decode automations response: %w", err)
 	}
 

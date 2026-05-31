@@ -15,6 +15,7 @@ import {
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import { useTransferStore, TransferTask, TransferBatch, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA } from '../../stores'
+import { useTabNavigation } from '../../App'
 
 // Format file size (issue #18)
 function formatSize(bytes: number): string {
@@ -53,7 +54,7 @@ function getStatusInfo(state: string): { icon: typeof CheckCircleIcon; color: st
   }
 }
 
-function FolderCheckRow({ folderName }: { folderName: string }) {
+function FolderCheckRow({ folderName, message }: { folderName: string; message?: string }) {
   return (
     <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20">
       <div className="flex-shrink-0 w-6">
@@ -71,7 +72,7 @@ function FolderCheckRow({ folderName }: { folderName: string }) {
       <div className="flex-1 min-w-0 flex items-center gap-3">
         <div className="flex items-center gap-2">
           <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-          <span className="text-sm text-blue-600">Checking destination for conflicts...</span>
+          <span className="text-sm text-blue-600">{message ?? 'Checking destination for conflicts...'}</span>
         </div>
       </div>
       <div className="flex-shrink-0 w-40" />
@@ -282,6 +283,18 @@ const BatchRow = memo(function BatchRow({
             </div>
             <div className="text-xs text-gray-500">
               {(() => {
+                // Skipped-only folder upload: anchored by a single placeholder task,
+                // total === 1 and completed === 1. Render a distinct summary so the
+                // user understands the upload produced no files.
+                if (batch.totalKnown && batch.skipped > 0 && batch.total <= 1) {
+                  return `0 files uploaded — ${formatNumber(batch.skipped)} item${batch.skipped === 1 ? '' : 's'} skipped (see Activity Logs)`
+                }
+                // Empty folder transfer: anchored by a single placeholder task with no
+                // skips and nothing discovered. The operation succeeded; there were simply
+                // no files to move. Render a distinct summary instead of a phantom file row.
+                if (batch.totalKnown && batch.skipped === 0 && batch.total <= 1 && batch.discoveredTotal === 0 && batch.completed >= batch.total) {
+                  return batch.direction === 'upload' ? 'No files to upload' : 'No files to download'
+                }
                 if (batch.totalKnown) {
                   // Use discoveredTotal as progress denominator when it's the better estimate.
                   // batch.total counts registered tasks (grows during streaming). discoveredTotal is the
@@ -306,6 +319,12 @@ const BatchRow = memo(function BatchRow({
                 }
                 return ''
               })()}
+              {/* Append skip count to the normal completion summary when files
+                  were also uploaded (mixed-outcome case). The skipped-only branch
+                  above handles the all-skipped case with its own message. */}
+              {batch.skipped > 0 && batch.total > 1 && (
+                <span> ({formatNumber(batch.skipped)} skipped)</span>
+              )}
             </div>
           </div>
         </div>
@@ -703,6 +722,8 @@ export function TransfersTab() {
     setBatchStatusFilter,
   } = useTransferStore()
 
+  const { activeTabName } = useTabNavigation()
+
   const [diskSpaceIncident, setDiskSpaceIncident] = useState<{
     count: number
     available: string
@@ -712,11 +733,16 @@ export function TransfersTab() {
   const [diskSpaceBannerDismissed, setDiskSpaceBannerDismissed] = useState(false)
   const [lastFingerprint, setLastFingerprint] = useState('')
 
-  // Start polling when tab is mounted
+  // Poll only while Transfers is the active tab. With Tab.Panel unmount={false}
+  // this component stays mounted for the rest of the session after first visit,
+  // so we can no longer rely on mount/unmount to start and stop polling.
+  // The 2s footer-stats poll in App.tsx still keeps overall counts current
+  // when Transfers isn't active.
   useEffect(() => {
+    if (activeTabName !== 'Transfers') return
     startPolling()
     return () => stopPolling()
-  }, [startPolling, stopPolling])
+  }, [activeTabName, startPolling, stopPolling])
 
   // Scan tasks for disk space errors; update incident state
   useEffect(() => {
@@ -841,7 +867,7 @@ export function TransfersTab() {
           </div>
         ) : (
           <div>
-            {folderCheckStatus && <FolderCheckRow folderName={folderCheckStatus.folderName} />}
+            {folderCheckStatus && <FolderCheckRow folderName={folderCheckStatus.folderName} message={folderCheckStatus.message} />}
 
             {/* For uploads, only show enumeration row during creating_folders phase (or completed/error).
                 Once scanning starts the BatchRow takes over. Filtering by "batch exists" left a

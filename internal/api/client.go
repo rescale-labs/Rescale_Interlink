@@ -88,12 +88,12 @@ func getStringField(m map[string]interface{}, key string, context string) string
 // apiMetrics tracks API usage statistics per scope
 type apiMetrics struct {
 	sync.Mutex
-	totalCalls      int64
-	callsByPath     map[string]int64
-	callsByScope    map[ratelimit.Scope]int64
-	windowStart     time.Time
-	callsInWindow   int64
-	scopeInWindow   map[ratelimit.Scope]int64
+	totalCalls    int64
+	callsByPath   map[string]int64
+	callsByScope  map[ratelimit.Scope]int64
+	windowStart   time.Time
+	callsInWindow int64
+	scopeInWindow map[ratelimit.Scope]int64
 }
 
 // Client represents the Rescale API client.
@@ -239,9 +239,9 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		apiKey:     clientAPIKey,
 		store:      store,
 		metrics: &apiMetrics{
-			callsByPath:  make(map[string]int64),
-			callsByScope: make(map[ratelimit.Scope]int64),
-			windowStart:  time.Now(),
+			callsByPath:   make(map[string]int64),
+			callsByScope:  make(map[ratelimit.Scope]int64),
+			windowStart:   time.Now(),
 			scopeInWindow: make(map[ratelimit.Scope]int64),
 		},
 	}, nil
@@ -508,6 +508,66 @@ func (c *Client) GetRootFolders(ctx context.Context) (*models.RootFolders, error
 	return &folders, nil
 }
 
+// FindItemParentFolder locates the parent folder of a file or folder by walking
+// the user's library tree (breadth-first from MyLibrary). It is used by the CLI
+// archive (move-to-trash) path, where only a bare item ID is supplied but the
+// archive endpoint requires the parent folder ID.
+//
+// isFolder selects whether to match against folders or files at each level.
+// Returns the parent folder ID, or an error if the item is not found anywhere
+// under the library (e.g. it lives under MyJobs, or the ID is wrong). Callers
+// should surface that error rather than guessing a parent.
+func (c *Client) FindItemParentFolder(ctx context.Context, itemID string, isFolder bool) (string, error) {
+	if itemID == "" {
+		return "", fmt.Errorf("item ID is required")
+	}
+
+	roots, err := c.GetRootFolders(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve library root: %w", err)
+	}
+
+	// BFS over the library folder tree.
+	queue := []string{roots.MyLibrary}
+	visited := map[string]bool{}
+	for len(queue) > 0 {
+		folderID := queue[0]
+		queue = queue[1:]
+		if folderID == "" || visited[folderID] {
+			continue
+		}
+		visited[folderID] = true
+
+		contents, err := c.ListFolderContentsAll(ctx, folderID)
+		if err != nil {
+			return "", fmt.Errorf("failed to list folder %s: %w", folderID, err)
+		}
+
+		if isFolder {
+			for _, f := range contents.Folders {
+				if f.ID == itemID {
+					return folderID, nil
+				}
+			}
+		} else {
+			for _, f := range contents.Files {
+				if f.ID == itemID {
+					return folderID, nil
+				}
+			}
+		}
+
+		// Descend into subfolders.
+		for _, sub := range contents.Folders {
+			if !visited[sub.ID] {
+				queue = append(queue, sub.ID)
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not locate item %s under the library — it may be in a job folder or the ID is incorrect", itemID)
+}
+
 func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequest) (*models.CloudFile, error) {
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/files/", fileReq)
 	if err != nil {
@@ -575,6 +635,14 @@ func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*mode
 
 	if resp.StatusCode != nethttp.StatusCreated && resp.StatusCode != nethttp.StatusOK {
 		body := readResponseBody(resp.Body)
+		bodyLower := strings.ToLower(body)
+		if strings.Contains(bodyLower, "interactive") && strings.Contains(bodyLower, "flag must be present") {
+			return nil, fmt.Errorf("create job failed: status %d: %s\n\n"+
+				"Hint: this analysis requires the 'interactive' keyword at the end of its "+
+				"command (e.g. \"abaqus job=... double=both interactive\"). Add it to the "+
+				"command and resubmit. The Rescale platform lists each analysis's example commands.",
+				resp.StatusCode, body)
+		}
 		return nil, fmt.Errorf("create job failed: status %d: %s", resp.StatusCode, body)
 	}
 
@@ -928,7 +996,7 @@ type LegacyFilesPage struct {
 // Orders by most recent first (-dateUploaded) to show newest files at top.
 // pageSize: pass 0 for default (25), or specify items per page.
 func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int) (*LegacyFilesPage, error) {
-	url := pageURL
+	url := extractAPIPath(pageURL)
 	if url == "" {
 		// Use specified page size or default to 25
 		ps := 25
@@ -936,6 +1004,13 @@ func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int
 			ps = pageSize
 		}
 		url = fmt.Sprintf("/api/v3/files/?page_size=%d&ordering=-dateUploaded", ps)
+	} else if pageSize > 0 {
+		if u, err := neturl.Parse(url); err == nil {
+			q := u.Query()
+			q.Set("page_size", strconv.Itoa(pageSize))
+			u.RawQuery = q.Encode()
+			url = extractAPIPath(u.String())
+		}
 	}
 
 	resp, err := c.doRequest(ctx, "GET", url, nil)
@@ -969,7 +1044,7 @@ func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int
 
 	page := &LegacyFilesPage{
 		Files:   make([]FileInfo, 0, len(result.Results)),
-		NextURL: result.Next,
+		NextURL: extractAPIPath(result.Next),
 		HasMore: result.Next != "",
 	}
 
@@ -1030,6 +1105,11 @@ type FileInfo struct {
 	Name          string
 	DecryptedSize int64
 	DateUploaded  time.Time
+
+	// SymlinkID is the filesymlink id from trash listings, taken from item.id.
+	// It is the value the bulk recover/delete API expects in filesymlink_ids.
+	// Empty for non-trash listings.
+	SymlinkID string
 
 	// Full metadata fields — when populated, downloads skip GetFileInfo()
 	EncodedEncryptionKey string
@@ -1190,15 +1270,8 @@ func parseFileChecksums(itemData map[string]interface{}) []models.FileChecksum {
 // Pass pageURL="" for the first page, or use NextURL/PrevURL from previous response.
 // pageSize: pass 0 for API default, or specify items per page.
 func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL string, pageSize int) (*FolderContents, error) {
-	contents := &FolderContents{
-		Folders: make([]FolderInfo, 0),
-		Files:   make([]FileInfo, 0),
-	}
-
-	// Determine URL for this request
 	url := pageURL
 	if url == "" {
-		// Include page_size in first page request if specified
 		if pageSize > 0 {
 			url = fmt.Sprintf("/api/v3/folders/%s/contents/?page_size=%d", folderID, pageSize)
 		} else {
@@ -1215,6 +1288,18 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 			u.RawQuery = q.Encode()
 			url = u.String()
 		}
+	}
+
+	return c.fetchFolderContentsPage(ctx, url)
+}
+
+// fetchFolderContentsPage issues a GET to the given URL and parses the
+// standard folder-contents response shape (results / next / previous).
+// Shared by folder listings and trash-bin listings.
+func (c *Client) fetchFolderContentsPage(ctx context.Context, url string) (*FolderContents, error) {
+	contents := &FolderContents{
+		Folders: make([]FolderInfo, 0),
+		Files:   make([]FileInfo, 0),
 	}
 
 	resp, err := c.doRequest(ctx, "GET", url, nil)
@@ -1240,7 +1325,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 	}
 	resp.Body.Close()
 
-	// Process items from this page
 	for _, entry := range result.Results {
 		itemType := getStringField(entry, "type", "folderContents")
 		itemData, ok := entry["item"].(map[string]interface{})
@@ -1255,7 +1339,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 						ID:   id,
 						Name: name,
 					}
-					// Parse date: try dateUploaded (library), dateInserted (jobs), dateCreated
 					if dateStr, ok := itemData["dateUploaded"].(string); ok {
 						if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
 							folder.DateUploaded = t
@@ -1272,12 +1355,16 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 					contents.Folders = append(contents.Folders, folder)
 				}
 			}
-		} else if itemType == "file" {
+		} else if itemType == "file" || itemType == "filesymlink" {
 			id := getStringField(itemData, "id", "file")
 			name := getStringField(itemData, "name", "file")
+			symlinkID := ""
+			if itemType == "filesymlink" {
+				// Trash filesymlink entries carry only {type, item}; the id the
+				// bulk recover/delete API expects in filesymlink_ids is item.id.
+				symlinkID = id
+			}
 			size := int64(0)
-			// JSON numbers are float64 by default, which can lose precision for files > 2^53 bytes.
-			// Also handle string and json.Number representations for robustness.
 			if rawSize, ok := itemData["decryptedSize"]; ok {
 				switch v := rawSize.(type) {
 				case float64:
@@ -1296,8 +1383,8 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 				ID:            id,
 				Name:          name,
 				DecryptedSize: size,
+				SymlinkID:     symlinkID,
 			}
-			// Parse full metadata to eliminate per-file GetFileInfo() calls
 			file.EncodedEncryptionKey, _ = itemData["encodedEncryptionKey"].(string)
 			file.IV, _ = itemData["iv"].(string)
 			file.Owner, _ = itemData["owner"].(string)
@@ -1306,7 +1393,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 			file.Storage = parseStorage(itemData)
 			file.FileChecksums = parseFileChecksums(itemData)
 
-			// Parse date: try dateUploaded (library), dateInserted (jobs), dateCreated
 			if dateStr, ok := itemData["dateUploaded"].(string); ok {
 				if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
 					file.DateUploaded = t
@@ -1324,7 +1410,6 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 		}
 	}
 
-	// Set pagination info
 	contents.PageSize = len(result.Results)
 	if result.Next != nil && *result.Next != "" {
 		contents.NextURL = extractAPIPath(*result.Next)
@@ -1335,6 +1420,113 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 	}
 
 	return contents, nil
+}
+
+// ListTrashBinPage fetches a page of the user's trash bin.
+// Trash contains both files (filesymlink entries; SymlinkID is taken from item.id)
+// and folder-like items (job outputs, identified by item.id / FolderInfo.ID).
+// Pass pageURL="" for the first page; use NextURL from the previous response for subsequent pages.
+func (c *Client) ListTrashBinPage(ctx context.Context, pageURL string, pageSize int) (*FolderContents, error) {
+	url := pageURL
+	if url == "" {
+		if pageSize > 0 {
+			url = fmt.Sprintf("/api/v3/users/me/folders/trash-bin/?page_size=%d", pageSize)
+		} else {
+			url = "/api/v3/users/me/folders/trash-bin/"
+		}
+	}
+
+	if pageSize > 0 && pageURL != "" {
+		if u, err := neturl.Parse(url); err == nil {
+			q := u.Query()
+			q.Set("page_size", strconv.Itoa(pageSize))
+			u.RawQuery = q.Encode()
+			url = u.String()
+		}
+	}
+
+	return c.fetchFolderContentsPage(ctx, url)
+}
+
+// ArchiveContents moves files and/or folders to the user's Trash (soft delete),
+// matching the web UI's delete behavior. This is distinct from DeleteFile/
+// DeleteFolder, which permanently delete.
+//
+// The endpoint is folder-scoped: folderID must be the parent folder the items
+// currently live in, and the IDs are the items' library IDs (NOT trash symlink
+// IDs). Passing the wrong parent returns HTTP 400. Recovering a trashed item
+// uses the separate trash symlink ID via PostTrashBinAction.
+func (c *Client) ArchiveContents(ctx context.Context, folderID string, fileIDs, folderIDs []string) error {
+	if folderID == "" {
+		return fmt.Errorf("archive requires a parent folder ID")
+	}
+
+	// Ensure JSON encodes empty lists as [] rather than null.
+	if fileIDs == nil {
+		fileIDs = []string{}
+	}
+	if folderIDs == nil {
+		folderIDs = []string{}
+	}
+
+	body := map[string]interface{}{
+		"fileIds":   fileIDs,
+		"folderIds": folderIDs,
+	}
+
+	url := fmt.Sprintf("/api/v3/folders/%s/contents/archive/", folderID)
+	resp, err := c.doRequest(ctx, "POST", url, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusCreated && resp.StatusCode != nethttp.StatusOK &&
+		resp.StatusCode != nethttp.StatusAccepted && resp.StatusCode != nethttp.StatusNoContent {
+		respBody := readResponseBody(resp.Body)
+		return fmt.Errorf("archive (move to trash) failed with status %d: %s", resp.StatusCode, respBody)
+	}
+
+	return nil
+}
+
+// PostTrashBinAction POSTs a bulk recover or permanent-delete to the trash-bin endpoint.
+// action must be "recover" or "delete". Both take the same payload:
+//
+//	{"folderIds": [...], "filesymlink_ids": [...]}
+//
+// The endpoint returns 201 Created on success and is all-or-nothing.
+func (c *Client) PostTrashBinAction(ctx context.Context, action string, fileSymlinkIDs []string, folderIDs []string) error {
+	if action != "recover" && action != "delete" {
+		return fmt.Errorf("invalid trash-bin action %q (must be \"recover\" or \"delete\")", action)
+	}
+
+	// Ensure JSON encodes empty lists as [] rather than null.
+	if fileSymlinkIDs == nil {
+		fileSymlinkIDs = []string{}
+	}
+	if folderIDs == nil {
+		folderIDs = []string{}
+	}
+
+	body := map[string]interface{}{
+		"filesymlink_ids": fileSymlinkIDs,
+		"folderIds":       folderIDs,
+	}
+
+	url := fmt.Sprintf("/api/v3/users/me/folders/trash-bin/%s/", action)
+	resp, err := c.doRequest(ctx, "POST", url, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusCreated && resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusNoContent {
+		respBody := readResponseBody(resp.Body)
+		return fmt.Errorf("trash-bin %s failed with status %d: %s", action, resp.StatusCode, respBody)
+	}
+
+	return nil
 }
 
 // extractAPIPath extracts the API path from a full URL or returns the path as-is.
@@ -1682,9 +1874,9 @@ func (c *Client) GetJobRuns(ctx context.Context, jobID string) ([]models.JobRun,
 		}
 
 		var result struct {
-			Count   int              `json:"count"`
-			Next    *string          `json:"next"`
-			Results []models.JobRun  `json:"results"`
+			Count   int             `json:"count"`
+			Next    *string         `json:"next"`
+			Results []models.JobRun `json:"results"`
 		}
 
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1937,20 +2129,20 @@ type WorkspaceCustomFieldsResponse struct {
 	// Fields is a map of jobType -> section -> list of fields
 	// Example: {"compute": {"Context": [{name: "Auto Download", ...}]}, "workstation": {}}
 	Fields    map[string]map[string][]WorkspaceCustomField `json:"fields"`
-	IsEnabled bool                                          `json:"isEnabled"`
+	IsEnabled bool                                         `json:"isEnabled"`
 }
 
 // WorkspaceCustomField represents a custom field definition in a workspace.
 type WorkspaceCustomField struct {
 	Name                 string   `json:"name"`
-	ValueType            string   `json:"valueType"`            // "text", "select", "number", "date", "file", "user"
-	EnumOptions          []string `json:"enumOptions"`          // For select fields
+	ValueType            string   `json:"valueType"`   // "text", "select", "number", "date", "file", "user"
+	EnumOptions          []string `json:"enumOptions"` // For select fields
 	Placeholder          string   `json:"placeholder"`
 	HelpText             string   `json:"helpText"`
 	IsMultiple           bool     `json:"isMultiple"`
 	IsRequired           bool     `json:"isRequired"`
 	AllowOther           bool     `json:"allowOther"`
-	Section              string   `json:"section"`              // "Context", "Inputs", "Findings"
+	Section              string   `json:"section"` // "Context", "Inputs", "Findings"
 	OriginatingWorkspace string   `json:"originatingWorkspace"`
 }
 

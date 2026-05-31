@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.9.6
-**Last Updated**: May 9, 2026
+**Version**: 4.9.8
+**Last Updated**: May 31, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -31,7 +31,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.9.6                     |
+|                 Rescale Interlink v4.9.8                     |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -110,7 +110,7 @@ rescale-int/
 │   │
 │   │  ── CLI & Commands ──
 │   ├── cli/                       # Native CLI commands (Cobra)
-│   │   └── compat/                # rescale-cli compatibility mode (24 files)
+│   │   └── compat/                # rescale-cli compatibility mode (25 files)
 │   ├── watch/                     # Job watch engine (shared by native + compat)
 │   │
 │   │  ── Core ──
@@ -273,16 +273,13 @@ The `Engine` struct holds configuration, API client, event bus, state manager, p
 The `Client` struct manages HTTP transport with connection pooling, API token, base URL, rate limiter, and folder cache. See `internal/api/client.go` for the full definition.
 
 **Key Features**:
-- HTTP client with connection pooling (100 idle connections, 20 per host)
+- HTTP client with connection pooling (512 idle connections total, 100 per host, 90s idle timeout)
 - Automatic retry with exponential backoff
 - Rate limiting (three-scope token bucket)
 - Folder content caching via `ListFolderContentsPage` enrichment
 - Structured error handling
 
-**Key Methods**:
-- File operations: `UploadFile()`, `DownloadFile()`, `ListFiles()`, `DeleteFile()`
-- Folder operations: `CreateFolder()`, `ListFolderContents()`, `DeleteFolder()`
-- Job operations: `CreateJob()`, `SubmitJob()`, `GetJobStatus()`, `StopJob()`
+**Selected client methods**: file/folder/job CRUD (`ListFiles`, `DeleteFile`, `CreateFolder`, `ListFolderContents`, `DeleteFolder`, `GetJob`, `GetJobStatuses`, `SubmitJob`, `StopJob`, etc.). Streaming upload and download primitives are **not** methods on `api.Client` — they live as free functions in `internal/cloud/upload/` and `internal/cloud/download/` and run on top of provider-specific transfer handles. The API client only handles metadata-level REST calls.
 
 ### 3. Event Bus (`internal/events/`)
 
@@ -290,11 +287,12 @@ The `Client` struct manages HTTP transport with connection pooling, API token, b
 
 The `EventBus` struct manages per-type subscriber channels, an "all events" subscriber list, a ring buffer for timeline capture in error reports, and a dropped-event counter. See `internal/events/events.go` for the full definition.
 
-**Event Types** (16 total):
+**Event Types** (19 total):
 - Core pipeline: `EventProgress`, `EventLog`, `EventStateChange`, `EventError`, `EventComplete`
 - Transfer queue: `EventTransferQueued`, `EventTransferInitializing`, `EventTransferStarted`, `EventTransferProgress`, `EventTransferCompleted`, `EventTransferFailed`, `EventTransferCancelled`
 - Configuration: `EventConfigChanged`
 - Enumeration: `EventEnumerationStarted`, `EventEnumerationProgress`, `EventEnumerationCompleted`
+- Catalog scan: `EventScanProgress`
 - Batch display: `EventBatchProgress`
 - Error reporting: `EventReportableError`
 
@@ -315,10 +313,11 @@ The `EventBus` struct manages per-type subscriber channels, an "all events" subs
 
 The `FolderCache` struct in `internal/transfer/folder/folder.go` uses a map keyed by folder ID with RWMutex for thread safety. Double-checked locking prevents duplicate API calls.
 
-**Cache Operations**:
+**Cache methods**:
 - `Get(ctx, apiClient, folderID)`: Returns cached contents or fetches from API
 - `Invalidate(folderID)`: Removes cached entry
-- `CheckFolderExists()`: Probes cache before creating folders
+
+**Related package helper**: `folder.CheckFolderExists(ctx, apiClient, cache, parentID, name)` — a free function that probes the cache before creating folders. Not a method on `*FolderCache`.
 
 ### 5. Rate Limiter (`internal/ratelimit/`)
 
@@ -401,7 +400,7 @@ CLI uses `mpb` (multi-progress bars) with per-file bars showing speed and ETA. G
 
 ## CLI Compatibility Mode
 
-**Package**: `internal/cli/compat/` (24 files)
+**Package**: `internal/cli/compat/` (25 files)
 
 Provides drop-in compatibility with `rescale-cli` (the legacy Java-based Rescale CLI). Existing scripts and automation workflows can migrate to Interlink without modification.
 
@@ -478,6 +477,7 @@ All behavior is injected:
 7. **Event Bridge** (`event_bridge.go`): Forwards EventBus events to Wails runtime, throttles progress updates (100ms interval)
 8. **Version Bindings** (`version_bindings.go`): GitHub update check
 9. **Reporting Bindings** (`reporting_bindings.go`): Error report display
+10. **API Key Source Bindings** (`api_key_source_bindings.go`): Reports back to the GUI which credential source the runtime resolved (token file vs. env vs. config) and any source conflicts
 
 ### Frontend Stores (`frontend/src/stores/`)
 
@@ -487,10 +487,12 @@ All behavior is injected:
 4. **configStore** — API configuration and connection state
 5. **transferStore** — Transfer queue tracking with batch grouping and disk space error classification
 6. **logStore** — Activity log entries with level-aware trimming
+7. **fileBrowserStore** — File Browser state, including the four remote browse modes (My Library, My Jobs, Legacy, Trash) and selection bookkeeping
+8. **errorReportStore** — Pending error-report dialog state (current report, redacted details, modal visibility)
 
 ### Frontend Components (`frontend/src/components/tabs/`)
 
-1. **FileBrowserTab** — Two-pane local/remote file browser
+1. **FileBrowserTab** — Two-pane local/remote file browser. Remote pane has four browse modes: My Library, My Jobs, Legacy, and Trash (soft-deleted entries with restore/purge actions). Upload is disabled in Trash and My Jobs modes with an explicit reason.
 2. **TransfersTab** — Transfer progress with batch grouping, cancel/retry, disk space error banner
 3. **SingleJobTab** — Job template builder with three input modes (directory, local files, remote files)
 4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration)
@@ -499,7 +501,7 @@ All behavior is injected:
 
 ### Frontend Shared Widgets (`frontend/src/components/widgets/`)
 
-`JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge`
+`JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge`, `FileList`, `LocalBrowser`, `RemoteBrowser`, `RemoteFilePicker`, `TemplateBuilder`
 
 ---
 
@@ -616,7 +618,7 @@ Block blob API, 32MB blocks, concurrent block upload, automatic credential refre
 
 ### Connection Reuse
 
-Single HTTP client with connection pooling (100 idle connections, 20 per host, 90s timeout). All operations in a batch reuse the same client.
+Single HTTP client with connection pooling (512 idle connections total, 100 per host, 90s idle timeout). All operations in a batch reuse the same client.
 
 ### Rate Limiting
 
@@ -833,7 +835,7 @@ All configuration constants centralized in one file with named constants, inline
 4. **Disk Space Safety**: `DiskSpaceBufferPercent` (0.15)
 5. **Event System**: `EventBusDefaultBuffer` (1000), `EventBusMaxBuffer` (5000)
 6. **Pipeline Queues**: `DefaultQueueMultiplier` (2), `MaxQueueSize` (1000)
-7. **UI Updates**: `TableRefreshMinInterval` (100ms), `ProgressUpdateInterval` (250ms)
+7. **UI Updates**: `TableRefreshMinInterval` (100ms), `ProgressUpdateInterval` (500ms)
 8. **Thread Pool**: `AbsoluteMaxThreads` (32), `MemoryPerThreadMB` (128)
 9. **Resource Management**: File size thresholds and adaptive thread allocation
 10. **Adaptive Concurrency**: `DefaultMaxConcurrent` (5), `MaxMaxConcurrent` (20), tier-specific values

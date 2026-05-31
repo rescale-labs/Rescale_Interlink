@@ -1,7 +1,7 @@
 # Rescale Interlink — Feature Summary
 
-**Version:** 4.9.6
-**Last Updated:** May 9, 2026
+**Version:** 4.9.8
+**Last Updated:** May 31, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document catalogs what Rescale Interlink can do. For full command syntax, see [CLI_GUIDE.md](CLI_GUIDE.md). For architecture internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For version history, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
@@ -38,7 +38,7 @@ This document catalogs what Rescale Interlink can do. For full command syntax, s
 - Windows (amd64)
 
 ### FIPS 140-3 Compliance
-All production builds are compiled with `GOFIPS140=latest`. Non-FIPS builds refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. Mandatory for FedRAMP environments.
+All production builds are compiled with `GOFIPS140=certified` (the CMVP-validated Go Cryptographic Module) and the `fips` build tag. Non-FIPS builds refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. Mandatory for FedRAMP environments.
 
 ---
 
@@ -68,7 +68,7 @@ All production builds are compiled with `GOFIPS140=latest`. Non-FIPS builds refu
 - List all files in library with ID, name, size, upload date
 
 ### Delete
-- Delete one or more files with confirmation prompt
+- Move one or more files to Trash (recoverable) with a confirmation prompt; use `--permanent` to delete irreversibly
 
 ---
 
@@ -97,7 +97,7 @@ All production builds are compiled with `GOFIPS140=latest`. Non-FIPS builds refu
 - Streaming scan-to-download (downloads begin within seconds of scan start)
 
 ### Delete Folder
-- Delete folder and all contents with confirmation
+- Move a folder (and its contents) to Trash (recoverable) with confirmation; use `--permanent` to delete irreversibly
 
 ---
 
@@ -187,10 +187,14 @@ Background service for automatically downloading completed jobs.
 - **Unified Transfers tab**: Daemon transfers appear alongside GUI transfers with a `Daemon` badge. Per-row Cancel/Retry works on daemon rows, routed via IPC; `Cancel All` cancels both engines.
 
 ### Subcommands
-- `run` — Start the daemon
-- `status` — Show daemon state
-- `list` — List downloaded or failed jobs
-- `retry` — Mark failed jobs for retry
+- `run` — Start the daemon (foreground or `--background`, optional `--ipc`)
+- `stop` — Send a clean shutdown request to a running daemon
+- `status` — Show daemon state and statistics
+- `list [--failed]` — List downloaded or failed jobs
+- `retry [--all | -j ID...]` — Mark failed jobs for retry on the next poll
+- `config show` / `config path` / `config edit` / `config set <key> <value>` / `config init` / `config validate` — Manage `daemon.conf`
+
+On Windows MSI installs, the daemon is fronted by the Windows Service. See the **Service Commands** section in [CLI_GUIDE.md](CLI_GUIDE.md) for `service install`, `start`, `stop`, `install-and-start`, and `status`.
 
 ### Platform Support
 - macOS/Linux: subprocess mode with Unix domain socket IPC
@@ -218,6 +222,7 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Additional Commands
 - `make-dirs-csv` — Auto-generate jobs CSV from directory structure
+- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, summarize the matches, and optionally generate a jobs CSV from a template
 - `plan` — Validate pipeline (dry-run)
 - `resume` — Resume interrupted pipeline from state file
 - `submit-existing` — Submit jobs using previously uploaded files
@@ -237,10 +242,9 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Commands
 - `config init` — Interactive setup with numbered platform menu
-- `config set <key> <value>` — Set configuration value
-- `config get [key]` — View current configuration
-- `config list` — List all settings
+- `config show` — Display current configuration
 - `config test` — Test API connection
+- `config path` — Show the configuration file path
 
 ### Storage
 `config.csv` is the single source of truth for all persistent settings. API keys are stored in a separate token file (`~/.config/rescale/token`) with `0600` permissions. Keys are never written to `config.csv`.
@@ -251,11 +255,9 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Hardware
 - `rescale-int hardware list [--search TERM]` — List available core types
-- `rescale-int hardware get <code>` — Get core type details
 
 ### Software
 - `rescale-int software list [--search TERM]` — List available software packages
-- `rescale-int software get <code>` — Get software version details
 
 ---
 
@@ -266,7 +268,7 @@ Batch job submission pipeline for parallel computational studies.
 1. **Setup Tab**: API configuration, proxy settings, logging configuration, auto-download daemon management
 2. **Single Job Tab**: Job template builder with three input modes (directory, local files, remote files). Tar options for directory mode. Form state persists across tab navigation.
 3. **PUR Tab**: Batch job pipeline with view modes (choice screen, monitoring, configuration), pipeline settings, run queue
-4. **File Browser Tab**: Two-pane local/remote browser with upload, download, and delete operations
+4. **File Browser Tab**: Two-pane local/remote browser with upload, download, and delete operations. The remote pane offers four browse modes — My Library, My Jobs, Legacy, and Trash. Trash shows soft-deleted entries with restore/purge actions; Upload is disabled in Trash and My Jobs with an explicit "N/A in this view" reason.
 5. **Transfers Tab**: Transfer progress with batch grouping (folder ops, PUR, single-job collapse into single rows), cancel/retry, filter chips, disk space error banner. Daemon auto-download rows appear inline with a `Daemon` badge and support per-row Cancel/Retry via IPC.
 6. **Activity Tab**: Logs with level filtering (DEBUG/INFO/WARN/ERROR), run history with expandable job tables
 
@@ -336,7 +338,7 @@ Thread-safe `ConflictResolver[A comparable]` generic type with automatic escalat
 - **TLS**: 1.2+ with FIPS-approved cipher suites
 
 ### Proxy Support
-Four modes: `no-proxy`, `system`, `basic`, `ntlm` (NTLM not FIPS-compliant, auto-disabled on FedRAMP). Proxy warmup for authentication. `NO_PROXY` bypass rules fully wired.
+Modes: `no-proxy`, `system`, `basic`, and `ntlm` where supported. FIPS-tagged builds disable NTLM at build and backend-validation time; FedRAMP platforms also disable NTLM in the GUI. Proxy warmup for authentication. `NO_PROXY` bypass rules fully wired.
 
 ### S3 FIPS Endpoints
 ITAR platforms (`itar.rescale.com`, `itar.rescale-gov.com`) automatically route S3 traffic through AWS FIPS-validated endpoints. No user configuration required.

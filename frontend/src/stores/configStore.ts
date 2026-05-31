@@ -1,13 +1,14 @@
 import { create } from 'zustand';
 import { wailsapp } from '../../wailsjs/go/models';
 import * as App from '../../wailsjs/go/wailsapp/App';
-import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime';
+import { EventsOn } from '../../wailsjs/runtime/runtime';
 import type { ConnectionResultDTO } from '../types';
 
 interface ConfigState {
   // Data
   config: wailsapp.ConfigDTO | null;
   appInfo: wailsapp.AppInfoDTO | null;
+  credentialSource: wailsapp.CredentialSourceDTO | null;
 
   // Connection state
   connectionStatus: 'unknown' | 'testing' | 'connected' | 'failed';
@@ -26,8 +27,10 @@ interface ConfigState {
   // Actions
   fetchConfig: () => Promise<void>;
   fetchAppInfo: () => Promise<void>;
+  fetchCredentialSource: () => Promise<void>;
   updateConfig: (updates: Partial<wailsapp.ConfigDTO>) => void;
   saveConfig: () => Promise<void>;
+  clearSavedAPIKey: () => Promise<wailsapp.ClearSavedAPIKeyResultDTO>;
   loadConfigFromFile: (path: string) => Promise<void>;
   testConnection: () => Promise<void>;
   selectDirectory: (title: string) => Promise<string>;
@@ -35,12 +38,14 @@ interface ConfigState {
 
   // Internal
   setupEventListeners: () => () => void;
+  _eventListenersSetup: boolean;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
   // Initial state
   config: null,
   appInfo: null,
+  credentialSource: null,
   connectionStatus: 'unknown',
   connectionEmail: null,
   connectionFullName: null,
@@ -51,12 +56,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isLoading: false,
   isSaving: false,
   error: null,
+  _eventListenersSetup: false,
 
   fetchConfig: async () => {
     set({ isLoading: true, error: null });
     try {
-      const config = await App.GetConfig();
-      set({ config, isLoading: false });
+      const [config, credentialSource] = await Promise.all([
+        App.GetConfig(),
+        App.GetCredentialSource(),
+      ]);
+      set({ config, credentialSource, isLoading: false });
     } catch (err) {
       set({
         error: err instanceof Error ? err.message : String(err),
@@ -74,8 +83,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
   },
 
+  fetchCredentialSource: async () => {
+    try {
+      const credentialSource = await App.GetCredentialSource();
+      set({ credentialSource });
+    } catch (err) {
+      console.error('Failed to fetch credential source:', err);
+    }
+  },
+
   updateConfig: (updates) => {
-    const { config } = get();
+    const { config, credentialSource } = get();
     if (!config) return;
 
     // Create a new config with updates
@@ -84,7 +102,24 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       ...updates,
     });
 
-    set({ config: newConfig });
+    const stateUpdates: Partial<ConfigState> = { config: newConfig };
+    if (Object.prototype.hasOwnProperty.call(updates, 'apiKey')) {
+      const nextAPIKey = updates.apiKey || '';
+      stateUpdates.credentialSource = new wailsapp.CredentialSourceDTO({
+        ...(credentialSource || {}),
+        source: nextAPIKey ? 'direct-input' : '',
+        label: nextAPIKey ? 'Direct input' : 'Not configured',
+        detail: nextAPIKey
+          ? 'Current value has not been saved to the token file.'
+          : 'No API key is currently active.',
+        warning: credentialSource?.legacyConfigPresent
+          ? 'A legacy apiconfig file still contains an API key; the GUI is not using it as the active source.'
+          : '',
+        hasApiKey: Boolean(nextAPIKey),
+      });
+    }
+
+    set(stateUpdates);
   },
 
   saveConfig: async () => {
@@ -95,7 +130,34 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     try {
       await App.UpdateConfig(config);
       await App.SaveConfig();
+      await get().fetchCredentialSource();
       set({ isSaving: false });
+    } catch (err) {
+      set({
+        error: err instanceof Error ? err.message : String(err),
+        isSaving: false
+      });
+      throw err;
+    }
+  },
+
+  clearSavedAPIKey: async () => {
+    set({ isSaving: true, error: null });
+    try {
+      const result = await App.ClearSavedAPIKey();
+      const config = await App.GetConfig();
+      set({
+        config,
+        credentialSource: result.credentialSource,
+        connectionStatus: 'unknown',
+        connectionEmail: null,
+        connectionFullName: null,
+        workspaceId: null,
+        workspaceName: null,
+        connectionError: null,
+        isSaving: false,
+      });
+      return result;
     } catch (err) {
       set({
         error: err instanceof Error ? err.message : String(err),
@@ -174,6 +236,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   setupEventListeners: () => {
+    if (get()._eventListenersSetup) {
+      return () => {};
+    }
+
     const handleConnectionResult = (result: ConnectionResultDTO) => {
       if (result.success) {
         set({
@@ -198,11 +264,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
     };
 
-    EventsOn('interlink:connection_result', handleConnectionResult);
+    const unsubscribeConnectionResult = EventsOn('interlink:connection_result', handleConnectionResult);
+    set({ _eventListenersSetup: true });
 
-    // Return cleanup function
     return () => {
-      EventsOff('interlink:connection_result');
+      unsubscribeConnectionResult();
+      set({ _eventListenersSetup: false });
     };
   },
 }));

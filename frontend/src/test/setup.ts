@@ -24,6 +24,7 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
     version: '4.0.0-dev',
     fipsEnabled: true,
     fipsStatus: 'FIPS 140-3',
+    ntlmProxySupported: true,
   })),
   CheckForUpdates: vi.fn(() => Promise.resolve({
     hasUpdate: false,
@@ -59,9 +60,23 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
     hasMore: false,
     nextCursor: '',
   })),
+  ListRemoteFolderPage: vi.fn(() => Promise.resolve({
+    folderId: 'folder-123',
+    folderPath: 'My Library',
+    items: [],
+    hasMore: false,
+    nextCursor: '',
+  })),
   ListRemoteLegacy: vi.fn(() => Promise.resolve({
     folderId: '',
     folderPath: 'Legacy Files',
+    items: [],
+    hasMore: false,
+    nextCursor: '',
+  })),
+  ListRemoteTrash: vi.fn(() => Promise.resolve({
+    folderId: 'trash',
+    folderPath: 'Trash',
     items: [],
     hasMore: false,
     nextCursor: '',
@@ -70,6 +85,8 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
   GetMyJobsFolderID: vi.fn(() => Promise.resolve('jobs-folder-456')),
   CreateRemoteFolder: vi.fn(() => Promise.resolve('new-folder-789')),
   DeleteRemoteItems: vi.fn(() => Promise.resolve({ deleted: 1, failed: 0, error: '' })),
+  RecoverTrashItems: vi.fn(() => Promise.resolve({ deleted: 1, failed: 0, error: '' })),
+  PurgeTrashItems: vi.fn(() => Promise.resolve({ deleted: 1, failed: 0, error: '' })),
 
   // Transfer bindings
   StartTransfers: vi.fn(() => Promise.resolve()),

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -60,13 +61,14 @@ func translateAPIError(err error) string {
 
 // FileItemDTO is the JSON-safe version of services.FileItem.
 type FileItemDTO struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	IsFolder bool   `json:"isFolder"`
-	Size     int64  `json:"size"`
-	ModTime  string `json:"modTime"`
-	Path     string `json:"path,omitempty"`
-	ParentID string `json:"parentId,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsFolder  bool   `json:"isFolder"`
+	Size      int64  `json:"size"`
+	ModTime   string `json:"modTime"`
+	Path      string `json:"path,omitempty"`
+	ParentID  string `json:"parentId,omitempty"`
+	SymlinkID string `json:"symlinkId,omitempty"`
 }
 
 // FolderContentsDTO is the JSON-safe version of services.FolderContents.
@@ -304,6 +306,84 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 	return folderContentsToDTO(contents)
 }
 
+// ListRemoteTrash returns a single page of the user's trash bin.
+// Items include both files (with SymlinkID populated) and folder-like entries.
+// Pass pageSize=0 for API default.
+func (a *App) ListRemoteTrash(cursor string, pageSize int) FolderContentsDTO {
+	if a.engine == nil {
+		return FolderContentsDTO{}
+	}
+
+	fs := a.engine.FileService()
+	if fs == nil {
+		return FolderContentsDTO{}
+	}
+
+	ctx := context.Background()
+	contents, err := fs.ListTrashBinPage(ctx, cursor, pageSize)
+	if err != nil {
+		return FolderContentsDTO{
+			FolderID:   "trash",
+			FolderPath: "Trash",
+			Items:      []FileItemDTO{},
+			Warning:    translateAPIError(err),
+		}
+	}
+
+	dto := folderContentsToDTO(contents)
+	dto.FolderID = "trash"
+	return dto
+}
+
+// RecoverTrashItems restores selected trash items to their original locations.
+func (a *App) RecoverTrashItems(items []FileItemDTO) DeleteResultDTO {
+	return a.postTrashItems(items, true)
+}
+
+// PurgeTrashItems permanently deletes selected trash items. Irreversible.
+func (a *App) PurgeTrashItems(items []FileItemDTO) DeleteResultDTO {
+	return a.postTrashItems(items, false)
+}
+
+func (a *App) postTrashItems(items []FileItemDTO, recover bool) DeleteResultDTO {
+	if a.engine == nil {
+		return DeleteResultDTO{Error: ErrNoEngine.Error(), Failed: len(items)}
+	}
+
+	fs := a.engine.FileService()
+	if fs == nil {
+		return DeleteResultDTO{Error: ErrNoFileService.Error(), Failed: len(items)}
+	}
+
+	serviceItems := make([]services.FileItem, len(items))
+	for i, item := range items {
+		serviceItems[i] = services.FileItem{
+			ID:        item.ID,
+			Name:      item.Name,
+			IsFolder:  item.IsFolder,
+			SymlinkID: item.SymlinkID,
+		}
+	}
+
+	ctx := context.Background()
+	var count, failed int
+	var err error
+	if recover {
+		count, failed, err = fs.RecoverTrashItems(ctx, serviceItems)
+	} else {
+		count, failed, err = fs.PurgeTrashItems(ctx, serviceItems)
+	}
+
+	result := DeleteResultDTO{
+		Deleted: count,
+		Failed:  failed,
+	}
+	if err != nil {
+		result.Error = translateAPIError(err)
+	}
+	return result
+}
+
 // ValidateRemoteFolder checks that a remote folder exists and is accessible.
 // Lightweight preflight check — fetches a single item from the first page.
 // Does NOT use FolderCache.Get() (which fetches all pages).
@@ -354,8 +434,12 @@ func (a *App) CreateRemoteFolder(name string, parentID string) (string, error) {
 	return fs.CreateFolder(ctx, name, parentID)
 }
 
-// DeleteRemoteItems deletes multiple files and/or folders.
-func (a *App) DeleteRemoteItems(items []FileItemDTO) DeleteResultDTO {
+// DeleteRemoteItems moves multiple files and/or folders to the user's Trash
+// (soft delete), matching the web UI. parentFolderID is the folder currently
+// being viewed (the items' parent), required by the folder-scoped archive
+// endpoint. Items can be recovered from the Trash view. Permanent deletion is
+// handled separately by the Trash view's purge action.
+func (a *App) DeleteRemoteItems(parentFolderID string, items []FileItemDTO) DeleteResultDTO {
 	if a.engine == nil {
 		return DeleteResultDTO{Error: ErrNoEngine.Error(), Failed: len(items)}
 	}
@@ -376,10 +460,10 @@ func (a *App) DeleteRemoteItems(items []FileItemDTO) DeleteResultDTO {
 	}
 
 	ctx := context.Background()
-	deleted, failed, err := fs.DeleteItems(ctx, serviceItems)
+	archived, failed, err := fs.ArchiveItems(ctx, parentFolderID, serviceItems)
 
 	result := DeleteResultDTO{
-		Deleted: deleted,
+		Deleted: archived,
 		Failed:  failed,
 	}
 	if err != nil {
@@ -427,13 +511,14 @@ func folderContentsToDTO(contents *services.FolderContents) FolderContentsDTO {
 	items := make([]FileItemDTO, len(contents.Items))
 	for i, item := range contents.Items {
 		items[i] = FileItemDTO{
-			ID:       item.ID,
-			Name:     item.Name,
-			IsFolder: item.IsFolder,
-			Size:     item.Size,
-			ModTime:  item.ModTime.Format(time.RFC3339),
-			Path:     item.Path,
-			ParentID: item.ParentID,
+			ID:        item.ID,
+			Name:      item.Name,
+			IsFolder:  item.IsFolder,
+			Size:      item.Size,
+			ModTime:   item.ModTime.Format(time.RFC3339),
+			Path:      item.Path,
+			ParentID:  item.ParentID,
+			SymlinkID: item.SymlinkID,
 		}
 	}
 
@@ -711,6 +796,14 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 
 		// Final discovered totals update (ensures exact count is set)
 		ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
+
+		// Anchor a zero-file download so the Transfers row survives CleanupBatch.
+		// The scan succeeded; the folder simply had no files. Without this, the
+		// batch would vanish from the Transfers tab, unlike every other completed
+		// transfer (see RegisterEmptyBatchPlaceholder).
+		if filesQueued == 0 {
+			ts.RegisterEmptyBatchPlaceholder(enumID, displayName, "download")
+		}
 
 		emitLog(events.InfoLevel, fmt.Sprintf("Scan complete: %d folders, %d files (%.2f MB). Downloads in progress.",
 			foldersCreated, filesQueued, float64(totalBytes)/(1024*1024)))
@@ -1044,6 +1137,12 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		})
 	}
 
+	// Skip-entry counter shared between OnSkippedEntry (drain goroutine) and
+	// OnOrchestratorDone (Part C). Atomic for memory safety; the orchestrator's
+	// skipDrainWG.Wait() before OnOrchestratorDone guarantees this is the final
+	// count by the time the post-walk decision logic runs.
+	var skipCount atomic.Int64
+
 	_, _ = folder.RunOrchestrator(uploadCtx,
 		folder.OrchestratorConfig{
 			RootPath:          resolvedLocalPath, // Use resolved path for filesystem walk
@@ -1057,6 +1156,23 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 			Cache:             cache,
 		},
 		folder.OrchestratorCallbacks[services.TransferRequest]{
+			OnSkippedEntry: func(entry localfs.FileEntry) {
+				n := skipCount.Add(1)
+				ts.GetQueue().IncrementBatchSkipped(enumID, 1)
+
+				msg := fmt.Sprintf("Skipped %s (isSymlink=%v isDir=%v; reparse point or unidentifiable target)",
+					entry.Path, entry.IsSymlink, entry.IsDir)
+				switch {
+				case n <= 10:
+					a.logWarn("folder-upload", msg)
+				case n == 11:
+					a.logWarn("folder-upload",
+						"Further skip messages suppressed in Activity Logs — see interlink.log for full list (best-effort).")
+					WriteToLogFile("WARN", "folder-upload", msg)
+				default:
+					WriteToLogFile("WARN", "folder-upload", msg)
+				}
+			},
 			OnFileDiscovered: func(snap folder.ProgressSnapshot) {
 				// Update discovered totals on every file so the polling path always has an accurate count.
 				ts.GetQueue().UpdateBatchDiscovered(enumID, snap.TotalFiles, snap.TotalBytes)
@@ -1115,6 +1231,36 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 					emitLog(events.InfoLevel, fmt.Sprintf("Created %d remote folders", r.FoldersCreated))
 				}
 				emitLog(events.InfoLevel, fmt.Sprintf("All files queued for upload (%d discovered)", r.DiscoveredFiles))
+
+				// Finish bookend: a.logInfo writes to BOTH Activity tab AND interlink.log,
+				// giving customer support an authoritative file-log record of every folder
+				// upload outcome (including skip-only and empty-folder cases).
+				skips := int(skipCount.Load())
+				switch {
+				case r.DiscoveredFiles > 0 && skips > 0:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — %d files queued, %d items skipped",
+						displayName, r.DiscoveredFiles, skips))
+				case r.DiscoveredFiles > 0:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — %d files queued",
+						displayName, r.DiscoveredFiles))
+				case skips > 0:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — 0 files queued, %d items skipped",
+						displayName, skips))
+					// Anchor the batch with a placeholder task so the Transfers row
+					// survives CleanupBatch and the user can see the transaction.
+					ts.RegisterSkipPlaceholderTask(enumID, displayName, skips)
+				default:
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload finished: %s — empty folder, no files to upload",
+						displayName))
+					// Anchor the empty upload so its Transfers row survives CleanupBatch,
+					// symmetric with the empty-download case (see RegisterEmptyBatchPlaceholder).
+					ts.RegisterEmptyBatchPlaceholder(enumID, displayName, "upload")
+				}
+
 				emitCompletion(r.DiscoveredDirs, r.DiscoveredFiles, r.DiscoveredBytes, errMsg)
 			},
 		},

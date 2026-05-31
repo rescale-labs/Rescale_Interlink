@@ -437,13 +437,20 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 			} else {
 				// CLI fallback: direct upload.
 				// Signal active transfer since CLI fallback bypasses RunBatch.
+				fileInfo, statErr := os.Stat(absPath)
+				if statErr != nil {
+					return fmt.Errorf("failed to stat shared file %s: %w", item, statErr)
+				}
+				transferHandle := p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
 				ratelimit.GlobalStore().BeginTransferActivity()
 				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
-					LocalPath:    absPath,
-					APIClient:    p.apiClient,
-					OutputWriter: io.Discard,
+					LocalPath:      absPath,
+					APIClient:      p.apiClient,
+					TransferHandle: transferHandle,
+					OutputWriter:   io.Discard,
 				})
 				ratelimit.GlobalStore().EndTransferActivity()
+				transferHandle.Complete()
 			}
 			if err != nil {
 				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
@@ -811,7 +818,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				continue
 			}
 
-			transferHandle := p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+			var transferHandle *transfer.Transfer
 
 			for attempt := 1; attempt <= maxRetries; attempt++ {
 				progressCallback := func(progress float64) {
@@ -830,6 +837,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				} else {
 					// CLI fallback: direct upload.
 					// Signal active transfer since CLI fallback bypasses RunBatch.
+					if transferHandle == nil {
+						transferHandle = p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
+					}
 					ratelimit.GlobalStore().BeginTransferActivity()
 					cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 						LocalPath:        item.state.TarPath,
@@ -881,7 +891,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
 				p.setActiveWorker("upload", -1)
-				transferHandle.Complete()
+				if transferHandle != nil {
+					transferHandle.Complete()
+				}
 				continue
 			}
 
@@ -899,7 +911,9 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				}
 			}
 
-			transferHandle.Complete()
+			if transferHandle != nil {
+				transferHandle.Complete()
+			}
 
 			p.setActiveWorker("upload", -1)
 			select {
@@ -1046,6 +1060,19 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
 				p.logf("INFO", "job", item.state.JobName, "Created: Job ID %s", jobResp.ID)
 
+				// Apply user tags. The job-creation body's "tags" field is ignored
+				// by the platform; tags must be POSTed one at a time to the
+				// per-job tags endpoint. Non-fatal: a tag failure does not fail
+				// the job.
+				for _, tag := range item.jobSpec.Tags {
+					if tag == "" {
+						continue
+					}
+					if err := p.apiClient.AddJobTag(ctx, jobResp.ID, tag); err != nil {
+						p.logf("WARN", "job", item.state.JobName, "Failed to apply tag %q: %v", tag, err)
+					}
+				}
+
 				// Org-scoped project assignment
 				orgCode := item.jobSpec.OrgCode
 				if orgCode == "" {
@@ -1174,7 +1201,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 					},
 					CoresPerSlot: spec.CoresPerSlot,
 					Slots:        spec.Slots,
-					Walltime:     int(spec.WalltimeHours * 3600), // Convert hours to seconds
+					Walltime:     walltimeHoursToAPI(spec.WalltimeHours),
 				},
 				InputFiles:                 inputFiles,
 				EnvVars:                    licenseEnv,
@@ -1204,6 +1231,21 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 	}
 
 	return jobReq, nil
+}
+
+// walltimeHoursToAPI converts a user-specified walltime in hours to the value
+// the Rescale job API expects, which is also in hours (NOT seconds). Rounds up
+// to the next whole hour and enforces a minimum of 1 so a job never submits
+// with a zero walltime.
+func walltimeHoursToAPI(hours float64) int {
+	if hours <= 1 {
+		return 1
+	}
+	whole := int(hours)
+	if float64(whole) < hours {
+		whole++ // round fractional hours up
+	}
+	return whole
 }
 
 // NormalizeSubmitMode converts UI mode strings to canonical pipeline values.

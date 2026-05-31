@@ -108,12 +108,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Go 1.24.2
+      - name: Install Go 1.26.3
         run: |
-          curl -L -o go1.24.2.darwin-arm64.tar.gz https://go.dev/dl/go1.24.2.darwin-arm64.tar.gz
+          curl -L -o go1.26.3.darwin-arm64.tar.gz https://go.dev/dl/go1.26.3.darwin-arm64.tar.gz
           sudo rm -rf /usr/local/go
-          sudo tar -C /usr/local -xzf go1.24.2.darwin-arm64.tar.gz
-          rm go1.24.2.darwin-arm64.tar.gz
+          sudo tar -C /usr/local -xzf go1.26.3.darwin-arm64.tar.gz
+          rm go1.26.3.darwin-arm64.tar.gz
           echo "/usr/local/go/bin" >> $GITHUB_PATH
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
@@ -138,7 +138,7 @@ jobs:
           xcrun --show-sdk-path
 
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
       - name: Install frontend dependencies
         run: cd frontend && npm install
@@ -154,8 +154,8 @@ jobs:
           echo "CXX=$CXX"
           echo "which clang: $(which clang)"
           echo "xcrun clang: $(xcrun --find clang)"
-          GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
-            wails build -platform darwin/arm64 -ldflags "$LDFLAGS"
+          GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+            wails build -tags fips -platform darwin/arm64 -ldflags "$LDFLAGS"
 
       - name: Build standalone CLI binary
         run: |
@@ -164,8 +164,8 @@ jobs:
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
-          GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
-            go build -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
+          GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+            go build -tags fips -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
       - name: Install Apple Certificate
         env:

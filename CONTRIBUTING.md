@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 4.9.6
-**Last Updated**: May 9, 2026
+**Version**: 4.9.8
+**Last Updated**: May 31, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -12,7 +12,7 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
 ### Prerequisites
 
-- Go 1.24 or later (minimum required)
+- Go 1.26.3 (minimum required)
 - Node.js 18+ (for GUI development)
 - Wails v2 CLI (for GUI builds)
 - macOS, Linux, or Windows development environment
@@ -39,7 +39,7 @@ go test ./...
 
 ```bash
 # Install Wails CLI (if not already installed)
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
 # Install frontend dependencies
 cd frontend && npm install && cd ..
@@ -64,10 +64,10 @@ make build-darwin-arm64       # Build for macOS ARM64
 make build-all                # Build for all platforms
 
 # Output goes to: bin/{VERSION}/{PLATFORM}/rescale-int
-# Example: bin/v4.0.0/darwin-arm64/rescale-int
+# Example: bin/v4.9.8/darwin-arm64/rescale-int
 
 # Production GUI build
-GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -platform darwin/arm64
+GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -tags fips -platform darwin/arm64
 
 # Development only (not for production releases)
 # Note: Output to bin/dev/ to avoid polluting project root
@@ -176,7 +176,7 @@ rescale-int/
 ├── internal/
 │   ├── api/                   # Rescale API client (v3 + v2)
 │   ├── cli/                   # CLI commands (Cobra)
-│   │   └── compat/            # rescale-cli compatibility mode (24 files)
+│   │   └── compat/            # rescale-cli compatibility mode (25 files)
 │   ├── cloud/                 # Cloud storage operations
 │   │   ├── credentials/       # Credential management + warming
 │   │   ├── download/          # Download entry point

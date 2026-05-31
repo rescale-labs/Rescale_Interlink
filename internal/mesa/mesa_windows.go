@@ -302,9 +302,9 @@ func canWriteToDir(dir string) bool {
 
 // EnsureSoftwareRendering sets up Mesa software rendering for Windows.
 //
-// As of v3.4.13, the recommended deployment is "app-local": bundle Mesa DLLs
-// alongside the EXE. Windows loads DLLs from the EXE directory before System32
-// (when the DLL is not in KnownDLLs), so this works automatically.
+// Deployment model: "app-local" — Mesa DLLs are bundled alongside the EXE.
+// Windows loads DLLs from the EXE directory before System32 (when the DLL is
+// not in KnownDLLs), so the bundled DLLs are picked up automatically.
 //
 // This function:
 // 1. Sets GALLIUM_DRIVER=llvmpipe and LIBGL_ALWAYS_SOFTWARE=1

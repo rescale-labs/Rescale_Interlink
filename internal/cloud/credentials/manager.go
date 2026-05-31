@@ -90,7 +90,7 @@ func (m *Manager) GetS3Credentials(ctx context.Context) (*models.S3Credentials, 
 	}
 	m.mu.RUnlock()
 
-	// v4.8.2: Warm proxy before credential refresh API call
+	// Warm proxy before credential refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
@@ -131,7 +131,7 @@ func (m *Manager) GetAzureCredentials(ctx context.Context) (*models.AzureCredent
 	}
 	m.mu.RUnlock()
 
-	// v4.8.2: Warm proxy before credential refresh API call
+	// Warm proxy before credential refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
@@ -160,7 +160,7 @@ func (m *Manager) GetAzureCredentials(ctx context.Context) (*models.AzureCredent
 // ForceRefresh forces an immediate credential refresh, bypassing the cache
 // Useful for recovering from token expiration errors or when credentials are known to be invalid
 func (m *Manager) ForceRefresh(ctx context.Context) error {
-	// v4.8.2: Warm proxy before credential refresh API call
+	// Warm proxy before credential refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	m.mu.Lock()
@@ -195,7 +195,6 @@ func (m *Manager) GetAge() time.Duration {
 // Uses wall-clock time (via Round(0)) instead of monotonic clock for age checks,
 // because Go's monotonic clock may not account for system sleep on all platforms.
 // This ensures correct staleness detection after laptop sleep/wake.
-// v4.8.3
 func (m *Manager) EnsureFresh(ctx context.Context) error {
 	// Fast path: read-lock only, no contention
 	// Use wall-clock time via Round(0) to correctly detect staleness after sleep
@@ -236,7 +235,6 @@ func (m *Manager) EnsureFresh(ctx context.Context) error {
 // Session-level (EnsureFresh) + provider-level (S3 + Azure) + metadata (profile + folders).
 // All calls non-fatal — errors are silently ignored since callers retry on demand.
 // Proxy warmup NOT included (needs config.Config, handled separately by callers).
-// v4.8.7
 func (m *Manager) WarmAll(ctx context.Context) {
 	_ = m.EnsureFresh(ctx)
 	_, _ = m.GetS3Credentials(ctx)
@@ -273,7 +271,7 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 	}
 	m.mu.RUnlock()
 
-	// v4.8.2: Warm proxy before credential refresh API call
+	// Warm proxy before credential refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
@@ -318,7 +316,7 @@ func (m *Manager) GetAzureCredentialsForStorage(ctx context.Context, fileInfo *m
 		return m.GetAzureCredentials(ctx)
 	}
 
-	// v4.6.6: For shared-file credential requests, the API returns per-file SAS tokens
+	// For shared-file credential requests, the API returns per-file SAS tokens
 	// scoped to a specific blob path. Include the file path in the cache key so that
 	// each file gets credentials with its own per-file SAS token, rather than sharing
 	// a cached response whose per-file token only matches a different file.
@@ -338,7 +336,7 @@ func (m *Manager) GetAzureCredentialsForStorage(ctx context.Context, fileInfo *m
 	}
 	m.mu.RUnlock()
 
-	// v4.8.2: Warm proxy before credential refresh API call
+	// Warm proxy before credential refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
@@ -373,7 +371,7 @@ func (m *Manager) ForceRefreshForStorage(ctx context.Context, fileInfo *models.C
 		return m.ForceRefresh(ctx)
 	}
 
-	// v4.8.2: Warm proxy before credential refresh API call
+	// Warm proxy before credential refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	m.mu.Lock()
@@ -381,7 +379,8 @@ func (m *Manager) ForceRefreshForStorage(ctx context.Context, fileInfo *models.C
 
 	storageID := fileInfo.Storage.ID
 
-	// v4.8.2: Use same cache key as GetAzureCredentialsForStorage (storageID:path)
+	// Use same cache key shape as GetAzureCredentialsForStorage (storageID:path)
+	// so the two paths share the cache.
 	cacheKey := storageID
 	if fileInfo.PathParts != nil && fileInfo.PathParts.Path != "" {
 		cacheKey = storageID + ":" + fileInfo.PathParts.Path
@@ -413,7 +412,7 @@ func (m *Manager) GetUserProfile(ctx context.Context) (*models.UserProfile, erro
 	}
 	m.mu.RUnlock()
 
-	// v4.8.2: Warm proxy before profile refresh API call
+	// Warm proxy before profile refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)
@@ -452,7 +451,7 @@ func (m *Manager) GetRootFolders(ctx context.Context) (*models.RootFolders, erro
 	}
 	m.mu.RUnlock()
 
-	// v4.8.2: Warm proxy before folder refresh API call
+	// Warm proxy before folder refresh API call
 	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
 
 	// Slow path: refresh needed (write lock)

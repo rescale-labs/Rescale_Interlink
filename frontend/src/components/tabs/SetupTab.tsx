@@ -11,6 +11,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   ShieldCheckIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { ClipboardGetText, EventsOn, EventsOff } from '../../../wailsjs/runtime/runtime';
@@ -47,9 +48,6 @@ import {
   CodeTransientTimeout,
 } from '../../lib/errors';
 
-// Token source options matching Fyne
-type TokenSource = 'environment' | 'file' | 'direct';
-
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
 
 // Check if URL is a FedRAMP platform (requires FIPS compliance).
@@ -85,6 +83,7 @@ const PLATFORM_URLS = [
 export function SetupTab() {
   const {
     config,
+    credentialSource,
     connectionStatus,
     connectionEmail,
     connectionError,
@@ -96,12 +95,10 @@ export function SetupTab() {
     fetchAppInfo,
     updateConfig,
     saveConfig,
+    clearSavedAPIKey,
     testConnection,
-    selectFile,
-    setupEventListeners,
   } = useConfigStore();
 
-  const [tokenSource, setTokenSource] = useState<TokenSource>('direct');
   const [statusMessage, setStatusMessage] = useState('Ready');
   const [showApiKey, setShowApiKey] = useState(false);
   const [defaultConfigPath, setDefaultConfigPath] = useState<string>('');
@@ -142,13 +139,11 @@ export function SetupTab() {
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevLookbackRef = useRef<number | null>(null);
 
-  // Setup event listeners and fetch initial data
+  // Fetch initial data
   useEffect(() => {
-    const cleanup = setupEventListeners();
     fetchConfig();
     fetchAppInfo();
     GetDefaultConfigPath().then(setDefaultConfigPath).catch(console.error);
-    return cleanup;
   }, []);
 
   useEffect(() => {
@@ -306,14 +301,23 @@ export function SetupTab() {
     fetchFileLoggingSettings();
   }, []);
 
-  // Auto-switch proxy mode: NTLM uses non-FIPS algorithms (MD4/MD5) not allowed for FedRAMP
+  // NTLM can be unavailable either by build policy or by selected platform policy.
   useEffect(() => {
-    if (config && config.proxyMode === 'ntlm' && isFRMPlatform(config.apiBaseUrl || '')) {
-      // NTLM is not allowed for FRM platforms - switch to basic
-      updateConfig({ proxyMode: 'basic' });
-      setStatusMessage('Proxy mode switched to "basic": NTLM uses non-FIPS algorithms not allowed for FedRAMP');
+    if (!config || config.proxyMode !== 'ntlm') {
+      return;
     }
-  }, [config?.apiBaseUrl]);
+
+    const disabledByBuild = appInfo?.ntlmProxySupported === false;
+    const disabledByPlatform = isFRMPlatform(config.apiBaseUrl || '');
+    if (disabledByBuild || disabledByPlatform) {
+      updateConfig({ proxyMode: 'basic' });
+      setStatusMessage(
+        disabledByBuild
+          ? 'Proxy mode switched to "basic": NTLM is unavailable in this FIPS build'
+          : 'Proxy mode switched to "basic": NTLM uses non-FIPS algorithms not allowed for FedRAMP'
+      );
+    }
+  }, [config?.apiBaseUrl, config?.proxyMode, appInfo?.ntlmProxySupported]);
 
   useEffect(() => {
     if (connectionStatus === 'connected' && connectionEmail) {
@@ -336,21 +340,19 @@ export function SetupTab() {
     }
   };
 
-  const handleSelectTokenFile = async () => {
-    try {
-      const path = await selectFile('Select Token File');
-      if (path) {
-        // Load token from file would be handled by backend
-        setStatusMessage(`Token file selected: ${path}`);
-      }
-    } catch (err) {
-      console.error('Failed to select file:', err);
-    }
-  };
-
   const handleTestConnection = async () => {
     setStatusMessage('Testing connection...');
     await testConnection();
+  };
+
+  const handleClearSavedAPIKey = async () => {
+    try {
+      setStatusMessage('Removing saved API key...');
+      const result = await clearSavedAPIKey();
+      setStatusMessage(result.message);
+    } catch (err) {
+      setStatusMessage(`Failed to remove saved API key: ${err}`);
+    }
   };
 
   const [isUnifiedSaving, setIsUnifiedSaving] = useState(false);
@@ -786,8 +788,12 @@ export function SetupTab() {
 
   const proxyEnabled = config?.proxyMode !== 'no-proxy' && config?.proxyMode !== 'system';
   const basicAuthEnabled = config?.proxyMode === 'basic';
-  // NTLM not allowed for FedRAMP platforms (FIPS compliance)
   const isFRM = isFRMPlatform(config?.apiBaseUrl || '');
+  const ntlmProxySupported = appInfo?.ntlmProxySupported ?? true;
+  const ntlmUnavailable = !ntlmProxySupported || isFRM;
+  const ntlmUnavailableReason = !ntlmProxySupported
+    ? 'unavailable in FIPS build'
+    : 'unavailable for FRM';
 
   const hasUnsavedDaemonChanges = daemonConfig && lastSavedConfig
     ? JSON.stringify(daemonConfig) !== JSON.stringify(lastSavedConfig)
@@ -849,43 +855,6 @@ export function SetupTab() {
               </select>
             </div>
 
-            {/* Token Source */}
-            <div>
-              <label className="label">Token Source</label>
-              <div className="flex flex-col space-y-2">
-                {[
-                  { value: 'environment', label: 'Environment Variable (RESCALE_API_KEY)' },
-                  { value: 'file', label: 'Token File' },
-                  { value: 'direct', label: 'Direct Input' },
-                ].map((option) => (
-                  <label key={option.value} className="flex items-center">
-                    <input
-                      type="radio"
-                      name="tokenSource"
-                      value={option.value}
-                      checked={tokenSource === option.value}
-                      onChange={(e) => setTokenSource(e.target.value as TokenSource)}
-                      className="h-4 w-4 text-rescale-blue focus:ring-rescale-blue"
-                    />
-                    <span className="ml-2 text-sm text-gray-700">{option.label}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            {/* Token File Button */}
-            {tokenSource === 'file' && (
-              <div>
-                <button
-                  onClick={handleSelectTokenFile}
-                  className="btn-secondary flex items-center"
-                >
-                  <FolderOpenIcon className="w-4 h-4 mr-2" />
-                  Select Token File...
-                </button>
-              </div>
-            )}
-
             {/* API Key */}
             <div>
               <label className="label">API Key</label>
@@ -896,7 +865,6 @@ export function SetupTab() {
                   placeholder="API Key"
                   value={config?.apiKey || ''}
                   onChange={(e) => updateConfig({ apiKey: e.target.value })}
-                  disabled={tokenSource !== 'direct'}
                 />
                 <button
                   onClick={() => setShowApiKey(!showApiKey)}
@@ -913,12 +881,44 @@ export function SetupTab() {
                   onClick={handlePasteApiKey}
                   className="btn-secondary p-2"
                   title="Paste from clipboard"
-                  disabled={tokenSource !== 'direct'}
                 >
                   <ClipboardDocumentIcon className="w-5 h-5" />
                 </button>
               </div>
             </div>
+
+            {credentialSource && (
+              <div className="space-y-2 text-sm">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div>
+                      <span className="font-medium text-gray-700">API key source: </span>
+                      <span className="text-gray-900">{credentialSource.label}</span>
+                    </div>
+                    {credentialSource.detail && (
+                      <div className="mt-1 text-xs text-gray-500">{credentialSource.detail}</div>
+                    )}
+                    {connectionEmail && (
+                      <div className="mt-1 text-xs text-gray-500">Connected account: {connectionEmail}</div>
+                    )}
+                  </div>
+                  {credentialSource.hasSavedToken && (
+                    <button
+                      onClick={handleClearSavedAPIKey}
+                      className="btn-secondary flex items-center justify-center"
+                      title="Remove the saved API key token file"
+                      disabled={isSaving || isUnifiedSaving}
+                    >
+                      <TrashIcon className="w-4 h-4 mr-2" />
+                      Remove saved key
+                    </button>
+                  )}
+                </div>
+                {credentialSource.warning && (
+                  <div className="text-xs text-amber-700">{credentialSource.warning}</div>
+                )}
+              </div>
+            )}
 
             {/* Test Connection */}
             <div className="flex items-center gap-4">
@@ -943,12 +943,6 @@ export function SetupTab() {
               </div>
             </div>
 
-            {/* Active Source */}
-            {connectionEmail && (
-              <div className="text-sm text-gray-600">
-                Active Source: {tokenSource} ({connectionEmail})
-              </div>
-            )}
           </div>
         </div>
 
@@ -1022,9 +1016,12 @@ export function SetupTab() {
                 className="input"
                 value={config?.proxyMode || 'no-proxy'}
                 onChange={(e) => {
-                  // NTLM uses non-FIPS algorithms — block for FedRAMP platforms
-                  if (e.target.value === 'ntlm' && isFRM) {
-                    setStatusMessage('NTLM is not available for FedRAMP platforms (non-FIPS algorithms)');
+                  if (e.target.value === 'ntlm' && ntlmUnavailable) {
+                    setStatusMessage(
+                      !ntlmProxySupported
+                        ? 'NTLM is not available in this FIPS build'
+                        : 'NTLM is not available for FedRAMP platforms (non-FIPS algorithms)'
+                    );
                     return;
                   }
                   updateConfig({ proxyMode: e.target.value });
@@ -1034,18 +1031,12 @@ export function SetupTab() {
                   <option
                     key={mode}
                     value={mode}
-                    disabled={mode === 'ntlm' && isFRM}
+                    disabled={mode === 'ntlm' && ntlmUnavailable}
                   >
-                    {mode}{mode === 'ntlm' && isFRM ? ' (unavailable for FRM)' : ''}
+                    {mode}{mode === 'ntlm' && ntlmUnavailable ? ` (${ntlmUnavailableReason})` : ''}
                   </option>
                 ))}
               </select>
-              {isFRM && (
-                <p className="mt-1 text-xs text-amber-600">
-                  NTLM proxy mode is unavailable for FedRAMP platforms (uses non-FIPS MD4/MD5 algorithms).
-                  Use 'basic' proxy mode over TLS instead.
-                </p>
-              )}
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>

@@ -285,3 +285,43 @@ func TestPipeline_VersionResolutionMap(t *testing.T) {
 		}
 	}
 }
+
+func TestWalltimeHoursToAPI(t *testing.T) {
+	cases := []struct {
+		hours float64
+		want  int
+	}{
+		{0, 1},     // zero floors to the 1-hour minimum
+		{0.5, 1},   // fractional under an hour -> 1
+		{1, 1},     // exact
+		{1.5, 2},   // round fractional up
+		{2, 2},     // exact
+		{48, 48},   // large value passes through (hours, not seconds)
+	}
+	for _, c := range cases {
+		if got := walltimeHoursToAPI(c.hours); got != c.want {
+			t.Errorf("walltimeHoursToAPI(%v) = %d, want %d", c.hours, got, c.want)
+		}
+	}
+}
+
+func TestBuildJobRequest_WalltimeIsHoursNotSeconds(t *testing.T) {
+	spec := models.JobSpec{
+		JobName:         "wt",
+		AnalysisCode:    "user_included",
+		AnalysisVersion: "0",
+		Command:         "echo hi",
+		CoreType:        "emerald",
+		CoresPerSlot:    1,
+		Slots:           1,
+		WalltimeHours:   1.0,
+	}
+	req, err := BuildJobRequest(spec, nil, nil, false)
+	if err != nil {
+		t.Fatalf("BuildJobRequest() error = %v", err)
+	}
+	got := req.JobAnalyses[0].Hardware.Walltime
+	if got != 1 {
+		t.Errorf("walltime = %d, want 1 (hours); a value of 3600 would be the old seconds bug", got)
+	}
+}

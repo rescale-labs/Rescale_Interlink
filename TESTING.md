@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: May 9, 2026
-**Version**: 4.9.6
+**Last Updated**: May 31, 2026
+**Version**: 4.9.8
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -65,22 +65,22 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-90 test files across 46 directories. Grouped by functional area:
+113 Go test files across the `internal/` tree, plus the frontend test suites (currently 3 vitest files: TemplateBuilder, plus existing setup). Grouped by functional area:
 
 #### CLI & Commands
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/cli` | 6 | Command parsing, helpers, conflict resolution |
+| `internal/cli` | 6 | Command parsing, helpers, conflict resolution, shortcut concurrency |
 | `internal/cli/compat` | 8 | Compat mode detection, arg normalization, commands, parity |
 
 #### Core Infrastructure
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/core` | 1 | Engine pipeline orchestration |
+| `internal/core` | 2 | Engine pipeline orchestration, upload-progress reporting |
 | `internal/events` | 1 | EventBus pub/sub, ring buffer |
-| `internal/config` | 7 | CSV config, API config, jobs CSV, daemon config, platforms |
+| `internal/config` | 14 | CSV config, API config, jobs CSV, daemon config, platforms (incl. internal- and production-tagged variants), proxy features (FIPS / non-FIPS), token ACL on Windows |
 | `internal/models` | 2 | Job serialization, credential models |
 | `internal/validation` | 1 | Path validation |
 
@@ -103,7 +103,7 @@ go test -v ./internal/watch/...
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/wailsapp` | 4 | Job bindings, path helpers, version bindings, daemon bindings |
+| `internal/wailsapp` | 11 | Job bindings, path helpers, version bindings, daemon bindings, config bindings, API key source bindings, progress + failure-path tests |
 | `internal/services` | 1 | Transfer service |
 
 #### PUR (Parallel Upload and Run)
@@ -128,8 +128,8 @@ go test -v ./internal/watch/...
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
 | `internal/daemon` | 4 | Daemon lifecycle, monitor, state, transfer tracker |
-| `internal/service` | 2 | Windows service, detection |
-| `internal/ipc` | 5 | Client/server, messages, pipe, security |
+| `internal/service` | 4 | Windows service, detection, install/uninstall flows |
+| `internal/ipc` | 7 | Client/server, messages, pipe, security, user-scope catalog tests |
 
 #### Security & Crypto
 
@@ -185,10 +185,10 @@ export RESCALE_API_KEY=$(cat /path/to/rescale_token.txt)
 echo "Test content" > /tmp/test.txt
 
 # Upload
-./bin/rescale-int files upload --filepath /tmp/test.txt
+./bin/rescale-int files upload /tmp/test.txt
 
 # Note the file ID from output, then download
-./bin/rescale-int files download --fileid <FILE_ID> --outdir /tmp
+./bin/rescale-int files download <FILE_ID> --outdir /tmp
 
 # Verify
 cat /tmp/test.txt
@@ -205,7 +205,7 @@ echo "file2" > /tmp/test_upload/subdir/file2.txt
 FOLDER_ID=$(./bin/rescale-int folders create --name "Test_$(date +%s)" | grep -oE '[a-zA-Z0-9]{6}')
 
 # Upload directory
-./bin/rescale-int folders upload-dir --folder-id $FOLDER_ID --dir /tmp/test_upload -r
+./bin/rescale-int folders upload-dir /tmp/test_upload --parent-id $FOLDER_ID
 
 # Verify
 ./bin/rescale-int folders list --folder-id $FOLDER_ID
@@ -235,13 +235,13 @@ ln -s ./bin/rescale-int ./rescale-cli
 
 ```bash
 # Single-job watch
-./bin/rescale-int jobs watch -j JOB_ID -o ./output -i 30
+./bin/rescale-int jobs watch -j JOB_ID -d ./output -i 30
 
 # Newer-than watch (all jobs after reference)
-./bin/rescale-int jobs watch --newer-than REF_JOB_ID -o ./output
+./bin/rescale-int jobs watch --newer-than REF_JOB_ID -d ./output
 
 # Watch with file filtering
-./bin/rescale-int jobs watch -j JOB_ID -o ./output --filter "*.dat" --exclude "debug*"
+./bin/rescale-int jobs watch -j JOB_ID -d ./output --filter "*.dat" --exclude "debug*"
 ```
 
 ---
@@ -252,7 +252,7 @@ ln -s ./bin/rescale-int ./rescale-cli
 
 ```bash
 # Install Wails CLI (one-time setup)
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
 # Install frontend dependencies
 cd frontend && npm install && cd ..
@@ -268,7 +268,7 @@ wails dev
 CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
 
 # FIPS-compliant production build
-GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
+GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
 
 # Test production build
 open build/bin/rescale-int.app
@@ -457,9 +457,12 @@ GitHub Actions workflows run on tag push for release builds:
 - **v4.6.8**: 8 automation serialization unit tests; E2E validation for single/multiple/no automations
 - **v4.8.x**: Transfer system convergence validated — `RunBatch`/`RunBatchFromChannel` abstraction, conflict resolver, adaptive concurrency, FileInfo enrichment
 
-### Current State (v4.9.6)
+### Current State (v4.9.8)
 
-- **Unit Tests**: 109 Go test files across 46 packages, plus 3 frontend test suites (v4.9.6 adds xdg-desktop-portal fallback/options tests, TemplateBuilder license-reload vitest suite, Engine upload-progress tests, pipeline skip-status tests, job-bindings progress + failure-path tests, runStore polling-merge regression test, Bearer-scheme auth tests, and platform-URL allowlist validation tests)
+- **Unit Tests**: 113 Go test files across the `internal/` tree, plus 3 frontend vitest suites. v4.9.8 adds:
+  - `TestShouldProbeResolvedDirectory` — predicate gating the walker's defensive Stat to non-regular entries (covers regular file, directory, irregular file, named pipe).
+  - `TestWalkStream_SkippedChannelDrainsCleanly` — regression guard for the new `skippedChan` ensuring it closes cleanly when no entries are emitted.
+  - `TestWalkCollect_SymlinkSliceContainsBrokenSymlinks` — documents the `Symlinks` slice contract for `WalkCollect` after the junction-skip refactor.
 - **Coverage**: All core packages tested
 - **Known Bugs**: 0
 - **Quality Gates**:

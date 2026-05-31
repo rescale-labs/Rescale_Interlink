@@ -390,6 +390,7 @@ type BatchProgressEventDTO struct {
 	ETASeconds      float64 `json:"etaSeconds"`
 	DiscoveredTotal int     `json:"discoveredTotal"`
 	DiscoveredBytes int64   `json:"discoveredBytes"`
+	Skipped         int     `json:"skipped"`
 }
 
 func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO {
@@ -410,6 +411,7 @@ func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO
 		ETASeconds:      e.ETASeconds,
 		DiscoveredTotal: e.DiscoveredTotal,
 		DiscoveredBytes: e.DiscoveredBytes,
+		Skipped:         e.Skipped,
 	}
 }
 

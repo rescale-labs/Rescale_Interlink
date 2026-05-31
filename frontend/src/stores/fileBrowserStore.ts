@@ -5,7 +5,7 @@ import { wailsapp } from '../../wailsjs/go/models'
 import { EVENT_NAMES } from '../types/events'
 
 // Browse mode for remote browser (matching Go BrowseMode)
-export type BrowseMode = 'library' | 'jobs' | 'legacy'
+export type BrowseMode = 'library' | 'jobs' | 'legacy' | 'trash'
 
 const PAGE_CACHE_TTL = 5 * 60 * 1000  // 5 minutes
 const MAX_CACHED_PAGES = 10           // Limit memory usage
@@ -97,6 +97,7 @@ interface FileBrowserStore {
   setRemoteMode: (mode: BrowseMode) => void
   loadRemoteFolder: (folderId?: string, folderName?: string) => Promise<void>
   loadRemoteLegacy: () => Promise<void>
+  loadRemoteTrash: () => Promise<void>
   navigateRemoteTo: (folderId: string, folderName: string) => void
   navigateRemoteToBreadcrumb: (index: number) => void
   goRemoteBack: () => void
@@ -105,6 +106,8 @@ interface FileBrowserStore {
   clearRemoteSelection: () => void
   createRemoteFolder: (name: string) => Promise<string | null>
   deleteRemoteItems: (items: wailsapp.FileItemDTO[]) => Promise<{ deleted: number; failed: number }>
+  recoverTrashItems: (items: wailsapp.FileItemDTO[]) => Promise<{ recovered: number; failed: number; error?: string }>
+  purgeTrashItems: (items: wailsapp.FileItemDTO[]) => Promise<{ deleted: number; failed: number; error?: string }>
   setRemoteItemsPerPage: (size: number) => void       // Change page size, reload page 0
   goToNextRemotePage: () => Promise<void>             // Navigate to next page (replaces items)
   goToPreviousRemotePage: () => Promise<void>         // Navigate to previous page (from cache)
@@ -320,6 +323,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       const mode = get().remote.mode
       if (mode === 'legacy') {
         await get().loadRemoteLegacy()
+      } else if (mode === 'trash') {
+        await get().loadRemoteTrash()
       } else {
         const folderId = mode === 'library' ? myLibraryId : myJobsId
         const folderName = mode === 'library' ? 'My Library' : 'My Jobs'
@@ -359,6 +364,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
     if (mode === 'legacy') {
       get().loadRemoteLegacy()
+    } else if (mode === 'trash') {
+      get().loadRemoteTrash()
     } else {
       const folderId = mode === 'library' ? myLibraryId : myJobsId
       const folderName = mode === 'library' ? 'My Library' : 'My Jobs'
@@ -577,6 +584,91 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       }))
     }
   },
+  loadRemoteTrash: async () => {
+    const state = get().remote
+    const currentPage = state.currentPage
+    const itemsPerPage = state.itemsPerPage
+    const cursor = state.pageCursors[currentPage] ?? ''
+
+    const cachedPage = state.pageCache.get(currentPage)
+    if (cachedPage && (Date.now() - cachedPage.timestamp) < PAGE_CACHE_TTL) {
+      set(state => ({
+        remote: {
+          ...state.remote,
+          items: cachedPage.items,
+          hasMore: cachedPage.hasMore,
+          nextCursor: cachedPage.nextCursor,
+          isLoading: false,
+          error: null,
+        }
+      }))
+      return
+    }
+
+    const myGen = get().remote.navGeneration
+
+    set(state => ({
+      remote: { ...state.remote, isLoading: true, error: null }
+    }))
+
+    try {
+      const contents = await App.ListRemoteTrash(cursor, itemsPerPage)
+
+      if (get().remote.navGeneration !== myGen) return
+
+      const newPageCursors = [...state.pageCursors]
+      if (contents.hasMore && contents.nextCursor) {
+        newPageCursors[currentPage + 1] = contents.nextCursor
+      }
+
+      const newCache = new Map(state.pageCache)
+      newCache.set(currentPage, {
+        items: contents.items,
+        hasMore: contents.hasMore,
+        nextCursor: contents.nextCursor ?? '',
+        timestamp: Date.now(),
+      })
+      if (newCache.size > MAX_CACHED_PAGES) {
+        const oldestKey = newCache.keys().next().value
+        if (oldestKey !== undefined) {
+          newCache.delete(oldestKey)
+        }
+      }
+
+      let knownTotalPages = state.knownTotalPages
+      if (contents.hasMore && currentPage + 1 >= knownTotalPages) {
+        knownTotalPages = currentPage + 2
+      } else if (!contents.hasMore) {
+        knownTotalPages = currentPage + 1
+      }
+
+      set(state => ({
+        remote: {
+          ...state.remote,
+          currentFolderId: 'trash',
+          items: contents.items,
+          isLoading: false,
+          error: contents.warning || null,
+          hasMore: contents.hasMore,
+          nextCursor: contents.nextCursor ?? '',
+          breadcrumb: [{ id: 'trash', name: 'Trash' }],
+          pageCursors: newPageCursors,
+          knownTotalPages,
+          pageCache: newCache,
+        }
+      }))
+    } catch (error) {
+      if (get().remote.navGeneration !== myGen) return
+      set(state => ({
+        remote: {
+          ...state.remote,
+          isLoading: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }))
+    }
+  },
+
   setRemoteItemsPerPage: (size: number) => {
     // Clamp to reasonable range
     const clampedSize = Math.max(10, Math.min(200, size))
@@ -597,6 +689,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     const { mode } = get().remote
     if (mode === 'legacy') {
       get().loadRemoteLegacy()
+    } else if (mode === 'trash') {
+      get().loadRemoteTrash()
     } else {
       get().loadRemoteFolder()
     }
@@ -618,6 +712,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     // Load the next page
     if (mode === 'legacy') {
       await get().loadRemoteLegacy()
+    } else if (mode === 'trash') {
+      await get().loadRemoteTrash()
     } else {
       await get().loadRemoteFolder()
     }
@@ -635,6 +731,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     // Load the previous page (will use cache if available)
     if (mode === 'legacy') {
       await get().loadRemoteLegacy()
+    } else if (mode === 'trash') {
+      await get().loadRemoteTrash()
     } else {
       await get().loadRemoteFolder()
     }
@@ -657,7 +755,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   },
 
   navigateRemoteToBreadcrumb: (index: number) => {
-    const { breadcrumb } = get().remote
+    const { breadcrumb, mode } = get().remote
     if (index < 0 || index >= breadcrumb.length) return
 
     const target = breadcrumb[index]
@@ -674,6 +772,10 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         navGeneration: state.remote.navGeneration + 1,
       }
     }))
+    if (mode === 'trash' || target.id === 'trash') {
+      get().loadRemoteTrash()
+      return
+    }
     get().loadRemoteFolder(target.id, target.name)
   },
 
@@ -703,6 +805,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
     if (mode === 'legacy') {
       get().loadRemoteLegacy()
+    } else if (mode === 'trash') {
+      get().loadRemoteTrash()
     } else {
       get().loadRemoteFolder()
     }
@@ -748,7 +852,10 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
   deleteRemoteItems: async (items: wailsapp.FileItemDTO[]) => {
     try {
-      const result = await App.DeleteRemoteItems(items)
+      // Move-to-Trash is folder-scoped: pass the currently-viewed folder as the
+      // items' parent. The archive endpoint rejects a mismatched parent.
+      const parentFolderId = get().remote.currentFolderId
+      const result = await App.DeleteRemoteItems(parentFolderId, items)
       if (result.deleted > 0) {
         // Refresh to show updated list
         get().refreshRemote()
@@ -758,6 +865,34 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     } catch (error) {
       console.error('Failed to delete items:', error)
       return { deleted: 0, failed: items.length }
+    }
+  },
+
+  recoverTrashItems: async (items: wailsapp.FileItemDTO[]) => {
+    try {
+      const result = await App.RecoverTrashItems(items)
+      if (result.deleted > 0) {
+        get().refreshRemote()
+        get().clearRemoteSelection()
+      }
+      return { recovered: result.deleted, failed: result.failed, error: result.error }
+    } catch (error) {
+      console.error('Failed to recover items:', error)
+      return { recovered: 0, failed: items.length, error: error instanceof Error ? error.message : String(error) }
+    }
+  },
+
+  purgeTrashItems: async (items: wailsapp.FileItemDTO[]) => {
+    try {
+      const result = await App.PurgeTrashItems(items)
+      if (result.deleted > 0) {
+        get().refreshRemote()
+        get().clearRemoteSelection()
+      }
+      return { deleted: result.deleted, failed: result.failed, error: result.error }
+    } catch (error) {
+      console.error('Failed to purge items:', error)
+      return { deleted: 0, failed: items.length, error: error instanceof Error ? error.message : String(error) }
     }
   },
 

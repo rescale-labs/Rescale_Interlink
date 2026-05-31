@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,6 +120,162 @@ func newTestClient(t *testing.T, serverURL string) *Client {
 		APIKey:     "test-key",
 		ProxyMode:  "no-proxy",
 	})
+}
+
+func TestListFilesPage_NormalizesFullNextURLAndCursor(t *testing.T) {
+	var server *httptest.Server
+	fullNext := ""
+	seenPage2 := false
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/files/" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Query().Get("page") {
+		case "":
+			fullNext = server.URL + "/api/v3/files/?page=2&page_size=25"
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"count":    2,
+				"next":     fullNext,
+				"previous": "",
+				"results":  []map[string]interface{}{},
+			})
+		case "2":
+			seenPage2 = true
+			if got := r.URL.Query().Get("page_size"); got != "25" {
+				t.Errorf("page_size = %q, want 25", got)
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"count":    2,
+				"next":     "",
+				"previous": "",
+				"results":  []map[string]interface{}{},
+			})
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	page, err := client.ListFilesPage(context.Background(), "", 25)
+	if err != nil {
+		t.Fatalf("ListFilesPage(first page) error = %v", err)
+	}
+	if page.NextURL != "/api/v3/files/?page=2&page_size=25" {
+		t.Fatalf("NextURL = %q, want normalized API path", page.NextURL)
+	}
+
+	if _, err := client.ListFilesPage(context.Background(), fullNext, 25); err != nil {
+		t.Fatalf("ListFilesPage(full cursor) error = %v", err)
+	}
+	if !seenPage2 {
+		t.Fatal("server did not receive normalized page 2 request")
+	}
+}
+
+func TestListTrashBinPage_ParsesFilesymlinkID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/users/me/folders/trash-bin/" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if got := r.URL.Query().Get("page_size"); got != "50" {
+			t.Errorf("page_size = %q, want 50", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Mirrors a real captured trash-bin response: filesymlink entries carry
+		// only {type, item} with no top-level id. The id used for recover/delete
+		// (SymlinkID) is item.id.
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": []map[string]interface{}{
+				{
+					"type": "filesymlink",
+					"item": map[string]interface{}{
+						"id":            "tqmdnn",
+						"name":          "result.dat",
+						"decryptedSize": "12345",
+						"dateInserted":  "2026-05-01T12:00:00Z",
+					},
+				},
+				{
+					"type": "folder",
+					"item": map[string]interface{}{
+						"id":          "folder-789",
+						"name":        "job-output",
+						"dateCreated": "2026-05-02T12:00:00Z",
+					},
+				},
+			},
+			"next": nil,
+		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	contents, err := client.ListTrashBinPage(context.Background(), "", 50)
+	if err != nil {
+		t.Fatalf("ListTrashBinPage() error = %v", err)
+	}
+	if len(contents.Files) != 1 {
+		t.Fatalf("len(Files) = %d, want 1", len(contents.Files))
+	}
+	if contents.Files[0].ID != "tqmdnn" {
+		t.Errorf("Files[0].ID = %q, want tqmdnn", contents.Files[0].ID)
+	}
+	if contents.Files[0].SymlinkID != "tqmdnn" {
+		t.Errorf("Files[0].SymlinkID = %q, want tqmdnn", contents.Files[0].SymlinkID)
+	}
+	if len(contents.Folders) != 1 || contents.Folders[0].ID != "folder-789" {
+		t.Fatalf("Folders = %#v, want folder-789", contents.Folders)
+	}
+}
+
+func TestPostTrashBinAction_SendsMixedPayload(t *testing.T) {
+	var gotPayload map[string][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v3/users/me/folders/trash-bin/recover/" {
+			t.Errorf("path = %s, want recover trash endpoint", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	err := client.PostTrashBinAction(
+		context.Background(),
+		"recover",
+		[]string{"filesymlink-123"},
+		[]string{"folder-789"},
+	)
+	if err != nil {
+		t.Fatalf("PostTrashBinAction() error = %v", err)
+	}
+	if got := gotPayload["filesymlink_ids"]; len(got) != 1 || got[0] != "filesymlink-123" {
+		t.Errorf("filesymlink_ids = %#v, want filesymlink-123", got)
+	}
+	if got := gotPayload["folderIds"]; len(got) != 1 || got[0] != "folder-789" {
+		t.Errorf("folderIds = %#v, want folder-789", got)
+	}
+}
+
+func TestPostTrashBinAction_RejectsInvalidAction(t *testing.T) {
+	client := newTestClient(t, "https://platform.rescale.com")
+	err := client.PostTrashBinAction(context.Background(), "empty", nil, nil)
+	if err == nil {
+		t.Fatal("PostTrashBinAction() should reject invalid actions")
+	}
+	if !strings.Contains(err.Error(), "invalid trash-bin action") {
+		t.Errorf("error = %q, want invalid action message", err.Error())
+	}
 }
 
 // TestGetStorageCredentials_AzureSharedFile verifies that the credentials endpoint
@@ -272,9 +429,9 @@ func TestToCloudFile_Complete(t *testing.T) {
 
 func TestToCloudFile_MissingEncryptionKey(t *testing.T) {
 	fi := &FileInfo{
-		ID:            "file123",
-		PathParts:     &models.CloudFilePathParts{Container: "bucket", Path: "user/file"},
-		Storage:       &models.CloudFileStorage{ID: "stor1", StorageType: "S3"},
+		ID:        "file123",
+		PathParts: &models.CloudFilePathParts{Container: "bucket", Path: "user/file"},
+		Storage:   &models.CloudFileStorage{ID: "stor1", StorageType: "S3"},
 		// EncodedEncryptionKey is empty
 	}
 	cf := fi.ToCloudFile()
@@ -353,7 +510,7 @@ func TestListFolderContentsStreaming_EmitsPerPage(t *testing.T) {
 					{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
 						"encodedEncryptionKey": "key1", "iv": "iv1",
 						"owner": "u1", "path": "/p",
-						"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+						"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 						"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 					},
 				},
@@ -366,7 +523,7 @@ func TestListFolderContentsStreaming_EmitsPerPage(t *testing.T) {
 					{"id": "f2", "name": "file2.txt", "decryptedSize": json.Number("200"),
 						"encodedEncryptionKey": "key2", "iv": "iv2",
 						"owner": "u1", "path": "/p",
-						"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+						"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 						"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 					},
 				},
@@ -415,7 +572,7 @@ func TestListFolderContentsStreaming_CallbackErrorAbortsPagination(t *testing.T)
 				{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
 					"encodedEncryptionKey": "key1", "iv": "iv1",
 					"owner": "u1", "path": "/p",
-					"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+					"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 					"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 				},
 			},
@@ -449,7 +606,7 @@ func TestListFolderContentsStreaming_ContextCancellation(t *testing.T) {
 				{"id": "f1", "name": "file1.txt", "decryptedSize": json.Number("100"),
 					"encodedEncryptionKey": "key1", "iv": "iv1",
 					"owner": "u1", "path": "/p",
-					"storage": map[string]interface{}{"id": "s1", "storageType": "S3"},
+					"storage":   map[string]interface{}{"id": "s1", "storageType": "S3"},
 					"pathParts": map[string]interface{}{"container": "b", "path": "p"},
 				},
 			},
@@ -500,5 +657,100 @@ func TestNewClient_RejectsLocalhostURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid platform URL") {
 		t.Errorf("error = %q, want 'invalid platform URL'", err.Error())
+	}
+}
+
+func TestCreateJob_AppendsHintForInteractiveFlagError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"jobanalyses":[{"command":["the 'interactive' flag must be present"]}]}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.CreateJob(context.Background(), models.JobRequest{Name: "t"})
+	if err == nil {
+		t.Fatal("CreateJob() should return error on 400")
+	}
+	if !strings.Contains(err.Error(), "interactive' flag must be present") {
+		t.Errorf("error should preserve original body, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "Hint:") {
+		t.Errorf("error should append actionable hint, got %q", err.Error())
+	}
+}
+
+func TestCreateJob_NoHintForGenericError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"name":["This field is required."]}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	_, err := client.CreateJob(context.Background(), models.JobRequest{Name: "t"})
+	if err == nil {
+		t.Fatal("CreateJob() should return error on 400")
+	}
+	if strings.Contains(err.Error(), "Hint:") {
+		t.Errorf("generic error should not append interactive hint, got %q", err.Error())
+	}
+}
+
+func TestArchiveContents_PostsCorrectURLAndBody(t *testing.T) {
+	var gotPath string
+	var gotBody map[string][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	err := client.ArchiveContents(context.Background(), "QWGjp", []string{"f1", "f2"}, []string{"d1"})
+	if err != nil {
+		t.Fatalf("ArchiveContents() error = %v", err)
+	}
+	if gotPath != "/api/v3/folders/QWGjp/contents/archive/" {
+		t.Errorf("path = %q, want folder-scoped archive endpoint", gotPath)
+	}
+	if len(gotBody["fileIds"]) != 2 || gotBody["fileIds"][0] != "f1" {
+		t.Errorf("fileIds = %v, want [f1 f2]", gotBody["fileIds"])
+	}
+	if len(gotBody["folderIds"]) != 1 || gotBody["folderIds"][0] != "d1" {
+		t.Errorf("folderIds = %v, want [d1]", gotBody["folderIds"])
+	}
+}
+
+func TestArchiveContents_RequiresParentFolder(t *testing.T) {
+	client := newTestClient(t, "http://example.invalid")
+	if err := client.ArchiveContents(context.Background(), "", []string{"f1"}, nil); err == nil {
+		t.Fatal("ArchiveContents() should error when folderID is empty")
+	}
+}
+
+func TestArchiveContents_EncodesEmptyListsNotNull(t *testing.T) {
+	var raw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw = string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	if err := client.ArchiveContents(context.Background(), "QWGjp", []string{"f1"}, nil); err != nil {
+		t.Fatalf("ArchiveContents() error = %v", err)
+	}
+	if strings.Contains(raw, "null") {
+		t.Errorf("body should encode empty lists as [], not null: %s", raw)
 	}
 }

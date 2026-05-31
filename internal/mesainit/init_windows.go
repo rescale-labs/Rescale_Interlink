@@ -6,10 +6,10 @@
 // in main.go. Go runs init() functions in import order, so by importing
 // mesainit first, we can set up Mesa before Fyne's init() runs.
 //
-// As of v3.4.13, this package implements "self-extract and re-exec":
-// 1. Check if Mesa DLLs exist alongside the EXE
-// 2. If missing, extract from embedded resources
-// 3. Re-exec the process so the new DLLs are loaded on startup
+// This package implements a "self-extract and re-exec" boot sequence:
+//  1. Check if Mesa DLLs exist alongside the EXE
+//  2. If missing, extract from embedded resources
+//  3. Re-exec the process so the new DLLs are loaded on startup
 //
 // This allows the EXE to be distributed standalone - it will automatically
 // extract the required DLLs on first run.

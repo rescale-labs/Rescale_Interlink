@@ -440,6 +440,58 @@ func (ts *TransferService) StartStreamingUploadBatch(
 	return nil
 }
 
+// RegisterSkipPlaceholderTask creates a single completed synthetic task to anchor
+// a folder-upload batch whose walker skipped every entry (e.g. a Windows folder
+// of junctions). Without this anchor, CleanupBatch would delete the pre-registered
+// metadata and the Transfers row would vanish, hiding the upload transaction
+// from the user.
+//
+// The placeholder task carries Size=0 and a name like "(skipped: Public)" so it
+// renders distinctly from a real file transfer. Frontend code keys off Skipped>0
+// and Total==1 to render the appropriate "0 files uploaded — N items skipped"
+// summary.
+func (ts *TransferService) RegisterSkipPlaceholderTask(batchID, displayName string, skipCount int) {
+	ts.registerPlaceholderTask(batchID, displayName, fmt.Sprintf("(skipped: %s)", displayName), transfer.TaskTypeUpload)
+}
+
+// RegisterEmptyBatchPlaceholder anchors a streaming batch that completed with zero
+// real tasks and no error — e.g. downloading a remote folder that contains no files,
+// or uploading an empty local folder. Without an anchor, CleanupBatch deletes the
+// pre-registered metadata and the Transfers row vanishes, so the user loses the record
+// of a transfer that did happen (the operation succeeded; there was simply nothing to
+// move). Every transfer, in either direction, should leave a persistent record.
+//
+// The placeholder carries Size=0 and the name "(no files)" so the frontend can render
+// a distinct "No files to transfer" summary instead of a phantom file row. direction
+// determines whether the row reads as an upload or a download.
+func (ts *TransferService) RegisterEmptyBatchPlaceholder(batchID, displayName, direction string) {
+	taskType := transfer.TaskTypeDownload
+	if direction == "upload" {
+		taskType = transfer.TaskTypeUpload
+	}
+	ts.registerPlaceholderTask(batchID, displayName, "(no files)", taskType)
+}
+
+// registerPlaceholderTask creates a single completed synthetic task to anchor a batch
+// whose pre-registered metadata would otherwise be removed by CleanupBatch, leaving no
+// trace in the Transfers tab. Shared by the skip-only and empty-batch cases.
+func (ts *TransferService) registerPlaceholderTask(batchID, displayName, taskName string, taskType transfer.TaskType) {
+	if batchID == "" {
+		return
+	}
+	task := ts.queue.TrackTransferWithBatch(
+		taskName,
+		0,
+		taskType,
+		"",
+		"",
+		SourceLabelFileBrowser,
+		batchID,
+		displayName,
+	)
+	ts.queue.Complete(task.ID)
+}
+
 // registerUploadTask registers an upload task in the queue (starts as Queued).
 // Returns the task ID. No context or cancel fn is set — that happens in executeUploadTask.
 func (ts *TransferService) registerUploadTask(req TransferRequest) string {
@@ -625,10 +677,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 	select {
 	case ts.semaphore <- struct{}{}:
 	case <-uploadCtx.Done():
-		if errors.Is(uploadCtx.Err(), context.Canceled) {
-			return nil, uploadCtx.Err()
-		}
-		ts.queue.Fail(taskID, uploadCtx.Err())
+		ts.queue.FailIfNotTerminal(taskID, uploadCtx.Err())
 		return nil, uploadCtx.Err()
 	}
 	atomic.AddInt32(&ts.activeSlots, 1)
@@ -643,7 +692,13 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 		atomic.AddInt32(&ts.activeSlots, -1)
 	}()
 
-	ts.queue.Activate(taskID)
+	if !ts.queue.Activate(taskID) {
+		ts.queue.ClearCancel(taskID)
+		if err := uploadCtx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
+	}
 
 	// Get file info for transfer handle allocation
 	fileInfo, err := os.Stat(req.Source)
@@ -681,6 +736,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			ts.queue.FailIfNotTerminal(taskID, err)
 			return nil, err
 		}
 		ts.queue.Fail(taskID, err)

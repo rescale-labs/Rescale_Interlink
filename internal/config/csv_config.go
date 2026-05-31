@@ -20,7 +20,7 @@ type Config struct {
 	JobWorkers    int
 
 	// Proxy settings
-	ProxyMode     string // "no-proxy", "ntlm", "basic", "system"
+	ProxyMode     string // "no-proxy", "ntlm" when supported by build, "basic", "system"
 	ProxyHost     string
 	ProxyPort     int
 	ProxyUser     string
@@ -251,6 +251,12 @@ func LoadConfigCSV(path string) (*Config, error) {
 //
 // CSV format: key,value pairs
 func SaveConfigCSV(cfg *Config, path string) error {
+	if cfg != nil {
+		if err := ValidateProxyModeForBuild(cfg.ProxyMode); err != nil {
+			return err
+		}
+	}
+
 	// Ensure parent directory exists (fixes Windows issue where directory may not exist)
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -454,6 +460,9 @@ func (c *Config) Validate() error {
 	if c.APIBaseURL == "" {
 		return fmt.Errorf("API base URL is required")
 	}
+	if err := ValidateProxyModeForBuild(c.ProxyMode); err != nil {
+		return err
+	}
 	// Defense-in-depth: also validate platform URL here for paths that
 	// check config validity before creating a client.
 	if err := ValidatePlatformURL(c.APIBaseURL); err != nil {
@@ -491,7 +500,13 @@ func IsFRMPlatform(urlStr string) bool {
 
 // ValidateNTLMForFIPS checks if NTLM proxy mode is appropriate for the current configuration.
 func (c *Config) ValidateNTLMForFIPS() string {
-	if c.ProxyMode == "ntlm" && IsFRMPlatform(c.APIBaseURL) {
+	if !strings.EqualFold(c.ProxyMode, "ntlm") {
+		return ""
+	}
+	if !NTLMProxySupported() {
+		return ntlmProxyBuildWarning()
+	}
+	if IsFRMPlatform(c.APIBaseURL) {
 		return "NTLM proxy mode uses non-FIPS algorithms (MD4/MD5) and is not compliant with FedRAMP requirements. Consider using 'basic' proxy mode over TLS."
 	}
 	return ""
@@ -690,6 +705,15 @@ func WriteTokenFile(path, token string) error {
 	// model required by spec §11.2.
 	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
+	}
+
+	// os.WriteFile only applies the 0600 mode when creating the file; if the
+	// token file already existed with looser permissions (e.g. 0644), the
+	// overwrite preserves that mode. Explicitly chmod to repair it. On Windows
+	// the meaningful protection is the ACL applied below, so a chmod error
+	// there is non-fatal.
+	if err := os.Chmod(path, 0600); err != nil && runtime.GOOS != "windows" {
+		return fmt.Errorf("failed to set token file permissions: %w", err)
 	}
 
 	// Best-effort explicit-ACL tightening on Windows. A failure here does

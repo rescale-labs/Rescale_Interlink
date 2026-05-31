@@ -237,6 +237,7 @@ type BatchProgressEvent struct {
 	ETASeconds      float64 `json:"etaSeconds"`      // estimated time remaining (-1 = unknown)
 	DiscoveredTotal int     `json:"discoveredTotal"` // files discovered by scan
 	DiscoveredBytes int64   `json:"discoveredBytes"` // bytes discovered by scan
+	Skipped         int     `json:"skipped"`         // entries the walker skipped (junctions, unresolvable links)
 }
 
 // EventBus is a typed pub-sub hub; subscribers receive events matching their registered type.

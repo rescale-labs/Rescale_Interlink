@@ -1,5 +1,48 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.8 - May 30, 2026
+
+### File Browser Trash Bin, and deletes now go to Trash Bin (#30)
+
+A new **Trash** mode joins **My Library**, **My Jobs**, and **Legacy** in the File Browser's remote pane. Deleting a file or folder — in the GUI or via the CLI — moves it to Trash, where it can be restored or permanently removed, consistent with the Rescale web UI. Soft-delete uses the platform's archive endpoint; the CLI `files delete` and `folders delete` commands add a `--permanent` flag for irreversible deletion. The Upload control is disabled in Trash view. Contributed by @roque-rescale ([PR #47](https://github.com/rescale-labs/Rescale_Interlink/pull/47)).
+
+### Folder uploads no longer fail on Windows reparse-point junctions
+
+Folder uploads of trees containing legacy junctions (e.g. "My Music" / "My Pictures") previously aborted mid-batch. The streaming walker now skips reparse points that resolve to directories instead of emitting them as files. Skipped entries are surfaced in the Activity log, `interlink.log`, and the Transfers tab, so uploads no longer silently drop files.
+
+### Job submission fixes
+
+- **Walltime** was submitted multiplied by 3600 (a 1-hour request became 3600 hours). It is now submitted correctly in hours across the GUI, CLI, and SGE-script paths, and a guard rejects legacy seconds-style values with a clear error.
+- **Tags** entered for a job are now applied (the create-time field was ignored by the platform). Tags are comma-separated; multiple tags work.
+- **Command validation errors**, such as an Abaqus command missing the required `interactive` keyword, now show an actionable hint instead of a raw API error.
+
+### Automations load correctly
+
+Loading automations no longer fails to decode when an automation defines environment variables.
+
+### Folder upload and transfer UX
+
+- Folder uploads no longer silently drop a folder when the destination already contains one with the same name.
+- Starting a folder upload switches to the Transfers tab and shows an elapsed-time indicator during the destination check.
+- A footer indicator shows when Interlink is pacing requests to stay within Rescale's API rate limits.
+- The Transfers tab shows an indicator while transfers run and after they complete until the tab is viewed.
+- File Browser state persists across tab switches, so an upload's confirmation and merge dialogs are not lost when navigating away.
+- Uploading or downloading an empty folder now leaves a record in the Transfers tab like any other transfer, instead of disappearing.
+
+### FIPS module pinned to the CMVP-validated version
+
+Production builds now use `GOFIPS140=certified` — the Go Cryptographic Module version with a CMVP validation certificate — rather than `latest`. The `fips` build tag and the non-FIPS run guard are unchanged. Security-relevant dependencies were also refreshed.
+
+### Other improvements
+
+- Refreshed the Interlink logo for dark-mode surfaces. Contributed by @kday-rescale ([PR #51](https://github.com/rescale-labs/Rescale_Interlink/pull/51)).
+- File Browser: status messages moved above the file panes; pane labels bolded.
+- Credential-source reporting tightened so the GUI and CLI agree on the authoritative source.
+- PUR transfer accounting aligned so the GUI and CLI report the same totals.
+- Setup tab clarifies the "Remove saved key" action when an environment-variable key is active.
+
+---
+
 ## v4.9.6 - May 9, 2026
 
 ### Linux file picker reliability on restricted desktop environments (#41)

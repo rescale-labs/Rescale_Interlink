@@ -4,7 +4,6 @@ package wailsapp
 import (
 	"context"
 	"fmt"
-	"os"
 	goruntime "runtime"
 	"strings"
 	"sync"
@@ -33,6 +32,7 @@ type AppInfoDTO struct {
 	FIPSStatus          string           `json:"fipsStatus"`
 	OS                  string           `json:"os"`
 	SessionScopedDaemon bool             `json:"sessionScopedDaemon"`
+	NTLMProxySupported  bool             `json:"ntlmProxySupported"`
 	VersionCheck        *VersionCheckDTO `json:"versionCheck,omitempty"`
 }
 
@@ -45,6 +45,7 @@ func (a *App) GetAppInfo() AppInfoDTO {
 		FIPSStatus:          cli.FIPSStatus(),
 		OS:                  goruntime.GOOS,
 		SessionScopedDaemon: goruntime.GOOS == "darwin" || goruntime.GOOS == "linux",
+		NTLMProxySupported:  config.NTLMProxySupported(),
 	}
 
 	// Include cached version check if available and not expired
@@ -130,6 +131,10 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	if a.config == nil {
 		wailsLogger.Warn().Msg("UpdateConfig: config is nil, returning")
 		return nil
+	}
+	if err := config.ValidateProxyModeForBuild(cfg.ProxyMode); err != nil {
+		wailsLogger.Warn().Err(err).Str("proxy_mode", cfg.ProxyMode).Msg("UpdateConfig: unsupported proxy mode")
+		return err
 	}
 
 	// Track if API-related settings changed — these affect the API client and require engine update
@@ -228,13 +233,11 @@ func (a *App) SaveConfig() error {
 		a.logInfo("config", "API key saved successfully")
 	} else {
 		// User cleared the API key — remove persisted token file
-		tokenPath := config.GetDefaultTokenPath()
-		if tokenPath != "" {
-			if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
-				a.logError("config", fmt.Sprintf("Failed to remove token file: %v", err))
-			} else if err == nil {
-				a.logInfo("config", "API key cleared, token file removed")
-			}
+		removed, err := removeSavedAPIKeyTokenFiles()
+		if err != nil {
+			a.logError("config", fmt.Sprintf("Failed to remove token file: %v", err))
+		} else if removed > 0 {
+			a.logInfo("config", "API key cleared, token file removed")
 		}
 	}
 
@@ -424,10 +427,10 @@ const (
 // tests swap these to stubs that panic or return fixed values to verify the
 // wrapper's mutex, recovery, and error-handling contract.
 var (
-	openDirectoryDialog      = runtime.OpenDirectoryDialog
-	openFileDialog           = runtime.OpenFileDialog
-	openMultipleFilesDialog  = runtime.OpenMultipleFilesDialog
-	saveFileDialog           = runtime.SaveFileDialog
+	openDirectoryDialog     = runtime.OpenDirectoryDialog
+	openFileDialog          = runtime.OpenFileDialog
+	openMultipleFilesDialog = runtime.OpenMultipleFilesDialog
+	saveFileDialog          = runtime.SaveFileDialog
 )
 
 // dialogPathLogged ensures we log the selected dialog path (portal or

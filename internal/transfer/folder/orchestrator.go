@@ -46,6 +46,13 @@ type OrchestratorCallbacks[T any] struct {
 	// OnUnmappedFiles: called at shutdown for files whose parent was never created.
 	OnUnmappedFiles func(parentDir string, count int)
 
+	// OnSkippedEntry: called for each filesystem entry the walker chose to
+	// skip rather than upload — for example, Windows reparse-point junctions
+	// whose target identity could not be determined. Useful for surfacing
+	// "missing files" cases in the UI / log so users know why a folder
+	// upload didn't include certain children.
+	OnSkippedEntry func(entry localfs.FileEntry)
+
 	// OnOrchestratorDone: called when Part C (orchestrator) exits,
 	// BEFORE Part B (dispatcher) finishes draining.
 	// GUI: MarkBatchScanInProgress(false) + emitCompletion.
@@ -105,11 +112,33 @@ func RunOrchestrator[T any](
 	orchResult := &OrchestratorResult{}
 
 	// Start streaming walk — directories and files arrive as they're discovered.
-	dirChan, fileChan, walkErrChan := localfs.WalkStream(ctx, cfg.RootPath, localfs.WalkOptions{
+	dirChan, fileChan, skippedChan, walkErrChan := localfs.WalkStream(ctx, cfg.RootPath, localfs.WalkOptions{
 		IncludeHidden:  cfg.IncludeHidden,
 		SkipHiddenDirs: true,
 		FollowSymlinks: true,
 	})
+
+	// Drain skippedChan to surface entries the walker chose to skip.
+	// Always drain (even when no callback is wired) so the walker is not
+	// blocked by a full channel. Tracked by skipDrainWG so OnOrchestratorDone
+	// can wait for the final skip count before deciding upload outcome.
+	var skipDrainWG sync.WaitGroup
+	skipDrainWG.Add(1)
+	go func() {
+		defer skipDrainWG.Done()
+		for entry := range skippedChan {
+			if cfg.Logger != nil {
+				cfg.Logger.Warn().
+					Str("path", entry.Path).
+					Bool("isSymlink", entry.IsSymlink).
+					Bool("isDir", entry.IsDir).
+					Msg("Skipped during folder upload (unrecognized reparse point or unidentifiable target)")
+			}
+			if callbacks.OnSkippedEntry != nil {
+				callbacks.OnSkippedEntry(entry)
+			}
+		}
+	}()
 
 	// Create folder ready channel (buffered to prevent blocking)
 	folderReadyChan := make(chan FolderReadyEvent, constants.WorkChannelBuffer)
@@ -281,6 +310,7 @@ func RunOrchestrator[T any](
 				}
 
 			case <-ctx.Done():
+				skipDrainWG.Wait()
 				close(backlogDone)
 				backlogDoneClosed = true
 				if callbacks.OnOrchestratorDone != nil {
@@ -320,14 +350,28 @@ func RunOrchestrator[T any](
 		orchResult.DiscoveredBytes = discoveredBytes
 		orchResult.DiscoveredDirs = discoveredDirs
 
+		// Wait for the skip-drain goroutine to fully process skippedChan before
+		// signaling completion. Without this, OnOrchestratorDone could fire while
+		// the drain goroutine still has buffered entries to process — a skipped-
+		// only upload could be misclassified as "empty folder" because the skip
+		// counter hasn't been fully incremented yet. WalkStream always closes
+		// skippedChan via defer, so this Wait cannot deadlock.
+		//
+		// Wait BEFORE close(backlogDone) so OnOrchestratorDone still fires while
+		// the dispatcher has work left to do — otherwise the dispatcher could
+		// race ahead and close dispatchDone before the GUI's
+		// MarkBatchScanInProgress(false) callback runs.
+		skipDrainWG.Wait()
+
 		// Signal dispatcher to drain remaining items and close outputCh
 		close(backlogDone)
 		backlogDoneClosed = true
 
-		// Call OnOrchestratorDone AFTER closing backlogDone but BEFORE
-		// dispatcher finishes draining. This preserves the v4.8.5 bugfix
-		// timing: GUI's MarkBatchScanInProgress(false) fires when discovery
-		// count is final, not after all items are sent through outputCh.
+		// Call OnOrchestratorDone AFTER closing backlogDone but BEFORE the
+		// dispatcher finishes draining. The GUI's MarkBatchScanInProgress(false)
+		// must fire when the discovery count is final — not after all items
+		// have been sent through outputCh — otherwise the progress UI shows a
+		// stuck "scanning" state until the very last item dispatches.
 		if callbacks.OnOrchestratorDone != nil {
 			callbacks.OnOrchestratorDone(orchResult)
 		}

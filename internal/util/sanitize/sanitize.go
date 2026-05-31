@@ -5,7 +5,7 @@
 //   - Invisible Unicode characters (zero-width spaces, etc.)
 //   - Multiple whitespace normalization
 //
-// Part of PUR (Parallel Uploader and Runner) v1.0.0
+// Part of PUR (Parallel Uploader and Runner).
 package sanitize
 
 import (

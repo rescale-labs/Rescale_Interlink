@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -75,6 +76,10 @@ func TestGetAppInfo_OSAndSessionScopedDaemon(t *testing.T) {
 	if info.SessionScopedDaemon != wantSessionScoped {
 		t.Errorf("SessionScopedDaemon = %v, want %v (GOOS=%s)",
 			info.SessionScopedDaemon, wantSessionScoped, goruntime.GOOS)
+	}
+	if info.NTLMProxySupported != config.NTLMProxySupported() {
+		t.Errorf("NTLMProxySupported = %v, want %v",
+			info.NTLMProxySupported, config.NTLMProxySupported())
 	}
 }
 

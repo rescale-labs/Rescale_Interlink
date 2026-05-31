@@ -118,6 +118,7 @@ export namespace wailsapp {
 	    fipsStatus: string;
 	    os: string;
 	    sessionScopedDaemon: boolean;
+	    ntlmProxySupported: boolean;
 	    versionCheck?: VersionCheckDTO;
 	
 	    static createFrom(source: any = {}) {
@@ -132,6 +133,7 @@ export namespace wailsapp {
 	        this.fipsStatus = source["fipsStatus"];
 	        this.os = source["os"];
 	        this.sessionScopedDaemon = source["sessionScopedDaemon"];
+	        this.ntlmProxySupported = source["ntlmProxySupported"];
 	        this.versionCheck = this.convertValues(source["versionCheck"], VersionCheckDTO);
 	    }
 	
@@ -211,6 +213,66 @@ export namespace wailsapp {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.automations = this.convertValues(source["automations"], AutomationDTO);
 	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class CredentialSourceDTO {
+	    source: string;
+	    label: string;
+	    detail: string;
+	    warning: string;
+	    hasApiKey: boolean;
+	    hasSavedToken: boolean;
+	    environmentPresent: boolean;
+	    legacyConfigPresent: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CredentialSourceDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source = source["source"];
+	        this.label = source["label"];
+	        this.detail = source["detail"];
+	        this.warning = source["warning"];
+	        this.hasApiKey = source["hasApiKey"];
+	        this.hasSavedToken = source["hasSavedToken"];
+	        this.environmentPresent = source["environmentPresent"];
+	        this.legacyConfigPresent = source["legacyConfigPresent"];
+	    }
+	}
+	export class ClearSavedAPIKeyResultDTO {
+	    removed: boolean;
+	    message: string;
+	    credentialSource: CredentialSourceDTO;
+	
+	    static createFrom(source: any = {}) {
+	        return new ClearSavedAPIKeyResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.removed = source["removed"];
+	        this.message = source["message"];
+	        this.credentialSource = this.convertValues(source["credentialSource"], CredentialSourceDTO);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -409,6 +471,7 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
+	
 	export class DaemonBatchStatsDTO {
 	    batchId: string;
 	    batchLabel: string;
@@ -666,6 +729,7 @@ export namespace wailsapp {
 	    modTime: string;
 	    path?: string;
 	    parentId?: string;
+	    symlinkId?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new FileItemDTO(source);
@@ -680,6 +744,7 @@ export namespace wailsapp {
 	        this.modTime = source["modTime"];
 	        this.path = source["path"];
 	        this.parentId = source["parentId"];
+	        this.symlinkId = source["symlinkId"];
 	    }
 	}
 	export class FileLoggingSettingsDTO {
@@ -1260,6 +1325,7 @@ export namespace wailsapp {
 	    discoveredTotal: number;
 	    discoveredBytes: number;
 	    startedAtUnix: number;
+	    skipped: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new TransferBatchDTO(source);
@@ -1286,6 +1352,7 @@ export namespace wailsapp {
 	        this.discoveredTotal = source["discoveredTotal"];
 	        this.discoveredBytes = source["discoveredBytes"];
 	        this.startedAtUnix = source["startedAtUnix"];
+	        this.skipped = source["skipped"];
 	    }
 	}
 	export class TransferRequestDTO {

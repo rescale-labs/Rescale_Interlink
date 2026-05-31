@@ -24,12 +24,12 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 # =============================================================================
-# Step 1: Install Go 1.24.2
+# Step 1: Install Go 1.26.3
 # =============================================================================
 Write-Host ""
-Write-Host "[1/7] Installing Go 1.24.2..."
+Write-Host "[1/7] Installing Go 1.26.3..."
 
-$GoVersion = "1.24.2"
+$GoVersion = "1.26.3"
 $GoZip = "go${GoVersion}.windows-amd64.zip"
 $GoUrl = "https://go.dev/dl/$GoZip"
 $GoInstallDir = "C:\Go"
@@ -148,7 +148,7 @@ Write-Host $nodeResult
 
 # Install Wails CLI
 Write-Host "Installing Wails CLI..."
-$wailsInstallCmd = "go install github.com/wailsapp/wails/v2/cmd/wails@latest"
+$wailsInstallCmd = "go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 cmd /c $wailsInstallCmd 2>&1 | Out-Host
@@ -178,7 +178,7 @@ if ($env:REPO_NAME -and (Test-Path $env:REPO_NAME)) {
 $BuildTime = Get-Date -Format "yyyy-MM-dd"
 $LdFlags = "-s -w -X github.com/rescale/rescale-int/internal/version.Version=$($ReleaseTag) -X github.com/rescale/rescale-int/internal/version.BuildTime=$BuildTime"
 
-Write-Host "Build flags: GOFIPS140=latest"
+Write-Host "Build flags: GOFIPS140=certified"
 Write-Host "LDFLAGS: $LdFlags"
 
 # Install frontend dependencies
@@ -199,7 +199,7 @@ if ($npmExitCode -ne 0) {
 # NOTE: Must use wails build, not go build, because the app embeds frontend assets
 Write-Host "Building rescale-int-gui.exe with Wails..."
 $WailsExe = "$env:GOPATH\bin\wails.exe"
-$wailsBuildCmd = "set `"GOFIPS140=latest`"&& `"$WailsExe`" build -platform windows/amd64 -ldflags `"$LdFlags`""
+$wailsBuildCmd = "set `"GOFIPS140=certified`"&& `"$WailsExe`" build -tags fips -platform windows/amd64 -ldflags `"$LdFlags`""
 Write-Host "Running: $wailsBuildCmd"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
@@ -219,7 +219,7 @@ Write-Host "GUI binary built: rescale-int-gui.exe"
 # v4.0.2: Build standalone CLI binary
 Write-Host "Building rescale-int.exe (standalone CLI)..."
 $GoExe = "C:\Go\bin\go.exe"
-$cliBuildCmd = "set `"GOFIPS140=latest`"&& `"$GoExe`" build -ldflags `"$LdFlags`" -o `"$BinDir\rescale-int.exe`" .\cmd\rescale-int"
+$cliBuildCmd = "set `"GOFIPS140=certified`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags`" -o `"$BinDir\rescale-int.exe`" .\cmd\rescale-int"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 cmd /c $cliBuildCmd 2>&1 | Out-Host
@@ -230,7 +230,7 @@ Write-Host "CLI binary built: rescale-int.exe"
 
 # Build tray companion (windowsgui subsystem) - this is a separate simple Go app
 Write-Host "Building rescale-int-tray.exe..."
-$trayCmd = "set `"GOFIPS140=latest`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& go build -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
+$trayCmd = "set `"GOFIPS140=certified`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& go build -tags fips -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 cmd /c $trayCmd 2>&1 | Out-Host

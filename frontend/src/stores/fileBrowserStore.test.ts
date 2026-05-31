@@ -47,6 +47,30 @@ function resetLocal() {
   })
 }
 
+function resetRemote() {
+  useFileBrowserStore.setState({
+    remote: {
+      mode: 'library',
+      currentFolderId: '',
+      items: [],
+      isLoading: false,
+      error: null,
+      breadcrumb: [],
+      hasMore: false,
+      nextCursor: '',
+      myLibraryId: 'lib-folder-123',
+      myJobsId: 'jobs-folder-456',
+      navGeneration: 0,
+      selection: { selectedIds: new Set(), lastSelectedId: null },
+      currentPage: 0,
+      itemsPerPage: 25,
+      pageCursors: [''],
+      knownTotalPages: 1,
+      pageCache: new Map(),
+    },
+  })
+}
+
 describe('loadLocalDirectory', () => {
   beforeEach(() => {
     resetLocal()
@@ -173,5 +197,69 @@ describe('loadLocalDirectory', () => {
     await useFileBrowserStore.getState().loadLocalDirectory('/h')
 
     expect(App.ListLocalDirectoryEx).toHaveBeenCalledWith('/h', true)
+  })
+})
+
+describe('remote trash browser', () => {
+  beforeEach(() => {
+    resetRemote()
+    vi.clearAllMocks()
+  })
+
+  it('loads trash through the trash endpoint and sets trash breadcrumb', async () => {
+    vi.mocked(App.ListRemoteTrash).mockResolvedValueOnce(
+      mockContents({
+        folderId: 'trash',
+        folderPath: 'Trash',
+        items: [mockFileItem({ id: 'file-1', name: 'result.dat', symlinkId: 'filesymlink-1' })],
+      })
+    )
+
+    await useFileBrowserStore.getState().loadRemoteTrash()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(App.ListRemoteTrash).toHaveBeenCalledWith('', 25)
+    expect(s.currentFolderId).toBe('trash')
+    expect(s.breadcrumb).toEqual([{ id: 'trash', name: 'Trash' }])
+    expect(s.items[0].symlinkId).toBe('filesymlink-1')
+  })
+
+  it('routes trash breadcrumb clicks back through the trash endpoint', () => {
+    useFileBrowserStore.setState((state) => ({
+      remote: {
+        ...state.remote,
+        mode: 'trash',
+        currentFolderId: 'trash',
+        breadcrumb: [{ id: 'trash', name: 'Trash' }],
+      },
+    }))
+    vi.mocked(App.ListRemoteTrash).mockResolvedValueOnce(mockContents({ folderId: 'trash', folderPath: 'Trash' }))
+
+    useFileBrowserStore.getState().navigateRemoteToBreadcrumb(0)
+
+    expect(App.ListRemoteTrash).toHaveBeenCalledWith('', 25)
+    expect(App.ListRemoteFolderPage).not.toHaveBeenCalled()
+  })
+
+  it('recovering trash items refreshes trash and clears selection', async () => {
+    const item = mockFileItem({ id: 'file-1', name: 'result.dat', symlinkId: 'filesymlink-1' })
+    useFileBrowserStore.setState((state) => ({
+      remote: {
+        ...state.remote,
+        mode: 'trash',
+        currentFolderId: 'trash',
+        items: [item],
+        selection: { selectedIds: new Set(['file-1']), lastSelectedId: 'file-1' },
+      },
+    }))
+    vi.mocked(App.RecoverTrashItems).mockResolvedValueOnce({ deleted: 1, failed: 0, error: '' })
+    vi.mocked(App.ListRemoteTrash).mockResolvedValueOnce(mockContents({ folderId: 'trash', folderPath: 'Trash' }))
+
+    const result = await useFileBrowserStore.getState().recoverTrashItems([item])
+
+    expect(App.RecoverTrashItems).toHaveBeenCalledWith([item])
+    expect(result).toEqual({ recovered: 1, failed: 0, error: '' })
+    expect(App.ListRemoteTrash).toHaveBeenCalledWith('', 25)
+    expect(useFileBrowserStore.getState().remote.selection.selectedIds.size).toBe(0)
   })
 })

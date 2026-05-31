@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.9.6
-**Last Updated:** 2026-05-09
+**Version:** 4.9.8
+**Last Updated:** 2026-05-31
 
 ## Overview
 
@@ -18,7 +18,7 @@ Rescale Interlink REQUIRES FIPS 140-3 compliant builds for production use. This 
 All production builds must be compiled with:
 
 ```bash
-GOFIPS140=latest wails build
+GOFIPS140=certified wails build -tags fips
 # or
 make build
 ```
@@ -64,13 +64,20 @@ This satisfies FedRAMP Moderate requirements for FIPS-validated data-in-transit 
 
 NTLM proxy authentication (`proxy_mode=ntlm`) uses the Azure/go-ntlmssp library which requires MD4 and MD5 hashing algorithms. These algorithms are **not FIPS 140-3 approved**.
 
+#### For FIPS-Tagged Builds
+
+- **NTLM proxy mode is disabled by build policy** on all platforms
+- The NTLM transport implementation is excluded from FIPS-tagged builds
+- Backend config validation and HTTP client setup reject `proxy_mode=ntlm`
+- The GUI hides/disables NTLM when the running build reports that it is unavailable
+
 #### For FedRAMP Environments (`rescale-gov.com`)
 
 - **NTLM proxy mode is automatically disabled** in the GUI when a FedRAMP platform is selected
 - If NTLM is configured when switching to a FedRAMP platform, it automatically switches to `basic`
 - A warning is displayed explaining the restriction
 
-#### For Commercial Rescale Platforms
+#### For Non-FIPS Commercial Builds
 
 - NTLM proxy mode is available and supported
 - The FIPS boundary is the Rescale API communication, not the proxy
@@ -79,10 +86,10 @@ NTLM proxy authentication (`proxy_mode=ntlm`) uses the Azure/go-ntlmssp library 
 ### Recommendations
 
 1. **Always prefer `basic` authentication over TLS** for maximum compatibility
-2. If your proxy requires NTLM and you're targeting FedRAMP:
+2. If your proxy requires NTLM and you're using a FIPS-tagged or FedRAMP build:
    - Contact your IT team for proxy alternatives
    - Consider using a FIPS-compliant proxy gateway
-3. The startup warning will alert you if NTLM is configured in a FIPS build
+3. A FIPS-tagged build rejects `proxy_mode=ntlm` before creating an API client
 
 ---
 
@@ -95,7 +102,7 @@ All log directories are created with `0700` permissions (Unix) to restrict acces
 | Platform | Log Location | Permissions |
 |----------|-------------|-------------|
 | Unix | `~/.config/rescale/logs/` | `drwx------` (0700) |
-| Windows | `%LOCALAPPDATA%\Rescale\Interlink\logs\` | Owner-only via ACL |
+| Windows | `%LOCALAPPDATA%\Rescale\Interlink\logs\` | Inherits from `%LOCALAPPDATA%`, which is per-user owner-restricted by default. Unlike the token file, the log directory does not get an explicit DACL applied by Interlink. |
 
 ### Log Contents
 
@@ -127,7 +134,7 @@ API keys should be stored securely:
 
 | Method | Recommended | Notes |
 |--------|-------------|-------|
-| Token file (`~/.config/rescale/token`) | Yes | 0600 permissions |
+| Token file (Unix: `~/.config/rescale/token`; Windows: `%APPDATA%\Rescale\Interlink\token` for the default-user token, `%LOCALAPPDATA%\Rescale\Interlink\token` for the per-user token used in service mode) | Yes | 0600 on Unix; explicit DACL on Windows (owner + Administrators + SYSTEM, no inheritance) |
 | Environment variable (`RESCALE_API_KEY`) | Yes | Cleared after session |
 | Config file (`config.csv`) | **No** | Keys are ignored from config.csv |
 
@@ -136,13 +143,14 @@ API keys should be stored securely:
 - API keys are transmitted only over HTTPS
 - Keys are never logged (not even partially)
 - The GUI allows viewing the key (toggle) but never exposes it externally
+- **Auth scheme selected by key shape**: API tokens use `Authorization: Token <key>`; short-lived JWT-shaped credentials (three dot-separated `ey…` segments) automatically switch to `Authorization: Bearer <key>`. Selection is per request, based on the credential value at the time of the call
 
 ---
 
 ## Platform URL Allowlist
 
 Rescale Interlink restricts API communication to a fixed set of known Rescale platform URLs.
-This prevents credential exfiltration to arbitrary endpoints via `--api-url` or configuration files.
+This prevents credential exfiltration to arbitrary endpoints via `config.csv api_base_url`, the compat-mode `-X/--api-base-url` flag, or `RESCALE_API_URL`.
 
 - **Allowlist enforcement**: `ValidatePlatformURL()` in `internal/config/platforms.go` checks URLs against 6 known Rescale platform hostnames
 - **Strict origin validation**: HTTPS-only, no custom ports, no userinfo, no path/query/fragment components accepted
@@ -208,6 +216,7 @@ These return data scoped to the caller's SID in service mode. An unidentifiable 
 
 These return only non-user-scoped information and are available to any authenticated caller:
 - `GetStatus` (overall service state and version)
+- `OpenGUI` (forwarded to the tray app to surface the GUI window; carries no user data)
 
 ### Fail-Closed Authorization
 
@@ -247,10 +256,12 @@ Rescale Interlink resolves API credentials through a priority chain that differs
 ### Native CLI / GUI
 
 1. `--api-key` command-line flag (highest priority)
-2. Per-user token file (service mode: `<userProfile>/.config/rescale/token`)
-3. `apiconfig` INI file (service mode: legacy compatibility)
-4. Default token file (`~/.config/rescale/token`)
+2. Per-user token file in the resolved user-profile directory
+3. `apiconfig` INI file in the resolved user-profile directory (legacy)
+4. Default token file (Unix: `~/.config/rescale/token`; Windows: `%APPDATA%\Rescale\Interlink\token`)
 5. `RESCALE_API_KEY` environment variable (lowest priority)
+
+In **Windows service mode**, the chain is **truncated after step 3** — steps 4 and 5 are skipped to prevent the SYSTEM account's credentials from leaking into per-user daemon sessions. This truncation is the only mode-dependent behavior; the rest of the chain runs identically in both subprocess and service modes.
 
 **Source:** `internal/config/apikey.go`
 
@@ -295,13 +306,13 @@ The following are **not reportable** (users can fix these themselves):
 ### Redaction
 
 All error messages are redacted before inclusion in reports:
-- Hex tokens >20 characters → `[REDACTED]`
+- Hex tokens of **20 or more** characters → `[REDACTED]`
 - URL query parameters → `?[REDACTED]`
 - Email addresses → `[EMAIL]`
-- Bearer/authorization tokens → `[REDACTED]`
+- Strings of the form `(bearer|token|key|authorization)[=:\s]+VALUE` → the keyword is preserved and the value becomes `[REDACTED]` (e.g., `bearer abc...` → `bearer=[REDACTED]`)
 - Home directory paths → `[HOME]`
-- File paths reduced to basename only
-- Job names replaced with `job-N` placeholders
+
+In addition, when the report includes the recent **timeline snapshot** (transfer events, job state changes), each timeline entry has its file paths reduced to basename only and job names replaced with `job-N` placeholders. These two transformations apply to timeline entries only, not to the generic redacted error message.
 
 **Source:** `internal/reporting/redactor.go`
 
@@ -351,6 +362,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Security-Relevant Changes |
 |---------|------|---------------------------|
+| 4.9.8 | 2026-05-20 | FIPS 140-3 build path tightening; security dependency refresh to clear advisories; cleaner credential source DTO across GUI and CLI |
 | 4.9.4 | 2026-04-19 | Explicit Windows DACL on token file (owner + Administrators + SYSTEM, no inheritance); IPC caller-SID scoping consolidated behind one helper with catalog-wide fail-closed enforcement |
 | 4.9.3 | 2026-04-15 | AWS SDK security bump (eventstream DoS fix); CodeQL quality cleanup |
 | 4.9.2 | 2026-04-13 | S3 FIPS endpoints for ITAR platforms; Windows service credential isolation |

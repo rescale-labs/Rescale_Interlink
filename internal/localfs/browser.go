@@ -105,6 +105,28 @@ func (a *ancestrySet) with(id dirIdentity) *ancestrySet {
 	return &ancestrySet{ids: newIDs}
 }
 
+// emitSkipped non-blockingly delivers an entry to the streaming-walk
+// "skipped" channel, dropping the entry if the channel is full or the
+// caller has cancelled. The channel is informational; missing one
+// notification is preferable to stalling a long-running walk.
+func emitSkipped(ctx context.Context, skipped chan<- FileEntry, entry FileEntry) {
+	if skipped == nil {
+		return
+	}
+	select {
+	case skipped <- entry:
+	case <-ctx.Done():
+	default:
+		// Channel full — drop the notification.
+	}
+}
+
+func shouldProbeResolvedDirectory(mode fs.FileMode, isDir bool) bool {
+	// Windows junctions can appear as non-directories with irregular mode bits.
+	// Regular files should stay on the hot path without an extra Stat call.
+	return !isDir && !mode.IsRegular()
+}
+
 // FileEntry represents a file or directory in the local filesystem.
 type FileEntry struct {
 	Path       string      // Full path to the file
@@ -318,20 +340,30 @@ func resolveSymlinksParallel(ctx context.Context, entries []entryInfo, symlinkIn
 // Key property: filepath.WalkDir visits parents before children (depth-first,
 // parent-first), so directories at depth N are emitted before files at depth N+1.
 //
-// Both channels are closed when the walk completes. Errors are sent to errChan
+// All channels are closed when the walk completes. Errors are sent to errChan
 // (buffered at 1). Context cancellation stops the walk and closes all channels.
+//
+// skippedChan receives entries that the walker chose not to descend into and
+// not to emit as a file or directory — for example, Windows reparse-point
+// junctions whose target identity cannot be determined. Each entry has
+// IsSymlink=true and IsDir reflecting the post-Stat target type. Consumers
+// should report these to the user so that "missing files" cases are visible
+// rather than silent.
 func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 	dirChan <-chan FileEntry,
 	fileChan <-chan FileEntry,
+	skippedChan <-chan FileEntry,
 	errChan <-chan error,
 ) {
 	dirs := make(chan FileEntry, 1000)
 	files := make(chan FileEntry, 1000)
+	skipped := make(chan FileEntry, 100)
 	errs := make(chan error, 1)
 
 	go func() {
 		defer close(dirs)
 		defer close(files)
+		defer close(skipped)
 		defer close(errs)
 
 		// Initialize ancestry tracking for symlink cycle detection.
@@ -401,7 +433,13 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 					// Symlinked directory — check for cycles before descending
 					id, ok := getDirIdentity(realInfo)
 					if !ok {
-						// Can't determine identity (Windows) — don't follow, skip safely
+						// Can't determine identity (Windows) — don't follow, but
+						// surface to the caller so the user sees that this entry
+						// was skipped rather than silently lost.
+						emitSkipped(ctx, skipped, FileEntry{
+							Path: path, Name: name, IsDir: true, IsSymlink: true,
+							Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: fileInfo.Mode(),
+						})
 						return nil
 					}
 					// Trim ancestry to current depth before cycle check. Without this,
@@ -439,12 +477,28 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 					childAncestry := newAncestrySet(ancestry.snapshot())
 					childAncestry = childAncestry.with(id)
 
-					_ = walkSymlinkedDir(ctx, resolvedTarget, path, opts, childAncestry, dirs, files)
+					_ = walkSymlinkedDir(ctx, resolvedTarget, path, opts, childAncestry, dirs, files, skipped)
 					return nil // We handled it ourselves — return nil (not SkipDir) because d.IsDir()=false for symlinks
 				}
 
 				// Symlinked file — use real info for size/modtime
 				fileInfo = realInfo
+			}
+
+			// Defensive: an entry not classified as a directory by Lstat may
+			// still resolve to a directory through Stat — e.g. a Windows
+			// reparse-point junction whose Lstat mode lacks ModeSymlink (some
+			// legacy junctions are tagged ModeIrregular instead). Emitting it
+			// as a file would propagate to UploadFile and fail with
+			// "cannot upload a directory". Detect, skip, and surface.
+			if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
+				if realInfo, statErr := os.Stat(path); statErr == nil && realInfo.IsDir() {
+					emitSkipped(ctx, skipped, FileEntry{
+						Path: path, Name: name, IsDir: true, IsSymlink: true,
+						Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: fileInfo.Mode(),
+					})
+					return nil
+				}
 			}
 
 			entry := FileEntry{
@@ -486,7 +540,7 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 		}
 	}()
 
-	return dirs, files, errs
+	return dirs, files, skipped, errs
 }
 
 // walkSymlinkedDir walks a resolved symlink target directory, emitting entries
@@ -502,6 +556,7 @@ func walkSymlinkedDir(
 	ancestry *ancestrySet, // Snapshot of caller's ancestry
 	dirs chan<- FileEntry,
 	files chan<- FileEntry,
+	skipped chan<- FileEntry,
 ) error {
 	return filepath.WalkDir(resolvedRoot, func(resolvedPath string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -552,6 +607,10 @@ func walkSymlinkedDir(
 			if realInfo.IsDir() {
 				id, ok := getDirIdentity(realInfo)
 				if !ok {
+					emitSkipped(ctx, skipped, FileEntry{
+						Path: originalPath, Name: name, IsDir: true, IsSymlink: true,
+						Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: fileInfo.Mode(),
+					})
 					return nil // Can't identify (Windows) — don't follow
 				}
 
@@ -580,12 +639,25 @@ func walkSymlinkedDir(
 					return nil
 				}
 				childAncestry := ancestry.with(id)
-				_ = walkSymlinkedDir(ctx, nestedResolved, originalPath, opts, childAncestry, dirs, files)
+				_ = walkSymlinkedDir(ctx, nestedResolved, originalPath, opts, childAncestry, dirs, files, skipped)
 				return nil
 			}
 
 			// Symlinked file — use real info
 			fileInfo = realInfo
+		}
+
+		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
+		// a directory (Windows junction with ModeIrregular) must not be
+		// emitted as a file.
+		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
+			if realInfo, statErr := os.Stat(resolvedPath); statErr == nil && realInfo.IsDir() {
+				emitSkipped(ctx, skipped, FileEntry{
+					Path: originalPath, Name: name, IsDir: true, IsSymlink: true,
+					Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: fileInfo.Mode(),
+				})
+				return nil
+			}
 		}
 
 		entry := FileEntry{
@@ -690,6 +762,19 @@ func collectSymlinkedDir(
 			}
 
 			fileInfo = realInfo
+		}
+
+		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
+		// a directory (Windows junction with ModeIrregular) must not be
+		// emitted as a file.
+		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
+			if realInfo, statErr := os.Stat(resolvedPath); statErr == nil && realInfo.IsDir() {
+				result.Symlinks = append(result.Symlinks, FileEntry{
+					Path: originalPath, Name: name, IsDir: true, IsSymlink: true,
+					Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: fileInfo.Mode(),
+				})
+				return nil
+			}
 		}
 
 		entry := FileEntry{
@@ -830,6 +915,19 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 
 			// Symlinked file — use real info
 			fileInfo = realInfo
+		}
+
+		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
+		// a directory (Windows junction with ModeIrregular) must not be
+		// emitted as a file.
+		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
+			if realInfo, statErr := os.Stat(path); statErr == nil && realInfo.IsDir() {
+				result.Symlinks = append(result.Symlinks, FileEntry{
+					Path: path, Name: name, IsDir: true, IsSymlink: true,
+					Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: fileInfo.Mode(),
+				})
+				return nil
+			}
 		}
 
 		entry := FileEntry{

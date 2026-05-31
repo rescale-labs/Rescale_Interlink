@@ -176,7 +176,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 // Uses subprocess mode by default instead of Windows Service (which requires admin).
 // Blocks subprocess spawn if Windows Service is already running.
 func (a *App) StartDaemon() error {
-	// Per AUTO_DOWNLOAD_SPEC.md §4.3: persist before handoff to another process.
+	// Persist config + token before handing off to a different-identity process.
 	if err := a.ensureAllConfigPersisted(); err != nil {
 		return fmt.Errorf("cannot start daemon: %w", err)
 	}

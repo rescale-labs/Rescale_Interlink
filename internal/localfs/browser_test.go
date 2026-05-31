@@ -57,7 +57,7 @@ func TestWalkStream_BasicTraversal(t *testing.T) {
 	root := createTestTree(t)
 	ctx := context.Background()
 
-	dirChan, fileChan, errChan := WalkStream(ctx, root, WalkOptions{
+	dirChan, fileChan, _, errChan := WalkStream(ctx, root, WalkOptions{
 		IncludeHidden:  true,
 		SkipHiddenDirs: false,
 	})
@@ -127,7 +127,7 @@ func TestWalkStream_ContextCancellation(t *testing.T) {
 	root := createTestTree(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	dirChan, fileChan, errChan := WalkStream(ctx, root, WalkOptions{
+	dirChan, fileChan, _, errChan := WalkStream(ctx, root, WalkOptions{
 		IncludeHidden:  true,
 		SkipHiddenDirs: false,
 	})
@@ -184,7 +184,7 @@ func TestWalkStream_HiddenFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(root, ".hidden_dir", "inside.txt"), []byte("i"), 0644)
 
 	ctx := context.Background()
-	dirChan, fileChan, _ := WalkStream(ctx, root, WalkOptions{
+	dirChan, fileChan, _, _ := WalkStream(ctx, root, WalkOptions{
 		IncludeHidden:  false,
 		SkipHiddenDirs: true,
 	})
@@ -215,7 +215,7 @@ func TestWalkStream_EmptyDirectory(t *testing.T) {
 	root := t.TempDir()
 
 	ctx := context.Background()
-	dirChan, fileChan, errChan := WalkStream(ctx, root, WalkOptions{
+	dirChan, fileChan, _, errChan := WalkStream(ctx, root, WalkOptions{
 		IncludeHidden: true,
 	})
 
@@ -250,7 +250,7 @@ func TestWalkStream_OrderingGuarantee(t *testing.T) {
 	root := createTestTree(t)
 	ctx := context.Background()
 
-	dirChan, fileChan, _ := WalkStream(ctx, root, WalkOptions{
+	dirChan, fileChan, _, _ := WalkStream(ctx, root, WalkOptions{
 		IncludeHidden: true,
 	})
 
@@ -300,7 +300,7 @@ func TestWalkStream_ConsistencyWithWalkCollect(t *testing.T) {
 
 	// WalkStream
 	ctx := context.Background()
-	dirChan, fileChan, errChan := WalkStream(ctx, root, opts)
+	dirChan, fileChan, _, errChan := WalkStream(ctx, root, opts)
 
 	var streamDirs, streamFiles []string
 	dirsDone, filesDone := false, false
@@ -362,7 +362,7 @@ func TestWalkStream_ConsistencyWithWalkCollect(t *testing.T) {
 func drainWalkStream(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
 	t.Helper()
 	ctx := context.Background()
-	dirChan, fileChan, errChan := WalkStream(ctx, root, opts)
+	dirChan, fileChan, _, errChan := WalkStream(ctx, root, opts)
 
 	dirsDone, filesDone := false, false
 	for !dirsDone || !filesDone {
@@ -714,4 +714,108 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func TestShouldProbeResolvedDirectory(t *testing.T) {
+	tests := []struct {
+		name string
+		mode os.FileMode
+		dir  bool
+		want bool
+	}{
+		{name: "regular_file", mode: 0o644, want: false},
+		{name: "directory", mode: os.ModeDir | 0o755, dir: true, want: false},
+		{name: "irregular_file", mode: os.ModeIrregular, want: true},
+		{name: "named_pipe", mode: os.ModeNamedPipe, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldProbeResolvedDirectory(tc.mode, tc.dir)
+			if got != tc.want {
+				t.Fatalf("shouldProbeResolvedDirectory(%v, %v) = %v, want %v", tc.mode, tc.dir, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWalkStream_SkippedChannelDrainsCleanly verifies that the streaming
+// walker's "skipped" channel is closed when the walk completes, even when
+// no entries are emitted onto it. Regression guard for the orchestrator's
+// drain loop hanging on a non-closed channel.
+func TestWalkStream_SkippedChannelDrainsCleanly(t *testing.T) {
+	root := createTestTree(t)
+	ctx := context.Background()
+
+	dirChan, fileChan, skippedChan, errChan := WalkStream(ctx, root, WalkOptions{
+		IncludeHidden: true,
+	})
+
+	// Drain dirs/files so the walker can complete.
+	dirsDone, filesDone := false, false
+	for !dirsDone || !filesDone {
+		select {
+		case _, ok := <-dirChan:
+			if !ok {
+				dirsDone = true
+			}
+		case _, ok := <-fileChan:
+			if !ok {
+				filesDone = true
+			}
+		}
+	}
+
+	// skippedChan should now close (no junctions in this tree).
+	count := 0
+	for entry := range skippedChan {
+		count++
+		if entry.Path == "" {
+			t.Errorf("skipped entry has empty path")
+		}
+	}
+	if count != 0 {
+		t.Errorf("expected 0 skipped entries on a clean tree, got %d", count)
+	}
+
+	select {
+	case err := <-errChan:
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	default:
+	}
+}
+
+// TestWalkCollect_SymlinkSliceReceivesUnidentifiableTargets verifies the
+// existing Symlinks-slice behavior. On Unix, getDirIdentity always succeeds,
+// so this test does not exercise the unidentifiable branch directly — but
+// it documents the contract that the Symlinks slice is the surface for
+// "we walked it but couldn't follow it" cases.
+func TestWalkCollect_SymlinkSliceContainsBrokenSymlinks(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "real.txt"), []byte("data"), 0644)
+	// Symlink pointing at a non-existent target: Stat will fail.
+	os.Symlink(filepath.Join(root, "missing.txt"), filepath.Join(root, "broken_link"))
+
+	result, err := WalkCollect(root, WalkOptions{
+		IncludeHidden:  true,
+		FollowSymlinks: false, // Without follow, all symlinks land in Symlinks.
+	})
+	if err != nil {
+		t.Fatalf("WalkCollect: %v", err)
+	}
+
+	foundLink := false
+	for _, e := range result.Symlinks {
+		if filepath.Base(e.Path) == "broken_link" {
+			foundLink = true
+			if !e.IsSymlink {
+				t.Errorf("broken_link entry IsSymlink=false, want true")
+			}
+		}
+	}
+	if !foundLink {
+		t.Errorf("broken_link not in result.Symlinks: %+v", result.Symlinks)
+	}
 }

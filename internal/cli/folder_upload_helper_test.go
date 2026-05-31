@@ -114,7 +114,7 @@ func TestWalkStreamDirectoryOrdering(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "x", "y"), 0755)
 
 	ctx := context.Background()
-	dirChan, _, _ := localfs.WalkStream(ctx, root, localfs.WalkOptions{
+	dirChan, _, _, _ := localfs.WalkStream(ctx, root, localfs.WalkOptions{
 		IncludeHidden: true,
 	})
 
@@ -142,7 +142,7 @@ func TestCreateFolderStructureStreaming_RootEvent(t *testing.T) {
 	// Empty directory — no sub-dirs, so no API calls needed
 
 	ctx := context.Background()
-	dirChan, _, _ := localfs.WalkStream(ctx, root, localfs.WalkOptions{IncludeHidden: true})
+	dirChan, _, _, _ := localfs.WalkStream(ctx, root, localfs.WalkOptions{IncludeHidden: true})
 
 	folderReadyChan := make(chan FolderReadyEvent, 100)
 	conflictMode := ConflictMergeAll

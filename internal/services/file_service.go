@@ -11,10 +11,11 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
 	"github.com/rescale/rescale-int/internal/transfer/scan"
-	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/util/paths"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // FileService handles file and folder operations.
@@ -228,6 +229,44 @@ func (fs *FileService) DeleteItems(ctx context.Context, items []FileItem) (delet
 	return deleted, failed, nil
 }
 
+// ArchiveItems moves files and/or folders to the user's Trash (soft delete),
+// matching the web UI's delete behavior. parentFolderID is the folder the items
+// currently live in (the archive endpoint is folder-scoped and rejects a
+// mismatched parent). Items can be recovered from the Trash view afterward.
+//
+// This is the default delete path for user-initiated deletes. Permanent
+// deletion uses DeleteItems.
+func (fs *FileService) ArchiveItems(ctx context.Context, parentFolderID string, items []FileItem) (archived int, failed int, err error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return 0, len(items), fmt.Errorf("API client not configured")
+	}
+	if parentFolderID == "" {
+		return 0, len(items), fmt.Errorf("a parent folder is required to move items to Trash")
+	}
+
+	fileIDs := make([]string, 0, len(items))
+	folderIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.IsFolder {
+			folderIDs = append(folderIDs, item.ID)
+		} else {
+			fileIDs = append(fileIDs, item.ID)
+		}
+	}
+
+	if err := apiClient.ArchiveContents(ctx, parentFolderID, fileIDs, folderIDs); err != nil {
+		fs.logger.Error().Err(err).Str("parentFolder", parentFolderID).Int("count", len(items)).Msg("Move to Trash failed")
+		// The archive endpoint is all-or-nothing, so on error none were archived.
+		return 0, len(items), err
+	}
+
+	return len(items), 0, nil
+}
+
 // PrepareUploadFolder creates the remote folder structure for a local folder.
 // Returns the mapping of local directories to remote folder IDs and the list of files to upload.
 func (fs *FileService) PrepareUploadFolder(ctx context.Context, localPath string, remoteFolderID string) (*UploadFolderResult, error) {
@@ -328,7 +367,14 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 		return nil, fmt.Errorf("API client not configured")
 	}
 
-	localFolderPath := filepath.Join(localPath, folderName)
+	rootFolderName := folderName
+	if rootFolderName == "" {
+		rootFolderName = remoteFolderID
+	}
+	if err := validation.ValidateFilename(rootFolderName); err != nil {
+		return nil, fmt.Errorf("invalid folder name %q: %w", rootFolderName, err)
+	}
+	localFolderPath := filepath.Join(localPath, rootFolderName)
 
 	allFolders, allFiles, err := scan.ScanRemoteFolderRecursive(ctx, apiClient, remoteFolderID, "")
 	if err != nil {
@@ -342,7 +388,10 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 
 	// Create local directories for all subfolders
 	for _, folder := range allFolders {
-		dirPath := filepath.Join(localFolderPath, folder.RelativePath)
+		dirPath, err := validation.ResolvePathInDirectory(folder.RelativePath, localFolderPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid folder path %q: %w", folder.RelativePath, err)
+		}
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create folder %s: %w", folder.RelativePath, err)
 		}
@@ -351,10 +400,14 @@ func (fs *FileService) PrepareDownloadFolder(ctx context.Context, remoteFolderID
 	// Build download file list
 	downloadFiles := make([]DownloadFileSpec, 0, len(allFiles))
 	for _, f := range allFiles {
+		localFilePath, err := validation.ResolvePathInDirectory(f.RelativePath, localFolderPath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid file path %q: %w", f.RelativePath, err)
+		}
 		downloadFiles = append(downloadFiles, DownloadFileSpec{
 			FileID:    f.FileID,
 			Name:      f.Name,
-			LocalPath: filepath.Join(localFolderPath, f.RelativePath),
+			LocalPath: localFilePath,
 			Size:      f.Size,
 		})
 	}
@@ -437,6 +490,98 @@ func (fs *FileService) GetMyJobsFolderID(ctx context.Context) (string, error) {
 	}
 
 	return roots.MyJobs, nil
+}
+
+// ListTrashBinPage returns a single page of trash-bin contents.
+// Files in the result have SymlinkID populated (needed for recover/purge).
+// Folder-like items use FileItem.ID (which is the folder id).
+func (fs *FileService) ListTrashBinPage(ctx context.Context, cursor string, pageSize int) (*FolderContents, error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return nil, fmt.Errorf("API client not configured")
+	}
+
+	contents, err := apiClient.ListTrashBinPage(ctx, cursor, pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list trash: %w", err)
+	}
+
+	items := make([]FileItem, 0, len(contents.Folders)+len(contents.Files))
+
+	for _, f := range contents.Folders {
+		items = append(items, FileItem{
+			ID:       f.ID,
+			Name:     f.Name,
+			IsFolder: true,
+			ModTime:  f.DateUploaded,
+		})
+	}
+
+	for _, f := range contents.Files {
+		items = append(items, FileItem{
+			ID:        f.ID,
+			Name:      f.Name,
+			IsFolder:  false,
+			Size:      f.DecryptedSize,
+			ModTime:   f.DateUploaded,
+			SymlinkID: f.SymlinkID,
+		})
+	}
+
+	return &FolderContents{
+		FolderID:   "trash",
+		FolderPath: "Trash",
+		Items:      items,
+		HasMore:    contents.HasMore,
+		NextCursor: contents.NextURL,
+	}, nil
+}
+
+// RecoverTrashItems restores a mix of trashed files and folders to their
+// original locations via a single bulk POST. The endpoint is all-or-nothing.
+func (fs *FileService) RecoverTrashItems(ctx context.Context, items []FileItem) (recovered int, failed int, err error) {
+	return fs.postTrashAction(ctx, "recover", items)
+}
+
+// PurgeTrashItems permanently deletes a mix of trashed files and folders via
+// a single bulk POST. This is irreversible. The endpoint is all-or-nothing.
+func (fs *FileService) PurgeTrashItems(ctx context.Context, items []FileItem) (deleted int, failed int, err error) {
+	return fs.postTrashAction(ctx, "delete", items)
+}
+
+func (fs *FileService) postTrashAction(ctx context.Context, action string, items []FileItem) (int, int, error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return 0, len(items), fmt.Errorf("API client not configured")
+	}
+	if len(items) == 0 {
+		return 0, 0, nil
+	}
+
+	fileSymlinkIDs := make([]string, 0, len(items))
+	folderIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.IsFolder {
+			folderIDs = append(folderIDs, item.ID)
+		} else {
+			if item.SymlinkID == "" {
+				return 0, len(items), fmt.Errorf("trash file item %q is missing SymlinkID", item.Name)
+			}
+			fileSymlinkIDs = append(fileSymlinkIDs, item.SymlinkID)
+		}
+	}
+
+	if err := apiClient.PostTrashBinAction(ctx, action, fileSymlinkIDs, folderIDs); err != nil {
+		fs.logger.Error().Err(err).Str("action", action).Int("count", len(items)).Msg("Trash bulk action failed")
+		return 0, len(items), err
+	}
+	return len(items), 0, nil
 }
 
 // ListFolderPage returns a single page of folder contents with pagination support.

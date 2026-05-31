@@ -205,6 +205,7 @@ type TransferBatchDTO struct {
 	DiscoveredTotal int     `json:"discoveredTotal"`
 	DiscoveredBytes int64   `json:"discoveredBytes"`
 	StartedAtUnix   int64   `json:"startedAtUnix"`
+	Skipped         int     `json:"skipped"`                // entries the walker skipped
 }
 
 // GetTransferBatches returns aggregate stats for each batch of transfers.
@@ -242,6 +243,7 @@ func (a *App) GetTransferBatches() []TransferBatchDTO {
 			DiscoveredTotal: bs.DiscoveredTotal,
 			DiscoveredBytes: bs.DiscoveredBytes,
 			StartedAtUnix:   bs.StartedAt.Unix(),
+			Skipped:         bs.Skipped,
 		}
 	}
 	return dtos

@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	ntlmssp "github.com/Azure/go-ntlmssp"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"golang.org/x/net/http/httpproxy"
@@ -19,6 +18,10 @@ import (
 
 // ConfigureHTTPClient configures an HTTP client with proxy settings
 func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
+	if err := config.ValidateProxyModeForBuild(cfg.ProxyMode); err != nil {
+		return nil, err
+	}
+
 	transport := &nethttp.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   constants.HTTPDialTimeout,
@@ -61,12 +64,14 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		proxyURL := BuildProxyURL(cfg)
 		transport.Proxy = proxyFuncWithBypass(proxyURL, cfg.NoProxy)
 
-		// Wrap transport with NTLM
+		ntlmRoundTripper, err := ntlmTransport(transport)
+		if err != nil {
+			return nil, err
+		}
+
 		client := &nethttp.Client{
-			Transport: ntlmssp.Negotiator{
-				RoundTripper: transport,
-			},
-			Timeout: 300 * time.Second,
+			Transport: ntlmRoundTripper,
+			Timeout:   300 * time.Second,
 		}
 
 		// Only perform warmup if credentials are complete and warmup is requested.

@@ -7,8 +7,8 @@ import (
 )
 
 // FileForDownload represents a file to be downloaded with source and destination info.
-// This struct is used by both CLI and GUI download code paths to ensure consistent
-// behavior across all entry points (per CLAUDE.md north stars: "maximum code re-use").
+// Used by both CLI and GUI download code paths so collision-handling behavior stays
+// consistent across entry points.
 type FileForDownload struct {
 	FileID    string // Unique file identifier from Rescale
 	Name      string // Original filename

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -581,5 +582,37 @@ func TestGetConfigPathForProfile(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestWriteTokenFile_RepairsLoosePermissions verifies that overwriting an
+// existing token file that has loose (0644) permissions tightens it back to
+// 0600. os.WriteFile alone only sets the mode on create, so a pre-existing
+// loose file would otherwise keep its mode.
+func TestWriteTokenFile_RepairsLoosePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission model; Windows uses ACLs")
+	}
+	dir := t.TempDir()
+	path := dir + "/token"
+
+	// Pre-create the file with loose 0644 perms.
+	if err := os.WriteFile(path, []byte("old\n"), 0644); err != nil {
+		t.Fatalf("setup write: %v", err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatalf("setup chmod: %v", err)
+	}
+
+	if err := WriteTokenFile(path, "newtoken"); err != nil {
+		t.Fatalf("WriteTokenFile() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("token file perms = %o, want 0600", perm)
 	}
 }

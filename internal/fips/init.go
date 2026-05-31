@@ -29,7 +29,7 @@ func Init(buildType string) {
 
 	// FIPS is NOT active - this is a compliance issue
 	log.Printf("[CRITICAL] FIPS 140-3 mode is NOT active")
-	log.Printf("[CRITICAL] This binary was NOT built with GOFIPS140=latest")
+	log.Printf("[CRITICAL] This binary was NOT built with GOFIPS140=certified")
 	log.Printf("[CRITICAL] FedRAMP compliance REQUIRES FIPS 140-3 mode")
 
 	// Check if non-FIPS mode is explicitly allowed (for development only)
@@ -38,9 +38,9 @@ func Init(buildType string) {
 		return
 	}
 
-	rebuildHint := "GOFIPS140=latest go build ./cmd/rescale-int"
+	rebuildHint := "GOFIPS140=certified go build -tags fips ./cmd/rescale-int"
 	if buildType == "wails" {
-		rebuildHint = "GOFIPS140=latest wails build"
+		rebuildHint = "GOFIPS140=certified wails build -tags fips"
 	}
 
 	fmt.Fprintf(os.Stderr, "\n")
