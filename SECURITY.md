@@ -18,7 +18,7 @@ Rescale Interlink REQUIRES FIPS 140-3 compliant builds for production use. This 
 All production builds must be compiled with:
 
 ```bash
-GOFIPS140=latest wails build -tags fips
+GOFIPS140=certified wails build -tags fips
 # or
 make build
 ```

@@ -334,7 +334,7 @@ rescale-int files upload <file> [file...] [flags]
 **Flags:**
 - `-d, --folder-id string` - Target folder ID
 - `--max-concurrent int` - Maximum concurrent uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
-- `--tags strings` - Tag(s) to apply to each uploaded file (comma-separated or repeated)
+- `--tags string` - Comma-separated tags to apply to each uploaded file (e.g. `"simulation,cfd,v2"`)
 - `--check-duplicates` - Check for existing files before uploading (prompts for each duplicate)
 - `--no-check-duplicates` - Skip duplicate checking (fast mode, may create duplicates)
 - `--skip-duplicates` - Check and automatically skip files that already exist
@@ -535,7 +535,7 @@ rescale-int folders upload-dir <directory> [flags]
 - `--max-concurrent int` - Maximum concurrent file uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
 - `--folder-concurrency int` - Maximum concurrent folder-creation API calls (default 15, range 1-30)
 - `--include-hidden` - Include hidden files (starting with .)
-- `--tags strings` - Tag(s) to apply to each uploaded file (comma-separated or repeated)
+- `--tags string` - Comma-separated tags to apply to each uploaded file (e.g. `"simulation,cfd,v2"`)
 - `--sequential` - Use sequential mode (create all folders, then upload all files)
 - `--continue-on-error` - Continue uploading on errors without prompting
 - `-S, --skip-folder-conflicts` - Skip folders that already exist on Rescale
@@ -1969,8 +1969,8 @@ rescale-int files list --limit 50
 # Download file
 rescale-int download abc123 -o model_output.tar.gz
 
-# Delete old files
-rescale-int files delete old_file_id1 old_file_id2
+# Delete old files (moved to Trash; add --permanent to delete irreversibly)
+rescale-int files delete -i old_file_id1 -i old_file_id2
 ```
 
 ### Folder Management

@@ -268,7 +268,7 @@ wails dev
 CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
 
 # FIPS-compliant production build
-GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
+GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
 
 # Test production build
 open build/bin/rescale-int.app

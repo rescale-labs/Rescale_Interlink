@@ -38,7 +38,7 @@ This document catalogs what Rescale Interlink can do. For full command syntax, s
 - Windows (amd64)
 
 ### FIPS 140-3 Compliance
-All production builds are compiled with `GOFIPS140=latest` and the `fips` build tag. Non-FIPS builds refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. Mandatory for FedRAMP environments.
+All production builds are compiled with `GOFIPS140=certified` (the CMVP-validated Go Cryptographic Module) and the `fips` build tag. Non-FIPS builds refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. Mandatory for FedRAMP environments.
 
 ---
 
@@ -68,7 +68,7 @@ All production builds are compiled with `GOFIPS140=latest` and the `fips` build 
 - List all files in library with ID, name, size, upload date
 
 ### Delete
-- Delete one or more files with confirmation prompt
+- Move one or more files to Trash (recoverable) with a confirmation prompt; use `--permanent` to delete irreversibly
 
 ---
 
@@ -97,7 +97,7 @@ All production builds are compiled with `GOFIPS140=latest` and the `fips` build 
 - Streaming scan-to-download (downloads begin within seconds of scan start)
 
 ### Delete Folder
-- Delete folder and all contents with confirmation
+- Move a folder (and its contents) to Trash (recoverable) with confirmation; use `--permanent` to delete irreversibly
 
 ---
 

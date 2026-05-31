@@ -67,7 +67,7 @@ make build-all                # Build for all platforms
 # Example: bin/v4.9.8/darwin-arm64/rescale-int
 
 # Production GUI build
-GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -tags fips -platform darwin/arm64
+GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -tags fips -platform darwin/arm64
 
 # Development only (not for production releases)
 # Note: Output to bin/dev/ to avoid polluting project root

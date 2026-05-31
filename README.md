@@ -44,7 +44,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 ### CLI Features
 
 - **Configuration Management**: Interactive setup with `config init`
-- **File Operations**: Upload, download, list, delete files
+- **File Operations**: Upload, download, list, and delete files (delete moves to Trash by default; `--permanent` for irreversible delete)
 - **Folder Management**: Create, list, bulk upload with connection reuse and folder caching
 - **Job Operations**: Submit, monitor, control, download results
 - **Job Watch**: Monitor running jobs and incrementally download output files
