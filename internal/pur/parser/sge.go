@@ -288,8 +288,20 @@ func (p *SGEParser) validate(m *SGEMetadata) error {
 	if m.Walltime <= 0 {
 		return fmt.Errorf("missing or invalid field: RESCALE_WALLTIME must be > 0")
 	}
+	// RESCALE_WALLTIME is in HOURS. Reject implausibly large values, which almost
+	// always mean a legacy seconds-style script (e.g. 3600 or 86400) that would
+	// otherwise be submitted as thousands of hours. 8760 hours = 1 year.
+	if m.Walltime > maxWalltimeHours {
+		return fmt.Errorf("RESCALE_WALLTIME=%d is too large — this value is in HOURS, not seconds. "+
+			"A value like 3600 or 86400 looks like a legacy seconds-based script; convert it to hours "+
+			"(e.g. 86400 seconds = 24)", m.Walltime)
+	}
 	return nil
 }
+
+// maxWalltimeHours is the upper bound for a plausible job walltime in hours
+// (1 year). Larger values are rejected as likely legacy seconds-based input.
+const maxWalltimeHours = 8760
 
 // ToJobRequest converts SGE metadata to a Rescale API JobRequest
 func (m *SGEMetadata) ToJobRequest() *models.JobRequest {

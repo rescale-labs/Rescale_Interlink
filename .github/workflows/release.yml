@@ -154,7 +154,7 @@ jobs:
           echo "CXX=$CXX"
           echo "which clang: $(which clang)"
           echo "xcrun clang: $(xcrun --find clang)"
-          GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+          GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             wails build -tags fips -platform darwin/arm64 -ldflags "$LDFLAGS"
 
       - name: Build standalone CLI binary
@@ -164,7 +164,7 @@ jobs:
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
-          GOFIPS140=latest CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+          GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             go build -tags fips -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
       - name: Install Apple Certificate

@@ -28,7 +28,7 @@ func TestSGEParser_Parse(t *testing.T) {
 #RESCALE_CORES emerald
 #RESCALE_CORES_PER_SLOT 16
 #RESCALE_SLOTS 2
-#RESCALE_WALLTIME 86400
+#RESCALE_WALLTIME 24
 
 echo "Running simulation"
 ./run.sh
@@ -56,8 +56,8 @@ echo "Running simulation"
 				if m.Slots != 2 {
 					t.Errorf("Slots = %d, want %d", m.Slots, 2)
 				}
-				if m.Walltime != 86400 {
-					t.Errorf("Walltime = %d, want %d", m.Walltime, 86400)
+				if m.Walltime != 24 {
+					t.Errorf("Walltime = %d, want %d", m.Walltime, 24)
 				}
 			},
 		},

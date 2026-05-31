@@ -35,7 +35,7 @@ Write-Host "`n[1/5] Building Go binaries..." -ForegroundColor Yellow
 Write-Host "  Building rescale-int.exe..."
 $env:GOOS = "windows"
 $env:GOARCH = "amd64"
-$env:GOFIPS140 = "latest"
+$env:GOFIPS140 = "certified"
 $env:CGO_ENABLED = "1"
 
 Push-Location $ProjectRoot

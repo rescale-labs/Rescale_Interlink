@@ -707,6 +707,15 @@ func WriteTokenFile(path, token string) error {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
 
+	// os.WriteFile only applies the 0600 mode when creating the file; if the
+	// token file already existed with looser permissions (e.g. 0644), the
+	// overwrite preserves that mode. Explicitly chmod to repair it. On Windows
+	// the meaningful protection is the ACL applied below, so a chmod error
+	// there is non-fatal.
+	if err := os.Chmod(path, 0600); err != nil && runtime.GOOS != "windows" {
+		return fmt.Errorf("failed to set token file permissions: %w", err)
+	}
+
 	// Best-effort explicit-ACL tightening on Windows. A failure here does
 	// NOT block the write — the file has already been written with Go's
 	// default permissions, which is no worse than pre-Plan-4 behavior.
