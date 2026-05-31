@@ -27,6 +27,7 @@ Loading automations no longer fails to decode when an automation defines environ
 - A footer indicator shows when Interlink is pacing requests to stay within Rescale's API rate limits.
 - The Transfers tab shows an indicator while transfers run and after they complete until the tab is viewed.
 - File Browser state persists across tab switches, so an upload's confirmation and merge dialogs are not lost when navigating away.
+- Uploading or downloading an empty folder now leaves a record in the Transfers tab like any other transfer, instead of disappearing.
 
 ### FIPS module pinned to the CMVP-validated version
 
