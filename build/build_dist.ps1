@@ -71,10 +71,13 @@ if ($chocoExitCode -ne 0) {
     throw ".NET SDK installation failed with exit code: $chocoExitCode"
 }
 
-# Refresh PATH
-$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
-            [System.Environment]::GetEnvironmentVariable("PATH", "User") + ";" +
-            "$GoInstallDir\bin;$env:GOPATH\bin"
+# Refresh PATH. Our Go ($GoInstallDir\bin) MUST come first: the GitHub
+# windows-latest runner ships a preinstalled Go in hostedtoolcache that lacks
+# GOFIPS140=certified, and if it wins PATH precedence the FIPS build fails with
+# "unknown GOFIPS140 version".
+$env:PATH = "$GoInstallDir\bin;$env:GOPATH\bin;" +
+            [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
+            [System.Environment]::GetEnvironmentVariable("PATH", "User")
 
 Write-Host ".NET version:"
 $dotnetResult = cmd /c "dotnet --version 2>&1"
@@ -137,10 +140,11 @@ if ($nodeExitCode -ne 0) {
     throw "Node.js installation failed with exit code: $nodeExitCode"
 }
 
-# Refresh PATH
-$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
-            [System.Environment]::GetEnvironmentVariable("PATH", "User") + ";" +
-            "$GoInstallDir\bin;$env:GOPATH\bin;$env:USERPROFILE\.dotnet\tools"
+# Refresh PATH. Keep our Go ($GoInstallDir\bin) ahead of the runner's
+# preinstalled Go so the FIPS-certified toolchain is the one Wails invokes.
+$env:PATH = "$GoInstallDir\bin;$env:GOPATH\bin;$env:USERPROFILE\.dotnet\tools;" +
+            [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
+            [System.Environment]::GetEnvironmentVariable("PATH", "User")
 
 Write-Host "Node.js version:"
 $nodeResult = cmd /c "node --version 2>&1"
@@ -199,7 +203,9 @@ if ($npmExitCode -ne 0) {
 # NOTE: Must use wails build, not go build, because the app embeds frontend assets
 Write-Host "Building rescale-int-gui.exe with Wails..."
 $WailsExe = "$env:GOPATH\bin\wails.exe"
-$wailsBuildCmd = "set `"GOFIPS140=certified`"&& `"$WailsExe`" build -tags fips -platform windows/amd64 -ldflags `"$LdFlags`""
+# Wails shells out to `go`; force our FIPS-certified toolchain by putting it
+# first on PATH and pinning GOROOT, so the runner's preinstalled Go can't win.
+$wailsBuildCmd = "set `"GOFIPS140=certified`"&& set `"GOROOT=$GoInstallDir`"&& set `"PATH=$GoInstallDir\bin;%PATH%`"&& `"$WailsExe`" build -tags fips -platform windows/amd64 -ldflags `"$LdFlags`""
 Write-Host "Running: $wailsBuildCmd"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
@@ -230,7 +236,7 @@ Write-Host "CLI binary built: rescale-int.exe"
 
 # Build tray companion (windowsgui subsystem) - this is a separate simple Go app
 Write-Host "Building rescale-int-tray.exe..."
-$trayCmd = "set `"GOFIPS140=certified`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& go build -tags fips -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
+$trayCmd = "set `"GOFIPS140=certified`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 cmd /c $trayCmd 2>&1 | Out-Host
