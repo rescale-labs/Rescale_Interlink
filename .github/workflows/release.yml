@@ -17,14 +17,14 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Run build script
         run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}"
         shell: pwsh
 
       - name: Azure login
-        uses: azure/login@v1
+        uses: azure/login@v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -93,7 +93,7 @@ jobs:
         shell: pwsh
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: rescale-interlink-${{ github.ref_name }}-win_amd64
           path: |
@@ -106,7 +106,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Install Go 1.26.3
         run: |
@@ -118,7 +118,7 @@ jobs:
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.4.0
         with:
           node-version: '20'
 
@@ -312,7 +312,7 @@ jobs:
           cat rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip.sha256
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: rescale-interlink-${{ github.ref_name }}-macos_aarch64
           path: |
@@ -333,14 +333,14 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.1
         with:
           path: ./artifacts
           pattern: rescale-interlink-${{ github.ref_name }}-* # Downloads only artifacts for this version
           merge-multiple: true # Flattens the folder structure for easier uploading
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.0
         with:
           # This will automatically pick up all files in the directory
           files: ./artifacts/*
