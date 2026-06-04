@@ -224,14 +224,28 @@ func uriToPath(u string) (string, error) {
 // filters is a(sa(us)) per the portal spec, with Wails semicolon-separated
 // patterns split into one glob sub-tuple each.
 func buildPortalSaveOptions(defaultName string, filters []runtime.FileFilter) map[string]dbus.Variant {
-	out := map[string]dbus.Variant{}
-	if defaultName != "" {
-		out["current_name"] = dbus.MakeVariant(defaultName)
-	}
-	if len(filters) > 0 {
-		out["filters"] = dbus.MakeVariant(convertFilters(filters))
-	}
-	return out
+    out := map[string]dbus.Variant{}
+    if defaultName != "" {
+        out["current_name"] = dbus.MakeVariant(defaultName)
+    }
+
+    // 1. Create a temporary slice to hold ONLY valid filters
+    var validFilters []runtime.FileFilter
+
+    for _, f := range filters {
+        // Clean up whitespace and check if it's empty or just a semicolon
+        cleaned := strings.TrimSpace(f.Pattern)
+        if cleaned != "" && cleaned != ";" {
+            validFilters = append(validFilters, f)
+        }
+    }
+
+    // 2. Only add the "filters" key if real, valid filters survived the check
+    if len(validFilters) > 0 {
+        out["filters"] = dbus.MakeVariant(convertFilters(validFilters))
+    }
+
+    return out
 }
 
 // filterTuple mirrors the portal spec's filter tuple shape:

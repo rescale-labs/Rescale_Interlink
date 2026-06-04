@@ -26,14 +26,14 @@ func TestLoadConfigCSV(t *testing.T) {
 				if cfg.APIBaseURL != "https://platform.rescale.com" {
 					t.Errorf("APIBaseURL = %q, want %q", cfg.APIBaseURL, "https://platform.rescale.com")
 				}
-				if cfg.TarWorkers != 2 {
-					t.Errorf("TarWorkers = %d, want 2", cfg.TarWorkers)
+				if cfg.TarWorkers != 4 {
+					t.Errorf("TarWorkers = %d, want 4", cfg.TarWorkers)
 				}
-				if cfg.UploadWorkers != 2 {
-					t.Errorf("UploadWorkers = %d, want 2", cfg.UploadWorkers)
+				if cfg.UploadWorkers != 4 {
+					t.Errorf("UploadWorkers = %d, want 4", cfg.UploadWorkers)
 				}
-				if cfg.JobWorkers != 2 {
-					t.Errorf("JobWorkers = %d, want 2", cfg.JobWorkers)
+				if cfg.JobWorkers != 4 {
+					t.Errorf("JobWorkers = %d, want 4", cfg.JobWorkers)
 				}
 			},
 		},
