@@ -154,6 +154,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
 
   // Form state
   const [template, setTemplate] = useState<JobSpec>(initialTemplate || DEFAULT_JOB_TEMPLATE)
+  const [tagsInput, setTagsInput] = useState((initialTemplate?.tags ?? []).join(', '))
   const [selectedAnalysis, setSelectedAnalysis] = useState<AnalysisCode | null>(null)
   const [licenseType, setLicenseType] = useState('')
   const [licenseValue, setLicenseValue] = useState('')
@@ -275,6 +276,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   useEffect(() => {
     if (initialTemplate) {
       setTemplate(initialTemplate)
+      setTagsInput((initialTemplate.tags ?? []).join(', '))
       setLicenseAutoSwitchHint(null)
       setLicenseLoadHint(null)
       // Parse license settings if present
@@ -733,8 +735,9 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 <label className="block text-sm font-medium mb-1">Tags</label>
                 <input
                   type="text"
-                  value={template.tags.join(', ')}
-                  onChange={(e) =>
+                  value={tagsInput}
+                  onChange={(e) => setTagsInput(e.target.value)}
+                  onBlur={(e) =>
                     updateField(
                       'tags',
                       e.target.value
