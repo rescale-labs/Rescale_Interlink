@@ -7,6 +7,7 @@ import {
   ArrowsRightLeftIcon,
   DocumentTextIcon,
   PlayIcon,
+  ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 
@@ -18,6 +19,7 @@ import {
   TransfersTab,
   SingleJobTab,
   PURTab,
+  JobStatusTab,
 } from './components/tabs'
 import { ErrorBoundary } from './components/common'
 import ErrorReportModal from './components/ErrorReportModal'
@@ -51,6 +53,7 @@ const tabs = [
   { name: 'Setup', icon: Cog6ToothIcon, component: SetupTab },
   { name: 'Single Job', icon: PlayIcon, component: SingleJobTab },
   { name: 'PUR (Multiple Jobs)', icon: Square3Stack3DIcon, component: PURTab, title: 'PUR = Parallel Upload and Run' },
+  { name: 'Job Status', icon: ClipboardDocumentListIcon, component: JobStatusTab },
   { name: 'File Browser', icon: FolderOpenIcon, component: FileBrowserTab },
   { name: 'Transfers', icon: ArrowsRightLeftIcon, component: TransfersTab },
   { name: 'Activity Logs', icon: DocumentTextIcon, component: ActivityTab },

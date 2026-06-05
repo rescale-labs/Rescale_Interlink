@@ -100,6 +100,14 @@ export function GetUngroupedTransferTasks():Promise<Array<wailsapp.TransferTaskD
 
 export function InstallAndStartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
 
+export function InstallService():Promise<void>;
+
+export function InstallServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
+
+export function IsServiceInstalled():Promise<boolean>;
+
+export function ListJobStatuses():Promise<wailsapp.JobStatusListDTO>;
+
 export function ListLocalDirectory(arg1:string):Promise<wailsapp.FolderContentsDTO>;
 
 export function ListLocalDirectoryEx(arg1:string,arg2:boolean):Promise<wailsapp.FolderContentsDTO>;
@@ -209,6 +217,8 @@ export function TestConnection():Promise<wailsapp.ConnectionResultDTO>;
 export function TriggerDaemonScan():Promise<void>;
 
 export function TriggerProfileRescan():Promise<void>;
+
+export function UninstallServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
 
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
 
