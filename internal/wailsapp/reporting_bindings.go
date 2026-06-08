@@ -84,7 +84,7 @@ func (a *App) SaveErrorReport(reportJSON string) (path string, err error) {
 		return "", fmt.Errorf(appNotReadyError)
 	}
 
-	suggestedName := fmt.Sprintf("rescale-error-report-%s.json", time.Now().Format("2006-01-02T150405"))
+	suggestedName := fmt.Sprintf("rescale-error-report-%s.json", time.Now().Format("2006-01-02T15-04-05"))
 	path, err = portalAwareSaveFile(a.ctx, "SaveErrorReport", runtime.SaveDialogOptions{
 		DefaultFilename: suggestedName,
 		Title:           "Save Error Report",
@@ -127,7 +127,7 @@ func (a *App) SaveLogExport(content string) (path string, err error) {
 		return "", fmt.Errorf(appNotReadyError)
 	}
 
-	suggestedName := fmt.Sprintf("interlink-activity-%s.log", time.Now().Format("2006-01-02"))
+	suggestedName := fmt.Sprintf("interlink-activity-%s.log", time.Now().Format("2006-01-02T15-04-05"))
 	path, err = portalAwareSaveFile(a.ctx, "SaveLogExport", runtime.SaveDialogOptions{
 		DefaultFilename: suggestedName,
 		Title:           "Export Activity Logs",

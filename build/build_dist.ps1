@@ -2,6 +2,10 @@ param (
     [string]$ReleaseTag = $env:RELEASE_TAG
 )
 
+# Fail fast on any error, including the early setup steps below.
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
 # Set up paths
 $WorkDir = $PWD.Path
 $BuildDir = Join-Path $WorkDir "_build"
@@ -19,9 +23,6 @@ Write-Host "Build directory: $BuildDir"
 Write-Host "Bin directory: $BinDir"
 
 Set-Location $BuildDir
-
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
 
 # =============================================================================
 # Step 1: Install Go 1.26.3
@@ -87,7 +88,7 @@ Write-Host $dotnetResult
 # Step 3: Install WiX Toolset v4
 # =============================================================================
 Write-Host ""
-Write-Host "[4/7] Installing WiX Toolset v4..."
+Write-Host "[3/7] Installing WiX Toolset v4..."
 
 # Temporarily allow errors since dotnet outputs info to stderr
 $prevErrorAction = $ErrorActionPreference
@@ -127,7 +128,7 @@ Write-Host $wixVersionResult
 # Step 3.5: Install Node.js and Wails CLI (required for GUI build)
 # =============================================================================
 Write-Host ""
-Write-Host "[4.5/7] Installing Node.js and Wails CLI..."
+Write-Host "[3.5/7] Installing Node.js and Wails CLI..."
 
 # Install Node.js via Chocolatey
 $prevErrorAction = $ErrorActionPreference
@@ -171,7 +172,7 @@ Write-Host $wailsResult
 # Step 4: Build Wails Application
 # =============================================================================
 Write-Host ""
-Write-Host "[5/7] Building Wails application with FIPS 140-3..."
+Write-Host "[4/7] Building Wails application with FIPS 140-3..."
 
 # On GitHub Actions, the repo is already checked out to the workspace root.
 # On Rescale HPC, the script clones into $env:REPO_NAME and must cd into it.
@@ -193,7 +194,7 @@ $ErrorActionPreference = "Continue"
 cmd /c "npm install 2>&1" | Out-Host
 $npmExitCode = $LASTEXITCODE
 $ErrorActionPreference = $prevErrorAction
-Set-Location ..
+Set-Location $WorkDir
 
 if ($npmExitCode -ne 0) {
     Write-Host "Warning: npm install returned exit code $npmExitCode (may be non-fatal warnings)"
@@ -251,7 +252,7 @@ Get-ChildItem $BinDir
 # Step 4.5: Download and Bundle WebView2 Fixed Version Runtime
 # =============================================================================
 Write-Host ""
-Write-Host "[5.5/7] Bundling WebView2 Fixed Version Runtime..."
+Write-Host "[4.5/7] Bundling WebView2 Fixed Version Runtime..."
 
 $WebView2Dir = Join-Path $BinDir "webview2"
 New-Item -ItemType Directory -Force -Path $WebView2Dir | Out-Null
@@ -356,7 +357,7 @@ if ($hasWebView2) {
 # Step 5: Create Support Files
 # =============================================================================
 Write-Host ""
-Write-Host "[6/7] Creating support files..."
+Write-Host "[5/7] Creating support files..."
 
 $ReadmeContent = @"
 Rescale Interlink $($ReleaseTag)

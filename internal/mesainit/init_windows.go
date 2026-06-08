@@ -123,7 +123,11 @@ func tryExtractAndReexec() bool {
 		// Don't return error - the new process may have already run and exited
 	}
 
-	// Exit this process - the re-exec'd process is handling things now
+	// Exit this process - the re-exec'd process is handling things now.
+	// If the process never started, ProcessState is nil; exit non-zero rather than panic.
+	if cmd.ProcessState == nil {
+		os.Exit(1)
+	}
 	os.Exit(cmd.ProcessState.ExitCode())
 	return true // Never reached
 }
