@@ -169,22 +169,15 @@ func legacyAPIKeyPresent() bool {
 }
 
 func removeSavedAPIKeyTokenFiles() (int, error) {
-	removed := 0
-	seen := map[string]bool{}
-	for i := 0; i < 3; i++ {
-		tokenPath := config.GetDefaultTokenPath()
-		if tokenPath == "" || seen[tokenPath] {
-			break
-		}
-		seen[tokenPath] = true
-
-		if err := os.Remove(tokenPath); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return removed, err
-		}
-		removed++
+	tokenPath := config.GetDefaultTokenPath()
+	if tokenPath == "" {
+		return 0, nil
 	}
-	return removed, nil
+	if err := os.Remove(tokenPath); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return 1, nil
 }

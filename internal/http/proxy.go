@@ -8,6 +8,7 @@ import (
 	"net"
 	nethttp "net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -280,12 +281,17 @@ func proxyFuncWithBypass(proxyURL *url.URL, noProxy string) func(*nethttp.Reques
 		NoProxy:    noProxy,
 	}
 	proxyFunc := cfg.ProxyFunc()
+	// Per-request routing logs are noisy on concurrent transfer workloads; gate
+	// them behind RESCALE_DEBUG. Evaluated once here, not per request.
+	proxyDebug := os.Getenv("RESCALE_DEBUG") != ""
 	return func(req *nethttp.Request) (*url.URL, error) {
 		result, err := proxyFunc(req.URL)
-		if result == nil {
-			log.Printf("[PROXY] Bypass: %s (direct connection)", req.URL.Host)
-		} else {
-			log.Printf("[PROXY] Proxied: %s → %s", req.URL.Host, result.Host)
+		if proxyDebug {
+			if result == nil {
+				log.Printf("[PROXY] Bypass: %s (direct connection)", req.URL.Host)
+			} else {
+				log.Printf("[PROXY] Proxied: %s → %s", req.URL.Host, result.Host)
+			}
 		}
 		return result, err
 	}
