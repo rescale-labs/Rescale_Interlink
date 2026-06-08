@@ -1,4 +1,4 @@
-// Package wailsapp provides the event bridge between Go EventBus and Wails runtime.
+// Package wailsapp provides the event bridge between Go EventBus and UI runtimes.
 package wailsapp
 
 import (
@@ -12,11 +12,14 @@ import (
 	"github.com/rescale/rescale-int/internal/events"
 )
 
-// EventBridge forwards events from internal EventBus to Wails runtime.
+type eventEmitFunc func(context.Context, string, any)
+
+// EventBridge forwards events from internal EventBus to a frontend runtime.
 type EventBridge struct {
 	ctx          context.Context
 	eventBus     *events.EventBus
 	subscription <-chan events.Event
+	emit         eventEmitFunc
 
 	// Throttling for high-frequency events
 	lastProgress     map[string]time.Time
@@ -30,9 +33,20 @@ type EventBridge struct {
 
 // NewEventBridge creates a new event bridge.
 func NewEventBridge(ctx context.Context, eventBus *events.EventBus) *EventBridge {
+	return newEventBridge(ctx, eventBus, func(ctx context.Context, name string, data any) {
+		runtime.EventsEmit(ctx, name, data)
+	})
+}
+
+func newEventBridge(
+	ctx context.Context,
+	eventBus *events.EventBus,
+	emit eventEmitFunc,
+) *EventBridge {
 	return &EventBridge{
 		ctx:              ctx,
 		eventBus:         eventBus,
+		emit:             emit,
 		lastProgress:     make(map[string]time.Time),
 		progressInterval: 100 * time.Millisecond, // Throttle to 10 updates/sec
 		stopC:            make(chan struct{}),
@@ -107,19 +121,19 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		if eb.shouldThrottle(e.JobName) {
 			return
 		}
-		runtime.EventsEmit(eb.ctx, "interlink:progress", progressEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:progress", progressEventToDTO(e))
 
 	case *events.LogEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:log", logEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:log", logEventToDTO(e))
 
 	case *events.StateChangeEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:state_change", stateChangeEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:state_change", stateChangeEventToDTO(e))
 
 	case *events.ErrorEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:error", errorEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:error", errorEventToDTO(e))
 
 	case *events.CompleteEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:complete", completeEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:complete", completeEventToDTO(e))
 
 	case *events.TransferEvent:
 		// Only throttle PROGRESS events — never throttle terminal states
@@ -130,27 +144,27 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		if !isTerminalState && eb.shouldThrottle(e.TaskID) {
 			return
 		}
-		runtime.EventsEmit(eb.ctx, "interlink:transfer", transferEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:transfer", transferEventToDTO(e))
 
 	case *events.EnumerationEvent:
 		// Don't throttle these - they're infrequent and important for UX
-		runtime.EventsEmit(eb.ctx, "interlink:enumeration", enumerationEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:enumeration", enumerationEventToDTO(e))
 
 	case *events.ScanProgressEvent:
 		// Don't throttle - these are infrequent and important for UX
-		runtime.EventsEmit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
 
 	case *events.BatchProgressEvent:
 		// No throttling needed — ticker already limits to 1/sec per batch
-		runtime.EventsEmit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
 
 	case *events.ConfigChangedEvent:
 		// Forward credential changes so file browser can invalidate cache
-		runtime.EventsEmit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
 
 	case *events.ReportableErrorEvent:
 		// Reportable error events for safe error reporting — NOT throttled
-		runtime.EventsEmit(eb.ctx, "interlink:reportable_error", reportableErrorEventToDTO(e))
+		eb.emit(eb.ctx, "interlink:reportable_error", reportableErrorEventToDTO(e))
 	}
 }
 
