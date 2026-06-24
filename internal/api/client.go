@@ -1551,12 +1551,16 @@ func (c *Client) ListJobsPage(ctx context.Context, page, pageSize int) ([]models
 // when hitting jobs older than the cutoff. This is more efficient for daemon scans
 // that only care about recent jobs within a lookback window.
 func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]models.JobResponse, error) {
-	var allJobs []models.JobResponse
-	// Order by dateInserted descending (newest first) for early termination
-	nextURL := "/api/v3/jobs/?ordering=-dateInserted"
-	pageCount := 0
-
 	log.Printf("Daemon scan: Fetching jobs (cutoff: %s)", cutoff.Format("2006-01-02"))
+	// Order by dateInserted descending (newest first) for early termination
+	return c.listJobsSince(ctx, "/api/v3/jobs/?ordering=-dateInserted", cutoff)
+}
+
+// listJobsSince pages through a jobs listing ordered newest first, stopping at
+// the first page whose jobs all predate the cutoff.
+func (c *Client) listJobsSince(ctx context.Context, nextURL string, cutoff time.Time) ([]models.JobResponse, error) {
+	var allJobs []models.JobResponse
+	pageCount := 0
 
 	for nextURL != "" {
 		pageCount++
@@ -1626,6 +1630,42 @@ func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]mo
 	}
 
 	return allJobs, nil
+}
+
+// GetMetaFolders retrieves the workspace folder roots
+// (GET /api/v3/meta/folders/). Used by workspace-folder auto-download to find
+// the sharedWithWorkspace root and the folders under it.
+func (c *Client) GetMetaFolders(ctx context.Context) (*models.MetaFolders, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v3/meta/folders/", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("get meta folders failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var folders models.MetaFolders
+	if err := json.NewDecoder(resp.Body).Decode(&folders); err != nil {
+		return nil, fmt.Errorf("failed to decode meta folders: %w", err)
+	}
+
+	return &folders, nil
+}
+
+// ListJobsInFolder lists jobs in a specific workspace folder, ordered by
+// dateInserted (newest first), stopping when all jobs on a page predate the
+// cutoff. Mirrors ListJobsWithCutoff's early-termination but scopes to one
+// folder via the q=folder:<id> filter. Each returned job is expected to carry
+// its Folder.
+//
+// f=0 means "all jobs in the folder" rather than the default "only my jobs"
+// (f=1). This is required for workspace-folder auto-download to see jobs owned
+// by other users that live in shared folders.
+func (c *Client) ListJobsInFolder(ctx context.Context, folderID string, cutoff time.Time) ([]models.JobResponse, error) {
+	return c.listJobsSince(ctx, fmt.Sprintf("/api/v3/jobs/?q=folder:%s&f=0&ordering=-dateInserted", neturl.QueryEscape(folderID)), cutoff)
 }
 
 // GetCoreTypes retrieves available hardware core types from the Rescale API.

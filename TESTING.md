@@ -144,12 +144,12 @@ plus 8 frontend vitest files. Grouped by functional area:
 | `internal/ratelimit` | 3 | Token bucket, registry, store (incl. degraded-mode notices) |
 | `internal/ratelimit/coordinator` | 5 | Cross-process coordination |
 
-#### Background Service
+#### Background Auto-Download
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
 | `internal/daemon` | 6 | Daemon lifecycle, monitor, state pruning, transfer tracker, status snapshot errors |
-| `internal/service` | 4 | Windows service, detection, install/uninstall flows |
+| `internal/service` | 5 | Shared State/Presentation vocabulary (Compute, per-user state), detection, removal of an earlier version's service |
 | `internal/ipc` | 7 | Client/server, messages, pipe, security, user-scope catalog tests |
 
 #### Security & Crypto

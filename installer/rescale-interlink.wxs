@@ -40,16 +40,18 @@
       <ComponentGroupRef Id="StartMenuShortcuts" />
     </Feature>
 
-    <!-- The package installs no Windows service: auto-download runs in each user's
-         session, started from the app or the tray. -->
+    <!-- Auto-download no longer runs as a Windows service. It runs as a
+         subprocess in the logged-in user's session, started by the tray app.
+         No service is installed by this MSI. -->
 
     <Feature Id="TrayFeature" Title="System Tray Companion" Level="1">
       <ComponentGroupRef Id="TrayComponents" />
     </Feature>
 
     <!-- Custom actions -->
-    <!-- Best-effort removal of a Windows service that an earlier version's
-         'service install' registered. -->
+    <!-- Best-effort removal of a Windows service installed by older Interlink
+         versions. Runs on uninstall/upgrade so a stale SYSTEM service (which
+         could not reach user-mapped network drives) does not linger. -->
     <CustomAction Id="UninstallService"
                   Directory="INSTALLFOLDER"
                   ExeCommand="[INSTALLFOLDER]rescale-int.exe service uninstall"
@@ -68,7 +70,7 @@
                   Return="ignore" />
 
     <!-- Install sequence -->
-    <!-- Best-effort service removal on uninstall; tray launch on install. -->
+    <!-- Best-effort legacy service uninstall on removal + tray launch on install. -->
     <InstallExecuteSequence>
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="LaunchTray" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE" />
@@ -146,6 +148,9 @@
       </Files>
     </ComponentGroup>
   </Fragment>
+
+  <!-- No ServiceComponents: auto-download runs as a user-session subprocess,
+       not a Windows service. -->
 
   <!-- Tray companion components -->
   <Fragment>

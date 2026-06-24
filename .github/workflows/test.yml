@@ -147,7 +147,7 @@ jobs:
           PLATFORM_TESTS: >-
             ./cmd/rescale-int-tray:TestFailedActionsReturn
             ./cmd/rescale-int-tray:TestStartRefusalsAreShown
-            ./internal/cli:TestServiceStatusSaysNotInstalled
+            ./cmd/rescale-int-tray:TestStartupStartsOnlyWhenEnabledAndShowsWhy
             ./internal/ipc:TestDialUserPipe_RefusesAnotherUsersPipe
             ./internal/ipc:TestEveryPath_UsesThePipeNamedForTheUser
             ./internal/ipc:TestListenUserPipe_DoesNotJoinAnExistingPipe
@@ -159,6 +159,7 @@ jobs:
             ./internal/service:TestBlockSubprocess_SaysHowToStopTheRunningDaemon
             ./internal/service:TestServiceStateDecidesBlocking
             ./internal/service:TestRetiredServiceReportsRunningThenStops
+            ./internal/service:TestUninstallWithoutTheServiceSucceeds
             ./internal/util/multipart:TestScanDirectories_DriveRelativeRoots
             ./internal/wailsapp:TestStartDaemonSaysWhyItCannotStart
         run: |

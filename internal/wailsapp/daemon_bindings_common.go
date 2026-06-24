@@ -57,12 +57,6 @@ type DaemonStatusDTO struct {
 	// that just failed from one that failed hours ago and never recovered.
 	LastErrorTime string `json:"lastErrorTime,omitempty"`
 
-	// ManagedBy indicates if daemon is managed externally ("Windows Service", "", etc.)
-	ManagedBy string `json:"managedBy,omitempty"`
-
-	// ServiceMode indicates if daemon is running as Windows Service (true) or subprocess (false)
-	ServiceMode bool `json:"serviceMode"`
-
 	// UserConfigured indicates if this user has daemon.conf with enabled=true
 	UserConfigured bool `json:"userConfigured"`
 
@@ -148,6 +142,8 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	result.UseJobNameDir = cfg.Daemon.UseJobNameDir
 	result.MaxConcurrent = cfg.Daemon.MaxConcurrent
 	result.LookbackDays = cfg.Daemon.LookbackDays
+	result.IncludeWorkspaceFolders = cfg.Daemon.IncludeWorkspaceFolders
+	result.FlattenFolderStructure = cfg.Daemon.FlattenFolderStructure
 
 	result.NamePrefix = cfg.Filters.NamePrefix
 	result.NameContains = cfg.Filters.NameContains
@@ -353,10 +349,4 @@ type DaemonLogEntryDTO struct {
 	Stage     string                 `json:"stage"`
 	Message   string                 `json:"message"`
 	Fields    map[string]interface{} `json:"fields,omitempty"`
-}
-
-// ElevatedServiceResultDTO represents the result of an elevated service operation.
-type ElevatedServiceResultDTO struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
 }

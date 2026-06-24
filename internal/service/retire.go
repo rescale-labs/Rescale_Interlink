@@ -9,7 +9,7 @@ const RemovedMessage = "Multi-user service mode is not available in this version
 // OldServiceRunning is what the app, the tray and the CLI say while a service
 // installed by an earlier version runs. It serves only the shared pipe this
 // version no longer uses, so nothing here can reach it.
-const OldServiceRunning = "A Windows service from an earlier version is running; remove it with Remove Old Service in the Interlink app"
+const OldServiceRunning = "A Windows service from an earlier version is running; restart Windows, or run 'rescale-int service uninstall' as administrator"
 
 // EarlierDaemonRunning says how to end a daemon an earlier version started,
 // which listens on that shared pipe: neither the app nor 'rescale-int daemon
@@ -32,16 +32,15 @@ type scmHost struct {
 	log         func(string)
 }
 
-// retire is all a service installed by an earlier version does now: its
-// registration names a binary in a folder the user can write, and runs it as
-// LocalSystem, so it removes itself and stops. It reports whether an SCM
-// started this process.
+// retire is all a service installed by an earlier version does now: this
+// version has no service mode, so it removes itself and stops. It reports
+// whether an SCM started this process.
 func retire(h scmHost) bool {
 	err := h.dispatch(func(running func()) {
 		running()
 		if err := h.deleteSelf(); err != nil {
 			h.log(fmt.Sprintf("Multi-user service mode is not available in this version, and this service could not remove itself: %v. "+
-				"Remove it from the Interlink app or with 'rescale-int service uninstall' as administrator.", err))
+				"Remove it with 'rescale-int service uninstall' as administrator.", err))
 			return
 		}
 		h.clearMarker()

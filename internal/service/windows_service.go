@@ -117,8 +117,6 @@ func IsInstalledWithReason() (bool, string) {
 	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 		return false, ""
 	}
-	// DetectDaemon looks for "denied" to fall back to IPC; the OS text may not
-	// be English.
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		return false, fmt.Sprintf("SCM access denied: %v", err)
 	}
@@ -131,7 +129,9 @@ func IsInstalled() bool {
 	return installed
 }
 
-// Uninstall removes the service from the Service Control Manager.
+// Uninstall removes the service from the Service Control Manager. With no
+// service there is nothing to remove, and one already marked for deletion goes
+// once it has stopped, so the installer can run it on any machine.
 func Uninstall() error {
 	// Open service manager
 	m, err := mgr.Connect()
@@ -142,8 +142,12 @@ func Uninstall() error {
 
 	// Open service
 	s, err := m.OpenService(ServiceName)
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		clearInstalledMarker()
+		return nil
+	}
 	if err != nil {
-		return fmt.Errorf("service %s not found: %w", ServiceName, err)
+		return fmt.Errorf("failed to open service %s: %w", ServiceName, err)
 	}
 	defer s.Close()
 
@@ -166,7 +170,7 @@ func Uninstall() error {
 
 	// Delete service
 	err = s.Delete()
-	if err != nil {
+	if err != nil && !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
 		return fmt.Errorf("failed to delete service: %w", err)
 	}
 
@@ -180,29 +184,6 @@ func Uninstall() error {
 	clearInstalledMarker()
 
 	fmt.Printf("Service %s uninstalled successfully\n", ServiceName)
-	return nil
-}
-
-// StopService stops the installed service.
-func StopService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("failed to connect to service manager: %w", err)
-	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(ServiceName)
-	if err != nil {
-		return fmt.Errorf("failed to open service: %w", err)
-	}
-	defer s.Close()
-
-	_, err = s.Control(svc.Stop)
-	if err != nil {
-		return fmt.Errorf("failed to stop service: %w", err)
-	}
-
-	fmt.Printf("Service %s stopped\n", ServiceName)
 	return nil
 }
 

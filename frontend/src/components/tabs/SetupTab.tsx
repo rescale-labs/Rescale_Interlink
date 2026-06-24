@@ -11,7 +11,6 @@ import {
   EyeSlashIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-  ShieldCheckIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
@@ -35,8 +34,6 @@ import {
   TestAutoDownloadConnection,
   GetFileLoggingSettings,
   SetFileLoggingEnabled,
-  GetServiceStatus,
-  UninstallServiceElevated,
   TriggerProfileRescan,
   ReloadDaemonConfig,
   ValidateAutoDownloadPreFlight,
@@ -135,12 +132,6 @@ export function SetupTab() {
   // transient-pending timeout. The frontend just renders whatever userState
   // + userStateDetail the DTO says.
 
-  // A Windows Service installed by an earlier version (separate from the
-  // IPC-based daemon status); all it can do now is be removed.
-  const [serviceStatus, setServiceStatus] = useState<wailsapp.ServiceStatusDTO | null>(null);
-  const [isServiceLoading, setIsServiceLoading] = useState(false);
-  const [showUACConfirmDialog, setShowUACConfirmDialog] = useState(false);
-
   const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
   const [lastSavedConfig, setLastSavedConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -190,27 +181,6 @@ export function SetupTab() {
     fetchDaemonStatus();
 
     const interval = setInterval(fetchDaemonStatus, 5000);
-
-    return () => clearInterval(interval);
-  }, [isVisible]);
-
-  // Poll service status (Windows SCM) while the tab is visible
-  useEffect(() => {
-    if (!isVisible) return;
-
-    const fetchServiceStatus = async () => {
-      try {
-        const status = await GetServiceStatus();
-        setServiceStatus(status);
-      } catch (err) {
-        console.error('Failed to fetch service status:', err);
-      }
-    };
-
-    fetchServiceStatus();
-
-    // Same interval as daemon status
-    const interval = setInterval(fetchServiceStatus, 5000);
 
     return () => clearInterval(interval);
   }, [isVisible]);
@@ -622,56 +592,6 @@ export function SetupTab() {
       return 'Waiting for auto-download to pick up your settings...';
     }
     return '';
-  };
-
-  // After a service command has run, polls the service every 500 ms, for up to
-  // 10 s, until settled(status), and reports how it ended. A status error ends
-  // the wait, and is reported as a failed check: the command itself ran.
-  const waitForService = async (
-    command: string,
-    settled: (status: wailsapp.ServiceStatusDTO) => boolean,
-    done: string,
-    pending: string,
-  ) => {
-    try {
-      for (let attempt = 0; attempt < 20; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        const status = await GetServiceStatus();
-        setServiceStatus(status);
-        if (settled(status)) {
-          setStatusMessage(done);
-          setIsServiceLoading(false);
-          // The daemon status now reports the service's mode
-          await refreshDaemonStatus();
-          return;
-        }
-      }
-      setStatusMessage(pending);
-    } catch (err) {
-      setStatusMessage(`${command} command completed, but the service status could not be checked: ${err}`);
-    }
-    setIsServiceLoading(false);
-  };
-
-  const handleUninstallServiceElevated = async () => {
-    try {
-      setIsServiceLoading(true);
-      setShowUACConfirmDialog(false);
-      setStatusMessage('Removing the old Windows Service (UAC prompt will appear)...');
-
-      const result = await UninstallServiceElevated();
-      if (result.success) {
-        setStatusMessage('Remove command executed. Waiting for the service to be removed...');
-        await waitForService('Remove', (status) => !status.installed,
-          'Old Windows Service removed', 'The service may still be being removed. Check status in a moment.');
-      } else {
-        setStatusMessage(`Failed to remove service: ${result.error}`);
-        setIsServiceLoading(false);
-      }
-    } catch (err) {
-      setStatusMessage(`Failed to remove service: ${err}`);
-      setIsServiceLoading(false);
-    }
   };
 
   const handleValidateWorkspace = async () => {
@@ -1111,7 +1031,7 @@ export function SetupTab() {
                 <li><strong>Disabled</strong> - Job is never auto-downloaded</li>
               </ul>
               <p className="mt-2 text-xs text-blue-600">
-                Required field: "Auto Download" (select type). Optional: "Auto Download Path" (per-job download location).
+                Required field: "Auto Download" (select type). Optional: "Auto Download Path" (per-job download location, must be inside the Download Folder).
               </p>
             </div>
 
@@ -1172,6 +1092,51 @@ export function SetupTab() {
                   onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, lookbackDays: parseInt(e.target.value) || 7 })}
                 />
               </div>
+            </div>
+
+            {/* Workspace folders */}
+            <div>
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  id="includeWorkspaceFolders"
+                  checked={daemonConfig?.includeWorkspaceFolders || false}
+                  onChange={(e) => daemonConfig && setDaemonConfig({
+                    ...daemonConfig,
+                    includeWorkspaceFolders: e.target.checked,
+                    // Reset the suboption when the parent is turned off.
+                    flattenFolderStructure: e.target.checked ? daemonConfig.flattenFolderStructure : false,
+                  })}
+                  className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
+                />
+                <label htmlFor="includeWorkspaceFolders" className="ml-2 text-sm text-gray-700 cursor-pointer">
+                  Include jobs in workspace folders
+                </label>
+              </div>
+
+              <div className="mt-2 ml-6 flex items-center">
+                <input
+                  type="checkbox"
+                  id="flattenFolderStructure"
+                  checked={daemonConfig?.flattenFolderStructure || false}
+                  disabled={!daemonConfig?.includeWorkspaceFolders}
+                  onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, flattenFolderStructure: e.target.checked })}
+                  className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+                <label
+                  htmlFor="flattenFolderStructure"
+                  className={clsx(
+                    'ml-2 text-sm cursor-pointer',
+                    daemonConfig?.includeWorkspaceFolders ? 'text-gray-700' : 'text-gray-400 cursor-not-allowed'
+                  )}
+                >
+                  Flatten folder structure
+                </label>
+              </div>
+
+              <p className="mt-1 ml-6 text-xs text-gray-500">
+                When jobs from workspace folders are fetched, the folder structure is mirrored under the download folder by default, unless "Flatten folder structure" is enabled.
+              </p>
             </div>
 
             {/* Tag for Conditional Jobs */}
@@ -1301,45 +1266,7 @@ export function SetupTab() {
               </span>
             </div>
 
-            {/* A Windows Service installed by an earlier version removes itself when it next starts; offer to remove it now */}
-            {serviceStatus?.installed && (
-              <div className="border-t border-gray-200 pt-4 mt-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <h4 className="text-sm font-medium text-gray-700">Windows Service</h4>
-                  <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded flex items-center gap-1">
-                    <ShieldCheckIcon className="w-3 h-3" />
-                    Admin
-                  </span>
-                </div>
-                <div className="p-4 rounded-lg bg-gray-50">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className={clsx(
-                        'w-3 h-3 rounded-full',
-                        serviceStatus.running ? 'bg-green-500' : 'bg-gray-400'
-                      )} />
-                      <div className="font-medium text-gray-900">
-                        Status: {serviceStatus.status || 'Unknown'}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setShowUACConfirmDialog(true)}
-                      disabled={isServiceLoading}
-                      className="btn-secondary text-sm flex items-center gap-1"
-                      title="Remove the Windows Service installed by an earlier version (requires administrator privileges)"
-                    >
-                      <ShieldCheckIcon className="w-4 h-4" />
-                      {isServiceLoading ? 'Removing...' : 'Remove Old Service'}
-                    </button>
-                  </div>
-                </div>
-                <p className="mt-2 text-xs text-gray-500">
-                  A Windows Service from an earlier version of Interlink is installed. Multi-user service mode is not available in this version, so the service removes itself the next time Windows starts it; Remove Old Service removes it now, with administrator permission (a Windows security prompt, UAC, will appear). Auto-download runs in your session, started below.
-                </p>
-              </div>
-            )}
-
-            {/* My Downloads: show when daemon is running (IPC connected or service mode) */}
+            {/* My Downloads: show when daemon is running (IPC connected) */}
             {(daemonStatus?.ipcConnected || daemonStatus?.running) && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-3">My Downloads</h4>
@@ -1624,8 +1551,8 @@ export function SetupTab() {
               </div>
             )}
 
-            {/* Auto-download in the user's own session: controls while it runs (not an earlier version's service) */}
-            {daemonStatus?.running && !daemonStatus?.serviceMode && (
+            {/* Auto-download in the user's own session: controls while it runs */}
+            {daemonStatus?.running && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-3">Auto-Download Control</h4>
                 <div className={clsx(
@@ -1729,36 +1656,6 @@ export function SetupTab() {
               </div>
             )}
 
-            {showUACConfirmDialog && (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                <div className="bg-white rounded-lg shadow-xl p-6 max-w-md mx-4">
-                  <div className="flex items-center gap-3 mb-4">
-                    <ShieldCheckIcon className="w-8 h-8 text-amber-500" />
-                    <h3 className="text-lg font-semibold text-gray-900">
-                      Remove Old Service?
-                    </h3>
-                  </div>
-                  <p className="text-gray-600 mb-6">
-                    This will show a Windows security prompt (UAC) asking for administrator permission.
-                  </p>
-                  <div className="flex justify-end gap-3">
-                    <button
-                      onClick={() => setShowUACConfirmDialog(false)}
-                      className="btn-secondary"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleUninstallServiceElevated}
-                      className="btn-primary flex items-center gap-2"
-                    >
-                      <ShieldCheckIcon className="w-4 h-4" />
-                      Continue
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div> {/* End unified Auto-Download card */}
 

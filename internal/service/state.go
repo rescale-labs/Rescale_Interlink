@@ -80,14 +80,13 @@ const (
 type Action string
 
 const (
-	ActionUninstallService Action = "uninstall_service"
-	ActionConfigure        Action = "configure"
-	ActionOpenGUI          Action = "open_gui"
-	ActionPause            Action = "pause"
-	ActionResume           Action = "resume"
-	ActionTriggerScan      Action = "trigger_scan"
-	ActionRetry            Action = "retry"
-	ActionOpenLogs         Action = "open_logs"
+	ActionConfigure   Action = "configure"
+	ActionOpenGUI     Action = "open_gui"
+	ActionPause       Action = "pause"
+	ActionResume      Action = "resume"
+	ActionTriggerScan Action = "trigger_scan"
+	ActionRetry       Action = "retry"
+	ActionOpenLogs    Action = "open_logs"
 )
 
 // State is the composed view of the auto-download system's current condition.
@@ -113,11 +112,6 @@ type State struct {
 	Version         string
 	Uptime          string
 	IPCConnected    bool
-	ServiceMode     bool
-
-	// ServiceInstalled is true while a service from an earlier version is
-	// registered, whatever Installation says about the daemon that runs.
-	ServiceInstalled bool
 }
 
 // Presentation is the canonical per-surface rendering of a State.
@@ -222,11 +216,9 @@ func DefaultComputer(client IPCClient) *Computer {
 func (c *Computer) Compute(ctx context.Context, prior State) State {
 	now := c.Clock.Now()
 
-	found := c.Detector.Detect(ctx)
 	s := State{
-		Installation:     classifyInstallation(found),
-		ServiceInstalled: found.Installed,
-		Version:          version.Version,
+		Installation: classifyInstallation(c.Detector.Detect(ctx)),
+		Version:      version.Version,
 	}
 
 	// Per-user configuration state starts from daemon.conf.
@@ -248,17 +240,9 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 	// Query IPC for liveness details and the caller's user entry.
 	if status, err := c.IPC.GetStatus(ctx); err == nil && status != nil {
 		s.IPCConnected = true
-		s.ServiceMode = status.ServiceMode
 		s.Uptime = status.Uptime
 		s.ActiveDownloads = status.ActiveDownloads
 		s.LastScanTime = status.LastScanTime
-
-		// Refine installation state: if IPC responds, a daemon is alive.
-		// For non-Windows, stay SubprocessOnly. For Windows, upgrade to
-		// InstallationRunning when ServiceMode is true.
-		if status.ServiceMode && runtime.GOOS == "windows" {
-			s.Installation = InstallationRunning
-		}
 
 		if users, err2 := c.IPC.GetUserList(ctx); err2 == nil {
 			matched := c.matchUser(users)
@@ -433,22 +417,18 @@ func splitWindowsUsername(s string) (name, domain string) {
 // Presentation returns the canonical rendering of s across all surfaces.
 // Pure function of s; safe to call from tests.
 func (s State) Presentation() Presentation {
-	p := s.presentation()
-	// A service installed by an earlier version can only be removed.
-	switch s.Installation {
-	case InstallationStopped, InstallationStarting, InstallationRunning, InstallationStopping:
-		s.ServiceInstalled = true
-	}
-	if s.ServiceInstalled {
-		p.AllowedActions = append(p.AllowedActions, ActionUninstallService)
-	}
-	return p
-}
-
-func (s State) presentation() Presentation {
 	p := Presentation{AllowedActions: []Action{ActionOpenLogs}}
 
 	switch s.Installation {
+	case InstallationRunning:
+		// The user's own daemon cannot start while it runs, and nothing here
+		// can reach it, so the user is told how it ends.
+		p.GUILongForm = OldServiceRunning + "."
+		p.TrayStatusLine = "Old service running"
+		p.TrayTooltip = "Rescale Interlink: " + OldServiceRunning
+		p.AllowedActions = append(p.AllowedActions, ActionOpenGUI)
+		p.CLIStatusLine = "Status: " + OldServiceRunning
+		return p
 	case InstallationStarting:
 		p.GUILongForm = "Service starting..."
 		p.TrayStatusLine = "Service starting"
@@ -464,8 +444,6 @@ func (s State) presentation() Presentation {
 		return p
 	}
 
-	// The user's own daemon, or a service from an earlier version that is
-	// still running.
 	switch s.PerUser {
 	case PerUserNotConfigured:
 		p.GUILongForm = "You are not set up for auto-download. Click Configure to enable it for your account."
@@ -524,6 +502,7 @@ func (s State) presentation() Presentation {
 	p.GUILongForm = "Auto-download state unknown."
 	p.TrayStatusLine = "Unknown"
 	p.TrayTooltip = "Rescale Interlink: state unknown"
+	p.AllowedActions = append(p.AllowedActions, ActionOpenGUI)
 	p.CLIStatusLine = "Status: unknown"
 	return p
 }

@@ -8,43 +8,26 @@ import (
 
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/reporting"
-	"github.com/rescale/rescale-int/internal/service"
 )
 
-// The service can no longer be installed or started, on any system: the
-// commands say why before any system-specific step, and a refusal is a usage
-// error, which files no error report.
-func TestServiceInstallAndStartRefuse(t *testing.T) {
-	for _, use := range []string{"install", "install-and-start", "start"} {
-		t.Run(use, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			_, err := runDaemonCommand(t, newServiceCmd(), use)
-			if err == nil || err.Error() != service.ModeUnavailable {
-				t.Fatalf("service %s: %v, want %q", use, err, service.ModeUnavailable)
-			}
-			if saved := reporting.HandleCLIError(err, "cli", "rescale-int service "+use, ""); saved != "" {
-				t.Errorf("the refusal saved an error report to %s", saved)
-			}
-		})
+// The service group holds only the hidden command that removes a service an
+// earlier version installed; elsewhere than Windows it is a usage error, which
+// files no error report.
+func TestServiceUninstallIsHiddenAndWindowsOnly(t *testing.T) {
+	group := newServiceCmd()
+	if cmds := group.Commands(); !group.Hidden || len(cmds) != 1 || cmds[0].Name() != "uninstall" || !cmds[0].Hidden {
+		t.Errorf("service group hidden %v with commands %v, want it hidden with only a hidden uninstall", group.Hidden, cmds)
 	}
-}
-
-// Elsewhere than Windows the remaining service commands are usage errors too.
-func TestServiceCommandsOutsideWindowsAreUsageErrors(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("the commands reach the Service Control Manager on Windows")
+		t.Skip("the command reaches the Service Control Manager on Windows")
 	}
-	for _, use := range []string{"uninstall", "stop", "status"} {
-		t.Run(use, func(t *testing.T) {
-			t.Setenv("HOME", t.TempDir())
-			_, err := runDaemonCommand(t, newServiceCmd(), use)
-			if err == nil || !strings.Contains(err.Error(), "only supported on Windows") {
-				t.Fatalf("service %s: %v, want it refused as Windows-only", use, err)
-			}
-			if saved := reporting.HandleCLIError(err, "cli", "rescale-int service "+use, ""); saved != "" {
-				t.Errorf("the refusal saved an error report to %s", saved)
-			}
-		})
+	t.Setenv("HOME", t.TempDir())
+	_, err := runDaemonCommand(t, newServiceCmd(), "uninstall")
+	if err == nil || !strings.Contains(err.Error(), "only supported on Windows") {
+		t.Fatalf("service uninstall: %v, want it refused as Windows-only", err)
+	}
+	if saved := reporting.HandleCLIError(err, "cli", "rescale-int service uninstall", ""); saved != "" {
+		t.Errorf("the refusal saved an error report to %s", saved)
 	}
 }
 

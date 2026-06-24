@@ -127,27 +127,22 @@ func TestPresentationCells(t *testing.T) {
 			exactActions: []Action{ActionOpenLogs, ActionConfigure, ActionOpenGUI},
 		},
 		{
-			// A service installed by an earlier version can only be removed.
+			// A stopped service from an earlier version changes nothing for
+			// the user's own daemon.
 			name:         "stopped",
 			state:        State{Installation: InstallationStopped, PerUser: PerUserRunning},
 			wantPhrases:  []string{"Auto-download active"},
-			exactActions: []Action{ActionOpenLogs, ActionPause, ActionTriggerScan, ActionConfigure, ActionOpenGUI, ActionUninstallService},
-		},
-		{
-			name:        "running but not configured",
-			state:       State{Installation: InstallationRunning, PerUser: PerUserNotConfigured},
-			wantPhrases: []string{"Configure"},
-			wantActions: []Action{ActionConfigure, ActionUninstallService},
+			exactActions: []Action{ActionOpenLogs, ActionPause, ActionTriggerScan, ActionConfigure, ActionOpenGUI},
 		},
 		{
 			name:        "running and active",
-			state:       State{Installation: InstallationRunning, PerUser: PerUserRunning, JobsDownloaded: 7},
+			state:       State{Installation: InstallationSubprocessOnly, PerUser: PerUserRunning, JobsDownloaded: 7},
 			wantPhrases: []string{"Auto-download active"},
 			wantActions: []Action{ActionPause, ActionTriggerScan},
 		},
 		{
 			name:        "paused",
-			state:       State{Installation: InstallationRunning, PerUser: PerUserPaused},
+			state:       State{Installation: InstallationSubprocessOnly, PerUser: PerUserPaused},
 			wantActions: []Action{ActionResume},
 		},
 		{
@@ -155,7 +150,7 @@ func TestPresentationCells(t *testing.T) {
 			// the user is told what to do about it.
 			name: "error carries canonical text and hint",
 			state: State{
-				Installation:  InstallationRunning,
+				Installation:  InstallationSubprocessOnly,
 				PerUser:       PerUserError,
 				LastError:     ipc.CanonicalText[ipc.CodeNoAPIKey],
 				LastErrorCode: ipc.CodeNoAPIKey,
@@ -197,36 +192,23 @@ func TestPresentationCells(t *testing.T) {
 	}
 }
 
-// A service installed by an earlier version can be removed whatever else
-// runs: the user's own daemon, a stale pipe, or the service changing state.
-func TestRemovalOfferedWhileAServiceIsInstalled(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		found ServiceDetectionResult
-		state State // Presentation only, for states Compute does not produce off Windows
-		want  bool
-	}{
-		{name: "installed, own daemon running", found: ServiceDetectionResult{Installed: true, SubprocessPID: 42}, want: true},
-		{name: "installed, stale pipe", found: ServiceDetectionResult{Installed: true, PipeInUse: true}, want: true},
-		{name: "not installed, own daemon running", found: ServiceDetectionResult{SubprocessPID: 42}, want: false},
-		{name: "starting", state: State{Installation: InstallationStarting}, want: true},
-		{name: "stopping", state: State{Installation: InstallationStopping}, want: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			st := tc.state
-			if st.Installation == InstallationUnknown {
-				st = (&Computer{
-					Clock:    &fakeClock{},
-					Detector: fakeDetector{result: tc.found},
-					IPC:      fakeIPC{statusErr: errors.New("no daemon")},
-					Config:   fakeConfig{cfg: newDisabledConfig()},
-					Identity: fakeIdentity{},
-				}).Compute(context.Background(), State{})
+// While a service from an earlier version runs, the user's own daemon cannot
+// start and nothing here can reach the service, so every surface says how it
+// ends, whatever the user's settings, instead of waiting for a daemon.
+func TestPresentationWhileAnEarlierServiceRuns(t *testing.T) {
+	for _, pu := range []PerUserState{PerUserNotConfigured, PerUserPending, PerUserRunning, PerUserPaused, PerUserError} {
+		p := State{Installation: InstallationRunning, PerUser: pu}.Presentation()
+		for name, text := range map[string]string{"GUI": p.GUILongForm, "tray": p.TrayTooltip, "CLI": p.CLIStatusLine} {
+			if !strings.Contains(text, OldServiceRunning) {
+				t.Errorf("%v: %s says %q, want %q", pu, name, text, OldServiceRunning)
 			}
-			if got := slices.Contains(st.Presentation().AllowedActions, ActionUninstallService); got != tc.want {
-				t.Errorf("removal offered = %v, want %v (state %+v)", got, tc.want, st)
-			}
-		})
+		}
+		if want := []Action{ActionOpenLogs, ActionOpenGUI}; !slices.Equal(p.AllowedActions, want) {
+			t.Errorf("%v: actions = %v, want %v", pu, p.AllowedActions, want)
+		}
+	}
+	if strings.Contains(OldServiceRunning, "Remove Old Service") || !strings.Contains(OldServiceRunning, "'rescale-int service uninstall'") {
+		t.Errorf("OldServiceRunning = %q, want it to name the command that removes the service", OldServiceRunning)
 	}
 }
 

@@ -54,6 +54,11 @@ type Config struct {
 
 	// When set, jobs must pass eligibility checks to be downloaded
 	Eligibility *EligibilityConfig
+
+	// FlattenFolderStructure, when true, downloads workspace-folder jobs
+	// directly into DownloadDir instead of mirroring the folder tree. Only
+	// affects jobs that carry a workspace-folder path (CompletedJob.FolderPath).
+	FlattenFolderStructure bool
 }
 
 // scanBudget bounds one poll's scan phase: listing jobs and checking their
@@ -672,7 +677,13 @@ func (d *Daemon) poll(ctx context.Context) {
 	d.emitScanSummary(summary, time.Since(scanStart), false, nil)
 	d.checkAllUnsetWarning(summary)
 
-	d.clearScanError()
+	// Workspace folders that could not be listed went unscanned, which the
+	// user has to be told.
+	if result.WorkspaceErr != nil {
+		d.recordScanError(result.WorkspaceErr)
+	} else {
+		d.clearScanError()
+	}
 	d.persistPollProgress()
 }
 
@@ -906,8 +917,24 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		return OutcomeOutputDirCreateFailed
 	}
 
-	// Check for custom download path from eligibility config
+	// Base directory. For jobs that live in a workspace folder, mirror the
+	// folder structure under DownloadDir unless flattening is enabled. The
+	// folder names come from the server, so each is held to the rules for
+	// every other server name, and the path must stay within DownloadDir. A
+	// path that cannot be mirrored fails the job, unless the job's own
+	// download path applies.
 	baseDir := d.cfg.DownloadDir
+	var mirrorErr error
+	if len(job.FolderPath) > 0 && !d.cfg.FlattenFolderStructure {
+		var dir string
+		if dir, mirrorErr = mirrorDir(d.cfg.DownloadDir, job.FolderPath); mirrorErr == nil {
+			baseDir = dir
+		}
+	}
+
+	// Check for custom download path from eligibility config. A per-job
+	// "Auto Download Path" override takes precedence over folder mirroring and
+	// must resolve to within DownloadDir.
 	if d.cfg.Eligibility != nil {
 		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
 			// Custom path must resolve to within DownloadDir to prevent
@@ -938,9 +965,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 					Str("custom_path", customPath).
 					Str("resolved", realCandidate).
 					Msg("Using custom download path (validated under download directory)")
-				baseDir = realCandidate
+				baseDir, mirrorErr = realCandidate, nil
 			}
 		}
+	}
+	if mirrorErr != nil {
+		d.logger.Error().Err(mirrorErr).Str("job_id", job.ID).Msg("Refusing to download job")
+		d.markFailed(ctx, job, "", mirrorErr)
+		return OutcomeOutputDirCreateFailed
 	}
 
 	outputDir := ComputeOutputDir(baseDir, job.ID, job.Name, d.cfg.UseJobNameDir)
@@ -1282,6 +1314,28 @@ func (d *Daemon) applyDownloadedTag(ctx context.Context, job *CompletedJob) {
 		Str("job_id", job.ID).
 		Str("tag", config.DownloadedTag).
 		Msg("Tagged job as downloaded")
+}
+
+// mirrorDir returns the folder under downloadDir that mirrors a job's
+// workspace folder path, symlinks resolved.
+func mirrorDir(downloadDir string, folderPath []string) (string, error) {
+	refuse := func(err error) (string, error) {
+		return "", fmt.Errorf("cannot mirror workspace folder %s: %w", validation.Quote(strings.Join(folderPath, "/")), err)
+	}
+	for _, name := range folderPath {
+		if err := validation.ValidateFilename(name); err != nil {
+			return refuse(err)
+		}
+	}
+	realDownloadDir, err := filepath.EvalSymlinks(downloadDir)
+	if err != nil {
+		realDownloadDir = filepath.Clean(downloadDir)
+	}
+	realCandidate := resolvePathWithSymlinks(filepath.Join(append([]string{downloadDir}, folderPath...)...))
+	if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
+		return refuse(err)
+	}
+	return realCandidate, nil
 }
 
 // resolvePathWithSymlinks resolves symlinks for a path that may not fully exist.

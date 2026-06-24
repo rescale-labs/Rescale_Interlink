@@ -73,7 +73,6 @@ Components:
 Usage:
   rescale-int --gui            : Launch GUI
   rescale-int --help           : Show CLI help
-  rescale-int service status   : Check service status
 
 Documentation:
   https://docs.rescale.com/

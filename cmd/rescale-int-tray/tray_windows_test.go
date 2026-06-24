@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,23 +10,22 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/service"
 )
 
-// An action that fails, as a cancelled UAC prompt does, records why and
-// returns: redrawing takes the lock the failure was recorded under.
+// An action that fails records why and returns: redrawing takes the lock the
+// failure was recorded under.
 func TestFailedActionsReturn(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir()) // the startup log and PID file
 	t.Setenv("APPDATA", t.TempDir())      // no daemon.conf: defaults
-	origUninstall, origRedraw := elevateUninstall, redraw
-	t.Cleanup(func() { elevateUninstall, redraw = origUninstall, origRedraw })
-	elevateUninstall = func() error { return errors.New("FAKE the operation was canceled by the user") }
+	origRedraw := redraw
+	t.Cleanup(func() { redraw = origRedraw })
 	redraw = func(a *trayApp) { a.mu.RLock(); a.mu.RUnlock() } // as updateUI does
 
 	a := &trayApp{}
 	for name, action := range map[string]func(){
-		"remove service": a.uninstallServiceElevated,
-		"start":          a.startService, // no rescale-int.exe beside the test binary
+		"start": a.startService, // no API key, and no rescale-int.exe beside the test binary
 	} {
 		done := make(chan struct{})
 		go func() { action(); close(done) }()
@@ -74,6 +72,40 @@ func TestStartRefusalsAreShown(t *testing.T) {
 		}
 		if _, status := trayText(state, a.failure, a.failedAt, a.failedAt.Add(failureShown)); status != "FAKE state" {
 			t.Errorf("%s: after %s the status line still shows %q", section, failureShown, status)
+		}
+	}
+}
+
+// At tray launch auto-download starts only when daemon.conf enables it, and a
+// start that daemon.conf refuses, that cannot read it, or that has no API key,
+// as the app's Start refuses, is shown as Start's refusals are.
+func TestStartupStartsOnlyWhenEnabledAndShowsWhy(t *testing.T) {
+	dir := t.TempDir()
+	for _, env := range []string{"APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME"} {
+		t.Setenv(env, dir) // no token file anywhere
+	}
+	t.Setenv("RESCALE_API_KEY", "")
+	origRedraw := redraw
+	t.Cleanup(func() { redraw = origRedraw })
+	redraw = func(*trayApp) {}
+	conf, err := config.DefaultDaemonConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Dir(conf), 0o700)
+	for _, tc := range []struct{ name, conf, why string }{
+		{"not enabled", "[daemon]\r\nenabled = false\r\ndownload_folder = rel\r\n", ""},
+		{"enabled, refused", "[daemon]\r\nenabled = true\r\ndownload_folder = rel\r\n", `download_folder in daemon.conf must be an absolute path, got "rel"`},
+		{"unreadable", "[daemon\r\nenabled = true\r\n", "Configuration error"},
+		{"enabled, no API key", "[daemon]\r\nenabled = true\r\ndownload_folder = " + filepath.ToSlash(dir) + "\r\n", ipc.CanonicalText[ipc.CodeNoAPIKey]},
+	} {
+		if err := os.WriteFile(conf, []byte(tc.conf), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		a := &trayApp{}
+		a.startupTasks()
+		if (tc.why == "") != (a.failure == "") || !strings.Contains(a.failure, tc.why) {
+			t.Errorf("%s: startup showed %q, want %q", tc.name, a.failure, tc.why)
 		}
 	}
 }

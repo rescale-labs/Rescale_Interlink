@@ -170,10 +170,6 @@ export function GetRunStatus() {
   return window['go']['wailsapp']['App']['GetRunStatus']();
 }
 
-export function GetServiceStatus() {
-  return window['go']['wailsapp']['App']['GetServiceStatus']();
-}
-
 export function GetTransferBatches() {
   return window['go']['wailsapp']['App']['GetTransferBatches']();
 }
@@ -396,10 +392,6 @@ export function TriggerDaemonScan() {
 
 export function TriggerProfileRescan() {
   return window['go']['wailsapp']['App']['TriggerProfileRescan']();
-}
-
-export function UninstallServiceElevated() {
-  return window['go']['wailsapp']['App']['UninstallServiceElevated']();
 }
 
 export function UpdateConfig(arg1) {

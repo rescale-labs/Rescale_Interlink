@@ -17,6 +17,7 @@ Sizes in this document are binary and match the constants in `internal/constants
 - [CLI Compatibility Mode](#cli-compatibility-mode)
 - [Jobs Watch Engine](#jobs-watch-engine)
 - [GUI Architecture (Wails)](#gui-architecture-wails)
+- [Auto-Download Process Model](#auto-download-process-model)
 - [Encryption & Security](#encryption--security)
 - [Storage Backends](#storage-backends)
 - [Transfer Integrity](#transfer-integrity)
@@ -172,10 +173,10 @@ rescale-int/
 │   ├── wailsapp/                  # Wails v2 Go bindings
 │   ├── services/                  # GUI-agnostic services (TransferService, FileService)
 │   │
-│   │  ── Background Service ──
-│   ├── daemon/                    # Auto-download daemon
-│   ├── service/                   # Windows service mode (multi-user)
-│   ├── ipc/                       # Cross-process IPC (daemon ↔ GUI)
+│   │  ── Background Auto-Download ──
+│   ├── daemon/                    # Auto-download daemon (runs as the logged-in user)
+│   ├── service/                   # Shared state/Presentation vocab + legacy-service cleanup
+│   ├── ipc/                       # Cross-process IPC (daemon ↔ GUI/tray)
 │   │
 │   │  ── Rate Limiting ──
 │   ├── ratelimit/                 # Token bucket rate limiting
@@ -196,7 +197,6 @@ rescale-int/
 │   │
 │   │  ── Platform ──
 │   ├── diskspace/                 # Cross-platform disk space checking
-│   ├── elevation/                 # Windows UAC / Unix privilege elevation
 │   ├── logging/                   # Logger and TeeWriter
 │   ├── mesa/                      # Mesa/OpenGL software rendering (Windows only;
 │   │                              # the non-Windows files are no-op stubs)
@@ -652,7 +652,7 @@ The groups below are the binding surface by area, not an exhaustive method list.
 4. **Job Bindings** (`job_bindings.go`): `ScanDirectory()` — one entry point for both scan modes, dispatching on `ScanOptionsDTO.ScanMode == "files"` — plus `StartBulkRunWithOptions()`, `StartSingleJob()`, `CancelRun()`, `GetRunStatus()`, `GetJobRows()`, `GetRunHistory()`, `GetHistoricalJobRows()`, the catalog readers (`GetCoreTypes()`, `GetAnalysisCodes()`, `GetAutomations()`, `GetProjects()`), and the template load/save surface (CSV, JSON and SGE)
 5. **Job Status Bindings** (`job_status_bindings.go`): `ListJobStatuses()` for the first page and `ListJobStatusesPage(offset)` for subsequent pages, backing the Job Status tab
 6. **Config Bindings** (`config_bindings.go`): Configuration management
-7. **Daemon Bindings** (`daemon_bindings.go`, `daemon_bindings_common.go`, `daemon_bindings_windows.go`): daemon IPC and configuration. `daemon_bindings_common.go` is always compiled and holds the pre-flight and configuration readers (`ValidateAutoDownloadPreFlight`, `ValidateAutoDownloadSetup`, `GetDaemonConfig`, `GetDefaultDownloadFolder`, the file-logging pair) and the three daemon transfer controls the Transfers tab routes to — `CancelDaemonBatch`, `CancelDaemonTransfer`, `RetryFailedInDaemonBatch`. `daemon_bindings.go` (`//go:build !windows`) and `daemon_bindings_windows.go` (`//go:build windows`) are the two implementations of the same lifecycle, service and snapshot surface — `StartDaemon`, `StopDaemon`, `PauseDaemon`, `ResumeDaemon`, `TriggerDaemonScan`, `TriggerProfileRescan`, `ReloadDaemonConfig`, `SaveDaemonConfig`, `GetDaemonStatus`, `GetDaemonTransferSnapshot`, `GetDaemonLogs`, `GetServiceStatus` and the elevated service actions — over a subprocess daemon and over the Windows service respectively
+7. **Daemon Bindings** (`daemon_bindings.go`, `daemon_bindings_common.go`, `daemon_bindings_windows.go`): daemon IPC and configuration. `daemon_bindings_common.go` is always compiled and holds the pre-flight and configuration readers (`ValidateAutoDownloadPreFlight`, `ValidateAutoDownloadSetup`, `GetDaemonConfig`, `GetDefaultDownloadFolder`, the file-logging pair) and the three daemon transfer controls the Transfers tab routes to — `CancelDaemonBatch`, `CancelDaemonTransfer`, `RetryFailedInDaemonBatch`. `daemon_bindings.go` (`//go:build !windows`) and `daemon_bindings_windows.go` (`//go:build windows`) are the two implementations of the same lifecycle and snapshot surface — `StartDaemon`, `StopDaemon`, `PauseDaemon`, `ResumeDaemon`, `TriggerDaemonScan`, `TriggerProfileRescan`, `ReloadDaemonConfig`, `SaveDaemonConfig`, `GetDaemonStatus`, `GetDaemonTransferSnapshot`, `GetDaemonLogs` — each over a subprocess daemon in the user's session
 8. **Event Bridge** (`event_bridge.go`): Forwards EventBus events to Wails runtime, throttles progress updates (100ms interval)
 9. **Version Bindings** (`version_bindings.go`): GitHub update check
 10. **Reporting Bindings** (`reporting_bindings.go`): Error report display
@@ -688,6 +688,108 @@ Trash then addresses its contents by a different identity. A trashed **file** is
 ### Frontend Shared Widgets (`frontend/src/components/widgets/`)
 
 `JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge`, `FileList`, `LocalBrowser`, `RemoteBrowser`, `RemoteFilePicker`, `TemplateBuilder`, `DOEBuilder`
+
+---
+
+## Auto-Download Process Model
+
+Auto-download runs as a **subprocess in the logged-in user's session** on every
+platform. On Windows the tray app (`rescale-int-tray`, auto-started via
+`HKCU\...\Run`) launches `rescale-int.exe daemon run --ipc` when auto-download is
+enabled and controls it over the user's own named pipe
+`\\.\pipe\rescale-interlink-<SID>`; the GUI can also start it. There is
+**no Windows service** and **no multi-user/SYSTEM daemon**.
+
+### Job enumeration scope
+
+Each poll, the daemon (`internal/daemon/monitor.go`) builds its candidate set
+from the user's own jobs (`GET /api/v3/jobs/`). When
+`include_workspace_folders` is enabled in `daemon.conf`, it additionally walks
+the workspace's `sharedWithWorkspace` folder tree:
+
+1. `GET /api/v3/meta/folders/` → the `sharedWithWorkspace` root and the
+   folders under it, from which a folder-ID → path map is built (archived
+   folders and everything under them are left out; the walk is bounded by
+   `maxWorkspaceFolderDepth`).
+2. One listing, `GET /api/v3/jobs/?q=folder:<root id>&f=0`, fetched newest first
+   through the same pager as the personal listing, is relied on to return the
+   jobs in every folder under the shared root, for every owner; each job's
+   `folder.id` places it in the map, and a job whose folder is not in it is
+   skipped.
+3. Results are merged with the personal jobs and deduped by job ID (the
+   workspace entry wins, so a job keeps its folder path). Every job carries its
+   folder path relative to the shared root.
+
+Each candidate then passes the same per-job eligibility gate (the "Auto
+Download" custom field + tags). When downloading, the job's relative folder
+path is mirrored under the download folder (e.g. `Shared/ExampleFolder/Subfolder`
+→ `<download>/ExampleFolder/Subfolder/<job dir>`), unless
+`flatten_folder_structure` is set, in which case all jobs download into the root.
+Each folder name is held to the same rules as every other name the server
+supplies, and the mirrored path must stay within the download directory once
+symlinks are resolved; a job whose folder cannot be mirrored fails with the
+reason. A per-job "Auto Download Path" custom field (if present) still overrides
+the location. Jobs in archived folders are skipped; a folder-API failure is
+non-fatal: that poll scans personal jobs only and records the failure as its
+scan error.
+
+### Decision: why we removed the Windows service (2026-06)
+
+Earlier versions (≤ v4.9.8) shipped an optional Windows **service** that ran as
+`LocalSystem` and orchestrated one auto-download daemon per user profile
+(`MultiUserDaemon`). We removed it because running as SYSTEM is fundamentally
+incompatible with how customers store output: **on networked/mapped drives that
+require the logged-in user's credentials.**
+
+Concrete problems with the service model:
+
+- **Mapped drive letters are per-logon, not global.** A drive like `Z:\` is
+  established in the *user's* logon session. A service running as SYSTEM has its
+  own session and simply does not see `Z:\`, so downloads to it failed with
+  "path not found" / "access denied."
+- **UNC paths were effectively mandatory.** The only way to make the service
+  reach network storage was to configure a UNC path (`\\server\share\...`) whose
+  share/NTFS ACLs granted the *machine account* (or an explicitly configured
+  service account) access. Most users configure a drive letter, so this was a
+  constant support burden. The save-time path validator even applied
+  `ConsumerWindowsService` strictness to *reject* mapped-drive paths up front.
+- **Credentials.** SYSTEM cannot present the user's credentials to a file
+  server, so any share requiring user auth was unreachable regardless of path
+  form.
+- **Operational weight.** SCM registration needed admin/UAC, multi-user profile
+  enumeration walked the registry, and per-user state/log/IPC routing added
+  significant complexity (`internal/service/multi_daemon.go`,
+  `multiuser_windows.go`, `ipc_handler.go`, `windows_service.go`).
+
+Running as the logged-in user solves all of the above for free: the daemon
+inherits the user's drive mappings and credentials, so a plain `Z:\Downloads`
+path "just works," no admin is required, and the per-user-profile machinery
+disappears. The save-time validator now uses `ConsumerCurrentUser`.
+
+What we kept for cleanup:
+- A service installed by an earlier version removes itself the next time
+  Windows starts it (`service.RunDisabled`), and blocks a per-user daemon only
+  while it still runs, which every surface reports.
+- `service uninstall` (hidden CLI command), invoked by the installer's
+  best-effort `UninstallService` action and runnable as administrator.
+- The `internal/service` package still owns the shared `State` / `Presentation`
+  / `Computer` vocabulary that the GUI, tray, and CLI render from.
+
+### If we need the service back
+
+The trade-off it buys is **headless, no-one-logged-in** operation (e.g. a shared
+VM that downloads for users who never open a session). If that requirement
+returns, a service must be designed anew rather than restored from the old
+code, and paired with one of:
+- a documented requirement to use UNC paths with machine-account/service-account
+  ACLs (drive letters will never work under SYSTEM), or
+- running the service under a dedicated **user** account (not `LocalSystem`)
+  whose profile has the needed drive mappings/credentials, or
+- a hybrid: keep the per-user subprocess for interactive logons and use the
+  service only as a fallback when no user is logged in.
+
+The cleanest path is likely the hybrid, since it preserves the
+"network-drives-just-work" property for the common (logged-in) case.
 
 ---
 
@@ -731,7 +833,7 @@ Named pipe authorization with per-user SID matching. See SECURITY.md for details
 The daemon auto-download process routes all downloads through the same `TransferService` the GUI uses; there is no parallel transfer implementation inside `internal/daemon/`. GUI visibility is via IPC-based observation:
 - `Daemon.TransferService()` + `Daemon.Queue()` expose the shared machinery. IPC polling reads live task and batch state via `MsgGetTransferStatus` → `DaemonTransferSnapshot{Tasks, Batches}`.
 - The main Transfers tab renders daemon rows alongside GUI rows with a `Daemon` badge; per-row Cancel/Retry routes by `sourceLabel` through IPC commands (`MsgCancelDaemonBatch`, `MsgCancelDaemonTransfer`, `MsgRetryFailedInDaemonBatch`).
-- Works in both subprocess mode (macOS/Linux) and Windows service mode; service-mode routing goes through `MultiUserDaemon.userDaemon(...)` to the correct per-user daemon.
+- The daemon runs as a subprocess in the logged-in user's session on every platform (started by the tray/GUI). There is no Windows-service / multi-user mode — see [Auto-Download Process Model](#auto-download-process-model) for the rationale.
 
 ### Daemon Status Reporting
 

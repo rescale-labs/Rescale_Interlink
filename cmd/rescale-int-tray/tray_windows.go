@@ -16,7 +16,6 @@ import (
 	"fyne.io/systray"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
-	"github.com/rescale/rescale-int/internal/elevation"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/service"
@@ -51,17 +50,16 @@ type trayApp struct {
 	failedAt time.Time
 
 	// Menu items (for dynamic updates)
-	mStatus                *systray.MenuItem
-	mSetupRequired         *systray.MenuItem
-	mStartService          *systray.MenuItem
-	mUninstallServiceAdmin *systray.MenuItem
-	mPause                 *systray.MenuItem
-	mResume                *systray.MenuItem
-	mTriggerScan           *systray.MenuItem
-	mConfigure             *systray.MenuItem
-	mOpenGUI               *systray.MenuItem
-	mViewLogs              *systray.MenuItem
-	mQuit                  *systray.MenuItem
+	mStatus        *systray.MenuItem
+	mSetupRequired *systray.MenuItem
+	mStartService  *systray.MenuItem
+	mPause         *systray.MenuItem
+	mResume        *systray.MenuItem
+	mTriggerScan   *systray.MenuItem
+	mConfigure     *systray.MenuItem
+	mOpenGUI       *systray.MenuItem
+	mViewLogs      *systray.MenuItem
+	mQuit          *systray.MenuItem
 
 	// Control channels
 	done chan struct{}
@@ -97,11 +95,8 @@ func onReady() {
 
 	systray.AddSeparator()
 
-	// Removal of a Windows Service installed by an earlier version
-	app.mUninstallServiceAdmin = systray.AddMenuItem("Remove Old Service (Admin)", "Remove the Windows Service installed by an earlier version (requires administrator)")
-	app.mUninstallServiceAdmin.Hide()
-
-	// Auto-download in the user's own session
+	// Auto-download controls. The daemon runs as a subprocess in this user's
+	// session, so it inherits the user's drive mappings and credentials.
 	app.mStartService = systray.AddMenuItem("Start Auto-Download", "Start auto-download in your session")
 	app.mPause = systray.AddMenuItem("Pause Auto-Download", "Pause auto-download for current user")
 	app.mResume = systray.AddMenuItem("Resume Auto-Download", "Resume auto-download for current user")
@@ -125,6 +120,28 @@ func onReady() {
 
 	// Handle menu clicks
 	go app.handleMenuClicks()
+
+	// Auto-start the user daemon if auto-download is enabled.
+	go app.startupTasks()
+}
+
+// startupTasks runs once at tray launch, at login or when the app starts the
+// tray: it auto-starts the auto-download daemon when the user has enabled it in
+// daemon.conf. The daemon runs as a subprocess in this user's session so it can
+// reach the user's mapped/network drives. Start's checks apply, and a refusal
+// shows as Start's do; a daemon already running is left alone.
+func (a *trayApp) startupTasks() {
+	if daemonCfg, err := config.LoadDaemonConfig(""); err == nil && !daemonCfg.Daemon.Enabled {
+		return
+	}
+
+	// Don't start a second daemon if one is already running for this user.
+	if blocked, _ := service.ShouldBlockSubprocess(); blocked {
+		return
+	}
+
+	daemon.WriteStartupLog("Auto-download enabled — starting daemon on tray launch")
+	a.startService()
 }
 
 func onExit() {
@@ -193,14 +210,12 @@ func (a *trayApp) updateUI() {
 	for _, a := range pres.AllowedActions {
 		allowed[a] = true
 	}
-	setMenuItem(a.mUninstallServiceAdmin, allowed[service.ActionUninstallService])
 	setMenuItem(a.mPause, allowed[service.ActionPause])
 	setMenuItem(a.mResume, allowed[service.ActionResume])
 	setMenuItem(a.mTriggerScan, allowed[service.ActionTriggerScan])
 
-	// Setup-required shortcut: visible when the user is running under the
-	// service but not configured.
-	if st.PerUser == service.PerUserNotConfigured && st.Installation == service.InstallationRunning {
+	// Setup-required shortcut: visible when not yet configured.
+	if st.PerUser == service.PerUserNotConfigured {
 		a.mSetupRequired.Show()
 	} else {
 		a.mSetupRequired.Hide()
@@ -238,12 +253,8 @@ func (a *trayApp) fail(why string) {
 	redraw(a)
 }
 
-// redraw and elevateUninstall are variables so a test can run an action's
-// failure without a tray or a UAC prompt.
-var (
-	redraw           = (*trayApp).updateUI
-	elevateUninstall = elevation.UninstallServiceElevated
-)
+// redraw is a variable so a test can run an action's failure without a tray.
+var redraw = (*trayApp).updateUI
 
 // setMenuItem shows+enables or hides a systray menu item.
 func setMenuItem(mi *systray.MenuItem, enabled bool) {
@@ -283,9 +294,6 @@ func (a *trayApp) handleMenuClicks() {
 		case <-a.mResume.ClickedCh:
 			a.resumeAutoDownload()
 
-		case <-a.mUninstallServiceAdmin.ClickedCh:
-			a.uninstallServiceElevated()
-
 		case <-a.mViewLogs.ClickedCh:
 			a.viewLogs()
 
@@ -318,6 +326,11 @@ func (a *trayApp) startService() {
 	}
 	if err := daemon.CheckMaxConcurrent(daemonCfg.Daemon.MaxConcurrent, "max_concurrent in daemon.conf"); err != nil {
 		a.fail(err.Error())
+		return
+	}
+	// As the app's Start refuses: a daemon without a key could only fail.
+	if config.ResolveAPIKeyForCurrentUser("") == "" {
+		a.fail(ipc.CanonicalText[ipc.CodeNoAPIKey] + ". " + ipc.HintFor(ipc.CodeNoAPIKey))
 		return
 	}
 
@@ -534,26 +547,6 @@ func (a *trayApp) viewLogs() {
 	if err := exec.Command("explorer.exe", logsDir).Start(); err != nil {
 		a.fail("Failed to open logs directory")
 	}
-}
-
-// uninstallServiceElevated triggers UAC to uninstall the Windows Service.
-func (a *trayApp) uninstallServiceElevated() {
-	daemon.WriteStartupLog("=== TRAY ELEVATED UNINSTALL SERVICE ===")
-
-	if err := elevateUninstall(); err != nil {
-		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
-		a.fail(translateError(err))
-		return
-	}
-
-	daemon.WriteStartupLog("SUCCESS: UAC approved, service uninstall command executed")
-	a.fail("")
-
-	// Refresh status after uninstall
-	go func() {
-		time.Sleep(2 * time.Second)
-		a.refreshStatus()
-	}()
 }
 
 // translateError maps a raw error from an action (elevation, subprocess

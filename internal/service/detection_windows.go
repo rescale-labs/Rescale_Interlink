@@ -4,11 +4,8 @@
 package service
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"strings"
-	"time"
 
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -32,7 +29,6 @@ type ServiceDetectionResult struct {
 
 // DetectDaemon performs multi-layer detection to determine daemon state.
 // Should be used by GUI, CLI, and Tray instead of raw IsInstalled() calls.
-// Falls back to IPC and pipe detection when SCM access is denied.
 func DetectDaemon() ServiceDetectionResult {
 	result := ServiceDetectionResult{}
 	debugLog("Starting detection...")
@@ -50,29 +46,14 @@ func DetectDaemon() ServiceDetectionResult {
 		}
 	}
 
-	// Layer 2: If SCM access denied, check via IPC
-	if reason != "" && strings.Contains(strings.ToLower(reason), "denied") {
-		debugLog("SCM denied, trying IPC fallback...")
-		client := ipc.NewClient()
-		client.SetTimeout(5 * time.Second)
-		ctx := context.Background()
-		if status, err := client.GetStatus(ctx); err == nil {
-			if status.ServiceMode {
-				result.ServiceMode = true
-				debugLog("Result: ServiceMode=true (via IPC)")
-				return result
-			}
-		}
-	}
-
-	// Layer 3: Check for subprocess via PID file
+	// Layer 2: Check for subprocess via PID file
 	if pid := daemon.IsDaemonRunning(); pid != 0 {
 		result.SubprocessPID = pid
 		debugLog("Result: SubprocessPID=%d", pid)
 		return result
 	}
 
-	// Layer 4: Check if pipe exists (daemon may be running but slow)
+	// Layer 3: Check if pipe exists (daemon may be running but slow)
 	if ipc.IsPipeInUse() {
 		result.PipeInUse = true
 		result.Error = "Daemon appears to be running but not responding (pipe exists)"

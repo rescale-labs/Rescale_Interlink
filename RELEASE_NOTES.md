@@ -227,6 +227,50 @@ owner filter when none is selected.
   beginning; it says the rerun can resume from the completed parts while the file is
   unchanged and the interrupted upload is less than seven days old.
 
+### Auto-download can now include jobs in workspace shared folders
+
+Auto-download previously scanned only your own jobs. A new option —
+**Include jobs in workspace folders** (off by default) — additionally walks the
+workspace's "Shared" folder tree recursively and auto-downloads eligible
+completed jobs found there, including jobs owned by other users. Each job is
+still gated by the same per-job "Auto Download" custom field and tags.
+
+By default the folder structure is mirrored under your download folder (e.g. a
+job in `Shared/ExampleFolder/Subfolder` lands in
+`<download folder>/ExampleFolder/Subfolder/<job>`). A sub-option, **Flatten
+folder structure** (off by default), downloads everything directly into the
+download folder instead. Jobs in archived folders are skipped. A folder whose
+name cannot be used for a folder here (a name containing `:`, for example) is
+not mirrored: the job's download fails with the reason, shown by
+`daemon list --failed`, unless the structure is flattened or the job has its
+own "Auto Download Path". If the workspace folders cannot be listed, your own
+jobs are still downloaded and the failure is shown as the last scan error.
+Configure both options in the GUI Setup tab or via
+`daemon config set include_workspace_folders true` /
+`daemon config set flatten_folder_structure true`.
+
+### Auto-download now always runs as the logged-in user (Windows service removed)
+
+The optional Windows **service** for auto-download has been removed. Auto-download
+now runs as a background subprocess in the logged-in user's session on every
+platform — started automatically by the system tray app at login (and on demand
+by the GUI).
+
+Why: the service ran as `LocalSystem`, which **cannot reach networked/mapped
+drives that require the user's credentials.** Drive letters such as `Z:\` are
+per-logon and invisible to SYSTEM, so service-mode downloads to them failed and
+the only workaround was configuring UNC paths with machine-account ACLs. Running
+as the logged-in user means mapped drives and credentials "just work," with no
+admin/UAC and no per-user-profile orchestration.
+
+Upgrade behavior: a Windows service left over from an older version removes
+itself the next time Windows starts it, and uninstalling Interlink removes it
+on a best-effort basis; `rescale-int service uninstall`, run as administrator,
+removes it at once. The rationale, and what reinstating a service — should
+headless, no-one-logged-in operation ever be required — would take, are
+documented in
+[ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model).
+
 ### Auto-download reliability
 
 - A daemon that breaks now reports it on every surface (GUI Setup tab, CLI status, logs)

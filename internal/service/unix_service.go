@@ -27,11 +27,6 @@ func Uninstall() error {
 	return ErrNotSupported
 }
 
-// StopService is not supported on non-Windows platforms.
-func StopService() error {
-	return ErrNotSupported
-}
-
 // QueryStatus always returns StatusStopped on non-Windows platforms.
 func QueryStatus() (Status, error) {
 	return StatusStopped, ErrNotSupported

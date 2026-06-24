@@ -18,7 +18,6 @@ import (
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
-	"github.com/rescale/rescale-int/internal/elevation"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/service"
@@ -78,11 +77,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		legacyState = "pending"
 	}
 
-	managedBy := ""
-	if st.ServiceMode {
-		managedBy = "Windows Service"
-	}
-
 	lastScan := ""
 	if st.LastScanTime != nil && !st.LastScanTime.IsZero() {
 		lastScan = st.LastScanTime.Format(time.RFC3339)
@@ -107,8 +101,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		Error:           st.LastError,
 		ErrorCode:       string(st.LastErrorCode),
 		LastErrorTime:   lastErrorTime,
-		ManagedBy:       managedBy,
-		ServiceMode:     st.ServiceMode,
 		UserConfigured:  configured,
 		UserState:       userState,
 		UserStateDetail: pres.GUILongForm,
@@ -458,15 +450,7 @@ func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 	}
 
 	if data.Applied {
-		// A service from an earlier version applies the reload itself.
-		status, statusErr := client.GetStatus(ctx)
-		if statusErr == nil && status.ServiceMode {
-			result.Applied = true
-			a.logInfo("Daemon", "Config reload applied via service rescan")
-			return result
-		}
-
-		// Subprocess mode: stop and restart for config to take effect
+		// Stop and restart the subprocess daemon for the new config to apply.
 		a.logInfo("Daemon", "Config reload accepted — restarting daemon for new config")
 		if err := a.StopDaemon(); err != nil {
 			result.Error = fmt.Sprintf("failed to stop daemon for restart: %v", err)
@@ -495,6 +479,10 @@ type DaemonConfigDTO struct {
 	UseJobNameDir       bool   `json:"useJobNameDir"`
 	MaxConcurrent       int    `json:"maxConcurrent"`
 	LookbackDays        int    `json:"lookbackDays"`
+
+	// Workspace folder scanning
+	IncludeWorkspaceFolders bool `json:"includeWorkspaceFolders"`
+	FlattenFolderStructure  bool `json:"flattenFolderStructure"`
 
 	// Filter settings
 	NamePrefix   string `json:"namePrefix"`
@@ -528,6 +516,8 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	cfg.Daemon.UseJobNameDir = dto.UseJobNameDir
 	cfg.Daemon.MaxConcurrent = dto.MaxConcurrent
 	cfg.Daemon.LookbackDays = dto.LookbackDays
+	cfg.Daemon.IncludeWorkspaceFolders = dto.IncludeWorkspaceFolders
+	cfg.Daemon.FlattenFolderStructure = dto.FlattenFolderStructure
 
 	cfg.Filters.NamePrefix = dto.NamePrefix
 	cfg.Filters.NameContains = dto.NameContains
@@ -758,93 +748,4 @@ func (a *App) OpenLogsDirectory() error {
 	}
 
 	return nil
-}
-
-// =============================================================================
-// UAC-Elevated Service Control
-// =============================================================================
-
-// ServiceStatusDTO represents detailed Windows Service status.
-type ServiceStatusDTO struct {
-	Installed  bool   `json:"installed"`
-	Running    bool   `json:"running"`
-	Status     string `json:"status"`     // "Stopped", "Running", "Start Pending", etc.
-	SCMBlocked bool   `json:"scmBlocked"` // True if SCM access denied
-	SCMError   string `json:"scmError"`   // Error message for debugging
-}
-
-// GetServiceStatus returns detailed Windows Service status.
-// Falls back to IPC ServiceMode when SCM access is blocked.
-// NOTE: Do NOT infer installed from QueryStatus() because it returns "Stopped"
-// even when the service is not installed.
-func (a *App) GetServiceStatus() ServiceStatusDTO {
-	installed, scmError := service.IsInstalledWithReason()
-
-	if !installed && scmError != "" {
-		// SCM blocked - check if IPC says we're in service mode
-		client := ipc.NewClient()
-		client.SetTimeout(2 * time.Second)
-		ctx := context.Background()
-		if status, err := client.GetStatus(ctx); err == nil {
-			// Use ServiceMode flag to detect Windows Service
-			if status.ServiceMode {
-				return ServiceStatusDTO{
-					Installed:  true, // Inferred from IPC ServiceMode flag
-					Running:    status.ServiceState == "running",
-					Status:     "Running (via IPC)",
-					SCMBlocked: true,
-					SCMError:   scmError,
-				}
-			}
-		}
-		// Neither SCM nor IPC worked (or IPC is subprocess mode)
-		return ServiceStatusDTO{
-			Installed:  false,
-			Running:    false,
-			Status:     "Unknown",
-			SCMBlocked: true,
-			SCMError:   scmError,
-		}
-	}
-
-	if !installed {
-		return ServiceStatusDTO{
-			Installed: false,
-			Running:   false,
-			Status:    "Not Installed",
-		}
-	}
-
-	status, err := service.QueryStatus()
-	if err != nil {
-		return ServiceStatusDTO{
-			Installed: true,
-			Running:   false,
-			Status:    "Unknown",
-		}
-	}
-
-	return ServiceStatusDTO{
-		Installed: true,
-		Running:   status == service.StatusRunning,
-		Status:    status.String(),
-	}
-}
-
-// UninstallServiceElevated triggers a UAC prompt to remove a Windows Service
-// installed by an earlier version. Returns once the command has run; poll
-// GetServiceStatus to confirm.
-func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
-	a.logInfo("Service", "Removing Windows Service with UAC elevation...")
-
-	if err := elevation.UninstallServiceElevated(); err != nil {
-		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to remove service: %v", err),
-		}
-	}
-
-	a.logInfo("Service", "UAC approved, service uninstall command executed")
-	return ElevatedServiceResultDTO{Success: true}
 }

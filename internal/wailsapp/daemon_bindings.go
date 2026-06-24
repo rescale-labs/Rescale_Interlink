@@ -71,11 +71,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		legacyState = "pending"
 	}
 
-	managedBy := ""
-	if st.ServiceMode {
-		managedBy = "Windows Service"
-	}
-
 	lastScan := ""
 	if st.LastScanTime != nil && !st.LastScanTime.IsZero() {
 		lastScan = st.LastScanTime.Format(time.RFC3339)
@@ -100,8 +95,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		Error:           st.LastError,
 		ErrorCode:       string(st.LastErrorCode),
 		LastErrorTime:   lastErrorTime,
-		ManagedBy:       managedBy,
-		ServiceMode:     st.ServiceMode,
 		UserConfigured:  configured,
 		UserState:       userState,
 		UserStateDetail: pres.GUILongForm,
@@ -385,6 +378,10 @@ type DaemonConfigDTO struct {
 	MaxConcurrent       int    `json:"maxConcurrent"`
 	LookbackDays        int    `json:"lookbackDays"`
 
+	// Workspace folder scanning
+	IncludeWorkspaceFolders bool `json:"includeWorkspaceFolders"`
+	FlattenFolderStructure  bool `json:"flattenFolderStructure"`
+
 	// Filter settings
 	NamePrefix   string `json:"namePrefix"`
 	NameContains string `json:"nameContains"`
@@ -417,6 +414,8 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	cfg.Daemon.UseJobNameDir = dto.UseJobNameDir
 	cfg.Daemon.MaxConcurrent = dto.MaxConcurrent
 	cfg.Daemon.LookbackDays = dto.LookbackDays
+	cfg.Daemon.IncludeWorkspaceFolders = dto.IncludeWorkspaceFolders
+	cfg.Daemon.FlattenFolderStructure = dto.FlattenFolderStructure
 
 	cfg.Filters.NamePrefix = dto.NamePrefix
 	cfg.Filters.NameContains = dto.NameContains
@@ -649,36 +648,4 @@ func (a *App) OpenLogsDirectory() error {
 	}
 
 	return nil
-}
-
-// =============================================================================
-// Service Control Stubs for non-Windows
-// =============================================================================
-
-// ServiceStatusDTO represents detailed Windows Service status.
-type ServiceStatusDTO struct {
-	Installed  bool   `json:"installed"`
-	Running    bool   `json:"running"`
-	Status     string `json:"status"`
-	SCMBlocked bool   `json:"scmBlocked"` // True if SCM access denied
-	SCMError   string `json:"scmError"`
-}
-
-// GetServiceStatus returns detailed Windows Service status.
-// On non-Windows platforms, always returns "not installed".
-func (a *App) GetServiceStatus() ServiceStatusDTO {
-	return ServiceStatusDTO{
-		Installed: false,
-		Running:   false,
-		Status:    "Not Available (Windows only)",
-	}
-}
-
-// UninstallServiceElevated triggers UAC prompt to remove Windows Service.
-// On non-Windows platforms, returns error.
-func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
-	return ElevatedServiceResultDTO{
-		Success: false,
-		Error:   "Windows Service control is only available on Windows",
-	}
 }

@@ -14,7 +14,7 @@ import (
 func TestRetire(t *testing.T) {
 	errNotService, errDenied := errors.New("FAKE no service controller"), errors.New("FAKE access is denied")
 	const failed = "log: Multi-user service mode is not available in this version, and this service could not remove itself: FAKE access is denied. " +
-		"Remove it from the Interlink app or with 'rescale-int service uninstall' as administrator."
+		"Remove it with 'rescale-int service uninstall' as administrator."
 	for _, tc := range []struct {
 		name                   string
 		dispatchErr, deleteErr error

@@ -383,14 +383,17 @@ Examples:
 				return fmt.Errorf("failed to create download directory: %w", err)
 			}
 
-			// Build daemon config
+			// Build daemon config. Workspace-folder options are read straight
+			// from daemon.conf (no CLI flags) — the GUI/tray persist config
+			// before spawning the daemon, so the file is authoritative.
 			daemonCfg := &daemon.Config{
-				PollInterval:  interval,
-				DownloadDir:   absDownloadDir,
-				UseJobNameDir: !useJobID,
-				MaxConcurrent: maxConcurrent,
-				StateFile:     stateFile,
-				LogFile:       logFile,
+				PollInterval:           interval,
+				DownloadDir:            absDownloadDir,
+				UseJobNameDir:          !useJobID,
+				MaxConcurrent:          maxConcurrent,
+				StateFile:              stateFile,
+				LogFile:                logFile,
+				FlattenFolderStructure: daemonConf.Daemon.FlattenFolderStructure,
 			}
 
 			// Build filter if any filter options specified
@@ -404,8 +407,9 @@ Examples:
 
 			// Simplified eligibility - mode is per-job, only tag and lookback configurable
 			daemonCfg.Eligibility = &daemon.EligibilityConfig{
-				AutoDownloadTag: daemonConf.Eligibility.AutoDownloadTag,
-				LookbackDays:    daemonConf.Daemon.LookbackDays,
+				AutoDownloadTag:         daemonConf.Eligibility.AutoDownloadTag,
+				LookbackDays:            daemonConf.Daemon.LookbackDays,
+				IncludeWorkspaceFolders: daemonConf.Daemon.IncludeWorkspaceFolders,
 			}
 
 			// Load app config
@@ -562,8 +566,9 @@ Examples:
 var onWindows = runtime.GOOS == "windows"
 
 // oldServiceRunning reports whether a service installed by an earlier version
-// is running; see service.OldServiceRunning.
-func oldServiceRunning() bool {
+// is running; see service.OldServiceRunning. A variable so a test on any
+// system can run one.
+var oldServiceRunning = func() bool {
 	if !service.IsInstalled() {
 		return false
 	}
@@ -744,9 +749,9 @@ this to work.`,
 			client := ipc.NewClient()
 			client.SetTimeout(5 * time.Second)
 
+			// The service is not this user's daemon, which is still stopped.
 			if oldServiceRunning() {
 				fmt.Println(service.OldServiceRunning + ".")
-				return nil
 			}
 
 			// Check if daemon is running (subprocess mode)
@@ -1025,6 +1030,8 @@ Shows all settings from daemon.conf, or defaults if the file doesn't exist.`,
 			fmt.Printf("use_job_name_dir = %t\n", cfg.Daemon.UseJobNameDir)
 			fmt.Printf("max_concurrent = %d\n", cfg.Daemon.MaxConcurrent)
 			fmt.Printf("lookback_days = %d\n", cfg.Daemon.LookbackDays)
+			fmt.Printf("include_workspace_folders = %t\n", cfg.Daemon.IncludeWorkspaceFolders)
+			fmt.Printf("flatten_folder_structure = %t\n", cfg.Daemon.FlattenFolderStructure)
 			fmt.Println()
 
 			fmt.Println("[filters]")
@@ -1137,6 +1144,8 @@ Available keys:
     use_job_name_dir         - true/false
     max_concurrent           - concurrent downloads (` + fmt.Sprintf("%d-%d", constants.MinMaxConcurrent, constants.MaxMaxConcurrent) + `)
     lookback_days            - days to look back (1-365)
+    include_workspace_folders - true/false (also scan workspace shared folders)
+    flatten_folder_structure  - true/false (don't mirror folder tree)
 
   [filters]
     name_prefix              - job name prefix filter
@@ -1218,6 +1227,10 @@ Examples:
 					return usage("lookback_days must be between 1 and 365")
 				}
 				cfg.Daemon.LookbackDays = v
+			case "include_workspace_folders":
+				cfg.Daemon.IncludeWorkspaceFolders = value == "true" || value == "1" || value == "yes"
+			case "flatten_folder_structure":
+				cfg.Daemon.FlattenFolderStructure = value == "true" || value == "1" || value == "yes"
 
 			// [filters] section
 			case "name_prefix":

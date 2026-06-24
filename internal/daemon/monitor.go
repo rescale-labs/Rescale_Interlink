@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,11 @@ type EligibilityConfig struct {
 	// LookbackDays is the number of days to look back for completed jobs (default: 7).
 	// Jobs older than this are ignored.
 	LookbackDays int
+
+	// IncludeWorkspaceFolders, when true, also enumerates jobs in the
+	// workspace's shared folders (recursively) in addition to the user's own
+	// jobs. Default: false.
+	IncludeWorkspaceFolders bool
 }
 
 // DefaultEligibilityConfig returns the default eligibility configuration.
@@ -343,6 +349,13 @@ type CompletedJob struct {
 	Owner       string
 	Created     string
 	CompletedAt time.Time
+
+	// FolderPath names the job's workspace folders below the
+	// sharedWithWorkspace root, outermost first (e.g. ["ExampleFolder"] or
+	// ["TeamA", "Sub"]), with the "Shared" root excluded. Empty for the user's
+	// personal jobs. Used to mirror the folder structure into the download
+	// directory; ignored when flatten_folder_structure is enabled.
+	FolderPath []string
 }
 
 // getJobCompletionTime retrieves the actual completion time from job status history.
@@ -441,6 +454,95 @@ type FindCompletedJobsResult struct {
 	// extends this in place with per-job eligibility skips and download
 	// outcomes before emitting the single canonical INFO line.
 	Summary *ScanSummary
+
+	// WorkspaceErr is why the workspace folders could not be listed; the
+	// user's own jobs were scanned all the same.
+	WorkspaceErr error
+}
+
+// jobWithPath pairs a job with its workspace-folder path relative to the
+// shared root (empty for the user's personal jobs).
+type jobWithPath struct {
+	job        models.JobResponse
+	folderPath []string
+}
+
+// maxWorkspaceFolderDepth bounds the recursive folder walk as a safety net
+// against cycles or pathological trees.
+const maxWorkspaceFolderDepth = 20
+
+// collectWorkspaceJobs returns every job in the sharedWithWorkspace folder
+// tree, each tagged with its path relative to the shared root (the "Shared"
+// root itself is excluded from the path).
+//
+// It relies on the jobs/?q=folder:<id>&f=0 listing of the shared root to
+// include the jobs in every (sub)folder, whoever owns them, each with the
+// folder reference (folder.id) that says where it lives. So we:
+//  1. build a folder-id -> relative-path map from the meta/folders tree
+//     (skipping archived folders), then
+//  2. query the root once and map each job to its folder's path.
+//
+// A job whose folder is not in the map (e.g. an archived folder) is skipped.
+func (m *Monitor) collectWorkspaceJobs(ctx context.Context, creationCutoff time.Time) ([]jobWithPath, error) {
+	meta, err := m.apiClient.GetMetaFolders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workspace folders: %w", err)
+	}
+
+	root := meta.SharedWithWorkspace
+	if root.ID == "" {
+		m.logger.Debug().Msg("No sharedWithWorkspace root; skipping workspace folder scan")
+		return nil, nil
+	}
+
+	// Build folder-id -> folder path. The root maps to an empty path (jobs
+	// directly in the shared root download to the download-folder root).
+	// Archived folders and their descendants are omitted so their jobs are
+	// skipped.
+	pathByFolder := map[string][]string{root.ID: nil}
+	buildFolderPaths(root.Children, nil, pathByFolder, 1)
+
+	// One query for all jobs under the shared root.
+	jobs, err := m.apiClient.ListJobsInFolder(ctx, root.ID, creationCutoff)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workspace jobs: %w", err)
+	}
+
+	out := make([]jobWithPath, 0, len(jobs))
+	for i := range jobs {
+		fid := ""
+		if jobs[i].Folder != nil {
+			fid = jobs[i].Folder.ID
+		}
+		folderPath, ok := pathByFolder[fid]
+		if !ok {
+			// Job's folder is archived or otherwise not in the active tree.
+			m.logger.Debug().
+				Str("job_id", jobs[i].ID).
+				Str("folder_id", fid).
+				Msg("Skipping workspace job: folder not in active tree (archived?)")
+			continue
+		}
+		out = append(out, jobWithPath{job: jobs[i], folderPath: folderPath})
+	}
+	return out, nil
+}
+
+// buildFolderPaths fills pathByFolder with folder-id -> path-relative-to-shared-root
+// for each folder in the meta tree, appending the folder name to its parent's
+// path. Archived folders (and their descendants) are skipped.
+func buildFolderPaths(folders []models.MetaFolder, parentPath []string, pathByFolder map[string][]string, depth int) {
+	if depth > maxWorkspaceFolderDepth {
+		return
+	}
+	for _, f := range folders {
+		if f.IsArchived {
+			continue
+		}
+		folderPath := append(slices.Clip(parentPath), f.Name)
+		pathByFolder[f.ID] = folderPath
+		buildFolderPaths(f.Children, folderPath, pathByFolder, depth+1)
+	}
 }
 
 // FindCompletedJobs returns jobs that are completed and warrant an
@@ -482,9 +584,6 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		return nil, fmt.Errorf("failed to list jobs: %w", err)
 	}
 
-	// Debug-level only — verbose stats not useful in GUI
-	m.logger.Debug().Int("jobs_to_scan", len(jobs)).Msg("Scanning jobs from API")
-
 	// Pre-filter buffer: Use creation date with extra buffer to reduce API calls
 	// Jobs created more than (lookback_days + 30) days ago cannot have completed within lookback window
 	var creationCutoff time.Time
@@ -492,15 +591,55 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		creationCutoff = time.Now().AddDate(0, 0, -(m.eligibility.LookbackDays + 30))
 	}
 
+	// Build the worklist: jobs in the workspace's shared folders (each tagged
+	// with its path relative to the Shared root) plus the user's own jobs.
+	// Workspace entries are added FIRST and take precedence on a dedupe by job
+	// ID, because a job can appear in BOTH the personal listing (which has no
+	// folder path) and a workspace folder; keeping the workspace entry
+	// preserves its folder path so the download mirrors the folder structure.
+	worklist := make([]jobWithPath, 0, len(jobs))
+	seen := make(map[string]struct{}, len(jobs))
+	var wsErr error
+	if m.eligibility != nil && m.eligibility.IncludeWorkspaceFolders {
+		var wsJobs []jobWithPath
+		wsJobs, wsErr = m.collectWorkspaceJobs(ctx, creationCutoff)
+		if wsErr != nil {
+			// Non-fatal: log and continue with personal jobs so a folder API
+			// hiccup does not stall the whole scan.
+			m.logger.Warn().Err(wsErr).Msg("Failed to enumerate workspace folders; scanning personal jobs only")
+		} else {
+			for _, wj := range wsJobs {
+				if _, dup := seen[wj.job.ID]; dup {
+					continue
+				}
+				seen[wj.job.ID] = struct{}{}
+				worklist = append(worklist, wj)
+			}
+		}
+	}
+	// Add the user's own jobs, skipping any already contributed (with their
+	// folder path) by the workspace scan above.
+	for i := range jobs {
+		if _, dup := seen[jobs[i].ID]; dup {
+			continue
+		}
+		seen[jobs[i].ID] = struct{}{}
+		worklist = append(worklist, jobWithPath{job: jobs[i]})
+	}
+
+	// Debug-level only — verbose stats not useful in GUI
+	m.logger.Debug().Int("jobs_to_scan", len(worklist)).Msg("Scanning jobs from API")
+
 	var completed []*CompletedJob
 	summary := &ScanSummary{
-		TotalScanned:     len(jobs),
+		TotalScanned:     len(worklist),
 		SkipBuckets:      make(map[SkipReasonCode]int),
 		DownloadOutcomes: make(map[string]int),
 	}
 
 	now := time.Now()
-	for _, job := range jobs {
+	for _, item := range worklist {
+		job := item.job
 		// Check if job status is "Completed"
 		if job.JobStatus.Status != "Completed" {
 			summary.AddSkip(ReasonNotCompleted)
@@ -592,6 +731,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 			Owner:       job.Owner,
 			Created:     job.CreatedAt,
 			CompletedAt: completedAt,
+			FolderPath:  item.folderPath,
 		})
 	}
 
@@ -599,14 +739,15 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 	// summary INFO line is emitted by daemon.poll after extending the buckets
 	// with per-job eligibility skips and download outcomes.
 	m.logger.Debug().
-		Int("total_scanned", len(jobs)).
+		Int("total_scanned", len(worklist)).
 		Int("candidates", len(completed)).
 		Msg("Pre-eligibility scan complete")
 
 	return &FindCompletedJobsResult{
 		Candidates:   completed,
-		TotalScanned: len(jobs),
+		TotalScanned: len(worklist),
 		Summary:      summary,
+		WorkspaceErr: wsErr,
 	}, nil
 }
 

@@ -3,8 +3,10 @@
 package service
 
 import (
+	"errors"
 	"testing"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -25,5 +27,20 @@ func TestRetiredServiceReportsRunningThenStops(t *testing.T) {
 	}
 	if st := <-changes; st.State != svc.Running || st.Accepts != 0 {
 		t.Errorf("reported %+v, want Running, accepting no controls", st)
+	}
+}
+
+// With no service to remove, 'service uninstall' succeeds, so the installer
+// can run it on any machine.
+func TestUninstallWithoutTheServiceSucceeds(t *testing.T) {
+	if IsInstalled() {
+		t.Skip("a Rescale Interlink service is installed on this machine")
+	}
+	err := Uninstall()
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Skip("removing a service needs administrator rights")
+	}
+	if err != nil {
+		t.Errorf("Uninstall with no service: %v, want nil", err)
 	}
 }
