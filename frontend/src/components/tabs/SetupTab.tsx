@@ -10,7 +10,6 @@ import {
   EyeSlashIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-  ShieldCheckIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
@@ -33,14 +32,10 @@ import {
   TestAutoDownloadConnection,
   GetFileLoggingSettings,
   SetFileLoggingEnabled,
-  GetServiceStatus,
-  StartServiceElevated,
-  StopServiceElevated,
   TriggerProfileRescan,
   ReloadDaemonConfig,
   ValidateAutoDownloadPreFlight,
   OpenLogsDirectory,
-  InstallAndStartServiceElevated,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 import {
@@ -129,11 +124,6 @@ export function SetupTab() {
   // transient-pending timeout. The frontend just renders whatever userState
   // + userStateDetail the DTO says.
 
-  // Windows SCM service status (separate from IPC-based daemon status)
-  const [serviceStatus, setServiceStatus] = useState<wailsapp.ServiceStatusDTO | null>(null);
-  const [isServiceLoading, setIsServiceLoading] = useState(false);
-  const [showUACConfirmDialog, setShowUACConfirmDialog] = useState<'start' | 'stop' | null>(null);
-
   const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
   const [lastSavedConfig, setLastSavedConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -180,25 +170,6 @@ export function SetupTab() {
 
     // Poll every 5 seconds when tab is visible
     const interval = setInterval(fetchDaemonStatus, 5000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  // Fetch service status (Windows SCM) on mount and periodically
-  useEffect(() => {
-    const fetchServiceStatus = async () => {
-      try {
-        const status = await GetServiceStatus();
-        setServiceStatus(status);
-      } catch (err) {
-        console.error('Failed to fetch service status:', err);
-      }
-    };
-
-    fetchServiceStatus();
-
-    // Poll every 5 seconds (same interval as daemon status)
-    const interval = setInterval(fetchServiceStatus, 5000);
 
     return () => clearInterval(interval);
   }, []);
@@ -595,118 +566,6 @@ export function SetupTab() {
     return '';
   };
 
-  const handleStartServiceElevated = async () => {
-    try {
-      setIsServiceLoading(true);
-      setShowUACConfirmDialog(null);
-      setStatusMessage('Starting Windows Service (UAC prompt will appear)...');
-
-      const result = await StartServiceElevated();
-      if (result.success) {
-        setStatusMessage('Service start command executed. Waiting for service to start...');
-        // Poll for status change
-        let attempts = 0;
-        const maxAttempts = 20; // 10 seconds at 500ms intervals
-        const pollInterval = setInterval(async () => {
-          attempts++;
-          const status = await GetServiceStatus();
-          setServiceStatus(status);
-          if (status.running) {
-            clearInterval(pollInterval);
-            setStatusMessage('Windows Service started successfully');
-            setIsServiceLoading(false);
-            // Also refresh daemon status as it will now report Windows Service mode
-            await refreshDaemonStatus();
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollInterval);
-            setStatusMessage('Service may still be starting. Check status in a moment.');
-            setIsServiceLoading(false);
-          }
-        }, 500);
-      } else {
-        setStatusMessage(`Failed to start service: ${result.error}`);
-        setIsServiceLoading(false);
-      }
-    } catch (err) {
-      setStatusMessage(`Failed to start service: ${err}`);
-      setIsServiceLoading(false);
-    }
-  };
-
-  const handleInstallAndStartServiceElevated = async () => {
-    try {
-      setIsServiceLoading(true);
-      setShowUACConfirmDialog(null);
-      setStatusMessage('Installing and starting Windows Service (UAC prompt will appear)...');
-
-      const result = await InstallAndStartServiceElevated();
-      if (result.success) {
-        setStatusMessage('Install & start command executed. Waiting for service...');
-        // Poll for status change
-        let attempts = 0;
-        const maxAttempts = 20;
-        const pollInterval = setInterval(async () => {
-          attempts++;
-          const status = await GetServiceStatus();
-          setServiceStatus(status);
-          if (status.running) {
-            clearInterval(pollInterval);
-            setStatusMessage('Windows Service installed and started successfully');
-            setIsServiceLoading(false);
-            await refreshDaemonStatus();
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollInterval);
-            setStatusMessage('Service may still be starting. Check status in a moment.');
-            setIsServiceLoading(false);
-          }
-        }, 500);
-      } else {
-        setStatusMessage(`Failed to install and start service: ${result.error}`);
-        setIsServiceLoading(false);
-      }
-    } catch (err) {
-      setStatusMessage(`Failed to install and start service: ${err}`);
-      setIsServiceLoading(false);
-    }
-  };
-
-  const handleStopServiceElevated = async () => {
-    try {
-      setIsServiceLoading(true);
-      setShowUACConfirmDialog(null);
-      setStatusMessage('Stopping Windows Service (UAC prompt will appear)...');
-
-      const result = await StopServiceElevated();
-      if (result.success) {
-        setStatusMessage('Service stop command executed. Waiting for service to stop...');
-        // Poll for status change
-        let attempts = 0;
-        const maxAttempts = 20; // 10 seconds at 500ms intervals
-        const pollInterval = setInterval(async () => {
-          attempts++;
-          const status = await GetServiceStatus();
-          setServiceStatus(status);
-          if (!status.running) {
-            clearInterval(pollInterval);
-            setStatusMessage('Windows Service stopped successfully');
-            setIsServiceLoading(false);
-            // Also refresh daemon status
-            await refreshDaemonStatus();
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollInterval);
-            setStatusMessage('Service may still be stopping. Check status in a moment.');
-            setIsServiceLoading(false);
-          }
-        }, 500);
-      } else {
-        setStatusMessage(`Failed to stop service: ${result.error}`);
-        setIsServiceLoading(false);
-      }
-    } catch (err) {
-      setStatusMessage(`Failed to stop service: ${err}`);
-      setIsServiceLoading(false);
-    }
-  };
 
   const handleValidateWorkspace = async () => {
     try {
@@ -1130,7 +989,7 @@ export function SetupTab() {
                 <li><strong>Disabled</strong> - Job is never auto-downloaded</li>
               </ul>
               <p className="mt-2 text-xs text-blue-600">
-                Required field: "Auto Download" (select type). Optional: "Auto Download Path" (per-job download location).
+                Required field: "Auto Download" (select type). Optional: "Auto Download Path" (per-job download location, for security reasons this needs to be a subfolder to the default Download Folder).
               </p>
             </div>
 
@@ -1191,6 +1050,51 @@ export function SetupTab() {
                   onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, lookbackDays: parseInt(e.target.value) || 7 })}
                 />
               </div>
+            </div>
+
+            {/* Workspace folders */}
+            <div>
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  id="includeWorkspaceFolders"
+                  checked={daemonConfig?.includeWorkspaceFolders || false}
+                  onChange={(e) => daemonConfig && setDaemonConfig({
+                    ...daemonConfig,
+                    includeWorkspaceFolders: e.target.checked,
+                    // Reset the suboption when the parent is turned off.
+                    flattenFolderStructure: e.target.checked ? daemonConfig.flattenFolderStructure : false,
+                  })}
+                  className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
+                />
+                <label htmlFor="includeWorkspaceFolders" className="ml-2 text-sm text-gray-700 cursor-pointer">
+                  Include jobs in workspace folders
+                </label>
+              </div>
+
+              <div className="mt-2 ml-6 flex items-center">
+                <input
+                  type="checkbox"
+                  id="flattenFolderStructure"
+                  checked={daemonConfig?.flattenFolderStructure || false}
+                  disabled={!daemonConfig?.includeWorkspaceFolders}
+                  onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, flattenFolderStructure: e.target.checked })}
+                  className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                />
+                <label
+                  htmlFor="flattenFolderStructure"
+                  className={clsx(
+                    'ml-2 text-sm cursor-pointer',
+                    daemonConfig?.includeWorkspaceFolders ? 'text-gray-700' : 'text-gray-400 cursor-not-allowed'
+                  )}
+                >
+                  Flatten folder structure
+                </label>
+              </div>
+
+              <p className="mt-1 ml-6 text-xs text-gray-500">
+                When jobs from workspace folders are fetched, the folder structure is mirrored under the download folder by default, unless "Flatten folder structure" is enabled.
+              </p>
             </div>
 
             {/* Tag for Conditional Jobs */}
@@ -1320,79 +1224,7 @@ export function SetupTab() {
               </span>
             </div>
 
-            {/* Service Control: show when Windows Service is installed, SCM blocked + IPC service mode, or status is available */}
-            {(serviceStatus?.installed || (serviceStatus?.scmBlocked && daemonStatus?.serviceMode) || (serviceStatus && !serviceStatus.installed && serviceStatus.status !== 'Not Available (Windows only)')) && (
-              <div className="border-t border-gray-200 pt-4 mt-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <h4 className="text-sm font-medium text-gray-700">Service Control</h4>
-                  <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded flex items-center gap-1">
-                    <ShieldCheckIcon className="w-3 h-3" />
-                    Admin
-                  </span>
-                </div>
-                {serviceStatus?.scmBlocked && (
-                  <div className="mb-3 p-2 bg-amber-50 rounded text-xs text-amber-700">
-                    SCM status unavailable (access denied). Run as administrator for full access.
-                  </div>
-                )}
-                <div className={clsx(
-                  'p-4 rounded-lg',
-                  serviceStatus?.running ? 'bg-green-50' : 'bg-gray-50'
-                )}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className={clsx(
-                        'w-3 h-3 rounded-full',
-                        serviceStatus?.running ? 'bg-green-500' : 'bg-gray-400'
-                      )} />
-                      <div>
-                        <div className="font-medium text-gray-900">
-                          Status: {serviceStatus?.status || 'Unknown'}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {!serviceStatus?.installed && !serviceStatus?.running ? (
-                        <button
-                          onClick={() => setShowUACConfirmDialog('start')}
-                          disabled={isServiceLoading}
-                          className="btn-primary text-sm flex items-center gap-1"
-                          title="Install and start Windows Service (requires administrator privileges)"
-                        >
-                          <ShieldCheckIcon className="w-4 h-4" />
-                          {isServiceLoading ? 'Installing...' : 'Install & Start Service'}
-                        </button>
-                      ) : !serviceStatus?.running ? (
-                        <button
-                          onClick={() => setShowUACConfirmDialog('start')}
-                          disabled={isServiceLoading}
-                          className="btn-primary text-sm flex items-center gap-1"
-                          title="Start Windows Service (requires administrator privileges)"
-                        >
-                          <ShieldCheckIcon className="w-4 h-4" />
-                          {isServiceLoading ? 'Starting...' : 'Start Service'}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => setShowUACConfirmDialog('stop')}
-                          disabled={isServiceLoading}
-                          className="btn-secondary text-sm text-red-600 hover:text-red-700 flex items-center gap-1"
-                          title="Stop Windows Service (requires administrator privileges)"
-                        >
-                          <ShieldCheckIcon className="w-4 h-4" />
-                          {isServiceLoading ? 'Stopping...' : 'Stop Service (Admin)'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <p className="mt-2 text-xs text-gray-500">
-                  These actions require administrator privileges. A Windows security prompt (UAC) will appear.
-                </p>
-              </div>
-            )}
-
-            {/* My Downloads: show when daemon is running (IPC connected or service mode) */}
+            {/* My Downloads: show when daemon is running (IPC connected) */}
             {(daemonStatus?.ipcConnected || daemonStatus?.running) && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-3">My Downloads</h4>
@@ -1633,15 +1465,15 @@ export function SetupTab() {
                 )}
 
                 <p className="mt-2 text-xs text-gray-500">
-                  These controls only affect your downloads. The service continues running for other users.
+                  These controls affect auto-download for your account.
                 </p>
               </div>
             )}
 
-            {/* Subprocess mode: Show start button when service not installed and not running */}
-            {!serviceStatus?.installed && !daemonStatus?.running && (
+            {/* Show start button when no daemon is running for this user */}
+            {!daemonStatus?.running && (
               <div className="border-t border-gray-200 pt-4 mt-4">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
+                <h4 className="text-sm font-medium text-gray-700 mb-3">Auto-Download</h4>
                 <div className="p-4 rounded-lg bg-gray-50">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -1661,21 +1493,21 @@ export function SetupTab() {
                           "btn-primary text-sm",
                           !daemonConfig?.enabled && "opacity-50 cursor-not-allowed"
                         )}
-                        title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download service'}
+                        title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download'}
                       >
-                        {isDaemonLoading ? 'Starting...' : 'Start Service'}
+                        {isDaemonLoading ? 'Starting...' : 'Start Auto-Download'}
                       </button>
                     </div>
                   </div>
                 </div>
                 <p className="mt-2 text-xs text-gray-500">
-                  The auto-download service runs in the background and automatically downloads completed jobs.
+                  Auto-download runs in the background as your user and automatically downloads completed jobs.
                 </p>
               </div>
             )}
 
-            {/* Subprocess mode: Show controls when running in subprocess mode (no Windows Service) */}
-            {!serviceStatus?.installed && daemonStatus?.running && (
+            {/* Show controls when the daemon is running for this user */}
+            {daemonStatus?.running && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
                 <div className={clsx(
@@ -1776,38 +1608,6 @@ export function SetupTab() {
               </div>
             )}
 
-            {showUACConfirmDialog && (
-              <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                <div className="bg-white rounded-lg shadow-xl p-6 max-w-md mx-4">
-                  <div className="flex items-center gap-3 mb-4">
-                    <ShieldCheckIcon className="w-8 h-8 text-amber-500" />
-                    <h3 className="text-lg font-semibold text-gray-900">
-                      {showUACConfirmDialog === 'start' ? 'Start Service?' : 'Stop Service?'}
-                    </h3>
-                  </div>
-                  <p className="text-gray-600 mb-6">
-                    This will show a Windows security prompt (UAC) asking for administrator permission.
-                  </p>
-                  <div className="flex justify-end gap-3">
-                    <button
-                      onClick={() => setShowUACConfirmDialog(null)}
-                      className="btn-secondary"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={showUACConfirmDialog === 'start'
-                        ? (!serviceStatus?.installed ? handleInstallAndStartServiceElevated : handleStartServiceElevated)
-                        : handleStopServiceElevated}
-                      className="btn-primary flex items-center gap-2"
-                    >
-                      <ShieldCheckIcon className="w-4 h-4" />
-                      Continue
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div> {/* End unified Auto-Download card */}
 

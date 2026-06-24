@@ -64,20 +64,11 @@ func newDisabledConfig() *config.DaemonConfig {
 
 // --- Presentation matrix tests ---
 
-// TestPresentationMatrixCoverage walks every combination of
-// InstallationState × PerUserState (that Compute can produce) and asserts
-// Presentation returns non-empty strings and at least one allowed action
-// per cell. Acts as a coverage smoke test — real wording is checked by the
-// cell-specific tests below.
+// TestPresentationMatrixCoverage walks every PerUserState that Compute can
+// produce and asserts Presentation returns non-empty strings and at least one
+// allowed action per cell. Acts as a coverage smoke test — real wording is
+// checked by the cell-specific tests below.
 func TestPresentationMatrixCoverage(t *testing.T) {
-	installs := []InstallationState{
-		InstallationNotInstalled,
-		InstallationStopped,
-		InstallationStarting,
-		InstallationStopping,
-		InstallationRunning,
-		InstallationSubprocessOnly,
-	}
 	peruser := []PerUserState{
 		PerUserNotConfigured,
 		PerUserPending,
@@ -86,51 +77,29 @@ func TestPresentationMatrixCoverage(t *testing.T) {
 		PerUserError,
 	}
 
-	for _, inst := range installs {
-		for _, pu := range peruser {
-			s := State{Installation: inst, PerUser: pu, LastError: "test error", LastErrorCode: ipc.CodeNoAPIKey}
-			p := s.Presentation()
-			if p.GUILongForm == "" {
-				t.Errorf("empty GUILongForm for (%v,%v)", inst, pu)
-			}
-			if p.TrayStatusLine == "" {
-				t.Errorf("empty TrayStatusLine for (%v,%v)", inst, pu)
-			}
-			if p.TrayTooltip == "" {
-				t.Errorf("empty TrayTooltip for (%v,%v)", inst, pu)
-			}
-			if p.CLIStatusLine == "" {
-				t.Errorf("empty CLIStatusLine for (%v,%v)", inst, pu)
-			}
-			if len(p.AllowedActions) == 0 {
-				t.Errorf("no AllowedActions for (%v,%v)", inst, pu)
-			}
+	for _, pu := range peruser {
+		s := State{PerUser: pu, LastError: "test error", LastErrorCode: ipc.CodeNoAPIKey}
+		p := s.Presentation()
+		if p.GUILongForm == "" {
+			t.Errorf("empty GUILongForm for %v", pu)
+		}
+		if p.TrayStatusLine == "" {
+			t.Errorf("empty TrayStatusLine for %v", pu)
+		}
+		if p.TrayTooltip == "" {
+			t.Errorf("empty TrayTooltip for %v", pu)
+		}
+		if p.CLIStatusLine == "" {
+			t.Errorf("empty CLIStatusLine for %v", pu)
+		}
+		if len(p.AllowedActions) == 0 {
+			t.Errorf("no AllowedActions for %v", pu)
 		}
 	}
 }
 
-func TestPresentationNotInstalled(t *testing.T) {
-	p := State{Installation: InstallationNotInstalled}.Presentation()
-	if !strings.Contains(p.GUILongForm, "Install Service") {
-		t.Errorf("GUILongForm should prompt to install: %q", p.GUILongForm)
-	}
-	if !containsAction(p.AllowedActions, ActionInstallService) {
-		t.Errorf("expected ActionInstallService, got %v", p.AllowedActions)
-	}
-}
-
-func TestPresentationStopped(t *testing.T) {
-	p := State{Installation: InstallationStopped}.Presentation()
-	if !strings.Contains(p.GUILongForm, "Start Service") {
-		t.Errorf("GUILongForm should prompt to start: %q", p.GUILongForm)
-	}
-	if !containsAction(p.AllowedActions, ActionStartService) {
-		t.Errorf("expected ActionStartService, got %v", p.AllowedActions)
-	}
-}
-
-func TestPresentationRunningNotConfigured(t *testing.T) {
-	p := State{Installation: InstallationRunning, PerUser: PerUserNotConfigured}.Presentation()
+func TestPresentationNotConfigured(t *testing.T) {
+	p := State{PerUser: PerUserNotConfigured}.Presentation()
 	if !strings.Contains(p.GUILongForm, "Configure") {
 		t.Errorf("GUILongForm should prompt to configure: %q", p.GUILongForm)
 	}
@@ -139,9 +108,15 @@ func TestPresentationRunningNotConfigured(t *testing.T) {
 	}
 }
 
+func TestPresentationPending(t *testing.T) {
+	p := State{PerUser: PerUserPending}.Presentation()
+	if !containsAction(p.AllowedActions, ActionStartDaemon) {
+		t.Errorf("expected ActionStartDaemon, got %v", p.AllowedActions)
+	}
+}
+
 func TestPresentationRunningActive(t *testing.T) {
 	s := State{
-		Installation:   InstallationRunning,
 		PerUser:        PerUserRunning,
 		JobsDownloaded: 7,
 	}
@@ -158,7 +133,7 @@ func TestPresentationRunningActive(t *testing.T) {
 }
 
 func TestPresentationPaused(t *testing.T) {
-	p := State{Installation: InstallationRunning, PerUser: PerUserPaused}.Presentation()
+	p := State{PerUser: PerUserPaused}.Presentation()
 	if !containsAction(p.AllowedActions, ActionResume) {
 		t.Errorf("expected ActionResume, got %v", p.AllowedActions)
 	}
@@ -166,7 +141,6 @@ func TestPresentationPaused(t *testing.T) {
 
 func TestPresentationError_IncludesHint(t *testing.T) {
 	s := State{
-		Installation:  InstallationRunning,
 		PerUser:       PerUserError,
 		LastError:     ipc.CanonicalText[ipc.CodeNoAPIKey],
 		LastErrorCode: ipc.CodeNoAPIKey,

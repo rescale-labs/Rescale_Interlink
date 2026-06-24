@@ -519,6 +519,8 @@ export namespace wailsapp {
 	    useJobNameDir: boolean;
 	    maxConcurrent: number;
 	    lookbackDays: number;
+	    includeWorkspaceFolders: boolean;
+	    flattenFolderStructure: boolean;
 	    namePrefix: string;
 	    nameContains: string;
 	    exclude: string;
@@ -540,6 +542,8 @@ export namespace wailsapp {
 	        this.useJobNameDir = source["useJobNameDir"];
 	        this.maxConcurrent = source["maxConcurrent"];
 	        this.lookbackDays = source["lookbackDays"];
+	        this.includeWorkspaceFolders = source["includeWorkspaceFolders"];
+	        this.flattenFolderStructure = source["flattenFolderStructure"];
 	        this.namePrefix = source["namePrefix"];
 	        this.nameContains = source["nameContains"];
 	        this.exclude = source["exclude"];
@@ -583,8 +587,6 @@ export namespace wailsapp {
 	    downloadFolder: string;
 	    error?: string;
 	    errorCode?: string;
-	    managedBy?: string;
-	    serviceMode: boolean;
 	    userConfigured: boolean;
 	    userState: string;
 	    userStateDetail?: string;
@@ -608,8 +610,6 @@ export namespace wailsapp {
 	        this.downloadFolder = source["downloadFolder"];
 	        this.error = source["error"];
 	        this.errorCode = source["errorCode"];
-	        this.managedBy = source["managedBy"];
-	        this.serviceMode = source["serviceMode"];
 	        this.userConfigured = source["userConfigured"];
 	        this.userState = source["userState"];
 	        this.userStateDetail = source["userStateDetail"];
@@ -1205,26 +1205,6 @@ export namespace wailsapp {
 		}
 	}
 	
-	export class ServiceStatusDTO {
-	    installed: boolean;
-	    running: boolean;
-	    status: string;
-	    scmBlocked: boolean;
-	    scmError: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ServiceStatusDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.installed = source["installed"];
-	        this.running = source["running"];
-	        this.status = source["status"];
-	        this.scmBlocked = source["scmBlocked"];
-	        this.scmError = source["scmError"];
-	    }
-	}
 	export class SingleJobInputDTO {
 	    job: JobSpecDTO;
 	    inputMode: string;

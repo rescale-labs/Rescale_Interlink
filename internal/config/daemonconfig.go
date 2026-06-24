@@ -105,6 +105,17 @@ type DaemonCoreConfig struct {
 	// LookbackDays is the number of days to look back for completed jobs.
 	// Minimum: 1, Maximum: 365, Default: 7
 	LookbackDays int `ini:"lookback_days"`
+
+	// IncludeWorkspaceFolders, when true, also scans jobs in the workspace's
+	// shared folders (recursively), not just the user's own jobs.
+	// Default: false.
+	IncludeWorkspaceFolders bool `ini:"include_workspace_folders"`
+
+	// FlattenFolderStructure, when true, downloads workspace-folder jobs
+	// directly into the download folder instead of mirroring the folder tree.
+	// Only meaningful when IncludeWorkspaceFolders is true. Default: false
+	// (folder structure is mirrored).
+	FlattenFolderStructure bool `ini:"flatten_folder_structure"`
 }
 
 // FilterConfig contains job name filtering settings.
@@ -204,12 +215,14 @@ func DefaultDownloadFolder() string {
 func NewDaemonConfig() *DaemonConfig {
 	return &DaemonConfig{
 		Daemon: DaemonCoreConfig{
-			Enabled:             false,
-			DownloadFolder:      DefaultDownloadFolder(),
-			PollIntervalMinutes: 5,
-			UseJobNameDir:       true,
-			MaxConcurrent:       5,
-			LookbackDays:        7,
+			Enabled:                 false,
+			DownloadFolder:          DefaultDownloadFolder(),
+			PollIntervalMinutes:     5,
+			UseJobNameDir:           true,
+			MaxConcurrent:           5,
+			LookbackDays:            7,
+			IncludeWorkspaceFolders: false,
+			FlattenFolderStructure:  false,
 		},
 		Filters: FilterConfig{
 			NamePrefix:   "",
@@ -262,6 +275,8 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 	cfg.Daemon.UseJobNameDir = daemonSection.Key("use_job_name_dir").MustBool(true)
 	cfg.Daemon.MaxConcurrent = daemonSection.Key("max_concurrent").MustInt(5)
 	cfg.Daemon.LookbackDays = daemonSection.Key("lookback_days").MustInt(7)
+	cfg.Daemon.IncludeWorkspaceFolders = daemonSection.Key("include_workspace_folders").MustBool(false)
+	cfg.Daemon.FlattenFolderStructure = daemonSection.Key("flatten_folder_structure").MustBool(false)
 
 	// Parse [filters] section
 	filtersSection := iniFile.Section("filters")
@@ -320,6 +335,8 @@ func SaveDaemonConfig(cfg *DaemonConfig, path string) error {
 	daemonSection.Key("use_job_name_dir").SetValue(fmt.Sprintf("%t", cfg.Daemon.UseJobNameDir))
 	daemonSection.Key("max_concurrent").SetValue(fmt.Sprintf("%d", cfg.Daemon.MaxConcurrent))
 	daemonSection.Key("lookback_days").SetValue(fmt.Sprintf("%d", cfg.Daemon.LookbackDays))
+	daemonSection.Key("include_workspace_folders").SetValue(fmt.Sprintf("%t", cfg.Daemon.IncludeWorkspaceFolders))
+	daemonSection.Key("flatten_folder_structure").SetValue(fmt.Sprintf("%t", cfg.Daemon.FlattenFolderStructure))
 
 	// Write [filters] section
 	filtersSection, err := iniFile.NewSection("filters")

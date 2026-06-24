@@ -117,50 +117,9 @@ func getCliExecutablePath() (string, string, error) {
 	return "rescale-int.exe", cwd, nil
 }
 
-// StartServiceElevated triggers UAC to run "rescale-int service start".
-func StartServiceElevated() error {
-	cliPath, workDir, err := getCliExecutablePath()
-	if err != nil {
-		return fmt.Errorf("failed to locate CLI: %w", err)
-	}
-
-	return RunElevated(cliPath, "service start", workDir)
-}
-
-// StopServiceElevated triggers UAC to run "rescale-int service stop".
-func StopServiceElevated() error {
-	cliPath, workDir, err := getCliExecutablePath()
-	if err != nil {
-		return fmt.Errorf("failed to locate CLI: %w", err)
-	}
-
-	return RunElevated(cliPath, "service stop", workDir)
-}
-
-// InstallServiceElevated triggers UAC to run "rescale-int service install".
-// The elevated CLI process handles SCM registration and sets HKLM registry marker.
-func InstallServiceElevated() error {
-	cliPath, workDir, err := getCliExecutablePath()
-	if err != nil {
-		return fmt.Errorf("failed to locate CLI: %w", err)
-	}
-
-	return RunElevated(cliPath, "service install", workDir)
-}
-
-// InstallAndStartServiceElevated triggers UAC to run "rescale-int service install-and-start".
-// Combined idempotent install + start with a single UAC prompt.
-func InstallAndStartServiceElevated() error {
-	cliPath, workDir, err := getCliExecutablePath()
-	if err != nil {
-		return fmt.Errorf("failed to locate CLI: %w", err)
-	}
-
-	return RunElevated(cliPath, "service install-and-start", workDir)
-}
-
 // UninstallServiceElevated triggers UAC to run "rescale-int service uninstall".
-// The elevated CLI process handles SCM removal and clears HKLM registry marker.
+// The elevated CLI process removes a legacy Windows service installed by older
+// Interlink versions and clears its HKLM registry marker.
 func UninstallServiceElevated() error {
 	cliPath, workDir, err := getCliExecutablePath()
 	if err != nil {

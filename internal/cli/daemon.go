@@ -141,15 +141,9 @@ Examples:
 					daemon.WriteStartupLog("Working directory: %s", wd)
 				}
 
-				// Detect Windows service context and delegate to service handler.
-				// When SCM starts `daemon run`, we need to register with SCM properly.
-				if isService, err := service.IsWindowsService(); err == nil && isService {
-					daemon.WriteStartupLog("Detected Windows service context, starting multi-user service")
-					svcLogger := logging.NewLogger("service", nil)
-					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
-				}
-
-				// Only blocks when service is RUNNING (not just installed)
+				// Refuse to start a second daemon for this user. The daemon
+				// always runs as a subprocess in the logged-in user's session
+				// so it inherits the user's drive mappings and credentials.
 				if blocked, reason := service.ShouldBlockSubprocess(); blocked {
 					daemon.WriteStartupLog("Blocking subprocess: %s", reason)
 					fmt.Println(reason)
@@ -207,7 +201,7 @@ Examples:
 			// Handle background mode (Unix only)
 			if background {
 				if runtime.GOOS == "windows" {
-					return fmt.Errorf("--background is not supported on Windows; use Windows Service instead")
+					return fmt.Errorf("--background is not supported on Windows; the tray app starts the daemon as a detached subprocess instead")
 				}
 
 				// If we're not the daemon child, fork and exit
@@ -270,14 +264,17 @@ Examples:
 				return fmt.Errorf("failed to create download directory: %w", err)
 			}
 
-			// Build daemon config
+			// Build daemon config. Workspace-folder options are read straight
+			// from daemon.conf (no CLI flags) — the GUI/tray persist config
+			// before spawning the daemon, so the file is authoritative.
 			daemonCfg := &daemon.Config{
-				PollInterval:  interval,
-				DownloadDir:   absDownloadDir,
-				UseJobNameDir: !useJobID,
-				MaxConcurrent: maxConcurrent,
-				StateFile:     stateFile,
-				LogFile:       logFile,
+				PollInterval:           interval,
+				DownloadDir:            absDownloadDir,
+				UseJobNameDir:          !useJobID,
+				MaxConcurrent:          maxConcurrent,
+				StateFile:              stateFile,
+				LogFile:                logFile,
+				FlattenFolderStructure: daemonConf.Daemon.FlattenFolderStructure,
 			}
 
 			// Build filter if any filter options specified
@@ -291,8 +288,9 @@ Examples:
 
 			// Simplified eligibility - mode is per-job, only tag and lookback configurable
 			daemonCfg.Eligibility = &daemon.EligibilityConfig{
-				AutoDownloadTag: daemonConf.Eligibility.AutoDownloadTag,
-				LookbackDays:    daemonConf.Daemon.LookbackDays,
+				AutoDownloadTag:         daemonConf.Eligibility.AutoDownloadTag,
+				LookbackDays:            daemonConf.Daemon.LookbackDays,
+				IncludeWorkspaceFolders: daemonConf.Daemon.IncludeWorkspaceFolders,
 			}
 
 			// Load app config
@@ -505,17 +503,6 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 			}
 
 			// IPC not responding — fall through to the state-file view.
-			{
-				// On Windows, check if service is running but IPC not responding
-				if runtime.GOOS == "windows" && service.IsInstalled() {
-					if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
-						fmt.Println("Note: Windows Service is running but IPC not responding.")
-						fmt.Println("The service may be initializing or have an IPC issue.")
-						fmt.Println()
-					}
-				}
-			}
-
 			// Check PID file
 			if pid := daemon.IsDaemonRunning(); pid != 0 {
 				fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
@@ -595,29 +582,12 @@ func newDaemonStopCmd() *cobra.Command {
 This sends a shutdown command via IPC to gracefully stop the daemon.
 The daemon must have been started with --ipc flag for this to work.
 
-On Windows, behavior depends on mode:
-  - Subprocess mode: Shuts down the daemon via IPC (like macOS/Linux)
-  - Service mode: Pauses your user daemon via IPC (service stop requires admin)`,
+This sends a shutdown command via IPC to gracefully stop the daemon
+running in your user session.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			client := ipc.NewClient()
 			client.SetTimeout(5 * time.Second)
-
-			// Windows subprocess uses IPC shutdown; service mode pauses user
-			if runtime.GOOS == "windows" && service.IsInstalled() {
-				if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
-					fmt.Println("Windows Service detected. Pausing your daemon...")
-					// Pass empty userID - server infers caller SID
-					if err := client.PauseUser(ctx, ""); err != nil {
-						return fmt.Errorf("failed to pause: %w", err)
-					}
-					fmt.Println("Your daemon paused. To stop the entire service:")
-					fmt.Println("  - Run as admin: rescale-int service stop")
-					fmt.Println("  - Or: net stop \"Rescale Interlink Auto-Download\"")
-					fmt.Println("  - Or: Services.msc → Rescale Interlink Auto-Download → Stop")
-					return nil
-				}
-			}
 
 			// Check if daemon is running (subprocess mode)
 			pid := daemon.IsDaemonRunning()
@@ -879,6 +849,8 @@ Shows all settings from daemon.conf, or defaults if the file doesn't exist.`,
 			fmt.Printf("use_job_name_dir = %t\n", cfg.Daemon.UseJobNameDir)
 			fmt.Printf("max_concurrent = %d\n", cfg.Daemon.MaxConcurrent)
 			fmt.Printf("lookback_days = %d\n", cfg.Daemon.LookbackDays)
+			fmt.Printf("include_workspace_folders = %t\n", cfg.Daemon.IncludeWorkspaceFolders)
+			fmt.Printf("flatten_folder_structure = %t\n", cfg.Daemon.FlattenFolderStructure)
 			fmt.Println()
 
 			fmt.Println("[filters]")
@@ -991,6 +963,8 @@ Available keys:
     use_job_name_dir         - true/false
     max_concurrent           - concurrent downloads (1-10)
     lookback_days            - days to look back (1-365)
+    include_workspace_folders - true/false (also scan workspace shared folders)
+    flatten_folder_structure  - true/false (don't mirror folder tree)
 
   [filters]
     name_prefix              - job name prefix filter
@@ -1064,6 +1038,10 @@ Examples:
 					return fmt.Errorf("lookback_days must be between 1 and 365")
 				}
 				cfg.Daemon.LookbackDays = v
+			case "include_workspace_folders":
+				cfg.Daemon.IncludeWorkspaceFolders = value == "true" || value == "1" || value == "yes"
+			case "flatten_folder_structure":
+				cfg.Daemon.FlattenFolderStructure = value == "true" || value == "1" || value == "yes"
 
 			// [filters] section
 			case "name_prefix":

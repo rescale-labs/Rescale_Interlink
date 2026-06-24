@@ -88,8 +88,6 @@ export function GetRunHistory():Promise<Array<wailsapp.RunHistoryEntryDTO>>;
 
 export function GetRunStatus():Promise<wailsapp.RunStatusDTO>;
 
-export function GetServiceStatus():Promise<wailsapp.ServiceStatusDTO>;
-
 export function GetTransferBatches():Promise<Array<wailsapp.TransferBatchDTO>>;
 
 export function GetTransferStats():Promise<wailsapp.TransferStatsDTO>;
@@ -97,8 +95,6 @@ export function GetTransferStats():Promise<wailsapp.TransferStatsDTO>;
 export function GetTransferTasks():Promise<Array<wailsapp.TransferTaskDTO>>;
 
 export function GetUngroupedTransferTasks():Promise<Array<wailsapp.TransferTaskDTO>>;
-
-export function InstallAndStartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
 
 export function ListLocalDirectory(arg1:string):Promise<wailsapp.FolderContentsDTO>;
 
@@ -137,6 +133,8 @@ export function PurgeTrashItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsa
 export function RecoverTrashItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
 
 export function ReloadDaemonConfig():Promise<wailsapp.ReloadConfigResultDTO>;
+
+export function RemoveLegacyServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
 
 export function ResetRun():Promise<void>;
 
@@ -192,15 +190,11 @@ export function StartFolderDownload(arg1:string,arg2:string,arg3:string,arg4:str
 
 export function StartFolderUpload(arg1:string,arg2:string,arg3:Array<string>):Promise<wailsapp.FolderUploadResultDTO>;
 
-export function StartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
-
 export function StartSingleJob(arg1:wailsapp.SingleJobInputDTO):Promise<string>;
 
 export function StartTransfers(arg1:Array<wailsapp.TransferRequestDTO>):Promise<void>;
 
 export function StopDaemon():Promise<void>;
-
-export function StopServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
 
 export function TestAutoDownloadConnection(arg1:string):Promise<void>;
 

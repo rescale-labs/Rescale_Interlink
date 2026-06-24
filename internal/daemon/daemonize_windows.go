@@ -76,6 +76,10 @@ func ReadPIDFile() int {
 	return pid
 }
 
+// stillActiveExitCode is the value GetExitCodeProcess returns while a process
+// is still running (STILL_ACTIVE / STATUS_PENDING = 259).
+const stillActiveExitCode = 259
+
 // IsDaemonRunning checks if a daemon process is already running.
 // Returns the PID if running, 0 if not.
 func IsDaemonRunning() int {
@@ -92,7 +96,25 @@ func IsDaemonRunning() int {
 		RemovePIDFile()
 		return 0
 	}
-	windows.CloseHandle(handle)
+	defer windows.CloseHandle(handle)
+
+	// OpenProcess succeeds even for a TERMINATED process as long as any handle
+	// to it remains open — and the GUI/tray that spawned the daemon keep its
+	// process handle open (they never Wait()). So a dead daemon's PID object
+	// lingers and OpenProcess would falsely report it alive, blocking restarts.
+	// Confirm liveness via the exit code: STILL_ACTIVE means running.
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(handle, &exitCode); err != nil {
+		// Can't determine state — be conservative and treat as not running so
+		// a new daemon can start; clean up the stale PID file.
+		RemovePIDFile()
+		return 0
+	}
+	if exitCode != stillActiveExitCode {
+		// Process has exited - clean up stale PID file.
+		RemovePIDFile()
+		return 0
+	}
 
 	return pid
 }

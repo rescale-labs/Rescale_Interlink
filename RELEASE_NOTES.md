@@ -1,5 +1,43 @@
 # Release Notes - Rescale Interlink
 
+## Unreleased
+
+### Auto-download can now include jobs in workspace shared folders
+
+Auto-download previously scanned only your own jobs. A new option —
+**Include jobs in workspace folders** (off by default) — additionally walks the
+workspace's "Shared" folder tree recursively and auto-downloads eligible
+completed jobs found there, including jobs owned by other users. Each job is
+still gated by the same per-job "Auto Download" custom field and tags.
+
+By default the folder structure is mirrored under your download folder (e.g. a
+job in `Shared/PoC_Demo` lands in `<download folder>/PoC_Demo/<job>`). A
+sub-option, **Flatten folder structure** (off by default), downloads everything
+directly into the download folder instead. Archived folders and jobs are
+skipped. Configure both in the GUI Setup tab or via
+`daemon config set include_workspace_folders true` /
+`daemon config set flatten_folder_structure true`.
+
+### Auto-download now always runs as the logged-in user (Windows service removed)
+
+The optional Windows **service** for auto-download has been removed. Auto-download
+now runs as a background subprocess in the logged-in user's session on every
+platform — started automatically by the system tray app at login (and on demand
+by the GUI).
+
+Why: the service ran as `LocalSystem`, which **cannot reach networked/mapped
+drives that require the user's credentials.** Drive letters such as `Z:\` are
+per-logon and invisible to SYSTEM, so service-mode downloads to them failed and
+the only workaround was configuring UNC paths with machine-account ACLs. Running
+as the logged-in user means mapped drives and credentials "just work," with no
+admin/UAC and no per-user-profile orchestration.
+
+Upgrade behavior: a Windows service left over from an older version is removed
+on a best-effort basis during install/upgrade (and on first tray launch). The
+rationale and a plan for reinstating a service — should headless,
+no-one-logged-in operation ever be required — are documented in
+[ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model).
+
 ## v4.9.8 - May 30, 2026
 
 ### File Browser Trash Bin, and deletes now go to Trash Bin (#30)

@@ -1,26 +1,38 @@
 //go:build !windows
 
-// Package service provides platform-specific service detection.
-// This file provides stub implementations for non-Windows platforms.
+// Package service provides platform-specific daemon detection.
+// This file provides implementations for non-Windows platforms.
 package service
 
-// ServiceDetectionResult describes the current service state.
-// On non-Windows platforms, this is a stub.
+import "github.com/rescale/rescale-int/internal/daemon"
+
+// ServiceDetectionResult describes the current daemon state.
 type ServiceDetectionResult struct {
-	ServiceMode   bool
 	SubprocessPID int
 	PipeInUse     bool
 	Error         string
 }
 
-// DetectDaemon is a stub on non-Windows platforms.
-// Windows service detection is not applicable.
+// DetectDaemon reports whether a user daemon subprocess is running.
 func DetectDaemon() ServiceDetectionResult {
-	return ServiceDetectionResult{}
+	result := ServiceDetectionResult{}
+	if pid := daemon.IsDaemonRunning(); pid != 0 {
+		result.SubprocessPID = pid
+	}
+	return result
 }
 
-// ShouldBlockSubprocess is a stub on non-Windows platforms.
-// Always returns (false, "") as Windows Service detection is not applicable.
+// ShouldBlockSubprocess returns true if a daemon subprocess is already
+// running for this user.
 func ShouldBlockSubprocess() (bool, string) {
+	if d := DetectDaemon(); d.SubprocessPID > 0 {
+		return true, "Daemon already running"
+	}
 	return false, ""
 }
+
+// IsLegacyServiceInstalled is always false on non-Windows platforms.
+func IsLegacyServiceInstalled() bool { return false }
+
+// UninstallLegacyService is a no-op on non-Windows platforms.
+func UninstallLegacyService() error { return nil }

@@ -1,10 +1,12 @@
+// Package service derives the shared auto-download state vocabulary used by
+// the GUI, Tray, and CLI. Auto-download runs as a subprocess in the logged-in
+// user's session (started by the tray/GUI); there is no Windows service.
 package service
 
 import (
 	"context"
 	"fmt"
 	"os/user"
-	"runtime"
 	"strings"
 	"time"
 
@@ -15,42 +17,10 @@ import (
 
 // PendingTimeout is how long the system can remain in a transient pending
 // state before Compute promotes it to Error with CodeTransientTimeout.
-// Per AUTO_DOWNLOAD_SPEC §5.5.
 const PendingTimeout = 10 * time.Second
 
-// InstallationState describes whether and how a service-level installation
-// exists. On macOS, Linux, and Windows portable builds there is no SCM
-// concept, so Installation collapses to InstallationSubprocessOnly.
-type InstallationState int
-
-const (
-	InstallationUnknown InstallationState = iota
-
-	// InstallationSubprocessOnly — no system service is possible on this
-	// platform (macOS, Linux, Windows without MSI). A user-session
-	// subprocess daemon is the only option.
-	InstallationSubprocessOnly
-
-	// InstallationNotInstalled — Windows MSI is present but the service has
-	// not been registered with SCM.
-	InstallationNotInstalled
-
-	// InstallationStopped — Windows SCM has the service registered but it is
-	// currently stopped.
-	InstallationStopped
-
-	// InstallationStarting — SCM reports StartPending.
-	InstallationStarting
-
-	// InstallationRunning — SCM reports the service is running.
-	InstallationRunning
-
-	// InstallationStopping — SCM reports StopPending.
-	InstallationStopping
-)
-
 // PerUserState describes auto-download's setup and liveness for the current
-// user. Orthogonal to InstallationState.
+// user's session daemon.
 type PerUserState int
 
 const (
@@ -59,53 +29,47 @@ const (
 	// PerUserNotConfigured — no daemon.conf, or daemon.conf has Enabled=false.
 	PerUserNotConfigured
 
-	// PerUserPending — daemon.conf is enabled, but the service has not yet
-	// registered this user. Promotes to PerUserError if the pending state
-	// persists beyond PendingTimeout.
+	// PerUserPending — daemon.conf is enabled, but the daemon subprocess has
+	// not yet come up. Promotes to PerUserError if pending persists beyond
+	// PendingTimeout.
 	PerUserPending
 
-	// PerUserRunning — this user's daemon is registered and polling.
+	// PerUserRunning — the user's daemon is running and polling.
 	PerUserRunning
 
-	// PerUserPaused — this user's daemon is registered but polling is paused.
+	// PerUserPaused — the user's daemon is running but polling is paused.
 	PerUserPaused
 
-	// PerUserError — this user's daemon is configured but failing.
+	// PerUserError — the user's daemon is configured but failing.
 	PerUserError
 )
 
-// Action identifies a user-facing action a surface can expose to the user
-// given the current State. Surfaces enable/disable buttons and menu items
-// from State.Presentation().AllowedActions.
+// Action identifies a user-facing action a surface can expose given the
+// current State. Surfaces enable/disable buttons and menu items from
+// State.Presentation().AllowedActions.
 type Action string
 
 const (
-	ActionInstallService   Action = "install_service"
-	ActionUninstallService Action = "uninstall_service"
-	ActionStartService     Action = "start_service"
-	ActionStopService      Action = "stop_service"
-	ActionConfigure        Action = "configure"
-	ActionOpenGUI          Action = "open_gui"
-	ActionPause            Action = "pause"
-	ActionResume           Action = "resume"
-	ActionTriggerScan      Action = "trigger_scan"
-	ActionRetry            Action = "retry"
-	ActionOpenLogs         Action = "open_logs"
+	ActionStartDaemon Action = "start_daemon"
+	ActionConfigure   Action = "configure"
+	ActionOpenGUI     Action = "open_gui"
+	ActionPause       Action = "pause"
+	ActionResume      Action = "resume"
+	ActionTriggerScan Action = "trigger_scan"
+	ActionRetry       Action = "retry"
+	ActionOpenLogs    Action = "open_logs"
 )
 
 // State is the composed view of the auto-download system's current condition.
 // GUI, Tray, and CLI all derive their rendering from State via Presentation.
 type State struct {
-	Installation InstallationState
-	PerUser      PerUserState
+	PerUser PerUserState
 
 	// PendingSince is the time at which PerUser first transitioned to
-	// PerUserPending. Used by Compute to enforce PendingTimeout. Zero value
-	// means "not in a pending state" (or "pending state started now").
+	// PerUserPending. Used by Compute to enforce PendingTimeout.
 	PendingSince time.Time
 
-	// Liveness / observability fields surfaced by IPC. All optional; any may
-	// be zero if IPC is unavailable or the field is not applicable.
+	// Liveness / observability fields surfaced by IPC. All optional.
 	LastError       string
 	LastErrorCode   ipc.ErrorCode
 	ActiveDownloads int
@@ -115,7 +79,6 @@ type State struct {
 	Version         string
 	Uptime          string
 	IPCConnected    bool
-	ServiceMode     bool
 }
 
 // Presentation is the canonical per-surface rendering of a State.
@@ -165,8 +128,7 @@ func (realConfigLoader) LoadUserDaemonConfig() (*config.DaemonConfig, error) {
 }
 
 // UserIdentity abstracts the platform-specific lookup of the current user's
-// identity. On Windows, SID is used to match the IPC user list. On
-// macOS/Linux only username is needed.
+// identity. On Windows, SID is used to match the IPC user list.
 type UserIdentity interface {
 	CurrentSID() string
 	CurrentUsername() string
@@ -176,9 +138,6 @@ type realUserIdentity struct{}
 
 func (realUserIdentity) CurrentSID() string {
 	if u, err := user.Current(); err == nil {
-		// On Windows, Uid is the SID. On Unix, it's a numeric UID; the IPC
-		// peer uses SO_PEERCRED so SID matching is unnecessary, but we
-		// return what we have for consistency.
 		return u.Uid
 	}
 	return ""
@@ -202,7 +161,6 @@ type Computer struct {
 }
 
 // DefaultComputer returns a Computer wired with real platform dependencies.
-// The caller supplies an ipc.Client (typical: one client per surface).
 func DefaultComputer(client IPCClient) *Computer {
 	return &Computer{
 		Clock:    realClock{},
@@ -214,16 +172,11 @@ func DefaultComputer(client IPCClient) *Computer {
 }
 
 // Compute builds the current State given an optional prior State. The prior
-// State carries PendingSince across refreshes so the 10s timeout can fire.
-// Fresh/one-shot callers (e.g., CLI daemon status) pass prior = State{} and
-// accept that pending renders as pending.
+// State carries PendingSince across refreshes so the timeout can fire.
 func (c *Computer) Compute(ctx context.Context, prior State) State {
 	now := c.Clock.Now()
 
-	s := State{
-		Installation: classifyInstallation(c.Detector.Detect(ctx)),
-		Version:      version.Version,
-	}
+	s := State{Version: version.Version}
 
 	// Per-user configuration state starts from daemon.conf.
 	configured := false
@@ -237,24 +190,17 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 	if !configured {
 		s.PerUser = PerUserNotConfigured
 	} else {
-		// User is configured; default to pending until IPC confirms registration.
+		// User is configured; default to pending until IPC confirms the
+		// daemon is up.
 		s.PerUser = PerUserPending
 	}
 
 	// Query IPC for liveness details and the caller's user entry.
 	if status, err := c.IPC.GetStatus(ctx); err == nil && status != nil {
 		s.IPCConnected = true
-		s.ServiceMode = status.ServiceMode
 		s.Uptime = status.Uptime
 		s.ActiveDownloads = status.ActiveDownloads
 		s.LastScanTime = status.LastScanTime
-
-		// Refine installation state: if IPC responds, a daemon is alive.
-		// For non-Windows, stay SubprocessOnly. For Windows, upgrade to
-		// InstallationRunning when ServiceMode is true.
-		if status.ServiceMode && runtime.GOOS == "windows" {
-			s.Installation = InstallationRunning
-		}
 
 		if users, err2 := c.IPC.GetUserList(ctx); err2 == nil {
 			matched := c.matchUser(users)
@@ -279,8 +225,6 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 				if matched.ErrorCode != "" {
 					s.LastErrorCode = matched.ErrorCode
 				} else if matched.LastError != "" {
-					// Backwards compatibility: older servers don't set
-					// ErrorCode. Reverse-lookup the canonical text.
 					s.LastErrorCode = ipc.CodeFromCanonicalText(matched.LastError)
 				}
 			}
@@ -317,8 +261,7 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 }
 
 // matchUser finds the IPC user entry corresponding to the current process
-// identity. Windows matches by SID primarily, with a username fallback;
-// Unix matches by username.
+// identity. Windows matches by SID primarily, with a username fallback.
 func (c *Computer) matchUser(users []ipc.UserStatus) *ipc.UserStatus {
 	if len(users) == 0 {
 		return nil
@@ -342,43 +285,8 @@ func (c *Computer) matchUser(users []ipc.UserStatus) *ipc.UserStatus {
 	return nil
 }
 
-// classifyInstallation maps a ServiceDetectionResult to an InstallationState.
-func classifyInstallation(d ServiceDetectionResult) InstallationState {
-	if runtime.GOOS != "windows" {
-		return InstallationSubprocessOnly
-	}
-	if d.ServiceMode {
-		return InstallationRunning
-	}
-	if d.SubprocessPID > 0 || d.PipeInUse {
-		// A subprocess daemon is running (or a stale pipe). For presentation
-		// purposes, treat Windows as SubprocessOnly when no SCM service is up.
-		return InstallationSubprocessOnly
-	}
-	if IsInstalled() {
-		if st, err := QueryStatus(); err == nil {
-			switch st {
-			case StatusRunning:
-				return InstallationRunning
-			case StatusStartPending:
-				return InstallationStarting
-			case StatusStopPending:
-				return InstallationStopping
-			case StatusPaused:
-				return InstallationStopped
-			case StatusStopped:
-				return InstallationStopped
-			}
-		}
-		return InstallationStopped
-	}
-	return InstallationNotInstalled
-}
-
 // matchesWindowsUsername compares two Windows username renderings
-// case-insensitively, ignoring any DOMAIN\ prefix. Moved from
-// internal/wailsapp/daemon_bindings_windows.go so it can be reused from
-// state.Compute regardless of platform.
+// case-insensitively, ignoring any DOMAIN\ prefix.
 func matchesWindowsUsername(a, b string) bool {
 	if a == "" || b == "" {
 		return false
@@ -397,52 +305,20 @@ func matchesWindowsUsername(a, b string) bool {
 func (s State) Presentation() Presentation {
 	p := Presentation{AllowedActions: []Action{ActionOpenLogs}}
 
-	switch s.Installation {
-	case InstallationNotInstalled:
-		p.GUILongForm = "Auto-download is not installed. Click Install Service to set it up."
-		p.TrayStatusLine = "Service not installed"
-		p.TrayTooltip = "Rescale Interlink: Service not installed"
-		p.AllowedActions = append(p.AllowedActions, ActionInstallService, ActionConfigure, ActionOpenGUI)
-		p.CLIStatusLine = "Status: service not installed"
-		return p
-	case InstallationStopped:
-		p.GUILongForm = "Windows Service installed but stopped. Click Start Service."
-		p.TrayStatusLine = "Service stopped"
-		p.TrayTooltip = "Rescale Interlink: Service installed but not running"
-		p.AllowedActions = append(p.AllowedActions, ActionStartService, ActionUninstallService, ActionOpenGUI)
-		p.CLIStatusLine = "Status: service stopped"
-		return p
-	case InstallationStarting:
-		p.GUILongForm = "Service starting..."
-		p.TrayStatusLine = "Service starting"
-		p.TrayTooltip = "Rescale Interlink: Service starting"
-		p.AllowedActions = append(p.AllowedActions, ActionOpenGUI)
-		p.CLIStatusLine = "Status: service starting"
-		return p
-	case InstallationStopping:
-		p.GUILongForm = "Service stopping..."
-		p.TrayStatusLine = "Service stopping"
-		p.TrayTooltip = "Rescale Interlink: Service stopping"
-		p.CLIStatusLine = "Status: service stopping"
-		return p
-	}
-
-	// Either InstallationRunning (Windows service mode) or
-	// InstallationSubprocessOnly (macOS/Linux, or Windows portable/subprocess).
 	switch s.PerUser {
 	case PerUserNotConfigured:
-		p.GUILongForm = "Service running. You are not set up for auto-download. Click Configure to enable for your account."
+		p.GUILongForm = "Auto-download is not set up. Click Configure to enable it for your account."
 		p.TrayStatusLine = "Setup required"
-		p.TrayTooltip = "Rescale Interlink: Configure to enable auto-download for this user"
+		p.TrayTooltip = "Rescale Interlink: Configure to enable auto-download"
 		p.AllowedActions = append(p.AllowedActions, ActionConfigure, ActionOpenGUI)
 		p.CLIStatusLine = "Status: not configured"
 		return p
 	case PerUserPending:
-		p.GUILongForm = "Activating... the service is picking up your settings. This usually takes a few seconds."
-		p.TrayStatusLine = "Activating..."
-		p.TrayTooltip = "Rescale Interlink: Activating — waiting for the service to register this user"
-		p.AllowedActions = append(p.AllowedActions, ActionOpenGUI, ActionRetry)
-		p.CLIStatusLine = "Status: activating"
+		p.GUILongForm = "Starting... auto-download is picking up your settings. This usually takes a few seconds."
+		p.TrayStatusLine = "Starting..."
+		p.TrayTooltip = "Rescale Interlink: Starting auto-download"
+		p.AllowedActions = append(p.AllowedActions, ActionStartDaemon, ActionOpenGUI, ActionRetry)
+		p.CLIStatusLine = "Status: starting"
 		return p
 	case PerUserRunning:
 		scan := "never"
@@ -478,7 +354,7 @@ func (s State) Presentation() Presentation {
 		p.GUILongForm = long
 		p.TrayStatusLine = "Error: " + truncate(text, 40)
 		p.TrayTooltip = "Rescale Interlink: " + text
-		p.AllowedActions = append(p.AllowedActions, ActionRetry, ActionConfigure, ActionOpenGUI)
+		p.AllowedActions = append(p.AllowedActions, ActionStartDaemon, ActionRetry, ActionConfigure, ActionOpenGUI)
 		p.CLIStatusLine = "Status: error — " + text
 		return p
 	}
@@ -487,6 +363,7 @@ func (s State) Presentation() Presentation {
 	p.GUILongForm = "Auto-download state unknown."
 	p.TrayStatusLine = "Unknown"
 	p.TrayTooltip = "Rescale Interlink: state unknown"
+	p.AllowedActions = append(p.AllowedActions, ActionOpenGUI)
 	p.CLIStatusLine = "Status: unknown"
 	return p
 }

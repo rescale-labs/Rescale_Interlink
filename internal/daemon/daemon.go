@@ -51,6 +51,11 @@ type Config struct {
 
 	// When set, jobs must pass eligibility checks to be downloaded
 	Eligibility *EligibilityConfig
+
+	// FlattenFolderStructure, when true, downloads workspace-folder jobs
+	// directly into DownloadDir instead of mirroring the folder tree. Only
+	// affects jobs that carry a workspace-folder path (CompletedJob.RelPath).
+	FlattenFolderStructure bool
 }
 
 // DefaultConfig returns a daemon configuration with sensible defaults.
@@ -590,8 +595,32 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Str("job_name", job.Name).
 		Msg("Downloading job")
 
-	// Check for custom download path from eligibility config
+	// Base directory. For jobs that live in a workspace folder, mirror the
+	// folder structure under DownloadDir unless flattening is enabled. The
+	// relative path is derived from API folder names, so validate it stays
+	// within DownloadDir before using it.
 	baseDir := d.cfg.DownloadDir
+	if job.RelPath != "" && !d.cfg.FlattenFolderStructure {
+		candidate := filepath.Clean(filepath.Join(d.cfg.DownloadDir, filepath.FromSlash(job.RelPath)))
+		realDownloadDir, err := filepath.EvalSymlinks(d.cfg.DownloadDir)
+		if err != nil {
+			realDownloadDir = filepath.Clean(d.cfg.DownloadDir)
+		}
+		realCandidate := resolvePathWithSymlinks(candidate)
+		if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
+			d.logger.Warn().
+				Str("job_id", job.ID).
+				Str("folder_path", job.RelPath).
+				Err(err).
+				Msg("Rejecting workspace folder path: escapes download directory; using download root")
+		} else {
+			baseDir = realCandidate
+		}
+	}
+
+	// Check for custom download path from eligibility config. A per-job
+	// "Auto Download Path" override takes precedence over folder mirroring and
+	// must resolve to within DownloadDir.
 	if d.cfg.Eligibility != nil {
 		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
 			// Custom path must resolve to within DownloadDir to prevent

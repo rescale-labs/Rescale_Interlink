@@ -847,6 +847,96 @@ func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]mo
 	return allJobs, nil
 }
 
+// GetMetaFolders retrieves the workspace folder roots
+// (GET /api/v3/meta/folders/). Used by workspace-folder auto-download to find
+// the sharedWithWorkspace root and its immediate children.
+func (c *Client) GetMetaFolders(ctx context.Context) (*models.MetaFolders, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v3/meta/folders/", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, fmt.Errorf("get meta folders failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var folders models.MetaFolders
+	if err := json.NewDecoder(resp.Body).Decode(&folders); err != nil {
+		return nil, fmt.Errorf("failed to decode meta folders: %w", err)
+	}
+
+	return &folders, nil
+}
+
+// ListJobsInFolder lists jobs in a specific workspace folder, ordered by
+// dateInserted (newest first), stopping when all jobs on a page predate the
+// cutoff. Mirrors ListJobsWithCutoff's early-termination but scopes to one
+// folder via the q=folder:<id> filter. Each returned job carries its Folder.
+//
+// f=0 means "all jobs in the folder" rather than the default "only my jobs"
+// (f=1). This is required for workspace-folder auto-download to see jobs owned
+// by other users that live in shared folders.
+func (c *Client) ListJobsInFolder(ctx context.Context, folderID string, cutoff time.Time) ([]models.JobResponse, error) {
+	var allJobs []models.JobResponse
+	nextURL := fmt.Sprintf("/api/v3/jobs/?q=folder:%s&f=0&sort=dateInserted&sort_dir=desc", neturl.QueryEscape(folderID))
+	pageCount := 0
+
+	for nextURL != "" {
+		pageCount++
+		if pageCount > constants.MaxPaginationPages {
+			log.Printf("Warning: Pagination limit reached after %d pages (%d jobs fetched) for folder %s", pageCount-1, len(allJobs), folderID)
+			break
+		}
+
+		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != nethttp.StatusOK {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("list jobs in folder %s failed: status %d: %s", folderID, resp.StatusCode, body)
+		}
+
+		var result struct {
+			Count   int                  `json:"count"`
+			Next    *string              `json:"next"`
+			Results []models.JobResponse `json:"results"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode jobs response: %w", err)
+		}
+		resp.Body.Close()
+
+		oldJobsOnPage := 0
+		for _, job := range result.Results {
+			if !cutoff.IsZero() && job.CreatedAt != "" {
+				if createdAt, err := time.Parse(time.RFC3339, job.CreatedAt); err == nil && createdAt.Before(cutoff) {
+					oldJobsOnPage++
+				}
+			}
+			allJobs = append(allJobs, job)
+		}
+
+		// Stop early only when every job on the page predates the cutoff.
+		if !cutoff.IsZero() && oldJobsOnPage == len(result.Results) && len(result.Results) > 0 {
+			break
+		}
+
+		if result.Next != nil && *result.Next != "" {
+			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+		} else {
+			nextURL = ""
+		}
+	}
+
+	return allJobs, nil
+}
+
 // GetCoreTypes retrieves available hardware core types from the Rescale API.
 // This is used for validation to ensure jobs use valid core types.
 // By default (includeInactive=false), only returns active core types.

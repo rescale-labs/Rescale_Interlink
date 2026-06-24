@@ -83,6 +83,26 @@ type RootFolders struct {
 	MyLibrary string `json:"myLibrary"`
 }
 
+// MetaFolders represents the workspace folder roots returned by
+// GET /api/v3/meta/folders/. Used by workspace-folder auto-download to
+// enumerate jobs across shared folders.
+type MetaFolders struct {
+	Home                MetaFolder `json:"home"`
+	SharedWithWorkspace MetaFolder `json:"sharedWithWorkspace"`
+	SharedWithMe        MetaFolder `json:"sharedWithMe"`
+}
+
+// MetaFolder is a node in the workspace folder tree. The top-level
+// sharedWithWorkspace node carries its immediate Children; deeper levels are
+// fetched on demand (the meta endpoint only returns one level of children).
+type MetaFolder struct {
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	WorkspaceID string       `json:"workspaceId"`
+	IsArchived  bool         `json:"isArchived"`
+	Children    []MetaFolder `json:"children,omitempty"`
+}
+
 // UserProfile represents a user's profile
 type UserProfile struct {
 	Email          string        `json:"email"`

@@ -40,17 +40,18 @@
       <ComponentGroupRef Id="StartMenuShortcuts" />
     </Feature>
 
-    <!-- v4.5.7: ServiceFeature removed - service installation is now handled post-install
-         via GUI/tray UAC elevation. This avoids silent failures in per-user MSI mode. -->
+    <!-- Auto-download no longer runs as a Windows service. It runs as a
+         subprocess in the logged-in user's session, started by the tray app.
+         No service is installed by this MSI. -->
 
     <Feature Id="TrayFeature" Title="System Tray Companion" Level="1">
       <ComponentGroupRef Id="TrayComponents" />
     </Feature>
 
     <!-- Custom actions -->
-    <!-- v4.5.7: Service install/start custom actions removed. Service is now installed
-         post-MSI via GUI/tray UAC elevation (elevation.InstallServiceElevated).
-         Only a best-effort uninstall action remains for the uninstall flow. -->
+    <!-- Best-effort removal of a Windows service installed by older Interlink
+         versions. Runs on uninstall/upgrade so a stale SYSTEM service (which
+         could not reach user-mapped network drives) does not linger. -->
     <CustomAction Id="UninstallService"
                   Directory="INSTALLFOLDER"
                   ExeCommand="[INSTALLFOLDER]rescale-int.exe service uninstall"
@@ -69,8 +70,7 @@
                   Return="ignore" />
 
     <!-- Install sequence -->
-    <!-- v4.5.7: Only best-effort service uninstall on removal + tray launch on install.
-         Service install/start actions removed (handled via GUI/tray UAC post-install). -->
+    <!-- Best-effort legacy service uninstall on removal + tray launch on install. -->
     <InstallExecuteSequence>
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="LaunchTray" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE" />
@@ -149,9 +149,8 @@
     </ComponentGroup>
   </Fragment>
 
-  <!-- v4.5.7: ServiceComponents fragment removed. Service installation is handled
-       post-MSI via GUI/tray UAC elevation. The HKLM ServiceInstalled registry marker
-       is set/cleared by the elevated CLI (service install/uninstall commands). -->
+  <!-- No ServiceComponents: auto-download runs as a user-session subprocess,
+       not a Windows service. -->
 
   <!-- Tray companion components -->
   <Fragment>

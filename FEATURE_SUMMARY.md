@@ -194,11 +194,11 @@ Background service for automatically downloading completed jobs.
 - `retry [--all | -j ID...]` — Mark failed jobs for retry on the next poll
 - `config show` / `config path` / `config edit` / `config set <key> <value>` / `config init` / `config validate` — Manage `daemon.conf`
 
-On Windows MSI installs, the daemon is fronted by the Windows Service. See the **Service Commands** section in [CLI_GUIDE.md](CLI_GUIDE.md) for `service install`, `start`, `stop`, `install-and-start`, and `status`.
+On Windows MSI installs, the system tray app auto-starts the daemon at login when auto-download is enabled. The daemon runs as the logged-in user (no Windows service, no admin), so it can reach the user's mapped/network drives. See [ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model) for the rationale.
 
 ### Platform Support
-- macOS/Linux: subprocess mode with Unix domain socket IPC
-- Windows: native service mode with named pipe IPC, multi-user support, UAC elevation
+- macOS/Linux: subprocess in the user's session, Unix domain socket IPC
+- Windows: subprocess in the logged-in user's session, named pipe IPC; tray auto-start at login
 
 ---
 

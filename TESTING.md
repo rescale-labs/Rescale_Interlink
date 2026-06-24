@@ -123,12 +123,12 @@ go test -v ./internal/watch/...
 | `internal/ratelimit` | 3 | Token bucket, registry, store |
 | `internal/ratelimit/coordinator` | 5 | Cross-process coordination |
 
-#### Background Service
+#### Background Auto-Download
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
 | `internal/daemon` | 4 | Daemon lifecycle, monitor, state, transfer tracker |
-| `internal/service` | 4 | Windows service, detection, install/uninstall flows |
+| `internal/service` | 1 | Shared State/Presentation vocabulary (Compute, per-user state) |
 | `internal/ipc` | 7 | Client/server, messages, pipe, security, user-scope catalog tests |
 
 #### Security & Crypto

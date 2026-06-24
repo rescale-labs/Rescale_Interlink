@@ -16,12 +16,7 @@ func RunElevated(executable string, args string, workingDir string) error {
 	return ErrNotSupported
 }
 
-// StartServiceElevated is not supported on non-Windows platforms.
-func StartServiceElevated() error {
-	return ErrNotSupported
-}
-
-// StopServiceElevated is not supported on non-Windows platforms.
-func StopServiceElevated() error {
+// UninstallServiceElevated is not supported on non-Windows platforms.
+func UninstallServiceElevated() error {
 	return ErrNotSupported
 }
