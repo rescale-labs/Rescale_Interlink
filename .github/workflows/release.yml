@@ -5,13 +5,29 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger: lets a maintainer build a release from ANY branch (pick the
+  # branch in the "Run workflow" dropdown). Produces the same draft release as a
+  # tag push, named by the version entered below. The git tag is only created
+  # when the draft release is published from the GitHub UI.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, vX.Y.Z or vX.Y.Z-rc.N. Names the artifacts and the draft release's tag."
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+env:
+  # On a tag push this is the tag; on a manual run it's the `version` input, so
+  # a run from a branch is not named after the branch. The input is free text,
+  # so run: steps read it from the environment, never through an expression.
+  RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
 jobs:
-  # Gate every tag build on the same checks that run locally. The frontend is
-  # built before the Go steps because main.go embeds frontend/dist, which is
+  # Gate every release build on the same checks that run locally. The frontend
+  # is built before the Go steps because main.go embeds frontend/dist, which is
   # not in the repository — without it the Go build cannot load package main.
   verify:
     name: Verify
@@ -24,10 +40,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6.0.2
 
-      # A mistagged push would otherwise build, sign and notarize artifacts whose
-      # self-reported version disagrees with the tag they are published under.
-      # Runs before any toolchain install so it costs seconds when it fails.
-      - name: Check tag against source version
+      # A mistagged push or a mistyped version would otherwise build, sign and
+      # notarize artifacts whose self-reported version disagrees with the name
+      # they are published under. Runs before any toolchain install so it costs
+      # seconds when it fails.
+      - name: Check release version against source version
         run: |
           set -euo pipefail
           version_file=internal/version/version.go
@@ -36,17 +53,24 @@ jobs:
             echo "could not read a Version string from $version_file" >&2
             exit 1
           fi
+          # A manual version is typed in, names files and reaches the installer
+          # build's command line, so only vX.Y.Z or vX.Y.Z-rc.N is accepted.
+          release_re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && ! [[ $RELEASE_VERSION =~ $release_re ]]; then
+            echo "the version input must be vX.Y.Z or vX.Y.Z-rc.N" >&2
+            exit 1
+          fi
           # Accept the version verbatim, or the version plus a non-empty
           # hyphenated suffix so release candidates and dev tags still build.
-          case "$GITHUB_REF_NAME" in
+          case "$RELEASE_VERSION" in
             "$version") ;;
             "$version"-?*) ;;
             *)
-              echo "tag $GITHUB_REF_NAME does not match $version_file $version" >&2
+              echo "release version $RELEASE_VERSION does not match $version_file $version" >&2
               exit 1
               ;;
           esac
-          echo "tag $GITHUB_REF_NAME matches $version_file $version"
+          echo "release version $RELEASE_VERSION matches $version_file $version"
 
       - name: Install Go 1.26.7
         run: |
@@ -110,7 +134,7 @@ jobs:
           node-version: '24.21.0'
 
       - name: Run build script
-        run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}"
+        run: ./build/build_dist.ps1 -ReleaseTag $env:RELEASE_VERSION
         shell: pwsh
 
       - name: Azure login
@@ -145,11 +169,11 @@ jobs:
           exclude-interactive-browser-credential: true
 
       - name: Zip portable release
-        run: Compress-Archive -Path ${{ github.workspace }}\_build\bin\* -DestinationPath rescale-interlink-${{ github.ref_name }}-win_amd64.zip
+        run: Compress-Archive -Path ${{ github.workspace }}\_build\bin\* -DestinationPath "rescale-interlink-${env:RELEASE_VERSION}-win_amd64.zip"
         shell: pwsh
 
       - name: Create installer
-        run: ./build/build_installer.ps1 -ReleaseTag "${{ github.ref_name }}" -MsiName "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
+        run: ./build/build_installer.ps1 -ReleaseTag $env:RELEASE_VERSION -MsiName "rescale-interlink-${env:RELEASE_VERSION}-win_amd64.msi"
         shell: pwsh
 
       # v4.5.8: Sign the MSI after creation. The MSI is what users double-click,
@@ -181,7 +205,7 @@ jobs:
       # shasum -a 256 -c accepts it; with CRLF it looks for "<file name>\r".
       - name: Write MSI and zip checksums
         run: |
-          $base = "rescale-interlink-${env:GITHUB_REF_NAME}-win_amd64"
+          $base = "rescale-interlink-${env:RELEASE_VERSION}-win_amd64"
           foreach ($file in "$base.msi", "$base.zip") {
             $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLower()
             "$hash  $file`n" | Out-File -FilePath "$file.sha256" -Encoding ASCII -NoNewline
@@ -191,10 +215,10 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: rescale-interlink-${{ github.ref_name }}-win_amd64
+          name: rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64
           path: |
-            rescale-interlink-${{ github.ref_name }}-win_amd64.*
-            !rescale-interlink-${{ github.ref_name }}-win_amd64.wixpdb
+            rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.*
+            !rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.wixpdb
 
   macos-build:
     needs: [verify]
@@ -247,7 +271,7 @@ jobs:
       - name: Build standalone CLI binary
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
-          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${GITHUB_REF_NAME} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${RELEASE_VERSION} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
@@ -257,7 +281,7 @@ jobs:
       - name: Build Wails GUI application
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
-          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${GITHUB_REF_NAME} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${RELEASE_VERSION} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
@@ -337,8 +361,8 @@ jobs:
       - name: Create distribution zip
         run: |
           # Create README
-          cat > README.txt << 'EOF'
-          Rescale Interlink ${{ github.ref_name }} - macOS (Apple Silicon)
+          cat > README.txt << EOF
+          Rescale Interlink ${RELEASE_VERSION} - macOS (Apple Silicon)
 
           CONTENTS
           ========
@@ -375,7 +399,7 @@ jobs:
           cp README.txt _dist/
           cd _dist
           ditto -c -k --sequesterRsrc --keepParent . \
-            ../rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip
+            "../rescale-interlink-${RELEASE_VERSION}-macos_aarch64.zip"
           cd ..
 
       - name: Write App Store Connect API key to disk
@@ -387,7 +411,7 @@ jobs:
       - name: Notarize
         run: |
           xcrun notarytool submit \
-            "rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip" \
+            "rescale-interlink-${RELEASE_VERSION}-macos_aarch64.zip" \
             --key "$RUNNER_TEMP/notary/AuthKey.p8" \
             --key-id "${{ secrets.ASC_KEY_ID }}" \
             --issuer "${{ secrets.ASC_ISSUER_ID }}" \
@@ -406,21 +430,21 @@ jobs:
           cp README.txt _dist/
           cd _dist
           ditto -c -k --sequesterRsrc --keepParent . \
-            ../rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip
+            "../rescale-interlink-${RELEASE_VERSION}-macos_aarch64.zip"
           cd ..
 
       - name: Generate checksum
         run: |
-          shasum -a 256 rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip > \
-            rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip.sha256
-          cat rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip.sha256
+          shasum -a 256 "rescale-interlink-${RELEASE_VERSION}-macos_aarch64.zip" > \
+            "rescale-interlink-${RELEASE_VERSION}-macos_aarch64.zip.sha256"
+          cat "rescale-interlink-${RELEASE_VERSION}-macos_aarch64.zip.sha256"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: rescale-interlink-${{ github.ref_name }}-macos_aarch64
+          name: rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64
           path: |
-            rescale-interlink-${{ github.ref_name }}-macos_aarch64.*
+            rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.*
 
       - name: Cleanup keychain
         if: always()
@@ -440,7 +464,7 @@ jobs:
         uses: actions/download-artifact@v8.0.1
         with:
           path: ./artifacts
-          pattern: rescale-interlink-${{ github.ref_name }}-* # Downloads only artifacts for this version
+          pattern: rescale-interlink-${{ env.RELEASE_VERSION }}-* # Downloads only artifacts for this version
           merge-multiple: true # Flattens the folder structure for easier uploading
 
       - name: Create GitHub Release
@@ -448,7 +472,13 @@ jobs:
         with:
           # This will automatically pick up all files in the directory
           files: ./artifacts/*
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_VERSION }}
+          # Publishing a manual run's draft creates the tag at the commit built;
+          # on a tag push the tag already exists and this is ignored.
+          target_commitish: ${{ github.sha }}
+          # A manual run's draft names the branch and commit it was built from;
+          # a tag push sends no body, so notes already on the release are kept.
+          body: ${{ github.event_name == 'workflow_dispatch' && format('Built by a manual run from `{0}` at {1}.', github.ref_name, github.sha) || '' }}
           draft: true
           prerelease: false
         env:
