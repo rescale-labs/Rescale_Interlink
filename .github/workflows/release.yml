@@ -5,10 +5,26 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger: lets a maintainer build a release from ANY branch (pick the
+  # branch in the "Run workflow" dropdown). Produces the same draft release as a
+  # tag push, named by the version entered below. The git tag is only created
+  # when the draft release is published from the GitHub UI.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v4.9.9). Names the artifacts and the draft release's tag."
+        required: true
+        type: string
 
 permissions:
   id-token: write # Required for OIDC
   contents: read
+
+env:
+  # On a tag push this is the tag (e.g. v4.9.9); on a manual run it's the
+  # `version` input. Used everywhere the version was previously github.ref_name
+  # so manual runs from a branch don't use the branch name as the version.
+  RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
 jobs:
   windows-build:
@@ -20,7 +36,7 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       - name: Run build script
-        run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}"
+        run: ./build/build_dist.ps1 -ReleaseTag "${{ env.RELEASE_VERSION }}"
         shell: pwsh
 
       - name: Azure login
@@ -53,11 +69,11 @@ jobs:
           exclude-interactive-browser-credential: true
 
       - name: Zip portable release
-        run: Compress-Archive -Path ${{ github.workspace }}\_build\bin\* -DestinationPath rescale-interlink-${{ github.ref_name }}-win_amd64.zip
+        run: Compress-Archive -Path ${{ github.workspace }}\_build\bin\* -DestinationPath rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.zip
         shell: pwsh
 
       - name: Create installer
-        run: ./build/build_installer.ps1 -ReleaseTag "${{ github.ref_name }}" -MsiName "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
+        run: ./build/build_installer.ps1 -ReleaseTag "${{ env.RELEASE_VERSION }}" -MsiName "rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.msi"
         shell: pwsh
 
       # v4.5.8: Sign the MSI after creation. The MSI is what users double-click,
@@ -87,7 +103,7 @@ jobs:
       # v4.5.8: Regenerate checksum after signing changes the MSI file hash
       - name: Regenerate MSI checksum after signing
         run: |
-          $msiPath = "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
+          $msiPath = "rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.msi"
           $hash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
           "$hash  $msiPath" | Out-File -FilePath "$msiPath.sha256" -Encoding ASCII
         shell: pwsh
@@ -95,10 +111,10 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: rescale-interlink-${{ github.ref_name }}-win_amd64
+          name: rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64
           path: |
-            rescale-interlink-${{ github.ref_name }}-win_amd64.*
-            !rescale-interlink-${{ github.ref_name }}-win_amd64.wixpdb
+            rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.*
+            !rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.wixpdb
 
   macos-build:
     runs-on: macos-14  # Apple Silicon (M1) runner
@@ -146,7 +162,7 @@ jobs:
       - name: Build Wails GUI application
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
-          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ env.RELEASE_VERSION }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
@@ -160,7 +176,7 @@ jobs:
       - name: Build standalone CLI binary
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
-          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ env.RELEASE_VERSION }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
@@ -237,7 +253,7 @@ jobs:
         run: |
           # Create README
           cat > README.txt << 'EOF'
-          Rescale Interlink ${{ github.ref_name }} - macOS (Apple Silicon)
+          Rescale Interlink ${{ env.RELEASE_VERSION }} - macOS (Apple Silicon)
 
           CONTENTS
           ========
@@ -271,7 +287,7 @@ jobs:
           cp README.txt _dist/
           cd _dist
           ditto -c -k --sequesterRsrc --keepParent . \
-            ../rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip
+            ../rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.zip
           cd ..
 
       - name: Write App Store Connect API key to disk
@@ -283,7 +299,7 @@ jobs:
       - name: Notarize
         run: |
           xcrun notarytool submit \
-            "rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip" \
+            "rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.zip" \
             --key "$RUNNER_TEMP/notary/AuthKey.p8" \
             --key-id "${{ secrets.ASC_KEY_ID }}" \
             --issuer "${{ secrets.ASC_ISSUER_ID }}" \
@@ -302,21 +318,21 @@ jobs:
           cp README.txt _dist/
           cd _dist
           ditto -c -k --sequesterRsrc --keepParent . \
-            ../rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip
+            ../rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.zip
           cd ..
 
       - name: Generate checksum
         run: |
-          shasum -a 256 rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip > \
-            rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip.sha256
-          cat rescale-interlink-${{ github.ref_name }}-macos_aarch64.zip.sha256
+          shasum -a 256 rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.zip > \
+            rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.zip.sha256
+          cat rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.zip.sha256
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: rescale-interlink-${{ github.ref_name }}-macos_aarch64
+          name: rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64
           path: |
-            rescale-interlink-${{ github.ref_name }}-macos_aarch64.*
+            rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.*
 
       - name: Cleanup keychain
         if: always()
@@ -336,7 +352,7 @@ jobs:
         uses: actions/download-artifact@v8.0.1
         with:
           path: ./artifacts
-          pattern: rescale-interlink-${{ github.ref_name }}-* # Downloads only artifacts for this version
+          pattern: rescale-interlink-${{ env.RELEASE_VERSION }}-* # Downloads only artifacts for this version
           merge-multiple: true # Flattens the folder structure for easier uploading
 
       - name: Create GitHub Release
@@ -344,7 +360,12 @@ jobs:
         with:
           # This will automatically pick up all files in the directory
           files: ./artifacts/*
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_VERSION }}
+          # The branch/commit this run was triggered on. On a manual
+          # (workflow_dispatch) run from a branch, this is the branch the tag
+          # will be created from when the draft is published. On a tag push the
+          # tag already exists, so this is a harmless no-op.
+          target_commitish: ${{ github.sha }}
           draft: true
           prerelease: false
         env:
