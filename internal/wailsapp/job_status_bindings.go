@@ -3,7 +3,6 @@ package wailsapp
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 )
@@ -88,14 +87,8 @@ func (a *App) ListJobStatuses() JobStatusListDTO {
 				for job := range workCh {
 					statuses, err := apiClient.GetJobStatuses(ctx, job.id)
 					if err != nil || len(statuses) == 0 {
-						log.Printf("[JobStatus] id=%s err=%v entries=%d", job.id, err, len(statuses))
 						continue
 					}
-					log.Printf("[JobStatus] id=%s entries=%d first={status=%q reason=%q} last={status=%q reason=%q}",
-						job.id, len(statuses),
-						statuses[0].Status, statuses[0].StatusReason,
-						statuses[len(statuses)-1].Status, statuses[len(statuses)-1].StatusReason,
-					)
 					// Search all entries for a non-empty statusReason —
 					// the ordering varies and most entries have no reason.
 					reason := ""

@@ -7,6 +7,7 @@ import {
 import clsx from 'clsx';
 import { ListJobStatuses } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
+import { useTabNavigation } from '../../App';
 
 type JobItem = wailsapp.JobStatusItemDTO;
 
@@ -36,6 +37,7 @@ function formatDate(iso: string): string {
 }
 
 export function JobStatusTab() {
+  const { activeTabName } = useTabNavigation();
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,9 +63,12 @@ export function JobStatusTab() {
     }
   }, []);
 
+  // Only run the initial fetch when the tab is active. With unmount={false} in
+  // App.tsx the component stays mounted, so mount alone is not a reliable trigger.
   useEffect(() => {
+    if (activeTabName !== 'Job Status') return;
     fetchJobs();
-  }, [fetchJobs]);
+  }, [activeTabName, fetchJobs]);
 
   const filtered = jobs.filter(j => {
     if (!filter) return true;
