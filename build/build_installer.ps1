@@ -43,8 +43,7 @@ Write-Host "Building MSI: $MsiPath"
 $VersionNum = $ReleaseTag -replace '^v', ''
 $WxsFile = "$InstallerDir\rescale-interlink.wxs"
 # v4.0.8: Add -bindpath to tell WiX where to find License.rtf
-# v4.0.8: Add Util extension for WixShellExec (LaunchTray custom action)
-$wixBuildCmd = "wix build `"$WxsFile`" -d BuildDir=`"$BinDir`" -d SourceDir=`"$BinDir`" -d Version=`"$VersionNum`" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -bindpath `"$InstallerDir`" -o `"$MsiPath`""
+$wixBuildCmd = "wix build `"$WxsFile`" -d BuildDir=`"$BinDir`" -d SourceDir=`"$BinDir`" -d Version=`"$VersionNum`" -ext WixToolset.UI.wixext -bindpath `"$InstallerDir`" -o `"$MsiPath`""
 
 Write-Host "Running: $wixBuildCmd"
 $wixBuildResult = cmd /c "$wixBuildCmd 2>&1"

@@ -4,15 +4,20 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // JobFilter defines criteria for filtering jobs.
@@ -799,58 +804,177 @@ func (m *Monitor) matchesFilter(job models.JobResponse) bool {
 	return true
 }
 
+// JobIDFileName is the marker file written inside each job's output directory
+// holding the Rescale job ID. It replaces the old "_<shortID>" directory-name
+// suffix so folders can be named purely after the (sanitized) job name while
+// the authoritative job ID is still recoverable from disk.
+const JobIDFileName = ".jobid"
+
 // ComputeOutputDir determines the output directory for a job.
-// When useJobName is true, the directory name includes both the sanitized job name
-// and the job ID (truncated) to avoid collisions from jobs with the same name.
+//
+// When useJobName is true, the directory is named after the sanitized job name
+// alone (no job-ID suffix); the job ID is recorded in a .jobid file inside the
+// directory (see WriteJobIDFile). When useJobName is false, or the job has no
+// name, the directory is "job_<jobID>".
+//
+// Collision handling: if the job-name directory already exists and belongs to a
+// DIFFERENT job (its .jobid does not match, or it has none), the job ID is
+// appended ("<name>_<jobID>") to keep the two jobs separate. A directory that
+// does not exist, or that already belongs to this job (matching .jobid), uses
+// the plain name — so a re-download of the same job reuses its folder.
+//
+// A folder already made for this job under a suffixed name is reused too:
+// "<name>_<jobID>", and "<name>_<first six characters of the ID>", the name
+// earlier versions gave every job folder, which has no .jobid. Otherwise an
+// upgrade would download each of those jobs a second time. Only a real folder
+// is reused, never a link, and never one whose .jobid names another job.
+// When every such name is taken, "<name>_<jobID>_2", "_3" and so on follow.
 func ComputeOutputDir(baseDir, jobID, jobName string, useJobName bool) string {
-	if useJobName && jobName != "" {
-		// Sanitize job name for use as directory name
-		safeName := sanitizeDirectoryName(jobName)
-		// Always include job ID suffix to avoid collisions from jobs with same name
-		// Use short ID (first 6 chars) for readability
-		shortID := jobID
-		if len(shortID) > 6 {
-			shortID = shortID[:6]
-		}
-		return filepath.Join(baseDir, fmt.Sprintf("%s_%s", safeName, shortID))
+	if !useJobName || jobName == "" {
+		return filepath.Join(baseDir, fmt.Sprintf("job_%s", jobID))
 	}
-	// Default: use job ID
-	return filepath.Join(baseDir, fmt.Sprintf("job_%s", jobID))
+
+	dir := filepath.Join(baseDir, sanitizeDirectoryName(jobName))
+	suffixed := dir + "_" + jobID
+	if holdsJob(dir, jobID, false) {
+		return dir
+	}
+	for _, prior := range []string{suffixed, dir + "_" + jobID[:min(len(jobID), 6)]} {
+		if holdsJob(prior, jobID, true) {
+			return prior
+		}
+	}
+	// Anything else at a name, a folder or not, belongs to something else. The
+	// loop ends: a folder holds only so many names.
+	if _, err := os.Lstat(dir); err != nil {
+		return dir
+	}
+	next := suffixed
+	for n := 2; ; n++ {
+		if _, err := os.Lstat(next); err != nil || holdsJob(next, jobID, false) {
+			return next
+		}
+		next = fmt.Sprintf("%s_%d", suffixed, n)
+	}
 }
 
-// sanitizeDirectoryName makes a job name safe for use as a directory name.
+// holdsJob reports whether dir is a real folder, not a link, whose .jobid
+// names jobID, or, when unmarked is set, one with no .jobid at all.
+func holdsJob(dir, jobID string, unmarked bool) bool {
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return false
+	}
+	if id, ok := readJobIDFile(dir); ok {
+		return id == jobID
+	}
+	_, err := os.Lstat(filepath.Join(dir, JobIDFileName))
+	return unmarked && os.IsNotExist(err)
+}
+
+// WriteJobIDFile writes the job ID into a .jobid marker file inside outputDir.
+// This records the authoritative job ID now that the directory name no longer
+// carries an ID suffix. Best-effort: returns an error the caller may log, but
+// a failure should not fail the download.
+//
+// The marker path gets the check every download target gets, so a link or
+// anything but a file there is refused and left alone, and the marker is
+// replaced by a rename, never written through.
+func WriteJobIDFile(outputDir, jobID string) error {
+	path := filepath.Join(outputDir, JobIDFileName)
+	if err := validation.ValidateDownloadTarget(path); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(outputDir, JobIDFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // No-op once the rename below succeeds.
+	if _, err := tmp.WriteString(jobID + "\n"); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
+// readJobIDFile reads the job ID from the .jobid marker inside dir. Returns the
+// trimmed ID and true on success, or ("", false) if the file is absent,
+// unreadable, not a file (a link is not followed, nor a FIFO opened), or holds
+// anything but a job ID.
+func readJobIDFile(dir string) (string, bool) {
+	path := filepath.Join(dir, JobIDFileName)
+	if validation.ValidateDownloadTarget(path) != nil {
+		return "", false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	// A job ID is a few characters; a longer file is not a marker.
+	data, err := io.ReadAll(io.LimitReader(f, maxJobIDFileSize+1))
+	if err != nil || len(data) > maxJobIDFileSize {
+		return "", false
+	}
+	id := strings.TrimSpace(string(data))
+	if validation.ValidateID(id) != nil {
+		return "", false
+	}
+	return id, true
+}
+
+const maxJobIDFileSize = 64
+
+// sanitizeDirectoryName makes a job name safe for use as a single directory
+// name on both Windows and Unix. It replaces path separators, the characters
+// Windows reserves (\ / : * ? " < > |) and control characters, trims leading
+// and trailing dots and spaces (Windows drops trailing ones, so the folder
+// would not match the name), bounds the length without splitting a character,
+// and prefixes a device name, so the result passes validation.ValidateFilename.
 func sanitizeDirectoryName(name string) string {
-	// Replace problematic characters
-	replacer := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-		"\n", "_",
-		"\r", "_",
-	)
-	sanitized := replacer.Replace(name)
-
-	// Trim leading/trailing whitespace and dots
-	sanitized = strings.TrimSpace(sanitized)
-	sanitized = strings.Trim(sanitized, ".")
-
-	// Limit length
-	if len(sanitized) > 100 {
-		sanitized = sanitized[:100]
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			// Control characters (includes \n, \r, \t) -> underscore.
+			b.WriteByte('_')
+		case strings.ContainsRune(`/\:*?"<>|`, r):
+			// Windows-reserved filename characters (also unsafe on Unix for /).
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
 	}
 
-	// Trim trailing whitespace after truncation
-	sanitized = strings.TrimSpace(sanitized)
+	// Dots and spaces are trimmed together, so no mix of them ("abc. .") is
+	// left at either end.
+	trim := func(s string) string {
+		return strings.TrimFunc(s, func(r rune) bool { return r == '.' || unicode.IsSpace(r) })
+	}
+	sanitized := trim(b.String())
 
-	// Fallback if empty
+	// Limit length, cutting at the start of a character.
+	if len(sanitized) > 100 {
+		n := 100
+		for n > 0 && !utf8.RuneStart(sanitized[n]) {
+			n--
+		}
+		sanitized = trim(sanitized[:n])
+	}
+
+	// Fallback if empty after sanitization.
 	if sanitized == "" {
-		sanitized = "unnamed_job"
+		return "unnamed_job"
+	}
+
+	// All ValidateFilename can still refuse is a Windows device name ("CON",
+	// "nul.txt", "CONIN$", COM with a superscript digit). Prefix with
+	// underscore to keep it recognizable.
+	if validation.ValidateFilename(sanitized) != nil {
+		sanitized = "_" + sanitized
 	}
 
 	return sanitized

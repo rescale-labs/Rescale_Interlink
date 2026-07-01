@@ -140,11 +140,6 @@ Write-Host $wixExtResult
 # Note: wix extension add may return non-zero if already installed - that's OK
 # Pin to 6.0.x to match WiX v6 — unpinned resolves to v7.0.0-rc.1 which is incompatible
 
-# v4.0.8: Install WiX Util extension for WixShellExec (LaunchTray custom action)
-Write-Host "Installing WiX Util extension..."
-$wixUtilExtResult = cmd /c "wix extension add WixToolset.Util.wixext/6.0.2 -g 2>&1"
-Write-Host $wixUtilExtResult
-
 Write-Host "WiX version:"
 # Use cmd /c wrapper to avoid PowerShell transcript console buffer conflicts
 $wixVersionResult = cmd /c "wix --version 2>&1"

@@ -6,7 +6,7 @@
 #   powershell -ExecutionPolicy Bypass -File build\windows_local_build\installer.ps1 -SkipBuild
 #
 # Mirrors the release MSI job (build\build_installer.ps1): it compiles
-# installer\rescale-interlink.wxs with the WiX UI + Util extensions, pointing
+# installer\rescale-interlink.wxs with the WiX UI extension, pointing
 # the binary source at the dist\bin produced by dist.ps1.
 #
 # WiX (and the .NET SDK it needs) are provisioned by install-deps.ps1 into the
@@ -54,9 +54,8 @@ if ($SkipBuild) {
 }
 
 # --- 3. Ensure WiX extensions (idempotent) -----------------------------------
-Write-Step "Ensuring WiX extensions (UI, Util)"
-& $wixExe extension add WixToolset.UI.wixext/$($Script:WixVersion) -g 2>&1   | Out-Host
-& $wixExe extension add WixToolset.Util.wixext/$($Script:WixVersion) -g 2>&1 | Out-Host
+Write-Step "Ensuring WiX UI extension"
+& $wixExe extension add WixToolset.UI.wixext/$($Script:WixVersion) -g 2>&1 | Out-Host
 Write-Ok ("WiX: " + (& $wixExe --version))
 
 # --- 4. Build the MSI --------------------------------------------------------
@@ -82,7 +81,6 @@ Write-Step "Building MSI -> $msiPath (ProductVersion $msiVersion)"
     -d SourceDir="$binDir" `
     -d Version="$msiVersion" `
     -ext WixToolset.UI.wixext `
-    -ext WixToolset.Util.wixext `
     -bindpath "$installerDir" `
     -o "$msiPath"
 if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }

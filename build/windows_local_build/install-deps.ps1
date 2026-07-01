@@ -143,9 +143,8 @@ if ((Test-Path $wixExe) -and -not $Force) {
     Write-Ok "WiX -> $wixExe"
 }
 
-Write-Step "Ensuring WiX extensions (UI, Util)"
-& $wixExe extension add WixToolset.UI.wixext/$($Script:WixVersion) -g 2>&1   | Out-Host
-& $wixExe extension add WixToolset.Util.wixext/$($Script:WixVersion) -g 2>&1 | Out-Host
+Write-Step "Ensuring WiX UI extension"
+& $wixExe extension add WixToolset.UI.wixext/$($Script:WixVersion) -g 2>&1 | Out-Host
 
 # --- Report ------------------------------------------------------------------
 Write-Step "Toolchain ready. Versions:"

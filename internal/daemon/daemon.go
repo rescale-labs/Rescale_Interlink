@@ -985,6 +985,21 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		return OutcomeOutputDirCreateFailed
 	}
 
+	// Record the job ID in a .jobid marker file. A directory named after the
+	// job name alone (no ID suffix) is mapped back to its Rescale job by this
+	// file. Best-effort: a write failure is logged but does not fail the
+	// download.
+	if err := WriteJobIDFile(outputDir, job.ID); err != nil {
+		d.logger.Warn().Err(err).Str("dir", outputDir).Msg("Failed to write .jobid marker file")
+	}
+	// In such a directory no job file may take the marker's place: the job
+	// would lose its folder, or hand it to the job the file names. Case is
+	// ignored, as Windows and macOS ignore it.
+	var marker string
+	if d.cfg.UseJobNameDir && job.Name != "" {
+		marker, _ = validation.DownloadPath(outputDir, JobIDFileName, "")
+	}
+
 	files, err := d.apiClient.ListJobFiles(ctx, job.ID)
 	if err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to list job files")
@@ -1076,6 +1091,8 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 			localPath, err := validation.DownloadPath(outputDir, f.Name, f.RelativePath)
 			if err != nil {
 				err = fmt.Errorf("invalid path from API for file %s: %w", validation.QuoteUnsafe(f.ID), err)
+			} else if marker != "" && strings.EqualFold(localPath, marker) {
+				err = fmt.Errorf("refusing to download to %s: a folder named after its job keeps the job's ID there", validation.Quote(localPath))
 			} else if err = os.MkdirAll(filepath.Dir(localPath), 0755); err == nil {
 				// Before the presence check: a link of the right size is not
 				// the file, and is refused and left alone.
