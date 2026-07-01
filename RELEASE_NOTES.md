@@ -227,6 +227,54 @@ owner filter when none is selected.
   beginning; it says the rerun can resume from the completed parts while the file is
   unchanged and the interrupted upload is less than seven days old.
 
+### Installer no longer launches anything; auto-download starts with the tray
+
+The MSI no longer starts any process at install time. Previously it launched
+the tray immediately after install. Now installation only lays down files and
+registers the tray to auto-start at logon (under `HKCU\...\Run`). The tray is
+what brings up auto-download: when it starts, it launches the auto-download
+daemon automatically if auto-download is enabled in `daemon.conf` — no manual
+"Start Auto-Download" click needed. Launch the tray or GUI immediately after
+install from the Start Menu or desktop shortcut.
+
+### Fixed: uninstall no longer requires killing rescale-int.exe by hand
+
+When uninstalling while Interlink was running, the uninstaller could close the
+GUI and tray but not the auto-download daemon (`rescale-int.exe`), which runs
+as a detached, windowless background process that Windows Restart Manager
+cannot signal. The uninstaller reported it could not stop that process and left
+the user to end it manually from Task Manager. The uninstaller now stops the
+daemon before removing files. A new `rescale-int daemon stop --force` flag also
+ends a daemon that does not answer over IPC or does not shut down in time, once
+it has checked that the process is your own Interlink daemon.
+
+### Fixed: only one of several eligible workspace-folder jobs would download
+
+When auto-download picked up multiple jobs from workspace shared folders that
+live on the same platform storage, typically only one job downloaded
+successfully and the rest failed with `403 Forbidden` and spun in a retry
+loop. Each job's files now download with credentials requested for their own
+location, as Azure downloads already did.
+
+### Auto-download coordinates multiple clients downloading the same workspace folders
+
+When several clients poll the same workspace shared folders, they could each
+start downloading the same job. Auto-download now uses two job tags to
+coordinate:
+
+- `autodownload:started` is applied when a client begins downloading a job. It
+  acts as a cross-client lock — other clients skip a job that is already
+  `started` by someone else. A client recognizes its own lock (tracked in local
+  state) so it can resume its own in-flight job after a restart.
+- `autodownload:done` is applied on successful completion (and the `started`
+  tag is removed). Eligibility treats a `done` job as already downloaded.
+
+When a download fails, or the daemon stops during one, the `started` tag is
+removed so the job becomes retryable by any client. The tag added after a
+successful download was renamed from `autoDownloaded:true` to
+`autodownload:done`; a job carrying the old tag still counts as downloaded, so
+upgrading does not download those jobs again.
+
 ### Auto-download can now include jobs in workspace shared folders
 
 Auto-download previously scanned only your own jobs. A new option —

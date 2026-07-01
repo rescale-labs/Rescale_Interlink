@@ -101,6 +101,15 @@ const (
 	// re-download after tag removal).
 	ReasonHasDownloadedTag SkipReasonCode = "has_downloaded_tag"
 
+	// ReasonHasStartedTag — job carries the "started" tag set by another
+	// client that is currently downloading it. We back off so two clients
+	// polling the same workspace folder do not download the same job. Silent.
+	// It clears when the other client applies the done tag or releases the
+	// started tag; a tag that client never releases stays until removed. The
+	// client that set the tag itself is allowed through (local-state
+	// override) so it can resume after a restart.
+	ReasonHasStartedTag SkipReasonCode = "has_started_tag"
+
 	// ReasonConditionalMissingTag — "Auto Download" is Conditional but the
 	// job lacks the configured auto-download tag.
 	ReasonConditionalMissingTag SkipReasonCode = "conditional_missing_tag"
@@ -111,13 +120,9 @@ const (
 	// rather than a value, which would otherwise spam WARN for every job.
 	ReasonFieldCheckAPIError SkipReasonCode = "field_check_api_error"
 
-	// ReasonDownloadedTagCheckAPIError — checking whether the "downloaded"
-	// tag is present failed. Logged.
+	// ReasonDownloadedTagCheckAPIError — fetching the job's tags, which the
+	// downloaded, started and conditional checks all read, failed. Logged.
 	ReasonDownloadedTagCheckAPIError SkipReasonCode = "downloaded_tag_check_api_error"
-
-	// ReasonConditionalTagCheckAPIError — checking the conditional
-	// auto-download tag failed. Logged.
-	ReasonConditionalTagCheckAPIError SkipReasonCode = "conditional_tag_check_api_error"
 
 	// ReasonCompletionTimeAPIError — fetching the job's completion time
 	// failed. Logged.
@@ -151,6 +156,7 @@ func (c SkipReasonCode) IsSilent() bool {
 		ReasonFieldCheckAPIError,
 		ReasonInRetryBackoff,
 		ReasonPendingTagApply,
+		ReasonHasStartedTag,
 		ReasonHasDownloadedTag:
 		return true
 	default:
@@ -235,20 +241,36 @@ func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligi
 		return CheckEligibilityResult{EligibleForDownload: true, Detail: "eligibility checking disabled"}
 	}
 
-	// Step 1: downloaded tag is authoritative over local state (Plan 3 F9).
-	hasDownloadedTag, err := m.apiClient.HasJobTag(ctx, jobID, config.DownloadedTag)
+	// Step 1: the job's tags, fetched once for every tag check below. The done
+	// tag is authoritative over local state (Plan 3 F9); the tag earlier
+	// versions applied counts as done, so their jobs are not downloaded again.
+	tags, err := m.apiClient.GetJobTags(ctx, jobID)
 	if err != nil {
-		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check downloaded tag")
-		detail := fmt.Sprintf("failed to check 'downloaded' tag: %v", err)
+		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check job tags")
+		detail := fmt.Sprintf("failed to check job tags: %v", err)
 		return CheckEligibilityResult{
 			Reason: SkipReason{Code: ReasonDownloadedTagCheckAPIError, Detail: detail},
 			Detail: detail,
 		}
 	}
-	if hasDownloadedTag {
-		detail := fmt.Sprintf("already has '%s' tag", config.DownloadedTag)
+	for _, done := range []string{config.DownloadedTag, config.LegacyDownloadedTag} {
+		if slices.Contains(tags, done) {
+			detail := fmt.Sprintf("already has '%s' tag", done)
+			return CheckEligibilityResult{
+				Reason: SkipReason{Code: ReasonHasDownloadedTag, Detail: detail},
+				Detail: detail,
+			}
+		}
+	}
+
+	// Step 1b: started tag is a cross-client lock. If another client set it,
+	// back off. If we set it ourselves (tracked in local state), fall through
+	// so a restarted client can resume its own in-flight job rather than
+	// deadlocking on its own lock.
+	if slices.Contains(tags, config.StartedTag) && !m.state.IsStartedByUs(jobID) {
+		detail := fmt.Sprintf("another client is downloading (has '%s' tag)", config.StartedTag)
 		return CheckEligibilityResult{
-			Reason: SkipReason{Code: ReasonHasDownloadedTag, Detail: detail},
+			Reason: SkipReason{Code: ReasonHasStartedTag, Detail: detail},
 			Detail: detail,
 		}
 	}
@@ -297,16 +319,7 @@ func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligi
 			m.logger.Debug().Str("job_id", jobID).Msg("Auto Download is Conditional but no tag configured - eligible")
 			return CheckEligibilityResult{EligibleForDownload: true, Detail: "Auto Download is Conditional (no tag configured)"}
 		}
-		hasTag, err := m.apiClient.HasJobTag(ctx, jobID, m.eligibility.AutoDownloadTag)
-		if err != nil {
-			m.logger.Warn().Err(err).Str("job_id", jobID).Str("tag", m.eligibility.AutoDownloadTag).Msg("Failed to check conditional tag")
-			detail := fmt.Sprintf("failed to check conditional tag %q: %v", m.eligibility.AutoDownloadTag, err)
-			return CheckEligibilityResult{
-				Reason: SkipReason{Code: ReasonConditionalTagCheckAPIError, Detail: detail},
-				Detail: detail,
-			}
-		}
-		if !hasTag {
+		if !slices.Contains(tags, m.eligibility.AutoDownloadTag) {
 			m.logger.Debug().Str("job_id", jobID).Str("required_tag", m.eligibility.AutoDownloadTag).Msg("Conditional but missing tag")
 			detail := fmt.Sprintf("Auto Download is Conditional but missing tag %q", m.eligibility.AutoDownloadTag)
 			return CheckEligibilityResult{

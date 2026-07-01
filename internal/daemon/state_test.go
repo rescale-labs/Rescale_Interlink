@@ -668,3 +668,50 @@ func TestState_PendingTagApply(t *testing.T) {
 			entry != nil && entry.PendingTagApply)
 	}
 }
+
+// A job this client has put the 'started' tag on is in flight, not downloaded:
+// it is not counted or listed as a download. Its ownership survives a prune
+// and a restart, so the client can still tell its own tag from another
+// client's, until ClearStarted forgets it or it ages out of the retention
+// window, beyond which no scan selects the job.
+func TestState_StartedByUs(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	s := NewState(stateFile)
+	s.SetRetention(37 * 24 * time.Hour)
+
+	if s.IsStartedByUs("job1") {
+		t.Error("IsStartedByUs(job1) = true before MarkStarted, want false")
+	}
+	s.MarkStarted("job1")
+	s.MarkStarted("old")
+	s.Started["old"] = time.Now().Add(-100 * 24 * time.Hour)
+	if err := s.Save(); err != nil { // prunes
+		t.Fatalf("Save: %v", err)
+	}
+	if !s.IsStartedByUs("job1") || s.IsStartedByUs("old") {
+		t.Errorf("after a prune IsStartedByUs = %v for job1, %v for a job past retention; want true, false",
+			s.IsStartedByUs("job1"), s.IsStartedByUs("old"))
+	}
+	if n, recent := s.GetDownloadedCount(), s.GetRecentDownloads(0); n != 0 || len(recent) != 0 {
+		t.Errorf("an in-flight job counts as downloaded: count %d, recent %v", n, recent)
+	}
+
+	reloaded := NewState(stateFile)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load after save: %v", err)
+	}
+	if !reloaded.IsStartedByUs("job1") {
+		t.Error("IsStartedByUs(job1) = false after a restart, want true")
+	}
+	if n := reloaded.GetDownloadedCount(); n != 0 {
+		t.Errorf("after a restart an in-flight job counts as downloaded: %d", n)
+	}
+
+	reloaded.ClearStarted("job1")
+	if reloaded.IsStartedByUs("job1") {
+		t.Error("IsStartedByUs(job1) = true after ClearStarted, want false")
+	}
+	if reloaded.IsStartedByUs("unknown") {
+		t.Error("IsStartedByUs(unknown) = true, want false")
+	}
+}

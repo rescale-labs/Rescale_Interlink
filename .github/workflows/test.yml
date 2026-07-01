@@ -143,11 +143,14 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           # package:test for the Windows-only tests of the retired service, the
-          # per-user pipes, the tray and drive-relative scan roots.
+          # per-user pipes, the tray and drive-relative scan roots, and the tests
+          # that reach the Windows process checks of 'daemon stop --force'.
           PLATFORM_TESTS: >-
             ./cmd/rescale-int-tray:TestFailedActionsReturn
             ./cmd/rescale-int-tray:TestStartRefusalsAreShown
             ./cmd/rescale-int-tray:TestStartupStartsOnlyWhenEnabledAndShowsWhy
+            ./internal/daemon:TestKillDaemon_EndsOnlyThisUsersDaemon
+            ./internal/daemon:TestProcessInfo_ReadsAnotherProcesssCommandLine
             ./internal/ipc:TestDialUserPipe_RefusesAnotherUsersPipe
             ./internal/ipc:TestEveryPath_UsesThePipeNamedForTheUser
             ./internal/ipc:TestListenUserPipe_DoesNotJoinAnExistingPipe

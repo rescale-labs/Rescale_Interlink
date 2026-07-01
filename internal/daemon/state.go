@@ -42,6 +42,13 @@ type State struct {
 	// Downloaded jobs keyed by job ID
 	Downloaded map[string]*DownloadedJob `json:"downloaded"`
 
+	// Started holds the jobs this client has put the 'started' tag on, keyed
+	// by job ID, with when. A job is in flight here, not downloaded, so it is
+	// kept apart from Downloaded and never counted as a download. Persisted
+	// so that after a restart the tag is still recognized as this client's,
+	// and pruned with the finished entries.
+	Started map[string]time.Time `json:"started,omitempty"`
+
 	// Version for state file format migration
 	Version string `json:"version"`
 
@@ -132,6 +139,7 @@ func (s *State) load(locked bool) error {
 		// Fully reinitialize — Unmarshal may have left partial state
 		s.Version = stateVersion
 		s.Downloaded = make(map[string]*DownloadedJob)
+		s.Started = nil
 		s.LastPoll = time.Time{}
 		return nil
 	}
@@ -310,6 +318,11 @@ func (s *State) pruneExpired() {
 			delete(s.Downloaded, id)
 		}
 	}
+	for id, at := range s.Started {
+		if at.Before(cutoff) {
+			delete(s.Started, id)
+		}
+	}
 }
 
 // MaxDownloadAttempts is how many failed attempts the daemon makes at a job's
@@ -396,6 +409,35 @@ func (s *State) PendingTagApplyJobs() []string {
 		}
 	}
 	return ids
+}
+
+// MarkStarted records that this client is putting the 'started' tag on the
+// job, so a restart mid-download can tell its own tag from another client's
+// (IsStartedByUs).
+func (s *State) MarkStarted(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Started == nil {
+		s.Started = make(map[string]time.Time)
+	}
+	s.Started[jobID] = time.Now()
+}
+
+// ClearStarted forgets the job's 'started' tag once it has been removed.
+func (s *State) ClearStarted(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Started, jobID)
+}
+
+// IsStartedByUs reports whether this client put the 'started' tag on the job.
+// Used by eligibility to let a client resume its own in-flight job rather than
+// treating its own tag as another client's.
+func (s *State) IsStartedByUs(jobID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.Started[jobID]
+	return ok
 }
 
 // timeNow stamps failed attempts. A variable so a test can stop it, as Windows'

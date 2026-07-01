@@ -735,6 +735,7 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 
 // newDaemonStopCmd creates the 'daemon stop' command.
 func newDaemonStopCmd() *cobra.Command {
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop a running daemon via IPC",
@@ -764,15 +765,31 @@ this to work.`,
 				}
 			}
 
+			// forceKill terminates the process directly. Used as the --force
+			// fallback whenever a graceful IPC shutdown is unavailable or times
+			// out: the daemon is a detached, windowless subprocess, so Windows
+			// Restart Manager cannot close it and its .exe stays locked during
+			// an uninstall.
+			forceKill := func() error {
+				if err := daemon.KillDaemon(pid, daemonStopWait); err != nil {
+					return fmt.Errorf("failed to force-stop daemon: %w", err)
+				}
+				fmt.Println("Daemon force-stopped.")
+				return nil
+			}
+
 			// First check if IPC is responding
 			if !client.IsServiceRunning(ctx) {
 				if pid != 0 {
 					fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
+					if force {
+						return forceKill()
+					}
 					fmt.Println("The daemon may not have been started with --ipc flag.")
 					if onWindows {
 						fmt.Println(service.EarlierDaemonRunning + ".")
 					} else {
-						fmt.Printf("Use 'kill %d' to forcefully terminate it.\n", pid)
+						fmt.Printf("Use 'rescale-int daemon stop --force' or 'kill %d' to terminate it.\n", pid)
 					}
 				}
 				return nil
@@ -785,6 +802,10 @@ this to work.`,
 			fmt.Printf("Stopping %s...\n", name)
 
 			if err := client.Shutdown(ctx); err != nil {
+				if force {
+					fmt.Printf("Graceful shutdown failed (%v); forcing termination...\n", err)
+					return forceKill()
+				}
 				return fmt.Errorf("failed to send shutdown command: %w", err)
 			}
 			if pid == 0 {
@@ -797,6 +818,10 @@ this to work.`,
 			// between still finds the old daemon.
 			for deadline := time.Now().Add(daemonStopWait); !daemonExited(pid); time.Sleep(250 * time.Millisecond) {
 				if time.Now().After(deadline) {
+					if force {
+						fmt.Println("Graceful shutdown timed out; forcing termination...")
+						return forceKill()
+					}
 					return reporting.UsageError(fmt.Errorf("%s did not exit within %s of the shutdown request; check with 'rescale-int daemon status'", name, daemonStopWait))
 				}
 			}
@@ -804,6 +829,8 @@ this to work.`,
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&force, "force", false, "Force-terminate the daemon if graceful IPC shutdown is unavailable or times out")
 
 	return cmd
 }
@@ -1045,6 +1072,7 @@ Shows all settings from daemon.conf, or defaults if the file doesn't exist.`,
 			fmt.Println()
 			fmt.Println("# Note: Mode (Enabled/Conditional/Disabled) is set per-job via the")
 			fmt.Println("# 'Auto Download' custom field in Rescale workspace, not here.")
+			fmt.Printf("# Started tag (hardcoded, cross-client lock): %s\n", config.StartedTag)
 			fmt.Printf("# Downloaded tag (hardcoded): %s\n", config.DownloadedTag)
 			fmt.Println()
 

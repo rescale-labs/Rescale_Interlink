@@ -1765,6 +1765,7 @@ Send a clean shutdown request to a running daemon over IPC.
 
 ```bash
 rescale-int daemon stop
+rescale-int daemon stop --force   # force-terminate if graceful shutdown is unavailable
 ```
 
 Requires the daemon to have been started with `--ipc`. After sending the shutdown
@@ -1779,6 +1780,9 @@ responding, it says so and tells you how to terminate the process by PID.
 
 The daemon runs in your own user session, so this stops your auto-download daemon
 directly — there is no separate Windows service to stop.
+
+**Flags:**
+- `--force` — if the daemon is not reachable over IPC (e.g. started without `--ipc`), refuses the shutdown or does not exit in time, terminate the process directly using its recorded PID, and wait for it to exit. The process is ended only if it is your own Interlink daemon; on macOS and Linux it is sent SIGTERM first, and SIGKILL if that has not ended it.
 
 #### daemon config
 
@@ -1823,7 +1827,8 @@ auto_download_tag = autoDownload
 
 # Note: Mode (Enabled/Conditional/Disabled) is set per-job via the
 # 'Auto Download' custom field in Rescale workspace, not here.
-# Downloaded tag (hardcoded): autoDownloaded:true
+# Started tag (hardcoded, cross-client lock): autodownload:started
+# Downloaded tag (hardcoded): autodownload:done
 
 [notifications]
 enabled = true
@@ -1981,7 +1986,8 @@ reaches them:
 3. It completed longer ago than `lookback_days` (7 by default). This window is
    measured on completion time. A job whose completion time cannot be read is
    *kept* rather than dropped, since it already passed the creation pre-filter.
-4. The job already carries the `autoDownloaded:true` tag. This is authoritative
+4. The job already carries the `autodownload:done` tag, or `autoDownloaded:true`,
+   which earlier versions applied. This is authoritative
    over the daemon's own record, so removing it on the platform lets the daemon
    consider the job again — provided the job still passes the filters above, and
    bearing in mind that files already on disk and verified are skipped rather
@@ -1991,7 +1997,7 @@ reaches them:
    which case `Conditional` is eligible with no tag at all.
 
 One more suppression sits ahead of all of these and is not a reason to
-investigate: a job whose files are already on disk but whose `autoDownloaded:true`
+investigate: a job whose files are already on disk but whose `autodownload:done`
 tag has not yet been accepted by the platform is skipped silently until that tag
 call succeeds, so the retry pass cannot download it twice.
 
@@ -2178,7 +2184,7 @@ rescale-int daemon list --limit 10
 **This is not permanent history.** A running daemon prunes its state on every
 save: a record whose download timestamp is older than `lookback_days` plus a
 30-day buffer is dropped, because no scan can select that job again. Records
-still waiting for their `autoDownloaded:true` tag to be applied are kept
+still waiting for their `autodownload:done` tag to be applied are kept
 regardless of age. With the default `lookback_days` of 7, `daemon list` therefore
 reaches back 37 days, not forever.
 

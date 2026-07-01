@@ -43,6 +43,14 @@ func lockExclusive(path string) (unlock func(), err error) {
 	return func() { f.Close() }, nil
 }
 
+// endProcess asks the process with this PID to end, or with force makes it.
+func endProcess(pid int, force bool) error {
+	if force {
+		return syscall.Kill(pid, syscall.SIGKILL)
+	}
+	return syscall.Kill(pid, syscall.SIGTERM)
+}
+
 // Daemonize re-executes the current process as a daemon.
 // This performs true Unix daemonization:
 // 1. Fork via exec (Go doesn't support fork directly)

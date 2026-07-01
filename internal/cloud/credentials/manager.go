@@ -22,7 +22,7 @@ import (
 //
 // Cached data:
 //   - Storage credentials: Refreshed every 10 minutes (5-minute safety margin before 15-min expiry)
-//   - Storage-specific credentials: Same refresh interval, keyed by storage ID (for cross-storage downloads)
+//   - Storage-specific credentials: Same refresh interval, keyed by storage ID and file path (for cross-storage downloads)
 //   - User profile: Refreshed every 5 minutes (rarely changes, but refresh to catch updates)
 //   - Root folders: Refreshed every 5 minutes (rarely changes)
 type Manager struct {
@@ -301,7 +301,7 @@ func (m *Manager) WarmAll(ctx context.Context) {
 
 // GetS3CredentialsForStorage returns cached S3 credentials for a specific storage, refreshing if needed.
 // This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
-// The cache is keyed by storage ID to share credentials across files from the same storage.
+// The cache is keyed by storage ID and file path, since the credentials are scoped to the path.
 // Thread-safe with same double-checked locking pattern as GetS3Credentials.
 //
 // If fileInfo is nil or has no storage info, falls back to GetS3Credentials for user's default storage.
@@ -316,10 +316,21 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 		return m.GetS3Credentials(ctx)
 	}
 
+	// The API returns per-file S3 STS credentials whose policy is scoped to the
+	// requested path prefix (GetStorageCredentials sends fileInfo.PathParts).
+	// Include the file path in the cache key so each path gets credentials
+	// scoped to it, rather than sharing a cached response whose policy only
+	// grants access to a different file's prefix — which would surface as a
+	// 403 on HeadObject/GetObject. Mirrors GetAzureCredentialsForStorage.
+	cacheKey := storageID
+	if fileInfo.PathParts != nil && fileInfo.PathParts.Path != "" {
+		cacheKey = storageID + ":" + fileInfo.PathParts.Path
+	}
+
 	// Fast path: check if refresh is needed (read lock only)
 	m.mu.RLock()
-	lastRefresh := m.storageCredsRefresh[storageID]
-	creds := m.storageS3Creds[storageID]
+	lastRefresh := m.storageCredsRefresh[cacheKey]
+	creds := m.storageS3Creds[cacheKey]
 	needsRefresh := time.Since(lastRefresh) > constants.GlobalCredentialRefreshInterval || creds == nil
 	if !needsRefresh {
 		m.mu.RUnlock()
@@ -335,8 +346,8 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 	defer m.mu.Unlock()
 
 	// Double-check: another goroutine might have refreshed while we waited
-	lastRefresh = m.storageCredsRefresh[storageID]
-	creds = m.storageS3Creds[storageID]
+	lastRefresh = m.storageCredsRefresh[cacheKey]
+	creds = m.storageS3Creds[cacheKey]
 	if time.Since(lastRefresh) <= constants.GlobalCredentialRefreshInterval && creds != nil {
 		return creds, nil
 	}
@@ -347,17 +358,17 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 		return nil, fmt.Errorf("failed to refresh storage-specific credentials: %w", err)
 	}
 
-	// Update cached credentials for this storage
-	m.storageS3Creds[storageID] = s3Creds
-	m.storageAzureCreds[storageID] = azureCreds
-	m.storageCredsRefresh[storageID] = time.Now()
+	// Update cached credentials for this storage+path
+	m.storageS3Creds[cacheKey] = s3Creds
+	m.storageAzureCreds[cacheKey] = azureCreds
+	m.storageCredsRefresh[cacheKey] = time.Now()
 
 	return s3Creds, nil
 }
 
 // GetAzureCredentialsForStorage returns cached Azure credentials for a specific storage, refreshing if needed.
 // This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
-// The cache is keyed by storage ID to share credentials across files from the same storage.
+// The cache is keyed by storage ID and file path, since the SAS token is scoped to the path.
 // Thread-safe with same double-checked locking pattern as GetAzureCredentials.
 //
 // If fileInfo is nil or has no storage info, falls back to GetAzureCredentials for user's default storage.

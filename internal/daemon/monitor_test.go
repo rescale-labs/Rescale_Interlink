@@ -320,12 +320,12 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 		// ReasonHasDownloadedTag is the common case on every poll, so it is
 		// silent to avoid log noise; ReasonPendingTagApply is a transient
 		// retry state.
-		ReasonHasDownloadedTag:            true,
-		ReasonPendingTagApply:             true,
-		ReasonConditionalMissingTag:       false,
-		ReasonDownloadedTagCheckAPIError:  false,
-		ReasonConditionalTagCheckAPIError: false,
-		ReasonCompletionTimeAPIError:      false,
+		ReasonHasDownloadedTag:           true,
+		ReasonPendingTagApply:            true,
+		ReasonHasStartedTag:              true,
+		ReasonConditionalMissingTag:      false,
+		ReasonDownloadedTagCheckAPIError: false,
+		ReasonCompletionTimeAPIError:     false,
 	}
 	for code, want := range silent {
 		if got := code.IsSilent(); got != want {

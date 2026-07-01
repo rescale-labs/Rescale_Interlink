@@ -131,12 +131,18 @@ func onReady() {
 // reach the user's mapped/network drives. Start's checks apply, and a refusal
 // shows as Start's do; a daemon already running is left alone.
 func (a *trayApp) startupTasks() {
-	if daemonCfg, err := config.LoadDaemonConfig(""); err == nil && !daemonCfg.Daemon.Enabled {
+	daemonCfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		// startService reports it; the log keeps the cause.
+		daemon.WriteStartupLog("Tray startup: could not load daemon.conf (%v)", err)
+	} else if !daemonCfg.Daemon.Enabled {
+		daemon.WriteStartupLog("Tray startup: auto-download disabled in daemon.conf — not starting daemon")
 		return
 	}
 
 	// Don't start a second daemon if one is already running for this user.
-	if blocked, _ := service.ShouldBlockSubprocess(); blocked {
+	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
+		daemon.WriteStartupLog("Tray startup: not starting daemon: %s", reason)
 		return
 	}
 

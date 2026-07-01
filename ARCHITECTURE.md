@@ -721,7 +721,17 @@ the workspace's `sharedWithWorkspace` folder tree:
    folder path relative to the shared root.
 
 Each candidate then passes the same per-job eligibility gate (the "Auto
-Download" custom field + tags). When downloading, the job's relative folder
+Download" custom field + tags). Because workspace folders can be polled by
+several clients at once, eligibility also honors two coordination tags: a job
+carrying `autodownload:done` (or `autoDownloaded:true`, which earlier versions
+applied) is treated as already downloaded, and one carrying
+`autodownload:started` (set by another client) is skipped as in-progress. The
+downloading client sets `autodownload:started` before fetching files, removes it
+when the attempt fails or the daemon stops (so the job is retryable by any
+client), and replaces it with `autodownload:done` on success. A client tracks
+its own `started` jobs in local state, apart from its downloaded jobs, so it can
+resume them after a restart rather than treating its own lock as another
+client's. When downloading, the job's relative folder
 path is mirrored under the download folder (e.g. `Shared/ExampleFolder/Subfolder`
 → `<download>/ExampleFolder/Subfolder/<job dir>`), unless
 `flatten_folder_structure` is set, in which case all jobs download into the root.
@@ -850,7 +860,7 @@ A job reaches the eligibility check only after `Monitor.FindCompletedJobs` has a
 
 What is then downloaded is decided per job by `Monitor.CheckEligibility`, tag first (`internal/daemon/monitor.go`):
 
-1. The downloaded-marker tag is authoritative and checked first — it is the common answer on every poll, and revoking it in the Rescale web UI is what triggers a re-download on the next one. Its literal value is `autoDownloaded:true` (`config.DownloadedTag`), which is the name it appears under in the web UI.
+1. The downloaded-marker tag is authoritative and checked first — it is the common answer on every poll, and revoking it in the Rescale web UI is what triggers a re-download on the next one. Its literal value is `autodownload:done` (`config.DownloadedTag`), which is the name it appears under in the web UI; `autoDownloaded:true` (`config.LegacyDownloadedTag`), which earlier versions applied, counts as well. The job's tags are read once, for this check, the `autodownload:started` check and the conditional tag below.
 2. The job's **Auto Download** custom field: disabled or empty is a silent skip, and so is an unrecognised value. Field-lookup failures are silent too, because a workspace without that field would otherwise log a line per job per poll.
 3. **Enabled** is eligible outright.
 4. **Conditional** with no conditional tag configured is also eligible; with one configured (`AutoDownloadTag`, default `autoDownload`), that tag decides.

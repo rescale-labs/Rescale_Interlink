@@ -7,7 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/reporting"
@@ -122,4 +125,58 @@ func IsDaemonRunning() int {
 		return 0
 	}
 	return pid
+}
+
+// KillDaemon ends the daemon process with this PID, for when 'daemon stop'
+// cannot shut it down over IPC, and returns once the system says it has exited.
+// A PID file can outlive its daemon and the PID be reused, so before each
+// signal it checks that the PID names this user's process, started with
+// 'daemon run' from the executable a daemon runs as: the CLI, or on macOS and
+// Linux the GUI, which runs the daemon itself. It ends nothing else. It asks
+// first (SIGTERM, which the daemon handles as a shutdown) and forces the end
+// (SIGKILL) only if the process is still there after wait; on Windows both are
+// TerminateProcess. A variable so a test can stand in for it.
+var KillDaemon = killDaemon
+
+func killDaemon(pid int, wait time.Duration) error {
+	if pid <= 0 { // to kill(2), these name groups of processes
+		return reporting.UsageError(fmt.Errorf("PID %d names no daemon process", pid))
+	}
+	exited := func() bool { gone, _ := state.ProcessExited(pid); return gone }
+	for _, force := range []bool{false, true} {
+		if exited() {
+			return nil
+		}
+		if err := checkDaemonProcess(pid); err != nil {
+			return reporting.UsageError(err)
+		}
+		if err := endProcess(pid, force); err != nil {
+			return fmt.Errorf("cannot end PID %d: %w", pid, err)
+		}
+		for deadline := time.Now().Add(wait); !exited() && time.Now().Before(deadline); {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if exited() {
+		return nil
+	}
+	return reporting.UsageError(fmt.Errorf("PID %d had not exited %s after it was forced to end", pid, wait))
+}
+
+// checkDaemonProcess refuses a PID that does not name this user's daemon. The
+// arguments are not quoted back, since they can carry an API key.
+func checkDaemonProcess(pid int) error {
+	image, args, err := processInfo(pid)
+	if err != nil {
+		return fmt.Errorf("cannot tell whether PID %d is this user's daemon, so it was not ended: %w", pid, err)
+	}
+	if name := strings.TrimSuffix(strings.ToLower(filepath.Base(image)), ".exe"); name != "rescale-int" && (name != "rescale-int-gui" || runtime.GOOS == "windows") {
+		return fmt.Errorf("PID %d is not an Interlink daemon, so it was not ended: it runs %s", pid, image)
+	}
+	for i := 1; i < len(args); i++ {
+		if args[i-1] == "daemon" && args[i] == "run" {
+			return nil
+		}
+	}
+	return fmt.Errorf("PID %d is not an Interlink daemon, so it was not ended: it runs %s, not 'daemon run'", pid, image)
 }

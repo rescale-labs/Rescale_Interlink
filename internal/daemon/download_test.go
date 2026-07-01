@@ -29,7 +29,8 @@ import (
 
 // fakeJobFilesServer serves just enough of the Rescale API for downloadJob:
 // the job file listing, plus a permissive handler for everything else so
-// tag/custom-field calls do not hang. tagCalls counts AddJobTag requests.
+// tag/custom-field calls do not hang. tagCalls counts AddJobTag requests for
+// the downloaded tag.
 func fakeJobFilesServer(t *testing.T, jobID string, files []models.JobFile, tagCalls *int) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +43,8 @@ func fakeJobFilesServer(t *testing.T, jobID string, files []models.JobFile, tagC
 				"results": files,
 			})
 		case strings.HasSuffix(r.URL.Path, fmt.Sprintf("/jobs/%s/tags/", jobID)) && r.Method == http.MethodPost:
-			if tagCalls != nil {
+			var tag api.JobTag
+			if json.NewDecoder(r.Body).Decode(&tag) == nil && tag.Name == config.DownloadedTag && tagCalls != nil {
 				*tagCalls++
 			}
 			w.WriteHeader(http.StatusCreated)

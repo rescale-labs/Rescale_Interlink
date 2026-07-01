@@ -30,8 +30,20 @@ const (
 	// AutoDownloadValueDisabled means never auto-download this job.
 	AutoDownloadValueDisabled = "Disabled"
 
-	// DownloadedTag is added to jobs after successful download to prevent re-downloading.
-	DownloadedTag = "autoDownloaded:true"
+	// StartedTag is added to a job when a client begins downloading it. It
+	// acts as a cross-client lock so other clients polling the same workspace
+	// folder do not start a duplicate download. Removed on completion (replaced
+	// by DownloadedTag) or on error (so the job becomes retryable again).
+	StartedTag = "autodownload:started"
+
+	// DownloadedTag is added to jobs after successful download to prevent
+	// re-downloading. Presence of this tag means a client finished the job.
+	DownloadedTag = "autodownload:done"
+
+	// LegacyDownloadedTag is the tag earlier versions added instead of
+	// DownloadedTag. It still counts as done, so upgrading does not download
+	// every job in the lookback window again.
+	LegacyDownloadedTag = "autoDownloaded:true"
 
 	// AutoDownloadPathFieldName is the optional custom field for per-job download path override.
 	AutoDownloadPathFieldName = "Auto Download Path"

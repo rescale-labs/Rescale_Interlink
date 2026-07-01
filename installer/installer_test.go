@@ -10,7 +10,7 @@ import (
 )
 
 // TestWixFile checks the WiX configuration's elements, not its comments: it
-// installs the GUI, the CLI and the tray, upgrades in place, launches the tray
+// installs the GUI, the CLI and the tray, upgrades in place, stops the daemon
 // and removes an earlier version's service on uninstall, and it neither
 // installs nor starts a service. The script that builds the MSI must be there.
 func TestWixFile(t *testing.T) {
@@ -51,7 +51,7 @@ func TestWixFile(t *testing.T) {
 		"Package", "MajorUpgrade", "Feature#MainFeature", "Feature#TrayFeature",
 		"ComponentGroup#MainComponents", "ComponentGroup#TrayComponents",
 		"File#RescaleIntExe", "File#RescaleIntGuiExe", "File#TrayExe",
-		"CustomAction#UninstallService", "CustomAction#LaunchTray",
+		"CustomAction#UninstallService", "CustomAction#StopDaemon",
 	} {
 		if !found[want] {
 			t.Errorf("WiX file lacks %s", want)
