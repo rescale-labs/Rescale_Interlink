@@ -59,17 +59,22 @@
                   Impersonate="no"
                   Return="ignore" />
 
-    <!-- Stop the auto-download daemon before removing files. The daemon is a
-         detached, windowless subprocess, so Windows Restart Manager cannot
-         close it and its rescale-int.exe would stay locked, forcing the user
-         to kill it manually from Task Manager. The forced daemon-stop command
-         shuts it down gracefully via IPC and force-terminates it if that
-         fails. Impersonate=yes so the action runs in the user's session where
-         the daemon lives (perUser install). -->
-    <CustomAction Id="StopDaemon"
+    <!-- Terminate all Interlink processes before removing files. This must run
+         BEFORE InstallValidate: that is where MSI's Restart Manager scans for
+         in-use files, and any of the three executables being locked (the GUI
+         and tray have windows; the daemon rescale-int.exe is a detached,
+         windowless subprocess Restart Manager cannot close) makes uninstall
+         prompt to "close these programs" and hang.
+
+         An IMMEDIATE action is used because deferred actions cannot run before
+         InstallValidate. Impersonate=yes runs it in the logged-in user's
+         session where these per-user processes live. taskkill /F force-closes
+         them (uninstall is destructive anyway); "& exit /b 0" makes a
+         "process not found" a success so an already-closed app is not an error. -->
+    <CustomAction Id="StopInterlinkProcesses"
                   Directory="INSTALLFOLDER"
-                  ExeCommand="[INSTALLFOLDER]rescale-int.exe daemon stop --force"
-                  Execute="deferred"
+                  ExeCommand="[SystemFolder]cmd.exe /c &quot;taskkill /F /IM rescale-int-gui.exe /IM rescale-int-tray.exe /IM rescale-int.exe &amp; exit /b 0&quot;"
+                  Execute="immediate"
                   Impersonate="yes"
                   Return="ignore" />
 
@@ -80,11 +85,13 @@
          GUI immediately from the Start Menu / desktop shortcuts. -->
 
     <!-- Install sequence -->
-    <!-- Best-effort daemon stop + legacy service uninstall on removal. No
-         process is started on install. -->
+    <!-- On removal: kill running processes before the in-use scan, then clean
+         up any legacy Windows service. No process is started on install. -->
     <InstallExecuteSequence>
-      <Custom Action="StopDaemon" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
-      <Custom Action="UninstallService" After="StopDaemon" Condition="REMOVE~=&quot;ALL&quot;" />
+      <!-- Kill running Interlink processes before the in-use file scan
+           (InstallValidate) so uninstall never prompts or hangs on a locked exe. -->
+      <Custom Action="StopInterlinkProcesses" Before="InstallValidate" Condition="REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <!-- UI reference - WiX v4 uses ui:WixUI from UI extension -->

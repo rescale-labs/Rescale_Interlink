@@ -915,7 +915,7 @@ The daemon automatically loads settings from the config file. CLI flags override
 - `--exclude stringArray` - Exclude jobs with names starting with these prefixes
 - `--max-concurrent int` - Maximum concurrent file downloads per job (default 5)
 - `--state-file string` - Path to daemon state file
-- `--use-job-id` - Use job ID instead of job name for output directory names
+- `--use-job-id` - Name output directories `job_<id>` instead of the (sanitized) job name. When using the job name (the default), the job ID is written to a `.jobid` file inside each job folder; if a same-named folder already exists for a different job, the job ID is appended (`<name>_<id>`)
 - `--once` - Run once and exit (useful for cron jobs)
 - `--log-file string` - Path to log file (empty = stdout)
 - `--background` - Run in background mode (Unix only)
@@ -1039,7 +1039,7 @@ rescale-int daemon config set <key> <value>
 - `enabled` - Enable/disable daemon (true/false)
 - `download_folder` - Download directory path
 - `poll_interval_minutes` - Poll interval in minutes (1-60)
-- `use_job_name_dir` - Use job name for subdirectories (true/false)
+- `use_job_name_dir` - Name subdirectories after the sanitized job name (true/false). The job ID is stored in a `.jobid` file inside each folder. When false, folders are named `job_<id>`
 - `max_concurrent` - Max concurrent downloads (1-20)
 - `lookback_days` - How many days back to check for jobs (1-30)
 - `include_workspace_folders` - Also scan jobs in workspace shared folders (true/false, default false)

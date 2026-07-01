@@ -676,6 +676,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		return OutcomeOutputDirCreateFailed
 	}
 
+	// Record the job ID in a .jobid marker file. The directory is now named
+	// after the job name alone (no ID suffix), so this file is what maps the
+	// folder back to its Rescale job. Best-effort: a write failure is logged
+	// but does not fail the download.
+	if err := WriteJobIDFile(outputDir, job.ID); err != nil {
+		d.logger.Warn().Err(err).Str("dir", outputDir).Msg("Failed to write .jobid marker file")
+	}
+
 	files, err := d.apiClient.ListJobFiles(ctx, job.ID)
 	if err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to list job files")
@@ -688,11 +696,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	if len(files) == 0 {
-		d.logger.Info().Str("job_id", job.ID).Msg("No files to download for job")
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, 0, 0)
+		// Tag as downloaded so a job with no output is not re-considered every poll.
+		d.markDownloaded(ctx, job)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
 		}
+		d.logger.Info().Msgf("COMPLETED: %s [%s] - no files to download (tagged as downloaded)",
+			job.Name, job.ID)
 		return OutcomeNoFiles
 	}
 
@@ -828,33 +839,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		fileCount := stats.Completed + alreadyPresent
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, fileCount, totalSize)
 
-		// Tag the job as downloaded. On failure, MarkPendingTagApply so the
-		// poll loop retries just the tag call (without re-downloading files).
-		// On success, remove the 'started' lock so the job ends with only the
-		// done tag.
-		if d.cfg.Eligibility != nil {
-			d.state.ClearStarted(job.ID)
-			if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
-				d.logger.Warn().
-					Err(err).
-					Str("job_id", job.ID).
-					Str("tag", config.DownloadedTag).
-					Msg("Failed to tag job as downloaded (will retry on next poll)")
-				d.state.MarkPendingTagApply(job.ID)
-			} else {
-				d.logger.Debug().
-					Str("job_id", job.ID).
-					Str("tag", config.DownloadedTag).
-					Msg("Tagged job as downloaded")
-				if err := d.apiClient.DeleteJobTag(ctx, job.ID, config.StartedTag); err != nil {
-					d.logger.Debug().
-						Err(err).
-						Str("job_id", job.ID).
-						Str("tag", config.StartedTag).
-						Msg("Failed to remove started lock tag after completion (harmless; done tag takes precedence)")
-				}
-			}
-		}
+		// Tag the job as downloaded so it is skipped on subsequent polls, and
+		// release the 'started' lock.
+		d.markDownloaded(ctx, job)
 
 		d.logger.Info().Msgf("COMPLETED: %s [%s] - %d files, %s",
 			job.Name, job.ID, fileCount, formatBytes(totalSize))
@@ -866,6 +853,39 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	return outcome
+}
+
+// markDownloaded applies the 'done' tag so the job is skipped on subsequent
+// polls, then clears the local 'started' ownership and removes the 'started'
+// lock tag. On a failed 'done' tag call it flags the job PendingTagApply so the
+// poll loop retries just the tag (without re-downloading). Safe to call for
+// jobs that never acquired the 'started' lock (e.g. the no-files path): the
+// ClearStarted and DeleteJobTag calls are no-ops in that case.
+func (d *Daemon) markDownloaded(ctx context.Context, job *CompletedJob) {
+	if d.cfg.Eligibility == nil {
+		return
+	}
+	d.state.ClearStarted(job.ID)
+	if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
+		d.logger.Warn().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.DownloadedTag).
+			Msg("Failed to tag job as downloaded (will retry on next poll)")
+		d.state.MarkPendingTagApply(job.ID)
+		return
+	}
+	d.logger.Debug().
+		Str("job_id", job.ID).
+		Str("tag", config.DownloadedTag).
+		Msg("Tagged job as downloaded")
+	if err := d.apiClient.DeleteJobTag(ctx, job.ID, config.StartedTag); err != nil {
+		d.logger.Debug().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.StartedTag).
+			Msg("Failed to remove started lock tag after completion (harmless; done tag takes precedence)")
+	}
 }
 
 // markStarted applies the cross-client 'started' lock tag and records local

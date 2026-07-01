@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Auto-download folders are named after the job, with the ID in a .jobid file
+
+Auto-downloaded job folders are now named after the (sanitized) job name — the
+previous `_<shortID>` suffix is gone. The Rescale job ID is instead written to a
+`.jobid` file inside each job folder, so the folder still maps back to its job.
+Only genuinely problematic characters are sanitized (Windows/POSIX reserved
+characters and control characters become `_`, trailing dots/spaces trimmed,
+Windows reserved device names avoided); spaces and other valid characters are
+preserved. If a folder with the same name already exists for a *different* job,
+the job ID is appended (`<name>_<jobID>`) to keep them separate; re-downloading
+the same job reuses its existing folder. Set `use_job_name_dir = false` (or
+`--use-job-id`) to keep the old `job_<id>` naming.
+
 ### Installer no longer launches anything; auto-download starts with the tray
 
 The MSI no longer starts any process at install time. Previously it launched
@@ -12,16 +25,17 @@ daemon automatically if auto-download is enabled in `daemon.conf` — no manual
 "Start Auto-Download" click needed. Launch the tray or GUI immediately after
 install from the Start Menu or desktop shortcut.
 
-### Fixed: uninstall no longer requires killing rescale-int.exe by hand
+### Fixed: uninstall no longer prompts or hangs on running Interlink processes
 
-When uninstalling while Interlink was running, the uninstaller could close the
-GUI and tray but not the auto-download daemon (`rescale-int.exe`), which runs
-as a detached, windowless background process that Windows Restart Manager
-cannot signal. The uninstaller reported it could not stop that process and left
-the user to end it manually from Task Manager. The uninstaller now runs
-`daemon stop --force` before removing files, which shuts the daemon down
-gracefully over IPC and force-terminates it if that fails. A new
-`rescale-int daemon stop --force` flag is also available for manual use.
+When uninstalling while Interlink was running, the uninstaller would prompt to
+close (or hang waiting on) the GUI, tray, and auto-download daemon — the daemon
+especially, since `rescale-int.exe` is a detached, windowless process that
+Windows Restart Manager cannot signal, leaving users to kill it manually from
+Task Manager. The uninstaller now terminates all three executables
+(`rescale-int-gui.exe`, `rescale-int-tray.exe`, `rescale-int.exe`) before the
+in-use file scan, so removal proceeds without a prompt. A
+`rescale-int daemon stop --force` flag is also available for stopping the
+daemon manually.
 
 ### Fixed: multiple auto-download daemons could start at once
 
