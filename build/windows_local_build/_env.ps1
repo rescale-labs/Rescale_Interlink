@@ -15,7 +15,7 @@ Set-StrictMode -Version Latest
 # Go 1.26.3 (go.mod requires 1.26.3), Node 20, Wails CLI v2.12.0, WiX 6.0.2.
 # .NET SDK is needed only for the WiX MSI tool; channel 8.0 (LTS) is fine.
 $Script:GoVersion     = $env:INTERLINK_GO_VERSION;     if (-not $Script:GoVersion)     { $Script:GoVersion     = '1.26.3' }
-$Script:NodeVersion   = $env:INTERLINK_NODE_VERSION;   if (-not $Script:NodeVersion)   { $Script:NodeVersion   = '20.18.0' }
+$Script:NodeVersion   = $env:INTERLINK_NODE_VERSION;   if (-not $Script:NodeVersion)   { $Script:NodeVersion   = '20.19.0' }
 $Script:WailsVersion  = $env:INTERLINK_WAILS_VERSION;  if (-not $Script:WailsVersion)  { $Script:WailsVersion  = 'v2.12.0' }
 $Script:DotnetVersion = $env:INTERLINK_DOTNET_VERSION; if (-not $Script:DotnetVersion) { $Script:DotnetVersion = '8.0.404' }
 $Script:WixVersion    = $env:INTERLINK_WIX_VERSION;    if (-not $Script:WixVersion)    { $Script:WixVersion    = '6.0.2' }

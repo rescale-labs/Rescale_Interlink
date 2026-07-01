@@ -2113,6 +2113,30 @@ func (c *Client) AddJobTag(ctx context.Context, jobID, tag string) error {
 	return nil
 }
 
+// DeleteJobTag removes a tag from a job.
+// Used by auto-download to release the "started" lock on error (so the job
+// can be retried) and to clear the "started" tag once "done" is applied.
+func (c *Client) DeleteJobTag(ctx context.Context, jobID, tag string) error {
+	path := fmt.Sprintf("/api/v3/jobs/%s/tags/", jobID)
+
+	requestBody := map[string]string{"name": tag}
+	resp, err := c.doRequest(ctx, "DELETE", path, requestBody)
+	if err != nil {
+		return fmt.Errorf("failed to delete job tag: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Accept 200, 202 (Accepted), or 204 as success. 404 means the tag is
+	// already gone, which is the desired end state, so treat it as success.
+	if resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusAccepted &&
+		resp.StatusCode != nethttp.StatusNoContent && resp.StatusCode != nethttp.StatusNotFound {
+		body := readResponseBody(resp.Body)
+		return fmt.Errorf("delete job tag failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	return nil
+}
+
 // HasJobTag checks if a job has a specific tag.
 // Convenience method for eligibility checking.
 func (c *Client) HasJobTag(ctx context.Context, jobID, tagName string) (bool, error) {

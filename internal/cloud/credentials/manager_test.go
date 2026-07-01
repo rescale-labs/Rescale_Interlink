@@ -337,6 +337,51 @@ func TestEnsureFresh_WallClockDetectsStaleAfterSimulatedSleep(t *testing.T) {
 	}
 }
 
+// TestGetS3CredentialsForStorage_PerPathCacheKey is a regression test for the
+// bug where S3 per-file credentials were cached by storage ID alone. The
+// platform returns S3 STS credentials scoped to the requested path prefix, so
+// two files on the SAME storage ID but with DIFFERENT paths must each get their
+// own credential fetch — otherwise the second file receives a token scoped to
+// the first file's prefix and its HeadObject/GetObject fails with 403. This
+// manifested as "only one of several eligible workspace-folder jobs downloads;
+// the rest spin in a retry loop." Mirrors the Azure per-path cache behavior.
+func TestGetS3CredentialsForStorage_PerPathCacheKey(t *testing.T) {
+	mgr, server, callCount := newTestManagerWithServer(t)
+	defer server.Close()
+
+	storageID := "shared-workspace-storage"
+	mkFile := func(path string) *models.CloudFile {
+		return &models.CloudFile{
+			Storage:   &models.CloudFileStorage{ID: storageID, StorageType: "S3Storage"},
+			PathParts: &models.CloudFilePathParts{Container: "rescale-files", Path: path},
+		}
+	}
+
+	ctx := context.Background()
+
+	// Two files on the same storage but different job prefixes.
+	if _, err := mgr.GetS3CredentialsForStorage(ctx, mkFile("jobs/JOB_A/output/results.dat")); err != nil {
+		t.Fatalf("fetch A: %v", err)
+	}
+	if _, err := mgr.GetS3CredentialsForStorage(ctx, mkFile("jobs/JOB_B/output/results.dat")); err != nil {
+		t.Fatalf("fetch B: %v", err)
+	}
+
+	// Distinct paths must trigger distinct fetches (no cross-path cache hit).
+	if got := callCount.Load(); got != 2 {
+		t.Fatalf("expected 2 credential fetches for 2 distinct paths, got %d "+
+			"(bare storage-ID cache key would give 1 and cause 403s)", got)
+	}
+
+	// A repeat of the first path is served from cache — no extra fetch.
+	if _, err := mgr.GetS3CredentialsForStorage(ctx, mkFile("jobs/JOB_A/output/results.dat")); err != nil {
+		t.Fatalf("re-fetch A: %v", err)
+	}
+	if got := callCount.Load(); got != 2 {
+		t.Errorf("expected repeat path to hit cache (still 2 fetches), got %d", got)
+	}
+}
+
 func TestEnsureFresh_RepeatedCallsNoCaching(t *testing.T) {
 	mgr, server, callCount := newTestManagerWithServer(t)
 	defer server.Close()

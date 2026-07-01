@@ -236,6 +236,20 @@ Examples:
 				}
 			}
 
+			// Single-instance guard. This is the authoritative duplicate-daemon
+			// check: unlike the PID-file/pipe checks above (which have a TOCTOU
+			// window between subprocess spawn and PID-file write), the OS lock is
+			// acquired atomically here, so two daemons launched near-simultaneously
+			// by the GUI and tray cannot both proceed. Runs after the Unix fork so
+			// the short-lived parent doesn't hold the lock — the child re-execs and
+			// acquires it here.
+			lockRelease, gotLock := daemon.AcquireSingleInstanceLock()
+			if !gotLock {
+				daemon.WriteStartupLog("Another daemon already holds the single-instance lock; exiting")
+				return fmt.Errorf("cannot start daemon: another daemon is already running")
+			}
+			defer lockRelease()
+
 			// Parse poll interval
 			interval, err := time.ParseDuration(pollInterval)
 			if err != nil {
@@ -574,6 +588,7 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 
 // newDaemonStopCmd creates the 'daemon stop' command.
 func newDaemonStopCmd() *cobra.Command {
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop a running daemon via IPC",
@@ -599,15 +614,31 @@ running in your user session.`,
 				}
 			}
 
+			// forceKill terminates the process directly. Used as the --force
+			// fallback whenever a graceful IPC shutdown is unavailable or times
+			// out. This is what the uninstaller relies on: the daemon is a
+			// detached, windowless subprocess, so Windows Restart Manager cannot
+			// close it and its .exe stays locked during uninstall.
+			forceKill := func() error {
+				if err := daemon.KillDaemon(); err != nil {
+					return fmt.Errorf("failed to force-stop daemon: %w", err)
+				}
+				fmt.Println("Daemon force-stopped.")
+				return nil
+			}
+
 			// First check if IPC is responding
 			if !client.IsServiceRunning(ctx) {
 				if pid != 0 {
 					fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
+					if force {
+						return forceKill()
+					}
 					fmt.Println("The daemon may not have been started with --ipc flag.")
 					if runtime.GOOS == "windows" {
-						fmt.Println("Use Task Manager to terminate the process.")
+						fmt.Println("Use 'rescale-int daemon stop --force' or Task Manager to terminate the process.")
 					} else {
-						fmt.Printf("Use 'kill %d' to forcefully terminate it.\n", pid)
+						fmt.Printf("Use 'rescale-int daemon stop --force' or 'kill %d' to terminate it.\n", pid)
 					}
 				}
 				return nil
@@ -620,6 +651,10 @@ running in your user session.`,
 			}
 
 			if err := client.Shutdown(ctx); err != nil {
+				if force {
+					fmt.Printf("Graceful shutdown failed (%v); forcing termination...\n", err)
+					return forceKill()
+				}
 				return fmt.Errorf("failed to send shutdown command: %w", err)
 			}
 
@@ -632,10 +667,19 @@ running in your user session.`,
 				}
 			}
 
+			// Graceful shutdown didn't complete in time. Force-kill if asked so
+			// the uninstaller never leaves a locked executable behind.
+			if force {
+				fmt.Println("Graceful shutdown timed out; forcing termination...")
+				return forceKill()
+			}
+
 			fmt.Println("Shutdown command sent. Daemon may still be cleaning up.")
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&force, "force", false, "Force-terminate the daemon if graceful IPC shutdown is unavailable or times out")
 
 	return cmd
 }
@@ -864,6 +908,7 @@ Shows all settings from daemon.conf, or defaults if the file doesn't exist.`,
 			fmt.Println()
 			fmt.Println("# Note: Mode (Enabled/Conditional/Disabled) is set per-job via the")
 			fmt.Println("# 'Auto Download' custom field in Rescale workspace, not here.")
+			fmt.Printf("# Started tag (hardcoded, cross-client lock): %s\n", config.StartedTag)
 			fmt.Printf("# Downloaded tag (hardcoded): %s\n", config.DownloadedTag)
 			fmt.Println()
 

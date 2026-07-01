@@ -182,7 +182,8 @@ Background service for automatically downloading completed jobs.
 - Persistent state tracking (downloaded/failed jobs)
 - Output directories include job ID suffix to prevent collisions
 - Graceful shutdown on Ctrl+C
-- **Tag-based source of truth**: The `downloaded` tag on the Rescale platform is authoritative. Removing the tag via the Rescale web UI triggers a re-download on the next poll; a tag-apply failure after a successful download is retried without re-downloading the files.
+- **Tag-based source of truth**: The `autodownload:done` tag on the Rescale platform is authoritative. Removing the tag via the Rescale web UI triggers a re-download on the next poll; a tag-apply failure after a successful download is retried without re-downloading the files.
+- **Multi-client coordination**: When several clients poll the same workspace folders, an `autodownload:started` tag acts as a cross-client lock so only one client downloads a given job. The lock is released on error (so the job is retryable) and replaced by `autodownload:done` on success. A client can resume its own in-flight job after a restart.
 - **Shared transfer engine**: Daemon downloads route through the same `TransferService` the GUI uses. Multi-file jobs download in parallel with adaptive concurrency; there is no parallel transfer implementation inside the daemon.
 - **Unified Transfers tab**: Daemon transfers appear alongside GUI transfers with a `Daemon` badge. Per-row Cancel/Retry works on daemon rows, routed via IPC; `Cancel All` cancels both engines.
 

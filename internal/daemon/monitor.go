@@ -100,6 +100,15 @@ const (
 	// re-download after tag removal).
 	ReasonHasDownloadedTag SkipReasonCode = "has_downloaded_tag"
 
+	// ReasonHasStartedTag — job carries the "started" tag set by another
+	// client that is currently downloading it. We back off so two clients
+	// polling the same workspace folder do not download the same job. Silent
+	// (transient, resolves when the other client applies the done tag or
+	// releases the started tag on error). The client that set the tag itself
+	// is allowed through (local-state override) so it can resume after a
+	// restart.
+	ReasonHasStartedTag SkipReasonCode = "has_started_tag"
+
 	// ReasonConditionalMissingTag — "Auto Download" is Conditional but the
 	// job lacks the configured auto-download tag.
 	ReasonConditionalMissingTag SkipReasonCode = "conditional_missing_tag"
@@ -149,6 +158,7 @@ func (c SkipReasonCode) IsSilent() bool {
 		ReasonFieldCheckAPIError,
 		ReasonInRetryBackoff,
 		ReasonPendingTagApply,
+		ReasonHasStartedTag,
 		ReasonHasDownloadedTag:
 		return true
 	default:
@@ -247,6 +257,27 @@ func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligi
 		detail := fmt.Sprintf("already has '%s' tag", config.DownloadedTag)
 		return CheckEligibilityResult{
 			Reason: SkipReason{Code: ReasonHasDownloadedTag, Detail: detail},
+			Detail: detail,
+		}
+	}
+
+	// Step 1b: started tag is a cross-client lock. If another client set it,
+	// back off. If we set it ourselves (tracked in local state), fall through
+	// so a restarted client can resume its own in-flight job rather than
+	// deadlocking on its own lock.
+	hasStartedTag, err := m.apiClient.HasJobTag(ctx, jobID, config.StartedTag)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check started tag")
+		detail := fmt.Sprintf("failed to check '%s' tag: %v", config.StartedTag, err)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonDownloadedTagCheckAPIError, Detail: detail},
+			Detail: detail,
+		}
+	}
+	if hasStartedTag && !m.state.IsStartedByUs(jobID) {
+		detail := fmt.Sprintf("another client is downloading (has '%s' tag)", config.StartedTag)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonHasStartedTag, Detail: detail},
 			Detail: detail,
 		}
 	}

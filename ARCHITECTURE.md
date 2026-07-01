@@ -530,7 +530,15 @@ the workspace's `sharedWithWorkspace` folder tree:
    wins). Every job carries its folder path relative to the shared root.
 
 Each candidate then passes the same per-job eligibility gate (the "Auto
-Download" custom field + tags). When downloading, the job's relative folder
+Download" custom field + tags). Because workspace folders can be polled by
+several clients at once, eligibility also honors two coordination tags: a job
+carrying `autodownload:done` is treated as already downloaded, and one carrying
+`autodownload:started` (set by another client) is skipped as in-progress. The
+downloading client sets `autodownload:started` before fetching files, removes it
+on error (so the job is retryable by any client), and replaces it with
+`autodownload:done` on success. A client tracks its own `started` jobs in local
+state so it can resume them after a restart rather than treating its own lock as
+another client's. When downloading, the job's relative folder
 path is mirrored under the download folder (e.g. `Shared/PoC_Demo` →
 `<download>/PoC_Demo/<job dir>`), unless `flatten_folder_structure` is set, in
 which case all jobs download into the root. The mirrored path is validated to

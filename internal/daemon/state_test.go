@@ -401,6 +401,55 @@ func TestState_PendingTagApply(t *testing.T) {
 	}
 }
 
+// TestState_StartedByUs verifies the cross-client lock ownership tracking:
+// MarkStarted sets the flag (creating the entry if absent), it survives a
+// save/load round-trip, IsStartedByUs reports it, and ClearStarted resets it.
+func TestState_StartedByUs(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "daemon-started-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	stateFile := filepath.Join(tmpDir, "state.json")
+	s := NewState(stateFile)
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// MarkStarted creates the entry when the job is not yet known.
+	if s.IsStartedByUs("job1") {
+		t.Error("IsStartedByUs(job1) = true before MarkStarted, want false")
+	}
+	s.MarkStarted("job1", "Test Job")
+	if !s.IsStartedByUs("job1") {
+		t.Error("IsStartedByUs(job1) = false after MarkStarted, want true")
+	}
+
+	// Persisted across save/load so a restart still recognizes our own lock.
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded := NewState(stateFile)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load after save: %v", err)
+	}
+	if !reloaded.IsStartedByUs("job1") {
+		t.Error("IsStartedByUs(job1) = false after reload, want true")
+	}
+
+	// ClearStarted resets ownership.
+	reloaded.ClearStarted("job1")
+	if reloaded.IsStartedByUs("job1") {
+		t.Error("IsStartedByUs(job1) = true after ClearStarted, want false")
+	}
+
+	// Unknown job is never owned.
+	if reloaded.IsStartedByUs("unknown") {
+		t.Error("IsStartedByUs(unknown) = true, want false")
+	}
+}
+
 // TestFindCompletedJobs_RespectsPendingSet — Plan 3 F2: jobs in the
 // pendingSet are skipped with ReasonPendingTagApply, never reach
 // CheckEligibility, and therefore cannot be re-enqueued for download

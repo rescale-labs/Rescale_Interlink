@@ -349,6 +349,13 @@ func (d *Daemon) poll(ctx context.Context) {
 				continue
 			}
 			d.state.ClearPendingTagApply(jobID)
+			if err := d.apiClient.DeleteJobTag(scanCtx, jobID, config.StartedTag); err != nil {
+				d.logger.Debug().
+					Str("job_id", jobID).
+					Str("tag", config.StartedTag).
+					Err(err).
+					Msg("Failed to remove started lock tag after tag retry (harmless; done tag takes precedence)")
+			}
 			d.logger.Info().
 				Str("job_id", jobID).
 				Str("tag", config.DownloadedTag).
@@ -524,6 +531,7 @@ var scanSummaryReasonOrder = []SkipReasonCode{
 	ReasonAutoDownloadUnrecognized,
 	ReasonFieldCheckAPIError,
 	ReasonHasDownloadedTag,
+	ReasonHasStartedTag,
 	ReasonConditionalMissingTag,
 	ReasonDownloadedTagCheckAPIError,
 	ReasonConditionalTagCheckAPIError,
@@ -693,6 +701,10 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Int("file_count", len(files)).
 		Msg("Downloading job files")
 
+	// Claim the cross-client lock now that we know there are files to fetch.
+	// Released on every error path below; replaced by the done tag on success.
+	d.markStarted(ctx, job)
+
 	batchID := "daemon:" + job.ID
 	batchLabel := "Auto: " + job.Name
 	reqCh := make(chan services.TransferRequest, 16)
@@ -701,6 +713,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 
 	if err := d.ts.StartStreamingDownloadBatch(scanCtx, reqCh, batchID, batchLabel, services.SourceLabelDaemon, scanCancel); err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to start download batch")
+		d.releaseStarted(job)
 		d.state.MarkFailed(job.ID, job.Name, err)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
@@ -773,6 +786,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	stats, waitErr := d.ts.WaitForBatch(ctx, batchID)
 	if waitErr != nil {
 		d.logger.Error().Err(waitErr).Str("job_id", job.ID).Msg("Job download interrupted")
+		d.releaseStarted(job)
 		d.state.MarkFailed(job.ID, job.Name, waitErr)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
@@ -793,6 +807,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 			Int("cancelled_files", stats.Cancelled).
 			Int("total_files", stats.Total+alreadyPresent).
 			Msg("Job incomplete, marking as failed for retry")
+		d.releaseStarted(job)
 		d.state.MarkFailed(job.ID, job.Name, failErr)
 		outcome = OutcomePartialFailure
 	} else {
@@ -815,7 +830,10 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 
 		// Tag the job as downloaded. On failure, MarkPendingTagApply so the
 		// poll loop retries just the tag call (without re-downloading files).
+		// On success, remove the 'started' lock so the job ends with only the
+		// done tag.
 		if d.cfg.Eligibility != nil {
+			d.state.ClearStarted(job.ID)
 			if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
 				d.logger.Warn().
 					Err(err).
@@ -828,6 +846,13 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 					Str("job_id", job.ID).
 					Str("tag", config.DownloadedTag).
 					Msg("Tagged job as downloaded")
+				if err := d.apiClient.DeleteJobTag(ctx, job.ID, config.StartedTag); err != nil {
+					d.logger.Debug().
+						Err(err).
+						Str("job_id", job.ID).
+						Str("tag", config.StartedTag).
+						Msg("Failed to remove started lock tag after completion (harmless; done tag takes precedence)")
+				}
 			}
 		}
 
@@ -841,6 +866,44 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	return outcome
+}
+
+// markStarted applies the cross-client 'started' lock tag and records local
+// ownership so this client can resume its own in-flight job after a restart.
+// Best-effort: a failed tag call is logged but does not abort the download —
+// the worst case is another client also picking up the job.
+func (d *Daemon) markStarted(ctx context.Context, job *CompletedJob) {
+	if d.cfg.Eligibility == nil {
+		return
+	}
+	d.state.MarkStarted(job.ID, job.Name)
+	if err := d.apiClient.AddJobTag(ctx, job.ID, config.StartedTag); err != nil {
+		d.logger.Warn().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.StartedTag).
+			Msg("Failed to apply started lock tag (download proceeds; another client may also pick up the job)")
+	}
+}
+
+// releaseStarted removes the 'started' lock tag so the job is retryable by any
+// client, and clears local ownership. Called on every error path. Uses a
+// fresh short-lived context so the tag is released even when the parent
+// context was cancelled (the interrupted path).
+func (d *Daemon) releaseStarted(job *CompletedJob) {
+	if d.cfg.Eligibility == nil {
+		return
+	}
+	d.state.ClearStarted(job.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := d.apiClient.DeleteJobTag(ctx, job.ID, config.StartedTag); err != nil {
+		d.logger.Warn().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.StartedTag).
+			Msg("Failed to release started lock tag (job may stay locked until manually cleared)")
+	}
 }
 
 // formatBytes formats a byte count as a human-readable string.

@@ -64,17 +64,31 @@ try {
         Write-Ok "Skipping npm ci (node_modules present)."
     } else {
         Write-Step "Installing frontend deps (npm ci)"
+        # Package postinstall scripts (e.g. esbuild's `node install.js`) invoke
+        # bare `node`, which fails with "'node' is not recognized" unless the
+        # toolchain node dir is on PATH for npm's grandchild cmd.exe. Setting
+        # $env:PATH from PowerShell does NOT reliably propagate that far, and
+        # npm's old scripts-prepend-node-path setting was removed in npm 7+.
+        # Use the same proven pattern as the wails build below: run npm inside a
+        # single cmd /c that sets PATH first, so every child process (npm ->
+        # cmd -> node install.js) inherits the toolchain node.
         Push-Location $frontend
-        try { & $npm ci; if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" } }
+        try {
+            $npmCmd = "set `"PATH=$($Script:NodeDir);%PATH%`"&& `"$npm`" ci"
+            cmd /c $npmCmd
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+        }
         finally { Pop-Location }
     }
 
     # --- Build GUI with Wails (embeds frontend assets) -----------------------
     # FIPS 140-3 is required: the app exits at startup (including during Wails
     # binding generation) unless built with GOFIPS140=certified -tags fips.
-    # Wails shells out to `go`; pin GOROOT + PATH so the portable toolchain wins.
+    # Wails shells out to `go` (bindings) AND `npm` (frontend compile), so PATH
+    # must include BOTH the Go bin and the node dir; otherwise the frontend
+    # compile step fails with `exec: "npm": executable file not found`.
     Write-Step "Building rescale-int-gui.exe (wails build, FIPS, version=$Version)"
-    $wailsBuildCmd = "set `"GOFIPS140=certified`"&& set `"GOROOT=$($Script:GoRoot)`"&& set `"PATH=$($Script:GoBin);%PATH%`"&& `"$wails`" build -tags fips -platform windows/amd64 -ldflags `"$ldflags`""
+    $wailsBuildCmd = "set `"GOFIPS140=certified`"&& set `"GOROOT=$($Script:GoRoot)`"&& set `"PATH=$($Script:GoBin);$($Script:NodeDir);%PATH%`"&& `"$wails`" build -tags fips -platform windows/amd64 -ldflags `"$ldflags`""
     cmd /c $wailsBuildCmd
     if ($LASTEXITCODE -ne 0) { throw "wails build failed ($LASTEXITCODE)" }
 

@@ -950,9 +950,13 @@ Send a clean shutdown request to a running daemon over IPC.
 
 ```bash
 rescale-int daemon stop
+rescale-int daemon stop --force   # force-terminate if graceful shutdown is unavailable
 ```
 
 Returns once the daemon has acknowledged the request. If no daemon is running (no IPC socket), prints a clear message and exits non-zero. The daemon runs in your own user session, so this stops your auto-download daemon directly — there is no separate Windows service to stop.
+
+**Flags:**
+- `--force` — if the daemon is not reachable over IPC (e.g. started without `--ipc`) or does not shut down in time, terminate the process directly using its recorded PID. This is what the uninstaller uses so the daemon executable is never left locked.
 
 #### daemon config
 

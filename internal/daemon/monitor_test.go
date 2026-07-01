@@ -358,6 +358,7 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 		// retry state).
 		ReasonHasDownloadedTag:            true,
 		ReasonPendingTagApply:             true,
+		ReasonHasStartedTag:               true,
 		ReasonConditionalMissingTag:       false,
 		ReasonDownloadedTagCheckAPIError:  false,
 		ReasonConditionalTagCheckAPIError: false,

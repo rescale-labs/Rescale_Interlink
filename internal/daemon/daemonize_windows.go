@@ -119,6 +119,34 @@ func IsDaemonRunning() int {
 	return pid
 }
 
+// KillDaemon forcefully terminates the running daemon process recorded in the
+// PID file. It is the last-resort fallback for callers (e.g. the uninstaller)
+// that cannot rely on a graceful IPC shutdown — the daemon is a detached,
+// windowless subprocess, so Windows Restart Manager cannot close it and its
+// executable stays locked during uninstall.
+//
+// Returns nil when no daemon is running (nothing to kill) or the process was
+// terminated. The PID file is removed on success.
+func KillDaemon() error {
+	pid := IsDaemonRunning()
+	if pid == 0 {
+		return nil // Not running (IsDaemonRunning already cleaned any stale PID file)
+	}
+
+	handle, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return fmt.Errorf("failed to open daemon process %d for termination: %w", pid, err)
+	}
+	defer windows.CloseHandle(handle)
+
+	if err := windows.TerminateProcess(handle, 1); err != nil {
+		return fmt.Errorf("failed to terminate daemon process %d: %w", pid, err)
+	}
+
+	RemovePIDFile()
+	return nil
+}
+
 // Daemonize on Windows is not supported for direct daemon mode.
 // Windows uses the Windows Service Manager instead.
 func Daemonize(args []string) error {

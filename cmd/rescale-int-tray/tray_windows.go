@@ -139,12 +139,18 @@ func (a *trayApp) startupTasks() {
 	}
 
 	daemonCfg, err := config.LoadDaemonConfig("")
-	if err != nil || daemonCfg == nil || !daemonCfg.Daemon.Enabled {
+	if err != nil {
+		daemon.WriteStartupLog("Tray startup: could not load daemon.conf (%v) — not auto-starting daemon", err)
+		return
+	}
+	if daemonCfg == nil || !daemonCfg.Daemon.Enabled {
+		daemon.WriteStartupLog("Tray startup: auto-download disabled in daemon.conf — not starting daemon")
 		return
 	}
 
 	// Don't start a second daemon if one is already running for this user.
-	if blocked, _ := service.ShouldBlockSubprocess(); blocked {
+	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
+		daemon.WriteStartupLog("Tray startup: daemon already running (%s) — not starting another", reason)
 		return
 	}
 
