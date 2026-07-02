@@ -1,5 +1,140 @@
 # Release Notes - Rescale Interlink
 
+## Unreleased
+
+### File Browser: option to download jobs without the Input/Output split
+
+Downloading a job folder in the File Browser mirrors the platform's job layout,
+creating separate `Input/` and `Output/` subfolders. A new setting —
+**Download jobs without Input/Output split** (Setup tab → File Browser Settings,
+or `flatten_job_download` in `config.csv`) — strips that leading `Input`/`Output`
+segment so files land directly under the job folder, matching the auto-download
+layout. Deeper structure (e.g. `Output/run1/…`) is preserved. Off by default, so
+existing downloads keep the Input/Output split.
+
+### Default "Conditional" auto-download tag renamed to `autodownload`
+
+The default tag checked for jobs whose "Auto Download" field is set to
+`Conditional` changed from `autoDownload` to `autodownload` (all lowercase).
+Configs that set `auto_download_tag` explicitly are unaffected; only the
+built-in default changed. Update the tag on your Conditional jobs (or set
+`auto_download_tag = autoDownload` in `daemon.conf`) if you relied on the old
+default.
+
+### Auto-download folders are named after the job, with the ID in a .jobid file
+
+Auto-downloaded job folders are now named after the (sanitized) job name — the
+previous `_<shortID>` suffix is gone. The Rescale job ID is instead written to a
+`.jobid` file inside each job folder, so the folder still maps back to its job.
+Only genuinely problematic characters are sanitized (Windows/POSIX reserved
+characters and control characters become `_`, trailing dots/spaces trimmed,
+Windows reserved device names avoided); spaces and other valid characters are
+preserved. If a folder with the same name already exists for a *different* job,
+the job ID is appended (`<name>_<jobID>`) to keep them separate; re-downloading
+the same job reuses its existing folder. Set `use_job_name_dir = false` (or
+`--use-job-id`) to keep the old `job_<id>` naming.
+
+### Installer no longer launches anything; auto-download starts with the tray
+
+The MSI no longer starts any process at install time. Previously it launched
+the tray immediately after install. Now installation only lays down files and
+registers the tray to auto-start at logon (under `HKCU\...\Run`). The tray is
+what brings up auto-download: when it starts, it launches the auto-download
+daemon automatically if auto-download is enabled in `daemon.conf` — no manual
+"Start Auto-Download" click needed. Launch the tray or GUI immediately after
+install from the Start Menu or desktop shortcut.
+
+### Fixed: uninstall no longer prompts or hangs on running Interlink processes
+
+When uninstalling while Interlink was running, the uninstaller would prompt to
+close (or hang waiting on) the GUI, tray, and auto-download daemon — the daemon
+especially, since `rescale-int.exe` is a detached, windowless process that
+Windows Restart Manager cannot signal, leaving users to kill it manually from
+Task Manager. The uninstaller now terminates all three executables
+(`rescale-int-gui.exe`, `rescale-int-tray.exe`, `rescale-int.exe`) before the
+in-use file scan, so removal proceeds without a prompt. A
+`rescale-int daemon stop --force` flag is also available for stopping the
+daemon manually.
+
+### Fixed: multiple auto-download daemons could start at once
+
+On launch, the GUI and the system tray could both spawn the auto-download
+daemon (and a config-change restart could pile on more), leaving two or more
+`rescale-int.exe` daemon processes running against the same account. The
+existing guards checked a PID file and the IPC pipe, but those checks have a
+gap between when a daemon is spawned and when it finishes starting up, so
+near-simultaneous launches all slipped through. The daemon now takes an
+OS-level single-instance lock (a named mutex on Windows, an exclusive file lock
+on macOS/Linux) as the first step of startup; any extra daemon exits
+immediately. The lock is released on shutdown and reclaimed automatically by
+the OS if a daemon crashes, so a stop/restart still works cleanly.
+
+### Fixed: only one of several eligible workspace-folder jobs would download
+
+When auto-download picked up multiple jobs from workspace shared folders that
+live on the same platform storage, typically only one job downloaded
+successfully and the rest failed with S3 `403 Forbidden` and spun in a retry
+loop. The platform issues S3 credentials scoped to the requested file's path
+prefix, but the client cached those credentials by storage ID alone — so the
+first job's path-scoped token was reused for every other job on the same
+storage, and those requests were denied. S3 credentials are now cached per
+path (matching the existing Azure behavior), so each job downloads with a token
+scoped to its own files.
+
+### Auto-download coordinates multiple clients downloading the same workspace folders
+
+When several clients poll the same workspace shared folders, they could each
+start downloading the same job. Auto-download now uses two job tags to
+coordinate:
+
+- `autodownload:started` is applied when a client begins downloading a job. It
+  acts as a cross-client lock — other clients skip a job that is already
+  `started` by someone else. A client recognizes its own lock (tracked in local
+  state) so it can resume its own in-flight job after a restart.
+- `autodownload:done` is applied on successful completion (and the `started`
+  tag is removed). Eligibility treats a `done` job as already downloaded.
+
+On a download error, the `started` tag is removed so the job becomes retryable
+by any client. Note: the tag added after a successful download was renamed from
+`autoDownloaded:true` to `autodownload:done`; jobs tagged by an older version
+re-download once and are then re-tagged with the new value.
+
+### Auto-download can now include jobs in workspace shared folders
+
+Auto-download previously scanned only your own jobs. A new option —
+**Include jobs in workspace folders** (off by default) — additionally walks the
+workspace's "Shared" folder tree recursively and auto-downloads eligible
+completed jobs found there, including jobs owned by other users. Each job is
+still gated by the same per-job "Auto Download" custom field and tags.
+
+By default the folder structure is mirrored under your download folder (e.g. a
+job in `Shared/PoC_Demo` lands in `<download folder>/PoC_Demo/<job>`). A
+sub-option, **Flatten folder structure** (off by default), downloads everything
+directly into the download folder instead. Archived folders and jobs are
+skipped. Configure both in the GUI Setup tab or via
+`daemon config set include_workspace_folders true` /
+`daemon config set flatten_folder_structure true`.
+
+### Auto-download now always runs as the logged-in user (Windows service removed)
+
+The optional Windows **service** for auto-download has been removed. Auto-download
+now runs as a background subprocess in the logged-in user's session on every
+platform — started automatically by the system tray app at login (and on demand
+by the GUI).
+
+Why: the service ran as `LocalSystem`, which **cannot reach networked/mapped
+drives that require the user's credentials.** Drive letters such as `Z:\` are
+per-logon and invisible to SYSTEM, so service-mode downloads to them failed and
+the only workaround was configuring UNC paths with machine-account ACLs. Running
+as the logged-in user means mapped drives and credentials "just work," with no
+admin/UAC and no per-user-profile orchestration.
+
+Upgrade behavior: a Windows service left over from an older version is removed
+on a best-effort basis during install/upgrade (and on first tray launch). The
+rationale and a plan for reinstating a service — should headless,
+no-one-logged-in operation ever be required — are documented in
+[ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model).
+
 ## v4.9.8 - May 30, 2026
 
 ### File Browser Trash Bin, and deletes now go to Trash Bin (#30)

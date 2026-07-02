@@ -106,6 +106,19 @@ type JobResponse struct {
 	JobStatus JobStatusContent `json:"jobStatus"`
 	CreatedAt string           `json:"dateInserted"`
 	Owner     string           `json:"owner"`
+
+	// Folder is the workspace folder the job lives in. Only populated by the
+	// per-folder listing (ListJobsInFolder); the personal /jobs/ listing does
+	// not return it. Used by workspace-folder auto-download to mirror the
+	// folder structure into the download directory.
+	Folder *JobFolder `json:"folder,omitempty"`
+}
+
+// JobFolder is the workspace folder reference embedded in a job listing.
+type JobFolder struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ParentID string `json:"parentId"`
 }
 
 // JobStatusContent represents job status

@@ -260,10 +260,21 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 		return m.GetS3Credentials(ctx)
 	}
 
+	// The API returns per-file S3 STS credentials whose policy is scoped to the
+	// requested path prefix (GetStorageCredentials sends fileInfo.PathParts).
+	// Include the file path in the cache key so each path gets credentials
+	// scoped to it, rather than sharing a cached response whose policy only
+	// grants access to a different file's prefix — which would surface as a
+	// 403 on HeadObject/GetObject. Mirrors GetAzureCredentialsForStorage.
+	cacheKey := storageID
+	if fileInfo.PathParts != nil && fileInfo.PathParts.Path != "" {
+		cacheKey = storageID + ":" + fileInfo.PathParts.Path
+	}
+
 	// Fast path: check if refresh is needed (read lock only)
 	m.mu.RLock()
-	lastRefresh := m.storageCredsRefresh[storageID]
-	creds := m.storageS3Creds[storageID]
+	lastRefresh := m.storageCredsRefresh[cacheKey]
+	creds := m.storageS3Creds[cacheKey]
 	needsRefresh := time.Since(lastRefresh) > constants.GlobalCredentialRefreshInterval || creds == nil
 	if !needsRefresh {
 		m.mu.RUnlock()
@@ -279,8 +290,8 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 	defer m.mu.Unlock()
 
 	// Double-check: another goroutine might have refreshed while we waited
-	lastRefresh = m.storageCredsRefresh[storageID]
-	creds = m.storageS3Creds[storageID]
+	lastRefresh = m.storageCredsRefresh[cacheKey]
+	creds = m.storageS3Creds[cacheKey]
 	if time.Since(lastRefresh) <= constants.GlobalCredentialRefreshInterval && creds != nil {
 		return creds, nil
 	}
@@ -291,10 +302,10 @@ func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *mode
 		return nil, fmt.Errorf("failed to refresh storage-specific credentials: %w", err)
 	}
 
-	// Update cached credentials for this storage
-	m.storageS3Creds[storageID] = s3Creds
-	m.storageAzureCreds[storageID] = azureCreds
-	m.storageCredsRefresh[storageID] = time.Now()
+	// Update cached credentials for this storage+path
+	m.storageS3Creds[cacheKey] = s3Creds
+	m.storageAzureCreds[cacheKey] = azureCreds
+	m.storageCredsRefresh[cacheKey] = time.Now()
 
 	return s3Creds, nil
 }

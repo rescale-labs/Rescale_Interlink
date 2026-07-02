@@ -51,6 +51,12 @@ bin/
 dist/
 _build/
 
+# Portable local-build toolchain (Go/Node/Wails/.NET/WiX) and its outputs.
+# Provisioned by build/windows_local_build/install-deps.ps1; never committed.
+build/windows_local_build/.toolchain/
+build/windows_local_build/dist/
+build/windows_local_build/*.log
+
 # Node.js dependencies (install with npm install)
 node_modules/
 frontend/node_modules/

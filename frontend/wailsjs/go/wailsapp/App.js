@@ -174,10 +174,6 @@ export function GetRunStatus() {
   return window['go']['wailsapp']['App']['GetRunStatus']();
 }
 
-export function GetServiceStatus() {
-  return window['go']['wailsapp']['App']['GetServiceStatus']();
-}
-
 export function GetTransferBatches() {
   return window['go']['wailsapp']['App']['GetTransferBatches']();
 }
@@ -192,10 +188,6 @@ export function GetTransferTasks() {
 
 export function GetUngroupedTransferTasks() {
   return window['go']['wailsapp']['App']['GetUngroupedTransferTasks']();
-}
-
-export function InstallAndStartServiceElevated() {
-  return window['go']['wailsapp']['App']['InstallAndStartServiceElevated']();
 }
 
 export function ListLocalDirectory(arg1) {
@@ -272,6 +264,10 @@ export function RecoverTrashItems(arg1) {
 
 export function ReloadDaemonConfig() {
   return window['go']['wailsapp']['App']['ReloadDaemonConfig']();
+}
+
+export function RemoveLegacyServiceElevated() {
+  return window['go']['wailsapp']['App']['RemoveLegacyServiceElevated']();
 }
 
 export function ResetRun() {
@@ -382,10 +378,6 @@ export function StartFolderUpload(arg1, arg2, arg3) {
   return window['go']['wailsapp']['App']['StartFolderUpload'](arg1, arg2, arg3);
 }
 
-export function StartServiceElevated() {
-  return window['go']['wailsapp']['App']['StartServiceElevated']();
-}
-
 export function StartSingleJob(arg1) {
   return window['go']['wailsapp']['App']['StartSingleJob'](arg1);
 }
@@ -396,10 +388,6 @@ export function StartTransfers(arg1) {
 
 export function StopDaemon() {
   return window['go']['wailsapp']['App']['StopDaemon']();
-}
-
-export function StopServiceElevated() {
-  return window['go']['wailsapp']['App']['StopServiceElevated']();
 }
 
 export function TestAutoDownloadConnection(arg1) {

@@ -47,20 +47,16 @@ type trayApp struct {
 	lastError   string
 
 	// Menu items (for dynamic updates)
-	mStatus            *systray.MenuItem
-	mSetupRequired     *systray.MenuItem
-	mStartService      *systray.MenuItem
-	mStartServiceAdmin   *systray.MenuItem
-	mStopServiceAdmin    *systray.MenuItem
-	mInstallServiceAdmin *systray.MenuItem
-	mUninstallServiceAdmin *systray.MenuItem
-	mPause             *systray.MenuItem
-	mResume            *systray.MenuItem
-	mTriggerScan       *systray.MenuItem
-	mConfigure         *systray.MenuItem
-	mOpenGUI           *systray.MenuItem
-	mViewLogs          *systray.MenuItem
-	mQuit              *systray.MenuItem
+	mStatus        *systray.MenuItem
+	mSetupRequired *systray.MenuItem
+	mStartDaemon   *systray.MenuItem
+	mPause         *systray.MenuItem
+	mResume        *systray.MenuItem
+	mTriggerScan   *systray.MenuItem
+	mConfigure     *systray.MenuItem
+	mOpenGUI       *systray.MenuItem
+	mViewLogs      *systray.MenuItem
+	mQuit          *systray.MenuItem
 
 	// Control channels
 	done chan struct{}
@@ -96,20 +92,9 @@ func onReady() {
 
 	systray.AddSeparator()
 
-	// Elevated service controls (when Windows Service installed)
-	app.mStartServiceAdmin = systray.AddMenuItem("Start Service (Admin)", "Start Windows Service (requires administrator)")
-	app.mStopServiceAdmin = systray.AddMenuItem("Stop Service (Admin)", "Stop Windows Service (requires administrator)")
-	app.mStartServiceAdmin.Hide()
-	app.mStopServiceAdmin.Hide()
-
-	// Elevated install/uninstall service controls
-	app.mInstallServiceAdmin = systray.AddMenuItem("Install Service (Admin)", "Install Windows Service (requires administrator)")
-	app.mUninstallServiceAdmin = systray.AddMenuItem("Uninstall Service (Admin)", "Uninstall Windows Service (requires administrator)")
-	app.mInstallServiceAdmin.Hide()
-	app.mUninstallServiceAdmin.Hide()
-
-	// Subprocess mode control (when no Windows Service)
-	app.mStartService = systray.AddMenuItem("Start Service", "Start the auto-download daemon")
+	// Auto-download controls. The daemon runs as a subprocess in this user's
+	// session, so it inherits the user's drive mappings and credentials.
+	app.mStartDaemon = systray.AddMenuItem("Start Auto-Download", "Start the auto-download daemon")
 	app.mPause = systray.AddMenuItem("Pause Auto-Download", "Pause auto-download for current user")
 	app.mResume = systray.AddMenuItem("Resume Auto-Download", "Resume auto-download for current user")
 	app.mTriggerScan = systray.AddMenuItem("Trigger Scan Now", "Trigger an immediate job scan")
@@ -132,6 +117,45 @@ func onReady() {
 
 	// Handle menu clicks
 	go app.handleMenuClicks()
+
+	// Best-effort: remove a Windows service left over from an older Interlink
+	// version, then auto-start the user daemon if auto-download is enabled.
+	go app.startupTasks()
+}
+
+// startupTasks runs once at tray launch: it removes any legacy Windows service
+// (installed by an older Interlink version) and auto-starts the auto-download
+// daemon when the user has enabled it in daemon.conf. The daemon runs as a
+// subprocess in this user's session so it can reach the user's mapped/network
+// drives.
+func (a *trayApp) startupTasks() {
+	if service.IsLegacyServiceInstalled() {
+		daemon.WriteStartupLog("=== TRAY LEGACY SERVICE CLEANUP ===")
+		if err := elevation.UninstallServiceElevated(); err != nil {
+			daemon.WriteStartupLog("Legacy service removal failed (non-fatal): %v", err)
+		} else {
+			daemon.WriteStartupLog("Legacy service removed")
+		}
+	}
+
+	daemonCfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		daemon.WriteStartupLog("Tray startup: could not load daemon.conf (%v) — not auto-starting daemon", err)
+		return
+	}
+	if daemonCfg == nil || !daemonCfg.Daemon.Enabled {
+		daemon.WriteStartupLog("Tray startup: auto-download disabled in daemon.conf — not starting daemon")
+		return
+	}
+
+	// Don't start a second daemon if one is already running for this user.
+	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
+		daemon.WriteStartupLog("Tray startup: daemon already running (%s) — not starting another", reason)
+		return
+	}
+
+	daemon.WriteStartupLog("Auto-download enabled — starting daemon on tray launch")
+	a.startService()
 }
 
 func onExit() {
@@ -201,26 +225,20 @@ func (a *trayApp) updateUI() {
 	for _, a := range pres.AllowedActions {
 		allowed[a] = true
 	}
-	setMenuItem(a.mInstallServiceAdmin, allowed[service.ActionInstallService])
-	setMenuItem(a.mUninstallServiceAdmin, allowed[service.ActionUninstallService])
-	setMenuItem(a.mStartServiceAdmin, allowed[service.ActionStartService])
-	setMenuItem(a.mStopServiceAdmin, allowed[service.ActionStopService])
 	setMenuItem(a.mPause, allowed[service.ActionPause])
 	setMenuItem(a.mResume, allowed[service.ActionResume])
 	setMenuItem(a.mTriggerScan, allowed[service.ActionTriggerScan])
 
-	// Setup-required shortcut: visible when the user is running under the
-	// service but not configured.
-	if st.PerUser == service.PerUserNotConfigured && st.Installation == service.InstallationRunning {
+	// Start option: visible when auto-download is configured but no daemon is
+	// currently running for this user.
+	setMenuItem(a.mStartDaemon, allowed[service.ActionStartDaemon] && !st.IPCConnected)
+
+	// Setup-required shortcut: visible when not yet configured.
+	if st.PerUser == service.PerUserNotConfigured {
 		a.mSetupRequired.Show()
 	} else {
 		a.mSetupRequired.Hide()
 	}
-
-	// Start Service (subprocess) option: visible on non-service installations
-	// when we have no running daemon.
-	canStartSubprocess := st.Installation == service.InstallationSubprocessOnly && !st.IPCConnected
-	setMenuItem(a.mStartService, canStartSubprocess)
 }
 
 // setMenuItem shows+enables or hides a systray menu item.
@@ -243,14 +261,8 @@ func (a *trayApp) handleMenuClicks() {
 		case <-a.mSetupRequired.ClickedCh:
 			a.openGUI()
 
-		case <-a.mStartService.ClickedCh:
+		case <-a.mStartDaemon.ClickedCh:
 			a.startService()
-
-		case <-a.mStartServiceAdmin.ClickedCh:
-			a.startServiceElevated()
-
-		case <-a.mStopServiceAdmin.ClickedCh:
-			a.stopServiceElevated()
 
 		case <-a.mConfigure.ClickedCh:
 			a.openGUI()
@@ -266,12 +278,6 @@ func (a *trayApp) handleMenuClicks() {
 
 		case <-a.mResume.ClickedCh:
 			a.resumeAutoDownload()
-
-		case <-a.mInstallServiceAdmin.ClickedCh:
-			a.installServiceElevated()
-
-		case <-a.mUninstallServiceAdmin.ClickedCh:
-			a.uninstallServiceElevated()
 
 		case <-a.mViewLogs.ClickedCh:
 			a.viewLogs()
@@ -544,100 +550,6 @@ func (a *trayApp) viewLogs() {
 		a.lastError = "Failed to open logs directory"
 		a.mu.Unlock()
 	}
-}
-
-// startServiceElevated triggers UAC to start the Windows Service.
-// Does not gate on IsInstalled() because SCM may be inaccessible from non-admin context.
-func (a *trayApp) startServiceElevated() {
-	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
-	// The elevated "rescale-int service start" will report errors properly.
-	daemon.WriteStartupLog("=== TRAY ELEVATED START SERVICE ===")
-
-	if err := elevation.StartServiceElevated(); err != nil {
-		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
-		a.mu.Lock()
-		a.lastError = translateError(err)
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
-	daemon.WriteStartupLog("SUCCESS: UAC approved, service start command executed")
-
-	// Wait for service to start, then refresh status
-	go func() {
-		time.Sleep(2 * time.Second)
-		a.refreshStatus()
-	}()
-}
-
-// stopServiceElevated triggers UAC to stop the Windows Service.
-// Does not gate on IsInstalled() because SCM may be inaccessible from non-admin context.
-func (a *trayApp) stopServiceElevated() {
-	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
-	// The elevated "rescale-int service stop" will report errors properly.
-	daemon.WriteStartupLog("=== TRAY ELEVATED STOP SERVICE ===")
-
-	if err := elevation.StopServiceElevated(); err != nil {
-		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
-		a.mu.Lock()
-		a.lastError = translateError(err)
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
-	daemon.WriteStartupLog("SUCCESS: UAC approved, service stop command executed")
-
-	// Wait for service to stop, then refresh status
-	go func() {
-		time.Sleep(2 * time.Second)
-		a.refreshStatus()
-	}()
-}
-
-// installServiceElevated triggers UAC to install the Windows Service.
-func (a *trayApp) installServiceElevated() {
-	daemon.WriteStartupLog("=== TRAY ELEVATED INSTALL SERVICE ===")
-
-	if err := elevation.InstallServiceElevated(); err != nil {
-		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
-		a.mu.Lock()
-		a.lastError = translateError(err)
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
-	daemon.WriteStartupLog("SUCCESS: UAC approved, service install command executed")
-
-	// Refresh status after install
-	go func() {
-		time.Sleep(2 * time.Second)
-		a.refreshStatus()
-	}()
-}
-
-// uninstallServiceElevated triggers UAC to uninstall the Windows Service.
-func (a *trayApp) uninstallServiceElevated() {
-	daemon.WriteStartupLog("=== TRAY ELEVATED UNINSTALL SERVICE ===")
-
-	if err := elevation.UninstallServiceElevated(); err != nil {
-		daemon.WriteStartupLog("ERROR: UAC elevation failed: %v", err)
-		a.mu.Lock()
-		a.lastError = translateError(err)
-		a.updateUI()
-		a.mu.Unlock()
-		return
-	}
-
-	daemon.WriteStartupLog("SUCCESS: UAC approved, service uninstall command executed")
-
-	// Refresh status after uninstall
-	go func() {
-		time.Sleep(2 * time.Second)
-		a.refreshStatus()
-	}()
 }
 
 // truncate shortens a string to maxLen, adding "..." if truncated.

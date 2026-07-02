@@ -4,6 +4,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -31,18 +32,23 @@ type JobFilter struct {
 // only AutoDownloadTag and LookbackDays are configurable in Interlink.
 type EligibilityConfig struct {
 	// AutoDownloadTag is the tag to check when a job's "Auto Download" field is "Conditional".
-	// Default: "autoDownload"
+	// Default: "autodownload"
 	AutoDownloadTag string
 
 	// LookbackDays is the number of days to look back for completed jobs (default: 7).
 	// Jobs older than this are ignored.
 	LookbackDays int
+
+	// IncludeWorkspaceFolders, when true, also enumerates jobs in the
+	// workspace's shared folders (recursively) in addition to the user's own
+	// jobs. Default: false.
+	IncludeWorkspaceFolders bool
 }
 
 // DefaultEligibilityConfig returns the default eligibility configuration.
 func DefaultEligibilityConfig() *EligibilityConfig {
 	return &EligibilityConfig{
-		AutoDownloadTag: "autoDownload",
+		AutoDownloadTag: "autodownload",
 		LookbackDays:    7,
 	}
 }
@@ -95,6 +101,15 @@ const (
 	// re-download after tag removal).
 	ReasonHasDownloadedTag SkipReasonCode = "has_downloaded_tag"
 
+	// ReasonHasStartedTag — job carries the "started" tag set by another
+	// client that is currently downloading it. We back off so two clients
+	// polling the same workspace folder do not download the same job. Silent
+	// (transient, resolves when the other client applies the done tag or
+	// releases the started tag on error). The client that set the tag itself
+	// is allowed through (local-state override) so it can resume after a
+	// restart.
+	ReasonHasStartedTag SkipReasonCode = "has_started_tag"
+
 	// ReasonConditionalMissingTag — "Auto Download" is Conditional but the
 	// job lacks the configured auto-download tag.
 	ReasonConditionalMissingTag SkipReasonCode = "conditional_missing_tag"
@@ -144,6 +159,7 @@ func (c SkipReasonCode) IsSilent() bool {
 		ReasonFieldCheckAPIError,
 		ReasonInRetryBackoff,
 		ReasonPendingTagApply,
+		ReasonHasStartedTag,
 		ReasonHasDownloadedTag:
 		return true
 	default:
@@ -246,6 +262,27 @@ func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligi
 		}
 	}
 
+	// Step 1b: started tag is a cross-client lock. If another client set it,
+	// back off. If we set it ourselves (tracked in local state), fall through
+	// so a restarted client can resume its own in-flight job rather than
+	// deadlocking on its own lock.
+	hasStartedTag, err := m.apiClient.HasJobTag(ctx, jobID, config.StartedTag)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check started tag")
+		detail := fmt.Sprintf("failed to check '%s' tag: %v", config.StartedTag, err)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonDownloadedTagCheckAPIError, Detail: detail},
+			Detail: detail,
+		}
+	}
+	if hasStartedTag && !m.state.IsStartedByUs(jobID) {
+		detail := fmt.Sprintf("another client is downloading (has '%s' tag)", config.StartedTag)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonHasStartedTag, Detail: detail},
+			Detail: detail,
+		}
+	}
+
 	// Step 2: check custom field.
 	fieldValue, err := m.apiClient.GetJobCustomFieldValue(ctx, jobID, config.AutoDownloadFieldName)
 	if err != nil {
@@ -342,6 +379,13 @@ type CompletedJob struct {
 	Owner       string
 	Created     string
 	CompletedAt time.Time
+
+	// RelPath is the job's workspace-folder path relative to the
+	// sharedWithWorkspace root (e.g. "PoC_Demo" or "TeamA/Sub"), with the
+	// "Shared" root excluded. Empty for the user's personal jobs. Used to
+	// mirror the folder structure into the download directory; ignored when
+	// flatten_folder_structure is enabled.
+	RelPath string
 }
 
 // getJobCompletionTime retrieves the actual completion time from job status history.
@@ -442,6 +486,93 @@ type FindCompletedJobsResult struct {
 	Summary *ScanSummary
 }
 
+// jobWithPath pairs a job with its workspace-folder path relative to the
+// shared root (empty for the user's personal jobs).
+type jobWithPath struct {
+	job     models.JobResponse
+	relPath string
+}
+
+// maxWorkspaceFolderDepth bounds the recursive folder walk as a safety net
+// against cycles or pathological trees.
+const maxWorkspaceFolderDepth = 20
+
+// collectWorkspaceJobs returns every job in the sharedWithWorkspace folder
+// tree, each tagged with its path relative to the shared root (the "Shared"
+// root itself is excluded from the path).
+//
+// The jobs/?q=folder:<id> query is RECURSIVE — querying the shared root with
+// f=0 returns every job in every (sub)folder in one shot, and each job's own
+// folder reference (folder.id) tells us exactly where it lives. So we:
+//  1. build a folder-id -> relative-path map from the meta/folders tree
+//     (skipping archived folders), then
+//  2. query the root once and map each job to its folder's path.
+//
+// A job whose folder is not in the map (e.g. an archived folder) is skipped.
+func (m *Monitor) collectWorkspaceJobs(ctx context.Context, creationCutoff time.Time) ([]jobWithPath, error) {
+	meta, err := m.apiClient.GetMetaFolders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get workspace folders: %w", err)
+	}
+
+	root := meta.SharedWithWorkspace
+	if root.ID == "" {
+		m.logger.Debug().Msg("No sharedWithWorkspace root; skipping workspace folder scan")
+		return nil, nil
+	}
+
+	// Build folder-id -> relPath. The root maps to "" (jobs directly in the
+	// shared root download to the download-folder root). Archived folders and
+	// their descendants are omitted so their jobs are skipped.
+	pathByFolder := map[string]string{root.ID: ""}
+	buildFolderPaths(root.Children, "", pathByFolder, 1)
+
+	// One recursive query for all jobs under the shared root.
+	jobs, err := m.apiClient.ListJobsInFolder(ctx, root.ID, creationCutoff)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workspace jobs: %w", err)
+	}
+
+	out := make([]jobWithPath, 0, len(jobs))
+	for i := range jobs {
+		fid := ""
+		if jobs[i].Folder != nil {
+			fid = jobs[i].Folder.ID
+		}
+		relPath, ok := pathByFolder[fid]
+		if !ok {
+			// Job's folder is archived or otherwise not in the active tree.
+			m.logger.Debug().
+				Str("job_id", jobs[i].ID).
+				Str("folder_id", fid).
+				Msg("Skipping workspace job: folder not in active tree (archived?)")
+			continue
+		}
+		out = append(out, jobWithPath{job: jobs[i], relPath: relPath})
+	}
+	return out, nil
+}
+
+// buildFolderPaths fills pathByFolder with folder-id -> path-relative-to-shared-root
+// for each folder in the meta tree, appending the folder name to its parent's
+// path. Archived folders (and their descendants) are skipped.
+func buildFolderPaths(folders []models.MetaFolder, parentPath string, pathByFolder map[string]string, depth int) {
+	if depth > maxWorkspaceFolderDepth {
+		return
+	}
+	for _, f := range folders {
+		if f.IsArchived {
+			continue
+		}
+		relPath := f.Name
+		if parentPath != "" {
+			relPath = parentPath + "/" + f.Name
+		}
+		pathByFolder[f.ID] = relPath
+		buildFolderPaths(f.Children, relPath, pathByFolder, depth+1)
+	}
+}
+
 // FindCompletedJobs returns jobs that are completed and warrant an
 // eligibility check. The pendingSet (job IDs whose files are on disk but
 // whose downloaded tag call has not yet succeeded) are skipped
@@ -481,9 +612,6 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		return nil, fmt.Errorf("failed to list jobs: %w", err)
 	}
 
-	// Debug-level only — verbose stats not useful in GUI
-	m.logger.Debug().Int("jobs_to_scan", len(jobs)).Msg("Scanning jobs from API")
-
 	// Pre-filter buffer: Use creation date with extra buffer to reduce API calls
 	// Jobs created more than (lookback_days + 30) days ago cannot have completed within lookback window
 	var creationCutoff time.Time
@@ -491,14 +619,52 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		creationCutoff = time.Now().AddDate(0, 0, -(m.eligibility.LookbackDays + 30))
 	}
 
+	// Build the worklist: jobs in the workspace's shared folders (each tagged
+	// with its path relative to the Shared root) plus the user's own jobs.
+	// Workspace entries are added FIRST and take precedence on a dedupe by job
+	// ID, because a job can appear in BOTH the personal listing (which has no
+	// folder path) and a workspace folder; keeping the workspace entry
+	// preserves its folder path so the download mirrors the folder structure.
+	worklist := make([]jobWithPath, 0, len(jobs))
+	seen := make(map[string]struct{}, len(jobs))
+	if m.eligibility != nil && m.eligibility.IncludeWorkspaceFolders {
+		wsJobs, wsErr := m.collectWorkspaceJobs(ctx, creationCutoff)
+		if wsErr != nil {
+			// Non-fatal: log and continue with personal jobs so a folder API
+			// hiccup does not stall the whole scan.
+			m.logger.Warn().Err(wsErr).Msg("Failed to enumerate workspace folders; scanning personal jobs only")
+		} else {
+			for _, wj := range wsJobs {
+				if _, dup := seen[wj.job.ID]; dup {
+					continue
+				}
+				seen[wj.job.ID] = struct{}{}
+				worklist = append(worklist, wj)
+			}
+		}
+	}
+	// Add the user's own jobs, skipping any already contributed (with their
+	// folder path) by the workspace scan above.
+	for i := range jobs {
+		if _, dup := seen[jobs[i].ID]; dup {
+			continue
+		}
+		seen[jobs[i].ID] = struct{}{}
+		worklist = append(worklist, jobWithPath{job: jobs[i]})
+	}
+
+	// Debug-level only — verbose stats not useful in GUI
+	m.logger.Debug().Int("jobs_to_scan", len(worklist)).Msg("Scanning jobs from API")
+
 	var completed []*CompletedJob
 	summary := &ScanSummary{
-		TotalScanned:     len(jobs),
+		TotalScanned:     len(worklist),
 		SkipBuckets:      make(map[SkipReasonCode]int),
 		DownloadOutcomes: make(map[string]int),
 	}
 
-	for _, job := range jobs {
+	for _, item := range worklist {
+		job := item.job
 		// Check if job status is "Completed"
 		if job.JobStatus.Status != "Completed" {
 			summary.AddSkip(ReasonNotCompleted)
@@ -582,6 +748,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 			Owner:       job.Owner,
 			Created:     job.CreatedAt,
 			CompletedAt: completedAt,
+			RelPath:     item.relPath,
 		})
 	}
 
@@ -635,58 +802,123 @@ func (m *Monitor) matchesFilter(job models.JobResponse) bool {
 	return true
 }
 
+// JobIDFileName is the marker file written inside each job's output directory
+// holding the Rescale job ID. It replaces the old "_<shortID>" directory-name
+// suffix so folders can be named purely after the (sanitized) job name while
+// the authoritative job ID is still recoverable from disk.
+const JobIDFileName = ".jobid"
+
 // ComputeOutputDir determines the output directory for a job.
-// When useJobName is true, the directory name includes both the sanitized job name
-// and the job ID (truncated) to avoid collisions from jobs with the same name.
+//
+// When useJobName is true, the directory is named after the sanitized job name
+// alone (no job-ID suffix); the job ID is recorded in a .jobid file inside the
+// directory (see WriteJobIDFile). When useJobName is false, or the job has no
+// name, the directory is "job_<jobID>".
+//
+// Collision handling: if the job-name directory already exists and belongs to a
+// DIFFERENT job (its .jobid does not match, or it has none), the job ID is
+// appended ("<name>_<jobID>") to keep the two jobs separate. A directory that
+// does not exist, or that already belongs to this job (matching .jobid), uses
+// the plain name — so a re-download of the same job reuses its folder.
 func ComputeOutputDir(baseDir, jobID, jobName string, useJobName bool) string {
-	if useJobName && jobName != "" {
-		// Sanitize job name for use as directory name
-		safeName := sanitizeDirectoryName(jobName)
-		// Always include job ID suffix to avoid collisions from jobs with same name
-		// Use short ID (first 6 chars) for readability
-		shortID := jobID
-		if len(shortID) > 6 {
-			shortID = shortID[:6]
-		}
-		return filepath.Join(baseDir, fmt.Sprintf("%s_%s", safeName, shortID))
+	if !useJobName || jobName == "" {
+		return filepath.Join(baseDir, fmt.Sprintf("job_%s", jobID))
 	}
-	// Default: use job ID
-	return filepath.Join(baseDir, fmt.Sprintf("job_%s", jobID))
+
+	dir := filepath.Join(baseDir, sanitizeDirectoryName(jobName))
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		// Folder exists. Reuse it only when it's the same job; otherwise a
+		// different job already owns this name, so disambiguate with the ID.
+		if existingID, ok := readJobIDFile(dir); !ok || existingID != jobID {
+			return dir + "_" + jobID
+		}
+	}
+	return dir
 }
 
-// sanitizeDirectoryName makes a job name safe for use as a directory name.
-func sanitizeDirectoryName(name string) string {
-	// Replace problematic characters
-	replacer := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-		"\n", "_",
-		"\r", "_",
-	)
-	sanitized := replacer.Replace(name)
+// WriteJobIDFile writes the job ID into a .jobid marker file inside outputDir.
+// This records the authoritative job ID now that the directory name no longer
+// carries an ID suffix. Best-effort: returns an error the caller may log, but
+// a failure should not fail the download.
+func WriteJobIDFile(outputDir, jobID string) error {
+	return os.WriteFile(filepath.Join(outputDir, JobIDFileName), []byte(jobID+"\n"), 0644)
+}
 
-	// Trim leading/trailing whitespace and dots
+// readJobIDFile reads the job ID from the .jobid marker inside dir. Returns the
+// trimmed ID and true on success, or ("", false) if the file is absent or
+// unreadable.
+func readJobIDFile(dir string) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, JobIDFileName))
+	if err != nil {
+		return "", false
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// windowsReservedNames are device names Windows forbids as a file/directory
+// base name (case-insensitive), with or without an extension. A job named e.g.
+// "CON" would otherwise create an unusable directory on Windows.
+var windowsReservedNames = map[string]struct{}{
+	"CON": {}, "PRN": {}, "AUX": {}, "NUL": {},
+	"COM1": {}, "COM2": {}, "COM3": {}, "COM4": {}, "COM5": {},
+	"COM6": {}, "COM7": {}, "COM8": {}, "COM9": {},
+	"LPT1": {}, "LPT2": {}, "LPT3": {}, "LPT4": {}, "LPT5": {},
+	"LPT6": {}, "LPT7": {}, "LPT8": {}, "LPT9": {},
+}
+
+// sanitizeDirectoryName makes a job name safe for use as a single directory
+// name on both Windows and Unix. It replaces path separators and characters
+// Windows reserves (\ / : * ? " < > |), strips control characters, collapses
+// the result, trims trailing dots/spaces (which Windows silently drops),
+// avoids reserved device names, and bounds the length.
+func sanitizeDirectoryName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			// Control characters (includes \n, \r, \t) -> underscore.
+			b.WriteByte('_')
+		case strings.ContainsRune(`/\:*?"<>|`, r):
+			// Windows-reserved filename characters (also unsafe on Unix for /).
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	sanitized := b.String()
+
+	// Trim leading/trailing whitespace and dots (Windows drops trailing dots
+	// and spaces, which would cause the created folder to not match the name).
 	sanitized = strings.TrimSpace(sanitized)
 	sanitized = strings.Trim(sanitized, ".")
-
-	// Limit length
-	if len(sanitized) > 100 {
-		sanitized = sanitized[:100]
-	}
-
-	// Trim trailing whitespace after truncation
 	sanitized = strings.TrimSpace(sanitized)
 
-	// Fallback if empty
+	// Limit length (bytes; job names are typically ASCII).
+	if len(sanitized) > 100 {
+		sanitized = sanitized[:100]
+		sanitized = strings.TrimSpace(sanitized)
+		sanitized = strings.Trim(sanitized, ".")
+		sanitized = strings.TrimSpace(sanitized)
+	}
+
+	// Fallback if empty after sanitization.
 	if sanitized == "" {
-		sanitized = "unnamed_job"
+		return "unnamed_job"
+	}
+
+	// Avoid Windows reserved device names (compare against the base, ignoring
+	// any extension and case). Prefix with underscore to keep it recognizable.
+	base := sanitized
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	if _, reserved := windowsReservedNames[strings.ToUpper(base)]; reserved {
+		sanitized = "_" + sanitized
 	}
 
 	return sanitized

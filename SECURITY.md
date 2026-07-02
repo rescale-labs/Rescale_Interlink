@@ -134,7 +134,7 @@ API keys should be stored securely:
 
 | Method | Recommended | Notes |
 |--------|-------------|-------|
-| Token file (Unix: `~/.config/rescale/token`; Windows: `%APPDATA%\Rescale\Interlink\token` for the default-user token, `%LOCALAPPDATA%\Rescale\Interlink\token` for the per-user token used in service mode) | Yes | 0600 on Unix; explicit DACL on Windows (owner + Administrators + SYSTEM, no inheritance) |
+| Token file (Unix: `~/.config/rescale/token`; Windows: `%APPDATA%\Rescale\Interlink\token` for the default-user token, `%LOCALAPPDATA%\Rescale\Interlink\token` for the per-user token preferred by the auto-download daemon) | Yes | 0600 on Unix; explicit DACL on Windows (owner + Administrators + SYSTEM, no inheritance) |
 | Environment variable (`RESCALE_API_KEY`) | Yes | Cleared after session |
 | Config file (`config.csv`) | **No** | Keys are ignored from config.csv |
 
@@ -192,9 +192,12 @@ The Windows daemon uses named pipes for IPC with a two-tier security model:
 1. **Connection Level**: Any authenticated user can connect
 2. **Operation Level**: Modify operations require owner authorization
 
+The daemon runs as a subprocess in a single user's session, so authorization is
+owner-based: the caller's SID must match the SID that owns the daemon.
+
 ### Modify Operations (Protected)
 
-These require the caller's SID to match the daemon owner (subprocess mode), or any authenticated caller with a captured SID (service mode, scoped to the caller's own daemon):
+These require the caller's SID to match the daemon owner:
 - `PauseUser`
 - `ResumeUser`
 - `TriggerScan`
@@ -206,31 +209,28 @@ These require the caller's SID to match the daemon owner (subprocess mode), or a
 
 ### User-Scoped Read Operations
 
-These return data scoped to the caller's SID in service mode. An unidentifiable caller (empty SID) is **rejected** rather than receiving another user's data or a silently-empty response:
-- `GetUserList` (filtered to the caller's own entry in service mode)
-- `GetRecentLogs` (scoped to the caller's per-user daemon)
-- `GetTransferStatus` (scoped to the caller's transfers)
-- `OpenLogs` (scoped; the special `"service"` keyword opens service-level logs)
+These require the caller's SID to match the daemon owner. An unidentifiable caller (empty SID) is **rejected** rather than receiving data or a silently-empty response:
+- `GetUserList` (returns the single owner's entry)
+- `GetRecentLogs`
+- `GetTransferStatus`
+- `OpenLogs`
 
-### Service-Level Read Operations
+### Non-Scoped Read Operations
 
-These return only non-user-scoped information and are available to any authenticated caller:
-- `GetStatus` (overall service state and version)
+These return only non-user-specific information and are available to any authenticated caller:
+- `GetStatus` (daemon state and version)
 - `OpenGUI` (forwarded to the tray app to surface the GUI window; carries no user data)
 
 ### Fail-Closed Authorization
 
-If the daemon cannot capture the owner SID at startup, all modify operations are denied. If a service-mode request arrives with an unidentifiable caller (SID capture failed at the pipe layer), both modify operations and user-scoped read operations are rejected rather than silently succeeding with an empty scope. This policy is enforced by a single `resolveUserScope` helper in `internal/ipc/server.go` and is covered by a table-driven catalog test (`TestServiceMode_UserScopedMessages_FailClosedWithoutCallerSID`) so that new message types inherit the policy or fail the test.
+If the daemon cannot capture the owner SID at startup, all modify operations are denied. If a request arrives with an unidentifiable caller (SID capture failed at the pipe layer), both modify operations and user-scoped read operations are rejected rather than silently succeeding with an empty scope. This policy is enforced by a single `resolveUserScope` helper in `internal/ipc/server.go` and is covered by a table-driven catalog test so that new message types inherit the policy or fail the test.
 
----
-
-## Windows Service Mode
-
-When running as a Windows Service:
-
-1. **User isolation**: Each user's daemon instance is scoped to their profile
-2. **Elevated controls**: Starting/stopping the service requires UAC approval
-3. **Per-user state**: Downloads, pauses, and scans are user-specific
+> **Note:** A relaxed "service mode" server (`ipc.NewServiceModeServer`, which
+> scoped operations per-caller-SID across multiple users) still exists in
+> `internal/ipc` but is **not wired into any production path** — it remains only
+> for the multi-user Windows service, which was removed (see
+> [ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model)).
+> The daemon always uses the owner-based `ipc.NewServer`.
 
 ---
 
@@ -261,7 +261,7 @@ Rescale Interlink resolves API credentials through a priority chain that differs
 4. Default token file (Unix: `~/.config/rescale/token`; Windows: `%APPDATA%\Rescale\Interlink\token`)
 5. `RESCALE_API_KEY` environment variable (lowest priority)
 
-In **Windows service mode**, the chain is **truncated after step 3** — steps 4 and 5 are skipped to prevent the SYSTEM account's credentials from leaking into per-user daemon sessions. This truncation is the only mode-dependent behavior; the rest of the chain runs identically in both subprocess and service modes.
+`ResolveAPIKey`/`ResolveAPIKeySource` still accept a `serviceMode` flag that, when `true`, **truncates the chain after step 3** — skipping the default token file and env var so a SYSTEM-account daemon could not pick up the wrong credentials. With the Windows service removed, no production path passes `serviceMode=true`; the daemon runs as the logged-in user and uses the full chain. The flag and its truncation remain in `internal/config/apikey.go` (and are still unit-tested) in case the service is reinstated — see [ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model).
 
 **Source:** `internal/config/apikey.go`
 

@@ -180,9 +180,10 @@ Background service for automatically downloading completed jobs.
 - Automatic polling for completed jobs (configurable interval, default 5m)
 - Job name filtering (prefix, contains, exclude patterns)
 - Persistent state tracking (downloaded/failed jobs)
-- Output directories include job ID suffix to prevent collisions
+- Output directories are named after the sanitized job name; the job ID is recorded in a `.jobid` file inside the folder (rather than appended to the folder name). If a same-named folder already exists for a different job, the job ID is appended to avoid collisions
 - Graceful shutdown on Ctrl+C
-- **Tag-based source of truth**: The `downloaded` tag on the Rescale platform is authoritative. Removing the tag via the Rescale web UI triggers a re-download on the next poll; a tag-apply failure after a successful download is retried without re-downloading the files.
+- **Tag-based source of truth**: The `autodownload:done` tag on the Rescale platform is authoritative. Removing the tag via the Rescale web UI triggers a re-download on the next poll; a tag-apply failure after a successful download is retried without re-downloading the files.
+- **Multi-client coordination**: When several clients poll the same workspace folders, an `autodownload:started` tag acts as a cross-client lock so only one client downloads a given job. The lock is released on error (so the job is retryable) and replaced by `autodownload:done` on success. A client can resume its own in-flight job after a restart.
 - **Shared transfer engine**: Daemon downloads route through the same `TransferService` the GUI uses. Multi-file jobs download in parallel with adaptive concurrency; there is no parallel transfer implementation inside the daemon.
 - **Unified Transfers tab**: Daemon transfers appear alongside GUI transfers with a `Daemon` badge. Per-row Cancel/Retry works on daemon rows, routed via IPC; `Cancel All` cancels both engines.
 
@@ -194,11 +195,11 @@ Background service for automatically downloading completed jobs.
 - `retry [--all | -j ID...]` — Mark failed jobs for retry on the next poll
 - `config show` / `config path` / `config edit` / `config set <key> <value>` / `config init` / `config validate` — Manage `daemon.conf`
 
-On Windows MSI installs, the daemon is fronted by the Windows Service. See the **Service Commands** section in [CLI_GUIDE.md](CLI_GUIDE.md) for `service install`, `start`, `stop`, `install-and-start`, and `status`.
+On Windows MSI installs, the system tray app auto-starts the daemon at login when auto-download is enabled. The daemon runs as the logged-in user (no Windows service, no admin), so it can reach the user's mapped/network drives. See [ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model) for the rationale.
 
 ### Platform Support
-- macOS/Linux: subprocess mode with Unix domain socket IPC
-- Windows: native service mode with named pipe IPC, multi-user support, UAC elevation
+- macOS/Linux: subprocess in the user's session, Unix domain socket IPC
+- Windows: subprocess in the logged-in user's session, named pipe IPC; tray auto-start at login
 
 ---
 

@@ -441,6 +441,49 @@ func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
 	}
 }
 
+// TestConfigRoundTripFlattenJobDownload verifies the flatten_job_download flag
+// persists through a save/load cycle and defaults to false when absent.
+func TestConfigRoundTripFlattenJobDownload(t *testing.T) {
+	tmpDir := t.TempDir()
+	csvPath := tmpDir + "/config.csv"
+
+	original := &Config{
+		TarWorkers:         4,
+		UploadWorkers:      4,
+		JobWorkers:         4,
+		ProxyMode:          "no-proxy",
+		APIBaseURL:         "https://platform.rescale.com",
+		MaxRetries:         1,
+		SortField:          "name",
+		SortAscending:      true,
+		FlattenJobDownload: true,
+	}
+
+	if err := SaveConfigCSV(original, csvPath); err != nil {
+		t.Fatalf("SaveConfigCSV() error = %v", err)
+	}
+	loaded, err := LoadConfigCSV(csvPath)
+	if err != nil {
+		t.Fatalf("LoadConfigCSV() error = %v", err)
+	}
+	if !loaded.FlattenJobDownload {
+		t.Error("After round-trip: FlattenJobDownload = false, want true")
+	}
+
+	// Default: a config with no flatten_job_download key parses as false.
+	defPath := tmpDir + "/default.csv"
+	if err := os.WriteFile(defPath, []byte("key,value\napi_base_url,https://platform.rescale.com\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	def, err := LoadConfigCSV(defPath)
+	if err != nil {
+		t.Fatalf("LoadConfigCSV(default) error = %v", err)
+	}
+	if def.FlattenJobDownload {
+		t.Error("Default FlattenJobDownload = true, want false")
+	}
+}
+
 // TestEmptyAPIBaseURLWithTenantURL tests the reverse case: tenant_url set, api_base_url empty.
 func TestEmptyAPIBaseURLWithTenantURL(t *testing.T) {
 	tmpDir := t.TempDir()

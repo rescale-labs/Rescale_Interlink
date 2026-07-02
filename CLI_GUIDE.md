@@ -167,6 +167,7 @@ Additional configuration options for specialized use cases:
 | `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`), opt-in | (none) |
 | `tar_compression` | Compression type: `none` or `gzip` (legacy `gz` is auto-normalized to `gzip`) | none |
 | `max_retries` | Maximum upload retry attempts | 1 |
+| `flatten_job_download` | In the File Browser, download a job folder without the `Input`/`Output` split — files land directly under the job folder, matching auto-download (`true`/`false`) | false |
 
 **Note:** In the GUI, worker and tar settings are configured via the **PUR tab's Pipeline Settings** section (visible in both the scan step and the jobs-validated step). Tar options are also available in the **SingleJob tab** when using directory input mode. The `run_subpath` and `validation_pattern` are configured on the **PUR tab** scan step and persist to `config.csv` automatically. These settings are no longer in the Setup tab's Advanced Settings.
 
@@ -915,7 +916,7 @@ The daemon automatically loads settings from the config file. CLI flags override
 - `--exclude stringArray` - Exclude jobs with names starting with these prefixes
 - `--max-concurrent int` - Maximum concurrent file downloads per job (default 5)
 - `--state-file string` - Path to daemon state file
-- `--use-job-id` - Use job ID instead of job name for output directory names
+- `--use-job-id` - Name output directories `job_<id>` instead of the (sanitized) job name. When using the job name (the default), the job ID is written to a `.jobid` file inside each job folder; if a same-named folder already exists for a different job, the job ID is appended (`<name>_<id>`)
 - `--once` - Run once and exit (useful for cron jobs)
 - `--log-file string` - Path to log file (empty = stdout)
 - `--background` - Run in background mode (Unix only)
@@ -950,9 +951,13 @@ Send a clean shutdown request to a running daemon over IPC.
 
 ```bash
 rescale-int daemon stop
+rescale-int daemon stop --force   # force-terminate if graceful shutdown is unavailable
 ```
 
-Returns once the daemon has acknowledged the request. If no daemon is running (no IPC socket), prints a clear message and exits non-zero. To stop all per-user daemons in Windows service mode, use `rescale-int service stop` instead.
+Returns once the daemon has acknowledged the request. If no daemon is running (no IPC socket), prints a clear message and exits non-zero. The daemon runs in your own user session, so this stops your auto-download daemon directly — there is no separate Windows service to stop.
+
+**Flags:**
+- `--force` — if the daemon is not reachable over IPC (e.g. started without `--ipc`) or does not shut down in time, terminate the process directly using its recorded PID. This is what the uninstaller uses so the daemon executable is never left locked.
 
 #### daemon config
 
@@ -980,6 +985,8 @@ poll_interval_minutes = 5
 use_job_name_dir = true
 max_concurrent = 5
 lookback_days = 7
+include_workspace_folders = false
+flatten_folder_structure = false
 
 [filters]
 name_prefix =
@@ -987,7 +994,7 @@ name_contains =
 exclude = test,debug
 
 [eligibility]
-auto_download_tag = autoDownload
+auto_download_tag = autodownload
 
 [notifications]
 enabled = true
@@ -1033,9 +1040,11 @@ rescale-int daemon config set <key> <value>
 - `enabled` - Enable/disable daemon (true/false)
 - `download_folder` - Download directory path
 - `poll_interval_minutes` - Poll interval in minutes (1-60)
-- `use_job_name_dir` - Use job name for subdirectories (true/false)
+- `use_job_name_dir` - Name subdirectories after the sanitized job name (true/false). The job ID is stored in a `.jobid` file inside each folder. When false, folders are named `job_<id>`
 - `max_concurrent` - Max concurrent downloads (1-20)
 - `lookback_days` - How many days back to check for jobs (1-30)
+- `include_workspace_folders` - Also scan jobs in workspace shared folders (true/false, default false)
+- `flatten_folder_structure` - Download workspace-folder jobs into the download folder instead of mirroring the folder tree (true/false, default false)
 - `name_prefix` - Job name prefix filter
 - `name_contains` - Job name contains filter
 - `exclude` - Comma-separated exclude patterns
@@ -1104,11 +1113,11 @@ Custom Fields Enabled: true
    - **Name**: `Auto Download` (exact spelling required)
    - **Type**: Select (dropdown)
    - **Values**: `Enabled`, `Disabled`, and optionally `Conditional`
-3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`).
+3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autodownload`).
 
 #### Auto-Start on Login
 
-On **Windows with MSI installer**, the service must be started from the GUI Setup tab ("Install & Start Service") or via `rescale-int service install-and-start` from an elevated command prompt.
+On **Windows with MSI installer**, auto-download starts automatically. The installer registers the system tray app (`rescale-int-tray.exe`) under `HKCU\...\Run`, and the tray starts the auto-download daemon at login whenever it is enabled in `daemon.conf`. The daemon runs as the logged-in user (so it can reach your mapped/network drives) — no admin, no Windows service. You can also start/stop it from the GUI Setup tab.
 
 On **Mac and Linux**, configure auto-start using the system's init system. Interlink does not ship a built-in provisioning flow for launchd or systemd-user; the instructions below are for users who want to wire this up themselves:
 
@@ -1276,58 +1285,22 @@ rescale-int daemon retry --job-id XxYyZz
 
 ---
 
-### Service Commands (Windows only)
+### Service Commands (legacy cleanup, Windows only)
 
-Manage the Rescale Interlink Windows service. The service is the multi-user auto-download daemon used in MSI-installer deployments. These commands are no-ops on macOS and Linux — auto-download on those platforms uses the subprocess daemon (`daemon run`).
+Auto-download no longer runs as a Windows service — it runs as a subprocess in
+the logged-in user's session, started by the tray app (see
+[Auto-Start on Login](#auto-start-on-login)). This change exists so auto-download
+can reach mapped/network drives using the user's own credentials; see
+[ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model)
+for the full rationale.
 
-All `service` commands require an elevated (Administrator) command prompt.
-
-#### service install
-
-Register the Interlink service with Windows Service Control Manager. After install, use `service start` to bring it up.
-
-```bash
-rescale-int service install
-```
-
-#### service uninstall
-
-Stop and unregister the Interlink service.
+The only remaining `service` command removes a service left over from an older
+Interlink version. It is hidden from `--help` and runs automatically during MSI
+upgrades and on first tray launch, so you normally never need it. To run it
+manually from an elevated prompt:
 
 ```bash
 rescale-int service uninstall
-```
-
-#### service start
-
-Start the registered service.
-
-```bash
-rescale-int service start
-```
-
-#### service stop
-
-Stop the running service. This stops every per-user daemon under it.
-
-```bash
-rescale-int service stop
-```
-
-#### service install-and-start
-
-Idempotent install + start in a single invocation. Used by the GUI Setup tab's "Install & Start Service" button. Safe to re-run if the service is already installed and/or running.
-
-```bash
-rescale-int service install-and-start
-```
-
-#### service status
-
-Show whether the service is installed and currently running.
-
-```bash
-rescale-int service status
 ```
 
 ---

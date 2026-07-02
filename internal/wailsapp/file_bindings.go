@@ -694,6 +694,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: err.Error()}
 	}
 
+	// When flatten_job_download is enabled, strip the leading "Input"/"Output"
+	// job subfolder segment so a downloaded job folder mirrors the auto-download
+	// layout (files directly under the job folder) instead of the platform's
+	// Input/ + Output/ split. Default false keeps the existing behavior.
+	flattenJobDownload := a.config != nil && a.config.FlattenJobDownload
+
 	// Scan-consumer goroutine — owns requestCh, closes it on all exit paths.
 	go func() {
 		defer close(requestCh)
@@ -724,9 +730,18 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				firstScanEvent = false
 			}
 			if event.Folder != nil {
+				relPath := event.Folder.RelativePath
+				if flattenJobDownload {
+					relPath = stripJobIOPrefix(relPath)
+				}
+				// A folder whose only purpose was the Input/Output level collapses
+				// to empty after stripping — nothing to create for it.
+				if flattenJobDownload && relPath == "" {
+					continue
+				}
 				// Validate folder path to prevent path traversal
-				if localPath, err := resolveSafeDownloadPath(event.Folder.RelativePath, rootOutputDir); err != nil {
-					emitLog(events.WarnLevel, fmt.Sprintf("Skipping folder with invalid path %q: %s", event.Folder.RelativePath, err.Error()))
+				if localPath, err := resolveSafeDownloadPath(relPath, rootOutputDir); err != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping folder with invalid path %q: %s", relPath, err.Error()))
 				} else if err := os.MkdirAll(localPath, 0755); err != nil {
 					emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
 				} else {
@@ -734,10 +749,14 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				}
 			}
 			if event.File != nil {
+				relPath := event.File.RelativePath
+				if flattenJobDownload {
+					relPath = stripJobIOPrefix(relPath)
+				}
 				// Validate file path to prevent path traversal
-				localPath, pathErr := resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
+				localPath, pathErr := resolveSafeDownloadPath(relPath, rootOutputDir)
 				if pathErr != nil {
-					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", event.File.RelativePath, pathErr.Error()))
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", relPath, pathErr.Error()))
 					continue
 				}
 				// In merge mode, skip files that already exist locally

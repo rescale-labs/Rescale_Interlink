@@ -2,6 +2,9 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/models"
@@ -119,55 +122,95 @@ func TestJobFilter_MatchesFilter(t *testing.T) {
 }
 
 func TestComputeOutputDir(t *testing.T) {
+	// baseDir/leaf are joined with filepath.Join so expectations are correct on
+	// both Windows (\) and Unix (/).
+	baseDir := filepath.Join("downloads")
 	tests := []struct {
 		name       string
-		baseDir    string
 		jobID      string
 		jobName    string
 		useJobName bool
-		expected   string
+		leaf       string
 	}{
 		{
 			name:       "use job ID",
-			baseDir:    "/downloads",
 			jobID:      "abc123",
 			jobName:    "Test Job",
 			useJobName: false,
-			expected:   "/downloads/job_abc123",
+			leaf:       "job_abc123",
 		},
 		{
-			name:       "use job name includes short ID suffix",
-			baseDir:    "/downloads",
+			name:       "use job name (no ID suffix; ID goes in .jobid file)",
 			jobID:      "abc123xyz",
 			jobName:    "Test Job",
 			useJobName: true,
-			expected:   "/downloads/Test Job_abc123",
+			leaf:       "Test Job",
 		},
 		{
-			name:       "short job ID kept as-is",
-			baseDir:    "/downloads",
+			name:       "job name sanitized for directory",
 			jobID:      "abc",
-			jobName:    "Test Job",
+			jobName:    "Test/Job:Name",
 			useJobName: true,
-			expected:   "/downloads/Test Job_abc",
+			leaf:       "Test_Job_Name",
 		},
 		{
 			name:       "empty job name falls back to job ID",
-			baseDir:    "/downloads",
 			jobID:      "abc123",
 			jobName:    "",
 			useJobName: true,
-			expected:   "/downloads/job_abc123",
+			leaf:       "job_abc123",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ComputeOutputDir(tt.baseDir, tt.jobID, tt.jobName, tt.useJobName)
-			if result != tt.expected {
-				t.Errorf("ComputeOutputDir() = %q, want %q", result, tt.expected)
+			expected := filepath.Join(baseDir, tt.leaf)
+			result := ComputeOutputDir(baseDir, tt.jobID, tt.jobName, tt.useJobName)
+			if result != expected {
+				t.Errorf("ComputeOutputDir() = %q, want %q", result, expected)
 			}
 		})
+	}
+}
+
+// TestComputeOutputDir_Collision verifies the on-disk collision handling:
+// the ID suffix is appended only when the job-name folder already exists for a
+// DIFFERENT job; a fresh name, or the same job's own folder, uses the plain name.
+func TestComputeOutputDir_Collision(t *testing.T) {
+	base := t.TempDir()
+
+	// 1. No existing folder -> plain name.
+	if got, want := ComputeOutputDir(base, "job1", "My Run", true), filepath.Join(base, "My Run"); got != want {
+		t.Fatalf("fresh: got %q, want %q", got, want)
+	}
+
+	// Simulate job1 having been downloaded (folder + matching .jobid).
+	dir := filepath.Join(base, "My Run")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJobIDFile(dir, "job1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Same job re-download -> reuse the plain folder (matching .jobid).
+	if got, want := ComputeOutputDir(base, "job1", "My Run", true), dir; got != want {
+		t.Errorf("same job: got %q, want %q", got, want)
+	}
+
+	// 3. Different job, same name -> append the job ID.
+	if got, want := ComputeOutputDir(base, "job2", "My Run", true), dir+"_job2"; got != want {
+		t.Errorf("collision: got %q, want %q", got, want)
+	}
+
+	// 4. Existing folder but no .jobid (e.g. pre-existing/user folder) ->
+	//    treat as a different owner and disambiguate.
+	bare := filepath.Join(base, "Bare")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := ComputeOutputDir(base, "job3", "Bare", true), bare+"_job3"; got != want {
+		t.Errorf("no-jobid collision: got %q, want %q", got, want)
 	}
 }
 
@@ -227,6 +270,26 @@ func TestSanitizeDirectoryName(t *testing.T) {
 			input:    "...",
 			expected: "unnamed_job",
 		},
+		{
+			name:     "control characters replaced",
+			input:    "Test\tJob\nName",
+			expected: "Test_Job_Name",
+		},
+		{
+			name:     "windows reserved name gets prefixed",
+			input:    "CON",
+			expected: "_CON",
+		},
+		{
+			name:     "windows reserved name with extension gets prefixed",
+			input:    "nul.txt",
+			expected: "_nul.txt",
+		},
+		{
+			name:     "reserved-looking substring is fine",
+			input:    "CONFIG",
+			expected: "CONFIG",
+		},
 	}
 
 	for _, tt := range tests {
@@ -236,6 +299,22 @@ func TestSanitizeDirectoryName(t *testing.T) {
 				t.Errorf("sanitizeDirectoryName(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestWriteJobIDFile verifies the .jobid marker is written with the job ID and
+// lands at the expected path inside the output directory.
+func TestWriteJobIDFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteJobIDFile(dir, "abc123xyz"); err != nil {
+		t.Fatalf("WriteJobIDFile: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, JobIDFileName))
+	if err != nil {
+		t.Fatalf("reading .jobid: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "abc123xyz" {
+		t.Errorf(".jobid contents = %q, want %q", got, "abc123xyz")
 	}
 }
 
@@ -251,8 +330,8 @@ func TestDefaultEligibilityConfig(t *testing.T) {
 	}
 
 	// EligibilityConfig has only AutoDownloadTag and LookbackDays
-	if cfg.AutoDownloadTag != "autoDownload" {
-		t.Errorf("AutoDownloadTag = %q, want %q", cfg.AutoDownloadTag, "autoDownload")
+	if cfg.AutoDownloadTag != "autodownload" {
+		t.Errorf("AutoDownloadTag = %q, want %q", cfg.AutoDownloadTag, "autodownload")
 	}
 	if cfg.LookbackDays != 7 {
 		t.Errorf("LookbackDays = %d, want %d", cfg.LookbackDays, 7)
@@ -268,7 +347,7 @@ func TestNewMonitorWithEligibility_NilConfig(t *testing.T) {
 	}
 
 	// Should have default values
-	if m.eligibility.AutoDownloadTag != "autoDownload" {
+	if m.eligibility.AutoDownloadTag != "autodownload" {
 		t.Errorf("expected default AutoDownloadTag, got %q", m.eligibility.AutoDownloadTag)
 	}
 	if m.eligibility.LookbackDays != 7 {
@@ -358,6 +437,7 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 		// retry state).
 		ReasonHasDownloadedTag:            true,
 		ReasonPendingTagApply:             true,
+		ReasonHasStartedTag:               true,
 		ReasonConditionalMissingTag:       false,
 		ReasonDownloadedTagCheckAPIError:  false,
 		ReasonConditionalTagCheckAPIError: false,

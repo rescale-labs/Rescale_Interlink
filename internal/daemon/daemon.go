@@ -51,6 +51,11 @@ type Config struct {
 
 	// When set, jobs must pass eligibility checks to be downloaded
 	Eligibility *EligibilityConfig
+
+	// FlattenFolderStructure, when true, downloads workspace-folder jobs
+	// directly into DownloadDir instead of mirroring the folder tree. Only
+	// affects jobs that carry a workspace-folder path (CompletedJob.RelPath).
+	FlattenFolderStructure bool
 }
 
 // DefaultConfig returns a daemon configuration with sensible defaults.
@@ -344,6 +349,13 @@ func (d *Daemon) poll(ctx context.Context) {
 				continue
 			}
 			d.state.ClearPendingTagApply(jobID)
+			if err := d.apiClient.DeleteJobTag(scanCtx, jobID, config.StartedTag); err != nil {
+				d.logger.Debug().
+					Str("job_id", jobID).
+					Str("tag", config.StartedTag).
+					Err(err).
+					Msg("Failed to remove started lock tag after tag retry (harmless; done tag takes precedence)")
+			}
 			d.logger.Info().
 				Str("job_id", jobID).
 				Str("tag", config.DownloadedTag).
@@ -519,6 +531,7 @@ var scanSummaryReasonOrder = []SkipReasonCode{
 	ReasonAutoDownloadUnrecognized,
 	ReasonFieldCheckAPIError,
 	ReasonHasDownloadedTag,
+	ReasonHasStartedTag,
 	ReasonConditionalMissingTag,
 	ReasonDownloadedTagCheckAPIError,
 	ReasonConditionalTagCheckAPIError,
@@ -590,8 +603,32 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Str("job_name", job.Name).
 		Msg("Downloading job")
 
-	// Check for custom download path from eligibility config
+	// Base directory. For jobs that live in a workspace folder, mirror the
+	// folder structure under DownloadDir unless flattening is enabled. The
+	// relative path is derived from API folder names, so validate it stays
+	// within DownloadDir before using it.
 	baseDir := d.cfg.DownloadDir
+	if job.RelPath != "" && !d.cfg.FlattenFolderStructure {
+		candidate := filepath.Clean(filepath.Join(d.cfg.DownloadDir, filepath.FromSlash(job.RelPath)))
+		realDownloadDir, err := filepath.EvalSymlinks(d.cfg.DownloadDir)
+		if err != nil {
+			realDownloadDir = filepath.Clean(d.cfg.DownloadDir)
+		}
+		realCandidate := resolvePathWithSymlinks(candidate)
+		if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
+			d.logger.Warn().
+				Str("job_id", job.ID).
+				Str("folder_path", job.RelPath).
+				Err(err).
+				Msg("Rejecting workspace folder path: escapes download directory; using download root")
+		} else {
+			baseDir = realCandidate
+		}
+	}
+
+	// Check for custom download path from eligibility config. A per-job
+	// "Auto Download Path" override takes precedence over folder mirroring and
+	// must resolve to within DownloadDir.
 	if d.cfg.Eligibility != nil {
 		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
 			// Custom path must resolve to within DownloadDir to prevent
@@ -639,6 +676,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		return OutcomeOutputDirCreateFailed
 	}
 
+	// Record the job ID in a .jobid marker file. The directory is now named
+	// after the job name alone (no ID suffix), so this file is what maps the
+	// folder back to its Rescale job. Best-effort: a write failure is logged
+	// but does not fail the download.
+	if err := WriteJobIDFile(outputDir, job.ID); err != nil {
+		d.logger.Warn().Err(err).Str("dir", outputDir).Msg("Failed to write .jobid marker file")
+	}
+
 	files, err := d.apiClient.ListJobFiles(ctx, job.ID)
 	if err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to list job files")
@@ -651,11 +696,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	if len(files) == 0 {
-		d.logger.Info().Str("job_id", job.ID).Msg("No files to download for job")
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, 0, 0)
+		// Tag as downloaded so a job with no output is not re-considered every poll.
+		d.markDownloaded(ctx, job)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
 		}
+		d.logger.Info().Msgf("COMPLETED: %s [%s] - no files to download (tagged as downloaded)",
+			job.Name, job.ID)
 		return OutcomeNoFiles
 	}
 
@@ -663,6 +711,10 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Str("job_id", job.ID).
 		Int("file_count", len(files)).
 		Msg("Downloading job files")
+
+	// Claim the cross-client lock now that we know there are files to fetch.
+	// Released on every error path below; replaced by the done tag on success.
+	d.markStarted(ctx, job)
 
 	batchID := "daemon:" + job.ID
 	batchLabel := "Auto: " + job.Name
@@ -672,6 +724,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 
 	if err := d.ts.StartStreamingDownloadBatch(scanCtx, reqCh, batchID, batchLabel, services.SourceLabelDaemon, scanCancel); err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to start download batch")
+		d.releaseStarted(job)
 		d.state.MarkFailed(job.ID, job.Name, err)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
@@ -744,6 +797,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	stats, waitErr := d.ts.WaitForBatch(ctx, batchID)
 	if waitErr != nil {
 		d.logger.Error().Err(waitErr).Str("job_id", job.ID).Msg("Job download interrupted")
+		d.releaseStarted(job)
 		d.state.MarkFailed(job.ID, job.Name, waitErr)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
@@ -764,6 +818,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 			Int("cancelled_files", stats.Cancelled).
 			Int("total_files", stats.Total+alreadyPresent).
 			Msg("Job incomplete, marking as failed for retry")
+		d.releaseStarted(job)
 		d.state.MarkFailed(job.ID, job.Name, failErr)
 		outcome = OutcomePartialFailure
 	} else {
@@ -784,23 +839,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		fileCount := stats.Completed + alreadyPresent
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, fileCount, totalSize)
 
-		// Tag the job as downloaded. On failure, MarkPendingTagApply so the
-		// poll loop retries just the tag call (without re-downloading files).
-		if d.cfg.Eligibility != nil {
-			if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
-				d.logger.Warn().
-					Err(err).
-					Str("job_id", job.ID).
-					Str("tag", config.DownloadedTag).
-					Msg("Failed to tag job as downloaded (will retry on next poll)")
-				d.state.MarkPendingTagApply(job.ID)
-			} else {
-				d.logger.Debug().
-					Str("job_id", job.ID).
-					Str("tag", config.DownloadedTag).
-					Msg("Tagged job as downloaded")
-			}
-		}
+		// Tag the job as downloaded so it is skipped on subsequent polls, and
+		// release the 'started' lock.
+		d.markDownloaded(ctx, job)
 
 		d.logger.Info().Msgf("COMPLETED: %s [%s] - %d files, %s",
 			job.Name, job.ID, fileCount, formatBytes(totalSize))
@@ -812,6 +853,77 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	return outcome
+}
+
+// markDownloaded applies the 'done' tag so the job is skipped on subsequent
+// polls, then clears the local 'started' ownership and removes the 'started'
+// lock tag. On a failed 'done' tag call it flags the job PendingTagApply so the
+// poll loop retries just the tag (without re-downloading). Safe to call for
+// jobs that never acquired the 'started' lock (e.g. the no-files path): the
+// ClearStarted and DeleteJobTag calls are no-ops in that case.
+func (d *Daemon) markDownloaded(ctx context.Context, job *CompletedJob) {
+	if d.cfg.Eligibility == nil {
+		return
+	}
+	d.state.ClearStarted(job.ID)
+	if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
+		d.logger.Warn().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.DownloadedTag).
+			Msg("Failed to tag job as downloaded (will retry on next poll)")
+		d.state.MarkPendingTagApply(job.ID)
+		return
+	}
+	d.logger.Debug().
+		Str("job_id", job.ID).
+		Str("tag", config.DownloadedTag).
+		Msg("Tagged job as downloaded")
+	if err := d.apiClient.DeleteJobTag(ctx, job.ID, config.StartedTag); err != nil {
+		d.logger.Debug().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.StartedTag).
+			Msg("Failed to remove started lock tag after completion (harmless; done tag takes precedence)")
+	}
+}
+
+// markStarted applies the cross-client 'started' lock tag and records local
+// ownership so this client can resume its own in-flight job after a restart.
+// Best-effort: a failed tag call is logged but does not abort the download —
+// the worst case is another client also picking up the job.
+func (d *Daemon) markStarted(ctx context.Context, job *CompletedJob) {
+	if d.cfg.Eligibility == nil {
+		return
+	}
+	d.state.MarkStarted(job.ID, job.Name)
+	if err := d.apiClient.AddJobTag(ctx, job.ID, config.StartedTag); err != nil {
+		d.logger.Warn().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.StartedTag).
+			Msg("Failed to apply started lock tag (download proceeds; another client may also pick up the job)")
+	}
+}
+
+// releaseStarted removes the 'started' lock tag so the job is retryable by any
+// client, and clears local ownership. Called on every error path. Uses a
+// fresh short-lived context so the tag is released even when the parent
+// context was cancelled (the interrupted path).
+func (d *Daemon) releaseStarted(job *CompletedJob) {
+	if d.cfg.Eligibility == nil {
+		return
+	}
+	d.state.ClearStarted(job.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := d.apiClient.DeleteJobTag(ctx, job.ID, config.StartedTag); err != nil {
+		d.logger.Warn().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.StartedTag).
+			Msg("Failed to release started lock tag (job may stay locked until manually cleared)")
+	}
 }
 
 // formatBytes formats a byte count as a human-readable string.

@@ -30,6 +30,13 @@ type DownloadedJob struct {
 	// is cleared. Jobs with this flag set are skipped pre-eligibility so
 	// they never re-enter the download path.
 	PendingTagApply bool `json:"pending_tag_apply,omitempty"`
+
+	// StartedByUs is true between the moment this client applies the
+	// 'started' lock tag and the moment the download finishes (success or
+	// error). It lets eligibility distinguish our own in-flight job (which we
+	// may resume after a restart) from one another client is downloading. It
+	// is persisted so a restart mid-download still recognizes the lock as ours.
+	StartedByUs bool `json:"started_by_us,omitempty"`
 }
 
 // State maintains the daemon's persistent state.
@@ -214,6 +221,43 @@ func (s *State) PendingTagApplyJobs() []string {
 		}
 	}
 	return ids
+}
+
+// MarkStarted records that this client has applied the 'started' lock tag
+// and is about to download the job. Tracked so a restart mid-download can
+// tell its own lock apart from another client's (IsStartedByUs).
+func (s *State) MarkStarted(jobID, jobName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry, ok := s.Downloaded[jobID]; ok {
+		entry.StartedByUs = true
+		return
+	}
+	s.Downloaded[jobID] = &DownloadedJob{
+		JobID:       jobID,
+		JobName:     jobName,
+		StartedByUs: true,
+	}
+}
+
+// ClearStarted clears the started-by-us flag once the download finishes
+// (success or terminal failure) or its lock tag has been released.
+func (s *State) ClearStarted(jobID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry, ok := s.Downloaded[jobID]; ok {
+		entry.StartedByUs = false
+	}
+}
+
+// IsStartedByUs reports whether this client holds the 'started' lock for the
+// job. Used by eligibility to let a client resume its own in-flight job
+// rather than treating its own lock as another client's.
+func (s *State) IsStartedByUs(jobID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.Downloaded[jobID]
+	return ok && entry != nil && entry.StartedByUs
 }
 
 // MarkFailed records a job download failure.

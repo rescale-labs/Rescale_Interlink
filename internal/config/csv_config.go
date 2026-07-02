@@ -74,6 +74,13 @@ type Config struct {
 
 	// Organization code for org-scoped project assignment
 	OrgCode string
+
+	// FlattenJobDownload, when true, strips the leading "Input"/"Output" job
+	// subfolder segment when downloading a job folder in the File Browser, so
+	// files land directly under the job folder (matching the auto-download
+	// layout) instead of under Input/ and Output/ subfolders. Default false
+	// (preserve the existing Input/Output split for backward compatibility).
+	FlattenJobDownload bool
 }
 
 // LoadConfigCSV loads configuration from a CSV file
@@ -216,6 +223,8 @@ func LoadConfigCSV(path string) (*Config, error) {
 			cfg.DetailedLogging = strings.ToLower(value) == "true" || value == "1"
 		case "org_code":
 			cfg.OrgCode = value
+		case "flatten_job_download":
+			cfg.FlattenJobDownload = strings.ToLower(value) == "true" || value == "1"
 		}
 	}
 
@@ -317,6 +326,7 @@ func SaveConfigCSV(cfg *Config, path string) error {
 		{"sort_ascending", strconv.FormatBool(cfg.SortAscending)},
 		{"detailed_logging", strconv.FormatBool(cfg.DetailedLogging)},
 		{"org_code", cfg.OrgCode},
+		{"flatten_job_download", strconv.FormatBool(cfg.FlattenJobDownload)},
 	}
 
 	// Write ALL values unconditionally. A previous filter skipped "0", "false",

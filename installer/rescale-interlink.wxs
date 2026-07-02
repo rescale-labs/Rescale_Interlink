@@ -40,17 +40,18 @@
       <ComponentGroupRef Id="StartMenuShortcuts" />
     </Feature>
 
-    <!-- v4.5.7: ServiceFeature removed - service installation is now handled post-install
-         via GUI/tray UAC elevation. This avoids silent failures in per-user MSI mode. -->
+    <!-- Auto-download no longer runs as a Windows service. It runs as a
+         subprocess in the logged-in user's session, started by the tray app.
+         No service is installed by this MSI. -->
 
     <Feature Id="TrayFeature" Title="System Tray Companion" Level="1">
       <ComponentGroupRef Id="TrayComponents" />
     </Feature>
 
     <!-- Custom actions -->
-    <!-- v4.5.7: Service install/start custom actions removed. Service is now installed
-         post-MSI via GUI/tray UAC elevation (elevation.InstallServiceElevated).
-         Only a best-effort uninstall action remains for the uninstall flow. -->
+    <!-- Best-effort removal of a Windows service installed by older Interlink
+         versions. Runs on uninstall/upgrade so a stale SYSTEM service (which
+         could not reach user-mapped network drives) does not linger. -->
     <CustomAction Id="UninstallService"
                   Directory="INSTALLFOLDER"
                   ExeCommand="[INSTALLFOLDER]rescale-int.exe service uninstall"
@@ -58,22 +59,39 @@
                   Impersonate="no"
                   Return="ignore" />
 
-    <!-- v4.0.8: Launch tray icon immediately after install using WixShellExec -->
-    <!-- Set target executable - [#FileId] resolves to installed path -->
-    <SetProperty Id="WixShellExecTarget" Value="[#TrayExe]" After="CostFinalize" Sequence="execute" />
+    <!-- Terminate all Interlink processes before removing files. This must run
+         BEFORE InstallValidate: that is where MSI's Restart Manager scans for
+         in-use files, and any of the three executables being locked (the GUI
+         and tray have windows; the daemon rescale-int.exe is a detached,
+         windowless subprocess Restart Manager cannot close) makes uninstall
+         prompt to "close these programs" and hang.
 
-    <CustomAction Id="LaunchTray"
-                  BinaryRef="Wix4UtilCA_X64"
-                  DllEntry="WixShellExec"
+         An IMMEDIATE action is used because deferred actions cannot run before
+         InstallValidate. Impersonate=yes runs it in the logged-in user's
+         session where these per-user processes live. taskkill /F force-closes
+         them (uninstall is destructive anyway); "& exit /b 0" makes a
+         "process not found" a success so an already-closed app is not an error. -->
+    <CustomAction Id="StopInterlinkProcesses"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[SystemFolder]cmd.exe /c &quot;taskkill /F /IM rescale-int-gui.exe /IM rescale-int-tray.exe /IM rescale-int.exe &amp; exit /b 0&quot;"
                   Execute="immediate"
+                  Impersonate="yes"
                   Return="ignore" />
 
+    <!-- The installer deliberately does NOT launch any process at install time.
+         The tray (rescale-int-tray.exe) is registered under HKCU ...\Run and
+         starts at the next logon; it then auto-starts the auto-download daemon
+         when it is enabled in daemon.conf. Users can also launch the tray or
+         GUI immediately from the Start Menu / desktop shortcuts. -->
+
     <!-- Install sequence -->
-    <!-- v4.5.7: Only best-effort service uninstall on removal + tray launch on install.
-         Service install/start actions removed (handled via GUI/tray UAC post-install). -->
+    <!-- On removal: kill running processes before the in-use scan, then clean
+         up any legacy Windows service. No process is started on install. -->
     <InstallExecuteSequence>
+      <!-- Kill running Interlink processes before the in-use file scan
+           (InstallValidate) so uninstall never prompts or hangs on a locked exe. -->
+      <Custom Action="StopInterlinkProcesses" Before="InstallValidate" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
-      <Custom Action="LaunchTray" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE" />
     </InstallExecuteSequence>
 
     <!-- UI reference - WiX v4 uses ui:WixUI from UI extension -->
@@ -149,9 +167,8 @@
     </ComponentGroup>
   </Fragment>
 
-  <!-- v4.5.7: ServiceComponents fragment removed. Service installation is handled
-       post-MSI via GUI/tray UAC elevation. The HKLM ServiceInstalled registry marker
-       is set/cleared by the elevated CLI (service install/uninstall commands). -->
+  <!-- No ServiceComponents: auto-download runs as a user-session subprocess,
+       not a Windows service. -->
 
   <!-- Tray companion components -->
   <Fragment>
@@ -159,11 +176,14 @@
       <Component Id="TrayExecutable" Guid="5E6F7A8B-9C0D-1E2F-3A4B-C5D6E7F8A9B0">
         <File Id="TrayExe" Source="$(var.BuildDir)\rescale-int-tray.exe" KeyPath="yes" />
 
-        <!-- Create scheduled task for tray auto-start -->
+        <!-- Auto-start the tray at logon. The tray (not the installer) is what
+             brings up auto-download: on launch it starts the daemon when it is
+             enabled in daemon.conf. The value is quoted so a profile path
+             containing spaces still launches correctly. -->
         <RegistryKey Root="HKCU" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run">
           <RegistryValue Name="RescaleInterlinkTray"
                          Type="string"
-                         Value="[INSTALLFOLDER]rescale-int-tray.exe" />
+                         Value="&quot;[INSTALLFOLDER]rescale-int-tray.exe&quot;" />
         </RegistryKey>
       </Component>
     </ComponentGroup>

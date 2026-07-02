@@ -1,18 +1,27 @@
 //go:build windows
 
-// Package service provides Windows Service Control Manager integration.
+// Package service provides subprocess daemon detection and legacy Windows
+// service cleanup.
 package service
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
+
+	"golang.org/x/sys/windows/registry"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
+	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 )
+
+// legacyServiceName is the name of the Windows service installed by older
+// Interlink versions. We no longer create it, but we still remove it on
+// upgrade so a stale SYSTEM service does not keep running.
+const legacyServiceName = "RescaleInterlink"
 
 // debugLog logs only when RESCALE_DEBUG is set (non-production debugging)
 func debugLog(format string, args ...interface{}) {
@@ -21,56 +30,23 @@ func debugLog(format string, args ...interface{}) {
 	}
 }
 
-// ServiceDetectionResult describes the current service state.
+// ServiceDetectionResult describes the current daemon state.
 type ServiceDetectionResult struct {
-	ServiceMode   bool   // True if Windows Service is running
 	SubprocessPID int    // PID if subprocess daemon is running
 	PipeInUse     bool   // True if named pipe exists
 	Error         string // Error message if detection failed
 }
 
-// DetectDaemon performs multi-layer detection to determine daemon state.
-// Should be used by GUI, CLI, and Tray instead of raw IsInstalled() calls.
-// Falls back to IPC and pipe detection when SCM access is denied.
+// DetectDaemon determines whether a user-session daemon subprocess is running.
 func DetectDaemon() ServiceDetectionResult {
 	result := ServiceDetectionResult{}
-	debugLog("Starting detection...")
 
-	// Layer 1: Try SCM (may require admin)
-	installed, reason := IsInstalledWithReason()
-	debugLog("SCM: installed=%v, reason=%s", installed, reason)
-	if installed {
-		// Windows Service is installed - check if running
-		if status, err := QueryStatus(); err == nil && status == StatusRunning {
-			result.ServiceMode = true
-			debugLog("Result: ServiceMode=true (via SCM)")
-			return result
-		}
-	}
-
-	// Layer 2: If SCM access denied, check via IPC
-	if reason != "" && strings.Contains(strings.ToLower(reason), "denied") {
-		debugLog("SCM denied, trying IPC fallback...")
-		client := ipc.NewClient()
-		client.SetTimeout(5 * time.Second)
-		ctx := context.Background()
-		if status, err := client.GetStatus(ctx); err == nil {
-			if status.ServiceMode {
-				result.ServiceMode = true
-				debugLog("Result: ServiceMode=true (via IPC)")
-				return result
-			}
-		}
-	}
-
-	// Layer 3: Check for subprocess via PID file
 	if pid := daemon.IsDaemonRunning(); pid != 0 {
 		result.SubprocessPID = pid
 		debugLog("Result: SubprocessPID=%d", pid)
 		return result
 	}
 
-	// Layer 4: Check if pipe exists (daemon may be running but slow)
 	if ipc.IsPipeInUse() {
 		result.PipeInUse = true
 		result.Error = "Daemon appears to be running but not responding (pipe exists)"
@@ -81,29 +57,87 @@ func DetectDaemon() ServiceDetectionResult {
 	return result
 }
 
-// ShouldBlockSubprocess returns true if subprocess spawn should be blocked.
-// Returns (blocked, reason). Only blocks when service is RUNNING, not just
-// installed — this allows subprocess mode when service is installed but stopped.
+// ShouldBlockSubprocess returns true if a new daemon subprocess should not be
+// started because one is already running for this user.
 func ShouldBlockSubprocess() (bool, string) {
 	d := DetectDaemon()
-	if d.ServiceMode {
-		return true, "Windows Service is running. Manage via Services.msc"
-	}
 	if d.SubprocessPID > 0 {
 		return true, fmt.Sprintf("Daemon already running (PID %d)", d.SubprocessPID)
 	}
 	if d.PipeInUse {
 		return true, d.Error
 	}
+	return false, ""
+}
 
-	// Check if service is installed but stopped - warn but don't block
-	if installed, _ := IsInstalledWithReason(); installed {
-		if status, err := QueryStatus(); err == nil && status != StatusRunning {
-			// Service is installed but not running - allow subprocess but log warning
-			debugLog("Warning: Service installed but stopped (status=%s). Allowing subprocess, but service may start later.", status.String())
-			daemon.WriteStartupLog("WARNING: Windows Service is installed but stopped. Subprocess allowed, but service may start later and cause conflicts.")
+// IsLegacyServiceInstalled reports whether the old Windows service is still
+// registered with the SCM. Returns false when SCM access is denied (we cannot
+// determine, so cleanup is skipped).
+func IsLegacyServiceInstalled() bool {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(legacyServiceName)
+	if err != nil {
+		return false
+	}
+	s.Close()
+	return true
+}
+
+// UninstallLegacyService stops and removes the legacy Windows service and
+// clears its registry marker. Requires administrator privileges. Safe to call
+// when the service does not exist (returns nil).
+func UninstallLegacyService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("failed to connect to service manager: %w", err)
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(legacyServiceName)
+	if err != nil {
+		// Service not installed — nothing to do. Still clear any stale marker.
+		clearLegacyRegistryMarker()
+		return nil
+	}
+	defer s.Close()
+
+	if status, qErr := s.Query(); qErr == nil && status.State != svc.Stopped {
+		if _, cErr := s.Control(svc.Stop); cErr != nil {
+			fmt.Printf("Warning: failed to stop legacy service: %v\n", cErr)
+		}
+		for i := 0; i < 30; i++ {
+			status, qErr = s.Query()
+			if qErr != nil || status.State == svc.Stopped {
+				break
+			}
+			time.Sleep(time.Second)
 		}
 	}
 
-	return false, ""
+	if err := s.Delete(); err != nil {
+		return fmt.Errorf("failed to delete legacy service: %w", err)
+	}
+
+	if err := eventlog.Remove(legacyServiceName); err != nil {
+		// Non-fatal.
+		fmt.Printf("Warning: failed to remove event log source: %v\n", err)
+	}
+
+	clearLegacyRegistryMarker()
+	return nil
+}
+
+// clearLegacyRegistryMarker removes the HKLM ServiceInstalled marker set by
+// older Interlink versions.
+func clearLegacyRegistryMarker() {
+	if regKey, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Rescale\Interlink`, registry.SET_VALUE); err == nil {
+		regKey.DeleteValue("ServiceInstalled")
+		regKey.Close()
+	}
 }

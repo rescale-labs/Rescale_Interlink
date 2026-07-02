@@ -25,8 +25,8 @@ func TestNewDaemonConfig(t *testing.T) {
 	if cfg.Daemon.UseJobNameDir != true {
 		t.Errorf("Expected UseJobNameDir=true, got %v", cfg.Daemon.UseJobNameDir)
 	}
-	if cfg.Eligibility.AutoDownloadTag != "autoDownload" {
-		t.Errorf("Expected AutoDownloadTag=autoDownload, got %s", cfg.Eligibility.AutoDownloadTag)
+	if cfg.Eligibility.AutoDownloadTag != "autodownload" {
+		t.Errorf("Expected AutoDownloadTag=autodownload, got %s", cfg.Eligibility.AutoDownloadTag)
 	}
 	if cfg.Notifications.Enabled != true {
 		t.Errorf("Expected Notifications.Enabled=true, got %v", cfg.Notifications.Enabled)

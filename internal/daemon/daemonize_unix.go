@@ -85,6 +85,30 @@ func IsDaemonRunning() int {
 	return pid
 }
 
+// KillDaemon forcefully terminates the running daemon process recorded in the
+// PID file. Last-resort fallback for callers that cannot rely on a graceful
+// IPC shutdown. Sends SIGTERM (not SIGKILL) so the daemon's signal handler can
+// still release resources; the PID file is removed on success. Returns nil
+// when no daemon is running.
+func KillDaemon() error {
+	pid := IsDaemonRunning()
+	if pid == 0 {
+		return nil
+	}
+
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("failed to find daemon process %d: %w", pid, err)
+	}
+
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("failed to terminate daemon process %d: %w", pid, err)
+	}
+
+	RemovePIDFile()
+	return nil
+}
+
 // Daemonize re-executes the current process as a daemon.
 // This performs true Unix daemonization:
 // 1. Fork via exec (Go doesn't support fork directly)

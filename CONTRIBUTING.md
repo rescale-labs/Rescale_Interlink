@@ -217,7 +217,7 @@ rescale-int/
 │   │   └── coordinator/       # Cross-process rate limit coordinator
 │   ├── reporting/             # Error reporting (classify → redact → report)
 │   ├── resources/             # Resource management (threads, memory)
-│   ├── service/               # Windows service mode (multi-user daemon)
+│   ├── service/               # Shared auto-download state vocab + legacy-service cleanup
 │   ├── services/              # GUI-agnostic services (TransferService, FileService)
 │   ├── transfer/              # Transfer coordination and batch abstraction
 │   │   ├── folder/            # Folder creation and orchestration
