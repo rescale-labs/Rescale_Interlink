@@ -20,6 +20,9 @@ const app = vi.hoisted(() => ({
   SaveDaemonConfig: vi.fn(() => Promise.resolve()),
   StartDaemon: vi.fn(() => Promise.resolve()),
   StopDaemon: vi.fn(() => Promise.resolve()),
+  UpdateConfig: vi.fn(() => Promise.resolve()),
+  SaveConfig: vi.fn(() => Promise.resolve()),
+  SetFlattenJobDownload: vi.fn(() => Promise.resolve()),
 }))
 
 vi.mock('../../../wailsjs/go/wailsapp/App', () => app)
@@ -87,5 +90,23 @@ describe('SetupTab auto-download controls', () => {
   it('says a job\'s own download path must be inside the Download Folder', async () => {
     await openAdvanced()
     expect(await screen.findByText(/"Auto Download Path" \(per-job download location, must be inside the Download Folder\)/)).toBeInTheDocument()
+  })
+})
+
+describe('SetupTab File Browser settings', () => {
+  // The option saves on its own: an API key typed but not saved is neither
+  // applied nor saved, and stays in the field.
+  it('saves only the Input/Output split option when it is ticked', async () => {
+    await openAdvanced()
+    const apiKey = await screen.findByPlaceholderText('API Key')
+    fireEvent.change(apiKey, { target: { value: 'UNSAVED-KEY' } })
+    const option = screen.getByLabelText('Download jobs without Input/Output split')
+    fireEvent.click(option)
+
+    await vi.waitFor(() => expect(app.SetFlattenJobDownload).toHaveBeenCalledWith(true))
+    await vi.waitFor(() => expect(option).toBeChecked())
+    expect(app.UpdateConfig).not.toHaveBeenCalled()
+    expect(app.SaveConfig).not.toHaveBeenCalled()
+    expect(apiKey).toHaveValue('UNSAVED-KEY')
   })
 })

@@ -315,6 +315,7 @@ export namespace wailsapp {
 	    runSubpath: string;
 	    maxRetries: number;
 	    detailedLogging: boolean;
+	    flattenJobDownload: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConfigDTO(source);
@@ -343,6 +344,7 @@ export namespace wailsapp {
 	        this.runSubpath = source["runSubpath"];
 	        this.maxRetries = source["maxRetries"];
 	        this.detailedLogging = source["detailedLogging"];
+	        this.flattenJobDownload = source["flattenJobDownload"];
 	    }
 	}
 	export class ConnectionResultDTO {

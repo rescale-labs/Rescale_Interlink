@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -733,6 +734,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: err.Error()}
 	}
 
+	// When flatten_job_download is enabled, strip the leading "Input"/"Output"
+	// job subfolder segment so a downloaded job folder mirrors the auto-download
+	// layout (files directly under the job folder) instead of the platform's
+	// Input/ + Output/ split. Default false keeps the existing behavior.
+	flattenJobDownload := a.config != nil && a.config.FlattenJobDownload
+
 	// Scan-consumer goroutine — owns requestCh, closes it on all exit paths.
 	go func() {
 		defer close(requestCh)
@@ -756,16 +763,36 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		var totalBytes int64
 		firstScanEvent := true
 		firstFileQueued := true
+		flattened := map[string]string{} // local path, case-folded -> the remote path it came from
 
-		for event := range scanEventCh {
+		stream := scanEventCh
+		if flattenJobDownload {
+			// Where only Input and Output sit at the top, as in a job's folder,
+			// no file keeps its own path, so Output files need not wait.
+			top, err := apiClient.ListFolderContentsAll(scanCtx, folderID)
+			jobFolder := err == nil && len(top.Files) == 0 &&
+				!slices.ContainsFunc(top.Folders, func(f api.FolderInfo) bool { return jobIOSplit(f.Name) == "" })
+			stream = holdSplitFiles(scanCtx, scanEventCh, !jobFolder)
+		}
+
+		for event := range stream {
 			if firstScanEvent {
 				emitLog(events.InfoLevel, fmt.Sprintf("[TIMING] First scan event received — elapsed=%s", time.Since(startTime)))
 				firstScanEvent = false
 			}
 			if event.Folder != nil {
+				relPath := event.Folder.RelativePath
+				if flattenJobDownload {
+					relPath = stripJobIOPrefix(relPath)
+				}
+				// A folder whose only purpose was the Input/Output level collapses
+				// to empty after stripping — nothing to create for it.
+				if flattenJobDownload && relPath == "" {
+					continue
+				}
 				// Validate folder path to prevent path traversal
-				if localPath, err := resolveSafeDownloadPath(event.Folder.RelativePath, rootOutputDir); err != nil {
-					emitLog(events.WarnLevel, fmt.Sprintf("Skipping folder with invalid path %q: %s", event.Folder.RelativePath, err.Error()))
+				if localPath, err := resolveSafeDownloadPath(relPath, rootOutputDir); err != nil {
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping folder with invalid path %q: %s", relPath, err.Error()))
 				} else if err := os.MkdirAll(localPath, 0755); err != nil {
 					emitLog(events.WarnLevel, fmt.Sprintf("Failed to create folder %s: %s", localPath, err.Error()))
 				} else {
@@ -773,8 +800,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				}
 			}
 			if event.File != nil {
+				relPath, movedFrom := event.File.RelativePath, ""
+				if flattenJobDownload {
+					relPath, movedFrom = jobIOMove(relPath)
+				}
 				// Validate file path to prevent path traversal
-				localPath, pathErr := resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
+				localPath, pathErr := resolveSafeDownloadPath(relPath, rootOutputDir)
 				// A name the scan refused, or a link or other non-file where
 				// the file belongs, which the merge skip below would take for
 				// the file: a failed row with the reason, and no transfer.
@@ -785,8 +816,23 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 					refusal = validation.ValidateDownloadTarget(localPath)
 				}
 				if pathErr != nil {
-					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", event.File.RelativePath, pathErr.Error()))
+					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", relPath, pathErr.Error()))
 					continue
+				}
+				// Flattening brings Input/x and Output/x to one local file,
+				// which both would download to at once. Case is folded, as
+				// Windows and macOS file systems fold it by default. The moved
+				// file's row keeps its split path, which no download takes, so
+				// a retry cannot write over the file that took the path.
+				if refusal == nil && flattenJobDownload {
+					key := strings.ToLower(localPath)
+					if first, taken := flattened[key]; !taken {
+						flattened[key] = event.File.RelativePath
+					} else if movedFrom != "" {
+						refusal = fmt.Errorf("file %s not downloaded: without the Input/Output split it lands on the same local file as %s",
+							validation.Quote(event.File.RelativePath), validation.Quote(first))
+						localPath, _ = resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
+					}
 				}
 				if refusal != nil {
 					emitLog(events.WarnLevel, refusal.Error())

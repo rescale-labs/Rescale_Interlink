@@ -68,27 +68,28 @@ func (a *App) GetAppInfo() AppInfoDTO {
 
 // ConfigDTO is the JSON-safe configuration structure.
 type ConfigDTO struct {
-	APIBaseURL        string `json:"apiBaseUrl"`
-	TenantURL         string `json:"tenantUrl"`
-	APIKey            string `json:"apiKey"`
-	ProxyMode         string `json:"proxyMode"`
-	ProxyHost         string `json:"proxyHost"`
-	ProxyPort         int    `json:"proxyPort"`
-	ProxyUser         string `json:"proxyUser"`
-	ProxyPassword     string `json:"proxyPassword"`
-	NoProxy           string `json:"noProxy"`
-	ProxyWarmup       bool   `json:"proxyWarmup"`
-	TarWorkers        int    `json:"tarWorkers"`
-	UploadWorkers     int    `json:"uploadWorkers"`
-	JobWorkers        int    `json:"jobWorkers"`
-	ExcludePatterns   string `json:"excludePatterns"`
-	IncludePatterns   string `json:"includePatterns"`
-	FlattenTar        bool   `json:"flattenTar"`
-	TarCompression    string `json:"tarCompression"`
-	ValidationPattern string `json:"validationPattern"`
-	RunSubpath        string `json:"runSubpath"`
-	MaxRetries        int    `json:"maxRetries"`
-	DetailedLogging   bool   `json:"detailedLogging"`
+	APIBaseURL         string `json:"apiBaseUrl"`
+	TenantURL          string `json:"tenantUrl"`
+	APIKey             string `json:"apiKey"`
+	ProxyMode          string `json:"proxyMode"`
+	ProxyHost          string `json:"proxyHost"`
+	ProxyPort          int    `json:"proxyPort"`
+	ProxyUser          string `json:"proxyUser"`
+	ProxyPassword      string `json:"proxyPassword"`
+	NoProxy            string `json:"noProxy"`
+	ProxyWarmup        bool   `json:"proxyWarmup"`
+	TarWorkers         int    `json:"tarWorkers"`
+	UploadWorkers      int    `json:"uploadWorkers"`
+	JobWorkers         int    `json:"jobWorkers"`
+	ExcludePatterns    string `json:"excludePatterns"`
+	IncludePatterns    string `json:"includePatterns"`
+	FlattenTar         bool   `json:"flattenTar"`
+	TarCompression     string `json:"tarCompression"`
+	ValidationPattern  string `json:"validationPattern"`
+	RunSubpath         string `json:"runSubpath"`
+	MaxRetries         int    `json:"maxRetries"`
+	DetailedLogging    bool   `json:"detailedLogging"`
+	FlattenJobDownload bool   `json:"flattenJobDownload"`
 }
 
 // GetConfig returns the current configuration.
@@ -102,27 +103,28 @@ func (a *App) GetConfig() ConfigDTO {
 		compression = "gzip"
 	}
 	return ConfigDTO{
-		APIBaseURL:        a.config.APIBaseURL,
-		TenantURL:         a.config.TenantURL,
-		APIKey:            a.config.APIKey,
-		ProxyMode:         a.config.ProxyMode,
-		ProxyHost:         a.config.ProxyHost,
-		ProxyPort:         a.config.ProxyPort,
-		ProxyUser:         a.config.ProxyUser,
-		ProxyPassword:     a.config.ProxyPassword,
-		NoProxy:           a.config.NoProxy,
-		ProxyWarmup:       a.config.ProxyWarmup,
-		TarWorkers:        a.config.TarWorkers,
-		UploadWorkers:     a.config.UploadWorkers,
-		JobWorkers:        a.config.JobWorkers,
-		ExcludePatterns:   strings.Join(a.config.ExcludePatterns, ","),
-		IncludePatterns:   strings.Join(a.config.IncludePatterns, ","),
-		FlattenTar:        a.config.FlattenTar,
-		TarCompression:    compression,
-		ValidationPattern: a.config.ValidationPattern,
-		RunSubpath:        a.config.RunSubpath,
-		MaxRetries:        a.config.MaxRetries,
-		DetailedLogging:   a.config.DetailedLogging,
+		APIBaseURL:         a.config.APIBaseURL,
+		TenantURL:          a.config.TenantURL,
+		APIKey:             a.config.APIKey,
+		ProxyMode:          a.config.ProxyMode,
+		ProxyHost:          a.config.ProxyHost,
+		ProxyPort:          a.config.ProxyPort,
+		ProxyUser:          a.config.ProxyUser,
+		ProxyPassword:      a.config.ProxyPassword,
+		NoProxy:            a.config.NoProxy,
+		ProxyWarmup:        a.config.ProxyWarmup,
+		TarWorkers:         a.config.TarWorkers,
+		UploadWorkers:      a.config.UploadWorkers,
+		JobWorkers:         a.config.JobWorkers,
+		ExcludePatterns:    strings.Join(a.config.ExcludePatterns, ","),
+		IncludePatterns:    strings.Join(a.config.IncludePatterns, ","),
+		FlattenTar:         a.config.FlattenTar,
+		TarCompression:     compression,
+		ValidationPattern:  a.config.ValidationPattern,
+		RunSubpath:         a.config.RunSubpath,
+		MaxRetries:         a.config.MaxRetries,
+		DetailedLogging:    a.config.DetailedLogging,
+		FlattenJobDownload: a.config.FlattenJobDownload,
 	}
 }
 
@@ -189,6 +191,7 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	a.config.RunSubpath = cfg.RunSubpath
 	a.config.MaxRetries = cfg.MaxRetries
 	a.config.DetailedLogging = cfg.DetailedLogging
+	a.config.FlattenJobDownload = cfg.FlattenJobDownload
 
 	// tenant_url is a legacy alias — keep in sync (both directions)
 	if a.config.TenantURL == "" && a.config.APIBaseURL != "" {
@@ -258,6 +261,25 @@ func (a *App) SaveConfig() error {
 	}
 
 	a.logInfo("config", "Config saved successfully")
+	return nil
+}
+
+// SetFlattenJobDownload saves the File Browser's Input/Output split option on
+// its own, as the Setup tab's checkbox changes. config.csv takes that one value;
+// the tab's other unsaved edits stay unsaved, and the token file is left alone.
+func (a *App) SetFlattenJobDownload(enabled bool) error {
+	path := config.GetDefaultConfigPath()
+	saved, err := config.LoadConfigCSV(path)
+	if err != nil {
+		return err
+	}
+	saved.FlattenJobDownload = enabled
+	if err := config.SaveConfigCSV(saved, path); err != nil {
+		return err
+	}
+	if a.config != nil {
+		a.config.FlattenJobDownload = enabled
+	}
 	return nil
 }
 

@@ -1194,7 +1194,7 @@ in the "Auto Download" custom field of your Rescale workspace, not here.
 Examples:
   rescale-int daemon config set download_folder /path/to/downloads
   rescale-int daemon config set poll_interval_minutes 10
-  rescale-int daemon config set auto_download_tag autoDownload
+  rescale-int daemon config set auto_download_tag autodownload
   rescale-int daemon config set exclude "test,debug,scratch"`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1363,7 +1363,7 @@ values, matched case-insensitively:
 
   Enabled      - download the job when it completes
   Conditional  - download only if the job also carries the tag named by
-                 auto_download_tag in daemon.conf (default: autoDownload)
+                 auto_download_tag in daemon.conf (default: autodownload)
   Disabled     - never auto-download the job
 
 These values are fixed and cannot be changed in Interlink. A job whose field

@@ -350,6 +350,10 @@ export function SetFileLoggingEnabled(arg1) {
   return window['go']['wailsapp']['App']['SetFileLoggingEnabled'](arg1);
 }
 
+export function SetFlattenJobDownload(arg1) {
+  return window['go']['wailsapp']['App']['SetFlattenJobDownload'](arg1);
+}
+
 export function StartBulkRunWithOptions(arg1, arg2) {
   return window['go']['wailsapp']['App']['StartBulkRunWithOptions'](arg1, arg2);
 }

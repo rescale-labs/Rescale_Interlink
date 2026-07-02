@@ -26,8 +26,8 @@ func TestNewDaemonConfig(t *testing.T) {
 	if cfg.Daemon.UseJobNameDir != true {
 		t.Errorf("Expected UseJobNameDir=true, got %v", cfg.Daemon.UseJobNameDir)
 	}
-	if cfg.Eligibility.AutoDownloadTag != "autoDownload" {
-		t.Errorf("Expected AutoDownloadTag=autoDownload, got %s", cfg.Eligibility.AutoDownloadTag)
+	if cfg.Eligibility.AutoDownloadTag != "autodownload" {
+		t.Errorf("Expected AutoDownloadTag=autodownload, got %s", cfg.Eligibility.AutoDownloadTag)
 	}
 	if cfg.Notifications.Enabled != true {
 		t.Errorf("Expected Notifications.Enabled=true, got %v", cfg.Notifications.Enabled)
@@ -129,6 +129,29 @@ func TestDaemonConfigLoadNonExistent(t *testing.T) {
 	}
 	if cfg.Daemon.Enabled != false {
 		t.Errorf("Expected default Enabled=false, got %v", cfg.Daemon.Enabled)
+	}
+}
+
+// Only a daemon.conf without a Conditional tag takes the lowercase default. One
+// that names the old default, under either key, keeps it: every earlier save
+// wrote the tag out, so existing setups go on matching their tagged jobs.
+func TestDaemonConfigConditionalTagDefault(t *testing.T) {
+	for eligibility, want := range map[string]string{
+		"":                                 "autodownload",
+		"auto_download_tag = autoDownload": "autoDownload",
+		"correctness_tag = autoDownload":   "autoDownload",
+	} {
+		path := filepath.Join(t.TempDir(), "daemon.conf")
+		if err := os.WriteFile(path, []byte("[daemon]\nenabled = true\n\n[eligibility]\n"+eligibility+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadDaemonConfig(path)
+		if err != nil {
+			t.Fatalf("LoadDaemonConfig(%q): %v", eligibility, err)
+		}
+		if got := cfg.Eligibility.AutoDownloadTag; got != want {
+			t.Errorf("with [eligibility] %q the tag is %q, want %q", eligibility, got, want)
+		}
 	}
 }
 

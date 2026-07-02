@@ -88,6 +88,7 @@ export function SelectDirectory(arg1:string):Promise<string>;
 export function SelectFile(arg1:string):Promise<string>;
 export function SelectMultipleFiles(arg1:string):Promise<Array<string>>;
 export function SetFileLoggingEnabled(arg1:boolean):Promise<void>;
+export function SetFlattenJobDownload(arg1:boolean):Promise<void>;
 export function StartBulkRunWithOptions(arg1:Array<wailsapp.JobSpecDTO>,arg2:wailsapp.PURRunOptionsDTO):Promise<string>;
 export function StartDaemon():Promise<void>;
 export function StartFolderDownload(arg1:string,arg2:string,arg3:string,arg4:string):Promise<wailsapp.FolderDownloadResultDTO>;

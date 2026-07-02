@@ -227,6 +227,31 @@ owner filter when none is selected.
   beginning; it says the rerun can resume from the completed parts while the file is
   unchanged and the interrupted upload is less than seven days old.
 
+### File Browser: option to download jobs without the Input/Output split
+
+Downloading a job folder in the File Browser mirrors the platform's job layout,
+creating separate `Input/` and `Output/` subfolders. A new setting —
+**Download jobs without Input/Output split** (Setup tab → File Browser Settings,
+or `flatten_job_download` in `config.csv`) — strips that leading `Input`/`Output`
+segment so files land directly under the job folder, matching the auto-download
+layout. Deeper structure (e.g. `Output/run1/…`) is preserved. Off by default, so
+existing downloads keep the Input/Output split. It applies to any downloaded folder
+whose first-level subfolder is named `Input` or `Output`. When two files would land
+on the same local file (`Input/model.inp` and `Output/model.inp`), the Output file is
+downloaded and the Input file shows as a failed row naming it; a file that is not
+moved keeps its place over one that is. The option is saved on its own as soon as
+it is changed; other unsaved Setup tab changes wait for **Save**.
+
+### Default "Conditional" auto-download tag renamed to `autodownload`
+
+The default tag checked for jobs whose "Auto Download" field is set to
+`Conditional` changed from `autoDownload` to `autodownload` (all lowercase).
+A `daemon.conf` saved by an earlier version records its tag and keeps it. The new
+default applies only where none is recorded: a new installation, or a `daemon.conf`
+whose `auto_download_tag` is empty or missing. The tag must match exactly, case
+included, so where new and existing installations work on the same jobs, set the
+same `auto_download_tag` on all of them.
+
 ### Auto-download folders are named after the job, with the ID in a .jobid file
 
 Auto-downloaded job folders are now named after the (sanitized) job name — the

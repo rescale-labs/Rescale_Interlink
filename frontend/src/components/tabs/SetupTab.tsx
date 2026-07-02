@@ -34,6 +34,7 @@ import {
   TestAutoDownloadConnection,
   GetFileLoggingSettings,
   SetFileLoggingEnabled,
+  SetFlattenJobDownload,
   TriggerProfileRescan,
   ReloadDaemonConfig,
   ValidateAutoDownloadPreFlight,
@@ -374,6 +375,19 @@ export function SetupTab() {
       setStatusMessage(`Failed to save settings: ${err}`);
     } finally {
       setIsUnifiedSaving(false);
+    }
+  };
+
+  // Toggle the flatten-job-download flag and persist immediately, so it sticks
+  // between runs without requiring the "Save" button. Only this setting is
+  // saved; the tab's other unsaved edits wait for Save.
+  const handleToggleFlattenJobDownload = async (checked: boolean) => {
+    try {
+      await SetFlattenJobDownload(checked);
+      updateConfig({ flattenJobDownload: checked });
+      setStatusMessage('File Browser setting saved');
+    } catch (err) {
+      setStatusMessage(`Failed to save the File Browser setting: ${err}`);
     }
   };
 
@@ -907,6 +921,30 @@ export function SetupTab() {
           </div>
         </div>
 
+        {/* File Browser Settings Section */}
+        <div className="card">
+          <h3 className="text-base font-semibold text-gray-900 mb-4">File Browser Settings</h3>
+          <div className="space-y-4">
+            <div className="flex items-center">
+              <input
+                type="checkbox"
+                id="flattenJobDownload"
+                checked={config?.flattenJobDownload || false}
+                onChange={(e) => handleToggleFlattenJobDownload(e.target.checked)}
+                className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
+              />
+              <label htmlFor="flattenJobDownload" className="ml-2 text-sm text-gray-700 cursor-pointer">
+                Download jobs without Input/Output split
+              </label>
+            </div>
+            <p className="text-xs text-gray-500">
+              When enabled, downloading a job folder places its files directly under the job folder
+              (matching auto-download), instead of separate Input/ and Output/ subfolders.
+              When disabled (default), the Input/Output structure is preserved.
+            </p>
+          </div>
+        </div>
+
         {/* Proxy Configuration Section */}
         <div className="card">
           <h3 className="text-base font-semibold text-gray-900 mb-4">Proxy Configuration</h3>
@@ -1145,7 +1183,7 @@ export function SetupTab() {
               <input
                 type="text"
                 className="input"
-                placeholder="autoDownload"
+                placeholder="autodownload"
                 value={daemonConfig?.autoDownloadTag || ''}
                 onChange={(e) => daemonConfig && setDaemonConfig({ ...daemonConfig, autoDownloadTag: e.target.value })}
               />

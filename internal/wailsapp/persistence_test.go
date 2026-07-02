@@ -104,3 +104,31 @@ func TestEnsureAllConfigPersisted_ProxyPasswordNotPersisted(t *testing.T) {
 		t.Fatalf("config.csv leaked proxy password: %s", data)
 	}
 }
+
+// The File Browser's split option saves on its own. config.csv takes that one
+// value; what the App holds unsaved stays out of it, and the token file stays
+// even though the App's API key field has been cleared.
+func TestSetFlattenJobDownloadSavesOnlyThatOption(t *testing.T) {
+	a, configPath, tokenPath := newTestApp(t, &config.Config{ProxyHost: "saved.example.invalid"})
+	if err := config.SaveConfigCSV(a.config, configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteTokenFile(tokenPath, "SAVED-KEY"); err != nil {
+		t.Fatal(err)
+	}
+	a.config = &config.Config{ProxyHost: "unsaved.example.invalid"}
+
+	if err := a.SetFlattenJobDownload(true); err != nil {
+		t.Fatalf("SetFlattenJobDownload: %v", err)
+	}
+	saved, err := config.LoadConfigCSV(configPath)
+	if err != nil || !saved.FlattenJobDownload || saved.ProxyHost != "saved.example.invalid" {
+		t.Errorf("config.csv has flatten_job_download=%v and proxy host %q (err %v), want true and the saved host", saved.FlattenJobDownload, saved.ProxyHost, err)
+	}
+	if token, err := config.ReadTokenFile(tokenPath); err != nil || token != "SAVED-KEY" {
+		t.Errorf("token file holds %q (err %v), want it untouched", token, err)
+	}
+	if !a.config.FlattenJobDownload || a.config.ProxyHost != "unsaved.example.invalid" {
+		t.Errorf("the App holds flatten=%v and proxy host %q, want true and the unsaved host", a.config.FlattenJobDownload, a.config.ProxyHost)
+	}
+}

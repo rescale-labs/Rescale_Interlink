@@ -508,10 +508,10 @@ func TestWriteJobIDFile_RefusesALink(t *testing.T) {
 // =============================================================================
 
 // TestMonitorEligibilityConfig pins where a monitor's eligibility config comes
-// from: the defaults (autoDownload, seven days) when none is given, the
+// from: the defaults (autodownload, seven days) when none is given, the
 // caller's own when one is, none at all from NewMonitor, and SetEligibility.
 func TestMonitorEligibilityConfig(t *testing.T) {
-	defaults := EligibilityConfig{AutoDownloadTag: "autoDownload", LookbackDays: 7}
+	defaults := EligibilityConfig{AutoDownloadTag: "autodownload", LookbackDays: 7}
 	if got := DefaultEligibilityConfig(); got == nil || *got != defaults {
 		t.Errorf("DefaultEligibilityConfig() = %+v, want %+v", got, defaults)
 	}

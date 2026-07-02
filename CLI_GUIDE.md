@@ -284,6 +284,7 @@ Additional configuration options for specialized use cases:
 | `detailed_logging` | GUI toggle for timing and metrics diagnostics. The CLI reads the key but does not act on it — pass `--timing` (or set `RESCALE_TIMING=1`) for the same output from a CLI run | false |
 | `sort_field` | GUI file-browser sort column | `name` |
 | `sort_ascending` | GUI file-browser sort direction (`true`/`false`) | true |
+| `flatten_job_download` | GUI File Browser: download a job folder without the `Input`/`Output` split, so files land directly under the job folder as auto-download lays them out (`true`/`false`). It applies to any downloaded folder whose first-level subfolder is named `Input` or `Output`; deeper subfolders keep their names, and an `Input` or `Output` folder inside the split is not moved up. When two files would land on the same local file (`Input/model.inp` and `Output/model.inp`), the Output file is downloaded and the Input file shows as a failed row naming it; a file that is not moved keeps its place over one that is | false |
 
 `tar_workers`, `upload_workers` and `job_workers` must each be at least 1.
 `rescale-int config test` checks that and reports `tar_workers must be at least
@@ -1801,7 +1802,7 @@ Shows all settings from the config file with current values.
 If the file does not exist yet, the defaults are shown and labelled as such. The
 shipped defaults are `enabled = false`, `poll_interval_minutes = 5`,
 `use_job_name_dir = true`, `max_concurrent = 5`, `lookback_days = 7`,
-`auto_download_tag = autoDownload`, and all three notification settings on.
+`auto_download_tag = autodownload`, and all three notification settings on.
 
 **Example output** (a configured file, not the defaults):
 ```
@@ -1823,7 +1824,7 @@ name_contains =
 exclude = test,debug
 
 [eligibility]
-auto_download_tag = autoDownload
+auto_download_tag = autodownload
 
 # Note: Mode (Enabled/Conditional/Disabled) is set per-job via the
 # 'Auto Download' custom field in Rescale workspace, not here.
@@ -1963,7 +1964,7 @@ Custom Fields Enabled: true
    - **Name**: `Auto Download` (exact spelling required)
    - **Type**: Select (Option List) — `daemon config validate` reports an error for any other type
    - **Options**: all three of `Enabled`, `Conditional`, `Disabled`. All three are required on the field. `daemon config validate` reports an error for each one missing and exits non-zero, so a field carrying only `Enabled` and `Disabled` does not pass. Extra options are reported as warnings
-3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`) — unless that key is configured empty, in which case `Conditional` is treated as eligible with no tag at all. Individual jobs need not use `Conditional`, but the option still has to exist on the field.
+3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autodownload`; an empty value also takes the default). Individual jobs need not use `Conditional`, but the option still has to exist on the field.
 
 The three values are matched case-insensitively, but the words themselves are fixed and
 cannot be changed in Interlink. A job whose field is unset, or set to anything the daemon
@@ -1993,8 +1994,8 @@ reaches them:
    bearing in mind that files already on disk and verified are skipped rather
    than fetched again.
 5. Its `Auto Download` field is `Disabled` or unset, or `Conditional` without the
-   tag named by `auto_download_tag` — unless that key is configured empty, in
-   which case `Conditional` is eligible with no tag at all.
+   tag named by `auto_download_tag`, which is `autodownload` when the key is
+   empty or missing.
 
 One more suppression sits ahead of all of these and is not a reason to
 investigate: a job whose files are already on disk but whose `autodownload:done`
