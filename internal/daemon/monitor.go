@@ -32,7 +32,7 @@ type JobFilter struct {
 // only AutoDownloadTag and LookbackDays are configurable in Interlink.
 type EligibilityConfig struct {
 	// AutoDownloadTag is the tag to check when a job's "Auto Download" field is "Conditional".
-	// Default: "autoDownload"
+	// Default: "autodownload"
 	AutoDownloadTag string
 
 	// LookbackDays is the number of days to look back for completed jobs (default: 7).
@@ -48,7 +48,7 @@ type EligibilityConfig struct {
 // DefaultEligibilityConfig returns the default eligibility configuration.
 func DefaultEligibilityConfig() *EligibilityConfig {
 	return &EligibilityConfig{
-		AutoDownloadTag: "autoDownload",
+		AutoDownloadTag: "autodownload",
 		LookbackDays:    7,
 	}
 }

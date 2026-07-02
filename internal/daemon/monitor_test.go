@@ -330,8 +330,8 @@ func TestDefaultEligibilityConfig(t *testing.T) {
 	}
 
 	// EligibilityConfig has only AutoDownloadTag and LookbackDays
-	if cfg.AutoDownloadTag != "autoDownload" {
-		t.Errorf("AutoDownloadTag = %q, want %q", cfg.AutoDownloadTag, "autoDownload")
+	if cfg.AutoDownloadTag != "autodownload" {
+		t.Errorf("AutoDownloadTag = %q, want %q", cfg.AutoDownloadTag, "autodownload")
 	}
 	if cfg.LookbackDays != 7 {
 		t.Errorf("LookbackDays = %d, want %d", cfg.LookbackDays, 7)
@@ -347,7 +347,7 @@ func TestNewMonitorWithEligibility_NilConfig(t *testing.T) {
 	}
 
 	// Should have default values
-	if m.eligibility.AutoDownloadTag != "autoDownload" {
+	if m.eligibility.AutoDownloadTag != "autodownload" {
 		t.Errorf("expected default AutoDownloadTag, got %q", m.eligibility.AutoDownloadTag)
 	}
 	if m.eligibility.LookbackDays != 7 {

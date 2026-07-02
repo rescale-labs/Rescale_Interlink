@@ -167,6 +167,7 @@ Additional configuration options for specialized use cases:
 | `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`), opt-in | (none) |
 | `tar_compression` | Compression type: `none` or `gzip` (legacy `gz` is auto-normalized to `gzip`) | none |
 | `max_retries` | Maximum upload retry attempts | 1 |
+| `flatten_job_download` | In the File Browser, download a job folder without the `Input`/`Output` split — files land directly under the job folder, matching auto-download (`true`/`false`) | false |
 
 **Note:** In the GUI, worker and tar settings are configured via the **PUR tab's Pipeline Settings** section (visible in both the scan step and the jobs-validated step). Tar options are also available in the **SingleJob tab** when using directory input mode. The `run_subpath` and `validation_pattern` are configured on the **PUR tab** scan step and persist to `config.csv` automatically. These settings are no longer in the Setup tab's Advanced Settings.
 
@@ -993,7 +994,7 @@ name_contains =
 exclude = test,debug
 
 [eligibility]
-auto_download_tag = autoDownload
+auto_download_tag = autodownload
 
 [notifications]
 enabled = true
@@ -1112,7 +1113,7 @@ Custom Fields Enabled: true
    - **Name**: `Auto Download` (exact spelling required)
    - **Type**: Select (dropdown)
    - **Values**: `Enabled`, `Disabled`, and optionally `Conditional`
-3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`).
+3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autodownload`).
 
 #### Auto-Start on Login
 

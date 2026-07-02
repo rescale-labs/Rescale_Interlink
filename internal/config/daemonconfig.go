@@ -64,7 +64,7 @@ const (
 //	exclude = test,debug,scratch
 //
 //	[eligibility]
-//	auto_download_tag = autoDownload  # Tag to check for "Conditional" jobs
+//	auto_download_tag = autodownload  # Tag to check for "Conditional" jobs
 //
 //	[notifications]
 //	enabled = true
@@ -145,7 +145,7 @@ type FilterConfig struct {
 type EligibilityConfig struct {
 	// AutoDownloadTag is the job tag to check when a job's "Auto Download" field is "Conditional".
 	// Jobs with "Conditional" mode must have this tag to be auto-downloaded.
-	// Default: "autoDownload"
+	// Default: "autodownload"
 	AutoDownloadTag string `ini:"auto_download_tag"`
 }
 
@@ -237,7 +237,7 @@ func NewDaemonConfig() *DaemonConfig {
 			Exclude:      "",
 		},
 		Eligibility: EligibilityConfig{
-			AutoDownloadTag: "autoDownload", // Tag to check for "Conditional" jobs
+			AutoDownloadTag: "autodownload", // Tag to check for "Conditional" jobs
 		},
 		Notifications: NotificationConfig{
 			Enabled:              true,
@@ -297,7 +297,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 	cfg.Eligibility.AutoDownloadTag = eligSection.Key("auto_download_tag").MustString("")
 	if cfg.Eligibility.AutoDownloadTag == "" {
 		// Fall back to old key name for backwards compatibility
-		cfg.Eligibility.AutoDownloadTag = eligSection.Key("correctness_tag").MustString("autoDownload")
+		cfg.Eligibility.AutoDownloadTag = eligSection.Key("correctness_tag").MustString("autodownload")
 	}
 
 	// Parse [notifications] section

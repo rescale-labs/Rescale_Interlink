@@ -1030,7 +1030,7 @@ Note (v4.3.0): Mode (Enabled/Conditional/Disabled) is now set per-job via the
 Examples:
   rescale-int daemon config set download_folder /path/to/downloads
   rescale-int daemon config set poll_interval_minutes 10
-  rescale-int daemon config set auto_download_tag autoDownload
+  rescale-int daemon config set auto_download_tag autodownload
   rescale-int daemon config set exclude "test,debug,scratch"`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {

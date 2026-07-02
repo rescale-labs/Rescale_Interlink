@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### File Browser: option to download jobs without the Input/Output split
+
+Downloading a job folder in the File Browser mirrors the platform's job layout,
+creating separate `Input/` and `Output/` subfolders. A new setting —
+**Download jobs without Input/Output split** (Setup tab → File Browser Settings,
+or `flatten_job_download` in `config.csv`) — strips that leading `Input`/`Output`
+segment so files land directly under the job folder, matching the auto-download
+layout. Deeper structure (e.g. `Output/run1/…`) is preserved. Off by default, so
+existing downloads keep the Input/Output split.
+
+### Default "Conditional" auto-download tag renamed to `autodownload`
+
+The default tag checked for jobs whose "Auto Download" field is set to
+`Conditional` changed from `autoDownload` to `autodownload` (all lowercase).
+Configs that set `auto_download_tag` explicitly are unaffected; only the
+built-in default changed. Update the tag on your Conditional jobs (or set
+`auto_download_tag = autoDownload` in `daemon.conf`) if you relied on the old
+default.
+
 ### Auto-download folders are named after the job, with the ID in a .jobid file
 
 Auto-downloaded job folders are now named after the (sanitized) job name — the

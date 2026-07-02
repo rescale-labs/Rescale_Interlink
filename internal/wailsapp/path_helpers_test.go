@@ -40,3 +40,28 @@ func TestResolveSafeDownloadPath_SimpleFilename(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, result)
 	}
 }
+
+func TestStripJobIOPrefix(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"output file", filepath.FromSlash("Output/results.dat"), "results.dat"},
+		{"input file", filepath.FromSlash("Input/model.inp"), "model.inp"},
+		{"nested under output", filepath.FromSlash("Output/run1/a.dat"), filepath.FromSlash("run1/a.dat")},
+		{"bare output segment", "Output", ""},
+		{"bare input segment", "Input", ""},
+		{"case insensitive", filepath.FromSlash("output/x.txt"), "x.txt"},
+		{"no io prefix unchanged", filepath.FromSlash("data/x.txt"), filepath.FromSlash("data/x.txt")},
+		{"prefix substring not stripped", filepath.FromSlash("Outputs/x.txt"), filepath.FromSlash("Outputs/x.txt")},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripJobIOPrefix(tt.input); got != tt.want {
+				t.Errorf("stripJobIOPrefix(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

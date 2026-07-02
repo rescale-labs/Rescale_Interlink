@@ -86,8 +86,9 @@ type ConfigDTO struct {
 	TarCompression    string `json:"tarCompression"`
 	ValidationPattern string `json:"validationPattern"`
 	RunSubpath        string `json:"runSubpath"`
-	MaxRetries        int    `json:"maxRetries"`
-	DetailedLogging   bool   `json:"detailedLogging"`
+	MaxRetries         int  `json:"maxRetries"`
+	DetailedLogging    bool `json:"detailedLogging"`
+	FlattenJobDownload bool `json:"flattenJobDownload"`
 }
 
 // GetConfig returns the current configuration.
@@ -120,8 +121,9 @@ func (a *App) GetConfig() ConfigDTO {
 		TarCompression:    compression,
 		ValidationPattern: a.config.ValidationPattern,
 		RunSubpath:        a.config.RunSubpath,
-		MaxRetries:        a.config.MaxRetries,
-		DetailedLogging:   a.config.DetailedLogging,
+		MaxRetries:         a.config.MaxRetries,
+		DetailedLogging:    a.config.DetailedLogging,
+		FlattenJobDownload: a.config.FlattenJobDownload,
 	}
 }
 
@@ -177,6 +179,7 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	a.config.RunSubpath = cfg.RunSubpath
 	a.config.MaxRetries = cfg.MaxRetries
 	a.config.DetailedLogging = cfg.DetailedLogging
+	a.config.FlattenJobDownload = cfg.FlattenJobDownload
 
 	// tenant_url is a legacy alias — keep in sync (both directions)
 	if a.config.TenantURL == "" && a.config.APIBaseURL != "" {
