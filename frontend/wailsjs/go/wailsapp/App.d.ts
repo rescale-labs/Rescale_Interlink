@@ -108,6 +108,8 @@ export function IsServiceInstalled():Promise<boolean>;
 
 export function ListJobStatuses():Promise<wailsapp.JobStatusListDTO>;
 
+export function ListJobStatusesPage(arg1:number):Promise<wailsapp.JobStatusListDTO>;
+
 export function ListLocalDirectory(arg1:string):Promise<wailsapp.FolderContentsDTO>;
 
 export function ListLocalDirectoryEx(arg1:string,arg2:boolean):Promise<wailsapp.FolderContentsDTO>;

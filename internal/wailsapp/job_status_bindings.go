@@ -3,9 +3,13 @@ package wailsapp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+const jobStatusPageSize = 50
 
 // JobStatusItemDTO represents a single job entry for the Job Status tab.
 type JobStatusItemDTO struct {
@@ -18,17 +22,26 @@ type JobStatusItemDTO struct {
 
 // JobStatusListDTO is the response from ListJobStatuses.
 type JobStatusListDTO struct {
-	Jobs  []JobStatusItemDTO `json:"jobs"`
-	Error string             `json:"error,omitempty"`
+	Jobs        []JobStatusItemDTO `json:"jobs"`
+	Error       string             `json:"error,omitempty"`
+	FetchErrors int                `json:"fetchErrors,omitempty"`
+	// HasMore is true when there are likely more jobs beyond this page.
+	HasMore bool `json:"hasMore"`
 }
 
-// ListJobStatuses fetches the current user's jobs from the Rescale API
-// and returns their id, name, status, reason, and creation date.
-//
-// The list endpoint only provides statusReason for a few statuses. For jobs
-// where the list endpoint gives no reason, we fetch the per-job statuses
-// endpoint concurrently (up to 8 at a time) to retrieve the latest reason.
+// ListJobStatuses fetches the first page (50) of the current user's most recent
+// jobs and returns their id, name, status, reason, and creation date.
 func (a *App) ListJobStatuses() JobStatusListDTO {
+	return a.listJobStatusesPage(0)
+}
+
+// ListJobStatusesPage fetches a page of jobs starting at the given offset.
+// Each page contains up to 50 jobs ordered by newest first.
+func (a *App) ListJobStatusesPage(offset int) JobStatusListDTO {
+	return a.listJobStatusesPage(offset)
+}
+
+func (a *App) listJobStatusesPage(offset int) JobStatusListDTO {
 	if a.engine == nil {
 		return JobStatusListDTO{Error: ErrNoEngine.Error()}
 	}
@@ -40,10 +53,24 @@ func (a *App) ListJobStatuses() JobStatusListDTO {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	jobs, err := apiClient.ListJobs(ctx)
+	// Fetch offset + pageSize + 1 so we can both skip prior pages and detect hasMore.
+	jobs, err := apiClient.ListJobsPaged(ctx, offset+jobStatusPageSize+1)
 	if err != nil {
 		return JobStatusListDTO{Error: fmt.Sprintf("Failed to fetch jobs: %v", err)}
 	}
+
+	hasMore := len(jobs) > offset+jobStatusPageSize
+
+	// Slice to the requested page window.
+	start := offset
+	if start > len(jobs) {
+		start = len(jobs)
+	}
+	end := offset + jobStatusPageSize
+	if end > len(jobs) {
+		end = len(jobs)
+	}
+	jobs = jobs[start:end]
 
 	items := make([]JobStatusItemDTO, len(jobs))
 	for i, j := range jobs {
@@ -76,6 +103,8 @@ func (a *App) ListJobStatuses() JobStatusListDTO {
 	}
 	close(workCh)
 
+	var fetchErrCount int64
+
 	if needFetch > 0 {
 		const workers = 8
 		var wg sync.WaitGroup
@@ -87,10 +116,13 @@ func (a *App) ListJobStatuses() JobStatusListDTO {
 				for job := range workCh {
 					statuses, err := apiClient.GetJobStatuses(ctx, job.id)
 					if err != nil || len(statuses) == 0 {
+						atomic.AddInt64(&fetchErrCount, 1)
 						continue
 					}
-					// Search all entries for a non-empty statusReason —
-					// the ordering varies and most entries have no reason.
+					// Sort by StatusDate descending to get the most recent reason.
+					sort.Slice(statuses, func(i, j int) bool {
+						return statuses[i].StatusDate > statuses[j].StatusDate
+					})
 					reason := ""
 					for _, s := range statuses {
 						if s.StatusReason != "" {
@@ -109,5 +141,5 @@ func (a *App) ListJobStatuses() JobStatusListDTO {
 		wg.Wait()
 	}
 
-	return JobStatusListDTO{Jobs: items}
+	return JobStatusListDTO{Jobs: items, FetchErrors: int(fetchErrCount), HasMore: hasMore}
 }

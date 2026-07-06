@@ -214,6 +214,10 @@ export function ListJobStatuses() {
   return window['go']['wailsapp']['App']['ListJobStatuses']();
 }
 
+export function ListJobStatusesPage(arg1) {
+  return window['go']['wailsapp']['App']['ListJobStatusesPage'](arg1);
+}
+
 export function ListLocalDirectory(arg1) {
   return window['go']['wailsapp']['App']['ListLocalDirectory'](arg1);
 }

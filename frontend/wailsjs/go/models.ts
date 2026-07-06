@@ -970,6 +970,8 @@ export namespace wailsapp {
 	export class JobStatusListDTO {
 	    jobs: JobStatusItemDTO[];
 	    error?: string;
+	    fetchErrors?: number;
+	    hasMore: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new JobStatusListDTO(source);
@@ -979,6 +981,8 @@ export namespace wailsapp {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.jobs = this.convertValues(source["jobs"], JobStatusItemDTO);
 	        this.error = source["error"];
+	        this.fetchErrors = source["fetchErrors"];
+	        this.hasMore = source["hasMore"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
