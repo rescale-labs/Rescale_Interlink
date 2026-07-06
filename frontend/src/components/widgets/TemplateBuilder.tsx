@@ -220,6 +220,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
     if (templateInfo.job) {
       setTemplate(templateInfo.job as JobSpec)
+      setTagsInput((templateInfo.job.tags ?? []).join(', '))
       setLicenseAutoSwitchHint(null)
       setLicenseLoadHint(null)
       if (templateInfo.job.licenseSettings) {
@@ -467,10 +468,11 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     const finalTemplate = {
       ...template,
       licenseSettings,
+      tags: tagsInput.split(',').map((t) => t.trim()).filter(Boolean),
     }
 
     onSave(finalTemplate)
-  }, [template, licenseType, licenseValue, validate, onSave])
+  }, [template, tagsInput, licenseType, licenseValue, validate, onSave])
 
   if (!isOpen) return null
 
