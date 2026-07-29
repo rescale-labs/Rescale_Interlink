@@ -202,6 +202,11 @@ type FileItem struct {
 	// SymlinkID is the filesymlink id for trash-bin entries (files only).
 	// Populated only by trash listings; empty otherwise.
 	SymlinkID string
+
+	// Additional fields for legacy files browser display
+	TypeCode     string    // File type code ("Input", "Output", etc.)
+	Owner        string    // Owner email address
+	DateInserted time.Time // Creation date
 }
 
 // BrowseMode indicates the remote browsing context.

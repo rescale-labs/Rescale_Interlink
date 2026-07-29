@@ -73,6 +73,13 @@ interface RemoteBrowserState {
   pageCursors: string[]          // Cursor for each page: [page0='', page1='...', page2='...']
   knownTotalPages: number        // Discovered page count (increments as user navigates forward)
   pageCache: Map<number, CachedPage>  // Cache by page number for fast back/forward
+  // Legacy Files filters
+  legacyOwnerFilter: string      // "" for all, "my_files" for owned, "shared" for shared with me
+  legacySearchQuery: string      // Search query for filtering by name
+  legacySortField: string        // Sort field: "name", "size", "created"
+  legacySortDirection: string    // Sort direction: "asc", "desc"
+  // My Library search query
+  librarySearchQuery: string     // Search query for My Library mode (server-side search)
 }
 
 interface FileBrowserStore {
@@ -111,6 +118,12 @@ interface FileBrowserStore {
   setRemoteItemsPerPage: (size: number) => void       // Change page size, reload page 0
   goToNextRemotePage: () => Promise<void>             // Navigate to next page (replaces items)
   goToPreviousRemotePage: () => Promise<void>         // Navigate to previous page (from cache)
+  // Legacy Files filter actions
+  setLegacyOwnerFilter: (filter: string) => void      // Set owner filter and reload
+  setLegacySearchQuery: (query: string) => void       // Set search query and reload
+  setLegacySort: (field: string, direction: string) => void  // Set sort field/direction and reload
+  // My Library search action
+  setLibrarySearchQuery: (query: string) => void      // Set My Library search query and reload
 
   // Event listeners
   setupEventListeners: () => () => void
@@ -150,6 +163,11 @@ const initialRemoteState: RemoteBrowserState = {
   pageCursors: [''],           // First page has empty cursor
   knownTotalPages: 1,          // At least one page
   pageCache: new Map(),
+  legacyOwnerFilter: '0',      // Default: show all files (0 = Any owner)
+  legacySearchQuery: '',       // Default: no search filter
+  legacySortField: 'created',  // Default: sort by creation date
+  legacySortDirection: 'desc', // Default: newest first
+  librarySearchQuery: '',      // Default: no search filter for My Library
 }
 
 export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
@@ -359,6 +377,13 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         knownTotalPages: 1,
         pageCache: new Map(),
         navGeneration: state.remote.navGeneration + 1,
+        // Reset legacy filters when changing modes
+        legacyOwnerFilter: '0',
+        legacySearchQuery: '',
+        legacySortField: 'created',
+        legacySortDirection: 'desc',
+        // Reset library search query when changing modes
+        librarySearchQuery: '',
       }
     }))
 
@@ -412,7 +437,11 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }))
 
     try {
-      const contents = await App.ListRemoteFolderPage(targetId, cursor, itemsPerPage)
+      // Use search API if librarySearchQuery is set and mode is library or jobs
+      const searchQuery = state.librarySearchQuery
+      const contents = searchQuery && (state.mode === 'library' || state.mode === 'jobs')
+        ? await App.SearchRemoteFolderContents(targetId, searchQuery, itemsPerPage)
+        : await App.ListRemoteFolderPage(targetId, cursor, itemsPerPage)
 
       // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return
@@ -502,9 +531,14 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     const currentPage = state.currentPage
     const itemsPerPage = state.itemsPerPage
     const cursor = state.pageCursors[currentPage] ?? ''
+    const ownerFilter = state.legacyOwnerFilter
+    const searchQuery = state.legacySearchQuery
+    const sortField = state.legacySortField
+    const sortDirection = state.legacySortDirection
 
     const cachedPage = state.pageCache.get(currentPage)
     if (cachedPage && (Date.now() - cachedPage.timestamp) < PAGE_CACHE_TTL) {
+      // Only use cache if filters haven't changed (simple check: cache was recent)
       set(state => ({
         remote: {
           ...state.remote,
@@ -526,7 +560,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     }))
 
     try {
-      const contents = await App.ListRemoteLegacy(cursor, itemsPerPage)
+      const contents = await App.ListRemoteLegacyWithFilters(cursor, itemsPerPage, ownerFilter, searchQuery, sortField, sortDirection)
 
       // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return
@@ -924,5 +958,69 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   getRemoteSelectedItems: () => {
     const { items, selection } = get().remote
     return items.filter(item => selection.selectedIds.has(item.id))
+  },
+
+  // ===== LEGACY FILES FILTER ACTIONS =====
+
+  setLegacyOwnerFilter: (filter: string) => {
+    set(state => ({
+      remote: {
+        ...state.remote,
+        legacyOwnerFilter: filter,
+        currentPage: 0,
+        pageCursors: [''],
+        knownTotalPages: 1,
+        pageCache: new Map(),
+        navGeneration: state.remote.navGeneration + 1,
+      }
+    }))
+    get().loadRemoteLegacy()
+  },
+
+  setLegacySearchQuery: (query: string) => {
+    set(state => ({
+      remote: {
+        ...state.remote,
+        legacySearchQuery: query,
+        currentPage: 0,
+        pageCursors: [''],
+        knownTotalPages: 1,
+        pageCache: new Map(),
+        navGeneration: state.remote.navGeneration + 1,
+      }
+    }))
+    get().loadRemoteLegacy()
+  },
+
+  setLegacySort: (field: string, direction: string) => {
+    set(state => ({
+      remote: {
+        ...state.remote,
+        legacySortField: field,
+        legacySortDirection: direction,
+        currentPage: 0,
+        pageCursors: [''],
+        knownTotalPages: 1,
+        pageCache: new Map(),
+        navGeneration: state.remote.navGeneration + 1,
+      }
+    }))
+    get().loadRemoteLegacy()
+  },
+
+  setLibrarySearchQuery: (query: string) => {
+    set(state => ({
+      remote: {
+        ...state.remote,
+        librarySearchQuery: query,
+        currentPage: 0,
+        pageCursors: [''],
+        knownTotalPages: 1,
+        pageCache: new Map(),
+        navGeneration: state.remote.navGeneration + 1,
+      }
+    }))
+    // Reload current folder with search query
+    get().loadRemoteFolder()
   },
 }))

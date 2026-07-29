@@ -4,6 +4,7 @@ package wailsapp
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -61,14 +62,17 @@ func translateAPIError(err error) string {
 
 // FileItemDTO is the JSON-safe version of services.FileItem.
 type FileItemDTO struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	IsFolder  bool   `json:"isFolder"`
-	Size      int64  `json:"size"`
-	ModTime   string `json:"modTime"`
-	Path      string `json:"path,omitempty"`
-	ParentID  string `json:"parentId,omitempty"`
-	SymlinkID string `json:"symlinkId,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	IsFolder      bool   `json:"isFolder"`
+	Size          int64  `json:"size"`
+	ModTime       string `json:"modTime"`
+	Path         string `json:"path,omitempty"`
+	ParentID     string `json:"parentId,omitempty"`
+	SymlinkID    string `json:"symlinkId,omitempty"`
+	TypeCode     string `json:"typeCode,omitempty"`
+	Owner        string `json:"owner,omitempty"`
+	DateInserted string `json:"dateInserted,omitempty"`
 }
 
 // FolderContentsDTO is the JSON-safe version of services.FolderContents.
@@ -282,9 +286,9 @@ func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int)
 	return folderContentsToDTO(contents)
 }
 
-// ListRemoteLegacy returns a flat list of all files (legacy mode).
-// Pass pageSize=0 for API default.
-func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
+// SearchRemoteFolderContents searches within a folder for files/folders matching the query.
+// Returns paginated results similar to ListRemoteFolderPage.
+func (a *App) SearchRemoteFolderContents(folderID string, searchQuery string, pageSize int) FolderContentsDTO {
 	if a.engine == nil {
 		return FolderContentsDTO{}
 	}
@@ -295,7 +299,54 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 	}
 
 	ctx := context.Background()
-	contents, err := fs.ListLegacyFiles(ctx, cursor, pageSize)
+	contents, err := fs.SearchFolderContents(ctx, folderID, searchQuery, pageSize)
+	if err != nil {
+		return FolderContentsDTO{
+			FolderID: folderID,
+			Items:    []FileItemDTO{},
+		}
+	}
+
+	return folderContentsToDTO(contents)
+}
+
+// ListRemoteLegacy returns a flat list of all files (legacy mode).
+// Pass pageSize=0 for API default.
+func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
+	return a.ListRemoteLegacyWithFilters(cursor, pageSize, "", "", "", "")
+}
+
+// ListRemoteLegacyWithFilters returns a flat list of files with optional filtering.
+// cursor: pass "" for first page, or nextCursor from previous response.
+// pageSize: pass 0 for API default (25).
+// ownerFilter: "my_files" for user's files, "shared" for shared files, "" for all.
+// searchQuery: search term for filtering by file name, "" for no search.
+// sortField: "name", "size", or "created" - field to sort by.
+// sortDirection: "asc" or "desc" - sort direction.
+func (a *App) ListRemoteLegacyWithFilters(cursor string, pageSize int, ownerFilter string, searchQuery string, sortField string, sortDirection string) FolderContentsDTO {
+	if a.engine == nil {
+		return FolderContentsDTO{}
+	}
+
+	fs := a.engine.FileService()
+	if fs == nil {
+		return FolderContentsDTO{}
+	}
+
+	ordering := mapSortToOrdering(sortField, sortDirection)
+	log.Printf("[WAILS] ListRemoteLegacyWithFilters: sortField='%s', sortDirection='%s', ordering='%s'", sortField, sortDirection, ordering)
+
+	var options *api.FileListOptions
+	if ownerFilter != "" || searchQuery != "" || sortField != "" {
+		options = &api.FileListOptions{
+			OwnerFilter: ownerFilter,
+			SearchQuery: searchQuery,
+			Ordering:    ordering,
+		}
+	}
+
+	ctx := context.Background()
+	contents, err := fs.ListLegacyFilesWithOptions(ctx, cursor, pageSize, options)
 	if err != nil {
 		return FolderContentsDTO{
 			FolderPath: "Legacy Files",
@@ -304,6 +355,30 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 	}
 
 	return folderContentsToDTO(contents)
+}
+
+// mapSortToOrdering converts frontend sort field/direction to API ordering parameter.
+func mapSortToOrdering(sortField string, sortDirection string) string {
+	if sortField == "" {
+		return ""
+	}
+
+	var apiField string
+	switch sortField {
+	case "name":
+		apiField = "name"
+	case "size":
+		apiField = "decryptedSize"
+	case "created":
+		apiField = "dateUploaded"
+	default:
+		return ""
+	}
+
+	if sortDirection == "desc" {
+		return "-" + apiField
+	}
+	return apiField
 }
 
 // ListRemoteTrash returns a single page of the user's trash bin.
@@ -510,7 +585,7 @@ func folderContentsToDTO(contents *services.FolderContents) FolderContentsDTO {
 
 	items := make([]FileItemDTO, len(contents.Items))
 	for i, item := range contents.Items {
-		items[i] = FileItemDTO{
+		dto := FileItemDTO{
 			ID:        item.ID,
 			Name:      item.Name,
 			IsFolder:  item.IsFolder,
@@ -519,7 +594,16 @@ func folderContentsToDTO(contents *services.FolderContents) FolderContentsDTO {
 			Path:      item.Path,
 			ParentID:  item.ParentID,
 			SymlinkID: item.SymlinkID,
+			TypeCode:  item.TypeCode,
+			Owner:     item.Owner,
 		}
+
+		// Format dates only if not zero
+		if !item.DateInserted.IsZero() {
+			dto.DateInserted = item.DateInserted.Format(time.RFC3339)
+		}
+
+		items[i] = dto
 	}
 
 	return FolderContentsDTO{
@@ -1397,3 +1481,5 @@ func (a *App) SelectDirectoryRecursive(title string) ([]string, error) {
 
 	return files, nil
 }
+
+// ListJobs returns all jobs for the current user.

@@ -991,11 +991,26 @@ type LegacyFilesPage struct {
 	HasMore bool   // True if there are more pages
 }
 
+// FileListOptions contains optional filters for listing files.
+type FileListOptions struct {
+	OwnerFilter string // "my_files" for user's files, "shared" for shared files, "" for all
+	SearchQuery string // Search term for filtering by file name
+	Ordering    string // Sort order: "name", "-name", "decryptedSize", "-decryptedSize", "dateUploaded", "-dateUploaded"
+}
+
 // ListFilesPage retrieves a page of files from the user's library (flat list).
 // pageURL: pass "" for first page, or NextURL from previous response.
 // Orders by most recent first (-dateUploaded) to show newest files at top.
 // pageSize: pass 0 for default (25), or specify items per page.
 func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int) (*LegacyFilesPage, error) {
+	return c.ListFilesPageWithOptions(ctx, pageURL, pageSize, nil)
+}
+
+// ListFilesPageWithOptions retrieves a page of files with optional filtering.
+// pageURL: pass "" for first page, or NextURL from previous response.
+// pageSize: pass 0 for default (25), or specify items per page.
+// options: optional filters (owner, search), pass nil for no filters.
+func (c *Client) ListFilesPageWithOptions(ctx context.Context, pageURL string, pageSize int, options *FileListOptions) (*LegacyFilesPage, error) {
 	url := extractAPIPath(pageURL)
 	if url == "" {
 		// Use specified page size or default to 25
@@ -1003,7 +1018,31 @@ func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int
 		if pageSize > 0 {
 			ps = pageSize
 		}
-		url = fmt.Sprintf("/api/v3/files/?page_size=%d&ordering=-dateUploaded", ps)
+
+		// Default ordering
+		ordering := "-dateUploaded"
+		if options != nil && options.Ordering != "" {
+			ordering = options.Ordering
+		}
+
+		url = fmt.Sprintf("/api/v3/files/?page=1&page_size=%d&ordering=%s&include_jobs=1&isActive=true", ps, ordering)
+		log.Printf("[API] First page URL: %s", url)
+
+		// Add optional filters
+		if options != nil {
+			u, err := neturl.Parse(url)
+			if err == nil {
+				q := u.Query()
+				if options.OwnerFilter != "" {
+					q.Set("owner", options.OwnerFilter)
+				}
+				if options.SearchQuery != "" {
+					q.Set("search", options.SearchQuery)
+				}
+				u.RawQuery = q.Encode()
+				url = u.RequestURI()
+			}
+		}
 	} else if pageSize > 0 {
 		if u, err := neturl.Parse(url); err == nil {
 			q := u.Query()
@@ -1035,6 +1074,8 @@ func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int
 			DateUploaded  time.Time `json:"dateUploaded"`
 			IsUploaded    bool      `json:"isUploaded"`
 			IsDeleted     bool      `json:"isDeleted"`
+			Owner         string    `json:"owner"`
+			TypeID        int       `json:"typeId"`
 		} `json:"results"`
 	}
 
@@ -1051,12 +1092,20 @@ func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int
 	// Filter to only include uploaded, non-deleted files
 	for _, f := range result.Results {
 		if f.IsUploaded && !f.IsDeleted {
-			page.Files = append(page.Files, FileInfo{
+			fileInfo := FileInfo{
 				ID:            f.ID,
 				Name:          f.Name,
 				DecryptedSize: f.DecryptedSize,
 				DateUploaded:  f.DateUploaded,
-			})
+				Owner:         f.Owner,
+				TypeID:        f.TypeID,
+				DateInserted:  f.DateUploaded, // Use DateUploaded as creation date
+			}
+
+			// Map TypeID to readable string
+			fileInfo.TypeCode = getTypeCodeFromID(f.TypeID)
+
+			page.Files = append(page.Files, fileInfo)
 		}
 	}
 
@@ -1097,6 +1146,9 @@ type FolderInfo struct {
 	ID           string
 	Name         string
 	DateUploaded time.Time
+	Size         int64  // Storage size for job folders
+	Owner        string // Job owner email
+	JobID        string // Associated job ID (for My Jobs folders)
 }
 
 // FileInfo represents file information from folder contents listing.
@@ -1119,6 +1171,11 @@ type FileInfo struct {
 	FileChecksums        []models.FileChecksum
 	Owner                string
 	Path                 string
+
+	// Additional display fields for legacy files browser
+	TypeID       int
+	TypeCode     string
+	DateInserted time.Time
 }
 
 // ToCloudFile converts a FileInfo to a models.CloudFile for use by download.DownloadFile().
@@ -1293,6 +1350,22 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 	return c.fetchFolderContentsPage(ctx, url)
 }
 
+// SearchFolderContents searches within a folder for files/folders matching the query.
+// Returns results paginated similar to ListFolderContentsPage.
+func (c *Client) SearchFolderContents(ctx context.Context, folderID, searchQuery string, pageSize int) (*FolderContents, error) {
+	if searchQuery == "" {
+		// If no search query, just return regular contents
+		return c.ListFolderContentsPage(ctx, folderID, "", pageSize)
+	}
+
+	url := fmt.Sprintf("/api/v3/folders/%s/contents/search/?search=%s", folderID, neturl.QueryEscape(searchQuery))
+	if pageSize > 0 {
+		url = fmt.Sprintf("%s&page_size=%d", url, pageSize)
+	}
+
+	return c.fetchFolderContentsPage(ctx, url)
+}
+
 // fetchFolderContentsPage issues a GET to the given URL and parses the
 // standard folder-contents response shape (results / next / previous).
 // Shared by folder listings and trash-bin listings.
@@ -1338,6 +1411,30 @@ func (c *Client) fetchFolderContentsPage(ctx context.Context, url string) (*Fold
 					folder := FolderInfo{
 						ID:   id,
 						Name: name,
+					}
+					// Parse size (job storage size)
+					if rawSize, ok := itemData["size"]; ok {
+						switch v := rawSize.(type) {
+						case float64:
+							folder.Size = int64(v)
+						case string:
+							if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
+								folder.Size = parsed
+							}
+						case json.Number:
+							if parsed, err := v.Int64(); err == nil {
+								folder.Size = parsed
+							}
+						}
+					}
+					// Parse owner and job ID from job object (for My Jobs folders)
+					if jobData, ok := itemData["job"].(map[string]interface{}); ok {
+						if ownerEmail, ok := jobData["owner"].(string); ok {
+							folder.Owner = ownerEmail
+						}
+						if jobID, ok := jobData["id"].(string); ok {
+							folder.JobID = jobID
+						}
 					}
 					if dateStr, ok := itemData["dateUploaded"].(string); ok {
 						if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
@@ -2294,4 +2391,39 @@ func (c *Client) ValidateAutoDownloadSetup(ctx context.Context) (*AutoDownloadVa
 	}
 
 	return result, nil
+}
+
+// getKeys returns the keys of a map for debugging
+func getKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// getTypeCodeFromID maps file type IDs to their string codes
+func getTypeCodeFromID(typeID int) string {
+	switch typeID {
+	case 1:
+		return "Input"
+	case 2:
+		return "Template"
+	case 3:
+		return "Param"
+	case 4:
+		return "Script"
+	case 5:
+		return "Output"
+	case 6:
+		return "Case"
+	case 7:
+		return "Checkpoint"
+	case 8:
+		return "Pending"
+	case 9:
+		return "Placeholder"
+	default:
+		return "Unknown"
+	}
 }
