@@ -67,6 +67,11 @@ function resetRemote() {
       pageCursors: [''],
       knownTotalPages: 1,
       pageCache: new Map(),
+      legacyOwnerFilter: '',
+      legacySearchQuery: '',
+      legacySortField: 'created',
+      legacySortDirection: 'desc',
+      librarySearchQuery: '',
     },
   })
 }
