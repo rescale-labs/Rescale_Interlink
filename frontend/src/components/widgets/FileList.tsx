@@ -5,7 +5,7 @@ import clsx from 'clsx'
 import { wailsapp } from '../../../wailsjs/go/models'
 
 // Sort configuration
-export type SortField = 'name' | 'size' | 'modTime'
+export type SortField = 'name' | 'size' | 'modTime' | 'created'
 export type SortDirection = 'asc' | 'desc'
 
 // Pagination constants (matching Fyne GUI behavior)
@@ -27,6 +27,7 @@ interface FileListProps {
   loadingMessage?: string // Custom loading message (e.g., for Legacy mode)
   showPath?: boolean // Show full path instead of just name
   isLocal?: boolean // Local browser uses different pagination defaults
+  mode?: 'library' | 'jobs' | 'legacy' | 'trash' // Display mode for conditional column rendering
   // Server-side pagination props (for remote browser)
   useServerPagination?: boolean  // When true, items are already one page from server
   serverCurrentPage?: number     // Current page (0-indexed)
@@ -36,6 +37,10 @@ interface FileListProps {
   onServerNextPage?: () => void  // Navigate to next page
   onServerPrevPage?: () => void  // Navigate to previous page
   onServerItemsPerPageChange?: (size: number) => void  // Change items per page
+  // Controlled sorting (for server-side sorting)
+  sortField?: SortField          // Externally controlled sort field
+  sortDirection?: 'asc' | 'desc' // Externally controlled sort direction
+  onSortChange?: (field: SortField, direction: 'asc' | 'desc') => void  // Callback when sort changes
 }
 
 // Format file size for display.
@@ -85,6 +90,7 @@ export function FileList({
   loadingMessage = 'Loading...',
   showPath = false,
   isLocal = false,
+  mode,
   useServerPagination = false,
   serverCurrentPage = 0,
   serverKnownTotalPages = 1,
@@ -93,6 +99,9 @@ export function FileList({
   onServerNextPage,
   onServerPrevPage,
   onServerItemsPerPageChange,
+  sortField: externalSortField,
+  sortDirection: externalSortDirection,
+  onSortChange,
 }: FileListProps) {
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -107,8 +116,26 @@ export function FileList({
   useEffect(() => {
     lastSelectedIdRef.current = lastSelectedId
   }, [lastSelectedId])
-  const [sortField, setSortField] = useState<SortField>('name')
-  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
+
+  // Use controlled sort if provided, otherwise use internal state
+  const [internalSortField, setInternalSortField] = useState<SortField>(mode === 'legacy' ? 'created' : 'name')
+  const [internalSortDirection, setInternalSortDirection] = useState<SortDirection>(mode === 'legacy' ? 'desc' : 'asc')
+
+  const sortField = externalSortField ?? internalSortField
+  const sortDirection = externalSortDirection ?? internalSortDirection
+
+  // Reset sort when switching to legacy mode (only for internal state)
+  useEffect(() => {
+    if (externalSortField === undefined && externalSortDirection === undefined) {
+      if (mode === 'legacy') {
+        setInternalSortField('created')
+        setInternalSortDirection('desc')
+      } else {
+        setInternalSortField('name')
+        setInternalSortDirection('asc')
+      }
+    }
+  }, [mode, externalSortField, externalSortDirection])
 
   const maxPageSize = isLocal ? LOCAL_MAX_PAGE_SIZE : REMOTE_MAX_PAGE_SIZE
 
@@ -167,12 +194,15 @@ export function FileList({
         case 'modTime':
           cmp = (a.modTime ?? '').localeCompare(b.modTime ?? '')
           break
+        case 'created':
+          cmp = (a.dateInserted ?? '').localeCompare(b.dateInserted ?? '')
+          break
       }
 
       return sortDirection === 'asc' ? cmp : -cmp
     })
     return sorted
-  }, [items, sortField, sortDirection])
+  }, [items, sortField, sortDirection, onSortChange])
 
   const totalPages = useServerPagination
     ? serverKnownTotalPages
@@ -212,13 +242,20 @@ export function FileList({
 
   // Handle sort header click
   const handleSort = useCallback((field: SortField) => {
-    if (sortField === field) {
-      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc')
+    if (onSortChange) {
+      // Controlled mode: notify parent
+      const newDirection = sortField === field ? (sortDirection === 'asc' ? 'desc' : 'asc') : 'asc'
+      onSortChange(field, newDirection)
     } else {
-      setSortField(field)
-      setSortDirection('asc')
+      // Uncontrolled mode: update internal state
+      if (sortField === field) {
+        setInternalSortDirection(prev => prev === 'asc' ? 'desc' : 'asc')
+      } else {
+        setInternalSortField(field)
+        setInternalSortDirection('asc')
+      }
     }
-  }, [sortField])
+  }, [sortField, sortDirection, onSortChange])
 
   // Handle row click with selection logic.
   // Uses refs to prevent stale closure issues — always get latest selection state.
@@ -365,33 +402,62 @@ export function FileList({
   }
 
   return (
-    <div className="flex flex-col h-full border border-gray-200 dark:border-gray-700 rounded">
-      {/* Header */}
-      <div className="flex items-center bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-sm font-medium text-gray-600 dark:text-gray-300 px-2 py-1 flex-shrink-0">
+    <div className="flex flex-col h-full border border-gray-200 dark:border-gray-700 rounded overflow-hidden">
+      {/* Scrollable container for header and content */}
+      <div className="flex flex-col h-full overflow-x-auto">
+        <div className={mode === 'legacy' ? "min-w-[1400px]" : ""}>
+          {/* Header */}
+          <div className="flex items-center bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-sm font-medium text-gray-600 dark:text-gray-300 px-2 py-1 flex-shrink-0">
         {/* Checkbox column header */}
         <span className="w-8 flex-shrink-0" />
+        {/* Icon space - matches icon width + margin in rows */}
+        {mode === 'legacy' && <span className="w-5 mr-2 flex-shrink-0" />}
         <button
-          className="flex-1 text-left hover:text-gray-900 dark:hover:text-white cursor-pointer"
+          className={mode === 'legacy' ? "w-64 text-left hover:text-gray-900 dark:hover:text-white cursor-pointer" : "flex-1 text-left hover:text-gray-900 dark:hover:text-white cursor-pointer"}
           onClick={() => handleSort('name')}
         >
           Name <SortIndicator field="name" />
         </button>
-        <button
-          className="w-24 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
-          onClick={() => handleSort('size')}
-        >
-          Size <SortIndicator field="size" />
-        </button>
-        <button
-          className="w-48 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
-          onClick={() => handleSort('modTime')}
-        >
-          Modified <SortIndicator field="modTime" />
-        </button>
-      </div>
+        {mode === 'legacy' && (
+          <>
+            <span className="w-24 text-left ml-1">File ID</span>
+            <span className="w-20 text-left ml-1">Type</span>
+            <button
+              className="w-24 text-left ml-1 hover:text-gray-900 dark:hover:text-white cursor-pointer"
+              onClick={() => handleSort('size')}
+            >
+              Size <SortIndicator field="size" />
+            </button>
+            <span className="w-64 text-left ml-1">Owner</span>
+            <button
+              className="w-40 text-left ml-1 hover:text-gray-900 dark:hover:text-white cursor-pointer"
+              onClick={() => handleSort('created')}
+            >
+              Created <SortIndicator field="created" />
+            </button>
+          </>
+        )}
+        {mode !== 'legacy' && (
+          <>
+            <span className="w-24 text-left ml-1">File ID</span>
+            <button
+              className="w-24 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
+              onClick={() => handleSort('size')}
+            >
+              Size <SortIndicator field="size" />
+            </button>
+            <button
+              className="w-48 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
+              onClick={() => handleSort('modTime')}
+            >
+              Modified <SortIndicator field="modTime" />
+            </button>
+          </>
+        )}
+          </div>
 
-      {/* Virtual scrolling list */}
-      <div ref={parentRef} className="flex-1 overflow-auto">
+          {/* Virtual scrolling list */}
+          <div ref={parentRef} className="flex-1 overflow-auto">
         <div
           style={{
             height: `${rowVirtualizer.getTotalSize()}px`,
@@ -442,22 +508,64 @@ export function FileList({
                 </span>
 
                 {/* Name */}
-                <span className="flex-1 truncate text-gray-900 dark:text-gray-100">
+                <span className={mode === 'legacy' ? "w-64 truncate text-gray-900 dark:text-gray-100" : "flex-1 truncate text-gray-900 dark:text-gray-100"}>
                   {showPath ? item.path || item.name : item.name}
                 </span>
 
-                {/* Size */}
-                <span className="w-24 text-right text-gray-500 dark:text-gray-400 flex-shrink-0">
-                  {item.isFolder ? '-' : formatSize(item.size ?? 0)}
-                </span>
+                {/* Legacy mode columns */}
+                {mode === 'legacy' && (
+                  <>
+                    {/* File ID */}
+                    <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
+                      {item.id ? item.id.substring(0, 8) : '-'}
+                    </span>
 
-                {/* w-48 to fit date + AM/PM */}
-                <span className="w-48 text-right text-gray-500 dark:text-gray-400 flex-shrink-0 whitespace-nowrap">
-                  {formatDate(item.modTime ?? '')}
-                </span>
+                    {/* Type */}
+                    <span className="w-20 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate ml-1">
+                      {item.typeCode || '-'}
+                    </span>
+
+                    {/* Size */}
+                    <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 ml-1">
+                      {item.isFolder ? '-' : formatSize(item.size ?? 0)}
+                    </span>
+
+                    {/* Owner */}
+                    <span className="w-64 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate ml-1">
+                      {item.owner || '-'}
+                    </span>
+
+                    {/* Created */}
+                    <span className="w-40 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 whitespace-nowrap ml-1">
+                      {formatDate(item.dateInserted ?? '')}
+                    </span>
+                  </>
+                )}
+
+                {/* Non-legacy mode columns */}
+                {mode !== 'legacy' && (
+                  <>
+                    {/* File ID */}
+                    <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
+                      {item.id ? item.id.substring(0, 8) : '-'}
+                    </span>
+
+                    {/* Size */}
+                    <span className="w-24 text-right text-gray-500 dark:text-gray-400 flex-shrink-0">
+                      {formatSize(item.size ?? 0)}
+                    </span>
+
+                    {/* Modified */}
+                    <span className="w-48 text-right text-gray-500 dark:text-gray-400 flex-shrink-0 whitespace-nowrap">
+                      {formatDate(item.modTime ?? '')}
+                    </span>
+                  </>
+                )}
               </div>
             )
           })}
+          </div>
+        </div>
         </div>
       </div>
 

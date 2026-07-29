@@ -117,6 +117,13 @@ func (fs *FileService) listFolderContents(ctx context.Context, apiClient *api.Cl
 // ListLegacyFiles returns a flat list of all files (legacy mode).
 // Pass pageSize=0 for API default.
 func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageSize int) (*FolderContents, error) {
+	return fs.ListLegacyFilesWithOptions(ctx, cursor, pageSize, nil)
+}
+
+// ListLegacyFilesWithOptions returns a flat list of files with optional filtering.
+// Pass pageSize=0 for API default.
+// options: optional filters (owner, search), pass nil for no filters.
+func (fs *FileService) ListLegacyFilesWithOptions(ctx context.Context, cursor string, pageSize int, options *api.FileListOptions) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
 	fs.mu.RUnlock()
@@ -125,7 +132,7 @@ func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageS
 		return nil, fmt.Errorf("API client not configured")
 	}
 
-	page, err := apiClient.ListFilesPage(ctx, cursor, pageSize)
+	page, err := apiClient.ListFilesPageWithOptions(ctx, cursor, pageSize, options)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
@@ -133,11 +140,14 @@ func (fs *FileService) ListLegacyFiles(ctx context.Context, cursor string, pageS
 	items := make([]FileItem, 0, len(page.Files))
 	for _, f := range page.Files {
 		items = append(items, FileItem{
-			ID:       f.ID,
-			Name:     f.Name,
-			IsFolder: false,
-			Size:     f.DecryptedSize,
-			ModTime:  f.DateUploaded,
+			ID:           f.ID,
+			Name:         f.Name,
+			IsFolder:     false,
+			Size:         f.DecryptedSize,
+			ModTime:      f.DateUploaded,
+			TypeCode:     f.TypeCode,
+			Owner:        f.Owner,
+			DateInserted: f.DateInserted,
 		})
 	}
 
@@ -619,7 +629,9 @@ func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, curs
 			ID:       f.ID,
 			Name:     f.Name,
 			IsFolder: true,
+			Size:     f.Size,
 			ModTime:  f.DateUploaded,
+			Owner:    f.Owner,
 		})
 	}
 
@@ -631,6 +643,66 @@ func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, curs
 			IsFolder: false,
 			Size:     f.DecryptedSize,
 			ModTime:  f.DateUploaded,
+		})
+	}
+
+	return &FolderContents{
+		FolderID:   folderID,
+		Items:      items,
+		HasMore:    contents.HasMore,
+		NextCursor: contents.NextURL,
+	}, nil
+}
+
+// SearchFolderContents searches within a folder for files/folders matching the query.
+// Returns paginated results similar to ListFolderPage.
+func (fs *FileService) SearchFolderContents(ctx context.Context, folderID string, searchQuery string, pageSize int) (*FolderContents, error) {
+	fs.mu.RLock()
+	apiClient := fs.apiClient
+	fs.mu.RUnlock()
+
+	if apiClient == nil {
+		return nil, fmt.Errorf("API client not configured")
+	}
+
+	if folderID == "" {
+		// For root, get MyLibrary folder first
+		roots, err := apiClient.GetRootFolders(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get root folders: %w", err)
+		}
+		folderID = roots.MyLibrary
+	}
+
+	// Use the search API method
+	contents, err := apiClient.SearchFolderContents(ctx, folderID, searchQuery, pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search folder contents: %w", err)
+	}
+
+	items := make([]FileItem, 0, len(contents.Folders)+len(contents.Files))
+
+	// Add folders first
+	for _, f := range contents.Folders {
+		items = append(items, FileItem{
+			ID:       f.ID,
+			Name:     f.Name,
+			IsFolder: true,
+			Size:     f.Size,
+			ModTime:  f.DateUploaded,
+			Owner:    f.Owner,
+		})
+	}
+
+	// Add files
+	for _, f := range contents.Files {
+		items = append(items, FileItem{
+			ID:        f.ID,
+			Name:      f.Name,
+			IsFolder:  false,
+			Size:      f.DecryptedSize,
+			ModTime:   f.DateUploaded,
+			SymlinkID: f.SymlinkID,
 		})
 	}
 
