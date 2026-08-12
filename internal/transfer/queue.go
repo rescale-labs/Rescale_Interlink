@@ -807,10 +807,22 @@ func (q *Queue) GetBatchStats(batchID string) (BatchStats, bool) {
 // stateFilter: "" = all tasks, "active" = non-terminal (queued/initializing/active),
 // or exact state string ("completed", "failed", "cancelled").
 func (q *Queue) GetBatchTasks(batchID string, offset, limit int, stateFilter string) []TransferTask {
+	if offset < 0 || limit <= 0 {
+		return []TransferTask{}
+	}
+
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
-	var matching []TransferTask
+	// Filter and paginate in one pass so only the requested page is cloned.
+	// Cloning every match before slicing meant asking for the first 50 rows of a
+	// 20k-file batch copied all 20k tasks while holding the read lock, blocking
+	// the progress writers that need the write lock — the GUI stall that made a
+	// newly queued transfer take seconds to appear.
+	// Cap the prealloc so an oversized limit from a caller can't demand a huge
+	// allocation up front.
+	page := make([]TransferTask, 0, min(limit, 256))
+	matched := 0
 	for _, task := range q.tasks {
 		if task.BatchID != batchID {
 			continue
@@ -819,7 +831,7 @@ func (q *Queue) GetBatchTasks(batchID string, offset, limit int, stateFilter str
 			state := task.GetState()
 			if stateFilter == "active" {
 				// Meta-filter: non-terminal states (queued, initializing, active).
-				// Consistent with BatchStats.Active counting (queue.go:639-642).
+				// Consistent with BatchStats.Active counting in GetAllBatchStats.
 				// TaskPaused excluded — BatchStats doesn't count it in Active.
 				if state == TaskCompleted || state == TaskFailed || state == TaskCancelled || state == TaskPaused {
 					continue
@@ -838,18 +850,16 @@ func (q *Queue) GetBatchTasks(batchID string, offset, limit int, stateFilter str
 				continue
 			}
 		}
-		matching = append(matching, task.Clone())
+		matched++
+		if matched <= offset {
+			continue
+		}
+		page = append(page, task.Clone())
+		if len(page) == limit {
+			break
+		}
 	}
-
-	// Apply pagination
-	if offset >= len(matching) {
-		return []TransferTask{}
-	}
-	end := offset + limit
-	if end > len(matching) {
-		end = len(matching)
-	}
-	return matching[offset:end]
+	return page
 }
 
 // GetFailedTaskErrors returns error messages from failed tasks in a batch (up to limit).

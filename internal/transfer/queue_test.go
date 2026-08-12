@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/rescale/rescale-int/internal/events"
 )
@@ -1756,4 +1758,172 @@ type tagCapturingExecutor struct {
 
 func (e tagCapturingExecutor) ExecuteRetry(task *TransferTask) {
 	e.captured <- task.GetTags()
+}
+
+// GetBatchTasks paging tests
+
+// newPagingQueue builds a queue holding n tasks in one batch without going
+// through track(), so no batch-progress ticker goroutine starts and the
+// allocation measurement below stays attributable to the call under test.
+func newPagingQueue(batchID string, n int) *Queue {
+	q := NewQueue(nil)
+	for i := 0; i < n; i++ {
+		task := NewTransferTask(TaskTypeUpload, fmt.Sprintf("file-%04d.dat", i), "/src", "dest", 1024)
+		task.BatchID = batchID
+		q.tasks = append(q.tasks, task)
+		q.tasksByID[task.ID] = task
+	}
+	return q
+}
+
+func TestGetBatchTasksPaging(t *testing.T) {
+	q := newPagingQueue("b1", 120)
+
+	// A second batch's task must never leak into b1's pages.
+	other := NewTransferTask(TaskTypeUpload, "other.dat", "/src", "dest", 1)
+	other.BatchID = "b2"
+	q.tasks = append(q.tasks, other)
+	q.tasksByID[other.ID] = other
+
+	tests := []struct {
+		name      string
+		offset    int
+		limit     int
+		wantLen   int
+		wantFirst string
+		wantLast  string
+	}{
+		{"first page", 0, 50, 50, "file-0000.dat", "file-0049.dat"},
+		{"second page", 50, 50, 50, "file-0050.dat", "file-0099.dat"},
+		{"final partial page", 100, 50, 20, "file-0100.dat", "file-0119.dat"},
+		{"offset at end", 120, 50, 0, "", ""},
+		{"offset past end", 500, 50, 0, "", ""},
+		{"limit exceeds batch", 0, 1000, 120, "file-0000.dat", "file-0119.dat"},
+		{"single row", 7, 1, 1, "file-0007.dat", "file-0007.dat"},
+		{"zero limit", 0, 0, 0, "", ""},
+		{"negative limit", 0, -5, 0, "", ""},
+		{"negative offset", -1, 50, 0, "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			page := q.GetBatchTasks("b1", tt.offset, tt.limit, "")
+			if len(page) != tt.wantLen {
+				t.Fatalf("length: got %d, want %d", len(page), tt.wantLen)
+			}
+			if tt.wantLen == 0 {
+				return
+			}
+			if page[0].Name != tt.wantFirst {
+				t.Errorf("first row: got %s, want %s", page[0].Name, tt.wantFirst)
+			}
+			if page[len(page)-1].Name != tt.wantLast {
+				t.Errorf("last row: got %s, want %s", page[len(page)-1].Name, tt.wantLast)
+			}
+			for i := range page {
+				if page[i].BatchID != "b1" {
+					t.Fatalf("page contains a task from batch %s", page[i].BatchID)
+				}
+			}
+		})
+	}
+
+	if page := q.GetBatchTasks("nosuchbatch", 0, 50, ""); len(page) != 0 {
+		t.Errorf("unknown batch returned %d rows", len(page))
+	}
+}
+
+func TestGetBatchTasksStateFilters(t *testing.T) {
+	// States are assigned round-robin over the seven task states so every
+	// filter has more matches than one page holds.
+	states := []TaskState{
+		TaskQueued, TaskInitializing, TaskActive, TaskPaused,
+		TaskCompleted, TaskFailed, TaskCancelled,
+	}
+	q := newPagingQueue("b1", 70)
+	for i, task := range q.tasks {
+		task.SetState(states[i%len(states)])
+	}
+
+	tests := []struct {
+		filter  string
+		wantLen int
+	}{
+		{"", 70},
+		// Frontend-sent filters.
+		{"inprogress", 20}, // initializing + active
+		{"queued", 10},
+		{"completed", 10},
+		{"failed", 10},
+		{"cancelled", 10},
+		// Meta-filter kept for API compatibility: non-terminal, paused excluded.
+		{"active", 30},
+		// Exact-state match on a state the UI has no chip for.
+		{"paused", 10},
+		{"bogus", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run("filter="+tt.filter, func(t *testing.T) {
+			all := q.GetBatchTasks("b1", 0, 1000, tt.filter)
+			if len(all) != tt.wantLen {
+				t.Fatalf("unpaged length: got %d, want %d", len(all), tt.wantLen)
+			}
+			if tt.wantLen == 0 {
+				return
+			}
+			// Paging must slice the filtered set, not the unfiltered one.
+			page := q.GetBatchTasks("b1", 3, 4, tt.filter)
+			wantPage := 4
+			if remaining := tt.wantLen - 3; remaining < wantPage {
+				wantPage = max(remaining, 0)
+			}
+			if len(page) != wantPage {
+				t.Fatalf("page length: got %d, want %d", len(page), wantPage)
+			}
+			for i := range page {
+				if page[i].ID != all[3+i].ID {
+					t.Errorf("row %d: got %s, want %s", i, page[i].Name, all[3+i].Name)
+				}
+			}
+		})
+	}
+}
+
+func TestGetBatchTasksClonesOnlyTheRequestedPage(t *testing.T) {
+	const (
+		batchSize = 20000
+		pageSize  = 50
+	)
+	q := newPagingQueue("big", batchSize)
+
+	measure := func() int64 {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		page := q.GetBatchTasks("big", 0, pageSize, "")
+		runtime.ReadMemStats(&after)
+		if len(page) != pageSize {
+			t.Fatalf("page length: got %d, want %d", len(page), pageSize)
+		}
+		return int64(after.TotalAlloc - before.TotalAlloc)
+	}
+
+	// Other tests in this package leave batch-progress tickers running, and a
+	// tick landing inside the measured window would inflate the delta, so take
+	// the smallest of several samples.
+	best := measure()
+	for i := 0; i < 4; i++ {
+		if d := measure(); d < best {
+			best = d
+		}
+	}
+
+	// The returned page costs pageSize task copies. Ten times that leaves room
+	// for allocator rounding while still failing loudly if the whole batch is
+	// cloned before slicing, which costs batchSize copies or more.
+	maxBytes := int64(unsafe.Sizeof(TransferTask{})) * pageSize * 10
+	if best > maxBytes {
+		t.Errorf("first page of a %d-task batch allocated %d bytes, want <= %d", batchSize, best, maxBytes)
+	}
 }
