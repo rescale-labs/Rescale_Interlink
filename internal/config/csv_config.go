@@ -746,7 +746,10 @@ func WriteTokenFile(path, token string) error {
 	// default permissions, which is no worse than pre-Plan-4 behavior.
 	sid, sidErr := currentUserSID()
 	if sidErr != nil {
-		log.Printf("[WARN] could not capture current user SID for token ACL: %v", sidErr)
+		// Straight to stderr, like the other token-security warnings: the CLI
+		// drops the standard logger's output unless asked for it, and silence
+		// here means an API token can sit with default permissions unnoticed.
+		fmt.Fprintf(os.Stderr, "[WARN] could not capture current user SID for token ACL: %v\n", sidErr)
 		return nil
 	}
 	if sid == "" {
@@ -754,7 +757,7 @@ func WriteTokenFile(path, token string) error {
 		return nil
 	}
 	if aclErr := applyTokenFileACL(path, sid); aclErr != nil {
-		log.Printf("[WARN] could not apply explicit ACL to token file %s: %v", path, aclErr)
+		fmt.Fprintf(os.Stderr, "[WARN] could not apply explicit ACL to token file %s: %v\n", path, aclErr)
 	}
 
 	return nil

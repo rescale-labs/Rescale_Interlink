@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/progress"
 )
 
 // NoticeFromAttempt is the retry number from which a retry is reported to the
@@ -69,9 +70,13 @@ func (o RetryObserver) Notify(ev RetryEvent) {
 		return
 	}
 
+	// With no writer from the caller, go through whatever progress display is
+	// live rather than straight to stderr. Compat mode draws its own bars and
+	// passes no writer, and a raw stderr write lands inside mpb's frame — the
+	// notice would fix one silence by shredding the bars instead.
 	w := o.Writer
 	if w == nil {
-		w = os.Stderr
+		w = progress.SinkWriter(os.Stderr)
 	}
 	fmt.Fprintf(w, "%s\n", msg)
 

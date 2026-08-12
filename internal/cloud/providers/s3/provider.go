@@ -29,7 +29,10 @@ type Provider struct {
 	fileInfo *models.CloudFile
 
 	// retryObserver is handed to each client so retries deep in the transfer
-	// stack reach whoever started it. Guarded by s3ClientMu.
+	// stack reach whoever started it. Every access here is under s3ClientMu,
+	// because SetRetryObserver may land while another goroutine is creating a
+	// client. The clients themselves copy it at construction and never write it,
+	// so their concurrent part workers read it without a lock.
 	retryObserver cloud.RetryObserver
 }
 
@@ -109,7 +112,11 @@ func (p *Provider) getOrCreateS3ClientForFile(ctx context.Context, fileInfo *mod
 
 	// Create a client with file-specific credentials
 	// Note: This client is NOT cached because different files may need different credentials
-	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, fileInfo, p.retryObserver)
+	p.s3ClientMu.Lock()
+	obs := p.retryObserver
+	p.s3ClientMu.Unlock()
+
+	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, fileInfo, obs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client for file: %w", err)
 	}

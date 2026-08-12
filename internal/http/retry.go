@@ -241,12 +241,14 @@ func ExecuteWithRetry(ctx context.Context, config Config, operation func() error
 			// Credential errors - force refresh and retry immediately
 			if attempt < config.MaxRetries-1 {
 				const credentialRetryPause = 1 * time.Second
-				if config.OnRetry != nil {
-					config.OnRetry(attempt+1, err, errType, credentialRetryPause)
-				}
+				// Budget first, then announce: telling the user we are "waiting 1s"
+				// for a retry that is about to be abandoned is worse than silence.
 				if elapsed, over := budgetExceeded(credentialRetryPause); over {
 					return fmt.Errorf("retries exhausted after %v (limit %v, %d attempt(s)): %w",
 						elapsed.Round(time.Millisecond), config.MaxElapsed, attempt+1, err)
+				}
+				if config.OnRetry != nil {
+					config.OnRetry(attempt+1, err, errType, credentialRetryPause)
 				}
 				// Brief pause before credential refresh (1 second), context-aware
 				select {
@@ -262,14 +264,16 @@ func ExecuteWithRetry(ctx context.Context, config Config, operation func() error
 			// Network or server errors - use exponential backoff
 			if attempt < config.MaxRetries-1 {
 				backoff := CalculateBackoff(attempt, config.InitialDelay, config.MaxDelay)
-				if config.OnRetry != nil {
-					config.OnRetry(attempt+1, err, errType, backoff)
-				}
-				// Give up rather than keep an unreachable endpoint spinning for
-				// minutes with nothing to show for it.
+				// Budget first, then announce. Give up rather than keep an
+				// unreachable endpoint spinning for minutes with nothing to show
+				// for it — and do not announce a wait we are not going to do, or
+				// count a retry that never happens against the file's retry label.
 				if elapsed, over := budgetExceeded(backoff); over {
 					return fmt.Errorf("retries exhausted after %v (limit %v, %d attempt(s)): %w",
 						elapsed.Round(time.Millisecond), config.MaxElapsed, attempt+1, err)
+				}
+				if config.OnRetry != nil {
+					config.OnRetry(attempt+1, err, errType, backoff)
 				}
 				// Check if remaining deadline is sufficient for the backoff sleep
 				if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < backoff {

@@ -376,3 +376,36 @@ func TestExecuteWithRetry_OnRetryReportsDelay(t *testing.T) {
 		}
 	}
 }
+
+// TestExecuteWithRetry_NoNoticeForAbandonedRetry pins the ordering: the budget is
+// checked before OnRetry fires, so the loop never announces "waiting 12.8s" for a
+// retry it is about to abandon (and never bumps a progress bar's retry count for
+// an attempt that does not happen).
+func TestExecuteWithRetry_NoNoticeForAbandonedRetry(t *testing.T) {
+	var notices []time.Duration
+	cfg := Config{
+		MaxRetries:   10,
+		InitialDelay: 30 * time.Millisecond,
+		MaxDelay:     240 * time.Millisecond,
+		MaxElapsed:   60 * time.Millisecond,
+		OnRetry: func(attempt int, err error, errType ErrorType, nextDelay time.Duration) {
+			notices = append(notices, nextDelay)
+		},
+	}
+
+	calls := 0
+	err := ExecuteWithRetry(context.Background(), cfg, func() error {
+		calls++
+		return fmt.Errorf("503 service unavailable")
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "retries exhausted after") {
+		t.Fatalf("expected the budget to end the loop, got %v", err)
+	}
+	// Every notice precedes a real sleep, and the abandoned attempt gets none:
+	// one notice per retry actually taken, i.e. one fewer than the attempts made.
+	if len(notices) != calls-1 {
+		t.Errorf("%d notices for %d attempts — want %d (no notice for the abandoned retry)",
+			len(notices), calls, calls-1)
+	}
+}

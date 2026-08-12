@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/progress"
 )
 
 func TestRetryEventNotice(t *testing.T) {
@@ -85,4 +87,30 @@ func TestRetryObserverNotify(t *testing.T) {
 			t.Errorf("writer must stay untouched when the caller renders: %q", buf.String())
 		}
 	})
+}
+
+// TestRetryObserverNilWriterUsesProgressSink covers the compat-mode case: it
+// draws its own bars and passes neither a writer nor a hook, so a raw stderr
+// write would land inside mpb's frame and shred the bars it was meant to
+// complement.
+func TestRetryObserverNilWriterUsesProgressSink(t *testing.T) {
+	ev := RetryEvent{Operation: "UploadPart 2", Attempt: 3, MaxAttempts: 10, Cause: "retryable",
+		Err: errors.New("503 service unavailable"), NextDelay: 2 * time.Second}
+
+	bars := &strings.Builder{}
+	progress.SetLogSink(bars)
+	RetryObserver{}.Notify(ev)
+	progress.ClearLogSink(bars)
+
+	if !strings.Contains(bars.String(), "UploadPart 2") {
+		t.Errorf("notice did not go through the progress display: %q", bars.String())
+	}
+
+	// With no bars live the writer falls back to stderr, which must not panic
+	// and must not write to the (now cleared) sink.
+	bars.Reset()
+	RetryObserver{}.Notify(ev)
+	if bars.Len() != 0 {
+		t.Errorf("wrote to a cleared sink: %q", bars.String())
+	}
 }
