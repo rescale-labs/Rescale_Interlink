@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -149,14 +150,14 @@ func TestStoreRegistryIsAccessible(t *testing.T) {
 
 // mockCoordClient implements CoordinatorClient for testing.
 type mockCoordClient struct {
-	mu              sync.Mutex
-	acquireCalls    int
-	drainCalls      int
-	cooldownCalls   int
-	pingCalls       int
-	acquireErr      error
-	lease           *LeaseInfo
-	pingErr         error
+	mu            sync.Mutex
+	acquireCalls  int
+	drainCalls    int
+	cooldownCalls int
+	pingCalls     int
+	acquireErr    error
+	lease         *LeaseInfo
+	pingErr       error
 }
 
 func (m *mockCoordClient) Acquire(_ context.Context, _, _ string, _ Scope) error {
@@ -499,6 +500,94 @@ func TestHasCoordinatorHooks(t *testing.T) {
 
 	if rl.HasCoordinatorHooks() {
 		t.Error("limiter should not have coordinator hooks after ClearCoordinatorHook")
+	}
+}
+
+// TestDegradedModeNotifies verifies the emergency cap announces itself on both
+// transitions. Utilization-based notices cannot do this: cutting the rate to the
+// emergency cap is exactly what pushes utilization below the warn threshold.
+func TestDegradedModeNotifies(t *testing.T) {
+	ResetGlobalStore()
+	s := GlobalStore()
+
+	type notice struct {
+		level   string
+		message string
+	}
+	var mu sync.Mutex
+	var notices []notice
+	SetGlobalNotifyFunc(func(level, message string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notices = append(notices, notice{level, message})
+	})
+	defer SetGlobalNotifyFunc(nil)
+
+	collected := func() []notice {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]notice(nil), notices...)
+	}
+
+	coordUp := true
+	mock := &mockCoordClient{acquireErr: errors.New("coordinator unreachable")}
+	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
+		if coordUp {
+			return mock, nil
+		}
+		return nil, errors.New("still down")
+	})
+
+	limiter := s.GetLimiter("https://platform.rescale.com", "key-degraded", ScopeUser)
+	if got := collected(); len(got) != 0 {
+		t.Fatalf("healthy limiter should not notify, got %v", got)
+	}
+
+	// Coordinator drops mid-flight: Wait() triggers handleCoordinatorDisconnect.
+	coordUp = false
+	_ = limiter.Wait(context.Background())
+	if !limiter.IsDegraded() {
+		t.Fatal("limiter should be degraded after coordinator disconnect")
+	}
+
+	got := collected()
+	if len(got) != 1 {
+		t.Fatalf("entering degraded mode should emit exactly one notice, got %d: %v", len(got), got)
+	}
+	if got[0].level != "warn" {
+		t.Errorf("degraded notice level = %q, want warn", got[0].level)
+	}
+	// (2.0/4)*0.5 = 0.25 req/s for the user scope.
+	if !strings.Contains(got[0].message, "0.25 req/s") {
+		t.Errorf("degraded notice should name the capped rate, got %q", got[0].message)
+	}
+
+	// Staying degraded must not repeat the notice: neither a failed recovery
+	// sweep nor another mark-degraded may add a line.
+	if recovered := s.RecoverEmergencyLimiters(); recovered != 0 {
+		t.Errorf("recovery with the coordinator still down should recover nothing, got %d", recovered)
+	}
+	limiter.setDegraded(true, "should not be emitted")
+	if got := collected(); len(got) != 1 {
+		t.Errorf("degraded mode should notify once per transition, got %d notices: %v", len(got), got)
+	}
+
+	// Coordinator returns: recovery must announce the restored rate.
+	coordUp = true
+	s.resetCoordinatorBackoff()
+	if recovered := s.RecoverEmergencyLimiters(); recovered != 1 {
+		t.Fatalf("expected 1 recovered limiter, got %d", recovered)
+	}
+
+	got = collected()
+	if len(got) != 2 {
+		t.Fatalf("leaving degraded mode should emit one more notice, got %d: %v", len(got), got)
+	}
+	if got[1].level != "info" {
+		t.Errorf("recovery notice level = %q, want info", got[1].level)
+	}
+	if !strings.Contains(got[1].message, "reconnected") {
+		t.Errorf("recovery notice should say the coordinator reconnected, got %q", got[1].message)
 	}
 }
 

@@ -761,3 +761,58 @@ func TestWaitFIFOOrder(t *testing.T) {
 		t.Errorf("expected %d results, got %d", N, expected)
 	}
 }
+
+// TestQueuedWaitersHonorLateCooldown verifies that a 429 cooldown arriving after
+// callers are already queued still blocks them. Wait() checks the cooldown on
+// entry only, so the guarantee has to come from token acquisition itself.
+func TestQueuedWaitersHonorLateCooldown(t *testing.T) {
+	// 10 tokens/sec with a 1-token bucket: the next token is 100ms out, so the
+	// cooldown below lands well before any waiter could have been granted.
+	rl := NewRateLimiter(10.0, 1.0)
+	rl.Drain()
+
+	const (
+		waiters  = 3
+		cooldown = 250 * time.Millisecond
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	acquired := make(chan time.Duration, waiters)
+	var wg sync.WaitGroup
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			if err := rl.Wait(ctx); err != nil {
+				t.Errorf("Wait() error: %v", err)
+				return
+			}
+			acquired <- time.Since(start)
+		}()
+	}
+
+	// Let the waiters queue, then impose the cooldown behind their backs.
+	time.Sleep(25 * time.Millisecond)
+	rl.SetCooldown(cooldown)
+
+	wg.Wait()
+	close(acquired)
+
+	// Each waiter started before the cooldown was set, so its own elapsed time
+	// must still cover the full cooldown. Without the fix they land at ~100ms,
+	// when the first token refills.
+	minAllowed := cooldown - 20*time.Millisecond // timer granularity tolerance
+	count := 0
+	for elapsed := range acquired {
+		count++
+		if elapsed < minAllowed {
+			t.Errorf("waiter acquired after %v — inside the %v cooldown", elapsed, cooldown)
+		}
+	}
+	if count != waiters {
+		t.Fatalf("expected %d waiters to acquire, got %d", waiters, count)
+	}
+}

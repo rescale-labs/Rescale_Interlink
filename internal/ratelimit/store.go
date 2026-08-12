@@ -87,15 +87,15 @@ type LimiterStore struct {
 	coordEnsurer     CoordinatorEnsurer
 
 	// Self-healing state
-	lastActivityTime   time.Time          // tracks last GetLimiter() call for gap detection
-	recoveryOnce       sync.Once          // ensures recovery loop starts at most once
-	staleConnCleanupFn func()             // called on wall-clock gap to close idle API HTTP connections
+	lastActivityTime   time.Time // tracks last GetLimiter() call for gap detection
+	recoveryOnce       sync.Once // ensures recovery loop starts at most once
+	staleConnCleanupFn func()    // called on wall-clock gap to close idle API HTTP connections
 
 	// Coordinator keepalive during active transfers
 	keepaliveMu     sync.Mutex
-	keepaliveCount  int32              // number of active transfer batches
+	keepaliveCount  int32 // number of active transfer batches
 	keepaliveCancel context.CancelFunc
-	sleepRelease    func()             // release function for OS sleep inhibition
+	sleepRelease    func() // release function for OS sleep inhibition
 }
 
 const coordRetryBackoff = 30 * time.Second
@@ -123,6 +123,16 @@ func getGlobalNotifyFn() func(level, message string) {
 	globalNotifyMu.Lock()
 	defer globalNotifyMu.Unlock()
 	return globalNotifyFn
+}
+
+// NotifyFunc returns the process-level rate limit visibility callback, or nil if
+// none is registered. Exported so packages that make the API calls being
+// throttled or retried can route their own "why is this stalling" notices
+// through the same channel the user already sees rate limit messages on.
+// Resolve it at emit time — the callback is registered during startup, which may
+// be after long-lived objects were constructed.
+func NotifyFunc() func(level, message string) {
+	return getGlobalNotifyFn()
 }
 
 // GlobalStore returns the process-level singleton LimiterStore.
@@ -183,6 +193,13 @@ func (s *LimiterStore) Registry() *Registry {
 	return s.registry
 }
 
+// hasCoordinatorEnsurer reports whether a coordinator is configured.
+func (s *LimiterStore) hasCoordinatorEnsurer() bool {
+	s.coordMu.Lock()
+	defer s.coordMu.Unlock()
+	return s.coordEnsurer != nil
+}
+
 // GetLimiter returns the shared rate limiter for the given account and scope.
 // If no limiter exists for this combination, one is created.
 //
@@ -214,6 +231,7 @@ func (s *LimiterStore) GetLimiter(baseURL, apiKey string, scope Scope) *RateLimi
 	cfg := s.registry.GetScopeConfig(scope)
 
 	var limiter *RateLimiter
+	var coldStartRate float64
 	if coordClient != nil {
 		// Coordinator available: create at full target rate, inject hooks
 		limiter = NewRateLimiter(cfg.TargetRate, cfg.BurstCapacity)
@@ -222,9 +240,7 @@ func (s *LimiterStore) GetLimiter(baseURL, apiKey string, scope Scope) *RateLimi
 		// Coordinator configured but unreachable: emergency cap rate (fail-safe invariant)
 		emergencyRate, emergencyBurst := emergencyCap(cfg)
 		limiter = NewRateLimiter(emergencyRate, emergencyBurst)
-		limiter.mu.Lock()
-		limiter.degraded = true
-		limiter.mu.Unlock()
+		coldStartRate = emergencyRate
 	} else {
 		// No coordinator configured: full target rate (backwards-compatible)
 		limiter = NewRateLimiter(cfg.TargetRate, cfg.BurstCapacity)
@@ -234,6 +250,12 @@ func (s *LimiterStore) GetLimiter(baseURL, apiKey string, scope Scope) *RateLimi
 	limiter.SetHardLimit(cfg.HardLimitPerS)
 	if fn := getGlobalNotifyFn(); fn != nil {
 		limiter.SetNotifyFunc(fn)
+	}
+
+	// Mark degraded only after the notify callback is wired, so a cold start at
+	// the emergency cap is announced rather than silently applied.
+	if coldStartRate > 0 {
+		limiter.setDegraded(true, degradedMessage(scope, coldStartRate))
 	}
 
 	s.mu.Lock()
@@ -369,10 +391,7 @@ func (s *LimiterStore) handleCoordinatorDisconnect(
 	limiter.ClearCoordinatorHook()
 
 	// Mark limiter as degraded for self-healing recovery
-	limiter.mu.Lock()
-	limiter.degraded = true
-	limiter.mu.Unlock()
-	log.Printf("[RATELIMIT] Limiter degraded to emergency cap (%.2f req/s) — coordinator disconnected", rate)
+	limiter.setDegraded(true, degradedMessage(scope, rate))
 
 	// Mark coordinator as disconnected for retry
 	s.coordMu.Lock()
@@ -391,6 +410,16 @@ func emergencyCap(cfg ScopeConfig) (rate float64, burst float64) {
 	rate = (cfg.HardLimitPerS / 4.0) * 0.5
 	burst = 1 // Minimum to allow token acquisition
 	return
+}
+
+// degradedMessage describes entry into emergency-cap mode in user-facing terms.
+func degradedMessage(scope Scope, rate float64) string {
+	return fmt.Sprintf("Rate limit coordinator unavailable — %s API calls capped at %.2f req/s until it reconnects", scope, rate)
+}
+
+// recoveredMessage describes the return to full rate in user-facing terms.
+func recoveredMessage(scope Scope, rate float64) string {
+	return fmt.Sprintf("Rate limit coordinator reconnected — %s API calls restored to %.2f req/s", scope, rate)
 }
 
 // RecoverEmergencyLimiters attempts to restore degraded limiters to full rate.
@@ -422,15 +451,10 @@ func (s *LimiterStore) RecoverEmergencyLimiters() int {
 		cfg := s.registry.GetScopeConfig(entry.scope)
 		entry.limiter.Reconfigure(cfg.TargetRate, cfg.BurstCapacity)
 		s.injectCoordinatorHooks(entry.limiter, coordClient, entry.baseURL, entry.keyHash, entry.scope, cfg)
-		entry.limiter.mu.Lock()
-		entry.limiter.degraded = false
-		entry.limiter.mu.Unlock()
+		entry.limiter.setDegraded(false, recoveredMessage(entry.scope, cfg.TargetRate))
 		recovered++
 	}
 
-	if recovered > 0 {
-		log.Printf("[RATELIMIT] Recovered %d degraded limiters — coordinator reconnected", recovered)
-	}
 	return recovered
 }
 
@@ -490,8 +514,14 @@ func (s *LimiterStore) checkWallClockGap() {
 		s.resetCoordinatorBackoff()
 		s.RecoverEmergencyLimiters()
 		s.RefreshCoordinatorHooks()
-		if s.staleConnCleanupFn != nil {
-			s.staleConnCleanupFn()
+
+		// Read the hook under the lock, call it outside: it reaches into the API
+		// client's connection pool and must not run with s.mu held.
+		s.mu.Lock()
+		cleanup := s.staleConnCleanupFn
+		s.mu.Unlock()
+		if cleanup != nil {
+			cleanup()
 		}
 	}
 }
@@ -524,6 +554,8 @@ func (s *LimiterStore) startRecoveryLoop() {
 // idle API HTTP connections. This only covers the API client pool — S3/Azure transport
 // pools are separate and not covered by this hook.
 func (s *LimiterStore) SetStaleConnectionCleanup(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.staleConnCleanupFn = fn
 }
 
@@ -531,6 +563,10 @@ func (s *LimiterStore) SetStaleConnectionCleanup(fn func()) {
 // Starts a coordinator keepalive if not already running.
 // Called from transfer.RunBatch/RunBatchFromChannel to cover both GUI and CLI paths.
 func (s *LimiterStore) BeginTransferActivity() {
+	// Resolved before taking keepaliveMu: the ensurer lives under coordMu, and
+	// nesting the two locks here would invert the order tryCoordinator uses.
+	coordConfigured := s.hasCoordinatorEnsurer()
+
 	s.keepaliveMu.Lock()
 	defer s.keepaliveMu.Unlock()
 	s.keepaliveCount++
@@ -542,7 +578,7 @@ func (s *LimiterStore) BeginTransferActivity() {
 		}
 		s.sleepRelease = release
 
-		if s.coordEnsurer != nil {
+		if coordConfigured {
 			ctx, cancel := context.WithCancel(context.Background())
 			s.keepaliveCancel = cancel
 			go s.keepaliveLoop(ctx)
@@ -594,7 +630,7 @@ func (s *LimiterStore) keepaliveLoop(ctx context.Context) {
 					s.RecoverEmergencyLimiters()
 					s.RefreshCoordinatorHooks()
 				}
-			} else if s.coordEnsurer != nil {
+			} else if s.hasCoordinatorEnsurer() {
 				// No client but ensurer configured — try to reconnect
 				s.resetCoordinatorBackoff()
 				s.RecoverEmergencyLimiters()

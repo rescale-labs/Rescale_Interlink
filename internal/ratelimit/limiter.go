@@ -97,6 +97,35 @@ func (rl *RateLimiter) IsDegraded() bool {
 	return rl.degraded
 }
 
+// setDegraded flips the degraded flag and announces the transition exactly once.
+//
+// The announcement is driven off the flag rather than off utilization: entering
+// degraded mode cuts refillRate to the emergency cap, which drops utilization
+// below the warn threshold and silences emitUtilizationNotice — precisely when
+// the user most needs to know throughput was cut. Repeat calls with the same
+// value are no-ops, so a limiter that stays degraded does not re-notify.
+func (rl *RateLimiter) setDegraded(degraded bool, message string) {
+	rl.mu.Lock()
+	if rl.degraded == degraded {
+		rl.mu.Unlock()
+		return
+	}
+	rl.degraded = degraded
+	fn := rl.notifyFn
+	rl.mu.Unlock()
+
+	// Release the mutex before calling out (same pattern as coordinator hooks).
+	if fn == nil {
+		log.Print(message)
+		return
+	}
+	level := "info"
+	if degraded {
+		level = "warn"
+	}
+	fn(level, message)
+}
+
 // HasCoordinatorHooks returns whether this limiter has coordinator hooks installed.
 // Used to detect stale hooks that need rebinding after a wall-clock gap.
 func (rl *RateLimiter) HasCoordinatorHooks() bool {
@@ -214,6 +243,8 @@ func (rl *RateLimiter) Reconfigure(rate, burst float64) {
 //
 // If a cooldown is active (set via SetCooldown after a 429 response), Wait
 // blocks until the cooldown expires before attempting to acquire a token.
+// A cooldown that lands after this check — while the caller is already queued —
+// is honored too: token acquisition itself refuses to grant during a cooldown.
 func (rl *RateLimiter) Wait(ctx context.Context) error {
 	// Try coordinator first if hook is installed
 	rl.mu.Lock()
@@ -319,6 +350,14 @@ func (rl *RateLimiter) tryAcquire() bool {
 // tryAcquireUnlocked is the lock-free version of tryAcquire.
 // Caller MUST hold rl.mu.
 func (rl *RateLimiter) tryAcquireUnlocked() bool {
+	// A server-mandated cooldown outranks the bucket: tokens that refilled
+	// while the server was still rejecting requests must not be handed out.
+	// The check belongs here rather than only at Wait()'s entry, because a 429
+	// can land after a caller has already joined the wait queue.
+	if rl.cooldownRemainingUnlocked() > 0 {
+		return false
+	}
+
 	// Refill tokens based on elapsed time
 	now := time.Now()
 	elapsed := now.Sub(rl.lastRefill).Seconds()
@@ -349,13 +388,18 @@ func (rl *RateLimiter) timeUntilNextToken() time.Duration {
 // timeUntilNextTokenUnlocked is the lock-free version of timeUntilNextToken.
 // Caller MUST hold rl.mu.
 func (rl *RateLimiter) timeUntilNextTokenUnlocked() time.Duration {
-	tokensNeeded := 1.0 - rl.tokens
-	if tokensNeeded <= 0 {
-		return 0
+	var wait time.Duration
+	if tokensNeeded := 1.0 - rl.tokens; tokensNeeded > 0 {
+		wait = time.Duration((tokensNeeded / rl.refillRate) * float64(time.Second))
 	}
 
-	secondsNeeded := tokensNeeded / rl.refillRate
-	return time.Duration(secondsNeeded * float64(time.Second))
+	// Nothing is grantable until the cooldown expires, however full the bucket
+	// is. Without this, Wait()'s poll loop would spin at zero delay for the
+	// whole cooldown once tokens had refilled.
+	if cooldown := rl.cooldownRemainingUnlocked(); cooldown > wait {
+		wait = cooldown
+	}
+	return wait
 }
 
 // GetCurrentTokens returns the current number of tokens (for testing/debugging).
@@ -437,7 +481,12 @@ func (rl *RateLimiter) SetCooldown(d time.Duration) {
 func (rl *RateLimiter) CooldownRemaining() time.Duration {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	return rl.cooldownRemainingUnlocked()
+}
 
+// cooldownRemainingUnlocked is the lock-free version of CooldownRemaining.
+// Caller MUST hold rl.mu.
+func (rl *RateLimiter) cooldownRemainingUnlocked() time.Duration {
 	if rl.cooldownEnd.IsZero() {
 		return 0
 	}
