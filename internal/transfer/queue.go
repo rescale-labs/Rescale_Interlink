@@ -49,8 +49,8 @@ func (s QueueStats) Total() int {
 //   - Queue publishes events for TransfersTab to display
 type Queue struct {
 	// Task storage
-	tasks     []*TransferTask            // All tasks in creation order
-	tasksByID map[string]*TransferTask   // Index by ID for quick lookup
+	tasks     []*TransferTask          // All tasks in creation order
+	tasksByID map[string]*TransferTask // Index by ID for quick lookup
 	mu        sync.RWMutex
 
 	// Cancel functions for active tasks
@@ -69,20 +69,27 @@ type Queue struct {
 	batchCancelFuncs    map[string]context.CancelFunc // Cancel functions for streaming batches
 	batchScanInProgress map[string]bool               // True while scan is still discovering files
 
+	// Batches the user cancelled. A streaming batch's registration goroutine can
+	// still be mid-flight when the cancel sweep runs, so tasks registered after
+	// the sweep are entered directly as TaskCancelled instead of TaskQueued —
+	// otherwise they sit queued forever with no worker left to run them, and the
+	// batch never reaches a terminal state.
+	cancelledBatches map[string]struct{}
+
 	// Pre-registered batches visible before first task is discovered
 	preRegisteredBatches map[string]*BatchStats
 
 	// Batch-level speed/ETA tracking
-	batchBytesTransferred map[string]int64       // cumulative bytes per batch
+	batchBytesTransferred map[string]int64        // cumulative bytes per batch
 	batchSpeedWindows     map[string]*speedWindow // 10s sliding window (bytes)
-	batchFilesCompleted   map[string]int64       // cumulative completed files per batch
+	batchFilesCompleted   map[string]int64        // cumulative completed files per batch
 	batchFileRateWindows  map[string]*speedWindow // 10s sliding window (files)
-	batchDiscoveredTotal  map[string]int         // total files discovered (may exceed registered tasks)
-	batchDiscoveredBytes  map[string]int64       // total bytes discovered
-	batchSkipped          map[string]int         // entries skipped by walker (junctions, unresolvable links)
-	batchPrevETA          map[string]float64     // smoothed ETA state
-	batchLastETA          map[string]float64     // last computed ETA (for polling DTO)
-	batchStartedAt        map[string]time.Time   // batch start time for elapsed display
+	batchDiscoveredTotal  map[string]int          // total files discovered (may exceed registered tasks)
+	batchDiscoveredBytes  map[string]int64        // total bytes discovered
+	batchSkipped          map[string]int          // entries skipped by walker (junctions, unresolvable links)
+	batchPrevETA          map[string]float64      // smoothed ETA state
+	batchLastETA          map[string]float64      // last computed ETA (for polling DTO)
+	batchStartedAt        map[string]time.Time    // batch start time for elapsed display
 }
 
 // NewQueue creates a new transfer queue with the specified event bus.
@@ -94,6 +101,7 @@ func NewQueue(eventBus *events.EventBus) *Queue {
 		cancelFuncs:           make(map[string]context.CancelFunc),
 		batchCancelFuncs:      make(map[string]context.CancelFunc),
 		batchScanInProgress:   make(map[string]bool),
+		cancelledBatches:      make(map[string]struct{}),
 		preRegisteredBatches:  make(map[string]*BatchStats),
 		batchBytesTransferred: make(map[string]int64),
 		batchSpeedWindows:     make(map[string]*speedWindow),
@@ -130,45 +138,59 @@ func (q *Queue) SetRetryExecutor(executor RetryExecutor) {
 //
 // Returns the created task with a unique ID.
 func (q *Queue) TrackTransfer(name string, size int64, taskType TaskType, source, dest string) *TransferTask {
-	task := NewTransferTask(taskType, name, source, dest, size)
-	task.State = TaskQueued // Starts as queued, call Activate() when actually running
-
-	q.mu.Lock()
-	q.tasks = append(q.tasks, task)
-	q.tasksByID[task.ID] = task
-	q.mu.Unlock()
-
-	// Publish queued event
-	q.publishTransferEvent(events.EventTransferQueued, task)
-
-	return task
+	return q.track(name, size, taskType, source, dest, "", "", "")
 }
 
 // TrackTransferWithLabel registers a new transfer with a source label.
 func (q *Queue) TrackTransferWithLabel(name string, size int64, taskType TaskType, source, dest, sourceLabel string) *TransferTask {
-	task := q.TrackTransfer(name, size, taskType, source, dest)
-	task.SourceLabel = sourceLabel
-	return task
+	return q.track(name, size, taskType, source, dest, sourceLabel, "", "")
 }
 
 // TrackTransferWithBatch registers a new transfer with source label and batch info.
 func (q *Queue) TrackTransferWithBatch(name string, size int64, taskType TaskType, source, dest, sourceLabel, batchID, batchLabel string) *TransferTask {
-	task := q.TrackTransferWithLabel(name, size, taskType, source, dest, sourceLabel)
+	return q.track(name, size, taskType, source, dest, sourceLabel, batchID, batchLabel)
+}
+
+// track is the single registration path for all TrackTransfer* variants.
+// Registration and the cancelled-batch check share one critical section so a
+// task can never be inserted as TaskQueued into a batch whose cancel sweep has
+// already run.
+func (q *Queue) track(name string, size int64, taskType TaskType, source, dest, sourceLabel, batchID, batchLabel string) *TransferTask {
+	task := NewTransferTask(taskType, name, source, dest, size)
+	task.SourceLabel = sourceLabel
 	task.BatchID = batchID
 	task.BatchLabel = batchLabel
 
+	q.mu.Lock()
+	batchCancelled := false
+	if batchID != "" {
+		_, batchCancelled = q.cancelledBatches[batchID]
+	}
+	if batchCancelled {
+		// Nothing will execute this task — enter it terminal so the batch can
+		// reach a terminal state and callers waiting on it can return.
+		task.State = TaskCancelled
+		task.CompletedAt = time.Now()
+	}
+	q.tasks = append(q.tasks, task)
+	q.tasksByID[task.ID] = task
 	// Stamp start time if not already set (non-streaming batches skip PreRegisterBatch).
 	if batchID != "" {
-		q.mu.Lock()
 		if _, exists := q.batchStartedAt[batchID]; !exists {
 			q.batchStartedAt[batchID] = time.Now()
 		}
-		q.mu.Unlock()
 	}
+	q.mu.Unlock()
 
 	// Start batch progress ticker if this is the first batched task
 	if batchID != "" {
 		q.ensureBatchTicker()
+	}
+
+	if batchCancelled {
+		q.publishTransferEvent(events.EventTransferCancelled, task)
+	} else {
+		q.publishTransferEvent(events.EventTransferQueued, task)
 	}
 
 	return task
@@ -181,12 +203,10 @@ func (q *Queue) TrackTransferWithBatch(name string, size int64, taskType TaskTyp
 func (q *Queue) Activate(taskID string) bool {
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
-	if !exists || task == nil || task.State != TaskQueued {
+	if !exists || task == nil || !task.activate() {
 		q.mu.Unlock()
 		return false
 	}
-	task.State = TaskInitializing
-	task.StartedAt = time.Now()
 	q.mu.Unlock()
 
 	q.publishTransferEvent(events.EventTransferInitializing, task)
@@ -201,9 +221,8 @@ func (q *Queue) StartTransfer(taskID string) {
 	var shouldPublish bool
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
-	if exists && task != nil && task.State == TaskInitializing {
-		task.State = TaskActive
-		shouldPublish = true
+	if exists && task != nil {
+		shouldPublish = task.beginTransfer()
 	}
 	q.mu.Unlock()
 
@@ -235,14 +254,11 @@ func (q *Queue) ClearCancel(taskID string) {
 func (q *Queue) FailIfNotTerminal(taskID string, err error) bool {
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
-	if !exists || task == nil || task.IsTerminal() {
+	if !exists || task == nil || !task.failIfNotTerminal(err) {
 		delete(q.cancelFuncs, taskID) // Cleanup
 		q.mu.Unlock()
 		return false
 	}
-	task.State = TaskFailed
-	task.Error = err
-	task.CompletedAt = time.Now()
 	delete(q.cancelFuncs, taskID)
 	q.mu.Unlock()
 	q.publishTransferEvent(events.EventTransferFailed, task)
@@ -255,15 +271,15 @@ func (q *Queue) UpdateSize(taskID string, size int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if task, ok := q.tasksByID[taskID]; ok && task != nil {
-		task.Size = size
+		task.setSize(size)
 	}
 }
 
 // UpdateProgress updates a task's progress.
 // Progress should be 0.0 to 1.0.
 // Speed is calculated automatically using smoothed EMA.
-// Lock is held for the entire operation to protect all task field updates
-// (Progress, Speed, lastUpdateTime) from concurrent access.
+// q.mu is held for the whole operation so the batch byte counter and the task's
+// own fields advance together; the task's mutex guards the fields themselves.
 func (q *Queue) UpdateProgress(taskID string, progress float64) {
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
@@ -272,49 +288,9 @@ func (q *Queue) UpdateProgress(taskID string, progress float64) {
 		return
 	}
 
-	now := time.Now()
-	elapsed := now.Sub(task.lastUpdateTime).Seconds()
-
-	// Only calculate speed if:
-	// 1. At least 0.3 seconds elapsed (avoid noisy samples)
-	// 2. Progress actually increased (ignore backwards jumps)
-	// 3. Byte delta is meaningful (> 100KB) — uses bytes instead of progress fraction
-	//    so the threshold works for both small and very large files.
-	//    (A fraction threshold fails for very large files where the delta between
-	//    progress callbacks is smaller than the fraction cutoff.)
-	progressDelta := progress - task.Progress
-	bytesTransferred := progressDelta * float64(task.Size)
-	if elapsed >= 0.3 && progressDelta > 0 && bytesTransferred > 100*1024 {
-		instantSpeed := bytesTransferred / elapsed
-
-		// Sanity check: clamp to reasonable range (1 KB/s to 1 GB/s)
-		if instantSpeed < 1024 {
-			instantSpeed = 0 // Ignore tiny speeds
-		} else if instantSpeed > 1024*1024*1024 {
-			instantSpeed = task.Speed // Keep previous if absurdly high
-		}
-
-		if instantSpeed > 0 {
-			// EMA with alpha=0.1 for smoother updates (was 0.25)
-			if task.Speed == 0 {
-				task.Speed = instantSpeed
-			} else {
-				task.Speed = 0.1*instantSpeed + 0.9*task.Speed
-			}
-		}
-	}
-
-	task.Progress = progress
-	task.lastUpdateTime = now
-
 	// Track cumulative bytes transferred for batch-level speed window
-	if task.BatchID != "" && task.Size > 0 {
-		taskBytes := int64(progress * float64(task.Size))
-		delta := taskBytes - task.lastBatchBytes
-		if delta > 0 {
-			task.lastBatchBytes = taskBytes
-			q.batchBytesTransferred[task.BatchID] += delta
-		}
+	if delta := task.applyProgress(progress); delta > 0 {
+		q.batchBytesTransferred[task.BatchID] += delta
 	}
 
 	q.mu.Unlock()
@@ -324,48 +300,44 @@ func (q *Queue) UpdateProgress(taskID string, progress float64) {
 }
 
 // Complete marks a task as successfully completed.
+// Terminal-guarded: a task the user already cancelled stays cancelled even if
+// its in-flight transfer went on to finish.
 func (q *Queue) Complete(taskID string) {
+	var completed bool
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
 	if exists && task != nil {
-		task.State = TaskCompleted
-		task.Progress = 1.0
-		task.CompletedAt = time.Now()
-
-		// Account for remaining bytes not yet counted toward batch total
-		if task.BatchID != "" && task.Size > 0 {
-			remaining := task.Size - task.lastBatchBytes
-			if remaining > 0 {
-				task.lastBatchBytes = task.Size
-				q.batchBytesTransferred[task.BatchID] += remaining
-			}
-		}
-		// Track completed file count for files/sec window
-		if task.BatchID != "" {
+		var batchDelta int64
+		batchDelta, completed = task.completeIfNotTerminal()
+		if completed && task.BatchID != "" {
+			// Account for remaining bytes not yet counted toward batch total
+			q.batchBytesTransferred[task.BatchID] += batchDelta
+			// Track completed file count for files/sec window
 			q.batchFilesCompleted[task.BatchID]++
 		}
 	}
 	delete(q.cancelFuncs, taskID) // Clean up cancel function
 	q.mu.Unlock()
 
-	if exists && task != nil {
+	if completed {
 		q.publishTransferEvent(events.EventTransferCompleted, task)
 	}
 }
 
 // Fail marks a task as failed with an error.
+// Terminal-guarded: after a cancel, the transfer often reports a secondary
+// error (unexpected EOF, connection reset) that must not overwrite Cancelled.
 func (q *Queue) Fail(taskID string, err error) {
+	var failed bool
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
 	if exists && task != nil {
-		task.State = TaskFailed
-		task.Error = err
-		task.CompletedAt = time.Now()
+		failed = task.failIfNotTerminal(err)
 	}
 	delete(q.cancelFuncs, taskID) // Clean up cancel function
 	q.mu.Unlock()
 
-	if exists && task != nil {
+	if failed {
 		q.publishTransferEvent(events.EventTransferFailed, task)
 	}
 }
@@ -396,41 +368,52 @@ func (q *Queue) Cancel(taskID string) error {
 	return nil
 }
 
-// CancelAll cancels all active, initializing, and queued tasks.
+// CancelAll cancels all active, initializing, and queued tasks, and cancels
+// every registered batch context so streaming scans stop discovering work.
+//
+// Ordering matters: tasks are transitioned to TaskCancelled in the same
+// critical section that snapshots them, before any cancel function runs. A
+// worker that reacts to its cancelled context calls FailIfNotTerminal, which
+// then correctly no-ops instead of recording "context canceled" as a failure.
 func (q *Queue) CancelAll() {
 	q.mu.Lock()
-	tasksToCancel := make([]*TransferTask, 0)
-	cancelFns := make([]context.CancelFunc, 0)
 
-	for _, task := range q.tasks {
-		if task.State == TaskActive || task.State == TaskInitializing || task.State == TaskQueued {
-			tasksToCancel = append(tasksToCancel, task)
-			if fn := q.cancelFuncs[task.ID]; fn != nil {
-				cancelFns = append(cancelFns, fn)
-			}
+	// Mirror CancelBatch: stop scan/registration goroutines and mark their
+	// batches cancelled so late registrations land terminal, not orphaned.
+	batchCancels := make([]context.CancelFunc, 0, len(q.batchCancelFuncs))
+	for batchID, fn := range q.batchCancelFuncs {
+		q.cancelledBatches[batchID] = struct{}{}
+		if fn != nil {
+			batchCancels = append(batchCancels, fn)
 		}
 	}
-	q.mu.Unlock()
 
-	// Call all cancel functions (outside lock — cancelFn may call Complete/Fail)
-	for _, fn := range cancelFns {
-		fn()
-	}
-
-	// Re-acquire lock and only transition tasks that haven't gone terminal
-	var actuallyCancelled []*TransferTask
-	q.mu.Lock()
-	for _, task := range tasksToCancel {
-		if !task.IsTerminal() {
-			task.State = TaskCancelled
-			task.CompletedAt = time.Now()
-			actuallyCancelled = append(actuallyCancelled, task)
+	cancelFns := make([]context.CancelFunc, 0)
+	var cancelled []*TransferTask
+	for _, task := range q.tasks {
+		state := task.GetState()
+		if state != TaskActive && state != TaskInitializing && state != TaskQueued {
+			continue
+		}
+		if fn := q.cancelFuncs[task.ID]; fn != nil {
+			cancelFns = append(cancelFns, fn)
+		}
+		if task.cancelIfNotTerminal() {
+			cancelled = append(cancelled, task)
 		}
 		delete(q.cancelFuncs, task.ID)
 	}
 	q.mu.Unlock()
 
-	for _, task := range actuallyCancelled {
+	// Call cancel functions outside the lock — a cancelFn may re-enter the queue.
+	for _, fn := range batchCancels {
+		fn()
+	}
+	for _, fn := range cancelFns {
+		fn()
+	}
+
+	for _, task := range cancelled {
 		q.publishTransferEvent(events.EventTransferCancelled, task)
 	}
 }
@@ -458,18 +441,7 @@ func (q *Queue) Retry(taskID string) (string, error) {
 
 	// Reset the existing task instead of creating a new one,
 	// keeping a single entry in the queue instead of duplicates.
-	originalTask.mu.Lock()
-	originalTask.State = TaskQueued
-	originalTask.Progress = 0.0
-	originalTask.Speed = 0.0
-	originalTask.Error = nil
-	originalTask.StartedAt = time.Time{}
-	originalTask.CompletedAt = time.Time{}
-	originalTask.lastBytes = 0
-	originalTask.lastUpdateTime = time.Time{}
-	originalTask.lastBatchBytes = 0
-	// Note: Keep ID, Type, Name, Source, Dest, Size, CreatedAt unchanged
-	originalTask.mu.Unlock()
+	originalTask.resetForRetry()
 
 	q.publishTransferEvent(events.EventTransferQueued, originalTask)
 
@@ -504,6 +476,15 @@ func (q *Queue) ClearCompleted() {
 	for batchID := range q.batchSkipped {
 		if _, ok := survivingBatches[batchID]; !ok {
 			delete(q.batchSkipped, batchID)
+		}
+	}
+
+	// Same for the cancelled-batch markers. They must outlive CancelBatch (a
+	// registration goroutine can still be streaming tasks in), so this is the
+	// only place they are dropped.
+	for batchID := range q.cancelledBatches {
+		if _, ok := survivingBatches[batchID]; !ok {
+			delete(q.cancelledBatches, batchID)
 		}
 	}
 }
@@ -581,7 +562,7 @@ func (q *Queue) publishTransferEvent(eventType events.EventType, task *TransferT
 		TaskID:   task.ID,
 		TaskType: string(task.Type),
 		Name:     task.Name,
-		Size:     task.Size,
+		Size:     task.GetSize(),
 		Progress: task.GetProgress(),
 		Speed:    task.GetSpeed(),
 		Error:    task.GetError(),
@@ -602,15 +583,16 @@ type BatchStats struct {
 	Failed          int
 	Cancelled       int
 	TotalBytes      int64
-	Progress        float64 // byte-weighted 0.0-1.0
-	Speed           float64 // aggregate bytes/sec
-	TotalKnown      bool    // True when scan is complete and Total is final
-	FilesPerSec     float64 // file completion rate (windowed)
-	ETASeconds      float64 // estimated time remaining (smoothed, -1 = unknown)
+	Progress        float64   // byte-weighted 0.0-1.0
+	Speed           float64   // aggregate bytes/sec
+	TotalKnown      bool      // True when scan is complete and Total is final
+	FilesPerSec     float64   // file completion rate (windowed)
+	ETASeconds      float64   // estimated time remaining (smoothed, -1 = unknown)
 	DiscoveredTotal int       // files discovered by scan (may > Total during queueing)
 	DiscoveredBytes int64     // bytes discovered by scan
 	StartedAt       time.Time // batch start time for elapsed display
 	Skipped         int       // entries the walker skipped (junctions, unresolvable links)
+	CancelRequested bool      // user cancelled this batch (stays true for the batch's lifetime)
 }
 
 // GetAllBatchStats returns aggregate stats for all batches in a single pass.
@@ -682,6 +664,9 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 		if sk, exists := q.batchSkipped[batchID]; exists {
 			bs.Skipped = sk
 		}
+		if _, exists := q.cancelledBatches[batchID]; exists {
+			bs.CancelRequested = true
+		}
 		// Return last ticker-computed ETA so polling DTO doesn't zero it out
 		if eta, exists := q.batchLastETA[batchID]; exists {
 			bs.ETASeconds = eta
@@ -700,6 +685,9 @@ func (q *Queue) GetAllBatchStats() []BatchStats {
 			clone.TotalKnown = !q.batchScanInProgress[batchID]
 			if sk, ok := q.batchSkipped[batchID]; ok {
 				clone.Skipped = sk
+			}
+			if _, ok := q.cancelledBatches[batchID]; ok {
+				clone.CancelRequested = true
 			}
 			batchMap[batchID] = &clone
 			batchOrder = append(batchOrder, batchID)
@@ -813,8 +801,11 @@ func (q *Queue) GetFailedTaskErrors(batchID string, limit int) []string {
 	defer q.mu.RUnlock()
 	var errs []string
 	for _, task := range q.tasks {
-		if task.BatchID == batchID && task.GetState() == TaskFailed && task.Error != nil {
-			errs = append(errs, task.Error.Error())
+		if task.BatchID != batchID || task.GetState() != TaskFailed {
+			continue
+		}
+		if err := task.GetError(); err != nil {
+			errs = append(errs, err.Error())
 			if len(errs) >= limit {
 				break
 			}
@@ -843,52 +834,53 @@ func (q *Queue) GetUngroupedTasks() []TransferTask {
 
 // CancelBatch cancels all non-terminal tasks in a batch.
 // Also cancels the batch-level context (stops streaming scan + registration).
+//
+// The sweep marks the batch cancelled and transitions its tasks to
+// TaskCancelled in ONE critical section, and only then invokes the batch and
+// per-task cancel functions. Two races depend on that order:
+//
+//   - A task already in flight sees its context die and calls
+//     FailIfNotTerminal. Cancelling first and transitioning afterwards let the
+//     worker win, recording a user cancel as Failed("context canceled").
+//   - A streaming batch's registration goroutine selects between its cancelled
+//     context and the next request; Go picks either when both are ready, so it
+//     can register one more task after the sweep. The cancelled-batch marker
+//     makes that task terminal on arrival instead of leaving it queued forever
+//     with no worker left to run it (which kept the batch non-terminal, so
+//     Cancel needed a second click and WaitForBatch never returned).
 func (q *Queue) CancelBatch(batchID string) error {
-	// Cancel batch-level context first (stops scan and registration goroutines)
 	q.mu.Lock()
-	if batchCancel, ok := q.batchCancelFuncs[batchID]; ok {
-		batchCancel()
-	}
-	q.mu.Unlock()
+	q.cancelledBatches[batchID] = struct{}{}
+	batchCancel := q.batchCancelFuncs[batchID]
 
-	q.mu.Lock()
-	var tasksToCancel []*TransferTask
 	var cancelFns []context.CancelFunc
-
+	var cancelled []*TransferTask
 	for _, task := range q.tasks {
 		if task.BatchID != batchID {
 			continue
 		}
-		state := task.GetState()
-		if state == TaskCompleted || state == TaskFailed || state == TaskCancelled {
+		if task.IsTerminal() {
 			continue
 		}
-		tasksToCancel = append(tasksToCancel, task)
 		if fn := q.cancelFuncs[task.ID]; fn != nil {
 			cancelFns = append(cancelFns, fn)
 		}
-	}
-	q.mu.Unlock()
-
-	// Call cancel functions for active tasks
-	for _, fn := range cancelFns {
-		fn()
-	}
-
-	// Idempotent guard — only transition tasks that haven't gone terminal
-	var actuallyCancelled []*TransferTask
-	q.mu.Lock()
-	for _, task := range tasksToCancel {
-		if !task.IsTerminal() {
-			task.State = TaskCancelled
-			task.CompletedAt = time.Now()
-			actuallyCancelled = append(actuallyCancelled, task)
+		if task.cancelIfNotTerminal() {
+			cancelled = append(cancelled, task)
 		}
 		delete(q.cancelFuncs, task.ID)
 	}
 	q.mu.Unlock()
 
-	for _, task := range actuallyCancelled {
+	// Call cancel functions outside the lock — a cancelFn may re-enter the queue.
+	if batchCancel != nil {
+		batchCancel()
+	}
+	for _, fn := range cancelFns {
+		fn()
+	}
+
+	for _, task := range cancelled {
 		q.publishTransferEvent(events.EventTransferCancelled, task)
 	}
 
@@ -1155,6 +1147,8 @@ func (q *Queue) batchTickerLoop() {
 					Queued:          bs.Queued,
 					Completed:       bs.Completed,
 					Failed:          bs.Failed,
+					Cancelled:       bs.Cancelled,
+					CancelRequested: bs.CancelRequested,
 					Progress:        bs.Progress,
 					Speed:           bs.Speed,
 					TotalKnown:      bs.TotalKnown,

@@ -208,13 +208,13 @@ type SanitizedTimelineEntry struct {
 // Published by Reporter.Report() or ClassifyAndPublish() for GUI error reporting.
 type ReportableErrorEvent struct {
 	BaseEvent
-	ErrorID      string                  `json:"errorID"`
-	Category     string                  `json:"category"`     // "transfer", "job_create", "pur_pipeline", "auth"
-	Severity     string                  `json:"severity"`     // "critical", "error"
-	Operation    string                  `json:"operation"`    // "folder_upload", "file_download", etc.
-	Backend      string                  `json:"backend"`      // "s3", "azure", ""
-	ErrorMessage string                  `json:"errorMessage"` // Redacted
-	ErrorClass   string                  `json:"errorClass"`   // "network", "auth", "disk_space", "client_error", "server_error", "internal", "timeout"
+	ErrorID      string                   `json:"errorID"`
+	Category     string                   `json:"category"`     // "transfer", "job_create", "pur_pipeline", "auth"
+	Severity     string                   `json:"severity"`     // "critical", "error"
+	Operation    string                   `json:"operation"`    // "folder_upload", "file_download", etc.
+	Backend      string                   `json:"backend"`      // "s3", "azure", ""
+	ErrorMessage string                   `json:"errorMessage"` // Redacted
+	ErrorClass   string                   `json:"errorClass"`   // "network", "auth", "disk_space", "client_error", "server_error", "internal", "timeout"
 	Timeline     []SanitizedTimelineEntry `json:"timeline"`
 }
 
@@ -226,10 +226,12 @@ type BatchProgressEvent struct {
 	Label           string  `json:"label"`
 	Direction       string  `json:"direction"` // "upload" or "download"
 	Total           int     `json:"total"`
-	Active          int     `json:"active"`    // Currently transferring
-	Queued          int     `json:"queued"`    // Waiting for semaphore slot
+	Active          int     `json:"active"` // Currently transferring
+	Queued          int     `json:"queued"` // Waiting for semaphore slot
 	Completed       int     `json:"completed"`
 	Failed          int     `json:"failed"`
+	Cancelled       int     `json:"cancelled"`
+	CancelRequested bool    `json:"cancelRequested"` // user cancelled this batch
 	Progress        float64 `json:"progress"`        // 0.0-1.0
 	Speed           float64 `json:"speed"`           // aggregate bytes/sec
 	TotalKnown      bool    `json:"totalKnown"`      // True when scan complete, Total is final

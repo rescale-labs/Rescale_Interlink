@@ -1247,11 +1247,11 @@ func TestCancelAll_IncludesQueuedTasks(t *testing.T) {
 	}
 }
 
-// Deterministic TOCTOU repro for CancelAll.
-// CancelAll calls cancel functions in the gap between its two lock sections.
-// We install a cancel function that calls Complete(taskID) — this fires
-// exactly in that gap, deterministically reproducing the race.
-func TestCancelAll_NoFalseCancelledEvent(t *testing.T) {
+// CancelAll transitions tasks under the same lock that snapshots them, then
+// runs the cancel functions. A cancel function that reports completion (the
+// transfer finished as its context died) must not overwrite the user's cancel,
+// and exactly one cancelled event must be published.
+func TestCancelAll_CancelWinsOverLateCompletion(t *testing.T) {
 	eb := events.NewEventBus(100)
 	defer eb.Close()
 	queue := NewQueue(eb)
@@ -1262,34 +1262,38 @@ func TestCancelAll_NoFalseCancelledEvent(t *testing.T) {
 	queue.Activate(task.ID)      // → TaskInitializing
 	queue.StartTransfer(task.ID) // → TaskActive
 
-	// Install cancel function that completes the task.
-	// CancelAll calls this in the gap between its two lock sections.
+	// Install a cancel function that reports the transfer as completed.
 	queue.SetCancel(task.ID, func() {
-		queue.Complete(task.ID) // Runs between CancelAll's unlock and re-lock
+		queue.Complete(task.ID)
 	})
 
-	// Subscribe to cancelled events
 	cancelledCh := eb.Subscribe(events.EventTransferCancelled)
+	completedCh := eb.Subscribe(events.EventTransferCompleted)
 
 	queue.CancelAll()
 
-	// Task should be Completed (Complete() ran first in the cancel function).
 	retrieved, _ := queue.GetTask(task.ID)
-	if retrieved.State != TaskCompleted {
-		t.Errorf("Expected TaskCompleted, got %v", retrieved.State)
+	if retrieved.State != TaskCancelled {
+		t.Errorf("Expected TaskCancelled, got %v", retrieved.State)
 	}
 
-	// No EventTransferCancelled should have been published.
 	select {
-	case evt := <-cancelledCh:
-		t.Errorf("Should not have received cancelled event, got: %+v", evt)
+	case <-cancelledCh:
+		// Good — the user's cancel is reported
 	default:
-		// Good — no false cancelled event
+		t.Error("Expected a cancelled event")
+	}
+
+	// Complete() is terminal-guarded, so no completion event for a cancelled task.
+	select {
+	case evt := <-completedCh:
+		t.Errorf("Should not have received completed event, got: %+v", evt)
+	default:
 	}
 }
 
-// Same TOCTOU repro for CancelBatch.
-func TestCancelBatch_NoFalseCancelledEvent(t *testing.T) {
+// Same ordering guarantee for CancelBatch.
+func TestCancelBatch_CancelWinsOverLateCompletion(t *testing.T) {
 	eb := events.NewEventBus(100)
 	defer eb.Close()
 	queue := NewQueue(eb)
@@ -1304,19 +1308,25 @@ func TestCancelBatch_NoFalseCancelledEvent(t *testing.T) {
 	})
 
 	cancelledCh := eb.Subscribe(events.EventTransferCancelled)
+	completedCh := eb.Subscribe(events.EventTransferCompleted)
 
 	queue.CancelBatch("batch-race")
 
 	retrieved, _ := queue.GetTask(task.ID)
-	if retrieved.State != TaskCompleted {
-		t.Errorf("Expected TaskCompleted, got %v", retrieved.State)
+	if retrieved.State != TaskCancelled {
+		t.Errorf("Expected TaskCancelled, got %v", retrieved.State)
 	}
 
 	select {
-	case evt := <-cancelledCh:
-		t.Errorf("Should not have received cancelled event, got: %+v", evt)
+	case <-cancelledCh:
 	default:
-		// Good
+		t.Error("Expected a cancelled event")
+	}
+
+	select {
+	case evt := <-completedCh:
+		t.Errorf("Should not have received completed event, got: %+v", evt)
+	default:
 	}
 }
 
@@ -1425,4 +1435,216 @@ func TestClearCompletedRemovesPlaceholderBatchSkip(t *testing.T) {
 			t.Errorf("expected 'to-clear' batch to be gone after ClearCompleted, got %+v", bs)
 		}
 	}
+}
+
+// A batch cancelled while its tasks are in flight must record every task as
+// Cancelled. Before the sweep was merged into one critical section, workers
+// reacting to their cancelled context won the race and recorded user cancels as
+// Failed("context canceled").
+func TestCancelBatch_InFlightTasksLandCancelledNotFailed(t *testing.T) {
+	const nTasks = 20
+	const iterations = 20
+
+	for iter := 0; iter < iterations; iter++ {
+		queue := NewQueue(nil)
+
+		batchCtx, batchCancel := context.WithCancel(context.Background())
+		queue.RegisterBatchCancel("b1", batchCancel)
+
+		// Saturated semaphore: every task parks on the same select an
+		// executeDownloadTask would, waiting for a slot that never frees.
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+
+		var wg sync.WaitGroup
+		ids := make([]string, 0, nTasks)
+		for i := 0; i < nTasks; i++ {
+			task := queue.TrackTransferWithBatch(
+				fmt.Sprintf("file%d", i), 1024, TaskTypeDownload,
+				"src", "dst", "FileBrowser", "b1", "Batch 1")
+			ids = append(ids, task.ID)
+
+			taskCtx, taskCancel := context.WithCancel(batchCtx)
+			queue.SetCancel(task.ID, taskCancel)
+
+			wg.Add(1)
+			go func(taskID string) {
+				defer wg.Done()
+				defer taskCancel()
+				select {
+				case sem <- struct{}{}:
+					<-sem
+				case <-taskCtx.Done():
+					queue.FailIfNotTerminal(taskID, taskCtx.Err())
+				}
+			}(task.ID)
+		}
+
+		// Let every worker park on its select before cancelling.
+		time.Sleep(10 * time.Millisecond)
+
+		if err := queue.CancelBatch("b1"); err != nil {
+			t.Fatalf("CancelBatch: %v", err)
+		}
+		wg.Wait()
+
+		for _, id := range ids {
+			task, ok := queue.GetTask(id)
+			if !ok {
+				t.Fatalf("task %s missing", id)
+			}
+			if task.State != TaskCancelled {
+				t.Fatalf("iteration %d: expected all tasks cancelled, got %s (error=%v)",
+					iter, task.State, task.Error)
+			}
+		}
+	}
+}
+
+// A streaming batch's registration goroutine can register one more task after
+// the cancel sweep (its select sees both a cancelled context and a pending
+// request). That task must land terminal, or the batch never completes:
+// WaitForBatch's exit condition (Queued+Active == 0) is never met and the
+// 1 Hz ticker never stops.
+func TestCancelBatch_LateRegistrationLandsCancelled(t *testing.T) {
+	queue := NewQueue(nil)
+
+	_, batchCancel := context.WithCancel(context.Background())
+	queue.RegisterBatchCancel("b1", batchCancel)
+	queue.PreRegisterBatch("b1", "Batch 1", "download", "FileBrowser")
+
+	early := queue.TrackTransferWithBatch("early", 10, TaskTypeDownload, "s", "d", "FileBrowser", "b1", "Batch 1")
+
+	if err := queue.CancelBatch("b1"); err != nil {
+		t.Fatalf("CancelBatch: %v", err)
+	}
+
+	// Registration loses the race and lands one more task after the sweep.
+	late := queue.TrackTransferWithBatch("late", 10, TaskTypeDownload, "s", "d", "FileBrowser", "b1", "Batch 1")
+
+	for _, id := range []string{early.ID, late.ID} {
+		task, ok := queue.GetTask(id)
+		if !ok {
+			t.Fatalf("task %s missing", id)
+		}
+		if task.State != TaskCancelled {
+			t.Errorf("task %s: expected cancelled, got %s", task.Name, task.State)
+		}
+	}
+
+	bs, ok := queue.GetBatchStats("b1")
+	if !ok {
+		t.Fatal("batch stats missing")
+	}
+	if bs.Queued+bs.Active != 0 {
+		t.Errorf("batch must be terminal after cancel, got queued=%d active=%d", bs.Queued, bs.Active)
+	}
+	if !bs.TotalKnown {
+		t.Error("cancelled batch should report TotalKnown so waiters can return")
+	}
+	if !bs.CancelRequested {
+		t.Error("cancelled batch should report CancelRequested")
+	}
+	if bs.Cancelled != 2 {
+		t.Errorf("expected 2 cancelled tasks, got %d", bs.Cancelled)
+	}
+}
+
+// CancelAll must cancel every registered batch context (stopping streaming
+// scans) and mark those batches cancelled, so a registration in flight cannot
+// orphan a queued task behind it.
+func TestCancelAll_CancelsBatchContextsAndLateRegistrations(t *testing.T) {
+	queue := NewQueue(nil)
+
+	batchCtx, batchCancel := context.WithCancel(context.Background())
+	queue.RegisterBatchCancel("b1", batchCancel)
+	queue.TrackTransferWithBatch("early", 10, TaskTypeUpload, "s", "d", "FB", "b1", "Batch 1")
+
+	queue.CancelAll()
+
+	select {
+	case <-batchCtx.Done():
+		// Good — scan/registration goroutines stop.
+	default:
+		t.Error("CancelAll must cancel registered batch contexts")
+	}
+
+	late := queue.TrackTransferWithBatch("late", 10, TaskTypeUpload, "s", "d", "FB", "b1", "Batch 1")
+	task, _ := queue.GetTask(late.ID)
+	if task.State != TaskCancelled {
+		t.Errorf("late registration after CancelAll: expected cancelled, got %s", task.State)
+	}
+}
+
+// Post-cancel transports routinely report a secondary error (unexpected EOF,
+// connection reset). Fail is terminal-guarded so it cannot overwrite Cancelled.
+func TestFail_DoesNotOverwriteCancelled(t *testing.T) {
+	queue := NewQueue(nil)
+
+	task := queue.TrackTransfer("test.dat", 100, TaskTypeDownload, "id", "/p")
+	queue.Activate(task.ID)
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	queue.Fail(task.ID, errors.New("unexpected EOF"))
+
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCancelled {
+		t.Errorf("expected state to stay cancelled, got %s", retrieved.State)
+	}
+	if retrieved.Error != nil {
+		t.Errorf("expected no error recorded on a cancelled task, got %v", retrieved.Error)
+	}
+}
+
+// Complete carries the same terminal guard: a transfer that finishes after the
+// user cancelled it stays cancelled.
+func TestComplete_DoesNotOverwriteCancelled(t *testing.T) {
+	queue := NewQueue(nil)
+
+	task := queue.TrackTransferWithBatch("test.dat", 100, TaskTypeDownload, "id", "/p", "FB", "b1", "Batch")
+	queue.Activate(task.ID)
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	queue.Complete(task.ID)
+
+	retrieved, _ := queue.GetTask(task.ID)
+	if retrieved.State != TaskCancelled {
+		t.Errorf("expected state to stay cancelled, got %s", retrieved.State)
+	}
+
+	bs, _ := queue.GetBatchStats("b1")
+	if bs.Completed != 0 {
+		t.Errorf("cancelled task must not count as completed, got %d", bs.Completed)
+	}
+}
+
+// Providers fire progress callbacks from more than one goroutine per file (a
+// ticker plus the transfer loop), so UpdateProgress must be safe to call
+// concurrently for the same task. Meaningful under -race.
+func TestUpdateProgress_ConcurrentCallbacks(t *testing.T) {
+	eb := events.NewEventBus(4096)
+	defer eb.Close()
+	queue := NewQueue(eb)
+
+	// No BatchID: progress events are published (batched tasks are suppressed),
+	// which exercises the publish path's reads of the same task fields.
+	task := queue.TrackTransferWithLabel("f", 10_000_000, TaskTypeDownload, "s", "d", "FileBrowser")
+	queue.Activate(task.ID)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 1; i <= 500; i++ {
+				queue.UpdateProgress(task.ID, float64(i)/1000.0)
+				queue.UpdateSize(task.ID, int64(10_000_000+i))
+			}
+		}()
+	}
+	wg.Wait()
 }

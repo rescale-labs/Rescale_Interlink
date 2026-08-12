@@ -220,10 +220,26 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 		go workerFn()
 	}
 
+	// Worker spawning is gated so no workerWg.Add() can land after the
+	// dispatcher exits. On the cancellation path workers return at their loop
+	// top, driving workerWg to zero while the dispatcher is still between
+	// "dispatch item" and "scale check" — and a positive Add on a zero counter
+	// concurrent with Wait is documented sync.WaitGroup misuse, which panics.
+	// Workers have no recover, so that panic kills the process.
+	var (
+		spawnMu      sync.Mutex
+		spawnStopped bool
+	)
+
 	// spawnMore adds additional workers up to the given target.
-	// No-op in ForceSequential mode.
+	// No-op in ForceSequential mode or once spawning has stopped.
 	spawnMore := func(target int) {
 		if cfg.ForceSequential {
+			return
+		}
+		spawnMu.Lock()
+		defer spawnMu.Unlock()
+		if spawnStopped {
 			return
 		}
 		current := int(activeWorkers.Load())
@@ -240,9 +256,19 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 		log.Printf("[BATCH] %s: scaled %d → %d workers", cfg.Label, current, target)
 	}
 
+	// dispatcherDone closes after the dispatcher has stopped spawning, so the
+	// Wait below is guaranteed to observe every Add.
+	dispatcherDone := make(chan struct{})
+
 	// Dispatcher goroutine: reads from input channel, samples file sizes,
 	// and dispatches to workers with periodic rescaling.
 	go func() {
+		defer close(dispatcherDone)
+		defer func() {
+			spawnMu.Lock()
+			spawnStopped = true
+			spawnMu.Unlock()
+		}()
 		defer close(dispatch)
 
 		const sampleSize = 20
@@ -297,7 +323,7 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 					target = maxTarget
 				}
 
-				if target > current {
+				if target > current && ctx.Err() == nil {
 					spawnMore(target)
 				} else if target < current {
 					// Scale-down: just update the adaptive count;
@@ -321,7 +347,7 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 		if len(sampled) > 0 && len(sampled) < sampleSize {
 			target := cfg.ResourceMgr.ComputeBatchConcurrency(sampled, maxWorkers)
 			current := int(activeWorkers.Load())
-			if target > current && target <= maxWorkers {
+			if target > current && target <= maxWorkers && ctx.Err() == nil {
 				spawnMore(target)
 			} else {
 				adaptive.value.Store(int32(target))
@@ -332,6 +358,13 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 			}
 		}
 	}()
+
+	// Wait for the dispatcher to finish spawning before waiting on the workers,
+	// so every workerWg.Add() happens-before this Wait. The dispatcher never
+	// waits on workers — it either drains the input channel or returns on
+	// ctx.Done(), the same condition that makes workers exit — so this cannot
+	// deadlock.
+	<-dispatcherDone
 
 	// Wait for all workers to complete.
 	workerWg.Wait()

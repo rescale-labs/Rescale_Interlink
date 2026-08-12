@@ -656,3 +656,118 @@ func TestRunBatchFromChannel_RaceSafety(t *testing.T) {
 		t.Errorf("expected 100 completed, got %d", result.Completed)
 	}
 }
+
+// hookItem fires a callback from FileSize(), i.e. on the dispatcher goroutine
+// immediately before an item is dispatched and the scale check runs.
+type hookItem struct {
+	size int64
+	hook func()
+}
+
+func (h hookItem) FileSize() int64 {
+	if h.hook != nil {
+		h.hook()
+	}
+	return h.size
+}
+
+// Cancelling mid-stream drives the worker WaitGroup counter to zero (workers
+// exit at their loop top) while the dispatcher is still inside its scale check,
+// where it would call workerWg.Add(). Adding to a zero counter concurrently
+// with Wait is sync.WaitGroup misuse and panics in a worker goroutine that has
+// no recover, killing the process. RunBatchFromChannel must not return until
+// the dispatcher has stopped spawning.
+func TestRunBatchFromChannel_NoWaitGroupReuseOnCancel(t *testing.T) {
+	const attempts = 3
+
+	for attempt := 0; attempt < attempts; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		var (
+			returned            atomic.Bool
+			returnedWhileInHook atomic.Bool
+			spawnAfterReturn    atomic.Bool
+			release             = make(chan struct{})
+			releaseOnce         sync.Once
+			hookDone            = make(chan struct{})
+		)
+
+		// Runs on the dispatcher goroutine for the 20th item — the first
+		// sampling point — right before that item is dispatched and the scale
+		// check runs. Cancelling here and releasing the parked workers lets them
+		// exit at their loop top (items are still buffered in dispatch), which is
+		// what drives the worker counter to zero mid-dispatch.
+		hook := func() {
+			defer close(hookDone)
+			cancel()
+			releaseOnce.Do(func() { close(release) })
+			deadline := time.Now().Add(150 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				if returned.Load() {
+					returnedWhileInHook.Store(true)
+					return
+				}
+				time.Sleep(100 * time.Microsecond)
+			}
+		}
+
+		ch := make(chan hookItem, 64)
+		for i := 0; i < 20; i++ {
+			it := hookItem{size: 1024}
+			if i == 19 {
+				it.hook = hook
+			}
+			ch <- it
+		}
+
+		cfg := BatchConfig{
+			MaxWorkers:  20,
+			ResourceMgr: newTestResourceMgr(),
+			Label:       "TEST-WG-REUSE",
+			ScaleCheckHook: func() {
+				if returned.Load() {
+					spawnAfterReturn.Store(true)
+				}
+			},
+		}
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			RunBatchFromChannel(ctx, ch, cfg, func(c context.Context, item hookItem) error {
+				<-release
+				return nil
+			})
+			returned.Store(true)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			cancel()
+			t.Fatal("RunBatchFromChannel did not return")
+		}
+
+		// The hook observes the return asynchronously, so let it finish before
+		// reading its verdict.
+		select {
+		case <-hookDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("dispatcher hook never finished")
+		}
+
+		// The dispatcher was still mid-loop (parked in the hook) — a return from
+		// workerWg.Wait() at that point is the window in which the next
+		// workerWg.Add() is WaitGroup misuse.
+		if returnedWhileInHook.Load() {
+			t.Fatalf("attempt %d: RunBatchFromChannel returned while the dispatcher was "+
+				"still dispatching (worker spawning not yet stopped)", attempt)
+		}
+		if spawnAfterReturn.Load() {
+			t.Fatalf("attempt %d: dispatcher reached the scale check (workerWg.Add) after "+
+				"RunBatchFromChannel returned from workerWg.Wait()", attempt)
+		}
+		cancel()
+		close(ch)
+	}
+}
