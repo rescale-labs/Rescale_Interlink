@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
@@ -86,6 +87,20 @@ func NewTransferService(apiClient *api.Client, eventBus *events.EventBus, config
 }
 
 // SetAPIClient updates the API client (e.g., after credential change).
+// retryNotice surfaces a storage retry on the Activity log. This path has no
+// progress bar to label, so the event bus is the only place a GUI user can see
+// that a transfer is struggling rather than stuck. label names the file, since
+// the provider only knows its own operation ("UploadPart 3").
+func (ts *TransferService) retryNotice(label string) func(cloud.RetryEvent) {
+	return func(ev cloud.RetryEvent) {
+		msg := ev.Notice()
+		if msg == "" || ts.eventBus == nil {
+			return
+		}
+		ts.eventBus.PublishLog(events.WarnLevel, fmt.Sprintf("%s: %s", label, msg), "transfer", "", nil)
+	}
+}
+
 func (ts *TransferService) SetAPIClient(client *api.Client) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -621,6 +636,7 @@ func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRe
 			ts.queue.StartTransfer(taskID)
 			ts.queue.UpdateProgress(taskID, progress)
 		},
+		OnRetry:        ts.retryNotice(filepath.Base(req.Source)),
 		TransferHandle: transferHandle,
 	})
 
@@ -742,6 +758,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 		FolderID:         req.Dest,
 		APIClient:        apiClient,
 		ProgressCallback: progressCallback,
+		OnRetry:          ts.retryNotice(filepath.Base(req.Source)),
 		TransferHandle:   transferHandle,
 	})
 
@@ -909,6 +926,7 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 		FileInfo:  req.FileInfo,
 		LocalPath: localPath,
 		APIClient: apiClient,
+		OnRetry:   ts.retryNotice(fileName),
 		ProgressCallback: func(progress float64) {
 			ts.queue.StartTransfer(taskID)
 			ts.queue.UpdateProgress(taskID, progress)

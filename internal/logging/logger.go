@@ -121,6 +121,10 @@ func (l *Logger) WithStr(key, value string) *Logger {
 //
 // Prefer this over SetOutput when transfer goroutines are already running — they
 // share the logger, and swapping its writer underneath them is a data race.
+//
+// Like SetOutput, this rebuilds the zerolog logger from scratch, so context
+// fields added by WithStr are dropped. Call it before adding per-operation
+// fields, not after.
 func (l *Logger) WithOutput(w io.Writer) *Logger {
 	out := zerolog.ConsoleWriter{Out: w, TimeFormat: "15:04:05"}
 	return &Logger{
