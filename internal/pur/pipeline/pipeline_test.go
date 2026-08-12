@@ -402,3 +402,119 @@ func TestCountFailedJobsNoStateManager(t *testing.T) {
 		t.Errorf("countFailedJobs() = %d, want 0", got)
 	}
 }
+
+// TestClearStaleFailures covers the resume case: a "failed" left by an earlier
+// attempt belongs to a stage this run is about to retry, so it must not be
+// counted as this run's failure — while a failure whose stage is NOT being
+// retried must survive.
+func TestClearStaleFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       *models.JobState
+		wantChanged bool
+		want        models.JobState
+	}{
+		{
+			name:        "tar failed last run, everything gets retried",
+			state:       &models.JobState{TarStatus: "failed", UploadStatus: "pending", SubmitStatus: "failed", ErrorMessage: "disk full"},
+			wantChanged: true,
+			want:        models.JobState{TarStatus: "pending", UploadStatus: "pending", SubmitStatus: "pending"},
+		},
+		{
+			name:        "upload failed last run, tar is kept",
+			state:       &models.JobState{TarStatus: "success", UploadStatus: "failed", SubmitStatus: "failed", ErrorMessage: "503"},
+			wantChanged: true,
+			want:        models.JobState{TarStatus: "success", UploadStatus: "pending", SubmitStatus: "pending"},
+		},
+		{
+			name:        "submit failed with both earlier stages done is not retried, so it stands",
+			state:       &models.JobState{TarStatus: "success", UploadStatus: "success", SubmitStatus: "failed", ErrorMessage: "400 bad request"},
+			wantChanged: false,
+			want:        models.JobState{TarStatus: "success", UploadStatus: "success", SubmitStatus: "failed", ErrorMessage: "400 bad request"},
+		},
+		{
+			name:        "completed job untouched",
+			state:       &models.JobState{TarStatus: "success", UploadStatus: "success", SubmitStatus: "success"},
+			wantChanged: false,
+			want:        models.JobState{TarStatus: "success", UploadStatus: "success", SubmitStatus: "success"},
+		},
+		{
+			name:        "fresh job untouched",
+			state:       &models.JobState{TarStatus: "pending", UploadStatus: "pending", SubmitStatus: "pending"},
+			wantChanged: false,
+			want:        models.JobState{TarStatus: "pending", UploadStatus: "pending", SubmitStatus: "pending"},
+		},
+		{
+			name:        "submit-existing mode: skipped stages, stale submit failure cleared",
+			state:       &models.JobState{TarStatus: "skipped", UploadStatus: "skipped", SubmitStatus: "failed"},
+			wantChanged: true,
+			want:        models.JobState{TarStatus: "skipped", UploadStatus: "skipped", SubmitStatus: "pending"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clearStaleFailures(tt.state)
+			if got != tt.wantChanged {
+				t.Errorf("clearStaleFailures() = %v, want %v", got, tt.wantChanged)
+			}
+			if tt.state.TarStatus != tt.want.TarStatus ||
+				tt.state.UploadStatus != tt.want.UploadStatus ||
+				tt.state.SubmitStatus != tt.want.SubmitStatus {
+				t.Errorf("statuses = %s/%s/%s, want %s/%s/%s",
+					tt.state.TarStatus, tt.state.UploadStatus, tt.state.SubmitStatus,
+					tt.want.TarStatus, tt.want.UploadStatus, tt.want.SubmitStatus)
+			}
+			if tt.state.ErrorMessage != tt.want.ErrorMessage {
+				t.Errorf("ErrorMessage = %q, want %q", tt.state.ErrorMessage, tt.want.ErrorMessage)
+			}
+		})
+	}
+
+	if clearStaleFailures(nil) {
+		t.Error("nil state must report no change")
+	}
+}
+
+// TestResumeAfterFailureReportsNoFailures is the D7 scenario end to end at the
+// state level: a run that failed at tar, resumed, and completed cleanly in
+// create-only mode must not report "N of M job(s) failed" and must not exit 1.
+func TestResumeAfterFailureReportsNoFailures(t *testing.T) {
+	mgr := state.NewManager(filepath.Join(t.TempDir(), "state.csv"))
+
+	// Previous run: job 1 failed at tar (which also stamps the submit marker),
+	// job 2 completed.
+	failedLastRun := &models.JobState{Index: 1, JobName: "run_1", TarStatus: "failed",
+		UploadStatus: "pending", SubmitStatus: "failed", ErrorMessage: "tar failed"}
+	done := &models.JobState{Index: 2, JobName: "run_2", TarStatus: "success",
+		UploadStatus: "success", SubmitStatus: "skipped"}
+	for _, st := range []*models.JobState{failedLastRun, done} {
+		if err := mgr.UpdateState(st); err != nil {
+			t.Fatalf("UpdateState: %v", err)
+		}
+	}
+
+	p := &Pipeline{stateMgr: mgr, totalJobs: 2}
+	if got := p.countFailedJobs(); got != 1 {
+		t.Fatalf("before the resume the stale failure should count: got %d, want 1", got)
+	}
+
+	// The resume: the feeder clears the stale markers, then the stages succeed.
+	for _, st := range mgr.GetAllStates() {
+		if clearStaleFailures(st) {
+			if err := mgr.UpdateState(st); err != nil {
+				t.Fatalf("UpdateState: %v", err)
+			}
+		}
+	}
+	failedLastRun.TarStatus = "success"
+	failedLastRun.UploadStatus = "success"
+	failedLastRun.SubmitStatus = "skipped" // create-only mode
+	if err := mgr.UpdateState(failedLastRun); err != nil {
+		t.Fatalf("UpdateState: %v", err)
+	}
+
+	if got := p.countFailedJobs(); got != 0 {
+		t.Errorf("a clean resume must report no failures, got %d", got)
+	}
+}

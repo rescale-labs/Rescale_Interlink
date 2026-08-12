@@ -530,6 +530,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				p.stateMgr.Save()
 			}
 
+			// A resumed run re-tries whatever did not finish, so any "failed"
+			// left over from the previous attempt is about to be superseded.
+			// Clearing it here keeps both the state file and the end-of-run
+			// failure count honest: without this, a job whose tar failed last
+			// time still carried SubmitStatus="failed" after a clean retry, so a
+			// successful resume reported "N of M jobs failed" and exited 1.
+			if clearStaleFailures(state) {
+				p.stateMgr.UpdateState(state)
+			}
+
 			item := &workItem{
 				index:   index,
 				jobSpec: jobSpec,
@@ -627,6 +637,56 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// clearStaleFailures resets the failure markers belonging to stages this run is
+// about to retry, and reports whether it changed anything.
+//
+// A resumed run re-tries whatever did not finish, so a "failed" left from the
+// previous attempt is about to be superseded. Every tar and upload failure path
+// also stamps SubmitStatus="failed", so that marker is collateral whenever an
+// earlier stage runs again — which is how a clean resume in create-only mode
+// still reported "N of M job(s) failed" and exited 1.
+//
+// A job whose tar and upload both succeeded is left alone: its submit failure is
+// its real, unretried outcome, and the feeder only re-queues a submit that is
+// still "pending", so clearing the marker would silently resubmit it.
+//
+// Chosen over an in-memory this-run counter because the counter would leave the
+// state file carrying a stale failure that the CSV, the GUI and the next resume
+// all still read.
+func clearStaleFailures(state *models.JobState) bool {
+	if state == nil {
+		return false
+	}
+
+	clear := func(status *string) bool {
+		if *status == "failed" {
+			*status = "pending"
+			return true
+		}
+		return false
+	}
+
+	changed := false
+	switch {
+	case state.TarStatus != "success":
+		// Tar, upload and submit will all be attempted again.
+		changed = clear(&state.TarStatus) || changed
+		changed = clear(&state.UploadStatus) || changed
+		changed = clear(&state.SubmitStatus) || changed
+	case state.UploadStatus != "success":
+		// Tar is done; upload and submit will be attempted again.
+		changed = clear(&state.UploadStatus) || changed
+		changed = clear(&state.SubmitStatus) || changed
+	default:
+		return false
+	}
+
+	if changed && state.ErrorMessage != "" {
+		state.ErrorMessage = ""
+	}
+	return changed
 }
 
 // countFailedJobs counts jobs that failed at any stage. The state manager is the
