@@ -600,3 +600,55 @@ func TestPruneOldReportsKeepsNewest(t *testing.T) {
 		t.Errorf("prune with keep=0 deleted files: %v", again)
 	}
 }
+
+// TestIsCLIUsageError_MissingFlags covers commands that validate their own
+// required flags: "--job-id (or --id) is required" is a keyboard mistake, not
+// something to raise a diagnostic report about.
+func TestIsCLIUsageError_MissingFlags(t *testing.T) {
+	usage := []string{
+		"--job-id (or --id) is required",
+		"at least one --fileid is required",
+		"--name is required",
+		`required flag(s) "job-id" not set`,
+		"cannot prompt for a file conflict: no interactive terminal (stdin is not a TTY) — decide up front with --continue-on-error",
+		"config init requires an interactive terminal; to configure non-interactively, set RESCALE_API_KEY",
+		"deleting files needs confirmation but stdin is not a terminal — re-run with --confirm",
+		"upload aborted by user",
+	}
+	for _, msg := range usage {
+		if !isCLIUsageError(msg) {
+			t.Errorf("expected a usage error: %q", msg)
+		}
+	}
+
+	notUsage := []string{
+		"failed to upload file: 500 internal server error",
+		"download failed for \"a.dat\": storage unreachable",
+		"retries exhausted after 1m30s (limit 1m30s, 6 attempt(s)): 503 service unavailable",
+	}
+	for _, msg := range notUsage {
+		if isCLIUsageError(msg) {
+			t.Errorf("expected a real failure, not a usage error: %q", msg)
+		}
+	}
+}
+
+// TestIsAggregateFailure verifies batch roll-ups do not raise their own report:
+// the individual failures were already shown item by item.
+func TestIsAggregateFailure(t *testing.T) {
+	aggregates := []string{
+		"3 file(s) failed to upload",
+		"pipeline failed: 2 of 10 job(s) failed",
+		"2 deletion(s) failed",
+		"some files failed to download",
+	}
+	for _, msg := range aggregates {
+		if !isAggregateFailure(msg) {
+			t.Errorf("expected an aggregate summary: %q", msg)
+		}
+	}
+
+	if isAggregateFailure("failed to list job files: 503 service unavailable") {
+		t.Error("a single concrete failure must stay reportable")
+	}
+}

@@ -139,7 +139,7 @@ Example:
 			logger := GetLogger()
 
 			if jobID == "" {
-				return fmt.Errorf("--job-id is required")
+				return fmt.Errorf("--job-id (or --id) is required")
 			}
 
 			// Get API client
@@ -187,9 +187,11 @@ Example:
 		},
 	}
 
-	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required)")
+	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required; --id is accepted too)")
 	cmd.Flags().StringVar(&jobID, "id", "", "Job ID (alias for --job-id)")
-	cmd.MarkFlagRequired("job-id")
+	// No MarkFlagRequired: --job-id and --id are two pflag entries sharing one
+	// variable, so cobra's required check on --job-id rejected a perfectly good
+	// --id. The RunE body checks the variable, which both flags write to.
 
 	return cmd
 }
@@ -216,7 +218,7 @@ Example:
 			logger := GetLogger()
 
 			if len(jobIDs) == 0 {
-				return fmt.Errorf("at least one --job-id is required")
+				return fmt.Errorf("at least one --job-id (or --id) is required")
 			}
 
 			// Confirmation prompt
@@ -225,10 +227,12 @@ Example:
 				for i, id := range jobIDs {
 					fmt.Printf("  %d. %s\n", i+1, id)
 				}
-				fmt.Print("\nAre you sure? (yes/no): ")
-				var response string
-				fmt.Scanln(&response)
-				if response != "yes" {
+				fmt.Println()
+				ok, err := confirmDestructive("deleting jobs", "--confirm")
+				if err != nil {
+					return err
+				}
+				if !ok {
 					fmt.Println("Deletion cancelled")
 					return nil
 				}
@@ -274,10 +278,11 @@ Example:
 		},
 	}
 
-	cmd.Flags().StringArrayVarP(&jobIDs, "job-id", "j", []string{}, "Job ID to delete (can be specified multiple times, required)")
+	cmd.Flags().StringArrayVarP(&jobIDs, "job-id", "j", []string{}, "Job ID to delete (can be specified multiple times, required; --id is accepted too)")
 	cmd.Flags().StringArrayVar(&jobIDs, "id", []string{}, "Job ID to delete (alias for --job-id)")
 	cmd.Flags().BoolVarP(&confirm, "confirm", "y", false, "Skip confirmation prompt")
-	cmd.MarkFlagRequired("job-id")
+	// No MarkFlagRequired — see newJobsGetCmd. Both flags append to jobIDs and
+	// RunE rejects an empty list.
 
 	return cmd
 }
@@ -539,16 +544,17 @@ Example:
 			logger := GetLogger()
 
 			if jobID == "" {
-				return fmt.Errorf("--job-id is required")
+				return fmt.Errorf("--job-id (or --id) is required")
 			}
 
 			// Confirmation prompt
 			if !confirm {
 				fmt.Printf("You are about to stop job %s. This cannot be undone.\n", jobID)
-				fmt.Print("Are you sure? (yes/no): ")
-				var response string
-				fmt.Scanln(&response)
-				if response != "yes" {
+				ok, err := confirmDestructive("stopping a job", "--confirm")
+				if err != nil {
+					return err
+				}
+				if !ok {
 					fmt.Println("Stop cancelled")
 					return nil
 				}
@@ -603,7 +609,7 @@ Example:
 			logger := GetLogger()
 
 			if jobID == "" {
-				return fmt.Errorf("--job-id is required")
+				return fmt.Errorf("--job-id (or --id) is required")
 			}
 
 			// Get API client
@@ -697,7 +703,7 @@ Example:
 			logger := GetLogger()
 
 			if jobID == "" {
-				return fmt.Errorf("--job-id is required")
+				return fmt.Errorf("--job-id (or --id) is required")
 			}
 
 			// Get API client
@@ -810,7 +816,7 @@ Examples:
 			logger := GetLogger()
 
 			if jobID == "" {
-				return fmt.Errorf("--job-id is required")
+				return fmt.Errorf("--job-id (or --id) is required")
 			}
 
 			// Get API client
@@ -961,7 +967,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required)")
+	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required; --id is accepted too)")
 	cmd.Flags().StringVar(&jobID, "id", "", "Job ID (alias for --job-id)")
 	cmd.Flags().StringVar(&fileID, "file-id", "", "Specific file ID to download (optional, downloads all files if not specified)")
 	cmd.Flags().StringVarP(&outputDir, "outdir", "d", "", "Output directory for batch download (default: current directory)")
@@ -977,7 +983,7 @@ Examples:
 	cmd.Flags().StringVarP(&searchTerms, "search", "s", "", "Include only files containing these terms in filename (comma-separated, case-insensitive)")
 	cmd.Flags().StringVar(&pathFilterPatterns, "path-filter", "", "Include only files matching these path patterns (supports ** for recursive matching, e.g. \"run_1/*.dat\" or \"**/results/*\")")
 
-	cmd.MarkFlagRequired("job-id")
+	// No MarkFlagRequired — see newJobsGetCmd.
 
 	return cmd
 }

@@ -450,6 +450,9 @@ Example:
 
   # Skip the confirmation prompt
   rescale-int files delete --fileid XxYyZz --confirm`,
+		// File IDs come from --fileid, so a positional argument is a mistake:
+		// "files delete --fileid A B C" used to delete A and drop B and C.
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
@@ -464,10 +467,11 @@ Example:
 				} else {
 					fmt.Printf("You are about to move %d file(s) to Trash (recoverable).\n", len(fileIDs))
 				}
-				fmt.Print("Are you sure? (yes/no): ")
-				var response string
-				fmt.Scanln(&response)
-				if response != "yes" {
+				ok, err := confirmDestructive("deleting files", "--confirm")
+				if err != nil {
+					return err
+				}
+				if !ok {
 					fmt.Println("Cancelled")
 					return nil
 				}

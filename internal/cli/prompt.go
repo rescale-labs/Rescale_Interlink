@@ -3,11 +3,14 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"syscall"
 
 	"golang.org/x/term"
+
+	"github.com/rescale/rescale-int/internal/progress"
 )
 
 // =============================================================================
@@ -30,19 +33,45 @@ import (
 //
 // =============================================================================
 
+// promptWriter returns where an interactive prompt should write. While progress
+// bars are live mpb owns the terminal, so the menu has to go through mpb's writer
+// or the next frame paints over the question the user is answering.
+func promptWriter() io.Writer {
+	if w := progress.LogSink(); w != nil {
+		return w
+	}
+	return os.Stdout
+}
+
+// promptf writes prompt text to the right place — see promptWriter.
+func promptf(format string, args ...interface{}) {
+	fmt.Fprintf(promptWriter(), format, args...)
+}
+
+// errPromptNeedsTerminal explains that a choice cannot be asked for, and names
+// the flags that make it up front. Without this the caller only sees "EOF".
+func errPromptNeedsTerminal(what, flags string) error {
+	return fmt.Errorf("cannot prompt for %s: no interactive terminal (stdin is not a TTY) — decide up front with %s", what, flags)
+}
+
 // ConflictAction type and constants live in internal/transfer/folder/conflict.go.
 // Aliases in folder_upload_compat.go preserve the cli.ConflictAction API surface.
 
 // promptFolderConflict asks user what to do when folder already exists
 func promptFolderConflict(folderName string) (ConflictAction, error) {
-	fmt.Printf("\n⚠️  Folder '%s' already exists.\n", folderName)
-	fmt.Println("What would you like to do?")
-	fmt.Println("  1. Skip (once) - Skip this folder only")
-	fmt.Println("  2. Skip (for all) - Skip all existing folders")
-	fmt.Println("  3. Merge (once) - Use existing folder, prompt for next")
-	fmt.Println("  4. Merge (for all) - Use all existing folders")
-	fmt.Println("  5. Abort - Stop upload")
-	fmt.Print("Choose [1-5]: ")
+	if !IsTerminal() {
+		return ConflictAbort, errPromptNeedsTerminal("a folder conflict",
+			"--merge-folder-conflicts or --skip-folder-conflicts")
+	}
+
+	promptf("\n⚠️  Folder '%s' already exists.\n", folderName)
+	promptf("What would you like to do?\n")
+	promptf("  1. Skip (once) - Skip this folder only\n")
+	promptf("  2. Skip (for all) - Skip all existing folders\n")
+	promptf("  3. Merge (once) - Use existing folder, prompt for next\n")
+	promptf("  4. Merge (for all) - Use all existing folders\n")
+	promptf("  5. Abort - Stop upload\n")
+	promptf("Choose [1-5]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -63,7 +92,7 @@ func promptFolderConflict(folderName string) (ConflictAction, error) {
 	case "5":
 		return ConflictAbort, nil
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptFolderConflict(folderName)
 	}
 }
@@ -82,14 +111,19 @@ const (
 
 // promptFileConflict asks user what to do when file already exists
 func promptFileConflict(fileName, folderPath string) (FileConflictAction, error) {
-	fmt.Printf("\n⚠️  File '%s' already exists in folder '%s'.\n", fileName, folderPath)
-	fmt.Println("What would you like to do?")
-	fmt.Println("  1. Skip (once) - Skip this file only")
-	fmt.Println("  2. Skip (for all) - Skip all existing files")
-	fmt.Println("  3. Overwrite (once) - Replace this file, prompt for next")
-	fmt.Println("  4. Overwrite (for all) - Replace all existing files")
-	fmt.Println("  5. Abort - Stop upload")
-	fmt.Print("Choose [1-5]: ")
+	if !IsTerminal() {
+		return FileAbort, errPromptNeedsTerminal("a file conflict",
+			"--merge-folder-conflicts (skip existing) or --continue-on-error")
+	}
+
+	promptf("\n⚠️  File '%s' already exists in folder '%s'.\n", fileName, folderPath)
+	promptf("What would you like to do?\n")
+	promptf("  1. Skip (once) - Skip this file only\n")
+	promptf("  2. Skip (for all) - Skip all existing files\n")
+	promptf("  3. Overwrite (once) - Replace this file, prompt for next\n")
+	promptf("  4. Overwrite (for all) - Replace all existing files\n")
+	promptf("  5. Abort - Stop upload\n")
+	promptf("Choose [1-5]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -110,7 +144,7 @@ func promptFileConflict(fileName, folderPath string) (FileConflictAction, error)
 	case "5":
 		return FileAbort, nil
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptFileConflict(fileName, folderPath)
 	}
 }
@@ -130,16 +164,21 @@ const (
 
 // promptDownloadConflict asks user what to do when download file already exists
 func promptDownloadConflict(fileName, localPath string) (DownloadConflictAction, error) {
-	fmt.Printf("\n⚠️  File '%s' already exists at '%s'.\n", fileName, localPath)
-	fmt.Println("What would you like to do?")
-	fmt.Println("  1. Skip (once) - Skip this file only")
-	fmt.Println("  2. Skip (for all) - Skip all existing files")
-	fmt.Println("  3. Overwrite (once) - Replace this file, prompt for next")
-	fmt.Println("  4. Overwrite (for all) - Replace all existing files")
-	fmt.Println("  5. Resume (once) - Try to resume download, prompt for next")
-	fmt.Println("  6. Resume (for all) - Try to resume all downloads")
-	fmt.Println("  7. Abort - Stop download")
-	fmt.Print("Choose [1-7]: ")
+	if !IsTerminal() {
+		return DownloadAbort, errPromptNeedsTerminal("a download conflict",
+			"--overwrite, --skip or --resume")
+	}
+
+	promptf("\n⚠️  File '%s' already exists at '%s'.\n", fileName, localPath)
+	promptf("What would you like to do?\n")
+	promptf("  1. Skip (once) - Skip this file only\n")
+	promptf("  2. Skip (for all) - Skip all existing files\n")
+	promptf("  3. Overwrite (once) - Replace this file, prompt for next\n")
+	promptf("  4. Overwrite (for all) - Replace all existing files\n")
+	promptf("  5. Resume (once) - Try to resume download, prompt for next\n")
+	promptf("  6. Resume (for all) - Try to resume all downloads\n")
+	promptf("  7. Abort - Stop download\n")
+	promptf("Choose [1-7]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -164,7 +203,7 @@ func promptDownloadConflict(fileName, localPath string) (DownloadConflictAction,
 	case "7":
 		return DownloadAbort, nil
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptDownloadConflict(fileName, localPath)
 	}
 }
@@ -182,14 +221,19 @@ const (
 
 // promptFolderDownloadConflict asks user what to do when a local folder already exists
 func promptFolderDownloadConflict(folderName, localPath string) (FolderDownloadConflictAction, error) {
-	fmt.Printf("\n⚠️  Folder '%s' already exists at '%s'.\n", folderName, localPath)
-	fmt.Println("What would you like to do?")
-	fmt.Println("  1. Skip folder (once) - Don't download this folder")
-	fmt.Println("  2. Skip folder (for all) - Skip all existing folders")
-	fmt.Println("  3. Merge folder (once) - Download into existing, skip existing files")
-	fmt.Println("  4. Merge folder (for all) - Merge all existing folders")
-	fmt.Println("  5. Abort - Stop download")
-	fmt.Print("Choose [1-5]: ")
+	if !IsTerminal() {
+		return FolderDownloadAbort, errPromptNeedsTerminal("a folder download conflict",
+			"--overwrite, --skip or --merge")
+	}
+
+	promptf("\n⚠️  Folder '%s' already exists at '%s'.\n", folderName, localPath)
+	promptf("What would you like to do?\n")
+	promptf("  1. Skip folder (once) - Don't download this folder\n")
+	promptf("  2. Skip folder (for all) - Skip all existing folders\n")
+	promptf("  3. Merge folder (once) - Download into existing, skip existing files\n")
+	promptf("  4. Merge folder (for all) - Merge all existing folders\n")
+	promptf("  5. Abort - Stop download\n")
+	promptf("Choose [1-5]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -210,7 +254,7 @@ func promptFolderDownloadConflict(folderName, localPath string) (FolderDownloadC
 	case "5":
 		return FolderDownloadAbort, nil
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptFolderDownloadConflict(folderName, localPath)
 	}
 }
@@ -228,17 +272,22 @@ const (
 // promptFolderDownloadMode asks user to select overall conflict handling mode
 // Returns the selected mode or error. Used when no --skip/--overwrite/--merge flag provided.
 func promptFolderDownloadMode() (FolderDownloadMode, error) {
-	fmt.Println("\n⚠️  Conflict handling not specified.")
-	fmt.Println("")
-	fmt.Println("The download destination may contain existing files or folders.")
-	fmt.Println("What should happen if conflicts are found?")
-	fmt.Println("")
-	fmt.Println("  1. Prompt for each conflict (interactive)")
-	fmt.Println("  2. Skip existing files/folders automatically")
-	fmt.Println("  3. Overwrite existing files automatically")
-	fmt.Println("  4. Merge folders (download into existing, skip existing files)")
-	fmt.Println("  5. Abort")
-	fmt.Print("\nChoose [1-5]: ")
+	if !IsTerminal() {
+		return FolderDownloadModePrompt, errPromptNeedsTerminal("conflict handling",
+			"--overwrite, --skip or --merge")
+	}
+
+	promptf("\n⚠️  Conflict handling not specified.\n")
+	promptf("\n")
+	promptf("The download destination may contain existing files or folders.\n")
+	promptf("What should happen if conflicts are found?\n")
+	promptf("\n")
+	promptf("  1. Prompt for each conflict (interactive)\n")
+	promptf("  2. Skip existing files/folders automatically\n")
+	promptf("  3. Overwrite existing files automatically\n")
+	promptf("  4. Merge folders (download into existing, skip existing files)\n")
+	promptf("  5. Abort\n")
+	promptf("\nChoose [1-5]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -259,7 +308,7 @@ func promptFolderDownloadMode() (FolderDownloadMode, error) {
 	case "5":
 		return FolderDownloadModePrompt, fmt.Errorf("download aborted by user")
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptFolderDownloadMode()
 	}
 }
@@ -277,16 +326,21 @@ const (
 // promptUploadDuplicateMode asks user to select duplicate handling mode for file uploads
 // Returns the selected mode or error. Used when no --check-duplicates flag is provided.
 func promptUploadDuplicateMode() (UploadDuplicateMode, error) {
-	fmt.Println("\n⚠️  Duplicate checking mode not specified.")
-	fmt.Println("")
-	fmt.Println("Rescale allows uploading files with the same name (they become separate objects).")
-	fmt.Println("Without checking, files may be uploaded multiple times.")
-	fmt.Println("")
-	fmt.Println("What would you like to do?")
-	fmt.Println("  1. Check for duplicates (1 API call per destination folder, cached)")
-	fmt.Println("  2. Upload without checking (faster, may create duplicates)")
-	fmt.Println("  3. Abort")
-	fmt.Print("\nChoose [1-3]: ")
+	if !IsTerminal() {
+		return UploadDuplicateModeNoCheck, errPromptNeedsTerminal("duplicate handling",
+			"--check-duplicates, --no-check-duplicates, --skip-duplicates or --allow-duplicates")
+	}
+
+	promptf("\n⚠️  Duplicate checking mode not specified.\n")
+	promptf("\n")
+	promptf("Rescale allows uploading files with the same name (they become separate objects).\n")
+	promptf("Without checking, files may be uploaded multiple times.\n")
+	promptf("\n")
+	promptf("What would you like to do?\n")
+	promptf("  1. Check for duplicates (1 API call per destination folder, cached)\n")
+	promptf("  2. Upload without checking (faster, may create duplicates)\n")
+	promptf("  3. Abort\n")
+	promptf("\nChoose [1-3]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -303,7 +357,7 @@ func promptUploadDuplicateMode() (UploadDuplicateMode, error) {
 	case "3":
 		return UploadDuplicateModeNoCheck, fmt.Errorf("upload aborted by user")
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptUploadDuplicateMode()
 	}
 }
@@ -322,18 +376,23 @@ const (
 
 // promptUploadConflict asks user what to do when a file already exists in the destination
 func promptUploadConflict(fileName string, existingChecksum string) (UploadConflictAction, error) {
-	fmt.Printf("\n⚠️  File '%s' already exists in destination", fileName)
-	if existingChecksum != "" {
-		fmt.Printf(" (matching SHA-512)")
+	if !IsTerminal() {
+		return UploadAbort, errPromptNeedsTerminal("a duplicate file",
+			"--skip-duplicates or --allow-duplicates")
 	}
-	fmt.Println(".")
-	fmt.Println("What would you like to do?")
-	fmt.Println("  1. Skip (once) - Don't upload this file")
-	fmt.Println("  2. Skip (for all) - Skip all duplicates")
-	fmt.Println("  3. Overwrite (once) - Replace existing file")
-	fmt.Println("  4. Overwrite (for all) - Replace all duplicates")
-	fmt.Println("  5. Abort - Stop upload")
-	fmt.Print("Choose [1-5]: ")
+
+	promptf("\n⚠️  File '%s' already exists in destination", fileName)
+	if existingChecksum != "" {
+		promptf(" (matching SHA-512)")
+	}
+	promptf(".\n")
+	promptf("What would you like to do?\n")
+	promptf("  1. Skip (once) - Don't upload this file\n")
+	promptf("  2. Skip (for all) - Skip all duplicates\n")
+	promptf("  3. Overwrite (once) - Replace existing file\n")
+	promptf("  4. Overwrite (for all) - Replace all duplicates\n")
+	promptf("  5. Abort - Stop upload\n")
+	promptf("Choose [1-5]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
@@ -354,7 +413,7 @@ func promptUploadConflict(fileName string, existingChecksum string) (UploadConfl
 	case "5":
 		return UploadAbort, nil
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptUploadConflict(fileName, existingChecksum)
 	}
 }
@@ -370,12 +429,17 @@ const (
 
 // promptUploadError asks user what to do when upload fails
 func promptUploadError(fileName string, err error) (ErrorAction, error) {
-	fmt.Printf("\n❌ Error uploading '%s': %v\n", fileName, err)
-	fmt.Println("What would you like to do?")
-	fmt.Println("  1. Continue (once) - Skip this file, prompt for next error")
-	fmt.Println("  2. Continue (for all) - Skip all errors")
-	fmt.Println("  3. Abort - Stop upload")
-	fmt.Print("Choose [1-3]: ")
+	if !IsTerminal() {
+		return ErrorAbort, errPromptNeedsTerminal("how to handle an upload error",
+			"--continue-on-error")
+	}
+
+	promptf("\n❌ Error uploading '%s': %v\n", fileName, err)
+	promptf("What would you like to do?\n")
+	promptf("  1. Continue (once) - Skip this file, prompt for next error\n")
+	promptf("  2. Continue (for all) - Skip all errors\n")
+	promptf("  3. Abort - Stop upload\n")
+	promptf("Choose [1-3]: ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, readErr := reader.ReadString('\n')
@@ -392,17 +456,37 @@ func promptUploadError(fileName string, err error) (ErrorAction, error) {
 	case "3":
 		return ErrorAbort, nil
 	default:
-		fmt.Println("Invalid choice, please try again.")
+		promptf("Invalid choice, please try again.\n")
 		return promptUploadError(fileName, err)
 	}
+}
+
+// confirmDestructive asks the user to type "yes" before something irreversible.
+//
+// Returns false with no error when the user declines — that is their decision,
+// not a failure. Without a terminal there is nobody to ask, so it errors and
+// names the flag that skips the question: reading EOF and treating it as "no"
+// made a scripted delete print "Cancelled" and exit 0, so a pipeline could not
+// tell a refused delete from a completed one.
+func confirmDestructive(action, flagHint string) (bool, error) {
+	if !IsTerminal() {
+		return false, fmt.Errorf("%s needs confirmation but stdin is not a terminal — re-run with %s", action, flagHint)
+	}
+
+	promptf("Are you sure? (yes/no): ")
+	answer, err := readPromptLine(bufio.NewReader(os.Stdin))
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(answer, "yes"), nil
 }
 
 // PromptProxyPassword prompts the user to enter their proxy password securely.
 // The password is read without echoing characters to the terminal.
 // Returns the entered password or an error if the prompt fails.
 func PromptProxyPassword(proxyUser, proxyHost string) (string, error) {
-	fmt.Printf("Proxy authentication required for %s@%s\n", proxyUser, proxyHost)
-	fmt.Print("Enter proxy password: ")
+	promptf("Proxy authentication required for %s@%s\n", proxyUser, proxyHost)
+	promptf("Enter proxy password: ")
 
 	// Read password without echoing
 	passwordBytes, err := term.ReadPassword(int(syscall.Stdin))

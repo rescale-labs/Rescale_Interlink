@@ -633,10 +633,11 @@ Example:
 				} else {
 					fmt.Printf("You are about to move folder %s to Trash (recoverable).\n", folderID)
 				}
-				fmt.Print("Are you sure? (yes/no): ")
-				var response string
-				fmt.Scanln(&response)
-				if response != "yes" {
+				ok, err := confirmDestructive("deleting a folder", "--confirm")
+				if err != nil {
+					return err
+				}
+				if !ok {
 					fmt.Println("Cancelled")
 					return nil
 				}
