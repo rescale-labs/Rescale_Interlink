@@ -730,6 +730,9 @@ export namespace wailsapp {
 	    path?: string;
 	    parentId?: string;
 	    symlinkId?: string;
+	    typeCode?: string;
+	    owner?: string;
+	    dateInserted?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new FileItemDTO(source);
@@ -745,6 +748,9 @@ export namespace wailsapp {
 	        this.path = source["path"];
 	        this.parentId = source["parentId"];
 	        this.symlinkId = source["symlinkId"];
+	        this.typeCode = source["typeCode"];
+	        this.owner = source["owner"];
+	        this.dateInserted = source["dateInserted"];
 	    }
 	}
 	export class FileLoggingSettingsDTO {

@@ -5,6 +5,7 @@ import {
   FolderPlusIcon,
   ChevronRightIcon,
   TrashIcon,
+  MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline'
 import { useFileBrowserStore, BrowseMode } from '../../stores'
 import { FileList } from './FileList'
@@ -25,6 +26,12 @@ export function RemoteBrowser() {
       currentPage,
       itemsPerPage,
       knownTotalPages,
+      // Legacy Files filters
+      legacyOwnerFilter,
+      legacySearchQuery,
+      legacySortField,
+      legacySortDirection,
+      librarySearchQuery,
     },
     initRemote,
     setRemoteMode,
@@ -38,13 +45,23 @@ export function RemoteBrowser() {
     setRemoteItemsPerPage,
     goToNextRemotePage,
     goToPreviousRemotePage,
+    // Legacy Files filter actions
+    setLegacyOwnerFilter,
+    setLegacySearchQuery,
+    setLegacySort,
+    setLibrarySearchQuery,
   } = useFileBrowserStore()
 
   const isTrash = mode === 'trash'
+  const isLegacy = mode === 'legacy'
 
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
+
+  // Local state for search input (debounced before applying to store)
+  const [searchInputValue, setSearchInputValue] = useState(legacySearchQuery)
+  const [librarySearchInputValue, setLibrarySearchInputValue] = useState(librarySearchQuery)
 
   // Initialize remote browser
   useEffect(() => {
@@ -52,6 +69,36 @@ export function RemoteBrowser() {
       initRemote()
     }
   }, [myLibraryId, myJobsId, initRemote])
+
+  // Debounce search input (500ms delay)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (searchInputValue !== legacySearchQuery) {
+        setLegacySearchQuery(searchInputValue)
+      }
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [searchInputValue, legacySearchQuery, setLegacySearchQuery])
+
+  // Sync input value when store changes externally (e.g., mode change resets it)
+  useEffect(() => {
+    setSearchInputValue(legacySearchQuery)
+  }, [legacySearchQuery])
+
+  // Debounce library search input (500ms delay)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (librarySearchInputValue !== librarySearchQuery) {
+        setLibrarySearchQuery(librarySearchInputValue)
+      }
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [librarySearchInputValue, librarySearchQuery, setLibrarySearchQuery])
+
+  // Sync library search input when store changes externally (e.g., mode change resets it)
+  useEffect(() => {
+    setLibrarySearchInputValue(librarySearchQuery)
+  }, [librarySearchQuery])
 
   // Handle mode change
   const handleModeChange = useCallback((newMode: BrowseMode) => {
@@ -179,6 +226,66 @@ export function RemoteBrowser() {
         </div>
       )}
 
+      {/* My Library / My Jobs Search Filter */}
+      {(mode === 'library' || mode === 'jobs') && (
+        <div className="flex items-center gap-2 px-2 py-2 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+          <MagnifyingGlassIcon className="w-4 h-4 text-gray-400 flex-shrink-0" />
+          <input
+            type="text"
+            placeholder={`Search for files within "${mode === 'library' ? 'My Library' : 'My Jobs'}"`}
+            value={librarySearchInputValue}
+            onChange={(e) => setLibrarySearchInputValue(e.target.value)}
+            className="flex-1 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500 min-w-0"
+          />
+          {librarySearchInputValue && (
+            <button
+              onClick={() => setLibrarySearchInputValue('')}
+              className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 flex-shrink-0"
+              title="Clear search"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Legacy Files Filters */}
+      {isLegacy && (
+        <div className="flex items-center gap-2 px-2 py-2 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+          {/* Owner Filter Dropdown */}
+          <select
+            value={legacyOwnerFilter}
+            onChange={(e) => setLegacyOwnerFilter(e.target.value)}
+            className="px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          >
+            <option value="0">Any owner</option>
+            <option value="1">My files</option>
+            <option value="2">Shared with me</option>
+          </select>
+
+          {/* Search Input */}
+          <div className="flex-1 flex items-center gap-1 min-w-0">
+            <MagnifyingGlassIcon className="w-4 h-4 text-gray-400 flex-shrink-0" />
+            <input
+              type="text"
+              placeholder="Filter by name"
+              value={searchInputValue}
+              onChange={(e) => setSearchInputValue(e.target.value)}
+              className="flex-1 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500 min-w-0"
+            />
+            {searchInputValue && (
+              <button
+                onClick={() => setSearchInputValue('')}
+                className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 flex-shrink-0"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* File list */}
       <div className="flex-1 overflow-hidden">
         <FileList
@@ -189,6 +296,7 @@ export function RemoteBrowser() {
           onFolderOpen={handleFolderOpen}
           isLoading={isLoading}
           error={error}
+          mode={mode}
           emptyMessage={
             mode === 'library'
               ? 'Your library is empty'
@@ -212,6 +320,10 @@ export function RemoteBrowser() {
           onServerNextPage={goToNextRemotePage}
           onServerPrevPage={goToPreviousRemotePage}
           onServerItemsPerPageChange={setRemoteItemsPerPage}
+          // Controlled sorting for legacy mode
+          sortField={mode === 'legacy' ? (legacySortField as any) : undefined}
+          sortDirection={mode === 'legacy' ? (legacySortDirection as any) : undefined}
+          onSortChange={mode === 'legacy' ? setLegacySort : undefined}
         />
       </div>
 

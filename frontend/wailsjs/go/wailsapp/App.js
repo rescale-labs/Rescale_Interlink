@@ -238,6 +238,10 @@ export function ListRemoteLegacy(arg1, arg2) {
   return window['go']['wailsapp']['App']['ListRemoteLegacy'](arg1, arg2);
 }
 
+export function ListRemoteLegacyWithFilters(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['wailsapp']['App']['ListRemoteLegacyWithFilters'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
 export function ListRemoteTrash(arg1, arg2) {
   return window['go']['wailsapp']['App']['ListRemoteTrash'](arg1, arg2);
 }
@@ -356,6 +360,10 @@ export function SaveTemplate(arg1, arg2) {
 
 export function ScanDirectory(arg1, arg2) {
   return window['go']['wailsapp']['App']['ScanDirectory'](arg1, arg2);
+}
+
+export function SearchRemoteFolderContents(arg1, arg2, arg3) {
+  return window['go']['wailsapp']['App']['SearchRemoteFolderContents'](arg1, arg2, arg3);
 }
 
 export function SelectDirectory(arg1) {

@@ -120,6 +120,8 @@ export function ListRemoteFolderPage(arg1:string,arg2:string,arg3:number):Promis
 
 export function ListRemoteLegacy(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
 
+export function ListRemoteLegacyWithFilters(arg1:string,arg2:number,arg3:string,arg4:string,arg5:string,arg6:string):Promise<wailsapp.FolderContentsDTO>;
+
 export function ListRemoteTrash(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
 
 export function ListSavedTemplates():Promise<Array<wailsapp.TemplateInfoDTO>>;
@@ -179,6 +181,8 @@ export function SaveLogExport(arg1:string):Promise<string>;
 export function SaveTemplate(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>;
 
 export function ScanDirectory(arg1:wailsapp.ScanOptionsDTO,arg2:wailsapp.JobSpecDTO):Promise<wailsapp.ScanResultDTO>;
+
+export function SearchRemoteFolderContents(arg1:string,arg2:string,arg3:number):Promise<wailsapp.FolderContentsDTO>;
 
 export function SelectDirectory(arg1:string):Promise<string>;
 
