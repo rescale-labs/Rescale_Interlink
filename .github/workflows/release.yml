@@ -108,12 +108,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6.0.2
 
-      - name: Install Go 1.26.3
+      - name: Install Go 1.26.5
         run: |
-          curl -L -o go1.26.3.darwin-arm64.tar.gz https://go.dev/dl/go1.26.3.darwin-arm64.tar.gz
+          curl -fL -o go1.26.5.darwin-arm64.tar.gz https://go.dev/dl/go1.26.5.darwin-arm64.tar.gz
+          # Official sha256 from https://go.dev/dl/?mode=json&include=all
+          echo "efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a  go1.26.5.darwin-arm64.tar.gz" | shasum -a 256 -c -
           sudo rm -rf /usr/local/go
-          sudo tar -C /usr/local -xzf go1.26.3.darwin-arm64.tar.gz
-          rm go1.26.3.darwin-arm64.tar.gz
+          sudo tar -C /usr/local -xzf go1.26.5.darwin-arm64.tar.gz
+          rm go1.26.5.darwin-arm64.tar.gz
           echo "/usr/local/go/bin" >> $GITHUB_PATH
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
@@ -141,7 +143,7 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
       - name: Install frontend dependencies
-        run: cd frontend && npm install
+        run: cd frontend && npm ci
 
       - name: Build Wails GUI application
         run: |
