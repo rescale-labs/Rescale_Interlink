@@ -1044,7 +1044,11 @@ type LegacyFilesPage struct {
 
 // FileListOptions contains optional filters for listing files.
 type FileListOptions struct {
-	OwnerFilter string // "my_files" for user's files, "shared" for shared files, "" for all
+	// OwnerFilter is sent as the owner query parameter: "1" for the caller's
+	// own files, "2" for files shared with them, "" to omit the parameter.
+	// Those two values come from the web UI's dropdown and have not yet been
+	// confirmed against the live API.
+	OwnerFilter string
 	SearchQuery string // Search term for filtering by file name
 	Ordering    string // Sort order: "name", "-name", "decryptedSize", "-decryptedSize", "dateUploaded", "-dateUploaded"
 }

@@ -319,7 +319,8 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 // ListRemoteLegacyWithFilters returns a flat list of files with optional filtering.
 // cursor: pass "" for first page, or nextCursor from previous response.
 // pageSize: pass 0 for API default (25).
-// ownerFilter: "my_files" for user's files, "shared" for shared files, "" for all.
+// ownerFilter: "1" for the user's own files, "2" for files shared with them,
+// "0" or "" for any owner.
 // searchQuery: search term for filtering by file name, "" for no search.
 // sortField: "name", "size", or "created" - field to sort by.
 // sortDirection: "asc" or "desc" - sort direction.
@@ -334,6 +335,12 @@ func (a *App) ListRemoteLegacyWithFilters(cursor string, pageSize int, ownerFilt
 	}
 
 	ordering := mapSortToOrdering(sortField, sortDirection)
+
+	// "0" is the owner dropdown's "any owner" choice, not a server-side filter.
+	// Forwarding it would send owner=0 on every legacy request.
+	if ownerFilter == "0" {
+		ownerFilter = ""
+	}
 
 	var options *api.FileListOptions
 	if ownerFilter != "" || searchQuery != "" || sortField != "" {

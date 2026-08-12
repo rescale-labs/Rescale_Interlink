@@ -74,7 +74,10 @@ interface RemoteBrowserState {
   knownTotalPages: number        // Discovered page count (increments as user navigates forward)
   pageCache: Map<number, CachedPage>  // Cache by page number for fast back/forward
   // Legacy Files filters
-  legacyOwnerFilter: string      // "" for all, "my_files" for owned, "shared" for shared with me
+  // legacyOwnerFilter matches the owner dropdown's option values: '0' any owner
+  // (sends no owner param), '1' my files, '2' shared with me. The meaning of
+  // '1' and '2' is taken from the web UI and is pending live-API validation.
+  legacyOwnerFilter: string
   legacySearchQuery: string      // Search query for filtering by name
   legacySortField: string        // Sort field: "name", "size", "created"
   legacySortDirection: string    // Sort direction: "asc", "desc"
