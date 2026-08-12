@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -174,6 +175,143 @@ func TestListFilesPage_NormalizesFullNextURLAndCursor(t *testing.T) {
 	}
 	if !seenPage2 {
 		t.Fatal("server did not receive normalized page 2 request")
+	}
+}
+
+// TestListFilesPageWithOptions_BuildsQuery covers the filtered request shape and,
+// crucially, pins the unfiltered one: passing no options must produce exactly the
+// request every pre-existing caller made, so adding filters cannot change what an
+// unfiltered file listing returns.
+func TestListFilesPageWithOptions_BuildsQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		options *FileListOptions
+		// wantURI is the exact request URI when it must be byte-identical;
+		// wantParams is used when only individual parameters matter.
+		wantURI    string
+		wantParams map[string]string
+		wantAbsent []string
+	}{
+		{
+			name:    "nil options is byte-identical to the unfiltered listing",
+			options: nil,
+			wantURI: "/api/v3/files/?page_size=25&ordering=-dateUploaded",
+		},
+		{
+			name:    "empty options is byte-identical to the unfiltered listing",
+			options: &FileListOptions{},
+			wantURI: "/api/v3/files/?page_size=25&ordering=-dateUploaded",
+		},
+		{
+			name:       "owner my-files",
+			options:    &FileListOptions{OwnerFilter: "1"},
+			wantParams: map[string]string{"owner": "1", "ordering": "-dateUploaded", "page_size": "25"},
+			wantAbsent: []string{"search"},
+		},
+		{
+			name:       "owner shared-with-me",
+			options:    &FileListOptions{OwnerFilter: "2"},
+			wantParams: map[string]string{"owner": "2"},
+		},
+		{
+			name:       "search term is percent-encoded",
+			options:    &FileListOptions{SearchQuery: "my mesh & stuff/v2"},
+			wantParams: map[string]string{"search": "my mesh & stuff/v2"},
+		},
+		{
+			name:       "custom ordering replaces the default",
+			options:    &FileListOptions{Ordering: "-decryptedSize"},
+			wantParams: map[string]string{"ordering": "-decryptedSize"},
+			wantAbsent: []string{"owner", "search"},
+		},
+		{
+			name:       "owner, search and ordering combined",
+			options:    &FileListOptions{OwnerFilter: "1", SearchQuery: "mesh", Ordering: "name"},
+			wantParams: map[string]string{"owner": "1", "search": "mesh", "ordering": "name", "page_size": "25"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotURI string
+			var gotRawQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v3/files/" {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				gotURI = r.URL.RequestURI()
+				gotRawQuery = r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"count":    0,
+					"next":     "",
+					"previous": "",
+					"results":  []map[string]interface{}{},
+				})
+			}))
+			defer server.Close()
+
+			client := newTestClient(t, server.URL)
+			if _, err := client.ListFilesPageWithOptions(context.Background(), "", 25, tc.options); err != nil {
+				t.Fatalf("ListFilesPageWithOptions() error = %v", err)
+			}
+
+			if tc.wantURI != "" && gotURI != tc.wantURI {
+				t.Fatalf("request URI = %q, want %q", gotURI, tc.wantURI)
+			}
+
+			q, err := neturl.ParseQuery(gotRawQuery)
+			if err != nil {
+				t.Fatalf("ParseQuery(%q) error = %v", gotRawQuery, err)
+			}
+			for key, want := range tc.wantParams {
+				if got := q.Get(key); got != want {
+					t.Errorf("query %s = %q, want %q", key, got, want)
+				}
+			}
+			for _, key := range tc.wantAbsent {
+				if _, ok := q[key]; ok {
+					t.Errorf("query %s = %q, want absent", key, q.Get(key))
+				}
+			}
+		})
+	}
+}
+
+// TestListFilesPage_UnfilteredRequestMatchesWithOptions verifies the convenience
+// wrapper and the options-aware call issue the same unfiltered request.
+func TestListFilesPage_UnfilteredRequestMatchesWithOptions(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/files/" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		seen = append(seen, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"count": 0, "next": "", "previous": "", "results": []map[string]interface{}{},
+		})
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	if _, err := client.ListFilesPage(context.Background(), "", 0); err != nil {
+		t.Fatalf("ListFilesPage() error = %v", err)
+	}
+	if _, err := client.ListFilesPageWithOptions(context.Background(), "", 0, nil); err != nil {
+		t.Fatalf("ListFilesPageWithOptions() error = %v", err)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("saw %d requests, want 2", len(seen))
+	}
+	if seen[0] != seen[1] {
+		t.Errorf("requests differ:\n  ListFilesPage            = %q\n  ListFilesPageWithOptions = %q", seen[0], seen[1])
+	}
+	if seen[0] != "/api/v3/files/?page_size=25&ordering=-dateUploaded" {
+		t.Errorf("request URI = %q, want the historical unfiltered shape", seen[0])
 	}
 }
 

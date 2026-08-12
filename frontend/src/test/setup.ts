@@ -74,6 +74,22 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
     hasMore: false,
     nextCursor: '',
   })),
+  ListRemoteLegacyWithFilters: vi.fn(() => Promise.resolve({
+    folderId: '',
+    folderPath: 'Legacy Files',
+    items: [],
+    hasMore: false,
+    nextCursor: '',
+    warning: '',
+  })),
+  SearchRemoteFolderContents: vi.fn(() => Promise.resolve({
+    folderId: 'folder-123',
+    folderPath: 'My Library',
+    items: [],
+    hasMore: false,
+    nextCursor: '',
+    warning: '',
+  })),
   ListRemoteTrash: vi.fn(() => Promise.resolve({
     folderId: 'trash',
     folderPath: 'Trash',

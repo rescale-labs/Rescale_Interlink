@@ -67,7 +67,7 @@ function resetRemote() {
       pageCursors: [''],
       knownTotalPages: 1,
       pageCache: new Map(),
-      legacyOwnerFilter: '',
+      legacyOwnerFilter: '0',
       legacySearchQuery: '',
       legacySortField: 'created',
       legacySortDirection: 'desc',
@@ -266,5 +266,295 @@ describe('remote trash browser', () => {
     expect(result).toEqual({ recovered: 1, failed: 0, error: '' })
     expect(App.ListRemoteTrash).toHaveBeenCalledWith('', 25)
     expect(useFileBrowserStore.getState().remote.selection.selectedIds.size).toBe(0)
+  })
+})
+
+// The filter setters are synchronous and fire their reload without awaiting it,
+// so tests that assert post-reload state need one macrotask turn.
+const flush = () => new Promise<void>((r) => setTimeout(r, 0))
+
+function setRemote(patch: Partial<ReturnType<typeof useFileBrowserStore.getState>['remote']>) {
+  useFileBrowserStore.setState((state) => ({ remote: { ...state.remote, ...patch } }))
+}
+
+describe('My Library search', () => {
+  beforeEach(() => {
+    resetRemote()
+    vi.clearAllMocks()
+  })
+
+  it('routes a non-empty query through the search binding, not the listing binding', async () => {
+    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+    vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(
+      mockContents({ folderId: 'lib-folder-123', items: [mockFileItem({ id: 'f-1', name: 'mesh.stl' })] })
+    )
+
+    await useFileBrowserStore.getState().loadRemoteFolder()
+
+    expect(App.SearchRemoteFolderContents).toHaveBeenCalledWith('lib-folder-123', 'mesh', '', 25)
+    expect(App.ListRemoteFolderPage).not.toHaveBeenCalled()
+    expect(useFileBrowserStore.getState().remote.items).toHaveLength(1)
+  })
+
+  it('falls back to the listing binding when the query is empty', async () => {
+    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: '' })
+    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
+
+    await useFileBrowserStore.getState().loadRemoteFolder()
+
+    expect(App.ListRemoteFolderPage).toHaveBeenCalledWith('lib-folder-123', '', 25)
+    expect(App.SearchRemoteFolderContents).not.toHaveBeenCalled()
+  })
+
+  it('changing the query resets pagination state', async () => {
+    setRemote({
+      currentFolderId: 'lib-folder-123',
+      currentPage: 2,
+      pageCursors: ['', 'c1', 'c2'],
+      knownTotalPages: 3,
+      pageCache: new Map([[0, { items: [], hasMore: true, nextCursor: 'c1', timestamp: Date.now() }]]),
+    })
+    vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
+
+    useFileBrowserStore.getState().setLibrarySearchQuery('mesh')
+    await flush()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.librarySearchQuery).toBe('mesh')
+    expect(s.currentPage).toBe(0)
+    expect(s.pageCursors).toEqual([''])
+    expect(s.knownTotalPages).toBe(1)
+    expect(s.pageCache.has(2)).toBe(false)
+    expect(App.SearchRemoteFolderContents).toHaveBeenCalledWith('lib-folder-123', 'mesh', '', 25)
+  })
+
+  it('page two of a search reuses page one\'s cursor', async () => {
+    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+    vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(
+      mockContents({ folderId: 'lib-folder-123', hasMore: true, nextCursor: 'search-cursor-2' })
+    )
+
+    await useFileBrowserStore.getState().loadRemoteFolder()
+    expect(App.SearchRemoteFolderContents).toHaveBeenNthCalledWith(1, 'lib-folder-123', 'mesh', '', 25)
+
+    vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
+    await useFileBrowserStore.getState().goToNextRemotePage()
+
+    expect(App.SearchRemoteFolderContents).toHaveBeenNthCalledWith(2, 'lib-folder-123', 'mesh', 'search-cursor-2', 25)
+    expect(useFileBrowserStore.getState().remote.currentPage).toBe(1)
+  })
+
+  it('discards a search response superseded by a newer navigation', async () => {
+    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+
+    let resolveSearch: (v: wailsapp.FolderContentsDTO) => void = () => {}
+    vi.mocked(App.SearchRemoteFolderContents).mockImplementationOnce(
+      () => new Promise<wailsapp.FolderContentsDTO>((r) => {
+        resolveSearch = r
+      })
+    )
+    vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(
+      mockContents({ folderId: 'sub-folder', items: [mockFileItem({ id: 'f-new', name: 'newer.txt' })] })
+    )
+
+    const stalePromise = useFileBrowserStore.getState().loadRemoteFolder()
+    useFileBrowserStore.getState().navigateRemoteTo('sub-folder', 'Sub')
+    await flush()
+
+    resolveSearch(
+      mockContents({ folderId: 'lib-folder-123', items: [mockFileItem({ id: 'f-stale', name: 'stale.txt' })] })
+    )
+    await stalePromise
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.items.map((i) => i.id)).toEqual(['f-new'])
+  })
+
+  it('reports a search failure instead of rendering an empty library', async () => {
+    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+    vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(
+      mockContents({ folderId: 'lib-folder-123', items: [], warning: 'Server error - please try again later' })
+    )
+
+    await useFileBrowserStore.getState().loadRemoteFolder()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.error).toBe('Server error - please try again later')
+    expect(s.items).toHaveLength(0)
+  })
+})
+
+describe('Legacy Files filters', () => {
+  beforeEach(() => {
+    resetRemote()
+    setRemote({ mode: 'legacy' })
+    vi.clearAllMocks()
+  })
+
+  it('forwards an explicit owner filter', async () => {
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(mockContents({ folderPath: 'Legacy Files' }))
+
+    useFileBrowserStore.getState().setLegacyOwnerFilter('1')
+    await flush()
+
+    expect(App.ListRemoteLegacyWithFilters).toHaveBeenCalledWith('', 25, '1', '', 'created', 'desc')
+    expect(useFileBrowserStore.getState().remote.legacyOwnerFilter).toBe('1')
+  })
+
+  it('forwards the "any owner" default as "0", which the binding drops', async () => {
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(mockContents({ folderPath: 'Legacy Files' }))
+
+    await useFileBrowserStore.getState().loadRemoteLegacy()
+
+    expect(useFileBrowserStore.getState().remote.legacyOwnerFilter).toBe('0')
+    expect(App.ListRemoteLegacyWithFilters).toHaveBeenCalledWith('', 25, '0', '', 'created', 'desc')
+  })
+
+  it('changing the owner filter resets pagination', async () => {
+    setRemote({
+      currentPage: 2,
+      pageCursors: ['', 'c1', 'c2'],
+      knownTotalPages: 3,
+      pageCache: new Map([[0, { items: [], hasMore: true, nextCursor: 'c1', timestamp: Date.now() }]]),
+    })
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(mockContents({ folderPath: 'Legacy Files' }))
+
+    useFileBrowserStore.getState().setLegacyOwnerFilter('2')
+    await flush()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.currentPage).toBe(0)
+    expect(s.pageCursors).toEqual([''])
+    expect(s.knownTotalPages).toBe(1)
+    expect(s.pageCache.has(2)).toBe(false)
+    expect(App.ListRemoteLegacyWithFilters).toHaveBeenCalledWith('', 25, '2', '', 'created', 'desc')
+  })
+
+  it('setLegacySort stores both field and direction', async () => {
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(mockContents({ folderPath: 'Legacy Files' }))
+
+    useFileBrowserStore.getState().setLegacySort('name', 'asc')
+    await flush()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.legacySortField).toBe('name')
+    expect(s.legacySortDirection).toBe('asc')
+  })
+
+  it('changing the sort resets pagination and re-requests page 0', async () => {
+    setRemote({
+      currentPage: 3,
+      pageCursors: ['', 'c1', 'c2', 'c3'],
+      knownTotalPages: 4,
+      pageCache: new Map([[3, { items: [], hasMore: false, nextCursor: '', timestamp: Date.now() }]]),
+    })
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(mockContents({ folderPath: 'Legacy Files' }))
+
+    useFileBrowserStore.getState().setLegacySort('size', 'asc')
+    await flush()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.currentPage).toBe(0)
+    expect(s.pageCursors).toEqual([''])
+    expect(s.knownTotalPages).toBe(1)
+    expect(s.pageCache.has(3)).toBe(false)
+    expect(App.ListRemoteLegacyWithFilters).toHaveBeenCalledWith('', 25, '0', '', 'size', 'asc')
+  })
+
+  it.each([
+    ['name', 'asc'],
+    ['name', 'desc'],
+    ['size', 'asc'],
+    ['created', 'desc'],
+  ])('forwards sort field %s / direction %s', async (field, direction) => {
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(mockContents({ folderPath: 'Legacy Files' }))
+
+    useFileBrowserStore.getState().setLegacySort(field, direction)
+    await flush()
+
+    expect(App.ListRemoteLegacyWithFilters).toHaveBeenCalledWith('', 25, '0', '', field, direction)
+  })
+
+  it('next page passes the stored cursor and preserves the active filters', async () => {
+    setRemote({
+      legacyOwnerFilter: '1',
+      legacySearchQuery: 'abc',
+      legacySortField: 'name',
+      legacySortDirection: 'asc',
+      hasMore: true,
+      pageCursors: ['', 'legacy-cursor-2'],
+    })
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(mockContents({ folderPath: 'Legacy Files' }))
+
+    await useFileBrowserStore.getState().goToNextRemotePage()
+
+    expect(App.ListRemoteLegacyWithFilters).toHaveBeenCalledWith('legacy-cursor-2', 25, '1', 'abc', 'name', 'asc')
+    expect(useFileBrowserStore.getState().remote.currentPage).toBe(1)
+  })
+
+  it('reports a listing failure instead of rendering an empty list', async () => {
+    vi.mocked(App.ListRemoteLegacyWithFilters).mockResolvedValueOnce(
+      mockContents({ folderPath: 'Legacy Files', items: [], warning: 'Rate limit exceeded - please wait a moment and try again' })
+    )
+
+    await useFileBrowserStore.getState().loadRemoteLegacy()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.error).toBe('Rate limit exceeded - please wait a moment and try again')
+    expect(s.items).toHaveLength(0)
+  })
+})
+
+describe('filter setters are scoped to their own mode', () => {
+  beforeEach(() => {
+    resetRemote()
+    vi.clearAllMocks()
+  })
+
+  it('ignores legacy setters while My Library is showing', () => {
+    setRemote({ mode: 'library' })
+
+    useFileBrowserStore.getState().setLegacySearchQuery('mesh')
+    useFileBrowserStore.getState().setLegacyOwnerFilter('1')
+    useFileBrowserStore.getState().setLegacySort('name', 'asc')
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.legacySearchQuery).toBe('')
+    expect(s.legacyOwnerFilter).toBe('0')
+    expect(s.legacySortField).toBe('created')
+    expect(s.legacySortDirection).toBe('desc')
+    expect(App.ListRemoteLegacyWithFilters).not.toHaveBeenCalled()
+  })
+
+  it('ignores the library search setter while Legacy Files is showing', () => {
+    setRemote({ mode: 'legacy' })
+
+    useFileBrowserStore.getState().setLibrarySearchQuery('mesh')
+
+    expect(useFileBrowserStore.getState().remote.librarySearchQuery).toBe('')
+    expect(App.SearchRemoteFolderContents).not.toHaveBeenCalled()
+    expect(App.ListRemoteFolderPage).not.toHaveBeenCalled()
+  })
+
+  it('switching modes clears the legacy filters and the library search', async () => {
+    setRemote({
+      mode: 'legacy',
+      legacyOwnerFilter: '1',
+      legacySearchQuery: 'abc',
+      legacySortField: 'name',
+      legacySortDirection: 'asc',
+      librarySearchQuery: 'mesh',
+    })
+    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
+
+    useFileBrowserStore.getState().setRemoteMode('library')
+    await flush()
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.legacyOwnerFilter).toBe('0')
+    expect(s.legacySearchQuery).toBe('')
+    expect(s.legacySortField).toBe('created')
+    expect(s.legacySortDirection).toBe('desc')
+    expect(s.librarySearchQuery).toBe('')
   })
 })
