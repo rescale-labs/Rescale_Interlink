@@ -2471,15 +2471,6 @@ func (c *Client) ValidateAutoDownloadSetup(ctx context.Context) (*AutoDownloadVa
 	return result, nil
 }
 
-// getKeys returns the keys of a map for debugging
-func getKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 // getTypeCodeFromID maps file type IDs to their string codes
 func getTypeCodeFromID(typeID int) string {
 	switch typeID {

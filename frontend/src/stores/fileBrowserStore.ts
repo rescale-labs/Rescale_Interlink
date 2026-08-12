@@ -541,9 +541,10 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     const sortField = state.legacySortField
     const sortDirection = state.legacySortDirection
 
+    // The cache is keyed by page number only, so it is safe to read here
+    // solely because every filter setter empties it before reloading.
     const cachedPage = state.pageCache.get(currentPage)
     if (cachedPage && (Date.now() - cachedPage.timestamp) < PAGE_CACHE_TTL) {
-      // Only use cache if filters haven't changed (simple check: cache was recent)
       set(state => ({
         remote: {
           ...state.remote,

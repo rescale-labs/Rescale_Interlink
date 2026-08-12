@@ -8,7 +8,7 @@ import {
   MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline'
 import { useFileBrowserStore, BrowseMode } from '../../stores'
-import { FileList } from './FileList'
+import { FileList, SortField, SortDirection } from './FileList'
 
 export function RemoteBrowser() {
   const {
@@ -327,8 +327,8 @@ export function RemoteBrowser() {
           onServerPrevPage={goToPreviousRemotePage}
           onServerItemsPerPageChange={setRemoteItemsPerPage}
           // Controlled sorting for legacy mode
-          sortField={mode === 'legacy' ? (legacySortField as any) : undefined}
-          sortDirection={mode === 'legacy' ? (legacySortDirection as any) : undefined}
+          sortField={mode === 'legacy' ? (legacySortField as SortField) : undefined}
+          sortDirection={mode === 'legacy' ? (legacySortDirection as SortDirection) : undefined}
           onSortChange={mode === 'legacy' ? setLegacySort : undefined}
         />
       </div>

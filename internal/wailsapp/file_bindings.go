@@ -61,11 +61,11 @@ func translateAPIError(err error) string {
 
 // FileItemDTO is the JSON-safe version of services.FileItem.
 type FileItemDTO struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	IsFolder      bool   `json:"isFolder"`
-	Size          int64  `json:"size"`
-	ModTime       string `json:"modTime"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	IsFolder     bool   `json:"isFolder"`
+	Size         int64  `json:"size"`
+	ModTime      string `json:"modTime"`
 	Path         string `json:"path,omitempty"`
 	ParentID     string `json:"parentId,omitempty"`
 	SymlinkID    string `json:"symlinkId,omitempty"`
@@ -1489,5 +1489,3 @@ func (a *App) SelectDirectoryRecursive(title string) ([]string, error) {
 
 	return files, nil
 }
-
-// ListJobs returns all jobs for the current user.
