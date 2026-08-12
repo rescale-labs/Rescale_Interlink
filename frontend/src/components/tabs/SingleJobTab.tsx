@@ -846,23 +846,31 @@ export function SingleJobTab() {
             )}
           </div>
 
-          {/* Continue button */}
-          <button
-            onClick={() => {
-              if (sjStore.isInputsValid()) {
-                sjStore.setState('inputsReady')
-              }
-            }}
-            disabled={!sjStore.isInputsValid()}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-2 rounded',
-              sjStore.isInputsValid()
-                ? 'bg-blue-500 text-white hover:bg-blue-600'
-                : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
-            )}
-          >
-            Continue
-          </button>
+          {/* Navigation buttons */}
+          <div className="flex gap-4">
+            <button
+              onClick={() => sjStore.setState('initial')}
+              className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              Back
+            </button>
+            <button
+              onClick={() => {
+                if (sjStore.isInputsValid()) {
+                  sjStore.setState('inputsReady')
+                }
+              }}
+              disabled={!sjStore.isInputsValid()}
+              className={clsx(
+                'flex items-center gap-2 px-4 py-2 rounded',
+                sjStore.isInputsValid()
+                  ? 'bg-blue-500 text-white hover:bg-blue-600'
+                  : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
+              )}
+            >
+              Continue
+            </button>
+          </div>
         </div>
       )
     }
