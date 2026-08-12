@@ -53,6 +53,18 @@ type Config struct {
 	Eligibility *EligibilityConfig
 }
 
+// stateRetentionBufferDays extends state retention past the lookback window by
+// the same margin FindCompletedJobs uses for its creation-date pre-filter, so an
+// entry is only dropped once no scan can select the job again.
+const stateRetentionBufferDays = 30
+
+// daemonBatchHistoryLimit caps how many finished download batches keep their
+// tasks in the shared transfer queue. The queue never removes terminal tasks, so
+// a daemon polling for weeks would accumulate one task per downloaded file
+// forever. Older batches are dropped once this many newer ones exist, which
+// keeps recent auto-downloads visible in the Transfers tab.
+const daemonBatchHistoryLimit = 20
+
 // DefaultConfig returns a daemon configuration with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -102,6 +114,11 @@ type Daemon struct {
 	lastScanErr   string
 	lastScanErrAt time.Time
 
+	// Finished download batches in completion order, capped at
+	// daemonBatchHistoryLimit; see retireOldBatches.
+	batchHistMu sync.Mutex
+	batchHist   []string
+
 	// Shared transfer infrastructure (Plan 3).
 	// The daemon is a consumer of TransferService, not a parallel
 	// implementation. Per-daemon instance; no cross-process sharing.
@@ -124,6 +141,15 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 	state := NewState(daemonCfg.StateFile)
 	if err := state.Load(); err != nil {
 		return nil, fmt.Errorf("failed to load state: %w", err)
+	}
+
+	// Bound the state file. Once a job's completion falls outside the lookback
+	// window plus the API pre-filter buffer, no scan can select it again, so its
+	// entry only grows the file — and this file is loaded and rewritten on every
+	// poll for the daemon's whole lifetime.
+	if daemonCfg.Eligibility != nil && daemonCfg.Eligibility.LookbackDays > 0 {
+		retentionDays := daemonCfg.Eligibility.LookbackDays + stateRetentionBufferDays
+		state.SetRetention(time.Duration(retentionDays) * 24 * time.Hour)
 	}
 
 	// Create monitor with eligibility checking if configured
@@ -745,6 +771,11 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		return OutcomePartialFailure
 	}
 
+	// Every path from here on leaves a batch in the shared queue, whether the
+	// job succeeded, failed, or was interrupted. Register it for retirement on
+	// all of them: a job that fails every poll produces a batch every poll.
+	defer d.retireOldBatches(batchID)
+
 	// Dispatch files onto the queue. This goroutine closes reqCh when done,
 	// which flips TotalKnown=true so WaitForBatch knows registration is
 	// complete. Files already present on disk with correct size are counted
@@ -890,6 +921,37 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	return outcome
+}
+
+// retireOldBatches records a finished download batch and drops the terminal
+// tasks of any batch beyond the most recent daemonBatchHistoryLimit.
+//
+// The shared queue never removes terminal tasks, so a daemon polling for weeks
+// accumulates one task per downloaded file for its whole lifetime. Retiring the
+// oldest batches instead of clearing on completion keeps recent auto-downloads
+// visible in the Transfers tab.
+func (d *Daemon) retireOldBatches(batchID string) {
+	if batchID == "" || d.ts == nil {
+		return
+	}
+
+	d.batchHistMu.Lock()
+	d.batchHist = append(d.batchHist, batchID)
+	var retire []string
+	if excess := len(d.batchHist) - daemonBatchHistoryLimit; excess > 0 {
+		retire = append(retire, d.batchHist[:excess]...)
+		d.batchHist = append([]string(nil), d.batchHist[excess:]...)
+	}
+	d.batchHistMu.Unlock()
+
+	for _, old := range retire {
+		if removed := d.ts.ClearBatchTerminalTasks(old); removed > 0 {
+			d.logger.Debug().
+				Str("batch_id", old).
+				Int("tasks_removed", removed).
+				Msg("Retired old daemon transfer batch from the queue")
+		}
+	}
 }
 
 // applyDownloadedTag tags a finished job so the tag-first eligibility check

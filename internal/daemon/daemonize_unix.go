@@ -21,7 +21,14 @@ func PIDFilePath() string {
 	return filepath.Join(home, ".config", "rescale", "daemon.pid")
 }
 
-// WritePIDFile writes the current process's PID to the PID file.
+// WritePIDFile claims the daemon PID file for this process.
+//
+// The claim is an exclusive create, so two daemons starting at the same time
+// cannot both pass the earlier IsDaemonRunning() check and then both write the
+// file — the loser gets an error instead of silently becoming a second daemon
+// polling the same jobs into the same folder. A PID file left behind by a dead
+// process is cleared by IsDaemonRunning(), which callers run first; this
+// function also clears it directly so a stale file cannot lock the daemon out.
 func WritePIDFile() error {
 	pidPath := PIDFilePath()
 
@@ -30,9 +37,33 @@ func WritePIDFile() error {
 		return fmt.Errorf("failed to create PID file directory: %w", err)
 	}
 
-	// Write PID
 	pid := os.Getpid()
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0600); err != nil {
+	f, err := os.OpenFile(pidPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if !os.IsExist(err) {
+			return fmt.Errorf("failed to write PID file: %w", err)
+		}
+		// Someone holds the file. If the process behind it is gone,
+		// IsDaemonRunning removes the file and we retry once.
+		if running := IsDaemonRunning(); running != 0 {
+			return fmt.Errorf("daemon is already running (PID %d)", running)
+		}
+		// Also covers an empty or unparseable file, which IsDaemonRunning
+		// reports as "not running" without removing.
+		os.Remove(pidPath)
+		f, err = os.OpenFile(pidPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return fmt.Errorf("failed to write PID file: %w", err)
+		}
+	}
+
+	if _, err := f.WriteString(strconv.Itoa(pid)); err != nil {
+		f.Close()
+		os.Remove(pidPath)
+		return fmt.Errorf("failed to write PID file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(pidPath)
 		return fmt.Errorf("failed to write PID file: %w", err)
 	}
 

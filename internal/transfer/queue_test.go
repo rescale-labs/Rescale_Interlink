@@ -1415,6 +1415,73 @@ func TestSkippedSurvivesCleanupBatch(t *testing.T) {
 	}
 }
 
+// ClearBatchTerminalTasks reclaims one batch without touching anyone else's
+// history. The daemon relies on it to bound a queue that would otherwise grow by
+// one task per downloaded file for as long as the process runs.
+func TestClearBatchTerminalTasksIsScopedToOneBatch(t *testing.T) {
+	queue := NewQueue(nil)
+
+	oldDone := queue.TrackTransferWithBatch("a.dat", 10, TaskTypeDownload, "a", "/a", "Daemon", "batch-old", "Auto: A")
+	oldFailed := queue.TrackTransferWithBatch("b.dat", 20, TaskTypeDownload, "b", "/b", "Daemon", "batch-old", "Auto: A")
+	oldActive := queue.TrackTransferWithBatch("c.dat", 30, TaskTypeDownload, "c", "/c", "Daemon", "batch-old", "Auto: A")
+	keep := queue.TrackTransferWithBatch("d.dat", 40, TaskTypeDownload, "d", "/d", "Daemon", "batch-new", "Auto: B")
+
+	queue.Activate(oldDone.ID)
+	queue.Complete(oldDone.ID)
+	queue.Activate(oldFailed.ID)
+	queue.Fail(oldFailed.ID, errors.New("boom"))
+	queue.Activate(oldActive.ID)
+	queue.Activate(keep.ID)
+	queue.Complete(keep.ID)
+
+	if removed := queue.ClearBatchTerminalTasks("batch-old"); removed != 2 {
+		t.Errorf("removed = %d, want 2 (the completed and failed tasks)", removed)
+	}
+
+	remaining := make(map[string]string)
+	tasks := queue.GetTasks()
+	for i := range tasks {
+		remaining[tasks[i].ID] = tasks[i].BatchID
+	}
+	if _, ok := remaining[oldActive.ID]; !ok {
+		t.Error("a non-terminal task must not be removed")
+	}
+	if _, ok := remaining[keep.ID]; !ok {
+		t.Error("another batch's completed task must not be removed")
+	}
+	if _, ok := remaining[oldDone.ID]; ok {
+		t.Error("the batch's completed task should be gone")
+	}
+
+	// The batch still has a live task, so its metadata must survive.
+	var sawOld bool
+	for _, bs := range queue.GetAllBatchStats() {
+		if bs.BatchID == "batch-old" {
+			sawOld = true
+			if bs.Total != 1 {
+				t.Errorf("batch-old Total = %d, want 1", bs.Total)
+			}
+		}
+	}
+	if !sawOld {
+		t.Error("batch-old should still be reported while a task remains")
+	}
+
+	// Once the last task goes terminal and is cleared, the batch disappears.
+	queue.Complete(oldActive.ID)
+	if removed := queue.ClearBatchTerminalTasks("batch-old"); removed != 1 {
+		t.Errorf("second clear removed = %d, want 1", removed)
+	}
+	for _, bs := range queue.GetAllBatchStats() {
+		if bs.BatchID == "batch-old" {
+			t.Errorf("batch-old should be gone once it has no tasks, got %+v", bs)
+		}
+	}
+	if queue.ClearBatchTerminalTasks("") != 0 {
+		t.Error("an empty batch ID must be a no-op")
+	}
+}
+
 func TestClearCompletedRemovesPlaceholderBatchSkip(t *testing.T) {
 	queue := NewQueue(nil)
 	task := queue.TrackTransferWithBatch("(skipped: X)", 0, TaskTypeUpload, "", "", "FB", "to-clear", "")

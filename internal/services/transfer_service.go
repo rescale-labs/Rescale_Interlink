@@ -1227,3 +1227,10 @@ func (ts *TransferService) reportPartialBatchFailure(batchID, direction string, 
 func (ts *TransferService) ClearCompleted() {
 	ts.queue.ClearCompleted()
 }
+
+// ClearBatchTerminalTasks drops one batch's terminal tasks, leaving every other
+// batch's history intact. Used by the daemon to bound its queue over a
+// long-running process. Returns the number of tasks removed.
+func (ts *TransferService) ClearBatchTerminalTasks(batchID string) int {
+	return ts.queue.ClearBatchTerminalTasks(batchID)
+}

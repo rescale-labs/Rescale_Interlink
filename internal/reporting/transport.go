@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
@@ -32,6 +33,12 @@ func (t *FileTransport) Save(report *ErrorReport, path string) error {
 // config.ReportDirectory().
 type AutoFileTransport struct{}
 
+// maxRetainedReports bounds how many auto-saved reports are kept on disk.
+// Nothing else prunes this directory, and a repeating failure (a daemon retrying
+// the same broken job every poll, for instance) writes one file per occurrence
+// for as long as it keeps failing.
+const maxRetainedReports = 500
+
 // Save writes the report and returns the saved path.
 func (t *AutoFileTransport) Save(report *ErrorReport) (string, error) {
 	if err := config.EnsureReportDirectory(); err != nil {
@@ -45,7 +52,44 @@ func (t *AutoFileTransport) Save(report *ErrorReport) (string, error) {
 	if err := ft.Save(report, path); err != nil {
 		return "", err
 	}
+
+	pruneOldReports(config.ReportDirectory(), maxRetainedReports)
 	return path, nil
+}
+
+// pruneOldReports keeps the newest keep report files and deletes the rest.
+// Best-effort: a report that cannot be removed is left in place, since failing
+// to prune must never fail the report that was just written.
+func pruneOldReports(dir string, keep int) {
+	if keep <= 0 {
+		return
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "report-*.json"))
+	if err != nil || len(matches) <= keep {
+		return
+	}
+
+	// Filenames carry a sortable timestamp, but a lexical sort would misorder
+	// files written by an older naming scheme. Sort on mtime instead.
+	type entry struct {
+		path string
+		mod  time.Time
+	}
+	entries := make([]entry, 0, len(matches))
+	for _, m := range matches {
+		info, statErr := os.Stat(m)
+		if statErr != nil {
+			continue
+		}
+		entries = append(entries, entry{path: m, mod: info.ModTime()})
+	}
+	if len(entries) <= keep {
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].mod.After(entries[j].mod) })
+	for _, e := range entries[keep:] {
+		_ = os.Remove(e.path)
+	}
 }
 
 // FormatTextSummary produces a compact text summary for CLI stderr output.

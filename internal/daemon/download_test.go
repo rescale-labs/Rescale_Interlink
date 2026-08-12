@@ -18,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/services"
+	"github.com/rescale/rescale-int/internal/transfer"
 )
 
 // fakeJobFilesServer serves just enough of the Rescale API for downloadJob:
@@ -189,6 +190,46 @@ func TestDownloadJob_NoFilesAppliesDownloadedTag(t *testing.T) {
 	}
 }
 
+// The shared queue never removes terminal tasks, so a daemon polling for weeks
+// would keep one task per downloaded file forever. Finished batches beyond the
+// most recent daemonBatchHistoryLimit are retired; the recent ones stay so the
+// Transfers tab still shows them.
+func TestRetireOldBatchesBoundsTheQueue(t *testing.T) {
+	d := newDownloadTestDaemon(t, "http://127.0.0.1:0", t.TempDir(), nil)
+	queue := d.Queue()
+
+	total := daemonBatchHistoryLimit + 5
+	ids := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		batchID := fmt.Sprintf("daemon:job%02d:1", i)
+		ids = append(ids, batchID)
+		task := queue.TrackTransferWithBatch("f.dat", 1, transfer.TaskTypeDownload,
+			"src", "/dest", services.SourceLabelDaemon, batchID, "Auto: job")
+		queue.Complete(task.ID)
+		d.retireOldBatches(batchID)
+	}
+
+	if got := len(queue.GetTasks()); got != daemonBatchHistoryLimit {
+		t.Errorf("tasks retained = %d, want %d", got, daemonBatchHistoryLimit)
+	}
+
+	live := make(map[string]struct{})
+	tasks := queue.GetTasks()
+	for i := range tasks {
+		live[tasks[i].BatchID] = struct{}{}
+	}
+	for _, id := range ids[:5] {
+		if _, ok := live[id]; ok {
+			t.Errorf("batch %s should have been retired", id)
+		}
+	}
+	for _, id := range ids[5:] {
+		if _, ok := live[id]; !ok {
+			t.Errorf("recent batch %s should still be visible", id)
+		}
+	}
+}
+
 // Each attempt gets its own batch ID. Terminal tasks are never removed from the
 // shared queue, so a stable per-job ID made attempt N see attempts 1..N-1's
 // failures and the job could never stop being reported as failed.
@@ -221,9 +262,10 @@ func TestDownloadJob_RetryDoesNotInheritEarlierFailures(t *testing.T) {
 
 	// Two distinct daemon batches, one per attempt.
 	seen := make(map[string]struct{})
-	for _, task := range d.Queue().GetTasks() {
-		if task.BatchID != "" {
-			seen[task.BatchID] = struct{}{}
+	tasks := d.Queue().GetTasks()
+	for i := range tasks {
+		if tasks[i].BatchID != "" {
+			seen[tasks[i].BatchID] = struct{}{}
 		}
 	}
 	if len(seen) != 2 {

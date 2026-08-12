@@ -3,7 +3,9 @@ package reporting
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -535,5 +537,65 @@ func TestCategoryFromOperation(t *testing.T) {
 				t.Errorf("categoryFromOperation(%q) = %q, want %q", tt.operation, got, tt.want)
 			}
 		})
+	}
+}
+
+// Nothing else prunes the report directory. A repeating failure writes one file
+// per occurrence, so the writer has to cap what it keeps — and it must keep the
+// newest ones.
+func TestPruneOldReportsKeepsNewest(t *testing.T) {
+	dir := t.TempDir()
+
+	base := time.Now().Add(-100 * time.Hour)
+	var newest, oldest string
+	for i := 0; i < 10; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("report-file-%02d.json", i))
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		mod := base.Add(time.Duration(i) * time.Hour)
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatalf("chtimes %s: %v", path, err)
+		}
+		if i == 0 {
+			oldest = path
+		}
+		newest = path
+	}
+
+	// An unrelated file must survive: the cap applies to reports only.
+	other := filepath.Join(dir, "keep-me.txt")
+	if err := os.WriteFile(other, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", other, err)
+	}
+
+	pruneOldReports(dir, 4)
+
+	remaining, err := filepath.Glob(filepath.Join(dir, "report-*.json"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(remaining) != 4 {
+		t.Errorf("kept %d reports, want 4: %v", len(remaining), remaining)
+	}
+	if _, err := os.Stat(newest); err != nil {
+		t.Errorf("newest report was pruned: %v", err)
+	}
+	if _, err := os.Stat(oldest); !os.IsNotExist(err) {
+		t.Error("oldest report should have been pruned")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("non-report file was removed: %v", err)
+	}
+
+	// Under the cap, nothing is touched.
+	pruneOldReports(dir, 100)
+	if again, _ := filepath.Glob(filepath.Join(dir, "report-*.json")); len(again) != 4 {
+		t.Errorf("prune under the cap changed the directory: %v", again)
+	}
+	// A non-positive cap is a no-op, not "delete everything".
+	pruneOldReports(dir, 0)
+	if again, _ := filepath.Glob(filepath.Join(dir, "report-*.json")); len(again) != 4 {
+		t.Errorf("prune with keep=0 deleted files: %v", again)
 	}
 }

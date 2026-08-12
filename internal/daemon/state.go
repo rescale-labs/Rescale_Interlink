@@ -47,6 +47,9 @@ type State struct {
 
 	// Path to the state file
 	filePath string
+
+	// retention bounds how long finished entries are kept; see SetRetention.
+	retention time.Duration
 }
 
 // NewState creates a new state instance.
@@ -104,6 +107,8 @@ func (s *State) Load() error {
 
 // Save writes state to the file system.
 func (s *State) Save() error {
+	s.pruneExpired()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -118,18 +123,73 @@ func (s *State) Save() error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	// Write to temp file first, then rename for atomicity
-	tmpFile := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
+	// Write to a uniquely named temp file in the same directory, then rename
+	// for atomicity. A fixed ".tmp" name is not safe: two writers (a daemon
+	// plus a `daemon retry` invocation, or two daemons) interleave writes into
+	// the same temp file and the survivor renames a half-written mixture over
+	// the real state.
+	tmp, err := os.CreateTemp(dir, filepath.Base(s.filePath)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp state file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // No-op once the rename below succeeds.
+
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("failed to set state file permissions: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close temp state file: %w", err)
+	}
 
-	if err := os.Rename(tmpFile, s.filePath); err != nil {
-		os.Remove(tmpFile) // Clean up temp file
+	if err := os.Rename(tmpName, s.filePath); err != nil {
 		return fmt.Errorf("failed to rename state file: %w", err)
 	}
 
 	return nil
+}
+
+// SetRetention bounds how long finished job entries are kept. Entries older
+// than the retention window are dropped on the next Save. Zero (the default)
+// keeps everything.
+//
+// The daemon sets this to its lookback window plus the API pre-filter buffer:
+// beyond that, a job can no longer be selected by a scan, so its entry can
+// only grow the file.
+func (s *State) SetRetention(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retention = d
+}
+
+// pruneExpired drops job entries older than the retention window. Entries with
+// a pending tag apply are always kept: the poll loop still owes them a tag
+// call, and losing the flag would let the job be downloaded again.
+func (s *State) pruneExpired() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.retention <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-s.retention)
+	for id, job := range s.Downloaded {
+		if job == nil {
+			delete(s.Downloaded, id)
+			continue
+		}
+		if job.PendingTagApply {
+			continue
+		}
+		if job.DownloadedAt.Before(cutoff) {
+			delete(s.Downloaded, id)
+		}
+	}
 }
 
 // IsDownloaded checks if a job has already been downloaded or should be skipped.

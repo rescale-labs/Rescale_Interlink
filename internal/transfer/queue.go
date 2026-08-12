@@ -499,6 +499,52 @@ func (q *Queue) ClearCompleted() {
 	}
 }
 
+// ClearBatchTerminalTasks removes the terminal tasks of a single batch and, when
+// none of its tasks remain, the batch's leftover metadata. Non-terminal tasks
+// are left alone, so calling this on a batch that is still running is safe but
+// will not empty it.
+//
+// This is the narrow counterpart to ClearCompleted for a caller that owns one
+// batch and wants to reclaim it without touching anyone else's history — the
+// daemon, whose queue would otherwise grow by one task per downloaded file for
+// as long as it runs. Returns the number of tasks removed.
+func (q *Queue) ClearBatchTerminalTasks(batchID string) int {
+	if batchID == "" {
+		return 0
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	removed := 0
+	anyLeft := false
+	filtered := make([]*TransferTask, 0, len(q.tasks))
+	for _, task := range q.tasks {
+		if task.BatchID == batchID && task.IsTerminal() {
+			delete(q.tasksByID, task.ID)
+			removed++
+			continue
+		}
+		if task.BatchID == batchID {
+			anyLeft = true
+		}
+		filtered = append(filtered, task)
+	}
+	if removed == 0 {
+		return 0
+	}
+	q.tasks = filtered
+
+	if !anyLeft {
+		// Same reasoning as ClearCompleted: this metadata must outlive the
+		// tasks' completion, but not their removal.
+		delete(q.batchSkipped, batchID)
+		delete(q.cancelledBatches, batchID)
+		q.cleanupBatchMetrics(batchID)
+	}
+	return removed
+}
+
 // GetStats returns current queue statistics.
 func (q *Queue) GetStats() QueueStats {
 	q.mu.RLock()

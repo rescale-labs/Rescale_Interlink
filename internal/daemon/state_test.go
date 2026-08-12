@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -249,6 +251,94 @@ func TestState_FilePermissions(t *testing.T) {
 
 	if perm != expectedPerm {
 		t.Errorf("State file permissions should be %o, got %o", expectedPerm, perm)
+	}
+}
+
+// A fixed ".tmp" name let two writers interleave into the same scratch file and
+// rename a half-written mixture over the real state. Each Save must use its own
+// temp file and leave nothing behind.
+func TestState_SaveUsesUniqueTempFile(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+
+	state := NewState(stateFile)
+	state.MarkDownloaded("job1", "Test Job", "/output", 1, 100)
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	if _, err := os.Stat(stateFile + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("fixed-name temp file %q should not be used", stateFile+".tmp")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("temp file %q left behind after Save", e.Name())
+		}
+	}
+
+	// Concurrent writers must all produce a loadable file.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			if err := state.Save(); err != nil {
+				t.Errorf("concurrent Save %d failed: %v", n, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	reloaded := NewState(stateFile)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load after concurrent saves failed: %v", err)
+	}
+	if _, ok := reloaded.Downloaded["job1"]; !ok {
+		t.Error("state file lost its entry across concurrent saves")
+	}
+}
+
+// Retention bounds the state file for a daemon that runs for months. Entries
+// still owed a tag call are exempt: dropping one would let the job be
+// downloaded a second time.
+func TestState_PruneOnSaveRespectsRetention(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+
+	state := NewState(stateFile)
+	now := time.Now()
+	state.Downloaded = map[string]*DownloadedJob{
+		"fresh":   {JobID: "fresh", DownloadedAt: now.Add(-24 * time.Hour)},
+		"stale":   {JobID: "stale", DownloadedAt: now.Add(-100 * 24 * time.Hour)},
+		"pending": {JobID: "pending", DownloadedAt: now.Add(-100 * 24 * time.Hour), PendingTagApply: true},
+	}
+
+	// No retention set: nothing is dropped.
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if len(state.Downloaded) != 3 {
+		t.Fatalf("entries = %d, want 3 with retention unset", len(state.Downloaded))
+	}
+
+	state.SetRetention(37 * 24 * time.Hour) // 7-day lookback + 30-day buffer
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	if _, ok := state.Downloaded["stale"]; ok {
+		t.Error("entry older than the retention window should have been pruned")
+	}
+	if _, ok := state.Downloaded["fresh"]; !ok {
+		t.Error("entry inside the retention window was pruned")
+	}
+	if _, ok := state.Downloaded["pending"]; !ok {
+		t.Error("entry with a pending tag apply must never be pruned")
 	}
 }
 
