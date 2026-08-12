@@ -561,15 +561,16 @@ func TestCheckBatchCompletion_CancelledBatchNotReported(t *testing.T) {
 	ts := NewTransferService(nil, eb, TransferServiceConfig{})
 	q := ts.GetQueue()
 
-	// Some tasks failed with a context error before the cancel sweep reached
-	// them, the rest were cancelled — exactly what a real cancel produces.
+	// Some tasks failed for real before the user hit Cancel, the rest were
+	// swept by the batch cancel — exactly what a mid-batch cancel produces.
+	// The batch-level cancel is what suppresses reporting.
 	for i := 0; i < 3; i++ {
 		task := q.TrackTransferWithBatch(
 			fmt.Sprintf("f%d.dat", i), 1024, transfer.TaskTypeDownload,
 			"/src", "/dst", "FileBrowser", "batch-cancelled", "TestBatch",
 		)
 		q.Activate(task.ID)
-		q.Fail(task.ID, fmt.Errorf("unexpected EOF"))
+		q.Fail(task.ID, fmt.Errorf("wire: something exploded"))
 	}
 	for i := 0; i < 2; i++ {
 		task := q.TrackTransferWithBatch(
@@ -577,9 +578,9 @@ func TestCheckBatchCompletion_CancelledBatchNotReported(t *testing.T) {
 			"/src", "/dst", "FileBrowser", "batch-cancelled", "TestBatch",
 		)
 		q.Activate(task.ID)
-		if err := q.Cancel(task.ID); err != nil {
-			t.Fatalf("Cancel: %v", err)
-		}
+	}
+	if err := q.CancelBatch("batch-cancelled"); err != nil {
+		t.Fatalf("CancelBatch: %v", err)
 	}
 
 	ts.checkBatchCompletion("batch-cancelled", "download")
@@ -588,6 +589,43 @@ func TestCheckBatchCompletion_CancelledBatchNotReported(t *testing.T) {
 	case event := <-ch:
 		t.Fatalf("expected NO ReportableErrorEvent for a cancelled batch, got %+v", event)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// Cancelling ONE task must not hide the rest of the batch's real failures:
+// only a batch-level cancel (CancelRequested) suppresses reporting.
+func TestCheckBatchCompletion_PerTaskCancelDoesNotSuppress(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	for i := 0; i < 3; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("f%d.dat", i), 1024, transfer.TaskTypeDownload,
+			"/src", "/dst", "FileBrowser", "batch-mixed", "TestBatch",
+		)
+		q.Activate(task.ID)
+		q.Fail(task.ID, fmt.Errorf("wire: something exploded"))
+	}
+	task := q.TrackTransferWithBatch(
+		"c0.dat", 1024, transfer.TaskTypeDownload,
+		"/src", "/dst", "FileBrowser", "batch-mixed", "TestBatch",
+	)
+	q.Activate(task.ID)
+	if err := q.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	ts.checkBatchCompletion("batch-mixed", "download")
+
+	select {
+	case <-ch:
+		// Reported, as it must be.
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a ReportableErrorEvent when real failures coexist with a single per-task cancel")
 	}
 }
 

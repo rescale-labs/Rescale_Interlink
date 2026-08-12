@@ -998,7 +998,43 @@ func (ts *TransferService) CancelAll() {
 // the GUI's per-batch cancel action. Used by the daemon's IPC cancel
 // handler and by daemon shutdown.
 func (ts *TransferService) CancelBatch(batchID string) error {
-	return ts.queue.CancelBatch(batchID)
+	// Capture the batch's identity first: cancelling a batch whose scan hasn't
+	// registered any task yet drops its pre-registered metadata, and with no
+	// task to anchor it the Transfers tab would show no record at all.
+	var label, direction string
+	hadRow := false
+	for _, bs := range ts.queue.GetAllBatchStats() {
+		if bs.BatchID == batchID {
+			hadRow, label, direction = true, bs.BatchLabel, bs.Direction
+			break
+		}
+	}
+
+	err := ts.queue.CancelBatch(batchID)
+
+	if hadRow {
+		anchored := false
+		for _, bs := range ts.queue.GetAllBatchStats() {
+			if bs.BatchID == batchID {
+				anchored = true
+				break
+			}
+		}
+		if !anchored {
+			taskType := transfer.TaskTypeDownload
+			if direction == "upload" {
+				taskType = transfer.TaskTypeUpload
+			}
+			// The queue's cancelled-batch marker lands this placeholder as
+			// TaskCancelled, so the row reads Cancelled — not Complete like
+			// the empty-batch placeholder.
+			ts.queue.TrackTransferWithBatch(
+				"(cancelled during scan)", 0, taskType, "", "",
+				SourceLabelFileBrowser, batchID, label,
+			)
+		}
+	}
+	return err
 }
 
 // RetryFailedInBatch retries all failed tasks in a batch. Mirrors the GUI
@@ -1092,9 +1128,11 @@ func (ts *TransferService) checkBatchCompletion(batchID, direction string) {
 		if bs.BatchID != batchID {
 			continue
 		}
-		if bs.Cancelled > 0 || bs.CancelRequested {
-			// The user stopped this batch. Whatever the surviving tasks report,
-			// nothing here is a failure worth showing an error report for.
+		if bs.CancelRequested {
+			// The user stopped this whole batch. Whatever the surviving tasks
+			// report, nothing here is a failure worth an error report. A
+			// per-task cancel deliberately does not suppress: cancelling one
+			// file must not hide two hundred real failures in the same batch.
 			return
 		}
 		if bs.Failed == 0 || bs.Total == 0 {

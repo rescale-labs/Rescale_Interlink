@@ -361,16 +361,16 @@ func (q *Queue) Cancel(taskID string) error {
 		q.mu.Unlock()
 		return errors.New("task not found")
 	}
-	if task.State != TaskActive && task.State != TaskInitializing && task.State != TaskQueued {
-		q.mu.Unlock()
-		return errors.New("task is not cancellable")
-	}
 	cancelFn := q.cancelFuncs[taskID]
-	task.State = TaskCancelled
-	task.CompletedAt = time.Now()
-	delete(q.cancelFuncs, taskID)
+	cancelled := task.cancelIfNotTerminal()
+	if cancelled {
+		delete(q.cancelFuncs, taskID)
+	}
 	q.mu.Unlock()
 
+	if !cancelled {
+		return errors.New("task is not cancellable")
+	}
 	if cancelFn != nil {
 		cancelFn()
 	}

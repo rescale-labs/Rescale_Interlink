@@ -391,6 +391,8 @@ type BatchProgressEventDTO struct {
 	DiscoveredTotal int     `json:"discoveredTotal"`
 	DiscoveredBytes int64   `json:"discoveredBytes"`
 	Skipped         int     `json:"skipped"`
+	Cancelled       int     `json:"cancelled"`
+	CancelRequested bool    `json:"cancelRequested"`
 }
 
 func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO {
@@ -412,6 +414,8 @@ func batchProgressEventToDTO(e *events.BatchProgressEvent) BatchProgressEventDTO
 		DiscoveredTotal: e.DiscoveredTotal,
 		DiscoveredBytes: e.DiscoveredBytes,
 		Skipped:         e.Skipped,
+		Cancelled:       e.Cancelled,
+		CancelRequested: e.CancelRequested,
 	}
 }
 

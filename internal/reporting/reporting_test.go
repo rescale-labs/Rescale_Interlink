@@ -74,7 +74,8 @@ func TestClassifyErrorClass(t *testing.T) {
 		{"open /Users/x/Downloads/out/f.dat: permission denied", ClassLocalFS},
 		{"open /Volumes/gone/f.dat: no such file or directory", ClassLocalFS},
 		{"write /mnt/ro/f.dat: read-only file system", ClassLocalFS},
-		{"open /tmp/f.dat: too many open files", ClassLocalFS},
+		// fd exhaustion is usually our own leak — deliberately NOT LocalFS.
+		{"open /tmp/f.dat: too many open files", ClassInternal},
 		{"open /tmp/aaaa...: file name too long", ClassLocalFS},
 		// Local-filesystem markers win over a bare status-code substring.
 		{"open /data/run400/f.dat: permission denied", ClassLocalFS},
@@ -115,7 +116,7 @@ func TestIsReportable(t *testing.T) {
 		{"local fs permission", errors.New("open /Users/x/Downloads/f.dat: permission denied"), CategoryTransfer, false},
 		{"local fs missing path", errors.New("open /Volumes/gone/f.dat: no such file or directory"), CategoryTransfer, false},
 		{"local fs read-only", errors.New("write /mnt/ro/f.dat: read-only file system"), CategoryTransfer, false},
-		{"local fs fd limit", errors.New("open /tmp/f.dat: too many open files"), CategoryTransfer, false},
+		{"fd exhaustion stays reportable", errors.New("open /tmp/f.dat: too many open files"), CategoryTransfer, true},
 		{"local fs name too long", errors.New("open /tmp/x: file name too long"), CategoryTransfer, false},
 
 		// Reportable: server errors and unclassified internal errors

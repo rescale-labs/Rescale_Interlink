@@ -154,13 +154,14 @@ func ClassifyErrorClass(msg string) ErrorClass {
 		return ClassDiskSpace
 	// Local filesystem refusals. These come from the user's own machine — a
 	// protected download directory, a path that disappeared mid-transfer, a
-	// read-only volume, an exhausted fd limit — so they are never a Rescale
-	// failure worth a report. Checked before the 4xx/5xx digit matches, whose
-	// substring tests would otherwise claim messages containing a bare number.
+	// read-only volume — so they are never a Rescale failure worth a report.
+	// Checked before the 4xx/5xx digit matches, whose substring tests would
+	// otherwise claim messages containing a bare number. Deliberately absent:
+	// "too many open files" — fd exhaustion is usually our own descriptor
+	// leak, so it stays reportable.
 	case strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "no such file or directory") ||
 		strings.Contains(lower, "read-only file system") ||
-		strings.Contains(lower, "too many open files") ||
 		strings.Contains(lower, "file name too long"):
 		return ClassLocalFS
 	case strings.Contains(lower, "400") || strings.Contains(lower, "404"):
