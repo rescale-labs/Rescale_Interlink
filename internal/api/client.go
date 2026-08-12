@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,12 +24,27 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
-// retryLogger implements the retryablehttp.LeveledLogger interface
-// In GUI mode, we suppress most retry logs to keep the console clean
-type retryLogger struct{}
+// retryNoticeMinWait is the shortest retry backoff that gets its own notice.
+// Below it the pause is too short for a user to wonder about; at or above it,
+// someone is watching a command sit there and needs to be told why.
+const retryNoticeMinWait = 5 * time.Second
+
+// retryDrainLimit caps how much of an abandoned response body is read back so
+// the connection can be reused. Matches go-retryablehttp's own limit.
+const retryDrainLimit = 4 << 10
+
+// retryLogger implements the retryablehttp.LeveledLogger interface.
+//
+// go-retryablehttp announces every retry through Debug("retrying request"),
+// which is the only signal that a call is stalling instead of failing. Those go
+// to the user through the rate limit notice hook — not the standard logger,
+// which the CLI discards at default verbosity. The remaining levels stay behind
+// RESCALE_DEBUG; the library never calls Warn at all.
+type retryLogger struct {
+	policy *retryPolicy
+}
 
 func (l *retryLogger) Error(msg string, keysAndValues ...interface{}) {
-	// Only log retry errors if RESCALE_DEBUG is set (suppress in GUI mode)
 	// Context canceled errors are expected during shutdown, don't log them
 	errStr := fmt.Sprintf("%v", keysAndValues)
 	if strings.Contains(errStr, "context canceled") {
@@ -40,18 +56,273 @@ func (l *retryLogger) Error(msg string, keysAndValues ...interface{}) {
 }
 
 func (l *retryLogger) Info(msg string, keysAndValues ...interface{}) {
-	// Only log in debug mode
+	if os.Getenv("RESCALE_DEBUG") != "" {
+		log.Printf("[RETRY INFO] %s %v", msg, keysAndValues)
+	}
 }
 
+// Debug surfaces retry attempts. Every "retrying request" is attempt 2 or later
+// by construction — go-retryablehttp only logs it once it has decided to retry.
 func (l *retryLogger) Debug(msg string, keysAndValues ...interface{}) {
-	// Only log in debug mode
+	if msg != "retrying request" || l.policy == nil {
+		return
+	}
+
+	wait, _ := kvValue(keysAndValues, "timeout").(time.Duration)
+	// A wait this long was already announced by retryPolicy.backoff, in more
+	// detail than is available here.
+	if wait >= retryNoticeMinWait {
+		return
+	}
+
+	desc, _ := kvValue(keysAndValues, "request").(string)
+	remaining, _ := kvValue(keysAndValues, "remaining").(int)
+	l.policy.emit("warn", fmt.Sprintf("Retrying %s in %s (%d attempt(s) left)",
+		desc, wait.Round(time.Millisecond), remaining))
 }
 
 func (l *retryLogger) Warn(msg string, keysAndValues ...interface{}) {
-	// Only log if RESCALE_DEBUG is set
 	if os.Getenv("RESCALE_DEBUG") != "" {
 		log.Printf("⚠️  [RETRY WARN] %s %v", msg, keysAndValues)
 	}
+}
+
+// kvValue pulls one value out of go-retryablehttp's alternating key/value log
+// arguments. Returns nil when the key is absent.
+func kvValue(keysAndValues []interface{}, key string) interface{} {
+	for i := 0; i+1 < len(keysAndValues); i += 2 {
+		if k, ok := keysAndValues[i].(string); ok && k == key {
+			return keysAndValues[i+1]
+		}
+	}
+	return nil
+}
+
+// retryBudgetKey marks a context that carries the start time of one logical API
+// call.
+type retryBudgetKey struct{}
+
+// withRetryBudget stamps ctx with the moment the HTTP work for one API call
+// starts, so the retry policy can bound the wall-clock time spent retrying it.
+// Stamp after any rate limiter wait: queuing for a token is not retrying.
+func withRetryBudget(ctx context.Context) context.Context {
+	return context.WithValue(ctx, retryBudgetKey{}, time.Now())
+}
+
+// retryPolicy holds what go-retryablehttp's callbacks need: the shared limiter
+// store, so every 429 teaches the rate limiter about itself, and the wall-clock
+// budget that bounds how long one API call may spend retrying.
+type retryPolicy struct {
+	store   *ratelimit.LimiterStore
+	baseURL string
+	apiKey  string
+
+	// maxElapsed bounds the total time one logical API call may spend retrying.
+	// Zero disables the bound.
+	maxElapsed time.Duration
+
+	// notify replaces the process-level rate limit notice hook. Tests set it;
+	// production leaves it nil so the hook is resolved when a notice is emitted,
+	// which may be long after the client was built.
+	notify func(level, message string)
+}
+
+// emit sends a user-visible notice through the rate limit notice channel — the
+// CLI's stderr sink and the GUI's Activity Logs. Falls back to the standard
+// logger only when no hook is registered at all.
+func (p *retryPolicy) emit(level, message string) {
+	fn := p.notify
+	if fn == nil {
+		fn = ratelimit.NotifyFunc()
+	}
+	if fn == nil {
+		log.Print(message)
+		return
+	}
+	fn(level, message)
+}
+
+// limiterFor resolves the shared limiter that governs a request's scope.
+func (p *retryPolicy) limiterFor(req *nethttp.Request) *ratelimit.RateLimiter {
+	scope := p.store.Registry().ResolveScope(req.Method, req.URL.Path)
+	return p.store.GetLimiter(p.baseURL, p.apiKey, scope)
+}
+
+// checkRetry decides whether an attempt gets retried.
+//
+// Never retries 4xx (not recoverable) except 429. Never retries 5xx on job
+// creation or submission POSTs: those are not idempotent, so a retry could
+// duplicate a job — the response is passed through instead so the caller can
+// report the server's own error.
+func (p *retryPolicy) checkRetry(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
+	// Don't retry on context cancellation
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+
+	// On 429, drain + cooldown through the coordinator hooks first, so the
+	// limiter learns about every 429 rather than only those that exhaust
+	// retries, and can block other processes' requests too. This runs even when
+	// the budget below is already spent — the cooldown outlives this call.
+	if err == nil && resp != nil && resp.StatusCode == nethttp.StatusTooManyRequests && resp.Request != nil {
+		limiter := p.limiterFor(resp.Request)
+		limiter.Drain()
+
+		// Parse Retry-After per RFC 7231: delta-seconds or HTTP-date
+		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+			if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil && seconds > 0 {
+				limiter.SetCooldown(time.Duration(seconds) * time.Second)
+			} else if t, parseErr := nethttp.ParseTime(retryAfter); parseErr == nil {
+				if d := time.Until(t); d > 0 {
+					limiter.SetCooldown(d)
+				}
+			}
+		}
+	}
+
+	if budgetErr := p.budgetExceeded(ctx, resp, err); budgetErr != nil {
+		return false, budgetErr
+	}
+
+	// Retry transport/connection errors (all methods)
+	if err != nil {
+		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+	}
+
+	// Never retry 4xx (client errors) — not recoverable.
+	// Return (false, nil) so the response flows through to the caller.
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 429 {
+		return false, nil
+	}
+	// Job creation/submission POSTs: pass the 5xx through cleanly so CreateJob
+	// can read the body and report the actual error.
+	if resp.StatusCode >= 500 && resp.Request != nil {
+		if resp.Request.Method == "POST" && (strings.Contains(resp.Request.URL.Path, "/api/v3/jobs/") ||
+			strings.Contains(resp.Request.URL.Path, "/submit/")) {
+			return false, nil
+		}
+	}
+	// Fall back to default policy for everything else
+	// (retries 5xx on GET, retries 429, etc.)
+	return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+}
+
+// budgetExceeded reports that this call has spent its wall-clock retry budget,
+// as an error describing what it was still failing on. Bounds the stall a user
+// sees: an unreachable host or a stuck 500 otherwise burns all 11 attempts,
+// silently, for minutes.
+//
+// The check is on elapsed time, not on elapsed plus the next backoff, so a call
+// can overshoot the budget by up to one RetryWaitMax before it stops.
+func (p *retryPolicy) budgetExceeded(ctx context.Context, resp *nethttp.Response, err error) error {
+	if p.maxElapsed <= 0 {
+		return nil
+	}
+	start, ok := ctx.Value(retryBudgetKey{}).(time.Time)
+	if !ok {
+		return nil // Not stamped — no budget to enforce
+	}
+	elapsed := time.Since(start)
+	if elapsed <= p.maxElapsed {
+		return nil
+	}
+
+	cause := err
+	if cause == nil {
+		if resp != nil {
+			cause = fmt.Errorf("HTTP %d", resp.StatusCode)
+		} else {
+			cause = errors.New("request failed")
+		}
+	}
+	return fmt.Errorf("retries exhausted after %v (limit %v): %w",
+		elapsed.Round(time.Millisecond), p.maxElapsed, cause)
+}
+
+// backoff resolves how long to sleep before the next attempt.
+//
+// DefaultBackoff returns Retry-After verbatim on 429/503 without applying
+// RetryWaitMax, so a server asking for 1800s would sleep half an hour inside a
+// single call, up to RetryMax times over. A coordinator cooldown seeded from the
+// same header arrives here too. Both are clamped to max.
+func (p *retryPolicy) backoff(min, max time.Duration, attemptNum int, resp *nethttp.Response) time.Duration {
+	wait := retryablehttp.DefaultBackoff(min, max, attemptNum, resp)
+
+	if resp != nil && resp.StatusCode == nethttp.StatusTooManyRequests && resp.Request != nil {
+		if cooldown := p.limiterFor(resp.Request).CooldownRemaining(); cooldown > wait {
+			wait = cooldown
+		}
+	}
+
+	asked := wait
+	if max > 0 && wait > max {
+		wait = max
+	}
+	if wait >= retryNoticeMinWait {
+		p.emit("warn", longWaitMessage(wait, asked, resp))
+	}
+	return wait
+}
+
+// longWaitMessage explains a retry sleep long enough for a user to notice.
+func longWaitMessage(wait, asked time.Duration, resp *nethttp.Response) string {
+	target := "the Rescale API"
+	status := ""
+	if resp != nil {
+		status = fmt.Sprintf(" (HTTP %d)", resp.StatusCode)
+		if resp.Request != nil && resp.Request.URL != nil {
+			target = resp.Request.Method + " " + resp.Request.URL.Path
+		}
+	}
+	msg := fmt.Sprintf("Waiting %s before retrying %s%s", wait.Round(time.Second), target, status)
+	if asked > wait {
+		msg += fmt.Sprintf(" — server asked for %s, capped at %s", asked.Round(time.Second), wait)
+	}
+	return msg
+}
+
+// Retry bounds for every API client. RetryMax is attempts after the first, so
+// 10 means 11 total.
+const (
+	apiRetryMax     = 10
+	apiRetryWaitMin = 1 * time.Second
+	apiRetryWaitMax = 30 * time.Second
+)
+
+// newRetryClient wires a retry policy onto a go-retryablehttp client. The bounds
+// are parameters so tests can drive the same callbacks without sleeping through
+// production backoff.
+func newRetryClient(inner *nethttp.Client, policy *retryPolicy, retryMax int, waitMin, waitMax time.Duration) *retryablehttp.Client {
+	rc := retryablehttp.NewClient()
+	rc.HTTPClient = inner
+	rc.RetryMax = retryMax
+	rc.RetryWaitMin = waitMin
+	rc.RetryWaitMax = waitMax
+	rc.Logger = &retryLogger{policy: policy}
+	rc.CheckRetry = policy.checkRetry
+	rc.Backoff = policy.backoff
+	rc.ErrorHandler = policy.errorHandler
+	return rc
+}
+
+// errorHandler decides what the caller sees once the retry loop gives up.
+//
+// A nil error means retries were exhausted on a response — a persistent 500,
+// say — so the response is handed back intact and the caller can report the
+// server's own error text. A non-nil error means there is no usable response,
+// but there may still be a body: a context cancelled between the response
+// arriving and checkRetry running leaves one behind, and net/http discards any
+// response returned alongside an error without closing it. Drain it here rather
+// than leak the connection.
+func (p *retryPolicy) errorHandler(resp *nethttp.Response, err error, _ int) (*nethttp.Response, error) {
+	if err == nil {
+		return resp, nil
+	}
+	if resp != nil && resp.Body != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, retryDrainLimit))
+		resp.Body.Close()
+	}
+	return nil, err
 }
 
 // authScheme picks the Authorization scheme for a Rescale API key.
@@ -128,103 +399,22 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("failed to configure HTTP client: %w", err)
 	}
 
-	// Wrap with retry logic
-	retryClient := retryablehttp.NewClient()
-	retryClient.HTTPClient = httpClient
-	retryClient.RetryMax = 10 // Increased from 5 to 10 (11 total attempts)
-	retryClient.RetryWaitMin = 1 * time.Second
-	retryClient.RetryWaitMax = 30 * time.Second
-	retryClient.Logger = &retryLogger{} // Enable error/warning logging
-
-	// Capture baseURL and apiKey for use in CheckRetry/Backoff closures
+	// Capture baseURL and apiKey for the retry callbacks
 	clientBaseURL := strings.TrimSuffix(cfg.APIBaseURL, "/")
 	clientAPIKey := cfg.APIKey
 	store := ratelimit.GlobalStore()
 
-	// Custom retry policy: don't retry non-idempotent job creation/submission
-	// on 5xx, and never retry 4xx (except 429 rate limiting).
-	// On 429, drain+cooldown through coordinator BEFORE returning (true, nil)
-	// so the rate limiter learns about every 429, not just those that exhaust retries.
-	retryClient.CheckRetry = func(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
-		// Don't retry on context cancellation
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		// Retry transport/connection errors (all methods)
-		if err != nil {
-			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
-		}
-
-		// Phase 2: On 429, drain + cooldown through coordinator hooks
-		// This runs BEFORE returning (true, nil) so the coordinator knows
-		// about the 429 and can block all other processes' requests.
-		if resp != nil && resp.StatusCode == 429 && resp.Request != nil {
-			registry := store.Registry()
-			scope := registry.ResolveScope(resp.Request.Method, resp.Request.URL.Path)
-			limiter := store.GetLimiter(clientBaseURL, clientAPIKey, scope)
-
-			// Drain (goes through coordinator hooks if connected)
-			limiter.Drain()
-
-			// Parse Retry-After per RFC 7231: delta-seconds or HTTP-date
-			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-				if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil && seconds > 0 {
-					limiter.SetCooldown(time.Duration(seconds) * time.Second)
-				} else if t, parseErr := nethttp.ParseTime(retryAfter); parseErr == nil {
-					if d := time.Until(t); d > 0 {
-						limiter.SetCooldown(d)
-					}
-				}
-			}
-		}
-
-		// Never retry 4xx (client errors) — not recoverable.
-		// Return (false, nil) so the response flows through to the caller.
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 429 {
-			return false, nil
-		}
-		// For job creation/submission POST specifically: don't retry 5xx.
-		// Job creation is non-idempotent — retrying could create duplicates.
-		// Return (false, nil) to let the 5xx response flow through cleanly
-		// so CreateJob can read the body and report the actual error.
-		if resp.StatusCode >= 500 && resp.Request != nil {
-			if resp.Request.Method == "POST" && (strings.Contains(resp.Request.URL.Path, "/api/v3/jobs/") ||
-				strings.Contains(resp.Request.URL.Path, "/submit/")) {
-				return false, nil
-			}
-		}
-		// Fall back to default policy for everything else
-		// (retries 5xx on GET, retries 429, etc.)
-		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+	// The retry policy owns 429 feedback to the rate limiter, the wall-clock
+	// retry budget, backoff clamping, and the notices a user sees while a call
+	// is stalling. Shared with the same wall-clock cap the storage layer uses.
+	policy := &retryPolicy{
+		store:      store,
+		baseURL:    clientBaseURL,
+		apiKey:     clientAPIKey,
+		maxElapsed: constants.RetryMaxElapsed,
 	}
 
-	// Phase 2: Custom backoff that honors coordinator cooldowns.
-	// After CheckRetry triggers drain+cooldown on a 429, retryablehttp's default
-	// backoff might return a short delay (e.g., 2s) while the server said "wait 60s".
-	// This function returns max(defaultBackoff, cooldownRemaining) so in-flight retries
-	// respect the server's Retry-After.
-	retryClient.Backoff = func(min, max time.Duration, attemptNum int, resp *nethttp.Response) time.Duration {
-		defaultBackoff := retryablehttp.DefaultBackoff(min, max, attemptNum, resp)
-
-		if resp != nil && resp.StatusCode == 429 && resp.Request != nil {
-			registry := store.Registry()
-			scope := registry.ResolveScope(resp.Request.Method, resp.Request.URL.Path)
-			limiter := store.GetLimiter(clientBaseURL, clientAPIKey, scope)
-
-			cooldown := limiter.CooldownRemaining()
-			if cooldown > defaultBackoff {
-				return cooldown
-			}
-		}
-
-		return defaultBackoff
-	}
-
-	// Preserve response body on retry exhaustion. Without this, go-retryablehttp
-	// drains the body and returns a generic "giving up after N attempt(s)" message.
-	retryClient.ErrorHandler = func(resp *nethttp.Response, err error, numTries int) (*nethttp.Response, error) {
-		return resp, err
-	}
+	retryClient := newRetryClient(httpClient, policy, apiRetryMax, apiRetryWaitMin, apiRetryWaitMax)
 
 	// Rate Limiter Setup
 	// Rate limiters are obtained from the process-level singleton store, keyed by
@@ -332,6 +522,10 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		}
 		reqBody = bytes.NewReader(jsonData)
 	}
+
+	// Start the retry budget here, not before the limiter wait above: queuing
+	// for a token is not retrying, and must not spend the budget.
+	ctx = withRetryBudget(ctx)
 
 	url := c.baseURL + path
 	req, err := nethttp.NewRequestWithContext(ctx, method, url, reqBody)

@@ -10,10 +10,14 @@ import (
 	neturl "net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
 // TestNewClientRejectsEmptyBaseURL verifies that NewClient fails with a clear error
@@ -958,6 +962,284 @@ func TestListJobsPage(t *testing.T) {
 		}
 		if len(jobs) != 12 || hasMore {
 			t.Errorf("got %d jobs, hasMore=%v; want 12, false", len(jobs), hasMore)
+		}
+	})
+}
+
+// --- Retry policy: backoff clamping, retry budget, notices, body handling ---
+
+// newRetryTestPolicy builds a policy with an isolated limiter store and a
+// notice recorder.
+func newRetryTestPolicy(t *testing.T, maxElapsed time.Duration) (*retryPolicy, func() []string) {
+	t.Helper()
+
+	var mu sync.Mutex
+	var notices []string
+	policy := &retryPolicy{
+		store:      ratelimit.NewTestStore(),
+		baseURL:    "https://platform.rescale.com",
+		apiKey:     "test-key",
+		maxElapsed: maxElapsed,
+		notify: func(_, message string) {
+			mu.Lock()
+			defer mu.Unlock()
+			notices = append(notices, message)
+		},
+	}
+	return policy, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), notices...)
+	}
+}
+
+// retryTestResponse fabricates a response carrying the request that produced it,
+// which is what the backoff and retry callbacks read.
+func retryTestResponse(status int, retryAfter string) *http.Response {
+	u, _ := neturl.Parse("https://platform.rescale.com/api/v3/files/?page=2")
+	header := http.Header{}
+	if retryAfter != "" {
+		header.Set("Retry-After", retryAfter)
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     header,
+		Request:    &http.Request{Method: "GET", URL: u},
+	}
+}
+
+// TestRetryBackoffClampsToWaitMax covers the sleep math: go-retryablehttp's
+// DefaultBackoff returns Retry-After verbatim on 429/503 without applying
+// RetryWaitMax, and a 429 cooldown can be just as long.
+func TestRetryBackoffClampsToWaitMax(t *testing.T) {
+	const (
+		waitMin = 1 * time.Second
+		waitMax = 30 * time.Second
+	)
+
+	t.Run("retry-after far beyond max is clamped and announced", func(t *testing.T) {
+		policy, notices := newRetryTestPolicy(t, 0)
+
+		got := policy.backoff(waitMin, waitMax, 0, retryTestResponse(429, "1800"))
+		if got != waitMax {
+			t.Errorf("backoff() = %v, want %v (Retry-After 1800s clamped)", got, waitMax)
+		}
+
+		msgs := notices()
+		if len(msgs) != 1 {
+			t.Fatalf("expected one notice before a %v sleep, got %d: %v", got, len(msgs), msgs)
+		}
+		for _, want := range []string{"Waiting 30s", "GET /api/v3/files/", "HTTP 429", "server asked for 30m0s", "capped at 30s"} {
+			if !strings.Contains(msgs[0], want) {
+				t.Errorf("notice %q missing %q", msgs[0], want)
+			}
+		}
+	})
+
+	t.Run("503 retry-after is clamped too", func(t *testing.T) {
+		policy, _ := newRetryTestPolicy(t, 0)
+
+		if got := policy.backoff(waitMin, waitMax, 0, retryTestResponse(503, "600")); got != waitMax {
+			t.Errorf("backoff() = %v, want %v", got, waitMax)
+		}
+	})
+
+	t.Run("limiter cooldown beyond max is clamped", func(t *testing.T) {
+		policy, _ := newRetryTestPolicy(t, 0)
+		policy.store.GetLimiter(policy.baseURL, policy.apiKey, ratelimit.ScopeUser).SetCooldown(20 * time.Minute)
+
+		if got := policy.backoff(waitMin, waitMax, 0, retryTestResponse(429, "")); got != waitMax {
+			t.Errorf("backoff() = %v, want %v (cooldown clamped)", got, waitMax)
+		}
+	})
+
+	t.Run("short retry-after passes through unannounced", func(t *testing.T) {
+		policy, notices := newRetryTestPolicy(t, 0)
+
+		if got := policy.backoff(waitMin, waitMax, 0, retryTestResponse(429, "2")); got != 2*time.Second {
+			t.Errorf("backoff() = %v, want 2s", got)
+		}
+		if msgs := notices(); len(msgs) != 0 {
+			t.Errorf("a 2s wait should not notify, got %v", msgs)
+		}
+	})
+
+	t.Run("exponential growth stops at max", func(t *testing.T) {
+		policy, notices := newRetryTestPolicy(t, 0)
+
+		// 2^5 * 1s = 32s, over the 30s ceiling.
+		if got := policy.backoff(waitMin, waitMax, 5, retryTestResponse(500, "")); got != waitMax {
+			t.Errorf("backoff() = %v, want %v", got, waitMax)
+		}
+		msgs := notices()
+		if len(msgs) != 1 {
+			t.Fatalf("expected one notice, got %d: %v", len(msgs), msgs)
+		}
+		if strings.Contains(msgs[0], "server asked") {
+			t.Errorf("notice should not blame the server for our own backoff: %q", msgs[0])
+		}
+	})
+
+	t.Run("first 500 retry is quiet", func(t *testing.T) {
+		policy, notices := newRetryTestPolicy(t, 0)
+
+		if got := policy.backoff(waitMin, waitMax, 0, retryTestResponse(500, "")); got != waitMin {
+			t.Errorf("backoff() = %v, want %v", got, waitMin)
+		}
+		if msgs := notices(); len(msgs) != 0 {
+			t.Errorf("a 1s wait should not notify, got %v", msgs)
+		}
+	})
+}
+
+// TestRetryBudgetStopsRetries verifies the wall-clock cap: once a call has spent
+// its budget, checkRetry stops the loop and says what it was failing on.
+func TestRetryBudgetStopsRetries(t *testing.T) {
+	const budget = 40 * time.Millisecond
+	policy, _ := newRetryTestPolicy(t, budget)
+	resp := retryTestResponse(500, "")
+
+	ctx := withRetryBudget(context.Background())
+	retry, err := policy.checkRetry(ctx, resp, nil)
+	if !retry || err != nil {
+		t.Fatalf("checkRetry() inside budget = (%v, %v), want (true, nil)", retry, err)
+	}
+
+	time.Sleep(budget + 20*time.Millisecond)
+
+	retry, err = policy.checkRetry(ctx, resp, nil)
+	if retry {
+		t.Error("checkRetry() should stop retrying once the budget is spent")
+	}
+	if err == nil {
+		t.Fatal("checkRetry() should explain why it gave up")
+	}
+	for _, want := range []string{"retries exhausted after", "HTTP 500"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+
+	t.Run("transport error is preserved as the cause", func(t *testing.T) {
+		dialErr := errors.New("dial tcp: lookup platform.rescale.com: no such host")
+		retry, err := policy.checkRetry(ctx, nil, dialErr)
+		if retry {
+			t.Error("checkRetry() should stop retrying a transport error past the budget")
+		}
+		if !errors.Is(err, dialErr) {
+			t.Errorf("error %v should wrap the transport error", err)
+		}
+	})
+
+	t.Run("unstamped context is not capped", func(t *testing.T) {
+		retry, err := policy.checkRetry(context.Background(), resp, nil)
+		if !retry || err != nil {
+			t.Errorf("checkRetry() without a budget stamp = (%v, %v), want (true, nil)", retry, err)
+		}
+	})
+}
+
+// TestRetryEmitsNoticesAndHonorsBudget drives the real go-retryablehttp wiring
+// against a server that never recovers: the retries have to be visible and the
+// call has to give up well short of all 11 attempts.
+func TestRetryEmitsNoticesAndHonorsBudget(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"detail":"backend on fire"}`))
+	}))
+	defer server.Close()
+
+	policy, notices := newRetryTestPolicy(t, 120*time.Millisecond)
+	policy.baseURL = server.URL
+	retryClient := newRetryClient(&http.Client{}, policy, apiRetryMax, 20*time.Millisecond, 40*time.Millisecond)
+
+	req, err := http.NewRequestWithContext(withRetryBudget(context.Background()), "GET", server.URL+"/api/v3/jobs/", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	resp, err := retryClient.StandardClient().Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("Do() should fail once the retry budget is spent")
+	}
+	if !strings.Contains(err.Error(), "retries exhausted after") {
+		t.Errorf("error %q should name the exhausted retry budget", err.Error())
+	}
+
+	attempts := atomic.LoadInt32(&hits)
+	if attempts < 2 {
+		t.Errorf("server saw %d requests, want at least one retry", attempts)
+	}
+	if attempts > apiRetryMax {
+		t.Errorf("server saw %d requests — the budget should stop the loop short of %d attempts",
+			attempts, apiRetryMax+1)
+	}
+
+	msgs := notices()
+	if len(msgs) == 0 {
+		t.Fatal("retries produced no user-visible notice")
+	}
+	if !strings.Contains(msgs[0], "Retrying") || !strings.Contains(msgs[0], "500") {
+		t.Errorf("first notice %q should name the retry and the status", msgs[0])
+	}
+}
+
+// trackedBody records whether a response body was read and closed.
+type trackedBody struct {
+	reader io.Reader
+	read   int
+	closed bool
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	b.read += n
+	return n, err
+}
+
+func (b *trackedBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+// TestRetryErrorHandlerBodyHandling covers both exits from the retry loop: a
+// cancelled call must not leak the response net/http is about to discard, and
+// retry exhaustion must hand the body to the caller so it can report the
+// server's own error text.
+func TestRetryErrorHandlerBodyHandling(t *testing.T) {
+	policy, _ := newRetryTestPolicy(t, 0)
+
+	t.Run("error path drains and closes", func(t *testing.T) {
+		body := &trackedBody{reader: strings.NewReader("server said no")}
+		got, err := policy.errorHandler(&http.Response{StatusCode: 500, Body: body}, context.Canceled, 3)
+
+		if got != nil {
+			t.Error("errorHandler() must not hand back a response alongside an error — net/http drops it unclosed")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("errorHandler() error = %v, want context.Canceled", err)
+		}
+		if !body.closed {
+			t.Error("response body was not closed")
+		}
+		if body.read == 0 {
+			t.Error("response body was not drained, so the connection cannot be reused")
+		}
+	})
+
+	t.Run("exhaustion path keeps the response readable", func(t *testing.T) {
+		body := &trackedBody{reader: strings.NewReader(`{"detail":"still broken"}`)}
+		resp := &http.Response{StatusCode: 500, Body: body}
+
+		got, err := policy.errorHandler(resp, nil, 11)
+		if got != resp || err != nil {
+			t.Fatalf("errorHandler() = (%v, %v), want the response and nil", got, err)
+		}
+		if body.closed {
+			t.Error("body must stay open for the caller to read the server's error")
 		}
 	})
 }
