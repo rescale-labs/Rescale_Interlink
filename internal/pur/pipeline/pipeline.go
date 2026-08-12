@@ -1313,6 +1313,9 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 		IsLowPriority: spec.IsLowPriority,
 		Tags:          spec.Tags,
 		ProjectID:     spec.ProjectID,
+		CIDRRule:      spec.CIDRRule,
+		PublicKey:     spec.PublicKey,
+		SSHPort:       spec.SSHPort,
 	}
 
 	if spec.OnDemandLicenseSeller != "" {

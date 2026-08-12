@@ -132,3 +132,119 @@ func TestJobAutomationRequest_NestedAutomationFormat(t *testing.T) {
 		t.Errorf("expected nested automation format, got: %s", s)
 	}
 }
+
+func TestJobRequest_SSHAccessFieldsSerialize(t *testing.T) {
+	req := JobRequest{
+		Name:      "ssh-job",
+		CIDRRule:  "10.0.0.0/8,76.238.240.39/32",
+		PublicKey: "ssh-rsa AAAAB3NzaC1yc2E",
+		SSHPort:   22,
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	s := string(data)
+	for _, want := range []string{
+		`"cidrRule":"10.0.0.0/8,76.238.240.39/32"`,
+		`"publicKey":"ssh-rsa AAAAB3NzaC1yc2E"`,
+		`"sshPort":22`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected %s in payload, got: %s", want, s)
+		}
+	}
+}
+
+// TestJobRequest_SSHAccessFieldsOmittedWhenUnset guards existing submits: a job
+// that sets none of the SSH fields must produce the same payload as before, so
+// the platform keeps applying its own defaults.
+func TestJobRequest_SSHAccessFieldsOmittedWhenUnset(t *testing.T) {
+	data, err := json.Marshal(JobRequest{Name: "plain-job"})
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	s := string(data)
+	for _, absent := range []string{"cidrRule", "publicKey", "sshPort"} {
+		if strings.Contains(s, absent) {
+			t.Errorf("expected %q to be omitted when unset, got: %s", absent, s)
+		}
+	}
+}
+
+func TestJobRequest_RoundTripSSHAccessFields(t *testing.T) {
+	// A user-authored job file: the SSH fields must survive the decode that
+	// previously discarded them.
+	const spec = `{
+	  "name": "ws",
+	  "jobanalyses": [],
+	  "cidrRule": "0.0.0.0/0",
+	  "publicKey": "ssh-ed25519 AAAAC3Nza",
+	  "sshPort": 32100
+	}`
+	var req JobRequest
+	if err := json.Unmarshal([]byte(spec), &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if req.CIDRRule != "0.0.0.0/0" {
+		t.Errorf("CIDRRule = %q", req.CIDRRule)
+	}
+	if req.PublicKey != "ssh-ed25519 AAAAC3Nza" {
+		t.Errorf("PublicKey = %q", req.PublicKey)
+	}
+	if req.SSHPort != 32100 {
+		t.Errorf("SSHPort = %d, want 32100", req.SSHPort)
+	}
+}
+
+func TestUnknownJobRequestFields(t *testing.T) {
+	tests := []struct {
+		name string
+		spec string
+		want []string
+	}{
+		{
+			name: "all keys known",
+			spec: `{"name":"j","jobanalyses":[],"isLowPriority":false,"tags":["a"],
+			        "projectId":"p","clusterId":"c","jobAutomations":[],
+			        "cidrRule":"0.0.0.0/0","publicKey":"k","sshPort":22}`,
+			want: nil,
+		},
+		{
+			name: "unsupported and misspelled keys reported, sorted",
+			spec: `{"name":"j","sessionTimeout":3600,"isInteractive":true,"cidrRuel":"x"}`,
+			want: []string{"cidrRuel", "isInteractive", "sessionTimeout"},
+		},
+		{
+			// encoding/json matches keys case-insensitively, so a differently
+			// cased key IS decoded and must not be reported as ignored.
+			name: "case-insensitive match is not unknown",
+			spec: `{"Name":"j","ProjectID":"p","CIDRRule":"0.0.0.0/0"}`,
+			want: nil,
+		},
+		{
+			name: "nested keys are not inspected",
+			spec: `{"name":"j","jobanalyses":[{"command":"c","madeUpKey":1}]}`,
+			want: nil,
+		},
+		{
+			name: "non-object input reports nothing",
+			spec: `[{"name":"j"}]`,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := UnknownJobRequestFields([]byte(tt.spec))
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}

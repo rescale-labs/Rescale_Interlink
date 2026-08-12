@@ -337,6 +337,11 @@ func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
 		},
 		Tags:      m.Tags,
 		ProjectID: m.ProjectID,
+		// From #RESCALE_INBOUND_SSH_CIDR and #RESCALE_PUBLIC_KEY. Both are
+		// required for the job to accept an SSH connection, so a script that
+		// declares them has to reach the create call with them.
+		CIDRRule:  m.InboundSSHCIDR,
+		PublicKey: m.PublicKey,
 	}
 
 	// Add user-defined license settings if provided
@@ -485,6 +490,8 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		Tags:            job.Tags,
 		ProjectID:       job.ProjectID,
 		Automations:     job.Automations,
+		InboundSSHCIDR:  job.CIDRRule,
+		PublicKey:       job.PublicKey,
 		// Note: LicenseSettings JSON from CSV doesn't map directly to SGE fields
 		// UseLicense could be derived from LicenseSettings if needed
 		EnvVariables: make(map[string]string),
@@ -518,6 +525,8 @@ func SGEMetadataToJobSpec(m *SGEMetadata) models.JobSpec {
 		Tags:            m.Tags,
 		ProjectID:       m.ProjectID,
 		Automations:     m.Automations,
+		CIDRRule:        m.InboundSSHCIDR,
+		PublicKey:       m.PublicKey,
 		// Note: InputFiles from script are stored in SGEMetadata.InputFiles
 		// and should be handled separately by the caller
 	}

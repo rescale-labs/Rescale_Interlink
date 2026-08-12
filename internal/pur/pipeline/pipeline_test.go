@@ -327,6 +327,60 @@ func TestBuildJobRequest_WalltimeIsHoursNotSeconds(t *testing.T) {
 	}
 }
 
+// TestBuildJobRequest_PropagatesSSHAccess covers the SSH access settings on the
+// way from a job spec to the create call. They used to stop here, so a spec that
+// requested SSH access produced a job the user could not reach.
+func TestBuildJobRequest_PropagatesSSHAccess(t *testing.T) {
+	spec := models.JobSpec{
+		JobName:       "ssh",
+		AnalysisCode:  "user_included",
+		Command:       "echo hi",
+		CoreType:      "emerald",
+		CoresPerSlot:  1,
+		Slots:         1,
+		WalltimeHours: 1.0,
+		CIDRRule:      "10.0.0.0/8",
+		PublicKey:     "ssh-rsa AAAAB3NzaC1yc2E",
+		SSHPort:       32100,
+	}
+	req, err := BuildJobRequest(spec, nil, nil, false)
+	if err != nil {
+		t.Fatalf("BuildJobRequest() error = %v", err)
+	}
+	if req.CIDRRule != spec.CIDRRule {
+		t.Errorf("CIDRRule = %q, want %q", req.CIDRRule, spec.CIDRRule)
+	}
+	if req.PublicKey != spec.PublicKey {
+		t.Errorf("PublicKey = %q, want %q", req.PublicKey, spec.PublicKey)
+	}
+	if req.SSHPort != spec.SSHPort {
+		t.Errorf("SSHPort = %d, want %d", req.SSHPort, spec.SSHPort)
+	}
+}
+
+// TestBuildJobRequest_OmitsUnsetSSHAccess guards specs that say nothing about
+// SSH: the request must leave all three fields empty so they serialize away and
+// the platform keeps its own defaults.
+func TestBuildJobRequest_OmitsUnsetSSHAccess(t *testing.T) {
+	spec := models.JobSpec{
+		JobName:       "plain",
+		AnalysisCode:  "user_included",
+		Command:       "echo hi",
+		CoreType:      "emerald",
+		CoresPerSlot:  1,
+		Slots:         1,
+		WalltimeHours: 1.0,
+	}
+	req, err := BuildJobRequest(spec, nil, nil, false)
+	if err != nil {
+		t.Fatalf("BuildJobRequest() error = %v", err)
+	}
+	if req.CIDRRule != "" || req.PublicKey != "" || req.SSHPort != 0 {
+		t.Errorf("expected no SSH settings, got cidrRule=%q publicKey=%q sshPort=%d",
+			req.CIDRRule, req.PublicKey, req.SSHPort)
+	}
+}
+
 // TestCountFailedJobs verifies the failure count that Run uses for its exit
 // status. A pipeline where jobs failed used to return nil, so 'pur run' printed
 // "Pipeline completed" and exited 0 even when every job failed.

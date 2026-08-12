@@ -1,7 +1,13 @@
 // Package models defines data structures for the PUR application.
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"reflect"
+	"sort"
+	"strings"
+	"time"
+)
 
 // JobSpec represents a complete job specification from CSV
 type JobSpec struct {
@@ -32,6 +38,12 @@ type JobSpec struct {
 	// Optional subdirectory within each Run_* to tar instead of the full directory.
 	// When set, only the contents of Directory/TarSubpath are archived.
 	TarSubpath string `json:"tarSubpath,omitempty"`
+
+	// Inbound SSH access, passed straight through to the matching JobRequest
+	// fields. Named after the API keys so the mapping needs no translation.
+	CIDRRule  string `json:"cidrRule,omitempty"`
+	PublicKey string `json:"publicKey,omitempty"`
+	SSHPort   int    `json:"sshPort,omitempty"`
 }
 
 // JobState represents the state of a job in the pipeline
@@ -60,6 +72,65 @@ type JobRequest struct {
 	ProjectID      string                 `json:"projectId,omitempty"`
 	ClusterID      string                 `json:"clusterId,omitempty"`
 	JobAutomations []JobAutomationRequest `json:"jobAutomations,omitempty"`
+
+	// Inbound SSH access, the platform's "Job Settings" fields. A running job or
+	// workstation is only reachable over SSH when a CIDR rule and a public key
+	// are both registered on it, so a spec that supplies them has to carry them
+	// into the create call. All three are omitted when unset, leaving the
+	// platform's own defaults in place.
+	CIDRRule  string `json:"cidrRule,omitempty"`
+	PublicKey string `json:"publicKey,omitempty"`
+	SSHPort   int    `json:"sshPort,omitempty"`
+}
+
+// UnknownJobRequestFields reports the top-level keys of a JSON job
+// specification that JobRequest does not model. Typed decoding drops such keys
+// without complaint, so an unsupported or misspelled field never reaches the
+// platform and the platform never gets the chance to reject it. Callers name the
+// keys instead of failing, since a spec may legitimately carry fields Interlink
+// has no reason to send.
+//
+// Comparison is case-insensitive because encoding/json matches keys that way.
+// Only the top level is inspected; unknown keys nested inside jobanalyses or
+// inputFiles are still dropped silently. Returns nil when data is not a JSON
+// object.
+func UnknownJobRequestFields(data []byte) []string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+
+	known := jobRequestJSONKeys()
+	var unknown []string
+	for key := range raw {
+		if !known[strings.ToLower(key)] {
+			unknown = append(unknown, key)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown
+}
+
+// jobRequestJSONKeys returns the lowercased top-level JSON keys JobRequest
+// decodes. Derived by reflection so it cannot drift from the struct.
+func jobRequestJSONKeys() map[string]bool {
+	t := reflect.TypeOf(JobRequest{})
+	keys := make(map[string]bool, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name := field.Name
+		if tag := field.Tag.Get("json"); tag != "" {
+			tagName := strings.Split(tag, ",")[0]
+			if tagName == "-" {
+				continue
+			}
+			if tagName != "" {
+				name = tagName
+			}
+		}
+		keys[strings.ToLower(name)] = true
+	}
+	return keys
 }
 
 // JobAnalysisRequest represents an analysis within a job

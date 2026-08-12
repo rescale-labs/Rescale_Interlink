@@ -531,6 +531,63 @@ func TestSGEMetadata_ToJobRequest(t *testing.T) {
 	}
 }
 
+// TestSGEMetadata_ToJobRequest_SSHAccess covers the two directives the parser
+// already understood but dropped on the way to the job request, so a script
+// asking for SSH access got a job with none.
+func TestSGEMetadata_ToJobRequest_SSHAccess(t *testing.T) {
+	metadata := &SGEMetadata{
+		Name:           "ssh_job",
+		Command:        "./run.sh",
+		Analysis:       "openfoam",
+		CoreType:       "emerald",
+		CoresPerSlot:   16,
+		Walltime:       4,
+		InboundSSHCIDR: "10.0.0.0/8",
+		PublicKey:      "ssh-rsa AAAAB3NzaC1yc2E",
+	}
+
+	jobReq := metadata.ToJobRequest()
+
+	if jobReq.CIDRRule != "10.0.0.0/8" {
+		t.Errorf("JobRequest.CIDRRule = %q, want %q", jobReq.CIDRRule, "10.0.0.0/8")
+	}
+	if jobReq.PublicKey != "ssh-rsa AAAAB3NzaC1yc2E" {
+		t.Errorf("JobRequest.PublicKey = %q, want %q", jobReq.PublicKey, "ssh-rsa AAAAB3NzaC1yc2E")
+	}
+}
+
+// TestSGEMetadata_SSHAccessSurvivesJobSpecRoundTrip covers the GUI path: load a
+// script into the job config, save it back out, and the SSH settings must still
+// be there.
+func TestSGEMetadata_SSHAccessSurvivesJobSpecRoundTrip(t *testing.T) {
+	metadata := &SGEMetadata{
+		Name:           "ssh_job",
+		Command:        "./run.sh",
+		Analysis:       "openfoam",
+		CoreType:       "emerald",
+		CoresPerSlot:   8,
+		Walltime:       4,
+		InboundSSHCIDR: "0.0.0.0/0",
+		PublicKey:      "ssh-ed25519 AAAAC3Nza",
+	}
+
+	spec := SGEMetadataToJobSpec(metadata)
+	if spec.CIDRRule != metadata.InboundSSHCIDR {
+		t.Errorf("JobSpec.CIDRRule = %q, want %q", spec.CIDRRule, metadata.InboundSSHCIDR)
+	}
+	if spec.PublicKey != metadata.PublicKey {
+		t.Errorf("JobSpec.PublicKey = %q, want %q", spec.PublicKey, metadata.PublicKey)
+	}
+
+	back := JobSpecToSGEMetadata(spec)
+	if back.InboundSSHCIDR != metadata.InboundSSHCIDR {
+		t.Errorf("round-tripped InboundSSHCIDR = %q, want %q", back.InboundSSHCIDR, metadata.InboundSSHCIDR)
+	}
+	if back.PublicKey != metadata.PublicKey {
+		t.Errorf("round-tripped PublicKey = %q, want %q", back.PublicKey, metadata.PublicKey)
+	}
+}
+
 func TestSGEMetadata_ToJobRequest_DefaultSlots(t *testing.T) {
 	metadata := &SGEMetadata{
 		Name:         "test_job",

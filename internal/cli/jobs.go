@@ -475,18 +475,17 @@ Examples:
 				// Convert to job request
 				jobReq = metadata.ToJobRequest()
 			} else {
-				// Read JSON file
-				fileData, err := os.ReadFile(jobFile)
+				req, ignored, err := decodeJobFile(jobFile)
 				if err != nil {
-					return fmt.Errorf("failed to read job file: %w", err)
+					return err
 				}
-
-				// Parse job request
-				var req models.JobRequest
-				if err := json.Unmarshal(fileData, &req); err != nil {
-					return fmt.Errorf("failed to parse job file: %w", err)
+				if len(ignored) > 0 {
+					logger.Warn().
+						Str("file", jobFile).
+						Strs("fields", ignored).
+						Msg("Job file contains fields Interlink does not support — they are NOT sent to Rescale")
 				}
-				jobReq = &req
+				jobReq = req
 			}
 
 			// Resolve analysis version names to version codes
@@ -541,6 +540,25 @@ Examples:
 	cmd.Flags().StringSliceVar(&automations, "automation", nil, "Automation ID(s) to attach (can specify multiple)")
 
 	return cmd
+}
+
+// decodeJobFile reads a JSON job specification. Alongside the request it returns
+// the top-level keys the decode ignored: typed decoding discards anything
+// JobRequest does not model, so without this the caller cannot tell a supported
+// field from a misspelled or unsupported one — both simply vanish before the
+// request is built.
+func decodeJobFile(path string) (*models.JobRequest, []string, error) {
+	fileData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read job file: %w", err)
+	}
+
+	var req models.JobRequest
+	if err := json.Unmarshal(fileData, &req); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse job file: %w", err)
+	}
+
+	return &req, models.UnknownJobRequestFields(fileData), nil
 }
 
 // newJobsStopCmd creates the 'jobs stop' command.
