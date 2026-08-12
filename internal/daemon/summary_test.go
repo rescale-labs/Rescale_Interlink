@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func TestEmitScanSummary_EmptyScan(t *testing.T) {
 		SkipBuckets:      map[SkipReasonCode]int{},
 		DownloadOutcomes: map[string]int{},
 	}
-	d.emitScanSummary(s, 500*time.Millisecond, false)
+	d.emitScanSummary(s, 500*time.Millisecond, false, nil)
 
 	out := buf.String()
 	if !strings.Contains(out, "scanned=0") {
@@ -61,7 +62,7 @@ func TestEmitScanSummary_MixedReasonsAndOutcomes(t *testing.T) {
 			string(OutcomeListFilesFailed): 1,
 		},
 	}
-	d.emitScanSummary(s, 2*time.Second, false)
+	d.emitScanSummary(s, 2*time.Second, false, nil)
 
 	out := buf.String()
 	for _, want := range []string{
@@ -104,7 +105,7 @@ func TestEmitScanSummary_Interrupted(t *testing.T) {
 			string(OutcomeInterrupted): 1,
 		},
 	}
-	d.emitScanSummary(s, 1*time.Second, true)
+	d.emitScanSummary(s, 1*time.Second, true, nil)
 
 	out := buf.String()
 	if !strings.Contains(out, "interrupted=true") {
@@ -112,6 +113,60 @@ func TestEmitScanSummary_Interrupted(t *testing.T) {
 	}
 	if !strings.Contains(out, "interrupted-jobs=1") {
 		t.Errorf("summary missing interrupted-jobs=1: %s", out)
+	}
+}
+
+// A poll that fails before the job loop must still emit the one canonical
+// summary line, with an error tag rather than a second bespoke format.
+func TestEmitScanSummary_ScanError(t *testing.T) {
+	d, buf := newTestDaemon()
+
+	s := &ScanSummary{
+		SkipBuckets:      map[SkipReasonCode]int{},
+		DownloadOutcomes: map[string]int{},
+	}
+	d.emitScanSummary(s, 3*time.Second, false, errors.New("list jobs failed: 503"))
+
+	out := buf.String()
+	for _, want := range []string{
+		"Poll complete: scanned=0",
+		"eligibility-checked=0",
+		"downloaded=0",
+		"no_files=0",
+		"failed=0",
+		"silent-skipped=0 (none)",
+		"logged-skipped=0 (none)",
+		"error=list jobs failed: 503",
+		"duration=3.0s",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("scan-error summary missing %q: %s", want, out)
+		}
+	}
+}
+
+// no_files must not be folded into the downloaded count: a completed job with
+// an empty output set is not a download.
+func TestEmitScanSummary_NoFilesIsSeparateFromDownloaded(t *testing.T) {
+	d, buf := newTestDaemon()
+
+	s := &ScanSummary{
+		TotalScanned:       4,
+		EligibilityChecked: 4,
+		SkipBuckets:        map[SkipReasonCode]int{},
+		DownloadOutcomes: map[string]int{
+			string(OutcomeDownloaded): 1,
+			string(OutcomeNoFiles):    3,
+		},
+	}
+	d.emitScanSummary(s, time.Second, false, nil)
+
+	out := buf.String()
+	if !strings.Contains(out, "downloaded=1") {
+		t.Errorf("summary should report downloaded=1: %s", out)
+	}
+	if !strings.Contains(out, "no_files=3") {
+		t.Errorf("summary should report no_files=3: %s", out)
 	}
 }
 

@@ -89,6 +89,19 @@ type Daemon struct {
 	// Centralized pause state, checked by pollLoop and TriggerPoll
 	paused atomic.Bool
 
+	// batchSeq makes every download attempt's batch ID unique. The queue never
+	// removes terminal tasks, and BatchStats aggregates every task that ever
+	// carried a batch ID, so a stable per-job ID would make attempt N inherit
+	// attempts 1..N-1's failures and the job could never be recorded as
+	// downloaded again.
+	batchSeq atomic.Uint64
+
+	// Most recent scan failure, surfaced over IPC. Guarded separately from mu
+	// so status reads never contend with the lifecycle lock.
+	scanErrMu     sync.RWMutex
+	lastScanErr   string
+	lastScanErrAt time.Time
+
 	// Shared transfer infrastructure (Plan 3).
 	// The daemon is a consumer of TransferService, not a parallel
 	// implementation. Per-daemon instance; no cross-process sharing.
@@ -371,7 +384,13 @@ func (d *Daemon) poll(ctx context.Context) {
 		} else {
 			d.logger.Error().Msgf("Failed to find completed jobs: %v", err)
 		}
-		d.logger.Info().Msgf("Poll complete: scanned=unknown, error=%v, duration=%.1fs", err, time.Since(scanStart).Seconds())
+		d.recordScanError(err)
+		// Same canonical line as every other poll, with an error tag: support
+		// scripts grep one format, not two.
+		d.emitScanSummary(&ScanSummary{
+			SkipBuckets:      make(map[SkipReasonCode]int),
+			DownloadOutcomes: make(map[string]int),
+		}, time.Since(scanStart), false, err)
 		return
 	}
 
@@ -395,20 +414,20 @@ func (d *Daemon) poll(ctx context.Context) {
 	// eligibility skips and download outcomes as we go.
 	for _, job := range completed {
 		select {
-		case <-ctx.Done():
+		case <-scanCtx.Done():
 			d.logger.Info().Msg("Scan interrupted by context cancellation")
-			d.emitScanSummary(summary, time.Since(scanStart), true)
+			d.emitScanSummary(summary, time.Since(scanStart), true, nil)
 			return
 		case <-d.stopChan:
 			d.logger.Info().Msg("Scan interrupted by stop signal")
-			d.emitScanSummary(summary, time.Since(scanStart), true)
+			d.emitScanSummary(summary, time.Since(scanStart), true, nil)
 			return
 		default:
 		}
 
 		if d.cfg.Eligibility != nil {
 			// Per-call timeout prevents a single slow eligibility check from blocking the scan
-			eligCtx, eligCancel := context.WithTimeout(ctx, 2*time.Minute)
+			eligCtx, eligCancel := context.WithTimeout(scanCtx, 2*time.Minute)
 			eligResult := d.monitor.CheckEligibility(eligCtx, job.ID)
 			eligCancel()
 
@@ -431,13 +450,16 @@ func (d *Daemon) poll(ctx context.Context) {
 			summary.EligibilityChecked++
 		}
 
-		outcome := d.downloadJob(ctx, job)
+		// scanCtx, not ctx: a job download must not be able to outlive the
+		// poll's own 10-minute budget.
+		outcome := d.downloadJob(scanCtx, job)
 		summary.AddOutcome(string(outcome))
 	}
 
-	d.emitScanSummary(summary, time.Since(scanStart), false)
+	d.emitScanSummary(summary, time.Since(scanStart), false, nil)
 	d.checkAllUnsetWarning(summary)
 
+	d.clearScanError()
 	d.state.UpdateLastPoll()
 	if err := d.state.Save(); err != nil {
 		d.logger.Error().Err(err).Msg("Failed to save state after poll")
@@ -445,12 +467,16 @@ func (d *Daemon) poll(ctx context.Context) {
 }
 
 // emitScanSummary logs the single canonical per-poll INFO summary line.
-// Buckets sum to TotalScanned when interrupted=false. Interrupted polls emit
-// partial counts with an interrupted marker so the sum may be less than
-// TotalScanned.
-func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interrupted bool) {
-	// Classify download outcomes.
-	downloaded := s.DownloadOutcomes[string(OutcomeDownloaded)] + s.DownloadOutcomes[string(OutcomeNoFiles)]
+// Buckets sum to TotalScanned when interrupted=false and scanErr is nil.
+// Interrupted polls emit partial counts with an interrupted marker so the sum
+// may be less than TotalScanned; a scan that failed outright emits zeroed
+// counts with an error marker.
+func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interrupted bool, scanErr error) {
+	// Classify download outcomes. no_files is reported separately from
+	// downloaded: a completed job with an empty output set is not a download,
+	// and folding it in made the downloaded count unfalsifiable.
+	downloaded := s.DownloadOutcomes[string(OutcomeDownloaded)]
+	noFiles := s.DownloadOutcomes[string(OutcomeNoFiles)]
 	partial := s.DownloadOutcomes[string(OutcomePartialFailure)]
 	interruptedJobs := s.DownloadOutcomes[string(OutcomeInterrupted)]
 	listFailed := s.DownloadOutcomes[string(OutcomeListFilesFailed)]
@@ -490,12 +516,16 @@ func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interru
 	if interrupted {
 		interruptedTag = ", interrupted=true"
 	}
+	if scanErr != nil {
+		interruptedTag += fmt.Sprintf(", error=%v", scanErr)
+	}
 
 	d.logger.Info().Msgf(
-		"Poll complete: scanned=%d, eligibility-checked=%d, downloaded=%d, failed=%d (partial=%d, list-failed=%d, dir-failed=%d), interrupted-jobs=%d, silent-skipped=%d (%s), logged-skipped=%d (%s)%s, duration=%.1fs",
+		"Poll complete: scanned=%d, eligibility-checked=%d, downloaded=%d, no_files=%d, failed=%d (partial=%d, list-failed=%d, dir-failed=%d), interrupted-jobs=%d, silent-skipped=%d (%s), logged-skipped=%d (%s)%s, duration=%.1fs",
 		s.TotalScanned,
 		s.EligibilityChecked,
 		downloaded,
+		noFiles,
 		failed,
 		partial, listFailed, dirFailed,
 		interruptedJobs,
@@ -504,6 +534,36 @@ func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interru
 		interruptedTag,
 		duration.Seconds(),
 	)
+}
+
+// recordScanError stores the most recent scan failure so IPC status consumers
+// (CLI `daemon status`, GUI Setup tab) can tell a healthy daemon apart from one
+// that is alive but failing every scan. Without it the only symptom is a
+// LastScan timestamp that silently stops advancing.
+func (d *Daemon) recordScanError(err error) {
+	if err == nil {
+		return
+	}
+	d.scanErrMu.Lock()
+	d.lastScanErr = err.Error()
+	d.lastScanErrAt = time.Now()
+	d.scanErrMu.Unlock()
+}
+
+// clearScanError clears the recorded scan failure after a scan completes.
+func (d *Daemon) clearScanError() {
+	d.scanErrMu.Lock()
+	d.lastScanErr = ""
+	d.lastScanErrAt = time.Time{}
+	d.scanErrMu.Unlock()
+}
+
+// LastScanError returns the most recent scan failure and when it happened.
+// Empty string means the last completed scan succeeded.
+func (d *Daemon) LastScanError() (string, time.Time) {
+	d.scanErrMu.RLock()
+	defer d.scanErrMu.RUnlock()
+	return d.lastScanErr, d.lastScanErrAt
 }
 
 // scanSummaryReasonOrder is the canonical order reasons appear in the scan
@@ -655,6 +715,10 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	if len(files) == 0 {
 		d.logger.Info().Str("job_id", job.ID).Msg("No files to download for job")
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, 0, 0)
+		// Tag it like any other finished job. Without the tag the job passes
+		// the tag-first eligibility check on every subsequent poll and is
+		// re-processed forever.
+		d.applyDownloadedTag(ctx, job)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
 		}
@@ -666,7 +730,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Int("file_count", len(files)).
 		Msg("Downloading job files")
 
-	batchID := "daemon:" + job.ID
+	batchID := fmt.Sprintf("daemon:%s:%d", job.ID, d.batchSeq.Add(1))
 	batchLabel := "Auto: " + job.Name
 	reqCh := make(chan services.TransferRequest, 16)
 	scanCtx, scanCancel := context.WithCancel(ctx)
@@ -688,7 +752,10 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	// download path does not short-circuit correct-size local files).
 	var totalSize int64
 	var alreadyPresent int
+	var dispatched int
+	dispatchDone := make(chan struct{})
 	go func() {
+		defer close(dispatchDone)
 		defer close(reqCh)
 		for i := range files {
 			f := files[i]
@@ -737,22 +804,48 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 			}
 			select {
 			case reqCh <- req:
+				dispatched++
 			case <-scanCtx.Done():
 				return
 			}
 		}
 	}()
 
-	stats, waitErr := d.ts.WaitForBatch(ctx, batchID)
-	if waitErr != nil {
-		d.logger.Error().Err(waitErr).Str("job_id", job.ID).Msg("Job download interrupted")
-		d.state.MarkFailed(job.ID, job.Name, waitErr)
+	// Registration inside TransferService only finishes once reqCh closes, and
+	// WaitForBatch cannot return before that, so waiting here costs nothing and
+	// makes the dispatch counters safe to read.
+	<-dispatchDone
+
+	var stats transfer.BatchStats
+	if dispatched > 0 {
+		var waitErr error
+		stats, waitErr = d.ts.WaitForBatch(ctx, batchID)
+		if waitErr != nil {
+			d.logger.Error().Err(waitErr).Str("job_id", job.ID).Msg("Job download interrupted")
+			d.state.MarkFailed(job.ID, job.Name, waitErr)
+			if saveErr := d.state.Save(); saveErr != nil {
+				d.logger.Error().Err(saveErr).Msg("Failed to persist state")
+			}
+			reporting.HandleCLIError(waitErr, "daemon", "job_download", "")
+			return OutcomeInterrupted
+		}
+	} else if alreadyPresent == 0 {
+		// Nothing dispatched and nothing on disk: every file was rejected by
+		// name validation or its directory could not be created. Record a
+		// failure instead of claiming success.
+		noneErr := fmt.Errorf("no downloadable files of %d (all skipped)", len(files))
+		d.logger.Warn().Str("job_id", job.ID).Int("total_files", len(files)).
+			Msg("Job had no downloadable files, marking as failed for retry")
+		d.state.MarkFailed(job.ID, job.Name, noneErr)
 		if saveErr := d.state.Save(); saveErr != nil {
 			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
 		}
-		reporting.HandleCLIError(waitErr, "daemon", "job_download", "")
-		return OutcomeInterrupted
+		return OutcomePartialFailure
 	}
+	// dispatched == 0 with files already on disk falls through with zero-valued
+	// stats: the batch registered no tasks, so its pre-registered metadata is
+	// already gone and WaitForBatch would poll a batch ID that GetBatchStats
+	// can never resolve — it would never return.
 
 	// Partial-failure path: any failed or cancelled tasks mean the job is
 	// incomplete and will retry on the next poll cycle.
@@ -785,24 +878,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		}
 		fileCount := stats.Completed + alreadyPresent
 		d.state.MarkDownloaded(job.ID, job.Name, outputDir, fileCount, totalSize)
-
-		// Tag the job as downloaded. On failure, MarkPendingTagApply so the
-		// poll loop retries just the tag call (without re-downloading files).
-		if d.cfg.Eligibility != nil {
-			if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
-				d.logger.Warn().
-					Err(err).
-					Str("job_id", job.ID).
-					Str("tag", config.DownloadedTag).
-					Msg("Failed to tag job as downloaded (will retry on next poll)")
-				d.state.MarkPendingTagApply(job.ID)
-			} else {
-				d.logger.Debug().
-					Str("job_id", job.ID).
-					Str("tag", config.DownloadedTag).
-					Msg("Tagged job as downloaded")
-			}
-		}
+		d.applyDownloadedTag(ctx, job)
 
 		d.logger.Info().Msgf("COMPLETED: %s [%s] - %d files, %s",
 			job.Name, job.ID, fileCount, formatBytes(totalSize))
@@ -814,6 +890,29 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	return outcome
+}
+
+// applyDownloadedTag tags a finished job so the tag-first eligibility check
+// stops re-selecting it. On failure the job is flagged PendingTagApply and the
+// poll loop retries just the tag call, without re-downloading files. No-op when
+// eligibility checking is disabled (no tags are consulted in that mode).
+func (d *Daemon) applyDownloadedTag(ctx context.Context, job *CompletedJob) {
+	if d.cfg.Eligibility == nil {
+		return
+	}
+	if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
+		d.logger.Warn().
+			Err(err).
+			Str("job_id", job.ID).
+			Str("tag", config.DownloadedTag).
+			Msg("Failed to tag job as downloaded (will retry on next poll)")
+		d.state.MarkPendingTagApply(job.ID)
+		return
+	}
+	d.logger.Debug().
+		Str("job_id", job.ID).
+		Str("tag", config.DownloadedTag).
+		Msg("Tagged job as downloaded")
 }
 
 // formatBytes formats a byte count as a human-readable string.
