@@ -403,169 +403,173 @@ export function FileList({
 
   return (
     <div className="flex flex-col h-full border border-gray-200 dark:border-gray-700 rounded overflow-hidden">
-      {/* Scrollable container for header and content */}
-      <div className="flex flex-col h-full overflow-x-auto">
-        <div className={mode === 'legacy' ? "min-w-[1400px]" : ""}>
+      {/* Horizontal scroll container for header + rows, so the wide legacy
+          column set scrolls as one unit. It must NOT scroll vertically: the
+          row virtualizer measures the list below as its scroll container, and
+          a vertically scrollable ancestor would make that element grow to fit
+          instead — rendering every row and scrolling the header out of view. */}
+      <div className="flex-1 min-h-0 overflow-x-auto flex flex-col">
+        <div className={clsx('flex flex-col flex-1 min-h-0', mode === 'legacy' && 'min-w-[1400px]')}>
           {/* Header */}
           <div className="flex items-center bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 text-sm font-medium text-gray-600 dark:text-gray-300 px-2 py-1 flex-shrink-0">
-        {/* Checkbox column header */}
-        <span className="w-8 flex-shrink-0" />
-        {/* Icon space - matches icon width + margin in rows */}
-        {mode === 'legacy' && <span className="w-5 mr-2 flex-shrink-0" />}
-        <button
-          className={mode === 'legacy' ? "w-64 text-left hover:text-gray-900 dark:hover:text-white cursor-pointer" : "flex-1 text-left hover:text-gray-900 dark:hover:text-white cursor-pointer"}
-          onClick={() => handleSort('name')}
-        >
-          Name <SortIndicator field="name" />
-        </button>
-        {mode === 'legacy' && (
-          <>
-            <span className="w-24 text-left ml-1">File ID</span>
-            <span className="w-20 text-left ml-1">Type</span>
+            {/* Checkbox column header */}
+            <span className="w-8 flex-shrink-0" />
+            {/* Icon space - matches icon width + margin in rows */}
+            {mode === 'legacy' && <span className="w-5 mr-2 flex-shrink-0" />}
             <button
-              className="w-24 text-left ml-1 hover:text-gray-900 dark:hover:text-white cursor-pointer"
-              onClick={() => handleSort('size')}
+              className={mode === 'legacy' ? "w-64 text-left hover:text-gray-900 dark:hover:text-white cursor-pointer" : "flex-1 text-left hover:text-gray-900 dark:hover:text-white cursor-pointer"}
+              onClick={() => handleSort('name')}
             >
-              Size <SortIndicator field="size" />
+              Name <SortIndicator field="name" />
             </button>
-            <span className="w-64 text-left ml-1">Owner</span>
-            <button
-              className="w-40 text-left ml-1 hover:text-gray-900 dark:hover:text-white cursor-pointer"
-              onClick={() => handleSort('created')}
-            >
-              Created <SortIndicator field="created" />
-            </button>
-          </>
-        )}
-        {mode !== 'legacy' && (
-          <>
-            <span className="w-24 text-left ml-1">File ID</span>
-            <button
-              className="w-24 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
-              onClick={() => handleSort('size')}
-            >
-              Size <SortIndicator field="size" />
-            </button>
-            <button
-              className="w-48 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
-              onClick={() => handleSort('modTime')}
-            >
-              Modified <SortIndicator field="modTime" />
-            </button>
-          </>
-        )}
+            {mode === 'legacy' && (
+              <>
+                <span className="w-24 text-left ml-1">File ID</span>
+                <span className="w-20 text-left ml-1">Type</span>
+                <button
+                  className="w-24 text-left ml-1 hover:text-gray-900 dark:hover:text-white cursor-pointer"
+                  onClick={() => handleSort('size')}
+                >
+                  Size <SortIndicator field="size" />
+                </button>
+                <span className="w-64 text-left ml-1">Owner</span>
+                <button
+                  className="w-40 text-left ml-1 hover:text-gray-900 dark:hover:text-white cursor-pointer"
+                  onClick={() => handleSort('created')}
+                >
+                  Created <SortIndicator field="created" />
+                </button>
+              </>
+            )}
+            {mode !== 'legacy' && (
+              <>
+                <span className="w-24 text-left ml-1">File ID</span>
+                <button
+                  className="w-24 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
+                  onClick={() => handleSort('size')}
+                >
+                  Size <SortIndicator field="size" />
+                </button>
+                <button
+                  className="w-48 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
+                  onClick={() => handleSort('modTime')}
+                >
+                  Modified <SortIndicator field="modTime" />
+                </button>
+              </>
+            )}
           </div>
 
-          {/* Virtual scrolling list */}
-          <div ref={parentRef} className="flex-1 overflow-auto">
-        <div
-          style={{
-            height: `${rowVirtualizer.getTotalSize()}px`,
-            width: '100%',
-            position: 'relative',
-          }}
-        >
-          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            const item = paginatedItems[virtualRow.index]
-            const isSelected = selectedIds.has(item.id)
+          {/* Virtual scrolling list — the virtualizer's scroll container */}
+          <div ref={parentRef} className="flex-1 min-h-0 overflow-y-auto">
+            <div
+              style={{
+                height: `${rowVirtualizer.getTotalSize()}px`,
+                width: '100%',
+                position: 'relative',
+              }}
+            >
+              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const item = paginatedItems[virtualRow.index]
+                const isSelected = selectedIds.has(item.id)
 
-            return (
-              <div
-                key={item.id}
-                className={clsx(
-                  'absolute top-0 left-0 w-full flex items-center px-2 py-1 cursor-pointer text-sm',
-                  'hover:bg-blue-50 dark:hover:bg-blue-900/30',
-                  isSelected && 'bg-blue-100 dark:bg-blue-800/50'
-                )}
-                style={{
-                  height: `${virtualRow.size}px`,
-                  transform: `translateY(${virtualRow.start}px)`,
-                }}
-                onClick={(e) => handleRowClick(e, item, virtualRow.index)}
-                onDoubleClick={() => handleRowDoubleClick(item)}
-              >
-                {/* Checkbox */}
-                <span className="w-8 flex-shrink-0 flex items-center justify-center">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={(e) => {
-                      e.stopPropagation()
-                      handleCheckboxChange(item, e.target.checked)
+                return (
+                  <div
+                    key={item.id}
+                    className={clsx(
+                      'absolute top-0 left-0 w-full flex items-center px-2 py-1 cursor-pointer text-sm',
+                      'hover:bg-blue-50 dark:hover:bg-blue-900/30',
+                      isSelected && 'bg-blue-100 dark:bg-blue-800/50'
+                    )}
+                    style={{
+                      height: `${virtualRow.size}px`,
+                      transform: `translateY(${virtualRow.start}px)`,
                     }}
-                    onClick={(e) => e.stopPropagation()}
-                    className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
-                  />
-                </span>
-
-                {/* Icon */}
-                <span className="w-5 h-5 mr-2 flex-shrink-0">
-                  {item.isFolder ? (
-                    <FolderIcon className="w-5 h-5 text-yellow-500" />
-                  ) : (
-                    <DocumentIcon className="w-5 h-5 text-gray-400" />
-                  )}
-                </span>
-
-                {/* Name */}
-                <span className={mode === 'legacy' ? "w-64 truncate text-gray-900 dark:text-gray-100" : "flex-1 truncate text-gray-900 dark:text-gray-100"}>
-                  {showPath ? item.path || item.name : item.name}
-                </span>
-
-                {/* Legacy mode columns */}
-                {mode === 'legacy' && (
-                  <>
-                    {/* File ID */}
-                    <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
-                      {item.id ? item.id.substring(0, 8) : '-'}
+                    onClick={(e) => handleRowClick(e, item, virtualRow.index)}
+                    onDoubleClick={() => handleRowDoubleClick(item)}
+                  >
+                    {/* Checkbox */}
+                    <span className="w-8 flex-shrink-0 flex items-center justify-center">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={(e) => {
+                          e.stopPropagation()
+                          handleCheckboxChange(item, e.target.checked)
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="h-4 w-4 rounded border border-gray-300 text-rescale-blue focus:ring-rescale-blue focus:ring-2 bg-white cursor-pointer"
+                      />
                     </span>
 
-                    {/* Type */}
-                    <span className="w-20 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate ml-1">
-                      {item.typeCode || '-'}
+                    {/* Icon */}
+                    <span className="w-5 h-5 mr-2 flex-shrink-0">
+                      {item.isFolder ? (
+                        <FolderIcon className="w-5 h-5 text-yellow-500" />
+                      ) : (
+                        <DocumentIcon className="w-5 h-5 text-gray-400" />
+                      )}
                     </span>
 
-                    {/* Size */}
-                    <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 ml-1">
-                      {item.isFolder ? '-' : formatSize(item.size ?? 0)}
+                    {/* Name */}
+                    <span className={mode === 'legacy' ? "w-64 truncate text-gray-900 dark:text-gray-100" : "flex-1 truncate text-gray-900 dark:text-gray-100"}>
+                      {showPath ? item.path || item.name : item.name}
                     </span>
 
-                    {/* Owner */}
-                    <span className="w-64 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate ml-1">
-                      {item.owner || '-'}
-                    </span>
+                    {/* Legacy mode columns */}
+                    {mode === 'legacy' && (
+                      <>
+                        {/* File ID */}
+                        <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
+                          {item.id ? item.id.substring(0, 8) : '-'}
+                        </span>
 
-                    {/* Created */}
-                    <span className="w-40 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 whitespace-nowrap ml-1">
-                      {formatDate(item.dateInserted ?? '')}
-                    </span>
-                  </>
-                )}
+                        {/* Type */}
+                        <span className="w-20 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate ml-1">
+                          {item.typeCode || '-'}
+                        </span>
 
-                {/* Non-legacy mode columns */}
-                {mode !== 'legacy' && (
-                  <>
-                    {/* File ID */}
-                    <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
-                      {item.id ? item.id.substring(0, 8) : '-'}
-                    </span>
+                        {/* Size */}
+                        <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 ml-1">
+                          {item.isFolder ? '-' : formatSize(item.size ?? 0)}
+                        </span>
 
-                    {/* Size */}
-                    <span className="w-24 text-right text-gray-500 dark:text-gray-400 flex-shrink-0">
-                      {formatSize(item.size ?? 0)}
-                    </span>
+                        {/* Owner */}
+                        <span className="w-64 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate ml-1">
+                          {item.owner || '-'}
+                        </span>
 
-                    {/* Modified */}
-                    <span className="w-48 text-right text-gray-500 dark:text-gray-400 flex-shrink-0 whitespace-nowrap">
-                      {formatDate(item.modTime ?? '')}
-                    </span>
-                  </>
-                )}
-              </div>
-            )
-          })}
+                        {/* Created */}
+                        <span className="w-40 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 whitespace-nowrap ml-1">
+                          {formatDate(item.dateInserted ?? '')}
+                        </span>
+                      </>
+                    )}
+
+                    {/* Non-legacy mode columns */}
+                    {mode !== 'legacy' && (
+                      <>
+                        {/* File ID */}
+                        <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
+                          {item.id ? item.id.substring(0, 8) : '-'}
+                        </span>
+
+                        {/* Size */}
+                        <span className="w-24 text-right text-gray-500 dark:text-gray-400 flex-shrink-0">
+                          {formatSize(item.size ?? 0)}
+                        </span>
+
+                        {/* Modified */}
+                        <span className="w-48 text-right text-gray-500 dark:text-gray-400 flex-shrink-0 whitespace-nowrap">
+                          {formatDate(item.modTime ?? '')}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </div>
-        </div>
         </div>
       </div>
 
