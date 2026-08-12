@@ -583,6 +583,7 @@ export namespace wailsapp {
 	    downloadFolder: string;
 	    error?: string;
 	    errorCode?: string;
+	    lastErrorTime?: string;
 	    managedBy?: string;
 	    serviceMode: boolean;
 	    userConfigured: boolean;
@@ -608,6 +609,7 @@ export namespace wailsapp {
 	        this.downloadFolder = source["downloadFolder"];
 	        this.error = source["error"];
 	        this.errorCode = source["errorCode"];
+	        this.lastErrorTime = source["lastErrorTime"];
 	        this.managedBy = source["managedBy"];
 	        this.serviceMode = source["serviceMode"];
 	        this.userConfigured = source["userConfigured"];

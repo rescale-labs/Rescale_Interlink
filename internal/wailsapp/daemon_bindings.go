@@ -61,6 +61,11 @@ type DaemonStatusDTO struct {
 	// to Error. Frontend compares on this, not on Error text.
 	ErrorCode string `json:"errorCode,omitempty"`
 
+	// LastErrorTime is when Error was recorded (ISO format, or empty). Lets the
+	// GUI show how stale the failure is, which is the only way to tell a scan
+	// that just failed from one that failed hours ago and never recovered.
+	LastErrorTime string `json:"lastErrorTime,omitempty"`
+
 	// ManagedBy indicates if daemon is managed externally ("Windows Service", "", etc.)
 	ManagedBy string `json:"managedBy,omitempty"`
 
@@ -142,6 +147,11 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		lastScan = st.LastScanTime.Format(time.RFC3339)
 	}
 
+	lastErrorTime := ""
+	if st.LastErrorTime != nil && !st.LastErrorTime.IsZero() {
+		lastErrorTime = st.LastErrorTime.Format(time.RFC3339)
+	}
+
 	return DaemonStatusDTO{
 		Running:         st.IPCConnected || pid != 0,
 		PID:             pid,
@@ -155,6 +165,7 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		DownloadFolder:  st.DownloadFolder,
 		Error:           st.LastError,
 		ErrorCode:       string(st.LastErrorCode),
+		LastErrorTime:   lastErrorTime,
 		ManagedBy:       managedBy,
 		ServiceMode:     st.ServiceMode,
 		UserConfigured:  configured,

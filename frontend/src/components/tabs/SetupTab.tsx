@@ -794,6 +794,20 @@ export function SetupTab() {
     return 'Not connected';
   };
 
+  // How long ago the daemon recorded its current error. A failure that is hours
+  // old and still current means the daemon has not recovered on its own — the
+  // error text alone cannot distinguish that from one that just happened.
+  const formatErrorAge = (iso?: string): string => {
+    if (!iso) return '';
+    const at = new Date(iso).getTime();
+    if (Number.isNaN(at)) return '';
+    const elapsed = Date.now() - at;
+    if (elapsed < 0) return '';
+    if (elapsed < 60000) return `${Math.round(elapsed / 1000)}s ago`;
+    if (elapsed < 3600000) return `${Math.round(elapsed / 60000)}m ago`;
+    return `${Math.round(elapsed / 3600000)}h ago`;
+  };
+
   if (isLoading && !config) {
     return (
       <div className="tab-panel flex items-center justify-center">
@@ -1646,6 +1660,9 @@ export function SetupTab() {
                 {daemonStatus?.error && (
                   <div className="mt-3 text-sm text-yellow-700">
                     <span className="font-medium">Note:</span> {daemonStatus.error}
+                    {formatErrorAge(daemonStatus.lastErrorTime) && (
+                      <span className="text-yellow-600"> ({formatErrorAge(daemonStatus.lastErrorTime)})</span>
+                    )}
                   </div>
                 )}
 
@@ -1787,6 +1804,9 @@ export function SetupTab() {
                   {daemonStatus?.error && (
                     <div className="mt-3 text-sm text-yellow-700">
                       <span className="font-medium">Note:</span> {daemonStatus.error}
+                      {formatErrorAge(daemonStatus.lastErrorTime) && (
+                        <span className="text-yellow-600"> ({formatErrorAge(daemonStatus.lastErrorTime)})</span>
+                      )}
                     </div>
                   )}
                 </div>
