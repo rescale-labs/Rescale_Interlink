@@ -894,10 +894,10 @@ func TestArchiveContents_EncodesEmptyListsNotNull(t *testing.T) {
 	}
 }
 
-// TestListJobsWindow verifies deep pages request only their own window via
-// limit/offset instead of refetching everything before the offset, and that
-// server-capped responses are followed via next links until the window fills.
-func TestListJobsWindow(t *testing.T) {
+// TestListJobsPage verifies deep pages are addressed by page number in a
+// single request. The live jobs endpoint honors page/page_size and ignores
+// limit/offset, so page-number addressing is the only correct windowing.
+func TestListJobsPage(t *testing.T) {
 	makeJobs := func(start, n int) []models.JobResponse {
 		jobs := make([]models.JobResponse, n)
 		for i := range jobs {
@@ -906,9 +906,10 @@ func TestListJobsWindow(t *testing.T) {
 		return jobs
 	}
 
-	t.Run("requests only the window", func(t *testing.T) {
+	t.Run("requests exactly one page with more remaining", func(t *testing.T) {
 		var gotQueries []string
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var server *httptest.Server
+		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/api/v3/jobs/" {
 				http.Error(w, "not found", http.StatusNotFound)
 				return
@@ -916,66 +917,47 @@ func TestListJobsWindow(t *testing.T) {
 			gotQueries = append(gotQueries, r.URL.RawQuery)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"next":    nil,
-				"results": makeJobs(100, 51),
+				"next":    server.URL + "/api/v3/jobs/?ordering=-dateInserted&page=4&page_size=50",
+				"results": makeJobs(100, 50),
 			})
 		}))
 		defer server.Close()
 
 		client := newTestClient(t, server.URL)
-		jobs, err := client.ListJobsWindow(context.Background(), 100, 51)
+		jobs, hasMore, err := client.ListJobsPage(context.Background(), 3, 50)
 		if err != nil {
-			t.Fatalf("ListJobsWindow() error = %v", err)
+			t.Fatalf("ListJobsPage() error = %v", err)
 		}
-		if len(jobs) != 51 {
-			t.Errorf("len(jobs) = %d, want 51", len(jobs))
+		if len(jobs) != 50 || !hasMore {
+			t.Errorf("got %d jobs, hasMore=%v; want 50, true", len(jobs), hasMore)
 		}
 		if len(gotQueries) != 1 {
 			t.Fatalf("server saw %d requests, want 1: %v", len(gotQueries), gotQueries)
 		}
-		q := gotQueries[0]
-		for _, want := range []string{"limit=51", "offset=100", "ordering=-dateInserted"} {
-			if !strings.Contains(q, want) {
-				t.Errorf("request query %q missing %q", q, want)
+		for _, want := range []string{"page=3", "page_size=50", "ordering=-dateInserted"} {
+			if !strings.Contains(gotQueries[0], want) {
+				t.Errorf("request query %q missing %q", gotQueries[0], want)
 			}
 		}
 	})
 
-	t.Run("follows next links when the server caps the page", func(t *testing.T) {
-		var server *httptest.Server
-		requests := 0
-		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			requests++
+	t.Run("last page reports no more", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			switch requests {
-			case 1:
-				next := server.URL + "/api/v3/jobs/?ordering=-dateInserted&limit=21&offset=130"
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"next":    next,
-					"results": makeJobs(100, 30),
-				})
-			default:
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"next":    nil,
-					"results": makeJobs(130, 21),
-				})
-			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"next":    nil,
+				"results": makeJobs(150, 12),
+			})
 		}))
 		defer server.Close()
 
 		client := newTestClient(t, server.URL)
-		jobs, err := client.ListJobsWindow(context.Background(), 100, 51)
+		jobs, hasMore, err := client.ListJobsPage(context.Background(), 4, 50)
 		if err != nil {
-			t.Fatalf("ListJobsWindow() error = %v", err)
+			t.Fatalf("ListJobsPage() error = %v", err)
 		}
-		if len(jobs) != 51 {
-			t.Errorf("len(jobs) = %d, want 51", len(jobs))
-		}
-		if requests != 2 {
-			t.Errorf("server saw %d requests, want 2", requests)
-		}
-		if jobs[0].ID != "job-100" || jobs[50].ID != "job-150" {
-			t.Errorf("window boundaries = %s..%s, want job-100..job-150", jobs[0].ID, jobs[50].ID)
+		if len(jobs) != 12 || hasMore {
+			t.Errorf("got %d jobs, hasMore=%v; want 12, false", len(jobs), hasMore)
 		}
 	})
 }

@@ -90,16 +90,13 @@ func (a *App) listJobStatusesPage(offset int) JobStatusListDTO {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Fetch one row beyond the page so hasMore is knowable without a count query
-	// or refetching earlier pages.
-	jobs, err := apiClient.ListJobsWindow(ctx, offset, jobStatusPageSize+1)
+	// Offsets arrive as multiples of jobStatusPageSize (the frontend appends
+	// whole pages), so the offset maps directly to a page number. The jobs API
+	// only honors page-number pagination — see Client.ListJobsPage.
+	page := offset/jobStatusPageSize + 1
+	jobs, hasMore, err := apiClient.ListJobsPage(ctx, page, jobStatusPageSize)
 	if err != nil {
 		return JobStatusListDTO{Error: fmt.Sprintf("Failed to fetch jobs: %v", err)}
-	}
-
-	hasMore := len(jobs) > jobStatusPageSize
-	if hasMore {
-		jobs = jobs[:jobStatusPageSize]
 	}
 
 	items := make([]JobStatusItemDTO, len(jobs))

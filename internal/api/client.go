@@ -768,15 +768,8 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 // ListJobsPaged returns the most recent `limit` jobs ordered by newest first.
 // It stops fetching as soon as it has accumulated enough results.
 func (c *Client) ListJobsPaged(ctx context.Context, limit int) ([]models.JobResponse, error) {
-	return c.ListJobsWindow(ctx, 0, limit)
-}
-
-// ListJobsWindow lists a window of jobs ordered by dateInserted (newest first),
-// requesting only the [offset, offset+limit) slice via limit/offset pagination
-// so callers paging deep into the list do not refetch earlier pages.
-func (c *Client) ListJobsWindow(ctx context.Context, offset, limit int) ([]models.JobResponse, error) {
 	var allJobs []models.JobResponse
-	nextURL := fmt.Sprintf("/api/v3/jobs/?ordering=-dateInserted&limit=%d&offset=%d", limit, offset)
+	nextURL := fmt.Sprintf("/api/v3/jobs/?ordering=-dateInserted&limit=%d", limit)
 
 	for nextURL != "" && len(allJobs) < limit {
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
@@ -814,6 +807,36 @@ func (c *Client) ListJobsWindow(ctx context.Context, offset, limit int) ([]model
 		allJobs = allJobs[:limit]
 	}
 	return allJobs, nil
+}
+
+// ListJobsPage fetches exactly one page of jobs ordered by newest first, and
+// reports whether more pages exist. The jobs endpoint uses page-number
+// pagination: page and page_size are honored, while limit/offset are accepted
+// but ignored (verified against the live API), so deep pages must be addressed
+// by page number — an offset-style request silently returns page one again.
+func (c *Client) ListJobsPage(ctx context.Context, page, pageSize int) ([]models.JobResponse, bool, error) {
+	url := fmt.Sprintf("/api/v3/jobs/?ordering=-dateInserted&page=%d&page_size=%d", page, pageSize)
+	resp, err := c.doRequest(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body := readResponseBody(resp.Body)
+		return nil, false, fmt.Errorf("list jobs page failed: status %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		Next    *string              `json:"next"`
+		Results []models.JobResponse `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, false, fmt.Errorf("failed to decode jobs response: %w", err)
+	}
+
+	hasMore := result.Next != nil && *result.Next != ""
+	return result.Results, hasMore, nil
 }
 
 // ListJobsWithCutoff lists jobs ordered by dateInserted (newest first) and stops
