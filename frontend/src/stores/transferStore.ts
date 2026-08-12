@@ -19,6 +19,8 @@ export function classifyError(error: string | undefined): TransferErrorType {
     lower.includes('out of disk space') ||
     lower.includes('not enough space') ||
     lower.includes('disk quota exceeded') ||
+    // Darwin's strerror(EDQUOT) spells it "Disc quota exceeded"; Linux uses "Disk".
+    lower.includes('disc quota exceeded') ||
     lower.includes('enospc')
   ) return 'disk_space'
   return 'generic'
@@ -109,7 +111,9 @@ interface TransferStore {
   // Actions
   fetchTasks: () => Promise<void>
   fetchStats: () => Promise<void>
-  fetchBatches: () => Promise<void>
+  // refreshExpanded also re-fetches the first page of every expanded batch.
+  // Defaults to true; the poll loop passes false on most ticks (see startPolling).
+  fetchBatches: (refreshExpanded?: boolean) => Promise<void>
   fetchDaemonSnapshot: () => Promise<void>
   fetchUngroupedTasks: () => Promise<void>
   fetchBatchTasks: (batchID: string, offset: number, limit: number) => Promise<void>
@@ -133,7 +137,7 @@ interface TransferStore {
   setupEventListeners: () => () => void
 
   // Internal
-  _pollInterval: ReturnType<typeof setInterval> | null
+  _pollStop: (() => void) | null
   _unsubscribeProgress: (() => void) | null
   _unsubscribeTransfer: (() => void) | null
   _unsubscribeEnumeration: (() => void) | null
@@ -180,6 +184,17 @@ function enhanceTask(dto: wailsapp.TransferTaskDTO): TransferTask {
   }
 }
 
+// Rows inside an expanded batch are refreshed once every this many poll ticks.
+// Their aggregate counters come from batch progress events, so a full page
+// re-fetch per tick bought little and cost one IPC round trip per expanded
+// batch per tick.
+const EXPANDED_BATCH_REFRESH_TICKS = 4
+
+// Page size for a batch's task rows. The offset-0 refresh and the "Show more"
+// append have to agree on it, otherwise fetchBatchTasks' prefix-alignment merge
+// sees a composition change on every poll and throws away the loaded tail.
+export const BATCH_PAGE_SIZE = 50
+
 const initialStats: TransferStats = {
   queued: 0,
   initializing: 0,
@@ -206,7 +221,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   error: null,
   isPolling: false,
   lastUpdate: 0,
-  _pollInterval: null,
+  _pollStop: null,
   _unsubscribeProgress: null,
   _unsubscribeTransfer: null,
   _unsubscribeEnumeration: null,
@@ -214,20 +229,27 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
   _appEventListenersSetup: false,
 
   // Fetch only ungrouped tasks (no batchID) -- lightweight for large batches
+  //
+  // Owns the non-Daemon rows only. Daemon rows are fetched separately by
+  // fetchDaemonSnapshot and are carried through untouched, so the two fetches
+  // running on the same tick can't wipe each other's rows.
   fetchUngroupedTasks: async () => {
     try {
       const tasks = await App.GetUngroupedTransferTasks()
-      set({
-        tasks: (tasks || []).map(enhanceTask),
+      const local = (tasks || []).map(enhanceTask)
+      set(state => ({
+        // Same order fetchDaemonSnapshot writes (local rows first), so a tick
+        // doesn't reshuffle the list.
+        tasks: [...local, ...state.tasks.filter(t => t.sourceLabel === 'Daemon')],
         lastUpdate: Date.now(),
         error: null,
-      })
+      }))
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) })
     }
   },
 
-  fetchBatches: async () => {
+  fetchBatches: async (refreshExpanded = true) => {
     try {
       const raw = await App.GetTransferBatches()
       // Map DTO to TransferBatch (totalKnown defaults true for non-streaming batches)
@@ -242,12 +264,19 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         skipped: (b as TransferBatch).skipped ?? 0,
         cancelRequested: (b as TransferBatch).cancelRequested ?? false,
       }))
-      set({ batches })
+      // Owns the non-Daemon batches only; Daemon batches come from
+      // fetchDaemonSnapshot and are preserved (see fetchUngroupedTasks).
+      set(state => ({
+        batches: [...batches, ...state.batches.filter(b => b.sourceLabel === 'Daemon')],
+      }))
 
-      // Refresh expanded batch tasks
-      const expanded = get().expandedBatches
-      for (const batchID of expanded) {
-        get().fetchBatchTasks(batchID, 0, 50)
+      // Refresh expanded batch tasks. Awaited so the caller's tick covers the
+      // whole cost of the poll instead of leaving N requests in flight.
+      if (refreshExpanded) {
+        const expanded = get().expandedBatches
+        await Promise.all(
+          [...expanded].map(batchID => get().fetchBatchTasks(batchID, 0, BATCH_PAGE_SIZE))
+        )
       }
 
       // Enumeration-to-batch reconciliation (4-layer removal)
@@ -274,8 +303,13 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           // Uses lastEventAt (staleness) not createdAt (absolute age) to avoid
           // prematurely removing long-running folder creation progress
           toRemove.push(e.id)
-        } else if (e.isComplete && e.completedAt && !hasMatchingBatch && (now - e.completedAt > 10000)) {
-          // Completed but no batch appeared after 10s (error path, empty folder, zero files)
+        } else if (e.isComplete && e.completedAt && !hasMatchingBatch && !e.error && (now - e.completedAt > 10000)) {
+          // Completed but no batch appeared after 10s (empty folder, zero files).
+          // Rows carrying an error are exempt: this reconciliation only runs
+          // while the Transfers tab is active, so a scan that failed while the
+          // user was on another tab would have its row removed by the first tick
+          // after they arrive, before they could read it. Those rows stay until
+          // "Clear Completed" acknowledges them.
           toRemove.push(e.id)
         }
       }
@@ -439,18 +473,35 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
+  // One tick at a time: the tick body is awaited in full and the next tick is
+  // armed only once it settles. This used to be a setInterval firing 4 + one
+  // per expanded batch unawaited calls every 500ms with no reentrancy guard, so
+  // whenever a call ran longer than the interval the ticks overlapped and the
+  // pending IPC calls piled up faster than they drained — which is why a newly
+  // queued transfer could take ~10s to appear while a large batch was running.
   startPolling: (intervalMs = 500) => {
-    const state = get()
+    if (get().isPolling) return
 
-    // Already polling
-    if (state.isPolling) return
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let ticks = 0
 
-    const pollInterval = setInterval(() => {
-      get().fetchBatches()
-      get().fetchUngroupedTasks()
-      get().fetchStats()
-      get().fetchDaemonSnapshot()
-    }, intervalMs)
+    const runTick = async () => {
+      ticks++
+      const refreshExpanded = ticks % EXPANDED_BATCH_REFRESH_TICKS === 0
+      try {
+        await Promise.all([
+          get().fetchBatches(refreshExpanded),
+          get().fetchUngroupedTasks(),
+          get().fetchStats(),
+          get().fetchDaemonSnapshot(),
+        ])
+      } finally {
+        if (!stopped) {
+          timer = setTimeout(runTick, intervalMs)
+        }
+      }
+    }
 
     // Subscribe to progress events for real-time updates (legacy PUR jobs)
     const unsubscribeProgress = EventsOn(EVENT_NAMES.PROGRESS, (event: ProgressEventDTO) => {
@@ -460,24 +511,25 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     // Transfer and enumeration events are subscribed at app level
     // via setupEventListeners() so they persist when navigating away
 
-    // Initial fetch
-    get().fetchBatches()
-    get().fetchUngroupedTasks()
-    get().fetchStats()
-    get().fetchDaemonSnapshot()
-
+    // Set the stop hook before the first tick so a stop that lands mid-tick is
+    // seen by the re-arm check.
     set({
       isPolling: true,
-      _pollInterval: pollInterval,
+      _pollStop: () => {
+        stopped = true
+        if (timer) clearTimeout(timer)
+      },
       _unsubscribeProgress: unsubscribeProgress,
     })
+
+    void runTick()
   },
 
   stopPolling: () => {
-    const { _pollInterval, _unsubscribeProgress } = get()
+    const { _pollStop, _unsubscribeProgress } = get()
 
-    if (_pollInterval) {
-      clearInterval(_pollInterval)
+    if (_pollStop) {
+      _pollStop()
     }
 
     // Only unsubscribe from progress events (legacy PUR)
@@ -488,7 +540,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
 
     set({
       isPolling: false,
-      _pollInterval: null,
+      _pollStop: null,
       _unsubscribeProgress: null,
       // Don't clear enumerations - they persist while scanning
     })
@@ -617,7 +669,13 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       for (const batchID of state.expandedBatches) {
         newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
       }
-      return { batchTasks: new Map(), batchEpochs: newEpochs }
+      return {
+        batchTasks: new Map(),
+        batchEpochs: newEpochs,
+        // This is the acknowledgement that lets finished enumeration rows go,
+        // including the errored ones that reconciliation deliberately keeps.
+        enumerations: state.enumerations.filter(e => !e.isComplete),
+      }
     })
     get().fetchBatches()
     get().fetchUngroupedTasks()
@@ -639,7 +697,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
       expanded.add(batchID)
       set({ expandedBatches: expanded })
       // Fetch first page of tasks
-      get().fetchBatchTasks(batchID, 0, 50)
+      get().fetchBatchTasks(batchID, 0, BATCH_PAGE_SIZE)
     }
   },
 
@@ -660,7 +718,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     newEpochs.set(batchID, (newEpochs.get(batchID) ?? 0) + 1)
     set({ batchStatusFilter: newFilters, batchTasks: newMap, batchEpochs: newEpochs })
     // Re-fetch with new filter
-    get().fetchBatchTasks(batchID, 0, 50)
+    get().fetchBatchTasks(batchID, 0, BATCH_PAGE_SIZE)
   },
 
   handleProgressEvent: (event: ProgressEventDTO) => {

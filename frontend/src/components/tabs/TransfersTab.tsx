@@ -14,7 +14,7 @@ import {
   ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useTransferStore, TransferTask, TransferBatch, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA } from '../../stores'
+import { useTransferStore, TransferTask, TransferBatch, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA, BATCH_PAGE_SIZE } from '../../stores'
 import { useTabNavigation } from '../../App'
 
 // Format file size (issue #18)
@@ -557,13 +557,13 @@ const BatchRow = memo(function BatchRow({
             />
           ))}
           {(() => {
-            // "Show more" count uses the filtered total when a status filter is active
+            // "Show more" count uses the filtered total when a status filter is active.
+            // The filter values are exactly the ones the chips above emit.
             const filteredTotal = statusFilter === 'completed' ? batch.completed
               : statusFilter === 'failed' ? batch.failed
               : statusFilter === 'cancelled' ? batch.cancelled
               : statusFilter === 'inprogress' ? batch.active
               : statusFilter === 'queued' ? batch.queued
-              : statusFilter === 'active' ? (batch.active + batch.queued)
               : batch.total
             const remaining = filteredTotal - expandedTasks.length
             if (remaining <= 0) return null
@@ -820,10 +820,13 @@ export function TransfersTab() {
     clearCompletedTransfers()
   }, [clearCompletedTransfers])
 
-  // Count completed/failed/cancelled for clear button
+  // Count completed/failed/cancelled for clear button. Finished enumeration rows
+  // count too: a folder scan that failed before queueing anything leaves a row
+  // with no task behind it, and Clear Completed is how that row is dismissed.
   const finishedCount = useMemo(() => {
     return stats.completed + stats.failed + stats.cancelled
-  }, [stats])
+      + enumerations.filter(e => e.isComplete).length
+  }, [stats, enumerations])
 
   const isEmpty = tasks.length === 0 && enumerations.length === 0 && batches.length === 0 && !folderCheckStatus
 
@@ -917,7 +920,7 @@ export function TransfersTab() {
                 onRetryFailed={() => retryFailedInBatch(batch.batchID)}
                 onLoadMore={() => {
                   const current = batchTasks.get(batch.batchID) || []
-                  fetchBatchTasks(batch.batchID, current.length, 50)
+                  fetchBatchTasks(batch.batchID, current.length, BATCH_PAGE_SIZE)
                 }}
                 onCancelTask={handleCancel}
                 onRetryTask={handleRetry}
