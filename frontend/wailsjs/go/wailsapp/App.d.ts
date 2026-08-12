@@ -182,7 +182,7 @@ export function SaveTemplate(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>
 
 export function ScanDirectory(arg1:wailsapp.ScanOptionsDTO,arg2:wailsapp.JobSpecDTO):Promise<wailsapp.ScanResultDTO>;
 
-export function SearchRemoteFolderContents(arg1:string,arg2:string,arg3:number):Promise<wailsapp.FolderContentsDTO>;
+export function SearchRemoteFolderContents(arg1:string,arg2:string,arg3:string,arg4:number):Promise<wailsapp.FolderContentsDTO>;
 
 export function SelectDirectory(arg1:string):Promise<string>;
 

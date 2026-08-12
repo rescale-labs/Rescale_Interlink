@@ -286,8 +286,9 @@ func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int)
 }
 
 // SearchRemoteFolderContents searches within a folder for files/folders matching the query.
+// Pass empty cursor for first page, or use nextCursor from previous response.
 // Returns paginated results similar to ListRemoteFolderPage.
-func (a *App) SearchRemoteFolderContents(folderID string, searchQuery string, pageSize int) FolderContentsDTO {
+func (a *App) SearchRemoteFolderContents(folderID string, searchQuery string, cursor string, pageSize int) FolderContentsDTO {
 	if a.engine == nil {
 		return FolderContentsDTO{}
 	}
@@ -298,7 +299,7 @@ func (a *App) SearchRemoteFolderContents(folderID string, searchQuery string, pa
 	}
 
 	ctx := context.Background()
-	contents, err := fs.SearchFolderContents(ctx, folderID, searchQuery, pageSize)
+	contents, err := fs.SearchFolderContents(ctx, folderID, searchQuery, cursor, pageSize)
 	if err != nil {
 		return FolderContentsDTO{
 			FolderID: folderID,

@@ -1411,16 +1411,30 @@ func (c *Client) ListFolderContentsPage(ctx context.Context, folderID, pageURL s
 }
 
 // SearchFolderContents searches within a folder for files/folders matching the query.
+// pageURL: pass "" for the first page, or NextURL from a previous response — the
+// cursor already carries the search term, so paging past page one requires it.
 // Returns results paginated similar to ListFolderContentsPage.
-func (c *Client) SearchFolderContents(ctx context.Context, folderID, searchQuery string, pageSize int) (*FolderContents, error) {
+func (c *Client) SearchFolderContents(ctx context.Context, folderID, searchQuery, pageURL string, pageSize int) (*FolderContents, error) {
 	if searchQuery == "" {
 		// If no search query, just return regular contents
-		return c.ListFolderContentsPage(ctx, folderID, "", pageSize)
+		return c.ListFolderContentsPage(ctx, folderID, pageURL, pageSize)
 	}
 
-	url := fmt.Sprintf("/api/v3/folders/%s/contents/search/?search=%s", folderID, neturl.QueryEscape(searchQuery))
-	if pageSize > 0 {
-		url = fmt.Sprintf("%s&page_size=%d", url, pageSize)
+	url := extractAPIPath(pageURL)
+	if url == "" {
+		url = fmt.Sprintf("/api/v3/folders/%s/contents/search/?search=%s", folderID, neturl.QueryEscape(searchQuery))
+		if pageSize > 0 {
+			url = fmt.Sprintf("%s&page_size=%d", url, pageSize)
+		}
+	} else if pageSize > 0 {
+		// Force page_size on pagination URLs — the API's nextURL may carry
+		// page_size=25 (server default), reintroducing slow pagination.
+		if u, err := neturl.Parse(url); err == nil {
+			q := u.Query()
+			q.Set("page_size", strconv.Itoa(pageSize))
+			u.RawQuery = q.Encode()
+			url = extractAPIPath(u.String())
+		}
 	}
 
 	return c.fetchFolderContentsPage(ctx, url)

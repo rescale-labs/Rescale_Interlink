@@ -655,8 +655,9 @@ func (fs *FileService) ListFolderPage(ctx context.Context, folderID string, curs
 }
 
 // SearchFolderContents searches within a folder for files/folders matching the query.
+// cursor: pass "" for the first page, or NextCursor from a previous response.
 // Returns paginated results similar to ListFolderPage.
-func (fs *FileService) SearchFolderContents(ctx context.Context, folderID string, searchQuery string, pageSize int) (*FolderContents, error) {
+func (fs *FileService) SearchFolderContents(ctx context.Context, folderID string, searchQuery string, cursor string, pageSize int) (*FolderContents, error) {
 	fs.mu.RLock()
 	apiClient := fs.apiClient
 	fs.mu.RUnlock()
@@ -675,7 +676,7 @@ func (fs *FileService) SearchFolderContents(ctx context.Context, folderID string
 	}
 
 	// Use the search API method
-	contents, err := apiClient.SearchFolderContents(ctx, folderID, searchQuery, pageSize)
+	contents, err := apiClient.SearchFolderContents(ctx, folderID, searchQuery, cursor, pageSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search folder contents: %w", err)
 	}

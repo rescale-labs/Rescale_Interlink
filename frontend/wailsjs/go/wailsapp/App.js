@@ -362,8 +362,8 @@ export function ScanDirectory(arg1, arg2) {
   return window['go']['wailsapp']['App']['ScanDirectory'](arg1, arg2);
 }
 
-export function SearchRemoteFolderContents(arg1, arg2, arg3) {
-  return window['go']['wailsapp']['App']['SearchRemoteFolderContents'](arg1, arg2, arg3);
+export function SearchRemoteFolderContents(arg1, arg2, arg3, arg4) {
+  return window['go']['wailsapp']['App']['SearchRemoteFolderContents'](arg1, arg2, arg3, arg4);
 }
 
 export function SelectDirectory(arg1) {

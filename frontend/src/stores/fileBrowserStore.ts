@@ -440,7 +440,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       // Use search API if librarySearchQuery is set and mode is library or jobs
       const searchQuery = state.librarySearchQuery
       const contents = searchQuery && (state.mode === 'library' || state.mode === 'jobs')
-        ? await App.SearchRemoteFolderContents(targetId, searchQuery, itemsPerPage)
+        ? await App.SearchRemoteFolderContents(targetId, searchQuery, cursor, itemsPerPage)
         : await App.ListRemoteFolderPage(targetId, cursor, itemsPerPage)
 
       // Stale response guard: discard if navigation changed during async call
