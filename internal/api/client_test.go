@@ -1168,6 +1168,11 @@ func TestRetryEmitsNoticesAndHonorsBudget(t *testing.T) {
 	if !strings.Contains(err.Error(), "retries exhausted after") {
 		t.Errorf("error %q should name the exhausted retry budget", err.Error())
 	}
+	// The budget always fires before attempt exhaustion, so this error is the
+	// only place the server's own explanation can still reach the caller.
+	if !strings.Contains(err.Error(), "HTTP 500") || !strings.Contains(err.Error(), "backend on fire") {
+		t.Errorf("error %q should quote the failing status and the server's detail", err.Error())
+	}
 
 	attempts := atomic.LoadInt32(&hits)
 	if attempts < 2 {
@@ -1206,9 +1211,8 @@ func (b *trackedBody) Close() error {
 }
 
 // TestRetryErrorHandlerBodyHandling covers both exits from the retry loop: a
-// cancelled call must not leak the response net/http is about to discard, and
-// retry exhaustion must hand the body to the caller so it can report the
-// server's own error text.
+// cancelled call must not leak the response net/http is about to discard, and an
+// unbudgeted policy that runs out of attempts must hand the body back.
 func TestRetryErrorHandlerBodyHandling(t *testing.T) {
 	policy, _ := newRetryTestPolicy(t, 0)
 
@@ -1432,5 +1436,57 @@ func TestFileTagErrorsCarryServerText(t *testing.T) {
 				t.Errorf("error %q dropped the server's explanation", err.Error())
 			}
 		})
+	}
+}
+
+// TestThrottleNoticeReachesTheUser covers the surviving-429 handler in
+// doRequest. The line is the clearest signal a user gets that the server is
+// refusing calls, so it must go through the notice channel rather than the
+// standard logger, which the CLI discards at default verbosity.
+func TestThrottleNoticeReachesTheUser(t *testing.T) {
+	var mu sync.Mutex
+	var notices []string
+	ratelimit.SetGlobalNotifyFunc(func(_, message string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notices = append(notices, message)
+	})
+	defer ratelimit.SetGlobalNotifyFunc(nil)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "7")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Limit", "7200")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	// newTestClient has no retry wrapper, so the 429 lands in doRequest's
+	// surviving-429 handler exactly as it would after retries are exhausted.
+	client := newTestClient(t, server.URL)
+	resp, err := client.doRequest(context.Background(), "GET", "/api/v3/files/", nil)
+	if err != nil {
+		t.Fatalf("doRequest() error = %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notices) != 1 {
+		t.Fatalf("a surviving 429 should emit exactly one notice, got %d: %v", len(notices), notices)
+	}
+	// The scope's numbers come from the registry, which NewTestStore overrides,
+	// so assert on the scope name rather than pinning test-store limits.
+	for _, want := range []string{
+		"Throttled by the Rescale API",
+		"GET /api/v3/files/",
+		"the user (",
+		"Retry-After 7s applied as cooldown",
+		"X-RateLimit-Remaining: 0",
+		"X-RateLimit-Limit: 7200",
+	} {
+		if !strings.Contains(notices[0], want) {
+			t.Errorf("throttle notice %q missing %q", notices[0], want)
+		}
 	}
 }

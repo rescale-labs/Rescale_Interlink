@@ -33,6 +33,11 @@ const retryNoticeMinWait = 5 * time.Second
 // the connection can be reused. Matches go-retryablehttp's own limit.
 const retryDrainLimit = 4 << 10
 
+// retryBodyExcerptLimit caps how much of a failing response body is quoted back
+// in a retry-exhausted error. Long enough for a Rescale API error payload,
+// short enough not to bury the message it is attached to.
+const retryBodyExcerptLimit = 200
+
 // retryLogger implements the retryablehttp.LeveledLogger interface.
 //
 // go-retryablehttp announces every retry through Debug("retrying request"),
@@ -127,19 +132,26 @@ type retryPolicy struct {
 	notify func(level, message string)
 }
 
-// emit sends a user-visible notice through the rate limit notice channel — the
-// CLI's stderr sink and the GUI's Activity Logs. Falls back to the standard
-// logger only when no hook is registered at all.
-func (p *retryPolicy) emit(level, message string) {
-	fn := p.notify
-	if fn == nil {
-		fn = ratelimit.NotifyFunc()
-	}
-	if fn == nil {
-		log.Print(message)
+// notifyUser sends a user-visible notice through the rate limit notice channel:
+// the CLI's stderr sink, the GUI's Activity Logs, the daemon's log file and IPC
+// buffer. Falls back to the standard logger only when no hook is registered —
+// which at default CLI verbosity means the message is dropped.
+func notifyUser(level, message string) {
+	if fn := ratelimit.NotifyFunc(); fn != nil {
+		fn(level, message)
 		return
 	}
-	fn(level, message)
+	log.Print(message)
+}
+
+// emit routes a notice through the policy's own hook when one is set (tests),
+// otherwise through the process-level channel.
+func (p *retryPolicy) emit(level, message string) {
+	if p.notify != nil {
+		p.notify(level, message)
+		return
+	}
+	notifyUser(level, message)
 }
 
 // limiterFor resolves the shared limiter that governs a request's scope.
@@ -229,14 +241,46 @@ func (p *retryPolicy) budgetExceeded(ctx context.Context, resp *nethttp.Response
 
 	cause := err
 	if cause == nil {
-		if resp != nil {
-			cause = fmt.Errorf("HTTP %d", resp.StatusCode)
-		} else {
+		switch {
+		case resp == nil:
 			cause = errors.New("request failed")
+		default:
+			// The budget always fires before attempt exhaustion, so this is the
+			// only path that reports a persistently failing endpoint. Carry the
+			// server's own words: without them the caller sees a bare status and
+			// has to go to the platform to find out what was wrong.
+			if excerpt := bodyExcerpt(resp.Body); excerpt != "" {
+				cause = fmt.Errorf("HTTP %d: %s", resp.StatusCode, excerpt)
+			} else {
+				cause = fmt.Errorf("HTTP %d", resp.StatusCode)
+			}
 		}
 	}
 	return fmt.Errorf("retries exhausted after %v (limit %v): %w",
 		elapsed.Round(time.Millisecond), p.maxElapsed, cause)
+}
+
+// orDash renders a missing header value as a dash so a partial pair still reads
+// as a pair.
+func orDash(v string) string {
+	if v == "" {
+		return "—"
+	}
+	return v
+}
+
+// bodyExcerpt reads the head of a response body for use in an error message,
+// collapsed to a single bounded line. Safe to call on a body that is about to be
+// drained and closed by errorHandler; nothing else reads it on this path.
+func bodyExcerpt(body io.ReadCloser) string {
+	if body == nil {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(body, retryBodyExcerptLimit))
+	if err != nil && len(data) == 0 {
+		return ""
+	}
+	return strings.Join(strings.Fields(string(data)), " ")
 }
 
 // backoff resolves how long to sleep before the next attempt.
@@ -307,13 +351,17 @@ func newRetryClient(inner *nethttp.Client, policy *retryPolicy, retryMax int, wa
 
 // errorHandler decides what the caller sees once the retry loop gives up.
 //
-// A nil error means retries were exhausted on a response — a persistent 500,
-// say — so the response is handed back intact and the caller can report the
-// server's own error text. A non-nil error means there is no usable response,
-// but there may still be a body: a context cancelled between the response
-// arriving and checkRetry running leaves one behind, and net/http discards any
-// response returned alongside an error without closing it. Drain it here rather
-// than leak the connection.
+// A non-nil error means there is no usable response, but there may still be a
+// body: a context cancelled between the response arriving and checkRetry running
+// leaves one behind, and net/http discards any response returned alongside an
+// error without closing it. Drain it here rather than leak the connection. The
+// server's explanation is not lost — budgetExceeded quotes it into the error.
+//
+// A nil error means the loop ran out of attempts rather than erroring, and the
+// response goes back intact. With a retry budget configured that cannot happen:
+// the budget always expires first, since ten backoffs total more than
+// constants.RetryMaxElapsed. The branch is what makes an unbudgeted policy
+// (maxElapsed == 0) behave sanely.
 func (p *retryPolicy) errorHandler(resp *nethttp.Response, err error, _ int) (*nethttp.Response, error) {
 	if err == nil {
 		return resp, nil
@@ -584,36 +632,40 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 	// Check for rate limit (429 Too Many Requests) response.
 	//
-	// NOTE: Most 429s are absorbed by retryablehttp's internal retry loop
-	// (CheckRetry returns true for 429). This handler only sees 429s that
-	// survive all retry attempts. Phase 3 adds a CheckRetry hook to drain
-	// the limiter on EVERY 429, not just the ones that exhaust retries.
+	// Most 429s are absorbed by retryablehttp's retry loop, and checkRetry
+	// already drains the limiter and applies the cooldown for every one of them.
+	// This handler only sees a 429 that outlived the retries, which is the case
+	// worth telling the user about.
 	if resp.StatusCode == 429 {
-		// Use the same registry for scope identification as doRequest routing
-		scopeDisplay := registry.ScopeDisplayString(scope)
-
-		log.Printf("⚠️  THROTTLED: %s %s - Rate limit exceeded on '%s' scope", method, path, scopeDisplay)
-
 		// Drain the limiter for this scope to prevent further requests
 		limiter.Drain()
 
 		// Parse and apply Retry-After header as cooldown
+		cooldown := ""
 		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
 			if seconds, err := strconv.Atoi(retryAfter); err == nil && seconds > 0 {
 				limiter.SetCooldown(time.Duration(seconds) * time.Second)
-				log.Printf("   └─ Retry-After: %d seconds (cooldown applied)", seconds)
+				cooldown = fmt.Sprintf("; Retry-After %ds applied as cooldown", seconds)
 			} else {
-				log.Printf("   └─ Retry-After: %s (unparseable, using drain only)", retryAfter)
+				cooldown = fmt.Sprintf("; Retry-After %q unparseable, draining only", retryAfter)
 			}
 		}
 
-		// Log rate limit headers for diagnostics
-		if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining != "" {
-			log.Printf("   └─ X-RateLimit-Remaining: %s", remaining)
+		// Include the server's own budget accounting when it sends it.
+		budget := ""
+		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		limit := resp.Header.Get("X-RateLimit-Limit")
+		if remaining != "" || limit != "" {
+			budget = fmt.Sprintf(" (X-RateLimit-Remaining: %s, X-RateLimit-Limit: %s)",
+				orDash(remaining), orDash(limit))
 		}
-		if limit := resp.Header.Get("X-RateLimit-Limit"); limit != "" {
-			log.Printf("   └─ X-RateLimit-Limit: %s", limit)
-		}
+
+		// One line, through the notice channel rather than the standard logger:
+		// this is how a user learns their commands are crawling because the
+		// server is refusing calls, and the CLI discards the logger by default.
+		// Scope identification uses the same registry as doRequest routing.
+		notifyUser("warn", fmt.Sprintf("Throttled by the Rescale API: %s %s exceeded the %s scope limit%s%s",
+			method, path, registry.ScopeDisplayString(scope), cooldown, budget))
 	}
 
 	return resp, nil
