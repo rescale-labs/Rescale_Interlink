@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ArrowLeftIcon,
   ArrowPathIcon,
@@ -9,6 +9,7 @@ import clsx from 'clsx'
 import { FileList } from './FileList'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../../wailsjs/go/models'
+import { useConfigStore } from '../../stores'
 
 // Browse mode for remote browser
 type BrowseMode = 'library' | 'jobs' | 'legacy'
@@ -50,6 +51,11 @@ export function RemoteFilePicker({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [currentFolderId, setCurrentFolderId] = useState('')
 
+  // Bumped by every view-changing operation so a listing that resolves after the
+  // user has navigated elsewhere is discarded instead of overwriting the newer
+  // view. Same guard the remote pane of fileBrowserStore uses.
+  const navGeneration = useRef(0)
+
   // Initialize root folder IDs on first open
   useEffect(() => {
     if (isOpen && !myLibraryId && !myJobsId) {
@@ -64,8 +70,30 @@ export function RemoteFilePicker({
     }
   }, [isOpen])
 
+  // A different API key is a different workspace, so the resolved root folder
+  // IDs and the cached listing belong to an account that is no longer active —
+  // handing their file IDs to a job submission would reference files the current
+  // key cannot see. Drop everything; the effect above re-resolves the roots the
+  // next time the dialog is open.
+  const apiKey = useConfigStore(s => s.config?.apiKey ?? '')
+  const lastAPIKey = useRef(apiKey)
+  useEffect(() => {
+    if (lastAPIKey.current === apiKey) return
+    lastAPIKey.current = apiKey
+    navGeneration.current++
+    setMyLibraryId(null)
+    setMyJobsId(null)
+    setItems([])
+    setBreadcrumb([])
+    setSelectedIds(new Set())
+    setCurrentFolderId('')
+    setError(null)
+    setIsLoading(false)
+  }, [apiKey])
+
   // Initialize remote browser - get root folder IDs
   const initRemote = useCallback(async () => {
+    const myGen = ++navGeneration.current
     setIsLoading(true)
     setError(null)
 
@@ -74,6 +102,7 @@ export function RemoteFilePicker({
         App.GetMyLibraryFolderID(),
         App.GetMyJobsFolderID(),
       ])
+      if (navGeneration.current !== myGen) return
 
       setMyLibraryId(libId)
       setMyJobsId(jobsId)
@@ -87,6 +116,7 @@ export function RemoteFilePicker({
         await loadFolder(folderId, folderName)
       }
     } catch (err) {
+      if (navGeneration.current !== myGen) return
       setError(err instanceof Error ? err.message : String(err))
       setIsLoading(false)
     }
@@ -96,11 +126,14 @@ export function RemoteFilePicker({
   const loadFolder = useCallback(async (folderId: string, folderName?: string) => {
     if (!folderId) return
 
+    const myGen = ++navGeneration.current
     setIsLoading(true)
     setError(null)
 
     try {
       const contents = await App.ListRemoteFolder(folderId)
+      // Superseded: a newer navigation owns the view and the loading flag.
+      if (navGeneration.current !== myGen) return
 
       // Update breadcrumb
       if (folderName !== undefined) {
@@ -117,6 +150,7 @@ export function RemoteFilePicker({
       setItems(contents.items)
       setIsLoading(false)
     } catch (err) {
+      if (navGeneration.current !== myGen) return
       setError(err instanceof Error ? err.message : String(err))
       setIsLoading(false)
     }
@@ -124,11 +158,13 @@ export function RemoteFilePicker({
 
   // Load legacy files
   const loadLegacy = useCallback(async (cursor?: string) => {
+    const myGen = ++navGeneration.current
     setIsLoading(true)
     setError(null)
 
     try {
       const contents = await App.ListRemoteLegacy(cursor ?? '', 0)
+      if (navGeneration.current !== myGen) return
 
       const existingItems = cursor ? items : []
 
@@ -137,6 +173,7 @@ export function RemoteFilePicker({
       setBreadcrumb([{ id: '', name: 'Legacy Files' }])
       setIsLoading(false)
     } catch (err) {
+      if (navGeneration.current !== myGen) return
       setError(err instanceof Error ? err.message : String(err))
       setIsLoading(false)
     }
