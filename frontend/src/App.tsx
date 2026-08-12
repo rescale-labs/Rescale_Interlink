@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, createContext, useContext } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback, memo, createContext, useContext } from 'react'
 import { Tab } from '@headlessui/react'
 import {
   Cog6ToothIcon,
@@ -50,37 +50,53 @@ const TabNavigationContext = createContext<TabNavigationContextType>({
 // eslint-disable-next-line react-refresh/only-export-components -- hook is consumed by several tabs; moving it to its own module is a separate refactor
 export const useTabNavigation = () => useContext(TabNavigationContext);
 
+// Every panel stays mounted for the session (unmount={false}), so without memo
+// any App state change — a footer stat, the workspace name — re-rendered all
+// seven tab bodies. The tabs take no props, so memo lets each one re-render only
+// when its own store subscriptions change.
 const tabs = [
-  { name: 'Setup', icon: Cog6ToothIcon, component: SetupTab },
-  { name: 'Single Job', icon: PlayIcon, component: SingleJobTab },
-  { name: 'PUR (Multiple Jobs)', icon: Square3Stack3DIcon, component: PURTab, title: 'PUR = Parallel Upload and Run' },
-  { name: 'Job Status', icon: ClipboardDocumentListIcon, component: JobStatusTab },
-  { name: 'File Browser', icon: FolderOpenIcon, component: FileBrowserTab },
-  { name: 'Transfers', icon: ArrowsRightLeftIcon, component: TransfersTab },
-  { name: 'Activity Logs', icon: DocumentTextIcon, component: ActivityTab },
+  { name: 'Setup', icon: Cog6ToothIcon, component: memo(SetupTab) },
+  { name: 'Single Job', icon: PlayIcon, component: memo(SingleJobTab) },
+  { name: 'PUR (Multiple Jobs)', icon: Square3Stack3DIcon, component: memo(PURTab), title: 'PUR = Parallel Upload and Run' },
+  { name: 'Job Status', icon: ClipboardDocumentListIcon, component: memo(JobStatusTab) },
+  { name: 'File Browser', icon: FolderOpenIcon, component: memo(FileBrowserTab) },
+  { name: 'Transfers', icon: ArrowsRightLeftIcon, component: memo(TransfersTab) },
+  { name: 'Activity Logs', icon: DocumentTextIcon, component: memo(ActivityTab) },
 ]
 
 function AppComponent() {
   const [appInfo, setAppInfo] = useState<wailsapp.AppInfoDTO | null>(null)
   const [selectedTabIndex, setSelectedTabIndex] = useState(0)
-  const {
-    workspaceName,
-    workspaceId,
-    connectionStatus,
-    config,
-    testConnection,
-    setupEventListeners: setupConfigEventListeners,
-    fetchConfig,
-  } = useConfigStore()
-  const { overallMessage, overallProgress } = useLogStore()
-  const { stats: transferStats, setupEventListeners: setupTransferEventListeners } = useTransferStore()
-  const { activeRun, setupEventListeners: setupRunEventListeners, recoverFromRestart } = useRunStore()
-  const { setupEventListeners: setupFileBrowserEventListeners } = useFileBrowserStore()
-  const { setupEventListeners: setupErrorReportEventListeners } = useErrorReportStore()
+  // Field-level selectors, not whole-store reads: a bare useStore() re-renders
+  // this component (and, before the memo above, every mounted tab) on any change
+  // to any field of that store, including the ones App never reads.
+  const workspaceName = useConfigStore(s => s.workspaceName)
+  const workspaceId = useConfigStore(s => s.workspaceId)
+  const connectionStatus = useConfigStore(s => s.connectionStatus)
+  const apiKey = useConfigStore(s => s.config?.apiKey)
+  const testConnection = useConfigStore(s => s.testConnection)
+  const setupConfigEventListeners = useConfigStore(s => s.setupEventListeners)
+  const fetchConfig = useConfigStore(s => s.fetchConfig)
+  const overallMessage = useLogStore(s => s.overallMessage)
+  const overallProgress = useLogStore(s => s.overallProgress)
+  // Individual counters, not the stats object: fetchStats builds a fresh object
+  // every 2s, so subscribing to it re-rendered on every poll whether or not a
+  // number had actually moved.
+  const transfersQueued = useTransferStore(s => s.stats.queued)
+  const transfersActiveCount = useTransferStore(s => s.stats.active)
+  const transfersCompleted = useTransferStore(s => s.stats.completed)
+  const transfersFailed = useTransferStore(s => s.stats.failed)
+  const transfersCancelled = useTransferStore(s => s.stats.cancelled)
+  const setupTransferEventListeners = useTransferStore(s => s.setupEventListeners)
+  const activeRun = useRunStore(s => s.activeRun)
+  const setupRunEventListeners = useRunStore(s => s.setupEventListeners)
+  const recoverFromRestart = useRunStore(s => s.recoverFromRestart)
+  const setupFileBrowserEventListeners = useFileBrowserStore(s => s.setupEventListeners)
+  const setupErrorReportEventListeners = useErrorReportStore(s => s.setupEventListeners)
 
   // App-level listener — persists across tab navigation
   // (events would be missed if set up inside ActivityTab only)
-  const { setupEventListeners } = useLogStore()
+  const setupEventListeners = useLogStore(s => s.setupEventListeners)
   useEffect(() => {
     const cleanup = setupEventListeners()
     return cleanup
@@ -88,7 +104,8 @@ function AppComponent() {
 
   // App-level rate-limit banner listener — must be global so it shows
   // regardless of which tab the user is on during a throttled operation.
-  const { active: rateLimited, setupEventListeners: setupRateLimitListeners } = useRateLimitStore()
+  const rateLimited = useRateLimitStore(s => s.active)
+  const setupRateLimitListeners = useRateLimitStore(s => s.setupEventListeners)
   useEffect(() => {
     const cleanup = setupRateLimitListeners()
     return cleanup
@@ -152,10 +169,10 @@ function AppComponent() {
     // 2. Workspace is not yet fetched
     // 3. Connection status is 'unknown' (never tested yet)
     // CRITICAL: Do NOT re-trigger if status is 'testing', 'failed', or 'connected'
-    if (config?.apiKey && !workspaceId && connectionStatus === 'unknown') {
+    if (apiKey && !workspaceId && connectionStatus === 'unknown') {
       testConnection()
     }
-  }, [config?.apiKey, workspaceId, connectionStatus, testConnection])
+  }, [apiKey, workspaceId, connectionStatus, testConnection])
 
   useEffect(() => {
     // Fetch app info from Go backend
@@ -180,43 +197,50 @@ function AppComponent() {
   }, [])
 
   // Tab navigation function
-  const switchToTab = (tabName: string) => {
+  const switchToTab = useCallback((tabName: string) => {
     const index = tabs.findIndex(t => t.name === tabName)
     if (index !== -1) {
       setSelectedTabIndex(index)
     }
-  }
+  }, [])
 
   const activeTabName = tabs[selectedTabIndex]?.name ?? ''
+
+  // Memoized so the context value changes only when the active tab does; a fresh
+  // object literal would re-render every consumer on every App render.
+  const tabNavigation = useMemo<TabNavigationContextType>(
+    () => ({ switchToTab, activeTabName }),
+    [switchToTab, activeTabName]
+  )
 
   // Transfers tab indicators:
   //  - "active": a pulsing dot while transfers are in progress or queued.
   //  - "unseen": after transfers finish, a dot persists until the user opens
   //    the Transfers tab (green for all-success, red if any failed/cancelled).
-  const transfersActive = transferStats.active > 0 || transferStats.queued > 0
+  const transfersActive = transfersActiveCount > 0 || transfersQueued > 0
   const [transfersUnseen, setTransfersUnseen] = useState<null | 'success' | 'error'>(null)
   const lastFinishedRef = useRef({ completed: 0, failed: 0, cancelled: 0 })
   useEffect(() => {
     const prev = lastFinishedRef.current
-    const completedGrew = transferStats.completed > prev.completed
-    const failedGrew = transferStats.failed > prev.failed || transferStats.cancelled > prev.cancelled
+    const completedGrew = transfersCompleted > prev.completed
+    const failedGrew = transfersFailed > prev.failed || transfersCancelled > prev.cancelled
     lastFinishedRef.current = {
-      completed: transferStats.completed,
-      failed: transferStats.failed,
-      cancelled: transferStats.cancelled,
+      completed: transfersCompleted,
+      failed: transfersFailed,
+      cancelled: transfersCancelled,
     }
     // Only raise the badge when a finish happens while the user is elsewhere.
     if ((completedGrew || failedGrew) && activeTabName !== 'Transfers') {
       setTransfersUnseen((cur) => (failedGrew || cur === 'error' ? 'error' : 'success'))
     }
-  }, [transferStats.completed, transferStats.failed, transferStats.cancelled, activeTabName])
+  }, [transfersCompleted, transfersFailed, transfersCancelled, activeTabName])
   // Clear the unseen badge once the user is looking at the Transfers tab.
   useEffect(() => {
     if (activeTabName === 'Transfers') setTransfersUnseen(null)
   }, [activeTabName])
 
   return (
-    <TabNavigationContext.Provider value={{ switchToTab, activeTabName }}>
+    <TabNavigationContext.Provider value={tabNavigation}>
       <ErrorReportModal />
       <div className="h-screen flex flex-col bg-slate-50">
         {/* Header */}
@@ -345,11 +369,11 @@ function AppComponent() {
                 {activeRun.completedJobs + activeRun.failedJobs}/{activeRun.totalJobs}
               </span>
             )}
-            {(transferStats.active > 0 || transferStats.queued > 0) && (
+            {transfersActive && (
               <span className="text-blue-600">
-                {transferStats.active > 0 && `${transferStats.active} active`}
-                {transferStats.active > 0 && transferStats.queued > 0 && ', '}
-                {transferStats.queued > 0 && `${transferStats.queued} queued`}
+                {transfersActiveCount > 0 && `${transfersActiveCount} active`}
+                {transfersActiveCount > 0 && transfersQueued > 0 && ', '}
+                {transfersQueued > 0 && `${transfersQueued} queued`}
               </span>
             )}
             {rateLimited && (
