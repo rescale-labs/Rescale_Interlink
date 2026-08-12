@@ -490,8 +490,9 @@ func (q *Queue) ClearCompleted() {
 	}
 
 	// Same for the cancelled-batch markers. They must outlive CancelBatch (a
-	// registration goroutine can still be streaming tasks in), so this is the
-	// only place they are dropped.
+	// registration goroutine can still be streaming tasks in), so they are
+	// dropped only once a batch has no tasks left — here, and in
+	// ClearBatchTerminalTasks for a single batch.
 	for batchID := range q.cancelledBatches {
 		if _, ok := survivingBatches[batchID]; !ok {
 			delete(q.cancelledBatches, batchID)

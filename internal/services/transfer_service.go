@@ -1043,6 +1043,13 @@ func (ts *TransferService) RetryFailedInBatch(batchID string) error {
 	return ts.queue.RetryFailedInBatch(batchID)
 }
 
+// ErrBatchVanished reports that a batch the caller was waiting on holds no
+// tasks and never will: registration ended without registering any, which
+// happens when the batch is cancelled before its first task lands. Only
+// returned by WaitForRegisteredBatch, whose caller guarantees registration is
+// finished — otherwise a missing batch is just one that hasn't started.
+var ErrBatchVanished = errors.New("transfer batch is no longer registered and has no tasks")
+
 // WaitForBatch blocks until the batch's registration phase is finished
 // (TotalKnown=true) AND all its tasks are in terminal state, or until ctx
 // is cancelled. Correctly handles the empty-batch case (Total=0 with
@@ -1054,6 +1061,22 @@ func (ts *TransferService) RetryFailedInBatch(batchID string) error {
 // decide OutcomeDownloaded vs. OutcomePartialFailure and apply the
 // downloaded tag.
 func (ts *TransferService) WaitForBatch(ctx context.Context, batchID string) (transfer.BatchStats, error) {
+	return ts.waitForBatch(ctx, batchID, false)
+}
+
+// WaitForRegisteredBatch is WaitForBatch for a caller that has already handed
+// over every request for the batch and closed its request channel. Under that
+// guarantee a batch the queue cannot resolve can never resolve — the entry that
+// makes an in-flight batch findable is dropped only when registration returns —
+// so this fails with ErrBatchVanished instead of polling forever.
+//
+// Waiting without that guarantee must use WaitForBatch: a batch whose first
+// task has not registered yet is legitimately unfindable for a moment.
+func (ts *TransferService) WaitForRegisteredBatch(ctx context.Context, batchID string) (transfer.BatchStats, error) {
+	return ts.waitForBatch(ctx, batchID, true)
+}
+
+func (ts *TransferService) waitForBatch(ctx context.Context, batchID string, failIfMissing bool) (transfer.BatchStats, error) {
 	t := time.NewTicker(250 * time.Millisecond)
 	defer t.Stop()
 	for {
@@ -1063,6 +1086,9 @@ func (ts *TransferService) WaitForBatch(ctx context.Context, batchID string) (tr
 		case <-t.C:
 			bs, ok := ts.queue.GetBatchStats(batchID)
 			if !ok {
+				if failIfMissing {
+					return transfer.BatchStats{}, fmt.Errorf("%w: %s", ErrBatchVanished, batchID)
+				}
 				continue // batch not yet registered, or already cleaned up
 			}
 			if !bs.TotalKnown {

@@ -298,6 +298,20 @@ func (s *State) MarkFailed(jobID, jobName string, err error) {
 	}
 }
 
+// AttemptCount returns how many times this job's download has already failed.
+// Zero for a job that has never been attempted, or whose last attempt succeeded
+// (a success replaces the failure entry). Add one for the attempt about to run.
+func (s *State) AttemptCount(jobID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	job, exists := s.Downloaded[jobID]
+	if !exists || job == nil || job.Error == "" {
+		return 0
+	}
+	return job.RetryCount
+}
+
 // ClearFailed removes failed status for a job, allowing retry.
 func (s *State) ClearFailed(jobID string) {
 	s.mu.Lock()

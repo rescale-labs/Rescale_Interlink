@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -187,6 +188,105 @@ func TestDownloadJob_NoFilesAppliesDownloadedTag(t *testing.T) {
 	}
 	if entry := d.state.Downloaded[jobID]; entry == nil || entry.PendingTagApply {
 		t.Errorf("expected a tagged state entry, got %+v", entry)
+	}
+}
+
+// A download must not inherit the scan's deadline. A large file legitimately
+// takes longer than any scan budget, and a download killed part-way leaves a
+// partial file that never matches the expected size, so the next poll restarts
+// it from zero — forever. The download's context lineage therefore has to come
+// from the daemon lifecycle, not from the poll's scan context.
+func TestDownloadJob_IgnoresAnExpiredScanBudget(t *testing.T) {
+	const jobID = "yzabcd"
+	dir := t.TempDir()
+
+	files := []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 5}}
+	srv := fakeJobFilesServer(t, jobID, files, nil)
+	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+
+	outDir := ComputeOutputDir(dir, jobID, "job", false)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "out1.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Stand in for a scan whose budget has already elapsed. downloadJob must
+	// never be handed this context; if it is, the job cannot succeed.
+	expired, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-expired.Done()
+
+	// The lifecycle context is healthy, which is what poll() now passes down.
+	outcome := runDownloadJob(t, d, &CompletedJob{ID: jobID, Name: "job"}, 20*time.Second)
+	if outcome != OutcomeDownloaded {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeDownloaded)
+	}
+
+	// And prove the failure mode is real: the same job under the expired
+	// context must not succeed, which is why poll() must not pass scanCtx.
+	if got := d.downloadJob(expired, &CompletedJob{ID: jobID, Name: "job"}); got == OutcomeDownloaded {
+		t.Error("an expired context produced a successful download; the test no longer proves anything")
+	}
+}
+
+// A batch cancelled before its first task registers leaves nothing for the
+// queue to resolve. Waiting on it used to spin for the whole context budget;
+// the wait now fails fast, and a user cancel is not reported as a fault.
+func TestWaitForRegisteredBatch_FailsFastWhenBatchVanished(t *testing.T) {
+	appCfg := &config.Config{APIKey: "test-key", APIBaseURL: "http://127.0.0.1:0", ProxyMode: "no-proxy"}
+	ts := services.NewTransferService(api.NewClientForTest(appCfg), events.NewEventBus(0), services.TransferServiceConfig{MaxConcurrent: 2})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := ts.WaitForRegisteredBatch(ctx, "daemon:gone:1")
+	if !errors.Is(err, services.ErrBatchVanished) {
+		t.Fatalf("err = %v, want ErrBatchVanished", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("took %s to give up; it should fail on the first tick", elapsed)
+	}
+
+	// The tolerant variant must keep its behaviour: before dispatch finishes, a
+	// batch that is not registered yet is normal, not an error.
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer shortCancel()
+	if _, err := ts.WaitForBatch(shortCtx, "daemon:gone:1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WaitForBatch err = %v, want DeadlineExceeded (it must keep waiting)", err)
+	}
+}
+
+// Repeated attempts at the same job produce one Transfers row each. Without the
+// attempt number they are indistinguishable, since the label is otherwise
+// identical and the start time is dropped with the batch's scan metadata.
+func TestDownloadJob_LabelsRepeatAttempts(t *testing.T) {
+	const jobID = "efghij"
+	dir := t.TempDir()
+
+	files := []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 9}}
+	srv := fakeJobFilesServer(t, jobID, files, nil)
+	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	job := &CompletedJob{ID: jobID, Name: "job"}
+
+	for i := 0; i < 2; i++ {
+		if outcome := runDownloadJob(t, d, job, 60*time.Second); outcome != OutcomePartialFailure {
+			t.Fatalf("attempt %d outcome = %q, want %q", i+1, outcome, OutcomePartialFailure)
+		}
+	}
+
+	labels := make(map[string]struct{})
+	tasks := d.Queue().GetTasks()
+	for i := range tasks {
+		labels[tasks[i].BatchLabel] = struct{}{}
+	}
+	if _, ok := labels["Auto: job"]; !ok {
+		t.Errorf("first attempt should carry the plain label, got %v", labels)
+	}
+	if _, ok := labels["Auto: job (attempt 2)"]; !ok {
+		t.Errorf("second attempt should be labelled as such, got %v", labels)
 	}
 }
 

@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,26 @@ func TestEmitScanSummary_MixedReasonsAndOutcomes(t *testing.T) {
 	}
 }
 
+// An interrupted poll can also carry an error (the scan budget running out is
+// both), and the field order must still hold.
+func TestEmitScanSummary_InterruptedWithError(t *testing.T) {
+	d, buf := newTestDaemon()
+
+	s := &ScanSummary{
+		TotalScanned:     3,
+		SkipBuckets:      map[SkipReasonCode]int{},
+		DownloadOutcomes: map[string]int{string(OutcomeDownloaded): 1},
+	}
+	d.emitScanSummary(s, 600*time.Second, true, errors.New("scan did not finish within 10m0s"))
+
+	// The buffer holds zerolog's JSON, so the quotes around the error arrive
+	// escaped.
+	out := buf.String()
+	if !strings.Contains(out, `interrupted=true, duration=600.0s, error=\"scan did not finish within 10m0s\"`) {
+		t.Errorf("interrupted+error line malformed: %s", out)
+	}
+}
+
 func TestEmitScanSummary_Interrupted(t *testing.T) {
 	d, buf := newTestDaemon()
 
@@ -125,7 +146,7 @@ func TestEmitScanSummary_ScanError(t *testing.T) {
 		SkipBuckets:      map[SkipReasonCode]int{},
 		DownloadOutcomes: map[string]int{},
 	}
-	d.emitScanSummary(s, 3*time.Second, false, errors.New("list jobs failed: 503"))
+	d.emitScanSummary(s, 3*time.Second, false, errors.New("list jobs: 503, retry exhausted"))
 
 	out := buf.String()
 	for _, want := range []string{
@@ -136,12 +157,18 @@ func TestEmitScanSummary_ScanError(t *testing.T) {
 		"failed=0",
 		"silent-skipped=0 (none)",
 		"logged-skipped=0 (none)",
-		"error=list jobs failed: 503",
-		"duration=3.0s",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("scan-error summary missing %q: %s", want, out)
 		}
+	}
+
+	// The error is last and quoted. Errors routinely contain commas, and every
+	// other field on this line is comma-delimited for grep/awk pipelines, so an
+	// error in the middle would corrupt the fields after it. (Quotes arrive
+	// escaped: the buffer holds zerolog's JSON.)
+	if !strings.Contains(out, `duration=3.0s, error=\"list jobs: 503, retry exhausted\"`) {
+		t.Errorf("error must come last and be quoted, after duration: %s", out)
 	}
 }
 
@@ -197,6 +224,38 @@ func TestScanErrorRecordAndClear(t *testing.T) {
 	d.clearScanError()
 	if got, at = d.LastScanError(); got != "" || !at.IsZero() {
 		t.Errorf("after clearScanError: %q at %v, want none", got, at)
+	}
+}
+
+// A poll that was cut short still did work, so its progress is written and its
+// timestamp advances; the recorded scan error is what marks it incomplete. If
+// this did not persist, a budget-killed poll would silently lose the timestamp
+// while its downloads had already mutated state.
+func TestPersistPollProgress(t *testing.T) {
+	var buf bytes.Buffer
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	d := &Daemon{
+		logger: logging.NewLoggerWithWriter(&buf),
+		state:  NewState(stateFile),
+	}
+	d.state.MarkDownloaded("job1", "Job One", "/out", 1, 10)
+
+	before := time.Now()
+	d.persistPollProgress()
+
+	if last := d.state.GetLastPoll(); last.Before(before) {
+		t.Errorf("LastPoll = %v, want at or after %v", last, before)
+	}
+
+	reloaded := NewState(stateFile)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := reloaded.Downloaded["job1"]; !ok {
+		t.Error("state was not written to disk")
+	}
+	if reloaded.GetLastPoll().IsZero() {
+		t.Error("LastPoll was not persisted")
 	}
 }
 

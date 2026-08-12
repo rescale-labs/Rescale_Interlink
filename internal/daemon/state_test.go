@@ -342,6 +342,32 @@ func TestState_PruneOnSaveRespectsRetention(t *testing.T) {
 	}
 }
 
+// AttemptCount drives the Transfers-row label for repeat attempts, so it has to
+// count only real prior failures.
+func TestState_AttemptCount(t *testing.T) {
+	state := NewState(filepath.Join(t.TempDir(), "state.json"))
+
+	if got := state.AttemptCount("unknown"); got != 0 {
+		t.Errorf("AttemptCount(unknown) = %d, want 0", got)
+	}
+
+	state.MarkFailed("job1", "Job One", fmt.Errorf("boom"))
+	if got := state.AttemptCount("job1"); got != 1 {
+		t.Errorf("after one failure AttemptCount = %d, want 1", got)
+	}
+
+	state.MarkFailed("job1", "Job One", fmt.Errorf("boom again"))
+	if got := state.AttemptCount("job1"); got != 2 {
+		t.Errorf("after two failures AttemptCount = %d, want 2", got)
+	}
+
+	// A success replaces the failure entry, so the count resets.
+	state.MarkDownloaded("job1", "Job One", "/out", 1, 10)
+	if got := state.AttemptCount("job1"); got != 0 {
+		t.Errorf("after success AttemptCount = %d, want 0", got)
+	}
+}
+
 func TestState_RetryBackoff(t *testing.T) {
 	state := NewState("")
 	state.Downloaded = make(map[string]*DownloadedJob)

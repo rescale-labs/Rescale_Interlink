@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,6 +53,11 @@ type Config struct {
 	// When set, jobs must pass eligibility checks to be downloaded
 	Eligibility *EligibilityConfig
 }
+
+// scanBudget bounds one poll's scan phase: listing jobs and checking their
+// eligibility. It must exceed the HTTP client timeout (300s) so a slow call can
+// still be retried. Downloads are not covered by it — see poll().
+const scanBudget = 10 * time.Minute
 
 // stateRetentionBufferDays extends state retention past the lookback window by
 // the same margin FindCompletedJobs uses for its creation-date pre-filter, so an
@@ -360,8 +366,11 @@ func (d *Daemon) poll(ctx context.Context) {
 	}
 	defer d.polling.Store(false)
 
-	// Scan timeout must be longer than HTTP client timeout (300s) to allow retries
-	scanCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	// scanCtx bounds the *scan* — listing jobs and checking their eligibility.
+	// It deliberately does not reach the downloads themselves: a single large
+	// file can legitimately take longer than any scan budget, and killing it
+	// mid-transfer restarts it from zero on the next poll, forever.
+	scanCtx, cancel := context.WithTimeout(ctx, scanBudget)
 	defer cancel()
 
 	scanStart := time.Now()
@@ -406,7 +415,7 @@ func (d *Daemon) poll(ctx context.Context) {
 	result, err := d.monitor.FindCompletedJobs(scanCtx, pendingSet)
 	if err != nil {
 		if scanCtx.Err() == context.DeadlineExceeded {
-			d.logger.Error().Dur("duration", time.Since(scanStart)).Msg("Scan timed out after 10 minutes")
+			d.logger.Error().Dur("duration", time.Since(scanStart)).Dur("budget", scanBudget).Msg("Scan timed out")
 		} else {
 			d.logger.Error().Msgf("Failed to find completed jobs: %v", err)
 		}
@@ -441,10 +450,27 @@ func (d *Daemon) poll(ctx context.Context) {
 	for _, job := range completed {
 		select {
 		case <-scanCtx.Done():
-			d.logger.Info().Msg("Scan interrupted by context cancellation")
-			d.emitScanSummary(summary, time.Since(scanStart), true, nil)
+			// Two very different reasons land here. The scan budget running out
+			// is a health problem the user needs to see: without a recorded
+			// error, this path froze LastScanTime while the daemon still
+			// reported "running". A cancelled parent context is just shutdown.
+			if ctx.Err() == nil {
+				budgetErr := fmt.Errorf("scan did not finish within %s", scanBudget)
+				d.logger.Warn().Dur("budget", scanBudget).
+					Msg("Scan budget exhausted; remaining jobs wait for the next poll")
+				d.recordScanError(budgetErr)
+				d.emitScanSummary(summary, time.Since(scanStart), true, budgetErr)
+				// This poll did real work — jobs were checked and possibly
+				// downloaded — so its progress is persisted and its timestamp
+				// advances. The recorded error is what says it was cut short.
+				d.persistPollProgress()
+			} else {
+				d.logger.Info().Msg("Scan interrupted by context cancellation")
+				d.emitScanSummary(summary, time.Since(scanStart), true, nil)
+			}
 			return
 		case <-d.stopChan:
+			// Shutdown, not a failure. Stop() saves state on the way out.
 			d.logger.Info().Msg("Scan interrupted by stop signal")
 			d.emitScanSummary(summary, time.Since(scanStart), true, nil)
 			return
@@ -476,9 +502,12 @@ func (d *Daemon) poll(ctx context.Context) {
 			summary.EligibilityChecked++
 		}
 
-		// scanCtx, not ctx: a job download must not be able to outlive the
-		// poll's own 10-minute budget.
-		outcome := d.downloadJob(scanCtx, job)
+		// ctx, not scanCtx: the download gets the daemon's lifecycle context, so
+		// it ends when the daemon stops or the batch is cancelled — never
+		// because the scan budget elapsed. A 20GB file at 10MB/s needs half an
+		// hour, and a partial file never matches the expected size, so a
+		// budget-killed download restarts from zero on every poll.
+		outcome := d.downloadJob(ctx, job)
 		summary.AddOutcome(string(outcome))
 	}
 
@@ -486,6 +515,12 @@ func (d *Daemon) poll(ctx context.Context) {
 	d.checkAllUnsetWarning(summary)
 
 	d.clearScanError()
+	d.persistPollProgress()
+}
+
+// persistPollProgress stamps the poll time and writes state to disk. Called by
+// every poll that ran to completion or did partial work before being cut short.
+func (d *Daemon) persistPollProgress() {
 	d.state.UpdateLastPoll()
 	if err := d.state.Save(); err != nil {
 		d.logger.Error().Err(err).Msg("Failed to save state after poll")
@@ -542,12 +577,18 @@ func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interru
 	if interrupted {
 		interruptedTag = ", interrupted=true"
 	}
+
+	// The error is free-form text that routinely contains commas (wrapped
+	// errors, HTTP bodies). Every other field on this line is comma-delimited
+	// for grep/awk pipelines, so the error goes last and quoted — nothing a
+	// splitter needs to read follows it.
+	errorTag := ""
 	if scanErr != nil {
-		interruptedTag += fmt.Sprintf(", error=%v", scanErr)
+		errorTag = fmt.Sprintf(", error=%q", scanErr.Error())
 	}
 
 	d.logger.Info().Msgf(
-		"Poll complete: scanned=%d, eligibility-checked=%d, downloaded=%d, no_files=%d, failed=%d (partial=%d, list-failed=%d, dir-failed=%d), interrupted-jobs=%d, silent-skipped=%d (%s), logged-skipped=%d (%s)%s, duration=%.1fs",
+		"Poll complete: scanned=%d, eligibility-checked=%d, downloaded=%d, no_files=%d, failed=%d (partial=%d, list-failed=%d, dir-failed=%d), interrupted-jobs=%d, silent-skipped=%d (%s), logged-skipped=%d (%s)%s, duration=%.1fs%s",
 		s.TotalScanned,
 		s.EligibilityChecked,
 		downloaded,
@@ -559,6 +600,7 @@ func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interru
 		loggedTotal, loggedBreakdown,
 		interruptedTag,
 		duration.Seconds(),
+		errorTag,
 	)
 }
 
@@ -756,13 +798,25 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Int("file_count", len(files)).
 		Msg("Downloading job files")
 
+	// The batch ID is unique per attempt so this attempt's stats cannot inherit
+	// an earlier one's failures. The label carries the attempt number instead of
+	// the sequence, because the sequence counts every batch the daemon has ever
+	// started — the user needs to tell repeated attempts at *this* job apart.
 	batchID := fmt.Sprintf("daemon:%s:%d", job.ID, d.batchSeq.Add(1))
 	batchLabel := "Auto: " + job.Name
-	reqCh := make(chan services.TransferRequest, 16)
-	scanCtx, scanCancel := context.WithCancel(ctx)
-	defer scanCancel()
+	if attempt := d.state.AttemptCount(job.ID) + 1; attempt > 1 {
+		batchLabel = fmt.Sprintf("%s (attempt %d)", batchLabel, attempt)
+	}
 
-	if err := d.ts.StartStreamingDownloadBatch(scanCtx, reqCh, batchID, batchLabel, services.SourceLabelDaemon, scanCancel); err != nil {
+	reqCh := make(chan services.TransferRequest, 16)
+	// batchCtx is derived from the daemon's lifecycle context, so downloads end
+	// on daemon shutdown or an explicit batch cancel, and never on a scan
+	// deadline. batchCancel is registered as the batch's cancel function, which
+	// is how CancelBatch stops a scan that is still dispatching.
+	batchCtx, batchCancel := context.WithCancel(ctx)
+	defer batchCancel()
+
+	if err := d.ts.StartStreamingDownloadBatch(batchCtx, reqCh, batchID, batchLabel, services.SourceLabelDaemon, batchCancel); err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to start download batch")
 		d.state.MarkFailed(job.ID, job.Name, err)
 		if saveErr := d.state.Save(); saveErr != nil {
@@ -836,28 +890,33 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 			select {
 			case reqCh <- req:
 				dispatched++
-			case <-scanCtx.Done():
+			case <-batchCtx.Done():
 				return
 			}
 		}
 	}()
 
-	// Registration inside TransferService only finishes once reqCh closes, and
-	// WaitForBatch cannot return before that, so waiting here costs nothing and
-	// makes the dispatch counters safe to read.
+	// reqCh is closed before dispatchDone (defers run last-in-first-out), so by
+	// the time this returns every request has been handed over. That is the
+	// guarantee WaitForRegisteredBatch needs, and it also makes the dispatch
+	// counters safe to read.
 	<-dispatchDone
 
 	var stats transfer.BatchStats
 	if dispatched > 0 {
 		var waitErr error
-		stats, waitErr = d.ts.WaitForBatch(ctx, batchID)
+		stats, waitErr = d.ts.WaitForRegisteredBatch(ctx, batchID)
 		if waitErr != nil {
 			d.logger.Error().Err(waitErr).Str("job_id", job.ID).Msg("Job download interrupted")
 			d.state.MarkFailed(job.ID, job.Name, waitErr)
 			if saveErr := d.state.Save(); saveErr != nil {
 				d.logger.Error().Err(saveErr).Msg("Failed to persist state")
 			}
-			reporting.HandleCLIError(waitErr, "daemon", "job_download", "")
+			// A vanished batch means someone cancelled it before its first task
+			// registered. That is a user action, not a fault to report.
+			if !errors.Is(waitErr, services.ErrBatchVanished) {
+				reporting.HandleCLIError(waitErr, "daemon", "job_download", "")
+			}
 			return OutcomeInterrupted
 		}
 	} else if alreadyPresent == 0 {
@@ -874,9 +933,8 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		return OutcomePartialFailure
 	}
 	// dispatched == 0 with files already on disk falls through with zero-valued
-	// stats: the batch registered no tasks, so its pre-registered metadata is
-	// already gone and WaitForBatch would poll a batch ID that GetBatchStats
-	// can never resolve — it would never return.
+	// stats. There is nothing to wait for: the batch registered no tasks, so
+	// waiting could only report a batch the queue has already forgotten.
 
 	// Partial-failure path: any failed or cancelled tasks mean the job is
 	// incomplete and will retry on the next poll cycle.
