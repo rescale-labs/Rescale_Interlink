@@ -311,10 +311,15 @@ func UploadFilesWithIDs(
 	// Create UploadUI for professional progress bars
 	uploadUI := progress.NewUploadUI(len(filePaths))
 
-	// NOTE: Do NOT redirect zerolog through uploadUI.Writer()
-	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
-	// when mixed with ANSI escape codes from mpb progress bars.
-	// The mpb library handles rendering progress bars above stderr output automatically.
+	// With bars on screen, route this command's logs through them: mpb
+	// interleaves each line above the frame, where writing to the terminal
+	// directly would tear it. The logger wraps the writer in a ConsoleWriter, so
+	// the bars receive plain lines, and WithOutput copies rather than mutating,
+	// leaving the shared logger alone for goroutines that already hold it. With
+	// no bars (piped output) nothing changes: logs keep going where they went.
+	if uploadUI.IsTerminal() {
+		logger = logger.WithOutput(uploadUI.Writer())
+	}
 
 	defer uploadUI.Wait()
 
@@ -389,8 +394,8 @@ func UploadFilesWithIDs(
 			fileBar.Complete("", err)
 
 			if state.UploadResumeStateExists(fPath) {
-				fmt.Fprintf(os.Stderr, "\n💡 Resume state saved. To resume this upload, run the same command again:\n")
-				fmt.Fprintf(os.Stderr, "   rescale-int files upload %s\n\n", fPath)
+				fmt.Fprintf(uploadUI.Writer(), "\n💡 Resume state saved. To resume this upload, run the same command again:\n")
+				fmt.Fprintf(uploadUI.Writer(), "   rescale-int files upload %s\n\n", fPath)
 			}
 
 			return fmt.Errorf("failed to upload %s: %w", fPath, err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/fips140"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
 	"github.com/rescale/rescale-int/internal/reporting"
@@ -77,16 +79,32 @@ Security:
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// Initialize logger
 			logger = logging.NewDefaultCLILogger()
-			if verbose || debug {
+			if VerboseOutput() {
 				logging.SetGlobalLevel(-1) // Debug level (zerolog.DebugLevel)
+			}
+
+			// The transfer path writes its [BATCH]/[SLOT]/[CRED]/[TIMING]
+			// diagnostics through the standard logger. Straight to the terminal
+			// they land inside mpb's frame and shred the progress bars, so they
+			// are dropped unless asked for, and routed through the bars when they
+			// are. 'daemon run' installs its own bridge afterwards (RunE runs
+			// after this hook), which is what that process wants.
+			if VerboseOutput() {
+				log.SetOutput(progress.SinkWriter(os.Stderr))
+			} else {
+				log.SetOutput(io.Discard)
 			}
 
 			// Wire cross-process rate limit coordinator (lazy — only spawns when GetLimiter is called)
 			ratelimit.GlobalStore().SetCoordinatorEnsurer(coordinator.EnsureCoordinatorClient)
 
-			// Wire rate limit visibility notifications for CLI output
+			// Wire rate limit visibility notifications for CLI output.
+			// Deliberately not the standard logger: "waiting on rate limit" is how
+			// the user learns why a transfer is crawling, so it has to survive the
+			// discard above. Still goes through the bars when they are live.
+			notices := progress.SinkWriter(os.Stderr)
 			ratelimit.SetGlobalNotifyFunc(func(level, message string) {
-				log.Printf("%s", message)
+				fmt.Fprintf(notices, "%s\n", message)
 			})
 		},
 	}
@@ -317,6 +335,13 @@ func AddCommands(rootCmd *cobra.Command) {
 
 	// Add shortcuts for convenience
 	AddShortcuts(rootCmd)
+}
+
+// VerboseOutput reports whether the user asked for debug output, via --verbose,
+// --debug, or RESCALE_DEBUG. It decides whether the standard logger's transfer
+// diagnostics are shown at all.
+func VerboseOutput() bool {
+	return verbose || debug || os.Getenv("RESCALE_DEBUG") != ""
 }
 
 // GetLogger returns the global CLI logger.

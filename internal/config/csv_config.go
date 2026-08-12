@@ -157,7 +157,9 @@ func LoadConfigCSV(path string) (*Config, error) {
 			// Proxy passwords should be entered at runtime via secure prompt
 			// This maintains backwards compatibility with old config files
 			if value != "" {
-				log.Printf("[WARN] proxy_password in config file is ignored for security - use secure prompt at runtime")
+				// Straight to stderr: a security notice the user must see, and the
+				// CLI drops the standard logger's output unless asked for it.
+				fmt.Fprintln(os.Stderr, "[WARN] proxy_password in config file is ignored for security - use secure prompt at runtime")
 			}
 		case "no_proxy":
 			cfg.NoProxy = value
@@ -168,7 +170,7 @@ func LoadConfigCSV(path string) (*Config, error) {
 			// API keys should be provided via RESCALE_API_KEY env var or --token-file flag
 			// This maintains backwards compatibility with old config files
 			if value != "" {
-				log.Printf("[WARN] api_key in config file is ignored for security - use RESCALE_API_KEY env var or --token-file flag")
+				fmt.Fprintln(os.Stderr, "[WARN] api_key in config file is ignored for security - use RESCALE_API_KEY env var or --token-file flag")
 			}
 		case "api_base_url":
 			cfg.APIBaseURL = value
@@ -331,6 +333,25 @@ func SaveConfigCSV(cfg *Config, path string) error {
 	return nil
 }
 
+// sameKey reports whether every non-empty value is identical, i.e. the API key
+// sources agree and there is nothing for the user to resolve.
+func sameKey(values ...string) bool {
+	first := ""
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if first == "" {
+			first = v
+			continue
+		}
+		if v != first {
+			return false
+		}
+	}
+	return true
+}
+
 // MergeWithFlags merges config with command-line flags and environment variables
 // Priority: flags > token-file > environment > defaults
 func (c *Config) MergeWithFlags(apiKey, apiBaseURL, proxyMode, proxyHost string, proxyPort int) {
@@ -378,11 +399,15 @@ func (c *Config) MergeWithFlagsAndTokenFile(apiKey, tokenFilePath, apiBaseURL, p
 		apiKeySources = append(apiKeySources, "--api-key flag")
 	}
 
-	// Warn if multiple API key sources are set
-	if len(apiKeySources) > 1 {
-		log.Printf("[WARN] Multiple API key sources detected: %v", apiKeySources)
-		log.Printf("[WARN] API key precedence (highest to lowest): --api-key > RESCALE_API_KEY env > --token-file > default token file")
-		log.Printf("[WARN] Using: %s", apiKeySources[len(apiKeySources)-1])
+	// Warn only when the sources actually disagree. 'config init' writes the
+	// default token file and then tells the user to export RESCALE_API_KEY or
+	// pass --token-file, so several sources holding the same key is the
+	// documented setup, not a mistake worth three warning lines on every run.
+	if len(apiKeySources) > 1 && !sameKey(defaultTokenKey, explicitTokenKey, envKey, apiKey) {
+		fmt.Fprintf(os.Stderr,
+			"[WARN] API key set from several sources with different values (%v); using %s "+
+				"(precedence: --api-key > RESCALE_API_KEY > --token-file > default token file)\n",
+			apiKeySources, apiKeySources[len(apiKeySources)-1])
 	}
 
 	// Apply API key in order of priority (lowest to highest, each overwriting the previous)

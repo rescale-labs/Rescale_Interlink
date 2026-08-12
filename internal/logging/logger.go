@@ -114,6 +114,23 @@ func (l *Logger) WithStr(key, value string) *Logger {
 	}
 }
 
+// WithOutput returns a copy of the logger that writes to w, leaving this logger
+// untouched. Used to route a command's logs through its progress display for the
+// duration of a transfer: the output goes through a ConsoleWriter, so what mpb
+// receives is a plain formatted line, not JSON.
+//
+// Prefer this over SetOutput when transfer goroutines are already running — they
+// share the logger, and swapping its writer underneath them is a data race.
+func (l *Logger) WithOutput(w io.Writer) *Logger {
+	out := zerolog.ConsoleWriter{Out: w, TimeFormat: "15:04:05"}
+	return &Logger{
+		zlog:     zerolog.New(out).With().Timestamp().Logger(),
+		mode:     l.mode,
+		eventBus: l.eventBus,
+		output:   out,
+	}
+}
+
 // SetOutput changes the output writer for the logger.
 // This is useful for redirecting logs through progress bars.
 func (l *Logger) SetOutput(w io.Writer) {

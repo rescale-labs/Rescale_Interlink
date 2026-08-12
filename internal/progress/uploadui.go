@@ -64,6 +64,12 @@ func NewUploadUI(totalFiles int) *UploadUI {
 		p = mpb.New(mpb.WithOutput(io.Discard))
 	}
 
+	// Only claim the log sink when bars are actually drawn. With mpb writing to
+	// io.Discard, routing log output through it would swallow it.
+	if isTerminal {
+		SetLogSink(p)
+	}
+
 	return &UploadUI{
 		progress:   p,
 		isTerminal: isTerminal,
@@ -269,6 +275,7 @@ func (f *FileBar) Complete(fileID string, err error) {
 // Wait blocks until all progress bars complete
 func (u *UploadUI) Wait() {
 	if u.progress != nil {
+		ClearLogSink(u.progress)
 		u.progress.Wait()
 	}
 }
@@ -279,6 +286,7 @@ func (u *UploadUI) WaitWithTimeout(timeout time.Duration) bool {
 	if u.progress == nil {
 		return true
 	}
+	ClearLogSink(u.progress)
 
 	done := make(chan struct{})
 	go func() {

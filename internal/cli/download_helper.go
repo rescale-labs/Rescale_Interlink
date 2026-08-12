@@ -193,9 +193,10 @@ func executeFileDownload(
 	// Create DownloadUI for professional progress bars
 	downloadUI := progress.NewDownloadUI(len(validFiles))
 
-	// NOTE: Do NOT redirect zerolog through downloadUI.Writer()
-	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
-	// when mixed with ANSI escape codes from mpb progress bars.
+	// Route this command's logs through the bars — see executeFileUpload for why.
+	if downloadUI.IsTerminal() {
+		logger = logger.WithOutput(downloadUI.Writer())
+	}
 
 	defer downloadUI.Wait()
 
@@ -356,7 +357,7 @@ func executeFileDownload(
 			fileBar.Complete(err)
 
 			if state.DownloadResumeStateExists(outputPath) {
-				fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
+				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
 			}
 
 			storageType := "unknown"
@@ -516,9 +517,10 @@ func executeJobDownload(
 	// Create DownloadUI for professional progress bars
 	downloadUI := progress.NewDownloadUI(len(files))
 
-	// NOTE: Do NOT redirect zerolog through downloadUI.Writer()
-	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
-	// when mixed with ANSI escape codes from mpb progress bars.
+	// Route this command's logs through the bars — see executeFileUpload for why.
+	if downloadUI.IsTerminal() {
+		logger = logger.WithOutput(downloadUI.Writer())
+	}
 
 	defer downloadUI.Wait()
 
@@ -680,7 +682,7 @@ func executeJobDownload(
 			fileBar.Complete(err)
 
 			if state.DownloadResumeStateExists(outputPath) {
-				fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
+				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
 			}
 
 			storageType := "unknown"

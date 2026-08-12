@@ -233,9 +233,10 @@ func DownloadFolderRecursive(
 	fmt.Println("\n📥 Downloading files...")
 	downloadUI := progress.NewDownloadUI(len(allFiles))
 
-	// NOTE: Do NOT redirect zerolog through downloadUI.Writer()
-	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
-	// when mixed with ANSI escape codes from mpb progress bars.
+	// Route this command's logs through the bars — see executeFileUpload for why.
+	if downloadUI.IsTerminal() {
+		logger = logger.WithOutput(downloadUI.Writer())
+	}
 
 	defer downloadUI.Wait()
 
@@ -341,7 +342,7 @@ func DownloadFolderRecursive(
 			fileBar.Complete(err)
 
 			if state.DownloadResumeStateExists(localPath) {
-				fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume, re-run the download command.\n", filepath.Base(localPath))
+				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume, re-run the download command.\n", filepath.Base(localPath))
 			}
 
 			downloadMutex.Lock()

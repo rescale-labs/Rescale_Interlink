@@ -887,8 +887,10 @@ Examples:
 			// Use modern download infrastructure with DownloadUI
 			downloadUI := progress.NewDownloadUI(1)
 
-			// NOTE: Do NOT redirect zerolog through downloadUI.Writer()
-			// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
+			// Route this command's logs through the bar — see executeFileUpload for why.
+			if downloadUI.IsTerminal() {
+				logger = logger.WithOutput(downloadUI.Writer())
+			}
 
 			defer downloadUI.Wait()
 

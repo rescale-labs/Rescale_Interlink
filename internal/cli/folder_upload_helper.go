@@ -161,9 +161,10 @@ func uploadDirectoryPipelined(
 	// Streaming progress UI — total starts at 0, increments as files are discovered.
 	uploadUI := progress.NewUploadUI(0)
 
-	// NOTE: Do NOT redirect zerolog through uploadUI.Writer()
-	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
-	// when mixed with ANSI escape codes from mpb progress bars.
+	// Route this command's logs through the bars — see executeFileUpload for why.
+	if uploadUI.IsTerminal() {
+		logger = logger.WithOutput(uploadUI.Writer())
+	}
 	defer uploadUI.Wait()
 
 	warmUploadCredentials(ctx, apiClient, logger)
@@ -285,7 +286,7 @@ func uploadDirectoryPipelined(
 				if uploadErr != nil {
 					fileBar.Complete("", uploadErr)
 					if state.UploadResumeStateExists(fpath) {
-						fmt.Fprintf(os.Stderr, "\n💡 Resume state saved for %s. To resume, re-run the upload command.\n", filepath.Base(fpath))
+						fmt.Fprintf(uploadUI.Writer(), "\n💡 Resume state saved for %s. To resume, re-run the upload command.\n", filepath.Base(fpath))
 					}
 					resultMutex.Lock()
 					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
