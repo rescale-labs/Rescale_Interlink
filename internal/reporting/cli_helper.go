@@ -3,6 +3,7 @@ package reporting
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -25,7 +26,12 @@ func isCLIUsageError(msg string) bool {
 	// Commands that check their own required flags, e.g. "--job-id (or --id) is
 	// required" or "at least one --fileid is required". A missing flag is a
 	// mistake at the keyboard, not something to file a diagnostic report about.
-	if strings.Contains(lower, "is required") {
+	//
+	// Anchored on the flag marker: "is required" on its own also matches internal
+	// invariants ("storageInfo is required", "apiClient is required") and API
+	// error bodies echoing a field name, which are exactly the failures a report
+	// is for.
+	if strings.Contains(lower, "is required") && strings.Contains(msg, "--") {
 		return true
 	}
 
@@ -80,16 +86,25 @@ func categoryFromOperation(operation string) ErrorCategory {
 	}
 }
 
-// isAggregateFailure matches the summary a batch command returns when some of
-// its items failed ("3 file(s) failed to upload", "2 of 10 job(s) failed").
-// The individual failures were already reported to the user item by item, so the
-// roll-up carries no diagnostic detail worth a report of its own.
+// reJobRollup matches the pipeline's roll-up, "N of M job(s) failed", however it
+// is wrapped ("pipeline failed: 2 of 10 job(s) failed").
+var reJobRollup = regexp.MustCompile(`\d+ of \d+ job\(s\) failed`)
+
+// isAggregateFailure matches the summary a batch command returns when it has
+// already reported each failure item by item, so the roll-up itself carries no
+// diagnostic detail worth a report.
+//
+// Matched narrowly, on the exact shapes those commands produce. A loose match on
+// "file(s) failed" also catches files upload's primary error ("upload failed:
+// 3 file(s) failed (first error: ...)"), which is the only thing that error says
+// — suppressing it would mean two failures report nothing while one failure
+// reports normally.
 func isAggregateFailure(msg string) bool {
 	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "file(s) failed") ||
-		strings.Contains(lower, "job(s) failed") ||
-		strings.Contains(lower, "deletion(s) failed") ||
-		strings.Contains(lower, "some files failed to download")
+	return strings.HasSuffix(lower, "file(s) failed to upload") ||
+		strings.HasSuffix(lower, "deletion(s) failed") ||
+		strings.HasSuffix(lower, "some files failed to download") ||
+		reJobRollup.MatchString(lower)
 }
 
 // HandleCLIError classifies an error and, if reportable, saves a report

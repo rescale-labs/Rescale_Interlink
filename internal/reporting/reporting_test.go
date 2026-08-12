@@ -652,3 +652,65 @@ func TestIsAggregateFailure(t *testing.T) {
 		t.Error("a single concrete failure must stay reportable")
 	}
 }
+
+// TestIsCLIUsageError_RequiredNeedsFlagMarker keeps "is required" from swallowing
+// internal invariants and API error bodies — those are precisely what a
+// diagnostic report is for.
+func TestIsCLIUsageError_RequiredNeedsFlagMarker(t *testing.T) {
+	notUsage := []string{
+		"storageInfo is required",
+		"apiClient is required",
+		"failed to create provider: storageInfo is required",
+		`failed to create job: status 400: {"detail":"name is required"}`,
+		"either FileID or FileInfo is required",
+	}
+	for _, msg := range notUsage {
+		if isCLIUsageError(msg) {
+			t.Errorf("internal/API failure misread as a usage error: %q", msg)
+		}
+	}
+
+	usage := []string{
+		"--job-id (or --id) is required",
+		"at least one --fileid is required",
+		"--folder-id is required",
+	}
+	for _, msg := range usage {
+		if !isCLIUsageError(msg) {
+			t.Errorf("expected a usage error: %q", msg)
+		}
+	}
+}
+
+// TestAggregateSuppressionIsSymmetric pins the shape that matters: files upload's
+// own error must be reported whether one file failed or several. A loose
+// "file(s) failed" match made two failures silent while one reported normally.
+func TestAggregateSuppressionIsSymmetric(t *testing.T) {
+	one := "failed to upload /tmp/a.dat: 500 internal server error"
+	many := "upload failed: 3 file(s) failed (first error: 500 internal server error)"
+
+	if isAggregateFailure(one) {
+		t.Errorf("single-failure error must stay reportable: %q", one)
+	}
+	if isAggregateFailure(many) {
+		t.Errorf("files upload's primary error must stay reportable: %q", many)
+	}
+
+	// The compat twin uses the same wording.
+	if isAggregateFailure("upload failed: 2 file(s) failed (first error: EOF)") {
+		t.Error("compat upload's primary error must stay reportable")
+	}
+
+	// True roll-ups, where each failure was already listed for the user.
+	rollups := []string{
+		"3 file(s) failed to upload",
+		"pipeline failed: 2 of 10 job(s) failed",
+		"2 deletion(s) failed",
+		"some files failed to download",
+	}
+	for _, msg := range rollups {
+		if !isAggregateFailure(msg) {
+			t.Errorf("expected a roll-up: %q", msg)
+		}
+	}
+}
