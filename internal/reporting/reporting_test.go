@@ -63,6 +63,10 @@ func TestClassifyErrorClass(t *testing.T) {
 		{"context deadline exceeded", ClassTimeout},
 		{"dial tcp: connection refused", ClassNetwork},
 		{"no space left on device", ClassDiskSpace},
+		// EDQUOT is spelled "disk quota exceeded" on Linux and "disc quota
+		// exceeded" on macOS/BSD. Both are the user's disk, not a Rescale failure.
+		{"write /net/home/f.dat: disk quota exceeded", ClassDiskSpace},
+		{"write /net/home/f.dat: disc quota exceeded", ClassDiskSpace},
 		{"HTTP 400 Bad Request", ClassClientError},
 		{"status 404: not found", ClassClientError},
 		{"HTTP 500 Internal Server Error", ClassServerError},

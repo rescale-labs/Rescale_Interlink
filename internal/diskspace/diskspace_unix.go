@@ -51,10 +51,13 @@ func CheckAvailableSpace(targetPath string, requiredBytes int64, safetyMargin fl
 }
 
 // GetAvailableSpace returns the available space in bytes for the filesystem
-// containing the given path. Returns 0 if unable to determine.
-func GetAvailableSpace(path string) int64 {
-	dir := filepath.Dir(path)
-
+// containing dir, which must be an existing directory. Returns 0 if unable to
+// determine.
+//
+// dir is stat'ed as given. Callers holding a file path must pass
+// filepath.Dir(file) themselves — stat'ing dir's parent here would report the
+// wrong volume whenever dir is itself a mount point.
+func GetAvailableSpace(dir string) int64 {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		return 0

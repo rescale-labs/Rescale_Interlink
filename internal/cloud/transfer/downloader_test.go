@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -381,5 +382,74 @@ func TestSafetyNetEncryptedCleanup(t *testing.T) {
 	// Verify the output file is untouched
 	if _, err := os.Stat(localPath); os.IsNotExist(err) {
 		t.Error("output file should not be removed by safety-net cleanup")
+	}
+}
+
+// mockLegacyDownloader implements LegacyDownloader so downloadLegacy can be
+// exercised without a provider.
+type mockLegacyDownloader struct {
+	mockCloudTransferDownload
+	downloadEncryptedCalled bool
+	downloadEncryptedErr    error
+}
+
+func (m *mockLegacyDownloader) DownloadEncryptedFile(ctx context.Context, params LegacyDownloadParams) error {
+	m.downloadEncryptedCalled = true
+	return m.downloadEncryptedErr
+}
+
+// TestDownloadLegacyDiskSpaceErrorStatesEnforcedRequirement verifies that when the
+// legacy path refuses a download for lack of space, the error it returns states the
+// requirement it actually enforced.
+//
+// The refusal used to be reported by a second, hand-built error that dropped the
+// safety margin and measured the parent of the download directory. Both understated
+// the gap, so a download refused on the margin printed "need N MB, have M MB
+// available" with N below M — a refusal contradicting its own numbers.
+func TestDownloadLegacyDiskSpaceErrorStatesEnforcedRequirement(t *testing.T) {
+	tmpDir := t.TempDir()
+	available := diskspace.GetAvailableSpace(tmpDir)
+	if available == 0 {
+		t.Skip("could not determine available space for temp dir")
+	}
+
+	// downloadLegacy holds the encrypted and decrypted copies at once, so it
+	// enforces fileSize*2 plus a 15% margin. Size the file so free space lands
+	// between the two: fileSize*2 fits, the margined requirement does not.
+	fileSize := int64(float64(available) / 2.1)
+	if fileSize*2 >= available {
+		t.Fatalf("test setup: %d bytes should fit in %d available", fileSize*2, available)
+	}
+	wantRequired := int64(float64(fileSize*2) * 1.15)
+
+	mock := &mockLegacyDownloader{}
+	downloader := NewDownloader(mock)
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "/remote/big.dat",
+			LocalPath:  filepath.Join(tmpDir, "big.dat"),
+			FileInfo:   &models.CloudFile{DecryptedSize: fileSize},
+		},
+	}
+
+	err := downloader.downloadLegacy(context.Background(), prep)
+	if err == nil {
+		t.Fatalf("expected refusal: %d bytes plus a 15%% margin exceeds %d available", fileSize*2, available)
+	}
+	spaceErr, ok := err.(*diskspace.InsufficientSpaceError)
+	if !ok {
+		t.Fatalf("expected *diskspace.InsufficientSpaceError, got %T: %v", err, err)
+	}
+
+	if spaceErr.RequiredBytes != wantRequired {
+		t.Errorf("RequiredBytes = %d, want the margined requirement %d that was enforced",
+			spaceErr.RequiredBytes, wantRequired)
+	}
+	if spaceErr.RequiredBytes <= spaceErr.AvailableBytes {
+		t.Errorf("message claims need %d <= have %d, contradicting its own refusal: %v",
+			spaceErr.RequiredBytes, spaceErr.AvailableBytes, spaceErr)
+	}
+	if mock.downloadEncryptedCalled {
+		t.Error("provider must not be called once the space check has refused the download")
 	}
 }

@@ -316,13 +316,12 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 	// file wasn't a multiple of AES block size (16 bytes).
 
 	// CHECK DISK SPACE before download (with 15% safety buffer for both encrypted + decrypted)
-	// Need space for: encrypted file + decrypted file during transition
+	// Need space for: encrypted file + decrypted file during transition.
+	// Return the error verbatim: it already reports the margined requirement this
+	// check enforced and the free space on localPath's own filesystem. Rebuilding
+	// it here would understate the requirement and stat the wrong volume.
 	if err := diskspace.CheckAvailableSpace(localPath, fileSize*2, 1.15); err != nil {
-		return &diskspace.InsufficientSpaceError{
-			Path:           localPath,
-			RequiredBytes:  fileSize * 2,
-			AvailableBytes: diskspace.GetAvailableSpace(targetDir),
-		}
+		return err
 	}
 
 	// Retry cleanup of temp file with backoff for Windows file locking.
@@ -361,7 +360,9 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 	}
 
 	if err := legacyProvider.DownloadEncryptedFile(ctx, downloadParams); err != nil {
-		// Convert disk full errors to standard type
+		// The filesystem filled up mid-download, so no pre-flight check produced
+		// this: report the encrypted file's size as what still had to fit, and
+		// the free space on targetDir's own filesystem (near zero by now).
 		if storage.IsDiskFullError(err) {
 			return &diskspace.InsufficientSpaceError{
 				Path:           encryptedPath,
@@ -382,7 +383,9 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 	// stale cache data.
 	computedHash, err := encryption.DecryptFileWithHash(encryptedPath, localPath, prep.EncryptionKey, prep.IV)
 	if err != nil {
-		// Check for disk full during decryption
+		// Same as the download branch above: the OS refused the write, so the
+		// figures describe the plaintext that still had to fit and the free space
+		// on targetDir's own filesystem.
 		if storage.IsDiskFullError(err) {
 			return &diskspace.InsufficientSpaceError{
 				Path:           localPath,

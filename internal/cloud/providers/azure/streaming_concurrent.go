@@ -587,14 +587,12 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 	// Calculate number of parts
 	numParts := (encryptedSize + encryptedPartSize - 1) / encryptedPartSize
 
-	// Check disk space before download
+	// Check disk space before download. Return the error verbatim: it already
+	// reports the margined requirement this check enforced and the free space on
+	// localPath's own filesystem.
 	estimatedPlaintextSize := encryptedSize - (numParts * 16) // Approximate padding overhead
 	if err := diskspace.CheckAvailableSpace(localPath, estimatedPlaintextSize, 1.15); err != nil {
-		return &diskspace.InsufficientSpaceError{
-			Path:           localPath,
-			RequiredBytes:  estimatedPlaintextSize,
-			AvailableBytes: diskspace.GetAvailableSpace(filepath.Dir(localPath)),
-		}
+		return err
 	}
 
 	azureClient.StartPeriodicRefresh(ctx)

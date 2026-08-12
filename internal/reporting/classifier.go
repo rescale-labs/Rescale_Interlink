@@ -150,7 +150,9 @@ func ClassifyErrorClass(msg string) ErrorClass {
 	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host") ||
 		strings.Contains(lower, "network") || strings.Contains(lower, "dns"):
 		return ClassNetwork
-	case strings.Contains(lower, "no space left") || strings.Contains(lower, "disk quota"):
+	// "disc quota" is the macOS/BSD spelling of EDQUOT; Linux says "disk quota".
+	case strings.Contains(lower, "no space left") || strings.Contains(lower, "disk quota") ||
+		strings.Contains(lower, "disc quota"):
 		return ClassDiskSpace
 	// Local filesystem refusals. These come from the user's own machine — a
 	// protected download directory, a path that disappeared mid-transfer, a

@@ -2,12 +2,13 @@ package diskspace
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 )
 
 func TestCheckAvailableSpace(t *testing.T) {
-	// Test with /tmp which should exist and have some space
-	tmpPath := "/tmp/test_disk_check.tmp"
+	tmpDir := t.TempDir()
+	tmpPath := filepath.Join(tmpDir, "test_disk_check.tmp")
 
 	// Test 1: Small file (should pass)
 	t.Run("SmallFile", func(t *testing.T) {
@@ -30,8 +31,8 @@ func TestCheckAvailableSpace(t *testing.T) {
 
 	// Test 3: Safety margin calculation
 	t.Run("SafetyMargin", func(t *testing.T) {
-		// Get actual available space
-		available := GetAvailableSpace(tmpPath)
+		// GetAvailableSpace takes the directory, not the file that will go in it.
+		available := GetAvailableSpace(tmpDir)
 		if available == 0 {
 			t.Skip("Could not determine available space")
 		}
@@ -56,14 +57,68 @@ func TestCheckAvailableSpace(t *testing.T) {
 	})
 }
 
+// TestGetAvailableSpace verifies that GetAvailableSpace reports the filesystem
+// of the directory it is handed, not the directory's parent. Reporting the parent
+// misstates free space by an unbounded factor whenever the target directory is a
+// mount point, which is how a download of a file that fits got refused.
 func TestGetAvailableSpace(t *testing.T) {
-	// Test with /tmp
-	available := GetAvailableSpace("/tmp/test.txt")
+	tmpDir := t.TempDir()
+
+	available := GetAvailableSpace(tmpDir)
 	if available == 0 {
-		t.Error("Expected non-zero available space for /tmp")
+		t.Fatalf("Expected non-zero available space for existing directory %s", tmpDir)
+	}
+	t.Logf("Available space in %s: %.2f GB", tmpDir, float64(available)/(1024*1024*1024))
+
+	// A directory that does not exist has no filesystem to report. Applying
+	// filepath.Dir first would silently answer with tmpDir's filesystem instead.
+	missing := filepath.Join(tmpDir, "no-such-directory")
+	if got := GetAvailableSpace(missing); got != 0 {
+		t.Errorf("GetAvailableSpace(%q) = %d, want 0 — it is reporting the parent %q instead of the path it was given",
+			missing, got, tmpDir)
+	}
+}
+
+// TestCheckAvailableSpaceErrorStatesEnforcedRequirement verifies that a refusal
+// reports the requirement it actually enforced, margin included.
+//
+// The reported requirement used to be rebuilt at the call site without the safety
+// margin, so a refusal that hinged on the margin printed "need N MB, have M MB
+// available" with N below M: a message that contradicted its own decision.
+func TestCheckAvailableSpaceErrorStatesEnforcedRequirement(t *testing.T) {
+	tmpDir := t.TempDir()
+	available := GetAvailableSpace(tmpDir)
+	if available == 0 {
+		t.Skip("Could not determine available space")
 	}
 
-	t.Logf("Available space in /tmp: %.2f GB", float64(available)/(1024*1024*1024))
+	// The legacy download path holds the encrypted and decrypted copies at once,
+	// so it asks for fileSize*2 with a 15% margin. Size the file so free space
+	// lands between the two: fileSize*2 fits, fileSize*2*1.15 does not.
+	fileSize := int64(float64(available) / 2.1)
+	required := fileSize * 2
+	if required >= available {
+		t.Fatalf("test setup: unmargined requirement %d should fit in %d available", required, available)
+	}
+	wantRequired := int64(float64(required) * 1.15)
+
+	err := CheckAvailableSpace(filepath.Join(tmpDir, "download.dat"), required, 1.15)
+	if err == nil {
+		t.Fatalf("expected refusal: %d bytes plus a 15%% margin exceeds %d available", required, available)
+	}
+	spaceErr, ok := err.(*InsufficientSpaceError)
+	if !ok {
+		t.Fatalf("expected *InsufficientSpaceError, got %T: %v", err, err)
+	}
+
+	if spaceErr.RequiredBytes != wantRequired {
+		t.Errorf("RequiredBytes = %d, want the margined requirement %d that was enforced",
+			spaceErr.RequiredBytes, wantRequired)
+	}
+	if spaceErr.RequiredBytes <= spaceErr.AvailableBytes {
+		t.Errorf("message claims need %d <= have %d, contradicting its own refusal: %v",
+			spaceErr.RequiredBytes, spaceErr.AvailableBytes, spaceErr)
+	}
 }
 
 func TestIsInsufficientSpaceError(t *testing.T) {

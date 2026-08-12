@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	kernel32             = syscall.NewLazyDLL("kernel32.dll")
-	getDiskFreeSpaceExW  = kernel32.NewProc("GetDiskFreeSpaceExW")
+	kernel32            = syscall.NewLazyDLL("kernel32.dll")
+	getDiskFreeSpaceExW = kernel32.NewProc("GetDiskFreeSpaceExW")
 )
 
 // CheckAvailableSpace checks if there is sufficient disk space available for a file operation.
@@ -50,9 +50,13 @@ func CheckAvailableSpace(targetPath string, requiredBytes int64, safetyMargin fl
 }
 
 // GetAvailableSpace returns the available space in bytes for the filesystem
-// containing the given path. Returns 0 if unable to determine.
-func GetAvailableSpace(path string) int64 {
-	dir := filepath.Dir(path)
+// containing dir, which must be an existing directory. Returns 0 if unable to
+// determine.
+//
+// dir is queried as given. Callers holding a file path must pass
+// filepath.Dir(file) themselves — querying dir's parent here would report the
+// wrong volume whenever dir is itself a mount point.
+func GetAvailableSpace(dir string) int64 {
 	return getAvailableSpaceWindows(dir)
 }
 

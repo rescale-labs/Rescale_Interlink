@@ -11,7 +11,7 @@ import (
 //   - Linux/Unix: "no space left on device", "enospc"
 //   - Windows: "out of disk space", "insufficient disk space"
 //   - Generic: "disk full", "not enough space"
-//   - Quota: "disk quota exceeded"
+//   - Quota: "disk quota exceeded" (Linux), "disc quota exceeded" (macOS/BSD)
 func IsDiskFullError(err error) bool {
 	if err == nil {
 		return false
@@ -26,7 +26,8 @@ func IsDiskFullError(err error) bool {
 		"insufficient disk space", // Windows
 		"not enough space",        // Generic
 		"enospc",                  // Linux errno
-		"disk quota exceeded",     // Quota systems
+		"disk quota exceeded",     // Quota systems (Linux EDQUOT)
+		"disc quota exceeded",     // Quota systems (macOS/BSD EDQUOT spelling)
 	}
 
 	for _, indicator := range diskFullIndicators {
