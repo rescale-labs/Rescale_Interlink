@@ -67,6 +67,17 @@ func TestClassifyErrorClass(t *testing.T) {
 		{"502 Bad Gateway", ClassServerError},
 		{"503 Service Unavailable", ClassServerError},
 		{"some unknown error", ClassInternal},
+
+		// Local filesystem refusals — the user's own machine, not a Rescale failure.
+		{"open /Users/x/Downloads/out/f.dat: permission denied", ClassLocalFS},
+		{"open /Volumes/gone/f.dat: no such file or directory", ClassLocalFS},
+		{"write /mnt/ro/f.dat: read-only file system", ClassLocalFS},
+		{"open /tmp/f.dat: too many open files", ClassLocalFS},
+		{"open /tmp/aaaa...: file name too long", ClassLocalFS},
+		// Local-filesystem markers win over a bare status-code substring.
+		{"open /data/run400/f.dat: permission denied", ClassLocalFS},
+		// HTTP 403 is still auth, not a local permission problem.
+		{"403 Forbidden: permission denied by policy", ClassAuth},
 	}
 	for _, tt := range tests {
 		got := ClassifyErrorClass(tt.msg)
@@ -99,6 +110,11 @@ func TestIsReportable(t *testing.T) {
 		{"disk space", errors.New("no space left on device"), CategoryTransfer, false},
 		{"client 400", errors.New("API returned 400 bad request"), CategoryTransfer, false},
 		{"client 404", errors.New("status 404: file not found"), CategoryTransfer, false},
+		{"local fs permission", errors.New("open /Users/x/Downloads/f.dat: permission denied"), CategoryTransfer, false},
+		{"local fs missing path", errors.New("open /Volumes/gone/f.dat: no such file or directory"), CategoryTransfer, false},
+		{"local fs read-only", errors.New("write /mnt/ro/f.dat: read-only file system"), CategoryTransfer, false},
+		{"local fs fd limit", errors.New("open /tmp/f.dat: too many open files"), CategoryTransfer, false},
+		{"local fs name too long", errors.New("open /tmp/x: file name too long"), CategoryTransfer, false},
 
 		// Reportable: server errors and unclassified internal errors
 		{"server 500", errors.New("API returned 500 internal server error"), CategoryTransfer, true},

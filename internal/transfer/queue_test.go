@@ -1648,3 +1648,45 @@ func TestUpdateProgress_ConcurrentCallbacks(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// The retry executor only receives the task, so tags recorded at registration
+// must live on the task — otherwise retrying a failed tagged upload silently
+// uploads it untagged.
+func TestRetry_PreservesTags(t *testing.T) {
+	queue := NewQueue(nil)
+
+	captured := make(chan []string, 1)
+	queue.SetRetryExecutor(tagCapturingExecutor{captured: captured})
+
+	task := queue.TrackTransferWithBatch("a.dat", 100, TaskTypeUpload, "/a", "folder", "FB", "b1", "Batch")
+	queue.SetTaskTags(task.ID, []string{"run:42", "owner:pk"})
+
+	queue.Activate(task.ID)
+	queue.Fail(task.ID, errors.New("500 internal server error"))
+
+	if _, err := queue.Retry(task.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+
+	select {
+	case tags := <-captured:
+		if len(tags) != 2 || tags[0] != "run:42" || tags[1] != "owner:pk" {
+			t.Errorf("retry lost tags: got %v", tags)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("retry executor never ran")
+	}
+
+	// Tags also survive the reset, so a second retry still applies them.
+	if got := task.GetTags(); len(got) != 2 {
+		t.Errorf("expected tags to persist on the task after reset, got %v", got)
+	}
+}
+
+type tagCapturingExecutor struct {
+	captured chan []string
+}
+
+func (e tagCapturingExecutor) ExecuteRetry(task *TransferTask) {
+	e.captured <- task.GetTags()
+}

@@ -38,6 +38,7 @@ const (
 	ClassServerError ErrorClass = "server_error" // 5xx — server-side failure
 	ClassInternal    ErrorClass = "internal"
 	ClassTimeout     ErrorClass = "timeout"
+	ClassLocalFS     ErrorClass = "local_fs" // local filesystem refused the operation (permissions, missing path, fd limit)
 )
 
 // ClassifiedError holds a fully classified error ready for report building.
@@ -123,6 +124,8 @@ func IsReportable(err error, category ErrorCategory) bool {
 		return false
 	case ClassClientError: // 400/404 — bad input (wrong ID, bad params)
 		return false
+	case ClassLocalFS: // local machine refused the write/read — user can fix the path or permissions
+		return false
 	}
 
 	// ClassServerError (5xx) and ClassInternal (unclassified) are reportable —
@@ -149,6 +152,17 @@ func ClassifyErrorClass(msg string) ErrorClass {
 		return ClassNetwork
 	case strings.Contains(lower, "no space left") || strings.Contains(lower, "disk quota"):
 		return ClassDiskSpace
+	// Local filesystem refusals. These come from the user's own machine — a
+	// protected download directory, a path that disappeared mid-transfer, a
+	// read-only volume, an exhausted fd limit — so they are never a Rescale
+	// failure worth a report. Checked before the 4xx/5xx digit matches, whose
+	// substring tests would otherwise claim messages containing a bare number.
+	case strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "no such file or directory") ||
+		strings.Contains(lower, "read-only file system") ||
+		strings.Contains(lower, "too many open files") ||
+		strings.Contains(lower, "file name too long"):
+		return ClassLocalFS
 	case strings.Contains(lower, "400") || strings.Contains(lower, "404"):
 		return ClassClientError
 	case strings.Contains(lower, "500") || strings.Contains(lower, "502") ||

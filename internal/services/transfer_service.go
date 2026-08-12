@@ -391,6 +391,11 @@ func (ts *TransferService) StartStreamingUploadBatch(
 	go func() {
 		defer close(dispatchCh)
 		defer ts.queue.CleanupBatch(batchID)
+		// Registration finished: flip TotalKnown=true so WaitForBatch callers
+		// know the task count is final. Must fire before CleanupBatch.
+		// (Symmetric with the download path; the GUI's OnOrchestratorDone also
+		// clears this, but the cancel and CLI paths do not.)
+		defer ts.queue.MarkBatchScanInProgress(batchID, false)
 
 		for {
 			select {
@@ -510,6 +515,9 @@ func (ts *TransferService) registerUploadTask(req TransferRequest) string {
 		task = ts.queue.TrackTransferWithBatch(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel, req.BatchID, req.BatchLabel)
 	} else {
 		task = ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
+	}
+	if len(req.Tags) > 0 {
+		ts.queue.SetTaskTags(task.ID, req.Tags)
 	}
 	return task.ID
 }
@@ -667,6 +675,9 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 		task = ts.queue.TrackTransferWithLabel(fileName, req.Size, transfer.TaskTypeUpload, req.Source, req.Dest, sourceLabel)
 	}
 	taskID := task.ID
+	if len(req.Tags) > 0 {
+		ts.queue.SetTaskTags(taskID, req.Tags)
+	}
 
 	// Create derived context for cancel support
 	uploadCtx, uploadCancel := context.WithCancel(ctx)
@@ -945,6 +956,8 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 			Dest:   task.Dest,
 			Name:   task.Name,
 			Size:   task.Size,
+			// Tags live on the task precisely so a retry still applies them.
+			Tags: task.GetTags(),
 		}
 		ts.executeUploadRetry(ctx, req, task.ID, apiClient)
 	} else {
@@ -1079,15 +1092,22 @@ func (ts *TransferService) checkBatchCompletion(batchID, direction string) {
 		if bs.BatchID != batchID {
 			continue
 		}
+		if bs.Cancelled > 0 || bs.CancelRequested {
+			// The user stopped this batch. Whatever the surviving tasks report,
+			// nothing here is a failure worth showing an error report for.
+			return
+		}
 		if bs.Failed == 0 || bs.Total == 0 {
 			return // No failures
 		}
 
 		if bs.Completed == 0 {
-			// Total wipeout — existing behavior (standard reportability check).
-			// If the error is user-fixable (e.g., network down), IsReportable correctly suppresses it.
-			err := fmt.Errorf("batch %s failed: %d/%d transfers failed", direction, bs.Failed, bs.Total)
-			reporting.ClassifyAndPublish(ts.eventBus, err, reporting.CategoryTransfer, "folder_"+direction, "")
+			// Total wipeout. Report a real per-task error, not a synthetic
+			// "N/N failed" summary: that summary always classified as
+			// ClassInternal, so it defeated every suppression rule and raised
+			// the report modal for batches that failed on a protected download
+			// folder, a full disk, or a dead network.
+			ts.reportTotalBatchFailure(batchID, direction)
 		} else {
 			// Partial failure: some succeeded, some failed.
 			// Batch context proves infrastructure works — per-error classification (e.g., ClassNetwork)
@@ -1098,37 +1118,54 @@ func (ts *TransferService) checkBatchCompletion(batchID, direction string) {
 	}
 }
 
-// reportPartialBatchFailure inspects failed tasks in a partial-failure batch, determines the
-// dominant error class, and publishes a ReportableErrorEvent when batch context contradicts
-// the per-error classification (e.g., network errors in a mostly-successful batch).
-func (ts *TransferService) reportPartialBatchFailure(batchID, direction string, bs transfer.BatchStats) {
+// dominantFailure samples a batch's failed tasks and returns the most common
+// error class together with a representative message of that class.
+// ok is false when no failed task recorded an error to reason about.
+func (ts *TransferService) dominantFailure(batchID string) (cls reporting.ErrorClass, representative string, ok bool) {
 	failedTasks := ts.queue.GetFailedTaskErrors(batchID, 5)
 	if len(failedTasks) == 0 {
-		return
+		return "", "", false
 	}
 
-	// Compute the dominant error class across sampled failures.
 	classCounts := make(map[reporting.ErrorClass]int)
 	for _, errMsg := range failedTasks {
-		cls := reporting.ClassifyErrorClass(errMsg)
-		classCounts[cls]++
+		classCounts[reporting.ClassifyErrorClass(errMsg)]++
 	}
-	var dominantClass reporting.ErrorClass
 	var maxCount int
-	for cls, count := range classCounts {
+	for c, count := range classCounts {
 		if count > maxCount {
-			dominantClass = cls
+			cls = c
 			maxCount = count
 		}
 	}
 
-	// Pick the first error matching the dominant class as representative.
-	var representativeErr string
 	for _, errMsg := range failedTasks {
-		if reporting.ClassifyErrorClass(errMsg) == dominantClass {
-			representativeErr = errMsg
-			break
+		if reporting.ClassifyErrorClass(errMsg) == cls {
+			return cls, errMsg, true
 		}
+	}
+	return cls, failedTasks[0], true
+}
+
+// reportTotalBatchFailure classifies a representative real error from a batch
+// where every transfer failed, so the standard reportability rules see the
+// original error markers and can suppress user-fixable causes.
+func (ts *TransferService) reportTotalBatchFailure(batchID, direction string) {
+	_, representative, ok := ts.dominantFailure(batchID)
+	if !ok {
+		return // Nothing concrete to report
+	}
+	reporting.ClassifyAndPublish(ts.eventBus, errors.New(representative),
+		reporting.CategoryTransfer, "folder_"+direction, "")
+}
+
+// reportPartialBatchFailure inspects failed tasks in a partial-failure batch, determines the
+// dominant error class, and publishes a ReportableErrorEvent when batch context contradicts
+// the per-error classification (e.g., network errors in a mostly-successful batch).
+func (ts *TransferService) reportPartialBatchFailure(batchID, direction string, bs transfer.BatchStats) {
+	dominantClass, representativeErr, ok := ts.dominantFailure(batchID)
+	if !ok {
+		return
 	}
 
 	// GATE: Explicit handling per error class.
@@ -1139,11 +1176,12 @@ func (ts *TransferService) reportPartialBatchFailure(batchID, direction string, 
 		// succeeded on the same network -> transient infrastructure issue -> publish.
 		// (Falls through to publish below)
 
-	case reporting.ClassAuth, reporting.ClassDiskSpace, reporting.ClassClientError:
+	case reporting.ClassAuth, reporting.ClassDiskSpace, reporting.ClassClientError, reporting.ClassLocalFS:
 		// DO NOT publish. Batch context does NOT contradict these:
 		// - Auth: bad credentials affect all files
 		// - Disk: local condition, not infrastructure
 		// - Client: 400/404 = bad input for specific files
+		// - LocalFS: the user's own filesystem refused specific files
 		return
 
 	case reporting.ClassServerError, reporting.ClassInternal:

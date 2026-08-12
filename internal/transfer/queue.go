@@ -275,6 +275,16 @@ func (q *Queue) UpdateSize(taskID string, size int64) {
 	}
 }
 
+// SetTaskTags records the tags to apply after a successful upload, so a retry
+// (which only sees the task) re-applies them instead of dropping them.
+func (q *Queue) SetTaskTags(taskID string, tags []string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if task, ok := q.tasksByID[taskID]; ok && task != nil {
+		task.setTags(tags)
+	}
+}
+
 // UpdateProgress updates a task's progress.
 // Progress should be 0.0 to 1.0.
 // Speed is calculated automatically using smoothed EMA.

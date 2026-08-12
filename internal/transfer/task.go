@@ -44,6 +44,11 @@ type TransferTask struct {
 	BatchID     string // Groups related transfers for bulk display
 	BatchLabel  string // Display name for the batch (folder name, etc.)
 
+	// Tags to apply after a successful upload. Held on the task so a retry
+	// re-applies them — the retry executor only has the task, not the original
+	// request, and dropping them here loses the tags silently.
+	Tags []string
+
 	// State tracking
 	State    TaskState // Current state
 	Progress float64   // 0.0 to 1.0
@@ -245,6 +250,20 @@ func (t *TransferTask) setSize(size int64) {
 	t.Size = size
 }
 
+// setTags records the tags to apply after a successful upload.
+func (t *TransferTask) setTags(tags []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Tags = tags
+}
+
+// GetTags returns the tags to apply after a successful upload (thread-safe).
+func (t *TransferTask) GetTags() []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.Tags
+}
+
 // failIfNotTerminal records a failure on a non-terminal task.
 // Returns false when the task was already terminal — a cancelled task must not
 // be overwritten by a late error from the transfer it was cancelling.
@@ -420,6 +439,7 @@ func (t *TransferTask) Clone() TransferTask {
 		SourceLabel: t.SourceLabel,
 		BatchID:     t.BatchID,
 		BatchLabel:  t.BatchLabel,
+		Tags:        t.Tags,
 		State:       t.State,
 		Progress:    t.Progress,
 		Speed:       t.Speed,

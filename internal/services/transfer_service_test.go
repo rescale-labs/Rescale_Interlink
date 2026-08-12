@@ -549,3 +549,124 @@ func TestRegisterEmptyBatchPlaceholder(t *testing.T) {
 	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
 	ts.RegisterEmptyBatchPlaceholder("", "Foo", "download")
 }
+
+// A batch the user cancelled must never raise an error report, whatever its
+// tasks ended up recording. This is the #27 path: cancelling a large batch
+// produced a wipeout "report this error" modal.
+func TestCheckBatchCompletion_CancelledBatchNotReported(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	// Some tasks failed with a context error before the cancel sweep reached
+	// them, the rest were cancelled — exactly what a real cancel produces.
+	for i := 0; i < 3; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("f%d.dat", i), 1024, transfer.TaskTypeDownload,
+			"/src", "/dst", "FileBrowser", "batch-cancelled", "TestBatch",
+		)
+		q.Activate(task.ID)
+		q.Fail(task.ID, fmt.Errorf("unexpected EOF"))
+	}
+	for i := 0; i < 2; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("c%d.dat", i), 1024, transfer.TaskTypeDownload,
+			"/src", "/dst", "FileBrowser", "batch-cancelled", "TestBatch",
+		)
+		q.Activate(task.ID)
+		if err := q.Cancel(task.ID); err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+	}
+
+	ts.checkBatchCompletion("batch-cancelled", "download")
+
+	select {
+	case event := <-ch:
+		t.Fatalf("expected NO ReportableErrorEvent for a cancelled batch, got %+v", event)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A total wipeout is reported by classifying a representative REAL per-task
+// error. Local-filesystem and disk-space causes are the user's own machine, so
+// they stay suppressed; the old synthetic "N/N transfers failed" message
+// classified as internal and always raised the modal.
+func TestCheckBatchCompletion_TotalWipeoutUsesRepresentativeError(t *testing.T) {
+	cases := []struct {
+		name       string
+		taskErr    string
+		wantReport bool
+	}{
+		{"local filesystem", "open /Users/x/Downloads/out/f.dat: permission denied", false},
+		{"disk full", "write /Volumes/ext/f.dat: no space left on device", false},
+		{"network down", "dial tcp: lookup api.rescale.com: no such host", false},
+		{"server error", "API returned 500 internal server error", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eb := events.NewEventBus(100)
+			defer eb.Close()
+			ch := eb.Subscribe(events.EventReportableError)
+
+			ts := NewTransferService(nil, eb, TransferServiceConfig{})
+			q := ts.GetQueue()
+
+			batchID := "batch-wipeout-" + tc.name
+			for i := 0; i < 5; i++ {
+				task := q.TrackTransferWithBatch(
+					fmt.Sprintf("file%d.dat", i), 1024, transfer.TaskTypeDownload,
+					"/src", "/dst", "FileBrowser", batchID, "TestBatch",
+				)
+				q.Fail(task.ID, fmt.Errorf("%s", tc.taskErr))
+			}
+
+			ts.checkBatchCompletion(batchID, "download")
+
+			select {
+			case event := <-ch:
+				if !tc.wantReport {
+					t.Fatalf("expected NO report for %s, got %+v", tc.name, event)
+				}
+				re := event.(*events.ReportableErrorEvent)
+				if re.ErrorClass != "server_error" {
+					t.Errorf("expected the representative per-task error to be classified, got class %q", re.ErrorClass)
+				}
+			case <-time.After(200 * time.Millisecond):
+				if tc.wantReport {
+					t.Fatalf("expected a report for %s, got none", tc.name)
+				}
+			}
+		})
+	}
+}
+
+// A wipeout with no per-task error recorded has nothing trustworthy to report.
+func TestCheckBatchCompletion_TotalWipeoutWithoutTaskErrors(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+	ch := eb.Subscribe(events.EventReportableError)
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	for i := 0; i < 3; i++ {
+		task := q.TrackTransferWithBatch(
+			fmt.Sprintf("f%d.dat", i), 1024, transfer.TaskTypeUpload,
+			"/src", "/dst", "FileBrowser", "batch-noerr", "TestBatch",
+		)
+		q.Fail(task.ID, nil)
+	}
+
+	ts.checkBatchCompletion("batch-noerr", "upload")
+
+	select {
+	case event := <-ch:
+		t.Fatalf("expected NO report when no per-task error was recorded, got %+v", event)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
