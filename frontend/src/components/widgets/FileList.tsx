@@ -28,6 +28,9 @@ interface FileListProps {
   showPath?: boolean // Show full path instead of just name
   isLocal?: boolean // Local browser uses different pagination defaults
   mode?: 'library' | 'jobs' | 'legacy' | 'trash' // Display mode for conditional column rendering
+  // Show the Rescale file ID column. Opt-in: local listings key items by
+  // absolute path, so the column would show a path fragment, not an ID.
+  showFileId?: boolean
   // Server-side pagination props (for remote browser)
   useServerPagination?: boolean  // When true, items are already one page from server
   serverCurrentPage?: number     // Current page (0-indexed)
@@ -91,6 +94,7 @@ export function FileList({
   showPath = false,
   isLocal = false,
   mode,
+  showFileId = false,
   useServerPagination = false,
   serverCurrentPage = 0,
   serverKnownTotalPages = 1,
@@ -424,7 +428,7 @@ export function FileList({
             </button>
             {mode === 'legacy' && (
               <>
-                <span className="w-24 text-left ml-1">File ID</span>
+                {showFileId && <span className="w-24 text-left ml-1">File ID</span>}
                 <span className="w-20 text-left ml-1">Type</span>
                 <button
                   className="w-24 text-left ml-1 hover:text-gray-900 dark:hover:text-white cursor-pointer"
@@ -443,7 +447,7 @@ export function FileList({
             )}
             {mode !== 'legacy' && (
               <>
-                <span className="w-24 text-left ml-1">File ID</span>
+                {showFileId && <span className="w-24 text-left ml-1">File ID</span>}
                 <button
                   className="w-24 text-right hover:text-gray-900 dark:hover:text-white cursor-pointer"
                   onClick={() => handleSort('size')}
@@ -520,9 +524,11 @@ export function FileList({
                     {mode === 'legacy' && (
                       <>
                         {/* File ID */}
-                        <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
-                          {item.id ? item.id.substring(0, 8) : '-'}
-                        </span>
+                        {showFileId && (
+                          <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
+                            {item.id ? item.id.substring(0, 8) : '-'}
+                          </span>
+                        )}
 
                         {/* Type */}
                         <span className="w-20 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate ml-1">
@@ -550,9 +556,11 @@ export function FileList({
                     {mode !== 'legacy' && (
                       <>
                         {/* File ID */}
-                        <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
-                          {item.id ? item.id.substring(0, 8) : '-'}
-                        </span>
+                        {showFileId && (
+                          <span className="w-24 text-left text-gray-500 dark:text-gray-400 flex-shrink-0 truncate text-xs ml-1">
+                            {item.id ? item.id.substring(0, 8) : '-'}
+                          </span>
+                        )}
 
                         {/* Size */}
                         <span className="w-24 text-right text-gray-500 dark:text-gray-400 flex-shrink-0">

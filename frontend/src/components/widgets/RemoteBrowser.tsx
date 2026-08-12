@@ -302,6 +302,7 @@ export function RemoteBrowser() {
           isLoading={isLoading}
           error={error}
           mode={mode}
+          showFileId
           emptyMessage={
             mode === 'library'
               ? 'Your library is empty'
