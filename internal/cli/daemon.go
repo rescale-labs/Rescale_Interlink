@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,11 @@ import (
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/service"
 )
+
+// daemonStopGrace bounds how long `daemon run` waits for Daemon.Stop() to
+// finish cleaning up before exiting anyway. Stop() cancels in-flight transfers
+// and saves state; a hung transfer must not keep the process alive forever.
+const daemonStopGrace = 5 * time.Second
 
 // newDaemonCmd creates the 'daemon' command group.
 func newDaemonCmd() *cobra.Command {
@@ -165,6 +171,12 @@ Examples:
 				LogFile:    logFile,                 // Persistent file logging (empty = disabled)
 			})
 			logger := logging.NewLoggerWithWriter(logWriter)
+
+			// The shared transfer path logs its per-file diagnostics through the
+			// standard logger. A daemon child runs with stderr closed, so those
+			// lines went nowhere; route them into the daemon's log file and IPC
+			// buffer instead.
+			daemon.RouteStdlibLogTo(logger)
 
 			// Load daemon config file
 			daemonConf, err := config.LoadDaemonConfig("")
@@ -325,10 +337,13 @@ Examples:
 			sigChan := make(chan os.Signal, 1)
 			signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-			// Shutdown function for IPC handler
+			// Shutdown function for IPC handler. Guarded: a second shutdown
+			// request (double-click in the GUI, GUI plus CLI) would otherwise
+			// close an already-closed channel and panic the daemon.
 			shutdownRequested := make(chan struct{})
+			var shutdownOnce sync.Once
 			shutdownFunc := func() {
-				close(shutdownRequested)
+				shutdownOnce.Do(func() { close(shutdownRequested) })
 			}
 
 			// Start IPC server if enabled.
@@ -359,6 +374,10 @@ Examples:
 				}
 			}
 
+			// Closed once Daemon.Stop() has finished its cleanup (in-flight
+			// transfers cancelled, final state saved). The main goroutine waits
+			// on it so the process does not exit mid-cleanup.
+			stopComplete := make(chan struct{})
 			go func() {
 				select {
 				case sig := <-sigChan:
@@ -368,6 +387,7 @@ Examples:
 				}
 				cancel()
 				d.Stop()
+				close(stopComplete)
 			}()
 
 			// Print startup info (only in foreground mode)
@@ -410,8 +430,18 @@ Examples:
 				return fmt.Errorf("failed to start daemon: %w", err)
 			}
 
-			// Wait for shutdown signal
+			// Wait for shutdown signal, then give Stop() a bounded window to
+			// finish. Returning as soon as the context is cancelled raced the
+			// deferred PID-file removal and IPC-server shutdown against
+			// process exit, so a stale PID file or socket could outlive the
+			// daemon.
 			<-ctx.Done()
+			select {
+			case <-stopComplete:
+			case <-time.After(daemonStopGrace):
+				logger.Warn().Dur("grace", daemonStopGrace).
+					Msg("Daemon cleanup did not finish in time; exiting anyway")
+			}
 
 			return nil
 		},
@@ -484,7 +514,16 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 					fmt.Println("Last Scan: Never")
 				}
 				if live.LastError != "" {
-					fmt.Printf("Last Error: %s\n", live.LastError)
+					if live.LastErrorTime != nil && !live.LastErrorTime.IsZero() {
+						fmt.Printf("Last Error: %s (%s ago)\n",
+							live.LastError,
+							time.Since(*live.LastErrorTime).Round(time.Second))
+					} else {
+						fmt.Printf("Last Error: %s\n", live.LastError)
+					}
+					if hint := ipc.HintFor(live.LastErrorCode); hint != "" {
+						fmt.Printf("            %s\n", hint)
+					}
 				}
 
 				// Per-user detail straight from IPC for the full view.

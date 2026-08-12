@@ -108,6 +108,7 @@ type State struct {
 	// be zero if IPC is unavailable or the field is not applicable.
 	LastError       string
 	LastErrorCode   ipc.ErrorCode
+	LastErrorTime   *time.Time
 	ActiveDownloads int
 	JobsDownloaded  int
 	LastScanTime    *time.Time
@@ -288,6 +289,7 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 
 		if status.LastError != "" && s.LastError == "" {
 			s.LastError = status.LastError
+			s.LastErrorTime = status.LastErrorTime
 			if status.LastErrorCode != "" {
 				s.LastErrorCode = status.LastErrorCode
 			} else {

@@ -451,20 +451,19 @@ func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResu
 		result.APIKeyError = ipc.CanonicalText[ipc.CodeNoAPIKey] + ". " + ipc.HintFor(ipc.CodeNoAPIKey)
 	}
 
-	// Check download folder
+	// Check download folder. A stat is not enough: an existing directory the
+	// daemon cannot write to used to pass pre-flight and then fail on every
+	// download. ValidateWritablePath is the same probe SaveDaemonConfig gates
+	// on, so pre-flight and save agree.
 	if downloadFolder == "" {
 		downloadFolder = config.DefaultDownloadFolder()
 	}
 	if downloadFolder != "" {
-		if info, err := os.Stat(downloadFolder); err == nil && info.IsDir() {
+		if res := pathutil.ValidateWritablePath(downloadFolder, pathutil.ConsumerCurrentUser); res.Reachable {
 			result.FolderOK = true
-		} else if os.IsNotExist(err) {
-			// Will be created on daemon start — OK
-			result.FolderOK = true
-		} else if err != nil {
-			result.FolderError = fmt.Sprintf("Cannot access folder: %v", err)
 		} else {
-			result.FolderError = "Path exists but is not a directory"
+			result.FolderError = fmt.Sprintf("%s: %s",
+				ipc.CanonicalText[res.ErrorCode], res.Reason)
 		}
 	}
 

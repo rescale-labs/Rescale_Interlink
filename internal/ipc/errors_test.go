@@ -22,6 +22,7 @@ var allCodes = []ErrorCode{
 	CodeWorkspaceFieldWrongType,
 	CodeWorkspaceFieldMissingOptions,
 	CodeNoTokenFile,
+	CodeScanFailed,
 }
 
 func TestCanonicalTextCoverage(t *testing.T) {

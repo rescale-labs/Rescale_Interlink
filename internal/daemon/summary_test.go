@@ -170,6 +170,65 @@ func TestEmitScanSummary_NoFilesIsSeparateFromDownloaded(t *testing.T) {
 	}
 }
 
+// The scan error must survive until the next completed scan clears it: that is
+// what lets a status query distinguish a healthy daemon from one that is alive
+// but failing every poll.
+func TestScanErrorRecordAndClear(t *testing.T) {
+	d, _ := newTestDaemon()
+
+	if got, at := d.LastScanError(); got != "" || !at.IsZero() {
+		t.Fatalf("fresh daemon reports scan error %q at %v, want none", got, at)
+	}
+
+	d.recordScanError(errors.New("list jobs failed: 503"))
+	got, at := d.LastScanError()
+	if got != "list jobs failed: 503" {
+		t.Errorf("LastScanError = %q, want the recorded error", got)
+	}
+	if at.IsZero() {
+		t.Error("LastScanError timestamp is zero, want the time of the failure")
+	}
+
+	d.recordScanError(nil)
+	if got, _ = d.LastScanError(); got != "list jobs failed: 503" {
+		t.Errorf("a nil error must not clear the recorded failure; got %q", got)
+	}
+
+	d.clearScanError()
+	if got, at = d.LastScanError(); got != "" || !at.IsZero() {
+		t.Errorf("after clearScanError: %q at %v, want none", got, at)
+	}
+}
+
+// TriggerPoll must say when it did not start a scan. Reporting success for a
+// scan that never ran is what made a wedged poll invisible from the GUI.
+func TestTriggerPollReportsWhyItDidNotRun(t *testing.T) {
+	d, _ := newTestDaemon()
+
+	if err := d.TriggerPoll(); err == nil {
+		t.Error("TriggerPoll on a stopped daemon returned nil, want an error")
+	}
+
+	d.mu.Lock()
+	d.running = true
+	d.mu.Unlock()
+
+	d.SetPaused(true)
+	if err := d.TriggerPoll(); err == nil {
+		t.Error("TriggerPoll while paused returned nil, want an error")
+	}
+	d.SetPaused(false)
+
+	// Simulate a poll in progress (also what a wedged poll looks like).
+	if !d.polling.CompareAndSwap(false, true) {
+		t.Fatal("polling flag was already set")
+	}
+	if err := d.TriggerPoll(); err == nil {
+		t.Error("TriggerPoll with a poll in progress returned nil, want an error")
+	}
+	d.polling.Store(false)
+}
+
 func TestCheckAllUnsetWarning_Fires(t *testing.T) {
 	d, buf := newTestDaemon()
 

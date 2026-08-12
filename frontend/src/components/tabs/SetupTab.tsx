@@ -366,11 +366,28 @@ export function SetupTab() {
       await saveConfig();
 
       // Save daemon config (includes all auto-download settings)
+      let daemonDetail = '';
       if (daemonConfig) {
         await SaveDaemonConfig(daemonConfig);
+
+        // Writing daemon.conf does not change a running daemon's behaviour;
+        // it keeps its old settings until it is restarted. Ask it to reload and
+        // report what actually happened instead of claiming a bare success.
+        try {
+          const result = await ReloadDaemonConfig();
+          if (result.deferred) {
+            daemonDetail = ` (auto-download settings apply when ${result.activeDownloads} download${result.activeDownloads > 1 ? 's' : ''} finish)`;
+          } else if (result.applied) {
+            daemonDetail = ' and applied to the running daemon';
+          } else if (result.error) {
+            daemonDetail = ` (daemon: ${result.error})`;
+          }
+        } catch {
+          // Daemon may not be running — the save itself still succeeded.
+        }
       }
 
-      setStatusMessage(`All settings saved${defaultConfigPath ? ` to ${defaultConfigPath}` : ''}`);
+      setStatusMessage(`All settings saved${defaultConfigPath ? ` to ${defaultConfigPath}` : ''}${daemonDetail}`);
     } catch (err) {
       setStatusMessage(`Failed to save settings: ${err}`);
     } finally {

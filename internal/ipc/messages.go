@@ -87,6 +87,10 @@ type StatusData struct {
 	// for backwards compatibility.
 	LastErrorCode ErrorCode `json:"last_error_code,omitempty"`
 
+	// LastErrorTime is when LastError was recorded. Lets a surface say how
+	// stale the failure is, which matters when LastScanTime has frozen.
+	LastErrorTime *time.Time `json:"last_error_time,omitempty"`
+
 	// Uptime is how long the service has been running
 	Uptime string `json:"uptime,omitempty"`
 

@@ -325,6 +325,42 @@ func TestCompute_ExplicitErrorCodePreferredOverReverseLookup(t *testing.T) {
 	}
 }
 
+// A daemon that is up and registered but whose last scan failed must still
+// surface the failure. The per-user entry carries no error in that case, so it
+// has to come from the service-level status, timestamp included — otherwise the
+// only symptom is a last-scan time that quietly stops advancing.
+func TestCompute_ScanFailureFromStatusIsSurfaced(t *testing.T) {
+	errAt := time.Unix(1700000000, 0)
+	c := &Computer{
+		Clock:    &fakeClock{t: time.Unix(1700000060, 0)},
+		Detector: fakeDetector{},
+		IPC: fakeIPC{
+			status: &ipc.StatusData{
+				ServiceState:  "running",
+				LastError:     ipc.CanonicalText[ipc.CodeScanFailed] + ": list jobs failed: 503",
+				LastErrorCode: ipc.CodeScanFailed,
+				LastErrorTime: &errAt,
+			},
+			users: []ipc.UserStatus{{Username: "alice", State: "running"}},
+		},
+		Config:   fakeConfig{cfg: newEnabledConfig()},
+		Identity: fakeIdentity{username: "alice"},
+	}
+	s := c.Compute(context.Background(), State{})
+	if s.PerUser != PerUserRunning {
+		t.Errorf("PerUser = %v, want PerUserRunning (a failed scan is not a dead daemon)", s.PerUser)
+	}
+	if s.LastErrorCode != ipc.CodeScanFailed {
+		t.Errorf("LastErrorCode = %q, want %q", s.LastErrorCode, ipc.CodeScanFailed)
+	}
+	if !strings.Contains(s.LastError, "list jobs failed: 503") {
+		t.Errorf("LastError = %q, want it to carry the scan error detail", s.LastError)
+	}
+	if s.LastErrorTime == nil || !s.LastErrorTime.Equal(errAt) {
+		t.Errorf("LastErrorTime = %v, want %v", s.LastErrorTime, errAt)
+	}
+}
+
 // --- matchesWindowsUsername ---
 
 func TestMatchesWindowsUsername(t *testing.T) {

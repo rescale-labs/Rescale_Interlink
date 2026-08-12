@@ -713,8 +713,7 @@ func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
 			strings.EqualFold(entry.profile.Username, identifier) {
 			if entry.running && entry.daemon != nil {
 				m.logger.Info().Str("user", entry.profile.Username).Msg("Triggering scan for user")
-				entry.daemon.TriggerPoll()
-				return nil
+				return entry.daemon.TriggerPoll()
 			}
 			return fmt.Errorf("daemon for %s is not running", identifier)
 		}
@@ -733,8 +732,7 @@ func (m *MultiUserDaemon) TriggerUserScan(identifier string) error {
 				if strings.EqualFold(entry.profile.Username, resolvedUsername) {
 					if entry.running && entry.daemon != nil {
 						m.logger.Info().Str("user", entry.profile.Username).Msg("Triggering scan for user (matched via SID resolution)")
-						entry.daemon.TriggerPoll()
-						return nil
+						return entry.daemon.TriggerPoll()
 					}
 					return fmt.Errorf("daemon for %s is not running", identifier)
 				}

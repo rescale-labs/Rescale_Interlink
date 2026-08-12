@@ -80,6 +80,11 @@ const (
 	// CodeNoAPIKey: the user has entered a key, the persistence layer did
 	// not carry it across the process-identity handoff.
 	CodeNoTokenFile ErrorCode = "no_token_file"
+
+	// CodeScanFailed indicates the daemon is alive but its most recent job
+	// scan failed (API error, timeout, expired credentials). Without it the
+	// only symptom is a last-scan timestamp that silently stops advancing.
+	CodeScanFailed ErrorCode = "scan_failed"
 )
 
 // CanonicalText returns the user-facing English string for a given ErrorCode.
@@ -101,6 +106,7 @@ var CanonicalText = map[ErrorCode]string{
 	CodeWorkspaceFieldWrongType:      "Workspace 'Auto Download' custom field has the wrong type",
 	CodeWorkspaceFieldMissingOptions: "Workspace 'Auto Download' custom field is missing required options",
 	CodeNoTokenFile:                  "API key is configured in the GUI but has not been written to disk",
+	CodeScanFailed:                   "The most recent job scan failed",
 }
 
 // hintText is the actionable hint shown alongside the canonical error text.
@@ -122,6 +128,7 @@ var hintText = map[ErrorCode]string{
 	CodeWorkspaceFieldWrongType:      "A workspace administrator must change the 'Auto Download' custom field to a select-list with Enabled/Disabled/Conditional options.",
 	CodeWorkspaceFieldMissingOptions: "A workspace administrator must add the missing Enabled/Disabled/Conditional options to the 'Auto Download' custom field.",
 	CodeNoTokenFile:                  "Save your configuration and retry. The daemon reads the API key from a token file that the GUI writes on save.",
+	CodeScanFailed:                   "Open Logs for the scan error. The daemon retries on the next poll; a repeating failure usually means an API key, network, or proxy problem.",
 }
 
 // HintFor returns an actionable hint for an ErrorCode, or an empty string if

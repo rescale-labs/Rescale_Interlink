@@ -53,7 +53,7 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 
 	uptime := time.Since(h.startTime).Round(time.Second).String()
 
-	return &ipc.StatusData{
+	status := &ipc.StatusData{
 		ServiceState:    state,
 		Version:         version.Version,
 		LastScanTime:    lastPollPtr,
@@ -62,6 +62,19 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 		Uptime:          uptime,
 		ServiceMode:     false,
 	}
+
+	// A daemon whose scans keep failing is running, not healthy. Report the
+	// failure so "alive but broken" is visible instead of showing a last-scan
+	// time that has silently stopped advancing.
+	if scanErr, at := h.daemon.LastScanError(); scanErr != "" {
+		status.LastErrorCode = ipc.CodeScanFailed
+		status.LastError = ipc.CanonicalText[ipc.CodeScanFailed] + ": " + scanErr
+		if !at.IsZero() {
+			status.LastErrorTime = &at
+		}
+	}
+
+	return status
 }
 
 // GetUserList returns the list of user daemon statuses.
@@ -109,15 +122,20 @@ func (h *IPCHandler) ResumeUser(userID string) error {
 	return nil
 }
 
-// TriggerScan triggers an immediate job scan.
+// TriggerScan triggers an immediate job scan. Returns an error when no scan
+// was started (paused, stopped, or a poll already running) so the caller is
+// not told a scan happened when it did not.
 func (h *IPCHandler) TriggerScan(userID string) error {
 	if h.daemon.IsPaused() {
 		h.daemon.logger.Warn().Msg("Scan requested but daemon is paused")
-		return nil
+		return fmt.Errorf("daemon is paused")
 	}
 
+	if err := h.daemon.TriggerPoll(); err != nil {
+		h.daemon.logger.Warn().Err(err).Msg("Scan requested but not started")
+		return err
+	}
 	h.daemon.logger.Info().Msg("Scan triggered via IPC")
-	h.daemon.TriggerPoll()
 	return nil
 }
 

@@ -1013,16 +1013,26 @@ func (d *Daemon) IsPaused() bool {
 // This is used by the tray app's "Trigger Scan Now" feature.
 // Holds RLock through wg.Add to prevent a race with Stop() (which holds
 // the write lock before calling wg.Wait).
-func (d *Daemon) TriggerPoll() {
+//
+// Returns an error when no scan was started, so callers can report the truth
+// rather than a blanket success. A poll already in progress is the ordinary
+// case, but it is also what a wedged poll looks like — either way the caller's
+// scan did not happen.
+func (d *Daemon) TriggerPoll() error {
 	d.mu.RLock()
 	if !d.running {
 		d.mu.RUnlock()
-		return
+		return fmt.Errorf("daemon is not running")
 	}
 	if d.paused.Load() {
 		d.mu.RUnlock()
 		d.logger.Debug().Msg("Daemon paused, ignoring manual trigger")
-		return
+		return fmt.Errorf("daemon is paused")
+	}
+	if d.polling.Load() {
+		d.mu.RUnlock()
+		d.logger.Debug().Msg("Poll already in progress, ignoring manual trigger")
+		return fmt.Errorf("a scan is already in progress")
 	}
 	// wg.Add under lock — Stop() holds write lock before wg.Wait(),
 	// so this Add is guaranteed to happen before or after Wait, never during.
@@ -1034,4 +1044,5 @@ func (d *Daemon) TriggerPoll() {
 		defer d.wg.Done()
 		d.poll(ctx)
 	}()
+	return nil
 }
