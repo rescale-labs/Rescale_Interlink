@@ -765,6 +765,50 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 	return allJobs, nil
 }
 
+// ListJobsPaged returns the most recent `limit` jobs ordered by newest first.
+// It stops fetching as soon as it has accumulated enough results.
+func (c *Client) ListJobsPaged(ctx context.Context, limit int) ([]models.JobResponse, error) {
+	var allJobs []models.JobResponse
+	nextURL := fmt.Sprintf("/api/v3/jobs/?ordering=-dateInserted&limit=%d", limit)
+
+	for nextURL != "" && len(allJobs) < limit {
+		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != nethttp.StatusOK {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("list jobs failed: status %d: %s", resp.StatusCode, body)
+		}
+
+		var result struct {
+			Next    *string              `json:"next"`
+			Results []models.JobResponse `json:"results"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode jobs response: %w", err)
+		}
+		resp.Body.Close()
+
+		allJobs = append(allJobs, result.Results...)
+
+		if result.Next != nil && *result.Next != "" {
+			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+		} else {
+			nextURL = ""
+		}
+	}
+
+	if len(allJobs) > limit {
+		allJobs = allJobs[:limit]
+	}
+	return allJobs, nil
+}
+
 // ListJobsWithCutoff lists jobs ordered by dateInserted (newest first) and stops
 // when hitting jobs older than the cutoff. This is more efficient for daemon scans
 // that only care about recent jobs within a lookback window.
