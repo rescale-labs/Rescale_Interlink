@@ -39,7 +39,10 @@ type FileBar struct {
 	retries    int32
 	startTime  time.Time
 	lastUpdate time.Time
-	lastBytes  int64
+
+	// lastBytes is read by SetRetry, which runs on the retry callback's
+	// goroutine while UpdateProgress writes it from the progress callback's.
+	lastBytes atomic.Int64
 }
 
 // NewUploadUI creates a new upload UI with the given number of total files
@@ -181,7 +184,7 @@ func (f *FileBar) UpdateProgress(fraction float64) {
 	elapsed := now.Sub(f.lastUpdate)
 
 	currentBytes := int64(fraction * float64(f.size))
-	bytesDelta := currentBytes - f.lastBytes
+	bytesDelta := currentBytes - f.lastBytes.Load()
 
 	// THROTTLE: Update every 300ms minimum to ensure smooth ticker-driven updates
 	// The key insight: ticker calls us even when no bytes have changed (bytesDelta == 0)
@@ -192,7 +195,7 @@ func (f *FileBar) UpdateProgress(fraction float64) {
 		// Always update MPB with elapsed time, even if no bytes transferred
 		// This keeps EWMA speed calculation accurate
 		f.bar.EwmaIncrBy(int(bytesDelta), elapsed)
-		f.lastBytes = currentBytes
+		f.lastBytes.Store(currentBytes)
 		f.lastUpdate = now
 	}
 }
@@ -202,7 +205,7 @@ func (f *FileBar) SetRetry(count int) {
 	atomic.StoreInt32(&f.retries, int32(count))
 	if f.bar != nil && count > 0 {
 		// SetRefill shows a visual indication of retry
-		f.bar.SetRefill(f.lastBytes)
+		f.bar.SetRefill(f.lastBytes.Load())
 	}
 }
 

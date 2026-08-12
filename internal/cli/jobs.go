@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/constants"
 	inthttp "github.com/rescale/rescale-int/internal/http"
@@ -903,9 +904,20 @@ Examples:
 				fmt.Fprintf(downloadUI.Writer(), "Using %d concurrent threads\n", transferHandle.GetThreads())
 			}
 
-			// Create progress bar
-			var fileBar *progress.DownloadFileBar
-			var barOnce sync.Once
+			// Create progress bar. The progress and retry callbacks run on
+			// different transfer goroutines, so creation is guarded by a lock.
+			var (
+				barMu   sync.Mutex
+				fileBar *progress.DownloadFileBar
+			)
+			ensureBar := func() *progress.DownloadFileBar {
+				barMu.Lock()
+				defer barMu.Unlock()
+				if fileBar == nil {
+					fileBar = downloadUI.AddFileBar(1, fileID, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
+				}
+				return fileBar
+			}
 
 			// Download file with progress tracking and transfer manager
 			// Use strict checksum verification (skipChecksum=false) for job downloads
@@ -918,22 +930,16 @@ Examples:
 				LocalPath: outputPath,
 				APIClient: apiClient,
 				ProgressCallback: func(fraction float64) {
-					// Create progress bar on first progress update
-					barOnce.Do(func() {
-						fileBar = downloadUI.AddFileBar(1, fileID, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
-					})
-					if fileBar != nil {
-						fileBar.UpdateProgress(fraction)
-					}
+					ensureBar().UpdateProgress(fraction)
+				},
+				OnRetry: func(ev cloud.RetryEvent) {
+					retryReporter(ensureBar(), downloadUI.Writer())(ev)
 				},
 				TransferHandle: transferHandle,
 				SkipChecksum:   false,
 			})
 
-			// Ensure progress bar exists before completing
-			if fileBar == nil {
-				fileBar = downloadUI.AddFileBar(1, fileID, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
-			}
+			fileBar = ensureBar()
 
 			if err != nil {
 				fileBar.Complete(err)

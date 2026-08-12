@@ -81,6 +81,20 @@ const (
 	// RetryMaxDelay - maximum delay between retries (15s)
 	// Exponential backoff with jitter caps at this value
 	RetryMaxDelay = 15 * time.Second
+
+	// RetryMaxElapsed - wall-clock cap on retrying a single storage operation.
+	//
+	// MaxRetries alone does not bound time: ten attempts against an unreachable
+	// endpoint spend roughly 35s of backoff on average and up to ~70s in the
+	// worst case, on top of each attempt's own connect/read time. That is how an
+	// upload against a broken storage endpoint appeared to hang for minutes.
+	//
+	// 90s is chosen to sit above the realistic worst case for a transient outage
+	// (so a recoverable blip still recovers) and below the point where an
+	// interactive CLI user concludes the tool is stuck. Each operation gets its
+	// own budget, so a large multi-part transfer can still exceed this in total —
+	// what it bounds is a single silent stall.
+	RetryMaxElapsed = 90 * time.Second
 )
 
 // Transfer operation timeouts

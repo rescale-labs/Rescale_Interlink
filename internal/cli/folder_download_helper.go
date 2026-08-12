@@ -332,6 +332,7 @@ func DownloadFolderRecursive(
 			ProgressCallback: func(fraction float64) {
 				fileBar.UpdateProgress(fraction)
 			},
+			OnRetry:      retryReporter(fileBar, downloadUI.Writer()),
 			SkipChecksum: skipChecksum,
 		})
 		transferHandle.Complete()

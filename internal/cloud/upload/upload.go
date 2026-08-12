@@ -47,6 +47,11 @@ type UploadParams struct {
 	// Optional: Output writer for status messages
 	OutputWriter io.Writer
 
+	// Optional: Called when a storage operation is retried, so the caller can
+	// surface it (progress bar label, log line). Runs on a transfer goroutine.
+	// When nil, the provider reports retries on its own (OutputWriter or stderr).
+	OnRetry func(cloud.RetryEvent)
+
 	// Optional: Encryption mode
 	// false (default) = streaming encryption (no temp file, saves disk space)
 	// true = pre-encryption (creates temp file, compatible with legacy clients)
@@ -131,6 +136,15 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
 	log.Printf("[DEBUG] %s: CreateProvider took %v", fileName, time.Since(t3))
+
+	// Retries happen several layers down in the provider client; hand it the
+	// caller's hooks so a stalled transfer is visible instead of silent.
+	if setter, ok := provider.(cloud.RetryObserverSetter); ok {
+		setter.SetRetryObserver(cloud.RetryObserver{
+			Writer:  params.OutputWriter,
+			OnRetry: params.OnRetry,
+		})
+	}
 	log.Printf("[DEBUG] %s: Total init took %v", fileName, time.Since(debugStart))
 
 	initTimer.StopWithMessage("backend=%s", profile.DefaultStorage.StorageType)

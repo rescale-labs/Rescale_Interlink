@@ -49,6 +49,11 @@ type DownloadParams struct {
 	// Optional: Output writer for status messages
 	OutputWriter io.Writer
 
+	// Optional: Called when a storage operation is retried, so the caller can
+	// surface it (progress bar label, log line). Runs on a transfer goroutine.
+	// When nil, the provider reports retries on its own (OutputWriter or stderr).
+	OnRetry func(cloud.RetryEvent)
+
 	// Optional: Checksum handling
 	// false (default) = strict mode - fail on checksum mismatch
 	// true = skip mode - warn but don't fail on checksum mismatch
@@ -115,6 +120,15 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	provider, err := factory.NewTransferFromStorageInfo(ctx, storageInfo, params.APIClient)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
+	}
+
+	// Retries happen several layers down in the provider client; hand it the
+	// caller's hooks so a stalled transfer is visible instead of silent.
+	if setter, ok := provider.(cloud.RetryObserverSetter); ok {
+		setter.SetRetryObserver(cloud.RetryObserver{
+			Writer:  params.OutputWriter,
+			OnRetry: params.OnRetry,
+		})
 	}
 
 	initTimer.StopWithMessage("backend=%s", storageInfo.StorageType)

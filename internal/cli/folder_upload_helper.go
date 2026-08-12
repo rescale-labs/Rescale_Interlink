@@ -260,6 +260,7 @@ func uploadDirectoryPipelined(
 
 				// Create progress bar
 				fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
+				onRetry := retryReporter(fileBar, uploadUI.Writer())
 
 				workerCount := constants.DefaultMaxConcurrent
 				if adaptive != nil {
@@ -275,6 +276,7 @@ func uploadDirectoryPipelined(
 					ProgressCallback: func(fraction float64) {
 						fileBar.UpdateProgress(fraction)
 					},
+					OnRetry:        onRetry,
 					OutputWriter:   uploadUI.Writer(),
 					TransferHandle: transferHandle,
 				})
@@ -567,6 +569,7 @@ func uploadFiles(
 
 		// Create progress bar for this file
 		fileBar := uploadUI.AddFileBar(fpath, remoteFolderID, fileInfo.Size())
+		onRetry := retryReporter(fileBar, uploadUI.Writer())
 
 		seqHandle := seqTransferMgr.AllocateTransfer(fileInfo.Size(), adaptiveWorkers)
 
@@ -578,6 +581,7 @@ func uploadFiles(
 			ProgressCallback: func(prog float64) {
 				fileBar.UpdateProgress(prog)
 			},
+			OnRetry:        onRetry,
 			OutputWriter:   uploadUI.Writer(),
 			TransferHandle: seqHandle,
 		})
@@ -685,6 +689,7 @@ func uploadFiles(
 						ProgressCallback: func(prog float64) {
 							fileBar.UpdateProgress(prog)
 						},
+						OnRetry:      onRetry,
 						OutputWriter: uploadUI.Writer(),
 					})
 

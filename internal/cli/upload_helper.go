@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
@@ -19,6 +21,27 @@ import (
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/glob"
 )
+
+// retryBar is the part of a progress bar that a retry notice touches. Both
+// progress.FileBar and progress.DownloadFileBar satisfy it.
+type retryBar interface {
+	SetRetry(count int)
+}
+
+// retryReporter builds the OnRetry hook for a transfer: label the bar with the
+// retry count, and from the second retry print one line through the progress
+// writer. Writing through the UI's writer keeps the line above the bars instead
+// of tearing them (mpb owns the terminal while bars are live).
+func retryReporter(bar retryBar, w io.Writer) func(cloud.RetryEvent) {
+	return func(ev cloud.RetryEvent) {
+		if bar != nil {
+			bar.SetRetry(ev.Attempt)
+		}
+		if msg := ev.Notice(); msg != "" {
+			fmt.Fprintf(w, "%s\n", msg)
+		}
+	}
+}
 
 // cliUploadItem wraps a file for upload with index info.
 // Implements transfer.WorkItem for BatchExecutor.
@@ -331,20 +354,30 @@ func UploadFilesWithIDs(
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
 		defer transferHandle.Complete()
 
-		var fileBar *progress.FileBar
-		var barOnce sync.Once
+		// The progress and retry callbacks run on different transfer goroutines,
+		// so the bar is created under a lock rather than with a bare sync.Once.
+		var (
+			barMu   sync.Mutex
+			fileBar *progress.FileBar
+		)
+		ensureBar := func() *progress.FileBar {
+			barMu.Lock()
+			defer barMu.Unlock()
+			if fileBar == nil {
+				fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
+			}
+			return fileBar
+		}
 
 		cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
 			LocalPath: fPath,
 			FolderID:  folderID,
 			APIClient: apiClient,
 			ProgressCallback: func(fraction float64) {
-				barOnce.Do(func() {
-					fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
-				})
-				if fileBar != nil {
-					fileBar.UpdateProgress(fraction)
-				}
+				ensureBar().UpdateProgress(fraction)
+			},
+			OnRetry: func(ev cloud.RetryEvent) {
+				retryReporter(ensureBar(), uploadUI.Writer())(ev)
 			},
 			TransferHandle: transferHandle,
 			OutputWriter:   uploadUI.Writer(),
@@ -352,9 +385,7 @@ func UploadFilesWithIDs(
 		})
 
 		if err != nil {
-			if fileBar == nil {
-				fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
-			}
+			fileBar = ensureBar()
 			fileBar.Complete("", err)
 
 			if state.UploadResumeStateExists(fPath) {
@@ -374,10 +405,7 @@ func UploadFilesWithIDs(
 			}
 		}
 
-		if fileBar == nil {
-			fileBar = uploadUI.AddFileBar(fPath, folderID, fileInfo.Size())
-		}
-		fileBar.Complete(cloudFile.ID, nil)
+		ensureBar().Complete(cloudFile.ID, nil)
 
 		uploadedFileIDs[item.idx] = cloudFile.ID
 		return nil

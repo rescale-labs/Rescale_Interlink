@@ -26,6 +26,10 @@ type Provider struct {
 	// Stored fileInfo for cross-storage credential fetching.
 	// When set, all subsequent operations use file-specific credentials.
 	fileInfo *models.CloudFile
+
+	// retryObserver is handed to each client so retries deep in the transfer
+	// stack reach whoever started it. Guarded by azureClientMu.
+	retryObserver cloud.RetryObserver
 }
 
 // NewProvider creates a new Azure provider.
@@ -64,6 +68,15 @@ func (p *Provider) SetFileInfo(fileInfo *models.CloudFile) {
 	p.azureClient = nil
 }
 
+// SetRetryObserver routes retry notices from this provider's operations back to
+// the caller. Call before the first transfer; a client already created keeps the
+// observer it was built with.
+func (p *Provider) SetRetryObserver(obs cloud.RetryObserver) {
+	p.azureClientMu.Lock()
+	defer p.azureClientMu.Unlock()
+	p.retryObserver = obs
+}
+
 // getOrCreateAzureClient returns the existing AzureClient or creates a new one.
 // Thread-safe: Uses mutex protection.
 // Uses stored fileInfo for cross-storage credential fetching if available.
@@ -77,7 +90,7 @@ func (p *Provider) getOrCreateAzureClient(ctx context.Context) (*AzureClient, er
 
 	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials.
 	// Otherwise, use nil for user's default storage (uploads, personal files).
-	client, err := NewAzureClient(ctx, p.storageInfo, p.apiClient, p.fileInfo)
+	client, err := NewAzureClient(ctx, p.storageInfo, p.apiClient, p.fileInfo, p.retryObserver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure client: %w", err)
 	}
@@ -104,7 +117,7 @@ func (p *Provider) getOrCreateAzureClientForFile(ctx context.Context, fileInfo *
 	// Create a client with file-specific credentials
 	// Note: This client is NOT cached because different files may need different credentials
 	// (same pattern as S3Provider.getOrCreateS3ClientForFile)
-	client, err := NewAzureClient(ctx, p.storageInfo, p.apiClient, fileInfo)
+	client, err := NewAzureClient(ctx, p.storageInfo, p.apiClient, fileInfo, p.retryObserver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure client for file: %w", err)
 	}
@@ -141,3 +154,6 @@ func (p *Provider) StorageType() string {
 
 // Compile-time interface verification
 var _ cloud.CloudTransfer = (*Provider)(nil)
+
+// Compile-time check: the provider can receive a retry observer.
+var _ cloud.RetryObserverSetter = (*Provider)(nil)

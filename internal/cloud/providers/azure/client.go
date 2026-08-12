@@ -18,6 +18,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/http"
@@ -37,10 +38,15 @@ type AzureClient struct {
 	client      *azblob.Client
 	storageInfo *models.StorageInfo
 	credManager *credentials.Manager
-	apiClient   *api.Client          // For file-specific credential fetching
-	fileInfo    *models.CloudFile    // Optional: for cross-storage downloads
-	httpClient  *nethttp.Client      // Shared HTTP client for connection reuse
-	clientMu    sync.Mutex           // Protects client updates during credential refresh
+	apiClient   *api.Client       // For file-specific credential fetching
+	fileInfo    *models.CloudFile // Optional: for cross-storage downloads
+	httpClient  *nethttp.Client   // Shared HTTP client for connection reuse
+	clientMu    sync.Mutex        // Protects client updates during credential refresh
+
+	// retryObserver reports retries to whoever started the transfer. Set at
+	// construction and never mutated, so it is safe to read from the concurrent
+	// block workers without a lock.
+	retryObserver cloud.RetryObserver
 
 	// For periodic refresh goroutine cancellation
 	cancelRefresh context.CancelFunc
@@ -68,7 +74,8 @@ type AzureClient struct {
 //   - Azure user downloading job outputs stored in S3
 //
 // The pattern mirrors S3Client's handling of file-specific credentials.
-func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile) (*AzureClient, error) {
+// retryObserver reports retries to the caller (zero value: stderr plus event bus).
+func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile, retryObserver cloud.RetryObserver) (*AzureClient, error) {
 	if storageInfo == nil {
 		return nil, fmt.Errorf("storageInfo is required")
 	}
@@ -127,12 +134,13 @@ func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiCli
 	}
 
 	return &AzureClient{
-		client:      client,
-		storageInfo: storageInfo,
-		credManager: credManager,
-		apiClient:   apiClient,   // Store for file-specific credential refresh
-		fileInfo:    fileInfo,    // Store for file-specific credential refresh
-		httpClient:  httpClient,
+		client:        client,
+		storageInfo:   storageInfo,
+		credManager:   credManager,
+		apiClient:     apiClient, // Store for file-specific credential refresh
+		fileInfo:      fileInfo,  // Store for file-specific credential refresh
+		httpClient:    httpClient,
+		retryObserver: retryObserver,
 	}, nil
 }
 
@@ -263,15 +271,21 @@ func (c *AzureClient) RetryWithBackoff(ctx context.Context, operation string, fn
 		MaxRetries:   constants.MaxRetries,
 		InitialDelay: constants.RetryInitialDelay,
 		MaxDelay:     constants.RetryMaxDelay,
+		MaxElapsed:   constants.RetryMaxElapsed,
 		CredentialRefresh: func(ctx context.Context) error {
 			return c.EnsureFreshCredentials(ctx)
 		},
-		OnRetry: func(attempt int, err error, errorType http.ErrorType) {
-			// Log retry attempts for debugging
-			if os.Getenv("DEBUG_RETRY") == "true" {
-				log.Printf("[RETRY] %s: attempt %d/%d, error type: %s, error: %v",
-					operation, attempt, constants.MaxRetries, http.ErrorTypeName(errorType), err)
-			}
+		// Retries are reported, not hidden behind an env var: a silent retry
+		// loop is what made a broken storage endpoint look like a hang.
+		OnRetry: func(attempt int, err error, errorType http.ErrorType, nextDelay time.Duration) {
+			c.retryObserver.Notify(cloud.RetryEvent{
+				Operation:   operation,
+				Attempt:     attempt,
+				MaxAttempts: constants.MaxRetries,
+				Cause:       http.ErrorTypeName(errorType),
+				Err:         err,
+				NextDelay:   nextDelay,
+			})
 		},
 	}
 

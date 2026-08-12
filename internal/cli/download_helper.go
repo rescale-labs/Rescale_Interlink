@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/cloud/state"
@@ -321,29 +322,37 @@ func executeFileDownload(
 				transferHandle.GetThreads(), item.name)
 		}
 
-		var fileBar *progress.DownloadFileBar
-		var barOnce sync.Once
+		// The progress and retry callbacks run on different transfer goroutines,
+		// so the bar is created under a lock rather than with a bare sync.Once.
+		var (
+			barMu   sync.Mutex
+			fileBar *progress.DownloadFileBar
+		)
+		ensureBar := func() *progress.DownloadFileBar {
+			barMu.Lock()
+			defer barMu.Unlock()
+			if fileBar == nil {
+				fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
+			}
+			return fileBar
+		}
 
 		err := downloadFileFn(ctx, download.DownloadParams{
 			FileID:    item.fileID,
 			LocalPath: outputPath,
 			APIClient: apiClient,
 			ProgressCallback: func(fraction float64) {
-				barOnce.Do(func() {
-					fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-				})
-				if fileBar != nil {
-					fileBar.UpdateProgress(fraction)
-				}
+				ensureBar().UpdateProgress(fraction)
+			},
+			OnRetry: func(ev cloud.RetryEvent) {
+				retryReporter(ensureBar(), downloadUI.Writer())(ev)
 			},
 			TransferHandle: transferHandle,
 			SkipChecksum:   skipChecksum,
 		})
 
 		if err != nil {
-			if fileBar == nil {
-				fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-			}
+			fileBar = ensureBar()
 			fileBar.Complete(err)
 
 			if state.DownloadResumeStateExists(outputPath) {
@@ -363,10 +372,7 @@ func executeFileDownload(
 			Str("path", outputPath).
 			Msg("File downloaded successfully")
 
-		if fileBar == nil {
-			fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-		}
-		fileBar.Complete(nil)
+		ensureBar().Complete(nil)
 
 		downloadMutex.Lock()
 		downloadedFiles = append(downloadedFiles, outputPath)
@@ -640,8 +646,18 @@ func executeJobDownload(
 				transferHandle.GetThreads(), item.name)
 		}
 
-		var fileBar *progress.DownloadFileBar
-		var barOnce sync.Once
+		var (
+			barMu   sync.Mutex
+			fileBar *progress.DownloadFileBar
+		)
+		ensureBar := func() *progress.DownloadFileBar {
+			barMu.Lock()
+			defer barMu.Unlock()
+			if fileBar == nil {
+				fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
+			}
+			return fileBar
+		}
 
 		cloudFile := item.jobFile.ToCloudFile()
 
@@ -650,21 +666,17 @@ func executeJobDownload(
 			LocalPath: outputPath,
 			APIClient: apiClient,
 			ProgressCallback: func(fraction float64) {
-				barOnce.Do(func() {
-					fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-				})
-				if fileBar != nil {
-					fileBar.UpdateProgress(fraction)
-				}
+				ensureBar().UpdateProgress(fraction)
+			},
+			OnRetry: func(ev cloud.RetryEvent) {
+				retryReporter(ensureBar(), downloadUI.Writer())(ev)
 			},
 			TransferHandle: transferHandle,
 			SkipChecksum:   skipChecksum,
 		})
 
 		if err != nil {
-			if fileBar == nil {
-				fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-			}
+			fileBar = ensureBar()
 			fileBar.Complete(err)
 
 			if state.DownloadResumeStateExists(outputPath) {
@@ -684,10 +696,7 @@ func executeJobDownload(
 			Str("path", outputPath).
 			Msg("File downloaded successfully")
 
-		if fileBar == nil {
-			fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-		}
-		fileBar.Complete(nil)
+		ensureBar().Complete(nil)
 
 		downloadMutex.Lock()
 		downloadedFiles = append(downloadedFiles, outputPath)

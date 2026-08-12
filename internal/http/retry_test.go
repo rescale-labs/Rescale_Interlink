@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -242,5 +243,136 @@ func TestExecuteWithRetry_InsufficientDeadline(t *testing.T) {
 	// Should have attempted at least once
 	if calls < 1 {
 		t.Errorf("expected at least 1 call, got %d", calls)
+	}
+}
+
+// TestExecuteWithRetry_MaxElapsed verifies the wall-clock retry budget. Without
+// it, ten attempts against an unreachable endpoint spend over a minute in
+// backoff with nothing on screen, which is what made uploads look like a hang.
+func TestExecuteWithRetry_MaxElapsed(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxElapsed   time.Duration
+		initialDelay time.Duration
+		maxRetries   int
+		perCall      time.Duration
+		wantCallsMax int
+		wantExhaust  bool
+	}{
+		{
+			name:         "budget stops the loop early",
+			maxElapsed:   100 * time.Millisecond,
+			initialDelay: 40 * time.Millisecond,
+			maxRetries:   10,
+			wantCallsMax: 9, // fewer than MaxRetries: the budget, not the count, ends it
+			wantExhaust:  true,
+		},
+		{
+			name:         "slow attempts consume the budget too",
+			maxElapsed:   120 * time.Millisecond,
+			initialDelay: time.Millisecond,
+			maxRetries:   10,
+			perCall:      50 * time.Millisecond,
+			wantCallsMax: 4,
+			wantExhaust:  true,
+		},
+		{
+			name:         "generous budget lets MaxRetries decide",
+			maxElapsed:   30 * time.Second,
+			initialDelay: time.Millisecond,
+			maxRetries:   4,
+			wantCallsMax: 4,
+			wantExhaust:  false,
+		},
+		{
+			name:         "zero budget means no cap",
+			maxElapsed:   0,
+			initialDelay: time.Millisecond,
+			maxRetries:   4,
+			wantCallsMax: 4,
+			wantExhaust:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				MaxRetries:   tt.maxRetries,
+				InitialDelay: tt.initialDelay,
+				MaxDelay:     tt.initialDelay * 8,
+				MaxElapsed:   tt.maxElapsed,
+			}
+
+			calls := 0
+			start := time.Now()
+			err := ExecuteWithRetry(context.Background(), cfg, func() error {
+				calls++
+				if tt.perCall > 0 {
+					time.Sleep(tt.perCall)
+				}
+				return fmt.Errorf("503 service unavailable")
+			})
+			elapsed := time.Since(start)
+
+			if err == nil {
+				t.Fatal("expected an error from a permanently failing operation")
+			}
+			exhausted := strings.Contains(err.Error(), "retries exhausted after")
+			if exhausted != tt.wantExhaust {
+				t.Errorf("error %q: exhausted=%v, want %v", err, exhausted, tt.wantExhaust)
+			}
+			if calls > tt.wantCallsMax {
+				t.Errorf("made %d attempts, want at most %d", calls, tt.wantCallsMax)
+			}
+			if calls == 0 {
+				t.Error("operation was never attempted")
+			}
+			// The budget bounds the sleeping, so a capped run must not overshoot
+			// by more than one attempt's worth of work.
+			if tt.wantExhaust && elapsed > tt.maxElapsed+tt.initialDelay*8+tt.perCall+time.Second {
+				t.Errorf("took %v, well past the %v budget", elapsed, tt.maxElapsed)
+			}
+		})
+	}
+}
+
+// TestExecuteWithRetry_OnRetryReportsDelay verifies OnRetry receives the wait it
+// is about to perform, which is what the user-facing notice reports.
+func TestExecuteWithRetry_OnRetryReportsDelay(t *testing.T) {
+	type call struct {
+		attempt   int
+		errType   ErrorType
+		nextDelay time.Duration
+	}
+	var calls []call
+
+	cfg := Config{
+		MaxRetries:   3,
+		InitialDelay: time.Millisecond,
+		MaxDelay:     5 * time.Millisecond,
+		OnRetry: func(attempt int, err error, errType ErrorType, nextDelay time.Duration) {
+			calls = append(calls, call{attempt, errType, nextDelay})
+		},
+	}
+
+	err := ExecuteWithRetry(context.Background(), cfg, func() error {
+		return fmt.Errorf("503 service unavailable")
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 retry notifications for 3 attempts, got %d", len(calls))
+	}
+	for i, c := range calls {
+		if c.attempt != i+1 {
+			t.Errorf("call %d: attempt = %d, want %d", i, c.attempt, i+1)
+		}
+		if c.errType != ErrorTypeRetryable {
+			t.Errorf("call %d: errType = %v, want retryable", i, c.errType)
+		}
+		if c.nextDelay < 0 || c.nextDelay > cfg.MaxDelay {
+			t.Errorf("call %d: nextDelay = %v, want within [0, %v]", i, c.nextDelay, cfg.MaxDelay)
+		}
 	}
 }

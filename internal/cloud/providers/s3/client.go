@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/http"
@@ -49,10 +50,15 @@ type S3Client struct {
 	client      *s3.Client
 	storageInfo *models.StorageInfo
 	credManager *credentials.Manager
-	apiClient   *api.Client         // For file-specific credential refresh
-	fileInfo    *models.CloudFile   // For cross-bucket credential fetching (nil for uploads)
-	httpClient  *nethttp.Client     // Shared HTTP client for connection reuse
-	clientMu    sync.Mutex          // Protects client updates during credential refresh
+	apiClient   *api.Client       // For file-specific credential refresh
+	fileInfo    *models.CloudFile // For cross-bucket credential fetching (nil for uploads)
+	httpClient  *nethttp.Client   // Shared HTTP client for connection reuse
+	clientMu    sync.Mutex        // Protects client updates during credential refresh
+
+	// retryObserver reports retries to whoever started the transfer. Set at
+	// construction and never mutated, so it is safe to read from the concurrent
+	// part workers without a lock.
+	retryObserver cloud.RetryObserver
 }
 
 // NewS3Client creates a new S3 client with auto-refreshing credentials.
@@ -68,7 +74,8 @@ type S3Client struct {
 //   - storageInfo: S3 storage configuration (bucket, region, path base)
 //   - apiClient: Rescale API client for credential refresh
 //   - fileInfo: Optional file info for cross-storage downloads (nil for uploads)
-func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile) (*S3Client, error) {
+//   - retryObserver: Where to report retries (zero value: stderr plus event bus)
+func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile, retryObserver cloud.RetryObserver) (*S3Client, error) {
 	clientStart := time.Now()
 	if storageInfo == nil {
 		return nil, fmt.Errorf("storageInfo is required")
@@ -122,12 +129,13 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 	log.Printf("[DEBUG] NewS3Client: total took %v", time.Since(clientStart))
 
 	return &S3Client{
-		client:      client,
-		storageInfo: storageInfo,
-		credManager: credManager,
-		apiClient:   apiClient,  // Store for file-specific credential refresh
-		fileInfo:    fileInfo,   // Store for cross-bucket downloads
-		httpClient:  httpClient,
+		client:        client,
+		storageInfo:   storageInfo,
+		credManager:   credManager,
+		apiClient:     apiClient, // Store for file-specific credential refresh
+		fileInfo:      fileInfo,  // Store for cross-bucket downloads
+		httpClient:    httpClient,
+		retryObserver: retryObserver,
 	}, nil
 }
 
@@ -227,15 +235,21 @@ func (c *S3Client) RetryWithBackoff(ctx context.Context, operation string, fn fu
 		MaxRetries:   constants.MaxRetries,
 		InitialDelay: constants.RetryInitialDelay,
 		MaxDelay:     constants.RetryMaxDelay,
+		MaxElapsed:   constants.RetryMaxElapsed,
 		CredentialRefresh: func(ctx context.Context) error {
 			return c.EnsureFreshCredentials(ctx)
 		},
-		OnRetry: func(attempt int, err error, errorType http.ErrorType) {
-			// Log retry attempts for debugging
-			if os.Getenv("DEBUG_RETRY") == "true" {
-				log.Printf("[RETRY] %s: attempt %d/%d, error type: %s, error: %v",
-					operation, attempt, constants.MaxRetries, http.ErrorTypeName(errorType), err)
-			}
+		// Retries are reported, not hidden behind an env var: a silent retry
+		// loop is what made a broken storage endpoint look like a hang.
+		OnRetry: func(attempt int, err error, errorType http.ErrorType, nextDelay time.Duration) {
+			c.retryObserver.Notify(cloud.RetryEvent{
+				Operation:   operation,
+				Attempt:     attempt,
+				MaxAttempts: constants.MaxRetries,
+				Cause:       http.ErrorTypeName(errorType),
+				Err:         err,
+				NextDelay:   nextDelay,
+			})
 		},
 	}
 

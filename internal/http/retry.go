@@ -35,10 +35,16 @@ type Config struct {
 	InitialDelay time.Duration
 	// MaxDelay is the maximum delay between retries (default: 15s)
 	MaxDelay time.Duration
+	// MaxElapsed caps the wall-clock time one operation may spend retrying.
+	// Checked before each wait: if the wait would carry the operation past the
+	// cap, the retry loop gives up and returns the failure instead of sleeping.
+	// Zero means no cap (MaxRetries alone decides).
+	MaxElapsed time.Duration
 	// CredentialRefresh is an optional function to refresh credentials before each attempt
 	CredentialRefresh func(context.Context) error
-	// OnRetry is an optional callback invoked before each retry attempt
-	OnRetry func(attempt int, err error, errorType ErrorType)
+	// OnRetry is an optional callback invoked before each retry attempt.
+	// nextDelay is how long the loop is about to wait before retrying.
+	OnRetry func(attempt int, err error, errorType ErrorType, nextDelay time.Duration)
 }
 
 // ClassifyError determines the error type for retry strategy
@@ -182,6 +188,18 @@ func CalculateBackoff(attempt int, initialDelay, maxDelay time.Duration) time.Du
 // it returns an error wrapping the last failure.
 func ExecuteWithRetry(ctx context.Context, config Config, operation func() error) error {
 	var lastErr error
+	start := time.Now()
+
+	// budgetExceeded reports whether waiting for `wait` would push this
+	// operation past MaxElapsed. Keeping the check on the sleep (rather than on
+	// the attempt count) is what bounds the wall-clock stall a user sees.
+	budgetExceeded := func(wait time.Duration) (time.Duration, bool) {
+		elapsed := time.Since(start)
+		if config.MaxElapsed <= 0 {
+			return elapsed, false
+		}
+		return elapsed, elapsed+wait > config.MaxElapsed
+	}
 
 	for attempt := 0; attempt < config.MaxRetries; attempt++ {
 		// Check context cancellation before each attempt
@@ -222,12 +240,17 @@ func ExecuteWithRetry(ctx context.Context, config Config, operation func() error
 		case ErrorTypeCredential:
 			// Credential errors - force refresh and retry immediately
 			if attempt < config.MaxRetries-1 {
+				const credentialRetryPause = 1 * time.Second
 				if config.OnRetry != nil {
-					config.OnRetry(attempt+1, err, errType)
+					config.OnRetry(attempt+1, err, errType, credentialRetryPause)
+				}
+				if elapsed, over := budgetExceeded(credentialRetryPause); over {
+					return fmt.Errorf("retries exhausted after %v (limit %v, %d attempt(s)): %w",
+						elapsed.Round(time.Millisecond), config.MaxElapsed, attempt+1, err)
 				}
 				// Brief pause before credential refresh (1 second), context-aware
 				select {
-				case <-time.After(1 * time.Second):
+				case <-time.After(credentialRetryPause):
 				case <-ctx.Done():
 					return fmt.Errorf("context cancelled during credential retry: %w", ctx.Err())
 				}
@@ -240,7 +263,13 @@ func ExecuteWithRetry(ctx context.Context, config Config, operation func() error
 			if attempt < config.MaxRetries-1 {
 				backoff := CalculateBackoff(attempt, config.InitialDelay, config.MaxDelay)
 				if config.OnRetry != nil {
-					config.OnRetry(attempt+1, err, errType)
+					config.OnRetry(attempt+1, err, errType, backoff)
+				}
+				// Give up rather than keep an unreachable endpoint spinning for
+				// minutes with nothing to show for it.
+				if elapsed, over := budgetExceeded(backoff); over {
+					return fmt.Errorf("retries exhausted after %v (limit %v, %d attempt(s)): %w",
+						elapsed.Round(time.Millisecond), config.MaxElapsed, attempt+1, err)
 				}
 				// Check if remaining deadline is sufficient for the backoff sleep
 				if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < backoff {

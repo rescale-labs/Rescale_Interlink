@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
@@ -448,6 +449,7 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 					APIClient:      p.apiClient,
 					TransferHandle: transferHandle,
 					OutputWriter:   io.Discard,
+					OnRetry:        p.retryLogger("pipeline", ""),
 				})
 				ratelimit.GlobalStore().EndTransferActivity()
 				transferHandle.Complete()
@@ -644,6 +646,17 @@ func (p *Pipeline) countFailedJobs() int {
 		}
 	}
 	return failed
+}
+
+// retryLogger reports storage retries through the pipeline log so a stalled
+// upload is visible. The pipeline discards the transfer's output writer (its
+// progress goes through callbacks), so without this the retries were silent.
+func (p *Pipeline) retryLogger(stage, jobName string) func(cloud.RetryEvent) {
+	return func(ev cloud.RetryEvent) {
+		if msg := ev.Notice(); msg != "" {
+			p.logf("WARN", stage, jobName, "%s", msg)
+		}
+	}
 }
 
 // tarWorker processes tar operations.
@@ -874,6 +887,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 						ProgressCallback: progressCallback,
 						TransferHandle:   transferHandle,
 						OutputWriter:     io.Discard,
+						OnRetry:          p.retryLogger("upload", item.state.JobName),
 					})
 					ratelimit.GlobalStore().EndTransferActivity()
 				}

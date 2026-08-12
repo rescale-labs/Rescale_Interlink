@@ -27,6 +27,10 @@ type Provider struct {
 	// Stored fileInfo for cross-storage credential fetching.
 	// When set, all subsequent operations use file-specific credentials.
 	fileInfo *models.CloudFile
+
+	// retryObserver is handed to each client so retries deep in the transfer
+	// stack reach whoever started it. Guarded by s3ClientMu.
+	retryObserver cloud.RetryObserver
 }
 
 // NewProvider creates a new S3 provider.
@@ -63,6 +67,15 @@ func (p *Provider) SetFileInfo(fileInfo *models.CloudFile) {
 	p.s3Client = nil
 }
 
+// SetRetryObserver routes retry notices from this provider's operations back to
+// the caller. Call before the first transfer; a client already created keeps the
+// observer it was built with.
+func (p *Provider) SetRetryObserver(obs cloud.RetryObserver) {
+	p.s3ClientMu.Lock()
+	defer p.s3ClientMu.Unlock()
+	p.retryObserver = obs
+}
+
 // getOrCreateS3Client returns the S3 client, creating it if necessary.
 // The client is cached for reuse across operations.
 // Uses stored fileInfo for cross-storage credential fetching if available.
@@ -77,7 +90,7 @@ func (p *Provider) getOrCreateS3Client(ctx context.Context) (*S3Client, error) {
 
 	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials.
 	// Otherwise, use nil for user's default storage (uploads, personal files).
-	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, p.fileInfo)
+	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, p.fileInfo, p.retryObserver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
@@ -96,7 +109,7 @@ func (p *Provider) getOrCreateS3ClientForFile(ctx context.Context, fileInfo *mod
 
 	// Create a client with file-specific credentials
 	// Note: This client is NOT cached because different files may need different credentials
-	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, fileInfo)
+	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, fileInfo, p.retryObserver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client for file: %w", err)
 	}
@@ -175,3 +188,6 @@ func (p *Provider) getS3Credentials(ctx context.Context) (*models.S3Credentials,
 
 // Compile-time interface verification
 var _ cloud.CloudTransfer = (*Provider)(nil)
+
+// Compile-time check: the provider can receive a retry observer.
+var _ cloud.RetryObserverSetter = (*Provider)(nil)
