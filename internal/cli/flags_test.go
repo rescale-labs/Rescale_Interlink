@@ -137,3 +137,57 @@ var errFake = fakeErr("upload failed")
 type fakeErr string
 
 func (e fakeErr) Error() string { return string(e) }
+
+// TestJobsRejectsBothIDSpellings covers another silently-discarded-ID case:
+// --job-id and --id are two pflag entries sharing one variable, so
+// "--job-id A --id B" acted on B and dropped A without a word.
+func TestJobsRejectsBothIDSpellings(t *testing.T) {
+	for _, sub := range []string{"get", "delete", "download"} {
+		t.Run(sub, func(t *testing.T) {
+			cmd := newJobsCmd()
+			target, flags, err := cmd.Find([]string{sub, "--job-id", "A", "--id", "B"})
+			if err != nil {
+				t.Fatalf("Find: %v", err)
+			}
+			if err := target.ParseFlags(flags); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+
+			// Both spellings set: the command must refuse rather than pick one.
+			if err := rejectBothIDSpellings(target); err == nil {
+				t.Error("expected an error when both --job-id and --id are given")
+			} else if !strings.Contains(err.Error(), "--job-id") || !strings.Contains(err.Error(), "--id") {
+				t.Errorf("error should name both spellings: %v", err)
+			}
+
+			// One spelling alone stays fine.
+			single := newJobsCmd()
+			target2, flags2, err := single.Find([]string{sub, "--id", "B"})
+			if err != nil {
+				t.Fatalf("Find: %v", err)
+			}
+			if err := target2.ParseFlags(flags2); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			if err := rejectBothIDSpellings(target2); err != nil {
+				t.Errorf("--id alone must be accepted: %v", err)
+			}
+		})
+	}
+}
+
+// TestRejectBothIDSpellingsIgnoresCommandsWithoutAlias guards the helper against
+// being called on a command that has no --id flag at all.
+func TestRejectBothIDSpellingsIgnoresCommandsWithoutAlias(t *testing.T) {
+	cmd := newJobsCmd()
+	target, flags, err := cmd.Find([]string{"stop", "--job-id", "A"})
+	if err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if err := target.ParseFlags(flags); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if err := rejectBothIDSpellings(target); err != nil {
+		t.Errorf("no --id flag on this command, so nothing to reject: %v", err)
+	}
+}

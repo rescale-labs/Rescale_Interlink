@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -17,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/localfs"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -64,9 +66,49 @@ type UploadError struct {
 // CreateFolderStructure, CreateFolderStructureStreaming, and related helpers live in
 // internal/transfer/folder/. Aliases in folder_upload_compat.go preserve the cli.* API surface.
 
-// checkFileExistsFn is a test seam for the folder-contents lookup, following the
-// same pattern as the download seams in download_helper.go.
-var checkFileExistsFn = checkFileExists
+// Test seams, following the same pattern as the download seams in
+// download_helper.go: the folder upload path needs an API client and live cloud
+// credentials, which a unit test cannot supply.
+var (
+	checkFileExistsFn = checkFileExists
+	uploadFileFn      = func(ctx context.Context, params upload.UploadParams) (*models.CloudFile, error) {
+		return upload.UploadFile(ctx, params)
+	}
+)
+
+// reportableErrors returns the failures worth showing the user. After a user
+// abort, whatever was mid-flight fails with a cancellation — that is the abort
+// itself, not four extra problems, and listing them buries the one line that
+// explains what happened.
+func (r *UploadResult) reportableErrors() []UploadError {
+	if r == nil {
+		return nil
+	}
+	if !r.Aborted {
+		return r.Errors
+	}
+	kept := make([]UploadError, 0, len(r.Errors))
+	for _, e := range r.Errors {
+		if isCancellation(e.Error) {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
+}
+
+// isCancellation reports whether err is a context cancellation. The string check
+// backs up errors.Is because parts of the transfer stack format the cause with %v
+// and lose the chain.
+func isCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "context canceled")
+}
 
 // uploadDirOutcome turns an upload result into the command's exit status.
 // A printed failure list with a zero exit status is invisible to scripts, so
@@ -78,8 +120,8 @@ func uploadDirOutcome(result *UploadResult) error {
 	if result.Aborted {
 		return fmt.Errorf("upload aborted by user")
 	}
-	if len(result.Errors) > 0 {
-		return fmt.Errorf("%d file(s) failed to upload", len(result.Errors))
+	if errs := result.reportableErrors(); len(errs) > 0 {
+		return fmt.Errorf("%d file(s) failed to upload", len(errs))
 	}
 	return nil
 }
@@ -270,7 +312,7 @@ func uploadDirectoryPipelined(
 				transferHandle := cliUploadTransferMgr.AllocateTransfer(fileInfo.Size(), workerCount)
 
 				// Upload file
-				cloudFile, uploadErr := upload.UploadFile(ctx, upload.UploadParams{
+				cloudFile, uploadErr := uploadFileFn(ctx, upload.UploadParams{
 					LocalPath: fpath,
 					FolderID:  remoteFolderID,
 					APIClient: apiClient,
@@ -575,7 +617,7 @@ func uploadFiles(
 		seqHandle := seqTransferMgr.AllocateTransfer(fileInfo.Size(), adaptiveWorkers)
 
 		// Upload with progress callback
-		cloudFile, uploadErr := upload.UploadFile(ctx, upload.UploadParams{
+		cloudFile, uploadErr := uploadFileFn(ctx, upload.UploadParams{
 			LocalPath: fpath,
 			FolderID:  remoteFolderID,
 			APIClient: apiClient,
@@ -683,7 +725,7 @@ func uploadFiles(
 					}
 
 					logger.Info().Str("file", fileName).Msg("Retrying upload after deletion")
-					cloudFile, retryErr := upload.UploadFile(ctx, upload.UploadParams{
+					cloudFile, retryErr := uploadFileFn(ctx, upload.UploadParams{
 						LocalPath: fpath,
 						FolderID:  remoteFolderID,
 						APIClient: apiClient,

@@ -124,6 +124,17 @@ Example:
 	return cmd
 }
 
+// rejectBothIDSpellings errors when one invocation uses both --job-id and its
+// --id alias. They are two pflag entries sharing one variable, and the second one
+// to be set replaces what the first wrote — "--job-id A --id B" acted on B and
+// silently discarded A. Refusing beats guessing which one was meant.
+func rejectBothIDSpellings(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("job-id") && cmd.Flags().Changed("id") {
+		return fmt.Errorf("use either --job-id or --id, not both: they are the same flag, so passing both discards one of the values")
+	}
+	return nil
+}
+
 // newJobsGetCmd creates the 'jobs get' command.
 func newJobsGetCmd() *cobra.Command {
 	var jobID string
@@ -138,6 +149,9 @@ Example:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
+			if err := rejectBothIDSpellings(cmd); err != nil {
+				return err
+			}
 			if jobID == "" {
 				return fmt.Errorf("--job-id (or --id) is required")
 			}
@@ -217,6 +231,9 @@ Example:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
+			if err := rejectBothIDSpellings(cmd); err != nil {
+				return err
+			}
 			if len(jobIDs) == 0 {
 				return fmt.Errorf("at least one --job-id (or --id) is required")
 			}
@@ -815,6 +832,9 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
+			if err := rejectBothIDSpellings(cmd); err != nil {
+				return err
+			}
 			if jobID == "" {
 				return fmt.Errorf("--job-id (or --id) is required")
 			}

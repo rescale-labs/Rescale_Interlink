@@ -113,7 +113,7 @@ const (
 func promptFileConflict(fileName, folderPath string) (FileConflictAction, error) {
 	if !IsTerminal() {
 		return FileAbort, errPromptNeedsTerminal("a file conflict",
-			"--merge-folder-conflicts (skip existing) or --continue-on-error")
+			"--merge-folder-conflicts (keep existing files) or --skip-folder-conflicts")
 	}
 
 	promptf("\n⚠️  File '%s' already exists in folder '%s'.\n", fileName, folderPath)
@@ -166,7 +166,7 @@ const (
 func promptDownloadConflict(fileName, localPath string) (DownloadConflictAction, error) {
 	if !IsTerminal() {
 		return DownloadAbort, errPromptNeedsTerminal("a download conflict",
-			"--overwrite, --skip or --resume")
+			"this command's conflict flags (--overwrite or --skip; see --help for the rest)")
 	}
 
 	promptf("\n⚠️  File '%s' already exists at '%s'.\n", fileName, localPath)

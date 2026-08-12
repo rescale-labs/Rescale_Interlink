@@ -8,12 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/localfs"
+	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/resources"
 )
@@ -365,5 +368,87 @@ func TestUploadFilesAbortStopsBatch(t *testing.T) {
 	}
 	if err := uploadDirOutcome(result); err == nil || !strings.Contains(err.Error(), "aborted by user") {
 		t.Errorf("expected an abort error, got %v", err)
+	}
+}
+
+// TestUploadFilesAbortSkipsRemainingFiles is the claim behind the abort fix:
+// choosing Abort stops the batch. Before, the worker logged "Upload aborted by
+// user", returned nil, and the batch carried on uploading everything else.
+//
+// Single worker so ordering is deterministic: the first file hits the conflict
+// prompt and aborts, and the rest must never reach the upload call.
+func TestUploadFilesAbortSkipsRemainingFiles(t *testing.T) {
+	rootPath, files, mapping, cfg, mgr := uploadFilesTestArgs(t, 6)
+
+	origCheck := checkFileExistsFn
+	origUpload := uploadFileFn
+	defer func() {
+		checkFileExistsFn = origCheck
+		uploadFileFn = origUpload
+	}()
+
+	// Only the first file conflicts; the others would upload normally.
+	checkFileExistsFn = func(ctx context.Context, apiClient *api.Client, cache *FolderCache, folderID, fileName string) (string, bool, error) {
+		return "existing-file-id", fileName == filepath.Base(files[0]), nil
+	}
+
+	var uploadMu sync.Mutex
+	uploaded := []string{}
+	uploadFileFn = func(ctx context.Context, params upload.UploadParams) (*models.CloudFile, error) {
+		uploadMu.Lock()
+		uploaded = append(uploaded, params.LocalPath)
+		uploadMu.Unlock()
+		return &models.CloudFile{ID: "new-file-id"}, nil
+	}
+
+	// FileAbort is not a "once" mode, so the resolver returns it without prompting.
+	result, err := uploadFiles(context.Background(), rootPath, files, mapping,
+		nil, NewFolderCache(), progress.NewUploadUI(len(files)),
+		NewFileConflictResolver(FileAbort), NewErrorActionResolver(ErrorContinueOnce),
+		false, 1, cfg, GetLogger(), mgr)
+	if err != nil {
+		t.Fatalf("uploadFiles returned error: %v", err)
+	}
+
+	if !result.Aborted {
+		t.Error("expected result.Aborted to be set")
+	}
+	uploadMu.Lock()
+	got := append([]string(nil), uploaded...)
+	uploadMu.Unlock()
+	if len(got) != 0 {
+		t.Errorf("abort must stop the batch, but %d file(s) were still uploaded: %v", len(got), got)
+	}
+	if result.FilesUploaded != 0 {
+		t.Errorf("FilesUploaded = %d, want 0", result.FilesUploaded)
+	}
+	if err := uploadDirOutcome(result); err == nil || !strings.Contains(err.Error(), "aborted by user") {
+		t.Errorf("expected an abort error, got %v", err)
+	}
+}
+
+// TestReportableErrorsDropsCancellations verifies the abort summary does not list
+// the cancellations the abort itself caused.
+func TestReportableErrorsDropsCancellations(t *testing.T) {
+	realFailure := UploadError{FilePath: "a.dat", Error: errors.New("500 internal server error")}
+	cancelled := UploadError{FilePath: "b.dat", Error: fmt.Errorf("S3Storage upload failed: %w", context.Canceled)}
+	cancelledFlat := UploadError{FilePath: "c.dat", Error: errors.New("upload failed: context canceled")}
+
+	aborted := &UploadResult{Aborted: true, Errors: []UploadError{realFailure, cancelled, cancelledFlat}}
+	got := aborted.reportableErrors()
+	if len(got) != 1 || got[0].FilePath != "a.dat" {
+		t.Errorf("expected only the real failure, got %+v", got)
+	}
+
+	// Without an abort, nothing is filtered: a cancellation then means Ctrl-C or a
+	// timeout, which the user should see.
+	notAborted := &UploadResult{Errors: []UploadError{realFailure, cancelled}}
+	if len(notAborted.reportableErrors()) != 2 {
+		t.Errorf("expected both errors kept when not aborted, got %+v", notAborted.reportableErrors())
+	}
+
+	var nilResult *UploadResult
+	if nilResult.reportableErrors() != nil {
+		t.Error("nil result must yield no errors")
 	}
 }

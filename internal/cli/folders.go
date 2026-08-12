@@ -429,6 +429,11 @@ Examples:
 				// Upload files
 				fmt.Println("\n📤 Uploading files...")
 				uploadUI := progress.NewUploadUI(len(files))
+				// Route logs through the bars while they are on screen — see
+				// executeFileUpload for why.
+				if uploadUI.IsTerminal() {
+					logger = logger.WithOutput(uploadUI.Writer())
+				}
 				defer uploadUI.Wait()
 
 				// Cache folder paths for display
@@ -516,11 +521,12 @@ Examples:
 			if len(symlinks) > 0 {
 				fmt.Printf("  Symlinks skipped:   %d\n", len(symlinks))
 			}
-			if len(result.Errors) > 0 {
+			// After an abort the cancellations are the abort, not extra failures.
+			if reportable := result.reportableErrors(); len(reportable) > 0 {
 				// Categorize errors
 				diskSpaceErrors := 0
 				otherErrors := 0
-				for _, e := range result.Errors {
+				for _, e := range reportable {
 					if diskspace.IsInsufficientSpaceError(e.Error) {
 						diskSpaceErrors++
 					} else {
@@ -528,7 +534,7 @@ Examples:
 					}
 				}
 
-				fmt.Printf("  Errors:             %d", len(result.Errors))
+				fmt.Printf("  Errors:             %d", len(reportable))
 				if diskSpaceErrors > 0 {
 					fmt.Printf(" (%d disk space, %d other)", diskSpaceErrors, otherErrors)
 				}
@@ -537,7 +543,7 @@ Examples:
 				// Show disk space errors first (if any)
 				if diskSpaceErrors > 0 {
 					fmt.Println("\n💾 Disk space errors:")
-					for _, e := range result.Errors {
+					for _, e := range reportable {
 						if diskspace.IsInsufficientSpaceError(e.Error) {
 							relPath, _ := filepath.Rel(localPath, e.FilePath)
 							fmt.Printf("  - %s: %v\n", relPath, e.Error)
@@ -548,13 +554,16 @@ Examples:
 				// Show other errors
 				if otherErrors > 0 {
 					fmt.Println("\n❌ Other upload failures:")
-					for _, e := range result.Errors {
+					for _, e := range reportable {
 						if !diskspace.IsInsufficientSpaceError(e.Error) {
 							relPath, _ := filepath.Rel(localPath, e.FilePath)
 							fmt.Printf("  - %s: %v\n", relPath, e.Error)
 						}
 					}
 				}
+			}
+			if result.Aborted {
+				fmt.Println("  Stopped:            aborted by user")
 			}
 			// Calculate metrics
 			elapsed := time.Since(startTime)
