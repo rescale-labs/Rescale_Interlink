@@ -1243,3 +1243,194 @@ func TestRetryErrorHandlerBodyHandling(t *testing.T) {
 		}
 	})
 }
+
+// TestPaginationFollowsNextWithMixedCaseBaseURL pins the fix for a configured
+// platform URL whose host case differs from the one the API echoes back.
+// Platform URLs are validated case-insensitively, so "LOCALHOST" is accepted;
+// trimming it as a literal prefix left the whole next URL in place, which was
+// then appended to the base and failed DNS on every retry.
+func TestPaginationFollowsNextWithMixedCaseBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		// page1 returns the first page, with next pointing at page 2 using the
+		// server's own (canonical-case) URL.
+		page1 func(nextURL string) map[string]interface{}
+		page2 map[string]interface{}
+		call  func(t *testing.T, c *Client) error
+	}{
+		{
+			name: "ListJobs",
+			path: "/api/v3/jobs/",
+			page1: func(nextURL string) map[string]interface{} {
+				return map[string]interface{}{
+					"count":   2,
+					"next":    nextURL,
+					"results": []map[string]interface{}{{"id": "job-1"}},
+				}
+			},
+			page2: map[string]interface{}{
+				"count":   2,
+				"next":    nil,
+				"results": []map[string]interface{}{{"id": "job-2"}},
+			},
+			call: func(t *testing.T, c *Client) error {
+				jobs, err := c.ListJobs(context.Background())
+				if err == nil && len(jobs) != 2 {
+					t.Errorf("ListJobs() returned %d jobs, want 2 (both pages)", len(jobs))
+				}
+				return err
+			},
+		},
+		{
+			name: "paginateRaw",
+			path: "/api/v2/analyses/",
+			page1: func(nextURL string) map[string]interface{} {
+				return map[string]interface{}{
+					"count":   2,
+					"next":    nextURL,
+					"results": []map[string]interface{}{{"code": "analysis-1"}},
+				}
+			},
+			page2: map[string]interface{}{
+				"count":   2,
+				"next":    nil,
+				"results": []map[string]interface{}{{"code": "analysis-2"}},
+			},
+			call: func(t *testing.T, c *Client) error {
+				raw, err := c.GetAnalysesRaw(context.Background())
+				if err == nil && len(raw) != 2 {
+					t.Errorf("GetAnalysesRaw() returned %d results, want 2 (both pages)", len(raw))
+				}
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var server *httptest.Server
+			var mu sync.Mutex
+			var seen []string
+
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				seen = append(seen, r.URL.RequestURI())
+				mu.Unlock()
+
+				if r.URL.Path != tc.path {
+					http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Query().Get("page") == "2" {
+					_ = json.NewEncoder(w).Encode(tc.page2)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(tc.page1(server.URL + tc.path + "?page=2"))
+			}))
+			defer server.Close()
+
+			// Same host, different case — exactly what a mixed-case --api-url
+			// produces after validation accepts it.
+			mixedCase := strings.Replace(server.URL, "127.0.0.1", "LOCALHOST", 1)
+			if mixedCase == server.URL {
+				t.Skipf("test server URL %q is not host-based", server.URL)
+			}
+
+			client := newTestClient(t, mixedCase)
+			if err := tc.call(t, client); err != nil {
+				t.Fatalf("pagination with base URL %q failed: %v", mixedCase, err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(seen) != 2 {
+				t.Fatalf("server saw %d requests, want 2 (page 1 then page 2): %v", len(seen), seen)
+			}
+			if !strings.Contains(seen[1], "page=2") {
+				t.Errorf("second request was %q, want the page 2 path", seen[1])
+			}
+		})
+	}
+}
+
+// TestMetricsPathTrackingIsBounded verifies the usage map cannot grow without
+// limit: keys drop the query string, and new paths stop being admitted at the
+// cap.
+func TestMetricsPathTrackingIsBounded(t *testing.T) {
+	m := &apiMetrics{callsByPath: make(map[string]int64)}
+
+	m.Lock()
+	for i := 0; i < 5; i++ {
+		m.trackPath("/api/v3/files/?page=" + strconv.Itoa(i) + "&page_size=100")
+	}
+	m.Unlock()
+
+	if len(m.callsByPath) != 1 {
+		t.Fatalf("paginated crawl produced %d keys, want 1: %v", len(m.callsByPath), m.callsByPath)
+	}
+	if got := m.callsByPath["/api/v3/files/"]; got != 5 {
+		t.Errorf("callsByPath[/api/v3/files/] = %d, want 5", got)
+	}
+
+	m.Lock()
+	for i := 0; i < maxTrackedPaths+500; i++ {
+		m.trackPath("/api/v3/folders/" + strconv.Itoa(i) + "/contents/")
+	}
+	// Known paths keep counting even at the cap.
+	m.trackPath("/api/v3/files/")
+	m.Unlock()
+
+	if len(m.callsByPath) > maxTrackedPaths {
+		t.Errorf("callsByPath grew to %d keys, want at most %d", len(m.callsByPath), maxTrackedPaths)
+	}
+	if got := m.callsByPath["/api/v3/files/"]; got != 6 {
+		t.Errorf("callsByPath[/api/v3/files/] = %d, want 6 — known paths must keep counting at the cap", got)
+	}
+}
+
+// TestFileTagErrorsCarryServerText verifies the tag calls read the body before
+// closing it, so the server's explanation survives into the error.
+func TestFileTagErrorsCarryServerText(t *testing.T) {
+	const serverText = `{"detail":"tag name is reserved"}`
+
+	tests := []struct {
+		name    string
+		call    func(c *Client) error
+		wantMsg string
+	}{
+		{
+			name:    "AddFileTags",
+			call:    func(c *Client) error { return c.AddFileTags(context.Background(), "file-1", []string{"bad tag"}) },
+			wantMsg: `failed to add tag "bad tag"`,
+		},
+		{
+			name:    "RemoveFileTags",
+			call:    func(c *Client) error { return c.RemoveFileTags(context.Background(), "file-1", []string{"bad tag"}) },
+			wantMsg: `failed to remove tag "bad tag"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(serverText))
+			}))
+			defer server.Close()
+
+			err := tc.call(newTestClient(t, server.URL))
+			if err == nil {
+				t.Fatal("expected an error for a 400 response")
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("error %q missing %q", err.Error(), tc.wantMsg)
+			}
+			if !strings.Contains(err.Error(), "tag name is reserved") {
+				t.Errorf("error %q dropped the server's explanation", err.Error())
+			}
+		})
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	nethttp "net/http"
-	"strings"
 
 	"github.com/rescale/rescale-int/internal/constants"
 )
@@ -53,7 +52,7 @@ func (c *Client) paginateRaw(ctx context.Context, startURL string) ([]json.RawMe
 		all = append(all, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}

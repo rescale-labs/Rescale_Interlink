@@ -356,6 +356,11 @@ func getStringField(m map[string]interface{}, key string, context string) string
 	return str
 }
 
+// maxTrackedPaths bounds how many distinct paths callsByPath will track. A
+// long-lived process walking large libraries would otherwise accumulate a key
+// per path forever.
+const maxTrackedPaths = 1000
+
 // apiMetrics tracks API usage statistics per scope
 type apiMetrics struct {
 	sync.Mutex
@@ -365,6 +370,22 @@ type apiMetrics struct {
 	windowStart   time.Time
 	callsInWindow int64
 	scopeInWindow map[ratelimit.Scope]int64
+}
+
+// trackPath counts a call against its path with the query string stripped, so a
+// paginated crawl counts as one endpoint rather than one key per page. Stops
+// admitting new paths at maxTrackedPaths; counts for paths already known keep
+// incrementing.
+//
+// Caller MUST hold m.Mutex.
+func (m *apiMetrics) trackPath(path string) {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	if _, known := m.callsByPath[path]; !known && len(m.callsByPath) >= maxTrackedPaths {
+		return
+	}
+	m.callsByPath[path]++
 }
 
 // Client represents the Rescale API client.
@@ -481,7 +502,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	// Track API call metrics per scope
 	c.metrics.Lock()
 	c.metrics.totalCalls++
-	c.metrics.callsByPath[path]++
+	c.metrics.trackPath(path)
 	c.metrics.callsByScope[scope]++
 	c.metrics.callsInWindow++
 	c.metrics.scopeInWindow[scope]++
@@ -949,8 +970,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 		allJobs = append(allJobs, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			// Extract path from full URL
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
@@ -991,7 +1011,7 @@ func (c *Client) ListJobsPaged(ctx context.Context, limit int) ([]models.JobResp
 		allJobs = append(allJobs, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
@@ -1106,7 +1126,7 @@ func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]mo
 		}
 
 		if result.Next != nil && *result.Next != "" {
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
@@ -1162,8 +1182,7 @@ func (c *Client) GetCoreTypes(ctx context.Context, includeInactive bool) ([]mode
 		allCoreTypes = append(allCoreTypes, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			// Extract path from full URL
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
@@ -1213,8 +1232,7 @@ func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 		allAnalyses = append(allAnalyses, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			// Extract path from full URL
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
@@ -1922,6 +1940,12 @@ func (c *Client) PostTrashBinAction(ctx context.Context, action string, fileSyml
 }
 
 // extractAPIPath extracts the API path from a full URL or returns the path as-is.
+//
+// Use this — not TrimPrefix against c.baseURL — to turn a paginated "next" link
+// into a request path. Platform URLs are validated case-insensitively, so a
+// configured host of "Platform.Rescale.com" never matches the canonical host the
+// API echoes back, and the untrimmed URL would be concatenated onto the base
+// into a host-in-path address that fails DNS on every retry.
 func extractAPIPath(url string) string {
 	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") {
 		if idx := strings.Index(url, "/api/"); idx >= 0 {
@@ -2071,13 +2095,17 @@ func (c *Client) AddFileTags(ctx context.Context, fileID string, tagsToAdd []str
 		if err != nil {
 			return fmt.Errorf("failed to add tag %q: %w", tag, err)
 		}
-		resp.Body.Close()
 
-		// Accept 200, 201, 202 (Accepted), or 204 as success
-		if resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusCreated &&
-			resp.StatusCode != nethttp.StatusAccepted && resp.StatusCode != nethttp.StatusNoContent {
-			return fmt.Errorf("failed to add tag %q: status %d", tag, resp.StatusCode)
+		// Accept 200, 201, 202 (Accepted), or 204 as success.
+		// Read the body before closing it: on failure it carries the reason.
+		ok := resp.StatusCode == nethttp.StatusOK || resp.StatusCode == nethttp.StatusCreated ||
+			resp.StatusCode == nethttp.StatusAccepted || resp.StatusCode == nethttp.StatusNoContent
+		if !ok {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("failed to add tag %q: status %d: %s", tag, resp.StatusCode, body)
 		}
+		resp.Body.Close()
 	}
 	return nil
 }
@@ -2092,13 +2120,17 @@ func (c *Client) RemoveFileTags(ctx context.Context, fileID string, tagsToRemove
 		if err != nil {
 			return fmt.Errorf("failed to remove tag %q: %w", tag, err)
 		}
-		resp.Body.Close()
 
-		// Accept 200, 202 (Accepted), or 204 as success
-		if resp.StatusCode != nethttp.StatusOK && resp.StatusCode != nethttp.StatusAccepted &&
-			resp.StatusCode != nethttp.StatusNoContent {
-			return fmt.Errorf("failed to remove tag %q: status %d", tag, resp.StatusCode)
+		// Accept 200, 202 (Accepted), or 204 as success.
+		// Read the body before closing it: on failure it carries the reason.
+		ok := resp.StatusCode == nethttp.StatusOK || resp.StatusCode == nethttp.StatusAccepted ||
+			resp.StatusCode == nethttp.StatusNoContent
+		if !ok {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("failed to remove tag %q: status %d: %s", tag, resp.StatusCode, body)
 		}
+		resp.Body.Close()
 	}
 	return nil
 }
@@ -2231,8 +2263,7 @@ func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFi
 		allFiles = append(allFiles, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			// Extract path from full URL
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
@@ -2280,7 +2311,7 @@ func (c *Client) GetJobRuns(ctx context.Context, jobID string) ([]models.JobRun,
 		allRuns = append(allRuns, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
@@ -2328,7 +2359,7 @@ func (c *Client) GetRunFiles(ctx context.Context, jobID, runID string) ([]models
 		allFiles = append(allFiles, result.Results...)
 
 		if result.Next != nil && *result.Next != "" {
-			nextURL = strings.TrimPrefix(*result.Next, c.baseURL)
+			nextURL = extractAPIPath(*result.Next)
 		} else {
 			nextURL = ""
 		}
