@@ -21,6 +21,7 @@ import (
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/pathutil"
+	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/service"
 )
 
@@ -28,6 +29,20 @@ import (
 // finish cleaning up before exiting anyway. Stop() cancels in-flight transfers
 // and saves state; a hung transfer must not keep the process alive forever.
 const daemonStopGrace = 5 * time.Second
+
+// daemonNotifyFunc adapts the rate limit notice hook to the daemon's logger,
+// which reaches the log file and the IPC log buffer. Levels come from the
+// ratelimit package as plain strings; anything that is not a warning is
+// informational.
+func daemonNotifyFunc(logger *logging.Logger) func(level, message string) {
+	return func(level, message string) {
+		if level == "warn" {
+			logger.Warn().Str("source", "rate-limit").Msg(message)
+			return
+		}
+		logger.Info().Str("source", "rate-limit").Msg(message)
+	}
+}
 
 // newDaemonCmd creates the 'daemon' command group.
 func newDaemonCmd() *cobra.Command {
@@ -177,6 +192,15 @@ Examples:
 			// lines went nowhere; route them into the daemon's log file and IPC
 			// buffer instead.
 			daemon.RouteStdlibLogTo(logger)
+
+			// Rate limit and retry notices do not go through the standard logger
+			// — they exist precisely because the CLI discards it — so the bridge
+			// above does not cover them. Root's PersistentPreRun pointed them at
+			// stderr, which a detached daemon child does not have. RunE runs
+			// after PersistentPreRun, so this registration is the one the daemon
+			// process keeps: throttling, cooldown and transfer-retry notices land
+			// in the log file and IPC buffer with everything else.
+			ratelimit.SetGlobalNotifyFunc(daemonNotifyFunc(logger))
 
 			// Load daemon config file
 			daemonConf, err := config.LoadDaemonConfig("")
