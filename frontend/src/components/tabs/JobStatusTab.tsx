@@ -50,9 +50,15 @@ export function JobStatusTab() {
   const [hasMore, setHasMore] = useState(false);
   // Incremented each time a new fetch starts; lets in-flight callbacks detect staleness.
   const fetchGenRef = useRef(0);
+  // Each loading flag is owned by the generation that most recently set it.
+  // A stale finally must clear its own flag (or the flag wedges on permanently),
+  // but must not clear a flag a newer request has since claimed.
+  const loadingOwnerRef = useRef(0);
+  const loadingMoreOwnerRef = useRef(0);
 
   const fetchJobs = useCallback(async () => {
     const gen = ++fetchGenRef.current;
+    loadingOwnerRef.current = gen;
     setIsLoading(true);
     setError(null);
     setFetchWarning(null);
@@ -77,12 +83,13 @@ export function JobStatusTab() {
       if (gen !== fetchGenRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (gen === fetchGenRef.current) setIsLoading(false);
+      if (gen === loadingOwnerRef.current) setIsLoading(false);
     }
   }, []);
 
   const loadMore = useCallback(async () => {
     const gen = ++fetchGenRef.current;
+    loadingMoreOwnerRef.current = gen;
     setIsLoadingMore(true);
     setFetchWarning(null);
     try {
@@ -103,7 +110,7 @@ export function JobStatusTab() {
       if (gen !== fetchGenRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (gen === fetchGenRef.current) setIsLoadingMore(false);
+      if (gen === loadingMoreOwnerRef.current) setIsLoadingMore(false);
     }
   }, [jobs.length]);
 
@@ -141,7 +148,7 @@ export function JobStatusTab() {
         </div>
         <button
           onClick={fetchJobs}
-          disabled={isLoading}
+          disabled={isLoading || isLoadingMore}
           className="btn-secondary flex items-center gap-2 flex-shrink-0"
           title="Refresh job list"
         >

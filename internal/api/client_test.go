@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -753,4 +754,90 @@ func TestArchiveContents_EncodesEmptyListsNotNull(t *testing.T) {
 	if strings.Contains(raw, "null") {
 		t.Errorf("body should encode empty lists as [], not null: %s", raw)
 	}
+}
+
+// TestListJobsWindow verifies deep pages request only their own window via
+// limit/offset instead of refetching everything before the offset, and that
+// server-capped responses are followed via next links until the window fills.
+func TestListJobsWindow(t *testing.T) {
+	makeJobs := func(start, n int) []models.JobResponse {
+		jobs := make([]models.JobResponse, n)
+		for i := range jobs {
+			jobs[i] = models.JobResponse{ID: "job-" + strconv.Itoa(start+i)}
+		}
+		return jobs
+	}
+
+	t.Run("requests only the window", func(t *testing.T) {
+		var gotQueries []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v3/jobs/" {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			gotQueries = append(gotQueries, r.URL.RawQuery)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"next":    nil,
+				"results": makeJobs(100, 51),
+			})
+		}))
+		defer server.Close()
+
+		client := newTestClient(t, server.URL)
+		jobs, err := client.ListJobsWindow(context.Background(), 100, 51)
+		if err != nil {
+			t.Fatalf("ListJobsWindow() error = %v", err)
+		}
+		if len(jobs) != 51 {
+			t.Errorf("len(jobs) = %d, want 51", len(jobs))
+		}
+		if len(gotQueries) != 1 {
+			t.Fatalf("server saw %d requests, want 1: %v", len(gotQueries), gotQueries)
+		}
+		q := gotQueries[0]
+		for _, want := range []string{"limit=51", "offset=100", "ordering=-dateInserted"} {
+			if !strings.Contains(q, want) {
+				t.Errorf("request query %q missing %q", q, want)
+			}
+		}
+	})
+
+	t.Run("follows next links when the server caps the page", func(t *testing.T) {
+		var server *httptest.Server
+		requests := 0
+		server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			w.Header().Set("Content-Type", "application/json")
+			switch requests {
+			case 1:
+				next := server.URL + "/api/v3/jobs/?ordering=-dateInserted&limit=21&offset=130"
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"next":    next,
+					"results": makeJobs(100, 30),
+				})
+			default:
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"next":    nil,
+					"results": makeJobs(130, 21),
+				})
+			}
+		}))
+		defer server.Close()
+
+		client := newTestClient(t, server.URL)
+		jobs, err := client.ListJobsWindow(context.Background(), 100, 51)
+		if err != nil {
+			t.Fatalf("ListJobsWindow() error = %v", err)
+		}
+		if len(jobs) != 51 {
+			t.Errorf("len(jobs) = %d, want 51", len(jobs))
+		}
+		if requests != 2 {
+			t.Errorf("server saw %d requests, want 2", requests)
+		}
+		if jobs[0].ID != "job-100" || jobs[50].ID != "job-150" {
+			t.Errorf("window boundaries = %s..%s, want job-100..job-150", jobs[0].ID, jobs[50].ID)
+		}
+	})
 }

@@ -768,8 +768,15 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 // ListJobsPaged returns the most recent `limit` jobs ordered by newest first.
 // It stops fetching as soon as it has accumulated enough results.
 func (c *Client) ListJobsPaged(ctx context.Context, limit int) ([]models.JobResponse, error) {
+	return c.ListJobsWindow(ctx, 0, limit)
+}
+
+// ListJobsWindow lists a window of jobs ordered by dateInserted (newest first),
+// requesting only the [offset, offset+limit) slice via limit/offset pagination
+// so callers paging deep into the list do not refetch earlier pages.
+func (c *Client) ListJobsWindow(ctx context.Context, offset, limit int) ([]models.JobResponse, error) {
 	var allJobs []models.JobResponse
-	nextURL := fmt.Sprintf("/api/v3/jobs/?ordering=-dateInserted&limit=%d", limit)
+	nextURL := fmt.Sprintf("/api/v3/jobs/?ordering=-dateInserted&limit=%d&offset=%d", limit, offset)
 
 	for nextURL != "" && len(allJobs) < limit {
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)

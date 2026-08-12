@@ -127,4 +127,8 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
   GetCoreTypes: vi.fn(() => Promise.resolve([])),
   GetAnalysisCodes: vi.fn(() => Promise.resolve([])),
   GetAutomations: vi.fn(() => Promise.resolve([])),
+
+  // Job Status tab
+  ListJobStatuses: vi.fn(() => Promise.resolve({ jobs: [], hasMore: false })),
+  ListJobStatusesPage: vi.fn(() => Promise.resolve({ jobs: [], hasMore: false })),
 }))

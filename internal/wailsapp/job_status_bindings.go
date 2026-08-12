@@ -7,7 +7,31 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/models"
 )
+
+// latestStatusReason returns the StatusReason of the chronologically newest
+// entry that has one. StatusDate values parse as RFC 3339; comparing them as
+// raw strings is only correct when every entry shares the same UTC offset, so
+// parsed times are compared where possible and the string form is the
+// fallback for unparseable dates.
+func latestStatusReason(statuses []models.JobStatusEntry) string {
+	sort.Slice(statuses, func(i, j int) bool {
+		ti, ei := time.Parse(time.RFC3339Nano, statuses[i].StatusDate)
+		tj, ej := time.Parse(time.RFC3339Nano, statuses[j].StatusDate)
+		if ei == nil && ej == nil {
+			return ti.After(tj)
+		}
+		return statuses[i].StatusDate > statuses[j].StatusDate
+	})
+	for _, s := range statuses {
+		if s.StatusReason != "" {
+			return s.StatusReason
+		}
+	}
+	return ""
+}
 
 const jobStatusPageSize = 50
 
@@ -53,24 +77,17 @@ func (a *App) listJobStatusesPage(offset int) JobStatusListDTO {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Fetch offset + pageSize + 1 so we can both skip prior pages and detect hasMore.
-	jobs, err := apiClient.ListJobsPaged(ctx, offset+jobStatusPageSize+1)
+	// Fetch one row beyond the page so hasMore is knowable without a count query
+	// or refetching earlier pages.
+	jobs, err := apiClient.ListJobsWindow(ctx, offset, jobStatusPageSize+1)
 	if err != nil {
 		return JobStatusListDTO{Error: fmt.Sprintf("Failed to fetch jobs: %v", err)}
 	}
 
-	hasMore := len(jobs) > offset+jobStatusPageSize
-
-	// Slice to the requested page window.
-	start := offset
-	if start > len(jobs) {
-		start = len(jobs)
+	hasMore := len(jobs) > jobStatusPageSize
+	if hasMore {
+		jobs = jobs[:jobStatusPageSize]
 	}
-	end := offset + jobStatusPageSize
-	if end > len(jobs) {
-		end = len(jobs)
-	}
-	jobs = jobs[start:end]
 
 	items := make([]JobStatusItemDTO, len(jobs))
 	for i, j := range jobs {
@@ -119,17 +136,7 @@ func (a *App) listJobStatusesPage(offset int) JobStatusListDTO {
 						atomic.AddInt64(&fetchErrCount, 1)
 						continue
 					}
-					// Sort by StatusDate descending to get the most recent reason.
-					sort.Slice(statuses, func(i, j int) bool {
-						return statuses[i].StatusDate > statuses[j].StatusDate
-					})
-					reason := ""
-					for _, s := range statuses {
-						if s.StatusReason != "" {
-							reason = s.StatusReason
-							break
-						}
-					}
+					reason := latestStatusReason(statuses)
 					if reason != "" {
 						mu.Lock()
 						items[job.index].Reason = reason
