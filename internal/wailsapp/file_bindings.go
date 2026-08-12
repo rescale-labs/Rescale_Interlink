@@ -304,6 +304,7 @@ func (a *App) SearchRemoteFolderContents(folderID string, searchQuery string, cu
 		return FolderContentsDTO{
 			FolderID: folderID,
 			Items:    []FileItemDTO{},
+			Warning:  translateAPIError(err),
 		}
 	}
 
@@ -357,6 +358,7 @@ func (a *App) ListRemoteLegacyWithFilters(cursor string, pageSize int, ownerFilt
 		return FolderContentsDTO{
 			FolderPath: "Legacy Files",
 			Items:      []FileItemDTO{},
+			Warning:    translateAPIError(err),
 		}
 	}
 

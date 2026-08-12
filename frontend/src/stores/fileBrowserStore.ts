@@ -493,7 +493,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
           currentFolderId: targetId,
           items: contents.items,  // Replace (not append) — each page is a standalone view
           isLoading: false,
-          error: null,
+          // The binding reports API failures as a warning alongside an empty
+          // item list, so an unreported warning would read as "no files".
+          error: contents.warning || null,
           hasMore: contents.hasMore,
           nextCursor: contents.nextCursor ?? '',
           breadcrumb,
@@ -600,7 +602,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
           currentFolderId: '',
           items: contents.items,  // Replace (not append) — each page is a standalone view
           isLoading: false,
-          error: null,
+          error: contents.warning || null,
           hasMore: contents.hasMore,
           nextCursor: contents.nextCursor ?? '',
           breadcrumb: [{ id: '', name: 'Legacy Files' }],
