@@ -13,21 +13,34 @@ import (
 
 // latestStatusReason returns the StatusReason of the chronologically newest
 // entry that has one. StatusDate values parse as RFC 3339; comparing them as
-// raw strings is only correct when every entry shares the same UTC offset, so
-// parsed times are compared where possible and the string form is the
-// fallback for unparseable dates.
+// raw strings is only correct when every entry shares the same UTC offset.
+// Entries are decorated with their parsed time once up front — a comparator
+// that switches between time and string comparison per pair is not transitive
+// when parseable and unparseable dates mix, and can return order-dependent
+// results. Parseable entries always rank ahead of unparseable ones.
 func latestStatusReason(statuses []models.JobStatusEntry) string {
-	sort.Slice(statuses, func(i, j int) bool {
-		ti, ei := time.Parse(time.RFC3339Nano, statuses[i].StatusDate)
-		tj, ej := time.Parse(time.RFC3339Nano, statuses[j].StatusDate)
-		if ei == nil && ej == nil {
-			return ti.After(tj)
+	type decorated struct {
+		entry  models.JobStatusEntry
+		t      time.Time
+		parsed bool
+	}
+	dec := make([]decorated, len(statuses))
+	for i, s := range statuses {
+		t, err := time.Parse(time.RFC3339Nano, s.StatusDate)
+		dec[i] = decorated{entry: s, t: t, parsed: err == nil}
+	}
+	sort.SliceStable(dec, func(i, j int) bool {
+		if dec[i].parsed != dec[j].parsed {
+			return dec[i].parsed
 		}
-		return statuses[i].StatusDate > statuses[j].StatusDate
+		if dec[i].parsed {
+			return dec[i].t.After(dec[j].t)
+		}
+		return dec[i].entry.StatusDate > dec[j].entry.StatusDate
 	})
-	for _, s := range statuses {
-		if s.StatusReason != "" {
-			return s.StatusReason
+	for _, d := range dec {
+		if d.entry.StatusReason != "" {
+			return d.entry.StatusReason
 		}
 	}
 	return ""

@@ -66,3 +66,23 @@ func TestLatestStatusReason(t *testing.T) {
 		})
 	}
 }
+
+// TestLatestStatusReason_OrderIndependent pins the transitivity fix: with a
+// per-pair comparator that mixed time and string comparison, this input
+// produced different winners depending on input order. Every permutation must
+// agree, and a malformed date must never outrank a parseable one.
+func TestLatestStatusReason_OrderIndependent(t *testing.T) {
+	entries := []models.JobStatusEntry{
+		{Status: "x", StatusDate: "2025-13-45", StatusReason: "from-malformed-date"},
+		{Status: "x", StatusDate: "2025-12-31T20:00:00-05:00", StatusReason: "true-newest"}, // 2026-01-01T01:00:00Z
+		{Status: "x", StatusDate: "2026-01-01T00:00:00+00:00", StatusReason: ""},
+	}
+
+	perms := [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}
+	for _, p := range perms {
+		input := []models.JobStatusEntry{entries[p[0]], entries[p[1]], entries[p[2]]}
+		if got := latestStatusReason(input); got != "true-newest" {
+			t.Errorf("permutation %v: latestStatusReason() = %q, want %q", p, got, "true-newest")
+		}
+	}
+}
