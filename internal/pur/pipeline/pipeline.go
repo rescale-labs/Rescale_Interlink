@@ -617,7 +617,33 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	p.logf("INFO", "pipeline", "", "Pipeline completed: %d/%d jobs finished in %v",
 		p.completedJobs, p.totalJobs, time.Since(p.pipelineStart))
 
+	// A run where jobs failed is not a successful run. Without this the CLI
+	// prints "Pipeline completed" and exits 0 even when every job failed.
+	// A cancelled run is the user's own doing, so it is not reported as failure.
+	if failed := p.countFailedJobs(); failed > 0 && ctx.Err() == nil {
+		return fmt.Errorf("%d of %d job(s) failed", failed, p.totalJobs)
+	}
+
 	return nil
+}
+
+// countFailedJobs counts jobs that failed at any stage. The state manager is the
+// authoritative record (it is what --state resume reads back), so counting there
+// covers every failure path without a counter at each one.
+func (p *Pipeline) countFailedJobs() int {
+	if p.stateMgr == nil {
+		return 0
+	}
+	failed := 0
+	for _, st := range p.stateMgr.GetAllStates() {
+		if st == nil {
+			continue
+		}
+		if st.TarStatus == "failed" || st.UploadStatus == "failed" || st.SubmitStatus == "failed" {
+			failed++
+		}
+	}
+	return failed
 }
 
 // tarWorker processes tar operations.

@@ -465,7 +465,7 @@ Examples:
 				pipelineResourceMgr := CreateResourceManager()
 				uploadResult, created, err := uploadDirectoryPipelined(
 					ctx, apiClient, cache, resolvedLocalPath, rootFolderID,
-					includeHidden, folderConcurrency, maxConcurrent, continueOnError, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
+					includeHidden, folderConcurrency, maxConcurrent, effectiveSkipExisting, cfg, logger, pipelineResourceMgr)
 				if err != nil {
 					return err
 				}
@@ -567,6 +567,10 @@ Examples:
 				fmt.Printf("  Elapsed time:       %.2f seconds\n", elapsed.Seconds())
 			}
 			fmt.Println(strings.Repeat("=", 60))
+
+			if err := uploadDirOutcome(result); err != nil {
+				return err
+			}
 
 			if result.FilesUploaded > 0 {
 				fmt.Println("✓ Upload completed successfully")

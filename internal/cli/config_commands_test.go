@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
 )
@@ -275,5 +279,58 @@ func TestConfigDefaultPath(t *testing.T) {
 	// Should be an absolute path (e.g., ~/.config/rescale-int/config.csv)
 	if !filepath.IsAbs(path) {
 		t.Error("Default config path is not absolute")
+	}
+}
+
+// TestConfigInitRequiresTerminal verifies that 'config init' fails fast without a
+// terminal. It used to discard the read error and re-prompt forever on the
+// required API-key field, spinning at 100% CPU and flooding stdout.
+func TestConfigInitRequiresTerminal(t *testing.T) {
+	if IsTerminal() {
+		t.Skip("test needs a non-interactive stdin")
+	}
+
+	cmd := newConfigInitCmd()
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.RunE(cmd, nil)
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errConfigInitNeedsTTY) {
+			t.Fatalf("expected errConfigInitNeedsTTY, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("config init did not return without a terminal (infinite prompt loop)")
+	}
+}
+
+// TestReadPromptLine verifies that a closed stdin is an error rather than an
+// empty answer — the difference between exiting and looping forever.
+func TestReadPromptLine(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "line with newline", input: "hello\n", want: "hello"},
+		{name: "trailing spaces trimmed", input: "  hello  \n", want: "hello"},
+		{name: "empty line is a valid answer", input: "\n", want: ""},
+		{name: "final line without newline", input: "hello", want: "hello"},
+		{name: "closed input", input: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readPromptLine(bufio.NewReader(strings.NewReader(tt.input)))
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("readPromptLine() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("readPromptLine() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

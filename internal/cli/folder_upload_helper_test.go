@@ -2,13 +2,19 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/localfs"
+	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/resources"
 )
 
@@ -211,5 +217,153 @@ func TestUploadResourceManagerConstants(t *testing.T) {
 	}
 	if constants.AdaptiveLargeFileConcurrency != 5 {
 		t.Errorf("AdaptiveLargeFileConcurrency = %d, want 5", constants.AdaptiveLargeFileConcurrency)
+	}
+}
+
+// TestUploadDirOutcome verifies that upload-dir's exit status matches what the
+// summary printed: failures and user aborts must not exit 0 (GitHub issue: a
+// failing upload-dir printed its failure list and exited 0).
+func TestUploadDirOutcome(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    *UploadResult
+		wantErr   bool
+		wantMatch string
+	}{
+		{
+			name:    "clean run",
+			result:  &UploadResult{FilesUploaded: 3},
+			wantErr: false,
+		},
+		{
+			name:    "nothing uploaded but nothing failed",
+			result:  &UploadResult{FilesIgnored: 2},
+			wantErr: false,
+		},
+		{
+			name: "one failure",
+			result: &UploadResult{
+				FilesUploaded: 1,
+				Errors:        []UploadError{{FilePath: "a.txt", Error: errors.New("boom")}},
+			},
+			wantErr:   true,
+			wantMatch: "1 file(s) failed to upload",
+		},
+		{
+			name: "prompt failure recorded as an error",
+			result: &UploadResult{
+				Errors: []UploadError{{FilePath: "a.txt", Error: io.EOF}},
+			},
+			wantErr:   true,
+			wantMatch: "1 file(s) failed to upload",
+		},
+		{
+			name:      "user abort outranks the error count",
+			result:    &UploadResult{Aborted: true, Errors: []UploadError{{FilePath: "a.txt", Error: context.Canceled}}},
+			wantErr:   true,
+			wantMatch: "aborted by user",
+		},
+		{
+			name:    "nil result",
+			result:  nil,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := uploadDirOutcome(tt.result)
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("uploadDirOutcome() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantMatch != "" && !strings.Contains(err.Error(), tt.wantMatch) {
+				t.Errorf("error %q does not contain %q", err, tt.wantMatch)
+			}
+		})
+	}
+}
+
+// uploadFilesTestArgs builds the argument set for uploadFiles with one existing
+// file, no API client, and conflict checking enabled.
+func uploadFilesTestArgs(t *testing.T, fileCount int) (rootPath string, files []string, mapping map[string]string, cfg *config.Config, mgr *resources.Manager) {
+	t.Helper()
+	rootPath = t.TempDir()
+	mapping = map[string]string{rootPath: "folder-1"}
+	for i := 0; i < fileCount; i++ {
+		p := filepath.Join(rootPath, fmt.Sprintf("f%d.txt", i))
+		if err := os.WriteFile(p, []byte("data"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		files = append(files, p)
+	}
+	return rootPath, files, mapping, &config.Config{CheckConflictsBeforeUpload: true}, resources.NewManager(resources.Config{AutoScale: true, MaxThreads: 4})
+}
+
+// TestUploadFilesRecordsPromptFailure verifies that a conflict prompt that cannot
+// run (no terminal, so the read fails immediately) is recorded as a failure.
+// Previously the file was silently dropped: not uploaded, not skipped, exit 0.
+func TestUploadFilesRecordsPromptFailure(t *testing.T) {
+	if IsTerminal() {
+		t.Skip("test needs a non-interactive stdin to make the prompt fail")
+	}
+
+	rootPath, files, mapping, cfg, mgr := uploadFilesTestArgs(t, 1)
+
+	orig := checkFileExistsFn
+	checkFileExistsFn = func(ctx context.Context, apiClient *api.Client, cache *FolderCache, folderID, fileName string) (string, bool, error) {
+		return "existing-file-id", true, nil
+	}
+	defer func() { checkFileExistsFn = orig }()
+
+	// FileOverwriteOnce is a "once" mode, so the resolver prompts — and the prompt
+	// fails because stdin is not a terminal.
+	result, err := uploadFiles(context.Background(), rootPath, files, mapping,
+		nil, NewFolderCache(), progress.NewUploadUI(len(files)),
+		NewFileConflictResolver(FileOverwriteOnce), NewErrorActionResolver(ErrorContinueOnce),
+		false, 2, cfg, GetLogger(), mgr)
+	if err != nil {
+		t.Fatalf("uploadFiles returned error: %v", err)
+	}
+
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 recorded error, got %d (%+v)", len(result.Errors), result.Errors)
+	}
+	if result.FilesUploaded != 0 || result.FilesIgnored != 0 {
+		t.Errorf("file must not count as uploaded or ignored: uploaded=%d ignored=%d",
+			result.FilesUploaded, result.FilesIgnored)
+	}
+	if err := uploadDirOutcome(result); err == nil {
+		t.Error("expected a non-zero exit status for a dropped file")
+	}
+}
+
+// TestUploadFilesAbortStopsBatch verifies that choosing Abort marks the result and
+// stops the batch instead of continuing with the remaining files.
+func TestUploadFilesAbortStopsBatch(t *testing.T) {
+	rootPath, files, mapping, cfg, mgr := uploadFilesTestArgs(t, 4)
+
+	orig := checkFileExistsFn
+	checkFileExistsFn = func(ctx context.Context, apiClient *api.Client, cache *FolderCache, folderID, fileName string) (string, bool, error) {
+		return "existing-file-id", true, nil
+	}
+	defer func() { checkFileExistsFn = orig }()
+
+	// FileAbort is not a "once" mode, so the resolver returns it without prompting.
+	result, err := uploadFiles(context.Background(), rootPath, files, mapping,
+		nil, NewFolderCache(), progress.NewUploadUI(len(files)),
+		NewFileConflictResolver(FileAbort), NewErrorActionResolver(ErrorContinueOnce),
+		false, 2, cfg, GetLogger(), mgr)
+	if err != nil {
+		t.Fatalf("uploadFiles returned error: %v", err)
+	}
+
+	if !result.Aborted {
+		t.Error("expected result.Aborted to be set")
+	}
+	if result.FilesUploaded != 0 {
+		t.Errorf("no file should have been uploaded after abort, got %d", result.FilesUploaded)
+	}
+	if err := uploadDirOutcome(result); err == nil || !strings.Contains(err.Error(), "aborted by user") {
+		t.Errorf("expected an abort error, got %v", err)
 	}
 }

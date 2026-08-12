@@ -4,6 +4,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,6 +41,27 @@ Commands:
 	return configCmd
 }
 
+// errConfigInitNeedsTTY is returned when 'config init' is run without a
+// terminal on stdin. Kept as a value so tests can match it exactly.
+var errConfigInitNeedsTTY = errors.New(
+	"config init requires an interactive terminal; to configure non-interactively, " +
+		"set RESCALE_API_KEY or use --token-file, or edit the config file directly " +
+		"(see 'rescale-int config path')")
+
+// readPromptLine reads one answer from an interactive prompt.
+//
+// A read error with no data means stdin ended (pipe closed, /dev/null, CI):
+// callers must abort rather than treat it as an empty answer, because the
+// required-field loops in 'config init' re-prompt on empty input and would
+// otherwise spin at full CPU forever.
+func readPromptLine(reader *bufio.Reader) (string, error) {
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("cannot read input: stdin closed (%w)", err)
+	}
+	return strings.TrimSpace(line), nil
+}
+
 // newConfigInitCmd creates the 'config init' command.
 func newConfigInitCmd() *cobra.Command {
 	var force bool
@@ -54,6 +76,12 @@ The configuration will be saved to ~/.config/rescale/config.csv
 Use --force to overwrite existing configuration.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
+
+			// Every answer below comes from stdin. Without a terminal there is
+			// nothing to read and the required-field loops would spin forever.
+			if !IsTerminal() {
+				return errConfigInitNeedsTTY
+			}
 
 			// Get default config path
 			configPath := config.GetDefaultConfigPath()
@@ -77,8 +105,11 @@ Use --force to overwrite existing configuration.`,
 			var apiKeyInput string
 			for apiKeyInput == "" {
 				fmt.Print("API Key (required): ")
-				input, _ := reader.ReadString('\n')
-				apiKeyInput = strings.TrimSpace(input)
+				input, err := readPromptLine(reader)
+				if err != nil {
+					return err
+				}
+				apiKeyInput = input
 				if apiKeyInput == "" {
 					fmt.Println("  Error: API key is required")
 				}
@@ -90,8 +121,10 @@ Use --force to overwrite existing configuration.`,
 				fmt.Printf("  %d. %s (%s)\n", i+1, p.Label, p.URL)
 			}
 			fmt.Printf("Select platform [1]: ")
-			selInput, _ := reader.ReadString('\n')
-			selInput = strings.TrimSpace(selInput)
+			selInput, err := readPromptLine(reader)
+			if err != nil {
+				return err
+			}
 			apiURLInput := ""
 			if selInput == "" {
 				apiURLInput = config.DefaultPlatformURL
@@ -111,8 +144,10 @@ Use --force to overwrite existing configuration.`,
 			fmt.Println("-------------------------------------------")
 
 			fmt.Print("Tar workers [4]: ")
-			tarWorkersInput, _ := reader.ReadString('\n')
-			tarWorkersInput = strings.TrimSpace(tarWorkersInput)
+			tarWorkersInput, err := readPromptLine(reader)
+			if err != nil {
+				return err
+			}
 			tarWorkers := 4
 			if tarWorkersInput != "" {
 				if v, err := strconv.Atoi(tarWorkersInput); err == nil && v > 0 {
@@ -121,8 +156,10 @@ Use --force to overwrite existing configuration.`,
 			}
 
 			fmt.Print("Upload workers [4]: ")
-			uploadWorkersInput, _ := reader.ReadString('\n')
-			uploadWorkersInput = strings.TrimSpace(uploadWorkersInput)
+			uploadWorkersInput, err := readPromptLine(reader)
+			if err != nil {
+				return err
+			}
 			uploadWorkers := 4
 			if uploadWorkersInput != "" {
 				if v, err := strconv.Atoi(uploadWorkersInput); err == nil && v > 0 {
@@ -131,8 +168,10 @@ Use --force to overwrite existing configuration.`,
 			}
 
 			fmt.Print("Job workers [4]: ")
-			jobWorkersInput, _ := reader.ReadString('\n')
-			jobWorkersInput = strings.TrimSpace(jobWorkersInput)
+			jobWorkersInput, err := readPromptLine(reader)
+			if err != nil {
+				return err
+			}
 			jobWorkers := 4
 			if jobWorkersInput != "" {
 				if v, err := strconv.Atoi(jobWorkersInput); err == nil && v > 0 {
@@ -143,8 +182,11 @@ Use --force to overwrite existing configuration.`,
 			// Proxy settings
 			fmt.Println()
 			fmt.Print("Configure proxy? [y/N]: ")
-			proxyInput, _ := reader.ReadString('\n')
-			proxyInput = strings.TrimSpace(strings.ToLower(proxyInput))
+			proxyInput, err := readPromptLine(reader)
+			if err != nil {
+				return err
+			}
+			proxyInput = strings.ToLower(proxyInput)
 
 			var proxyMode, proxyHost string
 			var proxyPort int
@@ -159,8 +201,10 @@ Use --force to overwrite existing configuration.`,
 				}
 				fmt.Printf("Proxy modes: %s\n", proxyModes)
 				fmt.Print("Proxy mode [system]: ")
-				proxyModeInput, _ := reader.ReadString('\n')
-				proxyMode = strings.TrimSpace(proxyModeInput)
+				proxyMode, err = readPromptLine(reader)
+				if err != nil {
+					return err
+				}
 				if proxyMode == "" {
 					proxyMode = "system"
 				}
@@ -170,12 +214,16 @@ Use --force to overwrite existing configuration.`,
 
 				if proxyMode != "no-proxy" {
 					fmt.Print("Proxy host: ")
-					proxyHostInput, _ := reader.ReadString('\n')
-					proxyHost = strings.TrimSpace(proxyHostInput)
+					proxyHost, err = readPromptLine(reader)
+					if err != nil {
+						return err
+					}
 
 					fmt.Print("Proxy port [8080]: ")
-					proxyPortInput, _ := reader.ReadString('\n')
-					proxyPortInput = strings.TrimSpace(proxyPortInput)
+					proxyPortInput, err := readPromptLine(reader)
+					if err != nil {
+						return err
+					}
 					proxyPort = 8080
 					if proxyPortInput != "" {
 						if v, err := strconv.Atoi(proxyPortInput); err == nil && v > 0 {

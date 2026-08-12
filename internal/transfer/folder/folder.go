@@ -3,6 +3,7 @@ package folder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,10 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
+
+// ErrAbortedByUser is returned when the user picks Abort at a folder-conflict
+// prompt. Callers match on it to report a deliberate stop rather than a failure.
+var ErrAbortedByUser = errors.New("upload aborted by user")
 
 // FolderReadyEvent signals that a folder has been created and is ready for file uploads
 type FolderReadyEvent struct {
@@ -207,7 +212,7 @@ func processFolder(p processFolderParams, dirPath string) (string, bool, error) 
 			}
 			return existingID, false, nil
 		case ConflictAbort:
-			return "", false, fmt.Errorf("upload aborted by user")
+			return "", false, ErrAbortedByUser
 		}
 	}
 

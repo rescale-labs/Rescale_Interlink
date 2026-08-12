@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/pur/state"
 )
 
 // mockAnalysisResolver implements AnalysisResolver for testing.
@@ -323,5 +324,81 @@ func TestBuildJobRequest_WalltimeIsHoursNotSeconds(t *testing.T) {
 	got := req.JobAnalyses[0].Hardware.Walltime
 	if got != 1 {
 		t.Errorf("walltime = %d, want 1 (hours); a value of 3600 would be the old seconds bug", got)
+	}
+}
+
+// TestCountFailedJobs verifies the failure count that Run uses for its exit
+// status. A pipeline where jobs failed used to return nil, so 'pur run' printed
+// "Pipeline completed" and exited 0 even when every job failed.
+func TestCountFailedJobs(t *testing.T) {
+	tests := []struct {
+		name   string
+		states []*models.JobState
+		want   int
+	}{
+		{
+			name: "all succeeded",
+			states: []*models.JobState{
+				{TarStatus: "success", UploadStatus: "success", SubmitStatus: "success"},
+				{TarStatus: "success", UploadStatus: "success", SubmitStatus: "success"},
+			},
+			want: 0,
+		},
+		{
+			name: "tar failure counted once even though submit is also failed",
+			states: []*models.JobState{
+				{TarStatus: "failed", UploadStatus: "pending", SubmitStatus: "failed"},
+			},
+			want: 1,
+		},
+		{
+			name: "upload failure",
+			states: []*models.JobState{
+				{TarStatus: "success", UploadStatus: "failed", SubmitStatus: "failed"},
+				{TarStatus: "success", UploadStatus: "success", SubmitStatus: "success"},
+			},
+			want: 1,
+		},
+		{
+			name: "submit failure only",
+			states: []*models.JobState{
+				{TarStatus: "success", UploadStatus: "success", SubmitStatus: "failed"},
+			},
+			want: 1,
+		},
+		{
+			name: "skipped and pending are not failures",
+			states: []*models.JobState{
+				{TarStatus: "skipped", UploadStatus: "skipped", SubmitStatus: "pending"},
+			},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := state.NewManager(filepath.Join(t.TempDir(), "state.csv"))
+			for i, st := range tt.states {
+				st.Index = i
+				st.JobName = "job"
+				if err := mgr.UpdateState(st); err != nil {
+					t.Fatalf("UpdateState: %v", err)
+				}
+			}
+
+			p := &Pipeline{stateMgr: mgr, totalJobs: len(tt.states)}
+			if got := p.countFailedJobs(); got != tt.want {
+				t.Errorf("countFailedJobs() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCountFailedJobsNoStateManager guards the nil path — Run calls this
+// unconditionally.
+func TestCountFailedJobsNoStateManager(t *testing.T) {
+	p := &Pipeline{}
+	if got := p.countFailedJobs(); got != 0 {
+		t.Errorf("countFailedJobs() = %d, want 0", got)
 	}
 }

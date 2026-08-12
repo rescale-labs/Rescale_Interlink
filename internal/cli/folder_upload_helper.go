@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,10 @@ type UploadResult struct {
 	Errors          []UploadError
 	SymlinksSkipped []string
 	UploadedFileIDs []string
+
+	// Aborted is set when the user chose Abort at a conflict or error prompt.
+	// Callers must treat it as a failure: files were left unprocessed on purpose.
+	Aborted bool
 }
 
 // UploadError tracks failed uploads
@@ -58,6 +63,36 @@ type UploadError struct {
 // FolderReadyEvent, FolderCache, NewFolderCache, BuildDirectoryTree, CheckFolderExists,
 // CreateFolderStructure, CreateFolderStructureStreaming, and related helpers live in
 // internal/transfer/folder/. Aliases in folder_upload_compat.go preserve the cli.* API surface.
+
+// checkFileExistsFn is a test seam for the folder-contents lookup, following the
+// same pattern as the download seams in download_helper.go.
+var checkFileExistsFn = checkFileExists
+
+// uploadDirOutcome turns an upload result into the command's exit status.
+// A printed failure list with a zero exit status is invisible to scripts, so
+// anything the summary reports as not uploaded must fail the command.
+func uploadDirOutcome(result *UploadResult) error {
+	if result == nil {
+		return nil
+	}
+	if result.Aborted {
+		return fmt.Errorf("upload aborted by user")
+	}
+	if len(result.Errors) > 0 {
+		return fmt.Errorf("%d file(s) failed to upload", len(result.Errors))
+	}
+	return nil
+}
+
+// warmUploadCredentials pre-warms the credential caches. No client, nothing to warm
+// (unit tests drive the upload workers without an API client).
+func warmUploadCredentials(ctx context.Context, apiClient *api.Client, logger *logging.Logger) {
+	if apiClient == nil {
+		return
+	}
+	logger.Debug().Msg("Pre-warming credential caches")
+	credentials.GetManager(apiClient).WarmAll(ctx)
+}
 
 // checkFileExists checks if a file with the given name exists in the folder
 func checkFileExists(ctx context.Context, apiClient *api.Client, cache *FolderCache, folderID, fileName string) (string, bool, error) {
@@ -89,6 +124,10 @@ func (p cliPipelinedUploadItem) FileSize() int64 { return p.size }
 // uploadDirectoryPipelined coordinates streaming pipelined folder creation and file uploads.
 // Uses WalkStream for streaming discovery — files start uploading before scan completes.
 // Uses shared folder.RunOrchestrator for the three-part streaming pipeline.
+//
+// There is no continue-on-error switch here: a per-file failure never stops the
+// batch, it is recorded in UploadResult.Errors and the caller decides. Only an
+// explicit user Abort stops the run.
 func uploadDirectoryPipelined(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -98,7 +137,6 @@ func uploadDirectoryPipelined(
 	includeHidden bool,
 	folderConcurrency int,
 	fileConcurrency int,
-	continueOnError bool,
 	skipExisting bool,
 	cfg *config.Config,
 	logger *logging.Logger,
@@ -109,6 +147,17 @@ func uploadDirectoryPipelined(
 	foldersCreated := 0
 	var foldersCreatedMutex sync.Mutex
 
+	// Abort at a prompt must stop the whole operation, not just the current file.
+	// Cancelling this context drains the folder orchestrator and the upload batch.
+	uploadCtx, cancelUpload := context.WithCancel(ctx)
+	defer cancelUpload()
+	abortUpload := func() {
+		resultMutex.Lock()
+		result.Aborted = true
+		resultMutex.Unlock()
+		cancelUpload()
+	}
+
 	// Streaming progress UI — total starts at 0, increments as files are discovered.
 	uploadUI := progress.NewUploadUI(0)
 
@@ -117,9 +166,7 @@ func uploadDirectoryPipelined(
 	// when mixed with ANSI escape codes from mpb progress bars.
 	defer uploadUI.Wait()
 
-	logger.Debug().Msg("Pre-warming credential caches")
-	credManager := credentials.GetManager(apiClient)
-	credManager.WarmAll(ctx)
+	warmUploadCredentials(ctx, apiClient, logger)
 
 	// Shared state for conflict modes
 	folderConflictMode := ConflictMergeOnce
@@ -131,7 +178,6 @@ func uploadDirectoryPipelined(
 		initialFileMode = FileSkipAll
 	}
 	fileConflictResolver := NewFileConflictResolver(initialFileMode)
-	errorMode := ErrorContinueOnce
 
 	if resourceMgr == nil {
 		panic("uploadDirectoryPipelined: resourceMgr is required (use CreateResourceManager())")
@@ -154,24 +200,22 @@ func uploadDirectoryPipelined(
 	batchWg.Add(1)
 	go func() {
 		defer batchWg.Done()
-		transfer.RunBatchFromChannel(ctx, batchCh, batchCfg,
+		transfer.RunBatchFromChannel(uploadCtx, batchCh, batchCfg,
 			func(ctx context.Context, item cliPipelinedUploadItem) error {
 				fpath := item.fpath
 				remoteFolderID := item.remoteFolderID
 				relativePath := item.relativePath
 				fileName := filepath.Base(fpath)
 
-				// Check if file exists
-				existingFileID, exists, checkErr := checkFileExists(ctx, apiClient, cache, remoteFolderID, fileName)
+				// Check if file exists. Either way this file is not uploaded, so
+				// the error is recorded — a logged-and-dropped failure would leave
+				// the command reporting success.
+				existingFileID, exists, checkErr := checkFileExistsFn(ctx, apiClient, cache, remoteFolderID, fileName)
 				if checkErr != nil {
-					if continueOnError || errorMode == ErrorContinueAll {
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, checkErr})
-						resultMutex.Unlock()
-						logger.Error().Str("file", fpath).Err(checkErr).Msg("Error checking file existence")
-						return nil
-					}
-					logger.Error().Err(checkErr).Str("file", fpath).Msg("Failed to check if file exists")
+					logger.Error().Str("file", fpath).Err(checkErr).Msg("Error checking file existence")
+					resultMutex.Lock()
+					result.Errors = append(result.Errors, UploadError{fpath, checkErr})
+					resultMutex.Unlock()
 					return nil
 				}
 
@@ -200,6 +244,7 @@ func uploadDirectoryPipelined(
 						}
 					case FileAbort:
 						logger.Info().Msg("Upload aborted by user")
+						abortUpload()
 						return nil
 					}
 				}
@@ -259,7 +304,7 @@ func uploadDirectoryPipelined(
 	}()
 
 	// rootPath is already resolved by caller (folders.go) — no need to double-resolve.
-	dispatchDone, orchResult := folder.RunOrchestrator(ctx,
+	dispatchDone, orchResult := folder.RunOrchestrator(uploadCtx,
 		folder.OrchestratorConfig{
 			RootPath:          rootPath,
 			RootRemoteID:      rootRemoteID,
@@ -305,11 +350,23 @@ func uploadDirectoryPipelined(
 	// Wait for orchestrator + dispatcher to finish sending all items to batchCh
 	<-dispatchDone
 
+	// Scan and folder-creation failures are operation-wide: record them so the
+	// command exits non-zero instead of printing a summary of what it skipped.
 	if orchResult.WalkError != nil {
 		logger.Error().Err(orchResult.WalkError).Msg("Walk error during streaming scan")
+		resultMutex.Lock()
+		result.Errors = append(result.Errors, UploadError{rootPath, orchResult.WalkError})
+		resultMutex.Unlock()
 	}
 	if orchResult.FolderError != nil {
 		logger.Error().Err(orchResult.FolderError).Msg("Folder creation failed")
+		if errors.Is(orchResult.FolderError, folder.ErrAbortedByUser) {
+			abortUpload()
+		} else {
+			resultMutex.Lock()
+			result.Errors = append(result.Errors, UploadError{rootPath, orchResult.FolderError})
+			resultMutex.Unlock()
+		}
 	}
 	foldersCreatedMutex.Lock()
 	foldersCreated = orchResult.FoldersCreated
@@ -349,13 +406,25 @@ func uploadFiles(
 	result := &UploadResult{}
 	var resultMutex sync.Mutex
 
-	// NOTE: Do NOT redirect zerolog through uploadUI.Writer()
-	// Zerolog outputs JSON which causes "invalid character '\x1b'" errors
-	// when mixed with ANSI escape codes from mpb progress bars.
+	// Abort at a prompt must stop the batch, not just skip the current file.
+	batchCtx, cancelBatch := context.WithCancel(ctx)
+	defer cancelBatch()
+	abortUpload := func() {
+		resultMutex.Lock()
+		result.Aborted = true
+		resultMutex.Unlock()
+		cancelBatch()
+	}
 
-	logger.Debug().Msg("Pre-warming credential caches")
-	credManager := credentials.GetManager(apiClient)
-	credManager.WarmAll(ctx)
+	// recordError appends a failure so the caller can exit non-zero. Prompt
+	// failures count as failures: the file was neither uploaded nor skipped.
+	recordError := func(path string, err error) {
+		resultMutex.Lock()
+		result.Errors = append(result.Errors, UploadError{path, err})
+		resultMutex.Unlock()
+	}
+
+	warmUploadCredentials(ctx, apiClient, logger)
 	if resourceMgr == nil {
 		panic("uploadFiles: resourceMgr is required (use CreateResourceManager())")
 	}
@@ -379,7 +448,7 @@ func uploadFiles(
 
 	// Note: We do NOT rely on BatchResult.Completed — many nil returns are
 	// skips/conflicts. All real outcomes are tracked by manual counters.
-	transfer.RunBatch(ctx, items, batchCfg, func(ctx context.Context, item cliUploadWorkItem) error {
+	transfer.RunBatch(batchCtx, items, batchCfg, func(ctx context.Context, item cliUploadWorkItem) error {
 		fpath := item.fpath
 
 		// Get parent directory
@@ -405,7 +474,7 @@ func uploadFiles(
 		var checkErr error
 
 		if cfg.CheckConflictsBeforeUpload {
-			existingFileID, exists, checkErr = checkFileExists(ctx, apiClient, cache, remoteFolderID, fileName)
+			existingFileID, exists, checkErr = checkFileExistsFn(ctx, apiClient, cache, remoteFolderID, fileName)
 		}
 
 		if cfg.CheckConflictsBeforeUpload && checkErr != nil {
@@ -421,16 +490,16 @@ func uploadFiles(
 			})
 			if promptErr != nil {
 				logger.Error().Err(promptErr).Msg("Error prompting user")
+				recordError(fpath, promptErr)
 				return nil
 			}
 			if action == ErrorAbort {
 				logger.Info().Msg("Upload aborted by user")
+				abortUpload()
 				return nil
 			}
 			// ErrorContinueOnce or ErrorContinueAll — record and continue
-			resultMutex.Lock()
-			result.Errors = append(result.Errors, UploadError{fpath, checkErr})
-			resultMutex.Unlock()
+			recordError(fpath, checkErr)
 			return nil
 		}
 
@@ -445,6 +514,7 @@ func uploadFiles(
 			})
 			if promptErr != nil {
 				logger.Error().Err(promptErr).Msg("Error prompting user")
+				recordError(fpath, promptErr)
 				return nil
 			}
 
@@ -463,6 +533,7 @@ func uploadFiles(
 				}
 			case FileAbort:
 				logger.Info().Msg("Upload aborted by user")
+				abortUpload()
 				return nil
 			}
 		}
@@ -482,15 +553,15 @@ func uploadFiles(
 			})
 			if promptErr != nil {
 				logger.Error().Err(promptErr).Msg("Error prompting user")
+				recordError(fpath, promptErr)
 				return nil
 			}
 			if action == ErrorAbort {
 				logger.Info().Msg("Upload aborted by user")
+				abortUpload()
 				return nil
 			}
-			resultMutex.Lock()
-			result.Errors = append(result.Errors, UploadError{fpath, statErr})
-			resultMutex.Unlock()
+			recordError(fpath, statErr)
 			return nil
 		}
 
@@ -583,6 +654,7 @@ func uploadFiles(
 				})
 				if promptErr != nil {
 					logger.Error().Err(promptErr).Msg("Error prompting user")
+					recordError(fpath, promptErr)
 					return nil
 				}
 
@@ -635,6 +707,7 @@ func uploadFiles(
 
 				case FileAbort:
 					logger.Info().Msg("Upload aborted by user")
+					abortUpload()
 					return nil
 				}
 
@@ -643,9 +716,7 @@ func uploadFiles(
 
 			// Handle other upload errors
 			if continueOnError {
-				resultMutex.Lock()
-				result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
-				resultMutex.Unlock()
+				recordError(fpath, uploadErr)
 				logger.Error().Str("file", fpath).Err(uploadErr).Msg("Upload failed")
 				return nil
 			}
@@ -654,15 +725,15 @@ func uploadFiles(
 			})
 			if promptErr != nil {
 				logger.Error().Err(promptErr).Msg("Error prompting user")
+				recordError(fpath, promptErr)
 				return nil
 			}
 			if action == ErrorAbort {
 				logger.Info().Msg("Upload aborted by user")
+				abortUpload()
 				return nil
 			}
-			resultMutex.Lock()
-			result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
-			resultMutex.Unlock()
+			recordError(fpath, uploadErr)
 			return nil
 		}
 
