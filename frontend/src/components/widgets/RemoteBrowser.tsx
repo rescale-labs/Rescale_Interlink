@@ -100,9 +100,14 @@ export function RemoteBrowser() {
     setLibrarySearchInputValue(librarySearchQuery)
   }, [librarySearchQuery])
 
-  // Handle mode change
+  // Handle mode change.
+  // Clear the local input mirrors first: a debounce timer already in flight
+  // compares its captured input value against the store and would otherwise
+  // re-apply the outgoing mode's search term after the switch.
   const handleModeChange = useCallback((newMode: BrowseMode) => {
     if (newMode !== mode) {
+      setSearchInputValue('')
+      setLibrarySearchInputValue('')
       setRemoteMode(newMode)
     }
   }, [mode, setRemoteMode])

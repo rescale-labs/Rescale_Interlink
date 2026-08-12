@@ -961,8 +961,15 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   },
 
   // ===== LEGACY FILES FILTER ACTIONS =====
+  //
+  // Each setter re-requests its own mode's listing, so a setter that fires
+  // after the user switched modes would overwrite the new mode's items with
+  // the old mode's results. The search inputs are debounced, which makes that
+  // a routine sequence rather than a rare race, so every setter ignores calls
+  // that arrive for a mode it does not own.
 
   setLegacyOwnerFilter: (filter: string) => {
+    if (get().remote.mode !== 'legacy') return
     set(state => ({
       remote: {
         ...state.remote,
@@ -978,6 +985,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   },
 
   setLegacySearchQuery: (query: string) => {
+    if (get().remote.mode !== 'legacy') return
     set(state => ({
       remote: {
         ...state.remote,
@@ -993,6 +1001,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   },
 
   setLegacySort: (field: string, direction: string) => {
+    if (get().remote.mode !== 'legacy') return
     set(state => ({
       remote: {
         ...state.remote,
@@ -1009,6 +1018,8 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   },
 
   setLibrarySearchQuery: (query: string) => {
+    const mode = get().remote.mode
+    if (mode !== 'library' && mode !== 'jobs') return
     set(state => ({
       remote: {
         ...state.remote,
