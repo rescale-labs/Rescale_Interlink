@@ -447,27 +447,19 @@ func (d *Daemon) poll(ctx context.Context) {
 
 	// Check eligibility and download each job. Extend the summary with per-job
 	// eligibility skips and download outcomes as we go.
+	//
+	// totalDownloadTime accumulates the time spent inside downloadJob so the
+	// budget check below can subtract it. Transferring a large file is allowed
+	// to take longer than the entire budget; charging that to the scan turned a
+	// poll that worked perfectly into a standing "scan failed" error, which is
+	// exactly the false alarm that makes a real one easy to ignore.
+	var totalDownloadTime time.Duration
 	for _, job := range completed {
 		select {
-		case <-scanCtx.Done():
-			// Two very different reasons land here. The scan budget running out
-			// is a health problem the user needs to see: without a recorded
-			// error, this path froze LastScanTime while the daemon still
-			// reported "running". A cancelled parent context is just shutdown.
-			if ctx.Err() == nil {
-				budgetErr := fmt.Errorf("scan did not finish within %s", scanBudget)
-				d.logger.Warn().Dur("budget", scanBudget).
-					Msg("Scan budget exhausted; remaining jobs wait for the next poll")
-				d.recordScanError(budgetErr)
-				d.emitScanSummary(summary, time.Since(scanStart), true, budgetErr)
-				// This poll did real work — jobs were checked and possibly
-				// downloaded — so its progress is persisted and its timestamp
-				// advances. The recorded error is what says it was cut short.
-				d.persistPollProgress()
-			} else {
-				d.logger.Info().Msg("Scan interrupted by context cancellation")
-				d.emitScanSummary(summary, time.Since(scanStart), true, nil)
-			}
+		case <-ctx.Done():
+			// Daemon shutting down, not a failure.
+			d.logger.Info().Msg("Scan interrupted by context cancellation")
+			d.emitScanSummary(summary, time.Since(scanStart), true, nil)
 			return
 		case <-d.stopChan:
 			// Shutdown, not a failure. Stop() saves state on the way out.
@@ -477,9 +469,32 @@ func (d *Daemon) poll(ctx context.Context) {
 		default:
 		}
 
+		// The scan phase outrunning its budget is a health problem the user
+		// needs to see: before it was recorded, this path froze LastScanTime
+		// while the daemon still reported "running". Note this is measured on
+		// scan work only — see totalDownloadTime above.
+		if scanBudgetExceeded(time.Since(scanStart), totalDownloadTime, scanBudget) {
+			budgetErr := fmt.Errorf("scan did not finish within %s", scanBudget)
+			d.logger.Warn().
+				Dur("budget", scanBudget).
+				Dur("download_time", totalDownloadTime).
+				Msg("Scan budget exhausted; remaining jobs wait for the next poll")
+			d.recordScanError(budgetErr)
+			d.emitScanSummary(summary, time.Since(scanStart), true, budgetErr)
+			// This poll did real work — jobs were checked and possibly
+			// downloaded — so its progress is persisted and its timestamp
+			// advances. The recorded error is what says it was cut short.
+			d.persistPollProgress()
+			return
+		}
+
 		if d.cfg.Eligibility != nil {
-			// Per-call timeout prevents a single slow eligibility check from blocking the scan
-			eligCtx, eligCancel := context.WithTimeout(scanCtx, 2*time.Minute)
+			// Per-call timeout prevents a single slow eligibility check from
+			// blocking the scan. Parented on the lifecycle context, not scanCtx:
+			// a legitimately long download can push the poll past the scan
+			// deadline, and an eligibility check must not inherit a context that
+			// is already dead and fail every job after it.
+			eligCtx, eligCancel := context.WithTimeout(ctx, 2*time.Minute)
 			eligResult := d.monitor.CheckEligibility(eligCtx, job.ID)
 			eligCancel()
 
@@ -507,7 +522,9 @@ func (d *Daemon) poll(ctx context.Context) {
 		// because the scan budget elapsed. A 20GB file at 10MB/s needs half an
 		// hour, and a partial file never matches the expected size, so a
 		// budget-killed download restarts from zero on every poll.
+		downloadStart := time.Now()
 		outcome := d.downloadJob(ctx, job)
+		totalDownloadTime += time.Since(downloadStart)
 		summary.AddOutcome(string(outcome))
 	}
 
@@ -516,6 +533,21 @@ func (d *Daemon) poll(ctx context.Context) {
 
 	d.clearScanError()
 	d.persistPollProgress()
+}
+
+// scanBudgetExceeded reports whether a poll's scan work alone has outrun its
+// budget. Time spent transferring files is subtracted first: a single large file
+// may legitimately run longer than the whole budget, and counting that as scan
+// time reported a healthy poll as a failed one.
+//
+// downloadTime greater than elapsed cannot happen from these measurements, but
+// is treated as "nothing to charge" rather than trusted into a negative.
+func scanBudgetExceeded(elapsed, downloadTime, budget time.Duration) bool {
+	scanTime := elapsed - downloadTime
+	if scanTime < 0 {
+		return false
+	}
+	return scanTime > budget
 }
 
 // persistPollProgress stamps the poll time and writes state to disk. Called by
@@ -527,11 +559,16 @@ func (d *Daemon) persistPollProgress() {
 	}
 }
 
-// emitScanSummary logs the single canonical per-poll INFO summary line.
-// Buckets sum to TotalScanned when interrupted=false and scanErr is nil.
-// Interrupted polls emit partial counts with an interrupted marker so the sum
-// may be less than TotalScanned; a scan that failed outright emits zeroed
-// counts with an error marker.
+// emitScanSummary logs the single canonical per-poll INFO summary line. Three
+// shapes, distinguished by the interrupted and error markers:
+//
+//   - Complete: no markers, and the buckets sum to TotalScanned.
+//   - Interrupted: interrupted=true with partial counts, so the buckets may sum
+//     to less than TotalScanned. Ends a poll cut short by shutdown.
+//   - Interrupted and failed: interrupted=true plus a quoted error, again with
+//     partial counts. Ends a poll whose scan phase outran its budget.
+//   - Failed outright: a quoted error with every count zero. The scan never got
+//     past listing jobs.
 func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interrupted bool, scanErr error) {
 	// Classify download outcomes. no_files is reported separately from
 	// downloaded: a completed job with an empty output set is not a download,

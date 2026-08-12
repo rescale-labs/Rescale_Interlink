@@ -1066,9 +1066,12 @@ func (ts *TransferService) WaitForBatch(ctx context.Context, batchID string) (tr
 
 // WaitForRegisteredBatch is WaitForBatch for a caller that has already handed
 // over every request for the batch and closed its request channel. Under that
-// guarantee a batch the queue cannot resolve can never resolve — the entry that
-// makes an in-flight batch findable is dropped only when registration returns —
-// so this fails with ErrBatchVanished instead of polling forever.
+// guarantee a batch the queue cannot resolve cannot resolve into anything the
+// caller should still wait for: the entry that makes an in-flight batch findable
+// is dropped only when registration returns. A cancelled batch may still
+// register a late task — the queue lands those as already-cancelled — so there
+// is nothing to wait for either way, and this fails with ErrBatchVanished
+// instead of polling on.
 //
 // Waiting without that guarantee must use WaitForBatch: a batch whose first
 // task has not registered yet is legitimately unfindable for a moment.

@@ -227,6 +227,70 @@ func TestScanErrorRecordAndClear(t *testing.T) {
 	}
 }
 
+// The scan budget covers scan work — listing and eligibility — not transfers. A
+// download that legitimately runs longer than the whole budget must not be read
+// as a stalled scan: doing so raised a standing "scan failed" error for a poll
+// that was working correctly, which is what makes a real error easy to ignore.
+func TestScanBudgetExceeded(t *testing.T) {
+	const budget = 10 * time.Minute
+
+	tests := []struct {
+		name         string
+		elapsed      time.Duration
+		downloadTime time.Duration
+		want         bool
+	}{
+		{
+			name:         "one long download, brief scan work",
+			elapsed:      35 * time.Minute,
+			downloadTime: 34 * time.Minute,
+			want:         false,
+		},
+		{
+			name:         "scan work genuinely overran, downloads incidental",
+			elapsed:      35 * time.Minute,
+			downloadTime: 20 * time.Minute,
+			want:         true,
+		},
+		{
+			name:    "quick poll, no downloads",
+			elapsed: 5 * time.Minute,
+			want:    false,
+		},
+		{
+			name:    "exactly at the budget is not over it",
+			elapsed: budget,
+			want:    false,
+		},
+		{
+			name:    "a hair over the budget",
+			elapsed: budget + time.Second,
+			want:    true,
+		},
+		{
+			name:         "every second spent downloading",
+			elapsed:      30 * time.Minute,
+			downloadTime: 30 * time.Minute,
+			want:         false,
+		},
+		{
+			name:         "download time exceeding elapsed is not trusted negative",
+			elapsed:      time.Minute,
+			downloadTime: time.Hour,
+			want:         false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scanBudgetExceeded(tc.elapsed, tc.downloadTime, budget); got != tc.want {
+				t.Errorf("scanBudgetExceeded(%s, %s, %s) = %v, want %v",
+					tc.elapsed, tc.downloadTime, budget, got, tc.want)
+			}
+		})
+	}
+}
+
 // A poll that was cut short still did work, so its progress is written and its
 // timestamp advances; the recorded scan error is what marks it incomplete. If
 // this did not persist, a budget-killed poll would silently lose the timestamp

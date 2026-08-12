@@ -805,7 +805,8 @@ export function SetupTab() {
     if (elapsed < 0) return '';
     if (elapsed < 60000) return `${Math.round(elapsed / 1000)}s ago`;
     if (elapsed < 3600000) return `${Math.round(elapsed / 60000)}m ago`;
-    return `${Math.round(elapsed / 3600000)}h ago`;
+    if (elapsed < 86400000) return `${Math.round(elapsed / 3600000)}h ago`;
+    return `${Math.round(elapsed / 86400000)}d ago`;
   };
 
   if (isLoading && !config) {
