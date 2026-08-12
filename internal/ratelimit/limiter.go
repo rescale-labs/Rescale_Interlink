@@ -45,6 +45,11 @@ type RateLimiter struct {
 	// Self-healing state
 	degraded bool // true when at emergency cap after coordinator disconnect
 
+	// degradedNotifyMu serializes degraded-mode notices. Claimed while mu is
+	// still held and released after the callback returns, so notices arrive in
+	// the order the transitions happened. Never held while acquiring mu.
+	degradedNotifyMu sync.Mutex
+
 	// FIFO wait queue — ensures fair token acquisition under contention.
 	waitQueue []*fifoTicket
 
@@ -104,6 +109,10 @@ func (rl *RateLimiter) IsDegraded() bool {
 // below the warn threshold and silences emitUtilizationNotice — precisely when
 // the user most needs to know throughput was cut. Repeat calls with the same
 // value are no-ops, so a limiter that stays degraded does not re-notify.
+//
+// Notices are delivered in transition order. A degrade racing a recovery would
+// otherwise be free to deliver after it, leaving the user's last message
+// contradicting the limiter's actual state.
 func (rl *RateLimiter) setDegraded(degraded bool, message string) {
 	rl.mu.Lock()
 	if rl.degraded == degraded {
@@ -112,16 +121,22 @@ func (rl *RateLimiter) setDegraded(degraded bool, message string) {
 	}
 	rl.degraded = degraded
 	fn := rl.notifyFn
-	rl.mu.Unlock()
-
-	// Release the mutex before calling out (same pattern as coordinator hooks).
-	if fn == nil {
-		log.Print(message)
-		return
-	}
 	level := "info"
 	if degraded {
 		level = "warn"
+	}
+
+	// Claim the delivery slot before releasing mu, so a transition that flips the
+	// flag after this one cannot get its notice out first. The callback runs
+	// outside mu (same pattern as the coordinator hooks) — a slow subscriber
+	// delays later notices, never the token bucket.
+	rl.degradedNotifyMu.Lock()
+	defer rl.degradedNotifyMu.Unlock()
+	rl.mu.Unlock()
+
+	if fn == nil {
+		log.Print(message)
+		return
 	}
 	fn(level, message)
 }

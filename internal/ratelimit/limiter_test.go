@@ -816,3 +816,70 @@ func TestQueuedWaitersHonorLateCooldown(t *testing.T) {
 		t.Fatalf("expected %d waiters to acquire, got %d", waiters, count)
 	}
 }
+
+// TestDegradedNoticesAreOrdered verifies that a transition cannot deliver its
+// notice while an earlier one is still being delivered. Without the ordering,
+// the recovery notice below would jump ahead of the degrade notice that is
+// blocked in its callback, leaving the user's last message contradicting state.
+func TestDegradedNoticesAreOrdered(t *testing.T) {
+	rl := NewRateLimiter(1.0, 1.0)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var delivered []string
+
+	var once sync.Once
+	rl.SetNotifyFunc(func(_, message string) {
+		mu.Lock()
+		delivered = append(delivered, message)
+		mu.Unlock()
+
+		// Only the first notice blocks; it holds the delivery slot while the
+		// second transition happens behind it.
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rl.setDegraded(true, "degraded")
+	}()
+
+	<-entered // The degrade notice is now mid-delivery.
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rl.setDegraded(false, "recovered")
+	}()
+
+	// Give the recovery every chance to deliver early. It flips the flag under
+	// mu, then has to wait for the delivery slot.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	count := len(delivered)
+	mu.Unlock()
+	if count != 1 {
+		t.Errorf("%d notices delivered while the first was still in flight, want 1: %v", count, delivered)
+	}
+
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"degraded", "recovered"}
+	if len(delivered) != len(want) {
+		t.Fatalf("delivered %v, want %v", delivered, want)
+	}
+	for i := range want {
+		if delivered[i] != want[i] {
+			t.Errorf("notice %d = %q, want %q (delivery order must match transition order)", i, delivered[i], want[i])
+		}
+	}
+}

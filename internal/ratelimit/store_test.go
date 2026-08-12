@@ -591,6 +591,50 @@ func TestDegradedModeNotifies(t *testing.T) {
 	}
 }
 
+// TestColdStartDegradedNotifies covers the other way into degraded mode: the
+// coordinator is already unreachable when the limiter is created, so it starts
+// at the emergency cap. GetLimiter has to wire the notify callback before it
+// marks the limiter degraded, or the notice is emitted into a nil hook and the
+// user never hears that the very first call is capped at 0.25 req/s.
+func TestColdStartDegradedNotifies(t *testing.T) {
+	ResetGlobalStore()
+	s := GlobalStore()
+
+	type notice struct {
+		level   string
+		message string
+	}
+	var mu sync.Mutex
+	var notices []notice
+	SetGlobalNotifyFunc(func(level, message string) {
+		mu.Lock()
+		defer mu.Unlock()
+		notices = append(notices, notice{level, message})
+	})
+	defer SetGlobalNotifyFunc(nil)
+
+	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
+		return nil, errors.New("coordinator unreachable")
+	})
+
+	limiter := s.GetLimiter("https://platform.rescale.com", "key-coldstart", ScopeUser)
+	if !limiter.IsDegraded() {
+		t.Fatal("a limiter created while the coordinator is down should start degraded")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notices) != 1 {
+		t.Fatalf("cold start at the emergency cap should emit one notice, got %d: %v", len(notices), notices)
+	}
+	if notices[0].level != "warn" {
+		t.Errorf("cold start notice level = %q, want warn", notices[0].level)
+	}
+	if !strings.Contains(notices[0].message, "0.25 req/s") {
+		t.Errorf("cold start notice should name the capped rate, got %q", notices[0].message)
+	}
+}
+
 func TestHandleCoordinatorDisconnect_SetsDegraded(t *testing.T) {
 	ResetGlobalStore()
 	s := GlobalStore()

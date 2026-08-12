@@ -563,8 +563,9 @@ func (s *LimiterStore) SetStaleConnectionCleanup(fn func()) {
 // Starts a coordinator keepalive if not already running.
 // Called from transfer.RunBatch/RunBatchFromChannel to cover both GUI and CLI paths.
 func (s *LimiterStore) BeginTransferActivity() {
-	// Resolved before taking keepaliveMu: the ensurer lives under coordMu, and
-	// nesting the two locks here would invert the order tryCoordinator uses.
+	// Resolved before taking keepaliveMu so the two mutexes are never held at
+	// once. Nothing acquires them in the opposite order today, and keeping them
+	// disjoint means nothing can start to.
 	coordConfigured := s.hasCoordinatorEnsurer()
 
 	s.keepaliveMu.Lock()
