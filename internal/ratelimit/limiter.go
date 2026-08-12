@@ -126,13 +126,14 @@ func (rl *RateLimiter) setDegraded(degraded bool, message string) {
 		level = "warn"
 	}
 
-	// Claim the delivery slot before releasing mu, so a transition that flips the
-	// flag after this one cannot get its notice out first. The callback runs
-	// outside mu (same pattern as the coordinator hooks) — a slow subscriber
-	// delays later notices, never the token bucket.
+	// Release mu before claiming the delivery slot: holding mu while waiting on
+	// a slow subscriber would block the token bucket itself. degradedNotifyMu
+	// still serializes delivery (never two notices in flight); ordering between
+	// two transitions racing in the unlock-to-claim window is best-effort, which
+	// is acceptable — the alternative was a reproduced bucket stall.
+	rl.mu.Unlock()
 	rl.degradedNotifyMu.Lock()
 	defer rl.degradedNotifyMu.Unlock()
-	rl.mu.Unlock()
 
 	if fn == nil {
 		log.Print(message)

@@ -302,7 +302,10 @@ func (a *App) CancelBatch(batchID string) error {
 		return ErrNoTransferService
 	}
 
-	return ts.GetQueue().CancelBatch(batchID)
+	// Through the service, not the queue: the service anchors a cancelled
+	// placeholder when a batch is cancelled before its scan registered any
+	// task, so the Transfers tab keeps a record of the cancel.
+	return ts.CancelBatch(batchID)
 }
 
 // RetryFailedInBatch retries all failed tasks in a batch.

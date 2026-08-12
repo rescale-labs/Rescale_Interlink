@@ -1019,13 +1019,16 @@ func (ts *TransferService) CancelBatch(batchID string) error {
 	// Capture the batch's identity first: cancelling a batch whose scan hasn't
 	// registered any task yet drops its pre-registered metadata, and with no
 	// task to anchor it the Transfers tab would show no record at all.
-	var label, direction string
+	var label, direction, sourceLabel string
 	hadRow := false
 	for _, bs := range ts.queue.GetAllBatchStats() {
 		if bs.BatchID == batchID {
-			hadRow, label, direction = true, bs.BatchLabel, bs.Direction
+			hadRow, label, direction, sourceLabel = true, bs.BatchLabel, bs.Direction, bs.SourceLabel
 			break
 		}
+	}
+	if sourceLabel == "" {
+		sourceLabel = SourceLabelFileBrowser
 	}
 
 	err := ts.queue.CancelBatch(batchID)
@@ -1048,7 +1051,7 @@ func (ts *TransferService) CancelBatch(batchID string) error {
 			// the empty-batch placeholder.
 			ts.queue.TrackTransferWithBatch(
 				"(cancelled during scan)", 0, taskType, "", "",
-				SourceLabelFileBrowser, batchID, label,
+				sourceLabel, batchID, label,
 			)
 		}
 	}

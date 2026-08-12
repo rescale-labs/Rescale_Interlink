@@ -708,3 +708,33 @@ func TestCheckBatchCompletion_TotalWipeoutWithoutTaskErrors(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+// A batch cancelled before its scan registers any task must still leave a
+// (cancelled) record in the queue — CleanupBatch drops the pre-registered
+// metadata, so without the placeholder the Transfers tab shows nothing.
+func TestCancelBatchAnchorsCancelledPlaceholder(t *testing.T) {
+	eb := events.NewEventBus(100)
+	defer eb.Close()
+
+	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	q := ts.GetQueue()
+
+	q.PreRegisterBatch("batch-prescan", "MyFolder", "upload", "Daemon")
+	if err := ts.CancelBatch("batch-prescan"); err != nil {
+		t.Fatalf("CancelBatch: %v", err)
+	}
+
+	for _, bs := range q.GetAllBatchStats() {
+		if bs.BatchID != "batch-prescan" {
+			continue
+		}
+		if bs.Cancelled != 1 || bs.Total != 1 {
+			t.Fatalf("placeholder shape = total %d cancelled %d, want 1/1", bs.Total, bs.Cancelled)
+		}
+		if bs.SourceLabel != "Daemon" {
+			t.Fatalf("placeholder SourceLabel = %q, want the pre-registered %q", bs.SourceLabel, "Daemon")
+		}
+		return
+	}
+	t.Fatal("cancelled batch left no record at all")
+}

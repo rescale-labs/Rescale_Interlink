@@ -883,3 +883,31 @@ func TestDegradedNoticesAreOrdered(t *testing.T) {
 		}
 	}
 }
+
+// A slow degraded-notice subscriber must never block the token bucket: the
+// notice mutex is claimed only after the limiter's own lock is released.
+func TestSlowNoticeDoesNotBlockBucket(t *testing.T) {
+	rl := NewRateLimiter(100.0, 10.0)
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	rl.SetNotifyFunc(func(level, message string) {
+		close(entered)
+		<-release
+	})
+
+	go rl.setDegraded(true, "degraded")
+	<-entered // the slow callback now holds the delivery slot
+
+	done := make(chan struct{})
+	go func() {
+		rl.IsDegraded()
+		rl.TryAcquire()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("token bucket blocked while a notice callback was in flight")
+	}
+	close(release)
+}
