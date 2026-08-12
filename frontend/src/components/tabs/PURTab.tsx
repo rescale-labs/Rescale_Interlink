@@ -307,7 +307,8 @@ export function PURTab() {
         validationPattern: scanOptions.validationPattern || config.validationPattern || '',
       })
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Deps are intentionally narrowed: this effect must re-run only when these two
+  // config fields change, not when scanOptions is edited by the user.
   }, [config?.runSubpath, config?.validationPattern])
 
   // Local state for CSV loading

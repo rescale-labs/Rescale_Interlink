@@ -45,6 +45,7 @@ const TabNavigationContext = createContext<TabNavigationContextType>({
   switchToTab: () => {},
   activeTabName: '',
 });
+// eslint-disable-next-line react-refresh/only-export-components -- hook is consumed by several tabs; moving it to its own module is a separate refactor
 export const useTabNavigation = () => useContext(TabNavigationContext);
 
 const tabs = [
@@ -275,7 +276,7 @@ function AppComponent() {
           {tabs.map((tab) => (
             <Tab
               key={tab.name}
-              title={(tab as any).title}
+              title={(tab as { title?: string }).title}
               className={({ selected }) =>
                 clsx(
                   'flex items-center px-4 py-2.5 text-sm font-medium text-left transition-colors',

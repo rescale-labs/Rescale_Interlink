@@ -273,7 +273,7 @@ export function FileBrowserTab() {
       // Validate destination folder before any transfers — it may have been deleted during confirmation
       try {
         await App.ValidateRemoteFolder(destFolderId)
-      } catch (err) {
+      } catch {
         setErrorDialog({
           title: 'Invalid Destination',
           message: `The destination folder is no longer accessible. Please select a new destination and try again.`
@@ -503,7 +503,7 @@ export function FileBrowserTab() {
       // Validate local destination before starting — it may have been removed during confirmation
       try {
         await App.ValidateLocalDirectory(destLocalPath)
-      } catch (err) {
+      } catch {
         setErrorDialog({
           title: 'Invalid Destination',
           message: `The local destination "${destLocalPath}" is no longer accessible.`

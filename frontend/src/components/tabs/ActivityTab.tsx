@@ -4,6 +4,7 @@ import { useRunStore } from '../../stores/runStore';
 import type { LogLevel } from '../../types';
 import type { JobRow } from '../../types/jobs';
 import { GetDaemonStatus, GetDaemonLogs, GetRunHistory, GetHistoricalJobRows, SaveLogExport } from '../../../wailsjs/go/wailsapp/App';
+import type { wailsapp } from '../../../wailsjs/go/models';
 import { JobsTable } from '../widgets';
 import { formatDurationMs } from '../../utils/formatDuration';
 import {
@@ -97,7 +98,7 @@ export function ActivityTab() {
   const { completedRuns } = useRunStore();
   const [runHistoryExpanded, setRunHistoryExpanded] = useState(false);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-  const [historicalRuns, setHistoricalRuns] = useState<any[]>([]);
+  const [historicalRuns, setHistoricalRuns] = useState<wailsapp.RunHistoryEntryDTO[]>([]);
   const [historicalRows, setHistoricalRows] = useState<Record<string, JobRow[]>>({});
   const [loadingHistory, setLoadingHistory] = useState(false);
 

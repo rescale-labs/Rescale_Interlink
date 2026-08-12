@@ -479,7 +479,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
         if (jobErrors && jobErrors.length > 0) {
           errors.push(`${job.jobName}: ${jobErrors.join(', ')}`)
         }
-      } catch (error) {
+      } catch {
         errors.push(`${job.jobName}: Validation failed`)
       }
     }
@@ -580,6 +580,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
 
   // File Operations Actions
   loadJobsFromCSV: async (path: string) => {
+    // eslint-disable-next-line no-useless-catch -- the catch below only rethrows; unwrapping it is behavior-preserving but out of scope for a release branch
     try {
       const jobs = await App.LoadJobsFromCSV(path)
       if (!jobs || jobs.length === 0) {
