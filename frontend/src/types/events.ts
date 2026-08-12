@@ -118,6 +118,8 @@ export interface BatchProgressEventDTO {
   queued: number;
   completed: number;
   failed: number;
+  cancelled: number;
+  cancelRequested: boolean; // user cancelled this batch
   progress: number;
   speed: number;
   totalKnown: boolean; // true when scan complete; total is final

@@ -268,9 +268,11 @@ func (d *Daemon) Stop() {
 	d.cancelFunc() // Cancel lifecycle context before closing stopChan
 	close(d.stopChan)
 
-	// Cancel in-flight transfers via the shared queue. Mirrors the GUI's
-	// Cancel All path — partial files are tolerated by the shared download
-	// path on next run.
+	// Cancel in-flight transfers via the shared queue. This is the queue-wide
+	// sweep: it cancels every registered batch context and every non-terminal
+	// task. (The GUI's "Cancel All" button instead iterates the visible batches
+	// and calls CancelBatch per batch.) Partial files are tolerated by the
+	// shared download path on next run.
 	if d.ts != nil {
 		d.ts.CancelAll()
 	}
@@ -934,4 +936,3 @@ func (d *Daemon) TriggerPoll() {
 		d.poll(ctx)
 	}()
 }
-

@@ -67,11 +67,11 @@ type OrchestratorConfig struct {
 	IncludeHidden     bool
 	FolderConcurrency int
 	ConflictMode      ConflictAction
-	ConflictPrompt    ConflictPrompt   // nil = no interactive prompting (GUI path)
+	ConflictPrompt    ConflictPrompt // nil = no interactive prompting (GUI path)
 	Logger            *logging.Logger
 	APIClient         *api.Client
-	Cache             *FolderCache     // caller creates, orchestrator uses
-	ProgressWriter    io.Writer        // nil for GUI, uploadUI.Writer() for CLI
+	Cache             *FolderCache // caller creates, orchestrator uses
+	ProgressWriter    io.Writer    // nil for GUI, uploadUI.Writer() for CLI
 }
 
 // OrchestratorResult holds the final counters from the orchestration pipeline.
@@ -83,6 +83,12 @@ type OrchestratorResult struct {
 	DiscoveredDirs  int
 	WalkError       error
 	FolderError     error
+
+	// Cancelled is true when the pipeline stopped because its context was
+	// cancelled rather than because discovery finished. The counters are then
+	// whatever was discovered before the cancel, not a final total — callers
+	// must not treat a zero count as "the folder was empty".
+	Cancelled bool
 }
 
 // folderResultMsg communicates Part A's result to Part C via a channel.
@@ -310,6 +316,15 @@ func RunOrchestrator[T any](
 				}
 
 			case <-ctx.Done():
+				// Report what discovery actually found before the cancel.
+				// Returning zeros here made a cancelled upload indistinguishable
+				// from an empty folder, so callers anchored a "no files"
+				// placeholder and the batch rendered as a clean completion.
+				orchResult.Cancelled = true
+				orchResult.DiscoveredFiles = discoveredFiles
+				orchResult.DiscoveredBytes = discoveredBytes
+				orchResult.DiscoveredDirs = discoveredDirs
+
 				skipDrainWG.Wait()
 				close(backlogDone)
 				backlogDoneClosed = true
@@ -318,6 +333,15 @@ func RunOrchestrator[T any](
 				}
 				return
 			}
+		}
+
+		// A cancel usually lands here rather than in the ctx.Done() branch
+		// above: WalkStream closes fileChan on cancellation, and a receive from
+		// a closed channel is always ready, so the merge loop normally finishes
+		// by observing both channels closed. Either way the counters are partial
+		// and callers must not read a low count as "the folder was empty".
+		if ctx.Err() != nil {
+			orchResult.Cancelled = true
 		}
 
 		// Check for walk errors

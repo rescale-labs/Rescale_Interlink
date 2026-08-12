@@ -893,7 +893,11 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		// The scan succeeded; the folder simply had no files. Without this, the
 		// batch would vanish from the Transfers tab, unlike every other completed
 		// transfer (see RegisterEmptyBatchPlaceholder).
-		if filesQueued == 0 {
+		//
+		// Only when the scan wasn't cancelled: a cancelled scan also reports zero
+		// files queued, and the placeholder is a COMPLETED task, so it made a
+		// cancelled download render as a finished one.
+		if filesQueued == 0 && scanCtx.Err() == nil {
 			ts.RegisterEmptyBatchPlaceholder(enumID, displayName, "download")
 		}
 
@@ -1329,6 +1333,14 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 				// upload outcome (including skip-only and empty-folder cases).
 				skips := int(skipCount.Load())
 				switch {
+				case r.Cancelled || uploadCtx.Err() != nil:
+					// Cancelled mid-scan. The counters are partial, so neither the
+					// "empty folder" reading nor a placeholder anchor applies: the
+					// placeholder is a COMPLETED task and would render a cancelled
+					// upload as a finished one.
+					a.logInfo("folder-upload", fmt.Sprintf(
+						"Folder upload cancelled: %s — %d files queued before cancel, %d items skipped",
+						displayName, r.DiscoveredFiles, skips))
 				case r.DiscoveredFiles > 0 && skips > 0:
 					a.logInfo("folder-upload", fmt.Sprintf(
 						"Folder upload finished: %s — %d files queued, %d items skipped",

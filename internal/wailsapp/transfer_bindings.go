@@ -34,8 +34,8 @@ type TransferTaskDTO struct {
 	SourceLabel string  `json:"sourceLabel,omitempty"` // "PUR", "SingleJob", "FileBrowser"
 	BatchID     string  `json:"batchID,omitempty"`
 	BatchLabel  string  `json:"batchLabel,omitempty"`
-	Progress    float64 `json:"progress"`              // 0.0 to 1.0
-	Speed       float64 `json:"speed"`                 // bytes/sec
+	Progress    float64 `json:"progress"` // 0.0 to 1.0
+	Speed       float64 `json:"speed"`    // bytes/sec
 	Error       string  `json:"error,omitempty"`
 	CreatedAt   string  `json:"createdAt"`
 	StartedAt   string  `json:"startedAt,omitempty"`
@@ -188,8 +188,8 @@ func (a *App) ClearCompletedTransfers() {
 type TransferBatchDTO struct {
 	BatchID         string  `json:"batchID"`
 	BatchLabel      string  `json:"batchLabel"`
-	Direction       string  `json:"direction"`              // "upload" or "download"
-	SourceLabel     string  `json:"sourceLabel"`            // "FileBrowser", "PUR", "SingleJob"
+	Direction       string  `json:"direction"`   // "upload" or "download"
+	SourceLabel     string  `json:"sourceLabel"` // "FileBrowser", "PUR", "SingleJob"
 	Total           int     `json:"total"`
 	Queued          int     `json:"queued"`
 	Active          int     `json:"active"`
@@ -197,15 +197,16 @@ type TransferBatchDTO struct {
 	Failed          int     `json:"failed"`
 	Cancelled       int     `json:"cancelled"`
 	TotalBytes      int64   `json:"totalBytes"`
-	Progress        float64 `json:"progress"`               // byte-weighted 0.0-1.0
-	Speed           float64 `json:"speed"`                  // aggregate bytes/sec
-	TotalKnown      bool    `json:"totalKnown"`             // true when scan complete
-	FilesPerSec     float64 `json:"filesPerSec"`            // file completion rate (windowed)
-	ETASeconds      float64 `json:"etaSeconds"`             // estimated time remaining (-1 = unknown)
+	Progress        float64 `json:"progress"`    // byte-weighted 0.0-1.0
+	Speed           float64 `json:"speed"`       // aggregate bytes/sec
+	TotalKnown      bool    `json:"totalKnown"`  // true when scan complete
+	FilesPerSec     float64 `json:"filesPerSec"` // file completion rate (windowed)
+	ETASeconds      float64 `json:"etaSeconds"`  // estimated time remaining (-1 = unknown)
 	DiscoveredTotal int     `json:"discoveredTotal"`
 	DiscoveredBytes int64   `json:"discoveredBytes"`
 	StartedAtUnix   int64   `json:"startedAtUnix"`
-	Skipped         int     `json:"skipped"`                // entries the walker skipped
+	Skipped         int     `json:"skipped"`         // entries the walker skipped
+	CancelRequested bool    `json:"cancelRequested"` // user cancelled this batch
 }
 
 // GetTransferBatches returns aggregate stats for each batch of transfers.
@@ -226,7 +227,7 @@ func (a *App) GetTransferBatches() []TransferBatchDTO {
 		dtos[i] = TransferBatchDTO{
 			BatchID:         bs.BatchID,
 			BatchLabel:      bs.BatchLabel,
-			Direction:        bs.Direction,
+			Direction:       bs.Direction,
 			SourceLabel:     bs.SourceLabel,
 			Total:           bs.Total,
 			Queued:          bs.Queued,
@@ -244,6 +245,7 @@ func (a *App) GetTransferBatches() []TransferBatchDTO {
 			DiscoveredBytes: bs.DiscoveredBytes,
 			StartedAtUnix:   bs.StartedAt.Unix(),
 			Skipped:         bs.Skipped,
+			CancelRequested: bs.CancelRequested,
 		}
 	}
 	return dtos

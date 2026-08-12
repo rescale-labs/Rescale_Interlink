@@ -3,6 +3,7 @@ package folder
 import (
 	"context"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -342,5 +343,99 @@ func TestRunOrchestrator_ProgressSnapshotIntegrity(t *testing.T) {
 
 	if lastFiles != 10 {
 		t.Errorf("final file count = %d, want 10", lastFiles)
+	}
+}
+
+// A cancelled run must report what it actually discovered and flag itself as
+// cancelled. Returning zeros made a cancelled upload look like an empty folder,
+// so callers anchored a "no files" placeholder — a COMPLETED task — and the
+// batch rendered as a clean completion.
+func TestRunOrchestrator_CancellationReportsPartialResult(t *testing.T) {
+	root := t.TempDir()
+
+	const totalFiles = 200
+	for i := 0; i < totalFiles; i++ {
+		f, err := os.CreateTemp(root, "file-*.txt")
+		if err != nil {
+			t.Fatalf("create temp file: %v", err)
+		}
+		if _, err := f.Write([]byte("data")); err != nil {
+			t.Fatalf("write temp file: %v", err)
+		}
+		f.Close()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	outputCh := make(chan testItem, totalFiles)
+	cache := NewFolderCache()
+
+	var doneCalls atomic.Int32
+	var cancelOnce sync.Once
+	var seen *OrchestratorResult
+	orchDone := make(chan struct{})
+
+	dispatchDone, result := RunOrchestrator(ctx,
+		OrchestratorConfig{
+			RootPath:          root,
+			RootRemoteID:      "root-id",
+			IncludeHidden:     true,
+			FolderConcurrency: 4,
+			ConflictMode:      ConflictMergeAll,
+			Cache:             cache,
+		},
+		OrchestratorCallbacks[testItem]{
+			// Runs on the orchestrator goroutine, so cancelling here guarantees
+			// the run is still mid-discovery — with plenty of files left, the
+			// merge loop takes its ctx.Done() branch.
+			OnFileDiscovered: func(snap ProgressSnapshot) {
+				if snap.TotalFiles == 5 {
+					cancelOnce.Do(func() {
+						cancel()
+						time.Sleep(2 * time.Millisecond)
+					})
+				}
+			},
+			BuildItem: func(file localfs.FileEntry, remoteFolderID, rootPath string) testItem {
+				return testItem{filePath: file.Path, remoteFolderID: remoteFolderID, size: file.Size}
+			},
+			OnOrchestratorDone: func(r *OrchestratorResult) {
+				doneCalls.Add(1)
+				seen = r
+				close(orchDone)
+			},
+		},
+		outputCh,
+	)
+
+	// dispatchDone is Part B; the result is populated by Part C, which reports
+	// through OnOrchestratorDone. Wait for both.
+	select {
+	case <-dispatchDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatchDone did not close within 5 seconds after cancel")
+	}
+	select {
+	case <-orchDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnOrchestratorDone was never called after cancel")
+	}
+	for range outputCh {
+	}
+
+	if doneCalls.Load() != 1 {
+		t.Fatalf("expected OnOrchestratorDone once, got %d", doneCalls.Load())
+	}
+	if seen != result {
+		t.Error("callback should receive the same result the caller holds")
+	}
+	if !result.Cancelled {
+		t.Error("cancelled run must set Cancelled so callers don't read it as an empty folder")
+	}
+	if result.DiscoveredFiles == 0 {
+		t.Error("cancelled run must report the files discovered before the cancel")
+	}
+	if result.DiscoveredFiles > 0 && result.DiscoveredBytes == 0 {
+		t.Error("expected discovered bytes alongside discovered files")
 	}
 }

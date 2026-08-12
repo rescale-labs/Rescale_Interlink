@@ -1388,6 +1388,7 @@ export namespace wailsapp {
 	    discoveredBytes: number;
 	    startedAtUnix: number;
 	    skipped: number;
+	    cancelRequested: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new TransferBatchDTO(source);
@@ -1415,6 +1416,7 @@ export namespace wailsapp {
 	        this.discoveredBytes = source["discoveredBytes"];
 	        this.startedAtUnix = source["startedAtUnix"];
 	        this.skipped = source["skipped"];
+	        this.cancelRequested = source["cancelRequested"];
 	    }
 	}
 	export class TransferRequestDTO {

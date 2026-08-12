@@ -206,9 +206,18 @@ const BatchRow = memo(function BatchRow({
   batch, isExpanded, expandedTasks, statusFilter, onToggle, onCancel, onRetryFailed, onLoadMore, onCancelTask, onRetryTask, onFilterChange
 }: BatchRowProps) {
   const isActive = batch.queued > 0 || batch.active > 0 || !batch.totalKnown
-  const isAllComplete = batch.totalKnown && batch.total > 0 && batch.completed === batch.total
   const hasFailed = batch.failed > 0
   const hasCancelled = batch.cancelled > 0
+  // "Complete" means every discovered file completed and nothing failed or was
+  // cancelled. The denominator matches the progress text below: batch.total
+  // counts registered tasks, which lags the scan's discoveredTotal.
+  const isAllComplete =
+    batch.totalKnown &&
+    batch.total > 0 &&
+    !hasFailed &&
+    !hasCancelled &&
+    !batch.cancelRequested &&
+    batch.completed === Math.max(batch.discoveredTotal, batch.total)
   const isPartial = !isActive && !isAllComplete && batch.completed > 0 && (hasFailed || hasCancelled)
 
   // Use backend-computed ETA — smoothed and handles discovered-during-scan bytes correctly
@@ -405,10 +414,20 @@ const BatchRow = memo(function BatchRow({
               {batch.failed} failed
             </span>
           )}
-          {hasCancelled && !isActive && !isAllComplete && !isPartial && !hasFailed && (
+          {(hasCancelled || batch.cancelRequested) && !isActive && !isAllComplete && !isPartial && !hasFailed && (
             <span className="text-gray-500 flex items-center gap-1">
               <XMarkIcon className="w-4 h-4" />
               Cancelled
+            </span>
+          )}
+          {/* Finished without completing everything the scan discovered, and with
+              nothing failed or cancelled to name — e.g. files whose parent folder
+              was never created. Say so rather than showing no status at all. */}
+          {!isActive && !isAllComplete && !isPartial && !hasFailed && !hasCancelled &&
+            !batch.cancelRequested && batch.total > 0 && (
+            <span className="text-yellow-600 dark:text-yellow-400 flex items-center gap-1">
+              <ExclamationTriangleIcon className="w-4 h-4" />
+              {formatNumber(batch.completed)} of {formatNumber(Math.max(batch.discoveredTotal, batch.total))} done
             </span>
           )}
         </div>

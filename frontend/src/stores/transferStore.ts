@@ -69,6 +69,7 @@ export interface TransferBatch {
   discoveredBytes: number // Bytes discovered by scan
   startedAtUnix: number // Batch start time (Unix seconds)
   skipped: number // Entries the walker skipped (junctions, unresolvable links)
+  cancelRequested: boolean // User cancelled this batch (stays true for its lifetime)
 }
 
 // Extended transfer task with UI state
@@ -239,6 +240,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         discoveredBytes: (b as TransferBatch).discoveredBytes ?? 0,
         startedAtUnix: (b as TransferBatch).startedAtUnix ?? 0,
         skipped: (b as TransferBatch).skipped ?? 0,
+        cancelRequested: (b as TransferBatch).cancelRequested ?? false,
       }))
       set({ batches })
 
@@ -731,7 +733,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           active: event.active,
           completed: event.completed,
           failed: event.failed,
-          cancelled: 0,
+          cancelled: event.cancelled ?? 0,
           totalBytes: 0,
           progress: event.progress,
           speed: event.speed,
@@ -742,6 +744,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
           discoveredBytes: event.discoveredBytes ?? 0,
           startedAtUnix: 0, // Will be populated on next fetchBatches
           skipped: event.skipped ?? 0,
+          cancelRequested: event.cancelRequested ?? false,
         }
         return { batches: [...state.batches, newBatch], lastUpdate: Date.now(), folderCheckStatus: null }
       }
@@ -754,6 +757,11 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
         queued: event.queued,
         completed: event.completed,
         failed: event.failed,
+        // Cancelled counts used to be hardcoded 0 here, so a batch cancelled
+        // while the Transfers tab was in the background stayed frozen at 0
+        // cancelled until the next poll.
+        cancelled: event.cancelled ?? 0,
+        cancelRequested: event.cancelRequested ?? false,
         progress: event.progress,
         speed: event.speed,
         totalKnown: event.totalKnown,
