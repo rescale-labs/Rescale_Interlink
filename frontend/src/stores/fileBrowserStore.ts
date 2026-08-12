@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
-import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
+import { EventsOn } from '../../wailsjs/runtime/runtime'
 import { wailsapp } from '../../wailsjs/go/models'
 import { EVENT_NAMES } from '../types/events'
 
@@ -950,8 +950,10 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       }))
       get().initRemote()
     }
-    EventsOn(EVENT_NAMES.CONFIG_CHANGED, handleConfigChanged)
-    return () => { EventsOff(EVENT_NAMES.CONFIG_CHANGED) }
+    // Unsubscribe with the handle EventsOn returns; EventsOff(name) would drop
+    // every listener registered for this event, including other components'.
+    const unsubscribeConfigChanged = EventsOn(EVENT_NAMES.CONFIG_CHANGED, handleConfigChanged)
+    return () => { unsubscribeConfigChanged() }
   },
 
   // ===== COMMON ACTIONS =====

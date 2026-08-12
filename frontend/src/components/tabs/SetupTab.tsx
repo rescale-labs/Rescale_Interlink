@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useConfigStore } from '../../stores';
+import { useTabNavigation } from '../../App';
 import {
   CheckCircleIcon,
   XCircleIcon,
@@ -14,7 +15,7 @@ import {
   TrashIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
-import { ClipboardGetText, EventsOn, EventsOff } from '../../../wailsjs/runtime/runtime';
+import { ClipboardGetText, EventsOn } from '../../../wailsjs/runtime/runtime';
 import {
   SelectDirectory,
   SaveConfigAs,
@@ -99,6 +100,12 @@ export function SetupTab() {
     testConnection,
   } = useConfigStore();
 
+  // Tab.Panel keeps this component mounted for the rest of the session
+  // (unmount={false}), so the status pollers below have to be gated on the tab
+  // actually being visible — an unmount cleanup will never run.
+  const { activeTabName } = useTabNavigation();
+  const isVisible = activeTabName === 'Setup';
+
   const [statusMessage, setStatusMessage] = useState('Ready');
   const [showApiKey, setShowApiKey] = useState(false);
   const [defaultConfigPath, setDefaultConfigPath] = useState<string>('');
@@ -158,15 +165,19 @@ export function SetupTab() {
       setAutoDownloadTestStatus(result.success ? 'success' : 'failed');
     };
 
-    EventsOn('interlink:autodownload_test_result', handleTestResult);
+    // Unsubscribe with the handle EventsOn returns; EventsOff(name) would drop
+    // every listener registered for this event, including other components'.
+    const unsubscribeTestResult = EventsOn('interlink:autodownload_test_result', handleTestResult);
 
     return () => {
-      EventsOff('interlink:autodownload_test_result');
+      unsubscribeTestResult();
     };
   }, []);
 
-  // Fetch daemon status on mount and periodically
+  // Poll daemon status while the tab is visible
   useEffect(() => {
+    if (!isVisible) return;
+
     const fetchDaemonStatus = async () => {
       try {
         const status = await GetDaemonStatus();
@@ -178,14 +189,15 @@ export function SetupTab() {
 
     fetchDaemonStatus();
 
-    // Poll every 5 seconds when tab is visible
     const interval = setInterval(fetchDaemonStatus, 5000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [isVisible]);
 
-  // Fetch service status (Windows SCM) on mount and periodically
+  // Poll service status (Windows SCM) while the tab is visible
   useEffect(() => {
+    if (!isVisible) return;
+
     const fetchServiceStatus = async () => {
       try {
         const status = await GetServiceStatus();
@@ -197,11 +209,11 @@ export function SetupTab() {
 
     fetchServiceStatus();
 
-    // Poll every 5 seconds (same interval as daemon status)
+    // Same interval as daemon status
     const interval = setInterval(fetchServiceStatus, 5000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [isVisible]);
 
   // Fetch daemon config on mount; pre-populate default download folder if empty
   useEffect(() => {

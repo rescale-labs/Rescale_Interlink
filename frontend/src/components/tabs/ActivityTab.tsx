@@ -1,6 +1,7 @@
 import { useEffect, useRef, useMemo, useState } from 'react';
 import { useLogStore } from '../../stores';
 import { useRunStore } from '../../stores/runStore';
+import { useTabNavigation } from '../../App';
 import type { LogLevel } from '../../types';
 import type { JobRow } from '../../types/jobs';
 import { GetDaemonStatus, GetDaemonLogs, GetRunHistory, GetHistoricalJobRows, SaveLogExport } from '../../../wailsjs/go/wailsapp/App';
@@ -90,6 +91,12 @@ export function ActivityTab() {
     // setupEventListeners moved to App.tsx for global event listening
   } = useLogStore();
 
+  // Tab.Panel keeps this component mounted for the rest of the session
+  // (unmount={false}), so the timers below have to be gated on the tab actually
+  // being visible — an unmount cleanup will never run.
+  const { activeTabName } = useTabNavigation();
+  const isVisible = activeTabName === 'Activity Logs';
+
   // Daemon log state for IPC-based log streaming
   const [daemonLogs, setDaemonLogs] = useState<LogEntry[]>([]);
   const [daemonRunning, setDaemonRunning] = useState(false);
@@ -145,8 +152,10 @@ export function ActivityTab() {
     }
   }, [filteredLogs.length, autoScroll]);
 
-  // Update uptime periodically
+  // Update uptime periodically while the tab is visible
   useEffect(() => {
+    if (!isVisible) return;
+
     const interval = setInterval(() => {
       // Force re-render to update uptime display
       useLogStore.setState((state) => ({
@@ -158,10 +167,14 @@ export function ActivityTab() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [isVisible]);
 
-  // Poll daemon logs when daemon is running
+  // Poll daemon logs while the tab is visible. Each poll replaces the buffer
+  // with the daemon's most recent entries, so pausing while hidden loses
+  // nothing that polling in the background would have kept.
   useEffect(() => {
+    if (!isVisible) return;
+
     const pollDaemonLogs = async () => {
       try {
         const status = await GetDaemonStatus();
@@ -194,7 +207,7 @@ export function ActivityTab() {
     pollDaemonLogs();
     const interval = setInterval(pollDaemonLogs, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [isVisible]);
 
   // Run history helpers
   const loadHistoricalRuns = async () => {
