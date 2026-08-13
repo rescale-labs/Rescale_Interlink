@@ -488,7 +488,8 @@ func TestMyFeature(t *testing.T) {
 `verify` gate; the platform builds declare `needs: [verify]`, so a failing check blocks
 the release instead of shipping alongside it.
 
-**`verify`** (macos-14, Go 1.26.5 and Node 20 both pinned with verified checksums):
+**`verify`** (macos-14; Go 1.26.5 downloaded and checked against its published SHA-256,
+Node.js pinned to major version 20 via `actions/setup-node`):
 
 | Step | Command |
 |------|---------|
@@ -510,9 +511,10 @@ needs them both):
 The Linux build runs outside GitHub Actions, on a Rescale HPC job. Its AppImage carries
 its own gate: `build/linux/bundle-webkit.sh` copies the host's WebKit helper
 executables into the AppDir with `$ORIGIN`-relative RPATHs, and
-`build/linux/verify-appimage.sh` extracts the produced AppImage and fails the build
-before packaging if the helpers are missing, not executable, or resolve their
-WebKit/GTK dependencies from outside the bundle.
+`build/linux/verify-appimage.sh` then extracts the **finished AppImage** — deliberately
+the image rather than the AppDir — and fails the release before the artifact ships if the
+helpers are missing, not executable, or resolve their WebKit/GTK dependencies from
+outside the bundle.
 
 **Not automated**: test runs on pull requests, cross-platform test execution (the suite
 runs on macOS only), and performance regression detection.
@@ -536,9 +538,10 @@ runs on macOS only), and performance regression detection.
 
 ### Current State (v4.9.9)
 
-- **Go suite**: 125 test files across 49 packages. `make test` reports 1,805 passing
-  cases (top-level tests plus subtests), 2 skipped, 0 failing. 16 packages have no test
-  files.
+- **Go suite**: 125 test files across 49 packages, 0 failing. `make test` reports about
+  1,800 passing cases (top-level tests plus subtests) and 2 skipped. The exact figure
+  moves with the platform you measure on — some tests branch on `runtime.GOOS` — so treat
+  it as a magnitude, not a checksum. 16 packages have no test files.
 - **Frontend suite**: 7 vitest files, 70 passing tests.
 - **CI**: the `verify` job in `.github/workflows/release.yml` runs both suites, plus
   `go vet -tags fips` and the frontend lint and build, on every `v*` tag push. The

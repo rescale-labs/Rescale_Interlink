@@ -35,7 +35,7 @@ This document catalogs what Rescale Interlink can do. For full command syntax, s
 
 ### Supported Platforms
 - macOS (darwin/arm64, darwin/amd64)
-- Linux (amd64) — the GUI ships as an AppImage that bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. A verification step fails the build before packaging if the bundled helpers are missing or resolve against the host
+- Linux (amd64) — the GUI ships as an AppImage that bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. A verification step inspects the finished AppImage and fails the release before the artifact ships if the bundled helpers are missing or resolve against the host
 - Windows (amd64) — standard and Mesa software-rendering variants; the Mesa build is for VMs and RDP sessions without usable GPU acceleration
 
 ### FIPS 140-3 Compliance

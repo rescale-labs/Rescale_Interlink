@@ -1221,7 +1221,7 @@ Custom Fields Enabled: true
 'Auto Download' Field: true
   - Type: select
   - Section: Context
-  - Values: [Enabled Disabled Conditional]
+  - Values: [Enabled Conditional Disabled]
 'Auto Download Path' Field: false (optional)
 
 ✓ Workspace is properly configured for auto-download.
@@ -1232,13 +1232,14 @@ Custom Fields Enabled: true
 1. Go to Rescale Platform → Workspace Settings → Custom Fields
 2. Create a new Job custom field:
    - **Name**: `Auto Download` (exact spelling required)
-   - **Type**: Select (dropdown)
-   - **Values**: `Enabled`, `Disabled`, and optionally `Conditional`
-3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`).
+   - **Type**: Select (Option List) — `daemon config validate` reports an error for any other type
+   - **Options**: all three of `Enabled`, `Conditional`, `Disabled`. All three are required on the field. `daemon config validate` reports an error for each one missing and exits non-zero, so a field carrying only `Enabled` and `Disabled` does not pass. Extra options are reported as warnings
+3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`). Individual jobs need not use `Conditional`, but the option still has to exist on the field.
 
-The three values are matched case-insensitively, but the words themselves matter —
-`Enabled`, `Disabled`, `Conditional`. A value the daemon does not recognize is treated
-as ineligible and the job is skipped, so `Enable` will not opt a job in.
+The three values are matched case-insensitively, but the words themselves are fixed and
+cannot be changed in Interlink. A job whose field is unset, or set to anything the daemon
+does not recognize, is skipped — including near-misses such as `Enable` and `Disable`,
+which produce no per-job skip line in the output.
 
 #### Auto-Start on Login
 
@@ -2283,10 +2284,12 @@ All batch transfers scale their concurrency to the file size distribution, withi
 - Medium files (100MB–1GB): up to 10 concurrent transfers
 - Large files (>1GB): up to 5 concurrent transfers (more threads per file)
 
-The cap differs by command. `folders upload-dir` and `folders download-dir` raise it to
-20 when you do not set `--max-concurrent`, so adaptive scaling can reach the top of that
-range. `files upload`, `files download`, `jobs download`, and `jobs watch` default to a
-cap of 5 — raise it explicitly (up to 20) for a directory full of small files.
+The cap differs by command. `folders upload-dir` and `folders download-dir` are the only
+two that raise it to 20 when you do not set `--max-concurrent`, so adaptive scaling can
+reach the top of that range there. Every other command that takes the flag defaults to a
+cap of 5 — `files upload`, `files download`, `jobs submit`, `jobs download`, `jobs watch`,
+and the `upload` and `download` shortcuts. Raise it explicitly (up to 20) for a directory
+full of small files.
 
 The adaptive count is validated against available system memory and thread pool capacity.
 

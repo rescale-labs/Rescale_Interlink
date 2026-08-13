@@ -64,8 +64,10 @@ with the following controls:
   ticket is stapled.
 - **Linux AppImage self-check.** The Linux build runs outside GitHub Actions. Its
   packaging step bundles WebKit's helper executables into the AppDir with
-  `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` fails the build before
-  packaging if the helpers are missing, not executable, or resolve their WebKit/GTK
+  `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then inspects the
+  finished AppImage — deliberately the built image rather than the AppDir, so a missing
+  RPATH cannot hide behind a matching host WebKit — and fails the release before the
+  artifact ships if the helpers are missing, not executable, or resolve their WebKit/GTK
   dependencies from the host instead of the bundle. Without this, WebKit forks the host's
   `WebKitWebProcess` from a compiled-in path and a mismatched build breaks its IPC.
 
