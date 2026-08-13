@@ -1,7 +1,7 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: May 31, 2026
-**Version**: 4.9.8
+**Last Updated**: August 12, 2026
+**Version**: 4.9.9
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -22,19 +22,32 @@ For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 ### Quick Test Suite
 
 ```bash
-# Run all unit tests
-go test ./...
+# Run the whole suite the way CI does: FIPS module + fips build tag
+make test
 
-# Run with verbose output
+# Same, with a coverage profile and HTML report
+make test-coverage
+```
+
+`make test` expands to `GOFIPS140=certified go test -tags fips -v ./...`. Use it rather
+than a bare `go test ./...` — a handful of files are behind the `fips` build tag
+(`internal/config/proxy_features_fips_test.go`,
+`internal/config/proxy_features_nonfips_test.go`,
+`internal/http/ntlm_transport_fips_test.go`), so an untagged run silently exercises the
+non-FIPS half only.
+
+```bash
+# Plain runs (skip the fips-tagged files)
+go test ./...
 go test -v ./...
 
-# Run with coverage
+# Coverage
 go test -cover ./...
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
-# Run with race detection
-go test -race ./...
+# Race detection
+GOFIPS140=certified go test -tags fips -race ./...
 ```
 
 ### Package-Specific Tests
@@ -65,37 +78,41 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-113 Go test files across the `internal/` tree, plus the frontend test suites (currently 3 vitest files: TemplateBuilder, plus existing setup). Grouped by functional area:
+125 Go test files (124 under `internal/`, one under `installer/`) across 49 packages,
+plus 7 frontend vitest files. Grouped by functional area:
 
 #### CLI & Commands
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/cli` | 6 | Command parsing, helpers, conflict resolution, shortcut concurrency |
+| `internal/cli` | 8 | Command parsing, flag aliases, config commands, daemon commands, job-file decode, conflict resolution, folder-upload abort/failure paths, shortcut concurrency |
 | `internal/cli/compat` | 8 | Compat mode detection, arg normalization, commands, parity |
 
 #### Core Infrastructure
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
+| `internal/api` | 3 | Client, retry policy and budget, pagination |
 | `internal/core` | 2 | Engine pipeline orchestration, upload-progress reporting |
 | `internal/events` | 1 | EventBus pub/sub, ring buffer |
 | `internal/config` | 14 | CSV config, API config, jobs CSV, daemon config, platforms (incl. internal- and production-tagged variants), proxy features (FIPS / non-FIPS), token ACL on Windows |
-| `internal/models` | 2 | Job serialization, credential models |
+| `internal/models` | 1 | Job serialization, including the SSH access fields |
+| `internal/pathutil` | 2 | Path resolution |
 | `internal/validation` | 1 | Path validation |
 
 #### Cloud & Transfer
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/cloud` | 1 | Timing utilities |
+| `internal/cloud` | 2 | Timing utilities, retry notices |
 | `internal/cloud/credentials` | 1 | Credential management |
-| `internal/cloud/providers/s3` | 1 | S3 upload progress reader |
+| `internal/cloud/providers/s3` | 2 | S3 upload progress reader, provider behavior |
 | `internal/cloud/providers/azure` | 1 | Azure client, SAS token lookup |
 | `internal/cloud/state` | 1 | Resume state serialization |
+| `internal/cloud/storage` | 1 | Disk-full and quota error classification |
 | `internal/cloud/transfer` | 1 | Transfer orchestration |
 | `internal/cloud/upload` | 1 | Upload flow |
-| `internal/transfer` | 4 | Batch executor, queue, speed window, manager |
+| `internal/transfer` | 4 | Batch executor, queue (incl. paginated batch rows), speed window, manager |
 | `internal/transfer/folder` | 2 | Folder creation, orchestrator |
 | `internal/transfer/scan` | 1 | Remote folder scanning |
 
@@ -103,7 +120,7 @@ go test -v ./internal/watch/...
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/wailsapp` | 11 | Job bindings, path helpers, version bindings, daemon bindings, config bindings, API key source bindings, progress + failure-path tests |
+| `internal/wailsapp` | 15 | Job bindings, job-status bindings, path helpers, version bindings, daemon bindings, config bindings, API key source bindings, progress + failure-path tests |
 | `internal/services` | 1 | Transfer service |
 
 #### PUR (Parallel Upload and Run)
@@ -111,23 +128,23 @@ go test -v ./internal/watch/...
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
 | `internal/pur/filescan` | 1 | File scanning |
-| `internal/pur/parser` | 1 | SGE script parsing |
+| `internal/pur/parser` | 1 | SGE script parsing, SSH directive round-trip |
 | `internal/pur/pattern` | 1 | Pattern detection |
-| `internal/pur/pipeline` | 1 | Pipeline orchestration |
+| `internal/pur/pipeline` | 2 | Pipeline orchestration, failed-job accounting, JobSpec → JobRequest mapping |
 
 #### Networking & Rate Limiting
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/http` | 2 | Proxy, retry logic |
-| `internal/ratelimit` | 3 | Token bucket, registry, store |
+| `internal/http` | 3 | Proxy, retry logic and elapsed budget, NTLM transport under FIPS |
+| `internal/ratelimit` | 3 | Token bucket, registry, store (incl. degraded-mode notices) |
 | `internal/ratelimit/coordinator` | 5 | Cross-process coordination |
 
 #### Background Service
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/daemon` | 4 | Daemon lifecycle, monitor, state, transfer tracker |
+| `internal/daemon` | 6 | Daemon lifecycle, monitor, state pruning, transfer tracker, status snapshot errors |
 | `internal/service` | 4 | Windows service, detection, install/uninstall flows |
 | `internal/ipc` | 7 | Client/server, messages, pipe, security, user-scope catalog tests |
 
@@ -142,10 +159,11 @@ go test -v ./internal/watch/...
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/diskspace` | 1 | Cross-platform disk space checking |
+| `internal/diskspace` | 1 | Cross-platform disk space checking, margin-vs-message accuracy |
 | `internal/localfs` | 2 | Directory browser, WalkStream |
 | `internal/logging` | 1 | TeeWriter (log → EventBus) |
 | `internal/platform` | 1 | Sleep prevention |
+| `internal/progress` | 1 | Bar-safe log sink |
 | `internal/resources` | 1 | Thread pool, memory management |
 | `internal/watch` | 1 | Job watch engine |
 | `internal/util/analysis` | 1 | Analysis utilities |
@@ -161,6 +179,18 @@ go test -v ./internal/watch/...
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
 | `installer` | 1 | Installer tests |
+
+#### Frontend (vitest)
+
+| File | Key Coverage |
+|------|--------------|
+| `stores/transferStore.test.ts` | Poll scheduling (no overlapping ticks, expanded-batch page refresh cadence), local-vs-daemon fetch namespaces, error classification, enumeration reconciliation |
+| `stores/fileBrowserStore.test.ts` | Local directory load (errors, slow path, stale responses), Trash browser, My Library search pagination, Legacy Files owner filter and sorting, per-mode setter scoping |
+| `stores/runStore.test.ts` | `mergePolledJobRow` — a polled row must not downgrade an in-progress upload, but must accept terminal updates |
+| `stores/errorReportStore.test.ts` | Report modal open/dismiss, duplicate suppression cooldown |
+| `components/tabs/JobStatusTab.test.tsx` | Fetch on tab activation, "Load next" paging, Refresh disabled during a page load, recovery when a tab-switch refresh supersedes an in-flight page |
+| `components/widgets/TemplateBuilder.test.tsx` | License UX — CUSTOM/RLM preset auto-switch and its hint lifecycle |
+| `components/widgets/RemoteFilePicker.test.tsx` | Workspace invalidation on API key change, discarding stale listings |
 
 ### Coverage Goals
 
@@ -254,8 +284,8 @@ ln -s ./bin/rescale-int ./rescale-cli
 # Install Wails CLI (one-time setup)
 go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
-# Install frontend dependencies
-cd frontend && npm install && cd ..
+# Install frontend dependencies (matches wails.json's frontend:install)
+cd frontend && npm ci && cd ..
 
 # Run in development mode with hot-reload
 wails dev
@@ -271,7 +301,7 @@ CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm
 GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
 
 # Test production build
-open build/bin/rescale-int.app
+open build/bin/rescale-int-gui.app
 ```
 
 ### Frontend Unit Tests
@@ -279,11 +309,20 @@ open build/bin/rescale-int.app
 ```bash
 cd frontend
 
-# Build verification
+# Run the vitest suite once (what CI runs)
+npm run test:run
+
+# Watch mode
+npm run test
+
+# Lint (CI runs this with --max-warnings 0)
+npm run lint
+
+# Build verification (runs tsc, then vite build)
 npm run build
 
-# Type checking
-npm run type-check  # or: npx tsc --noEmit
+# Type checking only
+npx tsc --noEmit
 ```
 
 ### Backend Binding Tests
@@ -303,7 +342,7 @@ wails generate module
 
 **Validation Points**:
 - GUI launches without errors
-- All tabs render correctly (Setup, SingleJob, PUR, FileBrowser, Transfers, Activity Logs)
+- All tabs render correctly (Setup, Single Job, PUR, Job Status, File Browser, Transfers, Activity Logs)
 - Real-time event updates via event bridge
 - No UI freezes or deadlocks
 - Error boundaries catch and display component errors
@@ -323,24 +362,36 @@ wails generate module
    - Monitor active run / Prepare new run choice screen
    - Queue run when another run is active
 
-3. **SingleJob Tab**
+3. **Single Job Tab**
    - Three input modes: directory, local files, remote files
    - Tar options visible only in directory mode
+   - Back button between step one and step two returns without losing entered values
+   - Tags typed into the template's tag field survive save and template reload
    - Submit / Queue Job workflow
 
-4. **File Browser Tab**
-   - Two-pane local/remote navigation
-   - Upload and download operations
-   - Delete operations with confirmation
+4. **Job Status Tab**
+   - Loads on tab activation, refreshes on return
+   - Name filter narrows the list
+   - "Load next" pages forward; Refresh is disabled while a page load is in flight
+   - Status badges render for every terminal and in-progress state
 
-5. **Transfers Tab**
+5. **File Browser Tab**
+   - Two-pane local/remote navigation
+   - Four remote browse modes: My Library, My Jobs, Legacy, Trash
+   - Search within My Library / My Jobs; owner filter and column sorting on Legacy
+   - A search or listing failure shows an error, not an empty library
+   - Upload and download operations
+   - Delete operations with confirmation; restore/purge from Trash
+
+6. **Transfers Tab**
    - Batch grouping with collapsible rows
    - Progress bars, speed, and ETA display
-   - Cancel and retry operations
+   - Cancel and retry operations; a cancelled batch reads as cancelled, not completed
+   - Storage retry notices appear in the batch rows and the Activity log
    - Disk space error banner
-   - Daemon auto-download rows (read-only)
+   - Daemon auto-download rows with per-row Cancel/Retry via IPC
 
-6. **Activity Tab**
+7. **Activity Logs Tab**
    - Log display with level filtering
    - Run history with expandable job tables
 
@@ -433,12 +484,38 @@ func TestMyFeature(t *testing.T) {
 
 ## Continuous Integration
 
-GitHub Actions workflows run on tag push for release builds:
-- Windows build (portable + MSI, Azure Trusted Signing)
-- macOS build (Apple Silicon, Developer ID signed + notarized)
-- Linux build via Rescale HPC job
+`.github/workflows/release.yml` runs on every `v*` tag push. The first job is a
+`verify` gate; the platform builds declare `needs: [verify]`, so a failing check blocks
+the release instead of shipping alongside it.
 
-**Future planned**: Automated test runs on PR creation, cross-platform build validation, performance regression detection.
+**`verify`** (macos-14, Go 1.26.5 and Node 20 both pinned with verified checksums):
+
+| Step | Command |
+|------|---------|
+| Install frontend deps | `npm ci` (deterministic, from `package-lock.json`) |
+| Frontend tests | `npm run test:run` |
+| Frontend lint | `npm run lint` |
+| Frontend build | `npm run build` — also produces `frontend/dist`, which `main.go` embeds |
+| Go vet | `GOFIPS140=certified go vet -tags fips ./...` |
+| Go tests | `make test` (the FIPS-tagged suite) |
+
+The frontend is built before the Go steps on purpose: `frontend/dist` is not in the
+repository, and without it the Go build cannot load package `main`.
+
+**Release builds in the workflow** (both gated on `verify`, then a `release` job that
+needs them both):
+- Windows build (portable zip + MSI, Azure Trusted Signing)
+- macOS build (Apple Silicon, Developer ID signed + notarized)
+
+The Linux build runs outside GitHub Actions, on a Rescale HPC job. Its AppImage carries
+its own gate: `build/linux/bundle-webkit.sh` copies the host's WebKit helper
+executables into the AppDir with `$ORIGIN`-relative RPATHs, and
+`build/linux/verify-appimage.sh` extracts the produced AppImage and fails the build
+before packaging if the helpers are missing, not executable, or resolve their
+WebKit/GTK dependencies from outside the bundle.
+
+**Not automated**: test runs on pull requests, cross-platform test execution (the suite
+runs on macOS only), and performance regression detection.
 
 ---
 
@@ -457,16 +534,28 @@ GitHub Actions workflows run on tag push for release builds:
 - **v4.6.8**: 8 automation serialization unit tests; E2E validation for single/multiple/no automations
 - **v4.8.x**: Transfer system convergence validated — `RunBatch`/`RunBatchFromChannel` abstraction, conflict resolver, adaptive concurrency, FileInfo enrichment
 
-### Current State (v4.9.8)
+### Current State (v4.9.9)
 
-- **Unit Tests**: 113 Go test files across the `internal/` tree, plus 3 frontend vitest suites. v4.9.8 adds:
+- **Go suite**: 125 test files across 49 packages. `make test` reports 1,805 passing
+  cases (top-level tests plus subtests), 2 skipped, 0 failing. 16 packages have no test
+  files.
+- **Frontend suite**: 7 vitest files, 70 passing tests.
+- **CI**: the `verify` job in `.github/workflows/release.yml` runs both suites, plus
+  `go vet -tags fips` and the frontend lint and build, on every `v*` tag push. The
+  platform builds are gated on it.
+- v4.9.8 adds:
   - `TestShouldProbeResolvedDirectory` — predicate gating the walker's defensive Stat to non-regular entries (covers regular file, directory, irregular file, named pipe).
   - `TestWalkStream_SkippedChannelDrainsCleanly` — regression guard for the new `skippedChan` ensuring it closes cleanly when no entries are emitted.
   - `TestWalkCollect_SymlinkSliceContainsBrokenSymlinks` — documents the `Symlinks` slice contract for `WalkCollect` after the junction-skip refactor.
-- **Coverage**: All core packages tested
+- v4.9.9 adds coverage for the behavior changes in this release, including: CLI exit
+  codes on partial batch failure and on an aborted prompt; the retry elapsed-time
+  budget and the notice threshold; the bar-safe log sink; disk-space margin-versus-
+  message accuracy and the EDQUOT spellings; `--job-file` decode with the SSH access
+  fields and unknown-key reporting; daemon state pruning and status-snapshot errors;
+  paginated batch rows; and the frontend Job Status tab and File Browser filters.
 - **Known Bugs**: 0
 - **Quality Gates**:
-  - All unit tests must pass
+  - `make test` and `npm run test:run` must pass
   - No race conditions detected
   - Coverage >75% for new code
   - Manual GUI smoke test passes

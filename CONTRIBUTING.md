@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
-**Version**: 4.9.8
-**Last Updated**: May 31, 2026
+**Version**: 4.9.9
+**Last Updated**: August 12, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -12,9 +12,9 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
 ### Prerequisites
 
-- Go 1.26.3 (minimum required)
-- Node.js 18+ (for GUI development)
-- Wails v2 CLI (for GUI builds)
+- Go 1.26.5 (the version in `go.mod`, and what CI pins)
+- Node.js 20 (CI pins 20; the frontend uses Vite 6 and Vitest 4)
+- Wails v2 CLI v2.12.0 (matching the `github.com/wailsapp/wails/v2` require in `go.mod`)
 - macOS, Linux, or Windows development environment
 - Git
 
@@ -31,8 +31,8 @@ go mod download
 # Build CLI only (use Makefile for proper output location)
 make build-darwin-arm64  # or make build for current platform
 
-# Run tests
-go test ./...
+# Run tests the way CI does (FIPS module + fips build tag)
+make test
 ```
 
 ### GUI Development (Wails)
@@ -41,8 +41,8 @@ go test ./...
 # Install Wails CLI (if not already installed)
 go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
-# Install frontend dependencies
-cd frontend && npm install && cd ..
+# Install frontend dependencies (this is what wails.json's frontend:install runs)
+cd frontend && npm ci && cd ..
 
 # Development mode (hot reload)
 wails dev
@@ -50,6 +50,10 @@ wails dev
 # Production build
 CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
 ```
+
+Use `npm ci` rather than `npm install`: it installs exactly what `package-lock.json`
+pins, which is what `wails build` and CI do. `npm install` can silently move
+dependencies and produce a lockfile diff you did not intend.
 
 ## Build Requirements (CRITICAL)
 
@@ -64,7 +68,7 @@ make build-darwin-arm64       # Build for macOS ARM64
 make build-all                # Build for all platforms
 
 # Output goes to: bin/{VERSION}/{PLATFORM}/rescale-int
-# Example: bin/v4.9.8/darwin-arm64/rescale-int
+# Example: bin/v4.9.9/darwin-arm64/rescale-int
 
 # Production GUI build
 GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -tags fips -platform darwin/arm64
@@ -75,6 +79,11 @@ RESCALE_ALLOW_NON_FIPS=true go build -o bin/dev/rescale-int ./cmd/rescale-int
 ```
 
 **IMPORTANT:** Never output binaries to the project root directory. The `bin/` directory is gitignored; the root is not.
+
+`GOFIPS140=certified` selects the latest Go Cryptographic Module version that holds a
+CMVP validation certificate, which is the audit-grade choice for FedRAMP. Do not
+substitute `latest`, which tracks the toolchain-bundled module and may not yet be
+CMVP-validated.
 
 Non-FIPS builds will refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. This environment variable is for development purposes only and must not be used in production.
 
@@ -102,15 +111,27 @@ go vet ./...
 All new features should include appropriate tests:
 
 ```bash
-# Run all tests
-go test ./...
+# Run the whole Go suite the way CI does
+make test
 
 # Run with coverage
-go test -cover ./...
+make test-coverage
 
 # Run specific package tests
 go test -v ./internal/events/
+
+# Frontend suite and lint
+cd frontend && npm run test:run && npm run lint
 ```
+
+`make test` is `GOFIPS140=certified go test -tags fips -v ./...`. A bare `go test ./...`
+skips the files behind the `fips` build tag, so use the make target before opening a PR.
+
+Go tests must not read from a checked-in fixture directory: `testdata/` is gitignored
+and blocked by the pre-commit hook. Inline fixture content in the test file and write it
+to `t.TempDir()`, which is what the config tests do.
+
+See [TESTING.md](TESTING.md) for the full test guide.
 
 ## Pull Request Process
 
@@ -121,8 +142,9 @@ go test -v ./internal/events/
    - Add tests for new functionality
    - Update documentation as needed
 4. **Test thoroughly**:
-   - Run `go test ./...`
-   - Run `go vet ./...`
+   - Run `make test`
+   - Run `GOFIPS140=certified go vet -tags fips ./...`
+   - Run `npm run test:run` and `npm run lint` in `frontend/` if you touched the frontend
    - Test the GUI manually if UI changes
 5. **Commit with clear messages**:
    ```
@@ -164,10 +186,13 @@ rescale-int/
 ├── frontend/                  # Wails GUI (React/TypeScript)
 │   ├── src/
 │   │   ├── components/        # React components
-│   │   │   ├── tabs/          # Tab components (Setup, SingleJob, PUR, etc.)
+│   │   │   ├── tabs/          # Tab components (Setup, SingleJob, PUR, JobStatus,
+│   │   │   │                  #   FileBrowser, Transfers, Activity)
 │   │   │   ├── widgets/       # Shared reusable widgets (JobsTable, StatsBar, etc.)
 │   │   │   └── common/        # Common components (ErrorBoundary, etc.)
 │   │   ├── stores/            # Zustand state stores (jobStore, runStore, etc.)
+│   │   ├── lib/               # Shared frontend helpers
+│   │   ├── test/              # Vitest setup
 │   │   ├── types/             # TypeScript type definitions (jobs, run, events)
 │   │   └── utils/             # Shared utilities (stageStats, formatDuration)
 │   ├── package.json           # Node.js dependencies
@@ -176,7 +201,7 @@ rescale-int/
 ├── internal/
 │   ├── api/                   # Rescale API client (v3 + v2)
 │   ├── cli/                   # CLI commands (Cobra)
-│   │   └── compat/            # rescale-cli compatibility mode (25 files)
+│   │   └── compat/            # rescale-cli compatibility mode
 │   ├── cloud/                 # Cloud storage operations
 │   │   ├── credentials/       # Credential management + warming
 │   │   ├── download/          # Download entry point
@@ -237,8 +262,9 @@ rescale-int/
 │   ├── wailsapp/              # Wails v2 Go bindings
 │   └── watch/                 # Job watch engine (polling + download)
 │
-├── build/                     # Wails build assets (icons, manifests)
-└── testdata/                  # Test fixtures
+├── build/                     # Wails build assets (icons, manifests), plus
+│                              # build/linux/ AppImage WebKit bundling + verify scripts
+└── installer/                 # Windows MSI installer sources
 ```
 
 ## Key Patterns
@@ -276,10 +302,13 @@ ch := eventBus.Subscribe(events.EventStateChange)
 # Start development server with hot reload
 wails dev
 
-# Lint frontend code
+# Lint frontend code (CI runs this with --max-warnings 0, so warnings fail)
 cd frontend && npm run lint
 
-# Build frontend only
+# Run the vitest suite once
+cd frontend && npm run test:run
+
+# Build frontend only (runs tsc, then vite build)
 cd frontend && npm run build
 ```
 
