@@ -1,5 +1,88 @@
 # Release Notes - Rescale Interlink
 
+## v4.9.9 - August 13, 2026
+
+### Linux GUI: blank window fixed (#31)
+
+The Linux AppImage bundled WebKit's library but relied on the host system for WebKit's
+helper executables (`WebKitWebProcess`, `WebKitNetworkProcess`). On hosts where the two
+didn't match — or the helpers didn't exist — the GUI launched to a blank window. The
+AppImage now ships the helper processes alongside the library and points the library at
+the bundled copies, so the GUI renders regardless of what WebKit the host has installed.
+The input-method cache is also regenerated inside the bundle, removing a cosmetic ibus
+warning at startup.
+
+### New Job Status tab (#62)
+
+A new **Job Status** tab lists your Rescale jobs with their current status, newest first,
+fifty at a time with on-demand paging. Contributed by @hjung-rescale
+([PR #62](https://github.com/rescale-labs/Rescale_Interlink/pull/62)).
+
+### File Browser: search, owner filtering, and sorting (#65)
+
+The File Browser's remote pane can now search folder contents by name, filter files by
+owner (mine / shared with me / all), and sort listings by column. Search results page
+through the full result set. Contributed by @jbeardslee-rescale
+([PR #65](https://github.com/rescale-labs/Rescale_Interlink/pull/65)).
+
+### Transfers: cancellation and status accuracy (#24, #27, #28)
+
+- Cancel and Cancel All now stop queued and in-flight work promptly on every path.
+- Cancelled batches show **Cancelled** end to end — including batches cancelled before
+  their folder scan registered any files, which previously vanished or showed Completed.
+- Local filesystem errors and user cancellations no longer raise the error-report modal.
+
+### CLI: visible retries, intact progress bars, truthful exit codes (#22, #23)
+
+- Persistent storage or API errors are retried with visible, attempt-numbered notices and
+  a bounded retry budget, and the server's own error message is preserved when a call
+  finally gives up — uploads no longer hang for minutes with no output.
+- Log output is routed around the progress bars, so bars no longer shred into multi-line
+  noise when logging is enabled (including rate-limit and retry notices, and in compat
+  mode).
+- Exit codes reflect what actually happened, and several flags and prompts that ignored
+  or misstated their input have been fixed.
+
+### Auto-download reliability
+
+- A daemon that breaks now reports it on every surface (GUI Setup tab, CLI status, logs)
+  instead of silently going idle, and the staleness of the last error is shown.
+- Downloads started by a poll are no longer cut off by the poll's own time budget, so
+  files that take longer than one polling interval complete instead of restarting.
+- The daemon's persistent state is now bounded. As part of this, the lifetime
+  `JobsDownloaded` counter becomes a trailing counter covering roughly the last 37 days.
+- Known limitation: when running as a Windows service, some low-level log lines do not
+  reach the service log. They are visible in foreground mode.
+- The `daemon config validate` help now names the values the daemon actually accepts
+  (`Enabled`, `Conditional`, `Disabled`) and the required custom-field setup; the old
+  text suggested values the daemon would silently skip.
+
+### Job submission (#61, #63, #43)
+
+- Job templates accept multiple tags through a proper multi-input control. Contributed by
+  @hjung-rescale ([PR #61](https://github.com/rescale-labs/Rescale_Interlink/pull/61)).
+- The Single Job flow's Back button returns from review to inputs without losing state.
+  Contributed by @hjung-rescale
+  ([PR #63](https://github.com/rescale-labs/Rescale_Interlink/pull/63)).
+- SSH access fields in job files — CIDR rule, public key, SSH port — are carried into the
+  create call instead of being silently dropped, and unknown top-level keys in a
+  `--job-file` produce a warning (#43).
+
+### Disk-space errors report real numbers (#34)
+
+Downloads were occasionally refused with a self-contradicting message ("need X, have Y"
+where Y exceeded X). The space check now measures the destination's actual filesystem,
+the message matches the check, and macOS "disc quota exceeded" errors are classified as
+disk-full.
+
+### Build and security
+
+Go toolchain 1.26.5 with refreshed dependencies (resolves all 24 open Dependabot alerts at
+release time); release builds are produced from deterministic, checksum-verified inputs,
+and every tagged build now runs the full Go and frontend test suites before packaging.
+
+---
+
 ## v4.9.8 - May 30, 2026
 
 ### File Browser Trash Bin, and deletes now go to Trash Bin (#30)
