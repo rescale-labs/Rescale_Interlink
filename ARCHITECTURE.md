@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
-**Version**: 4.9.8
-**Last Updated**: May 31, 2026
+**Version**: 4.9.9
+**Last Updated**: August 12, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -19,6 +19,7 @@ For verified feature details and source code references, see [FEATURE_SUMMARY.md
 - [Storage Backends](#storage-backends)
 - [Performance Optimizations](#performance-optimizations)
 - [Threading Model](#threading-model)
+- [Configuration & Settings Flow](#configuration--settings-flow)
 - [Data Flow](#data-flow)
 - [Design Principles](#design-principles)
 - [Constants Management](#constants-management)
@@ -31,7 +32,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 +-------------------------------------------------------------+
-|                 Rescale Interlink v4.9.8                     |
+|                 Rescale Interlink v4.9.9                     |
 |              Unified CLI + GUI Architecture                  |
 +-------------------------------------------------------------+
 |                                                              |
@@ -91,16 +92,19 @@ rescale-int/
 │   ├── src/
 │   │   ├── App.tsx                # Main app with tab navigation
 │   │   ├── components/
-│   │   │   ├── tabs/              # 6 tab implementations
+│   │   │   ├── tabs/              # 7 tab implementations
 │   │   │   ├── widgets/           # Shared widgets (JobsTable, StatsBar, etc.)
 │   │   │   └── common/            # Common components (ErrorBoundary)
-│   │   ├── stores/                # Zustand state management
-│   │   │   ├── jobStore.ts        # PUR workflow configuration
-│   │   │   ├── runStore.ts        # Active run monitoring + queue
-│   │   │   ├── singleJobStore.ts  # Single Job form state
-│   │   │   ├── configStore.ts     # Configuration state
-│   │   │   ├── transferStore.ts   # Transfer tracking + batch grouping
-│   │   │   └── logStore.ts        # Activity log state
+│   │   ├── stores/                  # Zustand state management
+│   │   │   ├── jobStore.ts          # PUR workflow configuration
+│   │   │   ├── runStore.ts          # Active run monitoring + queue
+│   │   │   ├── singleJobStore.ts    # Single Job form state
+│   │   │   ├── configStore.ts       # Configuration state
+│   │   │   ├── transferStore.ts     # Transfer tracking + batch grouping
+│   │   │   ├── fileBrowserStore.ts  # File Browser modes, filters, selection
+│   │   │   ├── rateLimitStore.ts    # Footer rate-limit indicator
+│   │   │   ├── errorReportStore.ts  # Pending error-report dialog
+│   │   │   └── logStore.ts          # Activity log state
 │   │   ├── types/                 # TypeScript type definitions
 │   │   └── utils/                 # Shared utilities
 │   ├── wailsjs/                   # Auto-generated Go bindings
@@ -194,27 +198,37 @@ rescale-int/
 │   │   └── tar/                   # TAR archive creation
 │   └── validation/                # Path validation
 │
-├── build/                         # Wails build assets (icons, manifests)
-└── testdata/                      # Test fixtures
+└── build/                         # Packaging assets and platform build scripts
+    ├── darwin/                    # Info.plist for the .app bundle
+    ├── linux/                     # AppImage WebKit bundling + release verification
+    └── windows/                   # Icon, manifest, dist and installer scripts
 ```
 
 ### Import Dependencies
 
+Selected edges, not the full graph. `go list -f '{{join .Imports "\n"}}' ./internal/<pkg>` is authoritative.
+
 ```
-cmd/rescale-int
+cmd/rescale-int                     (complete — this package imports nothing else internal)
     ├─→ internal/cli
     ├─→ internal/cli/compat
     ├─→ internal/fips
     └─→ internal/version
 
 internal/cli
-    ├─→ internal/core
-    ├─→ internal/progress
     ├─→ internal/api
+    ├─→ internal/config
     ├─→ internal/watch
-    └─→ internal/models
+    ├─→ internal/models
+    ├─→ internal/progress
+    ├─→ internal/transfer  (+ /folder, /scan)
+    ├─→ internal/cloud/{upload,download,credentials,state}
+    ├─→ internal/pur/{pipeline,parser,pattern,state,filescan,validation}
+    ├─→ internal/daemon, internal/service, internal/ipc
+    └─→ internal/ratelimit (+ /coordinator)
+        NOT internal/core — the PUR engine is reached through internal/pur/pipeline
 
-internal/cli/compat
+internal/cli/compat                 (does NOT import internal/cli — that is what avoids the cycle)
     ├─→ internal/api
     ├─→ internal/config
     ├─→ internal/watch
@@ -226,26 +240,37 @@ internal/wailsapp
     ├─→ internal/services
     ├─→ internal/events
     ├─→ internal/api
-    └─→ internal/models
-
-internal/services (GUI-agnostic)
-    ├─→ internal/core
-    ├─→ internal/events
-    └─→ internal/cloud
+    ├─→ internal/models
+    └─→ internal/cli          (reuses CLI-side helpers; the dependency runs GUI → CLI, never back)
 
 internal/core
+    ├─→ internal/services     (the engine is a consumer of the services layer)
     ├─→ internal/events
     ├─→ internal/api
     ├─→ internal/config
-    ├─→ internal/pur/state
+    ├─→ internal/pur/{pipeline,state,pattern,validation}
     └─→ internal/models
 
-internal/watch (zero imports from cli or compat)
+internal/services (GUI-agnostic)
+    ├─→ internal/cloud (+ /upload, /download, /credentials)
+    ├─→ internal/transfer (+ /folder, /scan)
+    ├─→ internal/events
+    ├─→ internal/resources
+    ├─→ internal/ratelimit
+    └─→ internal/api
+        NOT internal/core — the arrow runs core → services
+
+internal/watch                      (complete — verified with go list -deps)
     ├─→ internal/constants
-    └─→ (all dependencies injected via function types)
+    └─→ (all other dependencies injected via function types)
 ```
 
-**Key Principle**: No circular dependencies. Clear layering with dependencies flowing downward. The `watch` package is deliberately import-free from `cli` and `compat` — all behavior is injected.
+**Key Principle**: No circular dependencies. Dependencies flow downward: `wailsapp` → `core` → `services` → `cloud`/`transfer`. `internal/cli` sits at the same altitude as `wailsapp` but reaches `transfer`/`cloud` directly rather than through `core`. Two packages are deliberately kept clean so they can be shared:
+
+- `internal/watch` imports only `internal/constants`, so both `internal/cli` and `internal/cli/compat` can use it. Everything else is injected via function types.
+- `internal/cli/compat` does not import `internal/cli`. It builds its own Cobra tree on top of `api`, `config`, `models`, `watch` and `version`.
+
+`internal/daemon` is a consumer of `TransferService`, not a parallel transfer implementation: it routes downloads through `TransferService.StartStreamingDownloadBatch` and touches `internal/transfer` only for the observation types (`transfer.Queue`, `transfer.BatchStats`). It must not reach for `transfer.RunBatch`, `transfer.Manager` or `resources.Manager` directly.
 
 ---
 
@@ -281,6 +306,10 @@ The `Client` struct manages HTTP transport with connection pooling, API token, b
 
 **Selected client methods**: file/folder/job CRUD (`ListFiles`, `DeleteFile`, `CreateFolder`, `ListFolderContents`, `DeleteFolder`, `GetJob`, `GetJobStatuses`, `SubmitJob`, `StopJob`, etc.). Streaming upload and download primitives are **not** methods on `api.Client` — they live as free functions in `internal/cloud/upload/` and `internal/cloud/download/` and run on top of provider-specific transfer handles. The API client only handles metadata-level REST calls.
 
+**Pagination**: the jobs endpoint paginates by **page number**, not by offset — `limit`/`offset` are accepted and ignored, so an offset-based reader silently re-reads page 1. `ListJobsPage(ctx, page, pageSize)` sends `page` and `page_size` (`internal/api/client.go`). File and folder listings page by following the server's `next` link, and `page_size` is re-applied to every `next` URL because the server's own link carries its 25-item default, which would otherwise reintroduce slow pagination mid-walk.
+
+**Filtered listings**: `ListFilesPageWithOptions` accepts a `FileListOptions{OwnerFilter, SearchQuery, Ordering}`, and `SearchFolderContents` searches within a folder. These back the File Browser's search, owner filter and sort controls.
+
 ### 3. Event Bus (`internal/events/`)
 
 **Purpose**: Decouple UI updates from business logic via publish-subscribe.
@@ -306,6 +335,7 @@ The `EventBus` struct manages per-type subscriber channels, an "all events" subs
 - `EventBatchProgress` — aggregate progress for batched transfers (1/sec per active batch)
 - Individual `EventTransferProgress` suppressed at source for batched tasks
 - Terminal events (completed, failed, cancelled) always published individually for accuracy
+- `BatchProgressEvent` carries `Cancelled` and `CancelRequested` alongside `Completed`/`Failed`, so a batch cancelled while the Transfers tab is in the background is still reported as cancelled rather than frozen at zero. It also carries `DiscoveredTotal`/`DiscoveredBytes` — the scan's running count, which leads `Total` (registered tasks) during a streaming folder transfer, so completion is measured against `max(discoveredTotal, total)`.
 
 ### 4. Folder Cache (`internal/transfer/folder/`)
 
@@ -343,7 +373,14 @@ The `FolderCache` struct in `internal/transfer/folder/folder.go` uses a map keye
 - Calls `limiter.Drain()` + `limiter.SetCooldown()` through coordinator hooks
 - Propagates drain/cooldown across all processes via coordinator
 
-**Visibility**: Utilization-based notifications with hysteresis — silent when utilization < 50%, warns when >= 60%, throttled to 1 notification per 10 seconds.
+**Visibility**: Utilization-based notifications with hysteresis — silent when utilization < 50% (`UtilizationSuppressThreshold`), warns at >= 60% (`UtilizationWarnThreshold`), throttled to 1 notification per 10 seconds (`NotifyMinInterval`).
+
+Notices reach a surface through `ratelimit.SetGlobalNotifyFunc`, a single process-level callback:
+- The CLI registers it in root's `PersistentPreRun`, pointing at stderr **through** `progress.SinkWriter` so a notice lands above the progress bars rather than inside them.
+- `daemon run` re-registers it onto the daemon's own logger in `RunE`, which runs after `PersistentPreRun`. It has to: `daemonize` sets a detached child's stderr to nil, and these notices deliberately bypass the standard logger, so without re-registration every throttling, cooldown and retry notice in the daemon went nowhere.
+- The GUI publishes to the event bus, which feeds the Activity log and the footer indicator (`rateLimitStore`).
+
+Entering and leaving degraded mode is announced exactly once per transition (`setDegraded`), not on every check — degraded mode cuts the refill rate, which by itself would drive utilization notices.
 
 **Fallback Behavior** (when coordinator is unreachable):
 - Emergency cap: `(hardLimit/4) * 0.5` per process
@@ -360,6 +397,14 @@ The `FolderCache` struct in `internal/transfer/folder/folder.go` uses a map keye
 - `RunBatchFromChannel[T WorkItem]`: Streaming mode for items arriving incrementally (e.g., folder scan → download). Dynamic worker scaling: samples first 20 items, resamples every 50, scales workers up to 2x per interval.
 
 **Usage**: All transfer paths — CLI folder upload/download, GUI streaming transfers, daemon auto-download — use `RunBatch` or `RunBatchFromChannel`. This replaced 10+ inline worker pool implementations.
+
+**Cancellation**: a cancel must remain distinguishable from an empty or successful run all the way to the surface that reports it, which takes three cooperating pieces:
+
+- The folder orchestrator (`internal/transfer/folder/orchestrator.go`) returns a `Cancelled` flag and the counts discovery reached. Cancellation usually leaves the merge loop through the closed-channel path rather than `ctx.Done()`, because `WalkStream` closes its file channel on cancel and a receive from a closed channel is always ready — so both exits set the flag.
+- An empty batch normally anchors a placeholder task so the transfer still leaves a record. That placeholder is a **completed** task, so registering one for a cancelled scan is what made a cancelled transfer render as finished; both registration sites are now guarded on the scan not having been cancelled, and `CancelBatch` anchors a *cancelled* placeholder instead.
+- The batch row treats "Complete" as requiring nothing failed, nothing cancelled, and no cancel requested.
+
+`TransferService.CancelAll()` is the queue-wide sweep. The GUI's "Cancel All" is not that call — it iterates the visible batches and calls `CancelBatch()` on each.
 
 ### 7. Error Reporting (`internal/reporting/`)
 
@@ -388,13 +433,26 @@ Integration: ref-counted in `ratelimit/store.go` — acquired when a transfer st
 
 **Purpose**: Prevent out-of-disk failures mid-operation.
 
-Cross-platform: `syscall.Statfs` on Unix, `windows.GetDiskFreeSpaceEx` on Windows. Safety margin: 15% additional space required.
+Cross-platform: `syscall.Statfs` on Unix, `GetDiskFreeSpaceExW` via `kernel32.dll` on Windows. `CheckAvailableSpace(targetPath, requiredBytes, safetyMargin)` takes the margin as a parameter; call sites pass 1.15, i.e. the 15% of `constants.DiskSpaceBufferPercent`.
+
+Two things about the requirement are easy to get wrong and are worth stating:
+
+- The legacy (pre-encrypted) download path requires **2x** the file size, because it holds the encrypted and the decrypted copy at once. That doubling and the margin are part of the decision, so the pre-flight sites return `CheckAvailableSpace`'s own error verbatim rather than rebuilding a message — a rebuilt message that dropped the margin reported a requirement the check had not enforced, and could read as "need 292366 MB, have 312832 MB available".
+- Free space is measured on the filesystem of the directory being written to. Applying `filepath.Dir` to a directory argument measures the *parent* volume, which is wrong whenever the download directory is itself a mount point.
+
+Mid-transfer ENOSPC is a separate path: no pre-flight ran, so those sites report their own figures. `IsDiskFullError` and `ClassifyErrorClass` match both the Linux ("disk quota exceeded") and macOS/BSD ("disc quota exceeded") spellings of `EDQUOT`.
 
 ### 10. Progress Tracking (`internal/progress/`)
 
 **Purpose**: Abstract progress reporting for CLI and GUI.
 
 CLI uses `mpb` (multi-progress bars) with per-file bars showing speed and ETA. GUI uses EventBus events forwarded through the Wails event bridge.
+
+**Log routing during CLI transfers**: while `mpb` is drawing it owns the terminal, redrawing its frame on a timer, so anything written to the same terminal in between lands *inside* that frame — one bar becomes a screenful of half-drawn ones. Everything with something to say during a transfer therefore goes through mpb's own writer, which interleaves whole lines above the bars:
+
+- `progress.SetLogSink` lets the active UI register itself and `SinkWriter` resolves the sink per write, so log setup happens once at startup and follows the bars as they come and go. Only a UI attached to a terminal claims the sink — with bars off, mpb writes to `io.Discard`, and routing logs there would swallow them.
+- The standard logger, which carries the transfer path's `[BATCH]`, `[SLOT]`, `[CRED]` and `[TIMING]` diagnostics, is discarded unless the user asked for it via `--verbose`, `--debug` or `RESCALE_DEBUG` — mirroring what compat mode already did.
+- Rate-limit visibility and credential-source warnings deliberately bypass the standard logger so they survive that discard. A crawling transfer must still be able to say it is waiting on a rate limit.
 
 ---
 
@@ -469,15 +527,16 @@ All behavior is injected:
 ### Backend Bindings (`internal/wailsapp/`)
 
 1. **App** (`app.go`): Main Wails application struct with lifecycle hooks
-2. **Transfer Bindings** (`transfer_bindings.go`): `StartTransfers()`, `CancelTransfer()`, `GetTransferBatches()`, `CancelBatch()`, `RetryFailedInBatch()`, DTOs
-3. **File Bindings** (`file_bindings.go`): `ListLocalDirectory()`, `ListRemoteFolder()`, `StartFolderDownload()`, `StartFolderUpload()`
+2. **Transfer Bindings** (`transfer_bindings.go`): `StartTransfers()`, `CancelTransfer()`, `CancelAllTransfers()`, `GetTransferBatches()`, `CancelBatch()`, `RetryFailedInBatch()`, `GetBatchTasks(batchID, offset, limit, stateFilter)` — the paged reader the Transfers tab uses so rendering a batch's rows does not copy the whole batch, DTOs
+3. **File Bindings** (`file_bindings.go`): `ListLocalDirectory()`, `ListRemoteFolder()`, `ListRemoteFolderPage()`, `SearchRemoteFolderContents()`, `ListRemoteLegacy()`, `ListRemoteLegacyWithFilters(cursor, pageSize, ownerFilter, searchQuery, sortField, sortDirection)`, `ListRemoteTrash()`, `RecoverTrashItems()`, `PurgeTrashItems()`, `StartFolderDownload()`, `StartFolderUpload()`
 4. **Job Bindings** (`job_bindings.go`): `ScanDirectory()`, `StartBulkRun()`, `StartSingleJob()`, `GetRunHistory()`, `GetHistoricalJobRows()`
-5. **Config Bindings** (`config_bindings.go`): Configuration management
-6. **Daemon Bindings** (`daemon_bindings.go`): Daemon IPC
-7. **Event Bridge** (`event_bridge.go`): Forwards EventBus events to Wails runtime, throttles progress updates (100ms interval)
-8. **Version Bindings** (`version_bindings.go`): GitHub update check
-9. **Reporting Bindings** (`reporting_bindings.go`): Error report display
-10. **API Key Source Bindings** (`api_key_source_bindings.go`): Reports back to the GUI which credential source the runtime resolved (token file vs. env vs. config) and any source conflicts
+5. **Job Status Bindings** (`job_status_bindings.go`): `ListJobStatuses()` for the first page and `ListJobStatusesPage(offset)` for subsequent pages, backing the Job Status tab
+6. **Config Bindings** (`config_bindings.go`): Configuration management
+7. **Daemon Bindings** (`daemon_bindings.go`): Daemon IPC
+8. **Event Bridge** (`event_bridge.go`): Forwards EventBus events to Wails runtime, throttles progress updates (100ms interval)
+9. **Version Bindings** (`version_bindings.go`): GitHub update check
+10. **Reporting Bindings** (`reporting_bindings.go`): Error report display
+11. **API Key Source Bindings** (`api_key_source_bindings.go`): Reports back to the GUI which credential source the runtime resolved (token file vs. env vs. config) and any source conflicts
 
 ### Frontend Stores (`frontend/src/stores/`)
 
@@ -487,17 +546,19 @@ All behavior is injected:
 4. **configStore** — API configuration and connection state
 5. **transferStore** — Transfer queue tracking with batch grouping and disk space error classification
 6. **logStore** — Activity log entries with level-aware trimming
-7. **fileBrowserStore** — File Browser state, including the four remote browse modes (My Library, My Jobs, Legacy, Trash) and selection bookkeeping
-8. **errorReportStore** — Pending error-report dialog state (current report, redacted details, modal visibility)
+7. **fileBrowserStore** — File Browser state, including the four remote browse modes (My Library, My Jobs, Legacy, Trash), the search/owner/sort controls, and selection bookkeeping. A search debounce is scoped to its browse mode so a pending one cannot land on the other mode's listing.
+8. **errorReportStore** — Pending error-report dialog state (current report, redacted details, modal visibility). Drops events whose class the backend already treats as user-fixable (`disk_space`, `auth`, `client_error`, `network`, `timeout`, `local_fs`) and will not reopen for the same `errorID` within a minute, so a duplicated event cannot interrupt repeatedly.
+9. **rateLimitStore** — Footer rate-limit indicator, driven by `stage: 'rate-limit'` log events with a lingering window so it stays steady across a burst instead of flickering
 
 ### Frontend Components (`frontend/src/components/tabs/`)
 
-1. **FileBrowserTab** — Two-pane local/remote file browser. Remote pane has four browse modes: My Library, My Jobs, Legacy, and Trash (soft-deleted entries with restore/purge actions). Upload is disabled in Trash and My Jobs modes with an explicit reason.
-2. **TransfersTab** — Transfer progress with batch grouping, cancel/retry, disk space error banner
-3. **SingleJobTab** — Job template builder with three input modes (directory, local files, remote files)
-4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration)
-5. **SetupTab** — API settings, proxy configuration, logging, auto-download daemon
-6. **ActivityTab** — Logs with level filtering, run history with expandable job tables
+1. **FileBrowserTab** — Two-pane local/remote file browser. Remote pane has four browse modes: My Library, My Jobs, Legacy, and Trash (soft-deleted entries with restore/purge actions). Search by name, owner filter (own files / shared with me), and sort by name, size or upload date, with the pagination cursor carried through search. Upload is disabled in Trash and My Jobs modes with an explicit reason.
+2. **TransfersTab** — Transfer progress with batch grouping, cancel/retry, disk space error banner. Batch rows are read a page at a time via `GetBatchTasks()`. Polling is gated on the tab being active.
+3. **SingleJobTab** — Job template builder with three input modes (directory, local files, remote files). A three-step state machine (`initial` → `jobConfigured` → `inputsReady`) with Back navigation; the form lives in `singleJobStore`, so stepping back or leaving the tab preserves what was entered.
+4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration) and its own `goBack`/`canGoBack` workflow navigation
+5. **JobStatusTab** — Paged listing of the user's most recent jobs (50 per page) with status badges, dates, and a name/ID filter. Fetches are generation-counted so a stale response cannot overwrite a newer one or wedge the loading state, and jobs whose status could not be fetched are surfaced as a warning rather than silently omitted.
+6. **SetupTab** — API settings, proxy configuration, logging, auto-download daemon
+7. **ActivityTab** — Logs with level filtering, run history with expandable job tables
 
 ### Frontend Shared Widgets (`frontend/src/components/widgets/`)
 
@@ -540,6 +601,15 @@ The daemon auto-download process routes all downloads through the same `Transfer
 - `Daemon.TransferService()` + `Daemon.Queue()` expose the shared machinery. IPC polling reads live task and batch state via `MsgGetTransferStatus` → `DaemonTransferSnapshot{Tasks, Batches}`.
 - The main Transfers tab renders daemon rows alongside GUI rows with a `Daemon` badge; per-row Cancel/Retry routes by `sourceLabel` through IPC commands (`MsgCancelDaemonBatch`, `MsgCancelDaemonTransfer`, `MsgRetryFailedInDaemonBatch`).
 - Works in both subprocess mode (macOS/Linux) and Windows service mode; service-mode routing goes through `MultiUserDaemon.userDaemon(...)` to the correct per-user daemon.
+
+### Daemon Status Reporting
+
+A background process the user cannot see needs a way to say it is broken, otherwise a failing scan (expired key, dead network, proxy trouble) shows only as a last-scan timestamp that stops advancing:
+
+- The status snapshot carries the most recent scan failure, its code and when it happened, cleared by the next scan that completes. `daemon status` prints it with the age and an actionable hint; the Setup tab renders the same error text and how stale it is.
+- Actions that could not happen do not report success. `TriggerPoll` returns *why* no scan started — stopped, paused, or a poll already running, which is also what a wedged poll looks like — and the IPC handlers and the Windows multi-daemon path propagate that rather than swallowing it, so "Scan triggered" in the GUI means a scan started.
+- "Save all settings" asks the running daemon to reload and reports what happened. Writing `daemon.conf` alone leaves a running daemon on its old settings, which used to be reported as a plain success.
+- Pre-flight validates the download folder with the same write probe `SaveDaemonConfig` gates on. A stat-only check green-lit read-only folders, and every download then failed after the user had been told setup was fine.
 
 ---
 
@@ -599,7 +669,7 @@ All transfer operations (uploads and downloads) from both CLI and GUI converge t
 
 **Storage Backend Parity**:
 - Both S3 and Azure implement identical 6 interfaces
-- Same chunk/part size (32MB via `constants.ChunkSize`)
+- Same part sizing: both call `resources.CalculateDynamicChunkSize(fileSize, threads)`, which picks 16MB / 32MB / 48MB / 64MB from the file-size tier and then caps it so `chunk * threads * 2` fits in 75% of available memory. `constants.ChunkSize` (32MB) is the base, not a fixed value; `MinChunkSize` and `MaxChunkSize` bound the result
 - Same concurrency model via orchestration layer
 - Same resume capability via `state/` package
 - Transparent to user (auto-detected via provider factory)
@@ -640,7 +710,7 @@ Validated against thread pool capacity and 75% of available memory. Applied symm
 
 ### FileInfo Enrichment
 
-`ListFolderContentsPage()` parses full metadata from folder listings (encryption keys, storage info, checksums). Downloads skip the per-file `GetFileInfo()` call. For 13,000 files: eliminates ~2+ hours of rate-limited API overhead.
+`ListFolderContentsPage()` parses full metadata from folder listings (encryption keys, storage info, checksums). Downloads therefore skip the per-file `GetFileInfo()` call, turning one API call per file into one per page. Since all v3 endpoints share a 2 req/sec budget, this is the difference between a large folder download being rate-limited by metadata and being limited by the transfer itself.
 
 **Source:** `internal/api/client.go`
 
@@ -685,25 +755,25 @@ Transfer concurrency uses two layers sharing a single global thread pool (`resou
 - Dynamic rebalancing: as files complete, freed threads become available
 
 ```
-                        ┌─────────────────────┐
-                        │  resources.Manager   │
-                        │  (Global Thread Pool)│
-                        └──────────┬──────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              │                    │                     │
-    ┌─────────▼─────────┐  ┌──────▼──────────────┐
-    │   RunBatch         │  │ StartStreamingDownloadBatch│
-    │   (known items)    │  │ (streaming — GUI folder    │
-    │   adaptive workers │  │  download AND daemon)      │
-    └─────────┬─────────┘  └──────┬──────────────┘
-              │                    │
-              └────────────────────┘
-                                   │ per file
-                        ┌──────────▼──────────┐
-                        │  AllocateTransfer    │
-                        │  (per-file threads)  │
-                        └─────────────────────┘
+                     ┌──────────────────────────┐
+                     │    resources.Manager     │
+                     │   (Global Thread Pool)   │
+                     └────────────┬─────────────┘
+                                  │
+                 ┌────────────────┴────────────────┐
+                 │                                 │
+      ┌──────────▼───────────┐   ┌─────────────────▼──────────────┐
+      │      RunBatch        │   │  StartStreamingDownloadBatch   │
+      │    (known items)     │   │  (streaming — GUI folder       │
+      │   adaptive workers   │   │   download AND daemon)         │
+      └──────────┬───────────┘   └─────────────────┬──────────────┘
+                 │                                 │
+                 └────────────────┬────────────────┘
+                                  │ per file
+                     ┌────────────▼─────────────┐
+                     │     AllocateTransfer     │
+                     │   (per-file threads)     │
+                     └──────────────────────────┘
 ```
 
 ### Conflict Resolution
@@ -753,11 +823,21 @@ Core Engine
     ├─→ 4. Upload to Storage ──→ S3/Azure (with progress)
     ├─→ 5. Register File ──────→ API: POST /api/v3/files/
     ├─→ 6. Create Job ─────────→ API: POST /api/v3/jobs/
-    └─→ 7. Submit Job ─────────→ API: POST /api/v3/jobs/{id}/submit/
+    └─→ 7. Submit Job ─────────→ API: POST /api/v2/jobs/{id}/submit/
             │
             ▼
          Rescale Platform
 ```
+
+### Job Request Construction
+
+A job payload is assembled at three independent sites, and a field added to only some of them is silently dropped rather than rejected — the platform cannot complain about a key it never received. All three must stay in sync:
+
+- typed decode of a `--job-file` (`internal/cli/jobs.go`), which needs only the struct field on `models.JobRequest`
+- `pipeline.BuildJobRequest` (`internal/pur/pipeline/pipeline.go`), which copies from `models.JobSpec`
+- `SGEMetadata.ToJobRequest` (`internal/pur/parser/sge.go`), plus the two `JobSpec` converters, so a script loaded into the GUI and saved back out keeps what it came in with
+
+The SSH access fields (`cidrRule`, `publicKey`, `sshPort`) are the worked example: the parser read `#RESCALE_INBOUND_SSH_CIDR` and `#RESCALE_PUBLIC_KEY` and then threw them away, and `JobRequest` had nowhere to put them. All three are `omitempty`, so a submit that does not set them produces a byte-identical payload. `--job-file` also warns about top-level keys the decode ignored, so a typo is named instead of vanishing.
 
 ### Download Pipeline
 
@@ -809,11 +889,21 @@ Core Engine
 - Abstract platform differences (disk space, file paths, sleep prevention)
 - Build tags for platform-specific code
 - Consistent user experience across platforms
+- A shipped bundle must not depend on the host's copy of a library it already bundles. `libwebkit2gtk` forks its helper executables (`WebKitWebProcess`, `WebKitNetworkProcess`) from a path compiled into the library, so bundling the library without the helpers makes the Linux AppImage fork the *host's* helpers — and a mismatched host WebKit fails the IPC handshake, leaving a window that paints but never renders. `build/linux/bundle-webkit.sh` copies the helpers in and gives them `$ORIGIN`-relative RPATHs; `build/linux/verify-appimage.sh` gates the release by resolving every helper's libraries with `LD_LIBRARY_PATH` deliberately unset, because setting it would hide exactly the missing RPATH that caused the original bug
 
 ### 7. Dependency Injection
 - Watch engine has zero imports from CLI packages
 - All behavior injected via function types
 - Enables sharing between native and compat modes without import cycles
+
+### 8. Truthful Status Reporting
+
+Every surface that reports an outcome must be able to distinguish success, failure, cancellation and "not yet known". This is a correctness property, not a UI nicety — a wrong answer here is worse than no answer, because it is acted on.
+
+- **Exit codes**: a command that printed a failure summary while returning nil taught scripts and CI to treat a failed run as a success. `folders upload-dir` and `pur run` now return an error when any item failed; an aborted prompt cancels the batch rather than continuing through the remaining files; a prompt that cannot run (no terminal) records the file as failed instead of dropping it silently. A cancelled run is deliberately *not* a failure.
+- **Cancellation**: see [Transfer Batch Abstraction](#6-transfer-batch-abstraction-internaltransferbatchgo). A cancelled transfer must not be able to render as a completion.
+- **Retries and throttling**: a silent retry loop is indistinguishable from a hang. Storage retries and rate-limit waits are published on every surface — progress-bar-safe stderr in the CLI, the daemon's own logger and IPC log buffer, the event bus and footer indicator in the GUI.
+- **Error messages must agree with the decision that produced them.** Rebuilding an error message at the call site from different figures than the check used is how a refusal came to read "need 292366 MB, have 312832 MB available".
 
 ---
 

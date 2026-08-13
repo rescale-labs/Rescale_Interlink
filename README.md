@@ -5,29 +5,35 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Rescale Interlink](./logo.png)
 
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)
-![Go Version](https://img.shields.io/badge/go-1.26.3-blue)
+![Go Version](https://img.shields.io/badge/go-1.26.5-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Status](https://img.shields.io/badge/status-v4.9.8-green)
+![Status](https://img.shields.io/badge/status-v4.9.9-green)
 
 ---
 
 > **FIPS 140-3 Compliance (FedRAMP Moderate)**
 >
-> Built with FIPS 140-3 compliant cryptography using Go 1.26.3 native FIPS module.
-> Use `make build` which includes FIPS automatically. Verify FIPS status with `rescale-int --version`.
+> Built with FIPS 140-3 compliant cryptography using the Go 1.26.5 native FIPS module.
+> Every `make` build target sets `GOFIPS140=certified` — the Go Cryptographic Module
+> version that holds a CMVP validation certificate — and builds with the `fips` build
+> tag. Verify FIPS status with `rescale-int --version`.
 >
 > See [Go FIPS 140-3 Documentation](https://go.dev/doc/security/fips140) for details.
 
 ---
 
-## What's New in v4.9.8
+## What's New in v4.9.9
 
-- **File Browser Trash Bin.** Soft-deleted files now flow through a new **Trash** mode in the remote pane (alongside My Library, My Jobs, and Legacy), where they can be restored or permanently removed. The Upload button is disabled in Trash view ("N/A in Trash view") for clarity.
-- **Folder uploads work cleanly through Windows junctions.** A folder upload of `C:\Users\Public` or any tree containing legacy "My Music" / "My Pictures" reparse-point junctions no longer fails mid-batch with `cannot upload a directory`. The walker now correctly identifies these entries and skips them with a WARN log so users can see what was excluded and why.
-- **Walker performance gate restored.** The defensive directory probe added to fix the junction case is now narrowed to non-regular entries, so regular files keep their original fast path — important for large folder uploads from NFS, SMB, or mapped drives.
-- **FIPS hardening + security dependency updates.** Tightened FIPS 140-3 build path; refreshed security-relevant dependencies to clear advisories.
-- **Cleaner credential source reporting.** Single authoritative DTO for "where did this credential come from" across GUI and CLI.
+- **New Job Status tab.** The GUI gains a dedicated tab listing your most recent jobs with status, dates and a name/ID filter, loading a page at a time rather than fetching everything up front.
+- **File Browser: search, owner filter, sorting and better pagination.** The remote pane can search by file name, restrict a listing to your own files or files shared with you, and sort by name, size or upload date, with the pagination cursor carried through search.
+- **Transfers tell the truth about what happened.** A cancelled folder transfer now reads as cancelled rather than as a clean completion, on the batch row and in the CLI. Storage retries and API rate-limit throttling are surfaced instead of silently stalling a transfer ([#22](https://github.com/rescale-labs/Rescale_Interlink/issues/22)), including for the detached auto-download daemon.
+- **CLI progress bars and exit codes fixed.** Diagnostic log lines are routed through the progress-bar writer instead of landing inside a redrawing frame ([#23](https://github.com/rescale-labs/Rescale_Interlink/issues/23)), and four commands that printed a failure summary while exiting 0 now exit non-zero — so scripts and CI see a failed run as failed.
+- **Auto-download daemon reliability.** A broken daemon now says so on every surface that reports its state, a zero-task download batch no longer wedges the poll loop, and its unbounded internal state is now bounded.
+- **Disk space refusals now agree with themselves.** A download could be refused with "need 292366 MB, have 312832 MB available" — need below have. The pre-flight check's own figures are reported verbatim, and free space is measured on the download directory's filesystem rather than its parent ([#34](https://github.com/rescale-labs/Rescale_Interlink/issues/34)).
+- **Job submission carries SSH access settings.** `cidrRule`, `publicKey` and `sshPort` from a job file or an SGE script now reach the API instead of being dropped during decode ([#43](https://github.com/rescale-labs/Rescale_Interlink/issues/43)).
+- **Linux AppImage renders on hosts with a different WebKit.** The AppImage now bundles the WebKitGTK helper processes it forks, with a release gate that verifies they resolve their libraries from inside the bundle. Previously a host WebKit mismatch left a window that painted but never rendered content.
+- **Toolchain pinned; tag builds gated on tests.** Go 1.26.5 and Node 20 with verified checksums, deterministic `npm ci` installs, and a release pipeline that runs the full test suite before it builds or signs anything.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -45,9 +51,11 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
 - **Configuration Management**: Interactive setup with `config init`
 - **File Operations**: Upload, download, list, and delete files (delete moves to Trash by default; `--permanent` for irreversible delete)
-- **Folder Management**: Create, list, bulk upload with connection reuse and folder caching
+- **File Tags**: List, add, remove and replace tags on a file (`files tags`)
+- **Folder Management**: Create, list, bulk upload and bulk download with connection reuse and folder caching
 - **Job Operations**: Submit, monitor, control, download results
 - **Job Watch**: Monitor running jobs and incrementally download output files
+- **Catalog Lookups**: Browse available hardware, software and automations (`hardware list`, `software list`, `automations list`)
 - **Compatibility Mode**: Drop-in replacement for `rescale-cli` (10 commands)
 - **PUR Integration**: Batch job pipeline execution
 - **Error Reporting**: Diagnostic reports with redacted context for server errors
@@ -63,33 +71,37 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
 Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 
-- **Six-Tab Interface**:
-  - **Setup**: API key, proxy configuration, logging settings, test connection
+- **Seven-Tab Interface**:
+  - **Setup**: API key, proxy configuration, logging settings, test connection, auto-download daemon
   - **Single Job**: Configure and submit individual jobs (directory with tar options, local files, or remote files)
-  - **PUR (Parallel Upload Run)**: Batch job pipeline with Pipeline Settings (workers, tar options), directory scanning
+  - **PUR (Multiple Jobs)**: Batch job pipeline (PUR = Parallel Upload and Run) with Pipeline Settings (workers, tar options) and directory scanning
+  - **Job Status**: Paged listing of your recent jobs with status, dates and a name/ID filter
   - **File Browser**: Two-pane local/remote file browser with upload/download
   - **Transfers**: Real-time transfer queue with progress, cancel, retry, disk space error banner
-  - **Activity**: Live log display with filtering, search, and run history panel
+  - **Activity Logs**: Live log display with filtering, search, and run history panel
 
 - **Modern UI**:
   - React-based responsive design
   - Tailwind CSS styling
-  - Virtual scrolling for large lists (TanStack Table)
+  - Virtual scrolling for large lists (TanStack Table + TanStack Virtual)
   - Real-time progress updates via Wails events
 
 - **File Browser**:
   - Two-pane layout (local left, remote right)
   - My Library / My Jobs / Legacy / Trash browse modes
+  - Search by file name, filter by owner (your files or files shared with you), sort by name, size or upload date
+  - Paged remote listings, with the page cursor carried through search
   - Multi-file selection with checkboxes and Shift/Ctrl
   - Upload/download with concurrent transfers
   - Delete remote files/folders (deleted entries are visible and recoverable in Trash)
 
 - **Job Management**:
-  - Template builder with searchable software/hardware selection
+  - Template builder with searchable software/hardware selection, and tags
   - CSV/JSON/SGE job file load/save
   - Directory scanning with pattern matching
   - Real-time job status updates
   - Active runs survive tab navigation and app restart
+  - Single Job's step navigation has a Back button that keeps the form state you already entered
 
 ---
 
@@ -99,7 +111,7 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 
 - macOS, Linux, or Windows
 - Rescale API key
-- For building from source: Go 1.26.3, Node.js 18+
+- For building from source: Go 1.26.5, Node.js 20, and the [Wails v2 CLI](https://wails.io/) for the GUI binary
 
 ### Installation
 
@@ -126,12 +138,22 @@ Download the latest release for your platform from [GitHub Releases](https://git
 git clone https://github.com/rescale-labs/Rescale_Interlink.git
 cd Rescale_Interlink
 
-# Install frontend dependencies
-cd frontend && npm install && cd ..
-
-# Build (includes FIPS 140-3 compliance automatically)
+# Build the CLI binary for the current platform (FIPS 140-3 automatically).
+# Output goes to bin/<version>/<os>-<arch>/rescale-int — never the project root.
 make build
 ```
+
+The GUI binary is built by Wails, not by `make`, and needs the frontend installed first:
+
+```bash
+cd frontend && npm ci && cd ..
+
+# macOS example; the CGO_LDFLAGS is macOS-only
+GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+  wails build -tags fips -platform darwin/arm64
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the per-platform GUI build invocations.
 
 ### First Run (CLI Mode)
 
@@ -154,7 +176,7 @@ rescale-int ls
 1. Launch the application (double-click `.app`, `.AppImage`, or `.exe`)
 2. Go to **Setup** tab
 3. Configure API URL and API Key
-4. Click **Test Connection**, then **Apply Changes**
+4. Click **Test Connection**, then **Save All Settings**
 5. Ready to submit jobs!
 
 ---
@@ -171,6 +193,11 @@ rescale-int upload model.tar.gz input.dat
 **Bulk upload directory:**
 ```bash
 rescale-int folders upload-dir ./simulation_data --parent-id abc123
+```
+
+**Bulk download a remote folder:**
+```bash
+rescale-int folders download-dir <folder-id> --outdir ./downloads
 ```
 
 **Download files:**
@@ -213,14 +240,15 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv
 
 ### GUI Mode
 
-The GUI provides six tabs:
+The GUI provides seven tabs:
 
 1. **Setup**: API credentials, proxy settings, logging, daemon control
 2. **Single Job**: Create and submit individual jobs (directory with tar options, local files, or remote files)
-3. **PUR**: Parallel Upload Run - batch job pipeline
-4. **File Browser**: Two-pane file manager for local and remote files
-5. **Transfers**: Monitor active transfers with progress and controls
-6. **Activity**: View real-time logs with filtering and search
+3. **PUR (Multiple Jobs)**: Parallel Upload and Run - batch job pipeline
+4. **Job Status**: Browse your recent jobs a page at a time, filtered by name or ID
+5. **File Browser**: Two-pane file manager for local and remote files
+6. **Transfers**: Monitor active transfers with progress and controls
+7. **Activity Logs**: View real-time logs with filtering and search
 
 ### Daemon Control
 
@@ -230,14 +258,20 @@ The auto-download daemon automatically downloads completed jobs. Control it via 
 # Start daemon in background with IPC control
 rescale-int daemon run --background --ipc --download-dir ./results
 
-# Query running daemon status
+# Query running daemon status — includes the most recent scan failure,
+# how long ago it happened, and what to do about it
 rescale-int daemon status
+
+# List downloaded jobs (--failed for the failures), and mark
+# failed jobs to be retried on the next poll cycle
+rescale-int daemon list
+rescale-int daemon retry
 
 # Stop running daemon
 rescale-int daemon stop
 ```
 
-In the GUI, the Setup tab provides start/stop/pause/resume buttons, status indicators, and "Scan Now" for immediate job checks. On **Windows MSI installs only**, a tray icon provides the same controls; the portable Windows distribution, macOS, and Linux do not include a tray — the main GUI and (on Windows) toast notifications fill that role.
+In the GUI, the Setup tab provides start/stop/pause/resume buttons, status indicators, and "Scan Now" for immediate job checks. A scan that fails (expired key, dead network, proxy trouble) is reported with its age rather than showing only as a last-scan timestamp that stops advancing. On **Windows MSI installs only**, a tray icon provides the same controls; the portable Windows distribution, macOS, and Linux do not include a tray — the main GUI and (on Windows) toast notifications fill that role.
 
 For auto-start on login (macOS launchd, Linux systemd), see [CLI_GUIDE.md](CLI_GUIDE.md#auto-start-on-login).
 
@@ -264,21 +298,26 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system design and code organ
 
 ### Project Structure
 
+An abridged view. [ARCHITECTURE.md](ARCHITECTURE.md) has the full package tree.
+
 ```
 rescale-int/
+├── main.go                   # GUI+CLI binary entry point (rescale-int-gui)
 ├── cmd/
-│   ├── rescale-int/          # CLI binary entry point
+│   ├── rescale-int/          # CLI-only binary entry point
 │   └── rescale-int-tray/     # Windows system tray companion (MSI install only)
 │
 ├── frontend/                 # Wails React frontend
 │   ├── src/
 │   │   ├── App.tsx           # Main app with tabs
-│   │   ├── components/       # React components
+│   │   ├── components/
+│   │   │   ├── tabs/         # The seven tab implementations
+│   │   │   └── widgets/      # Shared widgets (JobsTable, TemplateBuilder, ...)
 │   │   └── stores/           # Zustand stores
 │   └── wailsjs/              # Auto-generated Wails bindings
 │
 ├── internal/
-│   ├── cli/                  # CLI commands
+│   ├── cli/                  # CLI commands (Cobra)
 │   │   ├── compat/           # rescale-cli compatibility mode
 │   │   ├── root.go
 │   │   ├── files.go
@@ -291,8 +330,10 @@ rescale-int/
 │   ├── services/             # GUI-agnostic services (TransferService, FileService)
 │   ├── cloud/                # Cloud storage backends (S3, Azure)
 │   ├── daemon/               # Auto-download daemon
+│   ├── service/              # Windows service mode
 │   ├── ipc/                  # Inter-process communication
-│   ├── api/                  # Rescale API client
+│   ├── api/                  # Rescale API client (v3 + v2)
+│   ├── ratelimit/            # Token bucket rate limiting + cross-process coordinator
 │   ├── events/               # Event bus system
 │   ├── watch/                # Shared job watch/poll engine
 │   ├── reporting/            # Error diagnostic reports
@@ -300,9 +341,13 @@ rescale-int/
 │   ├── transfer/             # Transfer orchestration
 │   │   ├── scan/             # Remote folder scanning
 │   │   └── folder/           # Folder upload primitives
+│   ├── resources/            # Thread pool and adaptive concurrency
+│   ├── progress/             # CLI progress bars (mpb wrapper)
+│   ├── crypto/               # AES-256-CBC streaming encryption
 │   ├── core/                 # Core engine
 │   └── pur/                  # PUR pipeline packages
 │
+├── build/                    # Packaging assets and platform build scripts
 ├── CLI_GUIDE.md              # Complete CLI reference
 ├── ARCHITECTURE.md           # System architecture
 ├── CONTRIBUTING.md           # Contribution guide
@@ -317,17 +362,26 @@ rescale-int/
 # Development with hot reload
 wails dev -appargs "--gui"
 
-# Production build (macOS arm64)
+# CLI builds (all FIPS 140-3)
 make build-darwin-arm64
-
-# Cross-platform builds
 make build-linux-amd64
 make build-windows-amd64
+
+# Everything make can do
+make help
+```
+
+Checks, matching what the release pipeline runs before it builds anything:
+
+```bash
+make test                                 # go test under GOFIPS140=certified -tags fips
+GOFIPS140=certified go vet -tags fips ./...
+make check                                # compile check, no binary output
 ```
 
 Frontend development:
 ```bash
-cd frontend && npm install && npm run build
+cd frontend && npm ci && npm run test:run && npm run lint && npm run build
 ```
 
 After changing Go binding methods: `wails generate module`
@@ -340,21 +394,24 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development setup and guidel
 
 **Connection Issues:** Verify API key (`echo $RESCALE_API_KEY`), check proxy settings in Setup tab, try `system` proxy mode.
 
-**Build Failures:** Clean and rebuild: `make clean && cd frontend && rm -rf node_modules && npm install && cd .. && make build`
+**Build Failures:** Clean and rebuild: `make clean && cd frontend && rm -rf node_modules && npm ci && cd .. && make build`
+
+**A CLI transfer looks like it is doing nothing:** transfer diagnostics are hidden at default verbosity so they cannot corrupt the progress bars. Re-run with `--verbose` (or `--debug`, or set `RESCALE_DEBUG`) to see them; they are then interleaved above the bars. Rate-limit and retry notices are always shown.
 
 ---
 
 ## Known Limitations
 
 - Compat mode covers 10 of rescale-cli's commands; software publisher (spub) commands are not yet supported
-- No support for Rescale CFS or Publisher capabilities
+- No support for Rescale CFS or Publisher capabilities. In compat mode, `upload --copy-to-cfs` and `upload -T/--Target` return an explicit "not yet implemented" error rather than silently doing nothing
 - Terminal resize during CLI progress bars causes visual artifacts (transfers continue correctly)
+- The system tray and the installable system service are Windows-only. macOS and Linux run the auto-download daemon as a session-scoped subprocess; auto-start on login is manual (see [CLI_GUIDE.md](CLI_GUIDE.md#auto-start-on-login))
 
 ---
 
 ## License
 
-MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
+MIT License - see [LICENSE](LICENSE) for the full text
 
 ---
 
@@ -370,6 +427,6 @@ MIT License - see [CONTRIBUTING.md](CONTRIBUTING.md) for details
 
 ---
 
-**Version**: 4.9.8
+**Version**: 4.9.9
 **Status**: Production Ready
-**Last Updated**: May 31, 2026
+**Last Updated**: August 12, 2026
