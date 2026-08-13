@@ -11,7 +11,58 @@ permissions:
   contents: read
 
 jobs:
+  # Gate every tag build on the same checks that run locally. The frontend is
+  # built before the Go steps because main.go embeds frontend/dist, which is
+  # not in the repository — without it the Go build cannot load package main.
+  verify:
+    name: Verify
+    runs-on: macos-14  # Apple Silicon (M1) runner
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Go 1.26.5
+        run: |
+          curl -fL -o go1.26.5.darwin-arm64.tar.gz https://go.dev/dl/go1.26.5.darwin-arm64.tar.gz
+          # Official sha256 from https://go.dev/dl/?mode=json&include=all
+          echo "efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a  go1.26.5.darwin-arm64.tar.gz" | shasum -a 256 -c -
+          sudo rm -rf /usr/local/go
+          sudo tar -C /usr/local -xzf go1.26.5.darwin-arm64.tar.gz
+          rm go1.26.5.darwin-arm64.tar.gz
+          echo "/usr/local/go/bin" >> $GITHUB_PATH
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run frontend tests
+        run: npm run test:run
+        working-directory: frontend
+
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Vet Go sources
+        run: GOFIPS140=certified go vet -tags fips ./...
+
+      - name: Run Go tests
+        run: make test
+
   windows-build:
+    needs: [verify]
     runs-on: windows-latest
     environment: production
 
@@ -101,6 +152,7 @@ jobs:
             !rescale-interlink-${{ github.ref_name }}-win_amd64.wixpdb
 
   macos-build:
+    needs: [verify]
     runs-on: macos-14  # Apple Silicon (M1) runner
     environment: production
 
