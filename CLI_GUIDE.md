@@ -1,9 +1,9 @@
 # Rescale Interlink CLI Guide
 
-Complete command-line interface reference for `rescale-int` v4.9.8.
+Complete command-line interface reference for `rescale-int` v4.9.9.
 
-**Version:** 4.9.8
-**Build Date:** May 31, 2026
+**Version:** 4.9.9
+**Build Date:** August 12, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -14,6 +14,8 @@ For a comprehensive list of all features with source code references, see [FEATU
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Global Flags](#global-flags)
+- [Exit Codes](#exit-codes)
+- [Output, Retries, and Rate Limits](#output-retries-and-rate-limits)
 - [Quick Start](#quick-start)
 - [Command Reference](#command-reference)
   - [Config Commands](#config-commands)
@@ -27,10 +29,12 @@ For a comprehensive list of all features with source code references, see [FEATU
   - [Automations Commands](#automations-commands)
   - [PUR (Parallel Upload and Run) Commands](#pur-parallel-upload-and-run-commands)
   - [Shortcuts](#shortcuts)
+- [Shell Completion](#shell-completion)
 - [Compatibility Mode](#compatibility-mode)
 - [Compatibility Reference](#compatibility-reference)
-- [Shell Completion](#shell-completion)
 - [Examples](#examples)
+- [Performance Tips](#performance-tips)
+- [Troubleshooting](#troubleshooting)
 
 ## System Requirements
 
@@ -189,8 +193,13 @@ rescale-int files upload myfile.txt --debug
 
 When debug mode is enabled:
 - Shows detailed operation logs
-- Displays debug-level messages for troubleshooting
+- Displays the transfer path's `[BATCH]`, `[SLOT]`, `[CRED]` and `[TIMING]` diagnostics
 - Useful for diagnosing upload/download issues
+
+At default verbosity those diagnostics are suppressed entirely. When you ask for
+them they are written through the progress display rather than around it, so they
+appear as whole lines above the progress bars instead of tearing them. Setting
+`RESCALE_DEBUG` to any non-empty value has the same effect as `--verbose`.
 
 ### Performance Tuning
 
@@ -235,6 +244,78 @@ export RESCALE_DEBUG=1
 ```
 
 This enables debug output in the GUI application console.
+
+## Exit Codes
+
+Native CLI commands use these exit codes:
+
+| Code | Meaning |
+|-----:|---------|
+| `0` | The command did what it was asked to do |
+| `1` | The command failed, or completed with failures |
+| `2` | The binary was not built with FIPS 140-3 support (startup refusal) |
+
+Code `1` covers partial failures, not just outright errors. A batch command that
+transfers some files and fails others exits non-zero, so scripts and CI see the
+failure:
+
+- `files upload`, `files download`, and `jobs download` fail when any file in the batch
+  failed. Files you chose to skip are reported separately and are not failures.
+- `folders upload-dir` fails when any file, directory walk, or folder creation failed.
+- `folders download-dir` fails when any file failed.
+- `pur run` and `pur resume` fail when any job in the pipeline failed. A run you
+  cancelled is not a failure.
+- Choosing **Abort** at a conflict or error prompt stops the batch and exits non-zero.
+  Remaining files are not uploaded.
+- A prompt that cannot run — no terminal, so the read fails immediately — is
+  recorded as a failure rather than silently skipping the file. Pass the flag that
+  answers the question (`--overwrite`, `--skip`, `--merge`, `--confirm`,
+  `--continue-on-error`, or a duplicate-handling flag) when running non-interactively.
+
+Destructive confirmations (`files delete`, `folders delete`, `jobs delete`,
+`jobs stop`) fail and name `--confirm` when there is no terminal to prompt on. An
+explicit "no" at an interactive prompt still cancels quietly with exit code `0`.
+
+Compat mode uses rescale-cli's convention instead: `0` on success, `33` on error.
+See [Compatibility Mode](#compatibility-mode).
+
+## Output, Retries, and Rate Limits
+
+### Retries are visible and bounded
+
+Transient storage and API failures are retried automatically. From the second
+attempt onward each retry prints a one-line notice naming the operation, the
+attempt number, the cause class, and the next backoff:
+
+```
+⟳ Retrying PutObject (attempt 3/10, network): dial tcp: i/o timeout — waiting 4s
+```
+
+A single retry is routine and is not reported. Notices go through the progress
+display, so they land above the bars rather than through them.
+
+Every retried operation has its own 90-second wall-clock budget. When the budget
+runs out the operation stops retrying and fails with `retries exhausted after Xs`,
+quoting up to 200 bytes of the server's own response so the diagnostic survives.
+This bounds a single stalled call, not a whole multi-part transfer.
+
+### Rate limit notices
+
+Interlink rate-limits itself with a token bucket shared across processes by a
+coordinator. Two situations produce output:
+
+- **Waiting on the limiter.** When a call sleeps 5 seconds or more, the CLI says what
+  it is waiting on and for how long. A server-supplied `Retry-After` longer than the
+  client's cap is reported as asked-for-versus-applied.
+- **Degraded mode.** If the coordinator is unreachable, each scope falls back to an
+  emergency cap and says so once per transition, for example
+  `Rate limit coordinator unavailable — user API calls capped at 0.25 req/s until it
+  reconnects`. A matching notice is printed when it reconnects.
+
+These notices deliberately bypass the standard logger so they survive at default
+verbosity — a transfer that is crawling because the server is refusing calls should
+say so. A detached daemon (`daemon run --background`) writes them to its log file and
+IPC log buffer instead of stderr.
 
 ## Quick Start
 
@@ -325,15 +406,15 @@ rescale-int files upload <file> [file...] [flags]
 
 **Features:**
 - Automatic encryption (AES-256-CBC) before upload
-- Multi-part upload for files >100MB (32MB chunks)
-- Automatic resume on interruption (state saved to `.rescale-upload-state`)
+- Multi-part upload for files larger than 100MB (32MB parts by default)
+- Automatic resume on interruption (state saved to a `<file>.upload.resume` sidecar)
 - Progress bars with transfer speed and ETA
 - Support for both S3 and Azure storage backends
 - Duplicate detection with configurable handling modes
 
 **Flags:**
 - `-d, --folder-id string` - Target folder ID
-- `--max-concurrent int` - Maximum concurrent uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `--max-concurrent int` - Maximum concurrent uploads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
 - `--tags string` - Comma-separated tags to apply to each uploaded file (e.g. `"simulation,cfd,v2"`)
 - `--check-duplicates` - Check for existing files before uploading (prompts for each duplicate)
 - `--no-check-duplicates` - Skip duplicate checking (fast mode, may create duplicates)
@@ -373,7 +454,7 @@ rescale-int files upload *.dat --dry-run --check-duplicates
 rescale-int files upload large_dataset.tar.gz
 ```
 
-**Note:** Files are encrypted locally using AES-256-CBC before upload. Decryption happens automatically on download. See [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md#security--encryption) for encryption details.
+**Note:** Files are encrypted locally using AES-256-CBC before upload. Decryption happens automatically on download. See [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md#encryption) for encryption details.
 
 #### files download
 Download files from Rescale
@@ -384,15 +465,15 @@ rescale-int files download <file-id> [file-id...] [flags]
 
 **Features:**
 - Automatic decryption after download
-- Chunked download for large files (>100MB, 32MB chunks)
+- Chunked download for files larger than 100MB (32MB chunks by default)
 - Progress bars during download and decryption
-- Resume capability for interrupted downloads (state saved to `.rescale-download-state`)
+- Resume capability for interrupted downloads (state saved to a `<file>.download.resume` sidecar)
 - Streaming decryption using 16KB chunks (prevents memory exhaustion)
 - Concurrent chunk downloads for large files
 
 **Flags:**
 - `-o, --outdir string` - Output directory (default: current directory)
-- `-m, --max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `-m, --max-concurrent int` - Maximum concurrent downloads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
 - `-w, --overwrite` - Overwrite existing files without prompting
 - `-S, --skip` - Skip existing files without prompting
 - `-r, --resume` - Resume interrupted downloads without prompting
@@ -425,9 +506,9 @@ rescale-int files list [flags]
 
 **Flags:**
 - `-n, --limit int` - Maximum number of files to list (default 20)
-- `--include strings` - Include only files matching these glob patterns (comma-separated or repeated)
-- `-x, --exclude strings` - Exclude files matching these glob patterns (comma-separated or repeated)
-- `-s, --search string` - Free-text search across file names
+- `--include string` - Include only files matching these glob patterns (comma-separated, e.g. `"*.dat,*.log"`)
+- `-x, --exclude string` - Exclude files matching these glob patterns (comma-separated, e.g. `"debug*,temp*"`)
+- `-s, --search string` - Include only files whose name contains one of these terms (comma-separated, case-insensitive)
 
 **Example:**
 ```bash
@@ -443,9 +524,12 @@ rescale-int files delete -i <file-id> [-i <file-id>...] [-y] [--permanent]
 ```
 
 **Flags:**
-- `-i, --fileid strings` - File ID(s) to delete (repeat the flag for multiple files)
+- `-i, --fileid stringArray` - File ID to delete; repeat the flag for multiple files (required)
 - `-y, --confirm` - Skip confirmation prompt
 - `--permanent` - Permanently delete instead of moving to Trash (irreversible)
+
+Positional arguments are rejected — `files delete --fileid A B C` used to delete `A`
+and silently discard `B` and `C`, so every ID must carry its own `-i/--fileid`.
 
 **Example:**
 ```bash
@@ -532,7 +616,7 @@ rescale-int folders upload-dir <directory> [flags]
 
 **Flags:**
 - `--parent-id string` - Parent folder ID (default: My Library root)
-- `--max-concurrent int` - Maximum concurrent file uploads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `--max-concurrent int` - Maximum concurrent file uploads, 1-20. Left unset, the cap is raised to 20 so adaptive concurrency can scale up for small files; set it explicitly to pin a fixed cap
 - `--folder-concurrency int` - Maximum concurrent folder-creation API calls (default 15, range 1-30)
 - `--include-hidden` - Include hidden files (starting with .)
 - `--tags string` - Comma-separated tags to apply to each uploaded file (e.g. `"simulation,cfd,v2"`)
@@ -543,11 +627,12 @@ rescale-int folders upload-dir <directory> [flags]
 - `--check-conflicts` - Check for existing files before upload (slower but shows conflicts upfront)
 
 **Conflict Handling Modes:**
-- **Skip** (`-S`): If root folder already exists, abort the upload
+- **Skip** (`-S`): Skip subfolders that already exist on Rescale. The root folder cannot be skipped — if it already exists, the upload is cancelled with an error
 - **Merge** (`-m`): Use existing folders and skip files that already exist
-- **Interactive mode (no flags)**: Prompts for conflict handling mode when folder exists
+- **Interactive mode (no flags)**: Prompts for conflict handling mode when a folder exists
+- **Non-interactive**: With no terminal to prompt on, the command fails and names `--skip-folder-conflicts` / `--merge-folder-conflicts`
 
-**Performance Note:** Concurrent uploads (max 5 simultaneous) with connection reuse for maximum throughput.
+**Performance Note:** Files upload concurrently with connection reuse. Folder creation runs concurrently too (`--folder-concurrency`, default 15).
 
 **Examples:**
 ```bash
@@ -590,7 +675,7 @@ rescale-int folders download-dir <folder-id> [flags]
 
 **Flags:**
 - `-o, --outdir string` - Output directory for downloaded files (default: current directory)
-- `--max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `--max-concurrent int` - Maximum concurrent downloads, 1-20. Left unset, the cap is raised to 20 so adaptive concurrency can scale up for small files; set it explicitly to pin a fixed cap
 - `-S, --skip` - Skip existing files/folders without prompting
 - `-w, --overwrite` - Overwrite existing files without prompting
 - `-m, --merge` - Merge into existing folders, skip existing files
@@ -682,12 +767,16 @@ rescale-int jobs get -j <job-id>
 ```
 
 **Flags:**
-- `-j, --job-id string` - Job ID (required)
+- `-j, --job-id string` - Job ID (required; `--id` is accepted as an alias)
 
 **Example:**
 ```bash
 rescale-int jobs get -j WfbQa
 ```
+
+`--job-id` and `--id` write the same value, so passing both is rejected rather than
+silently acting on whichever came last. This applies to `jobs get`, `jobs delete`,
+and `jobs download`.
 
 #### jobs stop
 Stop a running job
@@ -760,14 +849,14 @@ rescale-int jobs download -j <job-id> [flags]
 - `--file-id string` - Specific file ID to download (optional)
 - `-d, --outdir string` - Output directory for batch download
 - `-o, --output string` - Output file path (for single file)
-- `-m, --max-concurrent int` - Maximum concurrent downloads (default: adaptive based on file sizes, up to 20; set explicitly to override)
+- `-m, --max-concurrent int` - Maximum concurrent downloads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
 - `-w, --overwrite` - Overwrite existing files
 - `-S, --skip` - Skip existing files
 - `-r, --resume` - Resume interrupted downloads
-- `-s, --search string` - Filter files by search term
-- `-x, --exclude string` - Exclude files matching pattern
-- `--filter string` - Include only files matching glob pattern(s); comma-separated
-- `--path-filter string` - Match `--filter` against the full path rather than just the filename
+- `-s, --search string` - Include only files whose name contains one of these terms (comma-separated, case-insensitive)
+- `-x, --exclude string` - Exclude files matching these glob patterns (comma-separated)
+- `--filter string` - Include only files matching these glob patterns; comma-separated. Matched against the filename
+- `--path-filter string` - Include only files matching these path patterns. Matched against the file's path within the job, and supports `**` for recursive matching (e.g. `"run_1/*.dat"`, `"**/results/*.csv"`)
 - `--skip-checksum` - Skip post-download checksum verification (not recommended)
 
 **Examples:**
@@ -804,7 +893,7 @@ Monitor a running job's status and incrementally download output files as they b
 - `--filter string` - Include globs, comma-separated (single-job mode only)
 - `-x, --exclude string` - Exclude globs, comma-separated (single-job mode only)
 - `-s, --search string` - Search terms, comma-separated (single-job mode only)
-- `-m, --max-concurrent int` - Maximum concurrent downloads
+- `-m, --max-concurrent int` - Maximum concurrent downloads, 1-20 (default 5)
 
 **Examples:**
 ```bash
@@ -868,8 +957,33 @@ rescale-int jobs submit --job-id <id>
 - `-E, --end-to-end` - Full workflow: upload, create, submit, monitor, download
 - `--download` - Auto-download results after job completes (requires `--end-to-end`)
 - `--no-tar` - Skip tarball creation for single file uploads
-- `-m, --max-concurrent int` - Maximum concurrent file uploads
+- `-m, --max-concurrent int` - Maximum concurrent file uploads, 1-20 (default 5)
 - `--automation strings` - Automation ID(s) to attach (comma-separated or repeated)
+
+**SGE script directives** (`--script`): `#RESCALE_NAME`, `#RESCALE_COMMAND`,
+`#RESCALE_ANALYSIS`, `#RESCALE_ANALYSIS_VERSION`, `#RESCALE_CORES`,
+`#RESCALE_CORES_PER_SLOT`, `#RESCALE_SLOTS`, `#RESCALE_WALLTIME`, `#RESCALE_TAGS`,
+`#RESCALE_PROJECT_ID`, `#RESCALE_INBOUND_SSH_CIDR`, `#RESCALE_PUBLIC_KEY`,
+`#RESCALE_USER_DEFINED_LICENSE_SETTINGS`, `#RESCALE_AUTOMATION`,
+`#RESCALE_ENV_<NAME>`, and `#USE_RESCALE_LICENSE`. The qsub forms `#$ -l key=value`,
+`#$ -N NAME`, and `#$ -pe smp N` are read as fallbacks — `#RESCALE_*` directives take
+precedence. If `#RESCALE_COMMAND` is absent the script body is used as the command.
+
+**SSH access to the running job:** A job specification can request inbound SSH.
+Three fields carry it, and all three reach the Rescale API:
+
+| JSON key (`--job-file`) | SGE directive (`--script`) | Meaning |
+|---|---|---|
+| `cidrRule` | `#RESCALE_INBOUND_SSH_CIDR` | CIDR range allowed to connect |
+| `publicKey` | `#RESCALE_PUBLIC_KEY` | Public key authorized for the job user |
+| `sshPort` | (JSON only) | Inbound SSH port |
+
+All three are omitted from the request when unset, so a specification that does not
+use them produces the same payload as before.
+
+**Unknown keys in `--job-file`:** Top-level JSON keys that Interlink does not model
+are not sent to Rescale. They are now named in a warning and the submit continues, so
+a typo'd or unsupported field is visible instead of vanishing silently.
 
 **Job tags:** Tags are applied to the created job from the `tags` column of a
 jobs CSV or the `#RESCALE_TAGS` directive of an SGE script. In both cases tags
@@ -952,7 +1066,13 @@ Send a clean shutdown request to a running daemon over IPC.
 rescale-int daemon stop
 ```
 
-Returns once the daemon has acknowledged the request. If no daemon is running (no IPC socket), prints a clear message and exits non-zero. To stop all per-user daemons in Windows service mode, use `rescale-int service stop` instead.
+Requires the daemon to have been started with `--ipc`. Returns once the daemon has
+acknowledged and exited, waiting up to 5 seconds. If no daemon is running it prints
+"No running daemon detected." and exits `0`. If a daemon process exists but IPC is not
+responding, it says so and tells you how to terminate the process by PID.
+
+To stop all per-user daemons in Windows service mode, use `rescale-int service stop`
+from an elevated prompt instead — `daemon stop` there only pauses your own daemon.
 
 #### daemon config
 
@@ -968,14 +1088,15 @@ rescale-int daemon config show
 
 Shows all settings from the config file with current values.
 
+If the file does not exist yet, the defaults are shown and labelled as such.
+
 **Example output:**
 ```
-Daemon Configuration (~/.config/rescale/daemon.conf)
-====================================================
+Config file: /Users/you/.config/rescale/daemon.conf
 
 [daemon]
 enabled = true
-download_folder = ~/Downloads/rescale-jobs
+download_folder = /Users/you/Downloads/rescale-jobs
 poll_interval_minutes = 5
 use_job_name_dir = true
 max_concurrent = 5
@@ -988,6 +1109,10 @@ exclude = test,debug
 
 [eligibility]
 auto_download_tag = autoDownload
+
+# Note: Mode (Enabled/Conditional/Disabled) is set per-job via the
+# 'Auto Download' custom field in Rescale workspace, not here.
+# Downloaded tag (hardcoded): autoDownloaded:true
 
 [notifications]
 enabled = true
@@ -1031,16 +1156,23 @@ rescale-int daemon config set <key> <value>
 
 **Available keys:**
 - `enabled` - Enable/disable daemon (true/false)
-- `download_folder` - Download directory path
-- `poll_interval_minutes` - Poll interval in minutes (1-60)
+- `download_folder` - Download directory path (resolved to an absolute path)
+- `poll_interval_minutes` - Poll interval in minutes (1-1440)
 - `use_job_name_dir` - Use job name for subdirectories (true/false)
-- `max_concurrent` - Max concurrent downloads (1-20)
-- `lookback_days` - How many days back to check for jobs (1-30)
+- `max_concurrent` - Max concurrent downloads (1-10)
+- `lookback_days` - How many days back to check for jobs (1-365)
 - `name_prefix` - Job name prefix filter
 - `name_contains` - Job name contains filter
 - `exclude` - Comma-separated exclude patterns
 - `auto_download_tag` - Job tag that opts a job into auto-download
 - `notifications_enabled` - Enable notifications (true/false)
+- `show_download_complete` - Notify on successful download (true/false)
+- `show_download_failed` - Notify on failed download (true/false)
+
+Booleans accept `true`, `1`, or `yes`; anything else reads as false. `correctness_tag`
+is still accepted as a deprecated alias for `auto_download_tag`. `mode`,
+`auto_download_value`, and `downloaded_tag` are no longer settable and print a note
+explaining that mode moved to the per-job custom field. Any other key is an error.
 
 **Examples:**
 ```bash
@@ -1059,19 +1191,17 @@ rescale-int daemon config set enabled true
 
 ##### daemon config init
 
-Interactive daemon configuration setup. Refuses to overwrite an existing `daemon.conf` — use `daemon config edit` to modify one in place.
+Create a fresh `daemon.conf` with default values. Not interactive. Refuses to
+overwrite an existing file — use `daemon config edit` or `daemon config set` to modify
+one in place.
 
 ```bash
 rescale-int daemon config init
 ```
 
-Prompts for common settings and creates a fresh `daemon.conf`.
-
-**Example:**
-```bash
-rescale-int daemon config init
-# Interactive prompts for download folder, poll interval, etc.
-```
+Prints the created path and the defaults it wrote (download folder, poll interval, max
+concurrent, and whether auto-download is enabled — it is off by default, so set
+`enabled true` to turn it on).
 
 ##### daemon config validate
 
@@ -1091,7 +1221,7 @@ Custom Fields Enabled: true
 'Auto Download' Field: true
   - Type: select
   - Section: Context
-  - Values: [Enable Disable]
+  - Values: [Enabled Disabled Conditional]
 'Auto Download Path' Field: false (optional)
 
 ✓ Workspace is properly configured for auto-download.
@@ -1105,6 +1235,10 @@ Custom Fields Enabled: true
    - **Type**: Select (dropdown)
    - **Values**: `Enabled`, `Disabled`, and optionally `Conditional`
 3. Set the field per job: `Enabled` opts the job into auto-download, `Disabled` (or unset) skips it. A job set to `Conditional` is downloaded only if it also carries the tag named by `auto_download_tag` in `daemon.conf` (default `autoDownload`).
+
+The three values are matched case-insensitively, but the words themselves matter —
+`Enabled`, `Disabled`, `Conditional`. A value the daemon does not recognize is treated
+as ineligible and the job is skipped, so `Enable` will not opt a job in.
 
 #### Auto-Start on Login
 
@@ -1207,7 +1341,8 @@ systemctl --user disable rescale-interlink
 
 #### daemon status
 
-Show daemon state and statistics.
+Show daemon state and statistics. There are two views, chosen by whether a running
+daemon answers over IPC.
 
 ```bash
 rescale-int daemon status [flags]
@@ -1216,16 +1351,26 @@ rescale-int daemon status [flags]
 **Flags:**
 - `--state-file string` - Path to daemon state file
 
+**Live view** (a daemon is running with `--ipc`):
+- Running / paused state, version, uptime
+- Active downloads
+- Last scan time, with how long ago it was
+- **Last error**, with its age and an actionable hint — a scan that failed on an expired
+  key, a dead network, or proxy trouble now says so instead of leaving a last-scan
+  timestamp that quietly stops advancing. The error is cleared by the next scan that
+  completes
+- Per-user detail (download folder, jobs downloaded) where the daemon reports it
+
+**State-file view** (no daemon answering):
+- Whether a daemon process was found at all, and whether it is likely missing `--ipc`
+- Last poll time
+- Number of downloaded jobs and failed downloads
+- Recent download history, and failed downloads with their error text
+
 **Example:**
 ```bash
 rescale-int daemon status
 ```
-
-Output includes:
-- Last poll time
-- Number of downloaded jobs
-- Number of failed downloads
-- Recent download history
 
 #### daemon list
 
@@ -2132,12 +2277,18 @@ rescale-int files upload file.tar.gz --no-auto-scale
 - `--max-concurrent N`: Override adaptive file-level concurrency with a fixed value
 
 **Adaptive concurrency:**
-Folder uploads and downloads automatically scale concurrent transfers based on file size distribution:
+All batch transfers scale their concurrency to the file size distribution, within the
+`--max-concurrent` cap:
 - Many small files (<100MB): up to 20 concurrent transfers
 - Medium files (100MB–1GB): up to 10 concurrent transfers
 - Large files (>1GB): up to 5 concurrent transfers (more threads per file)
 
-The adaptive count is validated against available system memory and thread pool capacity. Use `--max-concurrent N` to override with a fixed value if needed.
+The cap differs by command. `folders upload-dir` and `folders download-dir` raise it to
+20 when you do not set `--max-concurrent`, so adaptive scaling can reach the top of that
+range. `files upload`, `files download`, `jobs download`, and `jobs watch` default to a
+cap of 5 — raise it explicitly (up to 20) for a directory full of small files.
+
+The adaptive count is validated against available system memory and thread pool capacity.
 
 ### General Tips
 
@@ -2187,6 +2338,36 @@ rescale-int jobs tail --job-id WfbQa
 # List job files to verify outputs
 rescale-int jobs listfiles --job-id WfbQa
 ```
+
+### A Command Looks Hung
+
+Retries are bounded and reported. If a transfer or API call stalls, watch for the
+`⟳ Retrying ...` lines: they name the operation, the attempt, and the backoff. Each
+operation gives up after 90 seconds of retrying with `retries exhausted after Xs`, which
+quotes the server's own response. If you instead see rate limit notices, the server or
+the local limiter is throttling you and the wait is expected. See
+[Output, Retries, and Rate Limits](#output-retries-and-rate-limits).
+
+### Download Refused for Disk Space
+
+```
+insufficient disk space for <file>: need N MB, have M MB available
+```
+
+The legacy download path holds the encrypted and decrypted copies at once, so it
+requires roughly 2x the file size plus a 15% margin. The reported `need` figure is the
+requirement that was actually enforced, and the available figure is measured on the
+filesystem holding the output directory — including when that directory is its own mount
+point. If `need` looks larger than the file, that is the 2x-plus-margin rule, not an
+error in the message.
+
+### Non-Interactive Runs
+
+In CI or over a pipe there is no terminal to prompt on. Commands that would ask a
+question fail and name the flag that answers it rather than guessing. Supply the
+relevant flag up front: `--overwrite` / `--skip` / `--resume` / `--merge` for conflicts,
+`--confirm` for destructive operations, `--continue-on-error` for error prompts, and one
+of the duplicate-handling flags for `files upload`.
 
 ## Support
 
