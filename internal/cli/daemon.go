@@ -1226,14 +1226,23 @@ This command checks:
 3. Whether the optional "Auto Download Path" custom field exists
 
 The auto-download daemon requires a custom field named "Auto Download" to be
-configured in your Rescale workspace. Jobs with this field set to the configured
-value (default: "Enable") will be automatically downloaded when completed.
+configured in your Rescale workspace. The daemon recognizes exactly three
+values, matched case-insensitively:
+
+  Enabled      - download the job when it completes
+  Conditional  - download only if the job also carries the tag named by
+                 auto_download_tag in daemon.conf (default: autoDownload)
+  Disabled     - never auto-download the job
+
+These values are fixed and cannot be changed in Interlink. A job whose field
+is unset, or set to anything the daemon does not recognize, is skipped —
+including near-misses such as "Enable" and "Disable".
 
 To create the custom field:
 1. Go to Rescale Platform → Workspace Settings → Custom Fields
 2. Create a new Job custom field named "Auto Download"
-3. Set Type to "Select" (dropdown) or "Text"
-4. If using Select, add options like "Enable", "Disable"`,
+3. Set Type to "Select" (Option List)
+4. Add all three options: "Enabled", "Conditional", "Disabled"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Load app config for API client
 			cfg, err := loadConfig()
