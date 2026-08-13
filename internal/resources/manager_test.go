@@ -115,7 +115,11 @@ func TestMultipleAllocations(t *testing.T) {
 }
 
 func TestFileSizeAllocation(t *testing.T) {
-	mgr := NewManager(Config{MaxThreads: 16, AutoScale: true})
+	// Per-file allocation is capped at the core count, so the expectations below
+	// only hold on a machine with enough cores. Pin a 16-core machine to keep the
+	// tiers (and not the host) the thing under test.
+	allocatorConfig := Config{MaxThreads: 16, AutoScale: true, CPUCores: 16}
+	mgr := NewManager(allocatorConfig)
 
 	tests := []struct {
 		name       string
@@ -157,7 +161,7 @@ func TestFileSizeAllocation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset manager for each test
-			mgr = NewManager(Config{MaxThreads: 16, AutoScale: true})
+			mgr = NewManager(allocatorConfig)
 
 			allocated := mgr.AllocateForTransfer("test", tt.fileSize, tt.totalFiles)
 			if allocated < tt.expectMin || allocated > tt.expectMax {

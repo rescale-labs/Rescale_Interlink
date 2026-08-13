@@ -15,6 +15,7 @@ type Manager struct {
 	totalThreads        int            // Total threads in the pool
 	availableThreads    int            // Currently available (not allocated)
 	baselineThreads     int            // Baseline calculated from CPU cores
+	cpuCores            int            // Logical cores this manager plans against
 	memoryLimit         int            // Max threads based on memory
 	autoScale           bool           // Whether auto-scaling is enabled
 	aggressiveMode      bool           // Use more threads for large files
@@ -29,12 +30,21 @@ type Config struct {
 	AutoScale           bool  // Enable auto-scaling
 	AggressiveMode      bool  // More aggressive thread allocation for large files
 	AggressiveThreshold int64 // File size threshold for aggressive mode (default 100MB)
+
+	// CPUCores overrides the logical core count used for thread math
+	// (0 = detect with runtime.NumCPU()). Per-file allocation is capped at the
+	// core count, so tests set this to pin allocation to a synthetic machine
+	// rather than to whatever host they happen to run on.
+	CPUCores int
 }
 
 // NewManager creates a new resource manager
 func NewManager(config Config) *Manager {
 	// Calculate baseline from CPU cores
-	cores := runtime.NumCPU()
+	cores := config.CPUCores
+	if cores < 1 {
+		cores = runtime.NumCPU()
+	}
 	baselineThreads := cores * 2
 	if baselineThreads > constants.MaxBaselineThreads {
 		baselineThreads = constants.MaxBaselineThreads
@@ -84,6 +94,7 @@ func NewManager(config Config) *Manager {
 		totalThreads:        totalThreads,
 		availableThreads:    totalThreads,
 		baselineThreads:     baselineThreads,
+		cpuCores:            cores,
 		memoryLimit:         memoryThreads,
 		autoScale:           config.AutoScale,
 		aggressiveMode:      aggressiveMode,
@@ -207,7 +218,7 @@ type ManagerStats struct {
 // calculateDesiredThreads determines how many threads a transfer should get
 // This is called with the lock already held
 func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
-	cpuCores := runtime.NumCPU()
+	cpuCores := m.cpuCores
 
 	// For small files, use sequential
 	if fileSize < constants.SmallFileThreshold {

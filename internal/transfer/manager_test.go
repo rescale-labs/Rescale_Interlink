@@ -159,7 +159,9 @@ func TestSmallFileAllocation(t *testing.T) {
 }
 
 func TestLargeFileAllocation(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 16, AutoScale: true})
+	// Per-file allocation is capped at the core count, so pin a 16-core machine:
+	// on a smaller host the pool size (16) would not be the binding constraint.
+	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 16, AutoScale: true, CPUCores: 16})
 	transferMgr := NewManager(resourceMgr)
 
 	// Large file should get multiple threads
