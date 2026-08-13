@@ -6,6 +6,17 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
+const (
+	simpleJobsCSV = `Directory,JobName,AnalysisCode,AnalysisVersion,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings,ExtraInputFileIDs,OnDemandLicenseSeller,ProjectID,Tags,NoDecompress,IsLowPriority,Submit,TarSubpath
+./Run_1,TestJob1,user_included,1.0,./run.sh,emerald,1,1.0,1,,,,,,false,false,yes,
+./Run_2,TestJob2,user_included,1.0,./run2.sh,emerald,4,2.0,1,,,,,,false,false,yes,
+`
+
+	licenseJobsCSV = `Directory,JobName,AnalysisCode,AnalysisVersion,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings,ExtraInputFileIDs,OnDemandLicenseSeller,ProjectID,Tags,NoDecompress,IsLowPriority,Submit,TarSubpath
+./Run_License,LicenseJob,user_included,1.0,./run.sh,emerald,4,1.0,1,"{""LM_LICENSE_FILE"":""27000@server""}",,,,,false,false,yes,
+`
+)
+
 func TestLoadJobsCSV(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -16,7 +27,7 @@ func TestLoadJobsCSV(t *testing.T) {
 	}{
 		{
 			name:    "simple jobs",
-			file:    "../../testdata/jobs/simple_jobs.csv",
+			file:    writeFixtureCSV(t, "simple_jobs.csv", simpleJobsCSV),
 			wantErr: false,
 			wantLen: 2,
 			check: func(t *testing.T, jobs []models.JobSpec) {
@@ -36,7 +47,7 @@ func TestLoadJobsCSV(t *testing.T) {
 		},
 		{
 			name:    "license jobs",
-			file:    "../../testdata/jobs/license_jobs.csv",
+			file:    writeFixtureCSV(t, "license_jobs.csv", licenseJobsCSV),
 			wantErr: false,
 			wantLen: 1,
 			check: func(t *testing.T, jobs []models.JobSpec) {

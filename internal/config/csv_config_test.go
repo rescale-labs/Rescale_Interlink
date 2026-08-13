@@ -2,10 +2,37 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+// CSV fixtures are inlined instead of read from a testdata/ directory so the
+// tests run on any checkout, including a fresh clone.
+const (
+	validConfigCSV = `key,value
+api_base_url,https://platform.rescale.com
+tar_workers,2
+upload_workers,2
+job_workers,2
+proxy_mode,no-proxy
+`
+
+	minimalConfigCSV = `key,value
+api_base_url,https://platform.rescale.com
+`
+)
+
+// writeFixtureCSV writes content to a fresh temp file and returns its path.
+func writeFixtureCSV(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write fixture %s: %v", name, err)
+	}
+	return path
+}
 
 func TestLoadConfigCSV(t *testing.T) {
 	tests := []struct {
@@ -16,7 +43,7 @@ func TestLoadConfigCSV(t *testing.T) {
 	}{
 		{
 			name:    "valid config",
-			file:    "../../testdata/configs/valid_config.csv",
+			file:    writeFixtureCSV(t, "valid_config.csv", validConfigCSV),
 			wantErr: false,
 			check: func(t *testing.T, cfg *Config) {
 				// API key is intentionally NOT loaded from config files for security
@@ -39,7 +66,7 @@ func TestLoadConfigCSV(t *testing.T) {
 		},
 		{
 			name:    "minimal config",
-			file:    "../../testdata/configs/minimal_config.csv",
+			file:    writeFixtureCSV(t, "minimal_config.csv", minimalConfigCSV),
 			wantErr: false,
 			check: func(t *testing.T, cfg *Config) {
 				// API key is intentionally NOT loaded from config files for security
