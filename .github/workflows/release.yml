@@ -100,6 +100,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6.0.2
 
+      # The build script would otherwise install Node itself via Chocolatey, and
+      # that fails on this runner: the image already has a newer Node from the
+      # same MSI upgrade family, so msiexec refuses the downgrade with 1603.
+      # Pinned to the exact patch because this job produces the signed artifacts.
+      - name: Install Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '20.20.2'
+
       - name: Run build script
         run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}"
         shell: pwsh

@@ -22,6 +22,23 @@ Write-Host "Work directory: $WorkDir"
 Write-Host "Build directory: $BuildDir"
 Write-Host "Bin directory: $BinDir"
 
+# Record the Node.js this script inherited, before the PATH refreshes below
+# replace $env:PATH with the Machine and User registry values. Those refreshes
+# drop process-only PATH entries, and in CI actions/setup-node provides the
+# pinned Node through exactly such an entry (the hosted tool cache), so step 3.5
+# has to learn about it here or it will only ever see the machine-wide Node.
+$InheritedNodeDir = $null
+$InheritedNodeVersion = ""
+$inheritedNodeCmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+if ($inheritedNodeCmd) {
+    $InheritedNodeDir = Split-Path $inheritedNodeCmd.Source
+    $InheritedNodeVersion = ((cmd /c "node --version 2>&1") -join "`n").Trim()
+    Write-Host "Inherited Node.js: $InheritedNodeVersion ($InheritedNodeDir)"
+} else {
+    Write-Host "Inherited Node.js: none on PATH"
+}
+
 Set-Location $BuildDir
 
 # =============================================================================
@@ -143,20 +160,44 @@ Write-Host "[3.5/7] Installing Node.js and Wails CLI..."
 # nodejs-lts package tracks whatever the current LTS is (24.x today), and the
 # frontend must be built with the same Node 20 the other release paths use.
 $NodeVersion = "20.20.2"
+$PinnedNodeDir = $null
 
-$prevErrorAction = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-choco install nodejs-lts --version=$NodeVersion -y --no-progress --limit-output 2>&1 | Out-Host
-$nodeExitCode = $LASTEXITCODE
-$ErrorActionPreference = $prevErrorAction
+if ($InheritedNodeVersion -eq "v$NodeVersion") {
+    # Nothing to install. This is the CI path: actions/setup-node has already put
+    # the pinned Node on PATH, and running Chocolatey anyway fails with msiexec
+    # 1603, because the runner image ships a newer Node from the same MSI upgrade
+    # family and Windows Installer refuses to downgrade it.
+    Write-Host "Node.js $NodeVersion already present at ${InheritedNodeDir} - skipping Chocolatey install."
+    $PinnedNodeDir = $InheritedNodeDir
+} else {
+    Write-Host "Installing Node.js $NodeVersion via Chocolatey (inherited Node.js: '$InheritedNodeVersion')..."
+    $prevErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    choco install nodejs-lts --version=$NodeVersion -y --no-progress --limit-output 2>&1 | Out-Host
+    $nodeExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevErrorAction
 
-if ($nodeExitCode -ne 0) {
-    throw "Node.js $NodeVersion installation failed with exit code: $nodeExitCode"
+    if ($nodeExitCode -ne 0) {
+        $nodeFailure = "Node.js $NodeVersion installation failed with exit code: $nodeExitCode. " +
+                       "Inherited Node.js was '$InheritedNodeVersion'. Exit code 1603 comes from " +
+                       "msiexec and usually means a different Node.js from the same MSI upgrade " +
+                       "family is already installed, which Windows Installer will not downgrade. " +
+                       "Uninstall that Node.js, or install $NodeVersion yourself so this script " +
+                       "skips the install, then re-run."
+        throw $nodeFailure
+    }
 }
 
 # Refresh PATH. Keep our Go ($GoInstallDir\bin) ahead of the runner's
 # preinstalled Go so the FIPS-certified toolchain is the one Wails invokes.
-$env:PATH = "$GoInstallDir\bin;$env:GOPATH\bin;$env:USERPROFILE\.dotnet\tools;" +
+# $PinnedNodeDir is set only when the pinned Node was already on PATH, and it has
+# to be re-added by hand: this refresh reads the registry, where a process-only
+# directory such as the hosted tool cache never appears.
+$PathPrefix = "$GoInstallDir\bin;$env:GOPATH\bin;$env:USERPROFILE\.dotnet\tools"
+if ($PinnedNodeDir) {
+    $PathPrefix = "$PathPrefix;$PinnedNodeDir"
+}
+$env:PATH = "$PathPrefix;" +
             [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
             [System.Environment]::GetEnvironmentVariable("PATH", "User")
 
