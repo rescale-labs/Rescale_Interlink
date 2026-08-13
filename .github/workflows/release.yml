@@ -7,7 +7,6 @@ on:
       - "v*"
 
 permissions:
-  id-token: write # Required for OIDC
   contents: read
 
 jobs:
@@ -24,6 +23,30 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6.0.2
+
+      # A mistagged push would otherwise build, sign and notarize artifacts whose
+      # self-reported version disagrees with the tag they are published under.
+      # Runs before any toolchain install so it costs seconds when it fails.
+      - name: Check tag against source version
+        run: |
+          set -euo pipefail
+          version_file=internal/version/version.go
+          version="$(sed -n 's/^[[:space:]]*var[[:space:]]*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$version_file")"
+          if [ -z "$version" ]; then
+            echo "could not read a Version string from $version_file" >&2
+            exit 1
+          fi
+          # Accept the version verbatim, or the version plus a non-empty
+          # hyphenated suffix so release candidates and dev tags still build.
+          case "$GITHUB_REF_NAME" in
+            "$version") ;;
+            "$version"-?*) ;;
+            *)
+              echo "tag $GITHUB_REF_NAME does not match $version_file $version" >&2
+              exit 1
+              ;;
+          esac
+          echo "tag $GITHUB_REF_NAME matches $version_file $version"
 
       - name: Install Go 1.26.5
         run: |
@@ -67,6 +90,11 @@ jobs:
     needs: [verify]
     runs-on: windows-latest
     environment: production
+    # azure/login federates with Azure Trusted Signing over OIDC, which needs a
+    # workflow identity token. No other job requests one.
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout code
