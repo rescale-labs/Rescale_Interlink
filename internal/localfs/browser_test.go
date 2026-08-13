@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 )
@@ -245,45 +247,99 @@ func TestWalkStream_EmptyDirectory(t *testing.T) {
 	}
 }
 
-func TestWalkStream_OrderingGuarantee(t *testing.T) {
-	// Verify that parent directories are emitted before their children's files
-	root := createTestTree(t)
-	ctx := context.Background()
+// createReverseOrderTree builds a tree whose entries are created last-lexical
+// first, so a walk that leaked the filesystem's own directory-entry order would
+// produce a sequence other than the lexical one asserted below.
+func createReverseOrderTree(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
 
-	dirChan, fileChan, _, _ := WalkStream(ctx, root, WalkOptions{
-		IncludeHidden: true,
-	})
-
-	// Track when we first see each directory vs files in that directory
-	dirSeen := make(map[string]int) // dir path -> order index
-	fileSeen := make(map[string]int) // file's parent dir -> first file order index
-	order := 0
-
-	dirsDone, filesDone := false, false
-	for !dirsDone || !filesDone {
-		select {
-		case entry, ok := <-dirChan:
-			if !ok { dirsDone = true; continue }
-			rel, _ := filepath.Rel(root, entry.Path)
-			dirSeen[rel] = order
-			order++
-		case entry, ok := <-fileChan:
-			if !ok { filesDone = true; continue }
-			parentRel, _ := filepath.Rel(root, filepath.Dir(entry.Path))
-			if _, exists := fileSeen[parentRel]; !exists {
-				fileSeen[parentRel] = order
-			}
-			order++
+	for _, dir := range []string{"zdir", "adir/zsub", "adir/asub"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{
+		"zdir/zfile.txt", "zdir/afile.txt", "mfile.txt",
+		"adir/zsub/f.txt", "adir/asub/f.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0644); err != nil {
+			t.Fatal(err)
 		}
 	}
 
-	// For each directory that has files, verify dir was seen before first file
-	for dir, dirOrder := range dirSeen {
-		if fileOrder, hasFiles := fileSeen[dir]; hasFiles {
-			if dirOrder > fileOrder {
-				t.Errorf("directory %q (order %d) emitted after its file (order %d)", dir, dirOrder, fileOrder)
+	return root
+}
+
+// TestWalkStream_PerChannelOrdering pins the ordering WalkStream actually
+// provides: each channel on its own delivers entries in filepath.WalkDir's
+// lexical, parent-before-child order. Pinning the exact sequences also pins the
+// walk as independent of the order the OS hands back directory entries, since
+// WalkDir reads through os.ReadDir, which sorts — hence the second tree, whose
+// entries are created in reverse lexical order.
+//
+// There is deliberately no assertion that a directory arrives before the files
+// inside it. dirChan and fileChan are separate channels, so that order is not
+// observable by a consumer reading both, and no consumer needs it: the
+// folder-upload orchestrator buffers files whose parent folder is not yet mapped.
+func TestWalkStream_PerChannelOrdering(t *testing.T) {
+	tests := []struct {
+		name      string
+		makeTree  func(*testing.T) string
+		wantDirs  []string
+		wantFiles []string
+	}{
+		{
+			name:     "lexical_tree",
+			makeTree: createTestTree,
+			wantDirs: []string{"a", "a/sub", "a/sub/deep", "b"},
+			wantFiles: []string{
+				"a/file1.txt", "a/file2.txt", "a/sub/deep/file4.txt",
+				"a/sub/file3.txt", "b/file5.txt", "file0.txt",
+			},
+		},
+		{
+			name:     "reverse_created_tree",
+			makeTree: createReverseOrderTree,
+			wantDirs: []string{"adir", "adir/asub", "adir/zsub", "zdir"},
+			wantFiles: []string{
+				"adir/asub/f.txt", "adir/zsub/f.txt", "mfile.txt",
+				"zdir/afile.txt", "zdir/zfile.txt",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := tc.makeTree(t)
+			dirs, files := drainWalkStreamInOrder(t, root, WalkOptions{IncludeHidden: true})
+
+			if !slices.Equal(dirs, tc.wantDirs) {
+				t.Errorf("dirChan order:\n got %v\nwant %v", dirs, tc.wantDirs)
 			}
-		}
+			if !slices.Equal(files, tc.wantFiles) {
+				t.Errorf("fileChan order:\n got %v\nwant %v", files, tc.wantFiles)
+			}
+
+			// The property CreateFolderStructureStreaming depends on: a directory
+			// never arrives before the parent it will be created under, and every
+			// file's parent is announced on dirChan at some point.
+			seen := map[string]bool{".": true}
+			for _, d := range dirs {
+				if parent := filepath.Dir(d); !seen[parent] {
+					t.Errorf("directory %q arrived before its parent %q; order: %v", d, parent, dirs)
+				}
+				if seen[d] {
+					t.Errorf("directory %q emitted twice; order: %v", d, dirs)
+				}
+				seen[d] = true
+			}
+			for _, f := range files {
+				if parent := filepath.Dir(f); !seen[parent] {
+					t.Errorf("file %q has no dirChan entry for its parent %q; dirs: %v", f, parent, dirs)
+				}
+			}
+		})
 	}
 }
 
@@ -358,31 +414,35 @@ func TestWalkStream_ConsistencyWithWalkCollect(t *testing.T) {
 
 // === v4.8.8: Symlink following tests ===
 
-// drainWalkStream collects all entries from WalkStream channels into sorted path slices.
-func drainWalkStream(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
+// drainWalkStreamInOrder collects all entries from WalkStream, preserving each
+// channel's own arrival order.
+//
+// Each channel gets its own goroutine. A single select loop over both could not
+// distinguish the walker's send order from the pseudo-random pick select makes
+// when both channels are ready, and draining them one after the other would
+// deadlock as soon as the channel not being read filled its buffer.
+func drainWalkStreamInOrder(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
 	t.Helper()
 	ctx := context.Background()
 	dirChan, fileChan, _, errChan := WalkStream(ctx, root, opts)
 
-	dirsDone, filesDone := false, false
-	for !dirsDone || !filesDone {
-		select {
-		case entry, ok := <-dirChan:
-			if !ok {
-				dirsDone = true
-				continue
-			}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for entry := range dirChan {
 			rel, _ := filepath.Rel(root, entry.Path)
 			dirs = append(dirs, rel)
-		case entry, ok := <-fileChan:
-			if !ok {
-				filesDone = true
-				continue
-			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for entry := range fileChan {
 			rel, _ := filepath.Rel(root, entry.Path)
 			files = append(files, rel)
 		}
-	}
+	}()
+	wg.Wait()
 
 	select {
 	case err := <-errChan:
@@ -392,9 +452,16 @@ func drainWalkStream(t *testing.T, root string, opts WalkOptions) (dirs, files [
 	default:
 	}
 
+	return dirs, files
+}
+
+// drainWalkStream collects all entries from WalkStream channels into sorted path slices.
+func drainWalkStream(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
+	t.Helper()
+	dirs, files = drainWalkStreamInOrder(t, root, opts)
 	sort.Strings(dirs)
 	sort.Strings(files)
-	return
+	return dirs, files
 }
 
 func TestWalkStream_FollowSymlinks_SymlinkedDir(t *testing.T) {

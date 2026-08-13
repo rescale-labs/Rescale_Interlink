@@ -337,8 +337,17 @@ func resolveSymlinksParallel(ctx context.Context, entries []entryInfo, symlinkIn
 // filtering logic as WalkCollect (hidden handling, symlink skipping) for
 // consistent behavior.
 //
-// Key property: filepath.WalkDir visits parents before children (depth-first,
-// parent-first), so directories at depth N are emitted before files at depth N+1.
+// Ordering is guaranteed per channel, never across channels. filepath.WalkDir
+// visits entries in lexical order, parents before children, and reads through
+// os.ReadDir, which sorts — so dirChan delivers every directory after the parent
+// it will be created under, whatever order the filesystem itself returns entries
+// in. CreateFolderStructureStreaming relies on that to keep its pending-parent
+// buffer small.
+//
+// dirChan and fileChan are independent, so a consumer reading both concurrently
+// observes an arbitrary interleaving of the two and must not assume a directory
+// arrives before the files inside it. The folder-upload orchestrator buffers
+// files whose parent folder is not mapped yet for exactly this reason.
 //
 // All channels are closed when the walk completes. Errors are sent to errChan
 // (buffered at 1). Context cancellation stops the walk and closes all channels.
