@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
-**Version:** 4.9.8
-**Last Updated:** 2026-05-31
+**Version:** 4.9.9
+**Last Updated:** 2026-08-12
 
 ## Overview
 
@@ -18,15 +18,22 @@ Rescale Interlink REQUIRES FIPS 140-3 compliant builds for production use. This 
 All production builds must be compiled with:
 
 ```bash
+# GUI binary
 GOFIPS140=certified wails build -tags fips
-# or
+
+# CLI binary (this is what `make build` runs)
 make build
 ```
+
+`GOFIPS140=certified` selects the latest Go Cryptographic Module version holding a CMVP
+validation certificate. `GOFIPS140=latest` is **not** equivalent — it tracks the
+toolchain-bundled module, which may not yet be CMVP-validated, and must not be used for
+release builds.
 
 ### Runtime Verification
 
 The application verifies FIPS compliance at startup. Non-FIPS builds will:
-- Display a critical error message
+- Display a critical error message naming the correct rebuild command
 - Exit with code 2
 
 For development only, bypass with:
@@ -35,6 +42,32 @@ RESCALE_ALLOW_NON_FIPS=true ./rescale-int
 ```
 
 **Warning:** Never use non-FIPS builds in production or with FedRAMP platforms.
+
+### Build and Release Integrity
+
+Release artifacts are produced by `.github/workflows/release.yml` on a `v*` tag push,
+with the following controls:
+
+- **Gated on verification.** A `verify` job runs first: the FIPS-tagged Go test suite
+  (`make test`), `GOFIPS140=certified go vet -tags fips ./...`, and the frontend test,
+  lint, and build. The Windows and macOS build jobs declare `needs: [verify]`, so a
+  failing check blocks the release rather than shipping beside it.
+- **Pinned, checksum-verified toolchain.** Go 1.26.5 is downloaded and checked against
+  its published SHA-256 before install; Node.js is pinned to 20.
+- **Deterministic dependency installs.** `npm ci` installs exactly what
+  `package-lock.json` pins. This is also what `wails.json`'s `frontend:install` runs, so
+  local and CI builds resolve the same tree.
+- **Code signing.** Windows: the executable and the MSI are both signed via Azure
+  Trusted Signing with RFC-3161 timestamps. macOS: the `.app` bundle is deep-signed and
+  the standalone CLI is signed with the hardened runtime and a timestamp, signatures are
+  verified in-job, then the bundle is submitted to `notarytool` and the notarization
+  ticket is stapled.
+- **Linux AppImage self-check.** The Linux build runs outside GitHub Actions. Its
+  packaging step bundles WebKit's helper executables into the AppDir with
+  `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` fails the build before
+  packaging if the helpers are missing, not executable, or resolve their WebKit/GTK
+  dependencies from the host instead of the bundle. Without this, WebKit forks the host's
+  `WebKitWebProcess` from a compiled-in path and a mismatched build breaks its IPC.
 
 ### S3 FIPS Endpoints (ITAR Platforms)
 
@@ -292,16 +325,33 @@ Only errors where the user cannot self-diagnose are reportable:
 - **Server errors** (HTTP 5xx) — the server broke
 - **Unclassified internal errors** — something unexpected happened
 
-The following are **not reportable** (users can fix these themselves):
+The following are **not reportable** (users can fix these themselves, or nothing broke):
 - Authentication errors (401/403)
 - Network/DNS errors
 - Timeout errors
 - Disk space errors
 - Client errors (400/404)
-- User cancellation
+- Local filesystem refusals (permissions, missing path, file-descriptor limit)
+- User cancellation, and daemon-stopped
 - Rate limit responses (429)
 
-**Source:** `internal/reporting/classifier.go` — `IsReportable()` function
+**Source:** `internal/reporting/classifier.go` — `IsReportable()` and
+`ClassifyErrorClass()`
+
+Two further filters run ahead of `IsReportable()` on the CLI and daemon path, in
+`internal/reporting/cli_helper.go`:
+
+- **Usage errors** — a missing required flag, an unknown flag, a refusal to prompt
+  without a terminal, a user abort, or a pre-flight validation failure ("no valid files
+  to upload"). These are user mistakes, not system failures.
+- **Aggregate roll-ups** — the batch summary a command returns after it has already
+  reported each failure item by item (`N file(s) failed to upload`,
+  `N of M job(s) failed`, and similar). Reporting the roll-up as well would duplicate
+  diagnostics that carry no additional detail.
+
+When a report *is* generated, the diagnostic summary is printed to stderr first and
+unconditionally. Whether the report file could also be written is secondary: a save
+failure is a debug-only note rather than a warning that competes with the real failure.
 
 ### Redaction
 
@@ -320,6 +370,10 @@ In addition, when the report includes the recent **timeline snapshot** (transfer
 
 - **GUI:** Modal dialog with "Copy to Clipboard" and "Save Report" options. Duplicate suppression while modal is open.
 - **CLI/Daemon:** Auto-saved to the report directory with path printed to stderr.
+- **Retention:** The report directory keeps the newest 500 files and deletes the rest on
+  each write. Pruning is best-effort, so it can never fail the report it just wrote. This
+  bounds a repeating failure — a daemon retrying the same broken scan every poll used to
+  write one file per occurrence, forever (`internal/reporting/transport.go`).
 - Reports include workspace name, workspace ID, and platform URL for support context.
 - Reports **do not** contain API keys, passwords, file contents, or full file paths.
 
