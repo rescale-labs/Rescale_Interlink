@@ -28,7 +28,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 - **New Job Status tab.** The GUI gains a dedicated tab listing your most recent jobs with status, dates and a name/ID filter, loading a page at a time rather than fetching everything up front.
 - **File Browser: search, owner filter, sorting and better pagination.** The remote pane can search by file name, restrict a listing to your own files or files shared with you, and sort by name, size or upload date, with the pagination cursor carried through search.
 - **Transfers tell the truth about what happened.** A cancelled folder transfer now reads as cancelled rather than as a clean completion, on the batch row and in the CLI. Storage retries and API rate-limit throttling are surfaced instead of silently stalling a transfer ([#22](https://github.com/rescale-labs/Rescale_Interlink/issues/22)), including for the detached auto-download daemon.
-- **CLI progress bars and exit codes fixed.** Diagnostic log lines are routed through the progress-bar writer instead of landing inside a redrawing frame ([#23](https://github.com/rescale-labs/Rescale_Interlink/issues/23)), and four commands that printed a failure summary while exiting 0 now exit non-zero — so scripts and CI see a failed run as failed.
+- **CLI progress bars and exit codes fixed.** Diagnostic log lines are routed through the progress-bar writer instead of landing inside a redrawing frame ([#23](https://github.com/rescale-labs/Rescale_Interlink/issues/23)). And a run that printed a failure summary no longer exits 0: `folders upload-dir` and `pur run` return an error when any item failed, aborting at a prompt stops the batch instead of continuing through the remaining files, and a prompt that cannot run (no terminal) records the file as failed rather than dropping it silently — so scripts and CI see a failed run as failed.
 - **Auto-download daemon reliability.** A broken daemon now says so on every surface that reports its state, a zero-task download batch no longer wedges the poll loop, and its unbounded internal state is now bounded.
 - **Disk space refusals now agree with themselves.** A download could be refused with "need 292366 MB, have 312832 MB available" — need below have. The pre-flight check's own figures are reported verbatim, and free space is measured on the download directory's filesystem rather than its parent ([#34](https://github.com/rescale-labs/Rescale_Interlink/issues/34)).
 - **Job submission carries SSH access settings.** `cidrRule`, `publicKey` and `sshPort` from a job file or an SGE script now reach the API instead of being dropped during decode ([#43](https://github.com/rescale-labs/Rescale_Interlink/issues/43)).
@@ -51,7 +51,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
 - **Configuration Management**: Interactive setup with `config init`
 - **File Operations**: Upload, download, list, and delete files (delete moves to Trash by default; `--permanent` for irreversible delete)
-- **File Tags**: List, add, remove and replace tags on a file (`files tags`)
+- **File Tags**: `files tags list`, `add`, `remove`, and `set` (replaces a file's whole tag list; with no tags, clears it)
 - **Folder Management**: Create, list, bulk upload and bulk download with connection reuse and folder caching
 - **Job Operations**: Submit, monitor, control, download results
 - **Job Watch**: Monitor running jobs and incrementally download output files

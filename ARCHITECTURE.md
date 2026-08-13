@@ -84,6 +84,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 
 ```
 rescale-int/
+├── main.go                        # GUI+CLI binary entry point (rescale-int-gui)
 ├── cmd/
 │   ├── rescale-int/               # CLI-only binary entry point
 │   └── rescale-int-tray/          # Windows system tray companion (MSI install only)
@@ -198,11 +199,19 @@ rescale-int/
 │   │   └── tar/                   # TAR archive creation
 │   └── validation/                # Path validation
 │
-└── build/                         # Packaging assets and platform build scripts
-    ├── darwin/                    # Info.plist for the .app bundle
-    ├── linux/                     # AppImage WebKit bundling + release verification
-    └── windows/                   # Icon, manifest, dist and installer scripts
+├── build/                         # appicon.png, plus build_dist.ps1 and
+│   │                              # build_installer.ps1 (Windows driver scripts)
+│   ├── darwin/                    # Info.plist / Info.dev.plist for the .app bundle
+│   ├── linux/                     # AppImage WebKit bundling, release verification,
+│   │                              # and the .desktop entry
+│   └── windows/                   # icon.ico and wails.exe.manifest
+│
+├── installer/                     # Windows MSI: WiX source, licence, icon, build script
+├── packaging/                     # macOS install helper, Linux .desktop entry and icon
+└── .github/                       # Release workflow
 ```
+
+That is every tracked top-level directory. The tracked top-level files are `main.go`, `wails.json`, `Makefile`, `go.mod`/`go.sum`, `LICENSE`, `logo.png`, `.gitignore`, `.gitattributes`, and the documentation `.md` files.
 
 ### Import Dependencies
 
@@ -265,7 +274,7 @@ internal/watch                      (complete — verified with go list -deps)
     └─→ (all other dependencies injected via function types)
 ```
 
-**Key Principle**: No circular dependencies. Dependencies flow downward: `wailsapp` → `core` → `services` → `cloud`/`transfer`. `internal/cli` sits at the same altitude as `wailsapp` but reaches `transfer`/`cloud` directly rather than through `core`. Two packages are deliberately kept clean so they can be shared:
+**Key Principle**: No circular dependencies. Dependencies flow downward: `wailsapp` → `core` → `services` → `cloud`/`transfer`. `internal/cli` sits *below* `wailsapp`, which imports it, and above `transfer`/`cloud`, which it reaches directly rather than through `core`. Two packages are deliberately kept clean so they can be shared:
 
 - `internal/watch` imports only `internal/constants`, so both `internal/cli` and `internal/cli/compat` can use it. Everything else is injected via function types.
 - `internal/cli/compat` does not import `internal/cli`. It builds its own Cobra tree on top of `api`, `config`, `models`, `watch` and `version`.
@@ -665,10 +674,22 @@ All transfer operations (uploads and downloads) from both CLI and GUI converge t
 - Orchestration: `internal/cloud/transfer/`
 - State: `internal/cloud/state/`
 
-**Provider Interfaces (6)**: `CloudTransfer`, `StreamingConcurrentUploader`, `StreamingConcurrentDownloader`, `StreamingPartDownloader`, `LegacyDownloader`, `PreEncryptUploader`
+**Provider Interfaces (7)**: each `Provider` carries a compile-time assertion for all seven, so the two backends are structurally identical:
+
+| Interface | Declared in | Asserted at |
+|---|---|---|
+| `cloud.CloudTransfer` | `internal/cloud/interfaces.go` | `s3/provider.go`, `azure/provider.go` |
+| `cloud.RetryObserverSetter` | `internal/cloud/notice.go` | `s3/provider.go`, `azure/provider.go` |
+| `transfer.StreamingConcurrentUploader` | `internal/cloud/transfer/uploader.go` | `{s3,azure}/streaming_concurrent.go` |
+| `transfer.PreEncryptUploader` | `internal/cloud/transfer/uploader.go` | `{s3,azure}/pre_encrypt.go` |
+| `transfer.StreamingConcurrentDownloader` | `internal/cloud/transfer/downloader.go` | `{s3,azure}/streaming_concurrent.go` |
+| `transfer.StreamingPartDownloader` | `internal/cloud/transfer/downloader.go` | `{s3,azure}/streaming_concurrent.go` |
+| `transfer.LegacyDownloader` | `internal/cloud/transfer/downloader.go` | `{s3,azure}/download.go` |
+
+`internal/cloud/storage/` is a different thing despite the name: it holds the shared storage error types (`IsDiskFullError` and friends), which is all the rest of the tree imports from it.
 
 **Storage Backend Parity**:
-- Both S3 and Azure implement identical 6 interfaces
+- Both S3 and Azure assert the same seven interfaces above
 - Same part sizing: both call `resources.CalculateDynamicChunkSize(fileSize, threads)`, which picks 16MB / 32MB / 48MB / 64MB from the file-size tier and then caps it so `chunk * threads * 2` fits in 75% of available memory. `constants.ChunkSize` (32MB) is the base, not a fixed value; `MinChunkSize` and `MaxChunkSize` bound the result
 - Same concurrency model via orchestration layer
 - Same resume capability via `state/` package
@@ -676,11 +697,11 @@ All transfer operations (uploads and downloads) from both CLI and GUI converge t
 
 ### S3 Backend (`internal/cloud/providers/s3/`)
 
-Multi-part upload API for files ≥100MB, 32MB parts, concurrent part uploads, credential caching via `EnsureFreshCredentials()`, automatic retry with exponential backoff, seekable upload streams for SDK retry.
+Multi-part upload API for files ≥100MB (`constants.MultipartThreshold`), part size from `CalculateDynamicChunkSize` as above, concurrent part uploads, credential caching via `EnsureFreshCredentials()`, automatic retry with exponential backoff, seekable upload streams for SDK retry.
 
 ### Azure Backend (`internal/cloud/providers/azure/`)
 
-Block blob API, 32MB blocks, concurrent block upload, automatic credential refresh, same interface as S3 for consistency.
+Block blob API, block size from the same `CalculateDynamicChunkSize` call, concurrent block upload, automatic credential refresh, same seven interfaces as S3 for consistency.
 
 ---
 
