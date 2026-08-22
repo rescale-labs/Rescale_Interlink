@@ -54,8 +54,13 @@ interface LocalBrowserState {
 // the one the user no longer cares about.
 const LOCAL_CANCELLED_WARNING = 'Operation cancelled'
 
+// Display name of the library root. The upload confirmation names this folder
+// from Legacy Files mode, where there is no browsed folder to name, so it has
+// to match the name the library root is given while browsing.
+const MY_LIBRARY_LABEL = 'My Library'
+
 // Remote browser state
-interface RemoteBrowserState {
+export interface RemoteBrowserState {
   mode: BrowseMode
   currentFolderId: string
   items: wailsapp.FileItemDTO[]  // Current page's items only (not cumulative)
@@ -83,6 +88,70 @@ interface RemoteBrowserState {
   legacySortDirection: string    // Sort direction: "asc", "desc"
   // My Library search query
   librarySearchQuery: string     // Search query for My Library mode (server-side search)
+}
+
+// Where a remote write (upload, new folder) is allowed to go.
+export interface RemoteDestination {
+  destFolderId: string  // Empty whenever ready is false — there is no destination to fall back to
+  destLabel: string     // Names the folder that will actually receive the write
+  ready: boolean
+  reason: string        // Why not, short enough to use as a button label
+}
+
+// The single source of truth for anything that writes to a remote destination.
+//
+// currentFolderId names a real destination only once a load has confirmed it:
+// it is cleared on every mode switch and left untouched when a load fails or
+// never starts, so reading it unconditionally kept pointing uploads at the job
+// Output folder the user had already navigated away from. The API rejects that
+// folder as immutable at registration, after every byte has transferred.
+//
+// Both halves are resolved together so the confirmation dialog can never
+// promise one folder while the transfer targets another.
+export function selectRemoteDestination(remote: RemoteBrowserState): RemoteDestination {
+  const notReady = (reason: string): RemoteDestination => ({
+    destFolderId: '',
+    destLabel: '',
+    ready: false,
+    reason,
+  })
+
+  switch (remote.mode) {
+    case 'jobs':
+      // Job output folders are immutable server-side.
+      return notReady('N/A in Jobs view')
+    case 'trash':
+      return notReady('N/A in Trash view')
+    case 'legacy':
+      // Legacy Files is a flat listing with no browsed folder, so writes from
+      // it go to the library root and do not depend on the listing at all.
+      return remote.myLibraryId
+        ? { destFolderId: remote.myLibraryId, destLabel: MY_LIBRARY_LABEL, ready: true, reason: '' }
+        : notReady('Folder not loaded')
+    case 'library': {
+      // An in-flight load is about to replace the destination, and a failed one
+      // leaves behind whatever the previous view had resolved.
+      if (remote.isLoading) return notReady('Loading folder...')
+      if (remote.error) return notReady('Folder unavailable')
+      // The path and the folder id are written together only by a navigation.
+      // Breadcrumb navigation slices the path before its load runs, and every
+      // no-argument reload (refresh, page size, search) re-fetches the folder
+      // id while leaving the path alone — so a failed navigation followed by a
+      // refresh ends up showing one folder's path above another folder's
+      // contents. Naming a folder the transfer would not touch is the whole
+      // defect, so the tail of the path has to be the loaded folder.
+      const tail = remote.breadcrumb[remote.breadcrumb.length - 1]
+      if (!remote.currentFolderId || !tail || tail.id !== remote.currentFolderId) {
+        return notReady('Folder not loaded')
+      }
+      return {
+        destFolderId: remote.currentFolderId,
+        destLabel: remote.breadcrumb.map(b => b.name).join(' > '),
+        ready: true,
+        reason: '',
+      }
+    }
+  }
 }
 
 interface FileBrowserStore {
@@ -348,7 +417,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         await get().loadRemoteTrash()
       } else {
         const folderId = mode === 'library' ? myLibraryId : myJobsId
-        const folderName = mode === 'library' ? 'My Library' : 'My Jobs'
+        const folderName = mode === 'library' ? MY_LIBRARY_LABEL : 'My Jobs'
         await get().loadRemoteFolder(folderId, folderName)
       }
     } catch (error) {
@@ -370,6 +439,10 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       remote: {
         ...state.remote,
         mode,
+        // The outgoing mode's folder is not a destination in the incoming one.
+        // Only a completed load may name the new one, so nothing may write to
+        // the remote side until then.
+        currentFolderId: '',
         items: [],
         selection: { selectedIds: new Set(), lastSelectedId: null },
         breadcrumb: [],
@@ -396,7 +469,7 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
       get().loadRemoteTrash()
     } else {
       const folderId = mode === 'library' ? myLibraryId : myJobsId
-      const folderName = mode === 'library' ? 'My Library' : 'My Jobs'
+      const folderName = mode === 'library' ? MY_LIBRARY_LABEL : 'My Jobs'
       if (folderId) {
         get().loadRemoteFolder(folderId, folderName)
       }
@@ -408,7 +481,23 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   loadRemoteFolder: async (folderId?: string, folderName?: string) => {
     const state = get().remote
     const targetId = folderId ?? state.currentFolderId
-    if (!targetId) return
+    if (!targetId) {
+      // A caller reloading "the current folder" (refresh, page size, search)
+      // gets here with nothing to request, and has usually just bumped
+      // navGeneration — so the load that owns the spinner will be discarded on
+      // arrival and nothing else will ever clear it. Left set, it disables
+      // Refresh, pagination and Back with no way out of the view.
+      //
+      // An explicitly empty folderId is a different case: Legacy Files passes
+      // one from its breadcrumb, has no folder listing to fail, and started no
+      // spinner to clear.
+      if (folderId === undefined) {
+        set(state => ({
+          remote: { ...state.remote, isLoading: false, error: 'Folder not loaded' },
+        }))
+      }
+      return
+    }
 
     const isNewNavigation = folderName !== undefined
     const currentPage = isNewNavigation ? 0 : state.currentPage
@@ -874,13 +963,19 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   },
 
   createRemoteFolder: async (name: string) => {
-    const { currentFolderId, mode } = get().remote
-    if (mode === 'legacy' || !currentFolderId) {
+    // A new folder nests inside the folder being browsed. Legacy Files has no
+    // such folder — its upload destination is the library root, which is not
+    // where the user pointed "New Folder".
+    if (get().remote.mode === 'legacy') {
+      return null
+    }
+    const dest = selectRemoteDestination(get().remote)
+    if (!dest.ready) {
       return null
     }
 
     try {
-      const folderId = await App.CreateRemoteFolder(name, currentFolderId)
+      const folderId = await App.CreateRemoteFolder(name, dest.destFolderId)
       // Refresh to show new folder
       get().refreshRemote()
       return folderId

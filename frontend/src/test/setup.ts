@@ -104,6 +104,22 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
   RecoverTrashItems: vi.fn(() => Promise.resolve({ deleted: 1, failed: 0, error: '' })),
   PurgeTrashItems: vi.fn(() => Promise.resolve({ deleted: 1, failed: 0, error: '' })),
 
+  // Upload/download preflight (FileBrowserTab)
+  ValidateRemoteFolder: vi.fn(() => Promise.resolve()),
+  ValidateLocalDirectory: vi.fn(() => Promise.resolve()),
+  CheckFoldersExistForUpload: vi.fn(() => Promise.resolve([])),
+  CheckLocalFolderExists: vi.fn(() => Promise.resolve({ exists: false, path: '', error: '' })),
+  StartFolderUpload: vi.fn(() => Promise.resolve({
+    foldersCreated: 0,
+    filesQueued: 0,
+    mergedInto: '',
+    error: '',
+  })),
+  StartFolderDownload: vi.fn(() => Promise.resolve({
+    filesQueued: 0,
+    error: '',
+  })),
+
   // Transfer bindings
   StartTransfers: vi.fn(() => Promise.resolve()),
   CancelTransfer: vi.fn(() => Promise.resolve()),

@@ -7,7 +7,7 @@ import {
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
 import { LocalBrowser, RemoteBrowser } from '../widgets'
-import { useFileBrowserStore, useTransferStore } from '../../stores'
+import { useFileBrowserStore, useTransferStore, selectRemoteDestination } from '../../stores'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../../wailsjs/go/models'
 import { useTabNavigation } from '../../App'
@@ -144,11 +144,9 @@ export function FileBrowserTab() {
   // Frozen fields snapshot state at click time so confirm uses the original destination.
   const [uploadConfirm, setUploadConfirm] = useState<{
     items: wailsapp.FileItemDTO[]
-    destPath: string
+    destPath: string                  // Names frozenDestFolderId — the two are snapshotted together
     folderCount: number
     frozenDestFolderId: string        // Snapshot at click time to avoid stale navigation
-    frozenMode: string                // Browse mode at click time
-    frozenMyLibraryId: string | null  // For legacy mode fallback
   } | null>(null)
   const [downloadConfirm, setDownloadConfirm] = useState<{
     items: wailsapp.FileItemDTO[]
@@ -187,23 +185,23 @@ export function FileBrowserTab() {
   const localSelectedCount = local.selection.selectedIds.size
   const remoteSelectedCount = remote.selection.selectedIds.size
 
-  // Upload availability and reason
-  // Jobs mode: Uploads disabled (job outputs are read-only)
-  // Trash mode: Uploads disabled (trash is for recovery/permanent delete only)
-  // Library mode: Uploads allowed
-  // Legacy mode: Uploads allowed (files upload to user's library and appear in Legacy view)
+  // Where an upload would go, and whether that is settled enough to offer it.
+  // Covers the modes that forbid uploads outright (Jobs, Trash) as well as the
+  // navigation windows in which no destination is resolved yet.
+  const uploadDest = useMemo(() => selectRemoteDestination(remote), [remote])
+
+  // Upload availability and reason. The destination is checked ahead of the
+  // selection so the button says why uploading is unavailable even before the
+  // user has picked anything.
   const uploadState = useMemo(() => {
-    if (remote.mode === 'jobs') {
-      return { allowed: false, reason: 'N/A in Jobs view', hasSelection: localSelectedCount > 0 }
-    }
-    if (remote.mode === 'trash') {
-      return { allowed: false, reason: 'N/A in Trash view', hasSelection: localSelectedCount > 0 }
+    if (!uploadDest.ready) {
+      return { allowed: false, reason: uploadDest.reason, hasSelection: localSelectedCount > 0 }
     }
     if (localSelectedCount === 0) {
       return { allowed: false, reason: 'Select files', hasSelection: false }
     }
     return { allowed: true, reason: '', hasSelection: true }
-  }, [remote.mode, localSelectedCount])
+  }, [uploadDest, localSelectedCount])
 
   // Handle resize
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -238,26 +236,22 @@ export function FileBrowserTab() {
     // Count folders for confirmation dialog
     const folderCount = selectedItems.filter(item => item.isFolder).length
 
-    // Get destination path from breadcrumb
-    const destPath = remote.breadcrumb.map(b => b.name).join(' > ') || 'My Library'
-
-    // Resolve destination folder ID at snapshot time before async operations
-    const resolvedDestFolderId = remote.currentFolderId || remote.myLibraryId || ''
-    if (!resolvedDestFolderId) {
+    // Belt and braces: uploadState already gates the button on the same check.
+    if (!uploadDest.ready) {
       setStatus('Please wait for folder to load before uploading.')
       return
     }
 
-    // Snapshot destination state at click time to prevent stale references
+    // Snapshot the destination at click time so later navigation cannot move
+    // it, and take the label from the same snapshot so the dialog names the
+    // folder that will actually receive the files.
     setUploadConfirm({
       items: selectedItems,
-      destPath,
+      destPath: uploadDest.destLabel,
       folderCount,
-      frozenDestFolderId: resolvedDestFolderId,
-      frozenMode: remote.mode,
-      frozenMyLibraryId: remote.myLibraryId,
+      frozenDestFolderId: uploadDest.destFolderId,
     })
-  }, [uploadState.allowed, getLocalSelectedItems, remote.breadcrumb, remote.currentFolderId, remote.mode, remote.myLibraryId])
+  }, [uploadState.allowed, getLocalSelectedItems, uploadDest])
 
   const proceedWithUpload = useCallback(async (
     files: wailsapp.FileItemDTO[],
@@ -365,10 +359,8 @@ export function FileBrowserTab() {
     const files = uploadConfirm.items.filter(item => !item.isFolder)
     const folders = uploadConfirm.items.filter(item => item.isFolder)
 
-    // Use frozen values from click time instead of live store state
-    const destFolderId = uploadConfirm.frozenMode === 'legacy'
-      ? (uploadConfirm.frozenMyLibraryId || uploadConfirm.frozenDestFolderId)
-      : uploadConfirm.frozenDestFolderId
+    // Use the frozen destination from click time instead of live store state
+    const destFolderId = uploadConfirm.frozenDestFolderId
 
     // Check if any folders already exist before uploading.
     // Uses batch check with shared cache (single API paginate instead of N calls).
