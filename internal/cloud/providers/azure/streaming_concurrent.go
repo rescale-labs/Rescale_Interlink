@@ -45,6 +45,18 @@ type azureProviderData struct {
 	blockIDs     []string // Track uploaded block IDs in order
 }
 
+// UploadLimits reports Azure's block blob ceilings. A committed block list stops
+// at 50,000 blocks — and unlike S3 that only fails at CommitBlockList, after the
+// whole file has been staged. The planner works in plaintext, so the size it
+// reports leaves room for the padding CBC adds to the final part.
+func (p *Provider) UploadLimits() resources.UploadLimits {
+	return resources.UploadLimits{
+		StorageType: p.StorageType(),
+		MaxParts:    constants.MaxAzureUploadBlocks,
+		MaxPartSize: constants.MaxAzurePlaintextBlockSize,
+	}
+}
+
 // InitStreamingUpload initializes a block blob upload with streaming encryption.
 // Uses CBC chaining format compatible with Rescale platform.
 // Metadata stores `iv` (base64) for Rescale decryption compatibility.
@@ -78,10 +90,12 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 		storagePath = blobName
 	}
 
-	// Calculate part size dynamically based on file size and available threads
-	// This optimizes chunk size for memory constraints and throughput
-	numThreads := constants.MaxThreadsPerFile // Default thread count for large files
-	partSize := resources.CalculateDynamicChunkSize(params.FileSize, numThreads)
+	// Part size comes from the caller's upload plan, which keeps the block count
+	// under MaxAzureUploadBlocks as well as within the memory budget.
+	partSize, err := params.PartSize(p.UploadLimits())
+	if err != nil {
+		return nil, err
+	}
 
 	// Create streaming encryption state (CBC chaining)
 	encryptState, err := transfer.NewStreamingEncryptionState(partSize)
@@ -101,7 +115,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	blockIDs := make([]string, totalParts)
 
 	return &transfer.StreamingUpload{
-		UploadID:     "",        // Azure doesn't have upload IDs like S3
+		UploadID:     "", // Azure doesn't have upload IDs like S3
 		StoragePath:  storagePath,
 		MasterKey:    encryptState.GetKey(),
 		InitialIV:    encryptState.GetInitialIV(),
@@ -246,8 +260,8 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 
 	return &transfer.PartResult{
 		PartIndex:  partIndex,
-		PartNumber: int32(partIndex + 1), // 1-based for consistency with S3
-		ETag:       blockID,              // Azure uses block ID instead of ETag
+		PartNumber: int32(partIndex + 1),   // 1-based for consistency with S3
+		ETag:       blockID,                // Azure uses block ID instead of ETag
 		Size:       int64(len(ciphertext)), // Note: ciphertext size, not plaintext
 	}, nil
 }
@@ -270,8 +284,8 @@ func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *tra
 	// `streamingformat: cbc` enables streaming download (no temp file).
 	metadata := map[string]*string{
 		"iv":              to.Ptr(encryption.EncodeBase64(uploadState.InitialIV)),
-		"streamingformat": to.Ptr("cbc"),                                      // Marks file as CBC-chained streaming
-		"partsize":        to.Ptr(fmt.Sprintf("%d", uploadState.PartSize)),    // Required for correct download decryption
+		"streamingformat": to.Ptr("cbc"),                                   // Marks file as CBC-chained streaming
+		"partsize":        to.Ptr(fmt.Sprintf("%d", uploadState.PartSize)), // Required for correct download decryption
 	}
 
 	// Commit block list using AzureClient
@@ -350,7 +364,7 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 	blockIDs := make([]string, totalParts)
 
 	return &transfer.StreamingUpload{
-		UploadID:     "",                  // Azure doesn't have upload IDs like S3
+		UploadID:     "", // Azure doesn't have upload IDs like S3
 		StoragePath:  params.StoragePath,
 		MasterKey:    params.MasterKey,
 		InitialIV:    params.InitialIV,

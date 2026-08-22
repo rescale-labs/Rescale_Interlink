@@ -45,6 +45,30 @@ const (
 
 	// MinAzureBlockSize - Azure minimum block size (1 byte, but we use 1 MB for practical purposes)
 	MinAzureBlockSize = 1 * 1024 * 1024
+
+	// MaxS3UploadParts - AWS S3 rejects part numbers above 10,000. A multipart
+	// upload that needs part 10,001 fails mid-transfer, after every earlier part
+	// has already been sent, so part size has to be chosen to stay under this.
+	MaxS3UploadParts = 10000
+
+	// MaxAzureUploadBlocks - Azure rejects a block list longer than 50,000 blocks.
+	// Unlike S3 this only fails at CommitBlockList, i.e. after the whole file has
+	// been staged.
+	MaxAzureUploadBlocks = 50000
+
+	// MaxS3PlaintextPartSize - largest plaintext part the upload planner may pick
+	// for S3. CBC pads the final part by up to one AES block, so the ciphertext
+	// can be larger than the plaintext; the margin keeps that under MaxS3PartSize.
+	// A whole MiB rather than 16 bytes so planned sizes stay MiB-aligned.
+	MaxS3PlaintextPartSize = MaxS3PartSize - PartSizeAlignment
+
+	// MaxAzurePlaintextBlockSize - Azure counterpart of MaxS3PlaintextPartSize.
+	MaxAzurePlaintextBlockSize = MaxAzureBlockSize - PartSizeAlignment
+
+	// PartSizeAlignment - planned part sizes are whole multiples of this (1 MB).
+	// Any multiple of the 16-byte AES block would satisfy CBC chaining; 1 MB
+	// matches the rounding CalculateDynamicChunkSize already applies.
+	PartSizeAlignment = 1024 * 1024
 )
 
 // Credential refresh intervals
@@ -132,6 +156,27 @@ const (
 
 	// MaxQueueSize - absolute maximum queue size to prevent unbounded growth
 	MaxQueueSize = 1000
+
+	// UploadQueueDepthPerWorker - encrypted-part queue slots per upload worker (3).
+	// Encryption is sequential (CBC chaining) so it has to run ahead of the upload
+	// workers to keep them busy; three slots per worker is the depth that does it.
+	UploadQueueDepthPerWorker = 3
+
+	// UploadPipelineTransientParts - part-sized buffers the streaming upload holds
+	// outside the queue and the workers. See resources.PlanUpload for the derivation.
+	UploadPipelineTransientParts = 4
+
+	// UploadScalerThreadsPerTick - most threads the streaming upload's background
+	// scaler claims in one attempt, so a transfer that is freed up ramps in steps
+	// instead of grabbing the whole pool at once.
+	UploadScalerThreadsPerTick = 4
+
+	// UploadMinThrottledWorkers - fewest workers an upload keeps when it loses the
+	// race for the memory budget, whenever the machine can afford that many. The
+	// worker cap is fixed when the upload is planned and the scaler cannot raise
+	// it, so a transfer squeezed to one worker stays single-threaded for its whole
+	// life even after the transfers that crowded it out have finished.
+	UploadMinThrottledWorkers = 4
 )
 
 // UI Updates

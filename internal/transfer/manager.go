@@ -95,6 +95,19 @@ func (t *Transfer) TryAcquireMore(maxWanted int) int {
 	return acquired
 }
 
+// PlanUpload sizes this transfer's streaming upload pipeline and reserves its
+// memory from the shared pool, so several large uploads running at once cannot
+// each budget against the whole machine. Call ReleaseUploadPlan once the pipeline
+// has drained; Complete() releases it too, as a backstop.
+func (t *Transfer) PlanUpload(req resources.UploadPlanRequest) (resources.UploadPlan, error) {
+	return t.resourceMgr.PlanUpload(t.id, req)
+}
+
+// ReleaseUploadPlan returns this transfer's reserved upload memory to the pool.
+func (t *Transfer) ReleaseUploadPlan() {
+	t.resourceMgr.ReleaseUploadPlan(t.id)
+}
+
 // Complete releases this transfer's threads back to the pool. Safe to call multiple times.
 func (t *Transfer) Complete() {
 	t.mu.Lock()

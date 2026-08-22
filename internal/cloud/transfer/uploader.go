@@ -8,6 +8,8 @@ import (
 	"io"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
@@ -15,6 +17,10 @@ import (
 // Providers that support concurrent streaming uploads implement this interface.
 type StreamingConcurrentUploader interface {
 	cloud.CloudTransfer
+
+	// UploadLimits reports the backend's hard multipart ceilings so the
+	// orchestrator can size parts before it opens an upload against it.
+	UploadLimits() resources.UploadLimits
 
 	// InitStreamingUpload initializes a multipart upload with streaming encryption.
 	// Returns a StreamingUpload handle that tracks the upload state.
@@ -60,6 +66,32 @@ type StreamingUploadInitParams struct {
 	FileSize     int64     // Size of the file in bytes
 	FolderID     string    // Target folder ID (empty = MyLibrary)
 	OutputWriter io.Writer // Optional output for status messages
+
+	// Plan is the pipeline geometry the caller reserved for this upload.
+	// Providers take PartSize from it. Nil means the caller did not plan; see
+	// PartSize below.
+	Plan *resources.UploadPlan
+}
+
+// PartSize is the plaintext part size this upload must use. It comes from the
+// caller's plan when there is a usable one, and otherwise from a plan the
+// provider makes on the spot, so no path can reach a backend without a
+// part-count guard. A plan carrying no part size is treated as no plan: a zero
+// would divide by zero in CalculateTotalParts, and this fallback exists to catch
+// exactly that kind of caller mistake.
+func (p StreamingUploadInitParams) PartSize(limits resources.UploadLimits) (int64, error) {
+	if p.Plan != nil && p.Plan.PartSize > 0 {
+		return p.Plan.PartSize, nil
+	}
+	plan, err := resources.PlanUpload(resources.UploadPlanRequest{
+		FileSize: p.FileSize,
+		Threads:  constants.MaxThreadsPerFile,
+		Limits:   limits,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return plan.PartSize, nil
 }
 
 // StreamingUploadResumeParams contains parameters for resuming a streaming upload.

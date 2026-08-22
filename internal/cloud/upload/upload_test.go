@@ -6,29 +6,35 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
+	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/resources"
+	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
 // fakeStreamingUploader implements transfer.StreamingConcurrentUploader
 // for testing the upload pipeline without real cloud storage.
 type fakeStreamingUploader struct {
 	// Track what the pipeline does
-	mu                sync.Mutex
-	initCalled        bool
-	encryptCalls      []fakeEncryptCall
-	uploadCalls       []fakeUploadCall
-	completeCalled    bool
-	completeParts     []*transfer.PartResult
-	abortCalled       bool
+	mu             sync.Mutex
+	initCalled     bool
+	encryptCalls   []fakeEncryptCall
+	uploadCalls    []fakeUploadCall
+	completeCalled bool
+	completeParts  []*transfer.PartResult
+	abortCalled    bool
 
 	// Configure behavior
-	partSize          int64
-	encryptFn         func(partIndex int64, plaintext []byte) ([]byte, error)
+	partSize     int64
+	limits       resources.UploadLimits
+	encryptFn    func(partIndex int64, plaintext []byte) ([]byte, error)
+	capturedPlan *resources.UploadPlan
 }
 
 type fakeEncryptCall struct {
@@ -59,10 +65,22 @@ func (f *fakeStreamingUploader) StorageType() string {
 }
 
 // StreamingConcurrentUploader interface methods
+func (f *fakeStreamingUploader) UploadLimits() resources.UploadLimits {
+	if f.limits != (resources.UploadLimits{}) {
+		return f.limits
+	}
+	return resources.UploadLimits{
+		StorageType: "FakeStorage",
+		MaxParts:    constants.MaxS3UploadParts,
+		MaxPartSize: constants.MaxS3PlaintextPartSize,
+	}
+}
+
 func (f *fakeStreamingUploader) InitStreamingUpload(_ context.Context, params transfer.StreamingUploadInitParams) (*transfer.StreamingUpload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.initCalled = true
+	f.capturedPlan = params.Plan
 
 	partSize := f.partSize
 	if partSize == 0 {
@@ -419,6 +437,139 @@ func TestUploadStreamingEncryptError(t *testing.T) {
 	}
 	if fake.completeCalled {
 		t.Error("CompleteStreamingUpload should not be called on error")
+	}
+}
+
+// TestUploadStreamingPassesPlanToProvider checks the wiring the part-count guard
+// depends on: the orchestrator plans the pipeline and the provider receives it,
+// rather than each side sizing parts on its own.
+func TestUploadStreamingPassesPlanToProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "planned.dat")
+	data := make([]byte, 250)
+	if err := os.WriteFile(file, data, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	fake := &fakeStreamingUploader{partSize: 100}
+
+	fileSize := int64(len(data))
+	if _, err := uploadStreaming(context.Background(), fake, UploadParams{LocalPath: file}, fileSize); err != nil {
+		t.Fatalf("uploadStreaming failed: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	if fake.capturedPlan == nil {
+		t.Fatal("provider received no upload plan; it would fall back to sizing parts itself")
+	}
+	want, err := resources.PlanUpload(resources.UploadPlanRequest{
+		FileSize: fileSize,
+		Threads:  4, // the orchestrator's default when there is no transfer handle
+		Limits:   fake.UploadLimits(),
+	})
+	if err != nil {
+		t.Fatalf("reference plan failed: %v", err)
+	}
+	if *fake.capturedPlan != want {
+		t.Errorf("plan = %+v, want %+v", *fake.capturedPlan, want)
+	}
+}
+
+// TestUploadStreamingRejectsFileTooLargeBeforeInit is the fail-fast requirement:
+// a file the backend cannot hold must be refused before a multipart upload is
+// opened, not after hundreds of gigabytes have been sent.
+func TestUploadStreamingRejectsFileTooLargeBeforeInit(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "toobig.dat")
+	if err := os.WriteFile(file, []byte{}, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Two parts of at most 16 MB cannot hold a 1 GB file.
+	fake := &fakeStreamingUploader{
+		limits: resources.UploadLimits{
+			StorageType: "FakeStorage",
+			MaxParts:    2,
+			MaxPartSize: constants.MinChunkSize,
+		},
+	}
+
+	_, err := uploadStreaming(context.Background(), fake, UploadParams{LocalPath: file}, 1024*1024*1024)
+	if err == nil {
+		t.Fatal("expected an oversized file to be rejected")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error %q does not explain that the file is too large", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.initCalled {
+		t.Error("InitStreamingUpload was called for a file that cannot be stored")
+	}
+}
+
+// TestUploadStreamingReleasesPlannedMemory covers the reserve/release lifecycle
+// on both the success and the failure path: a finished upload must not keep
+// holding the shared budget.
+func TestUploadStreamingReleasesPlannedMemory(t *testing.T) {
+	const budget = 8 * 1024 * 1024 * 1024
+
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "released.dat")
+	data := make([]byte, 250)
+	if err := os.WriteFile(file, data, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+	fileSize := int64(len(data))
+
+	tests := []struct {
+		name      string
+		fake      *fakeStreamingUploader
+		wantError bool
+	}{
+		{
+			name: "success",
+			fake: &fakeStreamingUploader{partSize: 16 * 1024 * 1024},
+		},
+		{
+			name: "encryption failure",
+			fake: &fakeStreamingUploader{
+				partSize:  16 * 1024 * 1024,
+				encryptFn: func(int64, []byte) ([]byte, error) { return nil, fmt.Errorf("boom") },
+			},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resourceMgr := resources.NewManager(resources.Config{
+				MaxThreads:   8,
+				AutoScale:    true,
+				CPUCores:     8,
+				MemoryBudget: budget,
+			})
+			handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(fileSize, 1)
+			defer handle.Complete()
+
+			_, err := uploadStreaming(context.Background(), tt.fake, UploadParams{
+				LocalPath:      file,
+				TransferHandle: handle,
+			}, fileSize)
+			if tt.wantError && err == nil {
+				t.Fatal("expected the upload to fail")
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("uploadStreaming failed: %v", err)
+			}
+
+			if got := resourceMgr.GetAvailableUploadMemory(); got != budget {
+				t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(budget))
+			}
+		})
 	}
 }
 

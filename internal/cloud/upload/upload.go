@@ -22,6 +22,7 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/resources"
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
@@ -375,6 +376,27 @@ type uploadResult struct {
 	err       error
 }
 
+// planStreamingUpload sizes the pipeline and returns the release for whatever it
+// reserved. With a transfer handle the memory comes out of the shared pool, so
+// several large uploads at once cannot each budget against the whole machine;
+// without one there is no pool to share and the plan is advisory.
+func planStreamingUpload(handle *internaltransfer.Transfer, fileSize int64, threads int, limits resources.UploadLimits) (resources.UploadPlan, func(), error) {
+	req := resources.UploadPlanRequest{
+		FileSize: fileSize,
+		Threads:  threads,
+		Limits:   limits,
+	}
+	if handle == nil {
+		plan, err := resources.PlanUpload(req)
+		return plan, func() {}, err
+	}
+	plan, err := handle.PlanUpload(req)
+	if err != nil {
+		return resources.UploadPlan{}, func() {}, err
+	}
+	return plan, handle.ReleaseUploadPlan, nil
+}
+
 // uploadStreaming uses the StreamingConcurrentUploader interface for streaming uploads.
 // Encryption is sequential (CBC constraint), but uploads happen in parallel.
 func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params UploadParams, fileSize int64) (*cloud.UploadResult, error) {
@@ -389,11 +411,30 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 
 	streamInitTimer := cloud.StartTimer(params.OutputWriter, "Streaming upload init")
 
+	concurrency := 4
+	if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
+		concurrency = params.TransferHandle.GetThreads()
+	}
+
+	// Plan before anything is opened on the backend. A file too large for the
+	// storage type, or a machine that cannot hold one working set, has to fail
+	// here — the part-count limits are only hit after every earlier part has
+	// already been transferred.
+	plan, releasePlan, err := planStreamingUpload(params.TransferHandle, fileSize, concurrency, streamingUploader.UploadLimits())
+	if err != nil {
+		return nil, err
+	}
+	defer releasePlan()
+	if concurrency > plan.WorkerCap {
+		concurrency = plan.WorkerCap
+	}
+
 	// Initialize streaming upload
 	initParams := transfer.StreamingUploadInitParams{
 		LocalPath:    params.LocalPath,
 		FileSize:     fileSize,
 		OutputWriter: params.OutputWriter,
+		Plan:         &plan,
 	}
 
 	log.Printf("[DEBUG] %s: Starting InitStreamingUpload", fileName)
@@ -434,15 +475,11 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	}
 	defer file.Close()
 
-	concurrency := 4
-	if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
-		concurrency = params.TransferHandle.GetThreads()
-	}
+	cloud.TimingLog(params.OutputWriter, "Upload workers: %d threads (max %d)", concurrency, plan.WorkerCap)
 
-	cloud.TimingLog(params.OutputWriter, "Upload workers: %d threads", concurrency)
-
-	// Buffer sized to concurrency*3 so encryption can run ahead and keep all upload workers busy
-	encryptedChan := make(chan encryptedPart, concurrency*3)
+	// Depth comes from the plan so encryption can run ahead and keep all upload
+	// workers busy without the queued parts outgrowing the memory budget.
+	encryptedChan := make(chan encryptedPart, plan.QueueDepth)
 
 	// Result channel for collecting upload results
 	resultChan := make(chan uploadResult, concurrency*2)
@@ -608,8 +645,18 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 			case <-uploadCtx.Done():
 				return
 			case <-ticker.C:
-				// Try to acquire up to 4 more threads at a time
-				acquired := params.TransferHandle.TryAcquireMore(4)
+				// Never grow past the plan's cap: every extra worker holds another
+				// part-sized ciphertext, and the memory budget was reserved for at
+				// most WorkerCap of them. Asking for only what fits also avoids
+				// taking threads from the pool that could not be used.
+				room := plan.WorkerCap - int(atomic.LoadInt32(&workerCount))
+				if room <= 0 {
+					continue
+				}
+				if room > constants.UploadScalerThreadsPerTick {
+					room = constants.UploadScalerThreadsPerTick
+				}
+				acquired := params.TransferHandle.TryAcquireMore(room)
 				if acquired > 0 {
 					// Spawn additional workers
 					for i := 0; i < acquired; i++ {
@@ -628,8 +675,8 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// Cancel the context first (signals scaler to stop), then wait for it to finish.
 	// This prevents goroutine leaks.
 	defer func() {
-		cancelUpload()  // Cancel context to signal scaler and other goroutines to stop
-		<-scalerDone    // Wait for scaler goroutine to finish
+		cancelUpload() // Cancel context to signal scaler and other goroutines to stop
+		<-scalerDone   // Wait for scaler goroutine to finish
 	}()
 
 	// Close result channel when all workers finish
@@ -770,4 +817,3 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 
 	return result, nil
 }
-

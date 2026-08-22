@@ -36,6 +36,17 @@ var _ transfer.StreamingConcurrentUploader = (*Provider)(nil)
 var _ transfer.StreamingConcurrentDownloader = (*Provider)(nil)
 var _ transfer.StreamingPartDownloader = (*Provider)(nil)
 
+// UploadLimits reports S3's multipart ceilings. Part numbers stop at 10,000 and
+// a single part may not exceed 5 GB; the planner works in plaintext, so the size
+// it reports leaves room for the padding CBC adds to the final part.
+func (p *Provider) UploadLimits() resources.UploadLimits {
+	return resources.UploadLimits{
+		StorageType: p.StorageType(),
+		MaxParts:    constants.MaxS3UploadParts,
+		MaxPartSize: constants.MaxS3PlaintextPartSize,
+	}
+}
+
 // InitStreamingUpload initializes a multipart upload with streaming encryption.
 // Uses CBC chaining format compatible with Rescale platform.
 // Metadata stores `iv` (base64) for Rescale decryption compatibility.
@@ -63,10 +74,12 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	objectName := fmt.Sprintf("%s-%s", filename, randomSuffix)
 	objectKey := fmt.Sprintf("%s/%s", s3Client.PathBase(), objectName)
 
-	// Calculate part size dynamically based on file size and available threads
-	// This optimizes chunk size for memory constraints and throughput
-	numThreads := constants.MaxThreadsPerFile // Default thread count for large files
-	partSize := resources.CalculateDynamicChunkSize(params.FileSize, numThreads)
+	// Part size comes from the caller's upload plan, which keeps the part count
+	// under MaxS3UploadParts as well as within the memory budget.
+	partSize, err := params.PartSize(p.UploadLimits())
+	if err != nil {
+		return nil, err
+	}
 
 	// Create streaming encryption state (CBC chaining)
 	encryptState, err := transfer.NewStreamingEncryptionState(partSize)
