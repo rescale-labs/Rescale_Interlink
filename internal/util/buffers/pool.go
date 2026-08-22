@@ -14,10 +14,10 @@ import (
 
 // Pool monitoring counters
 var (
-	chunkAllocations  int64 // Total chunk buffer allocations (new creates)
-	chunkReuses       int64 // Total chunk buffer reuses from pool
-	smallAllocations  int64 // Total small buffer allocations
-	smallReuses       int64 // Total small buffer reuses from pool
+	chunkAllocations int64 // Total chunk buffer allocations (new creates)
+	chunkReuses      int64 // Total chunk buffer reuses from pool
+	smallAllocations int64 // Total small buffer allocations
+	smallReuses      int64 // Total small buffer reuses from pool
 )
 
 var (
@@ -79,6 +79,22 @@ func PutChunkBuffer(buf *[]byte) {
 	}
 }
 
+// GetPartBuffer returns a buffer of exactly size bytes, plus the function that
+// releases it.
+//
+// Readers must size their buffer to the part size the upload actually planned,
+// not to the pool's fixed size: a buffer shorter than the part size ends every
+// read early, and an upload loop that treats a short read as the final part then
+// stops with most of the file unsent. Only a part size that matches the pool can
+// use the pool; anything else is allocated for the life of the transfer.
+func GetPartBuffer(size int64) ([]byte, func()) {
+	if size == constants.ChunkSize {
+		bufPtr := GetChunkBuffer()
+		return *bufPtr, func() { PutChunkBuffer(bufPtr) }
+	}
+	return make([]byte, size), func() {}
+}
+
 // GetSmallBuffer retrieves a 16KB buffer from the pool
 // Used primarily for encryption/decryption streaming operations.
 //
@@ -106,8 +122,8 @@ func PutSmallBuffer(buf *[]byte) {
 // Stats returns current buffer pool statistics
 // Useful for monitoring and debugging memory usage
 type Stats struct {
-	ChunkBufferSize   int   // Size of chunk buffers (bytes)
-	SmallBufferSize   int   // Size of small buffers (bytes)
-	ChunkAllocations  int64 // Total chunk buffer allocations (new creates)
-	SmallAllocations  int64 // Total small buffer allocations (new creates)
+	ChunkBufferSize  int   // Size of chunk buffers (bytes)
+	SmallBufferSize  int   // Size of small buffers (bytes)
+	ChunkAllocations int64 // Total chunk buffer allocations (new creates)
+	SmallAllocations int64 // Total small buffer allocations (new creates)
 }

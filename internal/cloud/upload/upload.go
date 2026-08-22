@@ -789,6 +789,24 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 
 	encryptTimer.StopWithThroughput(fileSize)
 
+	// Plan against the ciphertext, which is what the backend splits into parts.
+	// Planning here rather than from the plaintext size keeps the part count
+	// exact: CBC padding can push a file that divides evenly into the part limit
+	// one byte over it.
+	encryptedInfo, err := os.Stat(encryptedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat encrypted file: %w", err)
+	}
+	threads := 1
+	if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
+		threads = params.TransferHandle.GetThreads()
+	}
+	plan, releasePlan, err := planStreamingUpload(params.TransferHandle, encryptedInfo.Size(), threads, preEncryptUploader.UploadLimits())
+	if err != nil {
+		return nil, err
+	}
+	defer releasePlan()
+
 	// Build upload params (providers stat the encrypted file themselves)
 	uploadParams := transfer.EncryptedFileUploadParams{
 		LocalPath:        params.LocalPath,
@@ -800,6 +818,7 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		ProgressCallback: params.ProgressCallback,
 		TransferHandle:   params.TransferHandle,
 		OutputWriter:     params.OutputWriter,
+		Plan:             &plan,
 	}
 
 	uploadTimer := cloud.StartTimer(params.OutputWriter, "Pre-encrypt upload")

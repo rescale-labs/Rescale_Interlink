@@ -25,8 +25,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
-	"github.com/rescale/rescale-int/internal/crypto"        // package name is 'encryption'
-	"github.com/rescale/rescale-int/internal/resources"
+	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/util/buffers"
 )
 
@@ -135,10 +134,14 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	}
 	defer file.Close()
 
-	// Calculate part size dynamically based on encrypted file size
-	numThreads := constants.MaxThreadsPerFile
-	partSize := resources.CalculateDynamicChunkSize(encryptedSize, numThreads)
-	totalParts := (encryptedSize + partSize - 1) / partSize
+	// Part size comes from the caller's upload plan, which keeps the part count
+	// under MaxS3UploadParts as well as within the memory budget.
+	plan, err := params.UploadPlan(encryptedSize, p.UploadLimits())
+	if err != nil {
+		return err
+	}
+	partSize := plan.PartSize
+	totalParts := transfer.CalculateTotalParts(encryptedSize, partSize)
 
 	// Try to load resume state
 	existingState, _ := state.LoadUploadState(params.LocalPath)
@@ -193,7 +196,8 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	}
 
 	// Upload parts
-	buffer := make([]byte, partSize)
+	buffer, releaseBuffer := buffers.GetPartBuffer(partSize)
+	defer releaseBuffer()
 	for partNum := startPart; int64(partNum) <= totalParts; partNum++ {
 		n, err := io.ReadFull(file, buffer)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
@@ -254,6 +258,11 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		state.SaveUploadState(currentState, params.LocalPath)
 	}
 
+	if err := verifyS3PartsComplete(uploadedBytes, encryptedSize, completedParts, totalParts); err != nil {
+		abortS3Upload(ctx, s3Client, objectKey, uploadID)
+		return fmt.Errorf("refusing to complete upload of %s: %w", objectKey, err)
+	}
+
 	// Complete multipart upload
 	err = s3Client.RetryWithBackoff(ctx, "CompleteMultipartUpload", func() error {
 		_, err := s3Client.Client().CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
@@ -286,11 +295,25 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	defer file.Close()
 
 	totalSize := encryptedSize
-	// Calculate part size dynamically based on file size and available threads
-	numThreads := constants.MaxThreadsPerFile
-	partSize := resources.CalculateDynamicChunkSize(totalSize, numThreads)
-	totalParts := int32((totalSize + partSize - 1) / partSize)
+	// Part size, worker count and queue depth all come from the caller's upload
+	// plan: it keeps the part count under MaxS3UploadParts and bounds how many
+	// part-sized buffers this pipeline can hold at once.
+	plan, err := params.UploadPlan(totalSize, p.UploadLimits())
+	if err != nil {
+		return err
+	}
+	partSize := plan.PartSize
+	totalParts := int32(transfer.CalculateTotalParts(totalSize, partSize))
 	concurrency := params.TransferHandle.GetThreads()
+	if concurrency > plan.WorkerCap {
+		concurrency = plan.WorkerCap
+	}
+	// A plan that carries no worker cap would otherwise start no workers at all:
+	// nothing drains the queue, so the upload fails its completeness check and
+	// strands the producer goroutine.
+	if concurrency < 1 {
+		concurrency = 1
+	}
 
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
@@ -313,6 +336,21 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	startPart := int32(1)
 	resuming := false
 	var createdAt time.Time
+
+	if existingState != nil && existingState.ObjectKey != objectKey {
+		// Every attempt generates a fresh key, IV and object suffix, so a state
+		// left by an earlier attempt describes an upload of DIFFERENT ciphertext.
+		// Resuming it would interleave two encryptions into one object; the parts
+		// already sent there are unusable, so drop the whole thing and start over.
+		log.Printf("Resume state is for a previous upload (%s), starting fresh", existingState.ObjectKey)
+		if existingState.UploadID != "" {
+			abortS3Upload(ctx, s3Client, existingState.ObjectKey, existingState.UploadID)
+		}
+		if delErr := state.DeleteUploadState(params.LocalPath); delErr != nil {
+			log.Printf("Warning: Failed to delete stale resume state: %v", delErr)
+		}
+		existingState = nil
+	}
 
 	if existingState != nil {
 		// Validate resume state
@@ -393,7 +431,8 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 
 		// Inform user about concurrent upload
 		if params.OutputWriter != nil {
-			fmt.Fprintf(params.OutputWriter, "Uploading with %d concurrent threads (%d parts of 64 MB)\n", concurrency, totalParts)
+			fmt.Fprintf(params.OutputWriter, "Uploading with %d concurrent threads (%d parts of %s)\n",
+				concurrency, totalParts, cloud.FormatBytes(partSize))
 		}
 	}
 
@@ -433,7 +472,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	}
 
 	// Channels for coordination
-	jobChan := make(chan partJob, concurrency*2)
+	jobChan := make(chan partJob, plan.QueueDepth)
 	resultChan := make(chan partResult, totalParts)
 
 	// Error handling: use context cancellation to signal workers to stop
@@ -519,6 +558,12 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	go func() {
 		defer close(jobChan)
 
+		// One buffer for the whole producer, sized to the part size the plan
+		// chose. A short read can then only mean the end of the file, which is
+		// what the loop below treats it as.
+		buffer, releaseBuffer := buffers.GetPartBuffer(partSize)
+		defer releaseBuffer()
+
 		partNumber := startPart
 		for {
 			select {
@@ -527,15 +572,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			default:
 			}
 
-			// Get buffer from pool for this part
-			bufferPtr := buffers.GetChunkBuffer()
-			buffer := *bufferPtr
-
-			// Read up to partSize bytes into pooled buffer
 			n, readErr := io.ReadFull(file, buffer)
 
 			if readErr == io.EOF {
-				buffers.PutChunkBuffer(bufferPtr)
 				break
 			}
 
@@ -546,15 +585,12 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				copy(partData, buffer[:n])
 				readErr = nil
 			} else if readErr != nil {
-				buffers.PutChunkBuffer(bufferPtr)
 				setError(fmt.Errorf("failed to read file chunk: %w", readErr))
 				return
 			} else {
 				partData = make([]byte, n)
 				copy(partData, buffer[:n])
 			}
-
-			buffers.PutChunkBuffer(bufferPtr)
 
 			// Queue this part for upload
 			jobChan <- partJob{
@@ -646,6 +682,15 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		return *completedParts[i].PartNumber < *completedParts[j].PartNumber
 	})
 
+	// The producer above stops on the first short read, so anything that makes a
+	// read return early — a mis-sized buffer, a truncated temp file — ends with a
+	// part list S3 would happily assemble into a shorter object and report as the
+	// whole file. Assigning err here also arms the deferred abort.
+	if err = verifyS3PartsComplete(atomic.LoadInt64(&atomicUploadedBytes), totalSize, completedParts, int64(totalParts)); err != nil {
+		err = fmt.Errorf("refusing to complete upload of %s: %w", objectKey, err)
+		return err
+	}
+
 	// Complete multipart upload with retry
 	err = s3Client.RetryWithBackoff(ctx, "CompleteMultipartUpload", func() error {
 		_, err := s3Client.Client().CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
@@ -671,6 +716,37 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	// Clear error to prevent defer from aborting successful upload
 	err = nil
 	return nil
+}
+
+// verifyS3PartsComplete checks that an upload covers the whole encrypted file
+// before it is committed. parts must already be in part-number order, which is
+// the order S3 assembles them in.
+func verifyS3PartsComplete(uploadedBytes, encryptedSize int64, parts []types.CompletedPart, totalParts int64) error {
+	if err := transfer.VerifyUploadComplete(uploadedBytes, encryptedSize, int64(len(parts)), totalParts); err != nil {
+		return err
+	}
+	partNumbers := make([]int32, len(parts))
+	for i, part := range parts {
+		if part.PartNumber != nil {
+			partNumbers[i] = *part.PartNumber
+		}
+	}
+	return transfer.VerifyPartSequence(partNumbers)
+}
+
+// abortS3Upload discards a multipart upload the caller has decided not to
+// commit. Best effort: the parts already sent are billed until the bucket's
+// lifecycle rules expire them, but there is nothing useful to do with a failure
+// here beyond logging it.
+func abortS3Upload(ctx context.Context, s3Client *S3Client, objectKey, uploadID string) {
+	_, err := s3Client.Client().AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(s3Client.Bucket()),
+		Key:      aws.String(objectKey),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		log.Printf("Warning: Failed to abort multipart upload %s for %s: %v", uploadID, objectKey, err)
+	}
 }
 
 // convertToCompletedParts converts state.CompletedPart slice to types.CompletedPart slice

@@ -5,6 +5,7 @@ package transfer
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -154,6 +155,10 @@ type PartResult struct {
 type PreEncryptUploader interface {
 	cloud.CloudTransfer
 
+	// UploadLimits reports the backend's hard multipart ceilings so the
+	// orchestrator can size parts before it opens an upload against it.
+	UploadLimits() resources.UploadLimits
+
 	// UploadEncryptedFile uploads an already-encrypted file.
 	// The file at EncryptedPath is the pre-encrypted data.
 	// Handles multipart upload with optional concurrency via TransferHandle.
@@ -172,4 +177,68 @@ type EncryptedFileUploadParams struct {
 	TransferHandle   *transfer.Transfer // For concurrency
 	ProgressCallback func(float64)      // Progress reporting
 	OutputWriter     io.Writer          // Status messages
+
+	// Plan is the pipeline geometry the caller reserved for this upload, sized
+	// against the ENCRYPTED file rather than the original. Providers take part
+	// size, worker cap and queue depth from it. Nil means the caller did not
+	// plan; see UploadPlan below.
+	Plan *resources.UploadPlan
+}
+
+// UploadPlan is the geometry this upload must run with. It comes from the
+// caller's plan when there is a usable one, and otherwise from a plan the
+// provider makes on the spot, so no path can reach a backend without a
+// part-count guard. A plan carrying no part size is treated as no plan: a zero
+// would divide by zero in CalculateTotalParts, and this fallback exists to catch
+// exactly that kind of caller mistake.
+//
+// encryptedSize, not the original file size, is what the fallback plans against:
+// the parts the backend counts are ciphertext.
+func (p EncryptedFileUploadParams) UploadPlan(encryptedSize int64, limits resources.UploadLimits) (resources.UploadPlan, error) {
+	if p.Plan != nil && p.Plan.PartSize > 0 {
+		return *p.Plan, nil
+	}
+	return resources.PlanUpload(resources.UploadPlanRequest{
+		FileSize: encryptedSize,
+		Threads:  constants.MaxThreadsPerFile,
+		Limits:   limits,
+	})
+}
+
+// VerifyUploadComplete reports whether an upload holds every byte and every part
+// of the file it is about to assemble. Both backends assemble whatever subset of
+// parts they are handed and report success, so a reader that stopped early would
+// otherwise register a truncated object as the whole file. Call this immediately
+// before CompleteMultipartUpload / CommitBlockList and abort instead of
+// committing when it fails.
+func VerifyUploadComplete(uploadedBytes, expectedBytes, partCount, expectedParts int64) error {
+	if uploadedBytes != expectedBytes || partCount != expectedParts {
+		return fmt.Errorf("upload incomplete: holding %d of %d bytes in %d of %d parts",
+			uploadedBytes, expectedBytes, partCount, expectedParts)
+	}
+	return nil
+}
+
+// VerifyPartSequence reports whether partNumbers, in the order given, is exactly
+// 1..len(partNumbers). S3 assembles an object in part-number order, so a gap, a
+// duplicate or an out-of-order list changes the stored bytes without failing.
+func VerifyPartSequence(partNumbers []int32) error {
+	for i, num := range partNumbers {
+		if num != int32(i+1) {
+			return fmt.Errorf("part numbers are not contiguous: position %d holds part %d", i+1, num)
+		}
+	}
+	return nil
+}
+
+// VerifyBlockList reports whether every slot of an ordered Azure block list was
+// filled. An unfilled slot is a block that was never staged; committing the list
+// without it silently drops that block's bytes from the blob.
+func VerifyBlockList(blockIDs []string) error {
+	for i, id := range blockIDs {
+		if id == "" {
+			return fmt.Errorf("block %d of %d was never staged", i+1, len(blockIDs))
+		}
+	}
+	return nil
 }

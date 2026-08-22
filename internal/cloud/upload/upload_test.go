@@ -661,3 +661,188 @@ func TestProgressInterpolatorStartStop(t *testing.T) {
 		t.Error("expected at least one progress callback from ticker")
 	}
 }
+
+// fakePreEncryptUploader implements transfer.PreEncryptUploader so the
+// pre-encrypt orchestration can be exercised without cloud storage.
+type fakePreEncryptUploader struct {
+	mu sync.Mutex
+
+	uploadCalled  bool
+	capturedPlan  *resources.UploadPlan
+	encryptedSize int64
+
+	limits    resources.UploadLimits
+	uploadErr error
+}
+
+func (f *fakePreEncryptUploader) Upload(_ context.Context, _ cloud.UploadParams) (*cloud.UploadResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (f *fakePreEncryptUploader) Download(_ context.Context, _ cloud.DownloadParams) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (f *fakePreEncryptUploader) RefreshCredentials(_ context.Context) error { return nil }
+
+func (f *fakePreEncryptUploader) StorageType() string { return "FakeStorage" }
+
+func (f *fakePreEncryptUploader) UploadLimits() resources.UploadLimits {
+	if f.limits != (resources.UploadLimits{}) {
+		return f.limits
+	}
+	return resources.UploadLimits{
+		StorageType: "FakeStorage",
+		MaxParts:    constants.MaxS3UploadParts,
+		MaxPartSize: constants.MaxS3PlaintextPartSize,
+	}
+}
+
+func (f *fakePreEncryptUploader) UploadEncryptedFile(_ context.Context, params transfer.EncryptedFileUploadParams) (*cloud.UploadResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.uploadCalled = true
+	f.capturedPlan = params.Plan
+	if info, err := os.Stat(params.EncryptedPath); err == nil {
+		f.encryptedSize = info.Size()
+	}
+	if f.uploadErr != nil {
+		return nil, f.uploadErr
+	}
+	return &cloud.UploadResult{
+		StoragePath:   "fake/path",
+		EncryptionKey: params.EncryptionKey,
+		IV:            params.IV,
+	}, nil
+}
+
+// TestUploadPreEncryptPassesPlanToProvider checks the wiring the part-count guard
+// depends on: the orchestrator plans the pipeline against the ENCRYPTED file — the
+// bytes the backend actually splits into parts — and the provider receives that
+// plan rather than sizing parts on its own.
+func TestUploadPreEncryptPassesPlanToProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "planned.dat")
+	data := make([]byte, 250)
+	if err := os.WriteFile(file, data, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	fake := &fakePreEncryptUploader{}
+	fileSize := int64(len(data))
+	if _, err := uploadPreEncrypt(context.Background(), fake, UploadParams{LocalPath: file}, fileSize); err != nil {
+		t.Fatalf("uploadPreEncrypt failed: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	if fake.capturedPlan == nil {
+		t.Fatal("provider received no upload plan; it would fall back to sizing parts itself")
+	}
+	if fake.encryptedSize <= fileSize {
+		t.Fatalf("encrypted file is %d bytes, expected padding beyond the %d-byte original", fake.encryptedSize, fileSize)
+	}
+	want, err := resources.PlanUpload(resources.UploadPlanRequest{
+		FileSize: fake.encryptedSize,
+		Threads:  1, // no transfer handle: the pre-encrypt path uploads sequentially
+		Limits:   fake.UploadLimits(),
+	})
+	if err != nil {
+		t.Fatalf("reference plan failed: %v", err)
+	}
+	if *fake.capturedPlan != want {
+		t.Errorf("plan = %+v, want %+v", *fake.capturedPlan, want)
+	}
+}
+
+// TestUploadPreEncryptRejectsFileTooLargeBeforeUpload is the fail-fast
+// requirement: a file the backend cannot hold must be refused before the upload
+// starts, not after parts have been sent.
+func TestUploadPreEncryptRejectsFileTooLargeBeforeUpload(t *testing.T) {
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "toobig.dat")
+	if err := os.WriteFile(file, make([]byte, 250), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// A backend that accepts one part of under a MiB cannot hold any file: part
+	// sizes are whole MiB multiples, so no part size fits inside its limit.
+	fake := &fakePreEncryptUploader{
+		limits: resources.UploadLimits{
+			StorageType: "FakeStorage",
+			MaxParts:    1,
+			MaxPartSize: constants.PartSizeAlignment - 1,
+		},
+	}
+
+	_, err := uploadPreEncrypt(context.Background(), fake, UploadParams{LocalPath: file}, 250)
+	if err == nil {
+		t.Fatal("expected an oversized file to be rejected")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error %q does not explain that the file is too large", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.uploadCalled {
+		t.Error("UploadEncryptedFile was called for a file that cannot be stored")
+	}
+}
+
+// TestUploadPreEncryptReleasesPlannedMemory covers the reserve/release lifecycle
+// on both the success and the failure path: a finished upload must not keep
+// holding the shared budget.
+func TestUploadPreEncryptReleasesPlannedMemory(t *testing.T) {
+	const budget = 8 * 1024 * 1024 * 1024
+
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "released.dat")
+	if err := os.WriteFile(file, make([]byte, 250), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+	fileSize := int64(250)
+
+	tests := []struct {
+		name      string
+		fake      *fakePreEncryptUploader
+		wantError bool
+	}{
+		{name: "success", fake: &fakePreEncryptUploader{}},
+		{
+			name:      "upload failure",
+			fake:      &fakePreEncryptUploader{uploadErr: fmt.Errorf("boom")},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resourceMgr := resources.NewManager(resources.Config{
+				MaxThreads:   8,
+				AutoScale:    true,
+				CPUCores:     8,
+				MemoryBudget: budget,
+			})
+			handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(fileSize, 1)
+			defer handle.Complete()
+
+			_, err := uploadPreEncrypt(context.Background(), tt.fake, UploadParams{
+				LocalPath:      file,
+				TransferHandle: handle,
+			}, fileSize)
+			if tt.wantError && err == nil {
+				t.Fatal("expected the upload to fail")
+			}
+			if !tt.wantError && err != nil {
+				t.Fatalf("uploadPreEncrypt failed: %v", err)
+			}
+
+			if got := resourceMgr.GetAvailableUploadMemory(); got != budget {
+				t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(budget))
+			}
+		})
+	}
+}

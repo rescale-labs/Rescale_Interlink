@@ -25,7 +25,6 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
-	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/util/buffers"
 )
 
@@ -151,10 +150,14 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 	}
 	defer file.Close()
 
-	// Calculate block size dynamically based on file size
-	numThreads := constants.MaxThreadsPerFile
-	blockSize := resources.CalculateDynamicChunkSize(encryptedSize, numThreads)
-	totalBlocks := (encryptedSize + blockSize - 1) / blockSize
+	// Block size comes from the caller's upload plan, which keeps the block count
+	// under MaxAzureUploadBlocks as well as within the memory budget.
+	plan, err := params.UploadPlan(encryptedSize, p.UploadLimits())
+	if err != nil {
+		return err
+	}
+	blockSize := plan.PartSize
+	totalBlocks := transfer.CalculateTotalParts(encryptedSize, blockSize)
 
 	// Try to load resume state
 	existingState, _ := state.LoadUploadState(params.LocalPath)
@@ -189,13 +192,15 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 		params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
 	}
 
-	// Get buffer from pool
-	bufferPtr := buffers.GetChunkBuffer()
-	defer buffers.PutChunkBuffer(bufferPtr)
-	buffer := *bufferPtr
+	// Sized to the block size the plan chose, so a short read means the end of the
+	// file rather than the end of the buffer.
+	buffer, releaseBuffer := buffers.GetPartBuffer(blockSize)
+	defer releaseBuffer()
 
-	// Upload blocks
-	for blockNum := startBlock; blockNum < totalBlocks; blockNum++ {
+	// Upload blocks. The loop runs to EOF rather than to a precomputed block
+	// count: the count is what the file SHOULD take, and the read is what it
+	// actually takes — disagreeing with each other is the bug this guards.
+	for blockNum := startBlock; ; blockNum++ {
 		n, err := io.ReadFull(file, buffer)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return fmt.Errorf("failed to read block %d: %w", blockNum, err)
@@ -248,6 +253,13 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 		state.SaveUploadState(currentState, params.LocalPath)
 	}
 
+	// Azure commits whatever block list it is handed and reports success, so a
+	// list that does not cover the whole file has to be caught here rather than
+	// discovered as a short blob later.
+	if err := transfer.VerifyUploadComplete(uploadedBytes, encryptedSize, int64(len(blockIDs)), totalBlocks); err != nil {
+		return fmt.Errorf("refusing to commit %s: %w", pathForRescale, err)
+	}
+
 	// Commit block list with metadata
 	metadata := map[string]*string{
 		"iv": to.Ptr(encryption.EncodeBase64(params.IV)),
@@ -281,11 +293,25 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	defer file.Close()
 
 	totalSize := encryptedSize
-	// Calculate part size dynamically based on file size and available threads
-	numThreads := constants.MaxThreadsPerFile
-	partSize := resources.CalculateDynamicChunkSize(totalSize, numThreads)
-	totalBlocks := int64((totalSize + partSize - 1) / partSize)
+	// Block size, worker count and queue depth all come from the caller's upload
+	// plan: it keeps the block count under MaxAzureUploadBlocks and bounds how
+	// many block-sized buffers this pipeline can hold at once.
+	plan, err := params.UploadPlan(totalSize, p.UploadLimits())
+	if err != nil {
+		return err
+	}
+	partSize := plan.PartSize
+	totalBlocks := transfer.CalculateTotalParts(totalSize, partSize)
 	concurrency := params.TransferHandle.GetThreads()
+	if concurrency > plan.WorkerCap {
+		concurrency = plan.WorkerCap
+	}
+	// A plan that carries no worker cap would otherwise start no workers at all:
+	// nothing drains the queue, so the upload fails its completeness check and
+	// strands the producer goroutine.
+	if concurrency < 1 {
+		concurrency = 1
+	}
 
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
@@ -350,7 +376,7 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	}
 
 	// Channels for coordination
-	jobChan := make(chan blockJob, concurrency*2)
+	jobChan := make(chan blockJob, plan.QueueDepth)
 	resultChan := make(chan blockResult, totalBlocks)
 
 	// Error handling: use context cancellation to signal workers to stop
@@ -426,6 +452,12 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	go func() {
 		defer close(jobChan)
 
+		// One buffer for the whole producer, sized to the block size the plan
+		// chose. A short read can then only mean the end of the file, which is
+		// what the loop below treats it as.
+		buffer, releaseBuffer := buffers.GetPartBuffer(partSize)
+		defer releaseBuffer()
+
 		blockIndex := startBlock
 		for {
 			select {
@@ -434,15 +466,9 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 			default:
 			}
 
-			// Get buffer from pool for this block
-			bufferPtr := buffers.GetChunkBuffer()
-			buffer := *bufferPtr
-
-			// Read up to partSize bytes into pooled buffer
 			n, readErr := io.ReadFull(file, buffer)
 
 			if readErr == io.EOF {
-				buffers.PutChunkBuffer(bufferPtr)
 				break
 			}
 
@@ -453,15 +479,12 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				copy(blockData, buffer[:n])
 				readErr = nil
 			} else if readErr != nil {
-				buffers.PutChunkBuffer(bufferPtr)
 				setError(fmt.Errorf("failed to read file chunk: %w", readErr))
 				return
 			} else {
 				blockData = make([]byte, n)
 				copy(blockData, buffer[:n])
 			}
-
-			buffers.PutChunkBuffer(bufferPtr)
 
 			// Generate block ID
 			blockID := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("block-%06d", blockIndex)))
@@ -537,20 +560,20 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				}
 			}
 			currentState := &state.UploadResumeState{
-				LocalPath:     params.LocalPath,
-				EncryptedPath: params.EncryptedPath,
-				ObjectKey:     pathForRescale,
-				TotalSize:     totalSize,
-				OriginalSize:  params.OriginalSize,
-				UploadedBytes: atomic.LoadInt64(&atomicUploadedBytes),
-				BlockIDs:      currentBlockIDs,
-				EncryptionKey: encryption.EncodeBase64(params.EncryptionKey),
-				IV:            encryption.EncodeBase64(params.IV),
-				RandomSuffix:  params.RandomSuffix,
-				CreatedAt:     createdAt,
-				LastUpdate:    time.Now(),
-				StorageType:   "AzureStorage",
-				ProcessID:     os.Getpid(),
+				LocalPath:      params.LocalPath,
+				EncryptedPath:  params.EncryptedPath,
+				ObjectKey:      pathForRescale,
+				TotalSize:      totalSize,
+				OriginalSize:   params.OriginalSize,
+				UploadedBytes:  atomic.LoadInt64(&atomicUploadedBytes),
+				BlockIDs:       currentBlockIDs,
+				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
+				IV:             encryption.EncodeBase64(params.IV),
+				RandomSuffix:   params.RandomSuffix,
+				CreatedAt:      createdAt,
+				LastUpdate:     time.Now(),
+				StorageType:    "AzureStorage",
+				ProcessID:      os.Getpid(),
 				LockAcquiredAt: uploadLock.AcquiredAt,
 			}
 			state.SaveUploadState(currentState, params.LocalPath)
@@ -567,12 +590,15 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	}
 	errorMu.Unlock()
 
-	// Build final block IDs list (in order)
-	finalBlockIDs := make([]string, 0, totalBlocks)
-	for i := int64(0); i < totalBlocks; i++ {
-		if allBlockIDs[i] != "" {
-			finalBlockIDs = append(finalBlockIDs, allBlockIDs[i])
-		}
+	// Every slot has to be filled. Skipping the empty ones instead would close the
+	// gap left by a block that was never staged and commit a blob shorter than the
+	// file, which Azure accepts and reports as a success.
+	finalBlockIDs := allBlockIDs
+	if err := transfer.VerifyBlockList(finalBlockIDs); err != nil {
+		return fmt.Errorf("refusing to commit %s: %w", pathForRescale, err)
+	}
+	if err := transfer.VerifyUploadComplete(atomic.LoadInt64(&atomicUploadedBytes), totalSize, int64(len(finalBlockIDs)), totalBlocks); err != nil {
+		return fmt.Errorf("refusing to commit %s: %w", pathForRescale, err)
 	}
 
 	// Commit block list with metadata
