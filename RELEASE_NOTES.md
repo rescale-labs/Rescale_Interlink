@@ -75,6 +75,26 @@ where Y exceeded X). The space check now measures the destination's actual files
 the message matches the check, and macOS "disc quota exceeded" errors are classified as
 disk-full.
 
+### Upload integrity and very large transfers
+
+- Multipart part size now scales with file size instead of capping at 64 MB, so uploads
+  are no longer limited to 640 GB on S3 or 3.2 TB on Azure by backend part-count limits.
+  Files beyond a backend's supported maximum are refused up front with a clear message
+  instead of failing mid-transfer, memory use for very large uploads is bounded, and
+  concurrent large uploads share a memory budget instead of each claiming the machine.
+- Pre-encrypted uploads (the optional pre-encrypt mode) of files of 1 GB or more could
+  stop early while the file was still registered as complete, leaving a truncated object
+  in storage. Every upload path now verifies that all bytes and all parts arrived, in
+  order, immediately before a file is committed — and aborts rather than registering a
+  partial object. Interrupted pre-encrypted uploads no longer attempt an unsafe resume
+  that could mix two encryptions in one object.
+- The File Browser uploads only to the folder it is actually showing. Switching between
+  Jobs and My Library, or navigating while a folder is still loading, can no longer send
+  files to the previous view's folder (which for job output folders failed with an
+  "immutable folder" error only after the entire file had transferred). Upload stays
+  disabled until the destination has loaded, and the confirmation dialog names the exact
+  folder that will receive the files.
+
 ### Build and security
 
 Go toolchain 1.26.5 with refreshed dependencies (resolves all 24 open Dependabot alerts at
