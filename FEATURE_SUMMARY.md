@@ -299,8 +299,12 @@ run is not a failure.
 Transient storage and API failures are retried automatically and reported from the second
 attempt onward, naming the operation, attempt number, cause class, and next backoff.
 Progress bars carry a matching `(retry N)` label. Each operation has a 90-second
-wall-clock retry budget; on exhaustion it fails with `retries exhausted after Xs`, quoting
-up to 200 bytes of the server's own response so the diagnostic survives. `Retry-After`
+wall-clock retry budget, reported per layer: storage transfers fail with `retries
+exhausted after 1m28s (limit 1m30s, 6 attempt(s))` and the failing operation's own error;
+API calls fail with `retry budget (1m30s) spent after 1m52s elapsed`, quoting the status
+and up to 200 bytes of the server's own response so the platform's explanation survives.
+The budget is checked between attempts and cannot cut short an attempt already in flight,
+so one slow attempt can push the reported elapsed time past the budget. `Retry-After`
 values longer than the client's cap are clamped and the discrepancy is reported.
 
 ### Bar-Safe Diagnostic Output

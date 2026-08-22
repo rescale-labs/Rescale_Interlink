@@ -34,8 +34,8 @@ const retryNoticeMinWait = 5 * time.Second
 const retryDrainLimit = 4 << 10
 
 // retryBodyExcerptLimit caps how much of a failing response body is quoted back
-// in a retry-exhausted error. Long enough for a Rescale API error payload,
-// short enough not to bury the message it is attached to.
+// in a spent-budget error. Long enough for a Rescale API error payload, short
+// enough not to bury the message it is attached to.
 const retryBodyExcerptLimit = 200
 
 // retryLogger implements the retryablehttp.LeveledLogger interface.
@@ -162,10 +162,11 @@ func (p *retryPolicy) limiterFor(req *nethttp.Request) *ratelimit.RateLimiter {
 
 // checkRetry decides whether an attempt gets retried.
 //
-// Never retries 4xx (not recoverable) except 429. Never retries 5xx on job
-// creation or submission POSTs: those are not idempotent, so a retry could
-// duplicate a job — the response is passed through instead so the caller can
-// report the server's own error.
+// go-retryablehttp asks this after every attempt, including the one that
+// succeeded, so the answer has to be classified before the retry budget is
+// consulted. Applying the budget first turned a slow-but-successful call into a
+// failure whose message carried the very result the caller had asked for, and
+// buried a terminal 4xx behind a generic exhaustion error.
 func (p *retryPolicy) checkRetry(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
 	// Don't retry on context cancellation
 	if ctx.Err() != nil {
@@ -192,10 +193,32 @@ func (p *retryPolicy) checkRetry(ctx context.Context, resp *nethttp.Response, er
 		}
 	}
 
-	if budgetErr := p.budgetExceeded(ctx, resp, err); budgetErr != nil {
-		return false, budgetErr
-	}
+	retry, classifyErr := p.classify(ctx, resp, err)
 
+	// The budget bounds retrying and nothing else. An answer — a success, or a
+	// refusal that was never going to be retried — is delivered however long it
+	// took to arrive; only a decision to go round again can be refused.
+	if retry {
+		if budgetErr := p.budgetExceeded(ctx, resp, err); budgetErr != nil {
+			return false, budgetErr
+		}
+	}
+	return retry, classifyErr
+}
+
+// classify applies the retry rules for one attempt, with no regard for how long
+// the call has been running.
+//
+// Never retries 4xx (not recoverable) except 429. Never retries 5xx on job
+// creation or submission POSTs: those are not idempotent, so a retry could
+// duplicate a job — the response is passed through instead so the caller can
+// report the server's own error.
+//
+// Must never pair a retry with an error: checkRetry hands this error straight
+// back, so a (true, err) would let a stale error outlive the retries it allowed.
+// DefaultRetryPolicy holds to that; retryablehttp's ErrorPropagatedRetryPolicy
+// does not, and cannot be swapped in here without gating its error too.
+func (p *retryPolicy) classify(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
 	// Retry transport/connection errors (all methods)
 	if err != nil {
 		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
@@ -224,8 +247,12 @@ func (p *retryPolicy) checkRetry(ctx context.Context, resp *nethttp.Response, er
 // sees: an unreachable host or a stuck 500 otherwise burns all 11 attempts,
 // silently, for minutes.
 //
-// The check is on elapsed time, not on elapsed plus the next backoff, so a call
-// can overshoot the budget by up to one RetryWaitMax before it stops.
+// The budget is only ever consulted between attempts, so it cannot interrupt one
+// that is in flight: a single attempt that hangs for minutes overshoots the
+// budget by however long it hangs. Even between attempts the check is on elapsed
+// time alone, not elapsed plus the next backoff, adding up to one RetryWaitMax.
+// This is a bound on retrying, not a deadline on the call — enforcing one of
+// those is the HTTP client's timeout, not this.
 func (p *retryPolicy) budgetExceeded(ctx context.Context, resp *nethttp.Response, err error) error {
 	if p.maxElapsed <= 0 {
 		return nil
@@ -256,8 +283,11 @@ func (p *retryPolicy) budgetExceeded(ctx context.Context, resp *nethttp.Response
 			}
 		}
 	}
-	return fmt.Errorf("retries exhausted after %v (limit %v): %w",
-		elapsed.Round(time.Millisecond), p.maxElapsed, cause)
+	// Reports the budget and the elapsed time as two separate facts rather than
+	// as a limit and an overrun: elapsed can exceed the budget by any margin
+	// when one attempt runs long, and calling that a limit reads as a bug.
+	return fmt.Errorf("retry budget (%v) spent after %v elapsed: %w",
+		p.maxElapsed, elapsed.Round(time.Millisecond), cause)
 }
 
 // orDash renders a missing header value as a dash so a partial pair still reads

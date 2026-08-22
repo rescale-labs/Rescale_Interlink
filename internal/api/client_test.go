@@ -1092,51 +1092,211 @@ func TestRetryBackoffClampsToWaitMax(t *testing.T) {
 	})
 }
 
-// TestRetryBudgetStopsRetries verifies the wall-clock cap: once a call has spent
-// its budget, checkRetry stops the loop and says what it was failing on.
-func TestRetryBudgetStopsRetries(t *testing.T) {
-	const budget = 40 * time.Millisecond
-	policy, _ := newRetryTestPolicy(t, budget)
-	resp := retryTestResponse(500, "")
+// spentBudgetContext stamps a call as having started `ago` in the past, so any
+// budget shorter than that is already gone — without spending real time.
+func spentBudgetContext(ago time.Duration) context.Context {
+	return context.WithValue(context.Background(), retryBudgetKey{}, time.Now().Add(-ago))
+}
 
-	ctx := withRetryBudget(context.Background())
-	retry, err := policy.checkRetry(ctx, resp, nil)
-	if !retry || err != nil {
-		t.Fatalf("checkRetry() inside budget = (%v, %v), want (true, nil)", retry, err)
+// budgetErrOwnWords cuts a spent-budget error at the end of the policy's own
+// text, before the quoted cause. A server is free to say "rate limit exceeded"
+// in its body; checking the whole message would read that back as ours.
+func budgetErrOwnWords(msg string) string {
+	const end = "elapsed:"
+	if i := strings.Index(msg, end); i >= 0 {
+		return msg[:i+len(end)]
+	}
+	return msg
+}
+
+// TestRetryBudgetAppliesOnlyToRetries pins what the wall-clock budget may and
+// may not refuse. go-retryablehttp asks checkRetry about every attempt,
+// including the one that succeeded, so a budget consulted before the response
+// was classified turned a slow 200 into an error carrying the caller's own
+// result, and reported a terminal 404 as a generic exhaustion. Every answer is
+// delivered however late it arrives; only a decision to retry can be refused.
+func TestRetryBudgetAppliesOnlyToRetries(t *testing.T) {
+	const budget = 50 * time.Millisecond
+
+	dialErr := errors.New("dial tcp: lookup platform.rescale.com: no such host")
+
+	tests := []struct {
+		name       string
+		method     string // defaults to GET
+		path       string // defaults to the files listing
+		status     int    // 0 => transport error, no response at all
+		body       string
+		retryAfter string
+
+		wantRetry    bool     // what classification alone says
+		wantSpentErr []string // past the budget: substrings of the error, nil => same answer as inside it
+		wantCooldown bool     // the 429 limiter hook has to run in both phases
+	}{
+		{
+			name:   "success arriving late is still a success",
+			status: 200,
+			body:   `{"count":226680,"results":[]}`,
+		},
+		{
+			name:   "terminal 404 is reported as a 404",
+			status: 404,
+			body:   `{"detail":"Not found."}`,
+		},
+		{
+			name:   "501 is terminal for the default policy",
+			status: 501,
+			body:   `{"detail":"not implemented"}`,
+		},
+		{
+			name:   "5xx on job creation stays a pass-through",
+			method: "POST",
+			path:   "/api/v3/jobs/",
+			status: 500,
+			body:   `{"detail":"job service down"}`,
+		},
+		{
+			name:         "retryable 500 stops and quotes the server",
+			status:       500,
+			body:         `{"detail":"backend on fire"}`,
+			wantRetry:    true,
+			wantSpentErr: []string{"retry budget (50ms) spent after", "elapsed", "HTTP 500", "backend on fire"},
+		},
+		{
+			// The body says "rate limit exceeded" — the words the guard below
+			// looks for in our own text. Quoting the server must not read back
+			// as us claiming a limit.
+			name:         "429 stops but still teaches the limiter",
+			status:       429,
+			retryAfter:   "2",
+			body:         `{"detail":"Request was throttled. Rate limit exceeded, expected available in 2 seconds."}`,
+			wantRetry:    true,
+			wantSpentErr: []string{"retry budget (50ms) spent after", "HTTP 429", "Rate limit exceeded"},
+			wantCooldown: true,
+		},
+		{
+			name:         "transport error stops",
+			wantRetry:    true,
+			wantSpentErr: []string{"retry budget (50ms) spent after", "no such host"},
+		},
 	}
 
-	time.Sleep(budget + 20*time.Millisecond)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A fresh response per phase: the exhaustion path consumes the body.
+			newResp := func() (*http.Response, *trackedBody) {
+				if tt.status == 0 {
+					return nil, nil
+				}
+				resp := retryTestResponse(tt.status, tt.retryAfter)
+				if tt.method != "" {
+					resp.Request.Method = tt.method
+				}
+				if tt.path != "" {
+					resp.Request.URL.Path = tt.path
+				}
+				body := &trackedBody{reader: strings.NewReader(tt.body)}
+				resp.Body = body
+				return resp, body
+			}
+			var attemptErr error
+			if tt.status == 0 {
+				attemptErr = dialErr
+			}
 
-	retry, err = policy.checkRetry(ctx, resp, nil)
-	if retry {
-		t.Error("checkRetry() should stop retrying once the budget is spent")
-	}
-	if err == nil {
-		t.Fatal("checkRetry() should explain why it gave up")
-	}
-	for _, want := range []string{"retries exhausted after", "HTTP 500"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q missing %q", err.Error(), want)
-		}
+			t.Run("inside the budget", func(t *testing.T) {
+				policy, _ := newRetryTestPolicy(t, budget)
+				resp, body := newResp()
+
+				retry, err := policy.checkRetry(withRetryBudget(context.Background()), resp, attemptErr)
+				if retry != tt.wantRetry || err != nil {
+					t.Fatalf("checkRetry() = (%v, %v), want (%v, nil)", retry, err, tt.wantRetry)
+				}
+				if body != nil && body.read != 0 {
+					t.Errorf("checkRetry() read %d bytes of a body the caller still has to decode", body.read)
+				}
+				if tt.wantCooldown && policy.limiterFor(resp.Request).CooldownRemaining() <= 0 {
+					t.Error("a 429 must set the limiter cooldown")
+				}
+			})
+
+			t.Run("past the budget", func(t *testing.T) {
+				policy, _ := newRetryTestPolicy(t, budget)
+				resp, body := newResp()
+
+				retry, err := policy.checkRetry(spentBudgetContext(2*budget), resp, attemptErr)
+				if retry {
+					t.Error("checkRetry() must not ask for another attempt once the budget is spent")
+				}
+
+				if tt.wantSpentErr == nil {
+					if err != nil {
+						t.Fatalf("checkRetry() = (%v, %v), want the answer delivered unchanged", retry, err)
+					}
+					if body != nil && body.read != 0 {
+						t.Errorf("checkRetry() read %d bytes of a body the caller still has to decode", body.read)
+					}
+					return
+				}
+
+				if err == nil {
+					t.Fatal("a spent budget has to explain what the call was still failing on")
+				}
+				for _, want := range tt.wantSpentErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q missing %q", err.Error(), want)
+					}
+				}
+				if own := budgetErrOwnWords(err.Error()); strings.Contains(own, "limit") {
+					t.Errorf("error %q claims a limit the budget cannot enforce mid-attempt", own)
+				}
+				if tt.wantCooldown && policy.limiterFor(resp.Request).CooldownRemaining() <= 0 {
+					t.Error("the 429 cooldown has to be applied even when the budget is spent")
+				}
+			})
+		})
 	}
 
-	t.Run("transport error is preserved as the cause", func(t *testing.T) {
-		dialErr := errors.New("dial tcp: lookup platform.rescale.com: no such host")
-		retry, err := policy.checkRetry(ctx, nil, dialErr)
-		if retry {
-			t.Error("checkRetry() should stop retrying a transport error past the budget")
-		}
-		if !errors.Is(err, dialErr) {
+	t.Run("the transport error is preserved as the cause", func(t *testing.T) {
+		policy, _ := newRetryTestPolicy(t, budget)
+		if _, err := policy.checkRetry(spentBudgetContext(2*budget), nil, dialErr); !errors.Is(err, dialErr) {
 			t.Errorf("error %v should wrap the transport error", err)
 		}
 	})
 
 	t.Run("unstamped context is not capped", func(t *testing.T) {
-		retry, err := policy.checkRetry(context.Background(), resp, nil)
+		policy, _ := newRetryTestPolicy(t, budget)
+		retry, err := policy.checkRetry(context.Background(), retryTestResponse(500, ""), nil)
 		if !retry || err != nil {
 			t.Errorf("checkRetry() without a budget stamp = (%v, %v), want (true, nil)", retry, err)
 		}
 	})
+}
+
+// TestRetryBudgetErrorWording pins the exhaustion message. Reporting the budget
+// as a "limit" describes something the mechanism cannot enforce: it is only
+// consulted between attempts, so one attempt that hangs overshoots it by however
+// long it hangs. The live report read "retries exhausted after 4m31.162s (limit
+// 1m30s)", which reads as a broken limiter rather than an honest account.
+func TestRetryBudgetErrorWording(t *testing.T) {
+	policy, _ := newRetryTestPolicy(t, 90*time.Second)
+	resp := retryTestResponse(500, "")
+	resp.Body = io.NopCloser(strings.NewReader(`{"detail":"backend on fire"}`))
+
+	retry, err := policy.checkRetry(spentBudgetContext(4*time.Minute+31*time.Second), resp, nil)
+	if retry || err == nil {
+		t.Fatalf("checkRetry() = (%v, %v), want (false, an error)", retry, err)
+	}
+
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "retry budget (1m30s) spent after 4m31") {
+		t.Errorf("error %q should lead with the budget and the elapsed time", msg)
+	}
+	if !strings.Contains(msg, `elapsed: HTTP 500: {"detail":"backend on fire"}`) {
+		t.Errorf("error %q should end with the server's own words", msg)
+	}
+	if own := budgetErrOwnWords(msg); strings.Contains(own, "limit") || strings.Contains(own, "exhausted") {
+		t.Errorf("error %q claims a limit the budget cannot enforce mid-attempt", own)
+	}
 }
 
 // TestRetryEmitsNoticesAndHonorsBudget drives the real go-retryablehttp wiring
@@ -1165,8 +1325,8 @@ func TestRetryEmitsNoticesAndHonorsBudget(t *testing.T) {
 		resp.Body.Close()
 		t.Fatal("Do() should fail once the retry budget is spent")
 	}
-	if !strings.Contains(err.Error(), "retries exhausted after") {
-		t.Errorf("error %q should name the exhausted retry budget", err.Error())
+	if !strings.Contains(err.Error(), "retry budget (120ms) spent after") {
+		t.Errorf("error %q should name the spent retry budget", err.Error())
 	}
 	// The budget always fires before attempt exhaustion, so this error is the
 	// only place the server's own explanation can still reach the caller.
@@ -1189,6 +1349,59 @@ func TestRetryEmitsNoticesAndHonorsBudget(t *testing.T) {
 	}
 	if !strings.Contains(msgs[0], "Retrying") || !strings.Contains(msgs[0], "500") {
 		t.Errorf("first notice %q should name the retry and the status", msgs[0])
+	}
+}
+
+// TestSlowSuccessSurvivesTheRetryBudget drives the real go-retryablehttp wiring
+// against a server that answers correctly, just slowly. The budget cannot
+// interrupt an attempt already in flight, so a single slow attempt outlives it
+// and checkRetry sees a 200 with the budget already spent. Reported live as
+// `retries exhausted after 4m31.162s (limit 1m30s): HTTP 200: {"count":226680`
+// — an error carrying the result the caller had asked for.
+func TestSlowSuccessSurvivesTheRetryBudget(t *testing.T) {
+	const (
+		budget   = 40 * time.Millisecond
+		payload  = `{"count":226680,"results":[]}`
+		slowness = 3 * budget
+	)
+
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		time.Sleep(slowness)
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	policy, _ := newRetryTestPolicy(t, budget)
+	policy.baseURL = server.URL
+	retryClient := newRetryClient(&http.Client{}, policy, apiRetryMax, 20*time.Millisecond, 40*time.Millisecond)
+
+	req, err := http.NewRequestWithContext(withRetryBudget(context.Background()), "GET", server.URL+"/api/v3/files/", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+
+	resp, err := retryClient.StandardClient().Do(req)
+	if err != nil {
+		t.Fatalf("Do() = %v, want the 200 the server sent", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	// The old order quoted the head of the body into the error, which also left
+	// the caller nothing to decode.
+	if string(body) != payload {
+		t.Errorf("body = %q, want the untouched payload %q", body, payload)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("server saw %d requests, want 1 — a success must not be retried", got)
 	}
 }
 

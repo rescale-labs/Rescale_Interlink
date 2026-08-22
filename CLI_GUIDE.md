@@ -294,10 +294,17 @@ attempt number, the cause class, and the next backoff:
 A single retry is routine and is not reported. Notices go through the progress
 display, so they land above the bars rather than through them.
 
-Every retried operation has its own 90-second wall-clock budget. When the budget
-runs out the operation stops retrying and fails with `retries exhausted after Xs`,
-quoting up to 200 bytes of the server's own response so the diagnostic survives.
-This bounds a single stalled call, not a whole multi-part transfer.
+Every retried operation has its own 90-second wall-clock budget. The two layers
+report running out of it differently:
+
+- **Storage transfers.** `retries exhausted after 1m28s (limit 1m30s, 6
+  attempt(s)):` then the failing operation's own error.
+- **API calls.** `retry budget (1m30s) spent after 1m52s elapsed:` then the
+  status and up to 200 bytes of the server's own response.
+
+The budget is checked between attempts, so it cannot cut short an attempt already
+in flight: one slow attempt can push the elapsed time it reports well past 90
+seconds. This bounds a single stalled call, not a whole multi-part transfer.
 
 ### Rate limit notices
 
@@ -2346,8 +2353,11 @@ rescale-int jobs listfiles --job-id WfbQa
 
 Retries are bounded and reported. If a transfer or API call stalls, watch for the
 `⟳ Retrying ...` lines: they name the operation, the attempt, and the backoff. Each
-operation gives up after 90 seconds of retrying with `retries exhausted after Xs`, which
-quotes the server's own response. If you instead see rate limit notices, the server or
+operation gives up after 90 seconds of retrying: storage transfers say `retries
+exhausted after ... (limit ..., N attempt(s))`, API calls say `retry budget (1m30s)
+spent after ... elapsed` and quote the server's own response. An elapsed time well past
+90 seconds is not a broken budget — it is only checked between attempts, so a single
+hung attempt is never cut short. If you instead see rate limit notices, the server or
 the local limiter is throttling you and the wait is expected. See
 [Output, Retries, and Rate Limits](#output-retries-and-rate-limits).
 
