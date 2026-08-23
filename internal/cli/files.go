@@ -477,7 +477,7 @@ Example:
 				}
 			}
 
-			apiClient, err := getAPIClient()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
@@ -498,6 +498,17 @@ Example:
 				// Move to Trash: the archive endpoint is folder-scoped, so resolve
 				// the file's parent folder first.
 				fmt.Printf("[%d/%d] Moving file %s to Trash...\n", i+1, len(fileIDs), fileID)
+
+				// Confirm the file exists before the parent hunt below. A file
+				// record carries no parent ID, so FindItemParentFolder has to walk
+				// the entire library tree — an ID that does not exist walks all of
+				// it, spending thousands of rate-limited calls (shared with every
+				// other command) only to fail. One lookup fails immediately instead.
+				if _, err := apiClient.GetFileInfo(ctx, fileID); err != nil {
+					logger.Error().Str("file_id", fileID).Err(err).Msg("Failed to get file info")
+					return fmt.Errorf("failed to get file info for %s: %w", fileID, err)
+				}
+
 				parentFolderID, err := apiClient.FindItemParentFolder(ctx, fileID, false)
 				if err != nil {
 					logger.Error().Str("file_id", fileID).Err(err).Msg("Failed to locate file's folder")

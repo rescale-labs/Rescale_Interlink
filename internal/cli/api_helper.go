@@ -23,3 +23,10 @@ func getAPIClient() (*api.Client, error) {
 
 	return client, nil
 }
+
+// getAPIClientFn is a test seam, following the pattern of the download seams in
+// download_helper.go: getAPIClient reads the user's on-disk config and enforces
+// the platform URL allowlist, so a command test cannot reach RunE without it.
+// Overriding this lets a test supply an api.NewClientForTest pointed at an
+// httptest server.
+var getAPIClientFn = getAPIClient
