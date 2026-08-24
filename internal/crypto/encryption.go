@@ -11,7 +11,6 @@ import (
 	"math/big"
 	"os"
 
-	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/util/buffers"
 )
 
@@ -98,6 +97,19 @@ func pkcs7Unpad(data []byte) ([]byte, error) {
 	return data[:length-padding], nil
 }
 
+// openEncryptSource opens the plaintext byte source for pre-encryption.
+// It is a package-level function variable — the test-seam pattern used by the
+// streaming upload path — because a local *os.File never returns a short read,
+// and short reads are precisely what the chunk loop below has to survive.
+// Overriding this lets a test deliver a real file's bytes in partial chunks.
+var openEncryptSource = func(path string) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // EncryptFile encrypts a file using AES-256-CBC with PKCS7 padding
 func EncryptFile(inputPath, outputPath string, key, iv []byte) error {
 	if len(key) != KeySize {
@@ -112,7 +124,7 @@ func EncryptFile(inputPath, outputPath string, key, iv []byte) error {
 		return fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	inputFile, err := os.Open(inputPath)
+	inputFile, err := openEncryptSource(inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to open input file: %w", err)
 	}
@@ -132,21 +144,31 @@ func EncryptFile(inputPath, outputPath string, key, iv []byte) error {
 	var lastChunk []byte
 
 	for {
-		n, err := inputFile.Read(buffer)
-		if err == io.EOF {
-			break
+		// io.ReadFull, never a bare Read: a Reader may legally return fewer bytes
+		// than the buffer holds, and network-backed sources (NFS/HPS/SMB mounts)
+		// do so routinely. A bare Read here treated any short fill as end of file,
+		// so the loop broke early, PKCS7-padded whatever it had, and silently
+		// dropped the rest of the user's plaintext — undetectably, because every
+		// downstream size check measures this output file rather than the source.
+		// ReadFull retries internally, so a partial fill can only mean the source
+		// really is exhausted.
+		n, err := io.ReadFull(inputFile, buffer)
+		if err == io.ErrUnexpectedEOF {
+			// Buffer partially filled at end of data: the genuine final chunk.
+			err = io.EOF
 		}
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return fmt.Errorf("failed to read input file: %w", err)
 		}
 
-		chunk := buffer[:n]
-
-		// If this might be the last chunk, hold it for padding
-		if n < constants.EncryptionChunkSize {
-			lastChunk = append(lastChunk, chunk...)
+		if err == io.EOF {
+			// End of data. n is 0 when the plaintext ended on a chunk boundary
+			// (or the file was empty); either way the tail below gets padded.
+			lastChunk = append(lastChunk, buffer[:n]...)
 			break
 		}
+
+		chunk := buffer[:n]
 
 		// Process full blocks
 		if len(chunk)%aes.BlockSize == 0 {
