@@ -1,14 +1,18 @@
 package upload
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -400,6 +404,172 @@ func TestUploadStreamingMultiPart(t *testing.T) {
 	}
 	if fake.abortCalled {
 		t.Error("AbortStreamingUpload should not be called on success")
+	}
+}
+
+// readCloser pairs an arbitrary Reader with the real file's Closer, so an
+// injected source still releases the underlying descriptor.
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// useUploadSource swaps the streaming upload's byte source for the duration of
+// the test and restores it afterwards.
+func useUploadSource(t *testing.T, open func(path string) (io.ReadCloser, error)) {
+	t.Helper()
+	original := openUploadSource
+	t.Cleanup(func() { openUploadSource = original })
+	openUploadSource = open
+}
+
+// shortReadingFile opens the real file but delivers its bytes through wrap,
+// standing in for a network-backed mount that satisfies a read with fewer bytes
+// than were asked for. Only the delivery pattern differs from production.
+func shortReadingFile(wrap func(io.Reader) io.Reader) func(string) (io.ReadCloser, error) {
+	return func(path string) (io.ReadCloser, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		return readCloser{Reader: wrap(f), Closer: f}, nil
+	}
+}
+
+// TestUploadStreamingShortReads pins the geometry contract. The planner fixes
+// TotalParts up front, the provider marks the part at TotalParts-1 as the
+// CBC-padded final part, and the completion guard rejects any other count — so
+// a source that returns short reads must still yield exactly the planned parts,
+// all PartSize except the last, carrying the file's bytes in order. Short reads
+// are legal for any Reader and routine on the network-backed filesystems this
+// path runs against.
+func TestUploadStreamingShortReads(t *testing.T) {
+	const partSize = 100
+
+	readers := []struct {
+		name string
+		wrap func(io.Reader) io.Reader
+	}{
+		{"whole buffer", func(r io.Reader) io.Reader { return r }},
+		{"one byte per read", func(r io.Reader) io.Reader { return iotest.OneByteReader(r) }},
+		{"half buffer per read", func(r io.Reader) io.Reader { return iotest.HalfReader(r) }},
+	}
+
+	sizes := []struct {
+		name string
+		size int
+	}{
+		{"empty", 0},
+		{"short single part", partSize / 2},
+		{"exact single part", partSize},
+		{"short final part", 2*partSize + 50},
+		{"exact multiple", 3 * partSize},
+	}
+
+	for _, rd := range readers {
+		for _, sz := range sizes {
+			t.Run(rd.name+"/"+sz.name, func(t *testing.T) {
+				// 251 is prime, so the byte pattern never repeats on a part
+				// boundary and misordered parts cannot compare equal.
+				data := make([]byte, sz.size)
+				for i := range data {
+					data[i] = byte(i % 251)
+				}
+
+				file := filepath.Join(t.TempDir(), "shortread.dat")
+				if err := os.WriteFile(file, data, 0644); err != nil {
+					t.Fatalf("failed to create test file: %v", err)
+				}
+
+				useUploadSource(t, shortReadingFile(rd.wrap))
+
+				fake := &fakeStreamingUploader{partSize: partSize}
+				fileSize := int64(len(data))
+				if _, err := uploadStreaming(context.Background(), fake, UploadParams{LocalPath: file}, fileSize); err != nil {
+					t.Fatalf("uploadStreaming failed: %v", err)
+				}
+
+				wantParts := int(transfer.CalculateTotalParts(fileSize, partSize))
+
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+
+				if len(fake.encryptCalls) != wantParts {
+					t.Fatalf("encrypted %d parts, want the planned %d", len(fake.encryptCalls), wantParts)
+				}
+				if len(fake.completeParts) != wantParts {
+					t.Errorf("completed %d parts, want the planned %d", len(fake.completeParts), wantParts)
+				}
+				if fake.abortCalled {
+					t.Error("AbortStreamingUpload was called for an upload that should have completed")
+				}
+
+				var reassembled []byte
+				for i, call := range fake.encryptCalls {
+					if call.partIndex != int64(i) {
+						t.Errorf("part %d carries index %d; the provider pads by index, so they must be dense and ordered", i, call.partIndex)
+					}
+					if i < wantParts-1 && len(call.plaintext) != partSize {
+						t.Errorf("part %d is %d bytes, want a full %d — only the final part may be short", i, len(call.plaintext), partSize)
+					}
+					reassembled = append(reassembled, call.plaintext...)
+				}
+
+				// An exact multiple of the part size must end on a full part,
+				// not a trailing zero-byte one.
+				wantFinal := 0
+				if len(data) > 0 {
+					wantFinal = (len(data)-1)%partSize + 1
+				}
+				if got := len(fake.encryptCalls[wantParts-1].plaintext); got != wantFinal {
+					t.Errorf("final part is %d bytes, want %d", got, wantFinal)
+				}
+
+				if !bytes.Equal(reassembled, data) {
+					t.Errorf("reassembled %d bytes that do not match the %d-byte file", len(reassembled), len(data))
+				}
+			})
+		}
+	}
+}
+
+// TestUploadStreamingReadErrorAborts pins that a genuine read failure still
+// fails the upload. ReadFull absorbs short reads by retrying, and it must not
+// absorb this.
+func TestUploadStreamingReadErrorAborts(t *testing.T) {
+	const partSize = 100
+
+	file := filepath.Join(t.TempDir(), "readerr.dat")
+	if err := os.WriteFile(file, make([]byte, 250), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	readFailure := errors.New("input/output error")
+	useUploadSource(t, func(string) (io.ReadCloser, error) {
+		// Fails partway through the second part, so the failure lands
+		// mid-stream rather than on the first read.
+		return io.NopCloser(io.MultiReader(
+			bytes.NewReader(make([]byte, 150)),
+			iotest.ErrReader(readFailure),
+		)), nil
+	})
+
+	fake := &fakeStreamingUploader{partSize: partSize}
+	_, err := uploadStreaming(context.Background(), fake, UploadParams{LocalPath: file}, 250)
+	if err == nil {
+		t.Fatal("expected the read failure to fail the upload")
+	}
+	if !errors.Is(err, readFailure) {
+		t.Errorf("error %q does not wrap the underlying read failure", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if !fake.abortCalled {
+		t.Error("expected AbortStreamingUpload to be called after a read failure")
+	}
+	if fake.completeCalled {
+		t.Error("CompleteStreamingUpload must not run after a read failure")
 	}
 }
 

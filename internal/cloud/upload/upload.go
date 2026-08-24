@@ -397,6 +397,19 @@ func planStreamingUpload(handle *internaltransfer.Transfer, fileSize int64, thre
 	return plan, handle.ReleaseUploadPlan, nil
 }
 
+// openUploadSource opens the plaintext byte source for a streaming upload.
+// It is a package-level function variable — the test-seam pattern used by the
+// CLI download helpers — because a local *os.File never returns a short read,
+// and short reads are precisely what the encrypt loop below has to survive.
+// Overriding this lets a test deliver a real file's bytes in partial chunks.
+var openUploadSource = func(path string) (io.ReadCloser, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // uploadStreaming uses the StreamingConcurrentUploader interface for streaming uploads.
 // Encryption is sequential (CBC constraint), but uploads happen in parallel.
 func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params UploadParams, fileSize int64) (*cloud.UploadResult, error) {
@@ -468,8 +481,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		params.ProgressCallback(0.0)
 	}
 
-	// Open file
-	file, err := os.Open(params.LocalPath)
+	file, err := openUploadSource(params.LocalPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
@@ -508,7 +520,19 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 			default:
 			}
 
-			n, readErr := file.Read(buffer)
+			// io.ReadFull, never a bare Read: a Reader may legally return fewer
+			// bytes than the buffer holds, and network-backed sources (NFS/HPS
+			// mounts) do so routinely. Under a bare Read every short read became
+			// its own part, so the emitted parts outnumbered the TotalParts the
+			// planner committed to — which trips the completion guard below and
+			// mis-places the CBC-padded final part, since the provider marks it
+			// by index. ReadFull retries internally, so a partial fill here can
+			// only mean the end of the data.
+			n, readErr := io.ReadFull(file, buffer)
+			if readErr == io.ErrUnexpectedEOF {
+				// Buffer partially filled at end of data: the genuine final part.
+				readErr = io.EOF
+			}
 
 			// Handle empty file: first read returns (0, io.EOF)
 			// Emit one encrypted empty part so the pipeline completes correctly
