@@ -1009,6 +1009,9 @@ export namespace wailsapp {
 	    commonInputFiles: string;
 	    decompressCommon: boolean;
 	    rmTarOnSuccess: boolean;
+	    uploadFolder: string;
+	    uploadFolderParent: string;
+	    fileTags: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new PURRunOptionsDTO(source);
@@ -1019,6 +1022,9 @@ export namespace wailsapp {
 	        this.commonInputFiles = source["commonInputFiles"];
 	        this.decompressCommon = source["decompressCommon"];
 	        this.rmTarOnSuccess = source["rmTarOnSuccess"];
+	        this.uploadFolder = source["uploadFolder"];
+	        this.uploadFolderParent = source["uploadFolderParent"];
+	        this.fileTags = source["fileTags"];
 	    }
 	}
 	

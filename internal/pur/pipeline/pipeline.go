@@ -22,6 +22,7 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/util/tags"
 	"github.com/rescale/rescale-int/internal/util/tar"
 )
 
@@ -77,6 +78,10 @@ type Pipeline struct {
 	commonInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
 	sharedFileIDs       []string // Resolved file IDs (after upload of local paths)
 	decompressCommon    bool     // Whether to decompress shared files on cluster
+
+	// Upload destination and tagging (applies to tars and common input files)
+	uploadFolderID string   // Target folder for uploads ("" = My Library)
+	fileTags       []string // Tags applied to every file this pipeline uploads
 
 	// Cleanup options
 	rmTarOnSuccess bool // Delete local tar file after successful upload
@@ -282,6 +287,31 @@ func (p *Pipeline) SetSyncUploader(u SyncUploader) {
 	p.syncUploader = u
 }
 
+// SetUploadFolderID sets the destination folder for every file this pipeline
+// uploads (job tars and common input files). Empty means My Library.
+// Callers resolve a folder path to an ID with folder.ResolveOrCreatePath.
+func (p *Pipeline) SetUploadFolderID(folderID string) {
+	p.uploadFolderID = folderID
+}
+
+// SetFileTags sets tags applied to every file this pipeline uploads.
+// Tagging is best-effort: failures are logged but never fail an upload.
+func (p *Pipeline) SetFileTags(fileTags []string) {
+	p.fileTags = tags.NormalizeTags(fileTags)
+}
+
+// applyFileTags tags an uploaded file. Only used on the CLI fallback path; the
+// SyncUploader path passes tags through to TransferService, which applies them.
+// Failures are non-fatal, matching job tag handling in jobWorker.
+func (p *Pipeline) applyFileTags(ctx context.Context, fileID, jobName string) {
+	if len(p.fileTags) == 0 || fileID == "" {
+		return
+	}
+	if err := p.apiClient.AddFileTags(ctx, fileID, p.fileTags); err != nil {
+		p.logf("WARN", "upload", jobName, "Failed to tag file %s: %v", fileID, err)
+	}
+}
+
 // logf logs a message, using callback if available.
 // When a callback is set (GUI mode via Engine), the callback path handles
 // both log.Printf and EventBus emission, so we skip direct logging to
@@ -429,10 +459,12 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 			if p.syncUploader != nil {
 				cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
 					LocalPath:   absPath,
+					FolderID:    p.uploadFolderID,
 					Name:        filepath.Base(absPath),
 					SourceLabel: "PUR",
 					BatchID:     p.batchID,
 					BatchLabel:  p.batchLabel,
+					Tags:        p.fileTags,
 				})
 			} else {
 				// CLI fallback: direct upload.
@@ -445,12 +477,16 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 				ratelimit.GlobalStore().BeginTransferActivity()
 				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 					LocalPath:      absPath,
+					FolderID:       p.uploadFolderID,
 					APIClient:      p.apiClient,
 					TransferHandle: transferHandle,
 					OutputWriter:   io.Discard,
 				})
 				ratelimit.GlobalStore().EndTransferActivity()
 				transferHandle.Complete()
+				if err == nil && cloudFile != nil {
+					p.applyFileTags(ctx, cloudFile.ID, "")
+				}
 			}
 			if err != nil {
 				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
@@ -828,11 +864,13 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				if p.syncUploader != nil {
 					cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
 						LocalPath:             item.state.TarPath,
+						FolderID:              p.uploadFolderID,
 						Name:                  filepath.Base(item.state.TarPath),
 						SourceLabel:           "PUR",
 						BatchID:               p.batchID,
 						BatchLabel:            p.batchLabel,
 						ExtraProgressCallback: progressCallback,
+						Tags:                  p.fileTags,
 					})
 				} else {
 					// CLI fallback: direct upload.
@@ -843,13 +881,16 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 					ratelimit.GlobalStore().BeginTransferActivity()
 					cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 						LocalPath:        item.state.TarPath,
-						FolderID:         "",
+						FolderID:         p.uploadFolderID,
 						APIClient:        p.apiClient,
 						ProgressCallback: progressCallback,
 						TransferHandle:   transferHandle,
 						OutputWriter:     io.Discard,
 					})
 					ratelimit.GlobalStore().EndTransferActivity()
+					if err == nil && cloudFile != nil {
+						p.applyFileTags(ctx, cloudFile.ID, item.state.JobName)
+					}
 				}
 
 				if err == nil {

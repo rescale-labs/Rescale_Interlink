@@ -28,6 +28,7 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
+	"github.com/rescale/rescale-int/internal/transfer/folder"
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
 
@@ -38,6 +39,19 @@ type RunOptions struct {
 	CommonInputFiles string
 	DecompressCommon bool
 	RmTarOnSuccess   bool
+
+	// UploadFolder is a remote folder path for the batch's uploads (tars and
+	// common input files). Segments are created on demand under UploadFolderParent.
+	// Empty means upload to UploadFolderParent directly.
+	UploadFolder string
+
+	// UploadFolderParent is the folder ID UploadFolder is resolved beneath.
+	// Empty means My Library.
+	UploadFolderParent string
+
+	// FileTags are applied to every file the batch uploads. Best-effort:
+	// tagging failures are logged, never fatal.
+	FileTags []string
 }
 
 // syncUploaderAdapter wraps TransferService to implement pipeline.SyncUploader.
@@ -1205,6 +1219,20 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
 	}
 	pip.SetRmTarOnSuccess(opts.RmTarOnSuccess)
+	pip.SetFileTags(opts.FileTags)
+
+	// Resolve the upload folder path to an ID before any upload starts, so a bad
+	// path fails the run up front rather than after tarring has begun.
+	if opts.UploadFolder != "" || opts.UploadFolderParent != "" {
+		folderID, ferr := folder.ResolveOrCreatePath(ctx, e.apiClient, opts.UploadFolderParent, opts.UploadFolder)
+		if ferr != nil {
+			e.mu.Unlock()
+			e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to resolve upload folder: %v", ferr), "run", "")
+			return ferr
+		}
+		pip.SetUploadFolderID(folderID)
+		e.publishLog(events.InfoLevel, fmt.Sprintf("Uploads target folder %s", folderID), "run", "")
+	}
 
 	// Set up callbacks to publish to event bus (identical to RunFromSpecs)
 	pip.SetLogCallback(func(level, message, stage, jobName string) {
