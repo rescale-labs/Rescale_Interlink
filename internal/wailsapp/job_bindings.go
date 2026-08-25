@@ -472,6 +472,10 @@ type PURRunOptionsDTO struct {
 	CommonInputFiles string `json:"commonInputFiles"` // Comma-separated paths and/or id:<fileId>, shared by all jobs
 	DecompressCommon bool   `json:"decompressCommon"` // Whether to decompress common files on cluster
 	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`
+
+	UploadFolder       string   `json:"uploadFolder"`       // Remote folder path for this batch's uploads, created if missing
+	UploadFolderParent string   `json:"uploadFolderParent"` // Folder ID uploadFolder resolves beneath (empty = My Library)
+	FileTags           []string `json:"fileTags"`           // Tags applied to every file this batch uploads
 }
 
 // StartBulkRunWithOptions starts a bulk job run with additional PUR options.
@@ -514,9 +518,12 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 	go func() {
 		defer a.engine.EndRun()
 		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, core.RunOptions{
-			CommonInputFiles: opts.CommonInputFiles,
-			DecompressCommon: opts.DecompressCommon,
-			RmTarOnSuccess:   opts.RmTarOnSuccess,
+			CommonInputFiles:   opts.CommonInputFiles,
+			DecompressCommon:   opts.DecompressCommon,
+			RmTarOnSuccess:     opts.RmTarOnSuccess,
+			UploadFolder:       opts.UploadFolder,
+			UploadFolderParent: opts.UploadFolderParent,
+			FileTags:           opts.FileTags,
 		})
 		if err != nil && ctx.Err() == nil {
 			wailsLogger.Error().Err(err).Msg("Pipeline run failed")

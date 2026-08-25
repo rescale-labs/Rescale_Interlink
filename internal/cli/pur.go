@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,7 +21,9 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/transfer/folder"
 	"github.com/rescale/rescale-int/internal/util/multipart"
+	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
 // newPURCmd creates the 'pur' command group.
@@ -567,6 +570,41 @@ func (f *commonInputFileFlags) resolve(cmd *cobra.Command) error {
 	return nil
 }
 
+// uploadTargetFlags holds the batch-level upload destination and file tagging
+// flags. Shared by 'pur run' and 'pur resume'.
+type uploadTargetFlags struct {
+	folder       string
+	folderParent string
+	fileTags     string
+}
+
+func (f *uploadTargetFlags) register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.folder, "folder", "", "Remote folder path for this batch's uploads, created if missing (e.g. \"sweeps/alpha-beta\")")
+	cmd.Flags().StringVar(&f.folderParent, "folder-parent", "", "Folder ID that --folder is resolved beneath (default: My Library)")
+	cmd.Flags().StringVar(&f.fileTags, "file-tags", "", "Comma-separated tags applied to every file this batch uploads")
+}
+
+// resolve turns the flags into a destination folder ID and a normalized tag list,
+// creating any missing folder segments. Returns an empty folder ID when neither
+// folder flag was given, which leaves uploads in My Library.
+//
+// Called before the pipeline starts so a bad folder path fails the command up
+// front rather than after tarring is already underway.
+func (f *uploadTargetFlags) resolve(ctx context.Context, apiClient *api.Client) (string, []string, error) {
+	fileTags := tags.ParseCommaSeparated(f.fileTags)
+
+	if f.folder == "" && f.folderParent == "" {
+		return "", fileTags, nil
+	}
+
+	folderID, err := folder.ResolveOrCreatePath(ctx, apiClient, f.folderParent, f.folder)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve upload folder: %w", err)
+	}
+
+	return folderID, fileTags, nil
+}
+
 // newRunCmd creates the 'run' command.
 func newRunCmd() *cobra.Command {
 	var jobsCSV string
@@ -581,6 +619,7 @@ func newRunCmd() *cobra.Command {
 	var jobWorkers int
 	var rmTarOnSuccess bool
 	var sharedFiles commonInputFileFlags
+	var uploadTarget uploadTargetFlags
 	var dryRun bool
 
 	cmd := &cobra.Command{
@@ -667,11 +706,23 @@ Example:
 				return fmt.Errorf("failed to create API client: %w", err)
 			}
 
+			ctx := GetContext()
+
+			// Resolve the upload destination and tags before any work starts, so a
+			// bad folder path fails before tarring begins.
+			folderID, fileTags, err := uploadTarget.resolve(ctx, apiClient)
+			if err != nil {
+				return err
+			}
+
 			// Create pipeline
 			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
+
+			pipe.SetUploadFolderID(folderID)
+			pipe.SetFileTags(fileTags)
 
 			// Apply rm-tar-on-success if set
 			if rmTarOnSuccess {
@@ -679,7 +730,6 @@ Example:
 			}
 
 			// Run pipeline
-			ctx := GetContext()
 			if err := pipe.Run(ctx); err != nil {
 				return fmt.Errorf("pipeline failed: %w", err)
 			}
@@ -702,6 +752,7 @@ Example:
 	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
 	sharedFiles.register(cmd)
+	uploadTarget.register(cmd)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate and show plan without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")
@@ -723,6 +774,7 @@ func newResumeCmd() *cobra.Command {
 	var jobWorkers int
 	var rmTarOnSuccess bool
 	var sharedFiles commonInputFileFlags
+	var uploadTarget uploadTargetFlags
 	var dryRun bool
 
 	cmd := &cobra.Command{
@@ -839,11 +891,23 @@ Example:
 				return fmt.Errorf("failed to create API client: %w", err)
 			}
 
+			ctx := GetContext()
+
+			// Resolve the upload destination and tags before any work starts, so a
+			// bad folder path fails before tarring begins.
+			folderID, fileTags, err := uploadTarget.resolve(ctx, apiClient)
+			if err != nil {
+				return err
+			}
+
 			// Create pipeline (will load existing state)
 			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
+
+			pipe.SetUploadFolderID(folderID)
+			pipe.SetFileTags(fileTags)
 
 			// Apply rm-tar-on-success if set
 			if rmTarOnSuccess {
@@ -851,7 +915,6 @@ Example:
 			}
 
 			// Run pipeline (will resume from state)
-			ctx := GetContext()
 			if err := pipe.Run(ctx); err != nil {
 				return fmt.Errorf("pipeline failed: %w", err)
 			}
@@ -874,6 +937,7 @@ Example:
 	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
 	sharedFiles.register(cmd)
+	uploadTarget.register(cmd)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be resumed without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")

@@ -1054,6 +1054,54 @@ export function PURTab() {
             </div>
           </div>
 
+          {/* Upload Destination & File Tags Section */}
+          <div className="border-t pt-4 mt-4 mb-6">
+            <h4 className="text-sm font-medium text-gray-700 mb-2">
+              Upload Destination &amp; Tags
+            </h4>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">
+                  Folder (optional)
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g. sweeps/alpha-beta"
+                  value={purRunOptions.uploadFolder}
+                  onChange={(e) => setPURRunOptions({ uploadFolder: e.target.value })}
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  Every file this batch uploads lands here. Missing folders are created;
+                  existing ones are reused. Leave empty to upload to My Library.
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">
+                  File Tags (optional)
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Comma-separated, e.g. sweep-2026-q3,cfd"
+                  value={purRunOptions.fileTags.join(', ')}
+                  onChange={(e) =>
+                    setPURRunOptions({
+                      fileTags: e.target.value
+                        .split(',')
+                        .map((t) => t.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  Applied to every uploaded file. Tagging is best-effort: a failure is
+                  logged but does not fail the run.
+                </p>
+              </div>
+            </div>
+          </div>
+
           <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
 
           {scanError && (

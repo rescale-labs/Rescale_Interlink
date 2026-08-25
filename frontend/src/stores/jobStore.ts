@@ -60,6 +60,9 @@ export interface PURRunOptions {
   commonInputFiles: string   // Comma-separated paths and/or id:fileId, shared by all jobs
   decompressCommon: boolean
   rmTarOnSuccess: boolean
+  uploadFolder: string       // Remote folder path for this batch's uploads, created if missing
+  uploadFolderParent: string // Folder ID uploadFolder resolves beneath (empty = My Library)
+  fileTags: string[]         // Tags applied to every file this batch uploads
 }
 
 // Scan options
@@ -264,6 +267,9 @@ export const useJobStore = create<JobStore>((set, get) => ({
     commonInputFiles: '',
     decompressCommon: false,
     rmTarOnSuccess: false,
+    uploadFolder: '',
+    uploadFolderParent: '',
+    fileTags: [],
   },
 
   scanOptions: {

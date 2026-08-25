@@ -1801,6 +1801,9 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `--multipart` - Enable multi-part mode
 - `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs
 - `--decompress-common` - Decompress common input files on cluster (default: false)
+- `--folder string` - Remote folder path for this batch's uploads, created if missing (e.g. `"sweeps/alpha-beta"`)
+- `--folder-parent string` - Folder ID that `--folder` is resolved beneath (default: My Library)
+- `--file-tags string` - Comma-separated tags applied to every file this batch uploads
 - `--include-pattern strings` - Only tar files matching glob (repeatable)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
 - `--flatten-tar` - Remove subdirectory structure in tarball
@@ -1823,6 +1826,10 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
   --common-input-files "/path/to/shared_script.py,id:AbCdEf123"
 
+# Collect the batch's uploads in a folder and tag every file:
+rescale-int pur run --jobs-csv jobs.csv --state state.csv \
+  --folder "sweeps/alpha-beta" --file-tags "sweep-2026-q3,cfd"
+
 # With tar filtering:
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
   --exclude-pattern "*.log" --exclude-pattern "*.tmp"
@@ -1844,6 +1851,9 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `--multipart` - Enable multi-part mode
 - `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>`
 - `--decompress-common` - Decompress common input files on cluster
+- `--folder string` - Remote folder path for this batch's uploads, created if missing
+- `--folder-parent string` - Folder ID that `--folder` is resolved beneath (default: My Library)
+- `--file-tags string` - Comma-separated tags applied to every file this batch uploads
 - `--include-pattern strings` - Only tar files matching glob (repeatable)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
 - `--flatten-tar` - Remove subdirectory structure in tarball
