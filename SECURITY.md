@@ -52,7 +52,7 @@ with the following controls:
   (`make test`), `GOFIPS140=certified go vet -tags fips ./...`, and the frontend test,
   lint, and build. The Windows and macOS build jobs declare `needs: [verify]`, so a
   failing check blocks the release rather than shipping beside it.
-- **Pinned, checksum-verified toolchain.** Go 1.26.5 is downloaded and checked against
+- **Pinned, checksum-verified toolchain.** Go 1.26.7 is downloaded and checked against
   its published SHA-256 before install; Node.js is pinned to 20.
 - **Deterministic dependency installs.** `npm ci` installs exactly what
   `package-lock.json` pins. This is also what `wails.json`'s `frontend:install` runs, so

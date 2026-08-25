@@ -97,7 +97,7 @@ disk-full.
 
 ### Build and security
 
-Go toolchain 1.26.5 with refreshed dependencies (resolves all 24 open Dependabot alerts at
+Go toolchain 1.26.7 with refreshed dependencies (resolves all 24 open Dependabot alerts at
 release time); release builds are produced from deterministic, checksum-verified inputs,
 and every tagged build now runs the full Go and frontend test suites before packaging.
 

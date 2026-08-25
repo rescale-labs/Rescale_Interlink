@@ -12,7 +12,7 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
 ### Prerequisites
 
-- Go 1.26.5 (the version in `go.mod`, and what CI pins)
+- Go 1.26.7 (the version in `go.mod`, and what CI pins)
 - Node.js 20 (CI pins 20; the frontend uses Vite 6 and Vitest 4)
 - Wails v2 CLI v2.12.0 (matching the `github.com/wailsapp/wails/v2` require in `go.mod`)
 - macOS, Linux, or Windows development environment

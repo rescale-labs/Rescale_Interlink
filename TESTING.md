@@ -488,7 +488,7 @@ func TestMyFeature(t *testing.T) {
 `verify` gate; the platform builds declare `needs: [verify]`, so a failing check blocks
 the release instead of shipping alongside it.
 
-**`verify`** (macos-14; Go 1.26.5 downloaded and checked against its published SHA-256,
+**`verify`** (macos-14; Go 1.26.7 downloaded and checked against its published SHA-256,
 Node.js pinned to major version 20 via `actions/setup-node`):
 
 | Step | Command |

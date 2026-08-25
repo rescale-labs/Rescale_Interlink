@@ -42,16 +42,16 @@ if ($inheritedNodeCmd) {
 Set-Location $BuildDir
 
 # =============================================================================
-# Step 1: Install Go 1.26.5
+# Step 1: Install Go 1.26.7
 # =============================================================================
 Write-Host ""
-Write-Host "[1/7] Installing Go 1.26.5..."
+Write-Host "[1/7] Installing Go 1.26.7..."
 
-$GoVersion = "1.26.5"
+$GoVersion = "1.26.7"
 $GoZip = "go${GoVersion}.windows-amd64.zip"
 $GoUrl = "https://go.dev/dl/$GoZip"
 # Official sha256 from https://go.dev/dl/?mode=json&include=all
-$GoZipSha256 = "97e6b2a833b6d89f9ff17d25419ac0a7e3b482a044e9ab18cdef834bd834fd38"
+$GoZipSha256 = "f4f534a486e4bc3387fa18f08208f2f854b7aaea8a08f2a2d829a914a05abb11"
 $GoInstallDir = "C:\Go"
 
 Write-Host "Downloading Go from: $GoUrl"

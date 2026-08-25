@@ -5,7 +5,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 ![Rescale Interlink](./logo.png)
 
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)
-![Go Version](https://img.shields.io/badge/go-1.26.5-blue)
+![Go Version](https://img.shields.io/badge/go-1.26.7-blue)
 ![FIPS](https://img.shields.io/badge/FIPS%20140--3-compliant-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/status-v4.9.9-green)
@@ -14,7 +14,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 > **FIPS 140-3 Compliance (FedRAMP Moderate)**
 >
-> Built with FIPS 140-3 compliant cryptography using the Go 1.26.5 native FIPS module.
+> Built with FIPS 140-3 compliant cryptography using the Go 1.26.7 native FIPS module.
 > Every `make` build target sets `GOFIPS140=certified` — the Go Cryptographic Module
 > version that holds a CMVP validation certificate — and builds with the `fips` build
 > tag. Verify FIPS status with `rescale-int --version`.
@@ -33,7 +33,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 - **Disk space refusals now agree with themselves.** A download could be refused with "need 292366 MB, have 312832 MB available" — need below have. The pre-flight check's own figures are reported verbatim, and free space is measured on the download directory's filesystem rather than its parent ([#34](https://github.com/rescale-labs/Rescale_Interlink/issues/34)).
 - **Job submission carries SSH access settings.** `cidrRule`, `publicKey` and `sshPort` from a job file or an SGE script now reach the API instead of being dropped during decode ([#43](https://github.com/rescale-labs/Rescale_Interlink/issues/43)).
 - **Linux AppImage renders on hosts with a different WebKit.** The AppImage now bundles the WebKitGTK helper processes it forks, with a release gate that verifies they resolve their libraries from inside the bundle. Previously a host WebKit mismatch left a window that painted but never rendered content.
-- **Toolchain pinned; tag builds gated on tests.** Go 1.26.5 and Node 20 with verified checksums, deterministic `npm ci` installs, and a release pipeline that runs the full test suite before it builds or signs anything.
+- **Toolchain pinned; tag builds gated on tests.** Go 1.26.7 and Node 20 with verified checksums, deterministic `npm ci` installs, and a release pipeline that runs the full test suite before it builds or signs anything.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -111,7 +111,7 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 
 - macOS, Linux, or Windows
 - Rescale API key
-- For building from source: Go 1.26.5, Node.js 20, and the [Wails v2 CLI](https://wails.io/) for the GUI binary
+- For building from source: Go 1.26.7, Node.js 20, and the [Wails v2 CLI](https://wails.io/) for the GUI binary
 
 ### Installation
 

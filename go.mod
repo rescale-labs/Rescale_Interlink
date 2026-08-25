@@ -1,6 +1,6 @@
 module github.com/rescale/rescale-int
 
-go 1.26.5
+go 1.26.7
 
 require (
 	fyne.io/systray v1.12.0
