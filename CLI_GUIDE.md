@@ -1799,8 +1799,8 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file for resume capability
 - `--multipart` - Enable multi-part mode
-- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs
-- `--decompress-extras` - Decompress extra input files on cluster (default: false)
+- `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs
+- `--decompress-common` - Decompress common input files on cluster (default: false)
 - `--include-pattern strings` - Only tar files matching glob (repeatable)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
 - `--flatten-tar` - Remove subdirectory structure in tarball
@@ -1811,13 +1811,17 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `--rm-tar-on-success` - Delete local tar after successful upload
 - `--dry-run` - Validate and show plan without executing
 
+> **Deprecated:** `--extra-input-files` and `--decompress-extras` are hidden aliases for
+> `--common-input-files` and `--decompress-common`. They still work but emit a warning;
+> passing a flag together with its alias is an error. Use the `common` names.
+
 **Example:**
 ```bash
 rescale-int pur run --jobs-csv jobs.csv --state state.csv
 
-# With shared extra input files:
+# With common input files shared by every job:
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
-  --extra-input-files "/path/to/shared_script.py,id:AbCdEf123"
+  --common-input-files "/path/to/shared_script.py,id:AbCdEf123"
 
 # With tar filtering:
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
@@ -1838,8 +1842,8 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file (required)
 - `--multipart` - Enable multi-part mode
-- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>`
-- `--decompress-extras` - Decompress extra input files on cluster
+- `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>`
+- `--decompress-common` - Decompress common input files on cluster
 - `--include-pattern strings` - Only tar files matching glob (repeatable)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
 - `--flatten-tar` - Remove subdirectory structure in tarball
