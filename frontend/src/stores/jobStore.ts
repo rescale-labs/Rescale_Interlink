@@ -65,6 +65,79 @@ export interface PURRunOptions {
   fileTags: string[]         // Tags applied to every file this batch uploads
 }
 
+// One swept parameter in a DOE. A non-empty values list makes the parameter
+// categorical and the numeric range is then ignored.
+export interface DOEParameter {
+  name: string
+  min: number
+  max: number
+  levels: number
+  values: string[]
+  format: string
+}
+
+// A DOE sampling method, described by the backend so this list cannot drift
+// from what generation accepts.
+export interface DOEMethod {
+  method: string
+  label: string
+  description: string
+  usesSamples: boolean
+  usesLevels: boolean
+  usesCenterPoints: boolean
+  usesCases: boolean
+  minParameters: number
+  maxParameters: number
+}
+
+// DOE sweep configuration
+export interface DOEOptions {
+  method: string
+  parameters: DOEParameter[]
+  samples: number
+  seed: number
+  centerPoints: number
+  maxCases: number
+  jobNameTemplate: string
+  tagTemplates: string[]
+  baseFileIds: string // Comma-separated IDs of an already-uploaded shared deck
+
+  // casesCSV holds the explicit method's cases as pasted text: a header row
+  // naming the parameters, then one row per case.
+  casesCSV: string
+}
+
+// One generated case
+export interface DOECase {
+  index: number
+  values: Record<string, string>
+  jobName: string
+  command: string
+  tags: string[]
+}
+
+// One validation finding. Errors block generation; warnings do not.
+export interface DOEProblem {
+  code: string
+  param: string
+  message: string
+}
+
+// Result of previewing or generating a sweep. caseCount is the whole design;
+// cases may be truncated for preview.
+export interface DOEResult {
+  ok: boolean
+  caseCount: number
+  truncated: boolean
+  cases: DOECase[]
+  errors: DOEProblem[]
+  warnings: DOEProblem[]
+}
+
+// How many cases the live preview asks for. The whole sweep is generated only
+// when the user commits to it.
+export const DOE_PREVIEW_LIMIT = 25
+
 // Scan options
 export interface ScanOptions {
   rootDir: string
@@ -74,7 +147,7 @@ export interface ScanOptions {
   recursive: boolean
   includeHidden: boolean
 
-  scanMode: 'folders' | 'files'
+  scanMode: 'folders' | 'files' | 'doe'
   primaryPattern: string           // For file mode: e.g., "*.inp", "inputs/*.inp"
   secondaryPatterns: SecondaryPattern[]
 
@@ -160,6 +233,13 @@ interface JobStore {
   isScanning: boolean
   scanError: string | null
 
+  // DOE state
+  doeOptions: DOEOptions
+  doeMethods: DOEMethod[]
+  doePreview: DOEResult | null
+  isGeneratingDOE: boolean
+  doeError: string | null
+
   // Workflow memory
   memory: WorkflowMemory
 
@@ -178,6 +258,12 @@ interface JobStore {
   // Actions - Scanning
   setScanOptions: (opts: Partial<ScanOptions>) => void
   scanDirectory: () => Promise<void>
+
+  // Actions - DOE
+  setDOEOptions: (opts: Partial<DOEOptions>) => void
+  fetchDOEMethods: () => Promise<void>
+  previewDOE: () => Promise<void>
+  generateDOE: () => Promise<void>
 
   // Actions - Validation
   validateJobs: () => Promise<string[]>
@@ -226,6 +312,101 @@ const BACK_TARGETS: Partial<Record<WorkflowState, WorkflowState>> = {
 }
 
 const MEMORY_KEY = 'rescale-int-job-memory'
+
+// buildDOEOptionsDTO converts the store's sweep configuration into the shape the
+// Go binding expects. Empty optional fields are sent as-is; the backend fills in
+// its own defaults for them.
+function buildDOEOptionsDTO(opts: DOEOptions, template: JobSpec): wailsapp.DOEOptionsDTO {
+  return {
+    template: template as wailsapp.JobSpecDTO,
+    parameters: opts.parameters.map((p) => ({
+      name: p.name.trim(),
+      min: p.min,
+      max: p.max,
+      levels: p.levels,
+      // An empty list means "not categorical", so it must be omitted rather
+      // than sent as [], which would mean "categorical with no values".
+      values: p.values.length > 0 ? p.values : undefined,
+      format: p.format,
+    })),
+    method: opts.method,
+    samples: opts.samples,
+    seed: opts.seed,
+    centerPoints: opts.centerPoints,
+    cases: parseCasesCSV(opts.casesCSV),
+    baseFileIds: splitList(opts.baseFileIds),
+    jobNameTemplate: opts.jobNameTemplate,
+    tagTemplates: opts.tagTemplates.filter(Boolean),
+    maxCases: opts.maxCases,
+  } as wailsapp.DOEOptionsDTO
+}
+
+// parseCasesCSV reads pasted cases: a header row naming the parameters, then one
+// row per case. Rows whose column count does not match the header are dropped,
+// which the backend then reports as a case missing a parameter value.
+//
+// Quoting is not handled because a parameter value cannot contain a quote or a
+// comma anyway — the backend rejects values that would restructure the command.
+export function parseCasesCSV(text: string): Array<Record<string, string>> {
+  const rows = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  if (rows.length < 2) return []
+
+  const names = rows[0].split(',').map((name) => name.trim())
+
+  return rows.slice(1).flatMap((row) => {
+    const values = row.split(',').map((value) => value.trim())
+    if (values.length !== names.length) return []
+
+    const entry: Record<string, string> = {}
+    names.forEach((name, i) => {
+      entry[name] = values[i]
+    })
+    return [entry]
+  })
+}
+
+// toDOEResult normalizes a result DTO so the UI never has to guard for null
+// arrays.
+function toDOEResult(result: wailsapp.DOEResultDTO): DOEResult {
+  return {
+    ok: result.ok,
+    caseCount: result.caseCount,
+    truncated: result.truncated,
+    cases: (result.cases || []) as DOECase[],
+    errors: (result.errors || []) as DOEProblem[],
+    warnings: (result.warnings || []) as DOEProblem[],
+  }
+}
+
+// splitList parses a comma-separated field into trimmed, non-empty entries.
+function splitList(value: string): string[] {
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+}
+
+// toJobRows builds the pending table rows for a freshly created job list.
+function toJobRows(jobs: JobSpec[]): JobRow[] {
+  return jobs.map((job, index) => ({
+    index,
+    directory: job.directory,
+    jobName: job.jobName,
+    tarStatus: 'pending',
+    uploadStatus: 'pending',
+    uploadProgress: 0,
+    createStatus: 'pending',
+    submitStatus: 'pending',
+    status: 'pending',
+    jobId: '',
+    progress: 0,
+    error: '',
+  }))
+}
 
 export const useJobStore = create<JobStore>((set, get) => ({
   // Initial state
@@ -287,6 +468,23 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
   isScanning: false,
   scanError: null,
+
+  doeOptions: {
+    method: 'full-factorial',
+    parameters: [],
+    samples: 20,
+    seed: 0,
+    centerPoints: 1,
+    maxCases: 0,
+    jobNameTemplate: '',
+    tagTemplates: [],
+    baseFileIds: '',
+    casesCSV: '',
+  },
+  doeMethods: [],
+  doePreview: null,
+  isGeneratingDOE: false,
+  doeError: null,
 
   memory: {
     lastTemplate: { ...DEFAULT_JOB_TEMPLATE },
@@ -470,6 +668,85 @@ export const useJobStore = create<JobStore>((set, get) => ({
       set({
         scanError: error instanceof Error ? error.message : String(error),
         isScanning: false,
+      })
+    }
+  },
+
+  // DOE Actions
+  setDOEOptions: (opts) => {
+    set((state) => ({
+      doeOptions: { ...state.doeOptions, ...opts },
+      // Any edit invalidates the preview, so it is dropped rather than left
+      // showing a design the current options no longer describe.
+      doePreview: null,
+    }))
+  },
+
+  fetchDOEMethods: async () => {
+    try {
+      const methods = await App.GetDOEMethods()
+      set({ doeMethods: (methods || []) as DOEMethod[] })
+    } catch (error) {
+      console.error('Failed to fetch DOE methods:', error)
+    }
+  },
+
+  previewDOE: async () => {
+    const { doeOptions, template } = get()
+
+    if (doeOptions.parameters.length === 0) {
+      set({ doePreview: null, doeError: null })
+      return
+    }
+
+    try {
+      const result = await App.PreviewDOECases(
+        buildDOEOptionsDTO(doeOptions, template),
+        DOE_PREVIEW_LIMIT,
+      )
+      set({ doePreview: toDOEResult(result), doeError: null })
+    } catch (error) {
+      set({
+        doePreview: null,
+        doeError: error instanceof Error ? error.message : String(error),
+      })
+    }
+  },
+
+  generateDOE: async () => {
+    const { doeOptions, template } = get()
+
+    set({ isGeneratingDOE: true, doeError: null })
+
+    try {
+      const result = await App.GenerateDOE(buildDOEOptionsDTO(doeOptions, template))
+
+      set({ doePreview: toDOEResult(result) })
+
+      if (!result.ok) {
+        set({
+          isGeneratingDOE: false,
+          doeError: (result.errors || [])
+            .map((p) => p.message)
+            .join('; ') || 'Sweep validation failed',
+        })
+        return
+      }
+
+      // A sweep is just a job list, so it joins the normal PUR flow here and
+      // inherits validation, tar/upload, submission and resume unchanged.
+      const jobs = (result.jobs || []) as JobSpec[]
+
+      set({
+        scannedJobs: jobs,
+        jobRows: toJobRows(jobs),
+        workflowState: 'directoriesScanned',
+        isGeneratingDOE: false,
+      })
+    } catch (error) {
+      set({
+        isGeneratingDOE: false,
+        doeError: error instanceof Error ? error.message : String(error),
       })
     }
   },

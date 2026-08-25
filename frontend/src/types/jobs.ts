@@ -36,6 +36,11 @@ export interface JobSpec {
   projectId: string
   orgCode: string
   automations: string[]
+
+  // Already-uploaded file IDs to attach instead of tarring directory. Set by
+  // file-scan mode and by DOE sweeps over a shared input deck.
+  inputFiles?: string[]
+  tarSubpath?: string
 }
 
 // Job row for the jobs table
