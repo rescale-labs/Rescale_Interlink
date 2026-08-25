@@ -132,6 +132,11 @@ Terminal_*.txt
 !internal/config/token_acl_other.go
 !internal/config/token_acl_windows_test.go
 
+# Explicit exceptions: {{name}} command-template tokens, unrelated to
+# credentials — also matched by *token* above.
+!internal/pur/pattern/tokens.go
+!internal/pur/pattern/tokens_test.go
+
 # Claude Code artifacts that may contain sensitive data
 *.compact
 conversation_*.json
