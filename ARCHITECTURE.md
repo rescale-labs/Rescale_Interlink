@@ -162,9 +162,10 @@ rescale-int/
 │   │
 │   │  ── PUR ──
 │   ├── pur/                       # PUR (Parallel Upload and Run)
+│   │   ├── doe/                   # Design of experiments (parameter sweeps)
 │   │   ├── filescan/              # File scanning
 │   │   ├── parser/                # SGE script parsing
-│   │   ├── pattern/               # Pattern detection for batch jobs
+│   │   ├── pattern/               # Pattern detection and {{token}} substitution
 │   │   ├── pipeline/              # Pipeline orchestration
 │   │   ├── state/                 # PUR state management
 │   │   └── validation/            # Core type validation
@@ -396,6 +397,21 @@ Cross-platform: `syscall.Statfs` on Unix, `windows.GetDiskFreeSpaceEx` on Window
 
 CLI uses `mpb` (multi-progress bars) with per-file bars showing speed and ETA. GUI uses EventBus events forwarded through the Wails event bridge.
 
+### 11. Design of Experiments (`internal/pur/doe/`)
+
+**Purpose**: Expand one base `JobSpec` into a parameter sweep, one job per design point.
+
+`doe.Generate(Options) Result` is pure — no API client, no filesystem, no engine — so the same call serves the CLI's `--preview`, the GUI's live preview, and generation itself. Its output is `[]models.JobSpec`, which is the pipeline's only ingress, so a sweep inherits tar/upload/create/submit, state and resume, progress events, and both front ends without pipeline changes.
+
+**Structure**:
+- `doe.go` — `Options`, `Parameter`, `Case`, `Result`, `Generate`
+- `methods.go` — `Methods()`, the single source of each design's label, description and which options it reads; consumed by CLI flag help and the GUI's method menu
+- Samplers produce points in unit coordinates, which are then mapped onto each parameter's range or category list
+
+**Command-line injection**: values are rendered into the job's command through `pur/pattern`'s `{{name}}` substitution rather than passed as environment variables, so each case's configuration is visible on its Rescale job page. Parameters and command tokens are validated against each other in both directions — an unused parameter and an unfilled token are both errors, not silently wrong jobs.
+
+**Shared inputs**: `BaseFileIDs` sets each case's `InputFiles` and clears its `Directory`, which is the pipeline's existing skip-tar-and-upload path. One uploaded deck then serves the whole sweep instead of being re-uploaded per case.
+
 ---
 
 ## CLI Compatibility Mode
@@ -478,6 +494,7 @@ All behavior is injected:
 8. **Version Bindings** (`version_bindings.go`): GitHub update check
 9. **Reporting Bindings** (`reporting_bindings.go`): Error report display
 10. **API Key Source Bindings** (`api_key_source_bindings.go`): Reports back to the GUI which credential source the runtime resolved (token file vs. env vs. config) and any source conflicts
+11. **DOE Bindings** (`doe_bindings.go`): `GetDOEMethods` for the method menu, `PreviewDOECases` for the debounced live preview (truncated, no job specs), `GenerateDOE` for the full sweep plus its job specs
 
 ### Frontend Stores (`frontend/src/stores/`)
 
@@ -495,13 +512,13 @@ All behavior is injected:
 1. **FileBrowserTab** — Two-pane local/remote file browser. Remote pane has four browse modes: My Library, My Jobs, Legacy, and Trash (soft-deleted entries with restore/purge actions). Upload is disabled in Trash and My Jobs modes with an explicit reason.
 2. **TransfersTab** — Transfer progress with batch grouping, cancel/retry, disk space error banner
 3. **SingleJobTab** — Job template builder with three input modes (directory, local files, remote files)
-4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration)
+4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration) and three job sources (folder scan, file scan, DOE sweep)
 5. **SetupTab** — API settings, proxy configuration, logging, auto-download daemon
 6. **ActivityTab** — Logs with level filtering, run history with expandable job tables
 
 ### Frontend Shared Widgets (`frontend/src/components/widgets/`)
 
-`JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge`, `FileList`, `LocalBrowser`, `RemoteBrowser`, `RemoteFilePicker`, `TemplateBuilder`
+`JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge`, `FileList`, `LocalBrowser`, `RemoteBrowser`, `RemoteFilePicker`, `TemplateBuilder`, `DOEBuilder`
 
 ---
 

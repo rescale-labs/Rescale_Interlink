@@ -1518,6 +1518,95 @@ rescale-int pur scan-files --root /data --primary "*.inp" \
   --template template.csv --output jobs.csv
 ```
 
+#### pur doe
+Expand one base job into a design of experiments (parameter sweep)
+
+```bash
+rescale-int pur doe --template TEMPLATE --param SPEC... [--output OUTPUT | --preview]
+```
+
+The base job's command must contain a `{{name}}` token for each swept parameter.
+Each case renders its own values into that command, so every case's configuration
+is visible in the command line on its Rescale job page:
+
+```
+template:  starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+case 1:    starccm+ -param alpha 10 -param beta 15 -load input.sim
+```
+
+Parameters and command tokens are checked against each other in both directions:
+a swept parameter with no matching token, or a token with no matching parameter,
+is an error rather than a silently wrong job.
+
+**Flags:**
+- `-t, --template string` - Template jobs CSV whose first row is the base job (required)
+- `-o, --output string` - Output jobs CSV file (required unless `--preview`)
+- `--overwrite` - Overwrite existing output file
+- `-m, --method string` - Sampling method (default `full-factorial`)
+- `--param stringArray` - Swept parameter, e.g. `"alpha=10:20:5"` or `"model=a,b,c"` (repeatable)
+- `--param-format stringArray` - Numeric rendering format, e.g. `"alpha=%.3f"` (repeatable, default `%g`)
+- `--samples int` - Design points for `latin-hypercube`, `sobol` and `monte-carlo`
+- `--seed uint` - Seed for the randomized samplers; the same seed always yields the same sweep
+- `--center-points int` - Center point repeats for `central-composite` and `box-behnken` (default 1)
+- `--max-cases int` - Maximum cases; 0 uses the default cap, negative removes the limit
+- `--job-name-template string` - Case name template (default `"{{__base}}_{{__index}}"`)
+- `--tag-template stringArray` - Per-case Rescale job tag, e.g. `"alpha={{alpha}}"` (repeatable)
+- `--base-file-ids string` - Comma-separated IDs of already-uploaded input files shared by every case
+- `--cases-csv string` - CSV of explicit cases, one column per parameter (implies `--method explicit`)
+- `--preview` - Show the generated cases without writing a CSV
+- `--preview-limit int` - How many cases to list; 0 lists all of them (default 20)
+
+**Parameter syntax:**
+| Spec | Meaning |
+|------|---------|
+| `alpha=10:20:5` | Numeric range, 5 levels from 10 to 20 |
+| `alpha=10:20` | Numeric range, the two endpoints |
+| `model=kepsilon,komega,les` | Categorical, one case per value |
+
+**Methods:**
+| Method | Design |
+|--------|--------|
+| `full-factorial` | Every combination of every level |
+| `ofat` | One factor at a time from a baseline |
+| `latin-hypercube` | `--samples` points, every parameter evenly covered |
+| `sobol` | `--samples` low-discrepancy points |
+| `monte-carlo` | `--samples` uniform random points |
+| `central-composite` | Corners, axial points and center, for a quadratic fit |
+| `box-behnken` | Quadratic design avoiding the corners (3+ parameters) |
+| `explicit` | Cases read from `--cases-csv` |
+
+**Name and tag templates** may use any parameter token plus `{{__base}}` (the
+template's job name) and `{{__index}}` (the 1-based case number). Rendered tags
+are applied to that case's Rescale job.
+
+**Shared input files:** every case in a sweep uses the same input deck. Pass
+`--base-file-ids` with the IDs of an already-uploaded deck and each case
+references those files directly, so the deck transfers once for the whole sweep
+instead of once per case; run the result with `pur submit-existing`. Without it,
+every case keeps the template's directory and `pur run` tars and uploads that
+directory per case.
+
+**Examples:**
+```bash
+# 3x3 full factorial written to a jobs CSV
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --param "alpha=10:20:3" --param "beta=15:25:3"
+
+# Preview a 20-point Latin hypercube without writing anything
+rescale-int pur doe --template base.csv --preview \
+  --method latin-hypercube --samples 20 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25"
+
+# Share one uploaded deck across the sweep and tag each job
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --base-file-ids abcde,fghij --tag-template "alpha={{alpha}}" \
+  --param "alpha=10:20:5"
+rescale-int pur submit-existing --jobs-csv sweep.csv
+
+# Cases from a hand-written CSV
+rescale-int pur doe --template base.csv --output sweep.csv --cases-csv cases.csv
+```
+
 #### pur plan
 Validate job pipeline without executing
 
@@ -2039,6 +2128,41 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv
 rescale-int pur resume \
   --jobs-csv jobs.csv \
   --state state.csv
+```
+
+### Parameter Sweep (DOE)
+
+```bash
+# 1. Upload the input deck once; every case will reference these files
+rescale-int upload input.sim
+# note the file ID(s) reported, e.g. AbCdEf
+
+# 2. Preview the design before committing to it. The template's command must
+#    contain a {{token}} per swept parameter, e.g.
+#      starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+rescale-int pur doe \
+  --template base.csv \
+  --method latin-hypercube --samples 24 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25" \
+  --preview
+
+# 3. Generate the sweep, tagging each job with its own values
+rescale-int pur doe \
+  --template base.csv \
+  --output sweep.csv \
+  --method latin-hypercube --samples 24 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25" \
+  --param-format "alpha=%.2f" \
+  --tag-template "alpha={{alpha}}" --tag-template "beta={{beta}}" \
+  --base-file-ids AbCdEf
+
+# 4. Submit. Tar and upload are skipped because the deck is already on Rescale.
+rescale-int pur submit-existing --jobs-csv sweep.csv --state sweep.state
+
+# Without --base-file-ids the cases keep the template's directory, so run them
+# through the full pipeline instead, and collect the uploads in one folder:
+rescale-int pur run --jobs-csv sweep.csv --state sweep.state \
+  --folder "sweeps/alpha-beta" --file-tags "sweep-2026-q3"
 ```
 
 ### Configuration Management

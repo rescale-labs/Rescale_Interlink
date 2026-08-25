@@ -1,5 +1,38 @@
 # Release Notes - Rescale Interlink
 
+## v4.10.0 (unreleased)
+
+### DOE parameter sweeps in PUR (`pur doe`, GUI sweep builder)
+
+One base job can now be expanded into a design of experiments — one Rescale job per design point — from either the CLI or the PUR tab.
+
+Each case's values are rendered into the **job's command line** rather than passed as environment variables, so the configuration of every case is visible on its Rescale job page:
+
+```
+template:  starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+case 1:    starccm+ -param alpha 10 -param beta 15 -load input.sim
+```
+
+Parameters and `{{token}}`s are validated against each other in both directions: a swept parameter with no matching token, and a token with no matching parameter, are both errors rather than silently wrong jobs.
+
+Eight designs are available — full factorial, one-factor-at-a-time, Latin hypercube, Sobol, Monte Carlo, central composite, Box-Behnken, and explicit cases from a CSV. The randomized samplers take a `--seed`, so the same seed always reproduces the same sweep.
+
+Per-case job names and Rescale job tags come from templates that may use any parameter token plus `{{__base}}` and `{{__index}}`, which makes a sweep filterable on the platform by the values that produced it.
+
+Because every case in a sweep shares one input deck, `--base-file-ids` (Shared Input File IDs in the GUI) points every case at an already-uploaded deck, so it transfers once for the whole sweep instead of once per case. A generated sweep is an ordinary jobs CSV, so it runs through the existing `pur run` / `pur submit-existing` pipeline with resume, state and monitoring unchanged.
+
+In the GUI, **PUR → Job Source → DOE** builds the sweep with a live case preview, showing the case table, the first case's rendered command and tags, and any validation problems before anything is submitted.
+
+### PUR uploads can target a folder and carry file tags
+
+`pur run` and `pur resume` accept `--folder` (created if missing), `--folder-parent`, and `--file-tags`, so a batch's uploads can be collected in one Rescale folder and tagged as a set.
+
+### `--extra-input-files` renamed to `--common-input-files`
+
+The flag that uploads a file once and attaches it to every job is now `--common-input-files`, with `--decompress-common` alongside it; the GUI label matches. The old `--extra-input-files` and `--decompress-extras` names still work as hidden aliases but emit a deprecation warning, and passing both a flag and its alias is an error.
+
+---
+
 ## v4.9.8 - May 30, 2026
 
 ### File Browser Trash Bin, and deletes now go to Trash Bin (#30)
