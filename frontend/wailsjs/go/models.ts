@@ -472,6 +472,237 @@ export namespace wailsapp {
 		}
 	}
 	
+	export class DOECaseDTO {
+	    index: number;
+	    values: Record<string, string>;
+	    jobName: string;
+	    command: string;
+	    tags?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DOECaseDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.values = source["values"];
+	        this.jobName = source["jobName"];
+	        this.command = source["command"];
+	        this.tags = source["tags"];
+	    }
+	}
+	export class DOEMethodDTO {
+	    method: string;
+	    label: string;
+	    description: string;
+	    usesSamples: boolean;
+	    usesLevels: boolean;
+	    usesCenterPoints: boolean;
+	    usesCases: boolean;
+	    minParameters: number;
+	    maxParameters: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DOEMethodDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.method = source["method"];
+	        this.label = source["label"];
+	        this.description = source["description"];
+	        this.usesSamples = source["usesSamples"];
+	        this.usesLevels = source["usesLevels"];
+	        this.usesCenterPoints = source["usesCenterPoints"];
+	        this.usesCases = source["usesCases"];
+	        this.minParameters = source["minParameters"];
+	        this.maxParameters = source["maxParameters"];
+	    }
+	}
+	export class DOEParameterDTO {
+	    name: string;
+	    min: number;
+	    max: number;
+	    levels: number;
+	    values?: string[];
+	    format?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DOEParameterDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.min = source["min"];
+	        this.max = source["max"];
+	        this.levels = source["levels"];
+	        this.values = source["values"];
+	        this.format = source["format"];
+	    }
+	}
+	export class JobSpecDTO {
+	    directory: string;
+	    jobName: string;
+	    analysisCode: string;
+	    analysisVersion: string;
+	    command: string;
+	    coreType: string;
+	    coresPerSlot: number;
+	    walltimeHours: number;
+	    slots: number;
+	    licenseSettings: string;
+	    extraInputFileIds: string;
+	    noDecompress: boolean;
+	    submitMode: string;
+	    isLowPriority: boolean;
+	    onDemandLicenseSeller: string;
+	    tags: string[];
+	    projectId: string;
+	    orgCode: string;
+	    automations: string[];
+	    inputFiles?: string[];
+	    tarSubpath?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobSpecDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.directory = source["directory"];
+	        this.jobName = source["jobName"];
+	        this.analysisCode = source["analysisCode"];
+	        this.analysisVersion = source["analysisVersion"];
+	        this.command = source["command"];
+	        this.coreType = source["coreType"];
+	        this.coresPerSlot = source["coresPerSlot"];
+	        this.walltimeHours = source["walltimeHours"];
+	        this.slots = source["slots"];
+	        this.licenseSettings = source["licenseSettings"];
+	        this.extraInputFileIds = source["extraInputFileIds"];
+	        this.noDecompress = source["noDecompress"];
+	        this.submitMode = source["submitMode"];
+	        this.isLowPriority = source["isLowPriority"];
+	        this.onDemandLicenseSeller = source["onDemandLicenseSeller"];
+	        this.tags = source["tags"];
+	        this.projectId = source["projectId"];
+	        this.orgCode = source["orgCode"];
+	        this.automations = source["automations"];
+	        this.inputFiles = source["inputFiles"];
+	        this.tarSubpath = source["tarSubpath"];
+	    }
+	}
+	export class DOEOptionsDTO {
+	    template: JobSpecDTO;
+	    parameters: DOEParameterDTO[];
+	    method: string;
+	    samples: number;
+	    seed: number;
+	    centerPoints: number;
+	    cases?: any[];
+	    baseFileIds?: string[];
+	    jobNameTemplate: string;
+	    tagTemplates?: string[];
+	    maxCases: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DOEOptionsDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.template = this.convertValues(source["template"], JobSpecDTO);
+	        this.parameters = this.convertValues(source["parameters"], DOEParameterDTO);
+	        this.method = source["method"];
+	        this.samples = source["samples"];
+	        this.seed = source["seed"];
+	        this.centerPoints = source["centerPoints"];
+	        this.cases = source["cases"];
+	        this.baseFileIds = source["baseFileIds"];
+	        this.jobNameTemplate = source["jobNameTemplate"];
+	        this.tagTemplates = source["tagTemplates"];
+	        this.maxCases = source["maxCases"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class DOEProblemDTO {
+	    code: string;
+	    param?: string;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DOEProblemDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.code = source["code"];
+	        this.param = source["param"];
+	        this.message = source["message"];
+	    }
+	}
+	export class DOEResultDTO {
+	    ok: boolean;
+	    caseCount: number;
+	    truncated: boolean;
+	    cases: DOECaseDTO[];
+	    jobs?: JobSpecDTO[];
+	    errors?: DOEProblemDTO[];
+	    warnings?: DOEProblemDTO[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DOEResultDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ok = source["ok"];
+	        this.caseCount = source["caseCount"];
+	        this.truncated = source["truncated"];
+	        this.cases = this.convertValues(source["cases"], DOECaseDTO);
+	        this.jobs = this.convertValues(source["jobs"], JobSpecDTO);
+	        this.errors = this.convertValues(source["errors"], DOEProblemDTO);
+	        this.warnings = this.convertValues(source["warnings"], DOEProblemDTO);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class DaemonBatchStatsDTO {
 	    batchId: string;
 	    batchLabel: string;
@@ -895,58 +1126,7 @@ export namespace wailsapp {
 	        this.error = source["error"];
 	    }
 	}
-	export class JobSpecDTO {
-	    directory: string;
-	    jobName: string;
-	    analysisCode: string;
-	    analysisVersion: string;
-	    command: string;
-	    coreType: string;
-	    coresPerSlot: number;
-	    walltimeHours: number;
-	    slots: number;
-	    licenseSettings: string;
-	    extraInputFileIds: string;
-	    noDecompress: boolean;
-	    submitMode: string;
-	    isLowPriority: boolean;
-	    onDemandLicenseSeller: string;
-	    tags: string[];
-	    projectId: string;
-	    orgCode: string;
-	    automations: string[];
-	    inputFiles?: string[];
-	    tarSubpath?: string;
 	
-	    static createFrom(source: any = {}) {
-	        return new JobSpecDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.directory = source["directory"];
-	        this.jobName = source["jobName"];
-	        this.analysisCode = source["analysisCode"];
-	        this.analysisVersion = source["analysisVersion"];
-	        this.command = source["command"];
-	        this.coreType = source["coreType"];
-	        this.coresPerSlot = source["coresPerSlot"];
-	        this.walltimeHours = source["walltimeHours"];
-	        this.slots = source["slots"];
-	        this.licenseSettings = source["licenseSettings"];
-	        this.extraInputFileIds = source["extraInputFileIds"];
-	        this.noDecompress = source["noDecompress"];
-	        this.submitMode = source["submitMode"];
-	        this.isLowPriority = source["isLowPriority"];
-	        this.onDemandLicenseSeller = source["onDemandLicenseSeller"];
-	        this.tags = source["tags"];
-	        this.projectId = source["projectId"];
-	        this.orgCode = source["orgCode"];
-	        this.automations = source["automations"];
-	        this.inputFiles = source["inputFiles"];
-	        this.tarSubpath = source["tarSubpath"];
-	    }
-	}
 	export class JobsStatsDTO {
 	    total: number;
 	    completed: number;

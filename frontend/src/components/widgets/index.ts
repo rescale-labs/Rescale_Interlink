@@ -5,6 +5,7 @@ export { LocalBrowser } from './LocalBrowser'
 export { RemoteBrowser } from './RemoteBrowser'
 export { RemoteFilePicker } from './RemoteFilePicker'
 export { TemplateBuilder } from './TemplateBuilder'
+export { DOEBuilder } from './DOEBuilder'
 
 // Shared pipeline widgets
 export { StatusBadge } from './StatusBadge'

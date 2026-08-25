@@ -19,7 +19,7 @@ import clsx from 'clsx'
 import { useJobStore, useConfigStore, useRunStore } from '../../stores'
 import type { WorkflowState } from '../../types/jobs'
 import { wailsapp } from '../../../wailsjs/go/models'
-import { TemplateBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
+import { TemplateBuilder, DOEBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
 import { formatDuration } from '../../utils/formatDuration'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import * as Runtime from '../../../wailsjs/runtime/runtime'
@@ -228,6 +228,9 @@ export function PURTab() {
     canGoBack,
     setScanOptions,
     scanDirectory,
+    doePreview,
+    isGeneratingDOE,
+    generateDOE,
     validateJobs,
     startBulkRun,
     cancelRun,
@@ -479,6 +482,13 @@ export function PURTab() {
     await scanDirectory()
   }, [scanDirectory])
 
+  // Handle sweep generation. A sweep produces the same job list a scan does, so
+  // it lands in the same 'directoriesScanned' state and the rest of the workflow
+  // is unchanged.
+  const handleGenerateSweep = useCallback(async () => {
+    await generateDOE()
+  }, [generateDOE])
+
   // Handle validation
   const handleValidate = useCallback(async () => {
     setIsValidating(true)
@@ -697,7 +707,9 @@ export function PURTab() {
       return (
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold">Scan to Create Jobs</h3>
+            <h3 className="text-lg font-semibold">
+              {scanOptions.scanMode === 'doe' ? 'Build Parameter Sweep' : 'Scan to Create Jobs'}
+            </h3>
             <div className="relative">
               <button
                 onClick={() => setShowSaveMenu(!showSaveMenu)}
@@ -738,7 +750,7 @@ export function PURTab() {
           )}
 
           <div className="mb-4">
-            <label className="block text-sm font-medium mb-2">Scan Mode</label>
+            <label className="block text-sm font-medium mb-2">Job Source</label>
             <div className="flex gap-4">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
@@ -760,9 +772,32 @@ export function PURTab() {
                 />
                 <span className="text-sm">Files (each file = 1 job)</span>
               </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="scanMode"
+                  checked={scanOptions.scanMode === 'doe'}
+                  onChange={() => setScanOptions({ scanMode: 'doe' })}
+                  className="w-4 h-4 text-blue-500"
+                />
+                <span className="text-sm">DOE (parameter sweep = 1 job per case)</span>
+              </label>
             </div>
           </div>
 
+          {scanOptions.scanMode === 'doe' && (
+            <div className="mb-6">
+              <p className="text-xs text-gray-500 mb-4">
+                A sweep expands the template job into one case per design point, rendering
+                each case&apos;s values into its command line so the configuration is visible
+                on the Rescale job page. The template command needs a{' '}
+                <code>{'{{name}}'}</code> token for every swept parameter.
+              </p>
+              <DOEBuilder />
+            </div>
+          )}
+
+          {scanOptions.scanMode !== 'doe' && (
           <div className="grid grid-cols-2 gap-6 mb-6">
             <div>
               <label className="block text-sm font-medium mb-1">Root Directory</label>
@@ -864,6 +899,7 @@ export function PURTab() {
               </>
             )}
           </div>
+          )}
 
           {scanOptions.scanMode === 'files' && (
             <div className="mb-6">
@@ -924,6 +960,7 @@ export function PURTab() {
             </div>
           )}
 
+          {scanOptions.scanMode !== 'doe' && (
           <div className="flex items-center gap-4 mb-6">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -946,6 +983,7 @@ export function PURTab() {
               </label>
             )}
           </div>
+          )}
 
           {/* Command Pattern Iteration - only in folder mode */}
           {scanOptions.scanMode === 'folders' && (
@@ -986,11 +1024,20 @@ export function PURTab() {
 
           {/* Common Input Files Section */}
           <div className="border-t pt-4 mt-4 mb-6">
-            <p className="text-xs text-gray-500 mb-3">
-              <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
-              automatically decompressed on the cluster. Common input files below are shared files uploaded once and
-              attached to every job.
-            </p>
+            {scanOptions.scanMode === 'doe' ? (
+              <p className="text-xs text-gray-500 mb-3">
+                <strong>How PUR handles a sweep:</strong> Cases differ only in their command,
+                so the files below are uploaded once and attached to every case. Unless the
+                sweep uses shared input file IDs, each case still archives and uploads the
+                template&apos;s directory separately.
+              </p>
+            ) : (
+              <p className="text-xs text-gray-500 mb-3">
+                <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
+                automatically decompressed on the cluster. Common input files below are shared files uploaded once and
+                attached to every job.
+              </p>
+            )}
             <h4 className="text-sm font-medium text-gray-700 mb-2">
               Common Input Files (shared across all jobs)
             </h4>
@@ -1109,28 +1156,55 @@ export function PURTab() {
             </div>
           )}
 
-          <button
-            onClick={handleScan}
-            disabled={!scanOptions.rootDir || isScanning}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-2 rounded',
-              scanOptions.rootDir && !isScanning
-                ? 'bg-blue-500 text-white hover:bg-blue-600'
-                : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
-            )}
-          >
-            {isScanning ? (
-              <>
-                <ArrowPathIcon className="w-5 h-5 animate-spin" />
-                Scanning...
-              </>
-            ) : (
-              <>
-                <PlayIcon className="w-5 h-5" />
-                Scan to Create Jobs
-              </>
-            )}
-          </button>
+          {scanOptions.scanMode === 'doe' ? (
+            <button
+              onClick={handleGenerateSweep}
+              disabled={isGeneratingDOE || !doePreview?.ok}
+              className={clsx(
+                'flex items-center gap-2 px-4 py-2 rounded',
+                !isGeneratingDOE && doePreview?.ok
+                  ? 'bg-blue-500 text-white hover:bg-blue-600'
+                  : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
+              )}
+            >
+              {isGeneratingDOE ? (
+                <>
+                  <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                  Generating...
+                </>
+              ) : (
+                <>
+                  <PlayIcon className="w-5 h-5" />
+                  {doePreview?.ok
+                    ? `Create ${doePreview.caseCount} Job${doePreview.caseCount !== 1 ? 's' : ''}`
+                    : 'Create Jobs from Sweep'}
+                </>
+              )}
+            </button>
+          ) : (
+            <button
+              onClick={handleScan}
+              disabled={!scanOptions.rootDir || isScanning}
+              className={clsx(
+                'flex items-center gap-2 px-4 py-2 rounded',
+                scanOptions.rootDir && !isScanning
+                  ? 'bg-blue-500 text-white hover:bg-blue-600'
+                  : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
+              )}
+            >
+              {isScanning ? (
+                <>
+                  <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                  Scanning...
+                </>
+              ) : (
+                <>
+                  <PlayIcon className="w-5 h-5" />
+                  Scan to Create Jobs
+                </>
+              )}
+            </button>
+          )}
         </div>
       )
     }

@@ -34,9 +34,13 @@ export function ClearSavedAPIKey():Promise<wailsapp.ClearSavedAPIKeyResultDTO>;
 
 export function CreateRemoteFolder(arg1:string,arg2:string):Promise<string>;
 
+export function DefaultDOEMaxCases():Promise<number>;
+
 export function DeleteRemoteItems(arg1:string,arg2:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
 
 export function DeleteTemplate(arg1:string):Promise<void>;
+
+export function GenerateDOE(arg1:wailsapp.DOEOptionsDTO):Promise<wailsapp.DOEResultDTO>;
 
 export function GetAnalysisCodes(arg1:string):Promise<wailsapp.AnalysisCodesResultDTO>;
 
@@ -51,6 +55,8 @@ export function GetConfig():Promise<wailsapp.ConfigDTO>;
 export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
 
 export function GetCredentialSource():Promise<wailsapp.CredentialSourceDTO>;
+
+export function GetDOEMethods():Promise<Array<wailsapp.DOEMethodDTO>>;
 
 export function GetDaemonConfig():Promise<wailsapp.DaemonConfigDTO>;
 
@@ -137,6 +143,8 @@ export function OpenLogsDirectory():Promise<void>;
 export function PauseDaemon():Promise<void>;
 
 export function PreviewCommandPatterns(arg1:string,arg2:Array<string>):Promise<Array<wailsapp.CommandPreviewDTO>>;
+
+export function PreviewDOECases(arg1:wailsapp.DOEOptionsDTO,arg2:number):Promise<wailsapp.DOEResultDTO>;
 
 export function PurgeTrashItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
 
