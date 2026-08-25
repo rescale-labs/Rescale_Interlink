@@ -37,6 +37,7 @@ func newPURCmd() *cobra.Command {
 	// Add PUR subcommands
 	purCmd.AddCommand(newMakeDirsCSVCmd())
 	purCmd.AddCommand(newScanFilesCmd())
+	purCmd.AddCommand(newDOECmd())
 	purCmd.AddCommand(newPlanCmd())
 	purCmd.AddCommand(newRunCmd())
 	purCmd.AddCommand(newResumeCmd())
