@@ -469,8 +469,8 @@ func (a *App) GetAutomations() AutomationsResultDTO {
 
 // PURRunOptionsDTO contains PUR-specific run configuration beyond the job list.
 type PURRunOptionsDTO struct {
-	ExtraInputFiles  string `json:"extraInputFiles"`  // Comma-separated paths and/or id:<fileId>
-	DecompressExtras bool   `json:"decompressExtras"` // Whether to decompress extra files on cluster
+	CommonInputFiles string `json:"commonInputFiles"` // Comma-separated paths and/or id:<fileId>, shared by all jobs
+	DecompressCommon bool   `json:"decompressCommon"` // Whether to decompress common files on cluster
 	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`
 }
 
@@ -514,8 +514,8 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 	go func() {
 		defer a.engine.EndRun()
 		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, core.RunOptions{
-			ExtraInputFiles:  opts.ExtraInputFiles,
-			DecompressExtras: opts.DecompressExtras,
+			CommonInputFiles: opts.CommonInputFiles,
+			DecompressCommon: opts.DecompressCommon,
 			RmTarOnSuccess:   opts.RmTarOnSuccess,
 		})
 		if err != nil && ctx.Err() == nil {

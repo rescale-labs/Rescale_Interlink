@@ -57,8 +57,8 @@ export interface SecondaryPattern {
 
 // PUR run options (beyond job list)
 export interface PURRunOptions {
-  extraInputFiles: string   // Comma-separated paths and/or id:fileId
-  decompressExtras: boolean
+  commonInputFiles: string   // Comma-separated paths and/or id:fileId, shared by all jobs
+  decompressCommon: boolean
   rmTarOnSuccess: boolean
 }
 
@@ -261,8 +261,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
   automationsError: null,
 
   purRunOptions: {
-    extraInputFiles: '',
-    decompressExtras: false,
+    commonInputFiles: '',
+    decompressCommon: false,
     rmTarOnSuccess: false,
   },
 

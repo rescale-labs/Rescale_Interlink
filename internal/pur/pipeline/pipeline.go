@@ -73,10 +73,10 @@ type Pipeline struct {
 	multiPartMode    bool
 	skipTarUpload    bool // true for submit-existing: skip tar/upload, go directly to job creation
 
-	// Shared files attached to all jobs (from --extra-input-files)
-	extraInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
-	sharedFileIDs      []string // Resolved file IDs (after upload of local paths)
-	decompressExtras   bool     // Whether to decompress shared files on cluster
+	// Shared files attached to all jobs (from --common-input-files)
+	commonInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
+	sharedFileIDs       []string // Resolved file IDs (after upload of local paths)
+	decompressCommon    bool     // Whether to decompress shared files on cluster
 
 	// Cleanup options
 	rmTarOnSuccess bool // Delete local tar file after successful upload
@@ -174,7 +174,7 @@ func findCommonParent(jobs []models.JobSpec) string {
 // NewPipeline creates a new pipeline.
 // When existingState is non-nil, the pipeline shares the caller's state manager
 // instead of creating a duplicate. CLI callers pass nil.
-func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, extraInputFiles string, decompressExtras bool) (*Pipeline, error) {
+func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, commonInputFiles string, decompressCommon bool) (*Pipeline, error) {
 	// Normalize all job directories to absolute paths at ingress.
 	// This prevents CWD-dependent failures when paths were generated
 	// with a different working directory (especially GUI mode).
@@ -225,7 +225,7 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		tempDir:          tempDir,
 		multiPartMode:    multiPartMode,
 		skipTarUpload:    skipTarUpload,
-		decompressExtras: decompressExtras,
+		decompressCommon: decompressCommon,
 		resourceMgr:      resourceMgr,
 		transferMgr:      transferMgr,
 		feederDone:       make(chan struct{}),
@@ -241,10 +241,10 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		totalJobs:     len(jobs),
 	}
 
-	// Parse extraInputFiles into sharedFileIDs where possible (id: refs only at construction time;
+	// Parse commonInputFiles into sharedFileIDs where possible (id: refs only at construction time;
 	// local paths require ctx and are resolved in ResolveSharedFiles during Run).
-	if extraInputFiles != "" {
-		p.extraInputFilesRaw = extraInputFiles
+	if commonInputFiles != "" {
+		p.commonInputFilesRaw = commonInputFiles
 	}
 
 	return p, nil
@@ -391,13 +391,13 @@ func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
 }
 
 // ResolveSharedFiles uploads local paths and collects file IDs from the
-// --extra-input-files flag. Called once at the start of Run() so the
+// --common-input-files flag. Called once at the start of Run() so the
 // resolved IDs are available for every job.
 func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
-	if p.extraInputFilesRaw == "" {
+	if p.commonInputFilesRaw == "" {
 		return nil
 	}
-	items := strings.Split(p.extraInputFilesRaw, ",")
+	items := strings.Split(p.commonInputFilesRaw, ",")
 	seen := make(map[string]bool) // dedupe
 
 	for _, item := range items {
@@ -1033,7 +1033,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				} else {
 					fileIDs = []string{item.state.FileID}
 				}
-				jobReq, err := BuildJobRequest(item.jobSpec, fileIDs, p.sharedFileIDs, p.decompressExtras)
+				jobReq, err := BuildJobRequest(item.jobSpec, fileIDs, p.sharedFileIDs, p.decompressCommon)
 				if err != nil {
 					p.logf("ERROR", "job", item.state.JobName, "Failed to build request: %v", err)
 					item.state.SubmitStatus = "failed"
@@ -1129,9 +1129,9 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 // This is the single source of truth for JobSpec -> JobRequest conversion.
 // Used by both GUI (single job tab) and PUR pipeline.
 // fileIDs are the primary input files; ExtraInputFileIDs from spec are also included.
-// sharedFileIDs are pipeline-level shared files (from --extra-input-files) attached to every job.
-// decompressExtras controls whether those shared files are decompressed on the cluster.
-func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []string, decompressExtras bool) (*models.JobRequest, error) {
+// sharedFileIDs are pipeline-level shared files (from --common-input-files) attached to every job.
+// decompressCommon controls whether those shared files are decompressed on the cluster.
+func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []string, decompressCommon bool) (*models.JobRequest, error) {
 	// Parse license settings (optional - empty string is valid)
 	var licenseEnv map[string]string
 	if spec.LicenseSettings != "" {
@@ -1167,7 +1167,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 		}
 	}
 
-	// Add shared files (pipeline-level --extra-input-files), deduplicating
+	// Add shared files (pipeline-level --common-input-files), deduplicating
 	// against files already in the list.
 	if len(sharedFileIDs) > 0 {
 		seen := make(map[string]bool, len(inputFiles))
@@ -1178,7 +1178,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 			if !seen[id] {
 				inputFiles = append(inputFiles, models.InputFileRequest{
 					ID:         id,
-					Decompress: decompressExtras,
+					Decompress: decompressCommon,
 				})
 				seen[id] = true
 			}

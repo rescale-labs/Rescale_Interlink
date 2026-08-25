@@ -984,15 +984,15 @@ export function PURTab() {
             </div>
           )}
 
-          {/* Extra Input Files Section */}
+          {/* Common Input Files Section */}
           <div className="border-t pt-4 mt-4 mb-6">
             <p className="text-xs text-gray-500 mb-3">
               <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
-              automatically decompressed on the cluster. Extra input files below are shared files uploaded once and
+              automatically decompressed on the cluster. Common input files below are shared files uploaded once and
               attached to every job.
             </p>
             <h4 className="text-sm font-medium text-gray-700 mb-2">
-              Extra Input Files (shared across all jobs)
+              Common Input Files (shared across all jobs)
             </h4>
             <div className="space-y-2">
               <div className="flex gap-2">
@@ -1000,19 +1000,19 @@ export function PURTab() {
                   type="text"
                   className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Comma-separated local paths or id:fileId references"
-                  value={purRunOptions.extraInputFiles}
-                  onChange={(e) => setPURRunOptions({ extraInputFiles: e.target.value })}
+                  value={purRunOptions.commonInputFiles}
+                  onChange={(e) => setPURRunOptions({ commonInputFiles: e.target.value })}
                 />
                 <button
                   type="button"
                   className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm hover:bg-gray-50 dark:hover:bg-gray-700"
                   onClick={async () => {
                     try {
-                      const path = await App.SelectFile('Select extra input file')
+                      const path = await App.SelectFile('Select common input file')
                       if (path) {
-                        const current = purRunOptions.extraInputFiles
+                        const current = purRunOptions.commonInputFiles
                         setPURRunOptions({
-                          extraInputFiles: current ? `${current},${path}` : path,
+                          commonInputFiles: current ? `${current},${path}` : path,
                         })
                       }
                     } catch {
@@ -1026,11 +1026,11 @@ export function PURTab() {
               <label className="flex items-center gap-2 text-sm text-gray-600">
                 <input
                   type="checkbox"
-                  checked={purRunOptions.decompressExtras}
-                  onChange={(e) => setPURRunOptions({ decompressExtras: e.target.checked })}
+                  checked={purRunOptions.decompressCommon}
+                  onChange={(e) => setPURRunOptions({ decompressCommon: e.target.checked })}
                   className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
                 />
-                Decompress extra files on cluster
+                Decompress common files on cluster
               </label>
               <p className="text-xs text-gray-400">
                 These files are uploaded once and attached to every job in the batch.

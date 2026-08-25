@@ -520,6 +520,53 @@ Example:
 	return cmd
 }
 
+// commonInputFileFlags holds the batch-level shared input file flags along with
+// their deprecated aliases. Shared by 'pur run' and 'pur resume'.
+type commonInputFileFlags struct {
+	commonInputFiles string
+	decompressCommon bool
+
+	// Deprecated aliases, retained for backwards compatibility.
+	legacyInputFiles string
+	legacyDecompress bool
+}
+
+// register adds --common-input-files/--decompress-common plus the hidden
+// deprecated --extra-input-files/--decompress-extras aliases.
+func (f *commonInputFileFlags) register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.commonInputFiles, "common-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
+	cmd.Flags().BoolVar(&f.decompressCommon, "decompress-common", false, "Decompress common input files on cluster")
+
+	cmd.Flags().StringVar(&f.legacyInputFiles, "extra-input-files", "", "DEPRECATED: Use --common-input-files instead")
+	cmd.Flags().BoolVar(&f.legacyDecompress, "decompress-extras", false, "DEPRECATED: Use --decompress-common instead")
+	cmd.Flags().MarkHidden("extra-input-files")
+	cmd.Flags().MarkHidden("decompress-extras")
+}
+
+// resolve folds any deprecated alias values into the canonical fields.
+// Returns an error when a flag and its deprecated alias are both set.
+func (f *commonInputFileFlags) resolve(cmd *cobra.Command) error {
+	logger := GetLogger()
+
+	if cmd.Flags().Changed("extra-input-files") {
+		if cmd.Flags().Changed("common-input-files") {
+			return fmt.Errorf("--extra-input-files is a deprecated alias for --common-input-files; specify only one")
+		}
+		logger.Warn().Msg("--extra-input-files is deprecated, use --common-input-files instead")
+		f.commonInputFiles = f.legacyInputFiles
+	}
+
+	if cmd.Flags().Changed("decompress-extras") {
+		if cmd.Flags().Changed("decompress-common") {
+			return fmt.Errorf("--decompress-extras is a deprecated alias for --decompress-common; specify only one")
+		}
+		logger.Warn().Msg("--decompress-extras is deprecated, use --decompress-common instead")
+		f.decompressCommon = f.legacyDecompress
+	}
+
+	return nil
+}
+
 // newRunCmd creates the 'run' command.
 func newRunCmd() *cobra.Command {
 	var jobsCSV string
@@ -533,8 +580,7 @@ func newRunCmd() *cobra.Command {
 	var uploadWorkers int
 	var jobWorkers int
 	var rmTarOnSuccess bool
-	var extraInputFiles string
-	var decompressExtras bool
+	var sharedFiles commonInputFileFlags
 	var dryRun bool
 
 	cmd := &cobra.Command{
@@ -549,6 +595,10 @@ Example:
 
 			if jobsCSV == "" {
 				return fmt.Errorf("--jobs-csv is required")
+			}
+
+			if err := sharedFiles.resolve(cmd); err != nil {
+				return err
 			}
 
 			logger.Info().
@@ -618,7 +668,7 @@ Example:
 			}
 
 			// Create pipeline
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, extraInputFiles, decompressExtras)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
@@ -651,8 +701,7 @@ Example:
 	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
 	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
-	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
-	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
+	sharedFiles.register(cmd)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate and show plan without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")
@@ -673,8 +722,7 @@ func newResumeCmd() *cobra.Command {
 	var uploadWorkers int
 	var jobWorkers int
 	var rmTarOnSuccess bool
-	var extraInputFiles string
-	var decompressExtras bool
+	var sharedFiles commonInputFileFlags
 	var dryRun bool
 
 	cmd := &cobra.Command{
@@ -692,6 +740,10 @@ Example:
 			}
 			if jobsCSV == "" {
 				return fmt.Errorf("--jobs-csv is required")
+			}
+
+			if err := sharedFiles.resolve(cmd); err != nil {
+				return err
 			}
 
 			logger.Info().
@@ -788,7 +840,7 @@ Example:
 			}
 
 			// Create pipeline (will load existing state)
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, extraInputFiles, decompressExtras)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
@@ -821,8 +873,7 @@ Example:
 	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
 	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
-	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
-	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
+	sharedFiles.register(cmd)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be resumed without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")

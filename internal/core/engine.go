@@ -33,8 +33,10 @@ import (
 
 // RunOptions groups PUR-specific pipeline options to avoid parameter creep.
 type RunOptions struct {
-	ExtraInputFiles  string
-	DecompressExtras bool
+	// CommonInputFiles are shared across every job in the batch: comma-separated
+	// local paths and/or id:<fileId> references, uploaded once at pipeline start.
+	CommonInputFiles string
+	DecompressCommon bool
 	RmTarOnSuccess   bool
 }
 
@@ -1192,7 +1194,7 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	}
 
 	// Create pipeline directly from JobSpecs with shared state manager and extra input files
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, opts.ExtraInputFiles, opts.DecompressExtras)
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, opts.CommonInputFiles, opts.DecompressCommon)
 	if err != nil {
 		e.mu.Unlock()
 		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")

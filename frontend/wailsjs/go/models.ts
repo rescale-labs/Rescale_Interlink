@@ -1006,8 +1006,8 @@ export namespace wailsapp {
 	    }
 	}
 	export class PURRunOptionsDTO {
-	    extraInputFiles: string;
-	    decompressExtras: boolean;
+	    commonInputFiles: string;
+	    decompressCommon: boolean;
 	    rmTarOnSuccess: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -1016,8 +1016,8 @@ export namespace wailsapp {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.extraInputFiles = source["extraInputFiles"];
-	        this.decompressExtras = source["decompressExtras"];
+	        this.commonInputFiles = source["commonInputFiles"];
+	        this.decompressCommon = source["decompressCommon"];
 	        this.rmTarOnSuccess = source["rmTarOnSuccess"];
 	    }
 	}
