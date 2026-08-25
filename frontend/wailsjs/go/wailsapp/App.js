@@ -198,6 +198,18 @@ export function InstallAndStartServiceElevated() {
   return window['go']['wailsapp']['App']['InstallAndStartServiceElevated']();
 }
 
+export function InstallService() {
+  return window['go']['wailsapp']['App']['InstallService']();
+}
+
+export function InstallServiceElevated() {
+  return window['go']['wailsapp']['App']['InstallServiceElevated']();
+}
+
+export function IsServiceInstalled() {
+  return window['go']['wailsapp']['App']['IsServiceInstalled']();
+}
+
 export function ListLocalDirectory(arg1) {
   return window['go']['wailsapp']['App']['ListLocalDirectory'](arg1);
 }
@@ -416,6 +428,10 @@ export function TriggerDaemonScan() {
 
 export function TriggerProfileRescan() {
   return window['go']['wailsapp']['App']['TriggerProfileRescan']();
+}
+
+export function UninstallServiceElevated() {
+  return window['go']['wailsapp']['App']['UninstallServiceElevated']();
 }
 
 export function UpdateConfig(arg1) {
