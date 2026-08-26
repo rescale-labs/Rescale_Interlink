@@ -201,6 +201,14 @@ func uploadDirectoryPipelined(
 		cancelUpload()
 	}
 
+	// recordError appends a failure so the caller can exit non-zero. Prompt
+	// failures count as failures: the file was neither uploaded nor skipped.
+	recordError := func(path string, err error) {
+		resultMutex.Lock()
+		result.Errors = append(result.Errors, UploadError{path, err})
+		resultMutex.Unlock()
+	}
+
 	// Streaming progress UI — total starts at 0, increments as files are discovered.
 	uploadUI := progress.NewUploadUI(0)
 
@@ -257,9 +265,7 @@ func uploadDirectoryPipelined(
 				existingFileID, exists, checkErr := checkFileExistsFn(ctx, apiClient, cache, remoteFolderID, fileName)
 				if checkErr != nil {
 					logger.Error().Str("file", fpath).Err(checkErr).Msg("Error checking file existence")
-					resultMutex.Lock()
-					result.Errors = append(result.Errors, UploadError{fpath, checkErr})
-					resultMutex.Unlock()
+					recordError(fpath, checkErr)
 					return nil
 				}
 
@@ -269,9 +275,7 @@ func uploadDirectoryPipelined(
 					})
 					if promptErr != nil {
 						logger.Error().Err(promptErr).Str("file", fileName).Msg("Error prompting for file conflict")
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, promptErr})
-						resultMutex.Unlock()
+						recordError(fpath, promptErr)
 						return nil
 					}
 
@@ -296,9 +300,7 @@ func uploadDirectoryPipelined(
 				// Get file info for size
 				fileInfo, statErr := os.Stat(fpath)
 				if statErr != nil {
-					resultMutex.Lock()
-					result.Errors = append(result.Errors, UploadError{fpath, statErr})
-					resultMutex.Unlock()
+					recordError(fpath, statErr)
 					return nil
 				}
 
@@ -331,9 +333,7 @@ func uploadDirectoryPipelined(
 					if state.UploadResumeStateExists(fpath) {
 						fmt.Fprintf(uploadUI.Writer(), "\n💡 Partial upload state for %s was left behind; re-running the command discards it and uploads the file again.\n", filepath.Base(fpath))
 					}
-					resultMutex.Lock()
-					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
-					resultMutex.Unlock()
+					recordError(fpath, uploadErr)
 					logger.Error().Str("file", fpath).Err(uploadErr).Msg("Failed to upload file")
 					return nil
 				}
@@ -400,18 +400,14 @@ func uploadDirectoryPipelined(
 	// command exits non-zero instead of printing a summary of what it skipped.
 	if orchResult.WalkError != nil {
 		logger.Error().Err(orchResult.WalkError).Msg("Walk error during streaming scan")
-		resultMutex.Lock()
-		result.Errors = append(result.Errors, UploadError{rootPath, orchResult.WalkError})
-		resultMutex.Unlock()
+		recordError(rootPath, orchResult.WalkError)
 	}
 	if orchResult.FolderError != nil {
 		logger.Error().Err(orchResult.FolderError).Msg("Folder creation failed")
 		if errors.Is(orchResult.FolderError, folder.ErrAbortedByUser) {
 			abortUpload()
 		} else {
-			resultMutex.Lock()
-			result.Errors = append(result.Errors, UploadError{rootPath, orchResult.FolderError})
-			resultMutex.Unlock()
+			recordError(rootPath, orchResult.FolderError)
 		}
 	}
 	foldersCreatedMutex.Lock()
@@ -470,6 +466,22 @@ func uploadFiles(
 		resultMutex.Unlock()
 	}
 
+	// ignoreExisting accounts for a file the user chose to leave untouched. It
+	// is not an error, so it is counted separately from skips and failures.
+	ignoreExisting := func(fileName string) {
+		logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
+		fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
+		resultMutex.Lock()
+		result.FilesIgnored++
+		resultMutex.Unlock()
+	}
+
+	// abortByUser reports the user's Abort choice and stops the whole batch.
+	abortByUser := func() {
+		logger.Info().Msg("Upload aborted by user")
+		abortUpload()
+	}
+
 	warmUploadCredentials(ctx, apiClient, logger)
 	if resourceMgr == nil {
 		panic("uploadFiles: resourceMgr is required (use CreateResourceManager())")
@@ -525,9 +537,7 @@ func uploadFiles(
 
 		if cfg.CheckConflictsBeforeUpload && checkErr != nil {
 			if continueOnError {
-				resultMutex.Lock()
-				result.Errors = append(result.Errors, UploadError{fpath, checkErr})
-				resultMutex.Unlock()
+				recordError(fpath, checkErr)
 				logger.Error().Str("file", fpath).Err(checkErr).Msg("Error checking file existence")
 				return nil
 			}
@@ -540,8 +550,7 @@ func uploadFiles(
 				return nil
 			}
 			if action == ErrorAbort {
-				logger.Info().Msg("Upload aborted by user")
-				abortUpload()
+				abortByUser()
 				return nil
 			}
 			// ErrorContinueOnce or ErrorContinueAll — record and continue
@@ -566,11 +575,7 @@ func uploadFiles(
 
 			switch action {
 			case FileSkipOnce, FileSkipAll:
-				logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
-				fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
-				resultMutex.Lock()
-				result.FilesIgnored++
-				resultMutex.Unlock()
+				ignoreExisting(fileName)
 				return nil
 			case FileOverwriteOnce, FileOverwriteAll:
 				logger.Info().Str("file", fileName).Str("file_id", existingFileID).Msg("Deleting existing file before overwrite")
@@ -578,8 +583,7 @@ func uploadFiles(
 					logger.Error().Str("file", fileName).Err(err).Msg("Failed to delete existing file")
 				}
 			case FileAbort:
-				logger.Info().Msg("Upload aborted by user")
-				abortUpload()
+				abortByUser()
 				return nil
 			}
 		}
@@ -588,9 +592,7 @@ func uploadFiles(
 		fileInfo, statErr := os.Stat(fpath)
 		if statErr != nil {
 			if continueOnError {
-				resultMutex.Lock()
-				result.Errors = append(result.Errors, UploadError{fpath, statErr})
-				resultMutex.Unlock()
+				recordError(fpath, statErr)
 				logger.Error().Str("file", fpath).Err(statErr).Msg("Error getting file info")
 				return nil
 			}
@@ -603,8 +605,7 @@ func uploadFiles(
 				return nil
 			}
 			if action == ErrorAbort {
-				logger.Info().Msg("Upload aborted by user")
-				abortUpload()
+				abortByUser()
 				return nil
 			}
 			recordError(fpath, statErr)
@@ -640,9 +641,7 @@ func uploadFiles(
 			fileBar.Complete(fileID, uploadErr)
 
 			if diskspace.IsInsufficientSpaceError(uploadErr) {
-				resultMutex.Lock()
-				result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
-				resultMutex.Unlock()
+				recordError(fpath, uploadErr)
 				logger.Error().Str("file", fpath).Err(uploadErr).Msg("Upload skipped - insufficient disk space")
 				return nil
 			}
@@ -655,9 +654,7 @@ func uploadFiles(
 				contents, queryErr := cache.Get(ctx, apiClient, remoteFolderID)
 				if queryErr != nil {
 					logger.Error().Err(queryErr).Msg("Failed to query folder after conflict")
-					resultMutex.Lock()
-					result.Errors = append(result.Errors, UploadError{fpath, queryErr})
-					resultMutex.Unlock()
+					recordError(fpath, queryErr)
 					return nil
 				}
 
@@ -687,9 +684,7 @@ func uploadFiles(
 
 				if !foundExisting {
 					logger.Error().Msg("File exists error but couldn't find existing file")
-					resultMutex.Lock()
-					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})
-					resultMutex.Unlock()
+					recordError(fpath, uploadErr)
 					return nil
 				}
 
@@ -708,20 +703,14 @@ func uploadFiles(
 
 				switch action {
 				case FileSkipOnce, FileSkipAll:
-					logger.Debug().Str("file", fileName).Msg("Ignoring existing file")
-					fmt.Fprintf(uploadUI.Writer(), "  ⏭  Ignoring existing file: %s\n", fileName)
-					resultMutex.Lock()
-					result.FilesIgnored++
-					resultMutex.Unlock()
+					ignoreExisting(fileName)
 					return nil
 
 				case FileOverwriteOnce, FileOverwriteAll:
 					logger.Info().Str("file", fileName).Str("file_id", existingFileID).Msg("Deleting existing file for overwrite")
 					if delErr := apiClient.DeleteFile(ctx, existingFileID); delErr != nil {
 						logger.Error().Err(delErr).Msg("Failed to delete existing file")
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, delErr})
-						resultMutex.Unlock()
+						recordError(fpath, delErr)
 						return nil
 					}
 
@@ -740,9 +729,7 @@ func uploadFiles(
 					if retryErr != nil {
 						fileBar.Complete("", retryErr)
 						logger.Error().Err(retryErr).Msg("Upload failed after overwrite")
-						resultMutex.Lock()
-						result.Errors = append(result.Errors, UploadError{fpath, retryErr})
-						resultMutex.Unlock()
+						recordError(fpath, retryErr)
 						return nil
 					}
 
@@ -755,8 +742,7 @@ func uploadFiles(
 					return nil
 
 				case FileAbort:
-					logger.Info().Msg("Upload aborted by user")
-					abortUpload()
+					abortByUser()
 					return nil
 				}
 
@@ -778,8 +764,7 @@ func uploadFiles(
 				return nil
 			}
 			if action == ErrorAbort {
-				logger.Info().Msg("Upload aborted by user")
-				abortUpload()
+				abortByUser()
 				return nil
 			}
 			recordError(fpath, uploadErr)

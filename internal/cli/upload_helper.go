@@ -60,6 +60,29 @@ func expandGlobPatterns(patterns []string) ([]string, error) {
 	return glob.ExpandPatterns(patterns)
 }
 
+// validateUploadPaths checks that every path exists and is a regular file, so a
+// batch fails before any bytes move rather than partway through. onNotFound, when
+// supplied, is called with the offending path just before the not-found error is
+// returned.
+func validateUploadPaths(filePaths []string, onNotFound func(path string)) error {
+	for _, filePath := range filePaths {
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			if onNotFound != nil {
+				onNotFound(filePath)
+			}
+			return fmt.Errorf("file not found: %s", filePath)
+		}
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to stat %s: %w", filePath, err)
+		}
+		if fileInfo.IsDir() {
+			return fmt.Errorf("'%s' is a directory, not a file. Use 'folders upload-dir' to upload directories", filePath)
+		}
+	}
+	return nil
+}
+
 // executeFileUpload - Common upload logic for both files upload and upload shortcut
 // Now uses the unified UploadFilesWithIDs for concurrent uploads
 func executeFileUpload(
@@ -96,17 +119,8 @@ func executeFileUploadWithDuplicateCheck(
 	}
 
 	// Validate all files exist before starting upload
-	for _, filePath := range filePaths {
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			return fmt.Errorf("file not found: %s", filePath)
-		}
-		fileInfo, err := os.Stat(filePath)
-		if err != nil {
-			return fmt.Errorf("failed to stat %s: %w", filePath, err)
-		}
-		if fileInfo.IsDir() {
-			return fmt.Errorf("'%s' is a directory, not a file. Use 'folders upload-dir' to upload directories", filePath)
-		}
+	if err := validateUploadPaths(filePaths, nil); err != nil {
+		return err
 	}
 
 	// If not checking duplicates, use the fast path
@@ -277,20 +291,10 @@ func UploadFilesWithIDs(
 	}
 
 	// Validate all files exist before starting upload
-	for _, filePath := range filePaths {
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			logger.Error().Str("file", filePath).Msg("File not found")
-			return nil, fmt.Errorf("file not found: %s", filePath)
-		}
-
-		// Check it's a file, not a directory
-		fileInfo, err := os.Stat(filePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to stat %s: %w", filePath, err)
-		}
-		if fileInfo.IsDir() {
-			return nil, fmt.Errorf("'%s' is a directory, not a file. Use 'folders upload-dir' to upload directories", filePath)
-		}
+	if err := validateUploadPaths(filePaths, func(missing string) {
+		logger.Error().Str("file", missing).Msg("File not found")
+	}); err != nil {
+		return nil, err
 	}
 
 	// Show target location

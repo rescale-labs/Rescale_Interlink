@@ -20,7 +20,7 @@ import (
 // transfers would consume <100KB. The transport itself is GC'd independently — calling
 // CloseIdleConnections on a client whose transport has been GC'd is a harmless no-op.
 var (
-	transportMu      sync.Mutex
+	transportMu       sync.Mutex
 	trackedTransports []*nethttp.Client
 )
 
@@ -90,13 +90,13 @@ func CreateOptimizedClient(cfg *config.Config) (*nethttp.Client, error) {
 	// These settings were determined through extensive performance testing
 
 	// Connection pooling - supports up to ~5 concurrent file operations efficiently
-	tr.MaxIdleConns = 512        // Total idle connections across all hosts
-	tr.MaxIdleConnsPerHost = 100 // Idle connections per host (S3/Azure endpoints)
-	tr.MaxConnsPerHost = 100     // Active + idle connections per host (must be >= MaxIdleConnsPerHost)
+	tr.MaxIdleConns = constants.HTTPTransferMaxIdleConns
+	tr.MaxIdleConnsPerHost = constants.HTTPMaxIdleConnsPerHost
+	tr.MaxConnsPerHost = constants.HTTPMaxConnsPerHost
 	tr.IdleConnTimeout = constants.HTTPIdleConnTimeout
 
 	// Timeouts - extended to handle large file transfers
-	tr.TLSHandshakeTimeout = constants.HTTPTLSHandshakeTimeout   // Increased for slow networks and high concurrency
+	tr.TLSHandshakeTimeout = constants.HTTPTLSHandshakeTimeout     // Increased for slow networks and high concurrency
 	tr.ExpectContinueTimeout = constants.HTTPExpectContinueTimeout // For HTTP 100-continue
 
 	// Optimizations

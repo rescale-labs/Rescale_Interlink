@@ -106,81 +106,7 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, azureClient *
 	}
 	defer resp.Body.Close()
 
-	// Create output file
-	file, err := os.Create(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	// Track whether we successfully closed the file to avoid double-close from defer
-	fileClosed := false
-	defer func() {
-		if !fileClosed {
-			file.Close()
-		}
-	}()
-
-	// If no progress callback or no total size, just copy directly
-	if progressCallback == nil || totalSize <= 0 {
-		_, err = io.Copy(file, resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to write file: %w", err)
-		}
-		if err := file.Sync(); err != nil {
-			return fmt.Errorf("failed to sync file to disk: %w", err)
-		}
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("failed to close file: %w", err)
-		}
-		fileClosed = true
-		return nil
-	}
-
-	// Copy with progress tracking using 32KB buffer
-	var downloaded int64
-	buffer := make([]byte, 32*1024)
-	lastProgress := 0.0
-
-	for {
-		n, readErr := resp.Body.Read(buffer)
-		if n > 0 {
-			if _, writeErr := file.Write(buffer[:n]); writeErr != nil {
-				return fmt.Errorf("failed to write file: %w", writeErr)
-			}
-			downloaded += int64(n)
-
-			// Update progress (throttle to avoid excessive updates)
-			progress := float64(downloaded) / float64(totalSize)
-			if progress-lastProgress >= 0.01 || progress >= 1.0 { // Update every 1% or at completion
-				progressCallback(progress)
-				lastProgress = progress
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("failed to read: %w", readErr)
-		}
-	}
-
-	// Ensure 100% is reported
-	progressCallback(1.0)
-
-	// Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Without this, sporadic checksum failures
-	// occur because the OS buffer may not be flushed yet.
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file to disk: %w", err)
-	}
-
-	// Explicit Close() before returning so the file handle is released
-	// before the caller reads the file for checksum verification.
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("failed to close file: %w", err)
-	}
-	fileClosed = true
-
-	return nil
+	return transfer.WriteBodyWithProgress(resp.Body, localPath, progressCallback, totalSize)
 }
 
 // downloadChunkedWithProgress downloads a blob in chunks with progress callback.
@@ -192,81 +118,16 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 		progressCallback(0.0)
 	}
 
-	// Create output file
-	file, err := os.Create(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	// Track whether we successfully closed the file to avoid double-close from defer
-	fileClosed := false
-	defer func() {
-		if !fileClosed {
-			file.Close()
-		}
-	}()
-
-	var offset int64 = 0
-
-	for offset < totalSize {
-		// Calculate chunk size for this iteration (32MB chunks, see constants.ChunkSize)
-		chunkSize := int64(constants.ChunkSize)
-		if offset+chunkSize > totalSize {
-			chunkSize = totalSize - offset
-		}
-
-		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
-		// Uses DownloadRangeOnce, the non-retrying variant, so this loop is the only retry.
-		var chunkData []byte
-		err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk offset=%d", offset), func() error {
-			// Per-attempt timeout to prevent stalled reads from hanging
-			attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-			defer cancel()
-
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, chunkSize)
+	// DownloadRangeOnce is the non-retrying variant, so the shared helper's
+	// per-chunk retry is the only retry.
+	return transfer.DownloadChunkedToFile(ctx, azureClient.RetryWithBackoff, localPath, totalSize, progressCallback,
+		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
+			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			data, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close() // Always close, even on read error
-			if readErr != nil {
-				return readErr
-			}
-			chunkData = data
-			return nil
+			return resp.Body, nil
 		})
-		if err != nil {
-			return fmt.Errorf("failed to download chunk at offset %d: %w", offset, err)
-		}
-
-		// Write chunk to file (OUTSIDE retry - disk errors are not retryable)
-		_, err = file.Write(chunkData)
-		if err != nil {
-			return fmt.Errorf("failed to write chunk at offset %d: %w", offset, err)
-		}
-
-		offset += int64(len(chunkData))
-
-		// Update progress after each chunk
-		if progressCallback != nil && totalSize > 0 {
-			progressCallback(float64(offset) / float64(totalSize))
-		}
-	}
-
-	// Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Without this, sporadic checksum failures
-	// occur because the OS buffer may not be flushed yet.
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file to disk: %w", err)
-	}
-
-	// Explicit Close() before returning so the file handle is released
-	// before the caller reads the file for checksum verification.
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("failed to close file: %w", err)
-	}
-	fileClosed = true
-
-	return nil
 }
 
 // downloadChunkedConcurrent downloads a blob using concurrent range requests.

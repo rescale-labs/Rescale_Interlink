@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/watch"
 )
 
@@ -140,7 +141,7 @@ func runCompatNewerThan(cmd *cobra.Command, refJobID, outputDir string, syncInte
 	// For single-run newer-than (syncInterval=0), use a minimal interval.
 	// WatchNewerThan will process all jobs once and exit if all are terminal.
 	if cfg.Interval <= 0 {
-		cfg.Interval = 5 * time.Second
+		cfg.Interval = constants.MinWatchInterval
 	}
 
 	statusFn := func(ctx context.Context, jID string) (string, error) {

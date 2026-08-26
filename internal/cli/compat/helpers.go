@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/constants"
 )
 
 // compatMonitorJob polls job status until a terminal state is reached.
@@ -13,7 +14,7 @@ import (
 // Returns nil on Completed, error on Failed/Terminated or after 5 consecutive errors.
 func compatMonitorJob(ctx context.Context, jobID string, client *api.Client, cc *CompatContext) error {
 	lastStatus := ""
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(constants.JobTailTickerInterval)
 	defer ticker.Stop()
 
 	consecutiveErrors := 0
@@ -23,13 +24,13 @@ func compatMonitorJob(ctx context.Context, jobID string, client *api.Client, cc 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			reqCtx, cancel := context.WithTimeout(ctx, constants.APIContextTimeout)
 			statuses, err := client.GetJobStatuses(reqCtx, jobID)
 			cancel()
 
 			if err != nil {
 				consecutiveErrors++
-				if consecutiveErrors >= 5 {
+				if consecutiveErrors >= constants.MaxConsecutiveWatchErrors {
 					return fmt.Errorf("failed to get job status after %d attempts: %w", consecutiveErrors, err)
 				}
 				continue

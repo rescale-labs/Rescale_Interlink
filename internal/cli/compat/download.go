@@ -253,106 +253,21 @@ func compatDownloadByJobID(ctx context.Context, jobID string, opts compatDownloa
 
 	cc.Printf("Downloading %d file(s) from job %s\n", len(files), jobID)
 
-	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
-	transferMgr := transfer.NewManager(resourceMgr)
-
 	items := make([]compatDownloadItem, len(files))
 	for i, f := range files {
-		localPath := filepath.Join(outputDir, f.Name)
-		if f.RelativePath != "" {
-			candidate := filepath.Join(outputDir, f.RelativePath)
-			if validation.ValidatePathInDirectory(candidate, outputDir) == nil {
-				localPath = candidate
-			}
-		}
 		items[i] = compatDownloadItem{
 			idx:       i,
 			fileID:    f.ID,
 			name:      f.Name,
 			size:      f.DecryptedSize,
-			localPath: localPath,
+			localPath: compatLocalPath(outputDir, f.Name, f.RelativePath),
 		}
 	}
 
-	cfg := transfer.BatchConfig{
-		MaxWorkers:  constants.DefaultMaxConcurrent,
-		ResourceMgr: resourceMgr,
-		Label:       "COMPAT-DOWNLOAD",
-	}
-	numWorkers := transfer.ComputedWorkers(items, cfg)
-
-	var downloadUI *progress.DownloadUI
-	if !cc.Quiet {
-		downloadUI = progress.NewDownloadUI(len(files))
-		defer downloadUI.Wait()
-	}
-
-	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item compatDownloadItem) error {
-		outputPath := item.localPath
-
-		// Ensure directory exists for relative paths
-		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-			return fmt.Errorf("failed to create directory for %s: %w", item.name, err)
-		}
-
-		// Skip existing files (compat default behavior)
-		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
-			cc.Printf("Skipping existing: %s\n", item.name)
-			return nil
-		}
-
-		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
-
-		var fileBar *progress.DownloadFileBar
-		var barOnce sync.Once
-
-		var progressCB func(float64)
-		if downloadUI != nil {
-			progressCB = func(fraction float64) {
-				barOnce.Do(func() {
-					fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-				})
-				if fileBar != nil {
-					fileBar.UpdateProgress(fraction)
-				}
-			}
-		}
-
-		// Use job file metadata directly to avoid per-file GetFileInfo calls
-		cloudFile := files[item.idx].ToCloudFile()
-
-		dlErr := download.DownloadFile(ctx, download.DownloadParams{
-			FileInfo:         cloudFile,
-			LocalPath:        outputPath,
-			APIClient:        apiClient,
-			ProgressCallback: progressCB,
-			TransferHandle:   transferHandle,
-		})
-
-		if downloadUI != nil {
-			if fileBar == nil {
-				fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-			}
-			if dlErr != nil {
-				fileBar.Complete(dlErr)
-			} else {
-				fileBar.Complete(nil)
-			}
-		}
-
-		if dlErr != nil {
-			return fmt.Errorf("failed to download %s: %w", item.name, dlErr)
-		}
-		return nil
-	})
-
-	if len(batchResult.Errors) > 0 {
-		cc.Printf("Downloaded %d file(s), %d failed\n", batchResult.Completed, batchResult.Failed)
-		return batchResult.Errors[0]
-	}
-
-	cc.Printf("Successfully downloaded %d file(s)\n", batchResult.Completed)
-	return nil
+	// Use job file metadata directly to avoid per-file GetFileInfo calls
+	return runCompatDownloadBatch(ctx, items, "COMPAT-DOWNLOAD", func(idx int) *models.CloudFile {
+		return files[idx].ToCloudFile()
+	}, apiClient, cc)
 }
 
 // compatDownloadByRunFiles downloads files from a specific job run.
@@ -410,43 +325,61 @@ func compatDownloadByRunFiles(ctx context.Context, jobID, runID string, opts com
 		resolved = append(resolved, resolvedFile{cloudFile: fileInfo, runFile: rf})
 	}
 
-	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
-	transferMgr := transfer.NewManager(resourceMgr)
-
 	items := make([]compatDownloadItem, len(resolved))
 	for i, r := range resolved {
-		localPath := filepath.Join(outputDir, r.runFile.Name)
-		if r.runFile.RelativePath != "" {
-			candidate := filepath.Join(outputDir, r.runFile.RelativePath)
-			if validation.ValidatePathInDirectory(candidate, outputDir) == nil {
-				localPath = candidate
-			}
-		}
 		items[i] = compatDownloadItem{
 			idx:       i,
 			fileID:    r.runFile.ID,
 			name:      r.runFile.Name,
 			size:      r.cloudFile.DecryptedSize,
-			localPath: localPath,
+			localPath: compatLocalPath(outputDir, r.runFile.Name, r.runFile.RelativePath),
 		}
 	}
+
+	return runCompatDownloadBatch(ctx, items, "COMPAT-RUN-DOWNLOAD", func(idx int) *models.CloudFile {
+		return resolved[idx].cloudFile
+	}, apiClient, cc)
+}
+
+// compatLocalPath places a downloaded file under outputDir, preferring the
+// server-reported relative path when it stays inside outputDir.
+func compatLocalPath(outputDir, name, relativePath string) string {
+	if relativePath != "" {
+		candidate := filepath.Join(outputDir, relativePath)
+		if validation.ValidatePathInDirectory(candidate, outputDir) == nil {
+			return candidate
+		}
+	}
+	return filepath.Join(outputDir, name)
+}
+
+// runCompatDownloadBatch downloads items concurrently and prints the compat
+// CLI's summary lines. cloudFileFor supplies the download metadata for an
+// item's index, which the two callers obtain differently.
+//
+// A file already on disk is skipped rather than overwritten: that is the compat
+// CLI's documented default and scripts depend on it.
+func runCompatDownloadBatch(ctx context.Context, items []compatDownloadItem, label string, cloudFileFor func(idx int) *models.CloudFile, apiClient *api.Client, cc *CompatContext) error {
+	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
+	transferMgr := transfer.NewManager(resourceMgr)
 
 	cfg := transfer.BatchConfig{
 		MaxWorkers:  constants.DefaultMaxConcurrent,
 		ResourceMgr: resourceMgr,
-		Label:       "COMPAT-RUN-DOWNLOAD",
+		Label:       label,
 	}
 	numWorkers := transfer.ComputedWorkers(items, cfg)
 
 	var downloadUI *progress.DownloadUI
 	if !cc.Quiet {
-		downloadUI = progress.NewDownloadUI(len(resolved))
+		downloadUI = progress.NewDownloadUI(len(items))
 		defer downloadUI.Wait()
 	}
 
 	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item compatDownloadItem) error {
 		outputPath := item.localPath
 
+		// Ensure directory exists for relative paths
 		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
 			return fmt.Errorf("failed to create directory for %s: %w", item.name, err)
 		}
@@ -474,7 +407,7 @@ func compatDownloadByRunFiles(ctx context.Context, jobID, runID string, opts com
 		}
 
 		dlErr := download.DownloadFile(ctx, download.DownloadParams{
-			FileInfo:         resolved[item.idx].cloudFile,
+			FileInfo:         cloudFileFor(item.idx),
 			LocalPath:        outputPath,
 			APIClient:        apiClient,
 			ProgressCallback: progressCB,

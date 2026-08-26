@@ -1225,7 +1225,7 @@ func runEndToEndJobWorkflow(
 // monitorJobUntilComplete monitors job status with live updates until completion
 func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.Client, logger *logging.Logger) error {
 	lastStatus := ""
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(constants.JobTailTickerInterval)
 	defer ticker.Stop()
 
 	consecutiveErrors := 0
@@ -1237,7 +1237,7 @@ func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.C
 			return ctx.Err()
 		case <-ticker.C:
 			// Show periodic "still monitoring" message
-			if time.Since(lastProgressMsg) > 30*time.Second {
+			if time.Since(lastProgressMsg) > constants.JobProgressLogInterval {
 				fmt.Printf("⏳ Still monitoring job %s...\n", jobID)
 				lastProgressMsg = time.Now()
 			}
@@ -1245,7 +1245,7 @@ func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.C
 			// Add per-request timeout
 			// Note: GetJob() doesn't return jobStatus - use GetJobStatuses() instead
 			// See models/job.go comment: "The /jobs/{id}/ GET endpoint does NOT include jobStatus"
-			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			reqCtx, cancel := context.WithTimeout(ctx, constants.APIContextTimeout)
 			statuses, err := apiClient.GetJobStatuses(reqCtx, jobID)
 			cancel()
 
@@ -1255,7 +1255,7 @@ func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.C
 					Msg("Failed to get job status")
 
 				// Abort after too many consecutive errors
-				if consecutiveErrors >= 5 {
+				if consecutiveErrors >= constants.MaxConsecutiveWatchErrors {
 					return fmt.Errorf("failed to get job status after %d attempts: %w",
 						consecutiveErrors, err)
 				}

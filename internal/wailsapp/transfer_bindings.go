@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/services"
-	"github.com/rescale/rescale-int/internal/transfer"
 )
 
 // TransferRequestDTO is the JSON-safe version of services.TransferRequest.
@@ -57,13 +56,9 @@ type TransferStatsDTO struct {
 // StartTransfers initiates one or more transfers.
 // Returns immediately; progress is published via events.
 func (a *App) StartTransfers(requests []TransferRequestDTO) error {
-	if a.engine == nil {
-		return ErrNoEngine
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
-		return ErrNoTransferService
+	ts, err := a.transferService()
+	if err != nil {
+		return err
 	}
 
 	// Convert DTOs to service requests
@@ -87,25 +82,17 @@ func (a *App) StartTransfers(requests []TransferRequestDTO) error {
 }
 
 func (a *App) CancelTransfer(taskID string) error {
-	if a.engine == nil {
-		return ErrNoEngine
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
-		return ErrNoTransferService
+	ts, err := a.transferService()
+	if err != nil {
+		return err
 	}
 
 	return ts.CancelTransfer(taskID)
 }
 
 func (a *App) CancelAllTransfers() {
-	if a.engine == nil {
-		return
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
+	ts, err := a.transferService()
+	if err != nil {
 		return
 	}
 
@@ -115,25 +102,17 @@ func (a *App) CancelAllTransfers() {
 // RetryTransfer retries a failed or cancelled transfer.
 // Returns the new task ID.
 func (a *App) RetryTransfer(taskID string) (string, error) {
-	if a.engine == nil {
-		return "", ErrNoEngine
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
-		return "", ErrNoTransferService
+	ts, err := a.transferService()
+	if err != nil {
+		return "", err
 	}
 
 	return ts.RetryTransfer(taskID)
 }
 
 func (a *App) GetTransferStats() TransferStatsDTO {
-	if a.engine == nil {
-		return TransferStatsDTO{}
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
+	ts, err := a.transferService()
+	if err != nil {
 		return TransferStatsDTO{}
 	}
 
@@ -153,12 +132,8 @@ func (a *App) GetTransferStats() TransferStatsDTO {
 // GetTransferTasks returns all tracked transfers.
 // Returns empty slice instead of nil to prevent frontend null errors.
 func (a *App) GetTransferTasks() []TransferTaskDTO {
-	if a.engine == nil {
-		return []TransferTaskDTO{}
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
+	ts, err := a.transferService()
+	if err != nil {
 		return []TransferTaskDTO{}
 	}
 
@@ -172,12 +147,8 @@ func (a *App) GetTransferTasks() []TransferTaskDTO {
 
 // ClearCompletedTransfers removes completed/failed/cancelled transfers from tracking.
 func (a *App) ClearCompletedTransfers() {
-	if a.engine == nil {
-		return
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
+	ts, err := a.transferService()
+	if err != nil {
 		return
 	}
 
@@ -212,12 +183,8 @@ type TransferBatchDTO struct {
 // GetTransferBatches returns aggregate stats for each batch of transfers.
 // Lightweight call for Transfers tab polling (returns ~200 bytes per batch).
 func (a *App) GetTransferBatches() []TransferBatchDTO {
-	if a.engine == nil {
-		return []TransferBatchDTO{}
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
+	ts, err := a.transferService()
+	if err != nil {
 		return []TransferBatchDTO{}
 	}
 
@@ -254,38 +221,30 @@ func (a *App) GetTransferBatches() []TransferBatchDTO {
 // GetUngroupedTransferTasks returns only tasks with no BatchID.
 // Used in polling path when batches exist, avoiding the full task list IPC payload.
 func (a *App) GetUngroupedTransferTasks() []TransferTaskDTO {
-	if a.engine == nil {
-		return []TransferTaskDTO{}
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
+	ts, err := a.transferService()
+	if err != nil {
 		return []TransferTaskDTO{}
 	}
 
 	tasks := ts.GetQueue().GetUngroupedTasks()
 	dtos := make([]TransferTaskDTO, len(tasks))
 	for i := range tasks {
-		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(&tasks[i]))
+		dtos[i] = transferTaskToDTO(services.TaskFromQueueTask(&tasks[i]))
 	}
 	return dtos
 }
 
 // GetBatchTasks returns paginated tasks for a specific batch.
 func (a *App) GetBatchTasks(batchID string, offset int, limit int, stateFilter string) []TransferTaskDTO {
-	if a.engine == nil {
-		return []TransferTaskDTO{}
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
+	ts, err := a.transferService()
+	if err != nil {
 		return []TransferTaskDTO{}
 	}
 
 	tasks := ts.GetQueue().GetBatchTasks(batchID, offset, limit, stateFilter)
 	dtos := make([]TransferTaskDTO, len(tasks))
 	for i := range tasks {
-		dtos[i] = transferTaskToDTO(serviceTaskFromQueueTask(&tasks[i]))
+		dtos[i] = transferTaskToDTO(services.TaskFromQueueTask(&tasks[i]))
 	}
 	return dtos
 }
@@ -293,13 +252,9 @@ func (a *App) GetBatchTasks(batchID string, offset int, limit int, stateFilter s
 // CancelBatch cancels all non-terminal tasks in a batch.
 // Also handles queued tasks (standard CancelTransfer only handles active/initializing).
 func (a *App) CancelBatch(batchID string) error {
-	if a.engine == nil {
-		return ErrNoEngine
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
-		return ErrNoTransferService
+	ts, err := a.transferService()
+	if err != nil {
+		return err
 	}
 
 	// Through the service, not the queue: the service anchors a cancelled
@@ -310,39 +265,12 @@ func (a *App) CancelBatch(batchID string) error {
 
 // RetryFailedInBatch retries all failed tasks in a batch.
 func (a *App) RetryFailedInBatch(batchID string) error {
-	if a.engine == nil {
-		return ErrNoEngine
-	}
-
-	ts := a.engine.TransferService()
-	if ts == nil {
-		return ErrNoTransferService
+	ts, err := a.transferService()
+	if err != nil {
+		return err
 	}
 
 	return ts.GetQueue().RetryFailedInBatch(batchID)
-}
-
-// serviceTaskFromQueueTask converts a transfer.TransferTask to services.TransferTask.
-// Takes pointer to avoid copying sync.RWMutex embedded in TransferTask.
-func serviceTaskFromQueueTask(qt *transfer.TransferTask) services.TransferTask {
-	return services.TransferTask{
-		ID:          qt.ID,
-		Type:        services.TransferType(qt.Type),
-		State:       services.TransferState(qt.State),
-		Name:        qt.Name,
-		Source:      qt.Source,
-		Dest:        qt.Dest,
-		Size:        qt.Size,
-		SourceLabel: qt.SourceLabel,
-		BatchID:     qt.BatchID,
-		BatchLabel:  qt.BatchLabel,
-		Progress:    qt.Progress,
-		Speed:       qt.Speed,
-		Error:       qt.Error,
-		CreatedAt:   qt.CreatedAt,
-		StartedAt:   qt.StartedAt,
-		CompletedAt: qt.CompletedAt,
-	}
 }
 
 // transferTaskToDTO converts a services.TransferTask to a DTO.

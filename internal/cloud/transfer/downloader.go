@@ -320,7 +320,7 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 	// Return the error verbatim: it already reports the margined requirement this
 	// check enforced and the free space on localPath's own filesystem. Rebuilding
 	// it here would understate the requirement and stat the wrong volume.
-	if err := diskspace.CheckAvailableSpace(localPath, fileSize*2, 1.15); err != nil {
+	if err := diskspace.CheckAvailableSpace(localPath, fileSize*2, 1+constants.DiskSpaceBufferPercent); err != nil {
 		return err
 	}
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 )
 
@@ -34,7 +35,7 @@ func NewEventBridge(ctx context.Context, eventBus *events.EventBus) *EventBridge
 		ctx:              ctx,
 		eventBus:         eventBus,
 		lastProgress:     make(map[string]time.Time),
-		progressInterval: 100 * time.Millisecond, // Throttle to 10 updates/sec
+		progressInterval: constants.TableRefreshMinInterval, // Throttle to 10 updates/sec
 		stopC:            make(chan struct{}),
 	}
 }

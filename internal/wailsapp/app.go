@@ -20,6 +20,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
+	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/config"
@@ -31,6 +32,7 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit/coordinator"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/service"
+	"github.com/rescale/rescale-int/internal/services"
 )
 
 // Assets holds the embedded frontend files, passed in from main package.
@@ -79,6 +81,45 @@ func (a *App) ensureStateComputer() *service.Computer {
 		a.stateComp = service.DefaultComputer(ipc.NewClient())
 	}
 	return a.stateComp
+}
+
+// transferService returns the engine's transfer service. The two errors it can
+// report are the same sentinels the bindings returned when each of them
+// repeated this guard inline.
+func (a *App) transferService() (*services.TransferService, error) {
+	if a.engine == nil {
+		return nil, ErrNoEngine
+	}
+	ts := a.engine.TransferService()
+	if ts == nil {
+		return nil, ErrNoTransferService
+	}
+	return ts, nil
+}
+
+// fileService returns the engine's file service, with the same sentinels.
+func (a *App) fileService() (*services.FileService, error) {
+	if a.engine == nil {
+		return nil, ErrNoEngine
+	}
+	fs := a.engine.FileService()
+	if fs == nil {
+		return nil, ErrNoFileService
+	}
+	return fs, nil
+}
+
+// apiClient returns the engine's API client, with the same sentinels. Callers
+// that report a different message for a missing client keep their own guard.
+func (a *App) apiClient() (*api.Client, error) {
+	if a.engine == nil {
+		return nil, ErrNoEngine
+	}
+	client := a.engine.API()
+	if client == nil {
+		return nil, ErrNoAPIClient
+	}
+	return client, nil
 }
 
 // NewApp creates a new Wails application instance.

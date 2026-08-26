@@ -17,6 +17,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
@@ -477,7 +478,7 @@ Examples:
 	cmd.Flags().StringVar(&namePrefix, "name-prefix", "", "Only download jobs with names starting with this prefix")
 	cmd.Flags().StringVar(&nameContains, "name-contains", "", "Only download jobs with names containing this string")
 	cmd.Flags().StringArrayVar(&excludeNames, "exclude", nil, "Exclude jobs with names starting with these prefixes")
-	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 5, "Maximum concurrent file downloads per job")
+	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", constants.DefaultMaxConcurrent, "Maximum concurrent file downloads per job")
 	cmd.Flags().StringVar(&stateFile, "state-file", daemon.DefaultStateFilePath(), "Path to daemon state file")
 	cmd.Flags().BoolVar(&useJobID, "use-job-id", false, "Use job ID instead of job name for output directory names")
 	cmd.Flags().BoolVar(&runOnce, "once", false, "Run once and exit (useful for cron jobs)")

@@ -1148,27 +1148,33 @@ func (ts *TransferService) GetTasks() []TransferTask {
 	tasks := make([]TransferTask, len(qTasks))
 	// Use index-based access to avoid copying mutex in range variable
 	for i := range qTasks {
-		qt := &qTasks[i]
-		tasks[i] = TransferTask{
-			ID:          qt.ID,
-			Type:        TransferType(qt.Type),
-			State:       TransferState(qt.State),
-			Name:        qt.Name,
-			Source:      qt.Source,
-			Dest:        qt.Dest,
-			Size:        qt.Size,
-			SourceLabel: qt.SourceLabel,
-			BatchID:     qt.BatchID,
-			BatchLabel:  qt.BatchLabel,
-			Progress:    qt.Progress,
-			Speed:       qt.Speed,
-			Error:       qt.Error,
-			CreatedAt:   qt.CreatedAt,
-			StartedAt:   qt.StartedAt,
-			CompletedAt: qt.CompletedAt,
-		}
+		tasks[i] = TaskFromQueueTask(&qTasks[i])
 	}
 	return tasks
+}
+
+// TaskFromQueueTask converts a queue task into its service-layer view.
+// Takes a pointer because transfer.TransferTask embeds a sync.RWMutex that
+// must not be copied.
+func TaskFromQueueTask(qt *transfer.TransferTask) TransferTask {
+	return TransferTask{
+		ID:          qt.ID,
+		Type:        TransferType(qt.Type),
+		State:       TransferState(qt.State),
+		Name:        qt.Name,
+		Source:      qt.Source,
+		Dest:        qt.Dest,
+		Size:        qt.Size,
+		SourceLabel: qt.SourceLabel,
+		BatchID:     qt.BatchID,
+		BatchLabel:  qt.BatchLabel,
+		Progress:    qt.Progress,
+		Speed:       qt.Speed,
+		Error:       qt.Error,
+		CreatedAt:   qt.CreatedAt,
+		StartedAt:   qt.StartedAt,
+		CompletedAt: qt.CompletedAt,
+	}
 }
 
 // checkBatchCompletion checks a completed batch for failures and publishes appropriate reports.

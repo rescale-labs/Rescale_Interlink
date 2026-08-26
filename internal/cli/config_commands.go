@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/constants"
 )
 
 // newConfigCmd creates the 'config' command group.
@@ -428,7 +428,7 @@ Use this to verify your API key and network connectivity.`,
 			}
 
 			// Test connection with timeout
-			ctx, cancel := context.WithTimeout(GetContext(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(GetContext(), constants.APIConnectionTestTimeout)
 			defer cancel()
 
 			// Fetch user info as a test

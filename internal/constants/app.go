@@ -384,6 +384,34 @@ const (
 
 	// HTTPDialKeepAlive - keep-alive period for dialer (30 seconds)
 	HTTPDialKeepAlive = 30 * time.Second
+
+	// HTTPClientTimeout - whole-request ceiling for the API/proxy HTTP client
+	// (300 seconds). The transfer-optimized client clears this and relies on
+	// per-operation context deadlines instead, because a large upload or
+	// download legitimately runs longer than any single request budget.
+	HTTPClientTimeout = 300 * time.Second
+)
+
+// HTTP Connection Pool
+//
+// The default net/http transport keeps only 2 idle connections per host, which
+// serializes concurrent transfers behind TLS handshakes. These values were set
+// from upload/download benchmarking.
+const (
+	// HTTPMaxIdleConns - idle connections retained across all hosts (100)
+	HTTPMaxIdleConns = 100
+
+	// HTTPMaxIdleConnsPerHost - idle connections retained per host (100)
+	HTTPMaxIdleConnsPerHost = 100
+
+	// HTTPMaxConnsPerHost - active plus idle connections per host (100).
+	// Must be >= HTTPMaxIdleConnsPerHost or the pool throttles itself.
+	HTTPMaxConnsPerHost = 100
+
+	// HTTPTransferMaxIdleConns - idle-connection ceiling for the transfer-optimized
+	// client (512), which fans out across the S3/Azure endpoints of several
+	// concurrent file operations.
+	HTTPTransferMaxIdleConns = 512
 )
 
 // Pipeline and Job Timeouts

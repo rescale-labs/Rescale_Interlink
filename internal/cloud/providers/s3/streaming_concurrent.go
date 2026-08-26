@@ -629,53 +629,14 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 		return nil, fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
-	// Uses GetObjectRangeOnce to avoid nested retries. Progress is tracked per-attempt
-	// with rollback on failure to maintain accurate progress tracking.
-	var data []byte
-	var attemptBytes int64 // Track bytes reported in current attempt
-	err = s3Client.RetryWithBackoff(ctx, fmt.Sprintf("DownloadRange [%d-%d]", offset, offset+length), func() error {
-		// Per-attempt timeout to prevent stalled reads from hanging
-		attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-		defer cancel()
-
-		// Reset attempt byte counter at start of each attempt
-		attemptBytes = 0
-
-		resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, offset, offset+length-1)
-		if err != nil {
-			return err
-		}
-
-		// Wrap response body with progress tracking for smooth download progress
-		var reader io.Reader = resp.Body
-		if progressCallback != nil {
-			reader = &transfer.ProgressReader{
-				Reader: resp.Body,
-				Callback: func(n int64) {
-					attemptBytes += n
-					progressCallback(n)
-				},
-				Threshold: transfer.ProgressReaderThreshold,
+	// GetObjectRangeOnce is the non-retrying variant: FetchRangeWithRetry owns
+	// the retry loop, the per-attempt timeout, and the progress rollback.
+	return transfer.FetchRangeWithRetry(ctx, s3Client.RetryWithBackoff, offset, length, progressCallback,
+		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
+			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, offset, offset+length-1)
+			if err != nil {
+				return nil, err
 			}
-		}
-
-		readData, readErr := io.ReadAll(reader)
-		resp.Body.Close() // Always close, even on read error
-		if readErr != nil {
-			// Roll back progress on failure (negative delta)
-			// This corrects the progress counter and allows retry to re-report
-			if progressCallback != nil && attemptBytes > 0 {
-				progressCallback(-attemptBytes)
-			}
-			return readErr
-		}
-		data = readData
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to download range [%d-%d]: %w", offset, offset+length-1, err)
-	}
-
-	return data, nil
+			return resp.Body, nil
+		})
 }

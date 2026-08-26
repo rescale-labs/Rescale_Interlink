@@ -314,14 +314,12 @@ Examples:
 				for _, file := range allFiles {
 					if fileMap, ok := file.(map[string]interface{}); ok {
 						if name, ok := fileMap["name"].(string); ok {
-							// Use filter package's matchesFilter logic
 							filterCfg := filter.Config{
 								Include: filterList,
 								Exclude: excludeList,
 								Search:  searchList,
 							}
-							// Create a temporary helper to reuse filter logic
-							if matchesFileFilter(name, filterCfg) {
+							if filter.MatchesFilter(name, filterCfg) {
 								filtered = append(filtered, file)
 							}
 						}
@@ -377,51 +375,6 @@ Examples:
 	cmd.Flags().StringVarP(&searchTerms, "search", "s", "", "Include only files containing these terms in filename (comma-separated, case-insensitive)")
 
 	return cmd
-}
-
-// matchesFileFilter checks if a filename matches the filter configuration.
-// This is a helper to reuse the filter package logic for file lists.
-func matchesFileFilter(filename string, config filter.Config) bool {
-	// 1. Check exclude patterns first (highest priority)
-	for _, pattern := range config.Exclude {
-		if matched, _ := filepath.Match(pattern, filename); matched {
-			return false // Excluded
-		}
-		if matched, _ := filepath.Match(pattern, filepath.Base(filename)); matched {
-			return false // Excluded
-		}
-	}
-
-	// 2. Check include patterns
-	if len(config.Include) > 0 {
-		included := false
-		for _, pattern := range config.Include {
-			if matched, _ := filepath.Match(pattern, filename); matched {
-				included = true
-				break
-			}
-			if matched, _ := filepath.Match(pattern, filepath.Base(filename)); matched {
-				included = true
-				break
-			}
-		}
-		if !included {
-			return false // Not included by any pattern
-		}
-	}
-
-	// 3. Check search terms (case-insensitive substring match)
-	if len(config.Search) > 0 {
-		lowerFilename := strings.ToLower(filename)
-		for _, term := range config.Search {
-			lowerTerm := strings.ToLower(term)
-			if !strings.Contains(lowerFilename, lowerTerm) {
-				return false // Must match ALL search terms
-			}
-		}
-	}
-
-	return true // Passed all filters
 }
 
 // newFilesDeleteCmd creates the 'files delete' command.

@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -77,7 +79,7 @@ func DefaultConfig() *Config {
 		PollInterval:  5 * time.Minute,
 		DownloadDir:   ".",
 		UseJobNameDir: true,
-		MaxConcurrent: 5,
+		MaxConcurrent: constants.DefaultMaxConcurrent,
 		StateFile:     DefaultStateFilePath(),
 	}
 }
@@ -1007,7 +1009,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		d.applyDownloadedTag(ctx, job)
 
 		d.logger.Info().Msgf("COMPLETED: %s [%s] - %d files, %s",
-			job.Name, job.ID, fileCount, formatBytes(totalSize))
+			job.Name, job.ID, fileCount, cloud.FormatBytes(totalSize))
 		outcome = OutcomeDownloaded
 	}
 
@@ -1070,20 +1072,6 @@ func (d *Daemon) applyDownloadedTag(ctx context.Context, job *CompletedJob) {
 		Str("job_id", job.ID).
 		Str("tag", config.DownloadedTag).
 		Msg("Tagged job as downloaded")
-}
-
-// formatBytes formats a byte count as a human-readable string.
-func formatBytes(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 // resolvePathWithSymlinks resolves symlinks for a path that may not fully exist.

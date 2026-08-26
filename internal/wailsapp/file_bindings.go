@@ -264,12 +264,8 @@ func (a *App) ListRemoteFolder(folderID string) FolderContentsDTO {
 // Pass empty cursor for first page, or use nextCursor from previous response.
 // Pass pageSize=0 for API default.
 func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int) FolderContentsDTO {
-	if a.engine == nil {
-		return FolderContentsDTO{}
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
+	fs, err := a.fileService()
+	if err != nil {
 		return FolderContentsDTO{}
 	}
 
@@ -289,12 +285,8 @@ func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int)
 // Pass empty cursor for first page, or use nextCursor from previous response.
 // Returns paginated results similar to ListRemoteFolderPage.
 func (a *App) SearchRemoteFolderContents(folderID string, searchQuery string, cursor string, pageSize int) FolderContentsDTO {
-	if a.engine == nil {
-		return FolderContentsDTO{}
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
+	fs, err := a.fileService()
+	if err != nil {
 		return FolderContentsDTO{}
 	}
 
@@ -326,12 +318,8 @@ func (a *App) ListRemoteLegacy(cursor string, pageSize int) FolderContentsDTO {
 // sortField: "name", "size", or "created" - field to sort by.
 // sortDirection: "asc" or "desc" - sort direction.
 func (a *App) ListRemoteLegacyWithFilters(cursor string, pageSize int, ownerFilter string, searchQuery string, sortField string, sortDirection string) FolderContentsDTO {
-	if a.engine == nil {
-		return FolderContentsDTO{}
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
+	fs, err := a.fileService()
+	if err != nil {
 		return FolderContentsDTO{}
 	}
 
@@ -393,12 +381,8 @@ func mapSortToOrdering(sortField string, sortDirection string) string {
 // Items include both files (with SymlinkID populated) and folder-like entries.
 // Pass pageSize=0 for API default.
 func (a *App) ListRemoteTrash(cursor string, pageSize int) FolderContentsDTO {
-	if a.engine == nil {
-		return FolderContentsDTO{}
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
+	fs, err := a.fileService()
+	if err != nil {
 		return FolderContentsDTO{}
 	}
 
@@ -429,13 +413,9 @@ func (a *App) PurgeTrashItems(items []FileItemDTO) DeleteResultDTO {
 }
 
 func (a *App) postTrashItems(items []FileItemDTO, recover bool) DeleteResultDTO {
-	if a.engine == nil {
-		return DeleteResultDTO{Error: ErrNoEngine.Error(), Failed: len(items)}
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
-		return DeleteResultDTO{Error: ErrNoFileService.Error(), Failed: len(items)}
+	fs, err := a.fileService()
+	if err != nil {
+		return DeleteResultDTO{Error: err.Error(), Failed: len(items)}
 	}
 
 	serviceItems := make([]services.FileItem, len(items))
@@ -450,7 +430,6 @@ func (a *App) postTrashItems(items []FileItemDTO, recover bool) DeleteResultDTO 
 
 	ctx := context.Background()
 	var count, failed int
-	var err error
 	if recover {
 		count, failed, err = fs.RecoverTrashItems(ctx, serviceItems)
 	} else {
@@ -471,20 +450,16 @@ func (a *App) postTrashItems(items []FileItemDTO, recover bool) DeleteResultDTO 
 // Lightweight preflight check — fetches a single item from the first page.
 // Does NOT use FolderCache.Get() (which fetches all pages).
 func (a *App) ValidateRemoteFolder(folderID string) error {
-	if a.engine == nil {
-		return ErrNoEngine
-	}
-	apiClient := a.engine.API()
-	if apiClient == nil {
-		return fmt.Errorf("API client not configured")
+	apiClient, err := a.apiClient()
+	if err != nil {
+		return err
 	}
 	if folderID == "" {
 		return fmt.Errorf("no destination folder specified")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := apiClient.ListFolderContentsPage(ctx, folderID, "", 1)
-	if err != nil {
+	if _, err := apiClient.ListFolderContentsPage(ctx, folderID, "", 1); err != nil {
 		return fmt.Errorf("folder not found or inaccessible: %w", err)
 	}
 	return nil
@@ -504,13 +479,9 @@ func (a *App) ValidateLocalDirectory(path string) error {
 
 // CreateRemoteFolder creates a new folder.
 func (a *App) CreateRemoteFolder(name string, parentID string) (string, error) {
-	if a.engine == nil {
-		return "", ErrNoEngine
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
-		return "", ErrNoFileService
+	fs, err := a.fileService()
+	if err != nil {
+		return "", err
 	}
 
 	ctx := context.Background()
@@ -523,13 +494,9 @@ func (a *App) CreateRemoteFolder(name string, parentID string) (string, error) {
 // endpoint. Items can be recovered from the Trash view. Permanent deletion is
 // handled separately by the Trash view's purge action.
 func (a *App) DeleteRemoteItems(parentFolderID string, items []FileItemDTO) DeleteResultDTO {
-	if a.engine == nil {
-		return DeleteResultDTO{Error: ErrNoEngine.Error(), Failed: len(items)}
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
-		return DeleteResultDTO{Error: ErrNoFileService.Error(), Failed: len(items)}
+	fs, err := a.fileService()
+	if err != nil {
+		return DeleteResultDTO{Error: err.Error(), Failed: len(items)}
 	}
 
 	// Convert DTOs to service items
@@ -557,13 +524,9 @@ func (a *App) DeleteRemoteItems(parentFolderID string, items []FileItemDTO) Dele
 
 // GetMyLibraryFolderID returns the MyLibrary root folder ID.
 func (a *App) GetMyLibraryFolderID() (string, error) {
-	if a.engine == nil {
-		return "", ErrNoEngine
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
-		return "", ErrNoFileService
+	fs, err := a.fileService()
+	if err != nil {
+		return "", err
 	}
 
 	ctx := context.Background()
@@ -572,13 +535,9 @@ func (a *App) GetMyLibraryFolderID() (string, error) {
 
 // GetMyJobsFolderID returns the MyJobs root folder ID.
 func (a *App) GetMyJobsFolderID() (string, error) {
-	if a.engine == nil {
-		return "", ErrNoEngine
-	}
-
-	fs := a.engine.FileService()
-	if fs == nil {
-		return "", ErrNoFileService
+	fs, err := a.fileService()
+	if err != nil {
+		return "", err
 	}
 
 	ctx := context.Background()
@@ -957,13 +916,9 @@ func (a *App) CheckLocalFolderExists(folderName string, destPath string) LocalFo
 func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID string) FolderExistsCheckDTO {
 	ctx := context.Background()
 
-	if a.engine == nil {
-		return FolderExistsCheckDTO{Error: ErrNoEngine.Error()}
-	}
-
-	apiClient := a.engine.API()
-	if apiClient == nil {
-		return FolderExistsCheckDTO{Error: "API client not configured"}
+	apiClient, err := a.apiClient()
+	if err != nil {
+		return FolderExistsCheckDTO{Error: err.Error()}
 	}
 
 	cache := folder.NewFolderCache()
@@ -985,17 +940,10 @@ func (a *App) CheckFoldersExistForUpload(folderNames []string, parentFolderID st
 	ctx := context.Background()
 	results := make([]FolderExistsCheckDTO, len(folderNames))
 
-	if a.engine == nil {
+	apiClient, err := a.apiClient()
+	if err != nil {
 		for i := range results {
-			results[i] = FolderExistsCheckDTO{Error: ErrNoEngine.Error()}
-		}
-		return results
-	}
-
-	apiClient := a.engine.API()
-	if apiClient == nil {
-		for i := range results {
-			results[i] = FolderExistsCheckDTO{Error: "API client not configured"}
+			results[i] = FolderExistsCheckDTO{Error: err.Error()}
 		}
 		return results
 	}

@@ -31,9 +31,9 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100, // CRITICAL: Keep 100 idle connections (was missing, defaulted to 2)
-		MaxConnsPerHost:       100, // Total connections per host (must be >= MaxIdleConnsPerHost)
+		MaxIdleConns:          constants.HTTPMaxIdleConns,
+		MaxIdleConnsPerHost:   constants.HTTPMaxIdleConnsPerHost,
+		MaxConnsPerHost:       constants.HTTPMaxConnsPerHost,
 		IdleConnTimeout:       constants.HTTPIdleConnTimeout,
 		TLSHandshakeTimeout:   constants.HTTPTLSHandshakeTimeout, // Extended for slow networks and high concurrency
 		ExpectContinueTimeout: constants.HTTPExpectContinueTimeout,
@@ -58,7 +58,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			transport.Proxy = nil
 			return &nethttp.Client{
 				Transport: transport,
-				Timeout:   300 * time.Second,
+				Timeout:   constants.HTTPClientTimeout,
 			}, nil
 		}
 
@@ -72,7 +72,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 
 		client := &nethttp.Client{
 			Transport: ntlmRoundTripper,
-			Timeout:   300 * time.Second,
+			Timeout:   constants.HTTPClientTimeout,
 		}
 
 		// Only perform warmup if credentials are complete and warmup is requested.
@@ -94,7 +94,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 			transport.Proxy = nil
 			return &nethttp.Client{
 				Transport: transport,
-				Timeout:   300 * time.Second,
+				Timeout:   constants.HTTPClientTimeout,
 			}, nil
 		}
 
@@ -109,7 +109,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 
 		client := &nethttp.Client{
 			Transport: transport,
-			Timeout:   300 * time.Second,
+			Timeout:   constants.HTTPClientTimeout,
 		}
 
 		// Only perform warmup if ProxyWarmup is true AND credentials are complete.
@@ -128,7 +128,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 
 	client := &nethttp.Client{
 		Transport: transport,
-		Timeout:   300 * time.Second,
+		Timeout:   constants.HTTPClientTimeout,
 	}
 
 	// Perform warmup if requested

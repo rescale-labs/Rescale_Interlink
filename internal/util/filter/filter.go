@@ -53,15 +53,17 @@ func ApplyToJobFiles(files []models.JobFile, config Config) []models.JobFile {
 		}
 
 		// Then check other filters
-		if matchesFilter(file.Name, config) {
+		if MatchesFilter(file.Name, config) {
 			filtered = append(filtered, file)
 		}
 	}
 	return filtered
 }
 
-// matchesFilter checks if a filename matches the filter configuration.
-func matchesFilter(filename string, config Config) bool {
+// MatchesFilter reports whether a filename passes the filter configuration:
+// exclude patterns win over include patterns, and every search term must match.
+// Patterns are tried against both the full name and its base name.
+func MatchesFilter(filename string, config Config) bool {
 	// 1. Check exclude patterns first (highest priority)
 	for _, pattern := range config.Exclude {
 		if matched, _ := filepath.Match(pattern, filename); matched {

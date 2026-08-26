@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"gopkg.in/ini.v1"
+
+	"github.com/rescale/rescale-int/internal/constants"
 )
 
 // Hardcoded auto-download constants (not user-configurable).
@@ -208,7 +210,7 @@ func NewDaemonConfig() *DaemonConfig {
 			DownloadFolder:      DefaultDownloadFolder(),
 			PollIntervalMinutes: 5,
 			UseJobNameDir:       true,
-			MaxConcurrent:       5,
+			MaxConcurrent:       constants.DefaultMaxConcurrent,
 			LookbackDays:        7,
 		},
 		Filters: FilterConfig{
@@ -260,7 +262,7 @@ func LoadDaemonConfig(path string) (*DaemonConfig, error) {
 	cfg.Daemon.DownloadFolder = daemonSection.Key("download_folder").MustString(DefaultDownloadFolder())
 	cfg.Daemon.PollIntervalMinutes = daemonSection.Key("poll_interval_minutes").MustInt(5)
 	cfg.Daemon.UseJobNameDir = daemonSection.Key("use_job_name_dir").MustBool(true)
-	cfg.Daemon.MaxConcurrent = daemonSection.Key("max_concurrent").MustInt(5)
+	cfg.Daemon.MaxConcurrent = daemonSection.Key("max_concurrent").MustInt(constants.DefaultMaxConcurrent)
 	cfg.Daemon.LookbackDays = daemonSection.Key("lookback_days").MustInt(7)
 
 	// Parse [filters] section

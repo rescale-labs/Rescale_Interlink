@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 )
 
@@ -1151,7 +1152,7 @@ func (q *Queue) smoothETA(batchID string, rawETA float64) float64 {
 
 // batchTickerLoop publishes batch progress events every second.
 func (q *Queue) batchTickerLoop() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(constants.TableRefreshBatchInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {

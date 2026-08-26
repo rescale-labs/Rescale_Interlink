@@ -25,7 +25,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
-	"github.com/rescale/rescale-int/internal/constants"
+	cloudtransfer "github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 )
@@ -223,31 +223,10 @@ func (c *S3Client) EnsureFreshCredentials(ctx context.Context) error {
 }
 
 // RetryWithBackoff executes a function with exponential backoff retry logic.
-// Uses the shared retry package for consistent retry behavior across all operations.
+// Delegates to the shared implementation so both storage backends retry,
+// refresh credentials, and report attempts identically.
 func (c *S3Client) RetryWithBackoff(ctx context.Context, operation string, fn func() error) error {
-	retryConfig := http.Config{
-		MaxRetries:   constants.MaxRetries,
-		InitialDelay: constants.RetryInitialDelay,
-		MaxDelay:     constants.RetryMaxDelay,
-		MaxElapsed:   constants.RetryMaxElapsed,
-		CredentialRefresh: func(ctx context.Context) error {
-			return c.EnsureFreshCredentials(ctx)
-		},
-		// Retries are reported, not hidden behind an env var: a silent retry
-		// loop is what made a broken storage endpoint look like a hang.
-		OnRetry: func(attempt int, err error, errorType http.ErrorType, nextDelay time.Duration) {
-			c.retryObserver.Notify(cloud.RetryEvent{
-				Operation:   operation,
-				Attempt:     attempt,
-				MaxAttempts: constants.MaxRetries,
-				Cause:       http.ErrorTypeName(errorType),
-				Err:         err,
-				NextDelay:   nextDelay,
-			})
-		},
-	}
-
-	return http.ExecuteWithRetry(ctx, retryConfig, fn)
+	return cloudtransfer.RetryWithBackoff(ctx, operation, c.retryObserver, c.EnsureFreshCredentials, fn)
 }
 
 // TraceContext adds HTTP connection tracing when DEBUG_HTTP=true.
