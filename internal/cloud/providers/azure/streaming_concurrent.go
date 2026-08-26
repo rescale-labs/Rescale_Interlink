@@ -14,9 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -26,7 +24,6 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
-	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/resources"
 )
 
@@ -369,261 +366,61 @@ func (rsc *readSeekCloser) Close() error {
 // Returns: formatVersion (0=legacy, 1=HKDF streaming, 2=CBC streaming), fileId (base64), partSize, iv, error
 // Both new uploads (IV/CBC) and old uploads (HKDF) are supported for download.
 func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
-	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
 	if err != nil {
 		return 0, "", 0, nil, fmt.Errorf("failed to get Azure client: %w", err)
 	}
 
-	// Ensure fresh credentials
 	if err := azureClient.EnsureFreshCredentials(ctx); err != nil {
 		return 0, "", 0, nil, fmt.Errorf("failed to refresh credentials: %w", err)
 	}
 
-	// Get blob properties (includes metadata)
 	props, err := azureClient.GetBlobProperties(ctx, remotePath)
 	if err != nil {
 		return 0, "", 0, nil, fmt.Errorf("failed to get blob properties: %w", err)
 	}
 
-	// Check for streaming format metadata
-	// Note: Azure may title-case metadata keys, so check multiple variants
-	metadata := props.Metadata
-
-	if metadata == nil {
-		return 0, "", 0, nil, nil // No metadata, legacy format
+	// Azure preserves whatever casing the writer used for metadata names, so the
+	// map is normalized before it is read.
+	format, err := transfer.ParseObjectFormat(transfer.NormalizeMetadataPointers(props.Metadata))
+	if err != nil {
+		return 0, "", 0, nil, err
 	}
-
-	// Check formatVersion (try various case combinations)
-	var formatVersionStr string
-	for _, key := range []string{"formatversion", "formatVersion", "FormatVersion", "Formatversion"} {
-		if v, ok := metadata[key]; ok && v != nil {
-			formatVersionStr = *v
-			break
-		}
-	}
-
-	if formatVersionStr == "1" {
-		// HKDF streaming format (backward compatibility for files uploaded before v3.2.0)
-		// Get fileId
-		var fileId string
-		for _, key := range []string{"fileid", "fileId", "FileId", "Fileid"} {
-			if v, ok := metadata[key]; ok && v != nil {
-				fileId = *v
-				break
-			}
-		}
-		if fileId == "" {
-			return 0, "", 0, nil, fmt.Errorf("streaming format missing fileId in metadata")
-		}
-
-		// Get partSize
-		var partSizeStr string
-		for _, key := range []string{"partsize", "partSize", "PartSize", "Partsize"} {
-			if v, ok := metadata[key]; ok && v != nil {
-				partSizeStr = *v
-				break
-			}
-		}
-		if partSizeStr == "" {
-			return 0, "", 0, nil, fmt.Errorf("streaming format missing partSize in metadata")
-		}
-
-		var partSize int64
-		if _, err := fmt.Sscanf(partSizeStr, "%d", &partSize); err != nil {
-			return 0, "", 0, nil, fmt.Errorf("invalid partSize in metadata: %w", err)
-		}
-
-		return 1, fileId, partSize, nil, nil
-	}
-
-	// Check for CBC streaming format (v3.2.4+) and get IV from metadata
-	var iv []byte
-	for _, key := range []string{"iv", "IV", "Iv"} {
-		if v, ok := metadata[key]; ok && v != nil && *v != "" {
-			iv, err = encryption.DecodeBase64(*v)
-			if err != nil {
-				// IV decode failed - might be provided via FileInfo instead
-				iv = nil
-			}
-			break
-		}
-	}
-
-	// Check for streamingformat: cbc
-	for _, key := range []string{"streamingformat", "streamingFormat", "StreamingFormat", "Streamingformat"} {
-		if v, ok := metadata[key]; ok && v != nil && *v == "cbc" {
-			// CBC streaming format - uploaded by rescale-int v3.2.4+
-			// Can use streaming download (no temp file) with sequential part decryption
-			// Read partSize from metadata. Return 0 if not present so downloader
-			// can calculate the correct size from file size (backward compatibility).
-			var partSize int64 = 0 // 0 means "calculate from file size"
-			for _, psKey := range []string{"partsize", "partSize", "PartSize", "Partsize"} {
-				if ps, psOk := metadata[psKey]; psOk && ps != nil && *ps != "" {
-					if parsed, parseErr := strconv.ParseInt(*ps, 10, 64); parseErr == nil && parsed > 0 {
-						partSize = parsed
-					}
-					break
-				}
-			}
-			return 2, "", partSize, iv, nil
-		}
-	}
-
-	// Legacy format - file uploaded by Rescale platform or older rescale-int
-	// Must use downloadLegacy() with temp file
-	return 0, "", 0, iv, nil
+	return format.Version, format.FileID, format.PartSize, format.IV, nil
 }
 
 // DownloadStreaming downloads and decrypts a file using HKDF streaming format (v1).
 // This is for backward compatibility with files uploaded before v3.2.0.
 // Format metadata (fileId, partSize) is read from Azure blob metadata.
 func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath string, masterKey []byte, progressCallback cloud.ProgressCallback) error {
-	// Report 0% at start
-	if progressCallback != nil {
-		progressCallback(0.0)
-	}
-
-	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get Azure client: %w", err)
 	}
 
-	// Ensure fresh credentials
-	if err := azureClient.EnsureFreshCredentials(ctx); err != nil {
-		return fmt.Errorf("failed to refresh credentials: %w", err)
-	}
-
-	// Get blob properties and streaming format metadata
-	props, err := azureClient.GetBlobProperties(ctx, remotePath)
-	if err != nil {
-		return fmt.Errorf("failed to get blob properties: %w", err)
-	}
-
-	encryptedSize := props.ContentLength
-	metadata := props.Metadata
-
-	// Get fileId from metadata
-	var fileIdStr string
-	for _, key := range []string{"fileid", "fileId", "FileId", "Fileid"} {
-		if v, ok := metadata[key]; ok && v != nil {
-			fileIdStr = *v
-			break
-		}
-	}
-	if fileIdStr == "" {
-		return fmt.Errorf("streaming format missing fileId in metadata")
-	}
-	fileId, err := encryption.DecodeBase64(fileIdStr)
-	if err != nil {
-		return fmt.Errorf("failed to decode fileId: %w", err)
-	}
-
-	// Get partSize from metadata
-	var partSizeStr string
-	for _, key := range []string{"partsize", "partSize", "PartSize", "Partsize"} {
-		if v, ok := metadata[key]; ok && v != nil {
-			partSizeStr = *v
-			break
-		}
-	}
-	if partSizeStr == "" {
-		return fmt.Errorf("streaming format missing partSize in metadata")
-	}
-	var partSize int64
-	if _, err := fmt.Sscanf(partSizeStr, "%d", &partSize); err != nil {
-		return fmt.Errorf("invalid partSize in metadata: %s", partSizeStr)
-	}
-
-	// Create HKDF streaming decryptor (legacy format)
-	decryptor, err := encryption.NewStreamingDecryptor(masterKey, fileId, partSize)
-	if err != nil {
-		return fmt.Errorf("failed to create streaming decryptor: %w", err)
-	}
-
-	// Calculate encrypted part size (includes PKCS7 padding overhead per part for HKDF format)
-	encryptedPartSize := encryption.CalculateEncryptedPartSize(partSize)
-
-	// Calculate number of parts
-	numParts := (encryptedSize + encryptedPartSize - 1) / encryptedPartSize
-
-	// Check disk space before download. Return the error verbatim: it already
-	// reports the margined requirement this check enforced and the free space on
-	// localPath's own filesystem.
-	estimatedPlaintextSize := encryptedSize - (numParts * 16) // Approximate padding overhead
-	if err := diskspace.CheckAvailableSpace(localPath, estimatedPlaintextSize, 1+constants.DiskSpaceBufferPercent); err != nil {
-		return err
-	}
-
-	azureClient.StartPeriodicRefresh(ctx)
-	defer azureClient.StopPeriodicRefresh()
-
-	// Create output file (plaintext, no temp file needed!)
-	outFile, err := os.Create(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer outFile.Close()
-
-	// Download and decrypt each part
-	var downloadedBytes int64 = 0
-	for partIndex := int64(0); partIndex < numParts; partIndex++ {
-		// Calculate byte range for this encrypted part
-		startByte := partIndex * encryptedPartSize
-		endByte := startByte + encryptedPartSize - 1
-		if endByte >= encryptedSize {
-			endByte = encryptedSize - 1
-		}
-		rangeSize := endByte - startByte + 1
-
-		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
-		// Uses DownloadRangeOnce to avoid nested retries.
-		var ciphertext []byte
-		err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadPart %d", partIndex), func() error {
-			// Per-attempt timeout to prevent stalled reads from hanging
-			attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-			defer cancel()
-
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, startByte, rangeSize)
+	return transfer.DownloadHKDFStream(ctx, transfer.HKDFStreamParams{
+		LocalPath:        localPath,
+		MasterKey:        masterKey,
+		Retry:            azureClient.RetryWithBackoff,
+		Refresh:          azureClient.EnsureFreshCredentials,
+		ProgressCallback: progressCallback,
+		Stat: func(statCtx context.Context) (int64, map[string]string, error) {
+			props, err := azureClient.GetBlobProperties(statCtx, remotePath)
 			if err != nil {
-				return err
+				return 0, nil, fmt.Errorf("failed to get blob properties: %w", err)
 			}
-			data, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close() // Always close, even on read error
-			if readErr != nil {
-				return readErr
+			return props.ContentLength, transfer.NormalizeMetadataPointers(props.Metadata), nil
+		},
+		// DownloadRangeOnce is the non-retrying variant: the shared driver owns
+		// the retry loop and the per-attempt timeout.
+		Open: func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
+			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
+			if err != nil {
+				return nil, err
 			}
-			ciphertext = data
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("failed to download part %d: %w", partIndex, err)
-		}
-
-		// Decrypt this part (HKDF format - each part has own key/IV)
-		plaintext, err := decryptor.DecryptPart(partIndex, ciphertext)
-		if err != nil {
-			return fmt.Errorf("failed to decrypt part %d: %w", partIndex, err)
-		}
-
-		// Write plaintext to output file (OUTSIDE retry - disk errors are not retryable)
-		if _, err := outFile.Write(plaintext); err != nil {
-			return fmt.Errorf("failed to write part %d: %w", partIndex, err)
-		}
-
-		downloadedBytes += int64(len(ciphertext))
-		if progressCallback != nil && encryptedSize > 0 {
-			progressCallback(float64(downloadedBytes) / float64(encryptedSize))
-		}
-	}
-
-	// Report 100% at end
-	if progressCallback != nil {
-		progressCallback(1.0)
-	}
-
-	return nil
+			return resp.Body, nil
+		},
+	})
 }
 
 // =============================================================================
@@ -671,7 +468,7 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 	// the retry loop, the per-attempt timeout, and the progress rollback.
 	return transfer.FetchRangeWithRetry(ctx, azureClient.RetryWithBackoff, offset, length, progressCallback,
 		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length)
+			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
 			if err != nil {
 				return nil, err
 			}

@@ -954,7 +954,7 @@ All configuration constants centralized in one file with named constants, inline
 **Categories:**
 
 1. **Storage Operations**: `MultipartThreshold` (100MB), `ChunkSize` (32MB), `MinPartSize` (5MB)
-2. **Credential Refresh**: `GlobalCredentialRefreshInterval` (10min), `AzurePeriodicRefreshInterval` (8min)
+2. **Credential Refresh**: `GlobalCredentialRefreshInterval` (10min), `PeriodicCredentialRefreshInterval` (8min, both providers)
 3. **Retry Logic**: `MaxRetries` (10), `RetryInitialDelay` (200ms), `RetryMaxDelay` (15s)
 4. **Disk Space Safety**: `DiskSpaceBufferPercent` (0.15)
 5. **Event System**: `EventBusDefaultBuffer` (1000), `EventBusMaxBuffer` (5000)

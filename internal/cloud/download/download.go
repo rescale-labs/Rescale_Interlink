@@ -175,8 +175,8 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	if err != nil {
 		return fmt.Errorf("failed to stat downloaded file: %w", err)
 	}
-	if fi.Size() == 0 && fileInfo.DecryptedSize > 0 {
-		return fmt.Errorf("download failed: file is empty (0 bytes) - possible write error or filesystem issue")
+	if err := verifyDownloadedSize(params.LocalPath, fi.Size(), fileInfo.DecryptedSize); err != nil {
+		return err
 	}
 
 	checksumTimer := cloud.StartTimer(params.OutputWriter, "Checksum verification")
@@ -229,31 +229,65 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 // corruptFileSuffix marks a downloaded file that failed checksum verification.
 const corruptFileSuffix = ".corrupt"
 
+// verifyDownloadedSize checks a finished download against the size the API
+// reported for the file. An expected size of zero means the API reported none,
+// so there is nothing to check.
+//
+// Size is the only completeness check that does not need the file to carry a
+// checksum, and it is the check every downstream presence test already makes —
+// the auto-download daemon's poll and the CLI's skip-existing modes both take a
+// file of the right length for a finished download. So a file of the wrong
+// length fails here and is moved aside like a corrupt one, rather than being
+// left to masquerade as complete.
+func verifyDownloadedSize(localPath string, actual, expected int64) error {
+	if expected <= 0 || actual == expected {
+		return nil
+	}
+
+	// An empty file is its own diagnosis and is not worth preserving.
+	if actual == 0 {
+		return fmt.Errorf("download failed: file is empty (0 bytes) - possible write error or filesystem issue")
+	}
+
+	return quarantineWrongSize(localPath, actual, expected)
+}
+
 // quarantineCorruptFile moves a download that failed checksum verification out
 // of the way and returns the error to report to the caller.
-//
-// The corrupt bytes must not be left at localPath. Callers decide a file is
-// already downloaded by comparing the on-disk size against the expected size
-// (the auto-download daemon's poll, the CLI's skip-existing modes), and a file
-// that fails its checksum is still full-size — leaving it in place makes the
-// next poll report the download as a success. Renaming is preferred over
-// deleting so the bytes stay available for diagnosis; deletion is the fallback,
-// and when neither works the returned error says so.
 func quarantineCorruptFile(localPath string, checksumErr error) error {
+	return fmt.Errorf("checksum verification failed for %s: %w\n\n%s\n\nTo download despite checksum mismatch, use --skip-checksum flag (not recommended)",
+		localPath, checksumErr, quarantineFile(localPath))
+}
+
+// quarantineWrongSize moves a download that ended up the wrong length out of the
+// way and returns the error to report to the caller. There is no flag to skip
+// this one: a short or long file is not a download that merely failed to verify.
+func quarantineWrongSize(localPath string, got, want int64) error {
+	return fmt.Errorf("download failed for %s: the file is %d bytes on disk but %d bytes were expected\n\n%s",
+		localPath, got, want, quarantineFile(localPath))
+}
+
+// quarantineFile moves a bad download aside and reports what became of it.
+//
+// The bad bytes must not be left at localPath. Callers decide a file is already
+// downloaded by comparing the on-disk size against the expected size (the
+// auto-download daemon's poll, the CLI's skip-existing modes), and a file that
+// fails its checksum is still full-size — leaving it in place makes the next poll
+// report the download as a success. Renaming is preferred over deleting so the
+// bytes stay available for diagnosis; deletion is the fallback, and when neither
+// works the returned sentence says so.
+func quarantineFile(localPath string) string {
 	quarantinePath := localPath + corruptFileSuffix
-	disposition := fmt.Sprintf("The corrupt file was moved to %s", quarantinePath)
 
 	if renameErr := os.Rename(localPath, quarantinePath); renameErr != nil {
 		if removeErr := os.Remove(localPath); removeErr != nil {
-			disposition = fmt.Sprintf("WARNING: the corrupt file is still at %s — it could not be moved aside (%v) or deleted (%v); delete it before retrying",
+			return fmt.Sprintf("WARNING: the corrupt file is still at %s — it could not be moved aside (%v) or deleted (%v); delete it before retrying",
 				localPath, renameErr, removeErr)
-		} else {
-			disposition = "The corrupt file was deleted"
 		}
+		return "The corrupt file was deleted"
 	}
 
-	return fmt.Errorf("checksum verification failed for %s: %w\n\n%s\n\nTo download despite checksum mismatch, use --skip-checksum flag (not recommended)",
-		localPath, checksumErr, disposition)
+	return fmt.Sprintf("The corrupt file was moved to %s", quarantinePath)
 }
 
 // getExpectedSHA512 extracts the expected SHA-512 hash from checksums.

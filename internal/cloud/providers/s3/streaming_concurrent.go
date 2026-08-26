@@ -14,9 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -391,201 +389,55 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 // Returns: formatVersion (0=legacy, 1=HKDF streaming, 2=CBC streaming), fileId (base64), partSize, iv, error
 // Both new uploads (IV/CBC) and old uploads (HKDF) are supported for download.
 func (p *Provider) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
-	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
 	if err != nil {
 		return 0, "", 0, nil, fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// Get object metadata using S3Client
-	var headResp *s3.HeadObjectOutput
-	err = s3Client.RetryWithBackoff(ctx, "HeadObject", func() error {
-		var err error
-		headResp, err = s3Client.Client().HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket: aws.String(s3Client.Bucket()),
-			Key:    aws.String(remotePath),
-		})
-		return err
-	})
+	headResp, err := s3Client.HeadObject(ctx, remotePath)
 	if err != nil {
 		return 0, "", 0, nil, fmt.Errorf("failed to get object metadata: %w", err)
 	}
 
-	// Check for HKDF streaming format metadata (S3 lowercases all metadata keys)
-	// This is for backward compatibility with files uploaded before v3.2.0
-	if fv, ok := headResp.Metadata["formatversion"]; ok && fv == "1" {
-		fileId := headResp.Metadata["fileid"]
-		if fileId == "" {
-			return 0, "", 0, nil, fmt.Errorf("streaming format missing fileId in metadata")
-		}
-
-		partSizeStr := headResp.Metadata["partsize"]
-		if partSizeStr == "" {
-			return 0, "", 0, nil, fmt.Errorf("streaming format missing partSize in metadata")
-		}
-
-		var partSize int64
-		if _, err := fmt.Sscanf(partSizeStr, "%d", &partSize); err != nil {
-			return 0, "", 0, nil, fmt.Errorf("invalid partSize in metadata: %s", partSizeStr)
-		}
-
-		return 1, fileId, partSize, nil, nil
+	format, err := transfer.ParseObjectFormat(transfer.NormalizeMetadata(headResp.Metadata))
+	if err != nil {
+		return 0, "", 0, nil, err
 	}
-
-	// Check for CBC streaming format (v3.2.4+)
-	// This indicates the file was uploaded with rescale-int using CBC chaining
-	// and can be downloaded without a temp file using sequential part decryption
-	var iv []byte
-	if ivStr, ok := headResp.Metadata["iv"]; ok && ivStr != "" {
-		iv, err = encryption.DecodeBase64(ivStr)
-		if err != nil {
-			// IV decode failed - might be provided via FileInfo instead
-			iv = nil
-		}
-	}
-
-	if sf, ok := headResp.Metadata["streamingformat"]; ok && sf == "cbc" {
-		// CBC streaming format - uploaded by rescale-int v3.2.4+
-		// Can use streaming download (no temp file) with sequential part decryption
-		// Read partSize from metadata. Return 0 if not present so downloader
-		// can calculate the correct size from file size (backward compatibility).
-		var partSize int64 = 0 // 0 means "calculate from file size"
-		if ps, ok := headResp.Metadata["partsize"]; ok && ps != "" {
-			if parsed, parseErr := strconv.ParseInt(ps, 10, 64); parseErr == nil && parsed > 0 {
-				partSize = parsed
-			}
-		}
-		return 2, "", partSize, iv, nil
-	}
-
-	// Legacy format - file uploaded by Rescale platform or older rescale-int
-	// Must use downloadLegacy() with temp file
-	return 0, "", 0, iv, nil
+	return format.Version, format.FileID, format.PartSize, format.IV, nil
 }
 
 // DownloadStreaming downloads and decrypts a file using HKDF streaming format (v1).
 // This is for backward compatibility with files uploaded before v3.2.0.
 // Format metadata (fileId, partSize) is read from S3 object metadata.
 func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath string, masterKey []byte, progressCallback cloud.ProgressCallback) error {
-	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// Report 0% at start
-	if progressCallback != nil {
-		progressCallback(0.0)
-	}
-
-	// Ensure fresh credentials
-	if err := s3Client.EnsureFreshCredentials(ctx); err != nil {
-		return fmt.Errorf("failed to refresh credentials: %w", err)
-	}
-
-	// Get object metadata for format detection and size
-	headResp, err := s3Client.HeadObject(ctx, remotePath)
-	if err != nil {
-		return fmt.Errorf("failed to get object metadata: %w", err)
-	}
-
-	// Get HKDF streaming format metadata (S3 lowercases keys)
-	fileIdStr := headResp.Metadata["fileid"]
-	if fileIdStr == "" {
-		return fmt.Errorf("streaming format missing fileId in metadata")
-	}
-	fileId, err := encryption.DecodeBase64(fileIdStr)
-	if err != nil {
-		return fmt.Errorf("failed to decode fileId: %w", err)
-	}
-
-	partSizeStr := headResp.Metadata["partsize"]
-	if partSizeStr == "" {
-		return fmt.Errorf("streaming format missing partSize in metadata")
-	}
-	var partSize int64
-	if _, err := fmt.Sscanf(partSizeStr, "%d", &partSize); err != nil {
-		return fmt.Errorf("invalid partSize in metadata: %s", partSizeStr)
-	}
-
-	encryptedSize := *headResp.ContentLength
-
-	// Create HKDF streaming decryptor (legacy format)
-	decryptor, err := encryption.NewStreamingDecryptor(masterKey, fileId, partSize)
-	if err != nil {
-		return fmt.Errorf("failed to create streaming decryptor: %w", err)
-	}
-
-	// Calculate encrypted part size (includes PKCS7 padding overhead per part for HKDF format)
-	encryptedPartSize := encryption.CalculateEncryptedPartSize(partSize)
-
-	// Calculate number of parts
-	numParts := (encryptedSize + encryptedPartSize - 1) / encryptedPartSize
-
-	// Create output file (plaintext, no temp file needed!)
-	outFile, err := os.Create(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer outFile.Close()
-
-	// Download and decrypt each part
-	var downloadedBytes int64 = 0
-	for partIndex := int64(0); partIndex < numParts; partIndex++ {
-		// Calculate byte range for this encrypted part
-		startByte := partIndex * encryptedPartSize
-		endByte := startByte + encryptedPartSize - 1
-		if endByte >= encryptedSize {
-			endByte = encryptedSize - 1
-		}
-
-		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
-		// Uses GetObjectRangeOnce to avoid nested retries.
-		var ciphertext []byte
-		err := s3Client.RetryWithBackoff(ctx, fmt.Sprintf("DownloadPart %d", partIndex), func() error {
-			// Per-attempt timeout to prevent stalled reads from hanging
-			attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-			defer cancel()
-
-			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, startByte, endByte)
+	return transfer.DownloadHKDFStream(ctx, transfer.HKDFStreamParams{
+		LocalPath:        localPath,
+		MasterKey:        masterKey,
+		Retry:            s3Client.RetryWithBackoff,
+		Refresh:          s3Client.EnsureFreshCredentials,
+		ProgressCallback: progressCallback,
+		Stat: func(statCtx context.Context) (int64, map[string]string, error) {
+			headResp, err := s3Client.HeadObject(statCtx, remotePath)
 			if err != nil {
-				return err
+				return 0, nil, fmt.Errorf("failed to get object metadata: %w", err)
 			}
-			data, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close() // Always close, even on read error
-			if readErr != nil {
-				return readErr
+			return *headResp.ContentLength, transfer.NormalizeMetadata(headResp.Metadata), nil
+		},
+		// GetObjectRangeOnce is the non-retrying variant: the shared driver owns
+		// the retry loop and the per-attempt timeout.
+		Open: func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
+			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, offset, offset+length-1, "")
+			if err != nil {
+				return nil, err
 			}
-			ciphertext = data
-			return nil
-		})
-		if err != nil {
-			return fmt.Errorf("failed to download part %d: %w", partIndex, err)
-		}
-
-		// Decrypt this part (HKDF format - each part has own key/IV)
-		plaintext, err := decryptor.DecryptPart(partIndex, ciphertext)
-		if err != nil {
-			return fmt.Errorf("failed to decrypt part %d: %w", partIndex, err)
-		}
-
-		// Write plaintext to output file (OUTSIDE retry - disk errors are not retryable)
-		if _, err := outFile.Write(plaintext); err != nil {
-			return fmt.Errorf("failed to write part %d: %w", partIndex, err)
-		}
-
-		downloadedBytes += int64(len(ciphertext))
-		if progressCallback != nil && encryptedSize > 0 {
-			progressCallback(float64(downloadedBytes) / float64(encryptedSize))
-		}
-	}
-
-	// Report 100% at end
-	if progressCallback != nil {
-		progressCallback(1.0)
-	}
-
-	return nil
+			return resp.Body, nil
+		},
+	})
 }
 
 // =============================================================================
@@ -633,7 +485,7 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 	// the retry loop, the per-attempt timeout, and the progress rollback.
 	return transfer.FetchRangeWithRetry(ctx, s3Client.RetryWithBackoff, offset, length, progressCallback,
 		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, offset, offset+length-1)
+			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, offset, offset+length-1, "")
 			if err != nil {
 				return nil, err
 			}

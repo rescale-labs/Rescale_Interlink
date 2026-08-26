@@ -1027,7 +1027,7 @@ Examples:
 	cmd.Flags().BoolVarP(&overwriteAll, "overwrite", "w", false, "Overwrite existing files without prompting")
 	cmd.Flags().BoolVarP(&skipAll, "skip", "S", false, "Skip existing files without prompting")
 	cmd.Flags().BoolVarP(&resumeAll, "resume", "r", false, "Resume interrupted downloads without prompting")
-	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Skip checksum verification (not recommended, allows corrupted downloads)")
+	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Skip checksum verification (not recommended; the file-size check still applies)")
 	cmd.Flags().StringVar(&filterPatterns, "filter", "", "Include only files matching these patterns (comma-separated glob patterns, e.g. \"*.dat,*.log\")")
 	cmd.Flags().StringVarP(&excludePatterns, "exclude", "x", "", "Exclude files matching these patterns (comma-separated glob patterns, e.g. \"debug*,temp*\")")
 	cmd.Flags().StringVarP(&searchTerms, "search", "s", "", "Include only files containing these terms in filename (comma-separated, case-insensitive)")

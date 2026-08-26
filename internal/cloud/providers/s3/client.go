@@ -291,11 +291,22 @@ func (c *S3Client) GetObject(ctx context.Context, objectKey string) (*s3.GetObje
 // GetObjectRangeOnce downloads a range of bytes WITHOUT retry (for use in provider-level retry).
 // This allows the provider to wrap the full request+read+close cycle in a single
 // retry loop, so a mid-transfer failure retries the whole cycle.
-func (c *S3Client) GetObjectRangeOnce(ctx context.Context, objectKey string, startByte, endByte int64) (*s3.GetObjectOutput, error) {
+//
+// A non-empty ifMatch pins the request to that ETag, so a download made of many
+// ranges fails outright if the object is replaced part way through instead of
+// returning a file stitched from two versions. S3 answers a mismatch with 412,
+// which the retry classifier treats as fatal.
+// ifMatch is accepted but currently always passed empty by callers
+// (per-request If-Match is disabled pending the ITAR proxy issue).
+func (c *S3Client) GetObjectRangeOnce(ctx context.Context, objectKey string, startByte, endByte int64, ifMatch string) (*s3.GetObjectOutput, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
-	return c.Client().GetObject(ctx, &s3.GetObjectInput{
+	input := &s3.GetObjectInput{
 		Bucket: aws.String(c.Bucket()),
 		Key:    aws.String(objectKey),
 		Range:  aws.String(rangeHeader),
-	})
+	}
+	if ifMatch != "" {
+		input.IfMatch = aws.String(ifMatch)
+	}
+	return c.Client().GetObject(ctx, input)
 }

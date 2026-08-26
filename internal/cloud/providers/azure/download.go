@@ -10,12 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"sync"
-	"sync/atomic"
-	"time"
 
-	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
@@ -122,7 +117,7 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 	// per-chunk retry is the only retry.
 	return transfer.DownloadChunkedToFile(ctx, azureClient.RetryWithBackoff, localPath, totalSize, progressCallback,
 		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length)
+			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
 			if err != nil {
 				return nil, err
 			}
@@ -131,224 +126,40 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 }
 
 // downloadChunkedConcurrent downloads a blob using concurrent range requests.
-// Full concurrent download implementation directly in provider, using AzureClient.
+// The shared driver owns the chunking, resume state, worker pool and writes; this
+// wrapper supplies only the Azure calls.
 func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *AzureClient, remotePath, localPath string, totalSize int64, progressCallback func(float64), transferHandle *internaltransfer.Transfer) error {
-	// Report 0% at start
-	if progressCallback != nil {
-		progressCallback(0.0)
-	}
-
-	// Check for existing resume state
-	existingState, _ := state.LoadDownloadState(localPath)
-	var completedChunksSet map[int64]bool = make(map[int64]bool)
-	var downloadedBytes int64 = 0
-	var currentETag string
-
-	// Get current blob ETag for resume validation
+	// The ETag pins the blob for resume validation: a resume state naming a
+	// different one is discarded. Range requests do not send it (see below).
 	props, err := azureClient.GetBlobProperties(ctx, remotePath)
 	if err != nil {
 		return fmt.Errorf("failed to get blob properties: %w", err)
 	}
-	currentETag = props.ETag
 
-	if existingState != nil {
-		// Validate resume state
-		if existingState.ETag == currentETag && existingState.TotalSize == totalSize {
-			// Resume is valid - convert slice to set for O(1) lookup
-			for _, chunkIdx := range existingState.CompletedChunks {
-				completedChunksSet[chunkIdx] = true
-			}
-			downloadedBytes = existingState.DownloadedBytes
-		} else {
-			// ETag mismatch or size changed - start fresh
-			state.DeleteDownloadState(localPath)
-		}
-	}
-
-	// Create or open output file
-	flags := os.O_CREATE | os.O_RDWR
-	file, err := os.OpenFile(localPath, flags, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to create/open file: %w", err)
-	}
-	// Track whether we successfully closed the file to avoid double-close from defer
-	fileClosed := false
-	defer func() {
-		if !fileClosed {
-			file.Close()
-		}
-	}()
-
-	// Truncate/extend file to final size for concurrent writes
-	if err := file.Truncate(totalSize); err != nil {
-		return fmt.Errorf("failed to truncate file: %w", err)
-	}
-
-	// Calculate chunks
-	chunkSize := int64(constants.ChunkSize)
-	totalChunks := (totalSize + chunkSize - 1) / chunkSize
-
-	// Build list of chunks to download
-	var chunksToDownload []int64
-	for chunkIdx := int64(0); chunkIdx < totalChunks; chunkIdx++ {
-		if !completedChunksSet[chunkIdx] {
-			chunksToDownload = append(chunksToDownload, chunkIdx)
-		}
-	}
-
-	if len(chunksToDownload) == 0 {
-		// All chunks already downloaded
-		if progressCallback != nil {
-			progressCallback(1.0)
-		}
-		return nil
-	}
-
-	// Set up worker pool
-	numWorkers := 4
+	concurrency := 4
 	if transferHandle != nil && transferHandle.GetThreads() > 0 {
-		numWorkers = transferHandle.GetThreads()
+		concurrency = transferHandle.GetThreads()
 	}
 
-	// Limit workers to number of chunks
-	if numWorkers > len(chunksToDownload) {
-		numWorkers = len(chunksToDownload)
-	}
-
-	// Channel for chunk indices
-	chunkChan := make(chan int64, len(chunksToDownload))
-	for _, chunkIdx := range chunksToDownload {
-		chunkChan <- chunkIdx
-	}
-	close(chunkChan)
-
-	// Error channel
-	errChan := make(chan error, numWorkers)
-
-	// Track progress atomically
-	var atomicDownloaded int64 = downloadedBytes
-	createdAt := time.Now()
-	if existingState != nil {
-		createdAt = existingState.CreatedAt
-	}
-
-	// Mutex for file writes and state updates
-	var fileMu sync.Mutex
-	var stateMu sync.Mutex
-
-	// Start workers
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			for chunkIdx := range chunkChan {
-				// Calculate byte range
-				startByte := chunkIdx * chunkSize
-				endByte := startByte + chunkSize
-				if endByte > totalSize {
-					endByte = totalSize
-				}
-				rangeSize := endByte - startByte
-
-				// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
-				// Uses DownloadRangeOnce, the non-retrying variant, so this loop is the only retry.
-				var chunkData []byte
-				err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk %d", chunkIdx), func() error {
-					// Per-attempt timeout to prevent stalled reads from hanging
-					attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-					defer cancel()
-
-					resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, startByte, rangeSize)
-					if err != nil {
-						return err
-					}
-					data, readErr := io.ReadAll(resp.Body)
-					resp.Body.Close() // Always close, even on read error
-					if readErr != nil {
-						return readErr
-					}
-					chunkData = data
-					return nil
-				})
-				if err != nil {
-					errChan <- fmt.Errorf("failed to download chunk %d: %w", chunkIdx, err)
-					return
-				}
-
-				// Write to file at correct offset (OUTSIDE retry - disk errors are not retryable)
-				fileMu.Lock()
-				_, err = file.WriteAt(chunkData, startByte)
-				fileMu.Unlock()
-				if err != nil {
-					errChan <- fmt.Errorf("failed to write chunk %d: %w", chunkIdx, err)
-					return
-				}
-
-				// Update progress
-				newDownloaded := atomic.AddInt64(&atomicDownloaded, rangeSize)
-				if progressCallback != nil && totalSize > 0 {
-					progressCallback(float64(newDownloaded) / float64(totalSize))
-				}
-
-				// Save resume state
-				stateMu.Lock()
-				completedChunksSet[chunkIdx] = true
-				// Convert set back to slice for serialization
-				completedChunksSlice := make([]int64, 0, len(completedChunksSet))
-				for idx := range completedChunksSet {
-					completedChunksSlice = append(completedChunksSlice, idx)
-				}
-				currentState := &state.DownloadResumeState{
-					LocalPath:       localPath,
-					EncryptedPath:   localPath,
-					RemotePath:      remotePath,
-					TotalSize:       totalSize,
-					DownloadedBytes: newDownloaded,
-					ETag:            currentETag,
-					ChunkSize:       chunkSize,
-					CompletedChunks: completedChunksSlice,
-					CreatedAt:       createdAt,
-					LastUpdate:      time.Now(),
-					StorageType:     "AzureStorage",
-				}
-				state.SaveDownloadState(currentState, localPath)
-				stateMu.Unlock()
+	return transfer.DownloadChunkedConcurrent(ctx, transfer.ChunkedConcurrentParams{
+		RemotePath:       remotePath,
+		LocalPath:        localPath,
+		TotalSize:        totalSize,
+		Concurrency:      concurrency,
+		StorageType:      "AzureStorage",
+		ObjectETag:       props.ETag,
+		Retry:            azureClient.RetryWithBackoff,
+		ProgressCallback: progressCallback,
+		// DownloadRangeOnce is the non-retrying variant, so the driver's
+		// per-chunk retry is the only retry.
+		Open: func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
+			// Per-request If-Match deliberately omitted (proxy ETag-mangling
+			// risk); staleness is caught by resume-state validation + checksums.
+			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
+			if err != nil {
+				return nil, err
 			}
-		}()
-	}
-
-	// Wait for workers
-	wg.Wait()
-	close(errChan)
-
-	errs := internaltransfer.CollectErrors(errChan)
-	if len(errs) > 0 {
-		return errs[0]
-	}
-
-	// Delete resume state on success
-	state.DeleteDownloadState(localPath)
-
-	// Sync file to disk before returning to ensure all data is written
-	// before checksum verification. Without this, sporadic checksum failures
-	// occur because the OS buffer may not be flushed yet.
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file to disk: %w", err)
-	}
-
-	// Explicit Close() before returning so the file handle is released
-	// before the caller reads the file for checksum verification.
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("failed to close file: %w", err)
-	}
-	fileClosed = true
-
-	// Report 100% at end
-	if progressCallback != nil {
-		progressCallback(1.0)
-	}
-
-	return nil
+			return resp.Body, nil
+		},
+	})
 }

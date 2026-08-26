@@ -78,10 +78,12 @@ const (
 	// Azure SAS tokens also expire at ~15 minutes
 	GlobalCredentialRefreshInterval = 10 * time.Minute
 
-	// AzurePeriodicRefreshInterval - periodic refresh for Azure long-running operations (8 minutes)
-	// Only used for Azure uploads/downloads of files >1GB
-	// Provides additional safety layer since Azure SDK has no automatic refresh
-	AzurePeriodicRefreshInterval = 8 * time.Minute
+	// PeriodicCredentialRefreshInterval - background refresh cadence for
+	// long-running transfers (8 minutes). Neither backend renews the credentials
+	// a transfer started with: Azure SAS URLs are static and the AWS SDK is
+	// handed static session credentials, so a multi-gigabyte transfer outlives
+	// its own token unless something refreshes on a timer.
+	PeriodicCredentialRefreshInterval = 8 * time.Minute
 
 	// LargeFileThreshold - files larger than this trigger periodic credential refresh (1 GB)
 	// Only applies to Azure backend (S3 uses AWS SDK automatic refresh)

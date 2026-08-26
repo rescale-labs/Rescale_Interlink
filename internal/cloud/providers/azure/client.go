@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -270,12 +272,12 @@ func (c *AzureClient) RetryWithBackoff(ctx context.Context, operation string, fn
 // Periodic Refresh (Layer 2 of 3-layer credential strategy)
 // =============================================================================
 
-// periodicRefresh refreshes credentials every azurePeriodicRefreshInterval for long-running operations.
+// periodicRefresh refreshes credentials on constants.PeriodicCredentialRefreshInterval for long-running operations.
 // This is Layer 2 of the 3-layer credential refresh strategy.
 func (c *AzureClient) periodicRefresh(ctx context.Context, operationCtx context.Context) {
 	defer c.refreshWg.Done()
 
-	ticker := time.NewTicker(constants.AzurePeriodicRefreshInterval)
+	ticker := time.NewTicker(constants.PeriodicCredentialRefreshInterval)
 	defer ticker.Stop()
 
 	for {
@@ -384,16 +386,32 @@ func (c *AzureClient) DownloadStream(ctx context.Context, blobPath string, optio
 // DownloadRangeOnce downloads a range of bytes WITHOUT retry (for use in provider-level retry).
 // This allows the provider to wrap the full request+read+close cycle in a single
 // retry loop, so a mid-transfer failure retries the whole cycle.
-func (c *AzureClient) DownloadRangeOnce(ctx context.Context, blobPath string, offset, count int64) (azblob.DownloadStreamResponse, error) {
+//
+// A non-empty ifMatch pins the request to that ETag, so a download made of many
+// ranges fails outright if the blob is replaced part way through instead of
+// returning a file stitched from two versions. Azure answers a mismatch with
+// 412, which the retry classifier treats as fatal.
+// ifMatch is accepted but currently always passed empty by callers
+// (per-request If-Match is disabled pending the ITAR proxy issue).
+func (c *AzureClient) DownloadRangeOnce(ctx context.Context, blobPath string, offset, count int64, ifMatch string) (azblob.DownloadStreamResponse, error) {
 	c.clientMu.Lock()
 	client := c.client
 	c.clientMu.Unlock()
 
-	blobClient := client.ServiceClient().NewContainerClient(c.Container()).NewBlobClient(blobPath)
-	return blobClient.DownloadStream(ctx, &azblob.DownloadStreamOptions{
+	options := &azblob.DownloadStreamOptions{
 		Range: azblob.HTTPRange{
 			Offset: offset,
 			Count:  count,
 		},
-	})
+	}
+	if ifMatch != "" {
+		options.AccessConditions = &blob.AccessConditions{
+			ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+				IfMatch: to.Ptr(azcore.ETag(ifMatch)),
+			},
+		}
+	}
+
+	blobClient := client.ServiceClient().NewContainerClient(c.Container()).NewBlobClient(blobPath)
+	return blobClient.DownloadStream(ctx, options)
 }

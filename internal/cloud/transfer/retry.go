@@ -10,7 +10,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -64,9 +66,29 @@ type OpenRange func(ctx context.Context, offset, length int64) (io.ReadCloser, e
 // reported by a failed attempt are rolled back with a negative delta so the
 // retry can report them again without double-counting.
 func FetchRangeWithRetry(ctx context.Context, retry Retrier, offset, length int64, progressCallback func(int64), open OpenRange) ([]byte, error) {
+	data, err := fetchRange(ctx, retry, fmt.Sprintf("DownloadRange [%d-%d]", offset, offset+length),
+		offset, length, progressCallback, open)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download range [%d-%d]: %w", offset, offset+length-1, err)
+	}
+
+	return data, nil
+}
+
+// fetchRange is FetchRangeWithRetry with the retry label and the error wording
+// left to the caller, for the shared download drivers that name their unit of
+// work differently ("DownloadPart 3", "DownloadChunk 7").
+//
+// Every caller asks for a range that lies inside the object, so a body shorter
+// than length means the transfer was cut short. That is the one failure a range
+// read cannot report on its own: the caller would otherwise write a short part
+// and only discover it at the checksum, or never on a file that has none. The
+// wording names EOF deliberately — the retry classifier reads it as a network
+// failure, which is what a body that stops early is, so the range is retried.
+func fetchRange(ctx context.Context, retry Retrier, operation string, offset, length int64, progressCallback func(int64), open OpenRange) ([]byte, error) {
 	var data []byte
 	var attemptBytes int64 // Track bytes reported in current attempt
-	err := retry(ctx, fmt.Sprintf("DownloadRange [%d-%d]", offset, offset+length), func() error {
+	err := retry(ctx, operation, func() error {
 		// Per-attempt timeout to prevent stalled reads from hanging
 		attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 		defer cancel()
@@ -92,6 +114,10 @@ func FetchRangeWithRetry(ctx context.Context, retry Retrier, offset, length int6
 
 		readData, readErr := io.ReadAll(reader)
 		body.Close() // Always close, even on read error
+		if readErr == nil && int64(len(readData)) != length {
+			readErr = fmt.Errorf("short range read at offset %d: EOF after %d of %d bytes",
+				offset, len(readData), length)
+		}
 		if readErr != nil {
 			if progressCallback != nil && attemptBytes > 0 {
 				progressCallback(-attemptBytes)
@@ -102,10 +128,47 @@ func FetchRangeWithRetry(ctx context.Context, retry Retrier, offset, length int6
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to download range [%d-%d]: %w", offset, offset+length-1, err)
+		return nil, err
 	}
 
 	return data, nil
+}
+
+// startCredentialRefresh renews storage credentials on a timer for as long as a
+// transfer runs, and returns the call that stops it. A multi-gigabyte transfer
+// outlives the token it started with, and without this the expiry only surfaces
+// as a failed request part way through.
+//
+// A failed refresh is logged, not fatal: the retry path refreshes again when a
+// request actually fails, so a missed tick is recoverable.
+func startCredentialRefresh(ctx context.Context, refresh func(context.Context) error) func() {
+	if refresh == nil {
+		return func() {}
+	}
+
+	refreshCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(constants.PeriodicCredentialRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := refresh(refreshCtx); err != nil {
+					log.Printf("[REFRESH] Periodic credential refresh failed: %v", err)
+				}
+			case <-refreshCtx.Done():
+				return
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		wg.Wait()
+	}
 }
 
 // WriteBodyWithProgress streams body into a new file at localPath, reporting
@@ -191,24 +254,8 @@ func DownloadChunkedToFile(ctx context.Context, retry Retrier, localPath string,
 			currentChunkSize = totalSize - offset
 		}
 
-		var chunkData []byte
-		err := retry(ctx, fmt.Sprintf("DownloadChunk offset=%d", offset), func() error {
-			// Per-attempt timeout to prevent stalled reads from hanging
-			attemptCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-			defer cancel()
-
-			body, err := open(attemptCtx, offset, currentChunkSize)
-			if err != nil {
-				return err
-			}
-			data, readErr := io.ReadAll(body)
-			body.Close() // Always close, even on read error
-			if readErr != nil {
-				return readErr
-			}
-			chunkData = data
-			return nil
-		})
+		chunkData, err := fetchRange(ctx, retry, fmt.Sprintf("DownloadChunk offset=%d", offset),
+			offset, currentChunkSize, nil, open)
 		if err != nil {
 			return fmt.Errorf("failed to download chunk at offset %d: %w", offset, err)
 		}
