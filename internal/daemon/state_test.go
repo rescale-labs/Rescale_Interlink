@@ -11,15 +11,182 @@ import (
 	"time"
 )
 
-func TestState_LoadAndSave(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "daemon-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+// ageLastAttempt rewinds a job's last-attempt stamp, which is what pushes it
+// out of (or keeps it inside) the retry backoff window.
+func ageLastAttempt(s *State, jobID string, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Downloaded[jobID].LastAttempt = time.Now().Add(-d)
+}
 
-	stateFile := filepath.Join(tmpDir, "state.json")
+// TestState_FailureLifecycle drives one job through a sequence of MarkFailed /
+// MarkDownloaded / ClearFailed calls and then reads the whole verdict: the
+// stored entry, the attempt count, and whether IsDownloaded suppresses the job.
+// Every row asserts all four, so the retry counter, the recorded error, the
+// backoff window and the give-up rule are pinned together.
+func TestState_FailureLifecycle(t *testing.T) {
+	const jobID = "job1"
+
+	tests := []struct {
+		name         string
+		steps        func(s *State)
+		wantMissing  bool   // no entry at all
+		wantRetry    int    // entry.RetryCount
+		wantError    string // entry.Error
+		wantAttempts int    // AttemptCount
+		wantHeld     bool   // IsDownloaded: downloaded, or suppressed
+	}{
+		{
+			name:        "no entry",
+			wantMissing: true,
+		},
+		{
+			name:     "clean success",
+			steps:    func(s *State) { s.MarkDownloaded(jobID, "Test Job 1", "/output", 1, 100) },
+			wantHeld: true,
+		},
+		{
+			name:         "one failure",
+			steps:        func(s *State) { s.MarkFailed(jobID, "Test Job 1", fmt.Errorf("connection timeout")) },
+			wantRetry:    1,
+			wantError:    "connection timeout",
+			wantAttempts: 1,
+			wantHeld:     true, // freshly failed jobs are suppressed during backoff
+		},
+		{
+			name: "two failures",
+			steps: func(s *State) {
+				s.MarkFailed(jobID, "Job One", fmt.Errorf("boom"))
+				s.MarkFailed(jobID, "Job One", fmt.Errorf("boom again"))
+			},
+			wantRetry:    2,
+			wantError:    "boom again",
+			wantAttempts: 2,
+			wantHeld:     true,
+		},
+		{
+			name: "three failures keep the latest error",
+			steps: func(s *State) {
+				for i := 1; i <= 3; i++ {
+					s.MarkFailed(jobID, "Test Job", fmt.Errorf("error %d", i))
+				}
+			},
+			wantRetry:    3,
+			wantError:    "error 3",
+			wantAttempts: 3,
+			wantHeld:     true,
+		},
+		{
+			// A success replaces the failure entry, so the count resets.
+			name: "success after failures",
+			steps: func(s *State) {
+				s.MarkFailed(jobID, "Test Job", fmt.Errorf("error 1"))
+				s.MarkFailed(jobID, "Test Job", fmt.Errorf("error 2"))
+				s.MarkDownloaded(jobID, "Test Job", "/output", 5, 1024)
+			},
+			wantHeld: true,
+		},
+		{
+			name: "backoff expired after a failure",
+			steps: func(s *State) {
+				s.MarkFailed(jobID, "Test Job 2", fmt.Errorf("network error"))
+				ageLastAttempt(s, jobID, 6*time.Minute)
+			},
+			wantRetry:    1,
+			wantError:    "network error",
+			wantAttempts: 1,
+			wantHeld:     false, // eligible for retry once backoff expires
+		},
+		{
+			// Same verdict from a hand-built entry rather than MarkFailed.
+			name: "backoff expired on a seeded entry",
+			steps: func(s *State) {
+				s.Downloaded[jobID] = &DownloadedJob{
+					JobID:       jobID,
+					JobName:     "Test Job",
+					Error:       "network error",
+					RetryCount:  1,
+					LastAttempt: time.Now(),
+				}
+				if !s.IsDownloaded(jobID) {
+					t.Error("job1 should be suppressed during backoff period")
+				}
+				ageLastAttempt(s, jobID, 6*time.Minute)
+			},
+			wantRetry:    1,
+			wantError:    "network error",
+			wantAttempts: 1,
+			wantHeld:     false,
+		},
+		{
+			// Even with the last attempt far in the past, five failures are
+			// permanently suppressed.
+			name: "gives up after five failures",
+			steps: func(s *State) {
+				for i := 1; i <= 5; i++ {
+					s.MarkFailed(jobID, "Test Job", fmt.Errorf("error %d", i))
+				}
+				ageLastAttempt(s, jobID, time.Hour)
+			},
+			wantRetry:    5,
+			wantError:    "error 5",
+			wantAttempts: 5,
+			wantHeld:     true,
+		},
+		{
+			name: "clearing a failure drops the entry",
+			steps: func(s *State) {
+				s.MarkFailed(jobID, "Test Job 1", fmt.Errorf("error"))
+				s.ClearFailed(jobID)
+			},
+			wantMissing: true,
+		},
+		{
+			// ClearFailed must not touch a successfully downloaded job.
+			name: "clearing a success keeps the entry",
+			steps: func(s *State) {
+				s.MarkDownloaded(jobID, "Test Job 2", "/output", 1, 100)
+				s.ClearFailed(jobID)
+			},
+			wantHeld: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := NewState("")
+			if tc.steps != nil {
+				tc.steps(state)
+			}
+
+			job, exists := state.Downloaded[jobID]
+			if tc.wantMissing {
+				if exists {
+					t.Errorf("expected no entry for %s, got %+v", jobID, job)
+				}
+			} else {
+				if !exists || job == nil {
+					t.Fatalf("%s not found in state", jobID)
+				}
+				if job.RetryCount != tc.wantRetry {
+					t.Errorf("RetryCount = %d, want %d", job.RetryCount, tc.wantRetry)
+				}
+				if job.Error != tc.wantError {
+					t.Errorf("Error = %q, want %q", job.Error, tc.wantError)
+				}
+			}
+			if got := state.AttemptCount(jobID); got != tc.wantAttempts {
+				t.Errorf("AttemptCount = %d, want %d", got, tc.wantAttempts)
+			}
+			if got := state.IsDownloaded(jobID); got != tc.wantHeld {
+				t.Errorf("IsDownloaded = %v, want %v", got, tc.wantHeld)
+			}
+		})
+	}
+}
+
+func TestState_LoadAndSave(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
 
 	// Test 1: Fresh state with no file
 	state := NewState(stateFile)
@@ -62,81 +229,8 @@ func TestState_LoadAndSave(t *testing.T) {
 	}
 }
 
-func TestState_IsDownloaded(t *testing.T) {
-	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
-
-	// Test 1: Not downloaded
-	if state.IsDownloaded("job1") {
-		t.Error("job1 should not be marked as downloaded")
-	}
-
-	// Test 2: Successfully downloaded
-	state.MarkDownloaded("job1", "Test Job 1", "/output", 1, 100)
-	if !state.IsDownloaded("job1") {
-		t.Error("job1 should be marked as downloaded")
-	}
-
-	// Test 3: Failed download within backoff period should be considered "downloaded" (skip)
-	// Freshly failed jobs are suppressed during backoff
-	state.MarkFailed("job2", "Test Job 2", fmt.Errorf("network error"))
-	if !state.IsDownloaded("job2") {
-		t.Error("job2 should be suppressed during backoff period (just failed)")
-	}
-
-	// Test 4: Failed download past backoff period should NOT be considered downloaded (allow retry)
-	state.mu.Lock()
-	state.Downloaded["job2"].LastAttempt = time.Now().Add(-6 * time.Minute)
-	state.mu.Unlock()
-	if state.IsDownloaded("job2") {
-		t.Error("job2 should be eligible for retry after backoff expires")
-	}
-}
-
-func TestState_MarkFailed(t *testing.T) {
-	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
-
-	state.MarkFailed("job1", "Test Job 1", fmt.Errorf("connection timeout"))
-
-	job := state.Downloaded["job1"]
-	if job == nil {
-		t.Fatal("job1 not found")
-	}
-	if job.Error == "" {
-		t.Error("Expected error to be set")
-	}
-	if job.Error != "connection timeout" {
-		t.Errorf("Expected error 'connection timeout', got %q", job.Error)
-	}
-}
-
-func TestState_ClearFailed(t *testing.T) {
-	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
-
-	// Mark job as failed
-	state.MarkFailed("job1", "Test Job 1", fmt.Errorf("error"))
-
-	// Clear failed status
-	state.ClearFailed("job1")
-
-	// Verify it's gone
-	if _, exists := state.Downloaded["job1"]; exists {
-		t.Error("job1 should have been removed after ClearFailed")
-	}
-
-	// Clearing successfully downloaded job should not remove it
-	state.MarkDownloaded("job2", "Test Job 2", "/output", 1, 100)
-	state.ClearFailed("job2")
-	if _, exists := state.Downloaded["job2"]; !exists {
-		t.Error("job2 should still exist (it wasn't failed)")
-	}
-}
-
 func TestState_Counts(t *testing.T) {
 	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
 
 	// Initial counts
 	if state.GetDownloadedCount() != 0 {
@@ -146,7 +240,6 @@ func TestState_Counts(t *testing.T) {
 		t.Errorf("Expected 0 failures, got %d", state.GetFailedCount())
 	}
 
-	// Add some downloads
 	state.MarkDownloaded("job1", "Job 1", "/output", 1, 100)
 	state.MarkDownloaded("job2", "Job 2", "/output", 1, 100)
 	state.MarkFailed("job3", "Job 3", fmt.Errorf("error"))
@@ -161,24 +254,22 @@ func TestState_Counts(t *testing.T) {
 
 func TestState_GetRecentDownloads(t *testing.T) {
 	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
 
 	// Add downloads with different times
 	now := time.Now()
-	state.Downloaded["job1"] = &DownloadedJob{
-		JobID:        "job1",
-		JobName:      "Job 1",
-		DownloadedAt: now.Add(-3 * time.Hour),
-	}
-	state.Downloaded["job2"] = &DownloadedJob{
-		JobID:        "job2",
-		JobName:      "Job 2",
-		DownloadedAt: now.Add(-1 * time.Hour),
-	}
-	state.Downloaded["job3"] = &DownloadedJob{
-		JobID:        "job3",
-		JobName:      "Job 3",
-		DownloadedAt: now.Add(-2 * time.Hour),
+	for _, seed := range []struct {
+		id  string
+		age time.Duration
+	}{
+		{"job1", 3 * time.Hour},
+		{"job2", 1 * time.Hour},
+		{"job3", 2 * time.Hour},
+	} {
+		state.Downloaded[seed.id] = &DownloadedJob{
+			JobID:        seed.id,
+			JobName:      seed.id,
+			DownloadedAt: now.Add(-seed.age),
+		}
 	}
 
 	// Get all
@@ -222,30 +313,21 @@ func TestState_LastPoll(t *testing.T) {
 
 // TestState_FilePermissions verifies that state files are created with secure permissions (0600).
 func TestState_FilePermissions(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "daemon-test-perms-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	stateFile := filepath.Join(t.TempDir(), "state.json")
 
-	stateFile := filepath.Join(tmpDir, "state.json")
-
-	// Create and save state
 	state := NewState(stateFile)
 	state.MarkDownloaded("job1", "Test Job", "/output", 1, 100)
 	if err := state.Save(); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 
-	// Check file permissions
 	info, err := os.Stat(stateFile)
 	if err != nil {
 		t.Fatalf("Failed to stat state file: %v", err)
 	}
 
-	// On Unix, permissions should be 0600 (owner read/write only)
-	// On Windows, this test is less meaningful but should still pass
+	// On Unix, permissions should be 0600 (owner read/write only).
+	// On Windows, this test is less meaningful but should still pass.
 	perm := info.Mode().Perm()
 	expectedPerm := os.FileMode(0600)
 
@@ -307,8 +389,7 @@ func TestState_SaveUsesUniqueTempFile(t *testing.T) {
 // still owed a tag call are exempt: dropping one would let the job be
 // downloaded a second time.
 func TestState_PruneOnSaveRespectsRetention(t *testing.T) {
-	dir := t.TempDir()
-	stateFile := filepath.Join(dir, "state.json")
+	stateFile := filepath.Join(t.TempDir(), "state.json")
 
 	state := NewState(stateFile)
 	now := time.Now()
@@ -342,136 +423,11 @@ func TestState_PruneOnSaveRespectsRetention(t *testing.T) {
 	}
 }
 
-// AttemptCount drives the Transfers-row label for repeat attempts, so it has to
-// count only real prior failures.
-func TestState_AttemptCount(t *testing.T) {
-	state := NewState(filepath.Join(t.TempDir(), "state.json"))
-
-	if got := state.AttemptCount("unknown"); got != 0 {
-		t.Errorf("AttemptCount(unknown) = %d, want 0", got)
-	}
-
-	state.MarkFailed("job1", "Job One", fmt.Errorf("boom"))
-	if got := state.AttemptCount("job1"); got != 1 {
-		t.Errorf("after one failure AttemptCount = %d, want 1", got)
-	}
-
-	state.MarkFailed("job1", "Job One", fmt.Errorf("boom again"))
-	if got := state.AttemptCount("job1"); got != 2 {
-		t.Errorf("after two failures AttemptCount = %d, want 2", got)
-	}
-
-	// A success replaces the failure entry, so the count resets.
-	state.MarkDownloaded("job1", "Job One", "/out", 1, 10)
-	if got := state.AttemptCount("job1"); got != 0 {
-		t.Errorf("after success AttemptCount = %d, want 0", got)
-	}
-}
-
-func TestState_RetryBackoff(t *testing.T) {
-	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
-
-	// Mark as failed with retry count 1 and recent attempt
-	state.Downloaded["job1"] = &DownloadedJob{
-		JobID:       "job1",
-		JobName:     "Test Job",
-		Error:       "network error",
-		RetryCount:  1,
-		LastAttempt: time.Now(), // just now
-	}
-
-	// Should be suppressed (within 5min backoff)
-	if !state.IsDownloaded("job1") {
-		t.Error("job1 should be suppressed during backoff period")
-	}
-
-	// Set last attempt to well past backoff (6 minutes ago)
-	state.mu.Lock()
-	state.Downloaded["job1"].LastAttempt = time.Now().Add(-6 * time.Minute)
-	state.mu.Unlock()
-
-	// Should now be eligible for retry
-	if state.IsDownloaded("job1") {
-		t.Error("job1 should be eligible for retry after backoff expires")
-	}
-}
-
-func TestState_MarkFailedPreservesRetryCount(t *testing.T) {
-	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
-
-	// Three sequential failures
-	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 1"))
-	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 2"))
-	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 3"))
-
-	job := state.Downloaded["job1"]
-	if job.RetryCount != 3 {
-		t.Errorf("Expected RetryCount=3 after 3 failures, got %d", job.RetryCount)
-	}
-	if job.Error != "error 3" {
-		t.Errorf("Expected latest error message, got %q", job.Error)
-	}
-}
-
-func TestState_RetryGivesUpAfter5(t *testing.T) {
-	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
-
-	// Simulate 5 failures
-	for i := 0; i < 5; i++ {
-		state.MarkFailed("job1", "Test Job", fmt.Errorf("error %d", i+1))
-	}
-
-	// Even with last attempt far in the past, should be permanently suppressed
-	state.mu.Lock()
-	state.Downloaded["job1"].LastAttempt = time.Now().Add(-1 * time.Hour)
-	state.mu.Unlock()
-
-	if !state.IsDownloaded("job1") {
-		t.Error("job1 should be permanently suppressed after 5 failures")
-	}
-}
-
-func TestState_SuccessResetsRetryCount(t *testing.T) {
-	state := NewState("")
-	state.Downloaded = make(map[string]*DownloadedJob)
-
-	// Fail twice
-	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 1"))
-	state.MarkFailed("job1", "Test Job", fmt.Errorf("error 2"))
-
-	if state.Downloaded["job1"].RetryCount != 2 {
-		t.Fatalf("Expected RetryCount=2, got %d", state.Downloaded["job1"].RetryCount)
-	}
-
-	// Succeed
-	state.MarkDownloaded("job1", "Test Job", "/output", 5, 1024)
-
-	job := state.Downloaded["job1"]
-	if job.RetryCount != 0 {
-		t.Errorf("Expected RetryCount=0 after success, got %d", job.RetryCount)
-	}
-	if job.Error != "" {
-		t.Errorf("Expected empty error after success, got %q", job.Error)
-	}
-	if !state.IsDownloaded("job1") {
-		t.Error("job1 should be marked as downloaded after success")
-	}
-}
-
-// TestState_PendingTagApply — Plan 3: verifies the pending-tag-apply flag
-// lifecycle: mark, clear, list. Also asserts the field round-trips through
-// JSON via omitempty (absent means false).
+// TestState_PendingTagApply verifies the pending-tag-apply flag lifecycle:
+// mark, clear, list. Also asserts the field round-trips through JSON via
+// omitempty (absent means false).
 func TestState_PendingTagApply(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "daemon-state-pending-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	stateFile := filepath.Join(tmpDir, "state.json")
+	stateFile := filepath.Join(t.TempDir(), "state.json")
 
 	s := NewState(stateFile)
 	if err := s.Load(); err != nil {
@@ -517,33 +473,25 @@ func TestState_PendingTagApply(t *testing.T) {
 	}
 }
 
-// TestFindCompletedJobs_RespectsPendingSet — Plan 3 F2: jobs in the
-// pendingSet are skipped with ReasonPendingTagApply, never reach
-// CheckEligibility, and therefore cannot be re-enqueued for download
-// while their tag is still being retried.
+// TestFindCompletedJobs_RespectsPendingSet — jobs in the pendingSet are skipped
+// with ReasonPendingTagApply, never reach CheckEligibility, and therefore
+// cannot be re-enqueued for download while their tag is still being retried.
 //
-// Note: this test drives the monitor with a local state and mock job
-// list via the state.IsDownloaded path since the monitor's API client
-// isn't mockable without broader refactoring. The test shape targets the
-// pendingSet code path directly.
+// Note: this test drives the monitor with a local state and mock job list via
+// the state.IsDownloaded path since the monitor's API client isn't mockable
+// without broader refactoring. The test shape targets the pendingSet code path
+// directly. Full eligibility integration testing is covered by integration
+// suites.
 func TestFindCompletedJobs_RespectsPendingSet(t *testing.T) {
-	// Light assertion: verify pendingSet skips a job via the new path.
-	// Full eligibility integration testing is covered by integration suites.
-	tmpDir, err := os.MkdirTemp("", "daemon-find-pending-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	s := NewState(filepath.Join(tmpDir, "state.json"))
+	s := NewState(filepath.Join(t.TempDir(), "state.json"))
 	if err := s.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	s.MarkDownloaded("pending-job", "Pending", "/tmp", 1, 100)
 	s.MarkPendingTagApply("pending-job")
 
-	// A direct assertion: PendingTagApplyJobs reports the job, so poll
-	// would wrap it into pendingSet and FindCompletedJobs would skip it.
+	// A direct assertion: PendingTagApplyJobs reports the job, so poll would
+	// wrap it into pendingSet and FindCompletedJobs would skip it.
 	pending := s.PendingTagApplyJobs()
 	if len(pending) != 1 || pending[0] != "pending-job" {
 		t.Errorf("PendingTagApplyJobs = %v, want [pending-job]", pending)

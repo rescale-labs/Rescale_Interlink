@@ -26,220 +26,189 @@ func newTestResourceMgr() *resources.Manager {
 	})
 }
 
-func TestRunBatch_Empty(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  10,
+// batchCfg is the config every batch test starts from; rows add their own knobs.
+func batchCfg(maxWorkers int, label string) BatchConfig {
+	return BatchConfig{
+		MaxWorkers:  maxWorkers,
 		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	result := RunBatch[testItem](context.Background(), nil, cfg, func(ctx context.Context, item testItem) error {
-		t.Fatal("execute should not be called for empty batch")
-		return nil
-	})
-	if result.Completed != 0 || result.Failed != 0 || len(result.Errors) != 0 {
-		t.Errorf("empty batch should return zero result, got %+v", result)
+		Label:       label,
 	}
 }
 
-func TestRunBatch_SingleItem(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  10,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	items := []testItem{{size: 1024, id: "file1"}}
-	result := RunBatch(context.Background(), items, cfg, func(ctx context.Context, item testItem) error {
-		return nil
-	})
-	if result.Completed != 1 {
-		t.Errorf("expected 1 completed, got %d", result.Completed)
-	}
-}
-
-func TestRunBatch_AllSucceed(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  5,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	items := make([]testItem, 20)
+// sizedItems returns n work items of the given size.
+func sizedItems(n int, size int64) []testItem {
+	items := make([]testItem, n)
 	for i := range items {
-		items[i] = testItem{size: 1024 * 1024, id: "file"} // 1MB each (small files)
+		items[i] = testItem{size: size, id: "file"}
 	}
-	var executed atomic.Int32
-	result := RunBatch(context.Background(), items, cfg, func(ctx context.Context, item testItem) error {
-		executed.Add(1)
-		return nil
-	})
-	if result.Completed != 20 {
-		t.Errorf("expected 20 completed, got %d", result.Completed)
-	}
-	if result.Failed != 0 {
-		t.Errorf("expected 0 failed, got %d", result.Failed)
-	}
-	if int(executed.Load()) != 20 {
-		t.Errorf("expected 20 executed, got %d", executed.Load())
-	}
+	return items
 }
 
-func TestRunBatch_ErrorPropagation(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  5,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
+// filledChan returns a closed channel already holding n items of the given size.
+func filledChan(n int, size int64) chan testItem {
+	ch := make(chan testItem, n+1)
+	for _, item := range sizedItems(n, size) {
+		ch <- item
 	}
-	items := make([]testItem, 10)
-	for i := range items {
-		items[i] = testItem{size: 1024, id: "file"}
-	}
-	errTest := errors.New("test error")
-	result := RunBatch(context.Background(), items, cfg, func(ctx context.Context, item testItem) error {
-		return errTest
-	})
-	if result.Failed != 10 {
-		t.Errorf("expected 10 failed, got %d", result.Failed)
-	}
-	if len(result.Errors) != 10 {
-		t.Errorf("expected 10 errors, got %d", len(result.Errors))
-	}
-	for _, err := range result.Errors {
-		if !errors.Is(err, errTest) {
-			t.Errorf("expected test error, got %v", err)
+	close(ch)
+	return ch
+}
+
+// noopExec is the execute func for rows that only care about the batch result.
+func noopExec(context.Context, testItem) error { return nil }
+
+// trackConcurrency records the highest number of executions running at once.
+func trackConcurrency(peak *atomic.Int32) func(context.Context, testItem) error {
+	var current atomic.Int32
+	return func(context.Context, testItem) error {
+		c := current.Add(1)
+		for {
+			prev := peak.Load()
+			if c <= prev || peak.CompareAndSwap(prev, c) {
+				break
+			}
 		}
+		time.Sleep(time.Millisecond)
+		current.Add(-1)
+		return nil
+	}
+}
+
+// TestRunBatch runs a slice of work items to completion. Rows differ only in
+// the batch size, the item size and whether the executor fails.
+func TestRunBatch(t *testing.T) {
+	errTest := errors.New("test error")
+
+	tests := []struct {
+		name          string
+		maxWorkers    int
+		items         int
+		size          int64
+		execErr       error
+		wantCompleted int
+		wantFailed    int
+	}{
+		{name: "empty batch", maxWorkers: 10, items: 0},
+		{name: "single item", maxWorkers: 10, items: 1, size: 1024, wantCompleted: 1},
+		{name: "all succeed", maxWorkers: 5, items: 20, size: 1024 * 1024, wantCompleted: 20},
+		{name: "all fail", maxWorkers: 5, items: 10, size: 1024, execErr: errTest, wantFailed: 10},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var executed atomic.Int32
+			result := RunBatch(context.Background(), sizedItems(tc.items, tc.size),
+				batchCfg(tc.maxWorkers, "TEST"),
+				func(context.Context, testItem) error {
+					executed.Add(1)
+					return tc.execErr
+				})
+
+			if result.Completed != tc.wantCompleted {
+				t.Errorf("Completed = %d, want %d", result.Completed, tc.wantCompleted)
+			}
+			if result.Failed != tc.wantFailed {
+				t.Errorf("Failed = %d, want %d", result.Failed, tc.wantFailed)
+			}
+			if len(result.Errors) != tc.wantFailed {
+				t.Errorf("len(Errors) = %d, want %d", len(result.Errors), tc.wantFailed)
+			}
+			for _, err := range result.Errors {
+				if !errors.Is(err, tc.execErr) {
+					t.Errorf("expected %v, got %v", tc.execErr, err)
+				}
+			}
+			// Covers "execute must not be called for an empty batch" too.
+			if int(executed.Load()) != tc.items {
+				t.Errorf("executed %d times, want %d", executed.Load(), tc.items)
+			}
+		})
+	}
+}
+
+// TestRunBatch_ComputedWorkers pins adaptive concurrency to file size: big
+// files get few workers, small files get many.
+func TestRunBatch_ComputedWorkers(t *testing.T) {
+	tests := []struct {
+		name        string
+		maxWorkers  int
+		items       int
+		size        int64
+		wantAtLeast int
+		wantAtMost  int // 0: no upper bound asserted
+	}{
+		{
+			name: "large files get few workers", maxWorkers: 20, items: 10,
+			size: 2 * 1024 * 1024 * 1024, wantAtLeast: 1, wantAtMost: 5,
+		},
+		{
+			name: "small files get many workers", maxWorkers: 20, items: 30,
+			size: 1024 * 1024, wantAtLeast: 5,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			workers := ComputedWorkers(sizedItems(tc.items, tc.size), batchCfg(tc.maxWorkers, "TEST"))
+			if workers < tc.wantAtLeast {
+				t.Errorf("ComputedWorkers = %d, want >= %d", workers, tc.wantAtLeast)
+			}
+			if tc.wantAtMost > 0 && workers > tc.wantAtMost {
+				t.Errorf("ComputedWorkers = %d, want <= %d", workers, tc.wantAtMost)
+			}
+		})
+	}
+}
+
+// TestRunBatch_Concurrency pins the observed parallelism: never above
+// MaxWorkers, and exactly one at a time under ForceSequential.
+func TestRunBatch_Concurrency(t *testing.T) {
+	tests := []struct {
+		name           string
+		maxWorkers     int
+		items          int
+		sequential     bool
+		wantPeakAtMost int32
+	}{
+		{name: "force sequential", maxWorkers: 10, items: 5, sequential: true, wantPeakAtMost: 1},
+		{name: "never exceeds max workers", maxWorkers: 3, items: 50, wantPeakAtMost: 3},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := batchCfg(tc.maxWorkers, "TEST")
+			cfg.ForceSequential = tc.sequential
+
+			var peak atomic.Int32
+			result := RunBatch(context.Background(), sizedItems(tc.items, 1024), cfg,
+				trackConcurrency(&peak))
+
+			if result.Completed != tc.items {
+				t.Errorf("Completed = %d, want %d", result.Completed, tc.items)
+			}
+			if peak.Load() > tc.wantPeakAtMost {
+				t.Errorf("peak concurrency %d, want <= %d", peak.Load(), tc.wantPeakAtMost)
+			}
+		})
 	}
 }
 
 func TestRunBatch_ContextCancellation(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  3,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	items := make([]testItem, 100)
-	for i := range items {
-		items[i] = testItem{size: 1024, id: "file"}
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	var executed atomic.Int32
-	result := RunBatch(ctx, items, cfg, func(ctx context.Context, item testItem) error {
-		if executed.Add(1) == 5 {
-			cancel()
-		}
-		// Simulate some work.
-		time.Sleep(time.Millisecond)
-		return nil
-	})
+	result := RunBatch(ctx, sizedItems(100, 1024), batchCfg(3, "TEST"),
+		func(context.Context, testItem) error {
+			if executed.Add(1) == 5 {
+				cancel()
+			}
+			// Simulate some work.
+			time.Sleep(time.Millisecond)
+			return nil
+		})
 
 	// Some items should have completed; not all 100.
-	total := result.Completed + result.Failed
-	if total >= 100 {
+	if total := result.Completed + result.Failed; total >= 100 {
 		t.Errorf("cancellation should have stopped processing before all 100 items, got %d", total)
-	}
-}
-
-func TestRunBatch_ForceSequential(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:      10,
-		ResourceMgr:     newTestResourceMgr(),
-		Label:           "TEST",
-		ForceSequential: true,
-	}
-	items := make([]testItem, 5)
-	for i := range items {
-		items[i] = testItem{size: 1024, id: "file"}
-	}
-
-	var maxConcurrent atomic.Int32
-	var current atomic.Int32
-	result := RunBatch(context.Background(), items, cfg, func(ctx context.Context, item testItem) error {
-		c := current.Add(1)
-		for {
-			prev := maxConcurrent.Load()
-			if c <= prev || maxConcurrent.CompareAndSwap(prev, c) {
-				break
-			}
-		}
-		time.Sleep(time.Millisecond)
-		current.Add(-1)
-		return nil
-	})
-
-	if result.Completed != 5 {
-		t.Errorf("expected 5 completed, got %d", result.Completed)
-	}
-	if maxConcurrent.Load() != 1 {
-		t.Errorf("ForceSequential should allow max 1 concurrent, got %d", maxConcurrent.Load())
-	}
-}
-
-func TestRunBatch_AdaptiveConcurrency_LargeFiles(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  20,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	// Large files (2GB each) should get fewer workers.
-	items := make([]testItem, 10)
-	for i := range items {
-		items[i] = testItem{size: 2 * 1024 * 1024 * 1024, id: "largefile"}
-	}
-
-	workers := ComputedWorkers(items, cfg)
-	if workers > 5 {
-		t.Errorf("large files (2GB) should get <= 5 workers, got %d", workers)
-	}
-	if workers < 1 {
-		t.Errorf("should get at least 1 worker, got %d", workers)
-	}
-}
-
-func TestRunBatch_AdaptiveConcurrency_SmallFiles(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  20,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	// Small files (1MB each) should get more workers.
-	items := make([]testItem, 30)
-	for i := range items {
-		items[i] = testItem{size: 1024 * 1024, id: "smallfile"}
-	}
-
-	workers := ComputedWorkers(items, cfg)
-	if workers < 5 {
-		t.Errorf("small files (1MB) should get >= 5 workers, got %d", workers)
-	}
-}
-
-func TestRunBatch_WorkerCountNeverExceedsMax(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  3,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	items := make([]testItem, 50)
-	for i := range items {
-		items[i] = testItem{size: 1024, id: "file"}
-	}
-
-	var maxConcurrent atomic.Int32
-	var current atomic.Int32
-	RunBatch(context.Background(), items, cfg, func(ctx context.Context, item testItem) error {
-		c := current.Add(1)
-		for {
-			prev := maxConcurrent.Load()
-			if c <= prev || maxConcurrent.CompareAndSwap(prev, c) {
-				break
-			}
-		}
-		time.Sleep(time.Millisecond)
-		current.Add(-1)
-		return nil
-	})
-
-	if maxConcurrent.Load() > 3 {
-		t.Errorf("worker count should never exceed MaxWorkers=3, observed %d", maxConcurrent.Load())
 	}
 }
 
@@ -252,270 +221,207 @@ func TestRunBatch_PanicOnNilResourceMgr(t *testing.T) {
 	RunBatch(context.Background(), []testItem{{size: 1}}, BatchConfig{
 		MaxWorkers: 5,
 		Label:      "TEST",
-	}, func(ctx context.Context, item testItem) error {
-		return nil
-	})
+	}, noopExec)
 }
 
 // --- RunBatchFromChannel tests ---
 
-func TestRunBatchFromChannel_Empty(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  10,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	ch := make(chan testItem)
-	close(ch)
-	result, adaptive := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		t.Fatal("execute should not be called for empty channel")
-		return nil
-	})
-	if result.Completed != 0 || result.Failed != 0 {
-		t.Errorf("empty channel should return zero result, got %+v", result)
-	}
-	if adaptive.Load() <= 0 {
-		t.Errorf("adaptive count should be positive, got %d", adaptive.Load())
-	}
-}
-
-func TestRunBatchFromChannel_BasicExecution(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  10,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	ch := make(chan testItem, 15)
-	for i := 0; i < 15; i++ {
-		ch <- testItem{size: 1024 * 1024, id: "file"}
-	}
-	close(ch)
-
-	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		return nil
-	})
-	if result.Completed != 15 {
-		t.Errorf("expected 15 completed, got %d", result.Completed)
-	}
-}
-
-func TestRunBatchFromChannel_SmallStream(t *testing.T) {
-	// Channel closes before sample size of 20 — should still compute adaptive.
-	cfg := BatchConfig{
-		MaxWorkers:  20,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-	var scaleChecked atomic.Bool
-	cfg.ScaleCheckHook = func() {
-		scaleChecked.Store(true)
-	}
-
-	ch := make(chan testItem, 5)
-	for i := 0; i < 5; i++ {
-		ch <- testItem{size: 1024, id: "small"}
-	}
-	close(ch)
-
-	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		return nil
-	})
-	if result.Completed != 5 {
-		t.Errorf("expected 5 completed, got %d", result.Completed)
-	}
-	if !scaleChecked.Load() {
-		t.Error("expected ScaleCheckHook to be called for small stream (< sample size)")
-	}
-}
-
-func TestRunBatchFromChannel_DynamicScaling(t *testing.T) {
-	// Send enough items to trigger initial sample + resample.
-	cfg := BatchConfig{
-		MaxWorkers:  20,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
-	}
-
-	var scaleCheckCount atomic.Int32
-	cfg.ScaleCheckHook = func() {
-		scaleCheckCount.Add(1)
-	}
-
-	ch := make(chan testItem, 100)
-	// 100 small files: should trigger sample at 20 + resample at 70.
-	for i := 0; i < 100; i++ {
-		ch <- testItem{size: 1024, id: "small"}
-	}
-	close(ch)
-
-	result, adaptive := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		return nil
-	})
-	if result.Completed != 100 {
-		t.Errorf("expected 100 completed, got %d", result.Completed)
-	}
-	if adaptive.Load() < 1 {
-		t.Errorf("adaptive count should be positive, got %d", adaptive.Load())
-	}
-	// Should have at least 1 scale check (initial sample at 20).
-	if scaleCheckCount.Load() < 1 {
-		t.Errorf("expected at least 1 scale check, got %d", scaleCheckCount.Load())
-	}
-}
-
-func TestRunBatchFromChannel_ContextCancellation(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  5,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST",
+// TestRunBatchFromChannel streams a closed, pre-filled channel to completion.
+// Every row asserts the same three things — all items completed, none failed,
+// and a positive adaptive worker count — and states its own deltas through
+// setup, which wires config knobs and returns the row's extra assertion.
+func TestRunBatchFromChannel(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxWorkers int
+		label      string
+		items      int
+		size       int64
+		setup      func(t *testing.T, cfg *BatchConfig) (exec func(context.Context, testItem) error, verify func(t *testing.T))
+	}{
+		{
+			name: "empty channel", maxWorkers: 10, label: "TEST", items: 0,
+			setup: func(t *testing.T, _ *BatchConfig) (func(context.Context, testItem) error, func(*testing.T)) {
+				return func(context.Context, testItem) error {
+					t.Error("execute should not be called for empty channel")
+					return nil
+				}, nil
+			},
+		},
+		{name: "basic execution", maxWorkers: 10, label: "TEST", items: 15, size: 1024 * 1024},
+		{
+			// Channel closes before the sample size of 20 — should still
+			// compute adaptive.
+			name: "small stream below sample size", maxWorkers: 20, label: "TEST", items: 5, size: 1024,
+			setup: func(_ *testing.T, cfg *BatchConfig) (func(context.Context, testItem) error, func(*testing.T)) {
+				var checked atomic.Bool
+				cfg.ScaleCheckHook = func() { checked.Store(true) }
+				return nil, func(t *testing.T) {
+					if !checked.Load() {
+						t.Error("expected ScaleCheckHook to be called for small stream (< sample size)")
+					}
+				}
+			},
+		},
+		{
+			// Enough items to trigger the initial sample at 20 and a resample at 70.
+			name: "dynamic scaling", maxWorkers: 20, label: "TEST", items: 100, size: 1024,
+			setup: func(_ *testing.T, cfg *BatchConfig) (func(context.Context, testItem) error, func(*testing.T)) {
+				var checks atomic.Int32
+				cfg.ScaleCheckHook = func() { checks.Add(1) }
+				return nil, func(t *testing.T) {
+					if checks.Load() < 1 {
+						t.Errorf("expected at least 1 scale check, got %d", checks.Load())
+					}
+				}
+			},
+		},
+		{
+			name: "force sequential", maxWorkers: 10, label: "TEST", items: 5, size: 1024,
+			setup: func(_ *testing.T, cfg *BatchConfig) (func(context.Context, testItem) error, func(*testing.T)) {
+				cfg.ForceSequential = true
+				var peak atomic.Int32
+				return trackConcurrency(&peak), func(t *testing.T) {
+					if peak.Load() != 1 {
+						t.Errorf("ForceSequential should allow max 1 concurrent, got %d", peak.Load())
+					}
+				}
+			},
+		},
+		{
+			// AdaptiveCount must be populated and readable from inside execute.
+			name: "adaptive count exposed", maxWorkers: 10, label: "TEST-ADAPTIVE", items: 10, size: 1024 * 1024,
+			setup: func(_ *testing.T, cfg *BatchConfig) (func(context.Context, testItem) error, func(*testing.T)) {
+				var adaptive *AdaptiveWorkerCount
+				var observed atomic.Int32
+				cfg.AdaptiveCount = &adaptive
+				exec := func(context.Context, testItem) error {
+					if adaptive != nil {
+						observed.Store(int32(adaptive.Load()))
+					}
+					return nil
+				}
+				return exec, func(t *testing.T) {
+					if adaptive == nil {
+						t.Fatal("expected AdaptiveCount to be populated, got nil")
+					}
+					if adaptive.Load() < 1 {
+						t.Errorf("expected AdaptiveCount >= 1, got %d", adaptive.Load())
+					}
+					if observed.Load() < 1 {
+						t.Errorf("expected closure to observe AdaptiveCount >= 1, got %d", observed.Load())
+					}
+				}
+			},
+		},
+		{
+			// AdaptiveCount left nil must not panic.
+			name: "nil adaptive count", maxWorkers: 10, label: "TEST-NIL-ADAPTIVE", items: 5, size: 1024,
+		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ch := make(chan testItem)
-
-	// Feed items in a goroutine; cancel after a few.
-	go func() {
-		defer close(ch)
-		for i := 0; i < 100; i++ {
-			select {
-			case ch <- testItem{size: 1024, id: "file"}:
-			case <-ctx.Done():
-				return
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := batchCfg(tc.maxWorkers, tc.label)
+			exec, verify := noopExec, func(*testing.T) {}
+			if tc.setup != nil {
+				rowExec, rowVerify := tc.setup(t, &cfg)
+				if rowExec != nil {
+					exec = rowExec
+				}
+				if rowVerify != nil {
+					verify = rowVerify
+				}
 			}
-			if i == 10 {
-				cancel()
+
+			result, adaptive := RunBatchFromChannel(context.Background(),
+				filledChan(tc.items, tc.size), cfg, exec)
+
+			if result.Completed != tc.items {
+				t.Errorf("Completed = %d, want %d", result.Completed, tc.items)
 			}
-		}
-	}()
-
-	result, _ := RunBatchFromChannel(ctx, ch, cfg, func(ctx context.Context, item testItem) error {
-		time.Sleep(time.Millisecond)
-		return nil
-	})
-	total := result.Completed + result.Failed
-	if total >= 100 {
-		t.Errorf("cancellation should have stopped before all 100, got %d", total)
-	}
-}
-
-func TestRunBatchFromChannel_ForceSequential(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:      10,
-		ResourceMgr:     newTestResourceMgr(),
-		Label:           "TEST",
-		ForceSequential: true,
-	}
-
-	ch := make(chan testItem, 5)
-	for i := 0; i < 5; i++ {
-		ch <- testItem{size: 1024, id: "file"}
-	}
-	close(ch)
-
-	var maxConcurrent atomic.Int32
-	var current atomic.Int32
-	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		c := current.Add(1)
-		for {
-			prev := maxConcurrent.Load()
-			if c <= prev || maxConcurrent.CompareAndSwap(prev, c) {
-				break
+			if result.Failed != 0 {
+				t.Errorf("Failed = %d, want 0", result.Failed)
 			}
-		}
-		time.Sleep(time.Millisecond)
-		current.Add(-1)
-		return nil
-	})
-
-	if result.Completed != 5 {
-		t.Errorf("expected 5 completed, got %d", result.Completed)
-	}
-	if maxConcurrent.Load() != 1 {
-		t.Errorf("ForceSequential should allow max 1 concurrent, got %d", maxConcurrent.Load())
+			if adaptive.Load() <= 0 {
+				t.Errorf("adaptive count should be positive, got %d", adaptive.Load())
+			}
+			verify(t)
+		})
 	}
 }
 
-func TestRunBatchFromChannel_AdaptiveCountExposed(t *testing.T) {
-	// Verify that AdaptiveCount is populated and readable from within the execute closure.
-	var adaptive *AdaptiveWorkerCount
-	cfg := BatchConfig{
-		MaxWorkers:    10,
-		ResourceMgr:   newTestResourceMgr(),
-		Label:         "TEST-ADAPTIVE",
-		AdaptiveCount: &adaptive,
+// TestRunBatchFromChannel_CancelMidStream cancels while a feeder is still
+// sending and checks the batch stops well short of the full stream.
+func TestRunBatchFromChannel_CancelMidStream(t *testing.T) {
+	const streamed = 100
+
+	tests := []struct {
+		name        string
+		maxWorkers  int
+		label       string
+		cancelAfter int // cancel once this many items have been sent
+		workPerItem time.Duration
+		wantBelow   int
+	}{
+		{
+			name: "cancel at item 10", maxWorkers: 5, label: "TEST",
+			cancelAfter: 10, workPerItem: time.Millisecond, wantBelow: streamed,
+		},
+		{
+			name: "cancel at item 5", maxWorkers: 2, label: "TEST-CANCEL-MID",
+			cancelAfter: 5, workPerItem: 10 * time.Millisecond, wantBelow: streamed / 2,
+		},
 	}
 
-	ch := make(chan testItem, 10)
-	for i := 0; i < 10; i++ {
-		ch <- testItem{size: 1024 * 1024, id: "file"}
-	}
-	close(ch)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ch := make(chan testItem)
 
-	var observedFromClosure atomic.Int32
-	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		// Read adaptive count from within the closure — should be > 0.
-		if adaptive != nil {
-			observedFromClosure.Store(int32(adaptive.Load()))
-		}
-		return nil
-	})
+			go func() {
+				defer close(ch)
+				for i := 0; i < streamed; i++ {
+					select {
+					case ch <- testItem{size: 1024, id: "file"}:
+					case <-ctx.Done():
+						return
+					}
+					if i == tc.cancelAfter {
+						cancel()
+					}
+				}
+			}()
 
-	if adaptive == nil {
-		t.Fatal("expected AdaptiveCount to be populated, got nil")
-	}
-	if adaptive.Load() < 1 {
-		t.Errorf("expected AdaptiveCount >= 1, got %d", adaptive.Load())
-	}
-	if observedFromClosure.Load() < 1 {
-		t.Errorf("expected closure to observe AdaptiveCount >= 1, got %d", observedFromClosure.Load())
-	}
-	if result.Completed != 10 {
-		t.Errorf("expected 10 completed, got %d", result.Completed)
-	}
-}
+			result, _ := RunBatchFromChannel(ctx, ch, batchCfg(tc.maxWorkers, tc.label),
+				func(context.Context, testItem) error {
+					time.Sleep(tc.workPerItem)
+					return nil
+				})
 
-func TestRunBatchFromChannel_AdaptiveCountNilIgnored(t *testing.T) {
-	// Verify that nil AdaptiveCount doesn't cause a panic.
-	cfg := BatchConfig{
-		MaxWorkers:  10,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST-NIL-ADAPTIVE",
-		// AdaptiveCount not set (nil)
-	}
-
-	ch := make(chan testItem, 5)
-	for i := 0; i < 5; i++ {
-		ch <- testItem{size: 1024, id: "file"}
-	}
-	close(ch)
-
-	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		return nil
-	})
-	if result.Completed != 5 {
-		t.Errorf("expected 5 completed, got %d", result.Completed)
+			if total := result.Completed + result.Failed; total >= tc.wantBelow {
+				t.Errorf("cancel after item %d: processed %d items, want fewer than %d",
+					tc.cancelAfter, total, tc.wantBelow)
+			}
+		})
 	}
 }
 
 func TestRunBatchFromChannel_CancelWhileBlocked(t *testing.T) {
 	// Verify that cancelling context while dispatcher is blocked on an empty
 	// input channel causes prompt return (not waiting for next item).
-	cfg := BatchConfig{
-		MaxWorkers:  5,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST-CANCEL-BLOCKED",
-	}
-
 	ch := make(chan testItem) // Unbuffered, never sent to — dispatcher will block
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan struct{})
 	go func() {
-		RunBatchFromChannel(ctx, ch, cfg, func(ctx context.Context, item testItem) error {
-			t.Error("execute should not be called — no items were sent")
-			return nil
-		})
-		close(done)
+		defer close(done)
+		RunBatchFromChannel(ctx, ch, batchCfg(5, "TEST-CANCEL-BLOCKED"),
+			func(context.Context, testItem) error {
+				t.Error("execute should not be called — no items were sent")
+				return nil
+			})
 	}()
 
 	// Cancel after 100ms
@@ -531,94 +437,50 @@ func TestRunBatchFromChannel_CancelWhileBlocked(t *testing.T) {
 	}
 }
 
-func TestRunBatchFromChannel_CancelMidStream(t *testing.T) {
-	// Send some items, cancel context, verify not all items were processed.
-	cfg := BatchConfig{
-		MaxWorkers:  2,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "TEST-CANCEL-MID",
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	ch := make(chan testItem)
-
-	go func() {
-		defer close(ch)
-		for i := 0; i < 100; i++ {
-			select {
-			case ch <- testItem{size: 1024, id: "file"}:
-			case <-ctx.Done():
-				return
-			}
-			if i == 5 {
-				cancel()
-			}
-		}
-	}()
-
-	result, _ := RunBatchFromChannel(ctx, ch, cfg, func(ctx context.Context, item testItem) error {
-		time.Sleep(10 * time.Millisecond)
-		return nil
-	})
-
-	total := result.Completed + result.Failed
-	if total >= 50 {
-		t.Errorf("expected fewer than 50 items processed after cancel at item 5, got %d", total)
-	}
-}
-
 // --- CollectErrors tests ---
 
-func TestCollectErrors_Empty(t *testing.T) {
-	ch := make(chan error)
-	close(ch)
-	errs := CollectErrors(ch)
-	if len(errs) != 0 {
-		t.Errorf("expected 0 errors, got %d", len(errs))
+func TestCollectErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		errs []error
+		want int
+	}{
+		{name: "empty", errs: nil, want: 0},
+		{name: "nils filtered", errs: []error{nil, errors.New("real error"), nil}, want: 1},
+		{
+			name: "multiple",
+			errs: []error{errors.New("err1"), errors.New("err2"), errors.New("err3")},
+			want: 3,
+		},
 	}
-}
 
-func TestCollectErrors_WithNils(t *testing.T) {
-	ch := make(chan error, 5)
-	ch <- nil
-	ch <- errors.New("real error")
-	ch <- nil
-	close(ch)
-	errs := CollectErrors(ch)
-	if len(errs) != 1 {
-		t.Errorf("expected 1 error (nils filtered), got %d", len(errs))
-	}
-}
-
-func TestCollectErrors_Multiple(t *testing.T) {
-	ch := make(chan error, 3)
-	ch <- errors.New("err1")
-	ch <- errors.New("err2")
-	ch <- errors.New("err3")
-	close(ch)
-	errs := CollectErrors(ch)
-	if len(errs) != 3 {
-		t.Errorf("expected 3 errors, got %d", len(errs))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := make(chan error, len(tc.errs)+1)
+			for _, err := range tc.errs {
+				ch <- err
+			}
+			close(ch)
+			if got := CollectErrors(ch); len(got) != tc.want {
+				t.Errorf("CollectErrors returned %d errors, want %d", len(got), tc.want)
+			}
+		})
 	}
 }
 
 // --- Concurrency safety tests (run with -race) ---
 
 func TestRunBatch_RaceSafety(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  10,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "RACE",
-	}
 	items := make([]testItem, 100)
 	for i := range items {
 		items[i] = testItem{size: int64(i * 1024), id: "file"}
 	}
 	var counter atomic.Int32
-	result := RunBatch(context.Background(), items, cfg, func(ctx context.Context, item testItem) error {
-		counter.Add(1)
-		return nil
-	})
+	result := RunBatch(context.Background(), items, batchCfg(10, "RACE"),
+		func(context.Context, testItem) error {
+			counter.Add(1)
+			return nil
+		})
 	if result.Completed != 100 {
 		t.Errorf("expected 100 completed, got %d", result.Completed)
 	}
@@ -628,11 +490,6 @@ func TestRunBatch_RaceSafety(t *testing.T) {
 }
 
 func TestRunBatchFromChannel_RaceSafety(t *testing.T) {
-	cfg := BatchConfig{
-		MaxWorkers:  10,
-		ResourceMgr: newTestResourceMgr(),
-		Label:       "RACE",
-	}
 	ch := make(chan testItem, 100)
 
 	var sendWg sync.WaitGroup
@@ -646,10 +503,11 @@ func TestRunBatchFromChannel_RaceSafety(t *testing.T) {
 	}()
 
 	var counter atomic.Int32
-	result, _ := RunBatchFromChannel(context.Background(), ch, cfg, func(ctx context.Context, item testItem) error {
-		counter.Add(1)
-		return nil
-	})
+	result, _ := RunBatchFromChannel(context.Background(), ch, batchCfg(10, "RACE"),
+		func(context.Context, testItem) error {
+			counter.Add(1)
+			return nil
+		})
 	sendWg.Wait()
 
 	if result.Completed != 100 {

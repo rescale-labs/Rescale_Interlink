@@ -12,12 +12,8 @@ import (
 )
 
 // createTestTree creates a temporary directory tree for testing WalkStream.
-// Returns the root path and a cleanup function.
 func createTestTree(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-
-	// Create directory structure:
 	// root/
 	//   a/
 	//     sub/
@@ -29,99 +25,157 @@ func createTestTree(t *testing.T) string {
 	//   b/
 	//     file5.txt
 	//   file0.txt
-	dirs := []string{
-		"a", "a/sub", "a/sub/deep", "b",
-	}
-	files := map[string]string{
-		"file0.txt":           "root file",
-		"a/file1.txt":         "file one",
-		"a/file2.txt":         "file two",
-		"a/sub/file3.txt":     "file three",
-		"a/sub/deep/file4.txt": "file four",
-		"b/file5.txt":         "file five",
-	}
+	return mkTree(t,
+		[]string{"a", "a/sub", "a/sub/deep", "b"},
+		[]string{
+			"file0.txt", "a/file1.txt", "a/file2.txt",
+			"a/sub/file3.txt", "a/sub/deep/file4.txt", "b/file5.txt",
+		},
+	)
+}
 
+// createReverseOrderTree builds a tree whose entries are created last-lexical
+// first, so a walk that leaked the filesystem's own directory-entry order would
+// produce a sequence other than the lexical one asserted below.
+func createReverseOrderTree(t *testing.T) string {
+	t.Helper()
+	return mkTree(t,
+		[]string{"zdir", "adir/zsub", "adir/asub"},
+		[]string{
+			"zdir/zfile.txt", "zdir/afile.txt", "mfile.txt",
+			"adir/zsub/f.txt", "adir/asub/f.txt",
+		},
+	)
+}
+
+// mkTree builds a fresh temp tree: every path in dirs is created as a
+// directory, and every path in files as a non-empty regular file (its own
+// relative name is the content). Paths are slash-relative to the tree root,
+// which is returned. Files may name parents not listed in dirs.
+func mkTree(t *testing.T, dirs, files []string) string {
+	t.Helper()
+	root := t.TempDir()
 	for _, dir := range dirs {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0644); err != nil {
+	for _, name := range files {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-
 	return root
 }
 
-func TestWalkStream_BasicTraversal(t *testing.T) {
-	root := createTestTree(t)
+// addSymlinks creates one symlink per {target, link} pair, both slash-relative
+// to root. An absolute target is used verbatim, which is how a row points a
+// link outside the tree.
+func addSymlinks(t *testing.T, root string, links [][2]string) {
+	t.Helper()
+	for _, link := range links {
+		target := link[0]
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(root, target)
+		}
+		if err := os.Symlink(target, filepath.Join(root, link[1])); err != nil {
+			t.Fatalf("symlink %s -> %s: %v", link[1], target, err)
+		}
+	}
+}
+
+// drainWalkStreamInOrder collects all entries from WalkStream, preserving each
+// channel's own arrival order.
+//
+// Each channel gets its own goroutine. A single select loop over both could not
+// distinguish the walker's send order from the pseudo-random pick select makes
+// when both channels are ready, and draining them one after the other would
+// deadlock as soon as the channel not being read filled its buffer.
+func drainWalkStreamInOrder(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
+	t.Helper()
 	ctx := context.Background()
+	dirChan, fileChan, _, errChan := WalkStream(ctx, root, opts)
 
-	dirChan, fileChan, _, errChan := WalkStream(ctx, root, WalkOptions{
-		IncludeHidden:  true,
-		SkipHiddenDirs: false,
-	})
-
-	var dirs []string
-	var files []string
-
-	// Drain both channels
-	dirsDone := false
-	filesDone := false
-	for !dirsDone || !filesDone {
-		select {
-		case entry, ok := <-dirChan:
-			if !ok {
-				dirsDone = true
-				continue
-			}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for entry := range dirChan {
 			rel, _ := filepath.Rel(root, entry.Path)
 			dirs = append(dirs, rel)
-		case entry, ok := <-fileChan:
-			if !ok {
-				filesDone = true
-				continue
-			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for entry := range fileChan {
 			rel, _ := filepath.Rel(root, entry.Path)
 			files = append(files, rel)
 		}
-	}
+	}()
+	wg.Wait()
 
-	// Check for errors
 	select {
 	case err := <-errChan:
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("unexpected walk error: %v", err)
 		}
 	default:
 	}
 
+	return dirs, files
+}
+
+// drainWalkStream collects all entries from WalkStream channels into sorted
+// slices of paths relative to root.
+func drainWalkStream(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
+	t.Helper()
+	dirs, files = drainWalkStreamInOrder(t, root, opts)
 	sort.Strings(dirs)
 	sort.Strings(files)
+	return dirs, files
+}
 
-	expectedDirs := []string{"a", "a/sub", "a/sub/deep", "b"}
-	expectedFiles := []string{"a/file1.txt", "a/file2.txt", "a/sub/deep/file4.txt", "a/sub/file3.txt", "b/file5.txt", "file0.txt"}
-	sort.Strings(expectedDirs)
-	sort.Strings(expectedFiles)
-
-	if len(dirs) != len(expectedDirs) {
-		t.Errorf("dirs: got %d, want %d: %v", len(dirs), len(expectedDirs), dirs)
+// walkCollectRel runs WalkCollect and returns its three result slices as sorted
+// paths relative to root, so they can be compared with drainWalkStream's.
+func walkCollectRel(t *testing.T, root string, opts WalkOptions) (dirs, files, symlinks []string) {
+	t.Helper()
+	result, err := WalkCollect(root, opts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i := range expectedDirs {
-		if i < len(dirs) && dirs[i] != expectedDirs[i] {
-			t.Errorf("dirs[%d]: got %q, want %q", i, dirs[i], expectedDirs[i])
+	rel := func(entries []FileEntry) []string {
+		paths := make([]string, len(entries))
+		for i, e := range entries {
+			paths[i], _ = filepath.Rel(root, e.Path)
 		}
+		sort.Strings(paths)
+		return paths
 	}
+	return rel(result.Directories), rel(result.Files), rel(result.Symlinks)
+}
 
-	if len(files) != len(expectedFiles) {
-		t.Errorf("files: got %d, want %d: %v", len(files), len(expectedFiles), files)
+func TestWalkStream_BasicTraversal(t *testing.T) {
+	root := createTestTree(t)
+
+	dirs, files := drainWalkStream(t, root, WalkOptions{
+		IncludeHidden:  true,
+		SkipHiddenDirs: false,
+	})
+
+	wantDirs := []string{"a", "a/sub", "a/sub/deep", "b"}
+	wantFiles := []string{
+		"a/file1.txt", "a/file2.txt", "a/sub/deep/file4.txt",
+		"a/sub/file3.txt", "b/file5.txt", "file0.txt",
 	}
-	for i := range expectedFiles {
-		if i < len(files) && files[i] != expectedFiles[i] {
-			t.Errorf("files[%d]: got %q, want %q", i, files[i], expectedFiles[i])
-		}
+	if !slices.Equal(dirs, wantDirs) {
+		t.Errorf("dirs: got %v, want %v", dirs, wantDirs)
+	}
+	if !slices.Equal(files, wantFiles) {
+		t.Errorf("files: got %v, want %v", files, wantFiles)
 	}
 }
 
@@ -176,99 +230,31 @@ func TestWalkStream_ContextCancellation(t *testing.T) {
 }
 
 func TestWalkStream_HiddenFiles(t *testing.T) {
-	root := t.TempDir()
+	root := mkTree(t,
+		[]string{"visible", ".hidden_dir"},
+		[]string{"visible.txt", ".hidden_file", ".hidden_dir/inside.txt"},
+	)
 
-	// Create visible and hidden items
-	os.MkdirAll(filepath.Join(root, "visible"), 0755)
-	os.MkdirAll(filepath.Join(root, ".hidden_dir"), 0755)
-	os.WriteFile(filepath.Join(root, "visible.txt"), []byte("v"), 0644)
-	os.WriteFile(filepath.Join(root, ".hidden_file"), []byte("h"), 0644)
-	os.WriteFile(filepath.Join(root, ".hidden_dir", "inside.txt"), []byte("i"), 0644)
-
-	ctx := context.Background()
-	dirChan, fileChan, _, _ := WalkStream(ctx, root, WalkOptions{
+	dirs, files := drainWalkStream(t, root, WalkOptions{
 		IncludeHidden:  false,
 		SkipHiddenDirs: true,
 	})
 
-	var dirs, files []string
-	dirsDone, filesDone := false, false
-	for !dirsDone || !filesDone {
-		select {
-		case entry, ok := <-dirChan:
-			if !ok { dirsDone = true; continue }
-			dirs = append(dirs, filepath.Base(entry.Path))
-		case entry, ok := <-fileChan:
-			if !ok { filesDone = true; continue }
-			files = append(files, filepath.Base(entry.Path))
-		}
-	}
-
 	// Should only see visible items
-	if len(dirs) != 1 || dirs[0] != "visible" {
+	if !slices.Equal(dirs, []string{"visible"}) {
 		t.Errorf("dirs: got %v, want [visible]", dirs)
 	}
-	if len(files) != 1 || files[0] != "visible.txt" {
+	if !slices.Equal(files, []string{"visible.txt"}) {
 		t.Errorf("files: got %v, want [visible.txt]", files)
 	}
 }
 
 func TestWalkStream_EmptyDirectory(t *testing.T) {
-	root := t.TempDir()
+	dirs, files := drainWalkStream(t, t.TempDir(), WalkOptions{IncludeHidden: true})
 
-	ctx := context.Background()
-	dirChan, fileChan, _, errChan := WalkStream(ctx, root, WalkOptions{
-		IncludeHidden: true,
-	})
-
-	var count int
-	dirsDone, filesDone := false, false
-	for !dirsDone || !filesDone {
-		select {
-		case _, ok := <-dirChan:
-			if !ok { dirsDone = true; continue }
-			count++
-		case _, ok := <-fileChan:
-			if !ok { filesDone = true; continue }
-			count++
-		}
+	if len(dirs)+len(files) != 0 {
+		t.Errorf("expected 0 entries for empty dir, got dirs=%v files=%v", dirs, files)
 	}
-
-	if count != 0 {
-		t.Errorf("expected 0 entries for empty dir, got %d", count)
-	}
-
-	select {
-	case err := <-errChan:
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-	default:
-	}
-}
-
-// createReverseOrderTree builds a tree whose entries are created last-lexical
-// first, so a walk that leaked the filesystem's own directory-entry order would
-// produce a sequence other than the lexical one asserted below.
-func createReverseOrderTree(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-
-	for _, dir := range []string{"zdir", "adir/zsub", "adir/asub"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, name := range []string{
-		"zdir/zfile.txt", "zdir/afile.txt", "mfile.txt",
-		"adir/zsub/f.txt", "adir/asub/f.txt",
-	} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	return root
 }
 
 // TestWalkStream_PerChannelOrdering pins the ordering WalkStream actually
@@ -343,444 +329,220 @@ func TestWalkStream_PerChannelOrdering(t *testing.T) {
 	}
 }
 
-func TestWalkStream_ConsistencyWithWalkCollect(t *testing.T) {
-	// WalkStream and WalkCollect should find the same entries
-	root := createTestTree(t)
-	opts := WalkOptions{IncludeHidden: true, SkipHiddenDirs: true}
-
-	// WalkCollect
-	collectResult, err := WalkCollect(root, opts)
-	if err != nil {
-		t.Fatal(err)
+// TestWalkStream_WalkCollectConsistency pins WalkStream and WalkCollect to the
+// same entry set for the same options, with and without symlink following.
+func TestWalkStream_WalkCollectConsistency(t *testing.T) {
+	tests := []struct {
+		name  string
+		links [][2]string
+		opts  WalkOptions
+	}{
+		{
+			name: "no_symlinks",
+			opts: WalkOptions{IncludeHidden: true, SkipHiddenDirs: true},
+		},
+		{
+			name:  "following_symlinks",
+			links: [][2]string{{"b", "link_to_b"}, {"file0.txt", "link_file.txt"}},
+			opts:  WalkOptions{IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true},
+		},
 	}
 
-	// WalkStream
-	ctx := context.Background()
-	dirChan, fileChan, _, errChan := WalkStream(ctx, root, opts)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := createTestTree(t)
+			addSymlinks(t, root, tc.links)
 
-	var streamDirs, streamFiles []string
-	dirsDone, filesDone := false, false
-	for !dirsDone || !filesDone {
-		select {
-		case entry, ok := <-dirChan:
-			if !ok { dirsDone = true; continue }
-			streamDirs = append(streamDirs, entry.Path)
-		case entry, ok := <-fileChan:
-			if !ok { filesDone = true; continue }
-			streamFiles = append(streamFiles, entry.Path)
-		}
-	}
-	select {
-	case err := <-errChan:
-		if err != nil {
-			t.Fatal(err)
-		}
-	default:
-	}
+			collectDirs, collectFiles, _ := walkCollectRel(t, root, tc.opts)
+			streamDirs, streamFiles := drainWalkStream(t, root, tc.opts)
 
-	// Compare counts
-	collectDirPaths := make([]string, len(collectResult.Directories))
-	for i, d := range collectResult.Directories {
-		collectDirPaths[i] = d.Path
-	}
-	collectFilePaths := make([]string, len(collectResult.Files))
-	for i, f := range collectResult.Files {
-		collectFilePaths[i] = f.Path
-	}
-
-	sort.Strings(collectDirPaths)
-	sort.Strings(collectFilePaths)
-	sort.Strings(streamDirs)
-	sort.Strings(streamFiles)
-
-	if len(streamDirs) != len(collectDirPaths) {
-		t.Errorf("dirs count: stream=%d, collect=%d", len(streamDirs), len(collectDirPaths))
-	}
-	if len(streamFiles) != len(collectFilePaths) {
-		t.Errorf("files count: stream=%d, collect=%d", len(streamFiles), len(collectFilePaths))
-	}
-
-	for i := range collectDirPaths {
-		if i < len(streamDirs) && streamDirs[i] != collectDirPaths[i] {
-			t.Errorf("dir mismatch at %d: stream=%q, collect=%q", i, streamDirs[i], collectDirPaths[i])
-		}
-	}
-	for i := range collectFilePaths {
-		if i < len(streamFiles) && streamFiles[i] != collectFilePaths[i] {
-			t.Errorf("file mismatch at %d: stream=%q, collect=%q", i, streamFiles[i], collectFilePaths[i])
-		}
-	}
-}
-
-// === v4.8.8: Symlink following tests ===
-
-// drainWalkStreamInOrder collects all entries from WalkStream, preserving each
-// channel's own arrival order.
-//
-// Each channel gets its own goroutine. A single select loop over both could not
-// distinguish the walker's send order from the pseudo-random pick select makes
-// when both channels are ready, and draining them one after the other would
-// deadlock as soon as the channel not being read filled its buffer.
-func drainWalkStreamInOrder(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
-	t.Helper()
-	ctx := context.Background()
-	dirChan, fileChan, _, errChan := WalkStream(ctx, root, opts)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for entry := range dirChan {
-			rel, _ := filepath.Rel(root, entry.Path)
-			dirs = append(dirs, rel)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for entry := range fileChan {
-			rel, _ := filepath.Rel(root, entry.Path)
-			files = append(files, rel)
-		}
-	}()
-	wg.Wait()
-
-	select {
-	case err := <-errChan:
-		if err != nil {
-			t.Fatalf("unexpected walk error: %v", err)
-		}
-	default:
-	}
-
-	return dirs, files
-}
-
-// drainWalkStream collects all entries from WalkStream channels into sorted path slices.
-func drainWalkStream(t *testing.T, root string, opts WalkOptions) (dirs, files []string) {
-	t.Helper()
-	dirs, files = drainWalkStreamInOrder(t, root, opts)
-	sort.Strings(dirs)
-	sort.Strings(files)
-	return dirs, files
-}
-
-func TestWalkStream_FollowSymlinks_SymlinkedDir(t *testing.T) {
-	root := createTestTree(t)
-
-	// Create symlink: root/link_to_b -> root/b
-	os.Symlink(filepath.Join(root, "b"), filepath.Join(root, "link_to_b"))
-
-	dirs, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-
-	// Should include both "b" (real) and "link_to_b" (symlink alias)
-	if !contains(dirs, "link_to_b") {
-		t.Errorf("expected link_to_b in dirs, got: %v", dirs)
-	}
-	// Should include files from both
-	if !contains(files, "b/file5.txt") {
-		t.Errorf("expected b/file5.txt in files, got: %v", files)
-	}
-	if !contains(files, "link_to_b/file5.txt") {
-		t.Errorf("expected link_to_b/file5.txt in files, got: %v", files)
-	}
-}
-
-func TestWalkStream_FollowSymlinks_SymlinkedFile(t *testing.T) {
-	root := createTestTree(t)
-
-	// Create file symlink: root/a/link_file.txt -> root/file0.txt
-	os.Symlink(filepath.Join(root, "file0.txt"), filepath.Join(root, "a", "link_file.txt"))
-
-	_, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-
-	if !contains(files, "a/link_file.txt") {
-		t.Errorf("expected a/link_file.txt in files, got: %v", files)
-	}
-}
-
-func TestWalkStream_FollowSymlinks_CircularSymlink(t *testing.T) {
-	root := t.TempDir()
-
-	// root/a/
-	// root/a/loop -> root/a  (cycle!)
-	os.MkdirAll(filepath.Join(root, "a"), 0755)
-	os.WriteFile(filepath.Join(root, "a", "file.txt"), []byte("test"), 0644)
-	os.Symlink(filepath.Join(root, "a"), filepath.Join(root, "a", "loop"))
-
-	// Should NOT hang, should complete normally
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		drainWalkStream(t, root, WalkOptions{
-			IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
+			if !slices.Equal(streamDirs, collectDirs) {
+				t.Errorf("dirs differ:\n stream %v\ncollect %v", streamDirs, collectDirs)
+			}
+			if !slices.Equal(streamFiles, collectFiles) {
+				t.Errorf("files differ:\n stream %v\ncollect %v", streamFiles, collectFiles)
+			}
 		})
-	}()
-
-	select {
-	case <-done:
-		// OK — completed without hanging
-	case <-time.After(10 * time.Second):
-		t.Fatal("walk with circular symlink did not complete within timeout")
 	}
 }
 
-func TestWalkStream_FollowSymlinks_SelfReference(t *testing.T) {
-	root := t.TempDir()
+// TestWalkStream_FollowSymlinks covers what a followed link contributes to the
+// walk. Every row builds a tree, adds its links, and drains WalkStream with the
+// same options bar FollowSymlinks; the wants are membership claims, since a row
+// only cares about the aliased entries.
+func TestWalkStream_FollowSymlinks(t *testing.T) {
+	tests := []struct {
+		name        string
+		tree        func(*testing.T) string // nil: createTestTree
+		links       [][2]string
+		follow      bool
+		wantDirs    []string
+		wantFiles   []string
+		absentDirs  []string
+		absentFiles []string
+	}{
+		{
+			name:      "symlinked_dir",
+			links:     [][2]string{{"b", "link_to_b"}},
+			follow:    true,
+			wantDirs:  []string{"link_to_b"},
+			wantFiles: []string{"b/file5.txt", "link_to_b/file5.txt"},
+		},
+		{
+			name:      "symlinked_file",
+			links:     [][2]string{{"file0.txt", "a/link_file.txt"}},
+			follow:    true,
+			wantFiles: []string{"a/link_file.txt"},
+		},
+		{
+			// A broken symlink is silently skipped; real entries still arrive.
+			name:        "broken_symlink",
+			tree:        func(t *testing.T) string { return mkTree(t, nil, []string{"file.txt"}) },
+			links:       [][2]string{{"/nonexistent/path/that/does/not/exist", "broken_link"}},
+			follow:      true,
+			wantFiles:   []string{"file.txt"},
+			absentDirs:  []string{"broken_link"},
+			absentFiles: []string{"broken_link"},
+		},
+		{
+			name:        "not_following_skips_links",
+			links:       [][2]string{{"b", "link_to_b"}, {"file0.txt", "link_file.txt"}},
+			follow:      false,
+			absentDirs:  []string{"link_to_b"},
+			absentFiles: []string{"link_file.txt"},
+		},
+		{
+			// Entries from the aliased walk keep the alias prefix: "link/...",
+			// never the resolved "a/sub/...".
+			name:      "path_rewriting",
+			links:     [][2]string{{"a/sub", "link"}},
+			follow:    true,
+			wantDirs:  []string{"link", "link/deep"},
+			wantFiles: []string{"link/file3.txt", "link/deep/file4.txt"},
+		},
+		{
+			// BOTH aliases produce entries (ancestry stack, not global dedup).
+			name:      "duplicate_aliases",
+			tree:      func(t *testing.T) string { return mkTree(t, nil, []string{"shared/data.txt"}) },
+			links:     [][2]string{{"shared", "linkA"}, {"shared", "linkB"}},
+			follow:    true,
+			wantFiles: []string{"linkA/data.txt", "linkB/data.txt", "shared/data.txt"},
+		},
+		{
+			name:     "alias_root_dir_entry",
+			links:    [][2]string{{"a/sub", "link_to_sub"}},
+			follow:   true,
+			wantDirs: []string{"link_to_sub"},
+		},
+		{
+			// A sibling link to an already-visited directory is not a cycle. This
+			// validates the depth-indexed ancestry map against a wrong global dedup.
+			name:      "sibling_no_cycle",
+			tree:      func(t *testing.T) string { return mkTree(t, []string{"b"}, []string{"a/sub/file.txt"}) },
+			links:     [][2]string{{"a/sub", "b/link"}},
+			follow:    true,
+			wantDirs:  []string{"b/link"},
+			wantFiles: []string{"b/link/file.txt"},
+		},
+	}
 
-	// root/self -> root (symlink to the root itself)
-	os.WriteFile(filepath.Join(root, "file.txt"), []byte("test"), 0644)
-	os.Symlink(root, filepath.Join(root, "self"))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			makeTree := tc.tree
+			if makeTree == nil {
+				makeTree = createTestTree
+			}
+			root := makeTree(t)
+			addSymlinks(t, root, tc.links)
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		drainWalkStream(t, root, WalkOptions{
-			IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
+			dirs, files := drainWalkStream(t, root, WalkOptions{
+				IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: tc.follow,
+			})
+
+			for _, want := range tc.wantDirs {
+				if !slices.Contains(dirs, want) {
+					t.Errorf("expected %q in dirs, got: %v", want, dirs)
+				}
+			}
+			for _, want := range tc.wantFiles {
+				if !slices.Contains(files, want) {
+					t.Errorf("expected %q in files, got: %v", want, files)
+				}
+			}
+			for _, absent := range tc.absentDirs {
+				if slices.Contains(dirs, absent) {
+					t.Errorf("did not expect %q in dirs, got: %v", absent, dirs)
+				}
+			}
+			for _, absent := range tc.absentFiles {
+				if slices.Contains(files, absent) {
+					t.Errorf("did not expect %q in files, got: %v", absent, files)
+				}
+			}
 		})
-	}()
-
-	select {
-	case <-done:
-		// OK
-	case <-time.After(10 * time.Second):
-		t.Fatal("walk with self-reference symlink did not complete within timeout")
 	}
 }
 
-func TestWalkStream_FollowSymlinks_BrokenSymlink(t *testing.T) {
-	root := t.TempDir()
-
-	os.WriteFile(filepath.Join(root, "file.txt"), []byte("test"), 0644)
-	os.Symlink("/nonexistent/path/that/does/not/exist", filepath.Join(root, "broken_link"))
-
-	dirs, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-
-	// Broken symlink should be silently skipped
-	if contains(dirs, "broken_link") || contains(files, "broken_link") {
-		t.Errorf("broken symlink should not appear; dirs=%v, files=%v", dirs, files)
+// TestWalkStream_FollowSymlinks_NoHang covers the links that would walk forever
+// without cycle detection. The only assertion is that the walk finishes.
+func TestWalkStream_FollowSymlinks_NoHang(t *testing.T) {
+	tests := []struct {
+		name  string
+		tree  func(*testing.T) string
+		links [][2]string
+	}{
+		{
+			name:  "cycle_to_ancestor",
+			tree:  func(t *testing.T) string { return mkTree(t, nil, []string{"a/file.txt"}) },
+			links: [][2]string{{"a", "a/loop"}},
+		},
+		{
+			name:  "self_reference_to_root",
+			tree:  func(t *testing.T) string { return mkTree(t, nil, []string{"file.txt"}) },
+			links: [][2]string{{".", "self"}},
+		},
 	}
-	// Regular file should still be found
-	if !contains(files, "file.txt") {
-		t.Errorf("expected file.txt in files, got: %v", files)
-	}
-}
 
-func TestWalkStream_FollowSymlinks_False_Unchanged(t *testing.T) {
-	root := createTestTree(t)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := tc.tree(t)
+			addSymlinks(t, root, tc.links)
 
-	// Add a symlink — should be skipped with FollowSymlinks=false
-	os.Symlink(filepath.Join(root, "b"), filepath.Join(root, "link_to_b"))
-	os.Symlink(filepath.Join(root, "file0.txt"), filepath.Join(root, "link_file.txt"))
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				drainWalkStream(t, root, WalkOptions{
+					IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
+				})
+			}()
 
-	dirs, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: false,
-	})
-
-	// Symlinks should NOT appear
-	if contains(dirs, "link_to_b") {
-		t.Errorf("symlink dir should be skipped with FollowSymlinks=false; dirs=%v", dirs)
-	}
-	if contains(files, "link_file.txt") {
-		t.Errorf("symlink file should be skipped with FollowSymlinks=false; files=%v", files)
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("walk did not complete within timeout")
+			}
+		})
 	}
 }
 
 func TestWalkCollect_FollowSymlinks(t *testing.T) {
 	root := createTestTree(t)
+	addSymlinks(t, root, [][2]string{{"b", "link_to_b"}})
 
-	os.Symlink(filepath.Join(root, "b"), filepath.Join(root, "link_to_b"))
-
-	result, err := WalkCollect(root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dirPaths := make([]string, len(result.Directories))
-	for i, d := range result.Directories {
-		dirPaths[i], _ = filepath.Rel(root, d.Path)
-	}
-	filePaths := make([]string, len(result.Files))
-	for i, f := range result.Files {
-		filePaths[i], _ = filepath.Rel(root, f.Path)
-	}
-	sort.Strings(dirPaths)
-	sort.Strings(filePaths)
-
-	if !contains(dirPaths, "link_to_b") {
-		t.Errorf("expected link_to_b in dirs, got: %v", dirPaths)
-	}
-	if !contains(filePaths, "link_to_b/file5.txt") {
-		t.Errorf("expected link_to_b/file5.txt in files, got: %v", filePaths)
-	}
-	// Symlinks slice should be empty when following
-	if len(result.Symlinks) != 0 {
-		syms := make([]string, len(result.Symlinks))
-		for i, s := range result.Symlinks {
-			syms[i], _ = filepath.Rel(root, s.Path)
-		}
-		t.Errorf("expected 0 symlinks when following, got: %v", syms)
-	}
-}
-
-func TestWalkStream_FollowSymlinks_PathRewriting(t *testing.T) {
-	root := createTestTree(t)
-
-	// Create symlink from root/link -> root/a/sub
-	os.Symlink(filepath.Join(root, "a", "sub"), filepath.Join(root, "link"))
-
-	dirs, files := drainWalkStream(t, root, WalkOptions{
+	dirs, files, symlinks := walkCollectRel(t, root, WalkOptions{
 		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
 	})
 
-	// All entries from the symlinked walk should have paths under "link/..."
-	// NOT under "a/sub/..."
-	if !contains(dirs, "link") {
-		t.Errorf("expected link in dirs, got: %v", dirs)
+	if !slices.Contains(dirs, "link_to_b") {
+		t.Errorf("expected link_to_b in dirs, got: %v", dirs)
 	}
-	if !contains(files, "link/file3.txt") {
-		t.Errorf("expected link/file3.txt in files, got: %v", files)
+	if !slices.Contains(files, "link_to_b/file5.txt") {
+		t.Errorf("expected link_to_b/file5.txt in files, got: %v", files)
 	}
-	if !contains(dirs, "link/deep") {
-		t.Errorf("expected link/deep in dirs, got: %v", dirs)
+	// Symlinks slice should be empty when following.
+	if len(symlinks) != 0 {
+		t.Errorf("expected 0 symlinks when following, got: %v", symlinks)
 	}
-	if !contains(files, "link/deep/file4.txt") {
-		t.Errorf("expected link/deep/file4.txt in files, got: %v", files)
-	}
-}
-
-func TestWalkStream_FollowSymlinks_DuplicateAliases(t *testing.T) {
-	root := t.TempDir()
-
-	// Create a shared directory
-	shared := filepath.Join(root, "shared")
-	os.MkdirAll(shared, 0755)
-	os.WriteFile(filepath.Join(shared, "data.txt"), []byte("shared data"), 0644)
-
-	// Create two sibling symlinks pointing to the same target
-	os.Symlink(shared, filepath.Join(root, "linkA"))
-	os.Symlink(shared, filepath.Join(root, "linkB"))
-
-	_, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-
-	// BOTH aliases should produce entries (ancestry-stack, not global dedup)
-	if !contains(files, "linkA/data.txt") {
-		t.Errorf("expected linkA/data.txt in files, got: %v", files)
-	}
-	if !contains(files, "linkB/data.txt") {
-		t.Errorf("expected linkB/data.txt in files, got: %v", files)
-	}
-	if !contains(files, "shared/data.txt") {
-		t.Errorf("expected shared/data.txt in files, got: %v", files)
-	}
-}
-
-func TestWalkStream_FollowSymlinks_AliasRootDirEntry(t *testing.T) {
-	root := createTestTree(t)
-
-	// root/link_to_sub -> root/a/sub
-	os.Symlink(filepath.Join(root, "a", "sub"), filepath.Join(root, "link_to_sub"))
-
-	dirs, _ := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-
-	// Verify that "link_to_sub" appears as a directory entry
-	if !contains(dirs, "link_to_sub") {
-		t.Errorf("expected link_to_sub as directory entry, got: %v", dirs)
-	}
-}
-
-func TestWalkCollect_FollowSymlinks_Consistency(t *testing.T) {
-	root := createTestTree(t)
-
-	os.Symlink(filepath.Join(root, "b"), filepath.Join(root, "link_to_b"))
-	os.Symlink(filepath.Join(root, "file0.txt"), filepath.Join(root, "link_file.txt"))
-
-	opts := WalkOptions{IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true}
-
-	// WalkCollect
-	collectResult, err := WalkCollect(root, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// WalkStream
-	streamDirs, streamFiles := drainWalkStream(t, root, opts)
-
-	collectDirs := make([]string, len(collectResult.Directories))
-	for i, d := range collectResult.Directories {
-		collectDirs[i], _ = filepath.Rel(root, d.Path)
-	}
-	collectFiles := make([]string, len(collectResult.Files))
-	for i, f := range collectResult.Files {
-		collectFiles[i], _ = filepath.Rel(root, f.Path)
-	}
-
-	sort.Strings(collectDirs)
-	sort.Strings(collectFiles)
-
-	if len(streamDirs) != len(collectDirs) {
-		t.Errorf("dirs count mismatch: stream=%d (%v), collect=%d (%v)", len(streamDirs), streamDirs, len(collectDirs), collectDirs)
-	}
-	if len(streamFiles) != len(collectFiles) {
-		t.Errorf("files count mismatch: stream=%d (%v), collect=%d (%v)", len(streamFiles), streamFiles, len(collectFiles), collectFiles)
-	}
-
-	for i := range collectDirs {
-		if i < len(streamDirs) && streamDirs[i] != collectDirs[i] {
-			t.Errorf("dir mismatch at %d: stream=%q, collect=%q", i, streamDirs[i], collectDirs[i])
-		}
-	}
-	for i := range collectFiles {
-		if i < len(streamFiles) && streamFiles[i] != collectFiles[i] {
-			t.Errorf("file mismatch at %d: stream=%q, collect=%q", i, streamFiles[i], collectFiles[i])
-		}
-	}
-}
-
-// Test that sibling symlinks to the same target don't cause false cycle detection.
-// This validates the depth-indexed ancestry map approach vs. a wrong global dedup.
-func TestWalkStream_FollowSymlinks_SiblingNoCycle(t *testing.T) {
-	root := t.TempDir()
-
-	// root/a/sub/ with files
-	os.MkdirAll(filepath.Join(root, "a", "sub"), 0755)
-	os.WriteFile(filepath.Join(root, "a", "sub", "file.txt"), []byte("data"), 0644)
-
-	// root/b/link -> root/a/sub (sibling link to previously visited dir)
-	os.MkdirAll(filepath.Join(root, "b"), 0755)
-	os.Symlink(filepath.Join(root, "a", "sub"), filepath.Join(root, "b", "link"))
-
-	dirs, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-
-	// b/link should NOT be falsely detected as a cycle
-	if !contains(dirs, "b/link") {
-		t.Errorf("expected b/link in dirs (sibling link, not a cycle), got: %v", dirs)
-	}
-	if !contains(files, "b/link/file.txt") {
-		t.Errorf("expected b/link/file.txt in files, got: %v", files)
-	}
-}
-
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }
 
 func TestShouldProbeResolvedDirectory(t *testing.T) {
@@ -854,16 +616,15 @@ func TestWalkStream_SkippedChannelDrainsCleanly(t *testing.T) {
 	}
 }
 
-// TestWalkCollect_SymlinkSliceReceivesUnidentifiableTargets verifies the
-// existing Symlinks-slice behavior. On Unix, getDirIdentity always succeeds,
-// so this test does not exercise the unidentifiable branch directly — but
-// it documents the contract that the Symlinks slice is the surface for
-// "we walked it but couldn't follow it" cases.
+// TestWalkCollect_SymlinkSliceContainsBrokenSymlinks verifies the existing
+// Symlinks-slice behavior. On Unix, getDirIdentity always succeeds, so this
+// test does not exercise the unidentifiable branch directly — but it documents
+// the contract that the Symlinks slice is the surface for "we walked it but
+// couldn't follow it" cases.
 func TestWalkCollect_SymlinkSliceContainsBrokenSymlinks(t *testing.T) {
-	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, "real.txt"), []byte("data"), 0644)
+	root := mkTree(t, nil, []string{"real.txt"})
 	// Symlink pointing at a non-existent target: Stat will fail.
-	os.Symlink(filepath.Join(root, "missing.txt"), filepath.Join(root, "broken_link"))
+	addSymlinks(t, root, [][2]string{{"missing.txt", "broken_link"}})
 
 	result, err := WalkCollect(root, WalkOptions{
 		IncludeHidden:  true,

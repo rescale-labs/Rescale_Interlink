@@ -107,175 +107,6 @@ func (cl *callbackLog) callbacks() *Callbacks {
 	}
 }
 
-func TestWatchJob_AlreadyTerminal(t *testing.T) {
-	var log callbackLog
-	var dlCount int
-
-	err := WatchJob(
-		context.Background(),
-		"job1",
-		shortConfig(),
-		mockStatusSequence("Completed"),
-		countingDownload(&dlCount),
-		log.callbacks(),
-	)
-
-	if err != nil {
-		t.Fatalf("expected nil error for Completed, got: %v", err)
-	}
-	if dlCount != 1 {
-		t.Errorf("expected 1 download pass, got %d", dlCount)
-	}
-	if len(log.Terminals) != 1 {
-		t.Errorf("expected 1 terminal callback, got %d", len(log.Terminals))
-	}
-	if len(log.Terminals) > 0 && log.Terminals[0][1] != "Completed" {
-		t.Errorf("expected terminal status Completed, got %s", log.Terminals[0][1])
-	}
-}
-
-func TestWatchJob_TransitionsToCompleted(t *testing.T) {
-	var log callbackLog
-	var dlCount int
-
-	err := WatchJob(
-		context.Background(),
-		"job1",
-		shortConfig(),
-		mockStatusSequence("Queued", "Running", "Completed"),
-		countingDownload(&dlCount),
-		log.callbacks(),
-	)
-
-	if err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
-	}
-	// Downloads: initial tick + each subsequent tick until terminal + final sweep
-	if dlCount < 3 {
-		t.Errorf("expected at least 3 download passes, got %d", dlCount)
-	}
-	if len(log.StatusChanges) < 3 {
-		t.Errorf("expected at least 3 status changes (empty->Queued, Queued->Running, Running->Completed), got %d", len(log.StatusChanges))
-	}
-}
-
-func TestWatchJob_TransitionsToFailed(t *testing.T) {
-	var log callbackLog
-
-	err := WatchJob(
-		context.Background(),
-		"job1",
-		shortConfig(),
-		mockStatusSequence("Running", "Failed"),
-		noopDownload,
-		log.callbacks(),
-	)
-
-	if err == nil {
-		t.Fatal("expected error for Failed status, got nil")
-	}
-	if len(log.Terminals) == 0 || log.Terminals[len(log.Terminals)-1][1] != "Failed" {
-		t.Errorf("expected terminal callback with Failed status")
-	}
-}
-
-func TestWatchJob_ContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Cancel after a short delay
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		cancel()
-	}()
-
-	err := WatchJob(
-		ctx,
-		"job1",
-		shortConfig(),
-		mockStatusSequence("Running"), // never terminal
-		noopDownload,
-		nil,
-	)
-
-	if err != context.Canceled {
-		t.Fatalf("expected context.Canceled, got: %v", err)
-	}
-}
-
-func TestWatchJob_MaxConsecutiveErrors(t *testing.T) {
-	cfg := shortConfig()
-	cfg.MaxConsecutiveErrors = 3
-
-	err := WatchJob(
-		context.Background(),
-		"job1",
-		cfg,
-		mockStatusError(fmt.Errorf("api unavailable")),
-		noopDownload,
-		nil,
-	)
-
-	if err == nil {
-		t.Fatal("expected error after max consecutive errors")
-	}
-}
-
-func TestWatchJob_ErrorRecovery(t *testing.T) {
-	// 2 errors then "Completed"
-	statusFn := mockStatusErrorThenRecover(2, "Completed")
-
-	err := WatchJob(
-		context.Background(),
-		"job1",
-		shortConfig(),
-		statusFn,
-		noopDownload,
-		nil,
-	)
-
-	if err != nil {
-		t.Fatalf("expected nil after recovery, got: %v", err)
-	}
-}
-
-func TestWatchJob_DownloadErrorContinues(t *testing.T) {
-	// Download always fails, but loop should continue until terminal
-	var log callbackLog
-
-	err := WatchJob(
-		context.Background(),
-		"job1",
-		shortConfig(),
-		mockStatusSequence("Running", "Completed"),
-		errorDownload,
-		log.callbacks(),
-	)
-
-	if err != nil {
-		t.Fatalf("expected nil (Completed), got: %v", err)
-	}
-	// Should have recorded download errors via callback
-	if len(log.DownloadPasses) < 2 {
-		t.Errorf("expected at least 2 download passes, got %d", len(log.DownloadPasses))
-	}
-}
-
-func TestWatchJob_NilCallbacks(t *testing.T) {
-	// Verifies nil Callbacks pointer doesn't panic
-	err := WatchJob(
-		context.Background(),
-		"job1",
-		shortConfig(),
-		mockStatusSequence("Completed"),
-		noopDownload,
-		nil,
-	)
-
-	if err != nil {
-		t.Fatalf("expected nil, got: %v", err)
-	}
-}
-
 // --- WatchNewerThan tests ---
 
 func mockLister(jobs ...JobInfo) JobLister {
@@ -303,161 +134,289 @@ func simpleFactory(dlFn DownloadFunc) DownloadFuncFactory {
 	return func(_ string) DownloadFunc { return dlFn }
 }
 
-func TestWatchNewerThan_EmptyList(t *testing.T) {
-	err := WatchNewerThan(
-		context.Background(),
-		"ref1",
-		shortConfig(),
-		mockLister(), // empty
-		mockStatusSequence("Completed"),
-		simpleFactory(noopDownload),
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("expected nil for empty list, got: %v", err)
-	}
-}
-
-func TestWatchNewerThan_AllTerminal(t *testing.T) {
-	var log callbackLog
-	var dlCount int
-
-	// Both jobs return Completed immediately
-	statusFn := func(_ context.Context, _ string) (string, error) {
-		return "Completed", nil
-	}
-
-	err := WatchNewerThan(
-		context.Background(),
-		"ref1",
-		shortConfig(),
-		mockLister(
-			JobInfo{ID: "j1", Name: "Job1", Status: "Completed"},
-			JobInfo{ID: "j2", Name: "Job2", Status: "Completed"},
-		),
-		statusFn,
-		simpleFactory(countingDownload(&dlCount)),
-		log.callbacks(),
-	)
-
-	if err != nil {
-		t.Fatalf("expected nil, got: %v", err)
-	}
-	if dlCount < 2 {
-		t.Errorf("expected at least 2 download passes, got %d", dlCount)
-	}
-	if len(log.Terminals) != 2 {
-		t.Errorf("expected 2 terminal callbacks, got %d", len(log.Terminals))
-	}
-}
-
-func TestWatchNewerThan_MixedStates(t *testing.T) {
+// completeOnCall reports "Running" until each job has been polled n times,
+// then "Completed" for that job.
+func completeOnCall(n int) StatusFunc {
 	var mu sync.Mutex
-	callCounts := map[string]int{}
-
-	statusFn := func(_ context.Context, jobID string) (string, error) {
+	calls := map[string]int{}
+	return func(_ context.Context, jobID string) (string, error) {
 		mu.Lock()
-		callCounts[jobID]++
-		n := callCounts[jobID]
+		calls[jobID]++
+		seen := calls[jobID]
 		mu.Unlock()
-
-		if jobID == "j1" {
-			return "Completed", nil
-		}
-		// j2 transitions to Completed on 2nd call
-		if n >= 2 {
+		if seen >= n {
 			return "Completed", nil
 		}
 		return "Running", nil
 	}
+}
 
-	err := WatchNewerThan(
-		context.Background(),
-		"ref1",
-		shortConfig(),
-		mockLister(
-			JobInfo{ID: "j1", Name: "Job1"},
-			JobInfo{ID: "j2", Name: "Job2"},
-		),
-		statusFn,
-		simpleFactory(noopDownload),
-		nil,
-	)
+// TestWatchJob drives WatchJob over the shared fixture: shortConfig(), a
+// background context, a counting download and a recording callbackLog. Each
+// row states only its deltas — a config tweak, a status source, a download
+// func, a nil Callbacks pointer, or a cancel deadline.
+func TestWatchJob(t *testing.T) {
+	tests := []struct {
+		name        string
+		tuneCfg     func(*Config)
+		status      StatusFunc
+		download    DownloadFunc // nil: countingDownload(&dlCount)
+		nilCB       bool         // pass a nil *Callbacks
+		cancelAfter time.Duration
+		wantErr     error // exact error required
+		wantAnyErr  bool  // any non-nil error required
+		check       func(t *testing.T, log *callbackLog, dlCount int)
+	}{
+		{
+			name:   "already terminal",
+			status: mockStatusSequence("Completed"),
+			check: func(t *testing.T, log *callbackLog, dlCount int) {
+				if dlCount != 1 {
+					t.Errorf("expected 1 download pass, got %d", dlCount)
+				}
+				if len(log.Terminals) != 1 {
+					t.Errorf("expected 1 terminal callback, got %d", len(log.Terminals))
+				}
+				if len(log.Terminals) > 0 && log.Terminals[0][1] != "Completed" {
+					t.Errorf("expected terminal status Completed, got %s", log.Terminals[0][1])
+				}
+			},
+		},
+		{
+			name:   "transitions to completed",
+			status: mockStatusSequence("Queued", "Running", "Completed"),
+			check: func(t *testing.T, log *callbackLog, dlCount int) {
+				// Downloads: initial tick + each subsequent tick until terminal + final sweep
+				if dlCount < 3 {
+					t.Errorf("expected at least 3 download passes, got %d", dlCount)
+				}
+				if len(log.StatusChanges) < 3 {
+					t.Errorf("expected at least 3 status changes (empty->Queued, Queued->Running, Running->Completed), got %d", len(log.StatusChanges))
+				}
+			},
+		},
+		{
+			name:       "transitions to failed",
+			status:     mockStatusSequence("Running", "Failed"),
+			download:   noopDownload,
+			wantAnyErr: true,
+			check: func(t *testing.T, log *callbackLog, _ int) {
+				if len(log.Terminals) == 0 || log.Terminals[len(log.Terminals)-1][1] != "Failed" {
+					t.Errorf("expected terminal callback with Failed status")
+				}
+			},
+		},
+		{
+			name:        "context cancel",
+			status:      mockStatusSequence("Running"), // never terminal
+			download:    noopDownload,
+			nilCB:       true,
+			cancelAfter: 30 * time.Millisecond,
+			wantErr:     context.Canceled,
+		},
+		{
+			name:       "max consecutive errors",
+			tuneCfg:    func(c *Config) { c.MaxConsecutiveErrors = 3 },
+			status:     mockStatusError(fmt.Errorf("api unavailable")),
+			download:   noopDownload,
+			nilCB:      true,
+			wantAnyErr: true,
+		},
+		{
+			name:     "error recovery",
+			status:   mockStatusErrorThenRecover(2, "Completed"), // 2 errors then "Completed"
+			download: noopDownload,
+			nilCB:    true,
+		},
+		{
+			// Download always fails, but the loop should continue until terminal.
+			name:     "download error continues",
+			status:   mockStatusSequence("Running", "Completed"),
+			download: errorDownload,
+			check: func(t *testing.T, log *callbackLog, _ int) {
+				// Should have recorded download errors via callback
+				if len(log.DownloadPasses) < 2 {
+					t.Errorf("expected at least 2 download passes, got %d", len(log.DownloadPasses))
+				}
+			},
+		},
+		{
+			// Verifies a nil Callbacks pointer doesn't panic.
+			name:     "nil callbacks",
+			status:   mockStatusSequence("Completed"),
+			download: noopDownload,
+			nilCB:    true,
+		},
+	}
 
-	if err != nil {
-		t.Fatalf("expected nil, got: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := shortConfig()
+			if tc.tuneCfg != nil {
+				tc.tuneCfg(&cfg)
+			}
+
+			ctx := context.Background()
+			if tc.cancelAfter > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				go func() {
+					time.Sleep(tc.cancelAfter)
+					cancel()
+				}()
+			}
+
+			var log callbackLog
+			cb := log.callbacks()
+			if tc.nilCB {
+				cb = nil
+			}
+			var dlCount int
+			download := tc.download
+			if download == nil {
+				download = countingDownload(&dlCount)
+			}
+
+			err := WatchJob(ctx, "job1", cfg, tc.status, download, cb)
+
+			switch {
+			case tc.wantErr != nil:
+				if err != tc.wantErr {
+					t.Fatalf("expected %v, got: %v", tc.wantErr, err)
+				}
+			case tc.wantAnyErr:
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+			default:
+				if err != nil {
+					t.Fatalf("expected nil error, got: %v", err)
+				}
+			}
+			if tc.check != nil {
+				tc.check(t, &log, dlCount)
+			}
+		})
 	}
 }
 
-func TestWatchNewerThan_NewJobDiscovery(t *testing.T) {
-	var log callbackLog
-	var mu sync.Mutex
-	callCounts := map[string]int{}
-
-	statusFn := func(_ context.Context, jobID string) (string, error) {
-		mu.Lock()
-		callCounts[jobID]++
-		n := callCounts[jobID]
-		mu.Unlock()
-		// All jobs complete on 2nd status check
-		if n >= 2 {
-			return "Completed", nil
-		}
-		return "Running", nil
+// TestWatchNewerThan drives WatchNewerThan over the same fixture as
+// TestWatchJob, with the job list supplied per row.
+func TestWatchNewerThan(t *testing.T) {
+	tests := []struct {
+		name     string
+		lister   JobLister
+		status   StatusFunc
+		download DownloadFunc // nil: countingDownload(&dlCount)
+		nilCB    bool
+		timeout  time.Duration
+		check    func(t *testing.T, log *callbackLog, dlCount int)
+	}{
+		{
+			name:     "empty list",
+			lister:   mockLister(), // empty
+			status:   mockStatusSequence("Completed"),
+			download: noopDownload,
+			nilCB:    true,
+		},
+		{
+			name: "all terminal",
+			lister: mockLister(
+				JobInfo{ID: "j1", Name: "Job1", Status: "Completed"},
+				JobInfo{ID: "j2", Name: "Job2", Status: "Completed"},
+			),
+			// Both jobs return Completed immediately.
+			status: mockStatusSequence("Completed"),
+			check: func(t *testing.T, log *callbackLog, dlCount int) {
+				if dlCount < 2 {
+					t.Errorf("expected at least 2 download passes, got %d", dlCount)
+				}
+				if len(log.Terminals) != 2 {
+					t.Errorf("expected 2 terminal callbacks, got %d", len(log.Terminals))
+				}
+			},
+		},
+		{
+			name: "mixed states",
+			lister: mockLister(
+				JobInfo{ID: "j1", Name: "Job1"},
+				JobInfo{ID: "j2", Name: "Job2"},
+			),
+			// j1 is terminal at once; j2 transitions to Completed on its 2nd call.
+			status: func() StatusFunc {
+				running := completeOnCall(2)
+				return func(ctx context.Context, jobID string) (string, error) {
+					if jobID == "j1" {
+						return "Completed", nil
+					}
+					return running(ctx, jobID)
+				}
+			}(),
+			download: noopDownload,
+			nilCB:    true,
+		},
+		{
+			name: "new job discovery",
+			lister: growingLister(
+				[]JobInfo{{ID: "j1", Name: "Job1"}},
+				[]JobInfo{{ID: "j1", Name: "Job1"}, {ID: "j2", Name: "Job2"}},
+			),
+			status:   completeOnCall(2), // all jobs complete on 2nd status check
+			download: noopDownload,
+			check: func(t *testing.T, log *callbackLog, _ int) {
+				// j2 should have been discovered and tracked
+				foundJ2 := false
+				for _, sc := range log.StatusChanges {
+					if sc[0] == "j2" {
+						foundJ2 = true
+						break
+					}
+				}
+				if !foundJ2 {
+					t.Error("expected j2 to appear in status changes (discovered on 2nd tick)")
+				}
+			},
+		},
+		{
+			// All jobs terminal + no new jobs on re-discovery -> exits.
+			name:     "exit condition",
+			lister:   mockLister(JobInfo{ID: "j1", Name: "Job1"}),
+			status:   mockStatusSequence("Completed"),
+			download: noopDownload,
+			nilCB:    true,
+			timeout:  500 * time.Millisecond,
+		},
 	}
 
-	first := []JobInfo{{ID: "j1", Name: "Job1"}}
-	later := []JobInfo{
-		{ID: "j1", Name: "Job1"},
-		{ID: "j2", Name: "Job2"},
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
+				defer cancel()
+			}
 
-	err := WatchNewerThan(
-		context.Background(),
-		"ref1",
-		shortConfig(),
-		growingLister(first, later),
-		statusFn,
-		simpleFactory(noopDownload),
-		log.callbacks(),
-	)
+			var log callbackLog
+			cb := log.callbacks()
+			if tc.nilCB {
+				cb = nil
+			}
+			var dlCount int
+			download := tc.download
+			if download == nil {
+				download = countingDownload(&dlCount)
+			}
 
-	if err != nil {
-		t.Fatalf("expected nil, got: %v", err)
-	}
-	// j2 should have been discovered and tracked
-	foundJ2 := false
-	for _, sc := range log.StatusChanges {
-		if sc[0] == "j2" {
-			foundJ2 = true
-			break
-		}
-	}
-	if !foundJ2 {
-		t.Error("expected j2 to appear in status changes (discovered on 2nd tick)")
-	}
-}
-
-func TestWatchNewerThan_ExitCondition(t *testing.T) {
-	// All jobs terminal + no new jobs on re-discovery -> exits
-	statusFn := func(_ context.Context, _ string) (string, error) {
-		return "Completed", nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	err := WatchNewerThan(
-		ctx,
-		"ref1",
-		shortConfig(),
-		mockLister(JobInfo{ID: "j1", Name: "Job1"}),
-		statusFn,
-		simpleFactory(noopDownload),
-		nil,
-	)
-
-	if err != nil {
-		t.Fatalf("expected nil (all terminal), got: %v", err)
+			err := WatchNewerThan(ctx, "ref1", shortConfig(), tc.lister, tc.status,
+				simpleFactory(download), cb)
+			if err != nil {
+				t.Fatalf("expected nil, got: %v", err)
+			}
+			if tc.check != nil {
+				tc.check(t, &log, dlCount)
+			}
+		})
 	}
 }
