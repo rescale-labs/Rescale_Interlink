@@ -394,8 +394,7 @@ func UploadFilesWithIDs(
 			fileBar.Complete("", err)
 
 			if state.UploadResumeStateExists(fPath) {
-				fmt.Fprintf(uploadUI.Writer(), "\n💡 Resume state saved. To resume this upload, run the same command again:\n")
-				fmt.Fprintf(uploadUI.Writer(), "   rescale-int files upload %s\n\n", fPath)
+				fmt.Fprintf(uploadUI.Writer(), "\n💡 Re-running the upload starts it from the beginning; the partial upload state is discarded.\n\n")
 			}
 
 			return fmt.Errorf("failed to upload %s: %w", fPath, err)

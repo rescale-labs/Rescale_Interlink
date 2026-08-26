@@ -135,59 +135,6 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	}, nil
 }
 
-// UploadStreamingPart encrypts and uploads a single block.
-// Uses CBC chaining - parts MUST be uploaded sequentially.
-// The orchestrator already calls this sequentially (see upload.go:217).
-func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, plaintext []byte) (*transfer.PartResult, error) {
-	providerData, ok := uploadState.ProviderData.(*azureProviderData)
-	if !ok {
-		return nil, fmt.Errorf("invalid provider data for Azure streaming upload")
-	}
-
-	// Determine if this is the final part
-	isFinal := (partIndex == uploadState.TotalParts-1)
-
-	// Encrypt this part with CBC chaining
-	ciphertext, err := providerData.encryptState.EncryptPart(plaintext, isFinal)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt block %d: %w", partIndex, err)
-	}
-
-	// Generate block ID (must be consistent and base64-encoded)
-	blockIDStr := fmt.Sprintf("block-%010d", partIndex)
-	blockID := base64.StdEncoding.EncodeToString([]byte(blockIDStr))
-
-	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-	defer cancel()
-
-	if deadline, ok := partCtx.Deadline(); ok {
-		log.Printf("[AZURE] Block %d: remaining deadline %v", partIndex, time.Until(deadline).Round(time.Second))
-	}
-
-	// Stage the block using AzureClient
-	err = providerData.azureClient.RetryWithBackoff(partCtx, fmt.Sprintf("StageBlock %d", partIndex), func() error {
-		client := providerData.azureClient.Client()
-		blockBlobClient := client.ServiceClient().NewContainerClient(providerData.container).NewBlockBlobClient(providerData.blobPath)
-		reader := &readSeekCloser{Reader: bytes.NewReader(ciphertext)}
-		_, err := blockBlobClient.StageBlock(partCtx, blockID, reader, nil)
-		return err
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to stage block %d: %w", partIndex, err)
-	}
-
-	// Store block ID at the correct index
-	providerData.blockIDs[partIndex] = blockID
-
-	return &transfer.PartResult{
-		PartIndex:  partIndex,
-		PartNumber: int32(partIndex + 1), // 1-based for consistency with S3
-		ETag:       blockID,              // Azure uses block ID instead of ETag
-		Size:       int64(len(plaintext)),
-	}, nil
-}
-
 // EncryptStreamingPart encrypts plaintext and returns ciphertext.
 // Must be called sequentially due to CBC chaining constraint.
 // Separated from upload to enable pipelining.
@@ -395,7 +342,7 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 	// The resume state validation already checks age < MaxResumeAge (7 days),
 	// so if we reach here, the state is valid and blocks should still exist.
 	//
-	// We could optionally call GetBlockList to verify blocks exist, but:
+	// We could optionally list the staged blocks to verify they exist, but:
 	// 1. It adds latency and API calls
 	// 2. Deterministic encryption means we can re-upload any missing blocks
 	// 3. State validation already handles the age check

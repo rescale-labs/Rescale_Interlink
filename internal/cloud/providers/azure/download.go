@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -216,7 +215,7 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 		}
 
 		// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
-		// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally).
+		// Uses DownloadRangeOnce, the non-retrying variant, so this loop is the only retry.
 		var chunkData []byte
 		err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk offset=%d", offset), func() error {
 			// Per-attempt timeout to prevent stalled reads from hanging
@@ -393,7 +392,7 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 				rangeSize := endByte - startByte
 
 				// Wrap request+read+close in single retry to handle mid-transfer proxy failures.
-				// Uses DownloadRangeOnce to avoid nested retries (DownloadRange already retries internally).
+				// Uses DownloadRangeOnce, the non-retrying variant, so this loop is the only retry.
 				var chunkData []byte
 				err := azureClient.RetryWithBackoff(ctx, fmt.Sprintf("DownloadChunk %d", chunkIdx), func() error {
 					// Per-attempt timeout to prevent stalled reads from hanging
@@ -470,12 +469,6 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 
 	// Delete resume state on success
 	state.DeleteDownloadState(localPath)
-
-	// Ensure directory exists for final file
-	dir := filepath.Dir(localPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
 
 	// Sync file to disk before returning to ensure all data is written
 	// before checksum verification. Without this, sporadic checksum failures

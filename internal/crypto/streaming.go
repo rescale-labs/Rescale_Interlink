@@ -171,14 +171,6 @@ func (e *CBCStreamingEncryptor) GetInitialIV() []byte {
 	return result
 }
 
-// GetCurrentIV returns the current IV (for resume state storage).
-// This is the last ciphertext block from the most recent encrypted part.
-func (e *CBCStreamingEncryptor) GetCurrentIV() []byte {
-	result := make([]byte, IVSize)
-	copy(result, e.currentIV)
-	return result
-}
-
 // CBCStreamingDecryptor provides streaming decryption with CBC chaining.
 // Used for decrypting files uploaded with CBCStreamingEncryptor.
 type CBCStreamingDecryptor struct {

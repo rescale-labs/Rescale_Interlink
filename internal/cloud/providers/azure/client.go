@@ -55,7 +55,6 @@ type AzureClient struct {
 }
 
 // NewAzureClient creates a new Azure client with auto-refreshing credentials.
-// This is the replacement for upload.NewAzureUploader() and download.NewAzureDownloader() client creation logic.
 //
 // The client:
 //   - Uses the global credential manager for auto-refresh (shared across operations)
@@ -196,11 +195,6 @@ func (c *AzureClient) Client() *azblob.Client {
 	c.clientMu.Lock()
 	defer c.clientMu.Unlock()
 	return c.client
-}
-
-// StorageInfo returns the storage configuration.
-func (c *AzureClient) StorageInfo() *models.StorageInfo {
-	return c.storageInfo
 }
 
 // Container returns the Azure container name.
@@ -407,20 +401,9 @@ func (c *AzureClient) DownloadStream(ctx context.Context, blobPath string, optio
 	return resp, err
 }
 
-// DownloadRange downloads a range of bytes from an Azure blob.
-// Uses retry logic with credential refresh.
-func (c *AzureClient) DownloadRange(ctx context.Context, blobPath string, offset, count int64) (azblob.DownloadStreamResponse, error) {
-	return c.DownloadStream(ctx, blobPath, &azblob.DownloadStreamOptions{
-		Range: azblob.HTTPRange{
-			Offset: offset,
-			Count:  count,
-		},
-	})
-}
-
 // DownloadRangeOnce downloads a range of bytes WITHOUT retry (for use in provider-level retry).
 // This allows the provider to wrap the full request+read+close cycle in a single
-// retry loop, avoiding nested retries that would occur if using DownloadRange within RetryWithBackoff.
+// retry loop, so a mid-transfer failure retries the whole cycle.
 func (c *AzureClient) DownloadRangeOnce(ctx context.Context, blobPath string, offset, count int64) (azblob.DownloadStreamResponse, error) {
 	c.clientMu.Lock()
 	client := c.client
@@ -433,40 +416,4 @@ func (c *AzureClient) DownloadRangeOnce(ctx context.Context, blobPath string, of
 			Count:  count,
 		},
 	})
-}
-
-// GetBlockBlobClient returns a block blob client for the specified path.
-// Thread-safe: Uses current client under mutex protection.
-func (c *AzureClient) GetBlockBlobClient(blobPath string) interface{} {
-	c.clientMu.Lock()
-	defer c.clientMu.Unlock()
-	return c.client.ServiceClient().NewContainerClient(c.Container()).NewBlockBlobClient(blobPath)
-}
-
-// GetBlockList gets the list of uncommitted blocks for a blob.
-// Used for resume validation.
-func (c *AzureClient) GetBlockList(ctx context.Context, blobPath string) ([]string, error) {
-	c.clientMu.Lock()
-	client := c.client
-	c.clientMu.Unlock()
-
-	blockBlobClient := client.ServiceClient().NewContainerClient(c.Container()).NewBlockBlobClient(blobPath)
-
-	var blockIDs []string
-	err := c.RetryWithBackoff(ctx, "GetBlockList", func() error {
-		resp, err := blockBlobClient.GetBlockList(ctx, "uncommitted", nil)
-		if err != nil {
-			return err
-		}
-		if resp.UncommittedBlocks != nil {
-			blockIDs = make([]string, len(resp.UncommittedBlocks))
-			for i, block := range resp.UncommittedBlocks {
-				if block.Name != nil {
-					blockIDs[i] = *block.Name
-				}
-			}
-		}
-		return nil
-	})
-	return blockIDs, err
 }

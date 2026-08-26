@@ -631,9 +631,3 @@ func (a *App) SaveFile(title string) (result string, err error) {
 	}
 	return
 }
-
-// =============================================================================
-// Auto-Download Configuration
-// =============================================================================
-// DEPRECATED - Auto-download config is now unified in daemon.conf.
-// Use GetDaemonConfig() and SaveDaemonConfig() from daemon_bindings.go instead.

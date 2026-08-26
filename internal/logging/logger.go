@@ -102,18 +102,6 @@ func (l *Logger) With() zerolog.Context {
 	return l.zlog.With()
 }
 
-// WithStr creates a new Logger with an additional string field.
-// This returns a new *Logger instance, useful for creating per-user loggers.
-func (l *Logger) WithStr(key, value string) *Logger {
-	childZlog := l.zlog.With().Str(key, value).Logger()
-	return &Logger{
-		zlog:     childZlog,
-		mode:     l.mode,
-		eventBus: l.eventBus,
-		output:   l.output,
-	}
-}
-
 // WithOutput returns a copy of the logger that writes to w, leaving this logger
 // untouched. Used to route a command's logs through its progress display for the
 // duration of a transfer: the output goes through a ConsoleWriter, so what mpb
@@ -123,7 +111,7 @@ func (l *Logger) WithStr(key, value string) *Logger {
 // share the logger, and swapping its writer underneath them is a data race.
 //
 // Like SetOutput, this rebuilds the zerolog logger from scratch, so context
-// fields added by WithStr are dropped. Call it before adding per-operation
+// fields added via With() are dropped. Call it before adding per-operation
 // fields, not after.
 func (l *Logger) WithOutput(w io.Writer) *Logger {
 	out := zerolog.ConsoleWriter{Out: w, TimeFormat: "15:04:05"}
@@ -150,25 +138,9 @@ func (l *Logger) Output() io.Writer {
 	return l.output
 }
 
-// Debugf logs a debug message with printf-style formatting.
-// This is only shown when debug/verbose mode is enabled.
-func (l *Logger) Debugf(format string, args ...interface{}) {
-	l.zlog.Debug().Msgf(format, args...)
-}
-
-// Infof logs an info message with printf-style formatting.
-func (l *Logger) Infof(format string, args ...interface{}) {
-	l.zlog.Info().Msgf(format, args...)
-}
-
 // Errorf logs an error message with printf-style formatting.
 func (l *Logger) Errorf(format string, args ...interface{}) {
 	l.zlog.Error().Msgf(format, args...)
-}
-
-// Warnf logs a warning message with printf-style formatting.
-func (l *Logger) Warnf(format string, args ...interface{}) {
-	l.zlog.Warn().Msgf(format, args...)
 }
 
 // SetGlobalLevel sets the global log level.

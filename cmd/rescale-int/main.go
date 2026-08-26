@@ -11,7 +11,6 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/cli/compat"
-	"github.com/rescale/rescale-int/internal/version"
 )
 
 func init() {
@@ -20,11 +19,6 @@ func init() {
 }
 
 func main() {
-	// Propagate version from the single source of truth (internal/version)
-	// to CLI package for backwards compatibility
-	cli.Version = version.Version
-	cli.BuildTime = version.BuildTime
-
 	// Enable timing output
 	if slices.Contains(os.Args, "--timing") {
 		os.Setenv("RESCALE_TIMING", "1")

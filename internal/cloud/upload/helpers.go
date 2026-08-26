@@ -34,7 +34,8 @@ func GenerateEncryptionParams() ([]byte, []byte, string, error) {
 // CreateEncryptedTempFile creates a temporary encrypted file path.
 // Tries system temp directory first, falls back to source directory if needed.
 // Returns the encrypted file path and an error if creation fails.
-// NOTE: This does NOT check disk space - call CheckDiskSpaceForEncryption separately.
+// NOTE: There is no disk-space pre-check; a full disk surfaces as a write
+// error once encryption starts.
 func CreateEncryptedTempFile(localPath string) (string, error) {
 	filename := filepath.Base(localPath)
 	sourceDir := filepath.Dir(localPath)

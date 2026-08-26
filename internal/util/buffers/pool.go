@@ -12,12 +12,11 @@ import (
 // during upload/download operations. This significantly reduces GC pressure
 // and improves overall performance.
 
-// Pool monitoring counters
+// Pool monitoring counters. sync.Pool does not report whether a Get was served
+// from cache, so only fresh allocations can be counted.
 var (
 	chunkAllocations int64 // Total chunk buffer allocations (new creates)
-	chunkReuses      int64 // Total chunk buffer reuses from pool
-	smallAllocations int64 // Total small buffer allocations
-	smallReuses      int64 // Total small buffer reuses from pool
+	smallAllocations int64 // Total small buffer allocations (new creates)
 )
 
 var (
@@ -30,9 +29,7 @@ var (
 			allocs := atomic.LoadInt64(&chunkAllocations)
 			// Log every 10th allocation to avoid spam during heavy use
 			if allocs%10 == 0 {
-				reuses := atomic.LoadInt64(&chunkReuses)
-				log.Printf("Buffer pool: %d chunk allocations, %d reuses (%.1f%% reuse rate)",
-					allocs, reuses, float64(reuses)/float64(allocs+reuses)*100)
+				log.Printf("Buffer pool: %d chunk allocations", allocs)
 			}
 			buf := make([]byte, constants.ChunkSize)
 			return &buf
@@ -50,7 +47,7 @@ var (
 	}
 )
 
-// GetChunkBuffer retrieves a 16MB buffer from the pool
+// GetChunkBuffer retrieves a constants.ChunkSize (32 MB) buffer from the pool.
 // The buffer must be returned to the pool using PutChunkBuffer when done
 // to allow reuse and prevent memory waste.
 //
@@ -61,10 +58,7 @@ var (
 //	n, err := io.ReadFull(file, *buf)
 //	// Use (*buf)[:n] for actual data
 func GetChunkBuffer() *[]byte {
-	buf := chunkPool.Get().(*[]byte)
-	// Track if this was a reuse (allocation counter didn't change)
-	// Note: This is approximate since sync.Pool doesn't tell us if it was from cache
-	return buf
+	return chunkPool.Get().(*[]byte)
 }
 
 // PutChunkBuffer returns a buffer to the pool for reuse

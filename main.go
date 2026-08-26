@@ -76,11 +76,6 @@ func init() {
 }
 
 func main() {
-	// Propagate version from the single source of truth (internal/version)
-	// to CLI package for backwards compatibility
-	cli.Version = version.Version
-	cli.BuildTime = version.BuildTime
-
 	// Check for diagnostic modes before GUI/CLI
 	if slices.Contains(os.Args, "--mesa-doctor") {
 		fmt.Printf("Rescale Interlink %s\n\n", version.Version)

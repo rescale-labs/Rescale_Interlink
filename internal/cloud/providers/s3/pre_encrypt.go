@@ -279,9 +279,8 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	return err
 }
 
-// uploadEncryptedMultipartConcurrent uploads an encrypted file using concurrent S3 multipart state.
-// Full concurrent upload implementation directly in provider, using S3Client.
-// This eliminates the dependency on state.NewS3Uploader().
+// uploadEncryptedMultipartConcurrent uploads an encrypted file using concurrent
+// S3 multipart state, driving S3Client directly from the provider.
 func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Client *S3Client, params transfer.EncryptedFileUploadParams, objectKey string, encryptedSize int64) error {
 	// If no transfer handle provided, fall back to sequential upload
 	if params.TransferHandle == nil || params.TransferHandle.GetThreads() <= 1 {

@@ -19,7 +19,6 @@ type DownloadUI struct {
 	bars       sync.Map // fileID -> *DownloadFileBar
 	isTerminal bool
 	totalFiles int
-	completed  int32
 }
 
 // DownloadFileBar represents a single file download progress bar
@@ -234,7 +233,6 @@ func (f *DownloadFileBar) Complete(err error) {
 		}
 	}
 
-	atomic.AddInt32(&f.ui.completed, 1)
 }
 
 // Wait blocks until all progress bars complete
@@ -242,28 +240,6 @@ func (u *DownloadUI) Wait() {
 	if u.progress != nil {
 		ClearLogSink(u.progress)
 		u.progress.Wait()
-	}
-}
-
-// WaitWithTimeout blocks until all progress bars complete or timeout expires.
-// Returns true if Wait completed normally, false if timeout occurred.
-func (u *DownloadUI) WaitWithTimeout(timeout time.Duration) bool {
-	if u.progress == nil {
-		return true
-	}
-	ClearLogSink(u.progress)
-
-	done := make(chan struct{})
-	go func() {
-		u.progress.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
 	}
 }
 
@@ -276,14 +252,8 @@ func (u *DownloadUI) LogWriter() io.Writer {
 }
 
 // Writer returns an io.Writer for output during progress operations.
-// Implements the ProgressUI interface.
 func (u *DownloadUI) Writer() io.Writer {
 	return u.LogWriter()
-}
-
-// GetCompleted returns the number of completed downloads
-func (u *DownloadUI) GetCompleted() int {
-	return int(atomic.LoadInt32(&u.completed))
 }
 
 // IsTerminal returns whether output is to a terminal

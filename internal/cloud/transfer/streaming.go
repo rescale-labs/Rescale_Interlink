@@ -72,36 +72,10 @@ func (s *StreamingEncryptionState) GetKey() []byte {
 	return s.encryptor.GetKey()
 }
 
-// GetMasterKey returns the encryption key (for backward compatibility).
-//
-// Deprecated: Use GetKey instead.
-func (s *StreamingEncryptionState) GetMasterKey() []byte {
-	return s.encryptor.GetKey()
-}
-
 // GetInitialIV returns the initial IV (for cloud metadata storage).
 // IV is stored in metadata for Rescale compatibility.
 func (s *StreamingEncryptionState) GetInitialIV() []byte {
 	return s.encryptor.GetInitialIV()
-}
-
-// GetCurrentIV returns the current IV (for resume state storage).
-// This is the last ciphertext block from the most recent encrypted part (for resume support).
-func (s *StreamingEncryptionState) GetCurrentIV() []byte {
-	return s.encryptor.GetCurrentIV()
-}
-
-// GetFileId returns nil for CBC streaming format.
-// Kept for interface compatibility but returns nil.
-//
-// Deprecated: CBC format doesn't use FileId, only IV.
-func (s *StreamingEncryptionState) GetFileId() []byte {
-	return nil
-}
-
-// GetPartSize returns the part size in bytes.
-func (s *StreamingEncryptionState) GetPartSize() int64 {
-	return s.partSize
 }
 
 // CalculateTotalParts calculates the number of parts needed for a file.

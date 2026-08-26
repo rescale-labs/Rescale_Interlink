@@ -640,14 +640,6 @@ func (a *trayApp) uninstallServiceElevated() {
 	}()
 }
 
-// truncate shortens a string to maxLen, adding "..." if truncated.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
-}
-
 // translateError maps a raw error from an action (elevation, subprocess
 // launch, IPC call) to canonical user-facing text. Uses ipc.ErrorCode so
 // the tray and the GUI agree on wording, and appends the actionable hint

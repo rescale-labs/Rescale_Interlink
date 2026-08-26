@@ -1061,50 +1061,6 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 	return allJobs, nil
 }
 
-// ListJobsPaged returns the most recent `limit` jobs ordered by newest first.
-// It stops fetching as soon as it has accumulated enough results.
-func (c *Client) ListJobsPaged(ctx context.Context, limit int) ([]models.JobResponse, error) {
-	var allJobs []models.JobResponse
-	nextURL := fmt.Sprintf("/api/v3/jobs/?ordering=-dateInserted&limit=%d", limit)
-
-	for nextURL != "" && len(allJobs) < limit {
-		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != nethttp.StatusOK {
-			body := readResponseBody(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("list jobs failed: status %d: %s", resp.StatusCode, body)
-		}
-
-		var result struct {
-			Next    *string              `json:"next"`
-			Results []models.JobResponse `json:"results"`
-		}
-
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to decode jobs response: %w", err)
-		}
-		resp.Body.Close()
-
-		allJobs = append(allJobs, result.Results...)
-
-		if result.Next != nil && *result.Next != "" {
-			nextURL = extractAPIPath(*result.Next)
-		} else {
-			nextURL = ""
-		}
-	}
-
-	if len(allJobs) > limit {
-		allJobs = allJobs[:limit]
-	}
-	return allJobs, nil
-}
-
 // ListJobsPage fetches exactly one page of jobs ordered by newest first, and
 // reports whether more pages exist. The jobs endpoint uses page-number
 // pagination: page and page_size are honored, while limit/offset are accepted
@@ -2106,28 +2062,6 @@ func (c *Client) ListFolderContentsStreaming(
 		}
 
 		nextURL = page.NextURL
-	}
-
-	return nil
-}
-
-// MoveFileToFolder moves a file to a specific folder
-func (c *Client) MoveFileToFolder(ctx context.Context, fileID, folderID string) error {
-	path := fmt.Sprintf("/api/v3/files/%s/", fileID)
-
-	requestBody := map[string]interface{}{
-		"currentFolderId": folderID,
-	}
-
-	resp, err := c.doRequest(ctx, "PATCH", path, requestBody)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != nethttp.StatusOK {
-		body := readResponseBody(resp.Body)
-		return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, body)
 	}
 
 	return nil

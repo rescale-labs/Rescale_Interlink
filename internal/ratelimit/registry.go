@@ -173,7 +173,7 @@ func (r *Registry) AllScopes() []Scope {
 }
 
 // ScopeDisplayString returns a human-readable description of the scope for logging.
-// Example: "user (v3 default, 7200/hour = 2.00/sec)"
+// Example: "user (7200/hour = 2.00/sec)"
 func (r *Registry) ScopeDisplayString(scope Scope) string {
 	cfg, ok := r.scopeConfigs[scope]
 	if !ok {

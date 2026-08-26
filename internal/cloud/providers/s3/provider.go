@@ -137,7 +137,7 @@ func (p *Provider) Upload(ctx context.Context, params cloud.UploadParams) (*clou
 	}
 
 	// The actual upload is handled by the transfer orchestrator, which calls:
-	// - InitStreamingUpload/UploadStreamingPart/CompleteStreamingUpload for streaming mode
+	// - InitStreamingUpload/EncryptStreamingPart/UploadCiphertext/CompleteStreamingUpload for streaming mode
 	// - UploadEncryptedFile for pre-encrypt mode
 	//
 	// For direct calls (not through orchestrator), delegate to appropriate method based on mode.

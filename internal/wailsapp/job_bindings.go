@@ -163,7 +163,7 @@ type AutomationsResultDTO struct {
 
 // RunStatusDTO represents the status of a pipeline run.
 type RunStatusDTO struct {
-	State       string `json:"state"` // "idle", "running", "completed", "failed", "cancelled"
+	State       string `json:"state"` // "idle", "running", "completed", "failed"
 	TotalJobs   int    `json:"totalJobs"`
 	SuccessJobs int    `json:"successJobs"`
 	FailedJobs  int    `json:"failedJobs"`

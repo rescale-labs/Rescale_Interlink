@@ -24,6 +24,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Windows-specific implementation in main_windows.go
+	// Windows-specific implementation in tray_windows.go
 	runTray()
 }

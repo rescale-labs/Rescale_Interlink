@@ -15,7 +15,7 @@ import (
 
 // PendingTimeout is how long the system can remain in a transient pending
 // state before Compute promotes it to Error with CodeTransientTimeout.
-// Per AUTO_DOWNLOAD_SPEC §5.5.
+// Per old-reference/AUTO_DOWNLOAD_SPEC.md §5.5.
 const PendingTimeout = 10 * time.Second
 
 // InstallationState describes whether and how a service-level installation

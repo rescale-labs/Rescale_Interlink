@@ -62,7 +62,6 @@ type S3Client struct {
 }
 
 // NewS3Client creates a new S3 client with auto-refreshing credentials.
-// This is the replacement for upload.NewS3Uploader() client creation logic.
 //
 // The client:
 //   - Uses the global credential manager for auto-refresh (shared across operations)
@@ -153,11 +152,6 @@ func (c *S3Client) Client() *s3.Client {
 	c.clientMu.Lock()
 	defer c.clientMu.Unlock()
 	return c.client
-}
-
-// StorageInfo returns the storage configuration.
-func (c *S3Client) StorageInfo() *models.StorageInfo {
-	return c.storageInfo
 }
 
 // Bucket returns the S3 bucket name.
@@ -315,26 +309,9 @@ func (c *S3Client) GetObject(ctx context.Context, objectKey string) (*s3.GetObje
 	return resp, err
 }
 
-// GetObjectRange downloads a range of bytes from an S3 object.
-// Uses retry logic with credential refresh.
-func (c *S3Client) GetObjectRange(ctx context.Context, objectKey string, startByte, endByte int64) (*s3.GetObjectOutput, error) {
-	rangeHeader := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
-	var resp *s3.GetObjectOutput
-	err := c.RetryWithBackoff(ctx, fmt.Sprintf("GetObject range %d-%d", startByte, endByte), func() error {
-		r, err := c.Client().GetObject(ctx, &s3.GetObjectInput{
-			Bucket: aws.String(c.Bucket()),
-			Key:    aws.String(objectKey),
-			Range:  aws.String(rangeHeader),
-		})
-		resp = r
-		return err
-	})
-	return resp, err
-}
-
 // GetObjectRangeOnce downloads a range of bytes WITHOUT retry (for use in provider-level retry).
 // This allows the provider to wrap the full request+read+close cycle in a single
-// retry loop, avoiding nested retries that would occur if using GetObjectRange within RetryWithBackoff.
+// retry loop, so a mid-transfer failure retries the whole cycle.
 func (c *S3Client) GetObjectRangeOnce(ctx context.Context, objectKey string, startByte, endByte int64) (*s3.GetObjectOutput, error) {
 	rangeHeader := fmt.Sprintf("bytes=%d-%d", startByte, endByte)
 	return c.Client().GetObject(ctx, &s3.GetObjectInput{

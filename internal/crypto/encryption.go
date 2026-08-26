@@ -170,28 +170,17 @@ func EncryptFile(inputPath, outputPath string, key, iv []byte) error {
 
 		chunk := buffer[:n]
 
-		// Process full blocks
-		if len(chunk)%aes.BlockSize == 0 {
-			encrypted := make([]byte, len(chunk))
-			mode.CryptBlocks(encrypted, chunk)
-			if _, err := outputFile.Write(encrypted); err != nil {
-				return fmt.Errorf("failed to write encrypted data: %w", err)
-			}
-		} else {
-			// Partial block - save for next iteration
-			lastChunk = append(lastChunk, chunk...)
-
-			// Process complete blocks from lastChunk
-			completeBlocks := (len(lastChunk) / aes.BlockSize) * aes.BlockSize
-			if completeBlocks > 0 {
-				toEncrypt := lastChunk[:completeBlocks]
-				encrypted := make([]byte, len(toEncrypt))
-				mode.CryptBlocks(encrypted, toEncrypt)
-				if _, err := outputFile.Write(encrypted); err != nil {
-					return fmt.Errorf("failed to write encrypted data: %w", err)
-				}
-				lastChunk = lastChunk[completeBlocks:]
-			}
+		// Reaching here means ReadFull filled the buffer exactly, and the buffer
+		// is a whole number of AES blocks, so chunk is always block-aligned. A
+		// short fill means end of data and was handled above. Fail loudly if
+		// that invariant is ever broken rather than dropping data silently.
+		if len(chunk)%aes.BlockSize != 0 {
+			return fmt.Errorf("internal error: %d-byte chunk is not AES block-aligned", len(chunk))
+		}
+		encrypted := make([]byte, len(chunk))
+		mode.CryptBlocks(encrypted, chunk)
+		if _, err := outputFile.Write(encrypted); err != nil {
+			return fmt.Errorf("failed to write encrypted data: %w", err)
 		}
 	}
 

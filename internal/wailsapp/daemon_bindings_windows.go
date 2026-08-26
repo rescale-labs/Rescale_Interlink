@@ -41,7 +41,7 @@ type DaemonStatusDTO struct {
 	// IPCConnected indicates if we can communicate with the daemon via IPC
 	IPCConnected bool `json:"ipcConnected"`
 
-	// State is the daemon state ("running", "paused", "stopped", "unknown")
+	// State is the daemon state ("running", "paused", "stopped", "error", "pending")
 	State string `json:"state"`
 
 	// Version is the daemon version

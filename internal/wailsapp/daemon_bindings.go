@@ -32,7 +32,7 @@ type DaemonStatusDTO struct {
 	// IPCConnected indicates if we can communicate with the daemon via IPC
 	IPCConnected bool `json:"ipcConnected"`
 
-	// State is the daemon state ("running", "paused", "stopped", "unknown")
+	// State is the daemon state ("running", "paused", "stopped", "error", "pending")
 	State string `json:"state"`
 
 	// Version is the daemon version
@@ -123,8 +123,8 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		userState = "error"
 	}
 
-	// Legacy State field: keep "running"/"paused"/"stopped"/"unknown" vocab
-	// for any frontend code still reading it during Plan 1 rollout.
+	// Legacy State field: keeps the "running"/"paused"/"stopped"/"error"/"pending"
+	// vocab for any frontend code still reading it during Plan 1 rollout.
 	legacyState := "stopped"
 	switch st.PerUser {
 	case service.PerUserRunning:

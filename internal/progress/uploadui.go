@@ -280,28 +280,6 @@ func (u *UploadUI) Wait() {
 	}
 }
 
-// WaitWithTimeout blocks until all progress bars complete or timeout expires.
-// Returns true if Wait completed normally, false if timeout occurred.
-func (u *UploadUI) WaitWithTimeout(timeout time.Duration) bool {
-	if u.progress == nil {
-		return true
-	}
-	ClearLogSink(u.progress)
-
-	done := make(chan struct{})
-	go func() {
-		u.progress.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
-	}
-}
-
 // LogWriter returns an io.Writer that safely prints above the progress bars
 func (u *UploadUI) LogWriter() io.Writer {
 	if u.progress != nil && u.isTerminal {
@@ -311,13 +289,11 @@ func (u *UploadUI) LogWriter() io.Writer {
 }
 
 // Writer returns an io.Writer for output during progress operations.
-// Implements the ProgressUI interface.
 func (u *UploadUI) Writer() io.Writer {
 	return u.LogWriter()
 }
 
 // IsTerminal returns true if output is to a terminal (progress bars are active).
-// Implements the ProgressUI interface.
 func (u *UploadUI) IsTerminal() bool {
 	return u.isTerminal
 }

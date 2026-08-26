@@ -240,7 +240,8 @@ const (
 	// AdaptiveSmallFileConcurrency - for files < SmallFileThreshold (100MB): 1 thread each
 	AdaptiveSmallFileConcurrency = 20
 
-	// AdaptiveMediumFileConcurrency - for files 100MB - 1GB: 4 threads each
+	// AdaptiveMediumFileConcurrency - for files 100MB - 1GB
+	// (1 thread each below 500MB, 4 threads each from 500MB up)
 	AdaptiveMediumFileConcurrency = 10
 
 	// AdaptiveLargeFileConcurrency - for files > 1GB: 8-16 threads each

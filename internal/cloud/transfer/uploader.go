@@ -38,11 +38,6 @@ type StreamingConcurrentUploader interface {
 	// Returns (exists, error) where exists=false means upload expired and should start fresh.
 	ValidateStreamingUploadExists(ctx context.Context, uploadID, storagePath string) (bool, error)
 
-	// UploadStreamingPart encrypts and uploads a single part.
-	// partIndex is 0-based, plaintext is the raw data for this part.
-	// Parts must be encrypted sequentially due to CBC chaining.
-	UploadStreamingPart(ctx context.Context, upload *StreamingUpload, partIndex int64, plaintext []byte) (*PartResult, error)
-
 	// EncryptStreamingPart encrypts plaintext and returns ciphertext.
 	// Must be called sequentially due to CBC chaining constraint.
 	// Separated from upload to enable pipelining.

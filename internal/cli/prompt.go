@@ -54,8 +54,8 @@ func errPromptNeedsTerminal(what, flags string) error {
 	return fmt.Errorf("cannot prompt for %s: no interactive terminal (stdin is not a TTY) — decide up front with %s", what, flags)
 }
 
-// ConflictAction type and constants live in internal/transfer/folder/conflict.go.
-// Aliases in folder_upload_compat.go preserve the cli.ConflictAction API surface.
+// ConflictAction type and constants live in internal/transfer/folder/conflict.go;
+// folder_upload_compat.go re-exports them for use within this package.
 
 // promptFolderConflict asks user what to do when folder already exists
 func promptFolderConflict(folderName string) (ConflictAction, error) {
@@ -98,7 +98,6 @@ func promptFolderConflict(folderName string) (ConflictAction, error) {
 }
 
 // FileConflictAction represents user choice for file upload conflicts (remote file exists)
-// Note: Uses Skip (consistent naming) - FileIgnore* aliases retained for backward compatibility
 type FileConflictAction int
 
 const (
@@ -363,7 +362,6 @@ func promptUploadDuplicateMode() (UploadDuplicateMode, error) {
 }
 
 // UploadConflictAction represents user choice for individual file upload conflicts (duplicate exists)
-// Note: Uses Overwrite (consistent naming) - UploadAnyway* aliases retained for backward compatibility
 type UploadConflictAction int
 
 const (

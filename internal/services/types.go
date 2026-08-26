@@ -20,16 +20,6 @@ const (
 // TransferState represents the current state of a transfer.
 type TransferState string
 
-const (
-	TransferStateQueued       TransferState = "queued"       // Waiting for execution slot
-	TransferStateInitializing TransferState = "initializing" // Acquired slot, setting up
-	TransferStateActive       TransferState = "active"       // Actively transferring bytes
-	TransferStatePaused       TransferState = "paused"       // Paused by user
-	TransferStateCompleted    TransferState = "completed"    // Successfully completed
-	TransferStateFailed       TransferState = "failed"       // Failed with error
-	TransferStateCancelled    TransferState = "cancelled"    // Cancelled by user
-)
-
 // Source label constants for transfer origin tracking.
 const (
 	SourceLabelPUR         = "PUR"
@@ -145,18 +135,6 @@ type UploadFileSyncParams struct {
 	ExtraProgressCallback func(progress float64)
 }
 
-// IsTerminal returns true if the transfer is in a terminal state.
-func (t *TransferTask) IsTerminal() bool {
-	return t.State == TransferStateCompleted ||
-		t.State == TransferStateFailed ||
-		t.State == TransferStateCancelled
-}
-
-// CanRetry returns true if the transfer can be retried.
-func (t *TransferTask) CanRetry() bool {
-	return t.State == TransferStateFailed || t.State == TransferStateCancelled
-}
-
 // TransferStats provides aggregate statistics about transfers.
 type TransferStats struct {
 	Queued       int
@@ -235,31 +213,4 @@ type FolderContents struct {
 
 	// NextCursor is the pagination cursor for the next page
 	NextCursor string
-}
-
-// UploadFolderResult contains the result of a folder structure creation.
-type UploadFolderResult struct {
-	// LocalToRemoteMapping maps local directory paths to created remote folder IDs
-	LocalToRemoteMapping map[string]string
-
-	// RootFolderID is the ID of the created root folder
-	RootFolderID string
-
-	// FilesToUpload is the list of files to upload with their destination folder IDs
-	FilesToUpload []UploadFileSpec
-}
-
-// UploadFileSpec specifies a single file upload with its destination.
-type UploadFileSpec struct {
-	LocalPath    string
-	DestFolderID string
-	Size         int64
-}
-
-// DownloadFileSpec specifies a single file download.
-type DownloadFileSpec struct {
-	FileID    string
-	Name      string
-	LocalPath string
-	Size      int64
 }

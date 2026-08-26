@@ -56,7 +56,6 @@ type TransferTask struct {
 	Error    error     // Error if failed
 
 	// Speed calculation internals (for EMA smoothing)
-	lastBytes      int64     // Bytes transferred at last update
 	lastUpdateTime time.Time // Time of last update
 
 	// Batch-level byte tracking
@@ -127,61 +126,14 @@ func (t *TransferTask) GetProgress() float64 {
 	return t.Progress
 }
 
-// UpdateProgress updates progress and speed (thread-safe).
-// Deprecated: Use UpdateProgressWithBytes for proper EMA speed calculation.
+// UpdateProgress sets progress and speed directly (thread-safe).
+// Deprecated: Use TransferQueue.UpdateProgress, which routes through
+// applyProgress and derives the smoothed speed itself.
 func (t *TransferTask) UpdateProgress(progress float64, speed float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.Progress = progress
 	t.Speed = speed
-}
-
-// UpdateProgressWithBytes updates progress and calculates speed using EMA.
-// This matches the proven approach from file_browser_tab.go for smooth, responsive speed display.
-// bytesTransferred: total bytes transferred so far
-// totalBytes: total file size
-func (t *TransferTask) UpdateProgressWithBytes(bytesTransferred, totalBytes int64) {
-	if totalBytes <= 0 {
-		return
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	now := time.Now()
-	progress := float64(bytesTransferred) / float64(totalBytes)
-	t.Progress = progress
-
-	// Reset start time on first real progress
-	if t.lastBytes == 0 && bytesTransferred > 0 {
-		t.StartedAt = now
-		t.lastUpdateTime = now
-		t.lastBytes = bytesTransferred
-		t.Speed = 0
-		return
-	}
-
-	// Calculate instantaneous rate using delta since last update
-	// Only calculate if we have a previous data point and enough time has passed
-	if t.lastBytes > 0 && bytesTransferred > t.lastBytes {
-		elapsed := now.Sub(t.lastUpdateTime).Seconds()
-		if elapsed > 0.1 { // Need at least 100ms between updates for meaningful rate
-			bytesDelta := bytesTransferred - t.lastBytes
-			instantRate := float64(bytesDelta) / elapsed
-
-			// EMA smoothing (alpha=0.25): 25% weight to new value, 75% to previous
-			// This provides smooth display while remaining responsive to speed changes
-			const speedSmoothingAlpha = 0.25
-			if t.Speed > 0 {
-				t.Speed = speedSmoothingAlpha*instantRate + (1-speedSmoothingAlpha)*t.Speed
-			} else {
-				t.Speed = instantRate
-			}
-
-			t.lastBytes = bytesTransferred
-			t.lastUpdateTime = now
-		}
-	}
 }
 
 // GetSpeed returns current transfer speed in bytes/sec (thread-safe).
@@ -383,7 +335,6 @@ func (t *TransferTask) resetForRetry() {
 	t.Error = nil
 	t.StartedAt = time.Time{}
 	t.CompletedAt = time.Time{}
-	t.lastBytes = 0
 	t.lastUpdateTime = time.Time{}
 	t.lastBatchBytes = 0
 }

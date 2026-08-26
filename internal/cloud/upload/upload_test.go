@@ -113,10 +113,6 @@ func (f *fakeStreamingUploader) ValidateStreamingUploadExists(_ context.Context,
 	return false, nil
 }
 
-func (f *fakeStreamingUploader) UploadStreamingPart(_ context.Context, _ *transfer.StreamingUpload, _ int64, _ []byte) (*transfer.PartResult, error) {
-	return nil, fmt.Errorf("not implemented - use EncryptStreamingPart + UploadCiphertext")
-}
-
 func (f *fakeStreamingUploader) EncryptStreamingPart(_ context.Context, _ *transfer.StreamingUpload, partIndex int64, plaintext []byte) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

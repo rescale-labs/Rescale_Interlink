@@ -24,7 +24,7 @@ func warnLegacyAPIKeyOnce() {
 //
 // Priority (highest to lowest):
 //  1. Provided apiKey parameter (if non-empty) - e.g., from --api-key flag
-//  2. Per-user token file (service mode only, when userProfilePath is provided)
+//  2. Per-user token file (when userProfilePath is provided)
 //  3. apiconfig INI file (for auto-download service compatibility)
 //  4. Default token file (~/.config/rescale/token) - created by 'config init' or GUI
 //  5. RESCALE_API_KEY environment variable
@@ -107,10 +107,14 @@ func ResolveAPIKeyForCurrentUser(apiKey string) string {
 //
 // Priority matches ResolveAPIKey:
 //  1. flag (explicitly provided apiKey parameter)
-//  2. user-token-file (per-user token, service mode only)
-//  3. apiconfig (INI file, service mode only)
+//  2. user-token-file (per-user token, when userProfilePath is provided)
+//  3. apiconfig (INI file, when userProfilePath is provided)
 //  4. token-file (default token path) — skipped in service mode
 //  5. environment (RESCALE_API_KEY env var) — skipped in service mode
+//
+// In service mode (serviceMode=true), steps 4-5 are skipped to prevent the Windows
+// service from falling back to SYSTEM-level credentials. Only per-user sources
+// (steps 1-3) are checked.
 //
 // Returns:
 //   - apiKey: The resolved API key (empty if not found)

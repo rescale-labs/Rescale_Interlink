@@ -214,51 +214,12 @@ func (e *Engine) FileService() *services.FileService {
 	return e.fileService
 }
 
-// TestConnection verifies API connectivity
-// This is a lightweight test that only checks authentication - no additional data fetching
-func (e *Engine) TestConnection() error {
-	// Check if API key is configured
-	e.mu.RLock()
-	hasAPIKey := e.config.APIKey != ""
-	e.mu.RUnlock()
-
-	if !hasAPIKey {
-		return fmt.Errorf("API key not configured - please enter your API key in the Setup tab")
-	}
-
-	e.publishLog(events.InfoLevel, "Testing API connection...", "", "")
-
-	// Use shorter timeout for connection test (10 seconds should be plenty)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Test user profile endpoint - this verifies authentication
-	profile, err := e.apiClient.GetUserProfile(ctx)
-	if err != nil {
-		e.publishLog(events.ErrorLevel, fmt.Sprintf("Connection failed: %v", err), "", "")
-		return fmt.Errorf("failed to connect to Rescale API: %w", err)
-	}
-
-	e.publishLog(events.InfoLevel, fmt.Sprintf("Connected as: %s", profile.Email), "", "")
-	return nil
-}
-
 // GetAnalyses retrieves all available software analyses from Rescale API
 func (e *Engine) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 	if e.apiClient == nil {
 		return nil, fmt.Errorf("API client not initialized")
 	}
 	return e.apiClient.GetAnalyses(ctx)
-}
-
-// LoadConfig loads configuration from a CSV file
-func (e *Engine) LoadConfig(path string) error {
-	cfg, err := config.LoadConfigCSV(path)
-	if err != nil {
-		return err
-	}
-
-	return e.UpdateConfig(cfg)
 }
 
 // SaveConfig saves configuration to a CSV file
@@ -1465,29 +1426,6 @@ func (e *Engine) ReportUploadProgress(jobName string, fraction float64, status, 
 			ErrorMessage:   errMsg,
 		})
 	}
-}
-
-// LoadState loads jobs from a state file
-func (e *Engine) LoadState(stateFile string) ([]*models.JobState, error) {
-	st := state.NewManager(stateFile)
-	// Load must be called manually
-	if err := st.Load(); err != nil {
-		return nil, fmt.Errorf("failed to load state: %w", err)
-	}
-
-	e.mu.Lock()
-	e.state = st
-	e.mu.Unlock()
-
-	jobs := st.GetAllStates()
-	e.publishLog(events.InfoLevel, fmt.Sprintf("Loaded %d jobs from state", len(jobs)), "", "")
-
-	// Emit state change events for each job
-	for _, job := range jobs {
-		e.eventBus.PublishStateChange(job.JobName, "", job.SubmitStatus, "", job.JobID, job.ErrorMessage)
-	}
-
-	return jobs, nil
 }
 
 // ============================================================================

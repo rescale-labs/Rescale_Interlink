@@ -125,7 +125,8 @@ const (
 // Endpoint Scope Assignments
 //
 // Documentation of which Rescale API endpoints belong to which throttle scope.
-// This is for reference only - the actual routing logic is in api/client.go
+// This is for reference only - the actual routing logic is Registry.ResolveScope
+// in registry.go.
 //
 // USER SCOPE (7200/hour = 2 req/sec):
 //   - POST /api/v3/credentials/

@@ -13,17 +13,14 @@ func TestNewAPIConfig(t *testing.T) {
 	if cfg.PlatformURL != "https://platform.rescale.com" {
 		t.Errorf("expected default PlatformURL to be https://platform.rescale.com, got %s", cfg.PlatformURL)
 	}
-	if cfg.AutoDownload.Enabled != false {
-		t.Error("expected AutoDownload.Enabled to default to false")
+	if !cfg.Notifications.Enabled {
+		t.Error("expected Notifications.Enabled to default to true")
 	}
-	if cfg.AutoDownload.CorrectnessTag != "isCorrect:true" {
-		t.Errorf("expected default CorrectnessTag to be isCorrect:true, got %s", cfg.AutoDownload.CorrectnessTag)
+	if !cfg.Notifications.ShowDownloadComplete {
+		t.Error("expected Notifications.ShowDownloadComplete to default to true")
 	}
-	if cfg.AutoDownload.ScanIntervalMinutes != 10 {
-		t.Errorf("expected default ScanIntervalMinutes to be 10, got %d", cfg.AutoDownload.ScanIntervalMinutes)
-	}
-	if cfg.AutoDownload.LookbackDays != 7 {
-		t.Errorf("expected default LookbackDays to be 7, got %d", cfg.AutoDownload.LookbackDays)
+	if !cfg.Notifications.ShowDownloadFailed {
+		t.Error("expected Notifications.ShowDownloadFailed to default to true")
 	}
 }
 
@@ -36,12 +33,10 @@ func TestSaveAndLoadAPIConfig(t *testing.T) {
 	cfg := &APIConfig{
 		PlatformURL: "https://test.rescale.com",
 		APIKey:      "test-api-key-12345",
-		AutoDownload: AutoDownloadConfig{
-			Enabled:               true,
-			CorrectnessTag:        "myTag:verified",
-			DefaultDownloadFolder: "/tmp/downloads",
-			ScanIntervalMinutes:   15,
-			LookbackDays:          14,
+		Notifications: NotificationConfig{
+			Enabled:              true,
+			ShowDownloadComplete: false,
+			ShowDownloadFailed:   true,
 		},
 	}
 
@@ -70,20 +65,8 @@ func TestSaveAndLoadAPIConfig(t *testing.T) {
 	if loadedCfg.APIKey != "" {
 		t.Errorf("APIKey should not be saved to file, but loaded as %q", loadedCfg.APIKey)
 	}
-	if loadedCfg.AutoDownload.Enabled != cfg.AutoDownload.Enabled {
-		t.Errorf("Enabled mismatch: expected %v, got %v", cfg.AutoDownload.Enabled, loadedCfg.AutoDownload.Enabled)
-	}
-	if loadedCfg.AutoDownload.CorrectnessTag != cfg.AutoDownload.CorrectnessTag {
-		t.Errorf("CorrectnessTag mismatch: expected %s, got %s", cfg.AutoDownload.CorrectnessTag, loadedCfg.AutoDownload.CorrectnessTag)
-	}
-	if loadedCfg.AutoDownload.DefaultDownloadFolder != cfg.AutoDownload.DefaultDownloadFolder {
-		t.Errorf("DefaultDownloadFolder mismatch: expected %s, got %s", cfg.AutoDownload.DefaultDownloadFolder, loadedCfg.AutoDownload.DefaultDownloadFolder)
-	}
-	if loadedCfg.AutoDownload.ScanIntervalMinutes != cfg.AutoDownload.ScanIntervalMinutes {
-		t.Errorf("ScanIntervalMinutes mismatch: expected %d, got %d", cfg.AutoDownload.ScanIntervalMinutes, loadedCfg.AutoDownload.ScanIntervalMinutes)
-	}
-	if loadedCfg.AutoDownload.LookbackDays != cfg.AutoDownload.LookbackDays {
-		t.Errorf("LookbackDays mismatch: expected %d, got %d", cfg.AutoDownload.LookbackDays, loadedCfg.AutoDownload.LookbackDays)
+	if loadedCfg.Notifications != cfg.Notifications {
+		t.Errorf("Notifications mismatch: expected %+v, got %+v", cfg.Notifications, loadedCfg.Notifications)
 	}
 }
 
@@ -98,9 +81,6 @@ func TestLoadAPIConfig_NonExistent(t *testing.T) {
 	if cfg.PlatformURL != "https://platform.rescale.com" {
 		t.Errorf("expected default PlatformURL for non-existent file")
 	}
-	if cfg.AutoDownload.Enabled != false {
-		t.Error("expected default Enabled=false for non-existent file")
-	}
 }
 
 func TestLoadAPIConfig_EmptyPath(t *testing.T) {
@@ -112,227 +92,6 @@ func TestLoadAPIConfig_EmptyPath(t *testing.T) {
 	}
 	if cfg == nil {
 		t.Fatal("LoadAPIConfig should return a config, not nil")
-	}
-}
-
-func TestAPIConfig_Validate(t *testing.T) {
-	// Validate() only checks auto-download settings when enabled.
-	// PlatformURL and APIKey are no longer validated here (use ResolveAPIKey() separately).
-	tests := []struct {
-		name    string
-		cfg     *APIConfig
-		wantErr error
-	}{
-		{
-			name: "valid disabled config",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled: false,
-				},
-			},
-			wantErr: nil,
-		},
-		{
-			name: "valid enabled config",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:               true,
-					CorrectnessTag:        "isCorrect:true",
-					DefaultDownloadFolder: "/downloads",
-					ScanIntervalMinutes:   10,
-					LookbackDays:          7,
-				},
-			},
-			wantErr: nil,
-		},
-		{
-			name: "missing platform URL — not checked by Validate",
-			cfg: &APIConfig{
-				PlatformURL: "",
-				APIKey:      "my-api-key",
-			},
-			wantErr: nil, // Validate() does not check PlatformURL
-		},
-		{
-			name: "missing API key — not checked by Validate",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "",
-			},
-			wantErr: nil, // Validate() does not check APIKey
-		},
-		{
-			name: "enabled but missing download folder",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:             true,
-					CorrectnessTag:      "isCorrect:true",
-					ScanIntervalMinutes: 10,
-					LookbackDays:        7,
-				},
-			},
-			wantErr: ErrMissingDownloadFolder,
-		},
-		{
-			name: "enabled but missing correctness tag",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:               true,
-					CorrectnessTag:        "",
-					DefaultDownloadFolder: "/downloads",
-					ScanIntervalMinutes:   10,
-					LookbackDays:          7,
-				},
-			},
-			wantErr: ErrMissingCorrectnessTag,
-		},
-		{
-			name: "invalid scan interval too low",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:               true,
-					CorrectnessTag:        "isCorrect:true",
-					DefaultDownloadFolder: "/downloads",
-					ScanIntervalMinutes:   0,
-					LookbackDays:          7,
-				},
-			},
-			wantErr: ErrInvalidScanInterval,
-		},
-		{
-			name: "invalid scan interval too high",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:               true,
-					CorrectnessTag:        "isCorrect:true",
-					DefaultDownloadFolder: "/downloads",
-					ScanIntervalMinutes:   1500, // > 1440
-					LookbackDays:          7,
-				},
-			},
-			wantErr: ErrInvalidScanInterval,
-		},
-		{
-			name: "invalid lookback days too low",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:               true,
-					CorrectnessTag:        "isCorrect:true",
-					DefaultDownloadFolder: "/downloads",
-					ScanIntervalMinutes:   10,
-					LookbackDays:          0,
-				},
-			},
-			wantErr: ErrInvalidLookbackDays,
-		},
-		{
-			name: "invalid lookback days too high",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:               true,
-					CorrectnessTag:        "isCorrect:true",
-					DefaultDownloadFolder: "/downloads",
-					ScanIntervalMinutes:   10,
-					LookbackDays:          400, // > 365
-				},
-			},
-			wantErr: ErrInvalidLookbackDays,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.cfg.Validate()
-			if err != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestAPIConfig_IsAutoDownloadEnabled(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *APIConfig
-		want bool
-	}{
-		{
-			name: "enabled and valid",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:               true,
-					CorrectnessTag:        "isCorrect:true",
-					DefaultDownloadFolder: "/downloads",
-					ScanIntervalMinutes:   10,
-					LookbackDays:          7,
-				},
-			},
-			want: true,
-		},
-		{
-			name: "disabled",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled: false,
-				},
-			},
-			want: false,
-		},
-		{
-			name: "enabled but invalid (missing folder)",
-			cfg: &APIConfig{
-				PlatformURL: "https://platform.rescale.com",
-				APIKey:      "my-api-key",
-				AutoDownload: AutoDownloadConfig{
-					Enabled:             true,
-					CorrectnessTag:      "isCorrect:true",
-					ScanIntervalMinutes: 10,
-					LookbackDays:        7,
-				},
-			},
-			want: false, // Invalid config means not enabled
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.IsAutoDownloadEnabled(); got != tt.want {
-				t.Errorf("IsAutoDownloadEnabled() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestAPIConfig_GetScanIntervalDuration(t *testing.T) {
-	cfg := &APIConfig{
-		AutoDownload: AutoDownloadConfig{
-			ScanIntervalMinutes: 15,
-		},
-	}
-
-	want := "15m"
-	if got := cfg.GetScanIntervalDuration(); got != want {
-		t.Errorf("GetScanIntervalDuration() = %s, want %s", got, want)
 	}
 }
 
@@ -402,14 +161,6 @@ api_key = partial-key
 	}
 	if cfg.APIKey != "partial-key" {
 		t.Errorf("APIKey not loaded correctly")
-	}
-
-	// AutoDownload should use defaults
-	if cfg.AutoDownload.Enabled != false {
-		t.Error("AutoDownload.Enabled should default to false")
-	}
-	if cfg.AutoDownload.ScanIntervalMinutes != 10 {
-		t.Errorf("ScanIntervalMinutes should default to 10, got %d", cfg.AutoDownload.ScanIntervalMinutes)
 	}
 }
 

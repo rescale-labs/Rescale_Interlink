@@ -7,26 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"gopkg.in/ini.v1"
 )
 
-// APIConfig represents the auto-download service configuration.
-// API key comes from ResolveAPIKey(), not stored here.
+// APIConfig holds the platform URL, notification settings, and the legacy
+// on-disk API key. Prefer ResolveAPIKey() for the key: this file is only one
+// of its sources, and SaveAPIConfig never writes the key back.
 //
 // Config file location:
 //   - Windows: %APPDATA%\Rescale\Interlink\apiconfig
 //   - Unix: ~/.config/rescale/apiconfig
 //
 // INI format:
-//
-//	[interlink.autoDownload]
-//	enabled = true
-//	correctness_tag = isCorrect:true
-//	default_download_folder = A:\Rescale\Downloads
-//	scan_interval_minutes = 10
-//	lookback_days = 7
 //
 //	[interlink.notifications]
 //	enabled = true
@@ -49,9 +42,6 @@ type APIConfig struct {
 	// Deprecated: will be removed in future version.
 	APIKey string `ini:"api_key"`
 
-	// Auto-download settings
-	AutoDownload AutoDownloadConfig
-
 	// Notification settings
 	Notifications NotificationConfig
 }
@@ -71,37 +61,10 @@ type NotificationConfig struct {
 	ShowDownloadFailed bool `ini:"show_download_failed"`
 }
 
-// AutoDownloadConfig contains settings specific to the auto-download service.
-type AutoDownloadConfig struct {
-	// Enabled indicates whether auto-download is active for this user
-	Enabled bool `ini:"enabled"`
-
-	// CorrectnessTag is the job tag required for download eligibility.
-	// Jobs must have this tag to be auto-downloaded.
-	// Default: "isCorrect:true"
-	CorrectnessTag string `ini:"correctness_tag"`
-
-	// DefaultDownloadFolder is the base directory for downloaded job outputs.
-	// Can be overridden per-job via the "Auto Download Path" custom field.
-	DefaultDownloadFolder string `ini:"default_download_folder"`
-
-	// ScanIntervalMinutes is the polling interval in minutes.
-	// Minimum: 1, Maximum: 1440 (24 hours), Default: 10
-	ScanIntervalMinutes int `ini:"scan_interval_minutes"`
-
-	// LookbackDays is the number of days to look back for completed jobs.
-	// Default: 7
-	LookbackDays int `ini:"lookback_days"`
-}
-
 // Validation errors
 var (
-	ErrMissingPlatformURL    = errors.New("platform_url is required")
-	ErrMissingAPIKey         = errors.New("api_key is required")
-	ErrMissingDownloadFolder = errors.New("default_download_folder is required when auto-download is enabled")
-	ErrMissingCorrectnessTag = errors.New("correctness_tag is required when auto-download is enabled")
-	ErrInvalidScanInterval   = errors.New("scan_interval_minutes must be between 1 and 1440")
-	ErrInvalidLookbackDays   = errors.New("lookback_days must be between 1 and 365")
+	ErrMissingPlatformURL = errors.New("platform_url is required")
+	ErrMissingAPIKey      = errors.New("api_key is required")
 )
 
 // DefaultAPIConfigPath returns the default path for the apiconfig file.
@@ -149,12 +112,6 @@ func APIConfigPathForUser(userProfileDir string) string {
 func NewAPIConfig() *APIConfig {
 	return &APIConfig{
 		PlatformURL: "https://platform.rescale.com",
-		AutoDownload: AutoDownloadConfig{
-			Enabled:             false,
-			CorrectnessTag:      "isCorrect:true",
-			ScanIntervalMinutes: 10,
-			LookbackDays:        7,
-		},
 		Notifications: NotificationConfig{
 			Enabled:              true,
 			ShowDownloadComplete: true,
@@ -193,14 +150,6 @@ func LoadAPIConfig(path string) (*APIConfig, error) {
 	rescaleSection := iniFile.Section("rescale")
 	cfg.PlatformURL = rescaleSection.Key("platform_url").MustString(cfg.PlatformURL)
 	cfg.APIKey = rescaleSection.Key("api_key").String()
-
-	// Parse [interlink.autoDownload] section
-	autoSection := iniFile.Section("interlink.autoDownload")
-	cfg.AutoDownload.Enabled = autoSection.Key("enabled").MustBool(false)
-	cfg.AutoDownload.CorrectnessTag = autoSection.Key("correctness_tag").MustString("isCorrect:true")
-	cfg.AutoDownload.DefaultDownloadFolder = autoSection.Key("default_download_folder").String()
-	cfg.AutoDownload.ScanIntervalMinutes = autoSection.Key("scan_interval_minutes").MustInt(10)
-	cfg.AutoDownload.LookbackDays = autoSection.Key("lookback_days").MustInt(7)
 
 	// Parse [interlink.notifications] section
 	notifySection := iniFile.Section("interlink.notifications")
@@ -242,17 +191,6 @@ func SaveAPIConfig(cfg *APIConfig, path string) error {
 	}
 	rescaleSection.Key("platform_url").SetValue(cfg.PlatformURL)
 	// API key intentionally NOT written — saves strip legacy plaintext keys from disk
-
-	// Write [interlink.autoDownload] section
-	autoSection, err := iniFile.NewSection("interlink.autoDownload")
-	if err != nil {
-		return fmt.Errorf("failed to create autoDownload section: %w", err)
-	}
-	autoSection.Key("enabled").SetValue(fmt.Sprintf("%t", cfg.AutoDownload.Enabled))
-	autoSection.Key("correctness_tag").SetValue(cfg.AutoDownload.CorrectnessTag)
-	autoSection.Key("default_download_folder").SetValue(cfg.AutoDownload.DefaultDownloadFolder)
-	autoSection.Key("scan_interval_minutes").SetValue(fmt.Sprintf("%d", cfg.AutoDownload.ScanIntervalMinutes))
-	autoSection.Key("lookback_days").SetValue(fmt.Sprintf("%d", cfg.AutoDownload.LookbackDays))
 
 	// Write [interlink.notifications] section
 	notifySection, err := iniFile.NewSection("interlink.notifications")
@@ -332,39 +270,4 @@ func LoadCompatProfile(configPath, profileName string) (apiKey, baseURL string, 
 	}
 
 	return apiKey, baseURL, nil
-}
-
-// Validate checks if the auto-download configuration is valid.
-// Does not validate API key — use ResolveAPIKey() separately.
-// Returns nil if valid, or an error describing what's wrong.
-func (cfg *APIConfig) Validate() error {
-	// Only validate auto-download settings if enabled
-	if cfg.AutoDownload.Enabled {
-		if strings.TrimSpace(cfg.AutoDownload.CorrectnessTag) == "" {
-			return ErrMissingCorrectnessTag
-		}
-		if strings.TrimSpace(cfg.AutoDownload.DefaultDownloadFolder) == "" {
-			return ErrMissingDownloadFolder
-		}
-		if cfg.AutoDownload.ScanIntervalMinutes < 1 || cfg.AutoDownload.ScanIntervalMinutes > 1440 {
-			return ErrInvalidScanInterval
-		}
-		if cfg.AutoDownload.LookbackDays < 1 || cfg.AutoDownload.LookbackDays > 365 {
-			return ErrInvalidLookbackDays
-		}
-	}
-
-	return nil
-}
-
-// IsAutoDownloadEnabled returns true if auto-download is enabled and properly configured.
-func (cfg *APIConfig) IsAutoDownloadEnabled() bool {
-	return cfg.AutoDownload.Enabled && cfg.Validate() == nil
-}
-
-// GetScanIntervalDuration returns the scan interval as a duration string (e.g., "10m").
-// Available for logging/display purposes; use AutoDownload.ScanIntervalMinutes directly
-// when constructing time.Duration values.
-func (cfg *APIConfig) GetScanIntervalDuration() string {
-	return fmt.Sprintf("%dm", cfg.AutoDownload.ScanIntervalMinutes)
 }

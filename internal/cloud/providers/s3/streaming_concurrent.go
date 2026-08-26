@@ -145,60 +145,6 @@ type s3ProviderData struct {
 	s3Client     *S3Client
 }
 
-// UploadStreamingPart encrypts and uploads a single part.
-// Uses CBC chaining - parts MUST be uploaded sequentially.
-// The orchestrator already calls this sequentially (see upload.go:217).
-func (p *Provider) UploadStreamingPart(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, plaintext []byte) (*transfer.PartResult, error) {
-	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
-	if !ok {
-		return nil, fmt.Errorf("invalid provider data for S3 streaming upload")
-	}
-
-	// Determine if this is the final part
-	isFinal := (partIndex == uploadState.TotalParts-1)
-
-	// Encrypt this part with CBC chaining
-	ciphertext, err := providerData.encryptState.EncryptPart(plaintext, isFinal)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt part %d: %w", partIndex, err)
-	}
-
-	// S3 uses 1-based part numbers
-	partNumber := int32(partIndex + 1)
-
-	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
-	defer cancel()
-
-	// Add HTTP tracing if DEBUG_HTTP is enabled
-	partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d", partNumber))
-
-	// Upload the part using S3Client
-	var uploadResp *s3.UploadPartOutput
-	err = providerData.s3Client.RetryWithBackoff(partCtx, fmt.Sprintf("UploadPart %d", partNumber), func() error {
-		var err error
-		uploadResp, err = providerData.s3Client.Client().UploadPart(partCtx, &s3.UploadPartInput{
-			Bucket:        aws.String(providerData.bucket),
-			Key:           aws.String(uploadState.StoragePath),
-			PartNumber:    aws.Int32(partNumber),
-			UploadId:      aws.String(uploadState.UploadID),
-			Body:          bytes.NewReader(ciphertext),
-			ContentLength: aws.Int64(int64(len(ciphertext))),
-		})
-		return err
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload part %d: %w", partNumber, err)
-	}
-
-	return &transfer.PartResult{
-		PartIndex:  partIndex,
-		PartNumber: partNumber,
-		ETag:       *uploadResp.ETag,
-		Size:       int64(len(plaintext)),
-	}, nil
-}
-
 // EncryptStreamingPart encrypts plaintext and returns ciphertext.
 // Must be called sequentially due to CBC chaining constraint.
 // Separated from upload to enable pipelining.

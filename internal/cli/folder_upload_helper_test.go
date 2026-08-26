@@ -19,6 +19,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/resources"
+	"github.com/rescale/rescale-int/internal/transfer/folder"
 )
 
 // TestPipelinedUploadAdaptiveConcurrency verifies Bug #2 fix:
@@ -156,9 +157,10 @@ func TestCreateFolderStructureStreaming_RootEvent(t *testing.T) {
 	folderReadyChan := make(chan FolderReadyEvent, 100)
 	conflictMode := ConflictMergeAll
 
-	mapping, created, err := CreateFolderStructureStreaming(
+	mapping, created, err := folder.CreateFolderStructureStreaming(
 		ctx, nil, NewFolderCache(), root, dirChan, "root-id",
 		&conflictMode, 4, nil, folderReadyChan, nil,
+		wrapPromptFolderConflict(),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

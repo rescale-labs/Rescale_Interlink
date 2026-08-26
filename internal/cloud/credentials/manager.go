@@ -178,14 +178,6 @@ func (m *Manager) ForceRefresh(ctx context.Context) error {
 	return nil
 }
 
-// GetAge returns the duration since the last credential refresh
-// Useful for debugging, monitoring, and logging credential freshness
-func (m *Manager) GetAge() time.Duration {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return time.Since(m.lastCredsRefresh)
-}
-
 // EnsureFresh proactively refreshes credentials if older than
 // CredentialFreshnessThreshold. Uses double-checked locking to prevent
 // redundant API calls when multiple goroutines detect staleness simultaneously.
@@ -362,40 +354,6 @@ func (m *Manager) GetAzureCredentialsForStorage(ctx context.Context, fileInfo *m
 	m.storageCredsRefresh[cacheKey] = time.Now()
 
 	return azureCreds, nil
-}
-
-// ForceRefreshForStorage forces an immediate credential refresh for a specific storage.
-// Useful for recovering from token expiration errors on cross-storage operations.
-func (m *Manager) ForceRefreshForStorage(ctx context.Context, fileInfo *models.CloudFile) error {
-	if fileInfo == nil || fileInfo.Storage == nil || fileInfo.Storage.ID == "" {
-		return m.ForceRefresh(ctx)
-	}
-
-	// Warm proxy before credential refresh API call
-	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	storageID := fileInfo.Storage.ID
-
-	// Use same cache key shape as GetAzureCredentialsForStorage (storageID:path)
-	// so the two paths share the cache.
-	cacheKey := storageID
-	if fileInfo.PathParts != nil && fileInfo.PathParts.Path != "" {
-		cacheKey = storageID + ":" + fileInfo.PathParts.Path
-	}
-
-	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
-	if err != nil {
-		return fmt.Errorf("failed to force refresh storage-specific credentials: %w", err)
-	}
-
-	m.storageS3Creds[cacheKey] = s3Creds
-	m.storageAzureCreds[cacheKey] = azureCreds
-	m.storageCredsRefresh[cacheKey] = time.Now()
-
-	return nil
 }
 
 // GetUserProfile returns cached user profile, refreshing if needed

@@ -62,9 +62,10 @@ type UploadError struct {
 	Error    error
 }
 
-// FolderReadyEvent, FolderCache, NewFolderCache, BuildDirectoryTree, CheckFolderExists,
-// CreateFolderStructure, CreateFolderStructureStreaming, and related helpers live in
-// internal/transfer/folder/. Aliases in folder_upload_compat.go preserve the cli.* API surface.
+// FolderReadyEvent, FolderCache, NewFolderCache, BuildDirectoryTree,
+// CheckFolderExists, CreateFolderStructure, and related helpers live in
+// internal/transfer/folder/. folder_upload_compat.go gives this package short
+// names for them.
 
 // Test seams, following the same pattern as the download seams in
 // download_helper.go: the folder upload path needs an API client and live cloud
@@ -328,7 +329,7 @@ func uploadDirectoryPipelined(
 				if uploadErr != nil {
 					fileBar.Complete("", uploadErr)
 					if state.UploadResumeStateExists(fpath) {
-						fmt.Fprintf(uploadUI.Writer(), "\n💡 Resume state saved for %s. To resume, re-run the upload command.\n", filepath.Base(fpath))
+						fmt.Fprintf(uploadUI.Writer(), "\n💡 Partial upload state for %s was left behind; re-running the command discards it and uploads the file again.\n", filepath.Base(fpath))
 					}
 					resultMutex.Lock()
 					result.Errors = append(result.Errors, UploadError{fpath, uploadErr})

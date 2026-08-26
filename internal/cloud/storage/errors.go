@@ -1,3 +1,5 @@
+// Package storage provides error classification helpers shared by the S3 and
+// Azure backends.
 package storage
 
 import (
