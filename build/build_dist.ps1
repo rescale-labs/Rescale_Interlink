@@ -445,11 +445,9 @@ CLI Mode:
   rescale-int jobs list
   rescale-int upload file.txt
 
-Documentation:
-  https://docs.rescale.com/
-
-Support:
-  support@rescale.com
+Documentation: https://docs.rescale.com
+Source/issues: https://github.com/rescale-labs/Rescale_Interlink
+Support:       support@rescale.com
 
 Copyright (c) 2026 Rescale, Inc.
 "@

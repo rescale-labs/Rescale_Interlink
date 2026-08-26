@@ -352,6 +352,9 @@ jobs:
             sudo cp rescale-int /usr/local/bin/
 
           Documentation: https://docs.rescale.com
+          Source/issues: https://github.com/rescale-labs/Rescale_Interlink
+          Support:       support@rescale.com
+
           Copyright (c) 2026 Rescale, Inc.
           EOF
 
