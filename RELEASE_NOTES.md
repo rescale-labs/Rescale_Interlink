@@ -20,9 +20,11 @@ fifty at a time with on-demand paging. Contributed by @hjung-rescale
 
 ### File Browser: search, owner filtering, and sorting (#65)
 
-The File Browser's remote pane can now search folder contents by name, filter files by
-owner (mine / shared with me / all), and sort listings by column. Search results page
-through the full result set. Contributed by @jbeardslee-rescale
+The File Browser's remote pane can now search folder contents by name in My Library, My
+Jobs, and Legacy views, and search results page through the full result set. Legacy view
+additionally gains an owner filter (mine / shared with me / all) and server-side sorting
+by name, size, or created date from the column headers; the other views keep their
+existing client-side column sorting. Contributed by @jbeardslee-rescale
 ([PR #65](https://github.com/rescale-labs/Rescale_Interlink/pull/65)).
 
 ### Transfers: cancellation and status accuracy (#24, #27, #28)
@@ -37,11 +39,15 @@ through the full result set. Contributed by @jbeardslee-rescale
 - Persistent storage or API errors are retried with visible, attempt-numbered notices and
   a bounded retry budget, and the server's own error message is preserved when a call
   finally gives up — uploads no longer hang for minutes with no output.
+- API responses that arrive after the retry budget is spent are delivered instead of
+  discarded; terminal errors such as 404 no longer surface as "retries exhausted".
 - Log output is routed around the progress bars, so bars no longer shred into multi-line
   noise when logging is enabled (including rate-limit and retry notices, and in compat
   mode).
 - Exit codes reflect what actually happened, and several flags and prompts that ignored
   or misstated their input have been fixed.
+- `files delete` checks a file exists before hunting for its parent folder — deleting a
+  nonexistent ID now fails in a single API call instead of walking the library.
 
 ### Auto-download reliability
 
@@ -59,7 +65,8 @@ through the full result set. Contributed by @jbeardslee-rescale
 
 ### Job submission (#61, #63, #43)
 
-- Job templates accept multiple tags through a proper multi-input control. Contributed by
+- The job template Tags field no longer rewrites itself while you type; the
+  comma-separated list is parsed into tags when you leave the field. Contributed by
   @hjung-rescale ([PR #61](https://github.com/rescale-labs/Rescale_Interlink/pull/61)).
 - The Single Job flow's Back button returns from review to inputs without losing state.
   Contributed by @hjung-rescale
@@ -88,6 +95,11 @@ disk-full.
   order, immediately before a file is committed — and aborts rather than registering a
   partial object. Interrupted pre-encrypted uploads no longer attempt an unsafe resume
   that could mix two encryptions in one object.
+- Fixed a silent truncation in pre-encrypted uploads: a short read while encrypting the
+  source file could commit a truncated object that every later size check agreed with.
+  All read paths now use full-read semantics.
+- Streaming uploads read every part exactly full before encrypting it; short reads from
+  network filesystems can no longer produce undersized parts or failed completion checks.
 - The File Browser uploads only to the folder it is actually showing. Switching between
   Jobs and My Library, or navigating while a folder is still loading, can no longer send
   files to the previous view's folder (which for job output folders failed with an
@@ -97,7 +109,7 @@ disk-full.
 
 ### Build and security
 
-Go toolchain 1.26.7 with refreshed dependencies (resolves all 24 open Dependabot alerts at
+Go toolchain 1.26.7 with refreshed dependencies (resolves all Dependabot alerts open at
 release time); release builds are produced from deterministic, checksum-verified inputs,
 and every tagged build now runs the full Go and frontend test suites before packaging.
 
