@@ -27,6 +27,7 @@ import (
 	"github.com/rescale/rescale-int/internal/util/analysis"
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/validation"
+	"github.com/rescale/rescale-int/internal/watch"
 )
 
 // newJobsCmd creates the 'jobs' command group.
@@ -648,7 +649,7 @@ Example:
 			}
 
 			// Get API client
-			apiClient, err := getAPIClient()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
@@ -670,8 +671,9 @@ Example:
 				return fmt.Errorf("failed to get job statuses: %w", err)
 			}
 
+			// Statuses come back newest-first, so the first entry is current.
 			if len(statuses) > 0 {
-				latest := statuses[len(statuses)-1]
+				latest := statuses[0]
 				lastStatus = latest.Status
 				lastDate = latest.StatusDate
 				fmt.Printf("[%s] %s", latest.StatusDate, latest.Status)
@@ -679,6 +681,13 @@ Example:
 					fmt.Printf(" - %s", latest.StatusReason)
 				}
 				fmt.Println()
+
+				// A job that is already finished when tail starts must not wait
+				// for a transition that will never come.
+				if watch.TerminalStatuses[latest.Status] {
+					fmt.Printf("\nJob reached terminal state: %s\n", latest.Status)
+					return nil
+				}
 			}
 
 			// Poll for updates
@@ -689,26 +698,29 @@ Example:
 					continue
 				}
 
-				if len(statuses) > 0 {
-					latest := statuses[len(statuses)-1]
+				if len(statuses) == 0 {
+					continue
+				}
+				latest := statuses[0]
 
-					// Only print if status or date changed
-					if latest.Status != lastStatus || latest.StatusDate != lastDate {
-						lastStatus = latest.Status
-						lastDate = latest.StatusDate
+				// Only print if status or date changed
+				if latest.Status != lastStatus || latest.StatusDate != lastDate {
+					lastStatus = latest.Status
+					lastDate = latest.StatusDate
 
-						fmt.Printf("[%s] %s", latest.StatusDate, latest.Status)
-						if latest.StatusReason != "" {
-							fmt.Printf(" - %s", latest.StatusReason)
-						}
-						fmt.Println()
-
-						// Stop monitoring if job reached terminal state
-						if latest.Status == "Completed" || latest.Status == "Failed" {
-							fmt.Printf("\nJob reached terminal state: %s\n", latest.Status)
-							return nil
-						}
+					fmt.Printf("[%s] %s", latest.StatusDate, latest.Status)
+					if latest.StatusReason != "" {
+						fmt.Printf(" - %s", latest.StatusReason)
 					}
+					fmt.Println()
+				}
+
+				// Checked on every poll rather than only on change: a repeated
+				// terminal status still has to end the loop. Tail only reports,
+				// so it returns nil for every terminal status.
+				if watch.TerminalStatuses[latest.Status] {
+					fmt.Printf("\nJob reached terminal state: %s\n", latest.Status)
+					return nil
 				}
 			}
 
@@ -1222,10 +1234,15 @@ func runEndToEndJobWorkflow(
 	return nil
 }
 
-// monitorJobUntilComplete monitors job status with live updates until completion
+// jobMonitorInterval is the poll interval for monitorJobUntilComplete. A
+// variable so tests can drive the loop without waiting on the real ticker.
+var jobMonitorInterval = constants.JobTailTickerInterval
+
+// monitorJobUntilComplete monitors job status with live updates until the job
+// reaches a terminal status. Returns nil only for Completed.
 func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.Client, logger *logging.Logger) error {
 	lastStatus := ""
-	ticker := time.NewTicker(constants.JobTailTickerInterval)
+	ticker := time.NewTicker(jobMonitorInterval)
 	defer ticker.Stop()
 
 	consecutiveErrors := 0
@@ -1277,12 +1294,13 @@ func monitorJobUntilComplete(ctx context.Context, jobID string, apiClient *api.C
 				lastStatus = currentStatus
 			}
 
-			// Check if job is complete
-			switch currentStatus {
-			case "Completed":
-				fmt.Printf("\n✓ Job completed successfully\n")
-				return nil
-			case "Failed", "Terminated":
+			// Check if job is finished. Only Completed counts as success —
+			// Stopped and Force Stopped end the job without producing results.
+			if watch.TerminalStatuses[currentStatus] {
+				if currentStatus == watch.StatusCompleted {
+					fmt.Printf("\n✓ Job completed successfully\n")
+					return nil
+				}
 				fmt.Printf("\n✗ Job ended with status: %s\n", currentStatus)
 				return fmt.Errorf("job ended with status: %s", currentStatus)
 			}

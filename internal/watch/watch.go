@@ -13,10 +13,17 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 )
 
+// StatusCompleted is the only terminal status that means the job produced the
+// result it was asked for. Failed, Terminated, Stopped and Force Stopped all
+// end the job without one, so callers that poll until a job finishes must not
+// treat them as success.
+const StatusCompleted = "Completed"
+
 // TerminalStatuses is the unified superset of statuses that indicate a job
-// has finished (compat sync.go + jobs.go monitorJobUntilComplete).
+// has finished. Every poll loop in the CLI, the compat layer and the watch
+// engine shares this set, so a status is terminal in all of them or in none.
 var TerminalStatuses = map[string]bool{
-	"Completed":     true,
+	StatusCompleted: true,
 	"Failed":        true,
 	"Stopped":       true,
 	"Force Stopped": true,
@@ -283,7 +290,7 @@ func checkStatus(ctx context.Context, jobID string, fn StatusFunc) (string, erro
 
 // terminalError returns nil for Completed, error for anything else.
 func terminalError(status string) error {
-	if status == "Completed" {
+	if status == StatusCompleted {
 		return nil
 	}
 	return fmt.Errorf("job reached terminal status: %s", status)

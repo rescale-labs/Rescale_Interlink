@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -345,5 +351,150 @@ func TestExecuteJobDownload_MalformedCredentialPayload(t *testing.T) {
 	}
 	if strings.Contains(errMsg, "Go struct field") {
 		t.Errorf("should not contain Go internals, got %q", errMsg)
+	}
+}
+
+// --- skip-existing size gate ---
+
+// TestExistingFileIsComplete covers the gate that stops --skip and jobs watch
+// from accepting a partial or corrupt leftover as an already-downloaded file.
+func TestExistingFileIsComplete(t *testing.T) {
+	tests := []struct {
+		name         string
+		onDisk       int64
+		expectedSize int64
+		want         bool
+	}{
+		{"size matches metadata", 1024, 1024, true},
+		{"truncated leftover", 512, 1024, false},
+		{"oversized leftover", 2048, 1024, false},
+		{"empty leftover", 0, 1024, false},
+		{"expected size unknown falls back to existence", 512, 0, true},
+	}
+
+	dir := t.TempDir()
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, fmt.Sprintf("case%d.dat", i))
+			if err := os.WriteFile(path, make([]byte, tt.onDisk), 0o644); err != nil {
+				t.Fatalf("seed file: %v", err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat: %v", err)
+			}
+			if got := existingFileIsComplete(info, tt.expectedSize); got != tt.want {
+				t.Errorf("existingFileIsComplete(%d bytes on disk, expected %d) = %v, want %v",
+					tt.onDisk, tt.expectedSize, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- server-supplied filename validation ---
+
+// TestFilterValidJobFiles covers the guard on the Name fallback used to build
+// local paths in executeJobDownload.
+func TestFilterValidJobFiles(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileName string
+		keep     bool
+	}{
+		{"plain name", "results.dat", true},
+		{"dots inside the name", "data..v2.csv", true},
+		{"unix traversal", "../../etc/passwd", false},
+		{"windows separator", `..\..\Windows\System32\evil.dll`, false},
+		{"bare parent directory", "..", false},
+		{"empty name", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kept, errs := filterValidJobFiles([]models.JobFile{{ID: "file123", Name: tt.fileName}})
+
+			if tt.keep {
+				if len(kept) != 1 || len(errs) != 0 {
+					t.Fatalf("kept %d files with %d errors, want 1 file and no errors", len(kept), len(errs))
+				}
+				return
+			}
+
+			if len(kept) != 0 {
+				t.Errorf("kept %d files, want 0", len(kept))
+			}
+			if len(errs) != 1 {
+				t.Fatalf("got %d errors, want 1", len(errs))
+			}
+			if !strings.Contains(errs[0].Error(), "invalid filename from API for file file123") {
+				t.Errorf("error = %q, want the shared invalid-filename wording", errs[0])
+			}
+		})
+	}
+}
+
+// TestExecuteJobDownload_SkipExistingSizeGate is the wiring test for the
+// skip-existing gate: --skip (and jobs watch, which passes the same flag) must
+// keep a file that matches the expected size and replace one that does not,
+// because a wrong-size leftover is a partial or corrupt artifact rather than a
+// download already in hand.
+func TestExecuteJobDownload_SkipExistingSizeGate(t *testing.T) {
+	const expectedSize = 1024
+
+	tests := []struct {
+		name             string
+		existingContents int
+		wantDownloads    int32
+	}{
+		{"wrong-size leftover is replaced", 9, 1},
+		{"matching size is skipped", expectedSize, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origList, origDownload := listJobFilesFn, downloadFileFn
+			t.Cleanup(func() { listJobFilesFn, downloadFileFn = origList, origDownload })
+
+			listJobFilesFn = func(_ context.Context, _ *api.Client, _ string) ([]models.JobFile, error) {
+				return []models.JobFile{{ID: "file123", Name: "results.dat", DecryptedSize: expectedSize}}, nil
+			}
+
+			var downloads int32
+			downloadFileFn = func(_ context.Context, params download.DownloadParams) error {
+				atomic.AddInt32(&downloads, 1)
+				return os.WriteFile(params.LocalPath, make([]byte, expectedSize), 0o644)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+			client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+
+			outDir := t.TempDir()
+			target := filepath.Join(outDir, "results.dat")
+			if err := os.WriteFile(target, make([]byte, tt.existingContents), 0o644); err != nil {
+				t.Fatalf("seed existing file: %v", err)
+			}
+
+			// skipAll=true is what --skip and jobs watch pass.
+			err := executeJobDownload(context.Background(), "job123", outDir, 1,
+				false, true, false, false, nil, nil, nil, nil, client, GetLogger())
+			if err != nil {
+				t.Fatalf("executeJobDownload: %v", err)
+			}
+
+			if got := atomic.LoadInt32(&downloads); got != tt.wantDownloads {
+				t.Errorf("downloadFileFn called %d times, want %d", got, tt.wantDownloads)
+			}
+			info, statErr := os.Stat(target)
+			if statErr != nil {
+				t.Fatalf("stat target: %v", statErr)
+			}
+			if info.Size() != expectedSize && tt.wantDownloads == 1 {
+				t.Errorf("target is %d bytes after re-download, want %d", info.Size(), expectedSize)
+			}
+		})
 	}
 }

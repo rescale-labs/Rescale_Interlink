@@ -3,12 +3,18 @@
 package transfer
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/models"
 )
@@ -451,5 +457,87 @@ func TestDownloadLegacyDiskSpaceErrorStatesEnforcedRequirement(t *testing.T) {
 	}
 	if mock.downloadEncryptedCalled {
 		t.Error("provider must not be called once the space check has refused the download")
+	}
+}
+
+// mockCBCPartDownloader serves one CBC-encrypted part, which makes it a
+// StreamingPartDownloader so Download() takes the v2 path instead of falling
+// back to legacy.
+type mockCBCPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+}
+
+func (m *mockCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
+	return int64(len(m.ciphertext)), nil
+}
+
+func (m *mockCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	if progressCallback != nil {
+		progressCallback(int64(len(out)))
+	}
+	return out, nil
+}
+
+// TestDownloadCBCStreamingDefersChecksumToCaller covers the v2 format's half of
+// the corrupt-download contract: downloadCBCStreaming hands the hash it computed
+// during write back to the caller and does NOT fail on a checksum mismatch of
+// its own accord. DownloadFile owns that comparison, because it also owns the
+// strict-vs---skip-checksum decision and the quarantine of the corrupt file.
+// A self-verification here would return before either could run, leaving the
+// full-size corrupt file at LocalPath.
+func TestDownloadCBCStreamingDefersChecksumToCaller(t *testing.T) {
+	// Large enough that verifyDecryptionQuick takes its normal 32-byte probe path.
+	plaintext := bytes.Repeat([]byte("interlink"), 512)
+
+	enc, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+
+	mock := &mockCBCPartDownloader{ciphertext: ciphertext}
+	mock.formatVersion = 2
+	mock.partSize = int64(len(ciphertext)) // single part
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+
+	// FileChecksums deliberately disagrees with the bytes actually downloaded.
+	hash, err := NewDownloader(mock).Download(context.Background(), cloud.DownloadParams{
+		RemotePath: "user/abc/results.dat",
+		LocalPath:  localPath,
+		FileInfo: &models.CloudFile{
+			EncodedEncryptionKey: base64.StdEncoding.EncodeToString(enc.GetKey()),
+			IV:                   base64.StdEncoding.EncodeToString(enc.GetInitialIV()),
+			DecryptedSize:        int64(len(plaintext)),
+			FileChecksums: []models.FileChecksum{
+				{HashFunction: "sha512", FileHash: strings.Repeat("0", 128)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Download returned %v; the v2 path must report the mismatch through the returned hash, not an early error", err)
+	}
+
+	want := sha512.Sum512(plaintext)
+	if !strings.EqualFold(hash, hex.EncodeToString(want[:])) {
+		t.Errorf("computed hash = %q, want %q", hash, hex.EncodeToString(want[:]))
+	}
+
+	got, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read downloaded file: %v", readErr)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("downloaded %d bytes, want %d", len(got), len(plaintext))
 	}
 }

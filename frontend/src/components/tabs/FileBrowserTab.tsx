@@ -961,8 +961,12 @@ export function FileBrowserTab() {
                 ))}
               </ul>
             )}
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">
               How would you like to proceed?
+            </p>
+            <p className="text-sm text-red-600 dark:text-red-400 mb-4">
+              Overwrite deletes the entire existing local folder(s) first, including any files
+              they hold that are not part of this download.
             </p>
             <div className="flex flex-col gap-2">
               <button
@@ -975,7 +979,7 @@ export function FileBrowserTab() {
                 onClick={handleConflictOverwrite}
                 className="w-full px-4 py-2 text-sm text-white bg-red-500 hover:bg-red-600 rounded"
               >
-                Overwrite — delete and re-download
+                Overwrite — delete the local folder, then re-download
               </button>
               {folderConflict.allFolders.length > folderConflict.conflictingFolders.length && (
                 <button

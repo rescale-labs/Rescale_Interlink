@@ -204,7 +204,7 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 			fmt.Fprintf(os.Stderr, "    Continuing because --skip-checksum flag is set\n")
 		} else {
 			// Strict mode (default): fail on checksum mismatch
-			return fmt.Errorf("checksum verification failed for %s: %w\n\nTo download despite checksum mismatch, use --skip-checksum flag (not recommended)", params.LocalPath, checksumErr)
+			return quarantineCorruptFile(params.LocalPath, checksumErr)
 		}
 	}
 
@@ -224,6 +224,36 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	state.DeleteDownloadState(params.LocalPath)
 
 	return nil
+}
+
+// corruptFileSuffix marks a downloaded file that failed checksum verification.
+const corruptFileSuffix = ".corrupt"
+
+// quarantineCorruptFile moves a download that failed checksum verification out
+// of the way and returns the error to report to the caller.
+//
+// The corrupt bytes must not be left at localPath. Callers decide a file is
+// already downloaded by comparing the on-disk size against the expected size
+// (the auto-download daemon's poll, the CLI's skip-existing modes), and a file
+// that fails its checksum is still full-size — leaving it in place makes the
+// next poll report the download as a success. Renaming is preferred over
+// deleting so the bytes stay available for diagnosis; deletion is the fallback,
+// and when neither works the returned error says so.
+func quarantineCorruptFile(localPath string, checksumErr error) error {
+	quarantinePath := localPath + corruptFileSuffix
+	disposition := fmt.Sprintf("The corrupt file was moved to %s", quarantinePath)
+
+	if renameErr := os.Rename(localPath, quarantinePath); renameErr != nil {
+		if removeErr := os.Remove(localPath); removeErr != nil {
+			disposition = fmt.Sprintf("WARNING: the corrupt file is still at %s — it could not be moved aside (%v) or deleted (%v); delete it before retrying",
+				localPath, renameErr, removeErr)
+		} else {
+			disposition = "The corrupt file was deleted"
+		}
+	}
+
+	return fmt.Errorf("checksum verification failed for %s: %w\n\n%s\n\nTo download despite checksum mismatch, use --skip-checksum flag (not recommended)",
+		localPath, checksumErr, disposition)
 }
 
 // getExpectedSHA512 extracts the expected SHA-512 hash from checksums.

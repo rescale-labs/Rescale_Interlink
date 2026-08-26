@@ -262,6 +262,14 @@ func executeFileDownload(
 
 			switch action {
 			case DownloadSkipOnce, DownloadSkipAll:
+				if !existingFileIsComplete(info, item.size) {
+					fmt.Fprintf(downloadUI.Writer(), "⚠️  Existing file %s is %d bytes, expected %d — re-downloading\n",
+						item.name, info.Size(), item.size)
+					if rmErr := os.Remove(outputPath); rmErr != nil {
+						return fmt.Errorf("failed to remove incomplete existing file: %w", rmErr)
+					}
+					break
+				}
 				downloadMutex.Lock()
 				skippedFiles = append(skippedFiles, outputPath)
 				downloadMutex.Unlock()
@@ -459,6 +467,19 @@ func executeJobDownload(
 		}
 	}
 
+	// Drop files whose server-supplied name is not a plain filename. Name is the
+	// fallback used to build the local path whenever RelativePath is absent or
+	// escapes the output directory, so an unchecked name would let the API place
+	// a file anywhere on disk. Matches the file-ID download path and the
+	// auto-download daemon, which reject the same names.
+	files, nameErrs := filterValidJobFiles(files)
+	for _, nameErr := range nameErrs {
+		fmt.Printf("⚠️  %v\n", nameErr)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no valid files to download")
+	}
+
 	if outputDir == "" {
 		outputDir = "."
 	}
@@ -588,6 +609,14 @@ func executeJobDownload(
 		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
 			switch conflictResolver.Mode() {
 			case DownloadSkipOnce, DownloadSkipAll:
+				if !existingFileIsComplete(info, item.size) {
+					fmt.Fprintf(downloadUI.Writer(), "⚠️  Existing file %s is %d bytes, expected %d — re-downloading\n",
+						item.name, info.Size(), item.size)
+					if rmErr := os.Remove(outputPath); rmErr != nil {
+						return fmt.Errorf("failed to remove incomplete existing file: %w", rmErr)
+					}
+					break
+				}
 				fmt.Fprintf(downloadUI.Writer(), "⊘ Skipping existing file: %s\n", item.name)
 				downloadMutex.Lock()
 				skippedFiles = append(skippedFiles, outputPath)
@@ -725,6 +754,35 @@ func executeJobDownload(
 		fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
 	}
 	return nil
+}
+
+// existingFileIsComplete reports whether a file already on disk can stand in for
+// the download. Existence alone is not proof: an interrupted or checksum-failed
+// earlier attempt leaves a file at the same path, and skipping it would hand the
+// user bad data while reporting success. Size is the same evidence the
+// auto-download daemon uses. When the expected size is unknown (metadata omitted
+// it) existence is all there is to go on.
+func existingFileIsComplete(info os.FileInfo, expectedSize int64) bool {
+	if expectedSize <= 0 {
+		return true
+	}
+	return info.Size() == expectedSize
+}
+
+// filterValidJobFiles splits job files into those whose server-supplied name is
+// a plain filename and one error per rejected file. See executeJobDownload for
+// why the name is checked even when the file also carries a relative path.
+func filterValidJobFiles(files []models.JobFile) ([]models.JobFile, []error) {
+	valid := make([]models.JobFile, 0, len(files))
+	var errs []error
+	for _, f := range files {
+		if err := validation.ValidateFilename(f.Name); err != nil {
+			errs = append(errs, fmt.Errorf("invalid filename from API for file %s: %w", f.ID, err))
+			continue
+		}
+		valid = append(valid, f)
+	}
+	return valid, errs
 }
 
 // sanitizeErrorString removes secrets (SAS tokens, access keys, session tokens)

@@ -377,6 +377,15 @@ func runCompatDownloadBatch(ctx context.Context, items []compatDownloadItem, lab
 	}
 
 	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item compatDownloadItem) error {
+		// compatLocalPath falls back to the server-supplied name whenever the
+		// relative path is absent or escapes the output directory, so the name
+		// must be a plain filename or the API could place a file anywhere on
+		// disk. Checked here rather than at the two call sites so both the job
+		// and run download paths are covered once.
+		if err := validation.ValidateFilename(item.name); err != nil {
+			return fmt.Errorf("invalid filename from API for file %s: %w", item.fileID, err)
+		}
+
 		outputPath := item.localPath
 
 		// Ensure directory exists for relative paths

@@ -7,14 +7,20 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/watch"
 )
+
+// compatMonitorInterval is the poll interval for compatMonitorJob. A variable
+// so tests can drive the loop without waiting on the real ticker.
+var compatMonitorInterval = constants.JobTailTickerInterval
 
 // compatMonitorJob polls job status until a terminal state is reached.
 // Prints status transitions via cc.Printf (suppressed in quiet mode).
-// Returns nil on Completed, error on Failed/Terminated or after 5 consecutive errors.
+// Returns nil on Completed, error on any other terminal status or after 5
+// consecutive errors.
 func compatMonitorJob(ctx context.Context, jobID string, client *api.Client, cc *CompatContext) error {
 	lastStatus := ""
-	ticker := time.NewTicker(constants.JobTailTickerInterval)
+	ticker := time.NewTicker(compatMonitorInterval)
 	defer ticker.Stop()
 
 	consecutiveErrors := 0
@@ -48,10 +54,12 @@ func compatMonitorJob(ctx context.Context, jobID string, client *api.Client, cc 
 				lastStatus = currentStatus
 			}
 
-			switch currentStatus {
-			case "Completed":
-				return nil
-			case "Failed", "Terminated":
+			// Only Completed counts as success — Stopped and Force Stopped
+			// end the job without producing results.
+			if watch.TerminalStatuses[currentStatus] {
+				if currentStatus == watch.StatusCompleted {
+					return nil
+				}
 				return fmt.Errorf("job ended with status: %s", currentStatus)
 			}
 		}

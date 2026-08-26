@@ -494,21 +494,6 @@ func (d *Downloader) verifyDecryptionQuick(
 	return nil
 }
 
-// getExpectedSHA512 extracts the expected SHA-512 hash from FileChecksums.
-// Returns empty string if no SHA-512 checksum is available.
-func getExpectedSHA512(fileInfo *models.CloudFile) string {
-	if fileInfo == nil || len(fileInfo.FileChecksums) == 0 {
-		return ""
-	}
-	for _, cs := range fileInfo.FileChecksums {
-		switch cs.HashFunction {
-		case "sha512", "SHA-512", "SHA512":
-			return cs.FileHash
-		}
-	}
-	return ""
-}
-
 // downloadCBCStreaming downloads using CBC chaining format (v2) with parallel fetch.
 // Downloads happen in parallel, but decryption is sequential (CBC constraint) for
 // 2-4x throughput improvement. CBC decryption MUST be sequential because each part's IV
@@ -567,7 +552,6 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	// Create hasher to compute checksum during write, eliminating a race condition
 	// where post-download verification could read stale data from filesystem cache.
 	hasher := sha512.New()
-	expectedHash := getExpectedSHA512(prep.Params.FileInfo)
 
 	// Use part size from metadata, or calculate for files that lack partsize metadata.
 	// Older uploads don't have partsize metadata, and the chunk size used during upload
@@ -837,17 +821,13 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		return fmt.Errorf("incomplete download: processed %d of %d parts", decryptedParts, numParts)
 	}
 
-	// Store computed hash for caller — this hash was computed during write, so it's authoritative.
-	actualHash := hex.EncodeToString(hasher.Sum(nil))
-	prep.ComputedHash = actualHash
-
-	// Verify checksum using hash computed during write, eliminating a race condition
-	// where post-download verification could read stale data from filesystem cache.
-	if expectedHash != "" {
-		if !strings.EqualFold(actualHash, expectedHash) {
-			return fmt.Errorf("checksum mismatch (computed during write): expected SHA-512=%s, got %s", expectedHash, actualHash)
-		}
-	}
+	// Store computed hash for caller — this hash was computed during write, so it's
+	// authoritative. Comparing it against the expected checksum is DownloadFile's
+	// job, not ours: it owns the strict-vs---skip-checksum decision and the
+	// quarantine of a corrupt file. Failing here instead would return before any
+	// of that, leaving the corrupt file in place. The v1 and legacy paths already
+	// hand the hash back the same way.
+	prep.ComputedHash = hex.EncodeToString(hasher.Sum(nil))
 
 	// Report 100% at end
 	if prep.Params.ProgressCallback != nil {
