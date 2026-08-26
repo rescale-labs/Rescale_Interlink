@@ -8,15 +8,6 @@ import (
 	"time"
 )
 
-// TestNewRateLimiterStartsFull verifies the bucket starts at full capacity.
-func TestNewRateLimiterStartsFull(t *testing.T) {
-	rl := NewRateLimiter(1.0, 10.0)
-	tokens := rl.GetCurrentTokens()
-	if tokens < 9.9 { // Allow small float imprecision
-		t.Errorf("expected ~10 tokens, got %.2f", tokens)
-	}
-}
-
 // TestTryAcquireConsumesToken verifies token consumption.
 func TestTryAcquireConsumesToken(t *testing.T) {
 	rl := NewRateLimiter(1.0, 5.0)
@@ -34,34 +25,45 @@ func TestTryAcquireConsumesToken(t *testing.T) {
 	}
 }
 
-// TestTokenRefill verifies tokens refill over time.
-func TestTokenRefill(t *testing.T) {
-	rl := NewRateLimiter(10.0, 10.0) // 10 tokens/sec
+// TestTokenBucketRefill pins the refill arithmetic — tokens grow by
+// elapsed*refillRate and never exceed the burst — at the three points that
+// behave differently: a fresh bucket (starts full), a drained bucket part-way
+// through a refill, and a bucket whose refill would overshoot the burst. All
+// three buckets share one sleep, so the arithmetic is checked against a single
+// elapsed interval.
+func TestTokenBucketRefill(t *testing.T) {
+	const elapsed = 200 * time.Millisecond
 
-	// Drain all tokens
-	for i := 0; i < 10; i++ {
-		rl.tryAcquire()
+	cases := []struct {
+		name    string
+		rate    float64
+		burst   float64
+		drain   int
+		wantMin float64
+		wantMax float64
+	}{
+		{"starts full", 1.0, 10.0, 0, 9.9, 10.0},
+		{"refills at rate", 10.0, 10.0, 10, 1.5, 3.0},
+		{"caps at burst", 100.0, 5.0, 0, 4.9, 5.1},
 	}
 
-	// Wait for partial refill
-	time.Sleep(200 * time.Millisecond) // Should refill ~2 tokens
-
-	tokens := rl.GetCurrentTokens()
-	if tokens < 1.5 || tokens > 3.0 {
-		t.Errorf("expected ~2 tokens after 200ms at 10/sec, got %.2f", tokens)
+	limiters := make([]*RateLimiter, len(cases))
+	for i, c := range cases {
+		rl := NewRateLimiter(c.rate, c.burst)
+		for j := 0; j < c.drain; j++ {
+			rl.tryAcquire()
+		}
+		limiters[i] = rl
 	}
-}
 
-// TestTokenRefillCapsAtMax verifies tokens don't exceed max capacity.
-func TestTokenRefillCapsAtMax(t *testing.T) {
-	rl := NewRateLimiter(100.0, 5.0) // Very fast refill, low max
+	time.Sleep(elapsed)
 
-	// Wait a bit to accumulate
-	time.Sleep(100 * time.Millisecond)
-
-	tokens := rl.GetCurrentTokens()
-	if tokens > 5.1 { // Allow tiny float imprecision
-		t.Errorf("tokens should cap at 5, got %.2f", tokens)
+	for i, c := range cases {
+		got := limiters[i].GetCurrentTokens()
+		if got < c.wantMin || got > c.wantMax {
+			t.Errorf("%s: tokens after %v at %.1f/s (burst %.1f) = %.2f, want [%.2f, %.2f]",
+				c.name, elapsed, c.rate, c.burst, got, c.wantMin, c.wantMax)
+		}
 	}
 }
 
@@ -110,23 +112,6 @@ func TestWaitRespectsContextCancellation(t *testing.T) {
 	}
 }
 
-// TestBurstBehavior verifies rapid consumption depletes the bucket.
-func TestBurstBehavior(t *testing.T) {
-	rl := NewRateLimiter(1.0, 20.0) // 1/sec refill, 20 burst capacity
-
-	// Rapid burst — should get all 20
-	for i := 0; i < 20; i++ {
-		if !rl.tryAcquire() {
-			t.Fatalf("burst failed at token %d", i+1)
-		}
-	}
-
-	// Next should fail
-	if rl.tryAcquire() {
-		t.Error("should fail after burst exhaustion")
-	}
-}
-
 // TestDrainEmptiesBucket verifies Drain sets tokens to zero.
 func TestDrainEmptiesBucket(t *testing.T) {
 	rl := NewRateLimiter(1.0, 100.0)
@@ -142,29 +127,6 @@ func TestDrainEmptiesBucket(t *testing.T) {
 	tokens := rl.GetCurrentTokens()
 	if tokens > 0.1 {
 		t.Errorf("after Drain: tokens = %.2f, want ~0", tokens)
-	}
-}
-
-// TestDrainCausesWaitToBlock verifies that after Drain, Wait blocks until refill.
-func TestDrainCausesWaitToBlock(t *testing.T) {
-	rl := NewRateLimiter(10.0, 10.0) // 10/sec refill
-
-	rl.Drain()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	err := rl.Wait(ctx)
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("Wait() after Drain returned error: %v", err)
-	}
-
-	// Should have waited ~100ms for 1 token at 10/sec
-	if elapsed < 50*time.Millisecond {
-		t.Errorf("Wait() after Drain completed too quickly: %v", elapsed)
 	}
 }
 

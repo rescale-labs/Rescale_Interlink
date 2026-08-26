@@ -10,6 +10,51 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
+// fieldCheck is one (got, want) pin. The conversion helpers are almost entirely
+// field mappings, so they read better as a list of pins than as a wall of
+// if-blocks.
+type fieldCheck struct {
+	name      string
+	got, want any
+}
+
+func checkFields(t *testing.T, checks []fieldCheck) {
+	t.Helper()
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// requiredDirectives are the six fields validate() insists on.
+var requiredDirectives = []string{
+	"#RESCALE_NAME test",
+	"#RESCALE_COMMAND ./run.sh",
+	"#RESCALE_ANALYSIS openfoam",
+	"#RESCALE_CORES emerald",
+	"#RESCALE_CORES_PER_SLOT 16",
+	"#RESCALE_WALLTIME 3",
+}
+
+// scriptOmitting builds a script carrying every required directive except omit.
+// It has no body, so dropping #RESCALE_COMMAND leaves the command genuinely
+// empty instead of falling back to the script body.
+func scriptOmitting(t *testing.T, omit string) string {
+	t.Helper()
+	lines := []string{"#!/bin/bash"}
+	for _, d := range requiredDirectives {
+		if !strings.HasPrefix(d, "#"+omit+" ") {
+			lines = append(lines, d)
+		}
+	}
+	if len(lines) != len(requiredDirectives) {
+		t.Fatalf("scriptOmitting(%q) dropped %d directives, want exactly 1",
+			omit, len(requiredDirectives)+1-len(lines))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func TestSGEParser_Parse(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -20,7 +65,11 @@ func TestSGEParser_Parse(t *testing.T) {
 		validate    func(t *testing.T, metadata *SGEMetadata)
 	}{
 		{
-			name: "basic job with all required fields",
+			// One full fixture for the #RESCALE_* dialect: every directive the
+			// parser understands except #RESCALE_AUTOMATION (unasserted here and
+			// at HEAD). TAGS is deliberately padded to pin trimming. The body is
+			// two lines so an explicit #RESCALE_COMMAND provably beats the body.
+			name: "all RESCALE_ directives",
 			script: `#!/bin/bash
 #RESCALE_NAME test_simulation
 #RESCALE_COMMAND ./run.sh
@@ -30,298 +79,66 @@ func TestSGEParser_Parse(t *testing.T) {
 #RESCALE_CORES_PER_SLOT 16
 #RESCALE_SLOTS 2
 #RESCALE_WALLTIME 24
-
-echo "Running simulation"
-./run.sh
-`,
-			wantErr: false,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "test_simulation" {
-					t.Errorf("Name = %q, want %q", m.Name, "test_simulation")
-				}
-				if m.Command != "./run.sh" {
-					t.Errorf("Command = %q, want %q", m.Command, "./run.sh")
-				}
-				if m.Analysis != "openfoam" {
-					t.Errorf("Analysis = %q, want %q", m.Analysis, "openfoam")
-				}
-				if m.AnalysisVersion != "8.0" {
-					t.Errorf("AnalysisVersion = %q, want %q", m.AnalysisVersion, "8.0")
-				}
-				if m.CoreType != "emerald" {
-					t.Errorf("CoreType = %q, want %q", m.CoreType, "emerald")
-				}
-				if m.CoresPerSlot != 16 {
-					t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 16)
-				}
-				if m.Slots != 2 {
-					t.Errorf("Slots = %d, want %d", m.Slots, 2)
-				}
-				if m.Walltime != 24 {
-					t.Errorf("Walltime = %d, want %d", m.Walltime, 24)
-				}
-			},
-		},
-		{
-			name: "job with tags and project",
-			script: `#!/bin/bash
-#RESCALE_NAME cfd_analysis
-#RESCALE_COMMAND ./solve.sh
-#RESCALE_ANALYSIS ansys-fluent
-#RESCALE_CORES emerald_max
-#RESCALE_CORES_PER_SLOT 32
-#RESCALE_WALLTIME 7
-#RESCALE_TAGS simulation,cfd,production
+#RESCALE_TAGS  simulation  ,  cfd  ,  production
 #RESCALE_PROJECT_ID proj_abc123
-
-./solve.sh
-`,
-			wantErr: false,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if len(m.Tags) != 3 {
-					t.Errorf("Tags length = %d, want %d", len(m.Tags), 3)
-				}
-				expectedTags := []string{"simulation", "cfd", "production"}
-				for i, tag := range expectedTags {
-					if m.Tags[i] != tag {
-						t.Errorf("Tags[%d] = %q, want %q", i, m.Tags[i], tag)
-					}
-				}
-				if m.ProjectID != "proj_abc123" {
-					t.Errorf("ProjectID = %q, want %q", m.ProjectID, "proj_abc123")
-				}
-			},
-		},
-		{
-			name: "job with environment variables",
-			script: `#!/bin/bash
-#RESCALE_NAME env_test
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS custom-solver
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 8
-#RESCALE_WALLTIME 3
+#RESCALE_INBOUND_SSH_CIDR 0.0.0.0/0
+#RESCALE_PUBLIC_KEY ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDexample
+#USE_RESCALE_LICENSE true
+#RESCALE_USER_DEFINED_LICENSE_SETTINGS port=1234@server.example.com
 #RESCALE_ENV_OMP_NUM_THREADS 8
 #RESCALE_ENV_LD_LIBRARY_PATH /opt/lib
 #RESCALE_ENV_CUSTOM_VAR myvalue
 
+echo "Running simulation"
 ./run.sh
 `,
-			wantErr: false,
 			validate: func(t *testing.T, m *SGEMetadata) {
-				if len(m.EnvVariables) != 3 {
-					t.Errorf("EnvVariables length = %d, want %d", len(m.EnvVariables), 3)
-				}
-				if m.EnvVariables["OMP_NUM_THREADS"] != "8" {
-					t.Errorf("OMP_NUM_THREADS = %q, want %q", m.EnvVariables["OMP_NUM_THREADS"], "8")
-				}
-				if m.EnvVariables["LD_LIBRARY_PATH"] != "/opt/lib" {
-					t.Errorf("LD_LIBRARY_PATH = %q, want %q", m.EnvVariables["LD_LIBRARY_PATH"], "/opt/lib")
-				}
-				if m.EnvVariables["CUSTOM_VAR"] != "myvalue" {
-					t.Errorf("CUSTOM_VAR = %q, want %q", m.EnvVariables["CUSTOM_VAR"], "myvalue")
+				checkFields(t, []fieldCheck{
+					{"Name", m.Name, "test_simulation"},
+					{"Command", m.Command, "./run.sh"},
+					{"Analysis", m.Analysis, "openfoam"},
+					{"AnalysisVersion", m.AnalysisVersion, "8.0"},
+					{"CoreType", m.CoreType, "emerald"},
+					{"CoresPerSlot", m.CoresPerSlot, 16},
+					{"Slots", m.Slots, 2},
+					{"Walltime", m.Walltime, 24},
+					{"ProjectID", m.ProjectID, "proj_abc123"},
+					{"InboundSSHCIDR", m.InboundSSHCIDR, "0.0.0.0/0"},
+					{"PublicKey", m.PublicKey, "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDexample"},
+					{"UseLicense", m.UseLicense, true},
+					{"UserDefinedLicenseSettings", m.UserDefinedLicenseSettings, "port=1234@server.example.com"},
+					{"len(EnvVariables)", len(m.EnvVariables), 3},
+					{"EnvVariables[OMP_NUM_THREADS]", m.EnvVariables["OMP_NUM_THREADS"], "8"},
+					{"EnvVariables[LD_LIBRARY_PATH]", m.EnvVariables["LD_LIBRARY_PATH"], "/opt/lib"},
+					{"EnvVariables[CUSTOM_VAR]", m.EnvVariables["CUSTOM_VAR"], "myvalue"},
+				})
+				if got := strings.Join(m.Tags, "|"); got != "simulation|cfd|production" {
+					t.Errorf("Tags = %q, want %q (comma-split and trimmed)", got, "simulation|cfd|production")
 				}
 			},
 		},
 		{
-			name: "job with SSH settings",
+			// One full fixture for the #$ -l dialect: every rescale_* key, split
+			// across a multi-pair line and a second line. No #RESCALE_COMMAND, so
+			// the multi-line script body becomes the command.
+			name: "all qsub -l keys, body becomes the command",
 			script: `#!/bin/bash
-#RESCALE_NAME ssh_enabled_job
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS matlab
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 4
-#RESCALE_WALLTIME 2
-#RESCALE_INBOUND_SSH_CIDR 0.0.0.0/0
-#RESCALE_PUBLIC_KEY ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDexample
-
-./run.sh
-`,
-			wantErr: false,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.InboundSSHCIDR != "0.0.0.0/0" {
-					t.Errorf("InboundSSHCIDR = %q, want %q", m.InboundSSHCIDR, "0.0.0.0/0")
-				}
-				if m.PublicKey != "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDexample" {
-					t.Errorf("PublicKey = %q", m.PublicKey)
-				}
-			},
-		},
-		{
-			name: "job with license settings",
-			script: `#!/bin/bash
-#RESCALE_NAME licensed_app
-#RESCALE_COMMAND ./app
-#RESCALE_ANALYSIS ansys
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3
-#USE_RESCALE_LICENSE true
-#RESCALE_USER_DEFINED_LICENSE_SETTINGS port=1234@server.example.com
-
-./app
-`,
-			wantErr: false,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if !m.UseLicense {
-					t.Errorf("UseLicense = %v, want %v", m.UseLicense, true)
-				}
-				if m.UserDefinedLicenseSettings != "port=1234@server.example.com" {
-					t.Errorf("UserDefinedLicenseSettings = %q", m.UserDefinedLicenseSettings)
-				}
-			},
-		},
-		{
-			name: "missing required NAME field",
-			script: `#!/bin/bash
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3
-
-./run.sh
-`,
-			wantErr:     true,
-			errContains: "RESCALE_NAME",
-		},
-		{
-			name: "missing required COMMAND field",
-			script: `#!/bin/bash
-#RESCALE_NAME test
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3
-`,
-			wantErr:     true,
-			errContains: "RESCALE_COMMAND",
-		},
-		{
-			name: "missing required ANALYSIS field",
-			script: `#!/bin/bash
-#RESCALE_NAME test
-#RESCALE_COMMAND ./run.sh
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3
-
-./run.sh
-`,
-			wantErr:     true,
-			errContains: "RESCALE_ANALYSIS",
-		},
-		{
-			name: "missing required CORES field",
-			script: `#!/bin/bash
-#RESCALE_NAME test
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES_PER_SLOT 16
-#RESCALE_WALLTIME 3
-
-./run.sh
-`,
-			wantErr:     true,
-			errContains: "RESCALE_CORES",
-		},
-		{
-			name: "missing required CORES_PER_SLOT field",
-			script: `#!/bin/bash
-#RESCALE_NAME test
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES emerald
-#RESCALE_WALLTIME 3
-
-./run.sh
-`,
-			wantErr:     true,
-			errContains: "RESCALE_CORES_PER_SLOT",
-		},
-		{
-			name: "missing required WALLTIME field",
-			script: `#!/bin/bash
-#RESCALE_NAME test
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 16
-
-./run.sh
-`,
-			wantErr:     true,
-			errContains: "RESCALE_WALLTIME",
-		},
-		{
-			name: "invalid CORES_PER_SLOT value",
-			script: `#!/bin/bash
-#RESCALE_NAME test
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT invalid
-#RESCALE_WALLTIME 3
-
-./run.sh
-`,
-			wantErr:     true,
-			errContains: "RESCALE_CORES_PER_SLOT",
-		},
-		{
-			name: "tags with spaces trimmed",
-			script: `#!/bin/bash
-#RESCALE_NAME test
-#RESCALE_COMMAND ./run.sh
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 8
-#RESCALE_WALLTIME 3
-#RESCALE_TAGS  tag1  ,  tag2  ,  tag3
-
-./run.sh
-`,
-			wantErr: false,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if len(m.Tags) != 3 {
-					t.Errorf("Tags length = %d, want %d", len(m.Tags), 3)
-				}
-				for i, tag := range m.Tags {
-					if tag != fmt.Sprintf("tag%d", i+1) {
-						t.Errorf("Tags[%d] = %q, want %q", i, tag, fmt.Sprintf("tag%d", i+1))
-					}
-				}
-			},
-		},
-		{
-			name: "qsub -l format",
-			script: `#!/bin/bash
-#$ -l rescale_name=qsub_job,rescale_code=openfoam
-#$ -l rescale_coretype=emerald
+#$ -l rescale_name=qsub_job,rescale_code=openfoam,rescale_coretype=emerald
 #$ -l rescale_cores=16,rescale_walltime=3
 
+echo "Setting up"
 ./run.sh --input data.txt
+echo "Done"
 `,
 			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "qsub_job" {
-					t.Errorf("Name = %q, want %q", m.Name, "qsub_job")
-				}
-				if m.Analysis != "openfoam" {
-					t.Errorf("Analysis = %q, want %q", m.Analysis, "openfoam")
-				}
-				if m.CoreType != "emerald" {
-					t.Errorf("CoreType = %q, want %q", m.CoreType, "emerald")
-				}
-				if m.CoresPerSlot != 16 {
-					t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 16)
-				}
-				if m.Walltime != 3 {
-					t.Errorf("Walltime = %d, want %d", m.Walltime, 3)
-				}
-				// No #RESCALE_COMMAND, so the script body is the command.
-				if m.Command != "./run.sh --input data.txt" {
-					t.Errorf("Command = %q, want %q", m.Command, "./run.sh --input data.txt")
-				}
+				checkFields(t, []fieldCheck{
+					{"Name", m.Name, "qsub_job"},
+					{"Analysis", m.Analysis, "openfoam"},
+					{"CoreType", m.CoreType, "emerald"},
+					{"CoresPerSlot", m.CoresPerSlot, 16},
+					{"Walltime", m.Walltime, 3},
+					{"Command", m.Command, "echo \"Setting up\"\n./run.sh --input data.txt\necho \"Done\""},
+				})
 			},
 		},
 		{
@@ -339,91 +156,11 @@ echo "Running simulation"
 ./override.sh
 `,
 			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "override_name" {
-					t.Errorf("Name = %q, want %q (RESCALE_NAME should win)", m.Name, "override_name")
-				}
-				if m.Analysis != "fluent" {
-					t.Errorf("Analysis = %q, want %q (RESCALE_ANALYSIS should win)", m.Analysis, "fluent")
-				}
-				if m.Command != "./override.sh" {
-					t.Errorf("Command = %q, want %q", m.Command, "./override.sh")
-				}
-			},
-		},
-		{
-			name: "script body becomes the command",
-			script: `#!/bin/bash
-#RESCALE_NAME body_cmd_test
-#RESCALE_ANALYSIS openfoam
-#RESCALE_CORES emerald
-#RESCALE_CORES_PER_SLOT 8
-#RESCALE_WALLTIME 3
-
-echo "Setting up"
-./run.sh --verbose
-echo "Done"
-`,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				want := "echo \"Setting up\"\n./run.sh --verbose\necho \"Done\""
-				if m.Command != want {
-					t.Errorf("Command = %q, want %q", m.Command, want)
-				}
-			},
-		},
-		{
-			name: "all qsub pairs on one -l line",
-			script: `#!/bin/bash
-#$ -l rescale_name=multi_test,rescale_code=star-ccm,rescale_coretype=emerald,rescale_cores=24,rescale_walltime=7
-#RESCALE_COMMAND ./star.sh
-`,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "multi_test" {
-					t.Errorf("Name = %q, want %q", m.Name, "multi_test")
-				}
-				if m.Analysis != "star-ccm" {
-					t.Errorf("Analysis = %q, want %q", m.Analysis, "star-ccm")
-				}
-				if m.CoreType != "emerald" {
-					t.Errorf("CoreType = %q, want %q", m.CoreType, "emerald")
-				}
-				if m.CoresPerSlot != 24 {
-					t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 24)
-				}
-				if m.Walltime != 7 {
-					t.Errorf("Walltime = %d, want %d", m.Walltime, 7)
-				}
-				if m.Command != "./star.sh" {
-					t.Errorf("Command = %q, want %q", m.Command, "./star.sh")
-				}
-			},
-		},
-		{
-			name: "qsub -N supplies the name",
-			script: `#!/bin/bash
-#$ -N MyTestJob
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_cores=4,rescale_walltime=3
-
-./run.sh
-`,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "MyTestJob" {
-					t.Errorf("Name = %q, want %q", m.Name, "MyTestJob")
-				}
-			},
-		},
-		{
-			name: "qsub -pe smp supplies cores per slot",
-			script: `#!/bin/bash
-#$ -N PeTest
-#$ -pe smp 8
-#$ -l rescale_code=openfoam,rescale_coretype=emerald,rescale_walltime=3
-
-./run.sh
-`,
-			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.CoresPerSlot != 8 {
-					t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 8)
-				}
+				checkFields(t, []fieldCheck{
+					{"Name", m.Name, "override_name"},
+					{"Analysis", m.Analysis, "fluent"},
+					{"Command", m.Command, "./override.sh"},
+				})
 			},
 		},
 		{
@@ -491,6 +228,7 @@ echo "Done"
 		},
 		{
 			// Other #$ directives are silently ignored rather than rejected.
+			// Also the only place -N and -pe smp supply values unopposed.
 			name: "unsupported qsub directives are ignored",
 			script: `#!/bin/bash
 #$ -A accounting_string
@@ -504,13 +242,64 @@ echo "Done"
 ./run.sh
 `,
 			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "TestJob" {
-					t.Errorf("Name = %q, want %q", m.Name, "TestJob")
-				}
-				if m.CoresPerSlot != 2 {
-					t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 2)
-				}
+				checkFields(t, []fieldCheck{
+					{"Name", m.Name, "TestJob"},
+					{"CoresPerSlot", m.CoresPerSlot, 2},
+				})
 			},
+		},
+		{
+			// A non-numeric value never matches the digits-only pattern, so the
+			// field stays unset and surfaces as a missing-field error.
+			name: "invalid CORES_PER_SLOT value",
+			script: `#!/bin/bash
+#RESCALE_NAME test
+#RESCALE_COMMAND ./run.sh
+#RESCALE_ANALYSIS openfoam
+#RESCALE_CORES emerald
+#RESCALE_CORES_PER_SLOT invalid
+#RESCALE_WALLTIME 3
+
+./run.sh
+`,
+			wantErr:     true,
+			errContains: "RESCALE_CORES_PER_SLOT",
+		},
+		{
+			name:        "missing required NAME field",
+			script:      scriptOmitting(t, "RESCALE_NAME"),
+			wantErr:     true,
+			errContains: "RESCALE_NAME",
+		},
+		{
+			name:        "missing required COMMAND field",
+			script:      scriptOmitting(t, "RESCALE_COMMAND"),
+			wantErr:     true,
+			errContains: "RESCALE_COMMAND",
+		},
+		{
+			name:        "missing required ANALYSIS field",
+			script:      scriptOmitting(t, "RESCALE_ANALYSIS"),
+			wantErr:     true,
+			errContains: "RESCALE_ANALYSIS",
+		},
+		{
+			name:        "missing required CORES field",
+			script:      scriptOmitting(t, "RESCALE_CORES"),
+			wantErr:     true,
+			errContains: "RESCALE_CORES",
+		},
+		{
+			name:        "missing required CORES_PER_SLOT field",
+			script:      scriptOmitting(t, "RESCALE_CORES_PER_SLOT"),
+			wantErr:     true,
+			errContains: "RESCALE_CORES_PER_SLOT",
+		},
+		{
+			name:        "missing required WALLTIME field",
+			script:      scriptOmitting(t, "RESCALE_WALLTIME"),
+			wantErr:     true,
+			errContains: "RESCALE_WALLTIME",
 		},
 		{
 			name: "compat defaults fill a bare script",
@@ -519,24 +308,14 @@ echo "hello world"
 `,
 			opts: &ParseOptions{CompatDefaults: true},
 			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "Unnamed Job" {
-					t.Errorf("Name = %q, want %q", m.Name, "Unnamed Job")
-				}
-				if m.CoreType != "emerald" {
-					t.Errorf("CoreType = %q, want %q", m.CoreType, "emerald")
-				}
-				if m.CoresPerSlot != 1 {
-					t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 1)
-				}
-				if m.Walltime != 48 {
-					t.Errorf("Walltime = %d, want %d", m.Walltime, 48)
-				}
-				if m.Analysis != "user_included" {
-					t.Errorf("Analysis = %q, want %q", m.Analysis, "user_included")
-				}
-				if m.Command != `echo "hello world"` {
-					t.Errorf("Command = %q, want %q", m.Command, `echo "hello world"`)
-				}
+				checkFields(t, []fieldCheck{
+					{"Name", m.Name, "Unnamed Job"},
+					{"CoreType", m.CoreType, "emerald"},
+					{"CoresPerSlot", m.CoresPerSlot, 1},
+					{"Walltime", m.Walltime, 48},
+					{"Analysis", m.Analysis, "user_included"},
+					{"Command", m.Command, `echo "hello world"`},
+				})
 			},
 		},
 		{
@@ -560,21 +339,13 @@ echo "hello world"
 `,
 			opts: &ParseOptions{CompatDefaults: true},
 			validate: func(t *testing.T, m *SGEMetadata) {
-				if m.Name != "ExplicitName" {
-					t.Errorf("Name = %q, want %q", m.Name, "ExplicitName")
-				}
-				if m.CoresPerSlot != 4 {
-					t.Errorf("CoresPerSlot = %d, want %d", m.CoresPerSlot, 4)
-				}
-				if m.Analysis != "star-ccm" {
-					t.Errorf("Analysis = %q, want %q", m.Analysis, "star-ccm")
-				}
-				if m.CoreType != "beryl" {
-					t.Errorf("CoreType = %q, want %q", m.CoreType, "beryl")
-				}
-				if m.Walltime != 7 {
-					t.Errorf("Walltime = %d, want %d", m.Walltime, 7)
-				}
+				checkFields(t, []fieldCheck{
+					{"Name", m.Name, "ExplicitName"},
+					{"CoresPerSlot", m.CoresPerSlot, 4},
+					{"Analysis", m.Analysis, "star-ccm"},
+					{"CoreType", m.CoreType, "beryl"},
+					{"Walltime", m.Walltime, 7},
+				})
 			},
 		},
 	}
@@ -619,6 +390,10 @@ echo "hello world"
 	}
 }
 
+// TestSGEMetadata_ToJobRequest pins the metadata -> JobRequest mapping. The two
+// SSH directives are included because the parser understood them long before
+// ToJobRequest carried them, so a script asking for SSH access got a job with
+// none; both have to reach the create call.
 func TestSGEMetadata_ToJobRequest(t *testing.T) {
 	metadata := &SGEMetadata{
 		Name:            "test_job",
@@ -631,105 +406,31 @@ func TestSGEMetadata_ToJobRequest(t *testing.T) {
 		Walltime:        24,
 		Tags:            []string{"simulation", "cfd"},
 		ProjectID:       "proj_123",
+		InboundSSHCIDR:  "10.0.0.0/8",
+		PublicKey:       "ssh-rsa AAAAB3NzaC1yc2E",
 	}
 
 	jobReq := metadata.ToJobRequest()
-
-	if jobReq.Name != metadata.Name {
-		t.Errorf("JobRequest.Name = %q, want %q", jobReq.Name, metadata.Name)
-	}
 
 	if len(jobReq.JobAnalyses) != 1 {
 		t.Fatalf("JobRequest.JobAnalyses length = %d, want 1", len(jobReq.JobAnalyses))
 	}
-
 	analysis := jobReq.JobAnalyses[0]
-	if analysis.Command != metadata.Command {
-		t.Errorf("Analysis.Command = %q, want %q", analysis.Command, metadata.Command)
-	}
-	if analysis.Analysis.Code != metadata.Analysis {
-		t.Errorf("Analysis.Code = %q, want %q", analysis.Analysis.Code, metadata.Analysis)
-	}
-	if analysis.Analysis.Version != metadata.AnalysisVersion {
-		t.Errorf("Analysis.Version = %q, want %q", analysis.Analysis.Version, metadata.AnalysisVersion)
-	}
-	if analysis.Hardware.CoreType.Code != metadata.CoreType {
-		t.Errorf("Hardware.CoreType = %q, want %q", analysis.Hardware.CoreType.Code, metadata.CoreType)
-	}
-	if analysis.Hardware.CoresPerSlot != metadata.CoresPerSlot {
-		t.Errorf("Hardware.CoresPerSlot = %d, want %d", analysis.Hardware.CoresPerSlot, metadata.CoresPerSlot)
-	}
-	// Slots are in Hardware, not JobAnalysis
-	if analysis.Hardware.Slots != metadata.Slots {
-		t.Errorf("Hardware.Slots = %d, want %d", analysis.Hardware.Slots, metadata.Slots)
-	}
-	if analysis.Hardware.Walltime != metadata.Walltime {
-		t.Errorf("Hardware.Walltime = %d, want %d", analysis.Hardware.Walltime, metadata.Walltime)
-	}
 
-	if len(jobReq.Tags) != len(metadata.Tags) {
-		t.Errorf("JobRequest.Tags length = %d, want %d", len(jobReq.Tags), len(metadata.Tags))
-	}
-	if jobReq.ProjectID != metadata.ProjectID {
-		t.Errorf("JobRequest.ProjectID = %q, want %q", jobReq.ProjectID, metadata.ProjectID)
-	}
-}
-
-// TestSGEMetadata_ToJobRequest_SSHAccess covers the two directives the parser
-// already understood but dropped on the way to the job request, so a script
-// asking for SSH access got a job with none.
-func TestSGEMetadata_ToJobRequest_SSHAccess(t *testing.T) {
-	metadata := &SGEMetadata{
-		Name:           "ssh_job",
-		Command:        "./run.sh",
-		Analysis:       "openfoam",
-		CoreType:       "emerald",
-		CoresPerSlot:   16,
-		Walltime:       4,
-		InboundSSHCIDR: "10.0.0.0/8",
-		PublicKey:      "ssh-rsa AAAAB3NzaC1yc2E",
-	}
-
-	jobReq := metadata.ToJobRequest()
-
-	if jobReq.CIDRRule != "10.0.0.0/8" {
-		t.Errorf("JobRequest.CIDRRule = %q, want %q", jobReq.CIDRRule, "10.0.0.0/8")
-	}
-	if jobReq.PublicKey != "ssh-rsa AAAAB3NzaC1yc2E" {
-		t.Errorf("JobRequest.PublicKey = %q, want %q", jobReq.PublicKey, "ssh-rsa AAAAB3NzaC1yc2E")
-	}
-}
-
-// TestSGEMetadata_SSHAccessSurvivesJobSpecRoundTrip covers the GUI path: load a
-// script into the job config, save it back out, and the SSH settings must still
-// be there.
-func TestSGEMetadata_SSHAccessSurvivesJobSpecRoundTrip(t *testing.T) {
-	metadata := &SGEMetadata{
-		Name:           "ssh_job",
-		Command:        "./run.sh",
-		Analysis:       "openfoam",
-		CoreType:       "emerald",
-		CoresPerSlot:   8,
-		Walltime:       4,
-		InboundSSHCIDR: "0.0.0.0/0",
-		PublicKey:      "ssh-ed25519 AAAAC3Nza",
-	}
-
-	spec := SGEMetadataToJobSpec(metadata)
-	if spec.CIDRRule != metadata.InboundSSHCIDR {
-		t.Errorf("JobSpec.CIDRRule = %q, want %q", spec.CIDRRule, metadata.InboundSSHCIDR)
-	}
-	if spec.PublicKey != metadata.PublicKey {
-		t.Errorf("JobSpec.PublicKey = %q, want %q", spec.PublicKey, metadata.PublicKey)
-	}
-
-	back := JobSpecToSGEMetadata(spec)
-	if back.InboundSSHCIDR != metadata.InboundSSHCIDR {
-		t.Errorf("round-tripped InboundSSHCIDR = %q, want %q", back.InboundSSHCIDR, metadata.InboundSSHCIDR)
-	}
-	if back.PublicKey != metadata.PublicKey {
-		t.Errorf("round-tripped PublicKey = %q, want %q", back.PublicKey, metadata.PublicKey)
-	}
+	checkFields(t, []fieldCheck{
+		{"Name", jobReq.Name, metadata.Name},
+		{"Analysis.Command", analysis.Command, metadata.Command},
+		{"Analysis.Code", analysis.Analysis.Code, metadata.Analysis},
+		{"Analysis.Version", analysis.Analysis.Version, metadata.AnalysisVersion},
+		{"Hardware.CoreType", analysis.Hardware.CoreType.Code, metadata.CoreType},
+		{"Hardware.CoresPerSlot", analysis.Hardware.CoresPerSlot, metadata.CoresPerSlot},
+		{"Hardware.Slots", analysis.Hardware.Slots, metadata.Slots},
+		{"Hardware.Walltime", analysis.Hardware.Walltime, metadata.Walltime},
+		{"len(Tags)", len(jobReq.Tags), len(metadata.Tags)},
+		{"ProjectID", jobReq.ProjectID, metadata.ProjectID},
+		{"CIDRRule", jobReq.CIDRRule, metadata.InboundSSHCIDR},
+		{"PublicKey", jobReq.PublicKey, metadata.PublicKey},
+	})
 }
 
 func TestSGEMetadata_ToJobRequest_DefaultSlots(t *testing.T) {
@@ -876,6 +577,8 @@ func TestSGEMetadata_ToSGEScript_MinimalFields(t *testing.T) {
 	}
 }
 
+// TestJobSpecToSGEMetadata pins the GUI -> script direction, including the SSH
+// settings the GUI can carry.
 func TestJobSpecToSGEMetadata(t *testing.T) {
 	job := models.JobSpec{
 		JobName:         "test_job",
@@ -888,44 +591,32 @@ func TestJobSpecToSGEMetadata(t *testing.T) {
 		WalltimeHours:   24.0,
 		Tags:            []string{"production", "cfd"},
 		ProjectID:       "proj_xyz",
+		CIDRRule:        "0.0.0.0/0",
+		PublicKey:       "ssh-ed25519 AAAAC3Nza",
 	}
 
 	metadata := JobSpecToSGEMetadata(job)
 
-	if metadata.Name != job.JobName {
-		t.Errorf("Name = %q, want %q", metadata.Name, job.JobName)
-	}
-	if metadata.Command != job.Command {
-		t.Errorf("Command = %q, want %q", metadata.Command, job.Command)
-	}
-	if metadata.Analysis != job.AnalysisCode {
-		t.Errorf("Analysis = %q, want %q", metadata.Analysis, job.AnalysisCode)
-	}
-	if metadata.AnalysisVersion != job.AnalysisVersion {
-		t.Errorf("AnalysisVersion = %q, want %q", metadata.AnalysisVersion, job.AnalysisVersion)
-	}
-	if metadata.CoreType != job.CoreType {
-		t.Errorf("CoreType = %q, want %q", metadata.CoreType, job.CoreType)
-	}
-	if metadata.CoresPerSlot != job.CoresPerSlot {
-		t.Errorf("CoresPerSlot = %d, want %d", metadata.CoresPerSlot, job.CoresPerSlot)
-	}
-	if metadata.Slots != job.Slots {
-		t.Errorf("Slots = %d, want %d", metadata.Slots, job.Slots)
-	}
-	// Walltime is in hours (the Rescale API unit), not seconds.
-	expectedWalltime := int(job.WalltimeHours)
-	if metadata.Walltime != expectedWalltime {
-		t.Errorf("Walltime = %d, want %d", metadata.Walltime, expectedWalltime)
-	}
-	if len(metadata.Tags) != len(job.Tags) {
-		t.Errorf("Tags length = %d, want %d", len(metadata.Tags), len(job.Tags))
-	}
-	if metadata.ProjectID != job.ProjectID {
-		t.Errorf("ProjectID = %q, want %q", metadata.ProjectID, job.ProjectID)
-	}
+	checkFields(t, []fieldCheck{
+		{"Name", metadata.Name, job.JobName},
+		{"Command", metadata.Command, job.Command},
+		{"Analysis", metadata.Analysis, job.AnalysisCode},
+		{"AnalysisVersion", metadata.AnalysisVersion, job.AnalysisVersion},
+		{"CoreType", metadata.CoreType, job.CoreType},
+		{"CoresPerSlot", metadata.CoresPerSlot, job.CoresPerSlot},
+		{"Slots", metadata.Slots, job.Slots},
+		// Walltime is in hours (the Rescale API unit), not seconds.
+		{"Walltime", metadata.Walltime, int(job.WalltimeHours)},
+		{"len(Tags)", len(metadata.Tags), len(job.Tags)},
+		{"ProjectID", metadata.ProjectID, job.ProjectID},
+		{"InboundSSHCIDR", metadata.InboundSSHCIDR, job.CIDRRule},
+		{"PublicKey", metadata.PublicKey, job.PublicKey},
+	})
 }
 
+// TestSGEMetadataToJobSpec pins the script -> GUI direction, including the SSH
+// settings, which must survive a load-then-save round trip through the job
+// config.
 func TestSGEMetadataToJobSpec(t *testing.T) {
 	metadata := &SGEMetadata{
 		Name:            "test_job",
@@ -938,42 +629,35 @@ func TestSGEMetadataToJobSpec(t *testing.T) {
 		Walltime:        24, // 24 hours (Rescale API unit)
 		Tags:            []string{"production", "cfd"},
 		ProjectID:       "proj_xyz",
+		InboundSSHCIDR:  "0.0.0.0/0",
+		PublicKey:       "ssh-ed25519 AAAAC3Nza",
 	}
 
 	job := SGEMetadataToJobSpec(metadata)
 
-	if job.JobName != metadata.Name {
-		t.Errorf("JobName = %q, want %q", job.JobName, metadata.Name)
-	}
-	if job.Command != metadata.Command {
-		t.Errorf("Command = %q, want %q", job.Command, metadata.Command)
-	}
-	if job.AnalysisCode != metadata.Analysis {
-		t.Errorf("AnalysisCode = %q, want %q", job.AnalysisCode, metadata.Analysis)
-	}
-	if job.AnalysisVersion != metadata.AnalysisVersion {
-		t.Errorf("AnalysisVersion = %q, want %q", job.AnalysisVersion, metadata.AnalysisVersion)
-	}
-	if job.CoreType != metadata.CoreType {
-		t.Errorf("CoreType = %q, want %q", job.CoreType, metadata.CoreType)
-	}
-	if job.CoresPerSlot != metadata.CoresPerSlot {
-		t.Errorf("CoresPerSlot = %d, want %d", job.CoresPerSlot, metadata.CoresPerSlot)
-	}
-	if job.Slots != metadata.Slots {
-		t.Errorf("Slots = %d, want %d", job.Slots, metadata.Slots)
-	}
-	// Walltime is in hours; no unit conversion.
-	expectedWalltimeHours := float64(metadata.Walltime)
-	if job.WalltimeHours != expectedWalltimeHours {
-		t.Errorf("WalltimeHours = %f, want %f", job.WalltimeHours, expectedWalltimeHours)
-	}
-	if len(job.Tags) != len(metadata.Tags) {
-		t.Errorf("Tags length = %d, want %d", len(job.Tags), len(metadata.Tags))
-	}
-	if job.ProjectID != metadata.ProjectID {
-		t.Errorf("ProjectID = %q, want %q", job.ProjectID, metadata.ProjectID)
-	}
+	checkFields(t, []fieldCheck{
+		{"JobName", job.JobName, metadata.Name},
+		{"Command", job.Command, metadata.Command},
+		{"AnalysisCode", job.AnalysisCode, metadata.Analysis},
+		{"AnalysisVersion", job.AnalysisVersion, metadata.AnalysisVersion},
+		{"CoreType", job.CoreType, metadata.CoreType},
+		{"CoresPerSlot", job.CoresPerSlot, metadata.CoresPerSlot},
+		{"Slots", job.Slots, metadata.Slots},
+		// Walltime is in hours; no unit conversion.
+		{"WalltimeHours", job.WalltimeHours, float64(metadata.Walltime)},
+		{"len(Tags)", len(job.Tags), len(metadata.Tags)},
+		{"ProjectID", job.ProjectID, metadata.ProjectID},
+		{"CIDRRule", job.CIDRRule, metadata.InboundSSHCIDR},
+		{"PublicKey", job.PublicKey, metadata.PublicKey},
+	})
+
+	// Slots and walltime are both defaulted rather than passed through as zero,
+	// which would make the spec unsubmittable.
+	bare := SGEMetadataToJobSpec(&SGEMetadata{})
+	checkFields(t, []fieldCheck{
+		{"default Slots", bare.Slots, 1},
+		{"default WalltimeHours", bare.WalltimeHours, 1.0},
+	})
 }
 
 func TestSGEScriptParseRoundTrip(t *testing.T) {
@@ -992,53 +676,31 @@ func TestSGEScriptParseRoundTrip(t *testing.T) {
 		EnvVariables:    make(map[string]string),
 	}
 
-	// Generate script
 	script := original.ToSGEScript()
 
-	// Write to temp file and parse
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "roundtrip.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
 		t.Fatalf("failed to write script: %v", err)
 	}
 
-	parser := NewSGEParser()
-	parsed, err := parser.Parse(scriptPath)
+	parsed, err := NewSGEParser().Parse(scriptPath)
 	if err != nil {
 		t.Fatalf("failed to parse generated script: %v", err)
 	}
 
-	// Verify fields are preserved
-	if parsed.Name != original.Name {
-		t.Errorf("Name = %q, want %q", parsed.Name, original.Name)
-	}
-	if parsed.Command != original.Command {
-		t.Errorf("Command = %q, want %q", parsed.Command, original.Command)
-	}
-	if parsed.Analysis != original.Analysis {
-		t.Errorf("Analysis = %q, want %q", parsed.Analysis, original.Analysis)
-	}
-	if parsed.AnalysisVersion != original.AnalysisVersion {
-		t.Errorf("AnalysisVersion = %q, want %q", parsed.AnalysisVersion, original.AnalysisVersion)
-	}
-	if parsed.CoreType != original.CoreType {
-		t.Errorf("CoreType = %q, want %q", parsed.CoreType, original.CoreType)
-	}
-	if parsed.CoresPerSlot != original.CoresPerSlot {
-		t.Errorf("CoresPerSlot = %d, want %d", parsed.CoresPerSlot, original.CoresPerSlot)
-	}
-	if parsed.Slots != original.Slots {
-		t.Errorf("Slots = %d, want %d", parsed.Slots, original.Slots)
-	}
-	if parsed.Walltime != original.Walltime {
-		t.Errorf("Walltime = %d, want %d", parsed.Walltime, original.Walltime)
-	}
-	if parsed.ProjectID != original.ProjectID {
-		t.Errorf("ProjectID = %q, want %q", parsed.ProjectID, original.ProjectID)
-	}
-	if len(parsed.Tags) != len(original.Tags) {
-		t.Errorf("Tags length = %d, want %d", len(parsed.Tags), len(original.Tags))
-	}
+	checkFields(t, []fieldCheck{
+		{"Name", parsed.Name, original.Name},
+		{"Command", parsed.Command, original.Command},
+		{"Analysis", parsed.Analysis, original.Analysis},
+		{"AnalysisVersion", parsed.AnalysisVersion, original.AnalysisVersion},
+		{"CoreType", parsed.CoreType, original.CoreType},
+		{"CoresPerSlot", parsed.CoresPerSlot, original.CoresPerSlot},
+		{"Slots", parsed.Slots, original.Slots},
+		{"Walltime", parsed.Walltime, original.Walltime},
+		{"ProjectID", parsed.ProjectID, original.ProjectID},
+		{"len(Tags)", len(parsed.Tags), len(original.Tags)},
+	})
 }
 
 // TestSGEParser_RejectsLegacySecondsWalltime verifies the guard that rejects
