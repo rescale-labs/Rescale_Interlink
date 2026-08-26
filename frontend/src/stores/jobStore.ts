@@ -508,7 +508,11 @@ export const useJobStore = create<JobStore>((set, get) => ({
 
   setTemplate: (template) => {
     const { workflowState, workflowPath } = get()
-    if (workflowState !== 'pathChosen' || workflowPath !== 'createNew') return
+    if (
+      workflowState !== 'pathChosen' ||
+      (workflowPath !== 'createNew' && workflowPath !== 'createSweep')
+    )
+      return
 
     set({
       template,

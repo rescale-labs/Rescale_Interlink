@@ -210,7 +210,8 @@ Examples:
 				fmt.Printf("\nEvery case references the same %d pre-uploaded file(s), so run it with:\n", len(opts.BaseFileIDs))
 				fmt.Printf("  rescale-int pur submit-existing --jobs-csv %s\n", outputPath)
 			} else {
-				fmt.Printf("\nRun it with:\n  rescale-int pur run --jobs-csv %s --state sweep.state\n", outputPath)
+				fmt.Printf("\nCases carry no input directory, so supply the shared deck once at run time:\n")
+				fmt.Printf("  rescale-int pur run --jobs-csv %s --state sweep.state --common-input-files <path-or-id:fileId>\n", outputPath)
 			}
 			return nil
 		},

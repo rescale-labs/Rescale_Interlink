@@ -12,8 +12,10 @@ export type WorkflowState =
   | 'completed'
   | 'error'
 
-// Workflow path enum
-export type WorkflowPath = 'unknown' | 'loadCSV' | 'createNew'
+// Workflow path enum. 'createSweep' is the dedicated DOE parameter-sweep entry:
+// like 'createNew' it builds a base job, but the base job is expanded into one
+// case per design point rather than scanned from directories.
+export type WorkflowPath = 'unknown' | 'loadCSV' | 'createNew' | 'createSweep'
 
 // Job spec from Go
 export interface JobSpec {

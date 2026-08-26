@@ -585,15 +585,17 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				continue
 			}
 
-			// If job has pre-specified input file IDs (single job remoteFiles/localFiles mode),
-			// skip tar/upload and go directly to job creation.
-			// Gated on Directory=="" to avoid interfering with file-scan mode where
-			// InputFiles contains local paths but Directory is also set.
+			// A job with no Directory has nothing to tar, so skip tar/upload and go
+			// directly to job creation. Its inputs come from pre-specified file IDs
+			// (single-job remoteFiles/localFiles mode, or a DOE sweep referencing a
+			// shared deck) and/or batch-level Common Files, both attached at job
+			// creation. Gated on Directory=="" to avoid interfering with file-scan
+			// mode, where InputFiles holds local paths but Directory is also set.
 			//
 			// Use nextSkipStatus so a terminal status already written by the
 			// engine (Single Job localFiles uploads via ReportUploadProgress)
 			// is preserved — only non-terminal statuses flip to "skipped".
-			if jobSpec.Directory == "" && len(jobSpec.InputFiles) > 0 {
+			if jobSpec.Directory == "" {
 				item.state.TarStatus = nextSkipStatus(item.state.TarStatus)
 				item.state.UploadStatus = nextSkipStatus(item.state.UploadStatus)
 				p.stateMgr.UpdateState(item.state)
@@ -1066,10 +1068,12 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.logf("INFO", "job", item.state.JobName, "Creating job: %s", item.jobSpec.JobName)
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
-				// When InputFiles are pre-specified (single job remoteFiles/localFiles mode),
-				// use them directly instead of the FileID from upload stage.
+				// With no Directory nothing was tarred/uploaded, so the FileID from
+				// the upload stage is empty; inputs come from any pre-specified file
+				// IDs (possibly none) plus batch-level Common Files, merged in
+				// BuildJobRequest. Otherwise use the uploaded tarball's FileID.
 				var fileIDs []string
-				if item.jobSpec.Directory == "" && len(item.jobSpec.InputFiles) > 0 {
+				if item.jobSpec.Directory == "" {
 					fileIDs = item.jobSpec.InputFiles
 				} else {
 					fileIDs = []string{item.state.FileID}
