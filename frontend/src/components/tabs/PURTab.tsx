@@ -14,6 +14,7 @@ import {
   CheckIcon,
   ChevronDownIcon,
   EyeIcon,
+  BeakerIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import { useJobStore, useConfigStore, useRunStore } from '../../stores'
@@ -343,8 +344,18 @@ export function PURTab() {
   }, [loadJobsFromCSV])
 
   const handleCreateNew = useCallback(() => {
+    // Directory scan is the folder/file path; make sure a prior sweep session
+    // does not leave scanMode on 'doe'.
+    setScanOptions({ scanMode: 'folders' })
     setWorkflowPath('createNew')
-  }, [setWorkflowPath])
+  }, [setScanOptions, setWorkflowPath])
+
+  const handleCreateSweep = useCallback(() => {
+    // The dedicated sweep entry builds a base job and expands it into cases; it
+    // never scans directories, so scanMode is DOE from the outset.
+    setScanOptions({ scanMode: 'doe' })
+    setWorkflowPath('createSweep')
+  }, [setScanOptions, setWorkflowPath])
 
   const mapDTOToTemplate = useCallback((loaded: wailsapp.JobSpecDTO) => {
     setTemplate({
@@ -613,6 +624,15 @@ export function PURTab() {
               <span className="font-medium">Create Jobs by Scanning</span>
               <span className="text-sm text-gray-500">Scan directories for jobs</span>
             </button>
+            <button
+              onClick={handleCreateSweep}
+              disabled={isLoadingCSV}
+              className="flex flex-col items-center gap-3 p-6 border-2 border-gray-200 dark:border-gray-700 rounded-lg hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors w-56"
+            >
+              <BeakerIcon className="w-12 h-12 text-purple-500" />
+              <span className="font-medium">Create Parameter Sweep</span>
+              <span className="text-sm text-gray-500">One base job, many cases (DOE)</span>
+            </button>
           </div>
         </div>
       )
@@ -750,49 +770,46 @@ export function PURTab() {
             </div>
           )}
 
-          <div className="mb-4">
-            <label className="block text-sm font-medium mb-2">Job Source</label>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="scanMode"
-                  checked={scanOptions.scanMode === 'folders'}
-                  onChange={() => setScanOptions({ scanMode: 'folders' })}
-                  className="w-4 h-4 text-blue-500"
-                />
-                <span className="text-sm">Folders (each folder = 1 job)</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="scanMode"
-                  checked={scanOptions.scanMode === 'files'}
-                  onChange={() => setScanOptions({ scanMode: 'files' })}
-                  className="w-4 h-4 text-blue-500"
-                />
-                <span className="text-sm">Files (each file = 1 job)</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="scanMode"
-                  checked={scanOptions.scanMode === 'doe'}
-                  onChange={() => setScanOptions({ scanMode: 'doe' })}
-                  className="w-4 h-4 text-blue-500"
-                />
-                <span className="text-sm">DOE (parameter sweep = 1 job per case)</span>
-              </label>
+          {/* Job Source applies only to directory scanning. The dedicated sweep
+              entry (scanMode 'doe') has no folder/file choice, so the group is
+              hidden there. */}
+          {scanOptions.scanMode !== 'doe' && (
+            <div className="mb-4">
+              <label className="block text-sm font-medium mb-2">Job Source</label>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="scanMode"
+                    checked={scanOptions.scanMode === 'folders'}
+                    onChange={() => setScanOptions({ scanMode: 'folders' })}
+                    className="w-4 h-4 text-blue-500"
+                  />
+                  <span className="text-sm">Folders (each folder = 1 job)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="scanMode"
+                    checked={scanOptions.scanMode === 'files'}
+                    onChange={() => setScanOptions({ scanMode: 'files' })}
+                    className="w-4 h-4 text-blue-500"
+                  />
+                  <span className="text-sm">Files (each file = 1 job)</span>
+                </label>
+              </div>
             </div>
-          </div>
+          )}
 
           {scanOptions.scanMode === 'doe' && (
             <div className="mb-6">
               <p className="text-xs text-gray-500 mb-4">
-                A sweep expands the template job into one case per design point, rendering
+                A sweep expands the base job into one case per design point, rendering
                 each case&apos;s values into its command line so the configuration is visible
-                on the Rescale job page. The template command needs a{' '}
-                <code>{'{{name}}'}</code> token for every swept parameter.
+                on the Rescale job page. The command needs a{' '}
+                <code>{'{{name}}'}</code> token for every swept parameter. The shared input
+                deck comes from the sweep&apos;s Shared Input File IDs or from Common Files —
+                a sweep never zips a working directory.
               </p>
               <DOEBuilder />
             </div>

@@ -219,10 +219,13 @@ func renderTags(opts Options, substitutions map[string]string, index int) ([]str
 
 // buildJobSpec derives one case's JobSpec from the template.
 //
-// When BaseFileIDs is set the case carries no Directory, which puts it on the
-// pipeline's skip path: no tar, no upload, straight to job creation. That is what
-// makes a sweep over a shared input deck transfer the deck once rather than once
-// per case.
+// A sweep varies the command against one shared input deck, so a case never tars
+// a per-case directory the way folder-scanned PUR jobs do. Every case therefore
+// carries no Directory, which puts it on the pipeline's skip path: no tar, no
+// upload, straight to job creation. The shared deck comes from Shared Input File
+// IDs (referenced directly here) or from batch-level Common Files (uploaded once
+// and attached to every job by the pipeline) — never from silently zipping the
+// template's working directory.
 func buildJobSpec(opts Options, jobName, command string, caseTags []string) models.JobSpec {
 	spec := opts.Template
 
@@ -230,10 +233,12 @@ func buildJobSpec(opts Options, jobName, command string, caseTags []string) mode
 	spec.Command = command
 	spec.Tags = caseTags
 
+	spec.Directory = ""
+	spec.TarSubpath = ""
 	if len(opts.BaseFileIDs) > 0 {
-		spec.Directory = ""
-		spec.TarSubpath = ""
 		spec.InputFiles = append([]string(nil), opts.BaseFileIDs...)
+	} else {
+		spec.InputFiles = nil
 	}
 
 	return spec

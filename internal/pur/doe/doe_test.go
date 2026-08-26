@@ -200,14 +200,15 @@ func TestGenerate_SharedFileIDsBypassTarAndUpload(t *testing.T) {
 	}
 }
 
-// Without shared file IDs each case keeps the template's directory, so the
-// pipeline tars and uploads per case as it always has.
-func TestGenerate_WithoutSharedFilesKeepsDirectory(t *testing.T) {
+// A sweep never tars a per-case directory: even without shared file IDs, cases
+// carry no Directory so the pipeline skips tar/upload and the shared deck is
+// supplied once via batch-level Common Files instead of zipped per case.
+func TestGenerate_NeverCarriesTemplateDirectory(t *testing.T) {
 	result := mustGenerate(t, twoLevelOptions())
 
 	for i, job := range result.Jobs {
-		if job.Directory != "/data/base" {
-			t.Errorf("job %d Directory = %q, want the template directory", i, job.Directory)
+		if job.Directory != "" {
+			t.Errorf("job %d Directory = %q, want empty so the pipeline skips tar/upload", i, job.Directory)
 		}
 		if len(job.InputFiles) != 0 {
 			t.Errorf("job %d InputFiles = %v, want none", i, job.InputFiles)

@@ -131,13 +131,12 @@ type Options struct {
 
 	// BaseFileIDs are already-uploaded Rescale file IDs shared by every case.
 	//
-	// When set, cases carry no Directory and reference these IDs directly. The
-	// pipeline's skip path then sends each case straight to job creation, so the
-	// shared input deck is transferred once rather than once per case — the whole
-	// point of sweeping parameters over one unchanged set of inputs.
-	//
-	// When empty, every case keeps Template.Directory, and the pipeline tars and
-	// uploads that directory once per case.
+	// Cases never carry a Directory (see buildJobSpec), so they always ride the
+	// pipeline's skip path: no tar, no upload, straight to job creation. When set,
+	// these IDs are referenced by every case directly. When empty, the shared deck
+	// is expected to come from batch-level Common Files (--common-input-files),
+	// which the pipeline uploads once and attaches to every job. Either way the
+	// deck transfers once for the whole sweep, never once per case.
 	BaseFileIDs []string
 
 	// JobNameTemplate names each case. It may use parameter tokens plus the

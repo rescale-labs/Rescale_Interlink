@@ -38,13 +38,18 @@ export function DOEBuilder() {
   }, [doeMethods.length, fetchDOEMethods])
 
   // Refresh the preview after edits settle, so typing a parameter name does not
-  // fire a generation per keystroke.
+  // fire a generation per keystroke. A sweep with no named parameter can only
+  // fail validation, so hold off until there is something worth generating
+  // rather than greeting the user with an error panel.
+  const hasNamedParameter = doeOptions.parameters.some((p) => p.name.trim() !== '')
+
   useEffect(() => {
+    if (!hasNamedParameter) return
     const timer = setTimeout(() => {
       void previewDOE()
     }, PREVIEW_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [doeOptions, template.command, template.jobName, previewDOE])
+  }, [hasNamedParameter, doeOptions, template.command, template.jobName, previewDOE])
 
   const method = useMemo(
     () => doeMethods.find((m) => m.method === doeOptions.method),
