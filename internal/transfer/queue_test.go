@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -790,156 +791,6 @@ func TestGetAllBatchStats(t *testing.T) {
 	}
 	if bs2.Direction != "download" {
 		t.Errorf("batch2: expected direction 'download', got %q", bs2.Direction)
-	}
-}
-
-func TestGetBatchTasksPaginated(t *testing.T) {
-	queue := NewQueue(nil)
-
-	// Create 5 tasks in a batch
-	for i := 0; i < 5; i++ {
-		queue.TrackTransferWithBatch("file.txt", 100, TaskTypeUpload, "/p", "f", "FileBrowser", "batch1", "Test")
-	}
-
-	// First page: offset=0, limit=3
-	page1 := queue.GetBatchTasks("batch1", 0, 3, "")
-	if len(page1) != 3 {
-		t.Errorf("Expected 3 tasks in page1, got %d", len(page1))
-	}
-
-	// Second page: offset=3, limit=3
-	page2 := queue.GetBatchTasks("batch1", 3, 3, "")
-	if len(page2) != 2 {
-		t.Errorf("Expected 2 tasks in page2, got %d", len(page2))
-	}
-
-	// Beyond end: offset=10, limit=3
-	page3 := queue.GetBatchTasks("batch1", 10, 3, "")
-	if len(page3) != 0 {
-		t.Errorf("Expected 0 tasks beyond end, got %d", len(page3))
-	}
-
-	// Nonexistent batch
-	page4 := queue.GetBatchTasks("nonexistent", 0, 50, "")
-	if len(page4) != 0 {
-		t.Errorf("Expected 0 tasks for nonexistent batch, got %d", len(page4))
-	}
-}
-
-func TestGetBatchTasksWithStateFilter(t *testing.T) {
-	queue := NewQueue(nil)
-
-	// Create 10 tasks in a batch: 6 completed, 3 failed, 1 queued
-	for i := 0; i < 6; i++ {
-		task := queue.TrackTransferWithBatch("ok.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
-		queue.Complete(task.ID)
-	}
-	for i := 0; i < 3; i++ {
-		task := queue.TrackTransferWithBatch("fail.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
-		queue.Fail(task.ID, fmt.Errorf("network error"))
-	}
-	queue.TrackTransferWithBatch("queued.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-filter", "Test")
-
-	// No filter — all 10
-	all := queue.GetBatchTasks("batch-filter", 0, 50, "")
-	if len(all) != 10 {
-		t.Errorf("no filter: expected 10 tasks, got %d", len(all))
-	}
-
-	// Filter: completed
-	completed := queue.GetBatchTasks("batch-filter", 0, 50, "completed")
-	if len(completed) != 6 {
-		t.Errorf("completed filter: expected 6, got %d", len(completed))
-	}
-
-	// Filter: failed
-	failed := queue.GetBatchTasks("batch-filter", 0, 50, "failed")
-	if len(failed) != 3 {
-		t.Errorf("failed filter: expected 3, got %d", len(failed))
-	}
-
-	// Filter: active (queued tasks count as active meta-filter)
-	active := queue.GetBatchTasks("batch-filter", 0, 50, "active")
-	if len(active) != 1 {
-		t.Errorf("active filter: expected 1 (queued), got %d", len(active))
-	}
-
-	// Filter: cancelled (none)
-	cancelled := queue.GetBatchTasks("batch-filter", 0, 50, "cancelled")
-	if len(cancelled) != 0 {
-		t.Errorf("cancelled filter: expected 0, got %d", len(cancelled))
-	}
-
-	// Pagination with filter: failed, page of 2
-	failedPage := queue.GetBatchTasks("batch-filter", 0, 2, "failed")
-	if len(failedPage) != 2 {
-		t.Errorf("failed paginated: expected 2, got %d", len(failedPage))
-	}
-}
-
-func TestGetBatchTasksWithInProgressAndQueuedFilters(t *testing.T) {
-	queue := NewQueue(nil)
-
-	// Create batch: 2 active (transferring), 1 initializing, 3 queued, 2 completed
-	// Activate() sets TaskInitializing; StartTransfer() transitions to TaskActive
-	active1 := queue.TrackTransferWithBatch("a1.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
-	queue.Activate(active1.ID)
-	queue.StartTransfer(active1.ID) // now TaskActive
-	active2 := queue.TrackTransferWithBatch("a2.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
-	queue.Activate(active2.ID)
-	queue.StartTransfer(active2.ID) // now TaskActive
-	// init1 stays at TaskInitializing (Activate only, no StartTransfer)
-	init1 := queue.TrackTransferWithBatch("i1.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
-	queue.Activate(init1.ID)
-
-	for i := 0; i < 3; i++ {
-		queue.TrackTransferWithBatch("q.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
-	}
-	for i := 0; i < 2; i++ {
-		task := queue.TrackTransferWithBatch("c.txt", 100, TaskTypeUpload, "/p", "f", "FB", "batch-ip", "Test")
-		queue.Complete(task.ID)
-	}
-
-	// "inprogress" filter: should return active + initializing = 3
-	inprogress := queue.GetBatchTasks("batch-ip", 0, 50, "inprogress")
-	if len(inprogress) != 3 {
-		t.Errorf("inprogress filter: expected 3 (2 active + 1 initializing), got %d", len(inprogress))
-	}
-	for i := range inprogress {
-		state := inprogress[i].GetState()
-		if state != TaskActive && state != TaskInitializing {
-			t.Errorf("inprogress filter: unexpected state %v", state)
-		}
-	}
-
-	// "queued" filter: should return 3
-	queued := queue.GetBatchTasks("batch-ip", 0, 50, "queued")
-	if len(queued) != 3 {
-		t.Errorf("queued filter: expected 3, got %d", len(queued))
-	}
-	for i := range queued {
-		if queued[i].GetState() != TaskQueued {
-			t.Errorf("queued filter: unexpected state %v", queued[i].GetState())
-		}
-	}
-
-	// Verify counts match GetAllBatchStats()
-	stats := queue.GetAllBatchStats()
-	var bs *BatchStats
-	for i := range stats {
-		if stats[i].BatchID == "batch-ip" {
-			bs = &stats[i]
-			break
-		}
-	}
-	if bs == nil {
-		t.Fatal("batch-ip not found in GetAllBatchStats()")
-	}
-	if bs.Active != len(inprogress) {
-		t.Errorf("batch.active=%d != inprogress count=%d", bs.Active, len(inprogress))
-	}
-	if bs.Queued != len(queued) {
-		t.Errorf("batch.queued=%d != queued count=%d", bs.Queued, len(queued))
 	}
 }
 
@@ -1846,21 +1697,22 @@ func TestGetBatchTasksStateFilters(t *testing.T) {
 	}
 
 	tests := []struct {
-		filter  string
-		wantLen int
+		filter     string
+		wantLen    int
+		wantStates []TaskState // when set, every returned row must be one of these
 	}{
-		{"", 70},
+		{"", 70, nil},
 		// Frontend-sent filters.
-		{"inprogress", 20}, // initializing + active
-		{"queued", 10},
-		{"completed", 10},
-		{"failed", 10},
-		{"cancelled", 10},
+		{"inprogress", 20, []TaskState{TaskInitializing, TaskActive}},
+		{"queued", 10, []TaskState{TaskQueued}},
+		{"completed", 10, []TaskState{TaskCompleted}},
+		{"failed", 10, []TaskState{TaskFailed}},
+		{"cancelled", 10, []TaskState{TaskCancelled}},
 		// Meta-filter kept for API compatibility: non-terminal, paused excluded.
-		{"active", 30},
+		{"active", 30, []TaskState{TaskQueued, TaskInitializing, TaskActive}},
 		// Exact-state match on a state the UI has no chip for.
-		{"paused", 10},
-		{"bogus", 0},
+		{"paused", 10, []TaskState{TaskPaused}},
+		{"bogus", 0, nil},
 	}
 
 	for _, tt := range tests {
@@ -1871,6 +1723,11 @@ func TestGetBatchTasksStateFilters(t *testing.T) {
 			}
 			if tt.wantLen == 0 {
 				return
+			}
+			for i := range all {
+				if tt.wantStates != nil && !slices.Contains(tt.wantStates, all[i].GetState()) {
+					t.Errorf("row %d: state %v not in %v", i, all[i].GetState(), tt.wantStates)
+				}
 			}
 			// Paging must slice the filtered set, not the unfiltered one.
 			page := q.GetBatchTasks("b1", 3, 4, tt.filter)
@@ -1887,6 +1744,26 @@ func TestGetBatchTasksStateFilters(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// The counters the UI renders come from GetAllBatchStats while the rows come
+	// from GetBatchTasks, so the two must agree on how many are in flight.
+	stats := q.GetAllBatchStats()
+	var bs *BatchStats
+	for i := range stats {
+		if stats[i].BatchID == "b1" {
+			bs = &stats[i]
+			break
+		}
+	}
+	if bs == nil {
+		t.Fatal("b1 not found in GetAllBatchStats()")
+	}
+	if got := len(q.GetBatchTasks("b1", 0, 1000, "inprogress")); bs.Active != got {
+		t.Errorf("batch.active=%d != inprogress filter count=%d", bs.Active, got)
+	}
+	if got := len(q.GetBatchTasks("b1", 0, 1000, "queued")); bs.Queued != got {
+		t.Errorf("batch.queued=%d != queued filter count=%d", bs.Queued, got)
 	}
 }
 

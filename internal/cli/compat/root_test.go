@@ -8,171 +8,103 @@ import (
 )
 
 func TestNewCompatRootCmd_GlobalFlags(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-
-	// Verify global flags are registered
-	flags := []struct {
-		name      string
-		shorthand string
+	tests := []struct {
+		name          string
+		wantShorthand string
+		wantHidden    bool
 	}{
-		{"api-token", "p"},
-		{"api-base-url", "X"},
-		{"quiet", "q"},
-		{"no-prompt", ""},
-		{"enableErrorTracking", ""},
+		{name: "api-token", wantShorthand: "p"},
+		{name: "api-base-url", wantShorthand: "X"},
+		{name: "quiet", wantShorthand: "q"},
+		{name: "no-prompt"},
+		{name: "enableErrorTracking", wantHidden: true},
 	}
 
-	for _, f := range flags {
-		pf := rootCmd.PersistentFlags().Lookup(f.name)
-		if pf == nil {
-			t.Errorf("flag %q not registered", f.name)
-			continue
-		}
-		if f.shorthand != "" && pf.Shorthand != f.shorthand {
-			t.Errorf("flag %q shorthand = %q, want %q", f.name, pf.Shorthand, f.shorthand)
-		}
-	}
-}
-
-func TestNewCompatRootCmd_EnableErrorTrackingHidden(t *testing.T) {
 	rootCmd, _ := NewCompatRootCmd()
-	f := rootCmd.PersistentFlags().Lookup("enableErrorTracking")
-	if f == nil {
-		t.Fatal("enableErrorTracking flag not registered")
-	}
-	if !f.Hidden {
-		t.Error("enableErrorTracking should be hidden")
-	}
-}
-
-func TestNewCompatRootCmd_FlagParsing(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-
-	// Parse -p TOKEN -q
-	rootCmd.SetArgs([]string{"-p", "my-token", "-q", "--version"})
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	// The flags are bound to the CompatContext created inside NewCompatRootCmd,
-	// so we verify by checking the parsed flag values.
-	pf := rootCmd.PersistentFlags().Lookup("api-token")
-	if pf.Value.String() != "my-token" {
-		t.Errorf("api-token = %q, want %q", pf.Value.String(), "my-token")
-	}
-	qf := rootCmd.PersistentFlags().Lookup("quiet")
-	if qf.Value.String() != "true" {
-		t.Errorf("quiet = %q, want %q", qf.Value.String(), "true")
-	}
-}
-
-func TestNewCompatRootCmd_VersionOutput(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-
-	// -v should trigger version output (not verbose)
-	var out strings.Builder
-	rootCmd.SetOut(&out)
-	rootCmd.SetArgs([]string{"-v"})
-
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("Execute() with -v error = %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "v") {
-		t.Errorf("-v output = %q, expected version string", output)
-	}
-}
-
-func TestNewCompatRootCmd_VersionFlag(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-
-	var out strings.Builder
-	rootCmd.SetOut(&out)
-	rootCmd.SetArgs([]string{"--version"})
-
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("Execute() with --version error = %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "v") {
-		t.Errorf("--version output = %q, expected version string", output)
-	}
-}
-
-func TestNewCompatRootCmd_HelpExitZero(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-
-	rootCmd.SetArgs([]string{"--help"})
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Errorf("--help returned error: %v", err)
-	}
-}
-
-func TestNewCompatRootCmd_PlaceholderCommands(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-
-	expectedCmds := []string{
-		"status", "stop", "delete", "submit", "upload",
-		"download-file", "sync", "list-info", "list-files",
-		"check-for-update", "spub",
-	}
-
-	for _, name := range expectedCmds {
-		found := false
-		for _, cmd := range rootCmd.Commands() {
-			if cmd.Name() == name {
-				found = true
-				break
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pf := rootCmd.PersistentFlags().Lookup(tt.name)
+			if pf == nil {
+				t.Fatalf("flag %q not registered", tt.name)
 			}
-		}
-		if !found {
-			t.Errorf("expected placeholder command %q not found", name)
-		}
+			if pf.Shorthand != tt.wantShorthand {
+				t.Errorf("flag %q shorthand = %q, want %q", tt.name, pf.Shorthand, tt.wantShorthand)
+			}
+			if pf.Hidden != tt.wantHidden {
+				t.Errorf("flag %q hidden = %v, want %v", tt.name, pf.Hidden, tt.wantHidden)
+			}
+		})
 	}
 }
 
-func TestNewCompatRootCmd_PlaceholderHelp(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
+// TestNewCompatRootCmd_Execute covers the invocations that must succeed without
+// credentials: version output, help, and global flag parsing.
+func TestNewCompatRootCmd_Execute(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantOut   string            // output must contain this
+		wantFlags map[string]string // flag name -> parsed value
+	}{
+		{
+			name:      "global flags parse before --version",
+			args:      []string{"-p", "my-token", "-q", "--version"},
+			wantFlags: map[string]string{"api-token": "my-token", "quiet": "true"},
+		},
+		// -v is version, not verbose.
+		{name: "-v prints the version", args: []string{"-v"}, wantOut: "v"},
+		{name: "--version prints the version", args: []string{"--version"}, wantOut: "v"},
+		{name: "--help exits zero", args: []string{"--help"}},
+		// Cobra intercepts --help before the subcommand's auth hook.
+		{name: "subcommand --help exits zero", args: []string{"status", "--help"}},
+	}
 
-	// Subcommand --help should not error (Cobra intercepts --help)
-	rootCmd.SetArgs([]string{"status", "--help"})
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Errorf("placeholder --help returned error: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rootCmd, _ := NewCompatRootCmd()
+			var out strings.Builder
+			rootCmd.SetOut(&out)
+			rootCmd.SetArgs(tt.args)
+
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("Execute(%v) error = %v", tt.args, err)
+			}
+			if tt.wantOut != "" && !strings.Contains(out.String(), tt.wantOut) {
+				t.Errorf("output = %q, want it to contain %q", out.String(), tt.wantOut)
+			}
+			for name, want := range tt.wantFlags {
+				pf := rootCmd.PersistentFlags().Lookup(name)
+				if pf == nil {
+					t.Fatalf("flag %q not registered", name)
+				}
+				if pf.Value.String() != want {
+					t.Errorf("flag %q = %q, want %q", name, pf.Value.String(), want)
+				}
+			}
+		})
 	}
 }
 
+// TestNewCompatRootCmd_FlagPlacement verifies Cobra's persistent-flag
+// inheritance: a global flag placed before the subcommand still binds.
 func TestNewCompatRootCmd_FlagPlacement(t *testing.T) {
-	// Verify global flags work when placed before subcommand.
-	// We can't fully test execution without a server, but we can test parsing.
 	rootCmd, _ := NewCompatRootCmd()
 
-	// Replace the status command with one that succeeds to test flag propagation
+	// Swap in a status command that succeeds, so only flag binding is under test.
 	for _, cmd := range rootCmd.Commands() {
 		if cmd.Name() == "status" {
 			rootCmd.RemoveCommand(cmd)
 			break
 		}
 	}
-	testCmd := &cobra.Command{
+	rootCmd.AddCommand(&cobra.Command{
 		Use:  "status",
 		RunE: func(cmd *cobra.Command, args []string) error { return nil },
-	}
-	rootCmd.AddCommand(testCmd)
+	})
 
-	// Global flag before subcommand — this tests Cobra's persistent flag inheritance.
-	// PersistentPreRunE will fail (no API server), but flag parsing should succeed.
 	rootCmd.SetArgs([]string{"-p", "TOKEN", "-q", "status"})
-
-	// We expect an auth error since there's no real API server,
-	// but the flags should parse correctly.
-	rootCmd.Execute()
+	// PersistentPreRunE may fail without an API server; the flags still parse.
+	_ = rootCmd.Execute()
 
 	pf := rootCmd.PersistentFlags().Lookup("api-token")
 	if pf.Value.String() != "TOKEN" {

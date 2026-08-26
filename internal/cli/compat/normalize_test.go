@@ -1,126 +1,48 @@
 package compat
 
 import (
-	"strings"
+	"slices"
 	"testing"
 )
 
-func TestNormalizeCompatArgs_MultiCharFlags(t *testing.T) {
+func TestNormalizeCompatArgs(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
 		want []string
 	}{
+		// rescale-cli multi-character short flags map to long flags.
+		{"fid to file-id", []string{"download-file", "-fid", "ABC123"}, []string{"download-file", "--file-id", "ABC123"}},
+		{"lh to load-hours", []string{"status", "-lh", "24", "-j", "JOB1"}, []string{"status", "--load-hours", "24", "-j", "JOB1"}},
+		{"no substitution needed", []string{"status", "-j", "JOB1"}, []string{"status", "-j", "JOB1"}},
+		{"both fid and lh", []string{"-lh", "24", "download-file", "-fid", "ABC"}, []string{"--load-hours", "24", "download-file", "--file-id", "ABC"}},
+
+		// upload -f is multi-value: each bare value gets its own -f.
+		{"upload: multiple files after -f", []string{"upload", "-f", "a.txt", "b.txt", "c.txt"}, []string{"upload", "-f", "a.txt", "-f", "b.txt", "-f", "c.txt"}},
+		{"upload: multi-value terminated by a flag", []string{"upload", "-f", "a.txt", "b.txt", "-d", "DIR"}, []string{"upload", "-f", "a.txt", "-f", "b.txt", "-d", "DIR"}},
+		{"upload: single value unchanged", []string{"upload", "-f", "a.txt"}, []string{"upload", "-f", "a.txt"}},
+		{"upload: root flags before the subcommand", []string{"-p", "TOKEN", "upload", "-f", "a.txt", "b.txt"}, []string{"-p", "TOKEN", "upload", "-f", "a.txt", "-f", "b.txt"}},
+		{"upload: -f at end of args", []string{"upload", "-f"}, []string{"upload", "-f"}},
+
+		{"submit: -f is multi-value too", []string{"submit", "-f", "a.txt", "b.txt", "c.txt"}, []string{"submit", "-f", "a.txt", "-f", "b.txt", "-f", "c.txt"}},
+
+		// download-file's -f is single-value, so it must not be expanded.
+		{"download-file: -f is not expanded", []string{"download-file", "-f", "name", "-j", "JOB1"}, []string{"download-file", "-f", "name", "-j", "JOB1"}},
+
 		{
-			"fid to file-id",
-			[]string{"download-file", "-fid", "ABC123"},
-			[]string{"download-file", "--file-id", "ABC123"},
-		},
-		{
-			"lh to load-hours",
-			[]string{"status", "-lh", "24", "-j", "JOB1"},
-			[]string{"status", "--load-hours", "24", "-j", "JOB1"},
-		},
-		{
-			"no substitution needed",
-			[]string{"status", "-j", "JOB1"},
-			[]string{"status", "-j", "JOB1"},
-		},
-		{
-			"both fid and lh",
-			[]string{"-lh", "24", "download-file", "-fid", "ABC"},
-			[]string{"--load-hours", "24", "download-file", "--file-id", "ABC"},
+			"realistic combined invocation",
+			[]string{"-p", "TOKEN", "upload", "-f", "a.txt", "b.txt", "c.txt", "-d", "DIR"},
+			[]string{"-p", "TOKEN", "upload", "-f", "a.txt", "-f", "b.txt", "-f", "c.txt", "-d", "DIR"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := NormalizeCompatArgs(tt.args)
-			if len(got) != len(tt.want) {
-				t.Fatalf("NormalizeCompatArgs(%v) len = %d, want %d\ngot: %v", tt.args, len(got), len(tt.want), got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("NormalizeCompatArgs(%v)[%d] = %q, want %q", tt.args, i, got[i], tt.want[i])
-				}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("NormalizeCompatArgs(%v) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestNormalizeCompatArgs_MultiValueF_Upload(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want []string
-	}{
-		{
-			"multiple files after -f",
-			[]string{"upload", "-f", "a.txt", "b.txt", "c.txt"},
-			[]string{"upload", "-f", "a.txt", "-f", "b.txt", "-f", "c.txt"},
-		},
-		{
-			"multi-value terminated by flag",
-			[]string{"upload", "-f", "a.txt", "b.txt", "-d", "DIR"},
-			[]string{"upload", "-f", "a.txt", "-f", "b.txt", "-d", "DIR"},
-		},
-		{
-			"single value no change",
-			[]string{"upload", "-f", "a.txt"},
-			[]string{"upload", "-f", "a.txt"},
-		},
-		{
-			"with root flags before subcommand",
-			[]string{"-p", "TOKEN", "upload", "-f", "a.txt", "b.txt"},
-			[]string{"-p", "TOKEN", "upload", "-f", "a.txt", "-f", "b.txt"},
-		},
-		{
-			"-f at end of args",
-			[]string{"upload", "-f"},
-			[]string{"upload", "-f"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := NormalizeCompatArgs(tt.args)
-			if len(got) != len(tt.want) {
-				t.Fatalf("NormalizeCompatArgs(%v) len = %d, want %d\ngot: %v", tt.args, len(got), len(tt.want), got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("NormalizeCompatArgs(%v)[%d] = %q, want %q", tt.args, i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
-func TestNormalizeCompatArgs_MultiValueF_Submit(t *testing.T) {
-	got := NormalizeCompatArgs([]string{"submit", "-f", "a.txt", "b.txt", "c.txt"})
-	want := []string{"submit", "-f", "a.txt", "-f", "b.txt", "-f", "c.txt"}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
-func TestNormalizeCompatArgs_NoExpandForDownload(t *testing.T) {
-	// download-file uses -f as single-value, should NOT be expanded
-	args := []string{"download-file", "-f", "name", "-j", "JOB1"}
-	got := NormalizeCompatArgs(args)
-	want := args // no change
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
-		}
 	}
 }
 
@@ -242,18 +164,5 @@ func TestMatchesE2EFilters(t *testing.T) {
 	// No filters = pass all
 	if !matchesE2EFilters("anything.xyz", nil, "", "") {
 		t.Error("expected no filters to pass everything")
-	}
-}
-
-func TestNormalizeCompatArgs_CombinedExample(t *testing.T) {
-	// Realistic example: -p TOKEN upload -f a.txt b.txt c.txt -d DIR
-	args := []string{"-p", "TOKEN", "upload", "-f", "a.txt", "b.txt", "c.txt", "-d", "DIR"}
-	got := NormalizeCompatArgs(args)
-	want := []string{"-p", "TOKEN", "upload", "-f", "a.txt", "-f", "b.txt", "-f", "c.txt", "-d", "DIR"}
-
-	gotStr := strings.Join(got, " ")
-	wantStr := strings.Join(want, " ")
-	if gotStr != wantStr {
-		t.Errorf("got  %q\nwant %q", gotStr, wantStr)
 	}
 }

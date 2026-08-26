@@ -6,72 +6,76 @@ import (
 	"testing"
 )
 
-func TestExpandPatterns_NonGlob(t *testing.T) {
-	// Use a real file to test absolute path resolution
-	tmpDir := t.TempDir()
-	testFile := filepath.Join(tmpDir, "test.txt")
-	os.WriteFile(testFile, []byte("hello"), 0644)
-
-	result, err := ExpandPatterns([]string{testFile})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestExpandPatterns(t *testing.T) {
+	tests := []struct {
+		name string
+		// files created in the temp dir before expanding.
+		files []string
+		// patterns are joined onto the temp dir unless the case passes none.
+		patterns []string
+		wantLen  int
+		wantErr  bool
+		// wantAbsOf, when set, is the file whose absolute path the single
+		// result must equal.
+		wantAbsOf string
+	}{
+		{
+			name:  "non-glob path resolves to absolute",
+			files: []string{"test.txt"}, patterns: []string{"test.txt"},
+			wantLen: 1, wantAbsOf: "test.txt",
+		},
+		{
+			name:  "glob matches only the extension asked for",
+			files: []string{"a.txt", "b.txt", "c.dat"}, patterns: []string{"*.txt"},
+			wantLen: 2,
+		},
+		{
+			name:  "repeated path is deduplicated",
+			files: []string{"test.txt"}, patterns: []string{"test.txt", "test.txt"},
+			wantLen: 1,
+		},
+		{
+			name:     "glob with no matches is an error",
+			patterns: []string{"*.nonexistent"}, wantErr: true,
+		},
+		{
+			name: "no patterns yields no results",
+		},
 	}
 
-	if len(result) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(result))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tt.files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0644); err != nil {
+					t.Fatalf("WriteFile %s: %v", f, err)
+				}
+			}
 
-	absExpected, _ := filepath.Abs(testFile)
-	if result[0] != absExpected {
-		t.Errorf("expected %q, got %q", absExpected, result[0])
-	}
-}
+			var patterns []string
+			for _, p := range tt.patterns {
+				patterns = append(patterns, filepath.Join(dir, p))
+			}
 
-func TestExpandPatterns_Glob(t *testing.T) {
-	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("a"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "b.txt"), []byte("b"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "c.dat"), []byte("c"), 0644)
-
-	result, err := ExpandPatterns([]string{filepath.Join(tmpDir, "*.txt")})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result) != 2 {
-		t.Fatalf("expected 2 results, got %d: %v", len(result), result)
-	}
-}
-
-func TestExpandPatterns_Dedup(t *testing.T) {
-	tmpDir := t.TempDir()
-	testFile := filepath.Join(tmpDir, "test.txt")
-	os.WriteFile(testFile, []byte("hello"), 0644)
-
-	result, err := ExpandPatterns([]string{testFile, testFile})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(result) != 1 {
-		t.Fatalf("expected 1 result (deduplicated), got %d", len(result))
-	}
-}
-
-func TestExpandPatterns_NoMatch(t *testing.T) {
-	tmpDir := t.TempDir()
-	_, err := ExpandPatterns([]string{filepath.Join(tmpDir, "*.nonexistent")})
-	if err == nil {
-		t.Fatal("expected error for no-match glob, got nil")
-	}
-}
-
-func TestExpandPatterns_Empty(t *testing.T) {
-	result, err := ExpandPatterns(nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result) != 0 {
-		t.Errorf("expected 0 results, got %d", len(result))
+			result, err := ExpandPatterns(patterns)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %v", result)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(result) != tt.wantLen {
+				t.Fatalf("expected %d results, got %d: %v", tt.wantLen, len(result), result)
+			}
+			if tt.wantAbsOf != "" {
+				want, _ := filepath.Abs(filepath.Join(dir, tt.wantAbsOf))
+				if result[0] != want {
+					t.Errorf("expected %q, got %q", want, result[0])
+				}
+			}
+		})
 	}
 }

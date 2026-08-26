@@ -7,200 +7,150 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
-// --- buildSASURL tests ---
-
-func TestBuildSASURL_WithAccountName(t *testing.T) {
-	storageInfo := &models.StorageInfo{
-		ConnectionSettings: models.ConnectionSettings{
-			AccountName: "myaccount",
-		},
-	}
-	creds := &models.AzureCredentials{
-		SASToken: "sv=2021-06-08&ss=b&sig=abc",
-	}
-
-	url, err := buildSASURL(storageInfo, creds)
-	if err != nil {
-		t.Fatalf("buildSASURL() error = %v", err)
-	}
-
-	expected := "https://myaccount.blob.core.windows.net/?sv=2021-06-08&ss=b&sig=abc"
-	if url != expected {
-		t.Errorf("buildSASURL() = %q, want %q", url, expected)
-	}
-}
-
-func TestBuildSASURL_FallbackToStorageAccount(t *testing.T) {
-	storageInfo := &models.StorageInfo{
-		ConnectionSettings: models.ConnectionSettings{
-			AccountName:    "",
-			StorageAccount: "legacyaccount",
-		},
-	}
-	creds := &models.AzureCredentials{
-		SASToken: "sv=2021-06-08&sig=def",
-	}
-
-	url, err := buildSASURL(storageInfo, creds)
-	if err != nil {
-		t.Fatalf("buildSASURL() error = %v", err)
-	}
-
-	if !strings.Contains(url, "legacyaccount.blob.core.windows.net") {
-		t.Errorf("buildSASURL() should use StorageAccount fallback, got %q", url)
-	}
-}
-
-func TestBuildSASURL_NoAccountName(t *testing.T) {
-	storageInfo := &models.StorageInfo{
-		ConnectionSettings: models.ConnectionSettings{
-			AccountName:    "",
-			StorageAccount: "",
-		},
-	}
-	creds := &models.AzureCredentials{
-		SASToken: "sv=2021-06-08&sig=ghi",
-	}
-
-	_, err := buildSASURL(storageInfo, creds)
-	if err == nil {
-		t.Fatal("buildSASURL() should return error when no account name available")
-	}
-
-	if !strings.Contains(err.Error(), "account name not found") {
-		t.Errorf("buildSASURL() error = %q, want error mentioning account name", err.Error())
-	}
-}
-
-func TestBuildSASURL_UsesPerFileSASForSharedFile(t *testing.T) {
-	storageInfo := &models.StorageInfo{
-		ConnectionSettings: models.ConnectionSettings{
-			AccountName: "sharedaccount",
-		},
-	}
-	creds := &models.AzureCredentials{
-		SASToken: "container-level-sas",
+// credsWithPath builds credentials holding one per-file SAS entry for path.
+func credsWithPath(containerSAS, path, perFileSAS string) *models.AzureCredentials {
+	return &models.AzureCredentials{
+		SASToken: containerSAS,
 		Paths: []models.AzureCredentialPath{
 			{
-				Path: "user/abc/shared-output.dat",
-				PathParts: &models.CloudFilePathParts{
-					Container: "rescale-files",
-					Path:      "user/abc/shared-output.dat",
-				},
-				SASToken: "per-file-sas-for-shared",
+				Path:      path,
+				PathParts: &models.CloudFilePathParts{Container: "rescale-files", Path: path},
+				SASToken:  perFileSAS,
 			},
 		},
 	}
-	fileInfo := &models.CloudFile{
-		PathParts: &models.CloudFilePathParts{
-			Container: "rescale-files",
-			Path:      "user/abc/shared-output.dat",
-		},
-	}
-
-	url, err := buildSASURL(storageInfo, creds, fileInfo)
-	if err != nil {
-		t.Fatalf("buildSASURL() error = %v", err)
-	}
-
-	// Should use per-file SAS token, not container-level
-	if !strings.Contains(url, "per-file-sas-for-shared") {
-		t.Errorf("buildSASURL() should use per-file SAS token for shared files, got %q", url)
-	}
-	if strings.Contains(url, "container-level-sas") {
-		t.Errorf("buildSASURL() should NOT use container-level SAS for shared files, got %q", url)
-	}
 }
 
-func TestBuildSASURL_FallsBackToContainerSASWhenNoMatch(t *testing.T) {
-	storageInfo := &models.StorageInfo{
-		ConnectionSettings: models.ConnectionSettings{
-			AccountName: "myaccount",
+func TestBuildSASURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		accountName string
+		storageAcct string
+		creds       *models.AzureCredentials
+		fileInfo    *models.CloudFile
+		wantErr     string   // when set, buildSASURL must fail and name this
+		wantExact   string   // when set, the URL must match exactly
+		wantSubstr  []string // fragments the URL must contain
+		wantAbsent  []string // fragments the URL must not contain
+	}{
+		{
+			name:        "account name from connection settings",
+			accountName: "myaccount",
+			creds:       &models.AzureCredentials{SASToken: "sv=2021-06-08&ss=b&sig=abc"},
+			wantExact:   "https://myaccount.blob.core.windows.net/?sv=2021-06-08&ss=b&sig=abc",
 		},
-	}
-	creds := &models.AzureCredentials{
-		SASToken: "container-level-sas",
-		Paths: []models.AzureCredentialPath{
-			{
-				Path: "user/abc/different-file.dat",
-				PathParts: &models.CloudFilePathParts{
-					Container: "rescale-files",
-					Path:      "user/abc/different-file.dat",
-				},
-				SASToken: "per-file-sas-other",
+		{
+			name:        "falls back to StorageAccount",
+			storageAcct: "legacyaccount",
+			creds:       &models.AzureCredentials{SASToken: "sv=2021-06-08&sig=def"},
+			wantSubstr:  []string{"legacyaccount.blob.core.windows.net"},
+		},
+		{
+			name:    "no account name at all",
+			creds:   &models.AzureCredentials{SASToken: "sv=2021-06-08&sig=ghi"},
+			wantErr: "account name not found",
+		},
+		{
+			// A shared job's file carries its own SAS; the container-level one
+			// would not grant access to it.
+			name:        "per-file SAS wins for a shared file",
+			accountName: "sharedaccount",
+			creds:       credsWithPath("container-level-sas", "user/abc/shared-output.dat", "per-file-sas-for-shared"),
+			fileInfo: &models.CloudFile{
+				PathParts: &models.CloudFilePathParts{Container: "rescale-files", Path: "user/abc/shared-output.dat"},
 			},
+			wantSubstr: []string{"per-file-sas-for-shared"},
+			wantAbsent: []string{"container-level-sas"},
 		},
-	}
-	fileInfo := &models.CloudFile{
-		PathParts: &models.CloudFilePathParts{
-			Container: "rescale-files",
-			Path:      "user/abc/wanted-file.dat",
-		},
-	}
-
-	url, err := buildSASURL(storageInfo, creds, fileInfo)
-	if err != nil {
-		t.Fatalf("buildSASURL() error = %v", err)
-	}
-
-	// No match — should fall back to container-level SAS
-	if !strings.Contains(url, "container-level-sas") {
-		t.Errorf("buildSASURL() should fall back to container-level SAS when no match, got %q", url)
-	}
-}
-
-// --- GetPerFileSASToken tests ---
-
-func TestGetPerFileSASToken_Match(t *testing.T) {
-	creds := &models.AzureCredentials{
-		SASToken: "container-level-sas",
-		Paths: []models.AzureCredentialPath{
-			{
-				Path: "user/abc/file1.dat",
-				PathParts: &models.CloudFilePathParts{
-					Container: "rescale-files",
-					Path:      "user/abc/file1.dat",
-				},
-				SASToken: "per-file-sas-token",
+		{
+			name:        "falls back to container SAS when no path matches",
+			accountName: "myaccount",
+			creds:       credsWithPath("container-level-sas", "user/abc/different-file.dat", "per-file-sas-other"),
+			fileInfo: &models.CloudFile{
+				PathParts: &models.CloudFilePathParts{Container: "rescale-files", Path: "user/abc/wanted-file.dat"},
 			},
+			wantSubstr: []string{"container-level-sas"},
 		},
 	}
 
-	token := GetPerFileSASToken(creds, "user/abc/file1.dat")
-	if token != "per-file-sas-token" {
-		t.Errorf("GetPerFileSASToken() = %q, want %q", token, "per-file-sas-token")
-	}
-}
-
-func TestGetPerFileSASToken_NoMatch(t *testing.T) {
-	creds := &models.AzureCredentials{
-		SASToken: "container-level-sas",
-		Paths: []models.AzureCredentialPath{
-			{
-				Path: "user/abc/other.dat",
-				PathParts: &models.CloudFilePathParts{
-					Container: "rescale-files",
-					Path:      "user/abc/other.dat",
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storageInfo := &models.StorageInfo{
+				ConnectionSettings: models.ConnectionSettings{
+					AccountName:    tt.accountName,
+					StorageAccount: tt.storageAcct,
 				},
-				SASToken: "per-file-sas-token",
-			},
-		},
-	}
+			}
 
-	token := GetPerFileSASToken(creds, "user/abc/wanted.dat")
-	if token != "container-level-sas" {
-		t.Errorf("GetPerFileSASToken() = %q, want container-level fallback %q", token, "container-level-sas")
+			var url string
+			var err error
+			if tt.fileInfo != nil {
+				url, err = buildSASURL(storageInfo, tt.creds, tt.fileInfo)
+			} else {
+				url, err = buildSASURL(storageInfo, tt.creds)
+			}
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("buildSASURL() = %q, want error", url)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("buildSASURL() error = %q, want mention of %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildSASURL() error = %v", err)
+			}
+			if tt.wantExact != "" && url != tt.wantExact {
+				t.Errorf("buildSASURL() = %q, want %q", url, tt.wantExact)
+			}
+			for _, want := range tt.wantSubstr {
+				if !strings.Contains(url, want) {
+					t.Errorf("buildSASURL() = %q, should contain %q", url, want)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(url, absent) {
+					t.Errorf("buildSASURL() = %q, should not contain %q", url, absent)
+				}
+			}
+		})
 	}
 }
 
-func TestGetPerFileSASToken_EmptyPaths(t *testing.T) {
-	creds := &models.AzureCredentials{
-		SASToken: "container-level-sas",
-		Paths:    []models.AzureCredentialPath{},
+func TestGetPerFileSASToken(t *testing.T) {
+	tests := []struct {
+		name    string
+		creds   *models.AzureCredentials
+		lookup  string
+		wantSAS string
+	}{
+		{
+			name:    "path match returns the per-file token",
+			creds:   credsWithPath("container-level-sas", "user/abc/file1.dat", "per-file-sas-token"),
+			lookup:  "user/abc/file1.dat",
+			wantSAS: "per-file-sas-token",
+		},
+		{
+			name:    "no match falls back to the container token",
+			creds:   credsWithPath("container-level-sas", "user/abc/other.dat", "per-file-sas-token"),
+			lookup:  "user/abc/wanted.dat",
+			wantSAS: "container-level-sas",
+		},
+		{
+			name:    "empty path list falls back to the container token",
+			creds:   &models.AzureCredentials{SASToken: "container-level-sas", Paths: []models.AzureCredentialPath{}},
+			lookup:  "user/abc/file1.dat",
+			wantSAS: "container-level-sas",
+		},
 	}
 
-	token := GetPerFileSASToken(creds, "user/abc/file1.dat")
-	if token != "container-level-sas" {
-		t.Errorf("GetPerFileSASToken() = %q, want container-level fallback %q", token, "container-level-sas")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetPerFileSASToken(tt.creds, tt.lookup); got != tt.wantSAS {
+				t.Errorf("GetPerFileSASToken() = %q, want %q", got, tt.wantSAS)
+			}
+		})
 	}
 }

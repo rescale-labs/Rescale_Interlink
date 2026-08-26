@@ -107,32 +107,11 @@ func TestDetectNumericPatterns(t *testing.T) {
 				return hasShExtension && hasPyExtension
 			},
 		},
-	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			patterns := DetectNumericPatterns(tt.command)
-			if len(patterns) != tt.expectedCount {
-				t.Errorf("DetectNumericPatterns() returned %d patterns, want %d\nPatterns: %+v",
-					len(patterns), tt.expectedCount, patterns)
-			}
-			if len(patterns) > 0 && !tt.checkPatterns(patterns) {
-				t.Errorf("Pattern validation failed for: %+v", patterns)
-			}
-		})
-	}
-}
-
-func TestDetectNumericPatterns_ComplexFilenames(t *testing.T) {
-	tests := []struct {
-		name          string
-		command       string
-		expectedCount int
-		checkPatterns func([]PatternInfo) bool
-	}{
+		// Complex filenames: a number followed by a separator and more text.
 		{
-			name:    "Number followed by separator and text with compound extension",
-			command: "Sim_100_Output_Data.avg.snc Sim_200_Output_Data.avg.fnc",
+			name:          "Number followed by separator and text with compound extension",
+			command:       "Sim_100_Output_Data.avg.snc Sim_200_Output_Data.avg.fnc",
 			expectedCount: 2, // Pattern 4 matches each; Pattern 2 can't match (no \b after digits before _)
 			checkPatterns: func(patterns []PatternInfo) bool {
 				hasSim100 := false
@@ -149,8 +128,8 @@ func TestDetectNumericPatterns_ComplexFilenames(t *testing.T) {
 			},
 		},
 		{
-			name:    "Single complex filename with number-separator-text",
-			command: "Run_335_Fluid_Meas.avg.snc",
+			name:          "Single complex filename with number-separator-text",
+			command:       "Run_335_Fluid_Meas.avg.snc",
 			expectedCount: 1, // Pattern 4 matches; Pattern 2 won't match (no \b after 335_)
 			checkPatterns: func(patterns []PatternInfo) bool {
 				if len(patterns) < 1 {
@@ -161,8 +140,8 @@ func TestDetectNumericPatterns_ComplexFilenames(t *testing.T) {
 			},
 		},
 		{
-			name:    "Dash separated complex filename",
-			command: "Case-010-Pressure-Results.dat",
+			name:          "Dash separated complex filename",
+			command:       "Case-010-Pressure-Results.dat",
 			expectedCount: 2, // Pattern 4 matches full, Pattern 2 matches Case-010 (\b fires before -)
 			checkPatterns: func(patterns []PatternInfo) bool {
 				hasLong := false
@@ -185,81 +164,6 @@ func TestDetectNumericPatterns_ComplexFilenames(t *testing.T) {
 			}
 			if len(patterns) > 0 && !tt.checkPatterns(patterns) {
 				t.Errorf("Pattern validation failed for: %+v", patterns)
-			}
-		})
-	}
-}
-
-func TestIterateCommandPatterns_NumberFollowedByText(t *testing.T) {
-	tests := []struct {
-		name        string
-		command     string
-		templateIdx int
-		currentIdx  int
-		expected    string
-	}{
-		{
-			name:        "Complex filename with number then text",
-			command:     "Run_335_Fluid_Meas.avg.snc",
-			templateIdx: 335,
-			currentIdx:  400,
-			expected:    "Run_400_Fluid_Meas.avg.snc",
-		},
-		{
-			name:        "Padded number with trailing text",
-			command:     "Sim_010_Output_Data.avg.snc",
-			templateIdx: 10,
-			currentIdx:  25,
-			expected:    "Sim_025_Output_Data.avg.snc",
-		},
-		{
-			name:        "Dash separator with trailing text",
-			command:     "Case-005-Pressure-Results.dat",
-			templateIdx: 5,
-			currentIdx:  12,
-			expected:    "Case-012-Pressure-Results.dat",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := IterateCommandPatterns(tt.command, tt.templateIdx, tt.currentIdx)
-			if result != tt.expected {
-				t.Errorf("IterateCommandPatterns() = %q, want %q", result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestIterateCommandPatterns_MultilineCommand(t *testing.T) {
-	tests := []struct {
-		name        string
-		command     string
-		templateIdx int
-		currentIdx  int
-		expected    string
-	}{
-		{
-			name:        "Multiline command with multiple patterns",
-			command:     "solver --input Run_001_Mesh.inp\n--output Run_001_Results.csv",
-			templateIdx: 1,
-			currentIdx:  5,
-			expected:    "solver --input Run_005_Mesh.inp\n--output Run_005_Results.csv",
-		},
-		{
-			name:        "Multiline with mixed pattern types",
-			command:     "preprocess data_10.txt\nsolver Run_10_Output_Data.avg.snc\npostprocess result_10.csv",
-			templateIdx: 10,
-			currentIdx:  20,
-			expected:    "preprocess data_20.txt\nsolver Run_20_Output_Data.avg.snc\npostprocess result_20.csv",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := IterateCommandPatterns(tt.command, tt.templateIdx, tt.currentIdx)
-			if result != tt.expected {
-				t.Errorf("IterateCommandPatterns() = %q, want %q", result, tt.expected)
 			}
 		})
 	}
@@ -314,6 +218,44 @@ func TestIterateCommandPatterns(t *testing.T) {
 			templateIdx: 5,
 			currentIdx:  10,
 			expected:    "process_010.py",
+		},
+
+		// A number followed by more text, not just an extension.
+		{
+			name:        "Complex filename with number then text",
+			command:     "Run_335_Fluid_Meas.avg.snc",
+			templateIdx: 335,
+			currentIdx:  400,
+			expected:    "Run_400_Fluid_Meas.avg.snc",
+		},
+		{
+			name:        "Padded number with trailing text",
+			command:     "Sim_010_Output_Data.avg.snc",
+			templateIdx: 10,
+			currentIdx:  25,
+			expected:    "Sim_025_Output_Data.avg.snc",
+		},
+		{
+			name:        "Dash separator with trailing text",
+			command:     "Case-005-Pressure-Results.dat",
+			templateIdx: 5,
+			currentIdx:  12,
+			expected:    "Case-012-Pressure-Results.dat",
+		},
+		// Every pattern on every line of a multiline command is iterated.
+		{
+			name:        "Multiline command with multiple patterns",
+			command:     "solver --input Run_001_Mesh.inp\n--output Run_001_Results.csv",
+			templateIdx: 1,
+			currentIdx:  5,
+			expected:    "solver --input Run_005_Mesh.inp\n--output Run_005_Results.csv",
+		},
+		{
+			name:        "Multiline with mixed pattern types",
+			command:     "preprocess data_10.txt\nsolver Run_10_Output_Data.avg.snc\npostprocess result_10.csv",
+			templateIdx: 10,
+			currentIdx:  20,
+			expected:    "preprocess data_20.txt\nsolver Run_20_Output_Data.avg.snc\npostprocess result_20.csv",
 		},
 	}
 

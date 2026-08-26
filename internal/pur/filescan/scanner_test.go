@@ -62,93 +62,64 @@ func TestScanFiles_BasicScan(t *testing.T) {
 	}
 }
 
-func TestResolveSecondaryPattern_RequiredMissing(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "filescan_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create primary file only, no secondary
-	primaryFile := filepath.Join(tmpDir, "model.inp")
-	if err := os.WriteFile(primaryFile, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	files, warning, skip := ResolveSecondaryPattern(
-		tmpDir, "model", primaryFile,
-		SecondaryPattern{Pattern: "*.mesh", Required: true},
-	)
-
-	if skip == "" {
-		t.Error("Expected skip reason for missing required file")
-	}
-	if len(files) > 0 {
-		t.Error("Expected no files returned for missing required")
-	}
-	if warning != "" {
-		t.Error("Expected no warning for skip")
-	}
-}
-
-func TestResolveSecondaryPattern_OptionalMissing(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "filescan_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	primaryFile := filepath.Join(tmpDir, "model.inp")
-	if err := os.WriteFile(primaryFile, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+func TestResolveSecondaryPattern(t *testing.T) {
+	tests := []struct {
+		name string
+		// files are created in the temp dir before resolving.
+		files       []string
+		required    bool
+		wantSkip    bool
+		wantWarning bool
+		wantFiles   []string
+	}{
+		{
+			// A missing required secondary skips the whole entry; a skip is not
+			// also reported as a warning.
+			name:  "required secondary missing",
+			files: []string{"model.inp"}, required: true,
+			wantSkip: true,
+		},
+		{
+			// A missing optional secondary warns instead of skipping.
+			name:  "optional secondary missing",
+			files: []string{"model.inp"}, required: false,
+			wantWarning: true,
+		},
+		{
+			name:  "wildcard resolves to the matching sibling",
+			files: []string{"model.inp", "model.mesh"}, required: true,
+			wantFiles: []string{"model.mesh"},
+		},
 	}
 
-	files, warning, skip := ResolveSecondaryPattern(
-		tmpDir, "model", primaryFile,
-		SecondaryPattern{Pattern: "*.mesh", Required: false},
-	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tt.files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("test"), 0644); err != nil {
+					t.Fatalf("failed to create %s: %v", f, err)
+				}
+			}
 
-	if skip != "" {
-		t.Errorf("Unexpected skip reason: %s", skip)
-	}
-	if len(files) > 0 {
-		t.Error("Expected no files for missing optional")
-	}
-	if warning == "" {
-		t.Error("Expected warning for missing optional file")
-	}
-}
+			files, warning, skip := ResolveSecondaryPattern(
+				dir, "model", filepath.Join(dir, "model.inp"),
+				SecondaryPattern{Pattern: "*.mesh", Required: tt.required},
+			)
 
-func TestResolveSecondaryPattern_WildcardResolution(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "filescan_test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create both primary and secondary with matching names
-	if err := os.WriteFile(filepath.Join(tmpDir, "model.inp"), []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create inp: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "model.mesh"), []byte("mesh"), 0644); err != nil {
-		t.Fatalf("Failed to create mesh: %v", err)
-	}
-
-	files, warning, skip := ResolveSecondaryPattern(
-		tmpDir, "model", filepath.Join(tmpDir, "model.inp"),
-		SecondaryPattern{Pattern: "*.mesh", Required: true},
-	)
-
-	if skip != "" {
-		t.Errorf("Unexpected skip: %s", skip)
-	}
-	if warning != "" {
-		t.Errorf("Unexpected warning: %s", warning)
-	}
-	if len(files) != 1 {
-		t.Errorf("Expected 1 file, got %d", len(files))
-	}
-	if len(files) > 0 && filepath.Base(files[0]) != "model.mesh" {
-		t.Errorf("Expected model.mesh, got %s", files[0])
+			if (skip != "") != tt.wantSkip {
+				t.Errorf("skip = %q, wantSkip %v", skip, tt.wantSkip)
+			}
+			if (warning != "") != tt.wantWarning {
+				t.Errorf("warning = %q, wantWarning %v", warning, tt.wantWarning)
+			}
+			if len(files) != len(tt.wantFiles) {
+				t.Fatalf("got %d files, want %d: %v", len(files), len(tt.wantFiles), files)
+			}
+			for i, want := range tt.wantFiles {
+				if got := filepath.Base(files[i]); got != want {
+					t.Errorf("files[%d] = %s, want %s", i, got, want)
+				}
+			}
+		})
 	}
 }

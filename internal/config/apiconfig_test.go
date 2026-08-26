@@ -70,28 +70,81 @@ func TestSaveAndLoadAPIConfig(t *testing.T) {
 	}
 }
 
-func TestLoadAPIConfig_NonExistent(t *testing.T) {
-	// Load from non-existent path should return defaults
-	cfg, err := LoadAPIConfig("/path/that/does/not/exist/apiconfig")
-	if err != nil {
-		t.Fatalf("LoadAPIConfig should not fail for non-existent file: %v", err)
+func TestLoadAPIConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		// content, when set, is written to a temp apiconfig; path overrides it.
+		content    string
+		path       string
+		wantErr    bool
+		wantURL    string
+		wantAPIKey string
+		wantNonNil bool
+	}{
+		{
+			// A missing file is not an error: the defaults stand in.
+			name:    "nonexistent path returns defaults",
+			path:    "/path/that/does/not/exist/apiconfig",
+			wantURL: "https://platform.rescale.com",
+		},
+		{
+			// An empty path means "the default location", which may or may not
+			// exist on the machine running the test; either way it must not error.
+			name:       "empty path uses the default location",
+			path:       "",
+			wantNonNil: true,
+		},
+		{
+			name:    "invalid INI is an error",
+			content: "this is not valid INI [[[",
+			wantErr: true,
+		},
+		{
+			name: "partial config loads the rescale section",
+			content: `[rescale]
+platform_url = https://partial.rescale.com
+api_key = partial-key
+`,
+			wantURL: "https://partial.rescale.com", wantAPIKey: "partial-key",
+		},
+		{
+			// Legacy api_key values are still read for backwards compatibility.
+			name:    "legacy api_key is read",
+			content: "[rescale]\nplatform_url = https://test.rescale.com\napi_key = legacy-key-value\n",
+			wantURL: "https://test.rescale.com", wantAPIKey: "legacy-key-value",
+		},
 	}
 
-	// Should return defaults
-	if cfg.PlatformURL != "https://platform.rescale.com" {
-		t.Errorf("expected default PlatformURL for non-existent file")
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := tt.path
+			if tt.content != "" {
+				configPath = filepath.Join(t.TempDir(), "apiconfig")
+				if err := os.WriteFile(configPath, []byte(tt.content), 0600); err != nil {
+					t.Fatalf("failed to write test file: %v", err)
+				}
+			}
 
-func TestLoadAPIConfig_EmptyPath(t *testing.T) {
-	// Empty path should try default location (may or may not exist)
-	// This should not panic or error
-	cfg, err := LoadAPIConfig("")
-	if err != nil {
-		t.Fatalf("LoadAPIConfig with empty path should not error: %v", err)
-	}
-	if cfg == nil {
-		t.Fatal("LoadAPIConfig should return a config, not nil")
+			cfg, err := LoadAPIConfig(configPath)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("LoadAPIConfig should fail")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadAPIConfig failed: %v", err)
+			}
+			if cfg == nil {
+				t.Fatal("LoadAPIConfig should return a config, not nil")
+			}
+			if tt.wantURL != "" && cfg.PlatformURL != tt.wantURL {
+				t.Errorf("PlatformURL = %q, want %q", cfg.PlatformURL, tt.wantURL)
+			}
+			if tt.wantAPIKey != "" && cfg.APIKey != tt.wantAPIKey {
+				t.Errorf("APIKey = %q, want %q", cfg.APIKey, tt.wantAPIKey)
+			}
+		})
 	}
 }
 
@@ -122,117 +175,94 @@ func TestSaveAPIConfig_CreatesDirectory(t *testing.T) {
 	}
 }
 
-func TestLoadAPIConfig_InvalidINI(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "invalid.ini")
-
-	// Write invalid INI content
-	if err := os.WriteFile(configPath, []byte("this is not valid INI [[["), 0600); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	_, err := LoadAPIConfig(configPath)
-	if err == nil {
-		t.Error("LoadAPIConfig should fail for invalid INI")
-	}
-}
-
-func TestLoadAPIConfig_PartialConfig(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "partial.ini")
-
-	// Write partial config (only rescale section)
-	content := `[rescale]
-platform_url = https://partial.rescale.com
-api_key = partial-key
-`
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	cfg, err := LoadAPIConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadAPIConfig failed: %v", err)
-	}
-
-	// Rescale section should be loaded
-	if cfg.PlatformURL != "https://partial.rescale.com" {
-		t.Errorf("PlatformURL not loaded correctly")
-	}
-	if cfg.APIKey != "partial-key" {
-		t.Errorf("APIKey not loaded correctly")
-	}
-}
-
-// Verify LoadAPIConfig still reads legacy api_key values for backwards compat.
-func TestLoadAPIConfig_LegacyAPIKey(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-
-	content := "[rescale]\nplatform_url = https://test.rescale.com\napi_key = legacy-key-value\n"
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	cfg, err := LoadAPIConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadAPIConfig failed: %v", err)
-	}
-	if cfg.APIKey != "legacy-key-value" {
-		t.Errorf("expected legacy APIKey to be read, got %q", cfg.APIKey)
-	}
-}
-
 // LoadCompatProfile tests
 
-func TestLoadCompatProfile_DefaultSection(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-	content := "[default]\napikey = default-key\napibaseurl = https://platform.rescale.com\n"
-	os.WriteFile(configPath, []byte(content), 0600)
+func TestLoadCompatProfile(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string // when empty, no file is written
+		section string
+		envPath bool // point RESCALE_CONFIG_FILE at the file and pass an empty path
+		wantErr bool
+		wantKey string
+		wantURL string
+	}{
+		{
+			name:    "default section",
+			content: "[default]\napikey = default-key\napibaseurl = https://platform.rescale.com\n",
+			section: "default",
+			wantKey: "default-key",
+			wantURL: "https://platform.rescale.com",
+		},
+		{
+			name:    "named section",
+			content: "[default]\napikey = default-key\n\n[eu]\napikey = eu-key\napibaseurl = https://eu.rescale.com\n",
+			section: "eu",
+			wantKey: "eu-key",
+			wantURL: "https://eu.rescale.com",
+		},
+		{
+			name:    "missing section is an error",
+			content: "[default]\napikey = default-key\n",
+			section: "nonexistent",
+			wantErr: true,
+		},
+		{
+			// rescale-cli spells the keys apikey/apibaseurl.
+			name:    "cli key format",
+			content: "[default]\napikey = cli-format-key\n",
+			section: "default",
+			wantKey: "cli-format-key",
+		},
+		{
+			// Interlink spells them api_key/platform_url.
+			name:    "int key format",
+			content: "[default]\napi_key = int-format-key\nplatform_url = https://int.rescale.com\n",
+			section: "default",
+			wantKey: "int-format-key",
+			wantURL: "https://int.rescale.com",
+		},
+		{
+			name:    "path from RESCALE_CONFIG_FILE",
+			content: "[default]\napikey = env-path-key\n",
+			section: "default",
+			envPath: true,
+			wantKey: "env-path-key",
+		},
+	}
 
-	key, url, err := LoadCompatProfile(configPath, "default")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key != "default-key" {
-		t.Errorf("apiKey = %q, want %q", key, "default-key")
-	}
-	if url != "https://platform.rescale.com" {
-		t.Errorf("baseURL = %q, want %q", url, "https://platform.rescale.com")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "apiconfig")
+			if err := os.WriteFile(configPath, []byte(tt.content), 0600); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+			if tt.envPath {
+				t.Setenv("RESCALE_CONFIG_FILE", configPath)
+				configPath = ""
+			}
+
+			key, url, err := LoadCompatProfile(configPath, tt.section)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got key=%q url=%q", key, url)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if key != tt.wantKey {
+				t.Errorf("apiKey = %q, want %q", key, tt.wantKey)
+			}
+			if url != tt.wantURL {
+				t.Errorf("baseURL = %q, want %q", url, tt.wantURL)
+			}
+		})
 	}
 }
 
-func TestLoadCompatProfile_NamedSection(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-	content := "[default]\napikey = default-key\n\n[eu]\napikey = eu-key\napibaseurl = https://eu.rescale.com\n"
-	os.WriteFile(configPath, []byte(content), 0600)
-
-	key, url, err := LoadCompatProfile(configPath, "eu")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key != "eu-key" {
-		t.Errorf("apiKey = %q, want %q", key, "eu-key")
-	}
-	if url != "https://eu.rescale.com" {
-		t.Errorf("baseURL = %q, want %q", url, "https://eu.rescale.com")
-	}
-}
-
-func TestLoadCompatProfile_MissingSectionError(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-	content := "[default]\napikey = default-key\n"
-	os.WriteFile(configPath, []byte(content), 0600)
-
-	_, _, err := LoadCompatProfile(configPath, "nonexistent")
-	if err == nil {
-		t.Fatal("expected error for nonexistent section")
-	}
-}
-
+// A missing file is not fatal: the compat path falls back to other sources.
 func TestLoadCompatProfile_MissingFileNonFatal(t *testing.T) {
 	key, url, err := LoadCompatProfile("/nonexistent/path/apiconfig", "default")
 	if err != nil {
@@ -240,56 +270,6 @@ func TestLoadCompatProfile_MissingFileNonFatal(t *testing.T) {
 	}
 	if key != "" || url != "" {
 		t.Errorf("expected empty results for missing file, got key=%q url=%q", key, url)
-	}
-}
-
-func TestLoadCompatProfile_CLIKeyFormat(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-	content := "[default]\napikey = cli-format-key\n"
-	os.WriteFile(configPath, []byte(content), 0600)
-
-	key, _, err := LoadCompatProfile(configPath, "default")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key != "cli-format-key" {
-		t.Errorf("apiKey = %q, want %q", key, "cli-format-key")
-	}
-}
-
-func TestLoadCompatProfile_INTKeyFormat(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-	content := "[default]\napi_key = int-format-key\nplatform_url = https://int.rescale.com\n"
-	os.WriteFile(configPath, []byte(content), 0600)
-
-	key, url, err := LoadCompatProfile(configPath, "default")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key != "int-format-key" {
-		t.Errorf("apiKey = %q, want %q", key, "int-format-key")
-	}
-	if url != "https://int.rescale.com" {
-		t.Errorf("baseURL = %q, want %q", url, "https://int.rescale.com")
-	}
-}
-
-func TestLoadCompatProfile_RescaleConfigFileEnv(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "custom_apiconfig")
-	content := "[default]\napikey = env-path-key\n"
-	os.WriteFile(configPath, []byte(content), 0600)
-
-	t.Setenv("RESCALE_CONFIG_FILE", configPath)
-
-	key, _, err := LoadCompatProfile("", "default")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key != "env-path-key" {
-		t.Errorf("apiKey = %q, want %q", key, "env-path-key")
 	}
 }
 

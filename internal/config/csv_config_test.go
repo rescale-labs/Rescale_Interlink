@@ -106,71 +106,65 @@ func TestLoadConfigCSV(t *testing.T) {
 	}
 }
 
+// MergeWithFlags delegates to MergeWithFlagsAndTokenFile with no token file.
+// API-key precedence is TestMergeWithFlagsAndTokenFile's job; this covers the
+// flag application for URL and proxy settings. APIKey is only asserted where
+// the --api-key flag is set, because it is the one source that outranks a
+// default token file sitting in the developer's real config dir.
 func TestMergeWithFlags(t *testing.T) {
 	tests := []struct {
-		name      string
-		config    *Config
-		apiKey    string
-		apiURL    string
-		proxyMode string
-		proxyHost string
-		proxyPort int
-		want      *Config
+		name                                 string
+		config                               Config
+		apiKey, apiURL, proxyMode, proxyHost string
+		proxyPort                            int
+		want                                 Config
 	}{
 		{
-			name: "flags override config",
-			config: &Config{
-				APIKey:     "config_key",
-				APIBaseURL: "https://config.com",
-			},
-			apiKey: "flag_key",
-			apiURL: "https://flag.com",
-			want: &Config{
-				APIKey:     "flag_key",
-				APIBaseURL: "https://flag.com",
-			},
+			name:   "flags override config",
+			config: Config{APIKey: "config_key", APIBaseURL: "https://config.com"},
+			apiKey: "flag_key", apiURL: "https://flag.com",
+			want: Config{APIKey: "flag_key", APIBaseURL: "https://flag.com", TenantURL: "https://flag.com"},
 		},
 		{
-			name: "empty flags use config",
-			config: &Config{
-				APIKey:     "config_key",
-				APIBaseURL: "https://config.com",
-			},
-			apiKey: "",
-			apiURL: "",
-			want: &Config{
-				APIKey:     "config_key",
-				APIBaseURL: "https://config.com",
-			},
+			name:   "empty flags leave config in place",
+			config: Config{APIKey: "config_key", APIBaseURL: "https://config.com"},
+			want:   Config{APIBaseURL: "https://config.com"},
 		},
 		{
-			name: "proxy settings merge",
-			config: &Config{
-				ProxyMode: "no-proxy",
-			},
-			proxyMode: "ntlm",
-			proxyHost: "proxy.example.com",
-			proxyPort: 8080,
-			want: &Config{
-				ProxyMode: "ntlm",
-				ProxyHost: "proxy.example.com",
-				ProxyPort: 8080,
-			},
+			name:      "proxy settings merge",
+			config:    Config{ProxyMode: "no-proxy"},
+			proxyMode: "ntlm", proxyHost: "proxy.example.com", proxyPort: 8080,
+			want: Config{ProxyMode: "ntlm", ProxyHost: "proxy.example.com", ProxyPort: 8080},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.config.MergeWithFlags(tt.apiKey, tt.apiURL, tt.proxyMode, tt.proxyHost, tt.proxyPort)
+			// These env sources outrank config values and would mask the flags.
+			t.Setenv("RESCALE_API_KEY", "")
+			t.Setenv("RESCALE_API_URL", "")
+			t.Setenv("HTTPS_PROXY", "")
 
-			if tt.apiKey != "" && tt.config.APIKey != tt.want.APIKey {
-				t.Errorf("APIKey = %q, want %q", tt.config.APIKey, tt.want.APIKey)
+			cfg := tt.config
+			cfg.MergeWithFlags(tt.apiKey, tt.apiURL, tt.proxyMode, tt.proxyHost, tt.proxyPort)
+
+			if tt.apiKey != "" && cfg.APIKey != tt.want.APIKey {
+				t.Errorf("APIKey = %q, want %q", cfg.APIKey, tt.want.APIKey)
 			}
-			if tt.apiURL != "" && tt.config.APIBaseURL != tt.want.APIBaseURL {
-				t.Errorf("APIBaseURL = %q, want %q", tt.config.APIBaseURL, tt.want.APIBaseURL)
+			if cfg.APIBaseURL != tt.want.APIBaseURL {
+				t.Errorf("APIBaseURL = %q, want %q", cfg.APIBaseURL, tt.want.APIBaseURL)
 			}
-			if tt.proxyMode != "" && tt.config.ProxyMode != tt.want.ProxyMode {
-				t.Errorf("ProxyMode = %q, want %q", tt.config.ProxyMode, tt.want.ProxyMode)
+			if tt.want.TenantURL != "" && cfg.TenantURL != tt.want.TenantURL {
+				t.Errorf("TenantURL = %q, want %q", cfg.TenantURL, tt.want.TenantURL)
+			}
+			if cfg.ProxyMode != tt.want.ProxyMode {
+				t.Errorf("ProxyMode = %q, want %q", cfg.ProxyMode, tt.want.ProxyMode)
+			}
+			if cfg.ProxyHost != tt.want.ProxyHost {
+				t.Errorf("ProxyHost = %q, want %q", cfg.ProxyHost, tt.want.ProxyHost)
+			}
+			if cfg.ProxyPort != tt.want.ProxyPort {
+				t.Errorf("ProxyPort = %d, want %d", cfg.ProxyPort, tt.want.ProxyPort)
 			}
 		})
 	}

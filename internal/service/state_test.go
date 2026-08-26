@@ -109,110 +109,229 @@ func TestPresentationMatrixCoverage(t *testing.T) {
 	}
 }
 
-func TestPresentationNotInstalled(t *testing.T) {
-	p := State{Installation: InstallationNotInstalled}.Presentation()
-	if !strings.Contains(p.GUILongForm, "Install Service") {
-		t.Errorf("GUILongForm should prompt to install: %q", p.GUILongForm)
+// TestPresentationCells pins the wording and allowed actions for the cells a
+// user actually sees; the matrix test above only checks each cell is populated.
+func TestPresentationCells(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       State
+		wantPhrases []string
+		wantActions []Action
+	}{
+		{
+			name:        "not installed",
+			state:       State{Installation: InstallationNotInstalled},
+			wantPhrases: []string{"Install Service"},
+			wantActions: []Action{ActionInstallService},
+		},
+		{
+			name:        "stopped",
+			state:       State{Installation: InstallationStopped},
+			wantPhrases: []string{"Start Service"},
+			wantActions: []Action{ActionStartService},
+		},
+		{
+			name:        "running but not configured",
+			state:       State{Installation: InstallationRunning, PerUser: PerUserNotConfigured},
+			wantPhrases: []string{"Configure"},
+			wantActions: []Action{ActionConfigure},
+		},
+		{
+			name:        "running and active",
+			state:       State{Installation: InstallationRunning, PerUser: PerUserRunning, JobsDownloaded: 7},
+			wantPhrases: []string{"Auto-download active"},
+			wantActions: []Action{ActionPause, ActionTriggerScan},
+		},
+		{
+			name:        "paused",
+			state:       State{Installation: InstallationRunning, PerUser: PerUserPaused},
+			wantActions: []Action{ActionResume},
+		},
+		{
+			// An error cell must carry both the canonical text and its hint, so
+			// the user is told what to do about it.
+			name: "error carries canonical text and hint",
+			state: State{
+				Installation:  InstallationRunning,
+				PerUser:       PerUserError,
+				LastError:     ipc.CanonicalText[ipc.CodeNoAPIKey],
+				LastErrorCode: ipc.CodeNoAPIKey,
+			},
+			wantPhrases: []string{ipc.CanonicalText[ipc.CodeNoAPIKey], ipc.HintFor(ipc.CodeNoAPIKey)},
+		},
 	}
-	if !containsAction(p.AllowedActions, ActionInstallService) {
-		t.Errorf("expected ActionInstallService, got %v", p.AllowedActions)
-	}
-}
 
-func TestPresentationStopped(t *testing.T) {
-	p := State{Installation: InstallationStopped}.Presentation()
-	if !strings.Contains(p.GUILongForm, "Start Service") {
-		t.Errorf("GUILongForm should prompt to start: %q", p.GUILongForm)
-	}
-	if !containsAction(p.AllowedActions, ActionStartService) {
-		t.Errorf("expected ActionStartService, got %v", p.AllowedActions)
-	}
-}
-
-func TestPresentationRunningNotConfigured(t *testing.T) {
-	p := State{Installation: InstallationRunning, PerUser: PerUserNotConfigured}.Presentation()
-	if !strings.Contains(p.GUILongForm, "Configure") {
-		t.Errorf("GUILongForm should prompt to configure: %q", p.GUILongForm)
-	}
-	if !containsAction(p.AllowedActions, ActionConfigure) {
-		t.Errorf("expected ActionConfigure, got %v", p.AllowedActions)
-	}
-}
-
-func TestPresentationRunningActive(t *testing.T) {
-	s := State{
-		Installation:   InstallationRunning,
-		PerUser:        PerUserRunning,
-		JobsDownloaded: 7,
-	}
-	p := s.Presentation()
-	if !strings.Contains(p.GUILongForm, "Auto-download active") {
-		t.Errorf("GUILongForm should say active: %q", p.GUILongForm)
-	}
-	if !containsAction(p.AllowedActions, ActionPause) {
-		t.Errorf("expected ActionPause when running, got %v", p.AllowedActions)
-	}
-	if !containsAction(p.AllowedActions, ActionTriggerScan) {
-		t.Errorf("expected ActionTriggerScan when running")
-	}
-}
-
-func TestPresentationPaused(t *testing.T) {
-	p := State{Installation: InstallationRunning, PerUser: PerUserPaused}.Presentation()
-	if !containsAction(p.AllowedActions, ActionResume) {
-		t.Errorf("expected ActionResume, got %v", p.AllowedActions)
-	}
-}
-
-func TestPresentationError_IncludesHint(t *testing.T) {
-	s := State{
-		Installation:  InstallationRunning,
-		PerUser:       PerUserError,
-		LastError:     ipc.CanonicalText[ipc.CodeNoAPIKey],
-		LastErrorCode: ipc.CodeNoAPIKey,
-	}
-	p := s.Presentation()
-	if !strings.Contains(p.GUILongForm, ipc.CanonicalText[ipc.CodeNoAPIKey]) {
-		t.Errorf("GUILongForm should contain canonical text: %q", p.GUILongForm)
-	}
-	if !strings.Contains(p.GUILongForm, ipc.HintFor(ipc.CodeNoAPIKey)) {
-		t.Errorf("GUILongForm should contain hint: %q", p.GUILongForm)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := tt.state.Presentation()
+			for _, phrase := range tt.wantPhrases {
+				if !strings.Contains(p.GUILongForm, phrase) {
+					t.Errorf("GUILongForm = %q, want it to contain %q", p.GUILongForm, phrase)
+				}
+			}
+			for _, action := range tt.wantActions {
+				if !containsAction(p.AllowedActions, action) {
+					t.Errorf("expected action %v, got %v", action, p.AllowedActions)
+				}
+			}
+		})
 	}
 }
 
 // --- Compute tests ---
 
-func TestCompute_NoConfigNoIPC(t *testing.T) {
-	c := &Computer{
-		Clock:    &fakeClock{t: time.Unix(0, 0)},
-		Detector: fakeDetector{},
-		IPC:      fakeIPC{statusErr: errors.New("no daemon")},
-		Config:   fakeConfig{cfg: newDisabledConfig()},
-		Identity: fakeIdentity{},
-	}
-	s := c.Compute(context.Background(), State{})
-	if s.PerUser != PerUserNotConfigured {
-		t.Errorf("PerUser = %v, want PerUserNotConfigured", s.PerUser)
-	}
-	if s.IPCConnected {
-		t.Errorf("IPCConnected should be false")
-	}
-}
+// TestCompute walks the single-shot state derivations: what Compute reports for
+// a given clock, daemon IPC reply, config and identity.
+func TestCompute(t *testing.T) {
+	errAt := time.Unix(1700000000, 0)
 
-func TestCompute_ConfiguredNoIPCStaysPending(t *testing.T) {
-	c := &Computer{
-		Clock:    &fakeClock{t: time.Unix(1000, 0)},
-		Detector: fakeDetector{},
-		IPC:      fakeIPC{statusErr: errors.New("no daemon yet")},
-		Config:   fakeConfig{cfg: newEnabledConfig()},
-		Identity: fakeIdentity{},
+	tests := []struct {
+		name     string
+		now      time.Time
+		ipc      fakeIPC
+		cfg      *config.DaemonConfig
+		identity fakeIdentity
+		validate func(t *testing.T, s State)
+	}{
+		{
+			name: "no config and no daemon",
+			now:  time.Unix(0, 0),
+			ipc:  fakeIPC{statusErr: errors.New("no daemon")},
+			cfg:  newDisabledConfig(),
+			validate: func(t *testing.T, s State) {
+				if s.PerUser != PerUserNotConfigured {
+					t.Errorf("PerUser = %v, want PerUserNotConfigured", s.PerUser)
+				}
+				if s.IPCConnected {
+					t.Error("IPCConnected should be false")
+				}
+			},
+		},
+		{
+			name: "configured but daemon not up yet stays pending",
+			now:  time.Unix(1000, 0),
+			ipc:  fakeIPC{statusErr: errors.New("no daemon yet")},
+			cfg:  newEnabledConfig(),
+			validate: func(t *testing.T, s State) {
+				if s.PerUser != PerUserPending {
+					t.Errorf("PerUser = %v, want PerUserPending", s.PerUser)
+				}
+				if s.PendingSince.IsZero() {
+					t.Error("PendingSince should be set")
+				}
+			},
+		},
+		{
+			// The matching user is found by SID, not by list position.
+			name: "running user matched by SID",
+			now:  time.Unix(0, 0),
+			ipc: fakeIPC{
+				status: &ipc.StatusData{ServiceState: "running", ServiceMode: false},
+				users: []ipc.UserStatus{
+					{Username: "other", SID: "S-1-0-0-1", State: "paused"},
+					{Username: "alice", SID: "S-1-0-0-2", State: "running", JobsDownloaded: 5},
+				},
+			},
+			cfg:      newEnabledConfig(),
+			identity: fakeIdentity{sid: "S-1-0-0-2", username: "alice"},
+			validate: func(t *testing.T, s State) {
+				if s.PerUser != PerUserRunning {
+					t.Errorf("PerUser = %v, want PerUserRunning", s.PerUser)
+				}
+				if s.JobsDownloaded != 5 {
+					t.Errorf("JobsDownloaded = %d, want 5", s.JobsDownloaded)
+				}
+			},
+		},
+		{
+			name: "error text is reverse-looked-up to a code",
+			now:  time.Unix(0, 0),
+			ipc: fakeIPC{
+				status: &ipc.StatusData{ServiceState: "running"},
+				users: []ipc.UserStatus{
+					{Username: "alice", State: "error", LastError: ipc.CanonicalText[ipc.CodeNoAPIKey]},
+				},
+			},
+			cfg:      newEnabledConfig(),
+			identity: fakeIdentity{username: "alice"},
+			validate: func(t *testing.T, s State) {
+				if s.PerUser != PerUserError {
+					t.Errorf("PerUser = %v, want PerUserError", s.PerUser)
+				}
+				if s.LastErrorCode != ipc.CodeNoAPIKey {
+					t.Errorf("LastErrorCode = %q, want %q (reverse-looked-up from canonical text)",
+						s.LastErrorCode, ipc.CodeNoAPIKey)
+				}
+			},
+		},
+		{
+			// An explicit ErrorCode from the peer outranks a reverse-lookup, so
+			// evolving the wording cannot change the code.
+			name: "explicit error code beats reverse lookup",
+			now:  time.Unix(0, 0),
+			ipc: fakeIPC{
+				status: &ipc.StatusData{ServiceState: "running"},
+				users: []ipc.UserStatus{{
+					Username:  "alice",
+					State:     "error",
+					LastError: "some evolved wording",
+					ErrorCode: ipc.CodeDownloadFolderInaccessible,
+				}},
+			},
+			cfg:      newEnabledConfig(),
+			identity: fakeIdentity{username: "alice"},
+			validate: func(t *testing.T, s State) {
+				if s.LastErrorCode != ipc.CodeDownloadFolderInaccessible {
+					t.Errorf("LastErrorCode = %q, want explicit CodeDownloadFolderInaccessible", s.LastErrorCode)
+				}
+			},
+		},
+		{
+			// A daemon that is up but whose last scan failed must still surface
+			// the failure. The per-user entry carries no error then, so it has to
+			// come from the service-level status, timestamp included — otherwise
+			// the only symptom is a last-scan time that quietly stops advancing.
+			name: "scan failure from service status is surfaced",
+			now:  time.Unix(1700000060, 0),
+			ipc: fakeIPC{
+				status: &ipc.StatusData{
+					ServiceState:  "running",
+					LastError:     ipc.CanonicalText[ipc.CodeScanFailed] + ": list jobs failed: 503",
+					LastErrorCode: ipc.CodeScanFailed,
+					LastErrorTime: &errAt,
+				},
+				users: []ipc.UserStatus{{Username: "alice", State: "running"}},
+			},
+			cfg:      newEnabledConfig(),
+			identity: fakeIdentity{username: "alice"},
+			validate: func(t *testing.T, s State) {
+				if s.PerUser != PerUserRunning {
+					t.Errorf("PerUser = %v, want PerUserRunning (a failed scan is not a dead daemon)", s.PerUser)
+				}
+				if s.LastErrorCode != ipc.CodeScanFailed {
+					t.Errorf("LastErrorCode = %q, want %q", s.LastErrorCode, ipc.CodeScanFailed)
+				}
+				if !strings.Contains(s.LastError, "list jobs failed: 503") {
+					t.Errorf("LastError = %q, want it to carry the scan error detail", s.LastError)
+				}
+				if s.LastErrorTime == nil || !s.LastErrorTime.Equal(errAt) {
+					t.Errorf("LastErrorTime = %v, want %v", s.LastErrorTime, errAt)
+				}
+			},
+		},
 	}
-	s := c.Compute(context.Background(), State{})
-	if s.PerUser != PerUserPending {
-		t.Errorf("PerUser = %v, want PerUserPending", s.PerUser)
-	}
-	if s.PendingSince.IsZero() {
-		t.Errorf("PendingSince should be set")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Computer{
+				Clock:    &fakeClock{t: tt.now},
+				Detector: fakeDetector{},
+				IPC:      tt.ipc,
+				Config:   fakeConfig{cfg: tt.cfg},
+				Identity: tt.identity,
+			}
+			tt.validate(t, c.Compute(context.Background(), State{}))
+		})
 	}
 }
 
@@ -250,114 +369,6 @@ func TestCompute_PendingTimeoutPromotesToError(t *testing.T) {
 	}
 	if third.LastErrorCode != ipc.CodeTransientTimeout {
 		t.Errorf("LastErrorCode = %v, want CodeTransientTimeout", third.LastErrorCode)
-	}
-}
-
-func TestCompute_IPCRunningMatchesUserBySID(t *testing.T) {
-	c := &Computer{
-		Clock:    &fakeClock{t: time.Unix(0, 0)},
-		Detector: fakeDetector{},
-		IPC: fakeIPC{
-			status: &ipc.StatusData{ServiceState: "running", ServiceMode: false},
-			users: []ipc.UserStatus{
-				{Username: "other", SID: "S-1-0-0-1", State: "paused"},
-				{Username: "alice", SID: "S-1-0-0-2", State: "running", JobsDownloaded: 5},
-			},
-		},
-		Config:   fakeConfig{cfg: newEnabledConfig()},
-		Identity: fakeIdentity{sid: "S-1-0-0-2", username: "alice"},
-	}
-	s := c.Compute(context.Background(), State{})
-	if s.PerUser != PerUserRunning {
-		t.Errorf("PerUser = %v, want PerUserRunning", s.PerUser)
-	}
-	if s.JobsDownloaded != 5 {
-		t.Errorf("JobsDownloaded = %d, want 5", s.JobsDownloaded)
-	}
-}
-
-func TestCompute_LastErrorReverseLookedUpToCode(t *testing.T) {
-	c := &Computer{
-		Clock:    &fakeClock{t: time.Unix(0, 0)},
-		Detector: fakeDetector{},
-		IPC: fakeIPC{
-			status: &ipc.StatusData{ServiceState: "running"},
-			users: []ipc.UserStatus{
-				{Username: "alice", State: "error", LastError: ipc.CanonicalText[ipc.CodeNoAPIKey]},
-			},
-		},
-		Config:   fakeConfig{cfg: newEnabledConfig()},
-		Identity: fakeIdentity{username: "alice"},
-	}
-	s := c.Compute(context.Background(), State{})
-	if s.PerUser != PerUserError {
-		t.Errorf("PerUser = %v, want PerUserError", s.PerUser)
-	}
-	if s.LastErrorCode != ipc.CodeNoAPIKey {
-		t.Errorf("LastErrorCode = %q, want %q (reverse-looked-up from canonical text)",
-			s.LastErrorCode, ipc.CodeNoAPIKey)
-	}
-}
-
-func TestCompute_ExplicitErrorCodePreferredOverReverseLookup(t *testing.T) {
-	// If an IPC peer sets ErrorCode explicitly, Compute trusts that over a
-	// reverse-lookup (future-proofs against text changes).
-	c := &Computer{
-		Clock:    &fakeClock{t: time.Unix(0, 0)},
-		Detector: fakeDetector{},
-		IPC: fakeIPC{
-			status: &ipc.StatusData{ServiceState: "running"},
-			users: []ipc.UserStatus{
-				{
-					Username:  "alice",
-					State:     "error",
-					LastError: "some evolved wording",
-					ErrorCode: ipc.CodeDownloadFolderInaccessible,
-				},
-			},
-		},
-		Config:   fakeConfig{cfg: newEnabledConfig()},
-		Identity: fakeIdentity{username: "alice"},
-	}
-	s := c.Compute(context.Background(), State{})
-	if s.LastErrorCode != ipc.CodeDownloadFolderInaccessible {
-		t.Errorf("LastErrorCode = %q, want explicit CodeDownloadFolderInaccessible", s.LastErrorCode)
-	}
-}
-
-// A daemon that is up and registered but whose last scan failed must still
-// surface the failure. The per-user entry carries no error in that case, so it
-// has to come from the service-level status, timestamp included — otherwise the
-// only symptom is a last-scan time that quietly stops advancing.
-func TestCompute_ScanFailureFromStatusIsSurfaced(t *testing.T) {
-	errAt := time.Unix(1700000000, 0)
-	c := &Computer{
-		Clock:    &fakeClock{t: time.Unix(1700000060, 0)},
-		Detector: fakeDetector{},
-		IPC: fakeIPC{
-			status: &ipc.StatusData{
-				ServiceState:  "running",
-				LastError:     ipc.CanonicalText[ipc.CodeScanFailed] + ": list jobs failed: 503",
-				LastErrorCode: ipc.CodeScanFailed,
-				LastErrorTime: &errAt,
-			},
-			users: []ipc.UserStatus{{Username: "alice", State: "running"}},
-		},
-		Config:   fakeConfig{cfg: newEnabledConfig()},
-		Identity: fakeIdentity{username: "alice"},
-	}
-	s := c.Compute(context.Background(), State{})
-	if s.PerUser != PerUserRunning {
-		t.Errorf("PerUser = %v, want PerUserRunning (a failed scan is not a dead daemon)", s.PerUser)
-	}
-	if s.LastErrorCode != ipc.CodeScanFailed {
-		t.Errorf("LastErrorCode = %q, want %q", s.LastErrorCode, ipc.CodeScanFailed)
-	}
-	if !strings.Contains(s.LastError, "list jobs failed: 503") {
-		t.Errorf("LastError = %q, want it to carry the scan error detail", s.LastError)
-	}
-	if s.LastErrorTime == nil || !s.LastErrorTime.Equal(errAt) {
-		t.Errorf("LastErrorTime = %v, want %v", s.LastErrorTime, errAt)
 	}
 }
 

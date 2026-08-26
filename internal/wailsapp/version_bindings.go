@@ -52,8 +52,10 @@ var (
 // We never use API-provided URLs (html_url) to prevent open-redirect attacks.
 const releaseURL = "https://github.com/rescale-labs/Rescale_Interlink/releases/latest"
 
-// githubAPIURL is the GitHub API endpoint for the latest release.
-const githubAPIURL = "https://api.github.com/repos/rescale-labs/Rescale_Interlink/releases/latest"
+// githubAPIURL is the GitHub API endpoint for the latest release. It is a var
+// rather than a const only so tests can point doVersionCheck at a local server
+// instead of reaching the real GitHub API.
+var githubAPIURL = "https://api.github.com/repos/rescale-labs/Rescale_Interlink/releases/latest"
 
 // githubRelease is the minimal subset of the GitHub release API response we parse.
 type githubRelease struct {

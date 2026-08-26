@@ -57,12 +57,12 @@ func (m *mockCloudTransferDownload) StorageType() string {
 // mockStreamingDownloader extends mockCloudTransferDownload with format detection.
 type mockStreamingDownloader struct {
 	mockCloudTransferDownload
-	formatVersion        int
-	fileID               string
-	partSize             int64
-	iv                   []byte // IV for legacy format (v0)
-	detectFormatErr      error
-	downloadStreamingErr error
+	formatVersion           int
+	fileID                  string
+	partSize                int64
+	iv                      []byte // IV for legacy format (v0)
+	detectFormatErr         error
+	downloadStreamingErr    error
 	streamingDownloadCalled bool
 }
 
@@ -184,9 +184,9 @@ func TestDownloaderLegacyFormat(t *testing.T) {
 // TestDownloaderStreamingFormat tests downloading with streaming format.
 func TestDownloaderStreamingFormat(t *testing.T) {
 	mock := &mockStreamingDownloader{
-		formatVersion: 1, // Streaming format
+		formatVersion: 1,                                              // Streaming format
 		fileID:        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", // 32 bytes base64
-		partSize:      64 * 1024 * 1024, // 64 MB
+		partSize:      64 * 1024 * 1024,                               // 64 MB
 	}
 	downloader := NewDownloader(mock)
 
@@ -208,101 +208,6 @@ func TestDownloaderStreamingFormat(t *testing.T) {
 	// For streaming format, should call DownloadStreaming
 	if !mock.streamingDownloadCalled {
 		t.Error("expected DownloadStreaming to be called for streaming format")
-	}
-}
-
-// TestDownloadPrepFormatVersion tests DownloadPrep struct initialization.
-func TestDownloadPrepFormatVersion(t *testing.T) {
-	tests := []struct {
-		name          string
-		formatVersion int
-		expected      int
-	}{
-		{"legacy format", 0, 0},
-		{"streaming format", 1, 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			prep := &DownloadPrep{
-				FormatVersion: tt.formatVersion,
-			}
-			if prep.FormatVersion != tt.expected {
-				t.Errorf("expected format version %d, got %d", tt.expected, prep.FormatVersion)
-			}
-		})
-	}
-}
-
-// TestStreamingDownloadInitParams tests the streaming download init params struct.
-func TestStreamingDownloadInitParams(t *testing.T) {
-	params := StreamingDownloadInitParams{
-		RemotePath: "/remote/file.txt",
-		LocalPath:  "/local/file.txt",
-		MasterKey:  []byte("test-key"),
-		FileID:     []byte("test-file-id"),
-		PartSize:   64 * 1024 * 1024,
-	}
-
-	if params.RemotePath != "/remote/file.txt" {
-		t.Error("RemotePath not set correctly")
-	}
-	if params.LocalPath != "/local/file.txt" {
-		t.Error("LocalPath not set correctly")
-	}
-	if string(params.MasterKey) != "test-key" {
-		t.Error("MasterKey not set correctly")
-	}
-	if string(params.FileID) != "test-file-id" {
-		t.Error("FileID not set correctly")
-	}
-	if params.PartSize != 64*1024*1024 {
-		t.Error("PartSize not set correctly")
-	}
-}
-
-// TestStreamingDownload tests the StreamingDownload struct.
-func TestStreamingDownload(t *testing.T) {
-	download := &StreamingDownload{
-		RemotePath:    "/remote/file.txt",
-		LocalPath:     "/local/file.txt",
-		MasterKey:     []byte("test-key"),
-		FileID:        []byte("test-file-id"),
-		PartSize:      64 * 1024 * 1024,
-		EncryptedSize: 150 * 1024 * 1024,
-		TotalParts:    3,
-	}
-
-	if download.RemotePath != "/remote/file.txt" {
-		t.Error("RemotePath not set correctly")
-	}
-	if download.LocalPath != "/local/file.txt" {
-		t.Error("LocalPath not set correctly")
-	}
-	if download.EncryptedSize != 150*1024*1024 {
-		t.Error("EncryptedSize not set correctly")
-	}
-	if download.TotalParts != 3 {
-		t.Error("TotalParts not set correctly")
-	}
-}
-
-// TestPartDownloadResult tests the PartDownloadResult struct.
-func TestPartDownloadResult(t *testing.T) {
-	result := &PartDownloadResult{
-		PartIndex: 2,
-		Plaintext: []byte("decrypted data"),
-		Size:      14,
-	}
-
-	if result.PartIndex != 2 {
-		t.Error("PartIndex not set correctly")
-	}
-	if string(result.Plaintext) != "decrypted data" {
-		t.Error("Plaintext not set correctly")
-	}
-	if result.Size != 14 {
-		t.Error("Size not set correctly")
 	}
 }
 

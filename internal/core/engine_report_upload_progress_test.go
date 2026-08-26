@@ -20,83 +20,103 @@ func newProgressTestEngine(t *testing.T) *Engine {
 	return e
 }
 
-// TestReportUploadProgress_inProgressUpdatesTransientOnly — first and
-// subsequent "in_progress" calls must not change UploadStatus (stays at
-// the initialized "pending"); only UploadProgress is updated. This is the
-// contract the runStore polling-merge guard relies on.
-func TestReportUploadProgress_inProgressUpdatesTransientOnly(t *testing.T) {
-	e := newProgressTestEngine(t)
-	e.EnsureSingleJobState("job1")
-
-	ch := e.eventBus.Subscribe(events.EventStateChange)
-	e.ReportUploadProgress("job1", 0.42, "in_progress", "")
-
-	js := e.state.GetState(1)
-	if js == nil {
-		t.Fatal("state row for index 1 missing after EnsureSingleJobState")
+// TestReportUploadProgress covers the transient-versus-terminal split the
+// runStore polling-merge guard relies on: "in_progress" updates only the
+// progress fraction, while terminal statuses persist through UpdateState so the
+// pipeline's InputFiles skip branch preserves them.
+func TestReportUploadProgress(t *testing.T) {
+	tests := []struct {
+		name string
+		// ensureRow false skips EnsureSingleJobState, leaving the manager empty.
+		ensureRow bool
+		progress  float64
+		status    string
+		errMsg    string
+		// wantRows is the expected number of state rows afterwards.
+		wantRows     int
+		wantStatus   string
+		wantProgress float64
+		wantErrMsg   string
+	}{
+		{
+			name:      "in_progress does not persist a status",
+			ensureRow: true, progress: 0.42, status: "in_progress",
+			wantRows: 1, wantStatus: "pending", wantProgress: 0.42,
+		},
+		{
+			name:      "success persists the terminal status",
+			ensureRow: true, progress: 1.0, status: "success",
+			wantRows: 1, wantStatus: "success", wantProgress: 1.0,
+		},
+		{
+			name:      "failed carries the error message",
+			ensureRow: true, progress: 0.3, status: "failed", errMsg: "network broken",
+			wantRows: 1, wantStatus: "failed", wantProgress: 0.3, wantErrMsg: "network broken",
+		},
+		{
+			// Defensive guard: a terminal report for an unknown job must not
+			// panic and must not invent a row.
+			name:      "terminal without a row invents nothing",
+			ensureRow: false, progress: 1.0, status: "success",
+			wantRows: 0,
+		},
 	}
-	if js.JobName != "job1" {
-		t.Errorf("JobName = %q, want %q", js.JobName, "job1")
-	}
-	if js.UploadStatus != "pending" {
-		t.Errorf("UploadStatus = %q, want %q (in_progress must NOT persist)", js.UploadStatus, "pending")
-	}
-	if js.UploadProgress < 0.41 || js.UploadProgress > 0.43 {
-		t.Errorf("UploadProgress = %v, want ~0.42", js.UploadProgress)
-	}
 
-	select {
-	case evt := <-ch:
-		sce, ok := evt.(*events.StateChangeEvent)
-		if !ok {
-			t.Fatalf("expected *StateChangeEvent, got %T", evt)
-		}
-		if sce.EventType != events.EventStateChange {
-			t.Errorf("EventType = %v, want EventStateChange (BaseEvent missing?)", sce.EventType)
-		}
-		if sce.Stage != "upload" || sce.NewStatus != "in_progress" {
-			t.Errorf("event stage/status = %q/%q, want upload/in_progress", sce.Stage, sce.NewStatus)
-		}
-		if sce.UploadProgress < 0.41 || sce.UploadProgress > 0.43 {
-			t.Errorf("event UploadProgress = %v, want ~0.42", sce.UploadProgress)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("no StateChangeEvent received")
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newProgressTestEngine(t)
+			if tt.ensureRow {
+				e.EnsureSingleJobState("job1")
+			}
 
-// TestReportUploadProgress_successWritesTerminalStatus — terminal
-// "success" persists UploadStatus via UpdateState so the pipeline
-// InputFiles skip branch (guarded by nextSkipStatus) preserves it.
-func TestReportUploadProgress_successWritesTerminalStatus(t *testing.T) {
-	e := newProgressTestEngine(t)
-	e.EnsureSingleJobState("job1")
+			ch := e.eventBus.Subscribe(events.EventStateChange)
+			e.ReportUploadProgress("job1", tt.progress, tt.status, tt.errMsg)
 
-	e.ReportUploadProgress("job1", 1.0, "success", "")
+			if n := len(e.state.GetAllStates()); n != tt.wantRows {
+				t.Fatalf("state rows = %d, want %d", n, tt.wantRows)
+			}
+			if tt.wantRows == 0 {
+				return
+			}
 
-	js := e.state.GetState(1)
-	if js == nil || js.UploadStatus != "success" {
-		t.Errorf("UploadStatus = %v, want %q", js, "success")
-	}
-	if js.UploadProgress != 1.0 {
-		t.Errorf("UploadProgress = %v, want 1.0", js.UploadProgress)
-	}
-}
+			js := e.state.GetState(1)
+			if js == nil {
+				t.Fatal("state row for index 1 missing after EnsureSingleJobState")
+			}
+			if js.JobName != "job1" {
+				t.Errorf("JobName = %q, want %q", js.JobName, "job1")
+			}
+			if js.UploadStatus != tt.wantStatus {
+				t.Errorf("UploadStatus = %q, want %q", js.UploadStatus, tt.wantStatus)
+			}
+			if js.UploadProgress < tt.wantProgress-0.01 || js.UploadProgress > tt.wantProgress+0.01 {
+				t.Errorf("UploadProgress = %v, want ~%v", js.UploadProgress, tt.wantProgress)
+			}
+			if js.ErrorMessage != tt.wantErrMsg {
+				t.Errorf("ErrorMessage = %q, want %q", js.ErrorMessage, tt.wantErrMsg)
+			}
 
-// TestReportUploadProgress_failedCarriesErrorMessage — terminal "failed"
-// persists status + ErrorMessage.
-func TestReportUploadProgress_failedCarriesErrorMessage(t *testing.T) {
-	e := newProgressTestEngine(t)
-	e.EnsureSingleJobState("job1")
-
-	e.ReportUploadProgress("job1", 0.3, "failed", "network broken")
-
-	js := e.state.GetState(1)
-	if js == nil || js.UploadStatus != "failed" {
-		t.Fatalf("UploadStatus = %v, want %q", js, "failed")
-	}
-	if js.ErrorMessage != "network broken" {
-		t.Errorf("ErrorMessage = %q, want %q", js.ErrorMessage, "network broken")
+			// Every report publishes one StateChangeEvent carrying the reported
+			// (not the persisted) status.
+			select {
+			case evt := <-ch:
+				sce, ok := evt.(*events.StateChangeEvent)
+				if !ok {
+					t.Fatalf("expected *StateChangeEvent, got %T", evt)
+				}
+				if sce.EventType != events.EventStateChange {
+					t.Errorf("EventType = %v, want EventStateChange (BaseEvent missing?)", sce.EventType)
+				}
+				if sce.Stage != "upload" || sce.NewStatus != tt.status {
+					t.Errorf("event stage/status = %q/%q, want upload/%s", sce.Stage, sce.NewStatus, tt.status)
+				}
+				if sce.UploadProgress < tt.wantProgress-0.01 || sce.UploadProgress > tt.wantProgress+0.01 {
+					t.Errorf("event UploadProgress = %v, want ~%v", sce.UploadProgress, tt.wantProgress)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("no StateChangeEvent received")
+			}
+		})
 	}
 }
 
@@ -114,19 +134,5 @@ func TestEnsureSingleJobState_isIdempotent(t *testing.T) {
 	}
 	if all[0].Index != 1 || all[0].JobName != "job1" {
 		t.Errorf("row = {Index:%d, JobName:%q}, want {Index:1, JobName:\"job1\"}", all[0].Index, all[0].JobName)
-	}
-}
-
-// TestReportUploadProgress_terminalWithoutRowLogsWarning — calling
-// terminal status without a pre-existing row must not panic and must not
-// invent a row. Defensive guard against programming errors.
-func TestReportUploadProgress_terminalWithoutRowLogsWarning(t *testing.T) {
-	e := newProgressTestEngine(t)
-
-	// No EnsureSingleJobState call — state manager is empty.
-	e.ReportUploadProgress("ghost", 1.0, "success", "")
-
-	if n := len(e.state.GetAllStates()); n != 0 {
-		t.Errorf("state.GetAllStates len = %d, want 0 (terminal without row must not invent one)", n)
 	}
 }

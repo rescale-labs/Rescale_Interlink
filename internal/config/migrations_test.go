@@ -6,76 +6,92 @@ import (
 	"testing"
 )
 
-func TestCopyThenRemove_SourceMissing(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), "dst")
-	if err := copyThenRemove(filepath.Join(t.TempDir(), "missing"), dst); err != nil {
-		t.Fatalf("missing source should be no-op, got %v", err)
-	}
-	if _, err := os.Stat(dst); !os.IsNotExist(err) {
-		t.Fatalf("dst should not be created when source is missing")
-	}
-}
-
-func TestCopyThenRemove_HappyPath(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src")
-	dst := filepath.Join(dir, "subdir", "dst")
-	if err := os.WriteFile(src, []byte("hello"), 0600); err != nil {
-		t.Fatalf("write src: %v", err)
-	}
-	if err := copyThenRemove(src, dst); err != nil {
-		t.Fatalf("copyThenRemove: %v", err)
-	}
-	if _, err := os.Stat(src); !os.IsNotExist(err) {
-		t.Fatalf("src should be removed")
-	}
-	got, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("read dst: %v", err)
-	}
-	if string(got) != "hello" {
-		t.Fatalf("dst content = %q, want %q", got, "hello")
-	}
-}
-
-func TestCopyThenRemove_DoesNotOverwriteExisting(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src")
-	dst := filepath.Join(dir, "dst")
-	if err := os.WriteFile(src, []byte("new"), 0600); err != nil {
-		t.Fatalf("write src: %v", err)
-	}
-	if err := os.WriteFile(dst, []byte("old"), 0600); err != nil {
-		t.Fatalf("write dst: %v", err)
+// TestCopyThenRemove covers the migration primitive: it copies then deletes the
+// source, but never clobbers a destination that already exists, and a missing
+// source is a no-op so re-running startup migrations is safe.
+func TestCopyThenRemove(t *testing.T) {
+	tests := []struct {
+		name string
+		// srcContent empty means the source file is not created.
+		srcContent  string
+		dstContent  string // when set, dst pre-exists with this content
+		nestedDst   bool   // dst lives in a directory that must be created
+		wantDst     string // "" means dst must not exist
+		wantSrcKept bool
+		twice       bool // call copyThenRemove a second time
+	}{
+		{
+			name: "missing source is a no-op",
+		},
+		{
+			name:       "copies then removes the source",
+			srcContent: "hello", nestedDst: true,
+			wantDst: "hello",
+		},
+		{
+			name:       "existing destination is not overwritten",
+			srcContent: "new", dstContent: "old",
+			wantDst: "old", wantSrcKept: true,
+		},
+		{
+			// The second call has no source left, so it must not error.
+			name:       "idempotent",
+			srcContent: "x", twice: true,
+			wantDst: "x",
+		},
 	}
 
-	if err := copyThenRemove(src, dst); err != nil {
-		t.Fatalf("copyThenRemove: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "src")
+			dst := filepath.Join(dir, "dst")
+			if tt.nestedDst {
+				dst = filepath.Join(dir, "subdir", "dst")
+			}
 
-	// dst must retain its existing content; src must remain untouched.
-	got, _ := os.ReadFile(dst)
-	if string(got) != "old" {
-		t.Fatalf("dst overwritten: got %q, want %q", got, "old")
-	}
-	if _, err := os.Stat(src); err != nil {
-		t.Fatalf("src should remain when dst pre-exists: %v", err)
-	}
-}
+			if tt.srcContent != "" {
+				if err := os.WriteFile(src, []byte(tt.srcContent), 0600); err != nil {
+					t.Fatalf("write src: %v", err)
+				}
+			}
+			if tt.dstContent != "" {
+				if err := os.WriteFile(dst, []byte(tt.dstContent), 0600); err != nil {
+					t.Fatalf("write dst: %v", err)
+				}
+			}
 
-func TestCopyThenRemove_Idempotent(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src")
-	dst := filepath.Join(dir, "dst")
-	if err := os.WriteFile(src, []byte("x"), 0600); err != nil {
-		t.Fatalf("write src: %v", err)
-	}
-	if err := copyThenRemove(src, dst); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	// Second call with no source is a no-op.
-	if err := copyThenRemove(src, dst); err != nil {
-		t.Fatalf("second call: %v", err)
+			if err := copyThenRemove(src, dst); err != nil {
+				t.Fatalf("copyThenRemove: %v", err)
+			}
+			if tt.twice {
+				if err := copyThenRemove(src, dst); err != nil {
+					t.Fatalf("second call: %v", err)
+				}
+			}
+
+			if tt.wantDst == "" {
+				if _, err := os.Stat(dst); !os.IsNotExist(err) {
+					t.Fatalf("dst should not be created")
+				}
+			} else {
+				got, err := os.ReadFile(dst)
+				if err != nil {
+					t.Fatalf("read dst: %v", err)
+				}
+				if string(got) != tt.wantDst {
+					t.Fatalf("dst content = %q, want %q", got, tt.wantDst)
+				}
+			}
+
+			_, srcErr := os.Stat(src)
+			if tt.wantSrcKept && srcErr != nil {
+				t.Fatalf("src should remain when dst pre-exists: %v", srcErr)
+			}
+			if !tt.wantSrcKept && tt.srcContent != "" && !os.IsNotExist(srcErr) {
+				t.Fatalf("src should be removed, stat err = %v", srcErr)
+			}
+		})
 	}
 }
 

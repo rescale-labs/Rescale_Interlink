@@ -20,402 +20,196 @@ func setupCmdTest(cmd *cobra.Command) {
 	SetCompatContext(cmd, &CompatContext{})
 }
 
-func TestStatusCmd_RequiresJobID(t *testing.T) {
-	cmd := newStatusCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for missing --job-id")
+func TestCompatCmdValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		// newCmd builds the command under test; setupCmdTest supplies a
+		// CompatContext so PersistentPreRunE auth never runs.
+		newCmd    func() *cobra.Command
+		args      []string
+		wantErr   string // error must mention this
+		wantExact string // error message must equal this
+		notWant   string // error must not mention this
+	}{
+		{name: "status requires job ID", newCmd: newStatusCmd, wantErr: "--job-id is required"},
+		{name: "status -e reaches the API", newCmd: newStatusCmd, args: []string{"-e", "-j", "TEST123"}, notWant: "not yet implemented"},
+		{name: "status --load-hours reaches the API", newCmd: newStatusCmd, args: []string{"--load-hours", "24", "-j", "TEST123"}, notWant: "not yet implemented"},
+
+		{name: "list-info requires -c or -a", newCmd: newListInfoCmd, wantErr: "required"},
+		{name: "list-info -c and -a are exclusive", newCmd: newListInfoCmd, args: []string{"-c", "-a"}, wantErr: "mutually exclusive"},
+		{name: "list-info -d is deferred", newCmd: newListInfoCmd, args: []string{"-d"}, wantErr: "not yet implemented"},
+
+		{name: "upload requires -f", newCmd: newUploadCmd, wantErr: "-f"},
+		{name: "upload --copy-to-cfs is deferred", newCmd: newUploadCmd, args: []string{"--copy-to-cfs", "-f", "a.txt"}, wantErr: "not yet implemented"},
+		{name: "upload -r reaches the API", newCmd: newUploadCmd, args: []string{"-r", "report.json", "-f", "a.txt"}, notWant: "not yet implemented"},
+		{name: "upload -e reaches the API", newCmd: newUploadCmd, args: []string{"-e", "-f", "a.txt"}, notWant: "not yet implemented"},
+
+		{name: "download-file requires an ID", newCmd: newDownloadFileCmd, wantErr: "required"},
+		{name: "download-file -j and --file-id are exclusive", newCmd: newDownloadFileCmd, args: []string{"-j", "JOB1", "--file-id", "FILE1"}, wantErr: "mutually exclusive"},
+		{name: "download-file --run-id reaches the API", newCmd: newDownloadFileCmd, args: []string{"-r", "RUN1", "-j", "JOB1"}, notWant: "not yet implemented"},
+		// The -e -j rejection happens after GetAPIClient(), so without
+		// credentials the auth error arrives first; either way it must fail.
+		{name: "download-file -e -j fails", newCmd: newDownloadFileCmd, args: []string{"-e", "-j", "JOB1"}},
+		{name: "download-file -e --file-id reaches the API", newCmd: newDownloadFileCmd, args: []string{"-e", "--file-id", "FILE1"}, notWant: "not yet implemented"},
+
+		{name: "submit requires a script", newCmd: newSubmitCmd, wantErr: "script file required"},
+		{name: "submit -e validates the script file", newCmd: newSubmitCmd, args: []string{"-e", "-i", "nonexistent_script.sh"}, notWant: "not yet implemented"},
+		{name: "submit --p-cluster is accepted", newCmd: newSubmitCmd, args: []string{"--p-cluster", "CL1", "-i", "nonexistent_script.sh"}, notWant: "not yet implemented"},
+		{name: "submit --waive-sla is accepted", newCmd: newSubmitCmd, args: []string{"--waive-sla", "-i", "nonexistent_script.sh"}, notWant: "not yet implemented"},
+
+		{name: "list-files requires job ID", newCmd: newListFilesCmd, wantErr: "--job-id is required"},
+		{name: "sync requires job ID", newCmd: newSyncCmd, wantExact: "--job-id is required"},
 	}
-	if !strings.Contains(err.Error(), "--job-id is required") {
-		t.Errorf("unexpected error: %v", err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := tt.newCmd()
+			setupCmdTest(cmd)
+			if err := cmd.Flags().Parse(tt.args); err != nil {
+				t.Fatalf("flag parse: %v", err)
+			}
+
+			err := cmd.RunE(cmd, []string{})
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if tt.wantExact != "" && err.Error() != tt.wantExact {
+				t.Errorf("error = %q, want exactly %q", err.Error(), tt.wantExact)
+			}
+			if tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want mention of %q", err, tt.wantErr)
+			}
+			if tt.notWant != "" && strings.Contains(err.Error(), tt.notWant) {
+				t.Errorf("error = %v, should not mention %q", err, tt.notWant)
+			}
+		})
 	}
 }
 
-func TestStatusCmd_ExtendedOutputRequiresAPI(t *testing.T) {
-	// status -e now attempts real API calls — should fail without valid API key,
-	// NOT return "not yet implemented"
-	cmd := newStatusCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{"-e", "-j", "TEST123"})
-	cmd.Flags().Parse([]string{"-e", "-j", "TEST123"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error (no API client)")
+// TestCompatRootCmdExecute drives commands through the root command so
+// PersistentPreRunE (auth) runs, which is what a real invocation does.
+func TestCompatRootCmdExecute(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+		errWant string
+	}{
+		// Auth may fail before the missing-flag check; either way it errors.
+		{name: "stop without job ID", args: []string{"stop"}, wantErr: true},
+		{name: "delete without job ID", args: []string{"delete"}, wantErr: true},
+		{name: "check-for-update needs no API key", args: []string{"check-for-update"}},
+		{name: "check-for-update -i is deferred", args: []string{"check-for-update", "-i"}, wantErr: true, errWant: "not yet implemented"},
 	}
-	if strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("status -e should no longer be deferred, got: %v", err)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rootCmd, _ := NewCompatRootCmd()
+			var out strings.Builder
+			rootCmd.SetOut(&out)
+			rootCmd.SetArgs(tt.args)
+
+			err := rootCmd.Execute()
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if err.Error() == "" {
+				t.Error("expected a non-empty error message")
+			}
+			if tt.errWant != "" && !strings.Contains(err.Error(), tt.errWant) {
+				t.Errorf("error = %v, want mention of %q", err, tt.errWant)
+			}
+		})
 	}
 }
 
-func TestStatusCmd_LoadHoursAccepted(t *testing.T) {
-	// --load-hours is no longer deferred — it should proceed past the guard
-	// and fail on API/auth, not "not yet implemented"
-	cmd := newStatusCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{"--load-hours", "24", "-j", "TEST123"})
-	cmd.Flags().Parse([]string{"--load-hours", "24", "-j", "TEST123"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error (no API client)")
+func TestCompatCmdFlags(t *testing.T) {
+	tests := []struct {
+		cmdName       string
+		newCmd        func() *cobra.Command
+		flag          string
+		wantShorthand string
+		wantHidden    bool
+	}{
+		{cmdName: "status", newCmd: newStatusCmd, flag: "job-id", wantShorthand: "j"},
+		{cmdName: "status", newCmd: newStatusCmd, flag: "extended-output", wantShorthand: "e"},
+		{cmdName: "status", newCmd: newStatusCmd, flag: "load-hours"},
+		{cmdName: "download-file", newCmd: newDownloadFileCmd, flag: "file-id"},
+		{cmdName: "download-file", newCmd: newDownloadFileCmd, flag: "run-id", wantShorthand: "r"},
+		{cmdName: "submit", newCmd: newSubmitCmd, flag: "p-cluster"},
+		{cmdName: "submit", newCmd: newSubmitCmd, flag: "waive-sla"},
+		{cmdName: "upload", newCmd: newUploadCmd, flag: "report", wantShorthand: "r"},
+		{cmdName: "list-files", newCmd: newListFilesCmd, flag: "run-id", wantShorthand: "r"},
 	}
-	if strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("--load-hours should no longer be deferred, got: %v", err)
+
+	for _, tt := range tests {
+		t.Run(tt.cmdName+"/"+tt.flag, func(t *testing.T) {
+			flag := tt.newCmd().Flags().Lookup(tt.flag)
+			if flag == nil {
+				t.Fatalf("--%s not registered", tt.flag)
+			}
+			if flag.Shorthand != tt.wantShorthand {
+				t.Errorf("--%s shorthand = %q, want %q", tt.flag, flag.Shorthand, tt.wantShorthand)
+			}
+			if flag.Hidden != tt.wantHidden {
+				t.Errorf("--%s hidden = %v, want %v", tt.flag, flag.Hidden, tt.wantHidden)
+			}
+		})
 	}
 }
 
-func TestStatusCmd_Flags(t *testing.T) {
-	cmd := newStatusCmd()
-
-	flags := []struct {
-		name      string
+// TestCompatCmdShorthandMappings pins the shorthands rescale-cli users type, so
+// a renamed long flag cannot silently steal a letter.
+func TestCompatCmdShorthandMappings(t *testing.T) {
+	tests := []struct {
+		cmdName   string
+		newCmd    func() *cobra.Command
 		shorthand string
-		hidden    bool
+		wantFlag  string
 	}{
-		{"job-id", "j", false},
-		{"extended-output", "e", false},
-		{"load-hours", "", false}, // no longer hidden
-	}
-
-	for _, f := range flags {
-		flag := cmd.Flags().Lookup(f.name)
-		if flag == nil {
-			t.Errorf("flag %q not registered", f.name)
-			continue
-		}
-		if f.shorthand != "" && flag.Shorthand != f.shorthand {
-			t.Errorf("flag %q shorthand = %q, want %q", f.name, flag.Shorthand, f.shorthand)
-		}
-		if flag.Hidden != f.hidden {
-			t.Errorf("flag %q hidden = %v, want %v", f.name, flag.Hidden, f.hidden)
-		}
-	}
-}
-
-func TestStopCmd_RequiresJobID(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-	rootCmd.SetArgs([]string{"stop"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for missing --job-id")
-	}
-	// Auth may fail first; just verify we get an error
-	if err.Error() == "" {
-		t.Error("expected non-empty error")
-	}
-}
-
-func TestDeleteCmd_RequiresJobID(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-	rootCmd.SetArgs([]string{"delete"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for missing --job-id")
-	}
-	if err.Error() == "" {
-		t.Error("expected non-empty error")
-	}
-}
-
-func TestCheckForUpdateCmd_SkipAuth(t *testing.T) {
-	cmd := newCheckForUpdateCmd()
-
-	if cmd.Annotations == nil || cmd.Annotations["skipAuth"] != "true" {
-		t.Error("check-for-update should have skipAuth annotation")
-	}
-}
-
-func TestCheckForUpdateCmd_RunsWithoutAPIKey(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-
-	var out strings.Builder
-	rootCmd.SetOut(&out)
-	rootCmd.SetArgs([]string{"check-for-update"})
-
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("check-for-update returned error: %v", err)
-	}
-}
-
-func TestCheckForUpdateCmd_DeferredInstallFlag(t *testing.T) {
-	rootCmd, _ := NewCompatRootCmd()
-	rootCmd.SetArgs([]string{"check-for-update", "-i"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for deferred -i flag")
-	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' error, got: %v", err)
-	}
-}
-
-func TestListInfoCmd_RequiresFlag(t *testing.T) {
-	cmd := newListInfoCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error when neither -c nor -a specified")
-	}
-	if !strings.Contains(err.Error(), "required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestListInfoCmd_MutualExclusion(t *testing.T) {
-	cmd := newListInfoCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-c", "-a"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for mutually exclusive flags")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestListInfoCmd_DeferredDesktopsFlag(t *testing.T) {
-	cmd := newListInfoCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-d"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for deferred -d flag")
-	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' error, got: %v", err)
-	}
-}
-
-func TestUploadCmd_RequiresFiles(t *testing.T) {
-	cmd := newUploadCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for missing -f flag")
-	}
-	if !strings.Contains(err.Error(), "-f") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestUploadCmd_DeferredFlags(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{"copy-to-cfs", []string{"--copy-to-cfs", "-f", "a.txt"}},
+		{cmdName: "submit", newCmd: newSubmitCmd, shorthand: "f", wantFlag: "file-matcher"},
+		{cmdName: "submit", newCmd: newSubmitCmd, shorthand: "s", wantFlag: "search"},
+		{cmdName: "submit", newCmd: newSubmitCmd, shorthand: "i", wantFlag: "input-file"},
+		{cmdName: "upload", newCmd: newUploadCmd, shorthand: "f", wantFlag: "files"},
+		{cmdName: "upload", newCmd: newUploadCmd, shorthand: "d", wantFlag: "directory-id"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd := newUploadCmd()
-			setupCmdTest(cmd)
-			cmd.Flags().Parse(tt.args)
-			err := cmd.RunE(cmd, []string{})
-			if err == nil {
-				t.Fatal("expected error for deferred flag")
+		t.Run(tt.cmdName+"/-"+tt.shorthand, func(t *testing.T) {
+			flag := tt.newCmd().Flags().ShorthandLookup(tt.shorthand)
+			if flag == nil {
+				t.Fatalf("-%s shorthand not registered", tt.shorthand)
 			}
-			if !strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("expected 'not yet implemented' error, got: %v", err)
+			if flag.Name != tt.wantFlag {
+				t.Errorf("-%s maps to %q, want %q", tt.shorthand, flag.Name, tt.wantFlag)
 			}
 		})
 	}
 }
 
-func TestUploadCmd_ReportAccepted(t *testing.T) {
-	// -r (report) is no longer deferred — it should proceed past the guard
-	cmd := newUploadCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-r", "report.json", "-f", "a.txt"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error (no API client)")
-	}
-	if strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("-r should no longer be deferred, got: %v", err)
-	}
-}
-
-func TestUploadCmd_ExtendedOutputRequiresAPI(t *testing.T) {
-	cmd := newUploadCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-e", "-f", "a.txt"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error (no API client)")
-	}
-	if strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("upload -e should no longer be deferred, got: %v", err)
-	}
-}
-
-func TestDownloadFileCmd_RequiresIDFlag(t *testing.T) {
-	cmd := newDownloadFileCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error when neither -j nor --file-id specified")
-	}
-	if !strings.Contains(err.Error(), "required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestDownloadFileCmd_MutualExclusion(t *testing.T) {
-	cmd := newDownloadFileCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-j", "JOB1", "--file-id", "FILE1"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for mutually exclusive flags")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestDownloadFileCmd_RunIdAccepted(t *testing.T) {
-	// --run-id is no longer deferred — it should proceed past the guard
-	cmd := newDownloadFileCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-r", "RUN1", "-j", "JOB1"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error (no API client)")
-	}
-	if strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("--run-id should no longer be deferred, got: %v", err)
-	}
-}
-
-func TestDownloadFileCmd_ExtendedJobIDNotSupported(t *testing.T) {
-	// The -e -j "not supported" check happens after GetAPIClient(),
-	// so without credentials we get an auth error first.
-	// Verify we get an error (not success) for this combination.
-	cmd := newDownloadFileCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-e", "-j", "JOB1"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for -e -j combination")
-	}
-}
-
-func TestDownloadFileCmd_ExtendedFileIDRequiresAPI(t *testing.T) {
-	cmd := newDownloadFileCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-e", "--file-id", "FILE1"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error (no API client)")
-	}
-	if strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("download-file -e -fid should no longer be deferred, got: %v", err)
-	}
-}
-
-func TestDownloadFileCmd_FileIdFlag(t *testing.T) {
-	// Verify --file-id is registered without shorthand
-	cmd := newDownloadFileCmd()
-	flag := cmd.Flags().Lookup("file-id")
-	if flag == nil {
-		t.Fatal("--file-id flag not registered")
-	}
-	if flag.Shorthand != "" {
-		t.Errorf("--file-id should have no shorthand, got %q", flag.Shorthand)
-	}
-}
-
-func TestDownloadFileCmd_RunIdNotHidden(t *testing.T) {
-	cmd := newDownloadFileCmd()
-	flag := cmd.Flags().Lookup("run-id")
-	if flag == nil {
-		t.Fatal("--run-id flag not registered")
-	}
-	if flag.Hidden {
-		t.Error("--run-id should not be hidden")
-	}
-}
-
-func TestSubmitCmd_RequiresScript(t *testing.T) {
-	cmd := newSubmitCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for missing script")
-	}
-	if !strings.Contains(err.Error(), "script file required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestSubmitCmd_ExtendedOutputRequiresScript(t *testing.T) {
-	// submit -e without a valid script file should fail on file validation,
-	// not "not yet implemented"
-	cmd := newSubmitCmd()
-	setupCmdTest(cmd)
-	cmd.Flags().Parse([]string{"-e", "-i", "nonexistent_script.sh"})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for nonexistent script file")
-	}
-	if strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("submit -e should no longer be deferred, got: %v", err)
-	}
-}
-
-func TestSubmitCmd_WaiveSlaAndPClusterAccepted(t *testing.T) {
-	// --waive-sla and --p-cluster are no longer deferred
+func TestDetectSubcommand_ProfileFlag(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
+		want string
 	}{
-		{"p-cluster", []string{"--p-cluster", "CL1", "-i", "nonexistent_script.sh"}},
-		{"waive-sla", []string{"--waive-sla", "-i", "nonexistent_script.sh"}},
+		// --profile takes a value, which must not be read as the subcommand.
+		{name: "profile before command", args: []string{"--profile", "default", "upload", "-f", "a.txt"}, want: "upload"},
+		{name: "token and profile before command", args: []string{"-p", "TOKEN", "--profile", "eu", "status", "-j", "JOB1"}, want: "status"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := newSubmitCmd()
-			setupCmdTest(cmd)
-			cmd.Flags().Parse(tt.args)
-			err := cmd.RunE(cmd, []string{})
-			if err == nil {
-				t.Fatal("expected error (no script file)")
-			}
-			if strings.Contains(err.Error(), "not yet implemented") {
-				t.Errorf("%s should no longer be deferred, got: %v", tt.name, err)
+			if got := detectSubcommand(tt.args); got != tt.want {
+				t.Errorf("detectSubcommand() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestSubmitCmd_PClusterNotHidden(t *testing.T) {
-	cmd := newSubmitCmd()
-	flag := cmd.Flags().Lookup("p-cluster")
-	if flag == nil {
-		t.Fatal("--p-cluster flag not registered")
-	}
-	if flag.Hidden {
-		t.Error("--p-cluster should not be hidden")
-	}
-}
-
-func TestSubmitCmd_WaiveSlaNotHidden(t *testing.T) {
-	cmd := newSubmitCmd()
-	flag := cmd.Flags().Lookup("waive-sla")
-	if flag == nil {
-		t.Fatal("--waive-sla flag not registered")
-	}
-	if flag.Hidden {
-		t.Error("--waive-sla should not be hidden")
 	}
 }
 
@@ -441,74 +235,6 @@ func TestAllCommandsRegistered(t *testing.T) {
 		}
 	}
 }
-
-func TestSubmitCmd_ShortFlagMappings(t *testing.T) {
-	cmd := newSubmitCmd()
-
-	// -f should map to --file-matcher (NOT --job-file)
-	fFlag := cmd.Flags().ShorthandLookup("f")
-	if fFlag == nil {
-		t.Fatal("-f shorthand not registered")
-	}
-	if fFlag.Name != "file-matcher" {
-		t.Errorf("-f maps to %q, want \"file-matcher\"", fFlag.Name)
-	}
-
-	// -s should map to --search
-	sFlag := cmd.Flags().ShorthandLookup("s")
-	if sFlag == nil {
-		t.Fatal("-s shorthand not registered")
-	}
-	if sFlag.Name != "search" {
-		t.Errorf("-s maps to %q, want \"search\"", sFlag.Name)
-	}
-
-	// -i should map to --input-file
-	iFlag := cmd.Flags().ShorthandLookup("i")
-	if iFlag == nil {
-		t.Fatal("-i shorthand not registered")
-	}
-	if iFlag.Name != "input-file" {
-		t.Errorf("-i maps to %q, want \"input-file\"", iFlag.Name)
-	}
-}
-
-func TestUploadCmd_FlagShorthand(t *testing.T) {
-	cmd := newUploadCmd()
-
-	// -f should map to --files
-	fFlag := cmd.Flags().ShorthandLookup("f")
-	if fFlag == nil {
-		t.Fatal("-f shorthand not registered")
-	}
-	if fFlag.Name != "files" {
-		t.Errorf("-f maps to %q, want \"files\"", fFlag.Name)
-	}
-
-	// -d should map to --directory-id
-	dFlag := cmd.Flags().ShorthandLookup("d")
-	if dFlag == nil {
-		t.Fatal("-d shorthand not registered")
-	}
-	if dFlag.Name != "directory-id" {
-		t.Errorf("-d maps to %q, want \"directory-id\"", dFlag.Name)
-	}
-}
-
-func TestUploadCmd_ReportFlag(t *testing.T) {
-	cmd := newUploadCmd()
-	flag := cmd.Flags().Lookup("report")
-	if flag == nil {
-		t.Fatal("--report flag not registered")
-	}
-	if flag.Shorthand != "r" {
-		t.Errorf("--report shorthand = %q, want \"r\"", flag.Shorthand)
-	}
-	if flag.Hidden {
-		t.Error("--report should not be hidden")
-	}
-}
-
 func TestRootCmd_AuthSkipAnnotation(t *testing.T) {
 	rootCmd, _ := NewCompatRootCmd()
 
@@ -546,23 +272,6 @@ func TestRootCmd_ProfileFlagRegistered(t *testing.T) {
 	}
 	if flag.Hidden {
 		t.Error("--profile should not be hidden")
-	}
-}
-
-func TestDetectSubcommand_ProfileFlag(t *testing.T) {
-	// --profile takes a value — its value should not be detected as a subcommand
-	args := []string{"--profile", "default", "upload", "-f", "a.txt"}
-	got := detectSubcommand(args)
-	if got != "upload" {
-		t.Errorf("detectSubcommand() = %q, want \"upload\"", got)
-	}
-}
-
-func TestDetectSubcommand_ProfileFlagBeforeCommand(t *testing.T) {
-	args := []string{"-p", "TOKEN", "--profile", "eu", "status", "-j", "JOB1"}
-	got := detectSubcommand(args)
-	if got != "status" {
-		t.Errorf("detectSubcommand() = %q, want \"status\"", got)
 	}
 }
 
@@ -621,29 +330,5 @@ func TestWriteUploadReport_Stdout(t *testing.T) {
 
 	if !strings.Contains(output, "file123") {
 		t.Errorf("stdout report should contain file ID, got: %s", output)
-	}
-}
-
-func TestListFilesCmd_RunIdNotHidden(t *testing.T) {
-	cmd := newListFilesCmd()
-	flag := cmd.Flags().Lookup("run-id")
-	if flag == nil {
-		t.Fatal("--run-id flag not registered")
-	}
-	if flag.Hidden {
-		t.Error("--run-id should not be hidden")
-	}
-}
-
-func TestListFilesCmd_RequiresJobID(t *testing.T) {
-	cmd := newListFilesCmd()
-	setupCmdTest(cmd)
-	cmd.SetArgs([]string{})
-	err := cmd.RunE(cmd, []string{})
-	if err == nil {
-		t.Fatal("expected error for missing --job-id")
-	}
-	if !strings.Contains(err.Error(), "--job-id is required") {
-		t.Errorf("unexpected error: %v", err)
 	}
 }

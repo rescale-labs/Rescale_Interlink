@@ -5,38 +5,35 @@ import (
 	"testing"
 )
 
-func TestResolveSafeDownloadPath_Normal(t *testing.T) {
-	result, err := resolveSafeDownloadPath("subdir/file.txt", "/tmp/output")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expected := filepath.Join("/tmp/output", "subdir/file.txt")
-	if result != expected {
-		t.Errorf("expected %q, got %q", expected, result)
-	}
-}
+func TestResolveSafeDownloadPath(t *testing.T) {
+	const dest = "/tmp/output"
 
-func TestResolveSafeDownloadPath_TraversalRejected(t *testing.T) {
-	_, err := resolveSafeDownloadPath("../../.ssh/authorized_keys", "/tmp/output")
-	if err == nil {
-		t.Fatal("expected error for path traversal, got nil")
+	tests := []struct {
+		name    string
+		rel     string
+		wantErr bool
+	}{
+		{name: "nested path", rel: "subdir/file.txt"},
+		{name: "simple filename", rel: "file.txt"},
+		{name: "leading traversal is rejected", rel: "../../.ssh/authorized_keys", wantErr: true},
+		{name: "traversal in the middle is rejected", rel: "subdir/../../etc/passwd", wantErr: true},
 	}
-}
 
-func TestResolveSafeDownloadPath_DotDotInMiddle(t *testing.T) {
-	_, err := resolveSafeDownloadPath("subdir/../../etc/passwd", "/tmp/output")
-	if err == nil {
-		t.Fatal("expected error for path traversal, got nil")
-	}
-}
-
-func TestResolveSafeDownloadPath_SimpleFilename(t *testing.T) {
-	result, err := resolveSafeDownloadPath("file.txt", "/tmp/output")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expected := filepath.Join("/tmp/output", "file.txt")
-	if result != expected {
-		t.Errorf("expected %q, got %q", expected, result)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveSafeDownloadPath(tt.rel, dest)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %q", tt.rel, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if want := filepath.Join(dest, tt.rel); got != want {
+				t.Errorf("expected %q, got %q", want, got)
+			}
+		})
 	}
 }

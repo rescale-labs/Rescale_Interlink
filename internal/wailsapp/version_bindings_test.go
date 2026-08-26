@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 // =============================================================================
@@ -67,32 +68,6 @@ func TestReleaseURLIsTrusted(t *testing.T) {
 	expected := "https://github.com/rescale-labs/Rescale_Interlink/releases/latest"
 	if releaseURL != expected {
 		t.Errorf("releaseURL = %q, want %q", releaseURL, expected)
-	}
-}
-
-func TestDoVersionCheckUsesConstantURL(t *testing.T) {
-	// Mock server that returns a newer version with a malicious html_url
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{
-			"tag_name": "v99.0.0",
-			"html_url": "https://evil.example.com/malware",
-		})
-	}))
-	defer server.Close()
-
-	// Temporarily override the API URL
-	origURL := githubAPIURL
-	// We can't override the const, so we test via the full CheckForUpdates flow
-	// Instead, verify the result URL is always the constant
-	_ = origURL
-
-	// The VersionCheckDTO.ReleaseURL should always be the constant
-	result := VersionCheckDTO{
-		HasUpdate:  true,
-		ReleaseURL: releaseURL,
-	}
-	if result.ReleaseURL != "https://github.com/rescale-labs/Rescale_Interlink/releases/latest" {
-		t.Errorf("ReleaseURL = %q, should be trusted constant", result.ReleaseURL)
 	}
 }
 
@@ -176,88 +151,78 @@ func TestCheckForUpdatesDisabledOnFedRAMPSubdomain(t *testing.T) {
 // HTTP behavior tests
 // =============================================================================
 
-func TestDoVersionCheckSuccess(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Accept") != "application/vnd.github.v3+json" {
-			t.Errorf("unexpected Accept header: %s", r.Header.Get("Accept"))
-		}
-		json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
-	}))
-	defer server.Close()
+// TestVersionCheckHTTPBehavior drives the real CheckForUpdates -> doVersionCheck
+// path against a local server, covering the success, no-update, and every error
+// response, plus the three result-reporting branches that follow the fetch.
+func TestVersionCheckHTTPBehavior(t *testing.T) {
+	t.Setenv("RESCALE_DISABLE_UPDATE_CHECK", "") // the env kill switch must be off
 
-	result := doVersionCheckWithURL(server.URL)
-
-	if !result.HasUpdate {
-		t.Error("expected hasUpdate=true for v99.0.0")
+	tests := []struct {
+		name           string
+		status         int    // non-zero: reply with this status and no body
+		body           string // non-empty: reply with this raw body instead of encoding tag
+		tag            string
+		wantErr        bool
+		wantUpdate     bool
+		wantReleaseURL string
+	}{
+		{name: "newer release", tag: "v99.0.0", wantUpdate: true, wantReleaseURL: releaseURL},
+		{name: "older release", tag: "v0.0.1"},
+		{name: "malformed json", body: "not json", wantErr: true},
+		{name: "empty tag name", tag: "", wantErr: true},
+		{name: "status 403", status: http.StatusForbidden, wantErr: true},
+		{name: "status 404", status: http.StatusNotFound, wantErr: true},
+		{name: "status 429", status: http.StatusTooManyRequests, wantErr: true},
+		{name: "status 500", status: http.StatusInternalServerError, wantErr: true},
+		{name: "status 502", status: http.StatusBadGateway, wantErr: true},
 	}
-	if result.LatestVersion != "v99.0.0" {
-		t.Errorf("latestVersion = %q, want v99.0.0", result.LatestVersion)
-	}
-	if result.ReleaseURL != releaseURL {
-		t.Errorf("releaseURL = %q, want constant %q", result.ReleaseURL, releaseURL)
-	}
-	if result.Error != "" {
-		t.Errorf("unexpected error: %s", result.Error)
-	}
-}
 
-func TestDoVersionCheckNoUpdate(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(githubRelease{TagName: "v0.0.1"})
-	}))
-	defer server.Close()
-
-	result := doVersionCheckWithURL(server.URL)
-
-	if result.HasUpdate {
-		t.Error("expected hasUpdate=false for v0.0.1")
-	}
-	if result.ReleaseURL != "" {
-		t.Errorf("releaseURL should be empty when no update, got %q", result.ReleaseURL)
-	}
-}
-
-func TestDoVersionCheckMalformedJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("not json"))
-	}))
-	defer server.Close()
-
-	result := doVersionCheckWithURL(server.URL)
-
-	if result.Error == "" {
-		t.Error("expected error for malformed JSON")
-	}
-}
-
-func TestDoVersionCheckHTTPError(t *testing.T) {
-	tests := []int{403, 404, 429, 500, 502}
-	for _, code := range tests {
-		t.Run(fmt.Sprintf("status_%d", code), func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(code)
+				if got := r.Header.Get("Accept"); got != "application/vnd.github.v3+json" {
+					t.Errorf("unexpected Accept header: %s", got)
+				}
+				switch {
+				case tt.status != 0:
+					w.WriteHeader(tt.status)
+				case tt.body != "":
+					_, _ = w.Write([]byte(tt.body))
+				default:
+					_ = json.NewEncoder(w).Encode(githubRelease{TagName: tt.tag})
+				}
 			}))
 			defer server.Close()
 
-			result := doVersionCheckWithURL(server.URL)
+			withGithubAPIURL(t, server.URL)
+			resetVersionCache()
+			t.Cleanup(resetVersionCache)
 
-			if result.Error == "" {
-				t.Errorf("expected error for HTTP %d", code)
+			app := &App{config: &config.Config{APIBaseURL: "https://platform.rescale.com"}}
+			result := app.CheckForUpdates()
+
+			if tt.wantErr {
+				if result.Error == "" {
+					t.Fatalf("expected error, got %+v", result)
+				}
+				return
+			}
+			if result.Error != "" {
+				t.Fatalf("unexpected error: %s", result.Error)
+			}
+			if result.HasUpdate != tt.wantUpdate {
+				t.Errorf("hasUpdate = %v, want %v", result.HasUpdate, tt.wantUpdate)
+			}
+			if result.LatestVersion != tt.tag {
+				t.Errorf("latestVersion = %q, want %q", result.LatestVersion, tt.tag)
+			}
+			if result.ReleaseURL != tt.wantReleaseURL {
+				t.Errorf("releaseURL = %q, want %q", result.ReleaseURL, tt.wantReleaseURL)
+			}
+			if result.CurrentVersion != version.Version {
+				t.Errorf("currentVersion = %q, want %q", result.CurrentVersion, version.Version)
 			}
 		})
-	}
-}
-
-func TestDoVersionCheckEmptyTagName(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(githubRelease{TagName: ""})
-	}))
-	defer server.Close()
-
-	result := doVersionCheckWithURL(server.URL)
-
-	if result.Error == "" {
-		t.Error("expected error for empty tag_name")
 	}
 }
 
@@ -283,6 +248,7 @@ func TestCacheHitPreventsHTTPCall(t *testing.T) {
 		json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
 	}))
 	defer server.Close()
+	withGithubAPIURL(t, server.URL)
 
 	app := &App{config: &config.Config{APIBaseURL: "https://platform.rescale.com"}}
 
@@ -309,34 +275,6 @@ func TestCacheHitPreventsHTTPCall(t *testing.T) {
 	}
 }
 
-func TestErrorCacheExpiresFaster(t *testing.T) {
-	resetVersionCache()
-
-	// Pre-populate cache with an error result that's 2 hours old
-	versionCheckCache.mu.Lock()
-	versionCheckCache.result = VersionCheckDTO{
-		CurrentVersion: "v4.8.2",
-		CheckedAt:      time.Now().UTC().Format(time.RFC3339),
-		Error:          "some error",
-	}
-	versionCheckCache.lastCheck = time.Now().Add(-2 * time.Hour)
-	versionCheckCache.cacheValid = true
-	versionCheckCache.mu.Unlock()
-
-	// The cache should be expired for errors (1h TTL)
-	versionCheckCache.mu.RLock()
-	cacheTTL := successCacheDuration
-	if versionCheckCache.result.Error != "" {
-		cacheTTL = errorCacheDuration
-	}
-	expired := time.Since(versionCheckCache.lastCheck) >= cacheTTL
-	versionCheckCache.mu.RUnlock()
-
-	if !expired {
-		t.Error("error cache should be expired after 2 hours (1h TTL)")
-	}
-}
-
 // =============================================================================
 // In-flight dedup tests
 // =============================================================================
@@ -352,6 +290,7 @@ func TestInFlightDedup(t *testing.T) {
 		json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
 	}))
 	defer server.Close()
+	withGithubAPIURL(t, server.URL)
 
 	// Simulate in-flight check
 	checkInProgressMu.Lock()
@@ -376,26 +315,26 @@ func TestInFlightDedup(t *testing.T) {
 	}
 }
 
+// TestConcurrentChecksSingleHTTPCall verifies the in-flight dedup collapses
+// concurrent CheckForUpdates calls into exactly one HTTP request: the winner
+// fetches and caches, latecomers get the early-return or the cached result.
 func TestConcurrentChecksSingleHTTPCall(t *testing.T) {
 	resetVersionCache()
+	t.Cleanup(resetVersionCache)
 
 	var callCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
 		time.Sleep(50 * time.Millisecond)
-		json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
+		_ = json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
 	}))
 	defer server.Close()
-
-	// We need a way to call with custom URL. Since we can't override the const,
-	// we test the dedup mechanism itself: start one real check, then verify
-	// concurrent calls see the in-flight flag.
+	withGithubAPIURL(t, server.URL)
 
 	app := &App{config: &config.Config{APIBaseURL: "https://platform.rescale.com"}}
 
 	var wg sync.WaitGroup
 	results := make([]VersionCheckDTO, 5)
-
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(idx int) {
@@ -405,11 +344,25 @@ func TestConcurrentChecksSingleHTTPCall(t *testing.T) {
 	}
 	wg.Wait()
 
-	// All results should have a CurrentVersion
+	if got := callCount.Load(); got != 1 {
+		t.Errorf("expected exactly 1 HTTP call for 5 concurrent checks, got %d", got)
+	}
 	for i, r := range results {
 		if r.CurrentVersion == "" {
 			t.Errorf("result[%d].CurrentVersion is empty", i)
 		}
+	}
+
+	// The winning check must have populated the cache with the fetched release.
+	versionCheckCache.mu.RLock()
+	cached := versionCheckCache.result
+	valid := versionCheckCache.cacheValid
+	versionCheckCache.mu.RUnlock()
+	if !valid {
+		t.Fatal("cache should be valid after a completed check")
+	}
+	if cached.LatestVersion != "v99.0.0" || !cached.HasUpdate {
+		t.Errorf("cached result = %+v, want HasUpdate with LatestVersion v99.0.0", cached)
 	}
 }
 
@@ -430,49 +383,10 @@ func resetVersionCache() {
 	checkInProgressMu.Unlock()
 }
 
-// doVersionCheckWithURL performs a version check against a custom URL (for httptest).
-// This bypasses the const githubAPIURL for testing HTTP behavior.
-func doVersionCheckWithURL(url string) VersionCheckDTO {
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	httpClient := &http.Client{Timeout: 5 * time.Second}
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return VersionCheckDTO{CurrentVersion: "test", CheckedAt: now, Error: err.Error()}
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "rescale-interlink/test")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return VersionCheckDTO{CurrentVersion: "test", CheckedAt: now, Error: "request failed: " + err.Error()}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return VersionCheckDTO{CurrentVersion: "test", CheckedAt: now, Error: fmt.Sprintf("GitHub API returned status %d", resp.StatusCode)}
-	}
-
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return VersionCheckDTO{CurrentVersion: "test", CheckedAt: now, Error: "failed to parse response: " + err.Error()}
-	}
-
-	if release.TagName == "" {
-		return VersionCheckDTO{CurrentVersion: "test", CheckedAt: now, Error: "no tag_name in release response"}
-	}
-
-	hasUpdate := compareVersions(release.TagName, "v4.8.2") > 0
-
-	result := VersionCheckDTO{
-		HasUpdate:      hasUpdate,
-		LatestVersion:  release.TagName,
-		CurrentVersion: "v4.8.2",
-		CheckedAt:      now,
-	}
-	if hasUpdate {
-		result.ReleaseURL = releaseURL
-	}
-	return result
+// withGithubAPIURL points doVersionCheck at a test server for the duration of t.
+func withGithubAPIURL(t *testing.T, url string) {
+	t.Helper()
+	orig := githubAPIURL
+	githubAPIURL = url
+	t.Cleanup(func() { githubAPIURL = orig })
 }

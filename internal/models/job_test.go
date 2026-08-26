@@ -2,102 +2,103 @@ package models
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestJobAutomationRequest_Serialization(t *testing.T) {
-	req := JobRequest{
-		Name: "test-job",
-		JobAutomations: []JobAutomationRequest{
-			{Automation: AutomationRef{ID: "test123"}},
+// TestJobAutomationRequestSerialization pins the wire shape the platform
+// expects: environmentVariables must appear as {} for every automation, never
+// omitted and never null, or job creation is rejected.
+func TestJobAutomationRequestSerialization(t *testing.T) {
+	tests := []struct {
+		name        string
+		automations []JobAutomationRequest
+		wantCount   int // occurrences of `"environmentVariables":{}`
+	}{
+		{
+			name:        "single automation",
+			automations: []JobAutomationRequest{{Automation: AutomationRef{ID: "test123"}}},
+			wantCount:   1,
 		},
-	}
-	req.NormalizeAutomations()
-	data, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("failed to marshal: %v", err)
-	}
-	// Verify "environmentVariables":{} is present, not omitted or null
-	if !strings.Contains(string(data), `"environmentVariables":{}`) {
-		t.Errorf("expected environmentVariables:{}, got: %s", string(data))
-	}
-}
-
-func TestJobAutomationRequest_SerializationMultiple(t *testing.T) {
-	req := JobRequest{
-		Name: "test-job-multi",
-		JobAutomations: []JobAutomationRequest{
-			{Automation: AutomationRef{ID: "auto1"}},
-			{Automation: AutomationRef{ID: "auto2"}},
-		},
-	}
-	req.NormalizeAutomations()
-	data, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("failed to marshal: %v", err)
-	}
-	s := string(data)
-	// Both automations should have environmentVariables:{}
-	count := strings.Count(s, `"environmentVariables":{}`)
-	if count != 2 {
-		t.Errorf("expected 2 environmentVariables:{} entries, got %d in: %s", count, s)
-	}
-}
-
-func TestNormalizeAutomations_NilMap(t *testing.T) {
-	req := JobRequest{
-		JobAutomations: []JobAutomationRequest{
-			{Automation: AutomationRef{ID: "a1"}, EnvironmentVariables: nil},
-		},
-	}
-	req.NormalizeAutomations()
-	if req.JobAutomations[0].EnvironmentVariables == nil {
-		t.Error("expected EnvironmentVariables to be initialized, got nil")
-	}
-	if len(req.JobAutomations[0].EnvironmentVariables) != 0 {
-		t.Error("expected empty map, got non-empty")
-	}
-}
-
-func TestNormalizeAutomations_EmptyMap(t *testing.T) {
-	req := JobRequest{
-		JobAutomations: []JobAutomationRequest{
-			{Automation: AutomationRef{ID: "a1"}, EnvironmentVariables: map[string]string{}},
-		},
-	}
-	req.NormalizeAutomations()
-	if req.JobAutomations[0].EnvironmentVariables == nil {
-		t.Error("expected EnvironmentVariables to remain initialized")
-	}
-	if len(req.JobAutomations[0].EnvironmentVariables) != 0 {
-		t.Error("expected empty map, got non-empty")
-	}
-}
-
-func TestNormalizeAutomations_PopulatedMap(t *testing.T) {
-	req := JobRequest{
-		JobAutomations: []JobAutomationRequest{
-			{
-				Automation:           AutomationRef{ID: "a1"},
-				EnvironmentVariables: map[string]string{"KEY": "VALUE"},
+		{
+			name: "multiple automations",
+			automations: []JobAutomationRequest{
+				{Automation: AutomationRef{ID: "auto1"}},
+				{Automation: AutomationRef{ID: "auto2"}},
 			},
+			wantCount: 2,
 		},
 	}
-	req.NormalizeAutomations()
-	if req.JobAutomations[0].EnvironmentVariables["KEY"] != "VALUE" {
-		t.Error("expected populated map to be preserved")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := JobRequest{Name: tt.name, JobAutomations: tt.automations}
+			req.NormalizeAutomations()
+
+			data, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("failed to marshal: %v", err)
+			}
+			if got := strings.Count(string(data), `"environmentVariables":{}`); got != tt.wantCount {
+				t.Errorf("environmentVariables:{} count = %d, want %d in: %s", got, tt.wantCount, data)
+			}
+		})
 	}
 }
 
-func TestNormalizeAutomations_NoAutomations(t *testing.T) {
-	req := JobRequest{
-		Name: "no-automations",
+func TestNormalizeAutomations(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      []JobAutomationRequest
+		wantEnv map[string]string // nil means: expect an initialized empty map
+	}{
+		{
+			name: "nil map is initialized",
+			in:   []JobAutomationRequest{{Automation: AutomationRef{ID: "a1"}, EnvironmentVariables: nil}},
+		},
+		{
+			name: "empty map stays initialized",
+			in:   []JobAutomationRequest{{Automation: AutomationRef{ID: "a1"}, EnvironmentVariables: map[string]string{}}},
+		},
+		{
+			name:    "populated map is preserved",
+			in:      []JobAutomationRequest{{Automation: AutomationRef{ID: "a1"}, EnvironmentVariables: map[string]string{"KEY": "VALUE"}}},
+			wantEnv: map[string]string{"KEY": "VALUE"},
+		},
+		{
+			name: "no automations does not panic",
+			in:   nil,
+		},
 	}
-	req.NormalizeAutomations() // Should not panic
-	if len(req.JobAutomations) != 0 {
-		t.Error("expected empty automations slice")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := JobRequest{Name: tt.name, JobAutomations: tt.in}
+			req.NormalizeAutomations()
+
+			if len(req.JobAutomations) != len(tt.in) {
+				t.Fatalf("automations = %d, want %d", len(req.JobAutomations), len(tt.in))
+			}
+			for i, got := range req.JobAutomations {
+				if got.EnvironmentVariables == nil {
+					t.Errorf("automation %d: EnvironmentVariables is nil, want an initialized map", i)
+					continue
+				}
+				if !reflect.DeepEqual(got.EnvironmentVariables, orEmpty(tt.wantEnv)) {
+					t.Errorf("automation %d: EnvironmentVariables = %v, want %v", i, got.EnvironmentVariables, orEmpty(tt.wantEnv))
+				}
+			}
+		})
 	}
+}
+
+// orEmpty treats a nil expectation as "an initialized empty map".
+func orEmpty(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
 }
 
 func TestJobAutomationRequest_NilEnvVarsSerializesToNull(t *testing.T) {

@@ -273,117 +273,93 @@ func TestMemoryDetection(t *testing.T) {
 	t.Logf("CPU cores: %d", runtime.NumCPU())
 }
 
-func TestComputeBatchConcurrency_AllSmallFiles(t *testing.T) {
-	mgr := NewManager(Config{MaxThreads: 32, AutoScale: true})
-	sizes := make([]int64, 100)
-	for i := range sizes {
-		sizes[i] = 1024 * 1024 // 1MB each
+func TestComputeBatchConcurrency(t *testing.T) {
+	small := func(n int, size int64) []int64 {
+		sizes := make([]int64, n)
+		for i := range sizes {
+			sizes[i] = size
+		}
+		return sizes
 	}
-	result := mgr.ComputeBatchConcurrency(sizes, constants.MaxMaxConcurrent)
-	// Tier is AdaptiveSmallFileConcurrency (20), but may be capped by memory constraints.
-	// On machines with <~3.4GB available memory, the memory check scales it down.
-	// The result should be significantly higher than default (5) and large file tier (5).
-	t.Logf("AllSmallFiles: got %d (tier=%d, may be memory-constrained)", result, constants.AdaptiveSmallFileConcurrency)
-	if result < constants.AdaptiveMediumFileConcurrency {
-		t.Errorf("AllSmallFiles: got %d, want >= %d (medium tier)", result, constants.AdaptiveMediumFileConcurrency)
-	}
-	if result > constants.AdaptiveSmallFileConcurrency {
-		t.Errorf("AllSmallFiles: got %d, want <= %d", result, constants.AdaptiveSmallFileConcurrency)
-	}
-}
+	const (
+		mb = 1024 * 1024
+		gb = 1024 * mb
+	)
 
-func TestComputeBatchConcurrency_AllLargeFiles(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	sizes := []int64{
-		2 * 1024 * 1024 * 1024, // 2GB
-		3 * 1024 * 1024 * 1024, // 3GB
-		5 * 1024 * 1024 * 1024, // 5GB
+	tests := []struct {
+		name       string
+		maxThreads int
+		sizes      []int64
+		maxAllowed int
+		wantMin    int // 0 means unconstrained
+		wantMax    int // 0 means unconstrained
+		wantExact  int // 0 means unconstrained
+	}{
+		{
+			// The small-file tier is AdaptiveSmallFileConcurrency, but the memory
+			// check scales it down on machines with less than ~3.4GB available,
+			// so this asserts the tier band rather than a single value.
+			name: "100 small files sits in the small-file band", maxThreads: 32,
+			sizes: small(100, 1*mb), maxAllowed: constants.MaxMaxConcurrent,
+			wantMin: constants.AdaptiveMediumFileConcurrency, wantMax: constants.AdaptiveSmallFileConcurrency,
+		},
+		{
+			name:  "large files stay at or below the large-file tier",
+			sizes: []int64{2 * gb, 3 * gb, 5 * gb}, maxAllowed: constants.MaxMaxConcurrent,
+			wantMax: constants.AdaptiveLargeFileConcurrency,
+		},
+		{
+			name:  "medium files stay at or below the medium-file tier",
+			sizes: []int64{200 * mb, 500 * mb, 800 * mb}, maxAllowed: constants.MaxMaxConcurrent,
+			wantMin: 1, wantMax: constants.AdaptiveMediumFileConcurrency,
+		},
+		{
+			// The median size (50MB) picks the tier; the file count then caps it.
+			name:  "mixed sizes are capped at the file count",
+			sizes: []int64{1024, 50 * mb, 2 * gb}, maxAllowed: constants.MaxMaxConcurrent,
+			wantMin: 1, wantMax: 3,
+		},
+		{
+			name:  "empty batch falls back to the default",
+			sizes: nil, maxAllowed: constants.MaxMaxConcurrent,
+			wantExact: constants.DefaultMaxConcurrent,
+		},
+		{
+			name:  "single file is capped at one",
+			sizes: []int64{50 * mb}, maxAllowed: constants.MaxMaxConcurrent,
+			wantExact: 1,
+		},
+		{
+			name:  "maxAllowed is respected",
+			sizes: small(100, 1024), maxAllowed: 8,
+			wantMax: 8,
+		},
+		{
+			name:  "three small files are capped at the file count",
+			sizes: []int64{1024, 2048, 4096}, maxAllowed: constants.MaxMaxConcurrent,
+			wantMax: 3,
+		},
+		{
+			name:  "one huge file still gets the guaranteed minimum",
+			sizes: []int64{10 * gb}, maxAllowed: constants.MaxMaxConcurrent,
+			wantMin: constants.MinMaxConcurrent,
+		},
 	}
-	result := mgr.ComputeBatchConcurrency(sizes, constants.MaxMaxConcurrent)
-	if result > constants.AdaptiveLargeFileConcurrency {
-		t.Errorf("AllLargeFiles: got %d, want <= %d", result, constants.AdaptiveLargeFileConcurrency)
-	}
-}
 
-func TestComputeBatchConcurrency_MediumFiles(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	sizes := []int64{
-		200 * 1024 * 1024, // 200MB
-		500 * 1024 * 1024, // 500MB
-		800 * 1024 * 1024, // 800MB
-	}
-	result := mgr.ComputeBatchConcurrency(sizes, constants.MaxMaxConcurrent)
-	// Medium tier but capped at file count (3)
-	if result > constants.AdaptiveMediumFileConcurrency {
-		t.Errorf("MediumFiles: got %d, want <= %d", result, constants.AdaptiveMediumFileConcurrency)
-	}
-	if result < 1 {
-		t.Errorf("MediumFiles: got %d, want >= 1", result)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := NewManager(Config{MaxThreads: tt.maxThreads, AutoScale: true})
+			got := mgr.ComputeBatchConcurrency(tt.sizes, tt.maxAllowed)
 
-func TestComputeBatchConcurrency_MixedSizes(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	// Median is 50MB (small)
-	sizes := []int64{
-		1024,                       // 1KB
-		50 * 1024 * 1024,           // 50MB (median)
-		2 * 1024 * 1024 * 1024,     // 2GB
-	}
-	result := mgr.ComputeBatchConcurrency(sizes, constants.MaxMaxConcurrent)
-	// Small tier but capped at file count (3)
-	if result > 3 {
-		t.Errorf("MixedSizes: got %d, want <= 3 (capped at file count)", result)
-	}
-	if result < 1 {
-		t.Errorf("MixedSizes: got %d, want >= 1", result)
-	}
-}
-
-func TestComputeBatchConcurrency_EmptyBatch(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	result := mgr.ComputeBatchConcurrency(nil, constants.MaxMaxConcurrent)
-	if result != constants.DefaultMaxConcurrent {
-		t.Errorf("EmptyBatch: got %d, want %d", result, constants.DefaultMaxConcurrent)
-	}
-}
-
-func TestComputeBatchConcurrency_SingleFile(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	sizes := []int64{50 * 1024 * 1024} // 50MB
-	result := mgr.ComputeBatchConcurrency(sizes, constants.MaxMaxConcurrent)
-	if result != 1 {
-		t.Errorf("SingleFile: got %d, want 1 (capped at file count)", result)
-	}
-}
-
-func TestComputeBatchConcurrency_RespectsMaxAllowed(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	sizes := make([]int64, 100)
-	for i := range sizes {
-		sizes[i] = 1024 // 1KB each
-	}
-	maxAllowed := 8
-	result := mgr.ComputeBatchConcurrency(sizes, maxAllowed)
-	if result > maxAllowed {
-		t.Errorf("MaxAllowed: got %d, want <= %d", result, maxAllowed)
-	}
-}
-
-func TestComputeBatchConcurrency_CappedAtFileCount(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	sizes := []int64{1024, 2048, 4096} // 3 small files
-	result := mgr.ComputeBatchConcurrency(sizes, constants.MaxMaxConcurrent)
-	if result > 3 {
-		t.Errorf("FileCount cap: got %d, want <= 3 (only 3 files)", result)
-	}
-}
-
-func TestComputeBatchConcurrency_MinimumGuaranteed(t *testing.T) {
-	mgr := NewManager(Config{AutoScale: true})
-	sizes := []int64{10 * 1024 * 1024 * 1024} // 10GB single file
-	result := mgr.ComputeBatchConcurrency(sizes, constants.MaxMaxConcurrent)
-	if result < constants.MinMaxConcurrent {
-		t.Errorf("Minimum: got %d, want >= %d", result, constants.MinMaxConcurrent)
+			if tt.wantExact != 0 && got != tt.wantExact {
+				t.Errorf("got %d, want %d", got, tt.wantExact)
+			}
+			if tt.wantMin != 0 && got < tt.wantMin {
+				t.Errorf("got %d, want >= %d", got, tt.wantMin)
+			}
+			if tt.wantMax != 0 && got > tt.wantMax {
+				t.Errorf("got %d, want <= %d", got, tt.wantMax)
+			}
+		})
 	}
 }

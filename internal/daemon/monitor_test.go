@@ -15,57 +15,57 @@ func TestJobFilter_MatchesFilter(t *testing.T) {
 		expected bool
 	}{
 		{
-			name:   "nil filter matches all",
-			filter: nil,
-			job:    models.JobResponse{Name: "Any Job Name"},
+			name:     "nil filter matches all",
+			filter:   nil,
+			job:      models.JobResponse{Name: "Any Job Name"},
 			expected: true,
 		},
 		{
-			name:   "empty filter matches all",
-			filter: &JobFilter{},
-			job:    models.JobResponse{Name: "Any Job Name"},
+			name:     "empty filter matches all",
+			filter:   &JobFilter{},
+			job:      models.JobResponse{Name: "Any Job Name"},
 			expected: true,
 		},
 		{
-			name:   "name prefix match",
-			filter: &JobFilter{NamePrefix: "Test"},
-			job:    models.JobResponse{Name: "Test Job 1"},
+			name:     "name prefix match",
+			filter:   &JobFilter{NamePrefix: "Test"},
+			job:      models.JobResponse{Name: "Test Job 1"},
 			expected: true,
 		},
 		{
-			name:   "name prefix no match",
-			filter: &JobFilter{NamePrefix: "Test"},
-			job:    models.JobResponse{Name: "Production Job 1"},
+			name:     "name prefix no match",
+			filter:   &JobFilter{NamePrefix: "Test"},
+			job:      models.JobResponse{Name: "Production Job 1"},
 			expected: false,
 		},
 		{
-			name:   "name prefix case insensitive",
-			filter: &JobFilter{NamePrefix: "test"},
-			job:    models.JobResponse{Name: "TEST Job 1"},
+			name:     "name prefix case insensitive",
+			filter:   &JobFilter{NamePrefix: "test"},
+			job:      models.JobResponse{Name: "TEST Job 1"},
 			expected: true,
 		},
 		{
-			name:   "name contains match",
-			filter: &JobFilter{NameContains: "simulation"},
-			job:    models.JobResponse{Name: "CFD Simulation Run 1"},
+			name:     "name contains match",
+			filter:   &JobFilter{NameContains: "simulation"},
+			job:      models.JobResponse{Name: "CFD Simulation Run 1"},
 			expected: true,
 		},
 		{
-			name:   "name contains no match",
-			filter: &JobFilter{NameContains: "simulation"},
-			job:    models.JobResponse{Name: "CFD Analysis Run 1"},
+			name:     "name contains no match",
+			filter:   &JobFilter{NameContains: "simulation"},
+			job:      models.JobResponse{Name: "CFD Analysis Run 1"},
 			expected: false,
 		},
 		{
-			name:   "exclude match",
-			filter: &JobFilter{ExcludeNames: []string{"Debug"}},
-			job:    models.JobResponse{Name: "Debug Test Run"},
+			name:     "exclude match",
+			filter:   &JobFilter{ExcludeNames: []string{"Debug"}},
+			job:      models.JobResponse{Name: "Debug Test Run"},
 			expected: false,
 		},
 		{
-			name:   "exclude no match",
-			filter: &JobFilter{ExcludeNames: []string{"Debug"}},
-			job:    models.JobResponse{Name: "Production Run 1"},
+			name:     "exclude no match",
+			filter:   &JobFilter{ExcludeNames: []string{"Debug"}},
+			job:      models.JobResponse{Name: "Production Run 1"},
 			expected: true,
 		},
 		{
@@ -342,16 +342,16 @@ func TestCheckEligibility_NilConfig(t *testing.T) {
 // is added and not classified in IsSilent, add it here and in the switch.
 func TestSkipReasonCodeIsSilent(t *testing.T) {
 	silent := map[SkipReasonCode]bool{
-		ReasonNotCompleted:                true,
-		ReasonAlreadyDownloadedLocal:      true,
-		ReasonTooOldCreationPrefilter:     true,
-		ReasonNameFilter:                  true,
-		ReasonAutoDownloadUnset:           true,
-		ReasonAutoDownloadDisabled:        true,
-		ReasonAutoDownloadUnrecognized:    true,
-		ReasonFieldCheckAPIError:          true,
-		ReasonInRetryBackoff:              true,
-		ReasonOutsideLookbackWindow:       false,
+		ReasonNotCompleted:             true,
+		ReasonAlreadyDownloadedLocal:   true,
+		ReasonTooOldCreationPrefilter:  true,
+		ReasonNameFilter:               true,
+		ReasonAutoDownloadUnset:        true,
+		ReasonAutoDownloadDisabled:     true,
+		ReasonAutoDownloadUnrecognized: true,
+		ReasonFieldCheckAPIError:       true,
+		ReasonInRetryBackoff:           true,
+		ReasonOutsideLookbackWindow:    false,
 		// Plan 3: tag-first semantics make ReasonHasDownloadedTag the common
 		// case every poll (N per-poll API calls), so it is silent to avoid
 		// log noise. Also new in Plan 3: ReasonPendingTagApply (transient
@@ -372,53 +372,6 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 	// to log about).
 	if !ReasonNone.IsSilent() {
 		t.Errorf("ReasonNone.IsSilent() = false, want true")
-	}
-}
-
-func TestGetJobDownloadPath_NilClient(t *testing.T) {
-	// GetJobDownloadPath requires apiClient to not be nil; calling with nil would panic.
-	t.Skip("Test requires mock API client, skipping - GetJobDownloadPath cannot work with nil apiClient")
-}
-
-func TestGetJobDownloadPath_EmptyConfig(t *testing.T) {
-	// GetJobDownloadPath calls apiClient.GetJobCustomFieldValue which would panic with nil client.
-	t.Skip("Test requires mock API client, skipping - GetJobDownloadPath cannot work with nil apiClient")
-}
-
-func TestEligibilityConfig_ZeroValue(t *testing.T) {
-	cfg := &EligibilityConfig{}
-
-	if cfg.AutoDownloadTag != "" {
-		t.Errorf("expected empty AutoDownloadTag, got %q", cfg.AutoDownloadTag)
-	}
-	if cfg.LookbackDays != 0 {
-		t.Errorf("expected zero LookbackDays, got %d", cfg.LookbackDays)
-	}
-}
-
-func TestCompletedJob_Struct(t *testing.T) {
-	cj := &CompletedJob{
-		ID:      "job123",
-		Name:    "Test Job",
-		Status:  "Completed",
-		Owner:   "user@example.com",
-		Created: "2025-12-29T10:00:00Z",
-	}
-
-	if cj.ID != "job123" {
-		t.Errorf("ID mismatch: got %q", cj.ID)
-	}
-	if cj.Name != "Test Job" {
-		t.Errorf("Name mismatch: got %q", cj.Name)
-	}
-	if cj.Status != "Completed" {
-		t.Errorf("Status mismatch: got %q", cj.Status)
-	}
-	if cj.Owner != "user@example.com" {
-		t.Errorf("Owner mismatch: got %q", cj.Owner)
-	}
-	if cj.Created != "2025-12-29T10:00:00Z" {
-		t.Errorf("Created mismatch: got %q", cj.Created)
 	}
 }
 

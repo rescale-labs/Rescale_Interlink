@@ -8,125 +8,6 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
-func TestSaveJobsCSV(t *testing.T) {
-	tests := []struct {
-		name    string
-		jobs    []models.JobSpec
-		wantErr bool
-	}{
-		{
-			name: "single job",
-			jobs: []models.JobSpec{
-				{
-					Directory:       "./Run_1",
-					JobName:         "Run_1",
-					AnalysisCode:    "user_included",
-					AnalysisVersion: "1.0",
-					Command:         "./run.sh",
-					CoreType:        "emerald",
-					CoresPerSlot:    4,
-					WalltimeHours:   48.0,
-					Slots:           1,
-					LicenseSettings: `{"RLM_LICENSE": "123@license-server"}`,
-					SubmitMode:      "create_and_submit",
-					Tags:            []string{"test"},
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "multiple jobs",
-			jobs: []models.JobSpec{
-				{
-					Directory:       "./Run_1",
-					JobName:         "Run_1",
-					AnalysisCode:    "user_included",
-					Command:         "./run.sh",
-					CoreType:        "emerald",
-					CoresPerSlot:    4,
-					WalltimeHours:   1.0,
-					Slots:           1,
-					LicenseSettings: `{"LICENSE": "value"}`,
-				},
-				{
-					Directory:       "./Run_2",
-					JobName:         "Run_2",
-					AnalysisCode:    "user_included",
-					Command:         "./run.sh",
-					CoreType:        "emerald",
-					CoresPerSlot:    8,
-					WalltimeHours:   2.5,
-					Slots:           2,
-					LicenseSettings: `{"LICENSE": "value"}`,
-				},
-			},
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create temp file
-			tmpDir := t.TempDir()
-			csvPath := filepath.Join(tmpDir, "test_jobs.csv")
-
-			// Save
-			err := SaveJobsCSV(csvPath, tt.jobs)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("SaveJobsCSV() error = %v, wantErr %v", err, tt.wantErr)
-			}
-
-			if tt.wantErr {
-				return
-			}
-
-			// Verify file exists
-			if _, err := os.Stat(csvPath); os.IsNotExist(err) {
-				t.Fatalf("SaveJobsCSV() did not create file at %s", csvPath)
-			}
-
-			// Load it back
-			loaded, err := LoadJobsCSV(csvPath)
-			if err != nil {
-				t.Fatalf("LoadJobsCSV() failed to load saved CSV: %v", err)
-			}
-
-			// Verify count
-			if len(loaded) != len(tt.jobs) {
-				t.Fatalf("LoadJobsCSV() loaded %d jobs, want %d", len(loaded), len(tt.jobs))
-			}
-
-			// Verify key fields of first job
-			if len(loaded) > 0 {
-				original := tt.jobs[0]
-				reloaded := loaded[0]
-
-				if reloaded.JobName != original.JobName {
-					t.Errorf("JobName = %s, want %s", reloaded.JobName, original.JobName)
-				}
-				if reloaded.Directory != original.Directory {
-					t.Errorf("Directory = %s, want %s", reloaded.Directory, original.Directory)
-				}
-				if reloaded.AnalysisCode != original.AnalysisCode {
-					t.Errorf("AnalysisCode = %s, want %s", reloaded.AnalysisCode, original.AnalysisCode)
-				}
-				if reloaded.CoreType != original.CoreType {
-					t.Errorf("CoreType = %s, want %s", reloaded.CoreType, original.CoreType)
-				}
-				if reloaded.CoresPerSlot != original.CoresPerSlot {
-					t.Errorf("CoresPerSlot = %d, want %d", reloaded.CoresPerSlot, original.CoresPerSlot)
-				}
-				if reloaded.WalltimeHours != original.WalltimeHours {
-					t.Errorf("WalltimeHours = %f, want %f", reloaded.WalltimeHours, original.WalltimeHours)
-				}
-				if reloaded.Slots != original.Slots {
-					t.Errorf("Slots = %d, want %d", reloaded.Slots, original.Slots)
-				}
-			}
-		})
-	}
-}
-
 func TestSaveLoadRoundTrip(t *testing.T) {
 	// Complex job with all fields
 	originalJob := models.JobSpec{
@@ -150,12 +31,28 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		TarSubpath:            "output/results",
 	}
 
+	// A second, simpler row keeps the multi-job write/read path covered.
+	secondJob := models.JobSpec{
+		Directory:       "./Run_2",
+		JobName:         "Run_2",
+		AnalysisCode:    "user_included",
+		Command:         "./run.sh",
+		CoreType:        "emerald",
+		CoresPerSlot:    8,
+		WalltimeHours:   2.5,
+		Slots:           2,
+		LicenseSettings: `{"LICENSE": "value"}`,
+	}
+
 	tmpDir := t.TempDir()
 	csvPath := filepath.Join(tmpDir, "roundtrip.csv")
 
 	// Save
-	if err := SaveJobsCSV(csvPath, []models.JobSpec{originalJob}); err != nil {
+	if err := SaveJobsCSV(csvPath, []models.JobSpec{originalJob, secondJob}); err != nil {
 		t.Fatalf("SaveJobsCSV() failed: %v", err)
+	}
+	if _, err := os.Stat(csvPath); err != nil {
+		t.Fatalf("SaveJobsCSV() did not create file at %s: %v", csvPath, err)
 	}
 
 	// Load
@@ -164,8 +61,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("LoadJobsCSV() failed: %v", err)
 	}
 
-	if len(loaded) != 1 {
-		t.Fatalf("LoadJobsCSV() loaded %d jobs, want 1", len(loaded))
+	if len(loaded) != 2 {
+		t.Fatalf("LoadJobsCSV() loaded %d jobs, want 2", len(loaded))
+	}
+	if loaded[1].JobName != secondJob.JobName || loaded[1].CoresPerSlot != secondJob.CoresPerSlot {
+		t.Errorf("second job = %+v, want JobName=%s CoresPerSlot=%d",
+			loaded[1], secondJob.JobName, secondJob.CoresPerSlot)
 	}
 
 	reloaded := loaded[0]

@@ -69,64 +69,33 @@ func TestTeeWriter_PassThrough(t *testing.T) {
 	}
 }
 
-func TestClassifyLine_BATCH(t *testing.T) {
-	level, stage := classifyLine("[BATCH] scaling workers 5 -> 8")
-	if level != events.DebugLevel {
-		t.Errorf("level = %v, want DebugLevel", level)
+func TestClassifyLine(t *testing.T) {
+	tests := []struct {
+		name      string
+		line      string
+		wantLevel events.LogLevel
+		wantStage string
+	}{
+		{name: "BATCH", line: "[BATCH] scaling workers 5 -> 8", wantLevel: events.DebugLevel, wantStage: "BATCH"},
+		{name: "CRED", line: "[CRED] credential refresh failed", wantLevel: events.WarnLevel, wantStage: "CRED"},
+		{name: "SLOT", line: "[SLOT] DOWNLOAD file.txt: waiting", wantLevel: events.DebugLevel, wantStage: "SLOT"},
+		{name: "TIMING", line: "[TIMING] credential pre-warm complete", wantLevel: events.DebugLevel, wantStage: "TIMING"},
+		{name: "RATELIMIT", line: "[RATELIMIT] token bucket refill", wantLevel: events.DebugLevel, wantStage: "RATELIMIT"},
+		{name: "no tag", line: "some random log output", wantLevel: events.DebugLevel, wantStage: "backend"},
+		// Brackets with lowercase or non-alpha content must not match a known prefix.
+		{name: "bracket but not a tag", line: "[something] lower case tag", wantLevel: events.DebugLevel, wantStage: "backend"},
 	}
-	if stage != "BATCH" {
-		t.Errorf("stage = %q, want %q", stage, "BATCH")
-	}
-}
 
-func TestClassifyLine_CRED(t *testing.T) {
-	level, stage := classifyLine("[CRED] credential refresh failed")
-	if level != events.WarnLevel {
-		t.Errorf("level = %v, want WarnLevel", level)
-	}
-	if stage != "CRED" {
-		t.Errorf("stage = %q, want %q", stage, "CRED")
-	}
-}
-
-func TestClassifyLine_SLOT(t *testing.T) {
-	level, stage := classifyLine("[SLOT] DOWNLOAD file.txt: waiting")
-	if level != events.DebugLevel {
-		t.Errorf("level = %v, want DebugLevel", level)
-	}
-	if stage != "SLOT" {
-		t.Errorf("stage = %q, want %q", stage, "SLOT")
-	}
-}
-
-func TestClassifyLine_TIMING(t *testing.T) {
-	level, stage := classifyLine("[TIMING] credential pre-warm complete")
-	if level != events.DebugLevel {
-		t.Errorf("level = %v, want DebugLevel", level)
-	}
-	if stage != "TIMING" {
-		t.Errorf("stage = %q, want %q", stage, "TIMING")
-	}
-}
-
-func TestClassifyLine_Unknown(t *testing.T) {
-	level, stage := classifyLine("some random log output")
-	if level != events.DebugLevel {
-		t.Errorf("level = %v, want DebugLevel", level)
-	}
-	if stage != "backend" {
-		t.Errorf("stage = %q, want %q", stage, "backend")
-	}
-}
-
-func TestClassifyLine_BracketButNotTag(t *testing.T) {
-	// Brackets with lowercase or non-alpha content should not match known prefixes
-	level, stage := classifyLine("[something] lower case tag")
-	if level != events.DebugLevel {
-		t.Errorf("level = %v, want DebugLevel", level)
-	}
-	if stage != "backend" {
-		t.Errorf("stage = %q, want %q", stage, "backend")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			level, stage := classifyLine(tt.line)
+			if level != tt.wantLevel {
+				t.Errorf("level = %v, want %v", level, tt.wantLevel)
+			}
+			if stage != tt.wantStage {
+				t.Errorf("stage = %q, want %q", stage, tt.wantStage)
+			}
+		})
 	}
 }
 
@@ -232,16 +201,6 @@ func TestTeeWriter_NilEventBus(t *testing.T) {
 	}
 	if n != 6 {
 		t.Errorf("Write returned %d, want 6", n)
-	}
-}
-
-func TestClassifyLine_RATELIMIT_Level(t *testing.T) {
-	level, stage := classifyLine("[RATELIMIT] token bucket refill")
-	if level != events.DebugLevel {
-		t.Errorf("level = %v, want DebugLevel", level)
-	}
-	if stage != "RATELIMIT" {
-		t.Errorf("stage = %q, want %q", stage, "RATELIMIT")
 	}
 }
 

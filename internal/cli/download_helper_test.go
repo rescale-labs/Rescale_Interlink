@@ -20,337 +20,190 @@ import (
 
 // --- sanitizeErrorString tests ---
 
-func TestSanitizeErrorString_SASTokens(t *testing.T) {
-	input := "request failed: https://account.blob.core.windows.net/?sig=abc123secret&se=2026-01-01&sp=r&sv=2021-06-08&sr=b"
-	result := sanitizeErrorString(input)
-
-	if strings.Contains(result, "abc123secret") {
-		t.Errorf("sanitizeErrorString() should redact sig value, got %q", result)
-	}
-	if !strings.Contains(result, "sig=REDACTED") {
-		t.Errorf("sanitizeErrorString() should contain sig=REDACTED, got %q", result)
-	}
-	if !strings.Contains(result, "se=REDACTED") {
-		t.Errorf("sanitizeErrorString() should contain se=REDACTED, got %q", result)
-	}
-}
-
-func TestSanitizeErrorString_AzureAccountKey(t *testing.T) {
-	input := "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=abc123secret456+base64==;EndpointSuffix=core.windows.net"
-	result := sanitizeErrorString(input)
-
-	if strings.Contains(result, "abc123secret456") {
-		t.Errorf("sanitizeErrorString() should redact AccountKey value, got %q", result)
-	}
-	if !strings.Contains(result, "AccountKey=REDACTED") {
-		t.Errorf("sanitizeErrorString() should contain AccountKey=REDACTED, got %q", result)
-	}
-	// AccountName should NOT be redacted
-	if !strings.Contains(result, "AccountName=myaccount") {
-		t.Errorf("sanitizeErrorString() should preserve AccountName, got %q", result)
-	}
-}
-
-func TestSanitizeErrorString_BearerToken(t *testing.T) {
-	input := `Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature`
-	result := sanitizeErrorString(input)
-
-	if strings.Contains(result, "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9") {
-		t.Errorf("sanitizeErrorString() should redact JWT token, got %q", result)
-	}
-	if !strings.Contains(result, "Bearer REDACTED") {
-		t.Errorf("sanitizeErrorString() should contain 'Bearer REDACTED', got %q", result)
-	}
-}
-
-func TestSanitizeErrorString_TokenScheme(t *testing.T) {
-	input := `Token abc123def456`
-	result := sanitizeErrorString(input)
-
-	if strings.Contains(result, "abc123def456") {
-		t.Errorf("sanitizeErrorString() should redact Token value, got %q", result)
-	}
-	if !strings.Contains(result, "Token REDACTED") {
-		t.Errorf("sanitizeErrorString() should contain 'Token REDACTED', got %q", result)
-	}
-}
-
-func TestSanitizeErrorString_AWSAccessKeyID(t *testing.T) {
-	input := "credentials error: AKIAIOSFODNN7EXAMPLE used for request"
-	result := sanitizeErrorString(input)
-
-	if strings.Contains(result, "AKIAIOSFODNN7EXAMPLE") {
-		t.Errorf("sanitizeErrorString() should redact AWS key ID, got %q", result)
-	}
-	if !strings.Contains(result, "[REDACTED_AWS_KEY]") {
-		t.Errorf("sanitizeErrorString() should contain [REDACTED_AWS_KEY], got %q", result)
-	}
-}
-
-func TestSanitizeErrorString_NoSecrets(t *testing.T) {
-	input := "connection timeout after 30 seconds"
-	result := sanitizeErrorString(input)
-
-	if result != input {
-		t.Errorf("sanitizeErrorString() should pass through unchanged, got %q", result)
-	}
-}
-
-// --- formatDownloadError tests ---
-
-func TestFormatDownloadError_CollapsesChain(t *testing.T) {
-	// Build a 5-level nested error chain
-	root := errors.New("connection refused")
-	level1 := fmt.Errorf("HTTP request failed: %w", root)
-	level2 := fmt.Errorf("failed to get credentials: %w", level1)
-	level3 := fmt.Errorf("Azure client creation error: %w", level2)
-	level4 := fmt.Errorf("file download orchestration: %w", level3)
-
-	result := formatDownloadError("results.dat", "abc123", "BWuHag", "AzureStorage", level4)
-	errMsg := result.Error()
-
-	// Root cause should be present
-	if !strings.Contains(errMsg, "connection refused") {
-		t.Errorf("formatDownloadError() should contain root cause, got %q", errMsg)
-	}
-	// Intermediate messages should NOT be present (collapsed)
-	if strings.Contains(errMsg, "orchestration") {
-		t.Errorf("formatDownloadError() should not contain intermediate chain messages, got %q", errMsg)
-	}
-}
-
-func TestFormatDownloadError_IncludesContext(t *testing.T) {
-	err := errors.New("timeout")
-	result := formatDownloadError("output.dat", "fileXYZ", "jobABC", "AzureStorage", err)
-	errMsg := result.Error()
-
-	if !strings.Contains(errMsg, "output.dat") {
-		t.Errorf("should contain file name, got %q", errMsg)
-	}
-	if !strings.Contains(errMsg, "fileXYZ") {
-		t.Errorf("should contain file ID, got %q", errMsg)
-	}
-	if !strings.Contains(errMsg, "jobABC") {
-		t.Errorf("should contain job ID, got %q", errMsg)
-	}
-	if !strings.Contains(errMsg, "AzureStorage") {
-		t.Errorf("should contain storage type, got %q", errMsg)
-	}
-}
-
-func TestFormatDownloadError_SanitizesGoInternals(t *testing.T) {
-	// Simulate the exact error that occurred with the old []string Paths type
-	root := errors.New(`json: cannot unmarshal object into Go struct field AzureCredentials.paths of type string`)
-	wrapped := fmt.Errorf("failed to parse Azure credentials: %w", root)
-
-	result := formatDownloadError("output.dat", "abc123", "BWuHag", "AzureStorage", wrapped)
-	errMsg := result.Error()
-
-	if strings.Contains(errMsg, "Go struct field") {
-		t.Errorf("should sanitize Go internals, got %q", errMsg)
-	}
-	if !strings.Contains(errMsg, "unexpected credential response format") {
-		t.Errorf("should contain sanitized message, got %q", errMsg)
-	}
-}
-
-func TestFormatDownloadError_EmptyJobID(t *testing.T) {
-	err := errors.New("timeout")
-	result := formatDownloadError("output.dat", "fileXYZ", "", "S3Storage", err)
-	errMsg := result.Error()
-
-	if strings.Contains(errMsg, "job ") {
-		t.Errorf("should omit job context when jobID is empty, got %q", errMsg)
-	}
-	if !strings.Contains(errMsg, "file fileXYZ") {
-		t.Errorf("should still contain file context, got %q", errMsg)
-	}
-}
-
-func TestFormatDownloadError_ClassifiesStep(t *testing.T) {
+func TestSanitizeErrorString(t *testing.T) {
 	tests := []struct {
-		name     string
-		errMsg   string
-		wantStep string
+		name        string
+		input       string
+		wantAbsent  []string
+		wantPresent []string
+		wantExact   bool // result must equal input, unchanged
 	}{
 		{
-			name:     "credential error",
-			errMsg:   "failed to get Azure credentials for file abc123: Forbidden",
-			wantStep: "fetching storage credentials",
+			name:        "SAS tokens",
+			input:       "request failed: https://account.blob.core.windows.net/?sig=abc123secret&se=2026-01-01&sp=r&sv=2021-06-08&sr=b",
+			wantAbsent:  []string{"abc123secret"},
+			wantPresent: []string{"sig=REDACTED", "se=REDACTED"},
 		},
 		{
-			name:     "download error",
-			errMsg:   "file size mismatch",
-			wantStep: "downloading from storage",
+			name:       "Azure account key",
+			input:      "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=abc123secret456+base64==;EndpointSuffix=core.windows.net",
+			wantAbsent: []string{"abc123secret456"},
+			// AccountName is not a secret and must survive redaction.
+			wantPresent: []string{"AccountKey=REDACTED", "AccountName=myaccount"},
 		},
 		{
-			name:     "checksum error",
-			errMsg:   "checksum verification failed",
-			wantStep: "verifying checksum",
+			name:        "bearer token",
+			input:       `Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature`,
+			wantAbsent:  []string{"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"},
+			wantPresent: []string{"Bearer REDACTED"},
 		},
 		{
-			name:     "client creation error",
-			errMsg:   "failed to create Azure client: invalid SAS",
-			wantStep: "creating storage client",
+			name:        "token scheme",
+			input:       `Token abc123def456`,
+			wantAbsent:  []string{"abc123def456"},
+			wantPresent: []string{"Token REDACTED"},
 		},
 		{
-			name:     "generic error",
-			errMsg:   "something unexpected",
-			wantStep: "downloading",
+			name:        "AWS access key ID",
+			input:       "credentials error: AKIAIOSFODNN7EXAMPLE used for request",
+			wantAbsent:  []string{"AKIAIOSFODNN7EXAMPLE"},
+			wantPresent: []string{"[REDACTED_AWS_KEY]"},
+		},
+		{
+			name:      "no secrets",
+			input:     "connection timeout after 30 seconds",
+			wantExact: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := errors.New(tt.errMsg)
-			result := formatDownloadError("test.dat", "abc", "job1", "AzureStorage", err)
-			errMsg := result.Error()
-			if !strings.Contains(errMsg, tt.wantStep) {
-				t.Errorf("step should be %q, got error: %q", tt.wantStep, errMsg)
+			got := sanitizeErrorString(tt.input)
+			if tt.wantExact && got != tt.input {
+				t.Errorf("sanitizeErrorString() should pass through unchanged, got %q", got)
+			}
+			for _, secret := range tt.wantAbsent {
+				if strings.Contains(got, secret) {
+					t.Errorf("sanitizeErrorString() should redact %q, got %q", secret, got)
+				}
+			}
+			for _, want := range tt.wantPresent {
+				if !strings.Contains(got, want) {
+					t.Errorf("sanitizeErrorString() should contain %q, got %q", want, got)
+				}
 			}
 		})
 	}
 }
 
-func TestFormatDownloadError_IncludesGuidance(t *testing.T) {
-	err := errors.New("something failed")
-	result := formatDownloadError("test.dat", "abc", "job1", "AzureStorage", err)
-	errMsg := result.Error()
+// --- formatDownloadError tests ---
 
-	if !strings.Contains(errMsg, "--debug") {
-		t.Errorf("should include --debug guidance, got %q", errMsg)
+func TestFormatDownloadError(t *testing.T) {
+	// A deep chain the user must not be shown verbatim.
+	connRefused := fmt.Errorf("file download orchestration: %w",
+		fmt.Errorf("Azure client creation error: %w",
+			fmt.Errorf("failed to get credentials: %w",
+				fmt.Errorf("HTTP request failed: %w", errors.New("connection refused")))))
+
+	// The 403 chain a shared job produces when the caller lacks access.
+	forbidden := fmt.Errorf("abc123 download failed: %w",
+		fmt.Errorf("failed to get Azure credentials for file abc123: %w",
+			fmt.Errorf("get storage credentials failed: status 403: %w", errors.New("Forbidden"))))
+
+	// The chain produced by a credential payload we cannot unmarshal.
+	badPayload := fmt.Errorf("abc123 download failed: %w",
+		fmt.Errorf("failed to get Azure credentials for file abc123: %w",
+			fmt.Errorf("failed to parse Azure credentials: %w",
+				errors.New(`json: cannot unmarshal object into Go struct field AzureCredentials.paths of type string`))))
+
+	tests := []struct {
+		name        string
+		fileName    string
+		fileID      string
+		jobID       string
+		noJobID     bool // exercise the empty-job-ID path instead of defaulting
+		storageType string
+		err         error
+		wantPresent []string
+		wantAbsent  []string
+	}{
+		{
+			name: "collapses the chain to the root cause",
+			err:  connRefused,
+			// Intermediate wrapper messages are noise to the user.
+			wantPresent: []string{"connection refused"},
+			wantAbsent:  []string{"orchestration"},
+		},
+		{
+			name:        "includes file, job and storage context",
+			fileName:    "output.dat",
+			fileID:      "fileXYZ",
+			jobID:       "jobABC",
+			err:         errors.New("timeout"),
+			wantPresent: []string{"output.dat", "fileXYZ", "jobABC", "AzureStorage"},
+		},
+		{
+			name:        "omits job context when the job ID is empty",
+			fileName:    "output.dat",
+			fileID:      "fileXYZ",
+			noJobID:     true,
+			storageType: "S3Storage",
+			err:         errors.New("timeout"),
+			wantPresent: []string{"file fileXYZ"},
+			wantAbsent:  []string{"job "},
+		},
+		{
+			name:        "sanitizes Go internals out of a credential parse failure",
+			err:         fmt.Errorf("failed to parse Azure credentials: %w", errors.New(`json: cannot unmarshal object into Go struct field AzureCredentials.paths of type string`)),
+			wantPresent: []string{"unexpected credential response format"},
+			wantAbsent:  []string{"Go struct field"},
+		},
+		{
+			name:        "sanitizes the full malformed-payload chain",
+			err:         badPayload,
+			wantPresent: []string{"unexpected credential response format"},
+			wantAbsent:  []string{"Go struct field", "json:"},
+		},
+		{
+			name:        "includes actionable guidance",
+			err:         errors.New("something failed"),
+			wantPresent: []string{"--debug", "verify you have access"},
+		},
+		{
+			name:        "403 classifies as credential fetching and keeps the root cause",
+			err:         forbidden,
+			wantPresent: []string{"fetching storage credentials", "Forbidden", "--debug"},
+			wantAbsent:  []string{"Go struct field"},
+		},
+
+		// Step classification: the phrase the user sees for where it broke.
+		{name: "step: credentials", err: errors.New("failed to get Azure credentials for file abc123: Forbidden"), wantPresent: []string{"fetching storage credentials"}},
+		{name: "step: download", err: errors.New("file size mismatch"), wantPresent: []string{"downloading from storage"}},
+		{name: "step: checksum", err: errors.New("checksum verification failed"), wantPresent: []string{"verifying checksum"}},
+		{name: "step: client creation", err: errors.New("failed to create Azure client: invalid SAS"), wantPresent: []string{"creating storage client"}},
+		{name: "step: generic", err: errors.New("something unexpected"), wantPresent: []string{"downloading"}},
 	}
-	if !strings.Contains(errMsg, "verify you have access") {
-		t.Errorf("should include access guidance, got %q", errMsg)
-	}
-}
 
-func TestFormatDownloadError_CredentialFailure(t *testing.T) {
-	// Simulate a 403 error chain from credential fetching
-	root := errors.New("Forbidden")
-	level1 := fmt.Errorf("get storage credentials failed: status 403: %w", root)
-	level2 := fmt.Errorf("failed to get Azure credentials for file abc123: %w", level1)
-	level3 := fmt.Errorf("abc123 download failed: %w", level2)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fileName, fileID, jobID := tt.fileName, tt.fileID, tt.jobID
+			if fileName == "" {
+				fileName = "results.dat"
+			}
+			if fileID == "" {
+				fileID = "abc123"
+			}
+			if jobID == "" && !tt.noJobID {
+				jobID = "BWuHag"
+			}
+			storageType := tt.storageType
+			if storageType == "" {
+				storageType = "AzureStorage"
+			}
 
-	result := formatDownloadError("output.dat", "abc123", "BWuHag", "AzureStorage", level3)
-	errMsg := result.Error()
+			errMsg := formatDownloadError(fileName, fileID, jobID, storageType, tt.err).Error()
 
-	if !strings.Contains(errMsg, "fetching storage credentials") {
-		t.Errorf("step should classify as credential fetching, got %q", errMsg)
-	}
-	if !strings.Contains(errMsg, "Forbidden") {
-		t.Errorf("root cause should be Forbidden, got %q", errMsg)
-	}
-}
-
-// --- CLI-level regression tests using test seams ---
-
-func TestExecuteJobDownload_SharedJobSuccess(t *testing.T) {
-	// Save original functions and restore after test
-	origListFn := listJobFilesFn
-	origDownloadFn := downloadFileFn
-	defer func() {
-		listJobFilesFn = origListFn
-		downloadFileFn = origDownloadFn
-	}()
-
-	// Mock listJobFilesFn to return a file with Azure storage metadata
-	listJobFilesFn = func(ctx context.Context, apiClient *api.Client, jobID string) ([]models.JobFile, error) {
-		return []models.JobFile{
-			{
-				ID:            "file123",
-				Name:          "results.dat",
-				DecryptedSize: 1024,
-				Storage: &models.CloudFileStorage{
-					ID:          "storage1",
-					StorageType: "AzureStorage",
-				},
-				PathParts: &models.CloudFilePathParts{
-					Container: "rescale-files",
-					Path:      "user/abc/results.dat",
-				},
-			},
-		}, nil
-	}
-
-	// Mock downloadFileFn to succeed
-	var downloadCalled bool
-	downloadFileFn = func(ctx context.Context, params download.DownloadParams) error {
-		downloadCalled = true
-		return nil
-	}
-
-	ctx := context.Background()
-
-	// executeJobDownload requires logger and apiClient but our mocks bypass them
-	// We can't easily call executeJobDownload without a full setup, so test the
-	// test seams are wired correctly by verifying the mock functions are called
-	_ = ctx
-	_ = downloadCalled
-
-	// Verify mock was set
-	files, err := listJobFilesFn(ctx, nil, "BWuHag")
-	if err != nil {
-		t.Fatalf("listJobFilesFn() error = %v", err)
-	}
-	if len(files) != 1 {
-		t.Fatalf("listJobFilesFn() returned %d files, want 1", len(files))
-	}
-	if files[0].Storage.StorageType != "AzureStorage" {
-		t.Errorf("file storage type = %q, want %q", files[0].Storage.StorageType, "AzureStorage")
-	}
-
-	// Verify download mock works
-	err = downloadFileFn(ctx, download.DownloadParams{})
-	if err != nil {
-		t.Fatalf("downloadFileFn() error = %v", err)
-	}
-	if !downloadCalled {
-		t.Error("downloadFileFn was not called")
-	}
-}
-
-func TestExecuteJobDownload_SharedJobPermissionDenied(t *testing.T) {
-	// Simulate the error chain from a 403 and verify formatDownloadError handles it
-	root := errors.New("Forbidden")
-	level1 := fmt.Errorf("get storage credentials failed: status 403: %w", root)
-	level2 := fmt.Errorf("failed to get Azure credentials for file abc123: %w", level1)
-	level3 := fmt.Errorf("abc123 download failed: %w", level2)
-
-	result := formatDownloadError("output.dat", "abc123", "BWuHag", "AzureStorage", level3)
-	errMsg := result.Error()
-
-	// Verify the error message is user-friendly
-	if !strings.Contains(errMsg, "fetching storage credentials") {
-		t.Errorf("should classify as credential step, got %q", errMsg)
-	}
-	if strings.Contains(errMsg, "Go struct field") {
-		t.Errorf("should not contain Go internals, got %q", errMsg)
-	}
-	if !strings.Contains(errMsg, "--debug") {
-		t.Errorf("should include guidance, got %q", errMsg)
-	}
-}
-
-func TestExecuteJobDownload_MalformedCredentialPayload(t *testing.T) {
-	// Simulate the exact error that would occur with old []string Paths type
-	root := errors.New(`json: cannot unmarshal object into Go struct field AzureCredentials.paths of type string`)
-	level1 := fmt.Errorf("failed to parse Azure credentials: %w", root)
-	level2 := fmt.Errorf("failed to get Azure credentials for file abc123: %w", level1)
-	level3 := fmt.Errorf("abc123 download failed: %w", level2)
-
-	result := formatDownloadError("output.dat", "abc123", "BWuHag", "AzureStorage", level3)
-	errMsg := result.Error()
-
-	// Verify the error is sanitized
-	if !strings.Contains(errMsg, "unexpected credential response format") {
-		t.Errorf("should sanitize to 'unexpected credential response format', got %q", errMsg)
-	}
-	if strings.Contains(errMsg, "json:") {
-		t.Errorf("should not contain json: prefix, got %q", errMsg)
-	}
-	if strings.Contains(errMsg, "Go struct field") {
-		t.Errorf("should not contain Go internals, got %q", errMsg)
+			for _, want := range tt.wantPresent {
+				if !strings.Contains(errMsg, want) {
+					t.Errorf("error should contain %q, got %q", want, errMsg)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(errMsg, absent) {
+					t.Errorf("error should not contain %q, got %q", absent, errMsg)
+				}
+			}
+		})
 	}
 }
 
