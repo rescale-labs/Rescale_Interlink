@@ -9,7 +9,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 )
+
+// gnuTarOnce caches the one-time detection of whether the `tar` on PATH is GNU
+// tar, so the version probe runs once per process rather than once per archive.
+var (
+	gnuTarOnce sync.Once
+	gnuTar     bool
+)
+
+// isGNUTar reports whether the `tar` binary on PATH is GNU tar.
+//
+// GNU tar interprets any argument containing a colon as a remote `host:path`
+// spec, so a Windows absolute path like `C:\Users\...` makes it try to connect
+// to a host named "C" ("Cannot connect to C: resolve failed"). Passing
+// --force-local disables that. The Windows-native bsdtar does not have this
+// behavior and does not accept --force-local, so the flag must only be added
+// for GNU tar.
+func isGNUTar() bool {
+	gnuTarOnce.Do(func() {
+		out, err := exec.Command("tar", "--version").CombinedOutput()
+		if err == nil && strings.Contains(string(out), "GNU tar") {
+			gnuTar = true
+		}
+	})
+	return gnuTar
+}
 
 // CreateTarGz creates a tar archive of a directory using system tar command
 // This matches the Python PUR behavior of using subprocess tar
@@ -50,6 +77,14 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 		parent := filepath.Dir(sourceDir)
 		dirname := filepath.Base(sourceDir)
 		args = []string{tarFlags, outputPath, "-C", parent, dirname}
+	}
+
+	// On Windows, GNU tar reads the drive-letter colon in an absolute path
+	// (C:\...) as a remote host and fails with "Cannot connect to C: resolve
+	// failed". --force-local keeps colons local. Only GNU tar needs (and
+	// accepts) the flag; see isGNUTar.
+	if isGNUTar() {
+		args = append([]string{"--force-local"}, args...)
 	}
 
 	// Execute tar command
