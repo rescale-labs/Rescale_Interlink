@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -49,17 +50,33 @@ var (
 // cliDownloadItem wraps a file for download with index info.
 // Implements transfer.WorkItem for BatchExecutor.
 type cliDownloadItem struct {
-	idx        int    // 0-based index in the batch
-	fileID     string // Rescale file ID
-	name       string // display name
-	size       int64  // decrypted size
-	localPath  string // resolved output path
-	cloudFile  *models.CloudFile
-	jobFile    *models.JobFile // non-nil for job downloads
+	idx       int    // 0-based index in the batch
+	fileID    string // Rescale file ID
+	name      string // display name
+	size      int64  // decrypted size
+	localPath string // resolved output path
+	cloudFile *models.CloudFile
+	jobFile   *models.JobFile // non-nil for job downloads
 }
 
 // FileSize implements transfer.WorkItem.
 func (d cliDownloadItem) FileSize() int64 { return d.size }
+
+// storageType names the storage backend an item came from, for the error a
+// failed download reports. A job file carries its own metadata; a file-ID
+// download carries the CloudFile its metadata fetch returned.
+func (d cliDownloadItem) storageType() string {
+	if d.jobFile != nil {
+		if d.jobFile.Storage != nil {
+			return d.jobFile.Storage.StorageType
+		}
+		return "unknown"
+	}
+	if d.cloudFile != nil && d.cloudFile.Storage != nil {
+		return d.cloudFile.Storage.StorageType
+	}
+	return "unknown"
+}
 
 // executeFileDownload - Common download logic for both files download and download shortcut.
 // Fetches all file metadata first, resolves collisions using shared
@@ -190,35 +207,7 @@ func executeFileDownload(
 
 	fmt.Printf("Downloading %d file(s) to: %s\n\n", len(validFiles), outputDir)
 
-	// Create DownloadUI for professional progress bars
-	downloadUI := progress.NewDownloadUI(len(validFiles))
-
-	// Route this command's logs through the bars — see executeFileUpload for why.
-	if downloadUI.IsTerminal() {
-		logger = logger.WithOutput(downloadUI.Writer())
-	}
-
-	defer downloadUI.Wait()
-
-	downloadedFiles := make([]string, 0, len(validFiles))
-	skippedFiles := make([]string, 0)
-	var downloadMutex sync.Mutex
-
-	initialConflictMode := DownloadSkipOnce
-	if overwriteAll {
-		initialConflictMode = DownloadOverwriteAll
-	} else if skipAll {
-		initialConflictMode = DownloadSkipAll
-	} else if resumeAll {
-		initialConflictMode = DownloadResumeAll
-	}
-	conflictResolver := NewDownloadConflictResolver(initialConflictMode)
-
-	// Create resource manager from global flags
-	resourceMgr := CreateResourceManager()
-	transferMgr := transfer.NewManager(resourceMgr)
-
-	// Build work items for BatchExecutor
+	// Build work items for the batch runner
 	items := make([]cliDownloadItem, len(downloadFiles))
 	for i, df := range downloadFiles {
 		meta := fileIDToMeta[df.FileID]
@@ -232,182 +221,16 @@ func executeFileDownload(
 		}
 	}
 
-	cfg := transfer.BatchConfig{
-		MaxWorkers:  maxConcurrent,
-		ResourceMgr: resourceMgr,
-		Label:       "FILE-DOWNLOAD",
-	}
-	numWorkers := transfer.ComputedWorkers(items, cfg)
-
-	// PHASE 3: Download each file concurrently using BatchExecutor
-	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item cliDownloadItem) error {
-		outputPath := item.localPath
-
-		// Check if path exists as a directory (name collision with folder)
-		if info, statErr := os.Stat(outputPath); statErr == nil && info.IsDir() {
-			originalPath := outputPath
-			outputPath = outputPath + ".file"
-			fmt.Fprintf(downloadUI.Writer(), "⚠️  File '%s' conflicts with directory, downloading as '%s'\n",
-				filepath.Base(originalPath), filepath.Base(outputPath))
-		}
-
-		// Check if file exists and handle conflict
-		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
-			action, err := conflictResolver.Resolve(func() (DownloadConflictAction, error) {
-				return promptDownloadConflict(item.name, outputPath)
-			})
-			if err != nil {
-				return fmt.Errorf("conflict prompt failed: %w", err)
-			}
-
-			switch action {
-			case DownloadSkipOnce, DownloadSkipAll:
-				if !existingFileIsComplete(info, item.size) {
-					fmt.Fprintf(downloadUI.Writer(), "⚠️  Existing file %s is %d bytes, expected %d — re-downloading\n",
-						item.name, info.Size(), item.size)
-					if rmErr := os.Remove(outputPath); rmErr != nil {
-						return fmt.Errorf("failed to remove incomplete existing file: %w", rmErr)
-					}
-					break
-				}
-				downloadMutex.Lock()
-				skippedFiles = append(skippedFiles, outputPath)
-				downloadMutex.Unlock()
-				return nil
-			case DownloadAbort:
-				return fmt.Errorf("download aborted by user")
-			case DownloadOverwriteOnce, DownloadOverwriteAll:
-				if err := os.Remove(outputPath); err != nil {
-					return fmt.Errorf("failed to remove existing file: %w", err)
-				}
-			case DownloadResumeOnce, DownloadResumeAll:
-				encryptedPath := outputPath + ".encrypted"
-				encryptedInfo, encErr := os.Stat(encryptedPath)
-				_, outErr := os.Stat(outputPath)
-
-				minEncryptedSize := item.size + 1
-				maxEncryptedSize := item.size + 16
-
-				if encErr == nil && encryptedInfo.Size() >= minEncryptedSize && encryptedInfo.Size() <= maxEncryptedSize {
-					fmt.Fprintf(downloadUI.Writer(), "✓ Encrypted file complete (%d bytes), retrying decryption for %s...\n",
-						encryptedInfo.Size(), item.name)
-					if outErr == nil {
-						os.Remove(outputPath)
-					}
-				} else {
-					resumeState, _ := state.LoadDownloadState(outputPath)
-					if resumeState != nil {
-						if err := state.ValidateDownloadState(resumeState, outputPath); err == nil {
-							resumeProgress := state.GetDownloadResumeProgress(resumeState)
-							fmt.Fprintf(downloadUI.Writer(), "↻ Resuming download for %s from %.1f%% (%d/%d bytes)...\n",
-								item.name, resumeProgress*100, resumeState.DownloadedBytes, resumeState.TotalSize)
-							if outErr == nil {
-								os.Remove(outputPath)
-							}
-						} else {
-							fmt.Fprintf(downloadUI.Writer(), "Resume state invalid for %s (reason: %v). Starting fresh download...\n",
-								item.name, err)
-							state.CleanupExpiredDownloadResume(resumeState, outputPath, false)
-							os.Remove(outputPath)
-						}
-					} else {
-						if encErr == nil {
-							fmt.Fprintf(downloadUI.Writer(), "Encrypted file has unexpected size (%d bytes, expected %d-%d bytes). Starting fresh download for %s...\n",
-								encryptedInfo.Size(), minEncryptedSize, maxEncryptedSize, item.name)
-							os.Remove(encryptedPath)
-						}
-						os.Remove(outputPath)
-					}
-				}
-			}
-		}
-
-		fmt.Fprintf(downloadUI.Writer(), "[%d/%d] Preparing to download %s...\n", item.idx+1, len(downloadFiles), item.name)
-
-		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
-
-		if transferHandle.GetThreads() > 1 && item.size > 100*1024*1024 {
-			fmt.Fprintf(downloadUI.Writer(), "Using %d concurrent threads for %s\n",
-				transferHandle.GetThreads(), item.name)
-		}
-
-		// The progress and retry callbacks run on different transfer goroutines,
-		// so the bar is created under a lock rather than with a bare sync.Once.
-		var (
-			barMu   sync.Mutex
-			fileBar *progress.DownloadFileBar
-		)
-		ensureBar := func() *progress.DownloadFileBar {
-			barMu.Lock()
-			defer barMu.Unlock()
-			if fileBar == nil {
-				fileBar = downloadUI.AddFileBar(item.idx+1, item.fileID, item.name, outputPath, item.size)
-			}
-			return fileBar
-		}
-
-		err := downloadFileFn(ctx, download.DownloadParams{
-			FileID:    item.fileID,
-			LocalPath: outputPath,
-			APIClient: apiClient,
-			ProgressCallback: func(fraction float64) {
-				ensureBar().UpdateProgress(fraction)
-			},
-			OnRetry: func(ev cloud.RetryEvent) {
-				retryReporter(ensureBar(), downloadUI.Writer())(ev)
-			},
-			TransferHandle: transferHandle,
-			SkipChecksum:   skipChecksum,
-		})
-
-		if err != nil {
-			fileBar = ensureBar()
-			fileBar.Complete(err)
-
-			if state.DownloadResumeStateExists(outputPath) {
-				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
-			}
-
-			storageType := "unknown"
-			if item.cloudFile != nil && item.cloudFile.Storage != nil {
-				storageType = item.cloudFile.Storage.StorageType
-			}
-			logger.Debug().Str("error", sanitizeErrorString(err.Error())).Str("file_id", item.fileID).Str("file_name", item.name).Msg("download failed - full error chain for debugging")
-			return formatDownloadError(item.name, item.fileID, "", storageType, err)
-		}
-
-		logger.Info().
-			Str("file_id", item.fileID).
-			Str("path", outputPath).
-			Msg("File downloaded successfully")
-
-		ensureBar().Complete(nil)
-
-		downloadMutex.Lock()
-		downloadedFiles = append(downloadedFiles, outputPath)
-		downloadMutex.Unlock()
-		return nil
+	return runDownloadBatch(ctx, items, downloadBatchOptions{
+		label:            "FILE-DOWNLOAD",
+		maxConcurrent:    maxConcurrent,
+		skipChecksum:     skipChecksum,
+		conflictMode:     initialDownloadConflictMode(overwriteAll, skipAll, resumeAll),
+		promptOnConflict: true,
+		announcePrepare:  true,
+		apiClient:        apiClient,
+		logger:           logger,
 	})
-
-	// Collect errors from batch result
-	errors := batchResult.Errors
-
-	// Print summary
-	if len(errors) > 0 {
-		fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
-		if len(skippedFiles) > 0 {
-			fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
-		}
-		fmt.Printf("✗ Failed to download %d file(s)\n", len(errors))
-		// Return first error but continue with others (per project objectives)
-		return errors[0]
-	}
-
-	fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
-	if len(skippedFiles) > 0 {
-		fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
-	}
-	return nil
 }
 
 // executeJobDownload - Common download logic for job output files.
@@ -535,35 +358,7 @@ func executeJobDownload(
 
 	fmt.Printf("Downloading %d file(s) from job %s to: %s\n\n", len(files), jobID, outputDir)
 
-	// Create DownloadUI for professional progress bars
-	downloadUI := progress.NewDownloadUI(len(files))
-
-	// Route this command's logs through the bars — see executeFileUpload for why.
-	if downloadUI.IsTerminal() {
-		logger = logger.WithOutput(downloadUI.Writer())
-	}
-
-	defer downloadUI.Wait()
-
-	downloadedFiles := make([]string, 0, len(files))
-	skippedFiles := make([]string, 0)
-	var downloadMutex sync.Mutex
-
-	initialConflictMode := DownloadSkipOnce
-	if overwriteAll {
-		initialConflictMode = DownloadOverwriteAll
-	} else if skipAll {
-		initialConflictMode = DownloadSkipAll
-	} else if resumeAll {
-		initialConflictMode = DownloadResumeAll
-	}
-	conflictResolver := NewDownloadConflictResolver(initialConflictMode)
-
-	// Create resource manager from global flags
-	resourceMgr := CreateResourceManager()
-	transferMgr := transfer.NewManager(resourceMgr)
-
-	// Build work items for BatchExecutor
+	// Build work items for the batch runner
 	items := make([]cliDownloadItem, len(files))
 	for i, file := range files {
 		outputPath := fileOutputPaths[file.ID]
@@ -581,10 +376,187 @@ func executeJobDownload(
 		}
 	}
 
+	return runDownloadBatch(ctx, items, downloadBatchOptions{
+		label:          "JOB-DOWNLOAD",
+		jobID:          jobID,
+		maxConcurrent:  maxConcurrent,
+		skipChecksum:   skipChecksum,
+		conflictMode:   initialDownloadConflictMode(overwriteAll, skipAll, resumeAll),
+		makeParentDirs: true,
+		announceSkip:   true,
+		apiClient:      apiClient,
+		logger:         logger,
+	})
+}
+
+// downloadBatchOptions carries the parts of a CLI download that differ per
+// command. Everything else — progress bars, conflict handling, the worker pool,
+// the closing summary — is the same for every download, and lives in
+// runDownloadBatch.
+type downloadBatchOptions struct {
+	label         string // BatchExecutor label for the batch log line
+	jobID         string // job downloads only; empty leaves job context out of errors and logs
+	maxConcurrent int
+	skipChecksum  bool
+	conflictMode  DownloadConflictAction
+
+	// promptOnConflict offers the per-file choice when a local file is already
+	// in the way. Job downloads leave it off: they run unattended from jobs
+	// watch and from the end-to-end workflow, so they act on the mode the flags
+	// set and never block on a prompt.
+	promptOnConflict bool
+
+	// makeParentDirs creates each item's parent directory before downloading.
+	// Job files carry a relative path, so their local path can be nested.
+	makeParentDirs bool
+
+	// announceSkip prints a line for each existing file left in place.
+	announceSkip bool
+
+	// announcePrepare prints a numbered line per file before its transfer starts.
+	announcePrepare bool
+
+	apiClient *api.Client
+	logger    *logging.Logger
+}
+
+// initialDownloadConflictMode maps the mutually exclusive conflict flags onto the
+// resolver's starting mode. With none of them set the mode stays a "once"
+// action, which is what makes a prompting command prompt.
+func initialDownloadConflictMode(overwriteAll, skipAll, resumeAll bool) DownloadConflictAction {
+	switch {
+	case overwriteAll:
+		return DownloadOverwriteAll
+	case skipAll:
+		return DownloadSkipAll
+	case resumeAll:
+		return DownloadResumeAll
+	}
+	return DownloadSkipOnce
+}
+
+// resolveDownloadConflict decides what to do about a file already sitting at
+// outputPath and carries out whatever that decision needs before the transfer
+// starts: dropping a file that is to be replaced, clearing a leftover of the
+// wrong size, or lining up the resume state. It reports skip=true when the file
+// on disk stands and the download must not run.
+func resolveDownloadConflict(
+	resolver *ConflictResolver[DownloadConflictAction],
+	item cliDownloadItem,
+	outputPath string,
+	info os.FileInfo,
+	opts downloadBatchOptions,
+	w io.Writer,
+) (bool, error) {
+	var action DownloadConflictAction
+	if opts.promptOnConflict {
+		chosen, err := resolver.Resolve(func() (DownloadConflictAction, error) {
+			return promptDownloadConflict(item.name, outputPath)
+		})
+		if err != nil {
+			return false, fmt.Errorf("conflict prompt failed: %w", err)
+		}
+		action = chosen
+	} else {
+		action = resolver.Mode()
+	}
+
+	switch action {
+	case DownloadSkipOnce, DownloadSkipAll:
+		if !existingFileIsComplete(info, item.size) {
+			fmt.Fprintf(w, "⚠️  Existing file %s is %d bytes, expected %d — re-downloading\n",
+				item.name, info.Size(), item.size)
+			if rmErr := os.Remove(outputPath); rmErr != nil {
+				return false, fmt.Errorf("failed to remove incomplete existing file: %w", rmErr)
+			}
+			return false, nil
+		}
+		if opts.announceSkip {
+			fmt.Fprintf(w, "⊘ Skipping existing file: %s\n", item.name)
+		}
+		return true, nil
+	case DownloadAbort:
+		return false, fmt.Errorf("download aborted by user")
+	case DownloadOverwriteOnce, DownloadOverwriteAll:
+		if err := os.Remove(outputPath); err != nil {
+			return false, fmt.Errorf("failed to remove existing file: %w", err)
+		}
+	case DownloadResumeOnce, DownloadResumeAll:
+		encryptedPath := outputPath + ".encrypted"
+		encryptedInfo, encErr := os.Stat(encryptedPath)
+		_, outErr := os.Stat(outputPath)
+
+		minEncryptedSize := item.size + 1
+		maxEncryptedSize := item.size + 16
+
+		if encErr == nil && encryptedInfo.Size() >= minEncryptedSize && encryptedInfo.Size() <= maxEncryptedSize {
+			fmt.Fprintf(w, "✓ Encrypted file complete (%d bytes), retrying decryption for %s...\n",
+				encryptedInfo.Size(), item.name)
+			if outErr == nil {
+				os.Remove(outputPath)
+			}
+		} else {
+			resumeState, _ := state.LoadDownloadState(outputPath)
+			if resumeState != nil {
+				if err := state.ValidateDownloadState(resumeState, outputPath); err == nil {
+					resumeProgress := state.GetDownloadResumeProgress(resumeState)
+					fmt.Fprintf(w, "↻ Resuming download for %s from %.1f%% (%d/%d bytes)...\n",
+						item.name, resumeProgress*100, resumeState.DownloadedBytes, resumeState.TotalSize)
+					if outErr == nil {
+						os.Remove(outputPath)
+					}
+				} else {
+					fmt.Fprintf(w, "Resume state invalid for %s (reason: %v). Starting fresh download...\n",
+						item.name, err)
+					state.CleanupExpiredDownloadResume(resumeState, outputPath, false)
+					os.Remove(outputPath)
+				}
+			} else {
+				if encErr == nil {
+					fmt.Fprintf(w, "Encrypted file has unexpected size (%d bytes, expected %d-%d bytes). Starting fresh download for %s...\n",
+						encryptedInfo.Size(), minEncryptedSize, maxEncryptedSize, item.name)
+					os.Remove(encryptedPath)
+				}
+				os.Remove(outputPath)
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// runDownloadBatch downloads a prepared batch of files: one progress display,
+// one worker pool sized from the item sizes, conflict handling per file, and the
+// summary the user reads at the end. Callers do the command-specific work first
+// — metadata, filtering, collision-resolved local paths — and hand over the
+// finished item list.
+func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloadBatchOptions) error {
+	logger := opts.logger
+
+	// Create DownloadUI for professional progress bars
+	downloadUI := progress.NewDownloadUI(len(items))
+
+	// Route this command's logs through the bars — see executeFileUpload for why.
+	if downloadUI.IsTerminal() {
+		logger = logger.WithOutput(downloadUI.Writer())
+	}
+
+	defer downloadUI.Wait()
+
+	downloadedFiles := make([]string, 0, len(items))
+	skippedFiles := make([]string, 0)
+	var downloadMutex sync.Mutex
+
+	conflictResolver := NewDownloadConflictResolver(opts.conflictMode)
+
+	// Create resource manager from global flags
+	resourceMgr := CreateResourceManager()
+	transferMgr := transfer.NewManager(resourceMgr)
+
 	cfg := transfer.BatchConfig{
-		MaxWorkers:  maxConcurrent,
+		MaxWorkers:  opts.maxConcurrent,
 		ResourceMgr: resourceMgr,
-		Label:       "JOB-DOWNLOAD",
+		Label:       opts.label,
 	}
 	numWorkers := transfer.ComputedWorkers(items, cfg)
 
@@ -592,9 +564,11 @@ func executeJobDownload(
 	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item cliDownloadItem) error {
 		outputPath := item.localPath
 
-		// Ensure directory exists
-		if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-			return fmt.Errorf("failed to create directory for %s: %w", item.name, err)
+		if opts.makeParentDirs {
+			// Ensure directory exists
+			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+				return fmt.Errorf("failed to create directory for %s: %w", item.name, err)
+			}
 		}
 
 		// Check if path exists as a directory (name collision with folder)
@@ -605,69 +579,22 @@ func executeJobDownload(
 				filepath.Base(originalPath), filepath.Base(outputPath))
 		}
 
-		// Check if file already exists
-		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
-			switch conflictResolver.Mode() {
-			case DownloadSkipOnce, DownloadSkipAll:
-				if !existingFileIsComplete(info, item.size) {
-					fmt.Fprintf(downloadUI.Writer(), "⚠️  Existing file %s is %d bytes, expected %d — re-downloading\n",
-						item.name, info.Size(), item.size)
-					if rmErr := os.Remove(outputPath); rmErr != nil {
-						return fmt.Errorf("failed to remove incomplete existing file: %w", rmErr)
-					}
-					break
-				}
-				fmt.Fprintf(downloadUI.Writer(), "⊘ Skipping existing file: %s\n", item.name)
+		// Check if file exists and handle conflict
+		if info, statErr := os.Stat(outputPath); statErr == nil && !info.IsDir() {
+			skip, err := resolveDownloadConflict(conflictResolver, item, outputPath, info, opts, downloadUI.Writer())
+			if err != nil {
+				return err
+			}
+			if skip {
 				downloadMutex.Lock()
 				skippedFiles = append(skippedFiles, outputPath)
 				downloadMutex.Unlock()
 				return nil
-			case DownloadAbort:
-				return fmt.Errorf("download aborted by user")
-			case DownloadOverwriteOnce, DownloadOverwriteAll:
-				if err := os.Remove(outputPath); err != nil {
-					return fmt.Errorf("failed to remove existing file: %w", err)
-				}
-			case DownloadResumeOnce, DownloadResumeAll:
-				encryptedPath := outputPath + ".encrypted"
-				encryptedInfo, encErr := os.Stat(encryptedPath)
-				_, outErr := os.Stat(outputPath)
-
-				minEncryptedSize := item.size + 1
-				maxEncryptedSize := item.size + 16
-
-				if encErr == nil && encryptedInfo.Size() >= minEncryptedSize && encryptedInfo.Size() <= maxEncryptedSize {
-					fmt.Fprintf(downloadUI.Writer(), "✓ Encrypted file complete (%d bytes), retrying decryption for %s...\n",
-						encryptedInfo.Size(), item.name)
-					if outErr == nil {
-						os.Remove(outputPath)
-					}
-				} else {
-					resumeState, _ := state.LoadDownloadState(outputPath)
-					if resumeState != nil {
-						if err := state.ValidateDownloadState(resumeState, outputPath); err == nil {
-							resumeProgress := state.GetDownloadResumeProgress(resumeState)
-							fmt.Fprintf(downloadUI.Writer(), "↻ Resuming download for %s from %.1f%% (%d/%d bytes)...\n",
-								item.name, resumeProgress*100, resumeState.DownloadedBytes, resumeState.TotalSize)
-							if outErr == nil {
-								os.Remove(outputPath)
-							}
-						} else {
-							fmt.Fprintf(downloadUI.Writer(), "Resume state invalid for %s (reason: %v). Starting fresh download...\n",
-								item.name, err)
-							state.CleanupExpiredDownloadResume(resumeState, outputPath, false)
-							os.Remove(outputPath)
-						}
-					} else {
-						if encErr == nil {
-							fmt.Fprintf(downloadUI.Writer(), "Encrypted file has unexpected size (%d bytes, expected %d-%d bytes). Starting fresh download for %s...\n",
-								encryptedInfo.Size(), minEncryptedSize, maxEncryptedSize, item.name)
-							os.Remove(encryptedPath)
-						}
-						os.Remove(outputPath)
-					}
-				}
 			}
+		}
+
+		if opts.announcePrepare {
+			fmt.Fprintf(downloadUI.Writer(), "[%d/%d] Preparing to download %s...\n", item.idx+1, len(items), item.name)
 		}
 
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
@@ -677,6 +604,8 @@ func executeJobDownload(
 				transferHandle.GetThreads(), item.name)
 		}
 
+		// The progress and retry callbacks run on different transfer goroutines,
+		// so the bar is created under a lock rather than with a bare sync.Once.
 		var (
 			barMu   sync.Mutex
 			fileBar *progress.DownloadFileBar
@@ -690,12 +619,9 @@ func executeJobDownload(
 			return fileBar
 		}
 
-		cloudFile := item.jobFile.ToCloudFile()
-
-		err = downloadFileFn(ctx, download.DownloadParams{
-			FileInfo:  cloudFile,
+		params := download.DownloadParams{
 			LocalPath: outputPath,
-			APIClient: apiClient,
+			APIClient: opts.apiClient,
 			ProgressCallback: func(fraction float64) {
 				ensureBar().UpdateProgress(fraction)
 			},
@@ -703,23 +629,30 @@ func executeJobDownload(
 				retryReporter(ensureBar(), downloadUI.Writer())(ev)
 			},
 			TransferHandle: transferHandle,
-			SkipChecksum:   skipChecksum,
-		})
+			SkipChecksum:   opts.skipChecksum,
+		}
+		// A job file arrives from the v2 listing with its metadata attached, so
+		// the download reads it straight off the item. A file-ID download has
+		// only the ID and the metadata is fetched downstream.
+		if item.jobFile != nil {
+			params.FileInfo = item.jobFile.ToCloudFile()
+		} else {
+			params.FileID = item.fileID
+		}
 
-		if err != nil {
-			fileBar = ensureBar()
-			fileBar.Complete(err)
+		if err := downloadFileFn(ctx, params); err != nil {
+			ensureBar().Complete(err)
 
 			if state.DownloadResumeStateExists(outputPath) {
 				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
 			}
 
-			storageType := "unknown"
-			if item.jobFile.Storage != nil {
-				storageType = item.jobFile.Storage.StorageType
+			failure := logger.Debug().Str("error", sanitizeErrorString(err.Error())).Str("file_id", item.fileID).Str("file_name", item.name)
+			if opts.jobID != "" {
+				failure = failure.Str("job_id", opts.jobID)
 			}
-			logger.Debug().Str("error", sanitizeErrorString(err.Error())).Str("file_id", item.fileID).Str("file_name", item.name).Str("job_id", jobID).Msg("download failed - full error chain for debugging")
-			return formatDownloadError(item.name, item.fileID, jobID, storageType, err)
+			failure.Msg("download failed - full error chain for debugging")
+			return formatDownloadError(item.name, item.fileID, opts.jobID, item.storageType(), err)
 		}
 
 		logger.Info().
@@ -736,17 +669,17 @@ func executeJobDownload(
 	})
 
 	// Collect errors from batch result
-	dlErrors := batchResult.Errors
+	errs := batchResult.Errors
 
 	// Print summary
-	if len(dlErrors) > 0 {
+	if len(errs) > 0 {
 		fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
 		if len(skippedFiles) > 0 {
 			fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
 		}
-		fmt.Printf("✗ Failed to download %d file(s)\n", len(dlErrors))
+		fmt.Printf("✗ Failed to download %d file(s)\n", len(errs))
 		// Return first error but continue with others (per project objectives)
-		return dlErrors[0]
+		return errs[0]
 	}
 
 	fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
