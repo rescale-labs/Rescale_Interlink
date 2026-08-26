@@ -1,7 +1,7 @@
 # Architecture - Rescale Interlink
 
 **Version**: 4.9.9
-**Last Updated**: August 12, 2026
+**Last Updated**: August 25, 2026
 
 For verified feature details and source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 
@@ -74,7 +74,7 @@ Rescale Interlink is a unified CLI and GUI application for managing Rescale comp
 **Binaries:**
 - `rescale-int` (from `cmd/rescale-int/`): CLI-only. Rejects `--gui` with an error directing users to `rescale-int-gui`. Also serves as the compat-mode entry point when invoked as `rescale-cli`.
 - `rescale-int-gui` (from root `main.go`): Unified GUI+CLI. The `--gui` flag launches the Wails GUI.
-- `rescale-int-tray` (from `cmd/rescale-int-tray/`): Windows system tray companion for daemon status. **Windows MSI installs only** — not shipped with the portable Windows distribution, macOS, or Linux builds.
+- `rescale-int-tray` (from `cmd/rescale-int-tray/`): Windows system tray companion for daemon status. Windows-only, and shipped in both Windows artifacts — `build_dist.ps1` builds it into `_build\bin\`, which is what the portable zip packs. What the zip lacks is the MSI's wiring: the per-user `Run` key that starts the tray at logon, and the installable Windows Service it fronts.
 
 ---
 
@@ -87,15 +87,16 @@ rescale-int/
 ├── main.go                        # GUI+CLI binary entry point (rescale-int-gui)
 ├── cmd/
 │   ├── rescale-int/               # CLI-only binary entry point
-│   └── rescale-int-tray/          # Windows system tray companion (MSI install only)
+│   └── rescale-int-tray/          # Windows system tray companion (zip + MSI; autostart is MSI-only)
 │
 ├── frontend/                      # Wails React frontend
 │   ├── src/
 │   │   ├── App.tsx                # Main app with tab navigation
 │   │   ├── components/
-│   │   │   ├── tabs/              # 7 tab implementations
-│   │   │   ├── widgets/           # Shared widgets (JobsTable, StatsBar, etc.)
-│   │   │   └── common/            # Common components (ErrorBoundary)
+│   │   │   ├── tabs/                # 7 tab implementations
+│   │   │   ├── widgets/             # Shared widgets (JobsTable, StatsBar, etc.)
+│   │   │   ├── common/              # Common components (ErrorBoundary)
+│   │   │   └── ErrorReportModal.tsx # Error-report dialog
 │   │   ├── stores/                  # Zustand state management
 │   │   │   ├── jobStore.ts          # PUR workflow configuration
 │   │   │   ├── runStore.ts          # Active run monitoring + queue
@@ -115,7 +116,7 @@ rescale-int/
 │   │
 │   │  ── CLI & Commands ──
 │   ├── cli/                       # Native CLI commands (Cobra)
-│   │   └── compat/                # rescale-cli compatibility mode (25 files)
+│   │   └── compat/                # rescale-cli compatibility mode (17 source files)
 │   ├── watch/                     # Job watch engine (shared by native + compat)
 │   │
 │   │  ── Core ──
@@ -181,7 +182,9 @@ rescale-int/
 │   ├── diskspace/                 # Cross-platform disk space checking
 │   ├── elevation/                 # Windows UAC / Unix privilege elevation
 │   ├── logging/                   # Logger and TeeWriter
-│   ├── mesa/                      # Mesa/OpenGL setup (Windows/Linux GPU)
+│   ├── mesa/                      # Mesa/OpenGL software rendering (Windows only;
+│   │                              # the non-Windows files are no-op stubs)
+│   │   └── dlls/                  # Mesa DLLs embedded by `-tags mesa`
 │   ├── mesainit/                  # Mesa early initialization
 │   ├── pathutil/                  # Path resolution
 │   ├── platform/                  # Cross-platform sleep prevention
@@ -238,11 +241,12 @@ internal/cli
         NOT internal/core — the PUR engine is reached through internal/pur/pipeline
 
 internal/cli/compat                 (does NOT import internal/cli — that is what avoids the cycle)
-    ├─→ internal/api
-    ├─→ internal/config
-    ├─→ internal/watch
-    ├─→ internal/models
-    └─→ internal/version
+    ├─→ internal/api, internal/config, internal/models, internal/version, internal/watch
+    ├─→ internal/cloud/{credentials,download,upload}
+    ├─→ internal/transfer, internal/resources, internal/progress, internal/http
+    ├─→ internal/constants, internal/validation
+    ├─→ internal/pur/parser
+    └─→ internal/util/{analysis,glob}
 
 internal/wailsapp
     ├─→ internal/core
@@ -277,7 +281,7 @@ internal/watch                      (complete — verified with go list -deps)
 **Key Principle**: No circular dependencies. Dependencies flow downward: `wailsapp` → `core` → `services` → `cloud`/`transfer`. `internal/cli` sits *below* `wailsapp`, which imports it, and above `transfer`/`cloud`, which it reaches directly rather than through `core`. Two packages are deliberately kept clean so they can be shared:
 
 - `internal/watch` imports only `internal/constants`, so both `internal/cli` and `internal/cli/compat` can use it. Everything else is injected via function types.
-- `internal/cli/compat` does not import `internal/cli`. It builds its own Cobra tree on top of `api`, `config`, `models`, `watch` and `version`.
+- `internal/cli/compat` does not import `internal/cli`. That is the whole of the rule: it builds its own Cobra tree, and reaches the transfer stack (`cloud/{credentials,download,upload}`, `transfer`, `resources`, `progress`, `http`) directly, the same way `internal/cli` does.
 
 `internal/daemon` is a consumer of `TransferService`, not a parallel transfer implementation: it routes downloads through `TransferService.StartStreamingDownloadBatch` and touches `internal/transfer` only for the observation types (`transfer.Queue`, `transfer.BatchStats`). It must not reach for `transfer.RunBatch`, `transfer.Manager` or `resources.Manager` directly.
 
@@ -304,13 +308,13 @@ The `Engine` struct holds configuration, API client, event bus, state manager, p
 
 **Purpose**: Interface to Rescale Platform REST API v3 and v2.
 
-The `Client` struct manages HTTP transport with connection pooling, API token, base URL, rate limiter, and folder cache. See `internal/api/client.go` for the full definition.
+The `Client` struct holds its HTTP client, the resolved config, base URL, API key, the process-level rate-limiter store, and API usage metrics. There is no folder cache on it. See `internal/api/client.go` for the full definition.
 
 **Key Features**:
-- HTTP client with connection pooling (512 idle connections total, 100 per host, 90s idle timeout)
+- HTTP client from `http.ConfigureHTTPClient` — connection pooling at 100 idle connections total, 100 per host, 90s idle timeout. The larger 512-idle pool is the transfer client's, not this one's
 - Automatic retry with exponential backoff
 - Rate limiting (three-scope token bucket)
-- Folder content caching via `ListFolderContentsPage` enrichment
+- Folder listing *enrichment* via `ListFolderContentsPage` — not caching. The cache is `folder.FolderCache` in `internal/transfer/folder/`, created per operation by the caller
 - Structured error handling
 
 **Selected client methods**: file/folder/job CRUD (`ListFiles`, `DeleteFile`, `CreateFolder`, `ListFolderContents`, `DeleteFolder`, `GetJob`, `GetJobStatuses`, `SubmitJob`, `StopJob`, etc.). Streaming upload and download primitives are **not** methods on `api.Client` — they live as free functions in `internal/cloud/upload/` and `internal/cloud/download/` and run on top of provider-specific transfer handles. The API client only handles metadata-level REST calls.
@@ -426,6 +430,7 @@ Entering and leaving degraded mode is announced exactly once per transition (`se
 - **Builder** (`builder.go`): Assembles report from classified error + redacted timeline snapshot.
 - **Reporter** (`reporter.go`): GUI wrapper for classify → publish flow.
 - **CLI Helper** (`cli_helper.go`): `HandleCLIError()` at CLI `ExecuteC()` error seam — auto-saves reports to disk.
+- **Transport** (`transport.go`): writes the report JSON `0600` and, for auto-saved reports, prunes the report directory to the newest 500 (`maxRetainedReports`). Nothing else prunes it, so a repeating failure would otherwise write one file per occurrence forever.
 
 ### 8. Sleep Prevention (`internal/platform/`)
 
@@ -467,7 +472,7 @@ CLI uses `mpb` (multi-progress bars) with per-file bars showing speed and ETA. G
 
 ## CLI Compatibility Mode
 
-**Package**: `internal/cli/compat/` (25 files)
+**Package**: `internal/cli/compat/` (17 source files, plus 8 of tests)
 
 Provides drop-in compatibility with `rescale-cli` (the legacy Java-based Rescale CLI). Existing scripts and automation workflows can migrate to Interlink without modification.
 
@@ -481,7 +486,7 @@ When active, `cmd/rescale-int/main.go` dispatches to `compat.ExecuteCompat()` in
 
 ### Architecture
 
-Compat mode builds a **separate Cobra command tree** (`NewCompatRootCmd()` in `root.go`) that mirrors rescale-cli's flag syntax. It imports `config`, `api`, `models`, and `version` directly — it does NOT import the `cli` package, avoiding import cycles.
+Compat mode builds a **separate Cobra command tree** (`NewCompatRootCmd()` in `root.go`) that mirrors rescale-cli's flag syntax. It imports `config`, `api`, `models`, `watch` and `version` directly, plus the shared transfer stack (`cloud/{credentials,download,upload}`, `transfer`, `resources`, `progress`, `http`, `pur/parser`, `util/{analysis,glob}`, `validation`, `constants`) — it does NOT import the `cli` package, which is what avoids the import cycle.
 
 **Credential resolution chain** (independent from native CLI):
 1. `-p/--api-token` flag
@@ -590,8 +595,9 @@ All behavior is injected:
 **Streaming implementation** processes files in 16KB chunks with constant ~16KB memory regardless of file size, preventing memory exhaustion on large files (60GB+). See `internal/crypto/encryption.go` and `internal/crypto/streaming.go`.
 
 **Encryption Modes**:
-- **Default (streaming)**: Per-part AES-256-CBC encryption during upload. No temporary encrypted file. HKDF-SHA256 key derivation per part.
+- **Default (streaming)**: AES-256-CBC chained across parts during upload. A single key and IV are stored in cloud metadata, part N's IV is the last ciphertext block of part N-1, and PKCS7 padding is applied only to the final part — so the combined ciphertext is identical to whole-file AES-256-CBC, which is what lets the platform decrypt it. No temporary encrypted file.
 - **Legacy (`--pre-encrypt`)**: Full-file encryption before upload. Compatible with older Rescale clients.
+- **Legacy read path (v3.1.x)**: per-part HKDF-SHA256 key and IV derivation. Still readable on download (format version 1); never written by new uploads.
 
 ### File Permissions Security
 
@@ -654,7 +660,7 @@ All transfer operations (uploads and downloads) from both CLI and GUI converge t
 ┌──────────────────────┐  ┌──────────────────────┐
 │    S3 Provider       │  │    Azure Provider     │
 │  (providers/s3/)     │  │  (providers/azure/)   │
-│  5 files, 6 ifaces   │  │  5 files, 6 ifaces    │
+│  5 files, 7 ifaces   │  │  5 files, 7 ifaces    │
 └──────────┬───────────┘  └──────────┬────────────┘
            └──────────┬──────────────┘
                       ▼
@@ -686,22 +692,23 @@ All transfer operations (uploads and downloads) from both CLI and GUI converge t
 | `transfer.StreamingPartDownloader` | `internal/cloud/transfer/downloader.go` | `{s3,azure}/streaming_concurrent.go` |
 | `transfer.LegacyDownloader` | `internal/cloud/transfer/downloader.go` | `{s3,azure}/download.go` |
 
-`internal/cloud/storage/` is a different thing despite the name: it holds the shared storage error types (`IsDiskFullError` and friends), which is all the rest of the tree imports from it.
+`internal/cloud/storage/` is a different thing despite the name: it holds the shared storage error types (`IsDiskFullError` and friends) and an `interfaces.go` declaring four cloud-client interfaces that nothing imports. The error types are all the rest of the tree takes from it — `internal/cloud/transfer/downloader.go` is the only importer.
 
 **Storage Backend Parity**:
 - Both S3 and Azure assert the same seven interfaces above
-- Same part sizing: both call `resources.CalculateDynamicChunkSize(fileSize, threads)`, which picks 16MB / 32MB / 48MB / 64MB from the file-size tier and then caps it so `chunk * threads * 2` fits in 75% of available memory. `constants.ChunkSize` (32MB) is the base, not a fixed value; `MinChunkSize` and `MaxChunkSize` bound the result
+- Same part sizing: neither provider picks its own. `resources.PlanUpload` sizes every upload, streaming or `--pre-encrypt`, before any bytes move and returns an `UploadPlan{PartSize, WorkerCap, QueueDepth}` (`internal/cloud/transfer/uploader.go`, `internal/cloud/upload/upload.go`). Part size starts at the file-size tier (16MB / 32MB / 48MB / 64MB from `constants.ChunkSize` and friends), is clamped so `chunk * threads * 2` fits in 75% of the memory budget, and is then raised to the **part-count floor** — `ceil(fileSize / MaxParts)` rounded up to a whole MB — whenever the tier would need more parts than the backend accepts. The floor overrides both the memory clamp and `MaxChunkSize`, which is what lifted the old 640GB (S3, 10,000 parts) and 3.2TB (Azure, 50,000 blocks) ceilings. When even the floor exceeds the backend's per-part limit, the upload is refused up front and names the largest file that backend can take, rather than failing after every byte has moved. Part size is stamped into the object's `partsize` metadata and CBC chains through it, so it cannot be renegotiated partway
+- Same memory budget: `(*Manager).PlanUpload` reserves each plan's peak part-buffer memory against one shared budget keyed by transfer ID, so concurrent uploads narrow each other's pipeline (queue depth first, then worker count, floor `UploadMinThrottledWorkers`) instead of each claiming the whole machine. `resources.CalculateDynamicChunkSize` is the tier-plus-memory step inside the planner; nothing in the transfer path calls it directly any more. Downloads size parts with `resources.ChunkSizeFromFileSize`, which is the same tier table without the memory clamp, for objects whose metadata carries no `partsize`
 - Same concurrency model via orchestration layer
-- Same resume capability via `state/` package
+- Same restart behaviour: an interrupted upload restarts from the beginning. Every attempt generates a fresh key, IV and object-key suffix, so a `state/` sidecar left by an earlier attempt describes an upload of *different* ciphertext; it is never resumed and the upload restarts from scratch, rather than splicing two encryptions into one object. The mechanism differs: S3 fails the object-key check, aborts the orphaned multipart upload and deletes the stale sidecar; Azure fails the same check and simply starts fresh, leaving the sidecar until a successful upload clears it (`{s3,azure}/pre_encrypt.go`). The streaming default never writes a sidecar at all. Only downloads in the legacy (v0) format resume, by chunk offset
 - Transparent to user (auto-detected via provider factory)
 
 ### S3 Backend (`internal/cloud/providers/s3/`)
 
-Multi-part upload API for files ≥100MB (`constants.MultipartThreshold`), part size from `CalculateDynamicChunkSize` as above, concurrent part uploads, credential caching via `EnsureFreshCredentials()`, automatic retry with exponential backoff, seekable upload streams for SDK retry.
+Multi-part upload API. The streaming default always creates a multipart upload, whatever the file size — `constants.MultipartThreshold` (100MB) never reaches it; it only splits a `--pre-encrypt` upload between multipart and a single `PutObject`, and decides whether a legacy download is chunked. Part size from the upload plan as above (`UploadLimits`: 10,000 parts, 5GB per part), concurrent part uploads, credential caching via `EnsureFreshCredentials()`, automatic retry with exponential backoff, seekable upload streams for SDK retry.
 
 ### Azure Backend (`internal/cloud/providers/azure/`)
 
-Block blob API, block size from the same `CalculateDynamicChunkSize` call, concurrent block upload, automatic credential refresh, same seven interfaces as S3 for consistency.
+Block blob API, block size from the same upload plan (`UploadLimits`: 50,000 blocks, 4000MB per block), concurrent block upload, automatic credential refresh, same seven interfaces as S3 for consistency.
 
 ---
 
@@ -709,7 +716,7 @@ Block blob API, block size from the same `CalculateDynamicChunkSize` call, concu
 
 ### Connection Reuse
 
-Single HTTP client with connection pooling (512 idle connections total, 100 per host, 90s idle timeout). All operations in a batch reuse the same client.
+The S3/Azure transfer client (`http.CreateOptimizedClient`) pools 512 idle connections total, 100 per host, 90s idle timeout, and every operation in a batch reuses it. Two transports keep the smaller pool `http.ConfigureHTTPClient` sets — 100 idle total (`internal/http/proxy.go`): the API client, which uses that function directly, and any transport an NTLM proxy has wrapped, because the optimisation pass only rewrites a plain `*http.Transport`.
 
 ### Rate Limiting
 
@@ -722,10 +729,11 @@ Token bucket algorithm with cross-process coordinator. See [Rate Limiter](#5-rat
 | Median File Size | Concurrent Transfers | Threads/File |
 |-----------------|---------------------|--------------|
 | < 100MB (small) | Up to 20 | 1 |
-| 100MB – 1GB (medium) | Up to 10 | 4 |
+| 100MB – 500MB (medium) | Up to 10 | 1 |
+| 500MB – 1GB (medium) | Up to 10 | 4 |
 | > 1GB (large) | Up to 5 | 8–16 |
 
-Validated against thread pool capacity and 75% of available memory. Applied symmetrically in GUI and CLI.
+The concurrency tier turns at 100MB and 1GB, but threads-per-file turns at 500MB (`constants.MediumFileThreshold`), which is why the medium band splits. Thread counts are the base tiers, before aggressive mode. Validated against thread pool capacity and 75% of the memory budget. That budget is `getAvailableMemory()`, and it is not a real reading everywhere: on Windows it is free physical memory from `GlobalMemoryStatusEx`, while on macOS and Linux it is 75% of a hardcoded 4GB model minus the current Go heap, clamped to 512MB–8GB (`internal/resources/memory_unix.go`). Applied symmetrically in GUI and CLI.
 
 **Source:** `internal/resources/manager.go`, `internal/constants/app.go`
 
@@ -747,7 +755,7 @@ Validated against thread pool capacity and 75% of available memory. Applied symm
 
 **Main Thread**: Command parsing (Cobra), synchronous execution, progress bar rendering.
 
-**Background Goroutines**: Concurrent uploads/downloads (controlled by `RunBatch` semaphore, adaptive 5–20 based on file sizes), per-file multi-threaded transfers via `TransferHandle`, API calls with timeouts, progress updates.
+**Background Goroutines**: Concurrent uploads/downloads (controlled by `RunBatch` semaphore — 20 / 10 / 5 by median file size, then clamped by the thread pool, the memory budget, `--max-concurrent` and the batch size, with a floor of 1; 5 is the default only for an empty batch), per-file multi-threaded transfers via `TransferHandle`, API calls with timeouts, progress updates.
 
 **Synchronization**: WaitGroups for concurrent operations, mutexes for shared state (minimal), channels for coordination.
 
@@ -770,9 +778,10 @@ Transfer concurrency uses two layers sharing a single global thread pool (`resou
 - `ComputeBatchConcurrency()` computes median file size → picks tier
 - All transfer paths (CLI, GUI, daemon) use this shared abstraction
 
-**Layer 2 — Per-File Multi-Threading** (`AllocateForTransfer` in `resources/manager.go`):
+**Layer 2 — Per-File Multi-Threading** (`transfer.Manager.AllocateTransfer` in `internal/transfer/manager.go`, which is what every batch caller invokes; it draws the thread count from `resources.Manager.AllocateForTransfer` underneath):
 - When each file starts, allocates threads from the shared pool
 - Thread count based on file size tiers (500MB-1GB: 4, 1-5GB: 8, 5-10GB: 12, 10GB+: 16)
+- Aggressive mode is on unless the caller configures it, and multiplies those tiers by 1.5x (1-5GB), 1.75x (5-10GB) or 2x (10GB+) *before* the 16-thread and CPU-core caps apply — so on a machine with enough cores the effective counts are 12 / 16 / 16, not 8 / 12 / 16
 - Dynamic rebalancing: as files complete, freed threads become available
 
 ```
@@ -838,13 +847,13 @@ CLI/GUI Interface
     ▼
 Core Engine
     │
-    ├─→ 1. Disk Space Check ──→ [FAIL FAST if insufficient]
-    ├─→ 2. Create Tar Archive ─→ /tmp/job-xxxx.tar.gz
-    ├─→ 3. Encrypt Archive ────→ Encrypted chunks
-    ├─→ 4. Upload to Storage ──→ S3/Azure (with progress)
-    ├─→ 5. Register File ──────→ API: POST /api/v3/files/
-    ├─→ 6. Create Job ─────────→ API: POST /api/v3/jobs/
-    └─→ 7. Submit Job ─────────→ API: POST /api/v2/jobs/{id}/submit/
+    ├─→ 1. Create Tar Archive ─→ /tmp/job-xxxx.tar.gz
+    ├─→ 2. Encrypt + Upload ───→ S3/Azure, encrypted per part in flight
+    │                            (--pre-encrypt instead writes a temp
+    │                             encrypted file, then uploads it)
+    ├─→ 3. Register File ──────→ API: POST /api/v3/files/
+    ├─→ 4. Create Job ─────────→ API: POST /api/v3/jobs/
+    └─→ 5. Submit Job ─────────→ API: POST /api/v2/jobs/{id}/submit/
             │
             ▼
          Rescale Platform
@@ -872,8 +881,12 @@ CLI/GUI Interface
 Core Engine
     │
     ├─→ 1. Get File Metadata ──→ API (or from enriched listing)
-    ├─→ 2. Download File ──────→ S3/Azure (with progress)
-    ├─→ 3. Decrypt File ───────→ Decrypted chunks
+    ├─→ 2. Detect Format ──────→ v2 CBC / v1 HKDF / v0 legacy
+    ├─→ 3. Download + Decrypt ─→ S3/Azure, decrypted per part in flight
+    │                            (v0 legacy instead downloads the whole
+    │                             encrypted file, then decrypts it. v0, and
+    │                             v1 on Azure, are the only paths that
+    │                             pre-check disk space)
     └─→ 4. Save to Disk ───────→ Local filesystem
 ```
 
@@ -910,7 +923,7 @@ Core Engine
 - Abstract platform differences (disk space, file paths, sleep prevention)
 - Build tags for platform-specific code
 - Consistent user experience across platforms
-- A shipped bundle must not depend on the host's copy of a library it already bundles. `libwebkit2gtk` forks its helper executables (`WebKitWebProcess`, `WebKitNetworkProcess`) from a path compiled into the library, so bundling the library without the helpers makes the Linux AppImage fork the *host's* helpers — and a mismatched host WebKit fails the IPC handshake, leaving a window that paints but never renders. `build/linux/bundle-webkit.sh` copies the helpers in and gives them `$ORIGIN`-relative RPATHs; `build/linux/verify-appimage.sh` gates the release by resolving every helper's libraries with `LD_LIBRARY_PATH` deliberately unset, because setting it would hide exactly the missing RPATH that caused the original bug
+- A shipped bundle must not depend on the host's copy of a library it already bundles. `libwebkit2gtk` forks its helper executables (`WebKitWebProcess`, `WebKitNetworkProcess`) from a path compiled into the library, so bundling the library without the helpers makes the Linux AppImage fork the *host's* helpers — and a mismatched host WebKit fails the IPC handshake, leaving a window that paints but never renders. `build/linux/bundle-webkit.sh` copies the helpers in and gives them `$ORIGIN`-relative RPATHs; `build/linux/verify-appimage.sh` gates the Linux build — the HPC build script runs it on the finished AppImage before packaging the tarball, not GitHub Actions, which has no Linux job — by resolving every helper's libraries with `LD_LIBRARY_PATH` deliberately unset, because setting it would hide exactly the missing RPATH that caused the original bug
 
 ### 7. Dependency Injection
 - Watch engine has zero imports from CLI packages

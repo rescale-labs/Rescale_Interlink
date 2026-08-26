@@ -1,7 +1,7 @@
 # Rescale Interlink — Feature Summary
 
 **Version:** 4.9.9
-**Last Updated:** August 12, 2026
+**Last Updated:** August 25, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document catalogs what Rescale Interlink can do. For full command syntax, see [CLI_GUIDE.md](CLI_GUIDE.md). For architecture internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For version history, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
@@ -34,9 +34,15 @@ This document catalogs what Rescale Interlink can do. For full command syntax, s
 - **GUI Mode**: Graphical interface with Wails v2 + React/TypeScript frontend. Entry point: root `main.go` with `--gui` flag via `rescale-int-gui` binary
 
 ### Supported Platforms
-- macOS (darwin/arm64, darwin/amd64)
-- Linux (amd64) — the GUI ships as an AppImage that bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. A verification step inspects the finished AppImage and fails the release before the artifact ships if the bundled helpers are missing or resolve against the host
-- Windows (amd64) — standard and Mesa software-rendering variants; the Mesa build is for VMs and RDP sessions without usable GPU acceleration
+
+**Release artifacts** (what a tagged release publishes):
+- macOS (darwin/arm64) — signed and notarized `.zip`
+- Linux (amd64) — `.tar.gz` holding the CLI and an AppImage GUI. The AppImage bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. The Linux build gates the AppImage on `build/linux/verify-appimage.sh` before packaging the tarball, so helpers that are missing or resolve against the host fail the build. This build runs on Rescale HPC, not GitHub Actions
+- Windows (amd64) — portable `.zip` and `.msi`; the executables are signed before zipping and the MSI is signed after it is built
+
+**Additional build targets** (`make build-all`, not published with a release):
+- macOS (darwin/amd64)
+- Windows (amd64) Mesa software-rendering variant, for VMs and RDP sessions without usable GPU acceleration
 
 ### FIPS 140-3 Compliance
 All production builds are compiled with `GOFIPS140=certified` (the CMVP-validated Go Cryptographic Module) and the `fips` build tag. Non-FIPS builds refuse to run (exit code 2) unless `RESCALE_ALLOW_NON_FIPS=true` is set. Mandatory for FedRAMP environments.
@@ -52,8 +58,9 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Upload to specific folder with `--folder-id`
 - **Streaming encryption** (default): encrypts on-the-fly during upload, no temp file needed
 - **Legacy mode** (`--pre-encrypt`): full-file encryption before upload, compatible with older clients
-- Multi-part upload for files larger than 100MB (32MB parts by default)
-- Automatic resume on interruption (`<file>.upload.resume` sidecar)
+- Every streaming upload is multipart, whatever the file size. The 100MB threshold (`constants.MultipartThreshold`) applies only to `--pre-encrypt`, which sends smaller files in a single request, and to legacy download chunking. Part size is planned per file, not fixed: 16MB / 32MB / 48MB / 64MB by file size, clamped to the transfer memory budget, then raised as far as needed to keep the part count inside the backend's limit (10,000 for S3, 50,000 for Azure). A file too large for even the largest legal part is refused up front, naming the biggest file that backend can take
+- An interrupted upload restarts from the beginning. Every attempt generates a fresh key, IV and object-key suffix, so a `<file>.upload.resume` sidecar from an earlier `--pre-encrypt` attempt describes different ciphertext; it is never resumed, so the upload restarts from scratch instead of splicing two encryptions into one object. On S3 the orphaned multipart upload is aborted as well; on Azure the sidecar simply fails the object-key check and is left until a successful upload clears it. The streaming default writes no sidecar at all
+- Every upload path checks completeness before committing and aborts rather than registering a partial object: the streaming default requires every part to be present, and `--pre-encrypt` additionally verifies the byte count and that the part or block sequence has no gaps (v4.9.9)
 - Progress bars with transfer speed and ETA, including a retry label when a part is retried
 - S3 and Azure backends with seekable upload streams for retry
 - Per-file tags applied after upload with `--tags`
@@ -62,9 +69,9 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Single or multiple file download
 - Automatic decryption after download
 - Chunked/concurrent download for files larger than 100MB
-- Full byte-offset resume via HTTP Range requests (`<file>.download.resume` sidecar)
+- Byte-offset resume via HTTP Range requests (`<file>.download.resume` sidecar) — legacy-format objects only. The current v2 CBC format decrypts sequentially into the output file, so an interrupted download restarts from zero
 - Progress bars during download and decryption
-- Pre-flight disk space check that reports the requirement it actually enforced, measured on the filesystem holding the output directory
+- Pre-flight disk space check that reports the requirement it actually enforced, measured on the filesystem holding the output directory — on the legacy path, which stages an encrypted temp file, and on the Azure v1 path. The v2 CBC format writes plaintext straight out and has no pre-flight check
 - No file size limit
 
 ### List
@@ -95,7 +102,7 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Optional hidden-file inclusion (`--include-hidden`)
 - Concurrent file uploads with adaptive concurrency, plus concurrent folder creation (`--folder-concurrency`)
 - Folder conflict handling: skip existing subfolders, or merge into them. The root folder cannot be skipped
-- Per-file resume, inherited from the shared upload path
+- No per-file resume: a re-run restarts each unfinished file from the beginning, the same as a single-file upload
 - Streaming folder creation (creates remote folders as parent becomes ready)
 - Exits non-zero when any file, directory walk, or folder creation failed
 
@@ -203,6 +210,8 @@ Background service for automatically downloading completed jobs.
 - **Actions that did not happen say so**: a scan trigger that could not start (stopped, paused, or a poll already running) reports why instead of returning success, and "Save all settings" asks the running daemon to reload and reports the result — writing `daemon.conf` alone leaves a running daemon on its old settings.
 - **Pre-flight validates the download folder** with the same write probe the config save uses, so a read-only folder is caught before every download fails.
 - **Bounded growth**: the report directory keeps the newest 500 files; state entries are dropped once no scan could select them again (jobs still owed a tag call are exempt); and terminal transfer tasks beyond the 20 most recent batches are cleared, keeping recent auto-downloads visible without accumulating one task per file forever.
+- **The downloaded count is a trailing window, not a lifetime total**: `daemon status` and the Setup tab count the state entries still retained, and retention is `lookback_days` + 30 days — about 37 days at the default. Jobs downloaded before that fall out of the count.
+- **Known limitation**: the shared transfer path's low-level diagnostics (`[SLOT]`, `[CRED]`, `[TIMING]`, `[BATCH]`) go through the standard library logger, which is bridged into the daemon log only by `daemon run`. The Windows service hosts each user's daemon in-process and returns before that bridge is installed, so those lines do not reach the service's per-user log. Run the daemon in the foreground to see them.
 - **Rate limit and retry notices** reach a detached daemon's log file and IPC log buffer, not the closed stderr it was started with.
 
 ### Subcommands
@@ -266,7 +275,7 @@ Batch job submission pipeline for parallel computational studies.
 - `config path` — Show the configuration file path
 
 ### Storage
-`config.csv` is the single source of truth for all persistent settings. API keys are stored in a separate token file (`~/.config/rescale/token`) with `0600` permissions. Keys are never written to `config.csv`.
+`config.csv` is the single source of truth for all persistent settings. API keys are stored in a separate token file — `~/.config/rescale/token` on macOS and Linux, `%LOCALAPPDATA%\Rescale\Interlink\token` on Windows — with `0600` permissions. Keys are never written to `config.csv`.
 
 ---
 
@@ -347,7 +356,7 @@ Bulk operations collapse into single aggregate batch rows instead of showing tho
 - Folder uploads/downloads use enumeration ID as batch ID
 - PUR pipeline generates `pur_<timestamp>` batch ID
 - Single-Job generates `job_<timestamp>` batch ID
-- File Browser multi-file selections generate `fb_upload_<timestamp>` / `fb_download_<timestamp>` batch IDs
+- File Browser selections of 50 files or more generate `fb_upload_<timestamp>` / `fb_download_<timestamp>` batch IDs; smaller selections stay as individual rows
 - Expand to see paginated individual tasks (50 per page). Paging filters and slices in one pass, cloning only the rows on the requested page, so asking for 50 rows of a 20,000-file batch does not stall progress updates behind the query
 - Batch-level cancel and retry, with the cancelled count carried through to the row even when the tab was in the background while the batch was cancelled
 
@@ -373,7 +382,7 @@ Bulk operations collapse into single aggregate batch rows instead of showing tho
 ## Transfer Architecture
 
 ### Unified Backend
-All transfers (CLI, GUI, daemon) converge to single entry points (`upload.UploadFile()`, `download.DownloadFile()`) and share the same provider factory, orchestration layer, and resume system.
+All transfers (CLI, GUI, daemon) converge to single entry points (`upload.UploadFile()`, `download.DownloadFile()`) and share the same provider factory, orchestration layer, and upload planner.
 
 ### Streaming Encryption
 Default mode encrypts on-the-fly during upload with AES-256-CBC chained across parts: a
@@ -399,8 +408,8 @@ renders them where the user is looking: the CLI through the progress writer, PUR
 the pipeline log, and the GUI onto the event bus for the Activity log and the batch rows.
 
 ### Resume Support
-- **Upload**: State saved to `.upload.resume` JSON files (parts, encryption key, IV)
-- **Download**: State saved to `.download.resume` JSON files with byte-offset HTTP Range resume
+- **Upload**: none in practice. The `--pre-encrypt` path writes a `.upload.resume` sidecar (parts, encryption key, IV), but a retry re-encrypts under a fresh key, IV and object-key suffix, so the sidecar always describes a different object and is deliberately discarded rather than resumed; S3 also aborts the orphaned multipart upload, while Azure leaves the sidecar until a successful upload clears it. The streaming default writes no sidecar. Interrupted uploads restart
+- **Download**: `.download.resume` JSON files with byte-offset HTTP Range resume, for legacy-format objects only. The current v2 CBC format restarts from zero
 
 ### Conflict Handling
 Thread-safe `ConflictResolver[A comparable]` generic type with automatic escalation from "prompt each" to "apply all".

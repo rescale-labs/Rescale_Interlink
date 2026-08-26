@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
 **Version:** 4.9.9
-**Last Updated:** 2026-08-12
+**Last Updated:** 2026-08-25
 
 ## Overview
 
@@ -53,7 +53,8 @@ with the following controls:
   lint, and build. The Windows and macOS build jobs declare `needs: [verify]`, so a
   failing check blocks the release rather than shipping beside it.
 - **Pinned, checksum-verified toolchain.** Go 1.26.7 is downloaded and checked against
-  its published SHA-256 before install; Node.js is pinned to 20.
+  its published SHA-256 before install. Node.js is pinned to major version 20 via
+  `actions/setup-node`; the Windows build job pins the exact patch (20.20.2).
 - **Deterministic dependency installs.** `npm ci` installs exactly what
   `package-lock.json` pins. This is also what `wails.json`'s `frontend:install` runs, so
   local and CI builds resolve the same tree.
@@ -418,16 +419,16 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Security-Relevant Changes |
 |---------|------|---------------------------|
-| 4.9.8 | 2026-05-20 | FIPS 140-3 build path tightening; security dependency refresh to clear advisories; cleaner credential source DTO across GUI and CLI |
+| 4.9.8 | 2026-05-31 | FIPS 140-3 build path tightening; security dependency refresh to clear advisories; cleaner credential source DTO across GUI and CLI |
 | 4.9.4 | 2026-04-19 | Explicit Windows DACL on token file (owner + Administrators + SYSTEM, no inheritance); IPC caller-SID scoping consolidated behind one helper with catalog-wide fail-closed enforcement |
 | 4.9.3 | 2026-04-15 | AWS SDK security bump (eventstream DoS fix); CodeQL quality cleanup |
 | 4.9.2 | 2026-04-13 | S3 FIPS endpoints for ITAR platforms; Windows service credential isolation |
 | 4.9.1 | 2026-04-12 | CLI compat mode with independent credential chain; `jobs watch` command |
-| 4.9.0 | 2026-03-25 | Error reporting privacy model (redaction, reportability filtering); sleep prevention |
+| 4.9.0 | 2026-04-03 | Error reporting privacy model (redaction, reportability filtering); sleep prevention |
 | 4.8.7 | 2026-03-11 | Platform URL allowlist — strict origin enforcement, credential exfiltration prevention |
 | 4.8.2 | 2026-03-02 | Automatic update check with policy gate (FedRAMP, env var), trusted URL enforcement |
 | 4.7.5 | 2026-02-25 | Empty file upload fix |
 | 4.7.3 | 2026-02-22 | Path traversal sanitization in GetHistoricalJobRows, event listener isolation |
 | 4.5.1 | 2026-01-28 | Log permissions hardened (0700), NTLM/FIPS safeguards, fail-closed IPC auth |
-| 4.4.2 | 2025-12-XX | Centralized log directory, file permissions security (0600 for sensitive state) |
-| 4.0.0 | 2025-XX-XX | Initial FIPS 140-3 compliance |
+| 4.4.2 | 2026-01-19 | Centralized log directory, file permissions security (0600 for sensitive state) |
+| 4.0.0 | 2025-12-27 | Initial FIPS 140-3 compliance |

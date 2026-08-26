@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
 **Version**: 4.9.9
-**Last Updated**: August 12, 2026
+**Last Updated**: August 25, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -40,6 +40,8 @@ make test
 ```bash
 # Install Wails CLI (if not already installed)
 go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+# go install puts it in $(go env GOPATH)/bin (usually ~/go/bin). Put that on your
+# PATH, or invoke the CLI as ~/go/bin/wails in the commands below.
 
 # Install frontend dependencies (this is what wails.json's frontend:install runs)
 cd frontend && npm ci && cd ..
@@ -47,8 +49,10 @@ cd frontend && npm ci && cd ..
 # Development mode (hot reload)
 wails dev
 
-# Production build
-CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
+# Production build (macOS). GOFIPS140=certified is what the startup FIPS check tests —
+# a GUI built without it exits 2. -tags fips selects the FIPS-only proxy/NTLM paths,
+# so production builds need both.
+GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
 ```
 
 Use `npm ci` rather than `npm install`: it installs exactly what `package-lock.json`
@@ -71,11 +75,13 @@ make build-all                # Build for all platforms
 # Example: bin/v4.9.9/darwin-arm64/rescale-int
 
 # Production GUI build
-GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" ~/go/bin/wails build -tags fips -platform darwin/arm64
+GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
 
-# Development only (not for production releases)
+# Development only (not for production releases). RESCALE_ALLOW_NON_FIPS is read at
+# run time, not build time, so it belongs on the run rather than on the build.
 # Note: Output to bin/dev/ to avoid polluting project root
-RESCALE_ALLOW_NON_FIPS=true go build -o bin/dev/rescale-int ./cmd/rescale-int
+go build -o bin/dev/rescale-int ./cmd/rescale-int
+RESCALE_ALLOW_NON_FIPS=true ./bin/dev/rescale-int --version
 ```
 
 **IMPORTANT:** Never output binaries to the project root directory. The `bin/` directory is gitignored; the root is not.
@@ -102,8 +108,8 @@ See [Go FIPS 140-3 Documentation](https://go.dev/doc/security/fips140) for detai
 # Format all code
 gofmt -w .
 
-# Check for issues
-go vet ./...
+# Check for issues (same invocation CI runs)
+GOFIPS140=certified go vet -tags fips ./...
 ```
 
 ## Testing
@@ -177,6 +183,7 @@ Types:
 
 ```
 rescale-int/
+├── main.go                    # GUI+CLI binary entry point (rescale-int-gui)
 ├── cmd/
 │   ├── rescale-int/           # CLI-only binary entry point
 │   │   └── main.go
@@ -264,7 +271,9 @@ rescale-int/
 │
 ├── build/                     # Wails build assets (icons, manifests), plus
 │                              # build/linux/ AppImage WebKit bundling + verify scripts
-└── installer/                 # Windows MSI installer sources
+├── installer/                 # Windows MSI installer sources
+├── packaging/                 # Desktop entry, icon, macOS install helper
+└── .github/workflows/         # release.yml — the tagged release pipeline
 ```
 
 ## Key Patterns
@@ -275,7 +284,7 @@ Use the event bus for decoupled communication:
 
 ```go
 // Publish an event
-eventBus.PublishStateChange(jobName, stage, status, jobID, error, progress)
+eventBus.PublishStateChange(jobName, oldStatus, newStatus, stage, jobID, errMsg)
 
 // Subscribe to events
 ch := eventBus.Subscribe(events.EventStateChange)

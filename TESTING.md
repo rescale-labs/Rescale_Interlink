@@ -1,6 +1,6 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: August 12, 2026
+**Last Updated**: August 25, 2026
 **Version**: 4.9.9
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -13,6 +13,9 @@ For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 - [Test Coverage](#test-coverage)
 - [Manual Testing Procedures](#manual-testing-procedures)
 - [GUI Testing](#gui-testing)
+- [Troubleshooting Tests](#troubleshooting-tests)
+- [Adding New Tests](#adding-new-tests)
+- [Continuous Integration](#continuous-integration)
 - [Historical Testing Summary](#historical-testing-summary)
 
 ---
@@ -78,14 +81,14 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-125 Go test files (124 under `internal/`, one under `installer/`) across 49 packages,
-plus 7 frontend vitest files. Grouped by functional area:
+129 Go test files (128 under `internal/`, one under `installer/`) across 49 packages,
+plus 8 frontend vitest files. Grouped by functional area:
 
 #### CLI & Commands
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/cli` | 8 | Command parsing, flag aliases, config commands, daemon commands, job-file decode, conflict resolution, folder-upload abort/failure paths, shortcut concurrency |
+| `internal/cli` | 9 | Command parsing, flag aliases, config commands, daemon commands, job-file decode, conflict resolution, folder-upload abort/failure paths, download helper, shortcut concurrency |
 | `internal/cli/compat` | 8 | Compat mode detection, arg normalization, commands, parity |
 
 #### Core Infrastructure
@@ -106,8 +109,8 @@ plus 7 frontend vitest files. Grouped by functional area:
 |---------|-----------|--------------|
 | `internal/cloud` | 2 | Timing utilities, retry notices |
 | `internal/cloud/credentials` | 1 | Credential management |
-| `internal/cloud/providers/s3` | 2 | S3 upload progress reader, provider behavior |
-| `internal/cloud/providers/azure` | 1 | Azure client, SAS token lookup |
+| `internal/cloud/providers/s3` | 3 | S3 upload progress reader, provider behavior, pre-encrypt part-count plan and short-upload refusal |
+| `internal/cloud/providers/azure` | 2 | Azure client, SAS token lookup, pre-encrypt block-count plan and short-upload refusal |
 | `internal/cloud/state` | 1 | Resume state serialization |
 | `internal/cloud/storage` | 1 | Disk-full and quota error classification |
 | `internal/cloud/transfer` | 1 | Transfer orchestration |
@@ -164,7 +167,7 @@ plus 7 frontend vitest files. Grouped by functional area:
 | `internal/logging` | 1 | TeeWriter (log → EventBus) |
 | `internal/platform` | 1 | Sleep prevention |
 | `internal/progress` | 1 | Bar-safe log sink |
-| `internal/resources` | 1 | Thread pool, memory management |
+| `internal/resources` | 2 | Thread pool, memory management, upload plan geometry and shared memory budget |
 | `internal/watch` | 1 | Job watch engine |
 | `internal/util/analysis` | 1 | Analysis utilities |
 | `internal/util/buffers` | 1 | Buffer pooling |
@@ -189,6 +192,7 @@ plus 7 frontend vitest files. Grouped by functional area:
 | `stores/runStore.test.ts` | `mergePolledJobRow` — a polled row must not downgrade an in-progress upload, but must accept terminal updates |
 | `stores/errorReportStore.test.ts` | Report modal open/dismiss, duplicate suppression cooldown |
 | `components/tabs/JobStatusTab.test.tsx` | Fetch on tab activation, "Load next" paging, Refresh disabled during a page load, recovery when a tab-switch refresh supersedes an in-flight page |
+| `components/tabs/FileBrowserTab.test.tsx` | Upload gating (job output folders, in-flight and failed folder loads) and destination resolution — the confirmation dialog names the folder the current view resolved, not the previous one |
 | `components/widgets/TemplateBuilder.test.tsx` | License UX — CUSTOM/RLM preset auto-switch and its hint lifecycle |
 | `components/widgets/RemoteFilePicker.test.tsx` | Workspace invalidation on API key change, discarding stale listings |
 
@@ -215,10 +219,10 @@ export RESCALE_API_KEY=$(cat /path/to/rescale_token.txt)
 echo "Test content" > /tmp/test.txt
 
 # Upload
-./bin/rescale-int files upload /tmp/test.txt
+./bin/v4.9.9/darwin-arm64/rescale-int files upload /tmp/test.txt
 
 # Note the file ID from output, then download
-./bin/rescale-int files download <FILE_ID> --outdir /tmp
+./bin/v4.9.9/darwin-arm64/rescale-int files download <FILE_ID> --outdir /tmp
 
 # Verify
 cat /tmp/test.txt
@@ -232,46 +236,46 @@ echo "file1" > /tmp/test_upload/file1.txt
 echo "file2" > /tmp/test_upload/subdir/file2.txt
 
 # Create folder
-FOLDER_ID=$(./bin/rescale-int folders create --name "Test_$(date +%s)" | grep -oE '[a-zA-Z0-9]{6}')
+FOLDER_ID=$(./bin/v4.9.9/darwin-arm64/rescale-int folders create --name "Test_$(date +%s)" | grep -oE '[a-zA-Z0-9]{6}')
 
 # Upload directory
-./bin/rescale-int folders upload-dir /tmp/test_upload --parent-id $FOLDER_ID
+./bin/v4.9.9/darwin-arm64/rescale-int folders upload-dir /tmp/test_upload --parent-id $FOLDER_ID
 
 # Verify
-./bin/rescale-int folders list --folder-id $FOLDER_ID
+./bin/v4.9.9/darwin-arm64/rescale-int folders list --folder-id $FOLDER_ID
 ```
 
 ### Compat Mode Testing
 
 ```bash
 # Verify compat mode activates
-./bin/rescale-int --compat --version
+./bin/v4.9.9/darwin-arm64/rescale-int --compat --version
 
 # Test via symlink
-ln -s ./bin/rescale-int ./rescale-cli
-./rescale-cli --version
+ln -s v4.9.9/darwin-arm64/rescale-int ./bin/rescale-cli
+./bin/rescale-cli --version
 
 # Test credential chain
-./rescale-cli -p $(cat /path/to/token) status -j JOB_ID
+./bin/rescale-cli -p $(cat /path/to/token) status -j JOB_ID
 
 # Test argument normalization
-./rescale-cli upload -f file1.txt file2.txt file3.txt  # multi-value -f
+./bin/rescale-cli upload -f file1.txt file2.txt file3.txt  # multi-value -f
 
 # Test exit code convention
-./rescale-cli status -j NONEXISTENT; echo "Exit code: $?"  # should be 33
+./bin/rescale-cli status -j NONEXISTENT; echo "Exit code: $?"  # should be 33
 ```
 
 ### Jobs Watch Testing
 
 ```bash
 # Single-job watch
-./bin/rescale-int jobs watch -j JOB_ID -d ./output -i 30
+./bin/v4.9.9/darwin-arm64/rescale-int jobs watch -j JOB_ID -d ./output -i 30
 
 # Newer-than watch (all jobs after reference)
-./bin/rescale-int jobs watch --newer-than REF_JOB_ID -d ./output
+./bin/v4.9.9/darwin-arm64/rescale-int jobs watch --newer-than REF_JOB_ID -d ./output
 
 # Watch with file filtering
-./bin/rescale-int jobs watch -j JOB_ID -d ./output --filter "*.dat" --exclude "debug*"
+./bin/v4.9.9/darwin-arm64/rescale-int jobs watch -j JOB_ID -d ./output --filter "*.dat" --exclude "debug*"
 ```
 
 ---
@@ -294,10 +298,9 @@ wails dev
 ### Production Build Testing
 
 ```bash
-# macOS (Apple Silicon)
-CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64
-
-# FIPS-compliant production build
+# macOS (Apple Silicon). GOFIPS140=certified is what the startup FIPS check tests —
+# a GUI built without it exits 2. -tags fips selects the FIPS-only proxy/NTLM paths,
+# so production builds need both.
 GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -tags fips -platform darwin/arm64
 
 # Test production build
@@ -422,10 +425,10 @@ go test ./...
 echo $RESCALE_API_KEY
 
 # Test connection
-./bin/rescale-int config test
+./bin/v4.9.9/darwin-arm64/rescale-int config test
 
 # Check logs
-./bin/rescale-int files list --verbose
+./bin/v4.9.9/darwin-arm64/rescale-int files list --verbose
 ```
 
 ### Common Issues
@@ -538,11 +541,11 @@ runs on macOS only), and performance regression detection.
 
 ### Current State (v4.9.9)
 
-- **Go suite**: 125 test files across 49 packages, 0 failing. `make test` reports about
-  1,800 passing cases (top-level tests plus subtests) and 2 skipped. The exact figure
-  moves with the platform you measure on — some tests branch on `runtime.GOOS` — so treat
-  it as a magnitude, not a checksum. 16 packages have no test files.
-- **Frontend suite**: 7 vitest files, 70 passing tests.
+- **Go suite**: 129 test files across 49 packages, 0 failing — roughly 1,200 top-level
+  test functions, plus subtests. Don't treat any of the reported case totals as a
+  checksum: some tests branch on `runtime.GOOS`, so what `make test` counts, and what it
+  skips, depends on the platform you measure on. 15 packages have no test files.
+- **Frontend suite**: 8 vitest files, 100 passing tests.
 - **CI**: the `verify` job in `.github/workflows/release.yml` runs both suites, plus
   `go vet -tags fips` and the frontend lint and build, on every `v*` tag push. The
   platform builds are gated on it.
@@ -556,6 +559,20 @@ runs on macOS only), and performance regression detection.
   message accuracy and the EDQUOT spellings; `--job-file` decode with the SSH access
   fields and unknown-key reporting; daemon state pruning and status-snapshot errors;
   paginated batch rows; and the frontend Job Status tab and File Browser filters.
+  The upload-integrity work adds:
+  - `internal/cloud/providers/s3/pre_encrypt_test.go` and
+    `internal/cloud/providers/azure/pre_encrypt_test.go` — every part or block is
+    uploaded, an upload short of the full byte count is refused rather than committed,
+    resume state belonging to another object is discarded, oversized files are rejected
+    before any request, and the plan's worker cap is respected.
+  - `internal/resources/upload_plan_test.go` — part-size and part-count geometry against
+    the S3 and Azure limits, the memory floor, and the shared budget across concurrent
+    and batched uploads.
+  - `internal/crypto/encryption_test.go` — short reads, mid-stream short reads, and read
+    errors during file encryption, with a differential check that the ciphertext still
+    matches the previous implementation byte for byte.
+  - `frontend/src/components/tabs/FileBrowserTab.test.tsx` — upload gating and
+    destination resolution in the File Browser.
 - **Known Bugs**: 0
 - **Quality Gates**:
   - `make test` and `npm run test:run` must pass

@@ -3,7 +3,7 @@
 Complete command-line interface reference for `rescale-int` v4.9.9.
 
 **Version:** 4.9.9
-**Build Date:** August 12, 2026
+**Build Date:** August 25, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 For a comprehensive list of all features with source code references, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -51,11 +51,17 @@ If you see an error like `GLIBC_2.27 not found`, your Linux distribution is too 
 
 ## Installation
 
-Download the appropriate binary for your platform from the releases page:
+Download the archive for your platform from the releases page. Each release
+attaches these assets, where `<tag>` is the release tag (for example `v4.9.9`):
 
-- **macOS (Apple Silicon)**: `rescale-int-darwin-arm64`
-- **Linux**: `rescale-int-linux-amd64`
-- **Windows**: `rescale-int-windows-amd64.exe`
+- **macOS (Apple Silicon)**: `rescale-interlink-<tag>-macos_aarch64.zip`
+- **Linux**: `rescale-interlink-<tag>-linux-amd64.tar.gz`
+- **Windows**: `rescale-interlink-<tag>-win_amd64.zip` (portable) or
+  `rescale-interlink-<tag>-win_amd64.msi` (installer)
+
+Unpack the archive. The CLI binary inside is named `rescale-int` (`rescale-int.exe`
+on Windows) on every platform; each archive also carries the GUI application
+alongside it.
 
 Make the binary executable (macOS/Linux):
 ```bash
@@ -100,6 +106,23 @@ proxy_mode,no-proxy
 
 **Note:** API keys and proxy passwords are NOT stored in config files for security reasons.
 
+**Note:** `api_base_url` (and the `--api-url` flag) accept only these six Rescale
+platform origins:
+
+| URL | Region |
+|-----|--------|
+| `https://platform.rescale.com` | North America |
+| `https://kr.rescale.com` | Korea |
+| `https://platform.rescale.jp` | Japan |
+| `https://eu.rescale.com` | Europe |
+| `https://itar.rescale.com` | US ITAR |
+| `https://itar.rescale-gov.com` | US ITAR FRM |
+
+The match is on scheme and host only: `https` is required, and a port, userinfo,
+path, query, or fragment is rejected. Anything else fails with a message listing
+the valid platforms. This is deliberate — it stops a mistyped or injected URL
+from sending your API key somewhere that is not Rescale.
+
 ### API Key Configuration
 
 **Option 1: Environment Variable**
@@ -126,10 +149,14 @@ rescale-int --api-key "your-api-key" <command>
 
 Configuration values are merged with this priority:
 1. `--api-key` command-line flag (highest)
-2. `--token-file` flag
-3. `RESCALE_API_KEY` environment variable
-4. Configuration file (non-credential settings only)
-5. Default values (lowest)
+2. `RESCALE_API_KEY` environment variable
+3. `--token-file` flag
+4. Default token file (`~/.config/rescale/token`)
+5. Configuration file (non-credential settings only)
+6. Default values (lowest)
+
+If several of these are set to *different* values, the CLI prints one warning
+naming the sources it found and the one it used.
 
 ### Proxy Configuration
 
@@ -169,7 +196,7 @@ Additional configuration options for specialized use cases:
 | `flatten_tar` | Remove subdirectory structure in tarballs (`true`/`false`) | false |
 | `run_subpath` | Scan prefix: subpath to navigate into before scanning for run directories (e.g., `Simcodes/Powerflow`) | (none) |
 | `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`), opt-in | (none) |
-| `tar_compression` | Compression type: `none` or `gzip` (legacy `gz` is auto-normalized to `gzip`) | none |
+| `tar_compression` | Compression type: `none` or `gzip`. Only the exact value `none` disables compression; anything else (including the legacy `gz`) produces a gzip archive. The GUI displays legacy `gz` as `gzip`, and saving from the GUI writes that normalized `gzip` back to `config.csv`; editing the file by hand leaves whatever you typed. `--tar-compression` is not validated, so a typo silently means gzip | none |
 | `max_retries` | Maximum upload retry attempts | 1 |
 
 **Note:** In the GUI, worker and tar settings are configured via the **PUR tab's Pipeline Settings** section (visible in both the scan step and the jobs-validated step). Tar options are also available in the **SingleJob tab** when using directory input mode. The `run_subpath` and `validation_pattern` are configured on the **PUR tab** scan step and persist to `config.csv` automatically. These settings are no longer in the Setup tab's Advanced Settings.
@@ -203,7 +230,8 @@ appear as whole lines above the progress bars instead of tearing them. Setting
 
 ### Performance Tuning
 
-**`--max-threads N`** - Set maximum concurrent threads (0 = auto-detect, range: 1-32)
+**`--max-threads N`** - Set maximum concurrent threads (0 = auto-detect, range: 1-32).
+A value outside 0-32 prints a warning and falls back to auto-detect; it is not an error.
 ```bash
 rescale-int files upload large_file.dat --max-threads 10
 ```
@@ -230,20 +258,22 @@ rescale-int files list --api-key your-api-key-here
 rescale-int files list --token-file ~/.config/rescale/token
 ```
 
-**`--api-url URL`** - Override API base URL
+**`--api-url URL`** - Override API base URL. Only the six approved Rescale
+platform origins are accepted (see [Manual Configuration](#manual-configuration));
+any other URL is rejected.
 ```bash
 rescale-int files list --api-url https://platform.rescale.com
 ```
 
 ### GUI Mode
 
-For GUI mode, set the RESCALE_DEBUG environment variable:
+`rescale-int` is the CLI-only binary; it rejects `--gui` and tells you to run
+`rescale-int-gui` instead. To get debug output in the GUI, set `RESCALE_DEBUG`
+before launching it:
 ```bash
 export RESCALE_DEBUG=1
-./rescale-int --gui
+./rescale-int-gui
 ```
-
-This enables debug output in the GUI application console.
 
 ## Exit Codes
 
@@ -269,8 +299,10 @@ failure:
   Remaining files are not uploaded.
 - A prompt that cannot run — no terminal, so the read fails immediately — is
   recorded as a failure rather than silently skipping the file. Pass the flag that
-  answers the question (`--overwrite`, `--skip`, `--merge`, `--confirm`,
-  `--continue-on-error`, or a duplicate-handling flag) when running non-interactively.
+  answers the question (`--overwrite`, `--skip`, `--merge`, `--confirm`, or
+  `--continue-on-error`) when running non-interactively. Duplicate handling is the
+  exception: `files upload` does not fail without one of the duplicate-handling
+  flags, it warns and proceeds with checking disabled (see below).
 
 Destructive confirmations (`files delete`, `folders delete`, `jobs delete`,
 `jobs stop`) fail and name `--confirm` when there is no terminal to prompt on. An
@@ -309,11 +341,21 @@ seconds. This bounds a single stalled call, not a whole multi-part transfer.
 ### Rate limit notices
 
 Interlink rate-limits itself with a token bucket shared across processes by a
-coordinator. Two situations produce output:
+coordinator. Three separate mechanisms produce output, and they mean different
+things:
 
-- **Waiting on the limiter.** When a call sleeps 5 seconds or more, the CLI says what
-  it is waiting on and for how long. A server-supplied `Retry-After` longer than the
-  client's cap is reported as asked-for-versus-applied.
+- **A long retry backoff.** When a *retry* is about to sleep 5 seconds or more, the
+  CLI names the operation and the wait, for example
+  `Waiting 12s before retrying POST /api/v3/jobs/ (HTTP 429)`. A server-supplied
+  `Retry-After` longer than the client's 30-second cap is reported as
+  asked-for-versus-applied. This is the retry layer talking, not the limiter.
+- **Waiting on the limiter.** When the limiter itself throttles a call, it reports
+  how much of the API budget is in use and how long the call waited, for example
+  `Rate limiting: 74% of API capacity, waited 1.8s`. This one is gated mainly on
+  utilization rather than on the length of the wait: it starts once utilization
+  reaches 60%, stops once it falls below 50%, and repeats at most once every 10
+  seconds. Waits under 100ms never report at all. Short waits at low utilization
+  are normal and stay silent.
 - **Degraded mode.** If the coordinator is unreachable, each scope falls back to an
   emergency cap and says so once per transition, for example
   `Rate limit coordinator unavailable — user API calls capped at 0.25 req/s until it
@@ -413,8 +455,14 @@ rescale-int files upload <file> [file...] [flags]
 
 **Features:**
 - Automatic encryption (AES-256-CBC) before upload
-- Multi-part upload for files larger than 100MB (32MB parts by default)
-- Automatic resume on interruption (state saved to a `<file>.upload.resume` sidecar)
+- Multi-part upload for every file, regardless of size. Part size scales with the
+  file: 16MB below 100MB, 32MB from 100MB to 1GB, 48MB from 1GB to 5GB, and 64MB
+  above that. Files large enough that 64MB parts would exceed the backend's part
+  ceiling — 10,000 parts on S3, 50,000 blocks on Azure — get proportionally
+  larger parts
+- Automatic retry of individual parts on transient network errors. An upload
+  killed outright restarts from the beginning — see the note on interrupted
+  uploads below
 - Progress bars with transfer speed and ETA
 - Support for both S3 and Azure storage backends
 - Duplicate detection with configurable handling modes
@@ -457,11 +505,23 @@ rescale-int files upload *.dat --no-check-duplicates
 # Preview what would be uploaded
 rescale-int files upload *.dat --dry-run --check-duplicates
 
-# Upload large file (>100MB) - uses multi-part with resume capability
+# Upload large file - multi-part, with part size scaled to the file
 rescale-int files upload large_dataset.tar.gz
 ```
 
 **Note:** Files are encrypted locally using AES-256-CBC before upload. Decryption happens automatically on download. See [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md#encryption) for encryption details.
+
+**Note on interrupted uploads:** Uploads do not resume. Individual parts are
+retried automatically when the network hiccups, but an upload that dies outright
+— Interlink killed, machine rebooted — restarts from the first byte when you rerun
+the command.
+
+The `--pre-encrypt` path writes a `<file>.upload.resume` sidecar as it goes, but it
+does not reuse it: every attempt encrypts with a fresh key and IV under a fresh
+object key, so the parts already sent describe different ciphertext and cannot be
+continued. On the next run the stale state is discarded and the upload starts over
+from the beginning; on S3 the orphaned multipart upload is aborted as well.
+Resuming it would silently produce a corrupt file, so it is thrown away on purpose.
 
 #### files download
 Download files from Rescale
@@ -497,12 +557,32 @@ rescale-int files download abc123 def456 ghi789 -o ./downloads
 # Download large file - shows "Decrypting..." message for large files
 rescale-int files download large-file-id -o output.dat
 
-# Resume interrupted download (automatically detects .encrypted file)
-# Just rerun the same command - it will resume from where it left off
-rescale-int files download abc123 -o result.tar.gz
+# Rerun an interrupted download; --resume answers the "partial file exists"
+# prompt with "continue" instead of asking
+rescale-int files download abc123 -o result.tar.gz --resume
 ```
 
-**Note on Resume:** The `--resume` flag supports full byte-offset resume for encrypted file downloads. Interrupted downloads continue from the exact byte position using HTTP Range requests. Resume state is tracked via `.download.resume` JSON sidecar files. Decryption starts from the beginning (AES-CBC mode constraint) but happens automatically once the encrypted file is complete.
+**Note on Resume:** `--resume` is an answer to a prompt, not a transfer mode. When a
+partial download is already on disk, Interlink asks what to do with it; `--resume`
+answers "continue" up front so the command can run unattended.
+
+What "continue" can actually reuse depends on how the file was stored:
+
+- **Legacy (v0) encrypted files** keep a `.download.resume` JSON sidecar recording
+  which chunks finished, and a rerun re-requests only the missing ones over HTTP
+  Range. This applies only to the concurrent chunked path — the file must be over
+  100MB *and* have been allocated more than one thread, which in practice means
+  500MB and up. Granularity is the 32MB chunk, not the exact byte: a chunk
+  interrupted halfway is fetched again in full.
+- **Files in the current (v2 CBC-streaming) format** — everything uploaded by a
+  current client — restart from zero. The output file is recreated on each attempt
+  because AES-CBC decryption is chained from the start of the stream, so a partial
+  plaintext cannot be extended safely.
+
+Either way decryption starts from the beginning. In the current format it happens
+inline as parts arrive. The legacy path is the one with a visible pause: it writes
+the whole ciphertext to `<file>.encrypted` first, then prints `Decrypting ...` and
+decrypts to the final file as a separate step.
 
 #### files list
 List files
@@ -545,7 +625,11 @@ rescale-int files delete -i abc123 --permanent          # permanent delete
 rescale-int files delete -i abc123 --confirm
 ```
 
-Note: moving to Trash looks up each file's parent folder automatically. If a file cannot be located under your library (e.g. it lives in a job folder), use `--permanent` to delete it by ID.
+Note: moving to Trash first confirms the file exists, then looks up its parent folder
+automatically. An ID that does not exist fails immediately with a 404 rather than
+scanning your library for it. If a file exists but cannot be located under your library
+(e.g. it lives in a job folder), use `--permanent` to delete it by ID. Either failure
+stops the batch at that file — IDs listed after it are not processed.
 
 #### files tags
 
@@ -663,7 +747,8 @@ rescale-int folders upload-dir ./project --include-hidden
 
 # Example: Folder caching in action
 # First run: 1 API call to resolve folder
-# Subsequent runs: Instant lookup from cache (99.8% faster)
+# Later lookups in the same run: served from the in-memory cache, no API call
+# (the cache lives for one operation and is gone when the process exits)
 ```
 
 #### folders download-dir
@@ -803,19 +888,28 @@ rescale-int jobs stop -j WfbQa -y  # Skip confirmation
 ```
 
 #### jobs tail
-Stream job log output
+Follow a job's status transitions
 
 ```bash
 rescale-int jobs tail -j <job-id> [flags]
 ```
 
+Polls the job's status history and prints each new entry as it appears. It does
+not stream the job's log or console output — use `jobs listfiles` and
+`jobs download` for the job's own output files.
+
 **Flags:**
 - `-j, --job-id string` - Job ID (required)
 - `-i, --interval int` - Polling interval in seconds (default: 10)
 
+**Note:** `jobs tail` stops on its own only at `Completed` or `Failed`. A job that
+ends as `Stopped`, `Force Stopped`, or `Terminated` prints that status and then
+keeps polling until you press Ctrl+C. `jobs watch` treats all five as terminal
+and exits on any of them.
+
 **Examples:**
 ```bash
-# View job logs with default 10-second polling
+# Follow status changes with default 10-second polling
 rescale-int jobs tail -j WfbQa
 
 # Monitor job with 5-second polling interval
@@ -930,7 +1024,7 @@ rescale-int jobs delete -j <job-id> [-j <job-id>...] [-y]
 ```
 
 **Flags:**
-- `-j, --job-id string` - Job ID to delete (can be specified multiple times) (alias: `--id`)
+- `-j, --job-id stringArray` - Job ID to delete (repeat the flag for multiple jobs) (alias: `--id`)
 - `-y, --confirm` - Skip confirmation prompt
 
 **Examples:**
@@ -1530,7 +1624,7 @@ rescale-int software list [flags]
 ```
 
 **Flags:**
-- `-s, --search string` - Search for software by code or name
+- `-s, --search string` - Search for software by code, name, or description
 - `-J, --json` - Output as JSON
 - `-V, --versions` - Show available versions for each software
 
@@ -1633,7 +1727,8 @@ rescale-int pur make-dirs-csv \
   --pattern "Run_*" \
   --iterate-command-patterns
 
-# Multi-part mode: scan multiple project directoriesrescale-int pur make-dirs-csv \
+# Multi-part mode: scan multiple project directories
+rescale-int pur make-dirs-csv \
   --template template.csv \
   --output jobs.csv \
   --pattern "Run_*" \
@@ -1774,8 +1869,8 @@ rescale-int pur submit-existing --ids JOB1,JOB2,JOB3
 Skips tar and upload phases. Use when files are already uploaded to Rescale.
 
 **Flags:**
-- `--jobs-csv string` - Jobs CSV file with extrainputfileids column
-- `--state string` - State file
+- `--jobs-csv string` - Jobs CSV file with extrainputfileids column (default `"jobs.csv"`)
+- `--state string` - State file (default `"submit_existing_state.csv"`)
 - `--ids string` - Comma-separated job IDs to submit directly (mutually exclusive with --jobs-csv)
 
 **Example:**
@@ -1981,7 +2076,8 @@ rescale-cli sync -n NEWER_THAN_JOB_ID [-d INTERVAL] [-o DIR]
 Compat mode normalizes rescale-cli's argument conventions for Cobra compatibility:
 - `-fid VALUE` → `--file-id VALUE`
 - `-lh VALUE` → `--load-hours VALUE`
-- Multi-value `-f`: `upload -f a b c` → `upload -f a -f b -f c` (for upload and submit)
+- Multi-value flags on `upload` and `submit`: `-f a b c` → `-f a -f b -f c`. The
+  same expansion applies to `--files` and `--file-matcher`.
 
 ### Deferred Commands
 
@@ -2012,7 +2108,9 @@ This section documents the compatibility status between Interlink's compat mode 
 
 ### Input Compatibility
 
-Compat mode accepts the same arguments as rescale-cli. All 56 per-command flag registrations are handled:
+Compat mode accepts the same arguments as rescale-cli. The table below tallies 56
+flag registrations; some flags repeat across commands, so the number of distinct
+flags is lower:
 
 | Category | Count | Details |
 |----------|------:|---------|
@@ -2022,7 +2120,8 @@ Compat mode accepts the same arguments as rescale-cli. All 56 per-command flag r
 
 **Argument normalization**: Compat mode automatically normalizes rescale-cli's non-standard argument patterns:
 - Multi-char short flags: `-fid VALUE` → `--file-id VALUE`, `-lh VALUE` → `--load-hours VALUE`
-- Multi-value `-f`: `upload -f a b c` → `upload -f a -f b -f c` (for upload and submit)
+- Multi-value `-f`, `--files`, and `--file-matcher` on `upload` and `submit`:
+  `-f a b c` → `-f a -f b -f c`
 
 **Credential resolution chain** (independent from native CLI):
 1. `-p/--api-token` flag (highest priority)
@@ -2128,7 +2227,7 @@ rescale-int files delete -i old_file_id1 -i old_file_id2
 # Create project folder
 rescale-int folders create --name "CFD Project Q1 2025"
 
-# Upload entire simulation directory (5-10x faster than individual uploads)
+# Upload entire simulation directory (significantly faster than individual uploads)
 rescale-int folders upload-dir ./simulation_cases --parent-id abc123
 
 # List folder contents
@@ -2144,7 +2243,7 @@ rescale-int ls --limit 20
 # Get job details
 rescale-int jobs get -j WfbQa
 
-# Stream job log in real-time
+# Follow status changes in real-time
 rescale-int jobs tail -j WfbQa
 
 # Download all job outputs
@@ -2220,10 +2319,10 @@ done
 **Download all completed jobs:**
 ```bash
 # Rescale's API doesn't filter by status server-side, so we filter client-side.
-# Each job appears as a multi-line block; pipe through `grep -B`/`-A` to keep
-# only Completed entries, then extract IDs.
+# Each job prints as a block with ID, Name, then Status, so the ID is two lines
+# above the status line — hence `grep -B2`.
 rescale-int jobs list --limit 100 | \
-  grep -B1 "Status: Completed" | \
+  grep -B2 "Status: Completed" | \
   grep "ID:" | \
   awk '{print $2}' | \
   while read job_id; do
@@ -2274,8 +2373,8 @@ rescale-int files upload file.tar.gz --no-auto-scale
 ```
 
 **Performance expectations**:
-- Small files (<100MB): No change (uses sequential transfer)
-- Medium files (100MB-1GB): 1.5-2x speedup
+- Small files (<500MB): No change — these transfer on a single thread
+- Medium files (500MB-1GB): 1.5-2x speedup
 - Large files (1-10GB): 2-4x speedup
 - Very large files (>10GB): 3-5x speedup
 
@@ -2302,7 +2401,7 @@ The adaptive count is validated against available system memory and thread pool 
 
 ### General Tips
 
-1. **Use folders upload-dir for bulk uploads**: Connection reuse provides 5-10x speedup
+1. **Use folders upload-dir for bulk uploads**: Connection reuse makes this significantly faster than uploading files one at a time
 2. **Batch operations**: Upload/download multiple files in one command
 3. **PUR pipeline**: Efficiently manage dozens or hundreds of jobs
 4. **State files**: Resume interrupted operations without starting over
@@ -2333,7 +2432,7 @@ ls -lh input.txt
 # Try with verbose logging
 rescale-int upload input.txt --verbose
 
-# Large files use multipart upload automatically (>100MB)
+# All uploads are multipart; part size scales with the file
 ```
 
 ### Job Issues
@@ -2342,7 +2441,7 @@ rescale-int upload input.txt --verbose
 # Check job status
 rescale-int jobs get --job-id WfbQa
 
-# View job logs (polls every 10 seconds by default)
+# Follow status changes (polls every 10 seconds by default)
 rescale-int jobs tail --job-id WfbQa
 
 # List job files to verify outputs
@@ -2379,8 +2478,12 @@ error in the message.
 In CI or over a pipe there is no terminal to prompt on. Commands that would ask a
 question fail and name the flag that answers it rather than guessing. Supply the
 relevant flag up front: `--overwrite` / `--skip` / `--resume` / `--merge` for conflicts,
-`--confirm` for destructive operations, `--continue-on-error` for error prompts, and one
-of the duplicate-handling flags for `files upload`.
+`--confirm` for destructive operations, and `--continue-on-error` for error prompts.
+
+`files upload` is the one exception. Without a duplicate-handling flag it does not
+fail: it warns that duplicate checking is disabled and uploads everything. Pass
+`--check-duplicates`, `--skip-duplicates`, `--allow-duplicates`, or
+`--no-check-duplicates` to choose deliberately.
 
 ## Support
 
