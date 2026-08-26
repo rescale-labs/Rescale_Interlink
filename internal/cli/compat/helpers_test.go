@@ -118,3 +118,70 @@ func TestRunCompatDownloadBatch_RejectsUnsafeNames(t *testing.T) {
 		})
 	}
 }
+
+// TestRunCompatDownloadBatch_SkipExistingSizeGate covers the size gate on the
+// compat batch's skip-existing check. Existence alone used to be enough, so a
+// truncated leftover from an interrupted run was reported as skipped: silent
+// data loss reported as success.
+//
+// The wrong-size row is proved by two side effects — the leftover is cleared,
+// and the batch goes on to attempt a download. The item's storage type is not a
+// real backend, so that attempt fails at provider creation without touching the
+// network, which is what makes "a download was attempted" observable here.
+func TestRunCompatDownloadBatch_SkipExistingSizeGate(t *testing.T) {
+	const expectedSize = 1024
+
+	tests := []struct {
+		name           string
+		onDisk         int
+		wantDownloaded bool
+	}{
+		{"wrong-size leftover is replaced", 9, true},
+		{"matching size is skipped", expectedSize, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputDir := t.TempDir()
+			target := filepath.Join(outputDir, "results.dat")
+			if err := os.WriteFile(target, make([]byte, tt.onDisk), 0o644); err != nil {
+				t.Fatalf("seed existing file: %v", err)
+			}
+
+			items := []compatDownloadItem{{
+				idx:       0,
+				fileID:    "file123",
+				name:      "results.dat",
+				size:      expectedSize,
+				localPath: target,
+			}}
+
+			err := runCompatDownloadBatch(context.Background(), items, "TEST",
+				func(int) *models.CloudFile {
+					return &models.CloudFile{Storage: &models.CloudFileStorage{StorageType: "NotAStorageBackend"}}
+				},
+				statusServer(t, "Completed"), &CompatContext{Quiet: true})
+
+			if tt.wantDownloaded != (err != nil) {
+				t.Fatalf("runCompatDownloadBatch error = %v, want a download attempt: %v", err, tt.wantDownloaded)
+			}
+
+			info, statErr := os.Stat(target)
+			if !tt.wantDownloaded {
+				if statErr != nil {
+					t.Fatalf("a complete file must be left in place: %v", statErr)
+				}
+				if info.Size() != expectedSize {
+					t.Errorf("file is %d bytes, want the untouched %d", info.Size(), expectedSize)
+				}
+				return
+			}
+			if !strings.Contains(err.Error(), "failed to download results.dat") {
+				t.Errorf("error = %q, want the failed-download wording", err)
+			}
+			if !os.IsNotExist(statErr) {
+				t.Errorf("wrong-size leftover survived (stat error = %v), want it cleared before the re-download", statErr)
+			}
+		})
+	}
+}

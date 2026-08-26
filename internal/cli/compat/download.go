@@ -196,7 +196,7 @@ func compatDownloadByFileID(ctx context.Context, fileID, outputPath string, apiC
 
 // compatDownloadOpts configures file filtering for job downloads.
 type compatDownloadOpts struct {
-	FileName     string   // exact match (for download-file -f)
+	FileName     string // exact match (for download-file -f)
 	OutputDir    string
 	FileMatchers []string // glob include patterns (for sync -f)
 	ExcludeTerm  string   // exclude pattern (for sync --exclude)
@@ -353,12 +353,30 @@ func compatLocalPath(outputDir, name, relativePath string) string {
 	return filepath.Join(outputDir, name)
 }
 
+// existingFileIsComplete reports whether a file already on disk can stand in for
+// the download. Existence alone is not proof: an interrupted or checksum-failed
+// earlier attempt leaves a file at the same path, and skipping it would report
+// success over bad data. Size is the same evidence the native CLI's
+// existingFileIsComplete and the auto-download daemon use — kept here as a
+// deliberate copy: by layering policy this package takes no dependency on
+// internal/cli (no import cycle forces it). The two bodies are intentionally
+// character-identical. When
+// the expected size is unknown (metadata omitted it) existence is all there is
+// to go on.
+func existingFileIsComplete(info os.FileInfo, expectedSize int64) bool {
+	if expectedSize <= 0 {
+		return true
+	}
+	return info.Size() == expectedSize
+}
+
 // runCompatDownloadBatch downloads items concurrently and prints the compat
 // CLI's summary lines. cloudFileFor supplies the download metadata for an
 // item's index, which the two callers obtain differently.
 //
-// A file already on disk is skipped rather than overwritten: that is the compat
-// CLI's documented default and scripts depend on it.
+// A complete file already on disk is skipped rather than overwritten: that is
+// the compat CLI's documented default and scripts depend on it. A file of the
+// wrong size is not that file, so it is replaced instead of skipped.
 func runCompatDownloadBatch(ctx context.Context, items []compatDownloadItem, label string, cloudFileFor func(idx int) *models.CloudFile, apiClient *api.Client, cc *CompatContext) error {
 	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
 	transferMgr := transfer.NewManager(resourceMgr)
@@ -394,8 +412,20 @@ func runCompatDownloadBatch(ctx context.Context, items []compatDownloadItem, lab
 		}
 
 		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
-			cc.Printf("Skipping existing: %s\n", item.name)
-			return nil
+			if existingFileIsComplete(info, item.size) {
+				cc.Printf("Skipping existing: %s\n", item.name)
+				return nil
+			}
+			// Wrong size: a leftover from an interrupted attempt, not the file
+			// the caller asked for. Reporting it as skipped is silent data loss,
+			// so clear it and download again.
+			// ASCII only: every other line this layer prints to stdout is, and
+			// scripts written against rescale-cli parse it.
+			cc.Printf("Existing file %s is %d bytes, expected %d - re-downloading\n",
+				item.name, info.Size(), item.size)
+			if rmErr := os.Remove(outputPath); rmErr != nil {
+				return fmt.Errorf("failed to remove incomplete existing file %s: %w", item.name, rmErr)
+			}
 		}
 
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)

@@ -16,6 +16,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/resources"
 )
 
 // --- sanitizeErrorString tests ---
@@ -347,6 +348,88 @@ func TestExecuteJobDownload_SkipExistingSizeGate(t *testing.T) {
 			}
 			if info.Size() != expectedSize && tt.wantDownloads == 1 {
 				t.Errorf("target is %d bytes after re-download, want %d", info.Size(), expectedSize)
+			}
+		})
+	}
+}
+
+// TestDownloadFolderRecursive_SkipExistingSizeGate is the wiring test for the
+// folder download's skip-existing gate: a file whose size matches the scan
+// stands, and one whose size does not is replaced, because a wrong-size file is
+// a partial or corrupt leftover rather than a download already in hand.
+//
+// Driven with --merge rather than --skip because --skip stops at the root folder
+// conflict — an output folder that already exists ends the whole download before
+// any file is looked at — so --merge (and a per-file Skip answer at the prompt)
+// is how this branch is reached.
+func TestDownloadFolderRecursive_SkipExistingSizeGate(t *testing.T) {
+	const expectedSize = 1024
+
+	tests := []struct {
+		name            string
+		onDisk          int
+		wantDownloads   int32
+		wantSkipped     int
+		wantDownloadedN int
+	}{
+		{"wrong-size leftover is replaced", 9, 1, 0, 1},
+		{"matching size is skipped", expectedSize, 0, 1, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := downloadFileFn
+			t.Cleanup(func() { downloadFileFn = orig })
+
+			var downloads int32
+			downloadFileFn = func(_ context.Context, params download.DownloadParams) error {
+				atomic.AddInt32(&downloads, 1)
+				return os.WriteFile(params.LocalPath, make([]byte, expectedSize), 0o644)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w,
+					`{"results":[{"type":"file","item":{"id":"file123","name":"results.dat","decryptedSize":%d}}]}`,
+					expectedSize)
+			}))
+			defer server.Close()
+			client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+
+			// The download nests under outputDir/folderName, and that directory
+			// already existing is what sends --merge into the per-file branch.
+			outDir := t.TempDir()
+			rootDir := filepath.Join(outDir, "myfolder")
+			if err := os.MkdirAll(rootDir, 0o755); err != nil {
+				t.Fatalf("create root folder: %v", err)
+			}
+			target := filepath.Join(rootDir, "results.dat")
+			if err := os.WriteFile(target, make([]byte, tt.onDisk), 0o644); err != nil {
+				t.Fatalf("seed existing file: %v", err)
+			}
+
+			result, err := DownloadFolderRecursive(context.Background(), "folder123", "myfolder", outDir,
+				false, false, true, true, 1, true, false, client, GetLogger(),
+				resources.NewManager(resources.Config{AutoScale: true, MaxThreads: 4}))
+			if err != nil {
+				t.Fatalf("DownloadFolderRecursive: %v", err)
+			}
+
+			if got := atomic.LoadInt32(&downloads); got != tt.wantDownloads {
+				t.Errorf("downloadFileFn called %d times, want %d", got, tt.wantDownloads)
+			}
+			if result.FilesSkipped != tt.wantSkipped {
+				t.Errorf("FilesSkipped = %d, want %d", result.FilesSkipped, tt.wantSkipped)
+			}
+			if result.FilesDownloaded != tt.wantDownloadedN {
+				t.Errorf("FilesDownloaded = %d, want %d", result.FilesDownloaded, tt.wantDownloadedN)
+			}
+			info, statErr := os.Stat(target)
+			if statErr != nil {
+				t.Fatalf("stat target: %v", statErr)
+			}
+			if info.Size() != expectedSize {
+				t.Errorf("target is %d bytes after the run, want the complete %d", info.Size(), expectedSize)
 			}
 		})
 	}

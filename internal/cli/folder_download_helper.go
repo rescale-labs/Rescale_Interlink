@@ -305,6 +305,24 @@ func DownloadFolderRecursive(
 
 			switch action {
 			case DownloadSkipOnce, DownloadSkipAll:
+				// Reached via --merge, the folder-level skip cascade, or an
+				// interactive Skip answer (bare --skip returns at the root-folder
+				// check before any file is examined). Existence alone is not
+				// proof the file is already in hand: an interrupted earlier run
+				// leaves a short file at the same path, and counting it as
+				// skipped hands the user a truncated result while reporting
+				// success. Same size gate as resolveDownloadConflict and the
+				// auto-download daemon.
+				if !existingFileIsComplete(info, task.Size) {
+					fmt.Fprintf(downloadUI.Writer(), "⚠️  Existing file %s is %d bytes, expected %d — re-downloading\n",
+						task.Name, info.Size(), task.Size)
+					if rmErr := os.Remove(localPath); rmErr != nil {
+						errChan <- DownloadError{FilePath: localPath, FileID: task.FileID,
+							Error: fmt.Errorf("failed to remove incomplete existing file: %w", rmErr)}
+						return nil
+					}
+					break // leave the switch and download the file
+				}
 				downloadMutex.Lock()
 				result.FilesSkipped++
 				downloadMutex.Unlock()
@@ -324,7 +342,7 @@ func DownloadFolderRecursive(
 
 		transferHandle := cliTransferMgr.AllocateTransfer(task.Size, numWorkers)
 
-		err := download.DownloadFile(ctx, download.DownloadParams{
+		err := downloadFileFn(ctx, download.DownloadParams{
 			FileID:         task.FileID,
 			FileInfo:       task.CloudFile,
 			LocalPath:      localPath,

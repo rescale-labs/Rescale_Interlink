@@ -81,15 +81,15 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-129 Go test files (128 under `internal/`, one under `installer/`) across 49 packages,
+134 Go test files (133 under `internal/`, one under `installer/`) across 50 packages,
 plus 8 frontend vitest files. Grouped by functional area:
 
 #### CLI & Commands
 
 | Package | Test Files | Key Coverage |
 |---------|-----------|--------------|
-| `internal/cli` | 9 | Command parsing, flag aliases, config commands, daemon commands, job-file decode, conflict resolution, folder-upload abort/failure paths, download helper, shortcut concurrency |
-| `internal/cli/compat` | 8 | Compat mode detection, arg normalization, commands, parity |
+| `internal/cli` | 10 | Command parsing, flag aliases, config commands, daemon commands, file deletion, job-file decode, conflict resolution, job monitoring, folder-upload abort/failure paths, download helper (incl. the skip-existing size gate), shortcut concurrency |
+| `internal/cli/compat` | 9 | Compat mode detection, arg normalization, commands, execution, JSON output, submit, parity, skip-existing size gate |
 
 #### Core Infrastructure
 
@@ -109,11 +109,12 @@ plus 8 frontend vitest files. Grouped by functional area:
 |---------|-----------|--------------|
 | `internal/cloud` | 2 | Timing utilities, retry notices |
 | `internal/cloud/credentials` | 1 | Credential management |
+| `internal/cloud/download` | 1 | Corrupt-file quarantine, downloaded-size verification |
 | `internal/cloud/providers/s3` | 3 | S3 upload progress reader, provider behavior, pre-encrypt part-count plan and short-upload refusal |
 | `internal/cloud/providers/azure` | 2 | Azure client, SAS token lookup, pre-encrypt block-count plan and short-upload refusal |
 | `internal/cloud/state` | 1 | Resume state serialization |
 | `internal/cloud/storage` | 1 | Disk-full and quota error classification |
-| `internal/cloud/transfer` | 1 | Transfer orchestration |
+| `internal/cloud/transfer` | 3 | Transfer orchestration, object-format parsing, concurrent chunked download and range-fetch retry |
 | `internal/cloud/upload` | 1 | Upload flow |
 | `internal/transfer` | 4 | Batch executor, queue (incl. paginated batch rows), speed window, manager |
 | `internal/transfer/folder` | 2 | Folder creation, orchestrator |
@@ -541,10 +542,10 @@ runs on macOS only), and performance regression detection.
 
 ### Current State (v4.9.9)
 
-- **Go suite**: 129 test files across 49 packages, 0 failing — roughly 1,200 top-level
+- **Go suite**: 134 test files across 50 packages, 0 failing — roughly 930 top-level
   test functions, plus subtests. Don't treat any of the reported case totals as a
   checksum: some tests branch on `runtime.GOOS`, so what `make test` counts, and what it
-  skips, depends on the platform you measure on. 15 packages have no test files.
+  skips, depends on the platform you measure on. 14 of the project's own packages have no test files (`make test` prints 15 `[no test files]` lines; the extra one is the vendored `frontend/node_modules/.../flatted` Go package).
 - **Frontend suite**: 8 vitest files, 100 passing tests.
 - **CI**: the `verify` job in `.github/workflows/release.yml` runs both suites, plus
   `go vet -tags fips` and the frontend lint and build, on every `v*` tag push. The
