@@ -1,7 +1,8 @@
 // Package azure provides an Azure implementation of the CloudTransfer interface.
 // This file implements the PreEncryptUploader interface for pre-encrypted uploads.
 //
-// Concurrent upload logic is implemented directly in the provider.
+// Concurrent blocks are staged through transfer.RunPartPipeline; this file
+// supplies the provider-specific setup, staging call and commit.
 package azure
 
 import (
@@ -13,8 +14,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -361,149 +360,6 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 		}
 	}
 
-	// Concurrent upload implementation
-	type blockJob struct {
-		blockIndex int64
-		blockID    string
-		data       []byte
-	}
-
-	type blockResult struct {
-		blockIndex int64
-		blockID    string
-		size       int64
-		err        error
-	}
-
-	// Channels for coordination
-	jobChan := make(chan blockJob, plan.QueueDepth)
-	resultChan := make(chan blockResult, totalBlocks)
-
-	// Error handling: use context cancellation to signal workers to stop
-	opCtx, cancelOp := context.WithCancel(ctx)
-	defer cancelOp()
-
-	var firstError error
-	var errorMu sync.Mutex
-	var errorOnce sync.Once
-	setError := func(err error) {
-		errorOnce.Do(func() {
-			errorMu.Lock()
-			firstError = err
-			errorMu.Unlock()
-			cancelOp()
-		})
-	}
-
-	// Start worker goroutines
-	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					setError(fmt.Errorf("worker %d panicked: %v", workerID, r))
-					log.Printf("PANIC in Azure upload worker %d: %v", workerID, r)
-				}
-			}()
-
-			for job := range jobChan {
-				// Check if context was cancelled
-				select {
-				case <-opCtx.Done():
-					return
-				default:
-				}
-
-				// Stage this block with retry logic
-				blockDataToUpload := job.data
-				currentBlockID := job.blockID
-
-				// Create context with timeout for this specific block
-				blockCtx, cancel := context.WithTimeout(opCtx, constants.PartOperationTimeout)
-
-				stageErr := azureClient.RetryWithBackoff(blockCtx, fmt.Sprintf("StageBlock %d/%d", job.blockIndex+1, totalBlocks), func() error {
-					client := azureClient.Client()
-					blockBlobClient := client.ServiceClient().NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobPath)
-					_, err := blockBlobClient.StageBlock(blockCtx, currentBlockID, &readSeekCloser{Reader: bytes.NewReader(blockDataToUpload)}, nil)
-					return err
-				})
-
-				cancel()
-
-				if stageErr != nil {
-					setError(fmt.Errorf("failed to stage block %d/%d: %w", job.blockIndex+1, totalBlocks, stageErr))
-					return
-				}
-
-				// Send result
-				resultChan <- blockResult{
-					blockIndex: job.blockIndex,
-					blockID:    job.blockID,
-					size:       int64(len(job.data)),
-					err:        nil,
-				}
-			}
-		}(i)
-	}
-
-	// Read blocks from file and queue them for upload
-	go func() {
-		defer close(jobChan)
-
-		// One buffer for the whole producer, sized to the block size the plan
-		// chose. A short read can then only mean the end of the file, which is
-		// what the loop below treats it as.
-		buffer, releaseBuffer := buffers.GetPartBuffer(partSize)
-		defer releaseBuffer()
-
-		blockIndex := startBlock
-		for {
-			select {
-			case <-opCtx.Done():
-				return
-			default:
-			}
-
-			n, readErr := io.ReadFull(file, buffer)
-
-			if readErr == io.EOF {
-				break
-			}
-
-			// Get the actual data slice and make a copy
-			var blockData []byte
-			if readErr == io.ErrUnexpectedEOF {
-				blockData = make([]byte, n)
-				copy(blockData, buffer[:n])
-				readErr = nil
-			} else if readErr != nil {
-				setError(fmt.Errorf("failed to read file chunk: %w", readErr))
-				return
-			} else {
-				blockData = make([]byte, n)
-				copy(blockData, buffer[:n])
-			}
-
-			// Generate block ID
-			blockID := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("block-%06d", blockIndex)))
-
-			// Queue this block for upload
-			jobChan <- blockJob{
-				blockIndex: blockIndex,
-				blockID:    blockID,
-				data:       blockData,
-			}
-
-			blockIndex++
-
-			if int64(len(blockData)) < partSize {
-				break
-			}
-		}
-	}()
-
 	// Pre-allocate blockIDs slice for ordering
 	allBlockIDs := make([]string, totalBlocks)
 	// Copy existing block IDs from resume state
@@ -511,50 +367,43 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 		allBlockIDs[i] = blockIDs[i]
 	}
 
-	// Collect results and update progress
-	var resultsMu sync.Mutex
-	var atomicUploadedBytes int64 = uploadedBytes
-	resultCount := 0
-	expectedResults := int(totalBlocks - startBlock)
+	// Stage every block through the shared concurrent pipeline.
+	stagedBytes, pipelineErr := transfer.RunPartPipeline(ctx, transfer.PartPipelineConfig{
+		Reader:        file,
+		PartSize:      partSize,
+		TotalParts:    totalBlocks,
+		StartPart:     startBlock,
+		UploadedBytes: uploadedBytes,
+		Concurrency:   concurrency,
+		QueueDepth:    plan.QueueDepth,
+		WorkerLabel:   "Azure upload worker",
+		StagePart: func(blockCtx context.Context, part transfer.PartAssignment) (string, error) {
+			blockID := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("block-%06d", part.Index)))
 
-	// Wait for results in a separate goroutine
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
+			stageErr := azureClient.RetryWithBackoff(blockCtx, fmt.Sprintf("StageBlock %d/%d", part.Index+1, totalBlocks), func() error {
+				client := azureClient.Client()
+				blockBlobClient := client.ServiceClient().NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobPath)
+				_, err := blockBlobClient.StageBlock(blockCtx, blockID, &readSeekCloser{Reader: bytes.NewReader(part.Data)}, nil)
+				return err
+			})
+			if stageErr != nil {
+				return "", fmt.Errorf("failed to stage block %d/%d: %w", part.Index+1, totalBlocks, stageErr)
+			}
 
-	// Collect all results
-	for result := range resultChan {
-		if result.err != nil {
-			setError(result.err)
-			break
-		}
-
-		// Add to block IDs at correct position
-		resultsMu.Lock()
-		allBlockIDs[result.blockIndex] = result.blockID
-		resultsMu.Unlock()
-
-		// Update progress atomically
-		atomic.AddInt64(&atomicUploadedBytes, result.size)
-
-		// Update progress callback
-		if params.ProgressCallback != nil {
-			params.ProgressCallback(float64(atomic.LoadInt64(&atomicUploadedBytes)) / float64(totalSize))
-		}
-
-		resultCount++
-
-		// Periodically save resume state
-		saveInterval := 5
-		if expectedResults > 20 {
-			saveInterval = expectedResults / 4
-		}
-		if resultCount%saveInterval == 0 {
-			resultsMu.Lock()
+			return blockID, nil
+		},
+		RecordPart: func(index int64, blockID string) {
+			allBlockIDs[index] = blockID
+		},
+		OnProgress: func(uploaded int64) {
+			if params.ProgressCallback != nil {
+				params.ProgressCallback(float64(uploaded) / float64(totalSize))
+			}
+		},
+		SaveState: func(uploaded int64, staged int) {
 			// Build current block IDs list (only completed blocks)
-			currentBlockIDs := make([]string, 0, resultCount+int(startBlock))
-			for i := int64(0); i < int64(resultCount)+startBlock; i++ {
+			currentBlockIDs := make([]string, 0, staged+int(startBlock))
+			for i := int64(0); i < int64(staged)+startBlock; i++ {
 				if allBlockIDs[i] != "" {
 					currentBlockIDs = append(currentBlockIDs, allBlockIDs[i])
 				}
@@ -565,7 +414,7 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				ObjectKey:      pathForRescale,
 				TotalSize:      totalSize,
 				OriginalSize:   params.OriginalSize,
-				UploadedBytes:  atomic.LoadInt64(&atomicUploadedBytes),
+				UploadedBytes:  uploaded,
 				BlockIDs:       currentBlockIDs,
 				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
 				IV:             encryption.EncodeBase64(params.IV),
@@ -577,18 +426,11 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				LockAcquiredAt: uploadLock.AcquiredAt,
 			}
 			state.SaveUploadState(currentState, params.LocalPath)
-			resultsMu.Unlock()
-		}
+		},
+	})
+	if pipelineErr != nil {
+		return pipelineErr
 	}
-
-	// Check for errors
-	errorMu.Lock()
-	if firstError != nil {
-		err := firstError
-		errorMu.Unlock()
-		return err
-	}
-	errorMu.Unlock()
 
 	// Every slot has to be filled. Skipping the empty ones instead would close the
 	// gap left by a block that was never staged and commit a blob shorter than the
@@ -597,7 +439,7 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	if err := transfer.VerifyBlockList(finalBlockIDs); err != nil {
 		return fmt.Errorf("refusing to commit %s: %w", pathForRescale, err)
 	}
-	if err := transfer.VerifyUploadComplete(atomic.LoadInt64(&atomicUploadedBytes), totalSize, int64(len(finalBlockIDs)), totalBlocks); err != nil {
+	if err := transfer.VerifyUploadComplete(stagedBytes, totalSize, int64(len(finalBlockIDs)), totalBlocks); err != nil {
 		return fmt.Errorf("refusing to commit %s: %w", pathForRescale, err)
 	}
 

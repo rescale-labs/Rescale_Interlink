@@ -1,7 +1,8 @@
 // Package s3 provides an S3 implementation of the CloudTransfer interface.
 // This file implements the PreEncryptUploader interface for pre-encrypted uploads.
 //
-// Concurrent upload logic is implemented directly in the provider.
+// Concurrent parts are staged through transfer.RunPartPipeline; this file
+// supplies the provider-specific setup, staging call and commit.
 package s3
 
 import (
@@ -13,8 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -456,194 +455,49 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		}
 	}
 
-	// Concurrent upload implementation
-	type partJob struct {
-		partNumber int32
-		data       []byte
-		offset     int64
-	}
+	// Stage every part through the shared concurrent pipeline. S3 numbers parts
+	// from one, so the pipeline's zero-based index is offset here.
+	stagedBytes, pipelineErr := transfer.RunPartPipeline(ctx, transfer.PartPipelineConfig{
+		Reader:        file,
+		PartSize:      partSize,
+		TotalParts:    int64(totalParts),
+		StartPart:     int64(startPart) - 1,
+		UploadedBytes: uploadedBytes,
+		Concurrency:   concurrency,
+		QueueDepth:    plan.QueueDepth,
+		WorkerLabel:   "upload worker",
+		StagePart: func(partCtx context.Context, part transfer.PartAssignment) (string, error) {
+			partNumber := int32(part.Index) + 1
+			var uploadResp *s3.UploadPartOutput
 
-	type partResult struct {
-		partNumber int32
-		etag       string
-		size       int64
-		err        error
-	}
+			// Add HTTP tracing if DEBUG_HTTP is enabled
+			partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d/%d (worker %d)", partNumber, totalParts, part.WorkerID))
 
-	// Channels for coordination
-	jobChan := make(chan partJob, plan.QueueDepth)
-	resultChan := make(chan partResult, totalParts)
-
-	// Error handling: use context cancellation to signal workers to stop
-	opCtx, cancelOp := context.WithCancel(ctx)
-	defer cancelOp()
-
-	var firstError error
-	var errorMu sync.Mutex
-	var errorOnce sync.Once
-	setError := func(err error) {
-		errorOnce.Do(func() {
-			errorMu.Lock()
-			firstError = err
-			errorMu.Unlock()
-			cancelOp()
-		})
-	}
-
-	// Start worker goroutines
-	var wg sync.WaitGroup
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					setError(fmt.Errorf("worker %d panicked: %v", workerID, r))
-					log.Printf("PANIC in upload worker %d: %v", workerID, r)
-				}
-			}()
-
-			for job := range jobChan {
-				// Check if context was cancelled
-				select {
-				case <-opCtx.Done():
-					return
-				default:
-				}
-
-				// Upload this part with retry logic
-				var uploadResp *s3.UploadPartOutput
-				partDataToUpload := job.data
-				currentPartNum := job.partNumber
-
-				// Create context with timeout for this specific part
-				partCtx, cancel := context.WithTimeout(opCtx, constants.PartOperationTimeout)
-
-				// Add HTTP tracing if DEBUG_HTTP is enabled
-				partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d/%d (worker %d)", job.partNumber, totalParts, workerID))
-
-				uploadErr := s3Client.RetryWithBackoff(partCtx, fmt.Sprintf("UploadPart %d/%d", job.partNumber, totalParts), func() error {
-					var err error
-					uploadResp, err = s3Client.Client().UploadPart(partCtx, &s3.UploadPartInput{
-						Bucket:        aws.String(s3Client.Bucket()),
-						Key:           aws.String(objectKey),
-						PartNumber:    aws.Int32(currentPartNum),
-						UploadId:      aws.String(uploadID),
-						Body:          bytes.NewReader(partDataToUpload),
-						ContentLength: aws.Int64(int64(len(partDataToUpload))),
-					})
-					return err
+			uploadErr := s3Client.RetryWithBackoff(partCtx, fmt.Sprintf("UploadPart %d/%d", partNumber, totalParts), func() error {
+				var err error
+				uploadResp, err = s3Client.Client().UploadPart(partCtx, &s3.UploadPartInput{
+					Bucket:        aws.String(s3Client.Bucket()),
+					Key:           aws.String(objectKey),
+					PartNumber:    aws.Int32(partNumber),
+					UploadId:      aws.String(uploadID),
+					Body:          bytes.NewReader(part.Data),
+					ContentLength: aws.Int64(int64(len(part.Data))),
 				})
-
-				cancel()
-
-				if uploadErr != nil {
-					setError(fmt.Errorf("failed to upload part %d/%d: %w", job.partNumber, totalParts, uploadErr))
-					return
-				}
-
-				// Send result
-				resultChan <- partResult{
-					partNumber: job.partNumber,
-					etag:       *uploadResp.ETag,
-					size:       int64(len(job.data)),
-					err:        nil,
-				}
-			}
-		}(i)
-	}
-
-	// Read parts from file and queue them for upload
-	go func() {
-		defer close(jobChan)
-
-		// One buffer for the whole producer, sized to the part size the plan
-		// chose. A short read can then only mean the end of the file, which is
-		// what the loop below treats it as.
-		buffer, releaseBuffer := buffers.GetPartBuffer(partSize)
-		defer releaseBuffer()
-
-		partNumber := startPart
-		for {
-			select {
-			case <-opCtx.Done():
-				return
-			default:
+				return err
+			})
+			if uploadErr != nil {
+				return "", fmt.Errorf("failed to upload part %d/%d: %w", partNumber, totalParts, uploadErr)
 			}
 
-			n, readErr := io.ReadFull(file, buffer)
-
-			if readErr == io.EOF {
-				break
-			}
-
-			// Get the actual data slice and make a copy
-			var partData []byte
-			if readErr == io.ErrUnexpectedEOF {
-				partData = make([]byte, n)
-				copy(partData, buffer[:n])
-				readErr = nil
-			} else if readErr != nil {
-				setError(fmt.Errorf("failed to read file chunk: %w", readErr))
-				return
-			} else {
-				partData = make([]byte, n)
-				copy(partData, buffer[:n])
-			}
-
-			// Queue this part for upload
-			jobChan <- partJob{
-				partNumber: partNumber,
-				data:       partData,
-			}
-
-			partNumber++
-
-			if int64(len(partData)) < partSize {
-				break
-			}
-		}
-	}()
-
-	// Collect results and update progress
-	var resultsMu sync.Mutex
-	var atomicUploadedBytes int64 = uploadedBytes
-	resultCount := 0
-	expectedResults := int(totalParts - startPart + 1)
-
-	// Wait for results in a separate goroutine
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Collect all results
-	for result := range resultChan {
-		if result.err != nil {
-			setError(result.err)
-			break
-		}
-
-		// Add to completed parts
-		resultsMu.Lock()
-		completedParts = append(completedParts, types.CompletedPart{
-			ETag:       aws.String(result.etag),
-			PartNumber: aws.Int32(result.partNumber),
-		})
-		resultsMu.Unlock()
-
-		// Update progress atomically
-		atomic.AddInt64(&atomicUploadedBytes, result.size)
-
-		resultCount++
-
-		// Periodically save resume state
-		saveInterval := 5
-		if expectedResults > 20 {
-			saveInterval = expectedResults / 4
-		}
-		if resultCount%saveInterval == 0 {
-			resultsMu.Lock()
+			return *uploadResp.ETag, nil
+		},
+		RecordPart: func(index int64, etag string) {
+			completedParts = append(completedParts, types.CompletedPart{
+				ETag:       aws.String(etag),
+				PartNumber: aws.Int32(int32(index) + 1),
+			})
+		},
+		SaveState: func(uploaded int64, staged int) {
 			currentState := &state.UploadResumeState{
 				LocalPath:      params.LocalPath,
 				EncryptedPath:  params.EncryptedPath,
@@ -651,7 +505,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				UploadID:       uploadID,
 				TotalSize:      totalSize,
 				OriginalSize:   params.OriginalSize,
-				UploadedBytes:  atomic.LoadInt64(&atomicUploadedBytes),
+				UploadedBytes:  uploaded,
 				CompletedParts: convertFromCompletedParts(completedParts),
 				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
 				IV:             encryption.EncodeBase64(params.IV),
@@ -663,29 +517,25 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				LockAcquiredAt: uploadLock.AcquiredAt,
 			}
 			state.SaveUploadState(currentState, params.LocalPath)
-			resultsMu.Unlock()
-		}
-	}
+		},
+	})
 
-	// Check for errors
-	errorMu.Lock()
-	if firstError != nil {
-		err := firstError
-		errorMu.Unlock()
-		return err
+	// Not assigned to err: the deferred abort stays disarmed so the upload ID in
+	// the resume state is still valid to retry against.
+	if pipelineErr != nil {
+		return pipelineErr
 	}
-	errorMu.Unlock()
 
 	// Sort completed parts by part number (S3 requires this)
 	sort.Slice(completedParts, func(i, j int) bool {
 		return *completedParts[i].PartNumber < *completedParts[j].PartNumber
 	})
 
-	// The producer above stops on the first short read, so anything that makes a
-	// read return early — a mis-sized buffer, a truncated temp file — ends with a
-	// part list S3 would happily assemble into a shorter object and report as the
-	// whole file. Assigning err here also arms the deferred abort.
-	if err = verifyS3PartsComplete(atomic.LoadInt64(&atomicUploadedBytes), totalSize, completedParts, int64(totalParts)); err != nil {
+	// The pipeline's producer stops on the first short read, so anything that
+	// makes a read return early — a mis-sized buffer, a truncated temp file —
+	// ends with a part list S3 would happily assemble into a shorter object and
+	// report as the whole file. Assigning err here also arms the deferred abort.
+	if err = verifyS3PartsComplete(stagedBytes, totalSize, completedParts, int64(totalParts)); err != nil {
 		err = fmt.Errorf("refusing to complete upload of %s: %w", objectKey, err)
 		return err
 	}

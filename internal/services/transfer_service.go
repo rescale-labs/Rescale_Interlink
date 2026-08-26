@@ -169,10 +169,10 @@ func (ts *TransferService) StartTransfers(ctx context.Context, requests []Transf
 
 	// Launch workers async (tasks already in queue)
 	if len(uploadItems) > 0 {
-		go ts.executePreRegisteredUploadBatch(ctx, uploadItems)
+		go ts.executePreRegisteredBatch(ctx, uploadItems, ts.uploadDirection())
 	}
 	if len(downloadItems) > 0 {
-		go ts.executePreRegisteredDownloadBatch(ctx, downloadItems)
+		go ts.executePreRegisteredBatch(ctx, downloadItems, ts.downloadDirection())
 	}
 
 	return nil
@@ -201,62 +201,95 @@ func (ts *TransferService) WarmCredentialCache(ctx context.Context) {
 	}
 }
 
-// executePreRegisteredUploadBatch dispatches pre-registered upload tasks to workers.
-func (ts *TransferService) executePreRegisteredUploadBatch(ctx context.Context, items []preRegItem) {
-	ts.mu.RLock()
-	apiClient := ts.apiClient
-	ts.mu.RUnlock()
+// transferDirection carries what differs between the upload and download halves
+// of the batch and task paths: the words the queue, the logs and the batch
+// reporting use, and the per-file work itself. Everything else on those paths is
+// shared.
+type transferDirection struct {
+	// name is the direction as the queue and the batch reporting spell it.
+	name string
 
-	if apiClient == nil {
-		ts.logger.Error().Msg("Upload batch aborted: no API client")
-		return
-	}
+	// label is the direction as the [SLOT] and [BATCH] log lines spell it.
+	label string
 
-	cfg := transfer.BatchConfig{
-		MaxWorkers:  cap(ts.semaphore),
-		ResourceMgr: ts.resourceMgr,
-		Label:       "UPLOAD",
-	}
+	// batchAbortMessage is logged when a batch has no API client to run against.
+	batchAbortMessage string
 
-	numWorkers := transfer.ComputedWorkers(items, cfg)
+	// register puts one request in the queue and returns its task ID.
+	register func(req TransferRequest) string
 
-	transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item preRegItem) error {
-		ts.executeUploadTask(ctx, item.req, item.taskID, apiClient, numWorkers)
-		return nil // errors handled internally via queue.Fail
-	})
+	// fileName is the display name this direction gives a request in logs.
+	fileName func(req TransferRequest) string
 
-	// Check for batch failures across all batch IDs in this execution.
-	seen := make(map[string]bool)
-	for _, item := range items {
-		bid := item.req.BatchID
-		if bid != "" && !seen[bid] {
-			seen[bid] = true
-			ts.checkBatchCompletion(bid, "upload")
-		}
+	// logSlotAcquired and logCredentialsChecked add a direction's own timing
+	// line at those two points of the task lifecycle. Only download has them.
+	logSlotAcquired       func(fileName string)
+	logCredentialsChecked func(fileName string)
+
+	// run performs the transfer once the shared lifecycle holds a semaphore
+	// slot, has activated the task and has checked credentials.
+	run func(x taskExecution)
+}
+
+func (ts *TransferService) uploadDirection() transferDirection {
+	return transferDirection{
+		name:              "upload",
+		label:             "UPLOAD",
+		batchAbortMessage: "Upload batch aborted: no API client",
+		register:          ts.registerUploadTask,
+		fileName: func(req TransferRequest) string {
+			if req.Name != "" {
+				return req.Name
+			}
+			return filepath.Base(req.Source)
+		},
+		run: ts.runUpload,
 	}
 }
 
-// executePreRegisteredDownloadBatch dispatches pre-registered download tasks to workers.
-func (ts *TransferService) executePreRegisteredDownloadBatch(ctx context.Context, items []preRegItem) {
+func (ts *TransferService) downloadDirection() transferDirection {
+	return transferDirection{
+		name:              "download",
+		label:             "DOWNLOAD",
+		batchAbortMessage: "Download batch aborted: no API client",
+		register:          ts.registerDownloadTask,
+		fileName: func(req TransferRequest) string {
+			if req.Name != "" {
+				return req.Name
+			}
+			return req.Source
+		},
+		logSlotAcquired: func(fileName string) {
+			log.Printf("[TIMING] DOWNLOAD %s: semaphore acquired, starting credential check", fileName)
+		},
+		logCredentialsChecked: func(fileName string) {
+			log.Printf("[TIMING] DOWNLOAD %s: credential check complete, starting download", fileName)
+		},
+		run: ts.runDownload,
+	}
+}
+
+// executePreRegisteredBatch dispatches pre-registered tasks to workers.
+func (ts *TransferService) executePreRegisteredBatch(ctx context.Context, items []preRegItem, dir transferDirection) {
 	ts.mu.RLock()
 	apiClient := ts.apiClient
 	ts.mu.RUnlock()
 
 	if apiClient == nil {
-		ts.logger.Error().Msg("Download batch aborted: no API client")
+		ts.logger.Error().Msg(dir.batchAbortMessage)
 		return
 	}
 
 	cfg := transfer.BatchConfig{
 		MaxWorkers:  cap(ts.semaphore),
 		ResourceMgr: ts.resourceMgr,
-		Label:       "DOWNLOAD",
+		Label:       dir.label,
 	}
 
 	numWorkers := transfer.ComputedWorkers(items, cfg)
 
 	transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item preRegItem) error {
-		ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient, numWorkers)
+		ts.executeTask(ctx, item.req, item.taskID, apiClient, numWorkers, dir)
 		return nil // errors handled internally via queue.Fail
 	})
 
@@ -266,7 +299,7 @@ func (ts *TransferService) executePreRegisteredDownloadBatch(ctx context.Context
 		bid := item.req.BatchID
 		if bid != "" && !seen[bid] {
 			seen[bid] = true
-			ts.checkBatchCompletion(bid, "download")
+			ts.checkBatchCompletion(bid, dir.name)
 		}
 	}
 }
@@ -283,89 +316,7 @@ func (ts *TransferService) StartStreamingDownloadBatch(
 	batchID, batchLabel, sourceLabel string,
 	cancelFn context.CancelFunc,
 ) error {
-	ts.mu.RLock()
-	apiClient := ts.apiClient
-	ts.mu.RUnlock()
-
-	if apiClient == nil {
-		return fmt.Errorf("API client not configured")
-	}
-
-	// Create a cancellable batch context — CancelBatch() will cancel this
-	batchCtx, batchCancel := context.WithCancel(ctx)
-
-	// Register caller-provided cancelFn if given (cancels scanCtx → batchCtx).
-	// This eliminates the race window between RegisterBatchCancel and any external override.
-	if cancelFn != nil {
-		ts.queue.RegisterBatchCancel(batchID, cancelFn)
-	} else {
-		ts.queue.RegisterBatchCancel(batchID, batchCancel)
-	}
-
-	// PreRegisterBatch implicitly marks scan-in-progress so BatchStats
-	// reports TotalKnown=false until registration finishes. Paired with
-	// MarkBatchScanInProgress(false) in the registration goroutine — this
-	// is what WaitForBatch polls on.
-	ts.queue.PreRegisterBatch(batchID, batchLabel, "download", sourceLabel)
-
-	// Dispatch channel: registration goroutine → RunBatchFromChannel
-	dispatchCh := make(chan preRegItem, constants.DispatchChannelBuffer)
-
-	// Registration goroutine: reads from requestCh, registers tasks, sends to dispatch.
-	// Lifecycle invariants preserved: RegisterBatchCancel, CleanupBatch, cancel propagation.
-	go func() {
-		defer close(dispatchCh)
-		defer ts.queue.CleanupBatch(batchID)
-		// Registration finished: flip TotalKnown=true so WaitForBatch callers
-		// know the task count is final. Must fire before CleanupBatch.
-		defer ts.queue.MarkBatchScanInProgress(batchID, false)
-
-		for {
-			select {
-			case <-batchCtx.Done():
-				return
-			case req, ok := <-requestCh:
-				if !ok {
-					return // Channel closed — scan complete
-				}
-				taskID := ts.registerDownloadTask(req)
-				select {
-				case dispatchCh <- preRegItem{req: req, taskID: taskID}:
-				case <-batchCtx.Done():
-					return
-				}
-			}
-		}
-	}()
-
-	// Worker goroutines via RunBatchFromChannel: adaptive concurrency from file sizes.
-	var adaptive *transfer.AdaptiveWorkerCount
-	cfg := transfer.BatchConfig{
-		MaxWorkers:    cap(ts.semaphore),
-		ResourceMgr:   ts.resourceMgr,
-		Label:         "DOWNLOAD-STREAM",
-		AdaptiveCount: &adaptive,
-	}
-
-	go func() {
-		defer batchCancel() // Ensure batchCtx resources are released when batch completes
-		transfer.RunBatchFromChannel(batchCtx, dispatchCh, cfg, func(ctx context.Context, item preRegItem) error {
-			wc := constants.DefaultMaxConcurrent
-			if adaptive != nil {
-				wc = adaptive.Load()
-			}
-			if wc < 1 {
-				wc = 1
-			}
-			ts.executeDownloadTask(ctx, item.req, item.taskID, apiClient, wc)
-			return nil // errors handled internally via queue.Fail
-		})
-		log.Printf("[BATCH] Streaming DOWNLOAD batch complete: %s", batchID)
-
-		ts.checkBatchCompletion(batchID, "download")
-	}()
-
-	return nil
+	return ts.startStreamingBatch(ctx, requestCh, batchID, batchLabel, sourceLabel, cancelFn, ts.downloadDirection())
 }
 
 // StartStreamingUploadBatch accepts a channel of TransferRequest and registers+dispatches
@@ -378,6 +329,19 @@ func (ts *TransferService) StartStreamingUploadBatch(
 	batchID, batchLabel, sourceLabel string,
 	cancelFn context.CancelFunc,
 ) error {
+	return ts.startStreamingBatch(ctx, requestCh, batchID, batchLabel, sourceLabel, cancelFn, ts.uploadDirection())
+}
+
+// startStreamingBatch registers requests as they arrive on requestCh and
+// dispatches each one as soon as it is registered, so transfers start while the
+// caller is still producing requests.
+func (ts *TransferService) startStreamingBatch(
+	ctx context.Context,
+	requestCh <-chan TransferRequest,
+	batchID, batchLabel, sourceLabel string,
+	cancelFn context.CancelFunc,
+	dir transferDirection,
+) error {
 	ts.mu.RLock()
 	apiClient := ts.apiClient
 	ts.mu.RUnlock()
@@ -389,27 +353,33 @@ func (ts *TransferService) StartStreamingUploadBatch(
 	// Create a cancellable batch context — CancelBatch() will cancel this
 	batchCtx, batchCancel := context.WithCancel(ctx)
 
-	// Register caller-provided cancelFn if given (cancels uploadCtx → batchCtx).
+	// Register caller-provided cancelFn if given (cancels the caller's context
+	// → batchCtx). This eliminates the race window between RegisterBatchCancel
+	// and any external override.
 	if cancelFn != nil {
 		ts.queue.RegisterBatchCancel(batchID, cancelFn)
 	} else {
 		ts.queue.RegisterBatchCancel(batchID, batchCancel)
 	}
 
-	// Pre-register batch for immediate UI visibility during folder creation
-	ts.queue.PreRegisterBatch(batchID, batchLabel, "upload", sourceLabel)
+	// PreRegisterBatch gives the UI something to show immediately, and
+	// implicitly marks scan-in-progress so BatchStats reports TotalKnown=false
+	// until registration finishes. Paired with MarkBatchScanInProgress(false)
+	// in the registration goroutine — this is what WaitForBatch polls on.
+	ts.queue.PreRegisterBatch(batchID, batchLabel, dir.name, sourceLabel)
 
 	// Dispatch channel: registration goroutine → RunBatchFromChannel
 	dispatchCh := make(chan preRegItem, constants.DispatchChannelBuffer)
 
 	// Registration goroutine: reads from requestCh, registers tasks, sends to dispatch.
+	// Lifecycle invariants preserved: RegisterBatchCancel, CleanupBatch, cancel propagation.
 	go func() {
 		defer close(dispatchCh)
 		defer ts.queue.CleanupBatch(batchID)
 		// Registration finished: flip TotalKnown=true so WaitForBatch callers
-		// know the task count is final. Must fire before CleanupBatch.
-		// (Symmetric with the download path; the GUI's OnOrchestratorDone also
-		// clears this, but the cancel and CLI paths do not.)
+		// know the task count is final. Must fire before CleanupBatch. (The
+		// GUI's OnOrchestratorDone also clears this, but the cancel and CLI
+		// paths do not.)
 		defer ts.queue.MarkBatchScanInProgress(batchID, false)
 
 		for {
@@ -418,9 +388,9 @@ func (ts *TransferService) StartStreamingUploadBatch(
 				return
 			case req, ok := <-requestCh:
 				if !ok {
-					return // Channel closed — all files queued
+					return // Channel closed — caller has queued everything
 				}
-				taskID := ts.registerUploadTask(req)
+				taskID := dir.register(req)
 				select {
 				case dispatchCh <- preRegItem{req: req, taskID: taskID}:
 				case <-batchCtx.Done():
@@ -435,7 +405,7 @@ func (ts *TransferService) StartStreamingUploadBatch(
 	cfg := transfer.BatchConfig{
 		MaxWorkers:    cap(ts.semaphore),
 		ResourceMgr:   ts.resourceMgr,
-		Label:         "UPLOAD-STREAM",
+		Label:         dir.label + "-STREAM",
 		AdaptiveCount: &adaptive,
 	}
 
@@ -449,12 +419,12 @@ func (ts *TransferService) StartStreamingUploadBatch(
 			if wc < 1 {
 				wc = 1
 			}
-			ts.executeUploadTask(ctx, item.req, item.taskID, apiClient, wc)
+			ts.executeTask(ctx, item.req, item.taskID, apiClient, wc, dir)
 			return nil // errors handled internally via queue.Fail
 		})
-		log.Printf("[BATCH] Streaming UPLOAD batch complete: %s", batchID)
+		log.Printf("[BATCH] Streaming %s batch complete: %s", dir.label, batchID)
 
-		ts.checkBatchCompletion(batchID, "upload")
+		ts.checkBatchCompletion(batchID, dir.name)
 	}()
 
 	return nil
@@ -537,52 +507,70 @@ func (ts *TransferService) registerUploadTask(req TransferRequest) string {
 	return task.ID
 }
 
-// executeUploadTask executes an upload for an already-registered task.
+// taskExecution is the state a direction's run func gets once the shared task
+// lifecycle has claimed a semaphore slot and activated the task.
+type taskExecution struct {
+	// ctx is the caller's context and taskCtx the cancellable one this task's
+	// cancel fn is bound to. Work that must survive a cancel of the task
+	// itself — applying tags to a file that already finished uploading — uses
+	// ctx; the transfer uses taskCtx.
+	ctx     context.Context
+	taskCtx context.Context
+
+	req         TransferRequest
+	taskID      string
+	fileName    string
+	apiClient   *api.Client
+	workerCount int
+}
+
+// executeTask runs an already-registered task in the given direction.
 // Handles semaphore acquisition, atomic claim via Activate(), cancel cleanup,
 // and ensures every early-return path after SetCancel() transitions the task
-// to a terminal state if it isn't already terminal.
-func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client, workerCount int) {
-	fileName := req.Name
-	if fileName == "" {
-		fileName = filepath.Base(req.Source)
-	}
+// to a terminal state if it isn't already terminal. The direction's run func
+// performs the transfer itself and owns the terminal transition from there on.
+func (ts *TransferService) executeTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client, workerCount int, dir transferDirection) {
+	fileName := dir.fileName(req)
 
 	// Create derived context for cancel support
-	uploadCtx, uploadCancel := context.WithCancel(ctx)
-	defer uploadCancel()
+	taskCtx, taskCancel := context.WithCancel(ctx)
+	defer taskCancel()
 
 	// Set cancel fn early — enables CancelBatch to cancel even while queued
-	ts.queue.SetCancel(taskID, uploadCancel)
+	ts.queue.SetCancel(taskID, taskCancel)
 
 	// Panic recovery — must transition to terminal after SetCancel
 	defer func() {
 		if r := recover(); r != nil {
-			ts.logger.Error().Msgf("PANIC in upload for %s: %v", fileName, r)
+			ts.logger.Error().Msgf("PANIC in %s for %s: %v", dir.name, fileName, r)
 			ts.queue.FailIfNotTerminal(taskID, fmt.Errorf("panic: %v", r))
 		}
 	}()
 
 	// Wait for semaphore slot
 	slotsBefore := atomic.LoadInt32(&ts.activeSlots)
-	log.Printf("[SLOT] UPLOAD %s: waiting (active=%d/%d)", fileName, slotsBefore, cap(ts.semaphore))
+	log.Printf("[SLOT] %s %s: waiting (active=%d/%d)", dir.label, fileName, slotsBefore, cap(ts.semaphore))
 
 	select {
 	case ts.semaphore <- struct{}{}:
 		// Acquired slot
-	case <-uploadCtx.Done():
+	case <-taskCtx.Done():
 		// Atomic terminal transition — CancelBatch may have set TaskCancelled,
 		// but other cancellations (parent timeout, shutdown) won't.
-		ts.queue.FailIfNotTerminal(taskID, uploadCtx.Err())
+		ts.queue.FailIfNotTerminal(taskID, taskCtx.Err())
 		return
 	}
 
 	slotsNow := atomic.AddInt32(&ts.activeSlots, 1)
-	log.Printf("[SLOT] UPLOAD %s: ACQUIRED (active=%d/%d)", fileName, slotsNow, cap(ts.semaphore))
+	log.Printf("[SLOT] %s %s: ACQUIRED (active=%d/%d)", dir.label, fileName, slotsNow, cap(ts.semaphore))
+	if dir.logSlotAcquired != nil {
+		dir.logSlotAcquired(fileName)
+	}
 
 	defer func() {
 		<-ts.semaphore
 		slotsAfter := atomic.AddInt32(&ts.activeSlots, -1)
-		log.Printf("[SLOT] UPLOAD %s: RELEASED (active=%d/%d)", fileName, slotsAfter, cap(ts.semaphore))
+		log.Printf("[SLOT] %s %s: RELEASED (active=%d/%d)", dir.label, fileName, slotsAfter, cap(ts.semaphore))
 	}()
 
 	// Atomic claim: only transition TaskQueued → TaskInitializing
@@ -594,13 +582,13 @@ func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRe
 
 	// Check cancellation after activation
 	select {
-	case <-uploadCtx.Done():
-		ts.queue.FailIfNotTerminal(taskID, uploadCtx.Err())
+	case <-taskCtx.Done():
+		ts.queue.FailIfNotTerminal(taskID, taskCtx.Err())
 		return
 	default:
 	}
 
-	// Proactive credential freshness check before upload.
+	// Proactive credential freshness check before the transfer.
 	// Lazy-init credManager synchronously if warmCredentialCache hasn't run yet.
 	ts.mu.Lock()
 	if ts.credManager == nil && ts.apiClient != nil {
@@ -609,53 +597,70 @@ func (ts *TransferService) executeUploadTask(ctx context.Context, req TransferRe
 	cm := ts.credManager
 	ts.mu.Unlock()
 	if cm != nil {
-		if err := cm.EnsureFresh(uploadCtx); err != nil {
-			log.Printf("[CRED] EnsureFresh failed before upload %s: %v", fileName, err)
+		if err := cm.EnsureFresh(taskCtx); err != nil {
+			log.Printf("[CRED] EnsureFresh failed before %s %s: %v", dir.name, fileName, err)
 			// Non-fatal: retry path will handle credential refresh on failure
 		}
 	}
+	if dir.logCredentialsChecked != nil {
+		dir.logCredentialsChecked(fileName)
+	}
 
+	dir.run(taskExecution{
+		ctx:         ctx,
+		taskCtx:     taskCtx,
+		req:         req,
+		taskID:      taskID,
+		fileName:    fileName,
+		apiClient:   apiClient,
+		workerCount: workerCount,
+	})
+}
+
+// runUpload uploads one file for a task the shared lifecycle has already
+// activated. It owns the task's terminal transition.
+func (ts *TransferService) runUpload(x taskExecution) {
 	// Get file info for transfer allocation
-	fileInfo, err := os.Stat(req.Source)
+	fileInfo, err := os.Stat(x.req.Source)
 	if err != nil {
-		ts.queue.Fail(taskID, fmt.Errorf("failed to stat file: %w", err))
+		ts.queue.Fail(x.taskID, fmt.Errorf("failed to stat file: %w", err))
 		return
 	}
 
 	// Allocate transfer handle — workerCount is the adaptive batch size so
 	// resource manager divides the thread pool correctly across concurrent workers.
-	transferHandle := ts.transferMgr.AllocateTransfer(fileInfo.Size(), workerCount)
+	transferHandle := ts.transferMgr.AllocateTransfer(fileInfo.Size(), x.workerCount)
 	defer transferHandle.Complete()
 
 	// Execute upload with progress callback
-	cloudFile, err := upload.UploadFile(uploadCtx, upload.UploadParams{
-		LocalPath: req.Source,
-		FolderID:  req.Dest,
-		APIClient: apiClient,
+	cloudFile, err := upload.UploadFile(x.taskCtx, upload.UploadParams{
+		LocalPath: x.req.Source,
+		FolderID:  x.req.Dest,
+		APIClient: x.apiClient,
 		ProgressCallback: func(progress float64) {
-			ts.queue.StartTransfer(taskID)
-			ts.queue.UpdateProgress(taskID, progress)
+			ts.queue.StartTransfer(x.taskID)
+			ts.queue.UpdateProgress(x.taskID, progress)
 		},
-		OnRetry:        ts.retryNotice(filepath.Base(req.Source)),
+		OnRetry:        ts.retryNotice(filepath.Base(x.req.Source)),
 		TransferHandle: transferHandle,
 	})
 
 	if err != nil {
 		// Don't overwrite cancelled state with failed
 		if errors.Is(err, context.Canceled) {
-			ts.queue.FailIfNotTerminal(taskID, err)
+			ts.queue.FailIfNotTerminal(x.taskID, err)
 			return
 		}
-		ts.queue.Fail(taskID, err)
-		ts.logger.Error().Err(err).Str("path", req.Source).Msg("Upload failed")
+		ts.queue.Fail(x.taskID, err)
+		ts.logger.Error().Err(err).Str("path", x.req.Source).Msg("Upload failed")
 		return
 	}
 
 	// Apply tags after successful upload (non-fatal)
-	ts.applyTags(ctx, apiClient, cloudFile.ID, req.Tags, fileName)
+	ts.applyTags(x.ctx, x.apiClient, cloudFile.ID, x.req.Tags, x.fileName)
 
-	ts.queue.Complete(taskID)
-	ts.logger.Info().Str("path", req.Source).Msg("File uploaded")
+	ts.queue.Complete(x.taskID)
+	ts.logger.Info().Str("path", x.req.Source).Msg("File uploaded")
 }
 
 // UploadFileSync uploads a file synchronously with transfer queue visibility.
@@ -823,113 +828,36 @@ func (ts *TransferService) registerDownloadTask(req TransferRequest) string {
 	return task.ID
 }
 
-// executeDownloadTask executes a download for an already-registered task.
-// Handles semaphore acquisition, atomic claim via Activate(), cancel cleanup,
-// and ensures every early-return path after SetCancel() transitions the task
-// to a terminal state if it isn't already terminal.
-func (ts *TransferService) executeDownloadTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client, workerCount int) {
-	fileName := req.Name
-	if fileName == "" {
-		fileName = req.Source
-	}
-
-	// Create derived context for cancel support
-	dlCtx, dlCancel := context.WithCancel(ctx)
-	defer dlCancel()
-
-	// Set cancel fn early — enables CancelBatch to cancel even while queued
-	ts.queue.SetCancel(taskID, dlCancel)
-
-	// Panic recovery — must transition to terminal after SetCancel
-	defer func() {
-		if r := recover(); r != nil {
-			ts.logger.Error().Msgf("PANIC in download for %s: %v", fileName, r)
-			ts.queue.FailIfNotTerminal(taskID, fmt.Errorf("panic: %v", r))
-		}
-	}()
-
-	// Wait for semaphore slot
-	slotsBefore := atomic.LoadInt32(&ts.activeSlots)
-	log.Printf("[SLOT] DOWNLOAD %s: waiting (active=%d/%d)", fileName, slotsBefore, cap(ts.semaphore))
-
-	select {
-	case ts.semaphore <- struct{}{}:
-		// Acquired slot
-	case <-dlCtx.Done():
-		// Atomic terminal transition — CancelBatch may have set TaskCancelled,
-		// but other cancellations (parent timeout, shutdown) won't.
-		ts.queue.FailIfNotTerminal(taskID, dlCtx.Err())
-		return
-	}
-
-	slotsNow := atomic.AddInt32(&ts.activeSlots, 1)
-	log.Printf("[SLOT] DOWNLOAD %s: ACQUIRED (active=%d/%d)", fileName, slotsNow, cap(ts.semaphore))
-	log.Printf("[TIMING] DOWNLOAD %s: semaphore acquired, starting credential check", fileName)
-
-	defer func() {
-		<-ts.semaphore
-		slotsAfter := atomic.AddInt32(&ts.activeSlots, -1)
-		log.Printf("[SLOT] DOWNLOAD %s: RELEASED (active=%d/%d)", fileName, slotsAfter, cap(ts.semaphore))
-	}()
-
-	// Atomic claim: only transition TaskQueued → TaskInitializing
-	if !ts.queue.Activate(taskID) {
-		// Task already terminal (e.g., CancelBatch ran while we waited for semaphore)
-		ts.queue.ClearCancel(taskID)
-		return
-	}
-
-	// Check cancellation after activation
-	select {
-	case <-dlCtx.Done():
-		ts.queue.FailIfNotTerminal(taskID, dlCtx.Err())
-		return
-	default:
-	}
-
-	// Proactive credential freshness check before download.
-	// Lazy-init credManager synchronously if warmCredentialCache hasn't run yet.
-	ts.mu.Lock()
-	if ts.credManager == nil && ts.apiClient != nil {
-		ts.credManager = credentials.GetManager(ts.apiClient)
-	}
-	cmDl := ts.credManager
-	ts.mu.Unlock()
-	if cmDl != nil {
-		if err := cmDl.EnsureFresh(dlCtx); err != nil {
-			log.Printf("[CRED] EnsureFresh failed before download %s: %v", fileName, err)
-			// Non-fatal: retry path will handle credential refresh on failure
-		}
-	}
-	log.Printf("[TIMING] DOWNLOAD %s: credential check complete, starting download", fileName)
-
+// runDownload downloads one file for a task the shared lifecycle has already
+// activated. It owns the task's terminal transition.
+func (ts *TransferService) runDownload(x taskExecution) {
 	// Allocate transfer handle — workerCount is the adaptive batch size so
 	// resource manager divides the thread pool correctly across concurrent workers.
-	transferHandle := ts.transferMgr.AllocateTransfer(req.Size, workerCount)
+	transferHandle := ts.transferMgr.AllocateTransfer(x.req.Size, x.workerCount)
 	defer transferHandle.Complete()
 
 	// Ensure dest is a file path, not a directory
-	localPath := req.Dest
+	localPath := x.req.Dest
 	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
-		localPath = filepath.Join(localPath, fileName)
+		localPath = filepath.Join(localPath, x.fileName)
 		ts.logger.Debug().
-			Str("original_dest", req.Dest).
+			Str("original_dest", x.req.Dest).
 			Str("corrected_path", localPath).
 			Msg("Dest was a directory, appending filename")
 	}
 
 	// Execute download with progress callback.
 	// Pass pre-fetched FileInfo to skip GetFileInfo() API call when available.
-	log.Printf("[TIMING] DOWNLOAD %s: DownloadFile() entered, provider init starting", fileName)
-	err := download.DownloadFile(dlCtx, download.DownloadParams{
-		FileID:    req.Source,
-		FileInfo:  req.FileInfo,
+	log.Printf("[TIMING] DOWNLOAD %s: DownloadFile() entered, provider init starting", x.fileName)
+	err := download.DownloadFile(x.taskCtx, download.DownloadParams{
+		FileID:    x.req.Source,
+		FileInfo:  x.req.FileInfo,
 		LocalPath: localPath,
-		APIClient: apiClient,
-		OnRetry:   ts.retryNotice(fileName),
+		APIClient: x.apiClient,
+		OnRetry:   ts.retryNotice(x.fileName),
 		ProgressCallback: func(progress float64) {
-			ts.queue.StartTransfer(taskID)
-			ts.queue.UpdateProgress(taskID, progress)
+			ts.queue.StartTransfer(x.taskID)
+			ts.queue.UpdateProgress(x.taskID, progress)
 		},
 		TransferHandle: transferHandle,
 	})
@@ -937,14 +865,14 @@ func (ts *TransferService) executeDownloadTask(ctx context.Context, req Transfer
 	if err != nil {
 		// Don't overwrite cancelled state with failed
 		if errors.Is(err, context.Canceled) {
-			ts.queue.FailIfNotTerminal(taskID, err)
+			ts.queue.FailIfNotTerminal(x.taskID, err)
 			return
 		}
-		ts.queue.Fail(taskID, err)
-		ts.logger.Error().Err(err).Str("file_id", req.Source).Str("name", fileName).Msg("Download failed")
+		ts.queue.Fail(x.taskID, err)
+		ts.logger.Error().Err(err).Str("file_id", x.req.Source).Str("name", x.fileName).Msg("Download failed")
 	} else {
-		ts.queue.Complete(taskID)
-		ts.logger.Info().Str("file_id", req.Source).Str("local_path", req.Dest).Msg("File downloaded")
+		ts.queue.Complete(x.taskID)
+		ts.logger.Info().Str("file_id", x.req.Source).Str("local_path", x.req.Dest).Msg("File downloaded")
 	}
 }
 
@@ -990,18 +918,18 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 	}
 }
 
-// executeUploadRetry delegates to executeUploadTask with the existing task ID.
+// executeUploadRetry delegates to executeTask with the existing task ID.
 // The task was already reset to TaskQueued by queue.Retry().
 // workerCount=1 — retry is single-file outside batch, gets full thread pool.
 func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
-	ts.executeUploadTask(ctx, req, taskID, apiClient, 1)
+	ts.executeTask(ctx, req, taskID, apiClient, 1, ts.uploadDirection())
 }
 
-// executeDownloadRetry delegates to executeDownloadTask with the existing task ID.
+// executeDownloadRetry delegates to executeTask with the existing task ID.
 // The task was already reset to TaskQueued by queue.Retry().
 // workerCount=1 — retry is single-file outside batch, gets full thread pool.
 func (ts *TransferService) executeDownloadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
-	ts.executeDownloadTask(ctx, req, taskID, apiClient, 1)
+	ts.executeTask(ctx, req, taskID, apiClient, 1, ts.downloadDirection())
 }
 
 func (ts *TransferService) CancelTransfer(taskID string) error {
