@@ -376,7 +376,18 @@ function toDOEResult(result: wailsapp.DOEResultDTO): DOEResult {
     ok: result.ok,
     caseCount: result.caseCount,
     truncated: result.truncated,
-    cases: (result.cases || []) as DOECase[],
+    // Each case is mapped field by field rather than cast: the Go DTO marks the
+    // per-case tags omitempty and a nil values map marshals to null, so a case
+    // with no tags arrives without the field at all. DOECase declares both as
+    // present, so casting would hand the UI a `tags` that is undefined and
+    // crash the first `.length` read on it.
+    cases: (result.cases || []).map((c) => ({
+      index: c.index,
+      values: c.values || {},
+      jobName: c.jobName,
+      command: c.command,
+      tags: c.tags || [],
+    })),
     errors: (result.errors || []) as DOEProblem[],
     warnings: (result.warnings || []) as DOEProblem[],
   }
