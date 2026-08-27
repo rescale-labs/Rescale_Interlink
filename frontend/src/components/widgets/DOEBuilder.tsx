@@ -4,7 +4,7 @@
 // as environment variables, so each case's configuration is visible on its
 // Rescale job page. Generation happens in Go and is pure, which is what lets the
 // preview below refresh as the design is edited.
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { XCircleIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline'
 import { useJobStore } from '../../stores'
 import type { DOEParameter } from '../../stores/jobStore'
@@ -14,6 +14,13 @@ const INPUT_CLASS =
 
 // How long to wait after an edit before refreshing the preview.
 const PREVIEW_DEBOUNCE_MS = 250
+
+// The per-parameter fields held as numbers, which therefore need draft text
+// while they are being typed.
+type NumericField = 'min' | 'max' | 'levels'
+
+// Fewest grid points a swept parameter can have: a range needs both ends.
+const MIN_LEVELS = 2
 
 function newParameter(): DOEParameter {
   return { name: '', min: 0, max: 1, levels: 3, values: [], format: '' }
@@ -62,7 +69,65 @@ export function DOEBuilder() {
     setDOEOptions({ parameters })
   }
 
+  // In-progress text for the numeric fields, keyed by row and field.
+  //
+  // A number field has to display what the user is still typing, and "-", "" and
+  // "1e" are all unparseable on the way to a valid number. Storing only the
+  // parsed number and echoing it back would erase the keystroke — which is what
+  // made negative values impossible to type by hand. The store still only ever
+  // holds numbers; this draft is what the input shows until it loses focus.
+  const [numberDrafts, setNumberDrafts] = useState<Record<string, string>>({})
+
+  const draftKey = (index: number, field: NumericField) => `${index}:${field}`
+
+  const numberFieldValue = (index: number, field: NumericField, committed: number) => {
+    const draft = numberDrafts[draftKey(index, field)]
+    return draft !== undefined ? draft : String(committed)
+  }
+
+  // A bound is any real number, negative included. Unparseable input commits 0
+  // rather than NaN so the design stays generatable while the field is mid-edit.
+  const handleBoundChange = (index: number, field: 'min' | 'max', raw: string) => {
+    setNumberDrafts((prev) => ({ ...prev, [draftKey(index, field)]: raw }))
+    const parsed = parseFloat(raw)
+    updateParameter(index, {
+      [field]: Number.isFinite(parsed) ? parsed : 0,
+    } as Partial<DOEParameter>)
+  }
+
+  // Levels counts the grid points along a parameter, so unlike a bound it is an
+  // integer of at least MIN_LEVELS. Non-digits are dropped from the draft rather
+  // than parsed away, so a sign or decimal point cannot be typed at all, and the
+  // committed value is never below the minimum.
+  const handleLevelsChange = (index: number, raw: string) => {
+    const digits = raw.replace(/\D/g, '')
+    setNumberDrafts((prev) => ({ ...prev, [draftKey(index, 'levels')]: digits }))
+    const parsed = parseInt(digits, 10)
+    updateParameter(index, {
+      levels: Number.isFinite(parsed) && parsed >= MIN_LEVELS ? parsed : MIN_LEVELS,
+    })
+  }
+
+  // Dropping the draft on blur normalizes the display to the stored number, so a
+  // field left as "-" settles to 0 instead of lingering as invalid-looking text.
+  const handleNumberBlur = (index: number, field: NumericField) => {
+    setNumberDrafts((prev) => {
+      const next = { ...prev }
+      delete next[draftKey(index, field)]
+      return next
+    })
+  }
+
+  // Drafts are keyed by row index, so adding or removing a parameter would leave
+  // them pointing at the wrong row. Clearing is correct: every field falls back
+  // to its stored value.
+  const addParameter = () => {
+    setNumberDrafts({})
+    setDOEOptions({ parameters: [...doeOptions.parameters, newParameter()] })
+  }
+
   const removeParameter = (index: number) => {
+    setNumberDrafts({})
     setDOEOptions({ parameters: doeOptions.parameters.filter((_, i) => i !== index) })
   }
 
@@ -90,7 +155,7 @@ export function DOEBuilder() {
         <div className="flex items-center justify-between mb-2">
           <label className="block text-sm font-medium">Swept Parameters</label>
           <button
-            onClick={() => setDOEOptions({ parameters: [...doeOptions.parameters, newParameter()] })}
+            onClick={addParameter}
             className="text-sm text-blue-500 hover:text-blue-600"
           >
             + Add Parameter
@@ -162,10 +227,9 @@ export function DOEBuilder() {
                       <div className="col-span-2">
                         <input
                           type="number"
-                          value={param.min}
-                          onChange={(e) =>
-                            updateParameter(index, { min: parseFloat(e.target.value) || 0 })
-                          }
+                          value={numberFieldValue(index, 'min', param.min)}
+                          onChange={(e) => handleBoundChange(index, 'min', e.target.value)}
+                          onBlur={() => handleNumberBlur(index, 'min')}
                           className={INPUT_CLASS}
                         />
                         <p className="mt-1 text-xs text-gray-400">min</p>
@@ -173,10 +237,9 @@ export function DOEBuilder() {
                       <div className="col-span-2">
                         <input
                           type="number"
-                          value={param.max}
-                          onChange={(e) =>
-                            updateParameter(index, { max: parseFloat(e.target.value) || 0 })
-                          }
+                          value={numberFieldValue(index, 'max', param.max)}
+                          onChange={(e) => handleBoundChange(index, 'max', e.target.value)}
+                          onBlur={() => handleNumberBlur(index, 'max')}
                           className={INPUT_CLASS}
                         />
                         <p className="mt-1 text-xs text-gray-400">max</p>
@@ -186,11 +249,11 @@ export function DOEBuilder() {
                           <>
                             <input
                               type="number"
-                              min={2}
-                              value={param.levels}
-                              onChange={(e) =>
-                                updateParameter(index, { levels: parseInt(e.target.value) || 2 })
-                              }
+                              min={MIN_LEVELS}
+                              step={1}
+                              value={numberFieldValue(index, 'levels', param.levels)}
+                              onChange={(e) => handleLevelsChange(index, e.target.value)}
+                              onBlur={() => handleNumberBlur(index, 'levels')}
                               className={INPUT_CLASS}
                             />
                             <p className="mt-1 text-xs text-gray-400">levels</p>
