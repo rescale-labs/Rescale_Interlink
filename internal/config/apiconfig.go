@@ -61,12 +61,6 @@ type NotificationConfig struct {
 	ShowDownloadFailed bool `ini:"show_download_failed"`
 }
 
-// Validation errors
-var (
-	ErrMissingPlatformURL = errors.New("platform_url is required")
-	ErrMissingAPIKey      = errors.New("api_key is required")
-)
-
 // DefaultAPIConfigPath returns the default path for the apiconfig file.
 // - Windows: %APPDATA%\Rescale\Interlink\apiconfig (standard Windows location)
 // - Unix: ~/.config/rescale/apiconfig (XDG standard)

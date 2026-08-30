@@ -230,43 +230,8 @@ func (m *Manager) GetAllStates() []*models.JobState {
 	return states
 }
 
-// CountByStatus counts jobs by their status
-func (m *Manager) CountByStatus(statusField string, status string) int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	count := 0
-	for _, state := range m.states {
-		switch statusField {
-		case "tar":
-			if state.TarStatus == status {
-				count++
-			}
-		case "upload":
-			if state.UploadStatus == status {
-				count++
-			}
-		case "submit":
-			if state.SubmitStatus == status {
-				count++
-			}
-		}
-	}
-	return count
-}
-
-// UpdateUploadProgress updates the upload progress for a job by index.
-// This is a transient update - progress is not persisted to CSV (only status is).
-func (m *Manager) UpdateUploadProgress(index int, progress float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if state, ok := m.states[index]; ok {
-		state.UploadProgress = progress
-	}
-}
-
 // UpdateUploadProgressByName updates the upload progress for a job by name.
+// This is a transient update - progress is not persisted to CSV (only status is).
 func (m *Manager) UpdateUploadProgressByName(jobName string, progress float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

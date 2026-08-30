@@ -20,15 +20,29 @@ type PatternInfo struct {
 	EndPos    int    // End position in original string
 }
 
+// Iteration-candidate patterns. Compiled once at package level because
+// IterateCommandPatterns re-runs the whole set for every job in a scan, and
+// compiling inside the function re-parses them on each of those calls.
+var (
+	// word + separator + number + extension (e.g., "file_1.txt", "data-001.csv")
+	reNumWithExt = regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)(\.[a-zA-Z0-9]+)`)
+	// word + separator + number + separator + more text (e.g., "Run_335_Fluid_Meas.avg.snc")
+	reNumWithTail = regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)([_-][a-zA-Z_][a-zA-Z0-9_.\-]+)`)
+	// word + separator + number (e.g., "run_1", "test-002")
+	reNumSeparated = regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)\b`)
+	// word + number, no separator (e.g., "file1", "test001")
+	reNumAttached = regexp.MustCompile(`(\b[a-zA-Z]+)(\d+)(?:\s|$|\.)`)
+	// first run of digits anywhere in the string
+	reFirstNumber = regexp.MustCompile(`\d+`)
+)
+
 // DetectNumericPatterns detects all numeric patterns in a command string that look like iteration candidates
 func DetectNumericPatterns(command string) []PatternInfo {
 	var patterns []PatternInfo
 	uniquePatterns := make(map[string]*PatternInfo)
 
-	// Define regex patterns to try, in order of specificity
-	// Pattern 1: word + separator + number + extension (e.g., "file_1.txt", "data-001.csv")
-	re1 := regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)(\.[a-zA-Z0-9]+)`)
-	for _, match := range re1.FindAllStringSubmatchIndex(command, -1) {
+	// Patterns are applied in order of specificity.
+	for _, match := range reNumWithExt.FindAllStringSubmatchIndex(command, -1) {
 		fullMatch := command[match[0]:match[1]]
 		prefix := command[match[2]:match[3]] + command[match[4]:match[5]]
 		number := command[match[6]:match[7]]
@@ -55,10 +69,9 @@ func DetectNumericPatterns(command string) []PatternInfo {
 		}
 	}
 
-	// Pattern 4: word + separator + number + separator + more text (e.g., "Run_335_Fluid_Meas.avg.snc")
-	// This must come before Pattern 2 because it's more specific; the overlap filter keeps the longest match.
-	re4 := regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)([_-][a-zA-Z_][a-zA-Z0-9_.\-]+)`)
-	for _, match := range re4.FindAllStringSubmatchIndex(command, -1) {
+	// reNumWithTail must come before reNumSeparated because it is more specific;
+	// the overlap filter keeps the longest match.
+	for _, match := range reNumWithTail.FindAllStringSubmatchIndex(command, -1) {
 		fullMatch := command[match[0]:match[1]]
 		prefix := command[match[2]:match[3]] + command[match[4]:match[5]]
 		number := command[match[6]:match[7]]
@@ -85,9 +98,7 @@ func DetectNumericPatterns(command string) []PatternInfo {
 		}
 	}
 
-	// Pattern 2: word + separator + number (e.g., "run_1", "test-002")
-	re2 := regexp.MustCompile(`(\b[a-zA-Z_]+)([_-])(\d+)\b`)
-	for _, match := range re2.FindAllStringSubmatchIndex(command, -1) {
+	for _, match := range reNumSeparated.FindAllStringSubmatchIndex(command, -1) {
 		fullMatch := command[match[0]:match[1]]
 		prefix := command[match[2]:match[3]] + command[match[4]:match[5]]
 		number := command[match[6]:match[7]]
@@ -113,9 +124,7 @@ func DetectNumericPatterns(command string) []PatternInfo {
 		}
 	}
 
-	// Pattern 3: word + number (no separator, e.g., "file1", "test001")
-	re3 := regexp.MustCompile(`(\b[a-zA-Z]+)(\d+)(?:\s|$|\.)`)
-	for _, match := range re3.FindAllStringSubmatchIndex(command, -1) {
+	for _, match := range reNumAttached.FindAllStringSubmatchIndex(command, -1) {
 		// The full match includes the lookahead character, so adjust
 		endPos := match[5] // End of number group (group 2)
 		if endPos > len(command) {
@@ -283,8 +292,7 @@ func filterOverlappingPatterns(patterns []PatternInfo) []PatternInfo {
 // ExtractIndexFromJobName extracts a numeric index from a job name
 // For example, "Job_10" returns 10
 func ExtractIndexFromJobName(jobName string) int {
-	re := regexp.MustCompile(`\d+`)
-	match := re.FindString(jobName)
+	match := reFirstNumber.FindString(jobName)
 	if match == "" {
 		return 1
 	}
