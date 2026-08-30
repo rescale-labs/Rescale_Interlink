@@ -2,8 +2,12 @@ package doe
 
 import (
 	"fmt"
+	"math"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 )
@@ -41,6 +45,11 @@ const (
 	CodeSingleLevel     = "single_level"
 	CodeDuplicateCase   = "duplicate_case"
 	CodeBadFormat       = "bad_format"
+	CodeBadMaxCases     = "bad_max_cases"
+	CodeTooManyParams   = "too_many_params"
+	CodeReservedParam   = "reserved_param"
+	CodeDuplicateValue  = "duplicate_value"
+	CodeTooLong         = "too_long"
 )
 
 // Problem is one validation finding. Errors block generation; warnings do not.
@@ -62,6 +71,27 @@ func (p Problem) Error() string {
 // substitution and quoting. A parameter value containing one of these is
 // rejected, since a sweep value is meant to be a datum, not syntax.
 const unsafeValueChars = "`$;|&><\n\r\"'\\"
+
+// globValueChars are characters a shell expands against the filesystem or the
+// argument list. Numeric output never contains them, but a categorical level or
+// an explicit case value is written by hand, and one that expands is no longer
+// the value the user wrote.
+const globValueChars = "*?[](){}~"
+
+// Rendered output is bounded at the one boundary every surface goes through.
+// A command legitimately gets long — solver flags, paths, mesh names — so it has
+// room to spare; a job name and a tag are labels, and one that runs past these
+// lengths is a runaway template rather than a label.
+const (
+	maxCommandLength = 32 << 10
+	maxJobNameLength = 128
+	maxTagLength     = 64
+)
+
+// maxFormatDigits bounds both the width and the precision of Parameter.Format.
+// fmt honours either to any size it is given, so "%.1000000f" renders a
+// megabyte-long argument from a single-digit value.
+const maxFormatDigits = 32
 
 // maxTagCallsBeforeWarning is where per-job tagging starts to be a meaningful
 // share of a sweep's API traffic. Tags are applied one POST per tag per job.
@@ -94,14 +124,23 @@ func validateOptions(opts Options) (errs []Problem, warns []Problem) {
 		})
 	}
 
+	// A cap that switches itself off is not a cap. Raising the limit is the
+	// supported way to run a large sweep; removing it is not, since every stage
+	// past this one allocates per case.
+	if opts.MaxCases < 0 {
+		errs = append(errs, Problem{
+			Code: CodeBadMaxCases,
+			Message: fmt.Sprintf("MaxCases is %d; it must be positive, and 0 selects the default of %d",
+				opts.MaxCases, DefaultMaxCases),
+		})
+	}
+
 	errs = append(errs, validateParameterSet(opts)...)
 
 	// Bidirectional parameter/token check. Only meaningful once names themselves
 	// are known-good, so it is skipped when the parameter set is already broken.
 	if len(errs) == 0 {
-		tokenErrs, tokenWarns := validateTokenAgreement(opts)
-		errs = append(errs, tokenErrs...)
-		warns = append(warns, tokenWarns...)
+		errs = append(errs, validateTokenAgreement(opts)...)
 	}
 
 	errs = append(errs, validateMethodRequirements(opts)...)
@@ -121,6 +160,14 @@ func validateParameterSet(opts Options) []Problem {
 		}}
 	}
 
+	if len(opts.Parameters) > maxParameters {
+		return []Problem{{
+			Code: CodeTooManyParams,
+			Message: fmt.Sprintf("%d parameters declared; at most %d are supported",
+				len(opts.Parameters), maxParameters),
+		}}
+	}
+
 	seen := make(map[string]bool, len(opts.Parameters))
 	seenFolded := make(map[string]string, len(opts.Parameters))
 
@@ -133,6 +180,19 @@ func validateParameterSet(opts Options) []Problem {
 				Param: name,
 				Message: "invalid parameter name; must start with a letter or underscore and " +
 					"contain only letters, digits, underscores, hyphens and dots",
+			})
+			continue
+		}
+
+		// Built-ins are added to the substitution map after the parameters, so a
+		// parameter of the same name loses the command but still shows its own
+		// value in the preview: the two would disagree with nothing to say so.
+		if isBuiltinToken(name) {
+			errs = append(errs, Problem{
+				Code:  CodeReservedParam,
+				Param: name,
+				Message: fmt.Sprintf("{{%s}} is supplied by the sweep itself and cannot be a parameter; "+
+					"rename it", name),
 			})
 			continue
 		}
@@ -181,10 +241,35 @@ func validateParameterDomain(p Parameter, method Method) []Problem {
 				Message: "Values is set but empty; give at least one value or use Min/Max",
 			})
 		}
+		seen := make(map[string]bool, len(p.Values))
 		for _, v := range p.Values {
-			errs = append(errs, validateValue(p.Name, v)...)
+			errs = append(errs, validateValue(p.Name, v, policyLiteral)...)
+
+			// A repeated level is a design that runs the same case twice. It is
+			// caught after the fact by the duplicate-case warning, but the input is
+			// wrong here, where it can be named.
+			if seen[v] {
+				errs = append(errs, Problem{
+					Code:    CodeDuplicateValue,
+					Param:   p.Name,
+					Message: fmt.Sprintf("value %q is listed more than once, so the design would repeat it", v),
+				})
+				continue
+			}
+			seen[v] = true
 		}
 		return errs
+	}
+
+	// NaN fails every comparison, so an unchecked NaN bound slips past the range
+	// test below and renders "NaN" into the command line; an infinite bound
+	// renders "+Inf" or, at the midpoint of an infinite range, "NaN" again.
+	if nonFinite(p.Min) || nonFinite(p.Max) {
+		errs = append(errs, Problem{
+			Code:    CodeBadRange,
+			Param:   p.Name,
+			Message: fmt.Sprintf("Min (%g) and Max (%g) must both be finite numbers", p.Min, p.Max),
+		})
 	}
 
 	if p.Min > p.Max {
@@ -194,6 +279,8 @@ func validateParameterDomain(p Parameter, method Method) []Problem {
 			Message: fmt.Sprintf("Min (%g) is greater than Max (%g)", p.Min, p.Max),
 		})
 	}
+
+	errs = append(errs, validateFormat(p)...)
 
 	// Only the grid designs consult Levels; the continuous samplers draw from the
 	// range directly, so an unset Levels is fine for them.
@@ -216,9 +303,66 @@ func validateParameterDomain(p Parameter, method Method) []Problem {
 	return errs
 }
 
+// numericFormat is the shape Parameter.Format must have: literal text with no
+// second conversion in it, around one numeric verb whose width and precision are
+// at most two digits each. Two digits is the bound itself — a longer run cannot
+// be under maxFormatDigits — which is what keeps "%.1000000f" from matching at
+// all rather than matching and being rejected afterwards.
+var numericFormat = regexp.MustCompile(`^[^%]*%[+\-#0]*([0-9]{0,2})(?:\.([0-9]{0,2}))?[eEfFgG][^%]*$`)
+
+// validateFormat checks Parameter.Format before it reaches fmt.Sprintf.
+//
+// fmt reports an inapplicable verb inside its output, which render.go catches,
+// but it applies a width or precision of any size without complaint. Checking
+// the syntax here rejects the sweep once, on its inputs, rather than once per
+// case on its results.
+func validateFormat(p Parameter) []Problem {
+	if p.Format == "" {
+		return nil
+	}
+
+	reject := func(reason string) []Problem {
+		return []Problem{{
+			Code:    CodeBadFormat,
+			Param:   p.Name,
+			Message: fmt.Sprintf("Format %q %s; use a numeric verb such as %%g, %%f or %%.3f", p.Format, reason),
+		}}
+	}
+
+	groups := numericFormat.FindStringSubmatch(p.Format)
+	if groups == nil {
+		return reject(fmt.Sprintf("is not a numeric format with a width and precision of at most %d",
+			maxFormatDigits))
+	}
+
+	for i, field := range []string{"width", "precision"} {
+		if digits := groups[i+1]; digits != "" {
+			if n, _ := strconv.Atoi(digits); n > maxFormatDigits {
+				return reject(fmt.Sprintf("asks for a %s of %d, above the limit of %d", field, n, maxFormatDigits))
+			}
+		}
+	}
+
+	return nil
+}
+
+// valuePolicy selects how strict validateValue is about a rendered value.
+type valuePolicy int
+
+const (
+	// policyNumeric applies to output produced by a numeric Format: its shape is
+	// fmt's, so only what would restructure the command is rejected. A leading
+	// "-" stays legal, since negative values are the point of a numeric range.
+	policyNumeric valuePolicy = iota
+
+	// policyLiteral applies to a categorical level or an explicit case value,
+	// which the user writes verbatim and the shell would happily expand.
+	policyLiteral
+)
+
 // validateValue rejects a value that would restructure the command rather than
 // fill a slot in it.
-func validateValue(param, value string) []Problem {
+func validateValue(param, value string, policy valuePolicy) []Problem {
 	if value == "" {
 		return []Problem{{
 			Code:  CodeEmptyValue,
@@ -228,7 +372,11 @@ func validateValue(param, value string) []Problem {
 		}}
 	}
 
-	if idx := strings.IndexAny(value, unsafeValueChars); idx >= 0 {
+	unsafe := unsafeValueChars
+	if policy == policyLiteral {
+		unsafe += globValueChars
+	}
+	if idx := strings.IndexAny(value, unsafe); idx >= 0 {
 		return []Problem{{
 			Code:  CodeUnsafeValue,
 			Param: param,
@@ -237,15 +385,27 @@ func validateValue(param, value string) []Problem {
 		}}
 	}
 
-	// Quoting is not available (quote characters are rejected above), so a space
-	// would silently split one argument into two.
-	if strings.ContainsAny(value, " \t") {
-		return []Problem{{
-			Code:  CodeValueHasSpace,
-			Param: param,
-			Message: fmt.Sprintf("value %q contains whitespace, which would split into separate "+
-				"command arguments", value),
-		}}
+	// Quoting is not available (quote characters are rejected above), so any
+	// space splits one argument into two — and that is every kind of space, not
+	// just the plain one: a non-breaking space, a vertical tab and a NUL all
+	// reach the API verbatim and mean something else there.
+	for _, r := range value {
+		switch {
+		case unicode.IsSpace(r):
+			return []Problem{{
+				Code:  CodeValueHasSpace,
+				Param: param,
+				Message: fmt.Sprintf("value %q contains whitespace (%U), which would split into separate "+
+					"command arguments", value, r),
+			}}
+		case unicode.IsControl(r):
+			return []Problem{{
+				Code:  CodeUnsafeValue,
+				Param: param,
+				Message: fmt.Sprintf("value %q contains the control character %U, which does not survive "+
+					"the trip to a command line", value, r),
+			}}
+		}
 	}
 
 	return nil
@@ -259,7 +419,9 @@ func validateValue(param, value string) []Problem {
 // with no parameter would survive substitution and reach Rescale as a literal
 // "{{alpha}}" in the command line. Neither is recoverable by guessing, so
 // neither is a warning.
-func validateTokenAgreement(opts Options) (errs []Problem, warns []Problem) {
+func validateTokenAgreement(opts Options) []Problem {
+	var errs []Problem
+
 	declared := make(map[string]bool, len(opts.Parameters))
 	for _, p := range opts.Parameters {
 		declared[p.Name] = true
@@ -302,12 +464,12 @@ func validateTokenAgreement(opts Options) (errs []Problem, warns []Problem) {
 	}
 
 	// Tokens in the job name and tag templates resolve against the same value set
-	// plus the built-ins, so an unknown one there is worth flagging too. These are
-	// warnings: an unresolved token in a name or tag is cosmetic, not a job that
-	// runs the wrong thing.
+	// plus the built-ins, and an unknown one there is fatal for the same reason it
+	// is in the command: substitution leaves it alone, so the literal "{{alpha}}"
+	// reaches Rescale as part of the job's name or one of its tags.
 	for _, name := range pattern.ExtractTokens(opts.JobNameTemplate) {
 		if !declared[name] && !isBuiltinToken(name) {
-			warns = append(warns, Problem{
+			errs = append(errs, Problem{
 				Code:    CodeUndeclaredToken,
 				Param:   name,
 				Message: fmt.Sprintf("job name template references unknown token {{%s}}", name),
@@ -317,7 +479,7 @@ func validateTokenAgreement(opts Options) (errs []Problem, warns []Problem) {
 	for _, tagTemplate := range opts.TagTemplates {
 		for _, name := range pattern.ExtractTokens(tagTemplate) {
 			if !declared[name] && !isBuiltinToken(name) {
-				warns = append(warns, Problem{
+				errs = append(errs, Problem{
 					Code:    CodeUndeclaredToken,
 					Param:   name,
 					Message: fmt.Sprintf("tag template %q references unknown token {{%s}}", tagTemplate, name),
@@ -326,7 +488,7 @@ func validateTokenAgreement(opts Options) (errs []Problem, warns []Problem) {
 		}
 	}
 
-	return errs, warns
+	return errs
 }
 
 // validateMethodRequirements checks the per-method preconditions.
@@ -368,6 +530,25 @@ func validateMethodRequirements(opts Options) []Problem {
 		errs = append(errs, validateExplicitCases(opts)...)
 	}
 
+	// The quadratic designs place points at coded coordinates and read them back
+	// through the category bins, which clamp: the axial points collapse onto the
+	// corners and the design degenerates into repeats rather than a response
+	// surface. Rejecting the combination says so, where a duplicate-case warning
+	// would not.
+	if opts.Method == MethodCentralComposite || opts.Method == MethodBoxBehnken {
+		for _, p := range opts.Parameters {
+			if p.Values != nil {
+				errs = append(errs, Problem{
+					Code:  CodeBadMethod,
+					Param: p.Name,
+					Message: fmt.Sprintf("method %q fits a quadratic response surface and needs numeric "+
+						"parameters, but %q is categorical; use full-factorial or ofat instead",
+						opts.Method, p.Name),
+				})
+			}
+		}
+	}
+
 	return errs
 }
 
@@ -394,7 +575,7 @@ func validateExplicitCases(opts Options) []Problem {
 				})
 				continue
 			}
-			for _, problem := range validateValue(p.Name, value) {
+			for _, problem := range validateValue(p.Name, value, policyLiteral) {
 				problem.Message = fmt.Sprintf("case %d: %s", caseNum, problem.Message)
 				errs = append(errs, problem)
 			}
@@ -445,6 +626,10 @@ func isValidTokenName(name string) bool {
 	tokens := pattern.ExtractTokens("{{" + name + "}}")
 	return len(tokens) == 1 && tokens[0] == name
 }
+
+// nonFinite reports whether v is NaN or an infinity, neither of which is usable
+// as a sweep bound.
+func nonFinite(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
 
 // isBuiltinToken reports whether name is one of the tokens Generate supplies
 // itself rather than one drawn from a parameter.

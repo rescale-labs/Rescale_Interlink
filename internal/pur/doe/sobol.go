@@ -45,24 +45,16 @@ var sobolDims = [sobolMaxDimensions]sobolDim{
 	{degree: 4, poly: 4, m: []uint32{1, 1, 5, 9}},
 }
 
-// sobolPoints generates n Sobol points in len(params) dimensions.
-func sobolPoints(params []Parameter, n int) ([]designPoint, *Problem) {
-	k := len(params)
-	if k > sobolMaxDimensions {
-		return nil, &Problem{
-			Code: CodeBadMethod,
-			Message: sprintf("sobol supports up to %d parameters, got %d; use latin-hypercube instead",
-				sobolMaxDimensions, k),
-		}
-	}
-
-	gen := newSobolGenerator(k)
+// sobolPoints generates n Sobol points in len(params) dimensions. Validation
+// rejects more dimensions than sobolDims covers before generation is reached.
+func sobolPoints(params []Parameter, n int) []designPoint {
+	gen := newSobolGenerator(len(params))
 
 	points := make([]designPoint, n)
 	for i := range points {
 		points[i] = designPoint{Coords: gen.next()}
 	}
-	return points, nil
+	return points
 }
 
 // sobolGenerator walks the sequence in Gray-code order, which lets each point be

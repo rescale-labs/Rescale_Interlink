@@ -152,8 +152,16 @@ type Options struct {
 	// the same tokens as JobNameTemplate, e.g. "alpha={{alpha}}".
 	TagTemplates []string
 
-	// MaxCases caps the sweep. Zero means DefaultMaxCases. Negative means no cap.
+	// MaxCases caps the sweep. Zero means DefaultMaxCases; a negative value is
+	// rejected. A hard ceiling applies on top of this one regardless of what it
+	// is raised to, since nothing downstream survives an unbounded sweep.
 	MaxCases int
+
+	// RenderLimit stops rendering after that many cases, which is what lets a
+	// preview show its first page without building every case's job spec. The
+	// design is still sampled in full, so the rendered cases are an exact prefix
+	// of the real sweep. Zero or less renders everything.
+	RenderLimit int
 }
 
 // Case is one generated design point.
@@ -178,6 +186,11 @@ type Result struct {
 	// empty when Errors is non-empty.
 	Cases []Case
 	Jobs  []models.JobSpec
+
+	// CaseCount is the size of the whole design. It equals len(Cases) unless
+	// Options.RenderLimit cut the rendering short, which is how a preview reports
+	// the real sweep size while only building its first page.
+	CaseCount int
 
 	// Errors are fatal: nothing is generated while any remain. Warnings are
 	// advisory and do not block generation.
@@ -222,12 +235,6 @@ func Generate(opts Options) Result {
 		return result
 	}
 
-	// Belt and braces: the projection above should already agree with the design.
-	if problem := checkCaseCount(opts, len(points)); problem != nil {
-		result.Errors = append(result.Errors, *problem)
-		return result
-	}
-
 	cases, jobs, problems, warnings := renderCases(opts, points)
 	result.Errors = append(result.Errors, problems...)
 	result.Warnings = append(result.Warnings, warnings...)
@@ -237,6 +244,7 @@ func Generate(opts Options) Result {
 
 	result.Cases = cases
 	result.Jobs = jobs
+	result.CaseCount = len(points)
 	return result
 }
 

@@ -1,6 +1,7 @@
 package doe
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -107,42 +108,53 @@ func TestGenerate_NamesCasesFromTemplate(t *testing.T) {
 	}
 }
 
-// A base job already carrying an index suffix must not accumulate another.
-func TestGenerate_StripsIndexSuffixFromBaseName(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Template.JobName = "sweep_7"
-
-	result := mustGenerate(t, opts)
-
-	if result.Cases[0].JobName != "sweep_1" {
-		t.Errorf("first case name = %q, want %q", result.Cases[0].JobName, "sweep_1")
+// The job name template decides both what a case is called and whether two cases
+// can end up sharing a name, so all of it is one table over the same generation.
+func TestGenerate_JobNames(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*Options)
+		wantName string // The first case's name, when generation succeeds.
+		wantCode string // Set instead when generation must fail.
+	}{
+		{
+			name:     "a base name already carrying an index suffix does not accumulate another",
+			mutate:   func(o *Options) { o.Template.JobName = "sweep_7" },
+			wantName: "sweep_1",
+		},
+		{
+			name:     "a custom template renders parameter values into the name",
+			mutate:   func(o *Options) { o.JobNameTemplate = "{{__base}}_a{{alpha}}_b{{beta}}" },
+			wantName: "sweep_a10_b15",
+		},
+		{
+			name:     "a template without the index collides once two cases share what it uses",
+			mutate:   func(o *Options) { o.JobNameTemplate = "{{__base}}_a{{alpha}}" },
+			wantCode: CodeDupJobName,
+		},
 	}
-}
 
-func TestGenerate_CustomJobNameTemplate(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.JobNameTemplate = "{{__base}}_a{{alpha}}_b{{beta}}"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := twoLevelOptions()
+			tt.mutate(&opts)
 
-	result := mustGenerate(t, opts)
+			if tt.wantCode != "" {
+				result := Generate(opts)
+				if result.OK() {
+					t.Fatalf("expected rejection with %s", tt.wantCode)
+				}
+				if !hasCode(result.Errors, tt.wantCode) {
+					t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), tt.wantCode)
+				}
+				return
+			}
 
-	if result.Cases[0].JobName != "sweep_a10_b15" {
-		t.Errorf("name = %q, want %q", result.Cases[0].JobName, "sweep_a10_b15")
-	}
-}
-
-// A job name template that leaves out the index collides as soon as two cases
-// share the values it does use.
-func TestGenerate_RejectsCollidingJobNames(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.JobNameTemplate = "{{__base}}_a{{alpha}}"
-
-	result := Generate(opts)
-
-	if result.OK() {
-		t.Fatal("expected colliding job names to be rejected")
-	}
-	if !hasCode(result.Errors, CodeDupJobName) {
-		t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeDupJobName)
+			result := mustGenerate(t, opts)
+			if result.Cases[0].JobName != tt.wantName {
+				t.Errorf("first case name = %q, want %q", result.Cases[0].JobName, tt.wantName)
+			}
+		})
 	}
 }
 
@@ -171,16 +183,18 @@ func TestGenerate_RendersTagsPerCase(t *testing.T) {
 	}
 }
 
-// Shared inputs are the point of a sweep: one input deck, many parameter sets.
-// Referencing already-uploaded file IDs puts every case on the pipeline's skip
-// path so the deck transfers once rather than once per case.
-func TestGenerate_SharedFileIDsBypassTarAndUpload(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.BaseFileIDs = []string{"file_abc", "file_def"}
+// A sweep never tars a per-case directory. Cases carry no Directory either way,
+// which puts them on the pipeline's skip path; what changes with shared file IDs
+// is only where the one shared deck comes from — those IDs, referenced directly,
+// or batch-level Common Files.
+func TestGenerate_CasesCarryNoDirectory(t *testing.T) {
+	withIDs := twoLevelOptions()
+	withIDs.BaseFileIDs = []string{"file_abc", "file_def"}
 
-	result := mustGenerate(t, opts)
+	shared := mustGenerate(t, withIDs)
+	bare := mustGenerate(t, twoLevelOptions())
 
-	for i, job := range result.Jobs {
+	for i, job := range shared.Jobs {
 		if job.Directory != "" {
 			t.Errorf("job %d Directory = %q, want empty so the pipeline skips tar/upload", i, job.Directory)
 		}
@@ -189,30 +203,23 @@ func TestGenerate_SharedFileIDsBypassTarAndUpload(t *testing.T) {
 		}
 	}
 
-	// The returned slices must not alias the caller's, or mutating one case's
-	// inputs would change every other case.
-	result.Jobs[0].InputFiles[0] = "mutated"
-	if opts.BaseFileIDs[0] != "file_abc" {
-		t.Error("job InputFiles aliases Options.BaseFileIDs")
-	}
-	if result.Jobs[1].InputFiles[0] != "file_abc" {
-		t.Error("jobs share one InputFiles backing array")
-	}
-}
-
-// A sweep never tars a per-case directory: even without shared file IDs, cases
-// carry no Directory so the pipeline skips tar/upload and the shared deck is
-// supplied once via batch-level Common Files instead of zipped per case.
-func TestGenerate_NeverCarriesTemplateDirectory(t *testing.T) {
-	result := mustGenerate(t, twoLevelOptions())
-
-	for i, job := range result.Jobs {
+	for i, job := range bare.Jobs {
 		if job.Directory != "" {
 			t.Errorf("job %d Directory = %q, want empty so the pipeline skips tar/upload", i, job.Directory)
 		}
 		if len(job.InputFiles) != 0 {
 			t.Errorf("job %d InputFiles = %v, want none", i, job.InputFiles)
 		}
+	}
+
+	// The returned slices must not alias the caller's, or mutating one case's
+	// inputs would change every other case.
+	shared.Jobs[0].InputFiles[0] = "mutated"
+	if withIDs.BaseFileIDs[0] != "file_abc" {
+		t.Error("job InputFiles aliases Options.BaseFileIDs")
+	}
+	if shared.Jobs[1].InputFiles[0] != "file_abc" {
+		t.Error("jobs share one InputFiles backing array")
 	}
 }
 
@@ -300,22 +307,30 @@ func TestGenerate_BuiltinTokensAllowedInCommand(t *testing.T) {
 	}
 }
 
-// An unknown token in a name or tag is cosmetic, so it warns rather than blocks.
-func TestGenerate_UnknownTokenInJobNameWarnsOnly(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.JobNameTemplate = "{{__base}}_{{__index}}_{{nope}}"
+// An unknown token in a name or tag is fatal for the same reason it is in the
+// command: substitution leaves it alone, so the placeholder text itself reaches
+// Rescale as the job's name or one of its tags.
+func TestGenerate_RejectsUnknownTokenInNamesAndTags(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*Options)
+	}{
+		{"job name template", func(o *Options) { o.JobNameTemplate = "{{__base}}_{{__index}}_{{nope}}" }},
+		{"tag template", func(o *Options) { o.TagTemplates = []string{"t={{nope}}"} }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := twoLevelOptions()
+			tt.mutate(&opts)
 
-	result := Generate(opts)
+			result := Generate(opts)
 
-	if !result.OK() {
-		t.Fatalf("expected only a warning, got errors: %v", problemStrings(result.Errors))
-	}
-	if !hasCode(result.Warnings, CodeUndeclaredToken) {
-		t.Errorf("warnings = %v, want a %s", problemStrings(result.Warnings), CodeUndeclaredToken)
-	}
-	// The unresolved token survives into the name rather than being dropped.
-	if !strings.Contains(result.Cases[0].JobName, "{{nope}}") {
-		t.Errorf("name = %q, want the unresolved token left visible", result.Cases[0].JobName)
+			if result.OK() {
+				t.Fatal("expected an unknown token to be rejected")
+			}
+			if !hasCode(result.Errors, CodeUndeclaredToken) {
+				t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeUndeclaredToken)
+			}
+		})
 	}
 }
 
@@ -399,6 +414,106 @@ func TestValidateOptions_Rejects(t *testing.T) {
 			mutate: func(o *Options) { o.Template.JobName = "" },
 			code:   CodeEmptyJobName,
 		},
+		{
+			name:   "NaN bound",
+			mutate: func(o *Options) { o.Parameters[0].Min = math.NaN() },
+			code:   CodeBadRange,
+		},
+		{
+			name:   "infinite bound",
+			mutate: func(o *Options) { o.Parameters[0].Max = math.Inf(1) },
+			code:   CodeBadRange,
+		},
+		{
+			name:   "negative MaxCases",
+			mutate: func(o *Options) { o.MaxCases = -1 },
+			code:   CodeBadMaxCases,
+		},
+		{
+			name: "a parameter named after a built-in token",
+			mutate: func(o *Options) {
+				o.Parameters[0].Name = tokenIndex
+				o.Template.Command = "run {{__index}} {{beta}}"
+			},
+			code: CodeReservedParam,
+		},
+		{
+			name:   "a categorical level listed twice",
+			mutate: func(o *Options) { o.Parameters[0].Values = []string{"a", "b", "a"} },
+			code:   CodeDuplicateValue,
+		},
+		{
+			name: "a categorical parameter in a quadratic design",
+			mutate: func(o *Options) {
+				o.Method = MethodCentralComposite
+				o.Parameters[0].Values = []string{"a", "b"}
+			},
+			code: CodeBadMethod,
+		},
+		{
+			name:   "a format with a runaway precision",
+			mutate: func(o *Options) { o.Parameters[0].Format = "%.1000000f" },
+			code:   CodeBadFormat,
+		},
+		{
+			name:   "a categorical value with a glob metacharacter",
+			mutate: func(o *Options) { o.Parameters[0].Values = []string{"10", "*"} },
+			code:   CodeUnsafeValue,
+		},
+		{
+			name:   "a value with a NUL byte",
+			mutate: func(o *Options) { o.Parameters[0].Values = []string{"10", "2\x000"} },
+			code:   CodeUnsafeValue,
+		},
+		{
+			name:   "a value with a non-breaking space",
+			mutate: func(o *Options) { o.Parameters[0].Values = []string{"10", "2 0"} },
+			code:   CodeValueHasSpace,
+		},
+		{
+			name:   "a rendered command past the length bound",
+			mutate: func(o *Options) { o.Template.Command += " " + strings.Repeat("x", maxCommandLength) },
+			code:   CodeTooLong,
+		},
+		{
+			name:   "a rendered job name past the length bound",
+			mutate: func(o *Options) { o.JobNameTemplate = strings.Repeat("x", maxJobNameLength) + "{{__index}}" },
+			code:   CodeTooLong,
+		},
+		{
+			name:   "a rendered tag past the length bound",
+			mutate: func(o *Options) { o.TagTemplates = []string{strings.Repeat("x", maxTagLength) + "{{__index}}"} },
+			code:   CodeTooLong,
+		},
+		{
+			name: "explicit case missing a parameter",
+			mutate: func(o *Options) {
+				o.Method = MethodExplicit
+				o.Cases = []map[string]string{{"alpha": "10"}}
+			},
+			code: CodeMissingToken,
+		},
+		{
+			name: "explicit case supplying an undeclared parameter",
+			mutate: func(o *Options) {
+				o.Method = MethodExplicit
+				o.Cases = []map[string]string{{"alpha": "10", "beta": "15", "gamma": "1"}}
+			},
+			code: CodeUndeclaredToken,
+		},
+		{
+			name: "explicit case with an unsafe value",
+			mutate: func(o *Options) {
+				o.Method = MethodExplicit
+				o.Cases = []map[string]string{{"alpha": "10", "beta": "$(whoami)"}}
+			},
+			code: CodeUnsafeValue,
+		},
+		{
+			name:   "explicit method with no cases",
+			mutate: func(o *Options) { o.Method = MethodExplicit },
+			code:   CodeNoCases,
+		},
 	}
 
 	for _, tt := range tests {
@@ -437,67 +552,71 @@ func TestGenerate_SampleCountRequiredForContinuousMethods(t *testing.T) {
 	}
 }
 
-func TestGenerate_EnforcesMaxCases(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Parameters[0].Levels = 10
-	opts.Parameters[1].Levels = 10
-	opts.MaxCases = 50
-
-	result := Generate(opts)
-
-	if result.OK() {
-		t.Fatal("expected 100 cases to exceed a limit of 50")
-	}
-	if !hasCode(result.Errors, CodeTooManyCases) {
-		t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeTooManyCases)
-	}
-}
-
-func TestGenerate_DefaultMaxCasesApplies(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Parameters[0].Levels = 40
-	opts.Parameters[1].Levels = 40 // 1600 cases
-
-	result := Generate(opts)
-
-	if result.OK() {
-		t.Fatalf("expected the default limit of %d to reject 1600 cases", DefaultMaxCases)
-	}
-}
-
-func TestGenerate_NegativeMaxCasesDisablesTheLimit(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Parameters[0].Levels = 40
-	opts.Parameters[1].Levels = 40
-	opts.MaxCases = -1
-
-	result := mustGenerate(t, opts)
-
-	if len(result.Cases) != 1600 {
-		t.Errorf("got %d cases, want 1600", len(result.Cases))
-	}
-}
-
-// Even with the limit disabled, a design that could never be submitted is
-// rejected by arithmetic rather than by trying to allocate it.
-func TestGenerate_RejectsAbsurdDesignEvenWithoutALimit(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.MaxCases = -1
-	opts.Template.Command = "run"
-	opts.Parameters = nil
-	for i := 0; i < 40; i++ {
-		name := "p" + string(rune('a'+i%26)) + string(rune('a'+i/26))
-		opts.Parameters = append(opts.Parameters, Parameter{Name: name, Min: 0, Max: 1, Levels: 4})
-		opts.Template.Command += " {{" + name + "}}"
+// Size is rejected by arithmetic, before the design is built. The projection has
+// to survive the counts that overflow it as well as the ones that merely exceed
+// a limit, because a wrapped count is negative and a negative count passes every
+// ceiling test on its way to a negative allocation.
+func TestGenerate_EnforcesCaseLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Options)
+	}{
+		{
+			name: "100 cases against an explicit limit of 50",
+			mutate: func(o *Options) {
+				o.Parameters[0].Levels, o.Parameters[1].Levels = 10, 10
+				o.MaxCases = 50
+			},
+		},
+		{
+			name: "1600 cases against the default limit",
+			mutate: func(o *Options) {
+				o.Parameters[0].Levels, o.Parameters[1].Levels = 40, 40
+			},
+		},
+		{
+			name: "a design past the absolute ceiling however high the limit is raised",
+			mutate: func(o *Options) {
+				o.MaxCases = absoluteMaxCases
+				o.Template.Command = "run"
+				o.Parameters = nil
+				for i := 0; i < 40; i++ {
+					name := "p" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+					o.Parameters = append(o.Parameters, Parameter{Name: name, Min: 0, Max: 1, Levels: 4})
+					o.Template.Command += " {{" + name + "}}"
+				}
+			},
+		},
+		{
+			name: "a level count whose product overflows",
+			mutate: func(o *Options) {
+				o.Parameters[0].Levels = 3
+				o.Parameters[1].Levels = 1 << 62
+			},
+		},
+		{
+			name: "center points whose sum overflows",
+			mutate: func(o *Options) {
+				o.Method = MethodCentralComposite
+				o.CenterPoints = math.MaxInt64
+			},
+		},
 	}
 
-	result := Generate(opts)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := twoLevelOptions()
+			tt.mutate(&opts)
 
-	if result.OK() {
-		t.Fatal("expected an unsubmittable design to be rejected")
-	}
-	if !hasCode(result.Errors, CodeTooManyCases) {
-		t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeTooManyCases)
+			result := Generate(opts)
+
+			if result.OK() {
+				t.Fatalf("expected rejection, got %d cases", len(result.Cases))
+			}
+			if !hasCode(result.Errors, CodeTooManyCases) {
+				t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeTooManyCases)
+			}
+		})
 	}
 }
 
@@ -518,53 +637,6 @@ func TestGenerate_Explicit(t *testing.T) {
 	}
 	if result.Cases[1].Command != "starccm+ -param alpha 12.5 -param beta 17 -load input.sim" {
 		t.Errorf("case 2 command = %q", result.Cases[1].Command)
-	}
-}
-
-func TestGenerate_ExplicitRejectsIncompleteCase(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Method = MethodExplicit
-	opts.Cases = []map[string]string{{"alpha": "10"}}
-
-	result := Generate(opts)
-
-	if !hasCode(result.Errors, CodeMissingToken) {
-		t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeMissingToken)
-	}
-}
-
-func TestGenerate_ExplicitRejectsUndeclaredParameter(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Method = MethodExplicit
-	opts.Cases = []map[string]string{{"alpha": "10", "beta": "15", "gamma": "1"}}
-
-	result := Generate(opts)
-
-	if !hasCode(result.Errors, CodeUndeclaredToken) {
-		t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeUndeclaredToken)
-	}
-}
-
-func TestGenerate_ExplicitRejectsUnsafeValue(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Method = MethodExplicit
-	opts.Cases = []map[string]string{{"alpha": "10", "beta": "$(whoami)"}}
-
-	result := Generate(opts)
-
-	if !hasCode(result.Errors, CodeUnsafeValue) {
-		t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeUnsafeValue)
-	}
-}
-
-func TestGenerate_ExplicitNeedsAtLeastOneCase(t *testing.T) {
-	opts := twoLevelOptions()
-	opts.Method = MethodExplicit
-
-	result := Generate(opts)
-
-	if !hasCode(result.Errors, CodeNoCases) {
-		t.Errorf("errors = %v, want a %s", problemStrings(result.Errors), CodeNoCases)
 	}
 }
 
@@ -701,23 +773,39 @@ func TestAllMethods_AreAllRecognized(t *testing.T) {
 }
 
 func TestWithDefaults(t *testing.T) {
-	opts := withDefaults(Options{})
-
-	if opts.MaxCases != DefaultMaxCases {
-		t.Errorf("MaxCases = %d, want %d", opts.MaxCases, DefaultMaxCases)
+	tests := []struct {
+		name string
+		in   Options
+		want Options
+	}{
+		{
+			name: "zero values take the defaults",
+			in:   Options{},
+			want: Options{MaxCases: DefaultMaxCases, CenterPoints: 1, JobNameTemplate: "{{__base}}_{{__index}}"},
+		},
+		{
+			// A negative MaxCases is rejected by validation rather than here, so
+			// withDefaults must pass it through: filling it in would replace the
+			// rejection with a silently different sweep.
+			name: "explicit values are left alone",
+			in:   Options{MaxCases: -1, CenterPoints: 5, JobNameTemplate: "x{{__index}}"},
+			want: Options{MaxCases: -1, CenterPoints: 5, JobNameTemplate: "x{{__index}}"},
+		},
 	}
-	if opts.CenterPoints != 1 {
-		t.Errorf("CenterPoints = %d, want 1", opts.CenterPoints)
-	}
-	if opts.JobNameTemplate != "{{__base}}_{{__index}}" {
-		t.Errorf("JobNameTemplate = %q", opts.JobNameTemplate)
-	}
-}
 
-func TestWithDefaults_LeavesExplicitValuesAlone(t *testing.T) {
-	opts := withDefaults(Options{MaxCases: -1, CenterPoints: 5, JobNameTemplate: "x{{__index}}"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withDefaults(tt.in)
 
-	if opts.MaxCases != -1 || opts.CenterPoints != 5 || opts.JobNameTemplate != "x{{__index}}" {
-		t.Errorf("withDefaults overwrote explicit values: %+v", opts)
+			if got.MaxCases != tt.want.MaxCases {
+				t.Errorf("MaxCases = %d, want %d", got.MaxCases, tt.want.MaxCases)
+			}
+			if got.CenterPoints != tt.want.CenterPoints {
+				t.Errorf("CenterPoints = %d, want %d", got.CenterPoints, tt.want.CenterPoints)
+			}
+			if got.JobNameTemplate != tt.want.JobNameTemplate {
+				t.Errorf("JobNameTemplate = %q, want %q", got.JobNameTemplate, tt.want.JobNameTemplate)
+			}
+		})
 	}
 }

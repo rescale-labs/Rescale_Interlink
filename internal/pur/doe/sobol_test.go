@@ -18,10 +18,7 @@ func TestSobol_StratifiesInPowersOfTwo(t *testing.T) {
 		for m := 1; m <= 6; m++ {
 			n := 1 << uint(m)
 
-			points, problem := sobolPoints(numericParams(k, 0), n)
-			if problem != nil {
-				t.Fatalf("k=%d n=%d: sobolPoints() failed: %v", k, n, problem)
-			}
+			points := sobolPoints(numericParams(k, 0), n)
 			if len(points) != n {
 				t.Fatalf("k=%d: got %d points, want %d", k, len(points), n)
 			}
@@ -43,21 +40,14 @@ func TestSobol_StratifiesInPowersOfTwo(t *testing.T) {
 }
 
 func TestSobol_CoordinatesAreInUnitInterval(t *testing.T) {
-	points, problem := sobolPoints(numericParams(sobolMaxDimensions, 0), 100)
-	if problem != nil {
-		t.Fatalf("sobolPoints() failed: %v", problem)
-	}
-	coordsInUnitInterval(t, points)
+	coordsInUnitInterval(t, sobolPoints(numericParams(sobolMaxDimensions, 0), 100))
 }
 
 // The sequence is deterministic and unscrambled, so it starts at the origin —
 // every parameter at its Min. Callers who need the corner excluded should use
 // latin-hypercube instead.
 func TestSobol_StartsAtTheOrigin(t *testing.T) {
-	points, problem := sobolPoints(numericParams(3, 0), 4)
-	if problem != nil {
-		t.Fatalf("sobolPoints() failed: %v", problem)
-	}
+	points := sobolPoints(numericParams(3, 0), 4)
 
 	for d, c := range points[0].Coords {
 		if c != 0 {
@@ -78,10 +68,7 @@ func TestSobol_StartsAtTheOrigin(t *testing.T) {
 func TestSobol_PointsAreDistinct(t *testing.T) {
 	const n = 64
 
-	points, problem := sobolPoints(numericParams(3, 0), n)
-	if problem != nil {
-		t.Fatalf("sobolPoints() failed: %v", problem)
-	}
+	points := sobolPoints(numericParams(3, 0), n)
 
 	seen := make(map[[3]float64]int, n)
 	for i, p := range points {
@@ -93,40 +80,20 @@ func TestSobol_PointsAreDistinct(t *testing.T) {
 	}
 }
 
-// The sequence is reproducible without a seed, which is what makes a Sobol sweep
-// resumable and comparable across runs.
-func TestSobol_IsReproducible(t *testing.T) {
-	a, _ := sobolPoints(numericParams(4, 0), 32)
-	b, _ := sobolPoints(numericParams(4, 0), 32)
-
-	if !samePoints(a, b) {
-		t.Error("two runs of the same Sobol sequence differ")
-	}
-}
-
 // A prefix of a longer run must match a shorter run exactly, since the sequence
-// is defined by index rather than by sample count.
+// is defined by index rather than by sample count. That subsumes plain
+// reproducibility: same-length runs agreeing is the n=n case of this.
 func TestSobol_PrefixIsStableAcrossSampleCounts(t *testing.T) {
-	short, _ := sobolPoints(numericParams(3, 0), 8)
-	long, _ := sobolPoints(numericParams(3, 0), 64)
+	short := sobolPoints(numericParams(3, 0), 8)
+	long := sobolPoints(numericParams(3, 0), 64)
 
 	if !samePoints(short, long[:8]) {
 		t.Error("the first 8 points differ between an 8-point and a 64-point run")
 	}
 }
 
-func TestSobol_RejectsTooManyDimensions(t *testing.T) {
-	_, problem := sobolPoints(numericParams(sobolMaxDimensions+1, 0), 8)
-
-	if problem == nil {
-		t.Fatal("expected more dimensions than the table covers to be rejected")
-	}
-	if problem.Code != CodeBadMethod {
-		t.Errorf("code = %q, want %q", problem.Code, CodeBadMethod)
-	}
-}
-
-// Generate must reject the same case, rather than only sobolPoints doing so.
+// More dimensions than the table covers is rejected by validation, which is the
+// only path to generation.
 func TestGenerate_SobolRejectsTooManyParameters(t *testing.T) {
 	opts := Options{
 		Template: models.JobSpec{JobName: "sweep", Command: "run"},

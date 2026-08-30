@@ -33,6 +33,15 @@ var indexSuffix = regexp.MustCompile(`_\d+$`)
 func renderCases(opts Options, points []designPoint) (cases []Case, jobs []models.JobSpec, errs []Problem, warns []Problem) {
 	base := indexSuffix.ReplaceAllString(opts.Template.JobName, "")
 
+	// A preview needs the first page, not the whole sweep. Sampling has already
+	// run over every point, so what is rendered here is an exact prefix of what a
+	// full generation would produce.
+	rendered := len(points)
+	if opts.RenderLimit > 0 && opts.RenderLimit < rendered {
+		rendered = opts.RenderLimit
+	}
+	points = points[:rendered]
+
 	cases = make([]Case, 0, len(points))
 	jobs = make([]models.JobSpec, 0, len(points))
 
@@ -62,14 +71,12 @@ func renderCases(opts Options, points []designPoint) (cases []Case, jobs []model
 		substitutions[tokenBase] = base
 
 		command := pattern.SubstituteTokens(opts.Template.Command, substitutions)
-		if residual := pattern.ExtractTokens(command); len(residual) > 0 {
-			errs = append(errs, Problem{
-				Code:  CodeResidualToken,
-				Param: residual[0],
-				Message: fmt.Sprintf("case %d: rendered command still contains {{%s}}; "+
-					"the job would run with the placeholder text in its command line",
-					index, strings.Join(residual, "}}, {{")),
-			})
+		if problem := checkResidualTokens(index, "command", command); problem != nil {
+			errs = append(errs, *problem)
+			continue
+		}
+		if problem := checkLength(index, "command", command, maxCommandLength); problem != nil {
+			errs = append(errs, *problem)
 			continue
 		}
 
@@ -79,6 +86,14 @@ func renderCases(opts Options, points []designPoint) (cases []Case, jobs []model
 				Code:    CodeEmptyJobName,
 				Message: fmt.Sprintf("case %d: job name template rendered to an empty name", index),
 			})
+			continue
+		}
+		if problem := checkResidualTokens(index, "job name", jobName); problem != nil {
+			errs = append(errs, *problem)
+			continue
+		}
+		if problem := checkLength(index, "job name", jobName, maxJobNameLength); problem != nil {
+			errs = append(errs, *problem)
 			continue
 		}
 		if first, dup := seenNames[jobName]; dup {
@@ -94,6 +109,11 @@ func renderCases(opts Options, points []designPoint) (cases []Case, jobs []model
 
 		caseTags, tagWarns := renderTags(opts, substitutions, index)
 		warns = append(warns, tagWarns...)
+
+		if tagProblems := checkTags(index, caseTags); len(tagProblems) > 0 {
+			errs = append(errs, tagProblems...)
+			continue
+		}
 
 		// Identical parameter values mean identical work. Possible when a
 		// categorical parameter has fewer values than the design has levels, so it
@@ -125,6 +145,54 @@ func renderCases(opts Options, points []designPoint) (cases []Case, jobs []model
 	}
 
 	return cases, jobs, errs, warns
+}
+
+// checkResidualTokens is the post-condition on substitution: whatever the
+// template asked for was either supplied or is fatal, because SubstituteTokens
+// leaves an unknown token alone and the literal "{{alpha}}" then reaches Rescale
+// in the field it was written into.
+func checkResidualTokens(index int, field, rendered string) *Problem {
+	residual := pattern.ExtractTokens(rendered)
+	if len(residual) == 0 {
+		return nil
+	}
+
+	return &Problem{
+		Code:  CodeResidualToken,
+		Param: residual[0],
+		Message: fmt.Sprintf("case %d: rendered %s still contains {{%s}}; the job would carry the "+
+			"placeholder text", index, field, strings.Join(residual, "}}, {{")),
+	}
+}
+
+// checkLength bounds one rendered field. A format or a template can multiply its
+// input by a large factor, so the bound goes where the rendered result is, not
+// on what went in.
+func checkLength(index int, field, rendered string, limit int) *Problem {
+	if len(rendered) <= limit {
+		return nil
+	}
+
+	return &Problem{
+		Code: CodeTooLong,
+		Message: fmt.Sprintf("case %d: rendered %s is %d bytes, which exceeds the limit of %d",
+			index, field, len(rendered), limit),
+	}
+}
+
+// checkTags applies the rendered-field checks to one case's whole tag list.
+func checkTags(index int, caseTags []string) []Problem {
+	var problems []Problem
+	for _, tag := range caseTags {
+		if problem := checkResidualTokens(index, "tag", tag); problem != nil {
+			problems = append(problems, *problem)
+			continue
+		}
+		if problem := checkLength(index, "tag", tag, maxTagLength); problem != nil {
+			problems = append(problems, *problem)
+		}
+	}
+	return problems
 }
 
 // pointValues resolves one design point into rendered parameter values.
@@ -165,7 +233,13 @@ func pointValues(params []Parameter, point designPoint) (map[string]string, []Pr
 
 		// The formatted result is checked, not just the inputs: a Format such as
 		// "'%g'" or "%8.2f" can introduce characters the raw value never had.
-		if problems := validateValue(p.Name, value); len(problems) > 0 {
+		// A categorical level is the user's own string and gets the stricter
+		// policy; numeric output is fmt's, where a leading "-" is expected.
+		policy := policyNumeric
+		if p.Values != nil {
+			policy = policyLiteral
+		}
+		if problems := validateValue(p.Name, value, policy); len(problems) > 0 {
 			errs = append(errs, problems...)
 			continue
 		}

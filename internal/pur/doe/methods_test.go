@@ -50,20 +50,18 @@ func TestMethodInfoFor(t *testing.T) {
 	}
 }
 
-// UsesLevels drives whether a UI offers a level count, so it has to match the
-// predicate validation actually uses.
-func TestMethods_UsesLevelsAgreesWithValidation(t *testing.T) {
+// Every MethodInfo field is a claim about what validation does, checked against
+// validation itself rather than against a second copy of the expectations.
+func TestMethods_MetadataAgreesWithValidation(t *testing.T) {
 	for _, info := range Methods() {
+		// UsesLevels drives whether a UI offers a level count, so it has to match
+		// the predicate validation actually uses.
 		if info.UsesLevels != usesLevels(info.Method) {
 			t.Errorf("method %q: UsesLevels = %v, but usesLevels() = %v",
 				info.Method, info.UsesLevels, usesLevels(info.Method))
 		}
-	}
-}
 
-// UsesSamples means "Samples must be set", which is what validation enforces.
-func TestMethods_UsesSamplesAgreesWithValidation(t *testing.T) {
-	for _, info := range Methods() {
+		// UsesSamples means "Samples must be set", which is what validation enforces.
 		opts := probeOptions(info, info.MinParameters)
 		opts.Samples = 0
 
@@ -79,42 +77,35 @@ func TestMethods_UsesSamplesAgreesWithValidation(t *testing.T) {
 				t.Errorf("method %q rejected Samples=1", info.Method)
 			}
 		}
-	}
-}
 
-// UsesCases means "Cases must be supplied".
-func TestMethods_UsesCasesAgreesWithValidation(t *testing.T) {
-	for _, info := range Methods() {
-		opts := probeOptions(info, info.MinParameters)
+		// UsesCases means "Cases must be supplied".
+		opts = probeOptions(info, info.MinParameters)
 		opts.Cases = nil
 
-		rejected := hasCode(validateMethodRequirements(opts), CodeNoCases)
+		rejected = hasCode(validateMethodRequirements(opts), CodeNoCases)
 		if rejected != info.UsesCases {
 			t.Errorf("method %q: UsesCases = %v, but omitting Cases rejected = %v",
 				info.Method, info.UsesCases, rejected)
 		}
-	}
-}
 
-func TestMethods_ParameterLimitsAgreeWithValidation(t *testing.T) {
-	for _, info := range Methods() {
-		// One below the minimum must be rejected, the minimum accepted.
+		// MinParameters and MaxParameters are the bounds a UI offers, so one step
+		// outside each must be rejected and each bound itself accepted.
 		if info.MinParameters > 1 {
-			opts := probeOptions(info, info.MinParameters-1)
+			opts = probeOptions(info, info.MinParameters-1)
 			if !hasCode(validateMethodRequirements(opts), CodeTooFewParams) {
 				t.Errorf("method %q accepted %d parameters despite MinParameters %d",
 					info.Method, info.MinParameters-1, info.MinParameters)
 			}
 		}
 
-		opts := probeOptions(info, info.MinParameters)
+		opts = probeOptions(info, info.MinParameters)
 		if hasCode(validateMethodRequirements(opts), CodeTooFewParams) {
 			t.Errorf("method %q rejected its own minimum of %d parameters",
 				info.Method, info.MinParameters)
 		}
 
 		if info.MaxParameters > 0 {
-			opts := probeOptions(info, info.MaxParameters)
+			opts = probeOptions(info, info.MaxParameters)
 			if hasCode(validateMethodRequirements(opts), CodeBadMethod) {
 				t.Errorf("method %q rejected its own maximum of %d parameters",
 					info.Method, info.MaxParameters)

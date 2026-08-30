@@ -175,14 +175,6 @@ func TestSubstituteTokens_IsSinglePass(t *testing.T) {
 	}
 }
 
-// A value containing braces is inserted literally rather than becoming a token.
-func TestSubstituteTokens_ValueWithBracesNotReparsed(t *testing.T) {
-	got := SubstituteTokens("run {{alpha}}", map[string]string{"alpha": "{{alpha}}"})
-	if got != "run {{alpha}}" {
-		t.Errorf("SubstituteTokens() = %q, want %q", got, "run {{alpha}}")
-	}
-}
-
 // Named tokens and numeric iteration are independent: substituting tokens must
 // not disturb the numeric patterns that IterateCommandPatterns looks for.
 func TestSubstituteTokens_LeavesNumericPatternsAlone(t *testing.T) {

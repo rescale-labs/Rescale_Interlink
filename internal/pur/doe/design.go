@@ -20,10 +20,22 @@ type designPoint struct {
 	Values map[string]string
 }
 
-// estimateOverflowGuard is a hard ceiling on the projected case count. It exists
-// so a full factorial over many parameters is rejected by arithmetic rather than
-// by allocating the design first, and it applies even when MaxCases is negative.
-const estimateOverflowGuard = 1 << 30
+// absoluteMaxCases is the hard ceiling on a sweep, applied whatever MaxCases
+// says. Every case carries a rendered command, a values map and a JobSpec, so
+// the ceiling sits where the whole design still fits comfortably in memory while
+// staying far above any sweep an account would actually submit.
+const absoluteMaxCases = 100_000
+
+// overflowProjection is what estimateCaseCount returns in place of a count it
+// cannot compute exactly. It is one past the ceiling, so a single comparison
+// rejects both an oversized design and an uncountable one.
+const overflowProjection = absoluteMaxCases + 1
+
+// maxParameters bounds the design's dimensionality independently of the case
+// count. Every design allocates one coordinate per parameter per point, and the
+// per-method count projections below stay exact only while the dimension is
+// small; a sweep over more inputs than this is a mistake rather than a design.
+const maxParameters = 128
 
 // samplePoints builds the design points for opts.Method. It assumes opts has
 // already passed validateOptions.
@@ -36,7 +48,7 @@ func samplePoints(opts Options) ([]designPoint, *Problem) {
 	case MethodLatinHypercube:
 		return latinHypercube(opts.Parameters, opts.Samples, opts.Seed), nil
 	case MethodSobol:
-		return sobolPoints(opts.Parameters, opts.Samples)
+		return sobolPoints(opts.Parameters, opts.Samples), nil
 	case MethodMonteCarlo:
 		return monteCarlo(opts.Parameters, opts.Samples, opts.Seed), nil
 	case MethodCentralComposite:
@@ -344,24 +356,36 @@ func valueIndex(coord float64, n int) int {
 // estimateCaseCount projects how many cases a design will produce, without
 // building it. Used to reject an oversized sweep before it is materialized and
 // to size the tag-volume warning.
+//
+// Every arithmetic step is guarded before it runs rather than after: a product
+// or sum that wraps past the int range comes back negative, and a negative count
+// passes every ceiling test there is on its way to a negative allocation.
 func estimateCaseCount(opts Options) int {
 	k := len(opts.Parameters)
+	if k > maxParameters {
+		return overflowProjection
+	}
 
 	switch opts.Method {
 	case MethodFullFactorial:
 		count := 1
 		for _, p := range opts.Parameters {
-			count *= effectiveLevels(p)
-			if count >= estimateOverflowGuard {
-				return estimateOverflowGuard
+			levels := effectiveLevels(p)
+			if levels <= 0 || count > overflowProjection/levels {
+				return overflowProjection
 			}
+			count *= levels
 		}
 		return count
 
 	case MethodOFAT:
 		count := 1
 		for _, p := range opts.Parameters {
-			count += effectiveLevels(p) - 1
+			levels := effectiveLevels(p)
+			if levels <= 0 || count > overflowProjection-levels {
+				return overflowProjection
+			}
+			count += levels - 1
 		}
 		return count
 
@@ -372,13 +396,22 @@ func estimateCaseCount(opts Options) int {
 		return opts.Samples
 
 	case MethodCentralComposite:
+		// 2^k corners: exact only while k is well inside the int width.
 		if k >= 30 {
-			return estimateOverflowGuard
+			return overflowProjection
 		}
-		return (1 << uint(k)) + 2*k + opts.CenterPoints
+		count := (1 << uint(k)) + 2*k
+		if opts.CenterPoints > overflowProjection-count {
+			return overflowProjection
+		}
+		return count + opts.CenterPoints
 
 	case MethodBoxBehnken:
-		return 4*(k*(k-1)/2) + opts.CenterPoints
+		count := 4 * (k * (k - 1) / 2)
+		if opts.CenterPoints > overflowProjection-count {
+			return overflowProjection
+		}
+		return count + opts.CenterPoints
 
 	case MethodExplicit:
 		return len(opts.Cases)
@@ -387,18 +420,18 @@ func estimateCaseCount(opts Options) int {
 	return 0
 }
 
-// checkCaseCount enforces MaxCases and the hard guard. Returns nil when count is
-// acceptable.
+// checkCaseCount enforces the absolute ceiling and then MaxCases. Returns nil
+// when count is acceptable.
 func checkCaseCount(opts Options, count int) *Problem {
-	if count >= estimateOverflowGuard {
+	if count > absoluteMaxCases {
 		return &Problem{
 			Code: CodeTooManyCases,
-			Message: sprintf("design would produce at least %d cases, which is far beyond anything "+
-				"that could be submitted; reduce the number of parameters or levels", estimateOverflowGuard),
+			Message: sprintf("design would produce more than %d cases, which is beyond what could be "+
+				"submitted as one sweep; reduce the number of parameters, levels or samples", absoluteMaxCases),
 		}
 	}
 
-	if opts.MaxCases >= 0 && count > opts.MaxCases {
+	if count > opts.MaxCases {
 		return &Problem{
 			Code: CodeTooManyCases,
 			Message: sprintf("design produces %d cases, which exceeds the limit of %d; "+

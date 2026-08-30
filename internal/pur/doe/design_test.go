@@ -152,18 +152,26 @@ func TestLatinHypercube_StratifiesEveryDimension(t *testing.T) {
 	}
 }
 
-func TestLatinHypercube_IsDeterministicForASeed(t *testing.T) {
-	params := numericParams(3, 0)
-
-	a := latinHypercube(params, 8, 7)
-	b := latinHypercube(params, 8, 7)
-	c := latinHypercube(params, 8, 8)
-
-	if !samePoints(a, b) {
-		t.Error("the same seed produced different designs")
+// The randomized samplers must be reproducible from their seed, which is what
+// makes a sweep repeatable, and must actually consult it, which is what makes a
+// different seed a different sweep.
+func TestRandomizedSamplers_AreDeterministicForASeed(t *testing.T) {
+	samplers := map[string]func([]Parameter, int, uint64) []designPoint{
+		"latin-hypercube": latinHypercube,
+		"monte-carlo":     monteCarlo,
 	}
-	if samePoints(a, c) {
-		t.Error("different seeds produced the same design")
+
+	for name, sample := range samplers {
+		t.Run(name, func(t *testing.T) {
+			params := numericParams(3, 0)
+
+			if !samePoints(sample(params, 8, 7), sample(params, 8, 7)) {
+				t.Error("the same seed produced different designs")
+			}
+			if samePoints(sample(params, 8, 7), sample(params, 8, 8)) {
+				t.Error("different seeds produced the same design")
+			}
+		})
 	}
 }
 
@@ -174,17 +182,6 @@ func TestMonteCarlo_CountAndRange(t *testing.T) {
 		t.Fatalf("got %d points, want 20", len(points))
 	}
 	coordsInUnitInterval(t, points)
-}
-
-func TestMonteCarlo_IsDeterministicForASeed(t *testing.T) {
-	params := numericParams(2, 0)
-
-	if !samePoints(monteCarlo(params, 10, 3), monteCarlo(params, 10, 3)) {
-		t.Error("the same seed produced different draws")
-	}
-	if samePoints(monteCarlo(params, 10, 3), monteCarlo(params, 10, 4)) {
-		t.Error("different seeds produced the same draws")
-	}
 }
 
 // A central composite design is corners plus axial points plus center replicates,
@@ -257,36 +254,10 @@ func TestCentralComposite_CornersAreInsideAxialPoints(t *testing.T) {
 }
 
 // Box-Behnken's reason for existing: it never places a point at a corner of the
-// space, where the extreme combination may be physically invalid.
-func TestBoxBehnken_Structure(t *testing.T) {
-	const k = 3
-	const centerPoints = 3
-
-	points := boxBehnken(numericParams(k, 0), centerPoints)
-
-	want := 4*(k*(k-1)/2) + centerPoints // 12 pairwise + 3 center = the classical 15-run k=3 design
-	if len(points) != want {
-		t.Fatalf("got %d points, want %d", len(points), want)
-	}
-	coordsInUnitInterval(t, points)
-
-	for i, p := range points {
-		extremes := 0
-		for _, c := range p.Coords {
-			if c == 0 || c == 1 {
-				extremes++
-			}
-		}
-		if extremes == k {
-			t.Errorf("point %d is a corner of the space (%v), which Box-Behnken must avoid", i, p.Coords)
-		}
-		if extremes != 0 && extremes != 2 {
-			t.Errorf("point %d has %d extreme coordinates, want 0 or 2: %v", i, extremes, p.Coords)
-		}
-	}
-}
-
-func TestBoxBehnken_CountsForClassicalSizes(t *testing.T) {
+// space, where the extreme combination may be physically invalid. Counts are
+// checked against the classical designs at the same time, since the structure is
+// what produces them.
+func TestBoxBehnken_StructureAndClassicalCounts(t *testing.T) {
 	tests := []struct{ k, centerPoints, want int }{
 		{3, 3, 15},
 		{4, 3, 27},
@@ -295,8 +266,28 @@ func TestBoxBehnken_CountsForClassicalSizes(t *testing.T) {
 
 	for _, tt := range tests {
 		points := boxBehnken(numericParams(tt.k, 0), tt.centerPoints)
+
 		if len(points) != tt.want {
 			t.Errorf("k=%d: got %d points, want %d", tt.k, len(points), tt.want)
+			continue
+		}
+		coordsInUnitInterval(t, points)
+
+		for i, p := range points {
+			extremes := 0
+			for _, c := range p.Coords {
+				if c == 0 || c == 1 {
+					extremes++
+				}
+			}
+			if extremes == tt.k {
+				t.Errorf("k=%d point %d is a corner of the space (%v), which Box-Behnken must avoid",
+					tt.k, i, p.Coords)
+			}
+			if extremes != 0 && extremes != 2 {
+				t.Errorf("k=%d point %d has %d extreme coordinates, want 0 or 2: %v",
+					tt.k, i, extremes, p.Coords)
+			}
 		}
 	}
 }
@@ -412,6 +403,44 @@ func TestEstimateCaseCount_MatchesTheGeneratedDesign(t *testing.T) {
 
 			if got := estimateCaseCount(opts); got != len(points) {
 				t.Errorf("estimateCaseCount() = %d, but the design has %d points", got, len(points))
+			}
+		})
+	}
+}
+
+// The counts that cannot be projected exactly must saturate past the ceiling
+// rather than wrap. A wrapped product or sum is negative, and a negative count
+// is below every limit there is, so it reaches the allocation the projection
+// exists to prevent.
+func TestEstimateCaseCount_SaturatesInsteadOfOverflowing(t *testing.T) {
+	tests := []struct {
+		name string
+		opts Options
+	}{
+		{"full factorial product", Options{Method: MethodFullFactorial, Parameters: []Parameter{
+			{Name: "a", Levels: 3}, {Name: "b", Levels: 1 << 62},
+		}}},
+		{"ofat sum", Options{Method: MethodOFAT, Parameters: []Parameter{
+			{Name: "a", Levels: 1 << 62}, {Name: "b", Levels: 1 << 62},
+		}}},
+		{"central composite center points", Options{Method: MethodCentralComposite,
+			Parameters: numericParams(3, 0), CenterPoints: math.MaxInt64}},
+		{"box behnken center points", Options{Method: MethodBoxBehnken,
+			Parameters: numericParams(3, 0), CenterPoints: math.MaxInt64}},
+		{"more parameters than any design supports", Options{Method: MethodFullFactorial,
+			Parameters: numericParams(maxParameters+1, 2)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := estimateCaseCount(withDefaults(tt.opts))
+
+			if got <= absoluteMaxCases {
+				t.Fatalf("estimateCaseCount() = %d, want a projection past the ceiling of %d",
+					got, absoluteMaxCases)
+			}
+			if problem := checkCaseCount(withDefaults(tt.opts), got); problem == nil {
+				t.Error("checkCaseCount accepted an uncountable design")
 			}
 		})
 	}
