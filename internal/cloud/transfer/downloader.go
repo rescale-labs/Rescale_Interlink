@@ -977,16 +977,16 @@ func (d *Downloader) downloadStreamingConcurrent(
 
 	// Set up concurrent download
 	type partJob struct {
-		partIndex         int64
-		encryptedStart    int64
-		encryptedEnd      int64
-		plaintextOffset   int64
+		partIndex       int64
+		encryptedStart  int64
+		encryptedEnd    int64
+		plaintextOffset int64
 	}
 
 	type partResult struct {
-		partIndex       int64
-		plaintextSize   int64
-		err             error
+		partIndex     int64
+		plaintextSize int64
+		err           error
 	}
 
 	// Create channels
@@ -1026,7 +1026,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 			select {
 			case <-progressTicker.C:
 				if prep.Params.ProgressCallback != nil && decryptedSize > 0 {
-						currentBytes := atomic.LoadInt64(&decryptedBytes)
+					currentBytes := atomic.LoadInt64(&decryptedBytes)
 					prep.Params.ProgressCallback(float64(currentBytes) / float64(decryptedSize))
 				}
 			case <-progressDone:
@@ -1264,8 +1264,8 @@ type StreamingDownloadInitParams struct {
 // StreamingDownload represents an in-progress streaming download.
 type StreamingDownload struct {
 	// Download identifiers
-	RemotePath  string // Path in cloud storage
-	LocalPath   string // Local destination path
+	RemotePath string // Path in cloud storage
+	LocalPath  string // Local destination path
 
 	// Decryption state
 	MasterKey []byte // Master encryption key
