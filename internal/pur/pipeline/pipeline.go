@@ -177,10 +177,48 @@ func findCommonParent(jobs []models.JobSpec) string {
 	return common
 }
 
+// PipelineOptions carries everything a pipeline needs beyond the config, API
+// client and job list. Every field has a usable zero value.
+type PipelineOptions struct {
+	// StateFile is where a newly created state manager persists job state.
+	// Ignored when ExistingState is set.
+	StateFile string
+
+	// ExistingState shares the caller's state manager instead of creating a
+	// duplicate (GUI, via Engine). CLI callers leave it nil.
+	ExistingState *state.Manager
+
+	// MultiPartMode tars run directories using absolute paths, so runs with the
+	// same name coming from different project trees stay distinct in the tarball.
+	MultiPartMode bool
+
+	// SkipTarUpload goes straight to job creation from pre-uploaded file IDs
+	// (submit-existing); no tar is built and nothing is uploaded.
+	SkipTarUpload bool
+
+	// CommonInputFiles are shared by every job in the batch: comma-separated
+	// local paths and/or id:<fileId> refs. Local paths need a ctx, so they are
+	// resolved in ResolveSharedFiles during Run rather than here.
+	CommonInputFiles string
+
+	// DecompressCommon decompresses the shared files on the cluster.
+	DecompressCommon bool
+
+	// UploadFolderID is the destination folder for every file the pipeline
+	// uploads (job tars and common input files). Empty means My Library.
+	// Callers resolve a folder path to an ID with folder.ResolveOrCreatePath.
+	UploadFolderID string
+
+	// FileTags are applied to every file the pipeline uploads. Best-effort:
+	// tagging failures are logged, never fatal.
+	FileTags []string
+
+	// RmTarOnSuccess deletes the local tar file after a successful upload.
+	RmTarOnSuccess bool
+}
+
 // NewPipeline creates a new pipeline.
-// When existingState is non-nil, the pipeline shares the caller's state manager
-// instead of creating a duplicate. CLI callers pass nil.
-func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, commonInputFiles string, decompressCommon bool) (*Pipeline, error) {
+func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, opts PipelineOptions) (*Pipeline, error) {
 	// Normalize all job directories to absolute paths at ingress.
 	// This prevents CWD-dependent failures when paths were generated
 	// with a different working directory (especially GUI mode).
@@ -205,11 +243,9 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 
 	// Use existing state manager if provided (shared with Engine/GUI),
 	// otherwise create a new one (CLI paths).
-	var stateMgr *state.Manager
-	if existingState != nil {
-		stateMgr = existingState
-	} else {
-		stateMgr = state.NewManager(stateFile)
+	stateMgr := opts.ExistingState
+	if stateMgr == nil {
+		stateMgr = state.NewManager(opts.StateFile)
 		if err := stateMgr.Load(); err != nil {
 			return nil, fmt.Errorf("failed to load state: %w", err)
 		}
@@ -222,44 +258,34 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 	})
 	transferMgr := transfer.NewManager(resourceMgr)
 
-	p := &Pipeline{
-		cfg:              cfg,
-		apiClient:        apiClient,
-		analysisResolver: apiClient, // Default: real API client satisfies AnalysisResolver
-		stateMgr:         stateMgr,
-		jobs:             jobs,
-		tempDir:          tempDir,
-		multiPartMode:    multiPartMode,
-		skipTarUpload:    skipTarUpload,
-		decompressCommon: decompressCommon,
-		resourceMgr:      resourceMgr,
-		transferMgr:      transferMgr,
-		feederDone:       make(chan struct{}),
-		versionsResolved: make(chan struct{}),
-		tarWorkers:       cfg.TarWorkers,
-		uploadWorkers:    cfg.UploadWorkers,
-		jobWorkers:       cfg.JobWorkers,
+	return &Pipeline{
+		cfg:                 cfg,
+		apiClient:           apiClient,
+		analysisResolver:    apiClient, // Default: real API client satisfies AnalysisResolver
+		stateMgr:            stateMgr,
+		jobs:                jobs,
+		tempDir:             tempDir,
+		multiPartMode:       opts.MultiPartMode,
+		skipTarUpload:       opts.SkipTarUpload,
+		commonInputFilesRaw: opts.CommonInputFiles,
+		decompressCommon:    opts.DecompressCommon,
+		uploadFolderID:      opts.UploadFolderID,
+		fileTags:            tags.NormalizeTags(opts.FileTags),
+		rmTarOnSuccess:      opts.RmTarOnSuccess,
+		resourceMgr:         resourceMgr,
+		transferMgr:         transferMgr,
+		feederDone:          make(chan struct{}),
+		versionsResolved:    make(chan struct{}),
+		tarWorkers:          cfg.TarWorkers,
+		uploadWorkers:       cfg.UploadWorkers,
+		jobWorkers:          cfg.JobWorkers,
 		// Dynamic queue sizes based on worker count for better throughput
 		tarQueue:      make(chan *workItem, cfg.TarWorkers*constants.DefaultQueueMultiplier),
 		uploadQueue:   make(chan *workItem, cfg.UploadWorkers*constants.DefaultQueueMultiplier),
 		jobQueue:      make(chan *workItem, cfg.JobWorkers*constants.DefaultQueueMultiplier),
 		activeWorkers: make(map[string]int),
 		totalJobs:     len(jobs),
-	}
-
-	// Parse commonInputFiles into sharedFileIDs where possible (id: refs only at construction time;
-	// local paths require ctx and are resolved in ResolveSharedFiles during Run).
-	if commonInputFiles != "" {
-		p.commonInputFilesRaw = commonInputFiles
-	}
-
-	return p, nil
-}
-
-// SetAnalysisResolver overrides the default AnalysisResolver (the API client).
-// Used in tests to inject a mock.
-func (p *Pipeline) SetAnalysisResolver(resolver AnalysisResolver) {
-	p.analysisResolver = resolver
+	}, nil
 }
 
 // SetProgressCallback sets the progress callback function
@@ -277,28 +303,10 @@ func (p *Pipeline) SetStateChangeCallback(callback StateChangeCallback) {
 	p.onStateChange = callback
 }
 
-// SetRmTarOnSuccess configures whether to delete local tar files after successful upload.
-func (p *Pipeline) SetRmTarOnSuccess(rm bool) {
-	p.rmTarOnSuccess = rm
-}
-
 // SetSyncUploader sets the sync uploader for TransferService integration.
 // When set, uploads are routed through TransferService for queue visibility.
 func (p *Pipeline) SetSyncUploader(u SyncUploader) {
 	p.syncUploader = u
-}
-
-// SetUploadFolderID sets the destination folder for every file this pipeline
-// uploads (job tars and common input files). Empty means My Library.
-// Callers resolve a folder path to an ID with folder.ResolveOrCreatePath.
-func (p *Pipeline) SetUploadFolderID(folderID string) {
-	p.uploadFolderID = folderID
-}
-
-// SetFileTags sets tags applied to every file this pipeline uploads.
-// Tagging is best-effort: failures are logged but never fail an upload.
-func (p *Pipeline) SetFileTags(fileTags []string) {
-	p.fileTags = tags.NormalizeTags(fileTags)
 }
 
 // applyFileTags tags an uploaded file. Only used on the CLI fallback path; the
@@ -377,18 +385,6 @@ func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
 
 	// Preflight validation: check that each (analysisCode, analysisVersion) pair
 	// is recognized before tar/upload work begins.
-	// Build a lookup for validation
-	lookup := make(map[string]map[string]string)
-	for _, a := range analyses {
-		vmap := make(map[string]string)
-		for _, v := range a.Versions {
-			if v.Version != "" && v.VersionCode != "" {
-				vmap[v.Version] = v.VersionCode
-			}
-		}
-		lookup[a.Code] = vmap
-	}
-
 	var validationErrors []string
 	for _, job := range p.jobs {
 		if job.AnalysisVersion == "" {

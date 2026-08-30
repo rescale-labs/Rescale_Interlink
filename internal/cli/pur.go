@@ -722,17 +722,17 @@ Example:
 			}
 
 			// Create pipeline
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
+				StateFile:        stateFile,
+				MultiPartMode:    multiPart,
+				CommonInputFiles: sharedFiles.commonInputFiles,
+				DecompressCommon: sharedFiles.decompressCommon,
+				UploadFolderID:   folderID,
+				FileTags:         fileTags,
+				RmTarOnSuccess:   rmTarOnSuccess,
+			})
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
-			}
-
-			pipe.SetUploadFolderID(folderID)
-			pipe.SetFileTags(fileTags)
-
-			// Apply rm-tar-on-success if set
-			if rmTarOnSuccess {
-				pipe.SetRmTarOnSuccess(true)
 			}
 
 			// Run pipeline
@@ -907,17 +907,17 @@ Example:
 			}
 
 			// Create pipeline (will load existing state)
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
+				StateFile:        stateFile,
+				MultiPartMode:    multiPart,
+				CommonInputFiles: sharedFiles.commonInputFiles,
+				DecompressCommon: sharedFiles.decompressCommon,
+				UploadFolderID:   folderID,
+				FileTags:         fileTags,
+				RmTarOnSuccess:   rmTarOnSuccess,
+			})
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
-			}
-
-			pipe.SetUploadFolderID(folderID)
-			pipe.SetFileTags(fileTags)
-
-			// Apply rm-tar-on-success if set
-			if rmTarOnSuccess {
-				pipe.SetRmTarOnSuccess(true)
 			}
 
 			// Run pipeline (will resume from state)
@@ -1050,7 +1050,10 @@ Example:
 			// Create pipeline with skip-upload mode
 			// The pipeline will skip tar and upload, only create and submit jobs
 			logger.Info().Msg("Creating pipeline (submit-existing mode)")
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, false, nil, true, "", false)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
+				StateFile:     stateFile,
+				SkipTarUpload: true,
+			})
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}

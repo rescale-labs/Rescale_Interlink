@@ -86,7 +86,6 @@ type Engine struct {
 	state     *state.Manager
 	eventBus  *events.EventBus
 	apiClient *api.Client
-	pipeline  *pipeline.Pipeline
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
@@ -250,20 +249,19 @@ func (e *Engine) SaveConfig(path string) error {
 	return nil
 }
 
+// reDirNumber matches the first run of digits in a run directory's base name.
+var reDirNumber = regexp.MustCompile(`\d+`)
+
 // ScanOptions contains options for directory scanning
 type ScanOptions struct {
-	TemplateCSV       string
-	OutputCSV         string
 	Pattern           string
 	Recursive         bool
 	IncludeHidden     bool
 	StartIndex        int
 	IteratePatterns   bool
 	ValidationPattern string
-	Overwrite         bool
 	RunSubpath        string   // Subpath to navigate before finding runs (e.g., "Simcodes/Powerflow")
-	MultiPartMode     bool     // Enable multi-part mode (scan multiple project directories)
-	PartDirs          []string // Project directories for multi-part mode
+	PartDirs          []string // Scan root; only the first entry is read, empty means the current directory
 	TarSubpath        string   // Subdirectory within each Run_* to tar (optional)
 }
 
@@ -274,178 +272,108 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 
 	validationPattern := opts.ValidationPattern
 
-	// Structure for directory entries
-	type dirEntry struct {
-		path        string
-		projectName string
+	scanRoot := ""
+	if len(opts.PartDirs) > 0 {
+		scanRoot = opts.PartDirs[0]
+	} else {
+		scanRoot, _ = os.Getwd()
 	}
-	var dirEntries []dirEntry
 
-	// Multi-part mode or normal mode
-	if opts.MultiPartMode {
-		// Multi-part mode: scan multiple project directories
-		e.publishLog(events.InfoLevel, fmt.Sprintf("Multi-part mode enabled with %d project directories", len(opts.PartDirs)), "scan", "")
-		e.publishLog(events.InfoLevel, fmt.Sprintf("Subdirectory pattern: '%s'", opts.Pattern), "scan", "")
-		if opts.RunSubpath != "" {
-			e.publishLog(events.InfoLevel, fmt.Sprintf("Run subpath: '%s'", opts.RunSubpath), "scan", "")
+	// Navigate through run_subpath if specified
+	if opts.RunSubpath != "" {
+		scanRoot = filepath.Join(scanRoot, opts.RunSubpath)
+		if _, err := os.Stat(scanRoot); os.IsNotExist(err) {
+			return nil, fmt.Errorf("subpath '%s' not found", opts.RunSubpath)
 		}
-		if validationPattern != "" {
-			e.publishLog(events.InfoLevel, fmt.Sprintf("Validation pattern: '%s'", validationPattern), "scan", "")
-		}
+		e.publishLog(events.InfoLevel, fmt.Sprintf("Scanning run directories under subpath: %s", opts.RunSubpath), "scan", "")
+	}
 
-		// Collect all run directories from all projects
-		allRuns, err := multipart.CollectAllRunDirectories(opts.PartDirs, opts.RunSubpath, opts.Pattern)
+	e.publishLog(events.InfoLevel, fmt.Sprintf("Scanning directory: %s (pattern: %s)", scanRoot, opts.Pattern), "scan", "")
+
+	var dirs []string
+	if opts.Recursive {
+		// Recursive mode - walk directory tree.
+		// Uses WalkDir instead of Walk to avoid per-entry os.Stat syscalls.
+		err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				// Skip hidden directories unless specified
+				if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
+					return filepath.SkipDir
+				}
+				// Check if this directory matches the pattern
+				matched, matchErr := filepath.Match(opts.Pattern, filepath.Base(path))
+				if matchErr == nil && matched && path != scanRoot {
+					dirs = append(dirs, path)
+					// SkipDir: intentionally stop descending into matched directories.
+					// Run directories (e.g., Run_*) are expected to be siblings, not nested.
+					// This avoids walking the full contents of each matched directory,
+					// which is the primary source of slow recursive scans.
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		})
 		if err != nil {
-			e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to collect run directories: %v", err), "scan", "")
+			e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to walk directory: %v", err), "scan", "")
+			return nil, fmt.Errorf("failed to walk directory tree: %w", err)
+		}
+	} else {
+		// Non-recursive mode - single level glob
+		matches, err := filepath.Glob(filepath.Join(scanRoot, opts.Pattern))
+		if err != nil {
+			e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to glob: %v", err), "scan", "")
 			return nil, err
 		}
-
-		if len(allRuns) == 0 {
-			return nil, fmt.Errorf("no run directories found in any project (pattern='%s')", opts.Pattern)
-		}
-
-		e.publishLog(events.InfoLevel, fmt.Sprintf("Found %d total run directories across all projects", len(allRuns)), "scan", "")
-
-		// Validate each run directory
-		validRuns := 0
-		for _, run := range allRuns {
-			if validationPattern == "" || multipart.ValidateRunDirectory(run.RunPath, validationPattern) {
-				dirEntries = append(dirEntries, dirEntry{
-					path:        run.RunPath,
-					projectName: run.ProjectName,
-				})
-				validRuns++
-				e.publishLog(events.InfoLevel, fmt.Sprintf("✓ Valid: %s from %s", run.RunName, run.ProjectName), "scan", "")
-			} else {
-				e.publishLog(events.DebugLevel, fmt.Sprintf("✗ Skipped: %s from %s (no %s file)", run.RunName, run.ProjectName, validationPattern), "scan", "")
-			}
-		}
-
-		if len(dirEntries) == 0 {
-			return nil, fmt.Errorf("no valid run directories found (validation: %s)", validationPattern)
-		}
-
-		e.publishLog(events.InfoLevel, fmt.Sprintf("Total valid runs after validation: %d/%d", validRuns, len(allRuns)), "scan", "")
-	} else {
-		// Normal mode - scan specified directory or current directory
-		scanRoot := ""
-		if len(opts.PartDirs) > 0 {
-			scanRoot = opts.PartDirs[0]
-		} else {
-			scanRoot, _ = os.Getwd()
-		}
-
-		// Navigate through run_subpath if specified
-		if opts.RunSubpath != "" {
-			scanRoot = filepath.Join(scanRoot, opts.RunSubpath)
-			if _, err := os.Stat(scanRoot); os.IsNotExist(err) {
-				return nil, fmt.Errorf("subpath '%s' not found", opts.RunSubpath)
-			}
-			e.publishLog(events.InfoLevel, fmt.Sprintf("Scanning run directories under subpath: %s", opts.RunSubpath), "scan", "")
-		}
-
-		e.publishLog(events.InfoLevel, fmt.Sprintf("Scanning directory: %s (pattern: %s)", scanRoot, opts.Pattern), "scan", "")
-
-		var dirs []string
-		if opts.Recursive {
-			// Recursive mode - walk directory tree.
-			// Uses WalkDir instead of Walk to avoid per-entry os.Stat syscalls.
-			err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return err
+		// Filter to directories only
+		for _, match := range matches {
+			info, err := os.Stat(match)
+			if err == nil && info.IsDir() {
+				if !opts.IncludeHidden && localfs.IsHidden(match) {
+					continue
 				}
-				if d.IsDir() {
-					// Skip hidden directories unless specified
-					if !opts.IncludeHidden && localfs.IsHidden(path) && path != scanRoot {
-						return filepath.SkipDir
-					}
-					// Check if this directory matches the pattern
-					matched, matchErr := filepath.Match(opts.Pattern, filepath.Base(path))
-					if matchErr == nil && matched && path != scanRoot {
-						dirs = append(dirs, path)
-						// SkipDir: intentionally stop descending into matched directories.
-						// Run directories (e.g., Run_*) are expected to be siblings, not nested.
-						// This avoids walking the full contents of each matched directory,
-						// which is the primary source of slow recursive scans.
-						return filepath.SkipDir
-					}
-				}
-				return nil
-			})
-			if err != nil {
-				e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to walk directory: %v", err), "scan", "")
-				return nil, fmt.Errorf("failed to walk directory tree: %w", err)
+				dirs = append(dirs, match)
 			}
-		} else {
-			// Non-recursive mode - single level glob
-			matches, err := filepath.Glob(filepath.Join(scanRoot, opts.Pattern))
-			if err != nil {
-				e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to glob: %v", err), "scan", "")
-				return nil, err
-			}
-			// Filter to directories only
-			for _, match := range matches {
-				info, err := os.Stat(match)
-				if err == nil && info.IsDir() {
-					if !opts.IncludeHidden && localfs.IsHidden(match) {
-						continue
-					}
-					dirs = append(dirs, match)
-				}
-			}
-		}
-
-		e.publishLog(events.InfoLevel, fmt.Sprintf("Found %d directories matching pattern", len(dirs)), "scan", "")
-
-		// Validate directories if validation pattern specified
-		var validDirs []string
-		if validationPattern != "" {
-			e.publishLog(events.InfoLevel, fmt.Sprintf("Validating directories (pattern: %s)", validationPattern), "scan", "")
-			for _, dir := range dirs {
-				if multipart.ValidateRunDirectory(dir, validationPattern) {
-					validDirs = append(validDirs, dir)
-				} else {
-					e.publishLog(events.DebugLevel, fmt.Sprintf("Skipped %s (no matching file)", filepath.Base(dir)), "scan", "")
-				}
-			}
-			if len(validDirs) == 0 {
-				return nil, fmt.Errorf("no directories found matching validation pattern '%s'", validationPattern)
-			}
-			e.publishLog(events.InfoLevel, fmt.Sprintf("Valid directories after validation: %d/%d", len(validDirs), len(dirs)), "scan", "")
-		} else {
-			validDirs = dirs
-		}
-
-		// Sort directories
-		sort.Strings(validDirs)
-
-		// Convert to dirEntries (no project name in normal mode)
-		for _, dir := range validDirs {
-			dirEntries = append(dirEntries, dirEntry{
-				path:        dir,
-				projectName: "",
-			})
 		}
 	}
+
+	e.publishLog(events.InfoLevel, fmt.Sprintf("Found %d directories matching pattern", len(dirs)), "scan", "")
+
+	// Validate directories if validation pattern specified
+	var validDirs []string
+	if validationPattern != "" {
+		e.publishLog(events.InfoLevel, fmt.Sprintf("Validating directories (pattern: %s)", validationPattern), "scan", "")
+		for _, dir := range dirs {
+			if multipart.ValidateRunDirectory(dir, validationPattern) {
+				validDirs = append(validDirs, dir)
+			} else {
+				e.publishLog(events.DebugLevel, fmt.Sprintf("Skipped %s (no matching file)", filepath.Base(dir)), "scan", "")
+			}
+		}
+		if len(validDirs) == 0 {
+			return nil, fmt.Errorf("no directories found matching validation pattern '%s'", validationPattern)
+		}
+		e.publishLog(events.InfoLevel, fmt.Sprintf("Valid directories after validation: %d/%d", len(validDirs), len(dirs)), "scan", "")
+	} else {
+		validDirs = dirs
+	}
+
+	sort.Strings(validDirs)
 
 	// Extract template job index for pattern iteration
 	templateIdx := pattern.ExtractIndexFromJobName(template.JobName)
 	baseJobName := strings.TrimSuffix(template.JobName, "_1")
 
-	// Sort dirEntries by path
-	sort.Slice(dirEntries, func(i, j int) bool {
-		return dirEntries[i].path < dirEntries[j].path
-	})
-
 	// Generate JobSpecs directly (instead of CSV rows)
 	var jobs []models.JobSpec
-	for i, entry := range dirEntries {
+	for i, dir := range validDirs {
 		dirNum := i + opts.StartIndex
 
 		// Extract directory number if using default start index
 		if opts.StartIndex == 1 {
-			baseName := filepath.Base(entry.path)
-			if match := regexp.MustCompile(`\d+`).FindString(baseName); match != "" {
+			if match := reDirNumber.FindString(filepath.Base(dir)); match != "" {
 				if num, err := strconv.Atoi(match); err == nil {
 					dirNum = num
 				}
@@ -456,18 +384,13 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 		job := template
 
 		// Normalize directory path to absolute
-		if absPath, err := pathutil.ResolveAbsolutePath(entry.path); err == nil {
+		if absPath, err := pathutil.ResolveAbsolutePath(dir); err == nil {
 			job.Directory = absPath
 		} else {
-			job.Directory = entry.path
+			job.Directory = dir
 		}
 
-		// Create job name with project suffix for multi-part mode
-		if opts.MultiPartMode && entry.projectName != "" {
-			job.JobName = fmt.Sprintf("%s_%d_%s", baseJobName, dirNum, entry.projectName)
-		} else {
-			job.JobName = fmt.Sprintf("%s_%d", baseJobName, dirNum)
-		}
+		job.JobName = fmt.Sprintf("%s_%d", baseJobName, dirNum)
 
 		// Iterate command patterns if requested
 		if opts.IteratePatterns {
@@ -520,20 +443,6 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 		e.state = state.NewManager(stateFile)
 	}
 
-	// Create pipeline directly from JobSpecs with shared state manager and extra input files
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, stateFile, false, e.state, false, opts.CommonInputFiles, opts.DecompressCommon)
-	if err != nil {
-		e.mu.Unlock()
-		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
-		return err
-	}
-
-	if e.transferService != nil {
-		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
-	}
-	pip.SetRmTarOnSuccess(opts.RmTarOnSuccess)
-	pip.SetFileTags(opts.FileTags)
-
 	// Resolve the upload folder path to an ID before any upload starts, so a bad
 	// path fails the run up front rather than after tarring has begun.
 	//
@@ -542,6 +451,7 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	// slow link or a proxy warmup would otherwise block every RLock accessor
 	// (GetConfig, API, TransferService, FileService) for the duration, which the
 	// user sees as the GUI freezing the moment they press Run.
+	var uploadFolderID string
 	if opts.UploadFolder != "" || opts.UploadFolderParent != "" {
 		apiClient := e.apiClient
 		e.mu.Unlock()
@@ -554,8 +464,31 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 			e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to resolve upload folder: %v", ferr), "run", "")
 			return ferr
 		}
-		pip.SetUploadFolderID(folderID)
+		uploadFolderID = folderID
 		e.publishLog(events.InfoLevel, fmt.Sprintf("Uploads target folder %s", folderID), "run", "")
+	}
+
+	// Create pipeline directly from JobSpecs with shared state manager and extra input files
+	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, pipeline.PipelineOptions{
+		// StateFile guards the window opened by the unlocked folder resolve
+		// above: a concurrent ResetRun can nil e.state before the relock, and
+		// the pipeline must not silently fall back to a pathless manager.
+		StateFile:        stateFile,
+		ExistingState:    e.state,
+		CommonInputFiles: opts.CommonInputFiles,
+		DecompressCommon: opts.DecompressCommon,
+		UploadFolderID:   uploadFolderID,
+		FileTags:         opts.FileTags,
+		RmTarOnSuccess:   opts.RmTarOnSuccess,
+	})
+	if err != nil {
+		e.mu.Unlock()
+		e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to create pipeline: %v", err), "run", "")
+		return err
+	}
+
+	if e.transferService != nil {
+		pip.SetSyncUploader(&syncUploaderAdapter{ts: e.transferService})
 	}
 
 	pip.SetLogCallback(func(level, message, stage, jobName string) {
