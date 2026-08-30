@@ -197,7 +197,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const loadSavedTemplates = useCallback(async () => {
     try {
       const templates = await App.ListSavedTemplates()
-      setSavedTemplates(templates as unknown as TemplateInfo[])
+      setSavedTemplates(templates)
     } catch (err) {
       console.error('Failed to load saved templates:', err)
     }

@@ -269,7 +269,6 @@ interface JobStore {
 
   // Actions - Validation
   validateJobs: () => Promise<string[]>
-  updateJobRow: (index: number, updates: Partial<JobRow>) => void
 
   // Actions - Execution
   startBulkRun: () => Promise<string | null>
@@ -769,16 +768,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
     }
 
     return errors
-  },
-
-  updateJobRow: (index, updates) => {
-    set((state) => {
-      const jobRows = [...state.jobRows]
-      if (index >= 0 && index < jobRows.length) {
-        jobRows[index] = { ...jobRows[index], ...updates }
-      }
-      return { jobRows }
-    })
   },
 
   // Execution Actions
