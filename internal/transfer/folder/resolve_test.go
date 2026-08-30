@@ -2,10 +2,14 @@ package folder
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 // noopClient is a zero-value client used only to satisfy the non-nil check in
@@ -85,5 +89,121 @@ func TestResolveOrCreatePath_RejectsBadPathBeforeAPICalls(t *testing.T) {
 	// before any folder lookup, so the zero-value client is never dialed.
 	if _, err := ResolveOrCreatePath(context.Background(), &noopClient, "parent-id", "../escape"); err == nil {
 		t.Error("expected error for a path containing \"..\"")
+	}
+}
+
+// fakeFolders is an httptest stand-in for the folder half of the API. It is the
+// only way to exercise the check-then-create loop, which is the sole code here
+// that writes to the account.
+type fakeFolders struct {
+	t *testing.T
+
+	// children maps a folder ID to its subfolders by name. A segment already
+	// present must be reused rather than duplicated.
+	children map[string]map[string]string
+
+	// failCreate names the segment whose creation fails, for the partial-failure
+	// case.
+	failCreate string
+
+	created []string // Segment names actually created, in order.
+}
+
+func (f *fakeFolders) handler(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+
+	switch {
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/contents/"):
+		parent := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v3/folders/"), "/contents/")
+		results := []map[string]any{}
+		for name, id := range f.children[parent] {
+			results = append(results, map[string]any{
+				"type": "folder",
+				"item": map[string]any{"id": id, "name": name},
+			})
+		}
+		f.writeJSON(w, map[string]any{"results": results})
+
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v3/folders/"):
+		parent := strings.Trim(strings.TrimPrefix(path, "/api/v3/folders/"), "/")
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			f.t.Errorf("create body decode: %v", err)
+		}
+		if body.Name == f.failCreate {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		id := parent + "/" + body.Name
+		if f.children[parent] == nil {
+			f.children[parent] = map[string]string{}
+		}
+		f.children[parent][body.Name] = id
+		f.created = append(f.created, body.Name)
+
+		w.WriteHeader(http.StatusCreated)
+		f.writeJSON(w, map[string]string{"id": id})
+
+	default:
+		f.t.Errorf("unexpected request: %s %s", r.Method, path)
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (f *fakeFolders) writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// newFakeFolders serves a library whose root already holds "sweeps".
+func newFakeFolders(t *testing.T, failCreate string) (*fakeFolders, *api.Client) {
+	t.Helper()
+
+	fake := &fakeFolders{
+		t:          t,
+		children:   map[string]map[string]string{"root": {"sweeps": "root/sweeps"}},
+		failCreate: failCreate,
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(server.Close)
+
+	return fake, api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+}
+
+func TestResolveOrCreatePath_ReusesAndCreates(t *testing.T) {
+	fake, client := newFakeFolders(t, "")
+
+	got, err := ResolveOrCreatePath(context.Background(), client, "root", "sweeps/2026/run-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got != "root/sweeps/2026/run-1" {
+		t.Errorf("got %q, want the deepest folder's ID", got)
+	}
+	// "sweeps" already existed, so only the two missing segments are created.
+	if len(fake.created) != 2 || fake.created[0] != "2026" || fake.created[1] != "run-1" {
+		t.Errorf("created = %v, want only the missing segments", fake.created)
+	}
+}
+
+// A failure part way down leaves the segments already created in place: deleting
+// them to roll back would destroy a folder that may not have been ours.
+func TestResolveOrCreatePath_ReportsTheFailingSegment(t *testing.T) {
+	fake, client := newFakeFolders(t, "run-1")
+
+	_, err := ResolveOrCreatePath(context.Background(), client, "root", "sweeps/2026/run-1")
+	if err == nil {
+		t.Fatal("expected the failing segment to be reported")
+	}
+	if !strings.Contains(err.Error(), "run-1") {
+		t.Errorf("error %q does not name the failing segment", err)
+	}
+	if len(fake.created) != 1 || fake.created[0] != "2026" {
+		t.Errorf("created = %v, want the earlier segment left in place", fake.created)
 	}
 }

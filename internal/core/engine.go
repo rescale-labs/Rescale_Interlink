@@ -1184,8 +1184,19 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 
 	// Resolve the upload folder path to an ID before any upload starts, so a bad
 	// path fails the run up front rather than after tarring has begun.
+	//
+	// The resolve is one API round trip per path segment, so it runs outside the
+	// lock for the same reason UpdateConfig creates its API client outside it: a
+	// slow link or a proxy warmup would otherwise block every RLock accessor
+	// (GetConfig, API, TransferService, FileService) for the duration, which the
+	// user sees as the GUI freezing the moment they press Run.
 	if opts.UploadFolder != "" || opts.UploadFolderParent != "" {
-		folderID, ferr := folder.ResolveOrCreatePath(ctx, e.apiClient, opts.UploadFolderParent, opts.UploadFolder)
+		apiClient := e.apiClient
+		e.mu.Unlock()
+
+		folderID, ferr := folder.ResolveOrCreatePath(ctx, apiClient, opts.UploadFolderParent, opts.UploadFolder)
+
+		e.mu.Lock()
 		if ferr != nil {
 			e.mu.Unlock()
 			e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to resolve upload folder: %v", ferr), "run", "")
