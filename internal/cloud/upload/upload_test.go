@@ -51,19 +51,7 @@ type fakeUploadCall struct {
 	ciphertext []byte
 }
 
-// CloudTransfer base interface methods
-func (f *fakeStreamingUploader) Upload(_ context.Context, _ cloud.UploadParams) (*cloud.UploadResult, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-func (f *fakeStreamingUploader) Download(_ context.Context, _ cloud.DownloadParams) error {
-	return fmt.Errorf("not implemented")
-}
-
-func (f *fakeStreamingUploader) RefreshCredentials(_ context.Context) error {
-	return nil
-}
-
+// CloudTransfer base interface method
 func (f *fakeStreamingUploader) StorageType() string {
 	return "FakeStorage"
 }
@@ -840,16 +828,6 @@ type fakePreEncryptUploader struct {
 	limits    resources.UploadLimits
 	uploadErr error
 }
-
-func (f *fakePreEncryptUploader) Upload(_ context.Context, _ cloud.UploadParams) (*cloud.UploadResult, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-func (f *fakePreEncryptUploader) Download(_ context.Context, _ cloud.DownloadParams) error {
-	return fmt.Errorf("not implemented")
-}
-
-func (f *fakePreEncryptUploader) RefreshCredentials(_ context.Context) error { return nil }
 
 func (f *fakePreEncryptUploader) StorageType() string { return "FakeStorage" }
 

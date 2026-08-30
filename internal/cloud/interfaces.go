@@ -5,7 +5,6 @@
 package cloud
 
 import (
-	"context"
 	"io"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -100,54 +99,18 @@ type UploadResult struct {
 	PartSize int64
 }
 
-// CloudTransfer is the unified interface for cloud storage operations.
-// Both S3Provider and AzureProvider implement this interface, providing
-// a consistent API regardless of the underlying storage backend.
+// CloudTransfer is what every cloud storage provider has in common.
+// Both S3Provider and AzureProvider implement it.
 //
-// Key design principles:
-//   - Single interface for both upload and download
-//   - Transfer handles enable concurrent operations
-//   - Resume support for all operation types
-//   - Streaming encryption as default (no temp files)
+// Transfer work itself is reached through the optional capability interfaces
+// the orchestrators type-assert on the provider they hold: FileInfoSetter and
+// RetryObserverSetter in this package, and StreamingConcurrentUploader,
+// PreEncryptUploader, StreamingConcurrentDownloader, StreamingPartDownloader
+// and LegacyDownloader in internal/cloud/transfer.
 type CloudTransfer interface {
-	// Upload uploads a file to cloud storage with optional concurrent part uploads.
-	// Uses streaming encryption by default (no temp file), unless PreEncrypt is true.
-	//
-	// If TransferHandle is provided with multiple threads, parts are uploaded concurrently.
-	// If TransferHandle is nil or has threads <= 1, upload is sequential.
-	//
-	// Returns UploadResult containing the storage path, encryption key, and format details.
-	Upload(ctx context.Context, params UploadParams) (*UploadResult, error)
-
-	// Download downloads and decrypts a file from cloud storage.
-	// Automatically detects encryption format (legacy v0 or streaming v1).
-	//
-	// If TransferHandle is provided with multiple threads, chunks are downloaded concurrently.
-	// If TransferHandle is nil or has threads <= 1, download is sequential.
-	//
-	// Resume support: If a partial download exists, resumes from last completed chunk.
-	Download(ctx context.Context, params DownloadParams) error
-
-	// RefreshCredentials refreshes storage credentials before they expire.
-	// Called automatically by Upload/Download, but can be called manually for long operations.
-	RefreshCredentials(ctx context.Context) error
-
 	// StorageType returns the storage type this provider handles.
 	// Returns "S3Storage" or "AzureStorage".
 	StorageType() string
-}
-
-// CloudTransferFactory creates CloudTransfer instances based on storage type.
-// This enables runtime selection of the appropriate provider.
-type CloudTransferFactory interface {
-	// NewTransfer creates a CloudTransfer for the specified storage type.
-	// storageType should be "S3Storage" or "AzureStorage".
-	NewTransfer(
-		ctx context.Context,
-		storageType string,
-		storageInfo *models.StorageInfo,
-		apiClient *api.Client,
-	) (CloudTransfer, error)
 }
 
 // FileInfoSetter is an optional interface for providers that support cross-storage downloads.

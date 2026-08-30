@@ -123,74 +123,9 @@ func (p *Provider) getOrCreateS3ClientForFile(ctx context.Context, fileInfo *mod
 	return client, nil
 }
 
-// Upload uploads a file to S3 storage.
-// Uses streaming encryption by default (no temp file), unless PreEncrypt is true.
-// If TransferHandle is provided with multiple threads, parts are uploaded concurrently.
-//
-// This method delegates to the transfer orchestrator, which calls back to the provider's
-// interface methods (InitStreamingUpload, UploadEncryptedFile, etc.).
-func (p *Provider) Upload(ctx context.Context, params cloud.UploadParams) (*cloud.UploadResult, error) {
-	// Ensure S3 client is initialized
-	_, err := p.getOrCreateS3Client(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	// The actual upload is handled by the transfer orchestrator, which calls:
-	// - InitStreamingUpload/EncryptStreamingPart/UploadCiphertext/CompleteStreamingUpload for streaming mode
-	// - UploadEncryptedFile for pre-encrypt mode
-	//
-	// For direct calls (not through orchestrator), delegate to appropriate method based on mode.
-	// This maintains backward compatibility with code that calls provider.Upload() directly.
-
-	if params.PreEncrypt {
-		// Pre-encrypt mode: file is encrypted first, then uploaded
-		// This is handled by the transfer orchestrator calling UploadEncryptedFile
-		return nil, fmt.Errorf("pre-encrypt uploads should go through transfer.Uploader, not provider.Upload directly")
-	}
-
-	// Streaming mode: encrypt on-the-fly
-	// This is handled by the transfer orchestrator calling streaming interface methods
-	return nil, fmt.Errorf("streaming uploads should go through transfer.Uploader, not provider.Upload directly")
-}
-
-// Download downloads and decrypts a file from S3 storage.
-// Automatically detects encryption format (legacy v0 or streaming v1).
-// If TransferHandle is provided with multiple threads, chunks are downloaded concurrently.
-func (p *Provider) Download(ctx context.Context, params cloud.DownloadParams) error {
-	// The download is handled by the transfer orchestrator, which calls:
-	// - DetectFormat to determine format version
-	// - DownloadStreaming for v1 streaming format
-	// - DownloadEncryptedFile for v0 legacy format
-	//
-	// This method should NOT be called directly. If it is, return an error
-	// pointing to the correct path through the orchestrator.
-	return fmt.Errorf("downloads should go through transfer.Downloader orchestrator, not provider.Download directly; use DetectFormat + DownloadStreaming or DownloadEncryptedFile instead")
-}
-
-// RefreshCredentials refreshes S3 storage credentials before they expire.
-func (p *Provider) RefreshCredentials(ctx context.Context) error {
-	// Credentials are refreshed on each Upload/Download call through the credential manager
-	// This method allows explicit refresh for long-running operations
-	_, err := p.getS3Credentials(ctx)
-	return err
-}
-
 // StorageType returns "S3Storage".
 func (p *Provider) StorageType() string {
 	return "S3Storage"
-}
-
-// getS3Credentials retrieves S3 credentials from the API.
-func (p *Provider) getS3Credentials(ctx context.Context) (*models.S3Credentials, error) {
-	creds, _, err := p.apiClient.GetStorageCredentials(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	if creds == nil {
-		return nil, fmt.Errorf("no S3 credentials returned")
-	}
-	return creds, nil
 }
 
 // Compile-time interface verification

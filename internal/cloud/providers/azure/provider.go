@@ -131,29 +131,6 @@ func (p *Provider) getOrCreateAzureClientForFile(ctx context.Context, fileInfo *
 	return client, nil
 }
 
-// Upload uploads a file to Azure storage.
-// Returns error - actual upload is handled by the orchestrator through specific interfaces.
-// Use UploadEncryptedFile (pre-encrypt) or streaming upload methods.
-func (p *Provider) Upload(ctx context.Context, params cloud.UploadParams) (*cloud.UploadResult, error) {
-	return nil, fmt.Errorf("use UploadEncryptedFile or streaming upload methods")
-}
-
-// Download downloads and decrypts a file from Azure storage.
-// Returns error - actual download is handled by the orchestrator through specific interfaces.
-// Use DownloadEncryptedFile (legacy) or DownloadStreaming methods.
-func (p *Provider) Download(ctx context.Context, params cloud.DownloadParams) error {
-	return fmt.Errorf("use DownloadEncryptedFile or DownloadStreaming methods")
-}
-
-// RefreshCredentials refreshes Azure storage credentials before they expire.
-func (p *Provider) RefreshCredentials(ctx context.Context) error {
-	client, err := p.getOrCreateAzureClient(ctx)
-	if err != nil {
-		return err
-	}
-	return client.EnsureFreshCredentials(ctx)
-}
-
 // StorageType returns "AzureStorage".
 func (p *Provider) StorageType() string {
 	return "AzureStorage"

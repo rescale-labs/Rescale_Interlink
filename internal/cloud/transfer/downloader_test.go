@@ -19,38 +19,11 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
-// mockCloudTransferDownload is a mock implementation for download testing.
-type mockCloudTransferDownload struct {
-	downloadCalled bool
-	downloadParams cloud.DownloadParams
-	downloadErr    error
-	uploadCalled   bool
-	storageType    string
-}
-
-func (m *mockCloudTransferDownload) Upload(ctx context.Context, params cloud.UploadParams) (*cloud.UploadResult, error) {
-	m.uploadCalled = true
-	return &cloud.UploadResult{
-		StoragePath:   "test/path",
-		EncryptionKey: []byte("test-key"),
-		FormatVersion: 1,
-	}, nil
-}
-
-func (m *mockCloudTransferDownload) Download(ctx context.Context, params cloud.DownloadParams) error {
-	m.downloadCalled = true
-	m.downloadParams = params
-	return m.downloadErr
-}
-
-func (m *mockCloudTransferDownload) RefreshCredentials(ctx context.Context) error {
-	return nil
-}
+// mockCloudTransferDownload is a bare CloudTransfer: the capability interfaces
+// the mocks below add are what the downloader actually reaches for.
+type mockCloudTransferDownload struct{}
 
 func (m *mockCloudTransferDownload) StorageType() string {
-	if m.storageType != "" {
-		return m.storageType
-	}
 	return "S3Storage"
 }
 
@@ -76,6 +49,23 @@ func (m *mockStreamingDownloader) DetectFormat(ctx context.Context, remotePath s
 func (m *mockStreamingDownloader) DownloadStreaming(ctx context.Context, remotePath, localPath string, masterKey []byte, progressCallback cloud.ProgressCallback) error {
 	m.streamingDownloadCalled = true
 	return m.downloadStreamingErr
+}
+
+// mockLegacyDownloader implements LegacyDownloader, writing whatever ciphertext
+// it was given to the .encrypted path the orchestrator asked it to fill.
+type mockLegacyDownloader struct {
+	mockStreamingDownloader
+	ciphertext              []byte
+	downloadEncryptedCalled bool
+	downloadEncryptedErr    error
+}
+
+func (m *mockLegacyDownloader) DownloadEncryptedFile(ctx context.Context, params LegacyDownloadParams) error {
+	m.downloadEncryptedCalled = true
+	if m.downloadEncryptedErr != nil {
+		return m.downloadEncryptedErr
+	}
+	return os.WriteFile(params.EncryptedPath, m.ciphertext, 0644)
 }
 
 // TestNewDownloader tests downloader creation.
@@ -153,31 +143,52 @@ func TestDownloaderDownloadValidation(t *testing.T) {
 	}
 }
 
-// TestDownloaderLegacyFormat tests downloading with legacy format.
+// TestDownloaderLegacyFormat covers the v0 path end to end: detection reports
+// version 0, downloadLegacy has the provider fill the .encrypted temp file, and
+// the orchestrator decrypts it into place and returns the hash it computed while
+// writing. CBC streaming produces the same ciphertext legacy does, so one
+// encrypted part stands in for a v0 object.
 func TestDownloaderLegacyFormat(t *testing.T) {
-	mock := &mockStreamingDownloader{
-		formatVersion: 0, // Legacy format
-	}
-	downloader := NewDownloader(mock)
+	plaintext := []byte("legacy v0 payload")
 
-	// Create valid params with encryption key (base64 encoded 32-byte key)
-	params := cloud.DownloadParams{
-		RemotePath: "/remote/file.txt",
-		LocalPath:  "/local/file.txt",
-		FileInfo: &models.CloudFile{
-			EncodedEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", // 32 bytes base64
-			IV:                   "AAAAAAAAAAAAAAAAAAAAAA==",                     // 16 bytes base64
-		},
-	}
-
-	_, err := downloader.Download(context.Background(), params)
+	enc, err := encryption.NewCBCStreamingEncryptor()
 	if err != nil {
-		t.Errorf("unexpected error: %v", err)
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
 	}
 
-	// For legacy format, should delegate to provider's Download method
-	if !mock.downloadCalled {
-		t.Error("expected provider's Download method to be called for legacy format")
+	mock := &mockLegacyDownloader{ciphertext: ciphertext}
+	mock.formatVersion = 0 // Legacy format
+	localPath := filepath.Join(t.TempDir(), "file.txt")
+
+	hash, err := NewDownloader(mock).Download(context.Background(), cloud.DownloadParams{
+		RemotePath: "/remote/file.txt",
+		LocalPath:  localPath,
+		FileInfo: &models.CloudFile{
+			EncodedEncryptionKey: base64.StdEncoding.EncodeToString(enc.GetKey()),
+			IV:                   base64.StdEncoding.EncodeToString(enc.GetInitialIV()),
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.downloadEncryptedCalled {
+		t.Error("expected DownloadEncryptedFile to be called for legacy format")
+	}
+
+	got, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read decrypted file: %v", readErr)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("decrypted %q, want %q", got, plaintext)
+	}
+	want := sha512.Sum512(plaintext)
+	if !strings.EqualFold(hash, hex.EncodeToString(want[:])) {
+		t.Errorf("computed hash = %q, want %q", hash, hex.EncodeToString(want[:]))
 	}
 }
 
@@ -294,19 +305,6 @@ func TestSafetyNetEncryptedCleanup(t *testing.T) {
 	if _, err := os.Stat(localPath); os.IsNotExist(err) {
 		t.Error("output file should not be removed by safety-net cleanup")
 	}
-}
-
-// mockLegacyDownloader implements LegacyDownloader so downloadLegacy can be
-// exercised without a provider.
-type mockLegacyDownloader struct {
-	mockCloudTransferDownload
-	downloadEncryptedCalled bool
-	downloadEncryptedErr    error
-}
-
-func (m *mockLegacyDownloader) DownloadEncryptedFile(ctx context.Context, params LegacyDownloadParams) error {
-	m.downloadEncryptedCalled = true
-	return m.downloadEncryptedErr
 }
 
 // TestDownloadLegacyDiskSpaceErrorStatesEnforcedRequirement verifies that when the

@@ -257,31 +257,12 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 		}
 	}
 
-	// Provider doesn't support format detection - fall back to legacy behavior
-	// Use IV presence to determine format
-	formatTimer.StopWithMessage("no format detection support, using IV presence")
-
-	prep := &DownloadPrep{
-		Params:         params,
-		TransferHandle: params.TransferHandle,
-		FormatVersion:  0, // Assume legacy
-		EncryptionKey:  encryptionKey,
-		IV:             iv,
-	}
-
-	if iv == nil {
-		// No IV suggests streaming format, but without detection we can't proceed
-		// The provider's Download method will handle this
-		prep.FormatVersion = 1
-	}
-
-	// Delegate to provider's Download method
-	// Provider's Download doesn't return hash, so return empty string.
-	// This legacy path is rarely used - most providers support format detection.
-	if err := d.provider.Download(ctx, params); err != nil {
-		return "", err
-	}
-	return "", nil // No computed hash available from legacy provider path
+	// Without format detection there is no way to tell which encryption format
+	// the object uses, and nothing else here can download it. Both shipped
+	// providers implement StreamingConcurrentDownloader, so this is a guard
+	// against a future provider, not a path.
+	formatTimer.StopWithMessage("no format detection support")
+	return "", fmt.Errorf("provider %s does not support encryption format detection", d.provider.StorageType())
 }
 
 // downloadLegacy downloads using legacy (v0) format.
@@ -292,11 +273,11 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		fmt.Fprintf(prep.Params.OutputWriter, "Using legacy format (v0) download\n")
 	}
 
-	// Check if provider implements LegacyDownloader interface
+	// Both shipped providers implement LegacyDownloader; one that does not
+	// cannot fetch the encrypted file this path decrypts.
 	legacyProvider, ok := d.provider.(LegacyDownloader)
 	if !ok {
-		// Fall back to provider's Download method (old code path)
-		return d.provider.Download(ctx, prep.Params)
+		return fmt.Errorf("provider %s does not support legacy (v0) downloads", d.provider.StorageType())
 	}
 
 	// Orchestrator handles: disk space, temp file, decryption

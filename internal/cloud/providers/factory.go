@@ -13,7 +13,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
-// Factory implements CloudTransferFactory and creates providers based on storage type.
+// Factory creates providers based on storage type.
 type Factory struct{}
 
 // NewFactory creates a new provider factory.
@@ -51,6 +51,3 @@ func (f *Factory) NewTransferFromStorageInfo(
 	}
 	return f.NewTransfer(ctx, storageInfo.StorageType, storageInfo, apiClient)
 }
-
-// Compile-time interface verification
-var _ cloud.CloudTransferFactory = (*Factory)(nil)
