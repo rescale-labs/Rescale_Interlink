@@ -2,6 +2,62 @@
 
 ## v4.9.9 - August 13, 2026
 
+### DOE parameter sweeps in PUR (`pur doe`, GUI sweep builder) (#66)
+
+One base job can now be expanded into a design of experiments — one Rescale job per
+design point — from either the CLI or the PUR tab. Contributed by @ctusa-rescale
+([PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66)).
+
+Each case's values are rendered into the **job's command line** rather than passed as
+environment variables, so the configuration of every case is visible on its Rescale job
+page:
+
+```
+template:  starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+case 1:    starccm+ -param alpha 10 -param beta 15 -load input.sim
+```
+
+Parameters and `{{token}}`s are validated against each other in both directions: a swept
+parameter with no matching token, and a token with no matching parameter, are both errors
+rather than silently wrong jobs. An unknown token in the job-name or tag template is
+an error too, and a token that survives substitution anywhere is fatal rather than
+shipped as literal text.
+
+Eight designs are available — full factorial, one-factor-at-a-time, Latin hypercube,
+Sobol, Monte Carlo, central composite, Box-Behnken, and explicit cases from a CSV. The
+randomized samplers (Latin hypercube and Monte Carlo) take a `--seed`, so the same seed
+reproduces the same sweep; Sobol is a deterministic low-discrepancy sequence and is
+unaffected by the seed.
+
+Per-case job names and Rescale job tags come from templates that may use any parameter
+token plus `{{__base}}` and `{{__index}}`, which makes a sweep filterable on the platform
+by the values that produced it.
+
+Because every case in a sweep shares one input deck, a sweep never zips a working
+directory. `--base-file-ids` (Shared Input File IDs in the GUI) points every case at an
+already-uploaded deck; leave it unset and the deck is supplied once at run time with
+`pur run --common-input-files`. Either way it transfers once for the whole sweep instead
+of once per case. A generated sweep is an ordinary jobs CSV, so it runs through the
+existing `pur run` / `pur submit-existing` pipeline with resume, state and monitoring
+unchanged.
+
+In the GUI, **PUR → Create Parameter Sweep** builds the sweep with a live case preview,
+showing the case table, the first case's rendered command and tags, and any validation
+problems before anything is submitted.
+
+### PUR uploads can target a folder and carry file tags
+
+`pur run` and `pur resume` accept `--folder` (created if missing), `--folder-parent`, and
+`--file-tags`, so a batch's uploads can be collected in one Rescale folder and tagged as a
+set. The PUR tab carries the same upload-folder and file-tag fields.
+
+### `--extra-input-files` renamed to `--common-input-files`
+
+The flag that uploads a file once and attaches it to every job is now
+`--common-input-files`, with `--decompress-common` alongside it; the GUI label matches.
+The old `--extra-input-files` and `--decompress-extras` names still work as hidden aliases
+but emit a deprecation warning, and passing both a flag and its alias is an error.
+
 ### Linux GUI: blank window fixed (#31)
 
 The Linux AppImage bundled WebKit's library but relied on the host system for WebKit's

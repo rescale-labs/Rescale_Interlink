@@ -1766,6 +1766,139 @@ rescale-int pur scan-files --root /data --primary "*.inp" \
   --template template.csv --output jobs.csv
 ```
 
+#### pur doe
+Expand one base job into a design of experiments (parameter sweep)
+
+```bash
+rescale-int pur doe --template TEMPLATE --param SPEC... [--output OUTPUT | --preview]
+```
+
+The base job's command must contain a `{{name}}` token for each swept parameter.
+Each case renders its own values into that command, so every case's configuration
+is visible in the command line on its Rescale job page:
+
+```
+template:  starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+case 1:    starccm+ -param alpha 10 -param beta 15 -load input.sim
+```
+
+Parameters and command tokens are checked against each other in both directions:
+a swept parameter with no matching token, or a token with no matching parameter,
+is an error rather than a silently wrong job. An unknown `{{token}}` in the
+job-name or tag template is an error too, and a token that survives substitution
+in any of the three is fatal rather than shipped as literal text.
+
+**Flags:**
+- `-t, --template string` - Template jobs CSV whose first row is the base job (required)
+- `-o, --output string` - Output jobs CSV file (required unless `--preview`)
+- `--overwrite` - Overwrite existing output file
+- `-m, --method string` - Sampling method (default `full-factorial`)
+- `--param stringArray` - Swept parameter, e.g. `"alpha=10:20:5"` or `"model=a,b,c"` (repeatable)
+- `--param-format stringArray` - Numeric rendering format, e.g. `"alpha=%.3f"` (repeatable; values render with `%g` when unset)
+- `--samples int` - Design points for `latin-hypercube`, `sobol` and `monte-carlo`
+- `--seed uint` - Seed for the randomized samplers (`latin-hypercube` and `monte-carlo`); `sobol` is deterministic and ignores it
+- `--center-points int` - Center point repeats for `central-composite` and `box-behnken` (default 1)
+- `--max-cases int` - Maximum cases; 0 uses the default of 1000. A negative value is an error
+- `--job-name-template string` - Case name template (default `"{{__base}}_{{__index}}"`)
+- `--tag-template stringArray` - Per-case Rescale job tag, e.g. `"alpha={{alpha}}"` (repeatable)
+- `--base-file-ids string` - Comma-separated IDs of already-uploaded input files shared by every case
+- `--cases-csv string` - CSV of explicit cases, one column per parameter (selects `--method explicit` unless `--method` is given)
+- `--preview` - Show the generated cases without writing a CSV
+- `--preview-limit int` - How many cases to list; 0 lists all of them (default 20)
+
+**Parameter syntax:**
+
+| Spec | Meaning |
+|------|---------|
+| `alpha=10:20:5` | Numeric range, 5 levels from 10 to 20 |
+| `alpha=10:20` | Numeric range, the two endpoints |
+| `model=kepsilon,komega,les` | Categorical, one case per value |
+
+Level counts apply to the designs that sample on a grid (`full-factorial` and
+`ofat`); the continuous samplers draw from the range directly and ignore them.
+A `--param-format` may name only a parameter that is actually being swept, and
+its width and precision are each capped at 32.
+
+**Methods:**
+
+| Method | Design |
+|--------|--------|
+| `full-factorial` | Every combination of every level |
+| `ofat` | One factor at a time from a baseline |
+| `latin-hypercube` | `--samples` points, every parameter evenly covered |
+| `sobol` | `--samples` low-discrepancy points (up to 6 parameters) |
+| `monte-carlo` | `--samples` uniform random points |
+| `central-composite` | Corners, axial points and center, for a quadratic fit |
+| `box-behnken` | Quadratic design avoiding the corners (3+ parameters) |
+| `explicit` | Cases read from `--cases-csv` |
+
+`central-composite` and `box-behnken` fit a quadratic response surface, so they
+take numeric parameters only; a categorical parameter is rejected rather than
+mapped onto coded coordinates.
+
+**Reproducibility:** `latin-hypercube` and `monte-carlo` draw from a seeded
+generator, so re-running with the same `--seed` on the same build reproduces the
+same sweep. `sobol` is a deterministic low-discrepancy sequence and is unaffected
+by `--seed` — the same `--samples` always yields the same points. The exact
+values a seed produces are a property of the build's Go runtime, not a
+cross-version guarantee; pin the generated CSV if you need the sweep itself to
+be an artifact.
+
+**Name and tag templates** may use any parameter token plus `{{__base}}` (the
+template's job name with any trailing `_<n>` removed, so sweeping a job called
+`sim_1` yields `sim_1`, `sim_2`, …) and `{{__index}}` (the 1-based case number).
+Both built-in names are reserved and cannot be used as parameter names. Rendered
+tags are applied to that case's Rescale job, one API call per tag per job — a
+sweep whose tagging would add more than about 500 calls says so as a warning.
+
+**Limits.** A sweep is capped at `--max-cases` (default 1000) and, whatever that
+is raised to, at an absolute ceiling of 100,000 cases; at most 128 parameters may
+be swept. A rendered command is bounded at 32 KiB, a job name at 128 bytes and a
+tag at 64 bytes. Each parameter value must be a single command-line argument: a
+value carrying whitespace, a quote or a shell metacharacter is rejected rather
+than rendered, and a categorical or explicit value additionally may not contain
+glob characters, which numeric output never produces. Negative numbers are fine.
+Every one of these is reported before anything is generated or written.
+
+**Shared input files:** every case in a sweep uses the same input deck, and a
+sweep never zips a working directory — generated cases carry no directory of
+their own. There are two ways to supply the deck, and the deck transfers once for
+the whole sweep either way:
+
+- Pass `--base-file-ids` with the IDs of an already-uploaded deck. Each case
+  references those files directly, and the generated CSV is run with
+  `pur submit-existing`.
+- Leave it unset and supply the deck once at run time with
+  `pur run --common-input-files`, which uploads it once and attaches it to every
+  job. A job that reaches `pur run` with no directory, no file IDs and no common
+  input files is rejected rather than submitted with no inputs at all.
+
+**Examples:**
+```bash
+# 3x3 full factorial written to a jobs CSV
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --param "alpha=10:20:3" --param "beta=15:25:3"
+
+# Preview a 20-point Latin hypercube without writing anything
+rescale-int pur doe --template base.csv --preview \
+  --method latin-hypercube --samples 20 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25"
+
+# Share one uploaded deck across the sweep and tag each job
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --base-file-ids abcde,fghij --tag-template "alpha={{alpha}}" \
+  --param "alpha=10:20:5"
+rescale-int pur submit-existing --jobs-csv sweep.csv
+
+# Cases from a hand-written CSV
+rescale-int pur doe --template base.csv --output sweep.csv --cases-csv cases.csv
+```
+
+The `--cases-csv` file is read as ordinary CSV: its header names the parameters,
+values may be quoted to carry embedded commas, and a row whose field count does
+not match the header is an error naming the line rather than a silently dropped
+case. The file is bounded at 4 MiB.
+
 #### pur plan
 Validate job pipeline without executing
 
@@ -2291,6 +2424,43 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv
 rescale-int pur resume \
   --jobs-csv jobs.csv \
   --state state.csv
+```
+
+### Parameter Sweep (DOE)
+
+```bash
+# 1. Upload the input deck once; every case will reference these files
+rescale-int upload input.sim
+# note the file ID(s) reported, e.g. AbCdEf
+
+# 2. Preview the design before committing to it. The template's command must
+#    contain a {{token}} per swept parameter, e.g.
+#      starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+rescale-int pur doe \
+  --template base.csv \
+  --method latin-hypercube --samples 24 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25" \
+  --preview
+
+# 3. Generate the sweep, tagging each job with its own values
+rescale-int pur doe \
+  --template base.csv \
+  --output sweep.csv \
+  --method latin-hypercube --samples 24 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25" \
+  --param-format "alpha=%.2f" \
+  --tag-template "alpha={{alpha}}" --tag-template "beta={{beta}}" \
+  --base-file-ids AbCdEf
+
+# 4. Submit. Tar and upload are skipped because the deck is already on Rescale.
+rescale-int pur submit-existing --jobs-csv sweep.csv --state sweep.state
+
+# Without --base-file-ids the generated cases carry no input files at all, so
+# supply the shared deck once at run time instead, and collect the uploads in
+# one folder:
+rescale-int pur run --jobs-csv sweep.csv --state sweep.state \
+  --common-input-files ./input.sim \
+  --folder "sweeps/alpha-beta" --file-tags "sweep-2026-q3"
 ```
 
 ### Configuration Management

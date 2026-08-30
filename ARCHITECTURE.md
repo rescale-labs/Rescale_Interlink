@@ -168,9 +168,10 @@ rescale-int/
 │   │
 │   │  ── PUR ──
 │   ├── pur/                       # PUR (Parallel Upload and Run)
+│   │   ├── doe/                   # Design of experiments (parameter sweeps)
 │   │   ├── filescan/              # File scanning
 │   │   ├── parser/                # SGE script parsing
-│   │   ├── pattern/               # Pattern detection for batch jobs
+│   │   ├── pattern/               # Pattern detection and {{token}} substitution
 │   │   ├── pipeline/              # Pipeline orchestration
 │   │   ├── state/                 # PUR state management
 │   │   └── validation/            # Core type validation
@@ -468,6 +469,25 @@ CLI uses `mpb` (multi-progress bars) with per-file bars showing speed and ETA. G
 - The standard logger, which carries the transfer path's `[BATCH]`, `[SLOT]`, `[CRED]` and `[TIMING]` diagnostics, is discarded unless the user asked for it via `--verbose`, `--debug` or `RESCALE_DEBUG` — mirroring what compat mode already did.
 - Rate-limit visibility and credential-source warnings deliberately bypass the standard logger so they survive that discard. A crawling transfer must still be able to say it is waiting on a rate limit.
 
+### 11. Design of Experiments (`internal/pur/doe/`)
+
+**Purpose**: Expand one base `JobSpec` into a parameter sweep, one job per design point.
+
+`doe.Generate(Options) Result` is pure — no API client, no filesystem, no engine — so the same call serves the CLI's `--preview`, the GUI's live preview, and generation itself. Its output is `[]models.JobSpec`, which is what `pipeline.NewPipeline` already takes as its job ingress, so a sweep inherits tar/upload/create/submit, state and resume, progress events, and both front ends without pipeline changes.
+
+**Structure**:
+- `doe.go` — `Options`, `Parameter`, `Case`, `Result`, `Generate`
+- `methods.go` — `Methods()`, the single source of each design's label, description and which options it reads; consumed by CLI flag help and the GUI's method menu
+- `design.go` / `sobol.go` — the samplers, which produce points in unit coordinates that `render.go` then maps onto each parameter's range or category list
+- `validate.go` — every rejection rule, run before anything is sampled
+- `cases_csv.go` — `ParseCasesCSV(io.Reader)`, the one parser behind both the CLI's `--cases-csv` and the GUI's pasted-cases box, so identical text yields an identical sweep on either surface
+
+**Values reach the command line**: they are rendered into the job's command through `pur/pattern`'s `{{name}}` substitution rather than passed as environment variables, so each case's configuration is visible on its Rescale job page. Parameters and command tokens are validated against each other in both directions — an unused parameter and an unfilled token are both errors, not silently wrong jobs — and every rendered surface (command, job name, tag) is asserted free of residual tokens afterwards.
+
+**One rejection boundary**: `Generate` is where every limit lives — case count, dimensionality, format syntax, value safety and rendered length — so the CLI and the GUI bindings surface the same errors instead of each carrying their own policy. Nothing is clamped silently; an oversized or malformed sweep is reported before any case is built.
+
+**Shared inputs**: a case never carries a `Directory`, so it always takes the pipeline's skip-tar-and-upload path. `BaseFileIDs` points every case at an already-uploaded deck; left empty, the deck arrives as batch-level Common Files, which the pipeline uploads once and attaches to every job. Either way one deck serves the whole sweep instead of being re-uploaded per case.
+
 ---
 
 ## CLI Compatibility Mode
@@ -543,7 +563,7 @@ All behavior is injected:
 1. **App** (`app.go`): Main Wails application struct with lifecycle hooks
 2. **Transfer Bindings** (`transfer_bindings.go`): `StartTransfers()`, `CancelTransfer()`, `CancelAllTransfers()`, `GetTransferBatches()`, `CancelBatch()`, `RetryFailedInBatch()`, `GetBatchTasks(batchID, offset, limit, stateFilter)` — the paged reader the Transfers tab uses so rendering a batch's rows does not copy the whole batch, DTOs
 3. **File Bindings** (`file_bindings.go`): `ListLocalDirectory()`, `ListRemoteFolder()`, `ListRemoteFolderPage()`, `SearchRemoteFolderContents()`, `ListRemoteLegacy()`, `ListRemoteLegacyWithFilters(cursor, pageSize, ownerFilter, searchQuery, sortField, sortDirection)`, `ListRemoteTrash()`, `RecoverTrashItems()`, `PurgeTrashItems()`, `StartFolderDownload()`, `StartFolderUpload()`
-4. **Job Bindings** (`job_bindings.go`): `ScanDirectory()`, `StartBulkRun()`, `StartSingleJob()`, `GetRunHistory()`, `GetHistoricalJobRows()`
+4. **Job Bindings** (`job_bindings.go`): `ScanDirectory()`, `StartBulkRunWithOptions()`, `StartSingleJob()`, `GetRunHistory()`, `GetHistoricalJobRows()`
 5. **Job Status Bindings** (`job_status_bindings.go`): `ListJobStatuses()` for the first page and `ListJobStatusesPage(offset)` for subsequent pages, backing the Job Status tab
 6. **Config Bindings** (`config_bindings.go`): Configuration management
 7. **Daemon Bindings** (`daemon_bindings.go`): Daemon IPC
@@ -551,6 +571,7 @@ All behavior is injected:
 9. **Version Bindings** (`version_bindings.go`): GitHub update check
 10. **Reporting Bindings** (`reporting_bindings.go`): Error report display
 11. **API Key Source Bindings** (`api_key_source_bindings.go`): Reports back to the GUI which credential source the runtime resolved (token file vs. env vs. config) and any source conflicts
+12. **DOE Bindings** (`doe_bindings.go`): `GetDOEMethods()` for the method menu, `PreviewDOECases()` for the debounced live preview (truncated, no job specs), `GenerateDOE()` for the full sweep plus its job specs, `ParseDOECasesCSV()` for pasted explicit cases, `DefaultDOEMaxCases()` for the cap the form shows
 
 ### Frontend Stores (`frontend/src/stores/`)
 
@@ -569,14 +590,14 @@ All behavior is injected:
 1. **FileBrowserTab** — Two-pane local/remote file browser. Remote pane has four browse modes: My Library, My Jobs, Legacy, and Trash (soft-deleted entries with restore/purge actions). Search by name, owner filter (own files / shared with me), and sort by name, size or upload date, with the pagination cursor carried through search. Upload is disabled in Trash and My Jobs modes with an explicit reason.
 2. **TransfersTab** — Transfer progress with batch grouping, cancel/retry, disk space error banner. Batch rows are read a page at a time via `GetBatchTasks()`. Polling is gated on the tab being active.
 3. **SingleJobTab** — Job template builder with three input modes (directory, local files, remote files). A three-step state machine (`initial` → `jobConfigured` → `inputsReady`) with Back navigation; the form lives in `singleJobStore`, so stepping back or leaving the tab preserves what was entered.
-4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration) and its own `goBack`/`canGoBack` workflow navigation
+4. **PURTab** — Batch job pipeline with view modes (choice screen, monitoring, configuration), three job sources (folder scan, file scan, or a parameter sweep), and its own `goBack`/`canGoBack` workflow navigation
 5. **JobStatusTab** — Paged listing of the user's most recent jobs (50 per page) with status badges, dates, and a name/ID filter. Fetches are generation-counted so a stale response cannot overwrite a newer one or wedge the loading state, and jobs whose status could not be fetched are surfaced as a warning rather than silently omitted.
 6. **SetupTab** — API settings, proxy configuration, logging, auto-download daemon
 7. **ActivityTab** — Logs with level filtering, run history with expandable job tables
 
 ### Frontend Shared Widgets (`frontend/src/components/widgets/`)
 
-`JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge`, `FileList`, `LocalBrowser`, `RemoteBrowser`, `RemoteFilePicker`, `TemplateBuilder`
+`JobsTable`, `StatsBar`, `PipelineStageSummary`, `PipelineLogPanel`, `ErrorSummary`, `StatusBadge`, `FileList`, `LocalBrowser`, `RemoteBrowser`, `RemoteFilePicker`, `TemplateBuilder`, `DOEBuilder`
 
 ---
 

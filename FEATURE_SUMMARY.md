@@ -245,8 +245,18 @@ Batch job submission pipeline for parallel computational studies.
 - Concurrent tar/upload/submit workers
 - Context-aware cancellation
 - Tar subpath and scan prefix support
-- Extra input files (upload once, attach to every job)
+- Common input files (upload once, attach to every job) — `--common-input-files`, with `--extra-input-files` kept as a deprecated hidden alias
 - Iterate command patterns (vary commands across runs)
+- Optional remote folder and file tags for a batch's uploads (`--folder`, `--folder-parent`, `--file-tags`)
+
+### Design of Experiments
+- `doe` — Expand one base job into a parameter sweep, one job per case
+- Eight designs: full factorial, one-factor-at-a-time, Latin hypercube, Sobol, Monte Carlo, central composite, Box-Behnken, explicit cases from a CSV
+- Values are rendered into each case's **command line**, not environment variables, so the configuration is visible on the Rescale job page
+- Parameters and `{{token}}`s in the command are checked against each other in both directions; unknown tokens in the job-name and tag templates are errors too
+- Per-case job name and Rescale job tag templates, with `{{__base}}` and `{{__index}}` built in
+- A sweep never zips a working directory: the shared deck comes either from `--base-file-ids` (already-uploaded IDs referenced by every case) or from `--common-input-files` at run time
+- `--preview` prints the design, the first case's rendered command and its tags without writing anything
 
 ### Additional Commands
 - `make-dirs-csv` — Auto-generate jobs CSV from directory structure
@@ -257,6 +267,7 @@ Batch job submission pipeline for parallel computational studies.
 
 ### GUI PUR Tab
 - Three-step workflow: configure → scan → execute
+- Jobs come from a folder scan, a file scan, or a parameter sweep built in the tab with a live case preview
 - Load/Save settings (CSV, JSON, SGE formats)
 - Pipeline Settings (workers, tar options)
 - Real-time monitoring dashboard with live progress
@@ -345,7 +356,7 @@ Seven tabs, in order:
 
 1. **Setup Tab**: API configuration, proxy settings, logging configuration, auto-download daemon management. Surfaces the daemon's most recent error with its age and an actionable hint.
 2. **Single Job Tab**: Job template builder with three input modes (directory, local files, remote files). Tar options for directory mode. A Back button between step one and step two returns to the first step without losing what was entered. The tag field accepts multiple comma-separated tags, and values typed without blurring are still captured on save and on template reload. Form state persists across tab navigation.
-3. **PUR Tab**: Batch job pipeline with view modes (choice screen, monitoring, configuration), pipeline settings, run queue
+3. **PUR Tab**: Batch job pipeline with view modes (choice screen, monitoring, configuration), pipeline settings, run queue. Jobs come from a folder scan, a file scan, or a parameter sweep built in the tab with a live case preview
 4. **Job Status Tab**: Paginated listing of your jobs with status badges, a name filter, and manual refresh. Pages forward with "Load next"; Refresh is disabled while a page load is in flight, and a tab-switch refresh that supersedes an in-flight page does not wedge the control.
 5. **File Browser Tab**: Two-pane local/remote browser with upload, download, and delete operations. The remote pane offers four browse modes — My Library, My Jobs, Legacy, and Trash. My Library and My Jobs support server-side search within a folder; Legacy adds an owner filter (any / mine / shared with me), server-side sorting by name, size, or created date, and Type / Owner / Created columns. Filters are scoped per mode and cleared on mode switch. A search or listing failure is reported rather than rendered as an empty library. Trash shows soft-deleted entries with restore/purge actions; Upload is disabled in Trash and My Jobs with an explicit "N/A in this view" reason.
 6. **Transfers Tab**: Transfer progress with batch grouping (folder ops, PUR, single-job collapse into single rows), cancel/retry, filter chips, disk space error banner. A cancelled batch reads as cancelled end to end rather than as a clean completion, and storage retries surface on the rows and in the Activity log. Daemon auto-download rows appear inline with a `Daemon` badge and support per-row Cancel/Retry via IPC.

@@ -25,6 +25,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ## What's New in v4.9.9
 
+- **Design of experiments in PUR.** One base job can be expanded into a parameter sweep — one Rescale job per design point — from the CLI (`pur doe`) or the PUR tab's sweep builder, with each case's values rendered into its own command line. Eight designs, per-case job name and tag templates, and one shared input deck for the whole sweep.
 - **New Job Status tab.** The GUI gains a dedicated tab listing your most recent jobs with status, dates and a name/ID filter, loading a page at a time rather than fetching everything up front.
 - **File Browser: search, owner filter, sorting and better pagination.** The remote pane can search by file name, restrict a listing to your own files or files shared with you, and sort by name, size or upload date, with the pagination cursor carried through search.
 - **Transfers tell the truth about what happened.** A cancelled folder transfer now reads as cancelled rather than as a clean completion, on the batch row and in the CLI. Storage retries and API rate-limit throttling are surfaced instead of silently stalling a transfer ([#22](https://github.com/rescale-labs/Rescale_Interlink/issues/22)), including for the detached auto-download daemon.
@@ -59,6 +60,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 - **Catalog Lookups**: Browse available hardware, software and automations (`hardware list`, `software list`, `automations list`)
 - **Compatibility Mode**: Drop-in replacement for `rescale-cli` (10 commands)
 - **PUR Integration**: Batch job pipeline execution
+- **Design of Experiments**: Expand one base job into a parameter sweep (`pur doe`), with values rendered into each case's command line
 - **Error Reporting**: Diagnostic reports with redacted context for server errors
 - **Adaptive Concurrency**: Automatic thread scaling based on file size distribution
 - **Command Shortcuts**: Quick aliases (`upload`, `download`, `ls`)
@@ -75,7 +77,7 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 - **Seven-Tab Interface**:
   - **Setup**: API key, proxy configuration, logging settings, test connection, auto-download daemon
   - **Single Job**: Configure and submit individual jobs (directory with tar options, local files, or remote files)
-  - **PUR (Multiple Jobs)**: Batch job pipeline (PUR = Parallel Upload and Run) with Pipeline Settings (workers, tar options) and directory scanning
+  - **PUR (Multiple Jobs)**: Batch job pipeline (PUR = Parallel Upload and Run) with Pipeline Settings (workers, tar options), directory scanning, and a DOE parameter sweep builder
   - **Job Status**: Paged listing of your recent jobs with status, dates and a name/ID filter
   - **File Browser**: Two-pane local/remote file browser with upload/download
   - **Transfers**: Real-time transfer queue with progress, cancel, retry, disk space error banner
@@ -239,6 +241,12 @@ rescale-int jobs download --id WfbQa --outdir ./results
 rescale-int pur run --jobs-csv jobs.csv --state state.csv
 ```
 
+**Expand one base job into a parameter sweep:**
+```bash
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --param "alpha=10:20:3" --param "beta=15:25:3"
+```
+
 **See [CLI_GUIDE.md](CLI_GUIDE.md) for complete command reference.**
 
 ### GUI Mode
@@ -247,7 +255,7 @@ The GUI provides seven tabs:
 
 1. **Setup**: API credentials, proxy settings, logging, daemon control
 2. **Single Job**: Create and submit individual jobs (directory with tar options, local files, or remote files)
-3. **PUR (Multiple Jobs)**: Parallel Upload and Run - batch job pipeline
+3. **PUR (Multiple Jobs)**: Parallel Upload and Run - batch job pipeline, from folders, input files, or a DOE parameter sweep
 4. **Job Status**: Browse your recent jobs a page at a time, filtered by name or ID
 5. **File Browser**: Two-pane file manager for local and remote files
 6. **Transfers**: Monitor active transfers with progress and controls
