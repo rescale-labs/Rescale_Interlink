@@ -606,22 +606,135 @@ func (f *uploadTargetFlags) resolve(ctx context.Context, apiClient *api.Client) 
 	return folderID, fileTags, nil
 }
 
+// purPipelineFlags holds the flag set that 'pur run' and 'pur resume' share:
+// batch inputs, the tar/upload/job worker overrides, and the two nested flag
+// groups. The commands differ only in their cobra metadata, resume's state-file
+// precondition, and the report each one prints for --dry-run.
+type purPipelineFlags struct {
+	jobsCSV         string
+	stateFile       string
+	multiPart       bool
+	includePatterns []string
+	excludePatterns []string
+	flattenTar      bool
+	tarCompression  string
+	tarWorkers      int
+	uploadWorkers   int
+	jobWorkers      int
+	rmTarOnSuccess  bool
+	sharedFiles     commonInputFileFlags
+	uploadTarget    uploadTargetFlags
+	dryRun          bool
+}
+
+// register adds the shared flags. The --state and --dry-run descriptions are
+// caller-supplied because they read differently on run than on resume.
+func (f *purPipelineFlags) register(cmd *cobra.Command, stateUsage, dryRunUsage string) {
+	cmd.Flags().StringVarP(&f.jobsCSV, "jobs-csv", "j", "", "Jobs CSV file (required)")
+	cmd.Flags().StringVarP(&f.stateFile, "state", "s", "", stateUsage)
+	cmd.Flags().BoolVar(&f.multiPart, "multipart", false, "Enable multi-part mode")
+	cmd.Flags().StringArrayVar(&f.includePatterns, "include-pattern", nil, "Only tar files matching glob pattern (can repeat)")
+	cmd.Flags().StringArrayVar(&f.excludePatterns, "exclude-pattern", nil, "Exclude files matching glob from tar (can repeat)")
+	cmd.Flags().BoolVar(&f.flattenTar, "flatten-tar", false, "Remove subdirectory structure in tarball")
+	cmd.Flags().StringVar(&f.tarCompression, "tar-compression", "", "Tar compression: 'none' or 'gzip' (default from config)")
+	cmd.Flags().IntVar(&f.tarWorkers, "tar-workers", 0, "Number of parallel tar workers (default from config)")
+	cmd.Flags().IntVar(&f.uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
+	cmd.Flags().IntVar(&f.jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
+	cmd.Flags().BoolVar(&f.rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
+	f.sharedFiles.register(cmd)
+	f.uploadTarget.register(cmd)
+	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, dryRunUsage)
+
+	cmd.MarkFlagRequired("jobs-csv")
+}
+
+// loadInputs loads the config, applies the tar and worker overrides the user
+// explicitly set, and reads the jobs CSV.
+//
+// It reaches no network, so both commands call it ahead of their --dry-run
+// branch and print their report from the jobs it returns.
+func (f *purPipelineFlags) loadInputs(cmd *cobra.Command) (*config.Config, []models.JobSpec, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cmd.Flags().Changed("include-pattern") {
+		cfg.IncludePatterns = f.includePatterns
+	}
+	if cmd.Flags().Changed("exclude-pattern") {
+		cfg.ExcludePatterns = f.excludePatterns
+	}
+	if cmd.Flags().Changed("flatten-tar") {
+		cfg.FlattenTar = f.flattenTar
+	}
+	if cmd.Flags().Changed("tar-compression") {
+		cfg.TarCompression = f.tarCompression
+	}
+	if cmd.Flags().Changed("tar-workers") && f.tarWorkers > 0 {
+		cfg.TarWorkers = f.tarWorkers
+	}
+	if cmd.Flags().Changed("upload-workers") && f.uploadWorkers > 0 {
+		cfg.UploadWorkers = f.uploadWorkers
+	}
+	if cmd.Flags().Changed("job-workers") && f.jobWorkers > 0 {
+		cfg.JobWorkers = f.jobWorkers
+	}
+
+	jobs, err := config.LoadJobsCSV(f.jobsCSV)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load jobs CSV: %w", err)
+	}
+
+	GetLogger().Info().Int("count", len(jobs)).Msg("Loaded jobs")
+	return cfg, jobs, nil
+}
+
+// runPipeline creates the API client, resolves the batch upload destination and
+// runs the pipeline to completion.
+//
+// Callers must have returned already when --dry-run is set: resolving the upload
+// target creates the remote folder, which a dry run must never do.
+func (f *purPipelineFlags) runPipeline(cfg *config.Config, jobs []models.JobSpec, doneMsg string) error {
+	apiClient, err := api.NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	ctx := GetContext()
+
+	// Resolve the upload destination and tags before any work starts, so a
+	// bad folder path fails before tarring begins.
+	folderID, fileTags, err := f.uploadTarget.resolve(ctx, apiClient)
+	if err != nil {
+		return err
+	}
+
+	pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
+		StateFile:        f.stateFile,
+		MultiPartMode:    f.multiPart,
+		CommonInputFiles: f.sharedFiles.commonInputFiles,
+		DecompressCommon: f.sharedFiles.decompressCommon,
+		UploadFolderID:   folderID,
+		FileTags:         fileTags,
+		RmTarOnSuccess:   f.rmTarOnSuccess,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create pipeline: %w", err)
+	}
+
+	if err := pipe.Run(ctx); err != nil {
+		return fmt.Errorf("pipeline failed: %w", err)
+	}
+
+	GetLogger().Info().Msg(doneMsg)
+	fmt.Println("\n✓ Pipeline completed")
+	return nil
+}
+
 // newRunCmd creates the 'run' command.
 func newRunCmd() *cobra.Command {
-	var jobsCSV string
-	var stateFile string
-	var multiPart bool
-	var includePatterns []string
-	var excludePatterns []string
-	var flattenTar bool
-	var tarCompression string
-	var tarWorkers int
-	var uploadWorkers int
-	var jobWorkers int
-	var rmTarOnSuccess bool
-	var sharedFiles commonInputFileFlags
-	var uploadTarget uploadTargetFlags
-	var dryRun bool
+	var f purPipelineFlags
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -631,59 +744,25 @@ func newRunCmd() *cobra.Command {
 Example:
   rescale-int pur run --jobs-csv jobs.csv --state state.csv`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logger := GetLogger()
-
-			if jobsCSV == "" {
+			if f.jobsCSV == "" {
 				return fmt.Errorf("--jobs-csv is required")
 			}
 
-			if err := sharedFiles.resolve(cmd); err != nil {
+			if err := f.sharedFiles.resolve(cmd); err != nil {
 				return err
 			}
 
-			logger.Info().
-				Str("jobs", jobsCSV).
-				Str("state", stateFile).
+			GetLogger().Info().
+				Str("jobs", f.jobsCSV).
+				Str("state", f.stateFile).
 				Msg("Starting job pipeline")
 
-			// Load config
-			cfg, err := loadConfig()
+			cfg, jobs, err := f.loadInputs(cmd)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			// Override config values when CLI flags are explicitly set
-			if cmd.Flags().Changed("include-pattern") {
-				cfg.IncludePatterns = includePatterns
-			}
-			if cmd.Flags().Changed("exclude-pattern") {
-				cfg.ExcludePatterns = excludePatterns
-			}
-			if cmd.Flags().Changed("flatten-tar") {
-				cfg.FlattenTar = flattenTar
-			}
-			if cmd.Flags().Changed("tar-compression") {
-				cfg.TarCompression = tarCompression
-			}
-			if cmd.Flags().Changed("tar-workers") && tarWorkers > 0 {
-				cfg.TarWorkers = tarWorkers
-			}
-			if cmd.Flags().Changed("upload-workers") && uploadWorkers > 0 {
-				cfg.UploadWorkers = uploadWorkers
-			}
-			if cmd.Flags().Changed("job-workers") && jobWorkers > 0 {
-				cfg.JobWorkers = jobWorkers
-			}
-
-			// Load jobs
-			jobs, err := config.LoadJobsCSV(jobsCSV)
-			if err != nil {
-				return fmt.Errorf("failed to load jobs CSV: %w", err)
-			}
-
-			logger.Info().Int("count", len(jobs)).Msg("Loaded jobs")
-
-			if dryRun {
+			if f.dryRun {
 				fmt.Printf("\n=== DRY RUN: %d jobs loaded ===\n\n", len(jobs))
 				fmt.Printf("%-5s %-30s %-20s %-10s %-8s %s\n", "#", "Job Name", "Directory", "CoreType", "Hours", "Command (preview)")
 				fmt.Println(strings.Repeat("-", 110))
@@ -706,82 +785,18 @@ Example:
 				return nil
 			}
 
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
-			}
-
-			ctx := GetContext()
-
-			// Resolve the upload destination and tags before any work starts, so a
-			// bad folder path fails before tarring begins.
-			folderID, fileTags, err := uploadTarget.resolve(ctx, apiClient)
-			if err != nil {
-				return err
-			}
-
-			// Create pipeline
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
-				StateFile:        stateFile,
-				MultiPartMode:    multiPart,
-				CommonInputFiles: sharedFiles.commonInputFiles,
-				DecompressCommon: sharedFiles.decompressCommon,
-				UploadFolderID:   folderID,
-				FileTags:         fileTags,
-				RmTarOnSuccess:   rmTarOnSuccess,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to create pipeline: %w", err)
-			}
-
-			// Run pipeline
-			if err := pipe.Run(ctx); err != nil {
-				return fmt.Errorf("pipeline failed: %w", err)
-			}
-
-			logger.Info().Msg("Pipeline completed successfully")
-			fmt.Println("\n✓ Pipeline completed")
-			return nil
+			return f.runPipeline(cfg, jobs, "Pipeline completed successfully")
 		},
 	}
 
-	cmd.Flags().StringVarP(&jobsCSV, "jobs-csv", "j", "", "Jobs CSV file (required)")
-	cmd.Flags().StringVarP(&stateFile, "state", "s", "", "State file for resume capability")
-	cmd.Flags().BoolVar(&multiPart, "multipart", false, "Enable multi-part mode")
-	cmd.Flags().StringArrayVar(&includePatterns, "include-pattern", nil, "Only tar files matching glob pattern (can repeat)")
-	cmd.Flags().StringArrayVar(&excludePatterns, "exclude-pattern", nil, "Exclude files matching glob from tar (can repeat)")
-	cmd.Flags().BoolVar(&flattenTar, "flatten-tar", false, "Remove subdirectory structure in tarball")
-	cmd.Flags().StringVar(&tarCompression, "tar-compression", "", "Tar compression: 'none' or 'gzip' (default from config)")
-	cmd.Flags().IntVar(&tarWorkers, "tar-workers", 0, "Number of parallel tar workers (default from config)")
-	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
-	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
-	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
-	sharedFiles.register(cmd)
-	uploadTarget.register(cmd)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate and show plan without executing")
-
-	cmd.MarkFlagRequired("jobs-csv")
+	f.register(cmd, "State file for resume capability", "Validate and show plan without executing")
 
 	return cmd
 }
 
 // newResumeCmd creates the 'resume' command.
 func newResumeCmd() *cobra.Command {
-	var jobsCSV string
-	var stateFile string
-	var multiPart bool
-	var includePatterns []string
-	var excludePatterns []string
-	var flattenTar bool
-	var tarCompression string
-	var tarWorkers int
-	var uploadWorkers int
-	var jobWorkers int
-	var rmTarOnSuccess bool
-	var sharedFiles commonInputFileFlags
-	var uploadTarget uploadTargetFlags
-	var dryRun bool
+	var f purPipelineFlags
 
 	cmd := &cobra.Command{
 		Use:   "resume",
@@ -791,69 +806,35 @@ func newResumeCmd() *cobra.Command {
 Example:
   rescale-int pur resume --jobs-csv jobs.csv --state state.csv`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logger := GetLogger()
-
-			if stateFile == "" {
+			if f.stateFile == "" {
 				return fmt.Errorf("--state is required")
 			}
-			if jobsCSV == "" {
+			if f.jobsCSV == "" {
 				return fmt.Errorf("--jobs-csv is required")
 			}
 
-			if err := sharedFiles.resolve(cmd); err != nil {
+			if err := f.sharedFiles.resolve(cmd); err != nil {
 				return err
 			}
 
-			logger.Info().
-				Str("jobs", jobsCSV).
-				Str("state", stateFile).
+			GetLogger().Info().
+				Str("jobs", f.jobsCSV).
+				Str("state", f.stateFile).
 				Msg("Resuming pipeline")
 
 			// Check that state file exists
-			if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-				return fmt.Errorf("state file does not exist: %s", stateFile)
+			if _, err := os.Stat(f.stateFile); os.IsNotExist(err) {
+				return fmt.Errorf("state file does not exist: %s", f.stateFile)
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			cfg, jobs, err := f.loadInputs(cmd)
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
 
-			// Override config values when CLI flags are explicitly set
-			if cmd.Flags().Changed("include-pattern") {
-				cfg.IncludePatterns = includePatterns
-			}
-			if cmd.Flags().Changed("exclude-pattern") {
-				cfg.ExcludePatterns = excludePatterns
-			}
-			if cmd.Flags().Changed("flatten-tar") {
-				cfg.FlattenTar = flattenTar
-			}
-			if cmd.Flags().Changed("tar-compression") {
-				cfg.TarCompression = tarCompression
-			}
-			if cmd.Flags().Changed("tar-workers") && tarWorkers > 0 {
-				cfg.TarWorkers = tarWorkers
-			}
-			if cmd.Flags().Changed("upload-workers") && uploadWorkers > 0 {
-				cfg.UploadWorkers = uploadWorkers
-			}
-			if cmd.Flags().Changed("job-workers") && jobWorkers > 0 {
-				cfg.JobWorkers = jobWorkers
-			}
-
-			// Load jobs
-			jobs, err := config.LoadJobsCSV(jobsCSV)
-			if err != nil {
-				return fmt.Errorf("failed to load jobs CSV: %w", err)
-			}
-
-			logger.Info().Int("count", len(jobs)).Msg("Loaded jobs")
-
-			if dryRun {
+			if f.dryRun {
 				// Load state file to analyze what's remaining
-				stateMgr := state.NewManager(stateFile)
+				stateMgr := state.NewManager(f.stateFile)
 				if err := stateMgr.Load(); err != nil {
 					return fmt.Errorf("failed to load state: %w", err)
 				}
@@ -891,62 +872,11 @@ Example:
 				return nil
 			}
 
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
-			}
-
-			ctx := GetContext()
-
-			// Resolve the upload destination and tags before any work starts, so a
-			// bad folder path fails before tarring begins.
-			folderID, fileTags, err := uploadTarget.resolve(ctx, apiClient)
-			if err != nil {
-				return err
-			}
-
-			// Create pipeline (will load existing state)
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
-				StateFile:        stateFile,
-				MultiPartMode:    multiPart,
-				CommonInputFiles: sharedFiles.commonInputFiles,
-				DecompressCommon: sharedFiles.decompressCommon,
-				UploadFolderID:   folderID,
-				FileTags:         fileTags,
-				RmTarOnSuccess:   rmTarOnSuccess,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to create pipeline: %w", err)
-			}
-
-			// Run pipeline (will resume from state)
-			if err := pipe.Run(ctx); err != nil {
-				return fmt.Errorf("pipeline failed: %w", err)
-			}
-
-			logger.Info().Msg("Pipeline resumed and completed")
-			fmt.Println("\n✓ Pipeline completed")
-			return nil
+			return f.runPipeline(cfg, jobs, "Pipeline resumed and completed")
 		},
 	}
 
-	cmd.Flags().StringVarP(&jobsCSV, "jobs-csv", "j", "", "Jobs CSV file (required)")
-	cmd.Flags().StringVarP(&stateFile, "state", "s", "", "State file (required)")
-	cmd.Flags().BoolVar(&multiPart, "multipart", false, "Enable multi-part mode")
-	cmd.Flags().StringArrayVar(&includePatterns, "include-pattern", nil, "Only tar files matching glob pattern (can repeat)")
-	cmd.Flags().StringArrayVar(&excludePatterns, "exclude-pattern", nil, "Exclude files matching glob from tar (can repeat)")
-	cmd.Flags().BoolVar(&flattenTar, "flatten-tar", false, "Remove subdirectory structure in tarball")
-	cmd.Flags().StringVar(&tarCompression, "tar-compression", "", "Tar compression: 'none' or 'gzip' (default from config)")
-	cmd.Flags().IntVar(&tarWorkers, "tar-workers", 0, "Number of parallel tar workers (default from config)")
-	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
-	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
-	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
-	sharedFiles.register(cmd)
-	uploadTarget.register(cmd)
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be resumed without executing")
-
-	cmd.MarkFlagRequired("jobs-csv")
+	f.register(cmd, "State file (required)", "Show what would be resumed without executing")
 	cmd.MarkFlagRequired("state")
 
 	return cmd
