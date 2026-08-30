@@ -285,6 +285,10 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		job := template
 		job.InputFiles = jobFiles.InputFiles
 		job.Directory = jobFiles.PrimaryDir
+		// Files mode tars the matched files directly; a subpath inherited from
+		// a loaded template has no directory to apply to and would fail every
+		// job at the tar stage, with no UI field in this mode to clear it.
+		job.TarSubpath = ""
 
 		// Generate job name
 		if template.JobName != "" {
