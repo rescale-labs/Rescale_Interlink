@@ -1045,9 +1045,9 @@ export function PURTab() {
             {scanOptions.scanMode === 'doe' ? (
               <p className="text-xs text-gray-500 mb-3">
                 <strong>How PUR handles a sweep:</strong> Cases differ only in their command,
-                so the files below are uploaded once and attached to every case. Unless the
-                sweep uses shared input file IDs, each case still archives and uploads the
-                template&apos;s directory separately.
+                so the files below are uploaded once and attached to every case. A sweep never
+                zips a working directory, so unless it uses shared input file IDs, the files
+                below are the only inputs its cases get.
               </p>
             ) : (
               <p className="text-xs text-gray-500 mb-3">

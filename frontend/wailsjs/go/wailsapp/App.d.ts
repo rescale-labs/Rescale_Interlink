@@ -74,6 +74,7 @@ export function LoadJobsFromCSV(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>
 export function LoadJobsFromJSON(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>;
 export function LoadTemplate(arg1:string):Promise<wailsapp.JobSpecDTO>;
 export function OpenLogsDirectory():Promise<void>;
+export function ParseDOECasesCSV(arg1:string):Promise<wailsapp.DOECasesCSVDTO>;
 export function PauseDaemon():Promise<void>;
 export function PreviewCommandPatterns(arg1:string,arg2:Array<string>):Promise<Array<wailsapp.CommandPreviewDTO>>;
 export function PreviewDOECases(arg1:wailsapp.DOEOptionsDTO,arg2:number):Promise<wailsapp.DOEResultDTO>;

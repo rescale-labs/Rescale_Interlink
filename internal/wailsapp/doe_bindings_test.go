@@ -109,7 +109,9 @@ func TestGenerateDOE_SharedFileIDsClearDirectory(t *testing.T) {
 	}
 }
 
-func TestGenerateDOE_RendersTagTemplates(t *testing.T) {
+// TagTemplates only has to survive the conversion here; what the tags render to
+// is pinned in the doe package.
+func TestGenerateDOE_PassesTagTemplatesThrough(t *testing.T) {
 	app := &App{}
 
 	opts := doeOptions()
@@ -126,42 +128,48 @@ func TestGenerateDOE_RendersTagTemplates(t *testing.T) {
 	}
 }
 
-func TestPreviewDOECases_TruncatesAndOmitsJobs(t *testing.T) {
-	app := &App{}
-
-	opts := doeOptions()
-	opts.Parameters[0].Levels = 5
-	opts.Parameters[1].Levels = 5
-
-	result := app.PreviewDOECases(opts, 3)
-	if !result.OK {
-		t.Fatalf("PreviewDOECases failed: %v", result.Errors)
+// A preview reports the whole design's size while returning only its first page,
+// and never the job specs — the limit reaches Generate, so the cases past it are
+// not rendered at all.
+func TestPreviewDOECases_LimitsCases(t *testing.T) {
+	tests := []struct {
+		name          string
+		levels        int
+		limit         int
+		wantCaseCount int
+		wantCases     int
+		wantTruncated bool
+	}{
+		{name: "limit below the design size", levels: 5, limit: 3, wantCaseCount: 25, wantCases: 3, wantTruncated: true},
+		{name: "zero limit returns everything", levels: 2, limit: 0, wantCaseCount: 4, wantCases: 4},
 	}
 
-	if result.CaseCount != 25 {
-		t.Errorf("CaseCount = %d, want the full design size 25", result.CaseCount)
-	}
-	if len(result.Cases) != 3 {
-		t.Errorf("got %d cases, want the limit of 3", len(result.Cases))
-	}
-	if !result.Truncated {
-		t.Error("Truncated = false, want true when cases were cut")
-	}
-	if len(result.Jobs) != 0 {
-		t.Errorf("preview returned %d jobs, want none", len(result.Jobs))
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &App{}
 
-func TestPreviewDOECases_ZeroLimitReturnsEverything(t *testing.T) {
-	app := &App{}
+			opts := doeOptions()
+			opts.Parameters[0].Levels = tt.levels
+			opts.Parameters[1].Levels = tt.levels
 
-	result := app.PreviewDOECases(doeOptions(), 0)
+			result := app.PreviewDOECases(opts, tt.limit)
+			if !result.OK {
+				t.Fatalf("PreviewDOECases failed: %v", result.Errors)
+			}
 
-	if len(result.Cases) != 4 {
-		t.Errorf("got %d cases, want all 4", len(result.Cases))
-	}
-	if result.Truncated {
-		t.Error("Truncated = true for an untruncated preview")
+			if result.CaseCount != tt.wantCaseCount {
+				t.Errorf("CaseCount = %d, want the full design size %d", result.CaseCount, tt.wantCaseCount)
+			}
+			if len(result.Cases) != tt.wantCases {
+				t.Errorf("got %d cases, want %d", len(result.Cases), tt.wantCases)
+			}
+			if result.Truncated != tt.wantTruncated {
+				t.Errorf("Truncated = %v, want %v", result.Truncated, tt.wantTruncated)
+			}
+			if len(result.Jobs) != 0 {
+				t.Errorf("preview returned %d jobs, want none", len(result.Jobs))
+			}
+		})
 	}
 }
 

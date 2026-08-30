@@ -290,6 +290,10 @@ export function OpenLogsDirectory() {
   return window['go']['wailsapp']['App']['OpenLogsDirectory']();
 }
 
+export function ParseDOECasesCSV(arg1) {
+  return window['go']['wailsapp']['App']['ParseDOECasesCSV'](arg1);
+}
+
 export function PauseDaemon() {
   return window['go']['wailsapp']['App']['PauseDaemon']();
 }

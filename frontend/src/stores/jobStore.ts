@@ -313,10 +313,19 @@ const BACK_TARGETS: Partial<Record<WorkflowState, WorkflowState>> = {
 
 const MEMORY_KEY = 'rescale-int-job-memory'
 
+// previewSequence numbers the live preview's requests. Only the newest one is
+// allowed to write its result; see previewDOE.
+let previewSequence = 0
+
 // buildDOEOptionsDTO converts the store's sweep configuration into the shape the
 // Go binding expects. Empty optional fields are sent as-is; the backend fills in
-// its own defaults for them.
-function buildDOEOptionsDTO(opts: DOEOptions, template: JobSpec): wailsapp.DOEOptionsDTO {
+// its own defaults for them. Explicit cases are parsed separately, by
+// resolveDOECases, because that parse is a backend call.
+function buildDOEOptionsDTO(
+  opts: DOEOptions,
+  template: JobSpec,
+  cases: Array<Record<string, string>>,
+): wailsapp.DOEOptionsDTO {
   return {
     template: template as wailsapp.JobSpecDTO,
     parameters: opts.parameters.map((p) => ({
@@ -333,7 +342,7 @@ function buildDOEOptionsDTO(opts: DOEOptions, template: JobSpec): wailsapp.DOEOp
     samples: opts.samples,
     seed: opts.seed,
     centerPoints: opts.centerPoints,
-    cases: parseCasesCSV(opts.casesCSV),
+    cases,
     baseFileIds: splitList(opts.baseFileIds),
     jobNameTemplate: opts.jobNameTemplate,
     tagTemplates: opts.tagTemplates.filter(Boolean),
@@ -341,32 +350,19 @@ function buildDOEOptionsDTO(opts: DOEOptions, template: JobSpec): wailsapp.DOEOp
   } as wailsapp.DOEOptionsDTO
 }
 
-// parseCasesCSV reads pasted cases: a header row naming the parameters, then one
-// row per case. Rows whose column count does not match the header are dropped,
-// which the backend then reports as a case missing a parameter value.
+// resolveDOECases parses the pasted explicit cases through the backend, which is
+// the same parser the CLI's --cases-csv goes through, so identical text means an
+// identical sweep on either surface. A parse failure throws and is reported as
+// the sweep's error.
 //
-// Quoting is not handled because a parameter value cannot contain a quote or a
-// comma anyway — the backend rejects values that would restructure the command.
-export function parseCasesCSV(text: string): Array<Record<string, string>> {
-  const rows = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
+// Only the explicit method reads the box, and only that method shows it, so the
+// text is left unparsed otherwise rather than turning a half-typed leftover into
+// an error the user cannot see the source of.
+async function resolveDOECases(opts: DOEOptions): Promise<Array<Record<string, string>>> {
+  if (opts.method !== 'explicit' || opts.casesCSV.trim() === '') return []
 
-  if (rows.length < 2) return []
-
-  const names = rows[0].split(',').map((name) => name.trim())
-
-  return rows.slice(1).flatMap((row) => {
-    const values = row.split(',').map((value) => value.trim())
-    if (values.length !== names.length) return []
-
-    const entry: Record<string, string> = {}
-    names.forEach((name, i) => {
-      entry[name] = values[i]
-    })
-    return [entry]
-  })
+  const parsed = await App.ParseDOECasesCSV(opts.casesCSV)
+  return (parsed?.cases || []) as Array<Record<string, string>>
 }
 
 // toDOEResult normalizes a result DTO so the UI never has to guard for null
@@ -714,13 +710,21 @@ export const useJobStore = create<JobStore>((set, get) => ({
       return
     }
 
+    // The debounce cancels a pending timer, not a call already in flight, so a
+    // slow generation could otherwise land after a newer one and show a design
+    // the user has already edited away from.
+    const seq = ++previewSequence
+
     try {
+      const cases = await resolveDOECases(doeOptions)
       const result = await App.PreviewDOECases(
-        buildDOEOptionsDTO(doeOptions, template),
+        buildDOEOptionsDTO(doeOptions, template, cases),
         DOE_PREVIEW_LIMIT,
       )
+      if (seq !== previewSequence) return
       set({ doePreview: toDOEResult(result), doeError: null })
     } catch (error) {
+      if (seq !== previewSequence) return
       set({
         doePreview: null,
         doeError: error instanceof Error ? error.message : String(error),
@@ -734,7 +738,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
     set({ isGeneratingDOE: true, doeError: null })
 
     try {
-      const result = await App.GenerateDOE(buildDOEOptionsDTO(doeOptions, template))
+      const cases = await resolveDOECases(doeOptions)
+      const result = await App.GenerateDOE(buildDOEOptionsDTO(doeOptions, template, cases))
 
       set({ doePreview: toDOEResult(result) })
 

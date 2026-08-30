@@ -1,6 +1,8 @@
 package wailsapp
 
 import (
+	"strings"
+
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/doe"
 )
@@ -65,6 +67,13 @@ type DOEResultDTO struct {
 	Warnings  []DOEProblemDTO `json:"warnings,omitempty"`
 }
 
+// DOECasesCSVDTO is a parsed explicit-cases CSV: the parameter names in column
+// order and one map of name to value per case.
+type DOECasesCSVDTO struct {
+	Names []string            `json:"names"`
+	Cases []map[string]string `json:"cases"`
+}
+
 // DOEMethodDTO describes a sampling method for the method menu, including which
 // fields the method reads so the form can hide the ones it ignores.
 type DOEMethodDTO struct {
@@ -118,8 +127,25 @@ func (a *App) GenerateDOE(opts DOEOptionsDTO) DOEResultDTO {
 // PreviewDOECases generates the sweep and returns at most limit cases without
 // the job specs, which is what the live preview needs. A limit of zero or less
 // returns every case.
+//
+// The limit is passed to Generate as well as applied here, so a preview stops
+// rendering once it has its page instead of building every case's job spec only
+// for the conversion below to discard them.
 func (a *App) PreviewDOECases(opts DOEOptionsDTO, limit int) DOEResultDTO {
-	return doeResultToDTO(doe.Generate(dtoToDOEOptions(opts)), limit, false)
+	doeOpts := dtoToDOEOptions(opts)
+	doeOpts.RenderLimit = limit
+	return doeResultToDTO(doe.Generate(doeOpts), limit, false)
+}
+
+// ParseDOECasesCSV parses pasted explicit cases with the same parser the CLI
+// uses for --cases-csv, so identical text yields an identical sweep on either
+// surface. Returns the parameter names in column order and one map per case.
+func (a *App) ParseDOECasesCSV(text string) (DOECasesCSVDTO, error) {
+	names, cases, err := doe.ParseCasesCSV(strings.NewReader(text))
+	if err != nil {
+		return DOECasesCSVDTO{}, err
+	}
+	return DOECasesCSVDTO{Names: names, Cases: cases}, nil
 }
 
 // dtoToDOEOptions converts the DTO to doe.Options.
@@ -156,17 +182,20 @@ func dtoToDOEOptions(opts DOEOptionsDTO) doe.Options {
 func doeResultToDTO(result doe.Result, limit int, includeJobs bool) DOEResultDTO {
 	dto := DOEResultDTO{
 		OK:        result.OK(),
-		CaseCount: len(result.Cases),
+		CaseCount: result.CaseCount,
 		Errors:    doeProblemsToDTO(result.Errors),
 		Warnings:  doeProblemsToDTO(result.Warnings),
 		Cases:     []DOECaseDTO{},
 	}
 
+	// Cases may already be short of the design because Generate was given the
+	// same limit, so truncation is measured against the design size rather than
+	// against what came back.
 	shown := len(result.Cases)
 	if limit > 0 && limit < shown {
 		shown = limit
-		dto.Truncated = true
 	}
+	dto.Truncated = shown < result.CaseCount
 
 	for _, c := range result.Cases[:shown] {
 		dto.Cases = append(dto.Cases, DOECaseDTO{

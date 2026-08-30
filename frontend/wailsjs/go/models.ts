@@ -492,6 +492,20 @@ export namespace wailsapp {
 	        this.tags = source["tags"];
 	    }
 	}
+	export class DOECasesCSVDTO {
+	    names: string[];
+	    cases: any[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DOECasesCSVDTO(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.names = source["names"];
+	        this.cases = source["cases"];
+	    }
+	}
 	export class DOEMethodDTO {
 	    method: string;
 	    label: string;

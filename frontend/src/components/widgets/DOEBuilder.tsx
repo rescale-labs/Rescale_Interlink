@@ -312,7 +312,9 @@ export function DOEBuilder() {
                   type="number"
                   min={0}
                   value={doeOptions.seed}
-                  onChange={(e) => setDOEOptions({ seed: parseInt(e.target.value) || 0 })}
+                  // Seed is a uint64 in Go, so a typed "-5" would fail to
+                  // unmarshal and reject the whole call with a raw parse error.
+                  onChange={(e) => setDOEOptions({ seed: Math.max(0, parseInt(e.target.value) || 0) })}
                   className={INPUT_CLASS}
                 />
                 <p className="mt-1 text-xs text-gray-500">
@@ -409,7 +411,8 @@ export function DOEBuilder() {
           Every case in a sweep uses the same input deck. Give the IDs of an
           already-uploaded deck and each case references those files directly, so the
           deck transfers once for the whole sweep instead of once per case. Leave empty
-          to tar and upload the template&apos;s directory per case.
+          and the cases carry no input files of their own — supply the deck once as a
+          Common Input File below.
         </p>
       </div>
 
