@@ -173,8 +173,8 @@ func (e *Engine) UpdateConfig(cfg *config.Config) error {
 
 	// Re-registered on each config update so the hook always points at the current client.
 	ratelimit.GlobalStore().SetStaleConnectionCleanup(func() {
-		apiClient.CloseIdleConnections()    // API client transport
-		inthttp.CloseAllIdleConnections()   // S3 + Azure provider transports
+		apiClient.CloseIdleConnections()  // API client transport
+		inthttp.CloseAllIdleConnections() // S3 + Azure provider transports
 	})
 
 	e.mu.Unlock()
@@ -695,8 +695,8 @@ func (e *Engine) StartJobMonitoring(interval time.Duration) {
 	}
 
 	e.monitorTicker = time.NewTicker(interval)
-	tickerC := e.monitorTicker.C   // Capture channel to avoid race with StopJobMonitoring
-	stopC := e.monitorStop         // Capture stop channel as well
+	tickerC := e.monitorTicker.C // Capture channel to avoid race with StopJobMonitoring
+	stopC := e.monitorStop       // Capture stop channel as well
 
 	e.monitorWg.Add(1)
 	go func() {
