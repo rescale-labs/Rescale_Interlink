@@ -12,9 +12,6 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
-// jobsCSVHeader is the column row every jobs/template CSV in these tests starts with.
-const jobsCSVHeader = "Directory,JobName,AnalysisCode,AnalysisVersion,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings"
-
 // newScanEngine returns an engine whose config skips directory validation, as
 // every scan test needs.
 func newScanEngine(t *testing.T) *Engine {
@@ -35,17 +32,6 @@ func mkRunDirs(t *testing.T, root string, names ...string) {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
-	}
-}
-
-// writeTemplateCSV writes the single-row template CSV that Scan clones per
-// discovered directory. licenseSettings is the last column verbatim, since it
-// is the one field whose quoting differs between tests.
-func writeTemplateCSV(t *testing.T, path, licenseSettings string) {
-	t.Helper()
-	content := jobsCSVHeader + "\n/tmp/test,test_job_1,user_included,1.0,./run.sh,emerald,4,1.0,1," + licenseSettings
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write template CSV: %v", err)
 	}
 }
 
@@ -173,38 +159,6 @@ func TestEngine_Events(t *testing.T) {
 	}
 }
 
-func TestEngine_Plan(t *testing.T) {
-	t.Run("nonexistent file", func(t *testing.T) {
-		engine, _ := NewEngine(nil)
-		if _, err := engine.Plan("/nonexistent/file.csv", false); err == nil {
-			t.Error("Expected error for nonexistent file")
-		}
-	})
-
-	t.Run("valid file", func(t *testing.T) {
-		jobsCSV := filepath.Join(t.TempDir(), "jobs.csv")
-		content := jobsCSVHeader + `
-/tmp/test,test-job-1,user_included,1.0,./run.sh,emerald,4,1.0,1,"{""test"":""value""}"
-/tmp/test2,test-job-2,user_included,1.0,./run.sh,onyx,8,2.0,2,"{""test"":""value""}"`
-		if err := os.WriteFile(jobsCSV, []byte(content), 0o644); err != nil {
-			t.Fatalf("Failed to create test CSV: %v", err)
-		}
-
-		engine, _ := NewEngine(nil)
-		result, err := engine.Plan(jobsCSV, false)
-		if err != nil {
-			t.Fatalf("Plan failed: %v", err)
-		}
-		if result.TotalJobs != 2 {
-			t.Errorf("Expected 2 total jobs, got %d", result.TotalJobs)
-		}
-		// Without core type validation and with nonexistent directories, should have errors
-		if result.InvalidJobs == 0 {
-			t.Log("Note: Some validation errors expected for nonexistent directories")
-		}
-	})
-}
-
 func TestEngine_Stop(t *testing.T) {
 	engine, _ := NewEngine(nil)
 
@@ -255,47 +209,8 @@ func TestEngine_SaveConfig(t *testing.T) {
 	}
 }
 
-func TestEngine_Scan(t *testing.T) {
-	engine := newScanEngine(t)
-
-	tmpDir := t.TempDir()
-	mkRunDirs(t, tmpDir, "Run_1", "Run_2")
-	templatePath := filepath.Join(tmpDir, "template.csv")
-	writeTemplateCSV(t, templatePath, `"{""test"":""value""}"`)
-
-	// Scan resolves its pattern against the working directory.
-	t.Chdir(tmpDir)
-
-	outputPath := filepath.Join(tmpDir, "jobs.csv")
-	err := engine.Scan(ScanOptions{
-		TemplateCSV:       templatePath,
-		OutputCSV:         outputPath,
-		Pattern:           "Run_*",
-		StartIndex:        1,
-		Overwrite:         true,
-		ValidationPattern: "", // Don't validate for this test
-		RunSubpath:        "", // No subpath
-		MultiPartMode:     false,
-		PartDirs:          nil,
-	})
-	if err != nil {
-		t.Fatalf("Scan failed: %v", err)
-	}
-
-	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
-		t.Error("Output CSV was not created")
-	}
-
-	jobs, err := config.LoadJobsCSV(outputPath)
-	if err != nil {
-		t.Fatalf("Failed to load generated CSV: %v", err)
-	}
-	if len(jobs) != 2 {
-		t.Errorf("Expected 2 jobs, got %d", len(jobs))
-	}
-	wantAbsoluteDirs(t, jobs)
-}
-
+// TestEngine_ScanToSpecs_AbsolutePaths covers the PartDirs scan root; the
+// recursive test below covers the working-directory fallback.
 func TestEngine_ScanToSpecs_AbsolutePaths(t *testing.T) {
 	engine := newScanEngine(t)
 
@@ -330,34 +245,24 @@ func TestEngine_ScanToSpecs_AbsolutePaths(t *testing.T) {
 
 // TestEngine_RecursiveScan_SkipDir verifies that nested directories matching
 // the pattern are NOT discovered when using recursive scan (SkipDir behavior).
+// With no PartDirs, the scan root is the working directory.
 func TestEngine_RecursiveScan_SkipDir(t *testing.T) {
 	engine := newScanEngine(t)
 
 	tmpDir := t.TempDir()
 	// Top-level Run dirs, plus a nested one inside Run_1 that must not match.
 	mkRunDirs(t, tmpDir, "Run_1", "Run_2", filepath.Join("Run_1", "sub", "Run_3"))
-	templatePath := filepath.Join(tmpDir, "template.csv")
-	writeTemplateCSV(t, templatePath, "")
 
 	t.Chdir(tmpDir)
 
-	outputPath := filepath.Join(tmpDir, "jobs_recursive.csv")
-	err := engine.Scan(ScanOptions{
-		TemplateCSV:       templatePath,
-		OutputCSV:         outputPath,
+	jobs, err := engine.ScanToSpecs(models.JobSpec{JobName: "test_job_1"}, ScanOptions{
 		Pattern:           "Run_*",
 		Recursive:         true,
 		StartIndex:        1,
-		Overwrite:         true,
 		ValidationPattern: "",
 	})
 	if err != nil {
 		t.Fatalf("Recursive scan failed: %v", err)
-	}
-
-	jobs, err := config.LoadJobsCSV(outputPath)
-	if err != nil {
-		t.Fatalf("Failed to load scan output: %v", err)
 	}
 
 	// Should find only Run_1 and Run_2 (not nested Run_3)
@@ -367,6 +272,7 @@ func TestEngine_RecursiveScan_SkipDir(t *testing.T) {
 			t.Logf("  Found: %s -> %s", j.JobName, j.Directory)
 		}
 	}
+	wantAbsoluteDirs(t, jobs)
 }
 
 func TestEngine_JobMonitoring(t *testing.T) {

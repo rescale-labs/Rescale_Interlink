@@ -33,7 +33,8 @@ type ScanOpts struct {
 
 // ScanDirectories scans one or more project directories for run directories,
 // applies validation, and generates unique job names.
-// Used by both make-dirs-csv CLI and engine.Scan()/ScanToSpecs() GUI path.
+// Used by the make-dirs-csv CLI only; Engine.ScanToSpecs runs its own loop over
+// CollectAllRunDirectories and does not route through here.
 //
 // Multi-part mode (PartDirs non-empty): scans each project directory, collects
 // all matching subdirectories, validates them, and generates job names with
