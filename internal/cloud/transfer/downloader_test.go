@@ -33,22 +33,17 @@ type mockStreamingDownloader struct {
 	formatVersion           int
 	fileID                  string
 	partSize                int64
-	iv                      []byte // IV for legacy format (v0)
-	detectFormatErr         error
-	downloadStreamingErr    error
+	iv                      []byte // nil for every shipped case: v0 derives its IV from the file header
 	streamingDownloadCalled bool
 }
 
 func (m *mockStreamingDownloader) DetectFormat(ctx context.Context, remotePath string) (int, string, int64, []byte, error) {
-	if m.detectFormatErr != nil {
-		return 0, "", 0, nil, m.detectFormatErr
-	}
 	return m.formatVersion, m.fileID, m.partSize, m.iv, nil
 }
 
 func (m *mockStreamingDownloader) DownloadStreaming(ctx context.Context, remotePath, localPath string, masterKey []byte, progressCallback cloud.ProgressCallback) error {
 	m.streamingDownloadCalled = true
-	return m.downloadStreamingErr
+	return nil
 }
 
 // mockLegacyDownloader implements LegacyDownloader, writing whatever ciphertext
@@ -57,14 +52,10 @@ type mockLegacyDownloader struct {
 	mockStreamingDownloader
 	ciphertext              []byte
 	downloadEncryptedCalled bool
-	downloadEncryptedErr    error
 }
 
 func (m *mockLegacyDownloader) DownloadEncryptedFile(ctx context.Context, params LegacyDownloadParams) error {
 	m.downloadEncryptedCalled = true
-	if m.downloadEncryptedErr != nil {
-		return m.downloadEncryptedErr
-	}
 	return os.WriteFile(params.EncryptedPath, m.ciphertext, 0644)
 }
 

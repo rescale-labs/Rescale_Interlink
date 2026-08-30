@@ -1,24 +1,20 @@
 package wailsapp
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/config"
-	"github.com/rescale/rescale-int/internal/logging"
 )
 
 // newTestApp builds a minimal App with an in-memory config and redirects
 // persistence to a temp directory.
 func newTestApp(t *testing.T, cfg *config.Config) (*App, string, string) {
 	t.Helper()
-	ensureTestLogger()
-	home := t.TempDir()
-	t.Setenv("HOME", home)               // Unix home — drives config/token paths
-	t.Setenv("USERPROFILE", home)        // Windows
-	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
-	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	testLogger(t)
+	setIsolatedUserConfigEnv(t)
 
 	configPath := config.GetDefaultConfigPath()
 	tokenPath := config.GetDefaultTokenPath()
@@ -26,12 +22,6 @@ func newTestApp(t *testing.T, cfg *config.Config) (*App, string, string) {
 	_ = os.MkdirAll(filepath.Dir(tokenPath), 0700)
 
 	return &App{config: cfg}, configPath, tokenPath
-}
-
-func ensureTestLogger() {
-	if wailsLogger == nil {
-		wailsLogger = logging.NewLogger("wails", nil)
-	}
 }
 
 func TestEnsureAllConfigPersisted_WritesTokenAndCSV(t *testing.T) {
@@ -110,23 +100,7 @@ func TestEnsureAllConfigPersisted_ProxyPasswordNotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read csv: %v", err)
 	}
-	if contains(data, []byte("SECRET-PROXY-PASSWORD")) {
+	if bytes.Contains(data, []byte("SECRET-PROXY-PASSWORD")) {
 		t.Fatalf("config.csv leaked proxy password: %s", data)
 	}
-}
-
-func contains(haystack, needle []byte) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		match := true
-		for j := range needle {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
 }

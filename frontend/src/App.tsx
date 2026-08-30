@@ -75,7 +75,6 @@ function AppComponent() {
   const connectionStatus = useConfigStore(s => s.connectionStatus)
   const apiKey = useConfigStore(s => s.config?.apiKey)
   const testConnection = useConfigStore(s => s.testConnection)
-  const setupConfigEventListeners = useConfigStore(s => s.setupEventListeners)
   const fetchConfig = useConfigStore(s => s.fetchConfig)
   const overallMessage = useLogStore(s => s.overallMessage)
   const overallProgress = useLogStore(s => s.overallProgress)
@@ -153,12 +152,10 @@ function AppComponent() {
     recoverFromRestart()
   }, [recoverFromRestart])
 
-  // Set up config event listeners and fetch config on mount
+  // Fetch config on mount
   useEffect(() => {
-    const cleanup = setupConfigEventListeners()
     fetchConfig()
-    return cleanup
-  }, [setupConfigEventListeners, fetchConfig])
+  }, [fetchConfig])
 
   // Guard: skip if already testing/failed/connected to prevent re-trigger loop.
   // Auto-trigger workspace fetch when API key is present but workspace is null,

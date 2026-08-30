@@ -3,6 +3,7 @@ package diskspace
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -158,31 +159,17 @@ func TestInsufficientSpaceErrorMessage(t *testing.T) {
 	}
 
 	// Check that message contains key information
-	if !contains(msg, "/tmp/test.txt") {
+	if !strings.Contains(msg, "/tmp/test.txt") {
 		t.Error("Error message should contain path")
 	}
-	if !contains(msg, "100.00") {
+	if !strings.Contains(msg, "100.00") {
 		t.Error("Error message should contain required space in MB")
 	}
-	if !contains(msg, "50.00") {
+	if !strings.Contains(msg, "50.00") {
 		t.Error("Error message should contain available space in MB")
 	}
 
 	t.Logf("Error message: %s", msg)
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && s != "" && substr != "" &&
-		(s == substr || len(s) > len(substr) && findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // Example test demonstrating usage

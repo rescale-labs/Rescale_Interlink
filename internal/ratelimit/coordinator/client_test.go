@@ -11,9 +11,9 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
-// startTestServer creates a server with a temp socket, starts it, and returns
-// the client, server, and a cleanup function.
-func startTestServer(t *testing.T) (*Client, *Server, func()) {
+// startTestServers creates a server on a temp socket, starts it, and returns
+// numClients clients connected to it plus a cleanup function.
+func startTestServers(t *testing.T, numClients int) ([]*Client, *Server, func()) {
 	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "coordinator-test")
@@ -31,15 +31,27 @@ func startTestServer(t *testing.T) (*Client, *Server, func()) {
 	srv := NewServer()
 	srv.Start(listener)
 
-	client := NewClientWithPath(sockPath)
+	clients := make([]*Client, numClients)
+	for i := range clients {
+		clients[i] = NewClientWithPath(sockPath)
+	}
 
 	cleanup := func() {
-		client.Close()
+		for _, c := range clients {
+			c.Close()
+		}
 		srv.Stop()
 		os.RemoveAll(tmpDir)
 	}
 
-	return client, srv, cleanup
+	return clients, srv, cleanup
+}
+
+// startTestServer is the single-client form of startTestServers.
+func startTestServer(t *testing.T) (*Client, *Server, func()) {
+	t.Helper()
+	clients, srv, cleanup := startTestServers(t, 1)
+	return clients[0], srv, cleanup
 }
 
 func TestClientConnect(t *testing.T) {

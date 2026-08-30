@@ -1,26 +1,15 @@
 package cli
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
-
-// writeJobFile writes a job specification to a temp file and returns its path.
-func writeJobFile(t *testing.T, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "job.json")
-	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
-		t.Fatalf("write job file: %v", err)
-	}
-	return path
-}
 
 // TestDecodeJobFileKeepsSSHAccessFields covers the fields a --job-file used to
 // lose: typed decoding dropped them, so they never reached the create call and
 // the platform never saw them to accept or reject.
 func TestDecodeJobFileKeepsSSHAccessFields(t *testing.T) {
-	path := writeJobFile(t, `{
+	path := writeTempFile(t, "job.json", `{
 	  "name": "ws-job",
 	  "jobanalyses": [{"command": "./run.sh",
 	                   "analysis": {"code": "user_included"},
@@ -52,7 +41,7 @@ func TestDecodeJobFileKeepsSSHAccessFields(t *testing.T) {
 // The decode still succeeds — a spec may carry fields Interlink has no reason to
 // send — but the caller now learns which keys went nowhere.
 func TestDecodeJobFileReportsIgnoredFields(t *testing.T) {
-	path := writeJobFile(t, `{
+	path := writeTempFile(t, "job.json", `{
 	  "name": "ws-job",
 	  "jobanalyses": [],
 	  "sessionTimeout": 3600,
@@ -85,7 +74,7 @@ func TestDecodeJobFileErrors(t *testing.T) {
 	})
 
 	t.Run("malformed JSON", func(t *testing.T) {
-		if _, _, err := decodeJobFile(writeJobFile(t, `{"name":`)); err == nil {
+		if _, _, err := decodeJobFile(writeTempFile(t, "job.json", `{"name":`)); err == nil {
 			t.Fatal("expected an error for malformed JSON")
 		}
 	})

@@ -13,43 +13,8 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
-// startIntegrationServer creates a server and multiple clients for integration testing.
-func startIntegrationServer(t *testing.T, numClients int) ([]*Client, *Server, func()) {
-	t.Helper()
-
-	tmpDir, err := os.MkdirTemp("", "coordinator-integration")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	sockPath := filepath.Join(tmpDir, "test.sock")
-
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		os.RemoveAll(tmpDir)
-		t.Fatalf("failed to listen: %v", err)
-	}
-
-	srv := NewServer()
-	srv.Start(listener)
-
-	clients := make([]*Client, numClients)
-	for i := 0; i < numClients; i++ {
-		clients[i] = NewClientWithPath(sockPath)
-	}
-
-	cleanup := func() {
-		for _, c := range clients {
-			c.Close()
-		}
-		srv.Stop()
-		os.RemoveAll(tmpDir)
-	}
-
-	return clients, srv, cleanup
-}
-
 func TestTwoClientsSharedBudget(t *testing.T) {
-	clients, _, cleanup := startIntegrationServer(t, 2)
+	clients, _, cleanup := startTestServers(t, 2)
 	defer cleanup()
 
 	// Both clients acquire tokens from the same bucket
@@ -87,7 +52,7 @@ func TestTwoClientsSharedBudget(t *testing.T) {
 }
 
 func TestDrainPropagatesAcrossClients(t *testing.T) {
-	clients, _, cleanup := startIntegrationServer(t, 2)
+	clients, _, cleanup := startTestServers(t, 2)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -126,7 +91,7 @@ func TestDrainPropagatesAcrossClients(t *testing.T) {
 }
 
 func TestCooldownPropagatesAcrossClients(t *testing.T) {
-	clients, _, cleanup := startIntegrationServer(t, 2)
+	clients, _, cleanup := startTestServers(t, 2)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -273,7 +238,7 @@ func TestGracefulFallbackTransition(t *testing.T) {
 }
 
 func TestConcurrentMultiClientAcquire(t *testing.T) {
-	clients, _, cleanup := startIntegrationServer(t, 5)
+	clients, _, cleanup := startTestServers(t, 5)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

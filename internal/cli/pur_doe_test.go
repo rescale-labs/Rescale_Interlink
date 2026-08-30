@@ -158,7 +158,7 @@ func TestCheckFormatsMatchParameters(t *testing.T) {
 // The parsing itself is the doe package's; what the CLI adds is opening the
 // file, so that is what is checked here.
 func TestParseCasesCSVFile(t *testing.T) {
-	path := writeTempCSV(t, "cases.csv", "alpha,beta\n10,15\n20,25\n")
+	path := writeTempFile(t, "cases.csv", "alpha,beta\n10,15\n20,25\n")
 
 	names, cases, err := parseCasesCSVFile(path)
 	if err != nil {
@@ -204,7 +204,9 @@ func TestDOEMethodList_ListsEveryMethod(t *testing.T) {
 	}
 }
 
-func writeTempCSV(t *testing.T, name, content string) string {
+// writeTempFile writes content to a fresh temp directory under name and
+// returns the full path.
+func writeTempFile(t *testing.T, name, content string) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), name)

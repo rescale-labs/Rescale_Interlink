@@ -1,9 +1,6 @@
 import { create } from 'zustand';
 import { wailsapp } from '../../wailsjs/go/models';
 import * as App from '../../wailsjs/go/wailsapp/App';
-import { EventsOn } from '../../wailsjs/runtime/runtime';
-import { EVENT_NAMES } from '../types/events';
-import type { ConnectionResultDTO } from '../types';
 
 interface ConfigState {
   // Data
@@ -36,10 +33,6 @@ interface ConfigState {
   testConnection: () => Promise<void>;
   selectDirectory: (title: string) => Promise<string>;
   selectFile: (title: string) => Promise<string>;
-
-  // Internal
-  setupEventListeners: () => () => void;
-  _eventListenersSetup: boolean;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -57,7 +50,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isLoading: false,
   isSaving: false,
   error: null,
-  _eventListenersSetup: false,
 
   fetchConfig: async () => {
     set({ isLoading: true, error: null });
@@ -234,43 +226,5 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   selectFile: async (title: string) => {
     return App.SelectFile(title);
-  },
-
-  setupEventListeners: () => {
-    if (get()._eventListenersSetup) {
-      return () => {};
-    }
-
-    const handleConnectionResult = (result: ConnectionResultDTO) => {
-      if (result.success) {
-        set({
-          connectionStatus: 'connected',
-          connectionEmail: result.email || null,
-          connectionFullName: result.fullName || null,
-          workspaceId: result.workspaceId || null,
-          workspaceName: result.workspaceName || null,
-          connectionError: null,
-          lastConnectionTest: new Date(),
-        });
-      } else {
-        set({
-          connectionStatus: 'failed',
-          connectionEmail: null,
-          connectionFullName: null,
-          workspaceId: null,
-          workspaceName: null,
-          connectionError: result.error || 'Connection failed',
-          lastConnectionTest: new Date(),
-        });
-      }
-    };
-
-    const unsubscribeConnectionResult = EventsOn(EVENT_NAMES.CONNECTION_RESULT, handleConnectionResult);
-    set({ _eventListenersSetup: true });
-
-    return () => {
-      unsubscribeConnectionResult();
-      set({ _eventListenersSetup: false });
-    };
   },
 }));

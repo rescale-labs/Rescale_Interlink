@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,22 +26,20 @@ type fakeIPC struct {
 	status    *ipc.StatusData
 	statusErr error
 	users     []ipc.UserStatus
-	usersErr  error
 }
 
 func (f fakeIPC) GetStatus(ctx context.Context) (*ipc.StatusData, error) {
 	return f.status, f.statusErr
 }
 func (f fakeIPC) GetUserList(ctx context.Context) ([]ipc.UserStatus, error) {
-	return f.users, f.usersErr
+	return f.users, nil
 }
 
 type fakeConfig struct {
 	cfg *config.DaemonConfig
-	err error
 }
 
-func (f fakeConfig) LoadUserDaemonConfig() (*config.DaemonConfig, error) { return f.cfg, f.err }
+func (f fakeConfig) LoadUserDaemonConfig() (*config.DaemonConfig, error) { return f.cfg, nil }
 
 type fakeIdentity struct {
 	sid, username string
@@ -170,7 +169,7 @@ func TestPresentationCells(t *testing.T) {
 				}
 			}
 			for _, action := range tt.wantActions {
-				if !containsAction(p.AllowedActions, action) {
+				if !slices.Contains(p.AllowedActions, action) {
 					t.Errorf("expected action %v, got %v", action, p.AllowedActions)
 				}
 			}
@@ -391,15 +390,4 @@ func TestMatchesWindowsUsername(t *testing.T) {
 			t.Errorf("matchesWindowsUsername(%q,%q)=%v, want %v", tc.a, tc.b, got, tc.want)
 		}
 	}
-}
-
-// helper
-
-func containsAction(actions []Action, want Action) bool {
-	for _, a := range actions {
-		if a == want {
-			return true
-		}
-	}
-	return false
 }

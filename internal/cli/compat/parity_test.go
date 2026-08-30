@@ -61,29 +61,20 @@ func requireAPIKey(t *testing.T) {
 	}
 }
 
-func getTestJobID(t *testing.T) string {
-	t.Helper()
-	id := os.Getenv("RESCALE_TEST_JOB_ID")
-	if id == "" {
-		t.Skip("RESCALE_TEST_JOB_ID not set (need a completed job)")
-	}
-	return id
+// idEnvHints says what each ID variable has to point at, so the skip message
+// tells whoever is running the parity suite how to satisfy it.
+var idEnvHints = map[string]string{
+	"RESCALE_TEST_JOB_ID":      " (need a completed job)",
+	"RESCALE_RUNNING_JOB_ID":   " (need a running job)",
+	"RESCALE_REFERENCE_JOB_ID": " (need an older job with newer jobs after it)",
 }
 
-func getTestFileID(t *testing.T) string {
+// requireEnvID returns the named ID variable, skipping the test when it is unset.
+func requireEnvID(t *testing.T, envVar string) string {
 	t.Helper()
-	id := os.Getenv("RESCALE_TEST_FILE_ID")
+	id := os.Getenv(envVar)
 	if id == "" {
-		t.Skip("RESCALE_TEST_FILE_ID not set")
-	}
-	return id
-}
-
-func getRunningJobID(t *testing.T) string {
-	t.Helper()
-	id := os.Getenv("RESCALE_RUNNING_JOB_ID")
-	if id == "" {
-		t.Skip("RESCALE_RUNNING_JOB_ID not set (need a running job)")
+		t.Skipf("%s not set%s", envVar, idEnvHints[envVar])
 	}
 	return id
 }
@@ -117,7 +108,7 @@ func compareJSONKeys(t *testing.T, label string, got, want []byte) {
 
 func TestParity_StatusText(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	out, code := runCompat(t, "-q", "status", "-j", jobID)
 	if code != 0 {
@@ -140,7 +131,7 @@ func TestParity_StatusText(t *testing.T) {
 
 func TestParity_StatusJSON(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	out, code := runCompat(t, "-q", "status", "-e", "-j", jobID)
 	if code != 0 {
@@ -212,7 +203,7 @@ func TestParity_ListInfoAnalyses(t *testing.T) {
 
 func TestParity_ListFilesCompleted(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	out, code := runCompat(t, "-q", "list-files", "-j", jobID)
 	// Completed job should have no active run → exit 33
@@ -230,7 +221,7 @@ func TestParity_ListFilesCompleted(t *testing.T) {
 
 func TestParity_ListFilesRunning(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getRunningJobID(t)
+	jobID := requireEnvID(t, "RESCALE_RUNNING_JOB_ID")
 
 	out, code := runCompat(t, "-q", "list-files", "-j", jobID)
 	if code != 0 {
@@ -258,7 +249,7 @@ func TestParity_ExitCode33(t *testing.T) {
 
 func TestParity_AuthLine(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	// Non-quiet mode should include "Authenticated as"
 	out, code := runCompat(t, "status", "-j", jobID)
@@ -272,7 +263,7 @@ func TestParity_AuthLine(t *testing.T) {
 
 func TestParity_QuietMode(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	out, code := runCompat(t, "-q", "status", "-j", jobID)
 	if code != 0 {
@@ -285,7 +276,7 @@ func TestParity_QuietMode(t *testing.T) {
 
 func TestParity_DownloadFileJSON(t *testing.T) {
 	requireAPIKey(t)
-	fileID := getTestFileID(t)
+	fileID := requireEnvID(t, "RESCALE_TEST_FILE_ID")
 
 	out, code := runCompat(t, "-q", "download-file", "-e", "--file-id", fileID)
 	if code != 0 {
@@ -308,7 +299,7 @@ func TestParity_DownloadFileJSON(t *testing.T) {
 
 func TestParity_SyncSingleRun(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	tmpDir := t.TempDir()
 	out, code := runCompat(t, "-q", "sync", "-j", jobID, "-o", tmpDir)
@@ -326,7 +317,7 @@ func TestParity_SyncSingleRun(t *testing.T) {
 
 func TestParity_SyncSingleRunSkipExisting(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	tmpDir := t.TempDir()
 
@@ -355,7 +346,7 @@ func TestParity_SyncSingleRunSkipExisting(t *testing.T) {
 
 func TestParity_SyncPolling(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t) // completed job
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID") // completed job
 
 	tmpDir := t.TempDir()
 	// Polling mode on a completed job: should download once, detect terminal, exit
@@ -376,7 +367,7 @@ func TestParity_SyncPolling(t *testing.T) {
 
 func TestParity_SyncNewerThan(t *testing.T) {
 	requireAPIKey(t)
-	refJobID := getReferenceJobID(t)
+	refJobID := requireEnvID(t, "RESCALE_REFERENCE_JOB_ID")
 
 	tmpDir := t.TempDir()
 	out, code := runCompat(t, "-q", "sync", "-n", refJobID, "-o", tmpDir)
@@ -423,18 +414,9 @@ func TestParity_SyncNewerThan(t *testing.T) {
 	}
 }
 
-func getReferenceJobID(t *testing.T) string {
-	t.Helper()
-	id := os.Getenv("RESCALE_REFERENCE_JOB_ID")
-	if id == "" {
-		t.Skip("RESCALE_REFERENCE_JOB_ID not set (need an older job with newer jobs after it)")
-	}
-	return id
-}
-
 func TestParity_DownloadFileExactName(t *testing.T) {
 	requireAPIKey(t)
-	jobID := getTestJobID(t)
+	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
 
 	// First get the file list to find a real filename
 	tmpDir := t.TempDir()

@@ -104,10 +104,7 @@ func TestNormalizeJobSpecDTO(t *testing.T) {
 // template bindings can be exercised for real. It returns the templates dir.
 func withTemplatesHome(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)        // os.UserHomeDir on unix
-	t.Setenv("USERPROFILE", home) // os.UserHomeDir on windows
-	dir := filepath.Join(home, ".config", "rescale", "templates")
+	dir := filepath.Join(setIsolatedUserConfigEnv(t), ".config", "rescale", "templates")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("failed to create templates dir: %v", err)
 	}

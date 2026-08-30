@@ -79,11 +79,15 @@ func TestCredentialSourceWarning_NotShownOnNonWindows(t *testing.T) {
 	}
 }
 
-func setIsolatedUserConfigEnv(t *testing.T) {
+// setIsolatedUserConfigEnv points every per-user config root at a fresh temp
+// directory, and returns it. Every test that touches config/token/template
+// paths needs this, or it reads and writes the developer's real home.
+func setIsolatedUserConfigEnv(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)        // Unix home — drives config/token paths
+	t.Setenv("USERPROFILE", home) // Windows
 	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	return home
 }

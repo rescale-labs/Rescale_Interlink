@@ -103,47 +103,40 @@ func TestEnvDisabled(t *testing.T) {
 	}
 }
 
-func TestCheckForUpdatesDisabledByEnv(t *testing.T) {
-	os.Setenv("RESCALE_DISABLE_UPDATE_CHECK", "1")
-	defer os.Unsetenv("RESCALE_DISABLE_UPDATE_CHECK")
-
-	app := &App{config: &config.Config{APIBaseURL: "https://platform.rescale.com"}}
-	result := app.CheckForUpdates()
-
-	if result.HasUpdate {
-		t.Error("expected no update when check is disabled")
+// TestCheckForUpdatesPolicyGates covers both gates that return before any HTTP
+// call: the environment kill switch, and FedRAMP platform detection on the bare
+// domain and on a subdomain. Each must report the current version with no
+// update and no error — a policy skip is not a failure.
+func TestCheckForUpdatesPolicyGates(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string // value of RESCALE_DISABLE_UPDATE_CHECK
+		baseURL string
+	}{
+		{name: "environment kill switch", env: "1", baseURL: "https://platform.rescale.com"},
+		{name: "FedRAMP platform", baseURL: "https://rescale-gov.com"},
+		{name: "FedRAMP subdomain", baseURL: "https://platform.rescale-gov.com"},
 	}
-	if result.CurrentVersion == "" {
-		t.Error("expected CurrentVersion to be set")
-	}
-	if result.Error != "" {
-		t.Errorf("expected no error, got: %s", result.Error)
-	}
-}
 
-func TestCheckForUpdatesDisabledOnFedRAMP(t *testing.T) {
-	// Reset cache to ensure fresh check
-	resetVersionCache()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RESCALE_DISABLE_UPDATE_CHECK", tt.env)
+			resetVersionCache()
+			t.Cleanup(resetVersionCache)
 
-	app := &App{config: &config.Config{APIBaseURL: "https://rescale-gov.com"}}
-	result := app.CheckForUpdates()
+			app := &App{config: &config.Config{APIBaseURL: tt.baseURL}}
+			result := app.CheckForUpdates()
 
-	if result.HasUpdate {
-		t.Error("expected no update on FedRAMP platform")
-	}
-	if result.Error != "" {
-		t.Errorf("expected no error, got: %s", result.Error)
-	}
-}
-
-func TestCheckForUpdatesDisabledOnFedRAMPSubdomain(t *testing.T) {
-	resetVersionCache()
-
-	app := &App{config: &config.Config{APIBaseURL: "https://platform.rescale-gov.com"}}
-	result := app.CheckForUpdates()
-
-	if result.HasUpdate {
-		t.Error("expected no update on FedRAMP subdomain")
+			if result.HasUpdate {
+				t.Error("expected no update when the check is gated off")
+			}
+			if result.CurrentVersion == "" {
+				t.Error("expected CurrentVersion to be set")
+			}
+			if result.Error != "" {
+				t.Errorf("expected no error, got: %s", result.Error)
+			}
+		})
 	}
 }
 
@@ -278,42 +271,6 @@ func TestCacheHitPreventsHTTPCall(t *testing.T) {
 // =============================================================================
 // In-flight dedup tests
 // =============================================================================
-
-func TestInFlightDedup(t *testing.T) {
-	resetVersionCache()
-
-	var callCount atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callCount.Add(1)
-		// Simulate slow response
-		time.Sleep(100 * time.Millisecond)
-		json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
-	}))
-	defer server.Close()
-	withGithubAPIURL(t, server.URL)
-
-	// Simulate in-flight check
-	checkInProgressMu.Lock()
-	checkInProgress = true
-	checkInProgressMu.Unlock()
-
-	app := &App{config: &config.Config{APIBaseURL: "https://platform.rescale.com"}}
-
-	// This should return immediately without making an HTTP call
-	result := app.CheckForUpdates()
-
-	// Reset the flag
-	checkInProgressMu.Lock()
-	checkInProgress = false
-	checkInProgressMu.Unlock()
-
-	if callCount.Load() != 0 {
-		t.Errorf("expected 0 HTTP calls during in-flight dedup, got %d", callCount.Load())
-	}
-	if result.CurrentVersion == "" {
-		t.Error("expected CurrentVersion to be set even during dedup")
-	}
-}
 
 // TestConcurrentChecksSingleHTTPCall verifies the in-flight dedup collapses
 // concurrent CheckForUpdates calls into exactly one HTTP request: the winner

@@ -130,15 +130,6 @@ export interface BatchProgressEventDTO {
   skipped: number;
 }
 
-export interface ConnectionResultDTO {
-  success: boolean;
-  email?: string;
-  fullName?: string;
-  workspaceId?: string;
-  workspaceName?: string;
-  error?: string;
-}
-
 // Event names as constants
 export const EVENT_NAMES = {
   PROGRESS: 'interlink:progress',
@@ -146,7 +137,6 @@ export const EVENT_NAMES = {
   STATE_CHANGE: 'interlink:state_change',
   ERROR: 'interlink:error',
   COMPLETE: 'interlink:complete',
-  CONNECTION_RESULT: 'interlink:connection_result',
   TRANSFER: 'interlink:transfer',
   ENUMERATION: 'interlink:enumeration',
   SCAN_PROGRESS: 'interlink:scan_progress',

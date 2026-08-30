@@ -156,8 +156,6 @@ type mockCoordClient struct {
 	cooldownCalls int
 	pingCalls     int
 	acquireErr    error
-	lease         *LeaseInfo
-	pingErr       error
 }
 
 func (m *mockCoordClient) Acquire(_ context.Context, _, _ string, _ Scope) error {
@@ -182,16 +180,14 @@ func (m *mockCoordClient) SetCooldown(_ context.Context, _, _ string, _ Scope, _
 }
 
 func (m *mockCoordClient) GetLease(_, _ string, _ Scope) *LeaseInfo {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.lease
+	return nil
 }
 
 func (m *mockCoordClient) Ping(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pingCalls++
-	return m.pingErr
+	return nil
 }
 
 func (m *mockCoordClient) getPingCalls() int {

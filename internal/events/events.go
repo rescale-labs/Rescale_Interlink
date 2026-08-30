@@ -382,20 +382,6 @@ func (eb *EventBus) PublishLog(level LogLevel, message, stage, jobName string, e
 	})
 }
 
-// PublishProgress is a convenience method for publishing progress events
-func (eb *EventBus) PublishProgress(jobName, stage string, progress float64, message string) {
-	eb.Publish(&ProgressEvent{
-		BaseEvent: BaseEvent{
-			EventType: EventProgress,
-			Time:      time.Now(),
-		},
-		JobName:  jobName,
-		Stage:    stage,
-		Progress: progress,
-		Message:  message,
-	})
-}
-
 // PublishStateChange is a convenience method for publishing state change events
 func (eb *EventBus) PublishStateChange(jobName, oldStatus, newStatus, stage, jobID, errorMsg string) {
 	eb.Publish(&StateChangeEvent{

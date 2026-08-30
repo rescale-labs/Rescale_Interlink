@@ -225,7 +225,6 @@ func TestConvenienceMethods(t *testing.T) {
 	defer bus.Close()
 
 	logCh := bus.Subscribe(EventLog)
-	progressCh := bus.Subscribe(EventProgress)
 	stateCh := bus.Subscribe(EventStateChange)
 
 	// Test PublishLog
@@ -242,22 +241,6 @@ func TestConvenienceMethods(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("Timeout waiting for log event")
-	}
-
-	// Test PublishProgress
-	bus.PublishProgress("job1", "upload", 0.75, "uploading")
-
-	select {
-	case event := <-progressCh:
-		progress, ok := event.(*ProgressEvent)
-		if !ok {
-			t.Fatal("Expected ProgressEvent")
-		}
-		if progress.Progress != 0.75 {
-			t.Errorf("Expected progress 0.75, got %f", progress.Progress)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("Timeout waiting for progress event")
 	}
 
 	// Test PublishStateChange
