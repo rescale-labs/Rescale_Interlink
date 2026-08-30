@@ -17,13 +17,13 @@ import {
   BeakerIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, useConfigStore, useRunStore } from '../../stores'
+import { useJobStore, useConfigStore, useRunStore, DEFAULT_JOB_TEMPLATE } from '../../stores'
 import type { WorkflowState } from '../../types/jobs'
 import { wailsapp } from '../../../wailsjs/go/models'
 import { TemplateBuilder, DOEBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
 import { formatDuration } from '../../utils/formatDuration'
+import { normalizeJobSpec } from '../../utils/jobs'
 import * as App from '../../../wailsjs/go/wailsapp/App'
-import * as Runtime from '../../../wailsjs/runtime/runtime'
 
 const WORKFLOW_STEPS: { state: WorkflowState; label: string; shortLabel: string }[] = [
   { state: 'initial', label: 'Choose Source', shortLabel: 'Source' },
@@ -357,27 +357,19 @@ export function PURTab() {
     setWorkflowPath('createSweep')
   }, [setScanOptions, setWorkflowPath])
 
+  // A file may hold a job whose sizing fields are zero or blank — a row saved
+  // before those columns existed, or hand-edited. Loading it as a *template* to
+  // start from backfills those four with the template defaults, which is why
+  // this does more than the shared normalizeJobSpec: an unusable 0-core, 0-hour
+  // template is worse than a suggested one.
   const mapDTOToTemplate = useCallback((loaded: wailsapp.JobSpecDTO) => {
+    const spec = normalizeJobSpec(loaded)
     setTemplate({
-      directory: loaded.directory || '',
-      jobName: loaded.jobName || '',
-      analysisCode: loaded.analysisCode || '',
-      analysisVersion: loaded.analysisVersion || '',
-      command: loaded.command || '',
-      coreType: loaded.coreType || '',
-      coresPerSlot: loaded.coresPerSlot || 4,
-      walltimeHours: loaded.walltimeHours || 1,
-      slots: loaded.slots || 1,
-      licenseSettings: loaded.licenseSettings || '',
-      extraInputFileIds: loaded.extraInputFileIds || '',
-      noDecompress: loaded.noDecompress || false,
-      submitMode: loaded.submitMode || 'create_and_submit',
-      isLowPriority: loaded.isLowPriority || false,
-      onDemandLicenseSeller: loaded.onDemandLicenseSeller || '',
-      tags: loaded.tags || [],
-      projectId: loaded.projectId || '',
-      orgCode: loaded.orgCode || '',
-      automations: loaded.automations || [],
+      ...spec,
+      coresPerSlot: spec.coresPerSlot || DEFAULT_JOB_TEMPLATE.coresPerSlot,
+      walltimeHours: spec.walltimeHours || DEFAULT_JOB_TEMPLATE.walltimeHours,
+      slots: spec.slots || DEFAULT_JOB_TEMPLATE.slots,
+      submitMode: spec.submitMode || DEFAULT_JOB_TEMPLATE.submitMode,
     })
   }, [setTemplate])
 
@@ -436,7 +428,7 @@ export function PURTab() {
       if (!path) return
       setLoadSaveError(null)
 
-      await App.SaveJobsToCSV(path, [template as unknown as wailsapp.JobSpecDTO])
+      await App.SaveJobsToCSV(path, [template])
     } catch (error) {
       setLoadSaveError(error instanceof Error ? error.message : String(error))
     }
@@ -524,10 +516,6 @@ export function PURTab() {
       if (!path) return // User cancelled
 
       await saveJobsToCSV(path)
-      Runtime.EventsEmit('notification', {
-        type: 'success',
-        message: 'Jobs exported successfully',
-      })
     } catch (error) {
       console.error('Failed to export CSV:', error)
     }
@@ -548,7 +536,7 @@ export function PURTab() {
 
   // Deep-copy current config so the queued run is isolated from further edits
   const handleQueueRun = useCallback(() => {
-    const jobsSnapshot = structuredClone(scannedJobs) as wailsapp.JobSpecDTO[]
+    const jobsSnapshot = structuredClone(scannedJobs)
     const optsSnapshot = structuredClone(purRunOptions) as wailsapp.PURRunOptionsDTO
     setQueuedJob({
       runType: 'pur',

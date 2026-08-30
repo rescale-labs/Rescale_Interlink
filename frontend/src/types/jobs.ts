@@ -1,6 +1,8 @@
 // Shared domain types extracted from jobStore.ts to break import cycles.
 // Both runStore.ts and jobStore.ts import from here. jobStore.ts re-exports for backward compat.
 
+import type { wailsapp } from '../../wailsjs/go/models'
+
 // Workflow state enum (matches Go JobsWorkflow)
 export type WorkflowState =
   | 'initial'
@@ -17,33 +19,10 @@ export type WorkflowState =
 // case per design point rather than scanned from directories.
 export type WorkflowPath = 'unknown' | 'loadCSV' | 'createNew' | 'createSweep'
 
-// Job spec from Go
-export interface JobSpec {
-  directory: string
-  jobName: string
-  analysisCode: string
-  analysisVersion: string
-  command: string
-  coreType: string
-  coresPerSlot: number
-  walltimeHours: number
-  slots: number
-  licenseSettings: string
-  extraInputFileIds: string
-  noDecompress: boolean
-  submitMode: string
-  isLowPriority: boolean
-  onDemandLicenseSeller: string
-  tags: string[]
-  projectId: string
-  orgCode: string
-  automations: string[]
-
-  // Already-uploaded file IDs to attach instead of tarring directory. Set by
-  // file-scan mode and by DOE sweeps over a shared input deck.
-  inputFiles?: string[]
-  tarSubpath?: string
-}
+// Job spec from Go. Derived from the generated binding rather than restated:
+// a hand-written copy silently drops any field the Go DTO gains, which is how
+// tarSubpath and inputFiles went missing from the CSV round-trip.
+export type JobSpec = wailsapp.JobSpecDTO
 
 // Job row for the jobs table
 export interface JobRow {

@@ -5,6 +5,7 @@ import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../wailsjs/go/models'
 import type { JobSpec, JobRow } from '../types/jobs'
+import { makePendingJobRow } from '../utils/jobs'
 import { DEFAULT_JOB_TEMPLATE } from './jobStore'
 
 // Single job workflow states
@@ -143,7 +144,7 @@ export const useSingleJobStore = create<SingleJobStore>((set, get) => ({
 
     try {
       const input = {
-        job: job as unknown as wailsapp.JobSpecDTO,
+        job,
         inputMode,
         directory,
         localFiles,
@@ -154,20 +155,11 @@ export const useSingleJobStore = create<SingleJobStore>((set, get) => ({
 
       if (runId) {
         // Build initial single-element jobRows
-        const initialJobRows: JobRow[] = [{
+        const initialJobRows: JobRow[] = [makePendingJobRow({
           index: 0,
           directory: inputMode === 'directory' ? directory : '',
           jobName: job.jobName,
-          tarStatus: 'pending',
-          uploadStatus: 'pending',
-          uploadProgress: 0,
-          createStatus: 'pending',
-          submitStatus: 'pending',
-          status: 'pending',
-          jobId: '',
-          progress: 0,
-          error: '',
-        }]
+        })]
 
         // Register with runStore (imported dynamically to avoid circular deps)
         const { useRunStore } = await import('./runStore')
@@ -192,7 +184,7 @@ export const useSingleJobStore = create<SingleJobStore>((set, get) => ({
 
     // Deep-copy to create an immutable snapshot (prevents mutation from subsequent UI edits)
     const inputSnapshot = structuredClone({
-      job: job as unknown as wailsapp.JobSpecDTO,
+      job,
       inputMode,
       directory,
       localFiles,

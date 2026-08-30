@@ -219,7 +219,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
 
   const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
     if (templateInfo.job) {
-      setTemplate(templateInfo.job as JobSpec)
+      setTemplate(templateInfo.job)
       setTagsInput((templateInfo.job.tags ?? []).join(', '))
       setLicenseAutoSwitchHint(null)
       setLicenseLoadHint(null)
@@ -252,7 +252,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const handleSaveTemplate = useCallback(async () => {
     if (!saveTemplateName.trim()) return
     try {
-      await App.SaveTemplate(saveTemplateName, template as unknown as Parameters<typeof App.SaveTemplate>[1])
+      await App.SaveTemplate(saveTemplateName, template)
       setShowSaveDialog(false)
       setSaveTemplateName('')
       loadSavedTemplates()

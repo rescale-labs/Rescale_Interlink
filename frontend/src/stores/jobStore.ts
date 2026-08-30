@@ -13,6 +13,8 @@ import type {
   PipelineStageStats,
 } from '../types/jobs'
 
+import { makePendingJobRow, normalizeJobSpec } from '../utils/jobs'
+
 export type { WorkflowState, WorkflowPath, JobSpec, JobRow, RunStatus, PipelineLogEntry, PipelineStageStats }
 
 // Core type from API
@@ -327,7 +329,7 @@ function buildDOEOptionsDTO(
   cases: Array<Record<string, string>>,
 ): wailsapp.DOEOptionsDTO {
   return {
-    template: template as wailsapp.JobSpecDTO,
+    template,
     parameters: opts.parameters.map((p) => ({
       name: p.name.trim(),
       min: p.min,
@@ -399,20 +401,9 @@ function splitList(value: string): string[] {
 
 // toJobRows builds the pending table rows for a freshly created job list.
 function toJobRows(jobs: JobSpec[]): JobRow[] {
-  return jobs.map((job, index) => ({
-    index,
-    directory: job.directory,
-    jobName: job.jobName,
-    tarStatus: 'pending',
-    uploadStatus: 'pending',
-    uploadProgress: 0,
-    createStatus: 'pending',
-    submitStatus: 'pending',
-    status: 'pending',
-    jobId: '',
-    progress: 0,
-    error: '',
-  }))
+  return jobs.map((job, index) =>
+    makePendingJobRow({ index, directory: job.directory, jobName: job.jobName }),
+  )
 }
 
 export const useJobStore = create<JobStore>((set, get) => ({
@@ -642,7 +633,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
           tarSubpath: scanOptions.tarSubpath,
           iteratePatterns: scanOptions.iteratePatterns,
         } as wailsapp.ScanOptionsDTO,
-        template as wailsapp.JobSpecDTO
+        template
       )
 
       if (result.error) {
@@ -650,25 +641,11 @@ export const useJobStore = create<JobStore>((set, get) => ({
         return
       }
 
-      const jobs = (result.jobs || []) as JobSpec[]
-      const jobRows: JobRow[] = jobs.map((job, index) => ({
-        index,
-        directory: job.directory,
-        jobName: job.jobName,
-        tarStatus: 'pending',
-        uploadStatus: 'pending',
-        uploadProgress: 0,
-        createStatus: 'pending',
-        submitStatus: 'pending',
-        status: 'pending',
-        jobId: '',
-        progress: 0,
-        error: '',
-      }))
+      const jobs = result.jobs || []
 
       set({
         scannedJobs: jobs,
-        jobRows,
+        jobRows: toJobRows(jobs),
         workflowState: 'directoriesScanned',
         isScanning: false,
       })
@@ -755,7 +732,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
 
       // A sweep is just a job list, so it joins the normal PUR flow here and
       // inherits validation, tar/upload, submission and resume unchanged.
-      const jobs = (result.jobs || []) as JobSpec[]
+      const jobs = result.jobs || []
 
       set({
         scannedJobs: jobs,
@@ -778,7 +755,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
 
     for (const job of scannedJobs) {
       try {
-        const jobErrors = await App.ValidateJobSpec(job as wailsapp.JobSpecDTO)
+        const jobErrors = await App.ValidateJobSpec(job)
         if (jobErrors && jobErrors.length > 0) {
           errors.push(`${job.jobName}: ${jobErrors.join(', ')}`)
         }
@@ -817,7 +794,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       set({ workflowState: 'executing' })
 
       const runId = await App.StartBulkRunWithOptions(
-        scannedJobs as wailsapp.JobSpecDTO[],
+        scannedJobs,
         get().purRunOptions as wailsapp.PURRunOptionsDTO,
       )
       set({ runId })
@@ -825,20 +802,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       // Build initial jobRows (all pending) and register with runStore
       const initialJobRows: JobRow[] = jobRows.length > 0
         ? jobRows.map((r) => ({ ...r, tarStatus: r.tarStatus || 'pending', uploadStatus: r.uploadStatus || 'pending', submitStatus: r.submitStatus || 'pending', status: 'pending' }))
-        : scannedJobs.map((job, i) => ({
-            index: i,
-            directory: job.directory,
-            jobName: job.jobName,
-            tarStatus: 'pending',
-            uploadStatus: 'pending',
-            uploadProgress: 0,
-            createStatus: 'pending',
-            submitStatus: 'pending',
-            status: 'pending',
-            jobId: '',
-            progress: 0,
-            error: '',
-          }))
+        : toJobRows(scannedJobs)
 
       // Register with runStore and start polling there
       const { useRunStore } = await import('./runStore')
@@ -890,48 +854,11 @@ export const useJobStore = create<JobStore>((set, get) => ({
         throw new Error('No jobs found in CSV file')
       }
 
-      // Map DTOs to local types
-      const mappedJobs: JobSpec[] = jobs.map((job) => ({
-        directory: job.directory,
-        jobName: job.jobName,
-        analysisCode: job.analysisCode,
-        analysisVersion: job.analysisVersion,
-        command: job.command,
-        coreType: job.coreType,
-        coresPerSlot: job.coresPerSlot,
-        walltimeHours: job.walltimeHours,
-        slots: job.slots,
-        licenseSettings: job.licenseSettings,
-        extraInputFileIds: job.extraInputFileIds,
-        noDecompress: job.noDecompress,
-        submitMode: job.submitMode,
-        isLowPriority: job.isLowPriority,
-        onDemandLicenseSeller: job.onDemandLicenseSeller,
-        tags: job.tags || [],
-        projectId: job.projectId,
-        orgCode: job.orgCode || '',
-        automations: job.automations || [],
-      }))
-
-      // Create job rows from the loaded jobs
-      const jobRows: JobRow[] = mappedJobs.map((job, index) => ({
-        index,
-        directory: job.directory,
-        jobName: job.jobName,
-        tarStatus: 'pending',
-        uploadStatus: 'pending',
-        uploadProgress: 0,
-        createStatus: 'pending',
-        submitStatus: 'pending',
-        status: 'pending',
-        jobId: '',
-        progress: 0,
-        error: '',
-      }))
+      const mappedJobs = jobs.map(normalizeJobSpec)
 
       set({
         scannedJobs: mappedJobs,
-        jobRows,
+        jobRows: toJobRows(mappedJobs),
         workflowPath: 'loadCSV',
         workflowState: 'jobsValidated',
       })
@@ -946,33 +873,12 @@ export const useJobStore = create<JobStore>((set, get) => ({
       throw new Error('No jobs to save')
     }
 
-    await App.SaveJobsToCSV(path, scannedJobs as wailsapp.JobSpecDTO[])
+    await App.SaveJobsToCSV(path, scannedJobs)
   },
 
   loadJobFromJSON: async (path: string) => {
     try {
-      const job = await App.LoadJobFromJSON(path)
-      return {
-        directory: job.directory,
-        jobName: job.jobName,
-        analysisCode: job.analysisCode,
-        analysisVersion: job.analysisVersion,
-        command: job.command,
-        coreType: job.coreType,
-        coresPerSlot: job.coresPerSlot,
-        walltimeHours: job.walltimeHours,
-        slots: job.slots,
-        licenseSettings: job.licenseSettings,
-        extraInputFileIds: job.extraInputFileIds,
-        noDecompress: job.noDecompress,
-        submitMode: job.submitMode,
-        isLowPriority: job.isLowPriority,
-        onDemandLicenseSeller: job.onDemandLicenseSeller,
-        tags: job.tags || [],
-        projectId: job.projectId,
-        orgCode: job.orgCode || '',
-        automations: job.automations || [],
-      } as JobSpec
+      return normalizeJobSpec(await App.LoadJobFromJSON(path))
     } catch (error) {
       console.error('Failed to load job from JSON:', error)
       return null
@@ -980,33 +886,12 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
 
   saveJobToJSON: async (path: string, job: JobSpec) => {
-    await App.SaveJobToJSON(path, job as wailsapp.JobSpecDTO)
+    await App.SaveJobToJSON(path, job)
   },
 
   loadJobFromSGE: async (path: string) => {
     try {
-      const job = await App.LoadJobFromSGE(path)
-      return {
-        directory: job.directory,
-        jobName: job.jobName,
-        analysisCode: job.analysisCode,
-        analysisVersion: job.analysisVersion,
-        command: job.command,
-        coreType: job.coreType,
-        coresPerSlot: job.coresPerSlot,
-        walltimeHours: job.walltimeHours,
-        slots: job.slots,
-        licenseSettings: job.licenseSettings,
-        extraInputFileIds: job.extraInputFileIds,
-        noDecompress: job.noDecompress,
-        submitMode: job.submitMode,
-        isLowPriority: job.isLowPriority,
-        onDemandLicenseSeller: job.onDemandLicenseSeller,
-        tags: job.tags || [],
-        projectId: job.projectId,
-        orgCode: job.orgCode || '',
-        automations: job.automations || [],
-      } as JobSpec
+      return normalizeJobSpec(await App.LoadJobFromSGE(path))
     } catch (error) {
       console.error('Failed to load job from SGE:', error)
       return null
@@ -1014,7 +899,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
 
   saveJobToSGE: async (path: string, job: JobSpec) => {
-    await App.SaveJobToSGE(path, job as wailsapp.JobSpecDTO)
+    await App.SaveJobToSGE(path, job)
   },
 
   // API Cache Actions
