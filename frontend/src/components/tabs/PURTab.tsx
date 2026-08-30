@@ -18,7 +18,8 @@ import {
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import { useJobStore, useConfigStore, useRunStore, DEFAULT_JOB_TEMPLATE } from '../../stores'
-import type { WorkflowState } from '../../types/jobs'
+import type { JobRow, PipelineLogEntry, PipelineStageStats, WorkflowState } from '../../types/jobs'
+import type { RunState } from '../../types/run'
 import { wailsapp } from '../../../wailsjs/go/models'
 import { TemplateBuilder, DOEBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
 import { formatDuration } from '../../utils/formatDuration'
@@ -545,6 +546,160 @@ export function PURTab() {
     })
     useRunStore.setState({ queueStatus: 'queued' })
   }, [scannedJobs, purRunOptions, setQueuedJob])
+
+  // Live-pipeline surface, shared by the workflow's 'executing' step and the
+  // standalone Run Monitor. The two reach it with different numbers (the
+  // workflow step falls back to jobStore when runStore has no PUR run) and
+  // different applicable actions, so every such difference arrives as an
+  // argument rather than being re-derived here.
+  const renderPipelineRunView = ({
+    status, rows, totalJobs, completedJobs, failedJobs, elapsedStr, stageStats, logs,
+    showCancel, showViewResults,
+  }: {
+    status: RunState | null   // null when no run is registered — reads as "running"
+    rows: JobRow[]
+    totalJobs: number
+    completedJobs: number
+    failedJobs: number
+    elapsedStr: string
+    stageStats: PipelineStageStats | null
+    logs: PipelineLogEntry[]
+    showCancel: boolean
+    showViewResults: boolean
+  }) => {
+    const doneJobs = completedJobs + failedJobs
+
+    return (
+      <div className="p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg font-semibold">
+              {!status || status === 'active' ? 'Pipeline Running'
+                : status === 'completed' ? 'Pipeline Complete'
+                : status === 'failed' ? 'Pipeline Failed'
+                : status === 'cancelled' ? 'Pipeline Cancelled'
+                : 'Pipeline Status'}
+            </h3>
+            <p className="text-sm text-gray-500">
+              {doneJobs} of {totalJobs} complete
+              {failedJobs > 0 && ` (${failedJobs} failed)`}
+              {' '}&middot; Elapsed: {elapsedStr}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                reset()
+                setPurViewMode('configure')
+              }}
+              className="flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-sm"
+            >
+              Prepare New Run
+            </button>
+            {showCancel && (
+              <button
+                onClick={handleCancel}
+                className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+              >
+                <StopIcon className="w-5 h-5" />
+                Cancel Pipeline
+              </button>
+            )}
+            {showViewResults && (
+              <button
+                onClick={() => setPurViewMode('auto')}
+                className="flex items-center gap-2 px-3 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+              >
+                View Results
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        <div className="mb-4">
+          <div className="flex justify-between text-sm mb-1">
+            <span>Progress</span>
+            <span>{Math.round((doneJobs / totalJobs) * 100) || 0}%</span>
+          </div>
+          <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+            <div
+              className="h-full transition-all duration-500"
+              style={{
+                width: `${(doneJobs / totalJobs) * 100 || 0}%`,
+                background: failedJobs > 0
+                  ? `linear-gradient(to right, #3b82f6 ${(completedJobs / totalJobs) * 100}%, #ef4444 ${(completedJobs / totalJobs) * 100}%)`
+                  : '#3b82f6',
+              }}
+            />
+          </div>
+        </div>
+
+        {stageStats && <PipelineStageSummary stats={stageStats} total={totalJobs} />}
+        <StatsBar jobs={rows} />
+        <JobsTable jobs={rows} />
+        <PipelineLogPanel logs={logs} />
+      </div>
+    )
+  }
+
+  // Terminal-pipeline surface, shared by the workflow's 'completed' step and the
+  // standalone Run Results view. cancelledCount is null on the surfaces that do
+  // not report a cancelled tally at all, which is not the same as reporting zero.
+  const renderPipelineResultsView = ({
+    rows, completedCount, failedCount, wasCancelled, cancelledCount, logs,
+  }: {
+    rows: JobRow[]
+    completedCount: number
+    failedCount: number
+    wasCancelled: boolean
+    cancelledCount: number | null
+    logs: PipelineLogEntry[]
+  }) => {
+    const allSuccess = failedCount === 0
+
+    return (
+      <div className="p-6">
+        <div className="flex flex-col items-center justify-center mb-6">
+          {wasCancelled ? (
+            <StopIcon className="w-16 h-16 text-gray-500 mb-4" />
+          ) : allSuccess ? (
+            <CheckCircleIcon className="w-16 h-16 text-green-500 mb-4" />
+          ) : (
+            <ExclamationTriangleIcon className="w-16 h-16 text-yellow-500 mb-4" />
+          )}
+          <h3 className="text-lg font-semibold mb-2">
+            {wasCancelled
+              ? 'Pipeline Cancelled'
+              : allSuccess
+                ? 'Pipeline Complete!'
+                : 'Pipeline Complete with Errors'}
+          </h3>
+          <p className="text-sm text-gray-500">
+            {completedCount} succeeded, {failedCount} failed
+            {cancelledCount !== null && `, ${cancelledCount} cancelled`}
+          </p>
+        </div>
+
+        <ErrorSummary jobs={rows} />
+        <JobsTable jobs={rows} />
+
+        {logs.length > 0 && (
+          <PipelineLogPanel logs={logs} maxHeight={300} />
+        )}
+
+        <div className="flex justify-center mt-6">
+          <button
+            onClick={handleStartOver}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+          >
+            <ArrowPathIcon className="w-5 h-5" />
+            Start New Pipeline
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   // Render content based on workflow state
   const renderContent = () => {
@@ -1343,89 +1498,21 @@ export function PURTab() {
       const failedJobs = runData ? runData.failedJobs : displayRows.filter((j) =>
         j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
       ).length
-      const doneJobs = completedJobs + failedJobs
-      const elapsed = runData ? Math.round(runData.durationMs / 1000) : 0
-      const elapsedStr = formatDuration(elapsed)
-      const stageStats = runData ? runData.pipelineStageStats : null
-      const logs = runData ? runData.pipelineLogs : []
-
-      return (
-        <div className="p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-lg font-semibold">
-                {!activeRun || activeRun.status === 'active' ? 'Pipeline Running'
-                  : activeRun.status === 'completed' ? 'Pipeline Complete'
-                  : activeRun.status === 'failed' ? 'Pipeline Failed'
-                  : activeRun.status === 'cancelled' ? 'Pipeline Cancelled'
-                  : 'Pipeline Status'}
-              </h3>
-              <p className="text-sm text-gray-500">
-                {doneJobs} of {totalJobs} complete
-                {failedJobs > 0 && ` (${failedJobs} failed)`}
-                {' '}&middot; Elapsed: {elapsedStr}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  reset()
-                  setPurViewMode('configure')
-                }}
-                className="flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-sm"
-              >
-                Prepare New Run
-              </button>
-              {activeRun?.runType === 'pur' && activeRun?.status === 'active' && (
-                <button
-                  onClick={handleCancel}
-                  className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
-                >
-                  <StopIcon className="w-5 h-5" />
-                  Cancel Pipeline
-                </button>
-              )}
-              {activeRun && activeRun.runType === 'pur' &&
-                (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') && (
-                <button
-                  onClick={() => setPurViewMode('auto')}
-                  className="flex items-center gap-2 px-3 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
-                >
-                  View Results
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Progress bar */}
-          <div className="mb-4">
-            <div className="flex justify-between text-sm mb-1">
-              <span>Progress</span>
-              <span>
-                {Math.round((doneJobs / totalJobs) * 100) || 0}%
-              </span>
-            </div>
-            <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-              <div
-                className="h-full transition-all duration-500"
-                style={{
-                  width: `${(doneJobs / totalJobs) * 100 || 0}%`,
-                  background: failedJobs > 0
-                    ? `linear-gradient(to right, #3b82f6 ${(completedJobs / totalJobs) * 100}%, #ef4444 ${(completedJobs / totalJobs) * 100}%)`
-                    : '#3b82f6',
-                }}
-              />
-            </div>
-          </div>
-
-          {stageStats && <PipelineStageSummary stats={stageStats} total={totalJobs} />}
-
-          <StatsBar jobs={displayRows} />
-          <JobsTable jobs={displayRows} />
-
-          <PipelineLogPanel logs={logs} />
-        </div>
-      )
+      // Both action buttons key off the PUR run specifically, so a Single Job run
+      // left in runStore offers neither.
+      return renderPipelineRunView({
+        status: activeRun?.status ?? null,
+        rows: displayRows,
+        totalJobs,
+        completedJobs,
+        failedJobs,
+        elapsedStr: formatDuration(runData ? Math.round(runData.durationMs / 1000) : 0),
+        stageStats: runData ? runData.pipelineStageStats : null,
+        logs: runData ? runData.pipelineLogs : [],
+        showCancel: runData?.status === 'active',
+        showViewResults: runData !== null &&
+          (runData.status === 'completed' || runData.status === 'failed' || runData.status === 'cancelled'),
+      })
     }
 
     if (workflowState === 'completed') {
@@ -1437,51 +1524,16 @@ export function PURTab() {
       const failedCount = runData ? runData.failedJobs : displayRows.filter((j) =>
         j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.error
       ).length
-      const allSuccess = failedCount === 0
       const wasCancelled = runData?.status === 'cancelled' || runStatus.state === 'cancelled'
-      const logs = runData ? runData.pipelineLogs : []
 
-      return (
-        <div className="p-6">
-          <div className="flex flex-col items-center justify-center mb-6">
-            {wasCancelled ? (
-              <StopIcon className="w-16 h-16 text-gray-500 mb-4" />
-            ) : allSuccess ? (
-              <CheckCircleIcon className="w-16 h-16 text-green-500 mb-4" />
-            ) : (
-              <ExclamationTriangleIcon className="w-16 h-16 text-yellow-500 mb-4" />
-            )}
-            <h3 className="text-lg font-semibold mb-2">
-              {wasCancelled
-                ? 'Pipeline Cancelled'
-                : allSuccess
-                  ? 'Pipeline Complete!'
-                  : 'Pipeline Complete with Errors'}
-            </h3>
-            <p className="text-sm text-gray-500">
-              {completedCount} succeeded, {failedCount} failed
-              {wasCancelled && `, ${displayRows.length - completedCount - failedCount} cancelled`}
-            </p>
-          </div>
-
-          <ErrorSummary jobs={displayRows} />
-          <JobsTable jobs={displayRows} />
-
-          {logs.length > 0 && (
-            <PipelineLogPanel logs={logs} maxHeight={300} />
-          )}
-
-          <div className="flex justify-center mt-6">
-            <button
-              onClick={handleStartOver}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-            >
-              <ArrowPathIcon className="w-5 h-5" />
-              Start New Pipeline
-            </button>
-          </div>
-        </div>
-      )
+      return renderPipelineResultsView({
+        rows: displayRows,
+        completedCount,
+        failedCount,
+        wasCancelled,
+        cancelledCount: wasCancelled ? displayRows.length - completedCount - failedCount : null,
+        logs: runData ? runData.pipelineLogs : [],
+      })
     }
 
     return null
@@ -1523,130 +1575,34 @@ export function PURTab() {
 
   const renderMonitorView = () => {
     if (!activeRun) return null
-    const doneJobs = activeRun.completedJobs + activeRun.failedJobs
-    const elapsed = Math.round(activeRun.durationMs / 1000)
-    const elapsedStr = formatDuration(elapsed)
-    const totalJobs = activeRun.totalJobs || 1
 
-    return (
-      <div className="p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h3 className="text-lg font-semibold">
-              {activeRun.status === 'active' ? 'Pipeline Running'
-                : activeRun.status === 'completed' ? 'Pipeline Complete'
-                : activeRun.status === 'failed' ? 'Pipeline Failed'
-                : activeRun.status === 'cancelled' ? 'Pipeline Cancelled'
-                : 'Pipeline Status'}
-            </h3>
-            <p className="text-sm text-gray-500">
-              {doneJobs} of {totalJobs} complete
-              {activeRun.failedJobs > 0 && ` (${activeRun.failedJobs} failed)`}
-              {' '}&middot; Elapsed: {elapsedStr}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                reset()
-                setPurViewMode('configure')
-              }}
-              className="flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-sm"
-            >
-              Prepare New Run
-            </button>
-            {activeRun.status === 'active' && (
-              <button
-                onClick={handleCancel}
-                className="flex items-center gap-2 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
-              >
-                <StopIcon className="w-5 h-5" />
-                Cancel Pipeline
-              </button>
-            )}
-            {(activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') && (
-              <button
-                onClick={() => setPurViewMode('auto')}
-                className="flex items-center gap-2 px-3 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
-              >
-                View Results
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        <div className="mb-4">
-          <div className="flex justify-between text-sm mb-1">
-            <span>Progress</span>
-            <span>{Math.round((doneJobs / totalJobs) * 100) || 0}%</span>
-          </div>
-          <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className="h-full transition-all duration-500"
-              style={{
-                width: `${(doneJobs / totalJobs) * 100 || 0}%`,
-                background: activeRun.failedJobs > 0
-                  ? `linear-gradient(to right, #3b82f6 ${(activeRun.completedJobs / totalJobs) * 100}%, #ef4444 ${(activeRun.completedJobs / totalJobs) * 100}%)`
-                  : '#3b82f6',
-              }}
-            />
-          </div>
-        </div>
-
-        <PipelineStageSummary stats={activeRun.pipelineStageStats} total={totalJobs} />
-        <StatsBar jobs={activeRun.jobRows} />
-        <JobsTable jobs={activeRun.jobRows} />
-        <PipelineLogPanel logs={activeRun.pipelineLogs} />
-      </div>
-    )
+    // Unlike the workflow's 'executing' step, this view acts on whatever run is
+    // registered — it does not require runType 'pur'.
+    return renderPipelineRunView({
+      status: activeRun.status,
+      rows: activeRun.jobRows,
+      totalJobs: activeRun.totalJobs || 1,
+      completedJobs: activeRun.completedJobs,
+      failedJobs: activeRun.failedJobs,
+      elapsedStr: formatDuration(Math.round(activeRun.durationMs / 1000)),
+      stageStats: activeRun.pipelineStageStats,
+      logs: activeRun.pipelineLogs,
+      showCancel: activeRun.status === 'active',
+      showViewResults: activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled',
+    })
   }
 
   const renderResultsView = () => {
     if (!activeRun) return null
-    const allSuccess = activeRun.failedJobs === 0
-    const wasCancelled = activeRun.status === 'cancelled'
 
-    return (
-      <div className="p-6">
-        <div className="flex flex-col items-center justify-center mb-6">
-          {wasCancelled ? (
-            <StopIcon className="w-16 h-16 text-gray-500 mb-4" />
-          ) : allSuccess ? (
-            <CheckCircleIcon className="w-16 h-16 text-green-500 mb-4" />
-          ) : (
-            <ExclamationTriangleIcon className="w-16 h-16 text-yellow-500 mb-4" />
-          )}
-          <h3 className="text-lg font-semibold mb-2">
-            {wasCancelled
-              ? 'Pipeline Cancelled'
-              : allSuccess
-                ? 'Pipeline Complete!'
-                : 'Pipeline Complete with Errors'}
-          </h3>
-          <p className="text-sm text-gray-500">
-            {activeRun.completedJobs} succeeded, {activeRun.failedJobs} failed
-          </p>
-        </div>
-
-        <ErrorSummary jobs={activeRun.jobRows} />
-        <JobsTable jobs={activeRun.jobRows} />
-
-        {activeRun.pipelineLogs.length > 0 && (
-          <PipelineLogPanel logs={activeRun.pipelineLogs} maxHeight={300} />
-        )}
-
-        <div className="flex justify-center mt-6">
-          <button
-            onClick={handleStartOver}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-          >
-            <ArrowPathIcon className="w-5 h-5" />
-            Start New Pipeline
-          </button>
-        </div>
-      </div>
-    )
+    return renderPipelineResultsView({
+      rows: activeRun.jobRows,
+      completedCount: activeRun.completedJobs,
+      failedCount: activeRun.failedJobs,
+      wasCancelled: activeRun.status === 'cancelled',
+      cancelledCount: null,
+      logs: activeRun.pipelineLogs,
+    })
   }
 
   const renderMonitoringBanner = () => {
