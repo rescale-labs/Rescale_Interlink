@@ -114,20 +114,20 @@ func withTemplatesHome(t *testing.T) string {
 	return dir
 }
 
-// TestLoadTemplateNormalizes verifies LoadTemplate normalizes on-disk template
-// JSON (null tags, zero numerics) and reports an error for corrupt files.
-func TestLoadTemplateNormalizes(t *testing.T) {
+// TestListSavedTemplatesNormalizes verifies normalizeJobSpecDTO's nil-safe
+// defaults are applied to on-disk template JSON (null tags, zero numerics), so
+// the GUI never receives a nil slice or a zero core/slot/walltime value.
+// Corrupt-file handling is covered by TestTemplateRoundTrip.
+func TestListSavedTemplatesNormalizes(t *testing.T) {
 	dir := withTemplatesHome(t)
 	app := &App{}
 
 	tests := []struct {
-		name    string
-		json    string
-		wantErr bool
+		name string
+		json string
 	}{
 		{name: "nil-tags", json: `{"jobName":"test-job","analysisCode":"openfoam","tags":null,"coresPerSlot":0}`},
 		{name: "minimal", json: `{}`},
-		{name: "corrupt", json: `{not valid json!!!`, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -136,15 +136,16 @@ func TestLoadTemplateNormalizes(t *testing.T) {
 				t.Fatalf("failed to write template: %v", err)
 			}
 
-			job, err := app.LoadTemplate(tt.name)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error for corrupt JSON")
+			// Subtests share the templates dir, so select by name rather than index.
+			var job JobSpecDTO
+			found := false
+			for _, tpl := range app.ListSavedTemplates() {
+				if tpl.Name == tt.name {
+					job, found = tpl.Job, true
 				}
-				return
 			}
-			if err != nil {
-				t.Fatalf("LoadTemplate failed: %v", err)
+			if !found {
+				t.Fatalf("template %q missing from ListSavedTemplates", tt.name)
 			}
 
 			if job.Tags == nil || job.Automations == nil || job.InputFiles == nil {
@@ -159,7 +160,7 @@ func TestLoadTemplateNormalizes(t *testing.T) {
 }
 
 // TestTemplateRoundTrip verifies SaveTemplate writes atomically (no .tmp left
-// behind), LoadTemplate reads the spec back, ListSavedTemplates reports it while
+// behind) with the spec intact on disk, ListSavedTemplates reports it while
 // skipping corrupt and non-JSON files, and DeleteTemplate removes it.
 func TestTemplateRoundTrip(t *testing.T) {
 	dir := withTemplatesHome(t)
@@ -185,12 +186,16 @@ func TestTemplateRoundTrip(t *testing.T) {
 		t.Error("tmp file should not exist after successful rename")
 	}
 
-	loaded, err := app.LoadTemplate("valid")
+	data, err := os.ReadFile(fullPath)
 	if err != nil {
-		t.Fatalf("LoadTemplate failed: %v", err)
+		t.Fatalf("failed to read saved template: %v", err)
 	}
-	if loaded.JobName != "atomic-test" {
-		t.Errorf("expected job name 'atomic-test', got '%s'", loaded.JobName)
+	var saved JobSpecDTO
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("saved template is not valid JSON: %v", err)
+	}
+	if saved.JobName != "atomic-test" {
+		t.Errorf("expected job name 'atomic-test', got '%s'", saved.JobName)
 	}
 
 	// Corrupt and non-JSON files must be skipped, not fatal.

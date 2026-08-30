@@ -19,7 +19,6 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/filescan"
 	"github.com/rescale/rescale-int/internal/pur/parser"
-	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/pur/validation"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
@@ -533,63 +532,6 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 	return runID, nil
 }
 
-// StartBulkRun starts a bulk job run (PUR pipeline).
-func (a *App) StartBulkRun(jobs []JobSpecDTO) (string, error) {
-	if a.engine == nil {
-		return "", ErrNoEngine
-	}
-
-	if len(jobs) == 0 {
-		return "", fmt.Errorf("no jobs provided")
-	}
-
-	if a.engine.IsRunActive() {
-		return "", fmt.Errorf("a run is already in progress")
-	}
-
-	// Generate run ID and state file
-	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
-	stateFile := generateStateFilePath(runID)
-
-	// Convert DTOs to job specs
-	jobSpecs := make([]models.JobSpec, len(jobs))
-	for i, job := range jobs {
-		jobSpecs[i] = dtoToJobSpec(job)
-	}
-
-	if err := a.engine.StartRun(runID, stateFile, len(jobs)); err != nil {
-		return "", err
-	}
-
-	// Pre-populate all jobs as "pending" so the GUI sees them immediately
-	// (before the pipeline goroutine starts processing).
-	if st := a.engine.GetState(); st != nil {
-		for i, job := range jobSpecs {
-			st.InitializeState(i+1, job.JobName, job.Directory)
-		}
-		st.Save()
-	}
-
-	// Protected by runMu to prevent race conditions with CancelRun
-	ctx, cancel := context.WithCancel(context.Background())
-	a.runMu.Lock()
-	a.runCancel = cancel
-	a.runMu.Unlock()
-
-	// Start the pipeline in background
-	go func() {
-		defer a.engine.EndRun()
-
-		err := a.engine.RunFromSpecs(ctx, jobSpecs, stateFile)
-		if err != nil && ctx.Err() == nil {
-			// Real error, not cancellation - errors are already tracked in Engine's state
-			wailsLogger.Error().Err(err).Msg("Pipeline run failed")
-		}
-	}()
-
-	return runID, nil
-}
-
 // StartSingleJob starts a single job submission.
 func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 	if a.engine == nil {
@@ -856,7 +798,7 @@ func (a *App) CancelRun() error {
 		return fmt.Errorf("no run in progress")
 	}
 
-	// Protected by mutex to prevent race with StartBulkRun/StartSingleJob
+	// Protected by mutex to prevent race with StartBulkRunWithOptions/StartSingleJob
 	a.runMu.Lock()
 	if a.runCancel != nil {
 		a.runCancel()
@@ -1097,54 +1039,6 @@ func (a *App) GetHistoricalJobRows(runID string) ([]JobRowDTO, error) {
 // ValidateJobSpec validates a job specification.
 func (a *App) ValidateJobSpec(job JobSpecDTO) []string {
 	return validation.ValidateJobSpec(dtoToJobSpec(job))
-}
-
-// CommandPreviewDTO shows how a command varies for a directory.
-type CommandPreviewDTO struct {
-	DirName  string           `json:"dirName"`
-	Command  string           `json:"command"`
-	Patterns []PatternInfoDTO `json:"patterns"`
-}
-
-// PatternInfoDTO represents a detected numeric pattern in a command.
-type PatternInfoDTO struct {
-	FullMatch string `json:"fullMatch"`
-	Number    string `json:"number"`
-	Prefix    string `json:"prefix"`
-	Suffix    string `json:"suffix"`
-}
-
-// PreviewCommandPatterns shows how a command varies across directories.
-func (a *App) PreviewCommandPatterns(command string, dirNames []string) []CommandPreviewDTO {
-	patterns := pattern.DetectNumericPatterns(command)
-
-	var previews []CommandPreviewDTO
-	for i, dirName := range dirNames {
-		dirNum := pattern.ExtractIndexFromJobName(dirName)
-		iteratedCmd := pattern.IterateCommandPatterns(command, 1, dirNum)
-
-		patternDTOs := make([]PatternInfoDTO, len(patterns))
-		for j, p := range patterns {
-			patternDTOs[j] = PatternInfoDTO{
-				FullMatch: p.FullMatch,
-				Number:    p.Number,
-				Prefix:    p.Prefix,
-				Suffix:    p.Suffix,
-			}
-		}
-
-		previews = append(previews, CommandPreviewDTO{
-			DirName:  dirName,
-			Command:  iteratedCmd,
-			Patterns: patternDTOs,
-		})
-
-		// Limit preview to 5 entries
-		if i >= 4 {
-			break
-		}
-	}
-	return previews
 }
 
 // Helper functions
@@ -1523,39 +1417,6 @@ func (a *App) SaveTemplate(name string, job JobSpecDTO) (err error) {
 		return err
 	}
 	return os.Rename(tmpPath, fullPath)
-}
-
-// LoadTemplate loads a template by name.
-func (a *App) LoadTemplate(name string) (result JobSpecDTO, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("template load panicked: %v", r)
-		}
-	}()
-
-	templatesDir, err := getTemplatesDir()
-	if err != nil {
-		return JobSpecDTO{}, err
-	}
-
-	safeName := name
-	if !strings.HasSuffix(safeName, ".json") {
-		safeName += ".json"
-	}
-
-	fullPath := filepath.Join(templatesDir, safeName)
-	data, err := os.ReadFile(fullPath)
-	if err != nil {
-		return JobSpecDTO{}, err
-	}
-
-	var job JobSpecDTO
-	if err := json.Unmarshal(data, &job); err != nil {
-		return JobSpecDTO{}, err
-	}
-	normalizeJobSpecDTO(&job)
-
-	return job, nil
 }
 
 // DeleteTemplate deletes a template by name.

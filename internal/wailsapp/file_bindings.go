@@ -234,17 +234,6 @@ func (a *App) ListLocalDirectoryEx(path string, includeHidden bool) FolderConten
 	return result
 }
 
-// CancelLocalDirectoryRead cancels the current local directory read operation.
-// Call this when the user navigates away before the directory listing completes.
-func (a *App) CancelLocalDirectoryRead() {
-	localDirCancelMu.Lock()
-	defer localDirCancelMu.Unlock()
-	if localDirCancelFunc != nil {
-		localDirCancelFunc()
-		localDirCancelFunc = nil
-	}
-}
-
 // GetHomeDirectory returns the user's home directory.
 func (a *App) GetHomeDirectory() string {
 	home, err := os.UserHomeDir()
@@ -911,28 +900,6 @@ func (a *App) CheckLocalFolderExists(folderName string, destPath string) LocalFo
 	return LocalFolderExistsCheckDTO{Exists: true}
 }
 
-// CheckFolderExistsForUpload checks if a folder with the given name already exists
-// in the destination folder. Used to show merge confirmation dialog before upload.
-func (a *App) CheckFolderExistsForUpload(folderName string, parentFolderID string) FolderExistsCheckDTO {
-	ctx := context.Background()
-
-	apiClient, err := a.apiClient()
-	if err != nil {
-		return FolderExistsCheckDTO{Error: err.Error()}
-	}
-
-	cache := folder.NewFolderCache()
-	folderID, exists, err := folder.CheckFolderExists(ctx, apiClient, cache, parentFolderID, folderName)
-	if err != nil {
-		return FolderExistsCheckDTO{Error: "Failed to check folder: " + err.Error()}
-	}
-
-	return FolderExistsCheckDTO{
-		Exists:   exists,
-		FolderID: folderID,
-	}
-}
-
 // CheckFoldersExistForUpload checks if multiple folders with the given names already exist
 // in the destination folder. Uses a shared FolderCache so that parent folder contents are
 // fetched once instead of once per folder.
@@ -1395,57 +1362,4 @@ func calculateDirStats(dirPath string) (totalSize int64, fileCount int) {
 		return nil
 	})
 	return
-}
-
-// SelectDirectoryAndListFiles opens a directory dialog and returns all file paths within.
-// This is useful for adding all files from a folder as job inputs.
-func (a *App) SelectDirectoryAndListFiles(title string) ([]string, error) {
-	// Select directory using Wails runtime
-	dir, err := a.SelectDirectory(title)
-	if err != nil || dir == "" {
-		return nil, err
-	}
-
-	// List all files in the directory (non-recursive for now)
-	files := []string{}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			files = append(files, filepath.Join(dir, entry.Name()))
-		}
-	}
-
-	return files, nil
-}
-
-// SelectDirectoryRecursive opens a directory dialog and returns all file paths recursively.
-// This includes files in subdirectories.
-func (a *App) SelectDirectoryRecursive(title string) ([]string, error) {
-	// Select directory using Wails runtime
-	dir, err := a.SelectDirectory(title)
-	if err != nil || dir == "" {
-		return nil, err
-	}
-
-	// List all files recursively
-	files := []string{}
-	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Continue on error
-		}
-		if !info.IsDir() {
-			files = append(files, path)
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return files, nil
 }

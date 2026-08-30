@@ -23,8 +23,8 @@ import (
 //     booting later would resurrect the stale credential.
 //
 // Called before:
-//   - StartDaemon, StartServiceElevated, InstallServiceElevated,
-//     InstallAndStartServiceElevated, ReloadDaemonConfig (handoffs).
+//   - StartDaemon, StartServiceElevated, InstallAndStartServiceElevated,
+//     ReloadDaemonConfig (handoffs).
 //   - SaveDaemonConfig (persistence is the point).
 func (a *App) ensureAllConfigPersisted() error {
 	if a.config == nil {

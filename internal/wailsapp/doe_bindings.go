@@ -116,7 +116,7 @@ func (a *App) GetDOEMethods() []DOEMethodDTO {
 }
 
 // GenerateDOE expands the template into a full sweep, returning both the cases
-// and the job specs to hand to StartBulkRun.
+// and the job specs to hand to StartBulkRunWithOptions.
 //
 // Generation is pure: no files are read and no API calls are made, so the
 // frontend can call it as freely as it likes while the user edits the design.

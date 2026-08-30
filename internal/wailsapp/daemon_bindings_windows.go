@@ -847,73 +847,6 @@ func (a *App) ValidateAutoDownloadSetup() AutoDownloadValidationDTO {
 	return result
 }
 
-// IsServiceInstalled returns whether the Windows Service is installed.
-func (a *App) IsServiceInstalled() bool {
-	return service.IsInstalled()
-}
-
-// InstallService attempts to install the Windows Service (non-elevated, legacy).
-// Deprecated: Use InstallServiceElevated() which triggers UAC for reliable installation.
-func (a *App) InstallService() error {
-	if service.IsInstalled() {
-		return fmt.Errorf("service is already installed")
-	}
-
-	a.logInfo("Daemon", "Installing Windows Service...")
-
-	// Get executable path and config path
-	execPath, err := service.GetExecutablePath()
-	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	// Config path is optional - empty string means use defaults
-	if err := service.Install(execPath, ""); err != nil {
-		return fmt.Errorf("failed to install service (Administrator privileges required): %w", err)
-	}
-
-	a.logInfo("Daemon", "Windows Service installed successfully")
-	return nil
-}
-
-// InstallServiceElevated triggers UAC prompt to install Windows Service.
-// The elevated CLI process handles SCM registration and sets HKLM registry marker.
-func (a *App) InstallServiceElevated() ElevatedServiceResultDTO {
-	a.logInfo("Service", "Installing Windows Service with UAC elevation...")
-
-	if err := a.ensureAllConfigPersisted(); err != nil {
-		return ElevatedServiceResultDTO{Success: false, Error: err.Error()}
-	}
-
-	if err := elevation.InstallServiceElevated(); err != nil {
-		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to install service: %v", err),
-		}
-	}
-
-	a.logInfo("Service", "UAC approved, service install command executed")
-	return ElevatedServiceResultDTO{Success: true}
-}
-
-// UninstallServiceElevated triggers UAC prompt to uninstall Windows Service.
-// The elevated CLI process handles SCM removal and clears HKLM registry marker.
-func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
-	a.logInfo("Service", "Uninstalling Windows Service with UAC elevation...")
-
-	if err := elevation.UninstallServiceElevated(); err != nil {
-		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to uninstall service: %v", err),
-		}
-	}
-
-	a.logInfo("Service", "UAC approved, service uninstall command executed")
-	return ElevatedServiceResultDTO{Success: true}
-}
-
 // =============================================================================
 // File Logging Settings
 // =============================================================================
@@ -944,11 +877,6 @@ func (a *App) SetFileLoggingEnabled(enabled bool) error {
 		a.logInfo("Logging", "File logging disabled")
 	}
 	return nil
-}
-
-// GetLogFileLocation returns the current log file path (if logging to file).
-func (a *App) GetLogFileLocation() string {
-	return GetLogFilePath()
 }
 
 // =============================================================================
@@ -1161,11 +1089,6 @@ func (a *App) OpenLogsDirectory() error {
 	}
 
 	return nil
-}
-
-// GetLogsDirectory returns the unified logs directory path.
-func (a *App) GetLogsDirectory() string {
-	return config.LogDirectory()
 }
 
 // =============================================================================

@@ -769,11 +769,6 @@ func (a *App) SetFileLoggingEnabled(enabled bool) error {
 	return nil
 }
 
-// GetLogFileLocation returns the current log file path (if logging to file).
-func (a *App) GetLogFileLocation() string {
-	return GetLogFilePath()
-}
-
 // =============================================================================
 // Daemon Transfer Visibility (Plan 3: unified with GUI Transfers tab)
 // =============================================================================
@@ -995,11 +990,6 @@ func (a *App) OpenLogsDirectory() error {
 	}
 
 	return nil
-}
-
-// GetLogsDirectory returns the unified logs directory path.
-func (a *App) GetLogsDirectory() string {
-	return config.LogDirectory()
 }
 
 // =============================================================================

@@ -22,20 +22,12 @@ export function CancelDaemonTransfer(arg1) {
   return window['go']['wailsapp']['App']['CancelDaemonTransfer'](arg1);
 }
 
-export function CancelLocalDirectoryRead() {
-  return window['go']['wailsapp']['App']['CancelLocalDirectoryRead']();
-}
-
 export function CancelRun() {
   return window['go']['wailsapp']['App']['CancelRun']();
 }
 
 export function CancelTransfer(arg1) {
   return window['go']['wailsapp']['App']['CancelTransfer'](arg1);
-}
-
-export function CheckFolderExistsForUpload(arg1, arg2) {
-  return window['go']['wailsapp']['App']['CheckFolderExistsForUpload'](arg1, arg2);
 }
 
 export function CheckFoldersExistForUpload(arg1, arg2) {
@@ -162,14 +154,6 @@ export function GetLocalFilesInfo(arg1) {
   return window['go']['wailsapp']['App']['GetLocalFilesInfo'](arg1);
 }
 
-export function GetLogFileLocation() {
-  return window['go']['wailsapp']['App']['GetLogFileLocation']();
-}
-
-export function GetLogsDirectory() {
-  return window['go']['wailsapp']['App']['GetLogsDirectory']();
-}
-
 export function GetMyJobsFolderID() {
   return window['go']['wailsapp']['App']['GetMyJobsFolderID']();
 }
@@ -208,18 +192,6 @@ export function GetUngroupedTransferTasks() {
 
 export function InstallAndStartServiceElevated() {
   return window['go']['wailsapp']['App']['InstallAndStartServiceElevated']();
-}
-
-export function InstallService() {
-  return window['go']['wailsapp']['App']['InstallService']();
-}
-
-export function InstallServiceElevated() {
-  return window['go']['wailsapp']['App']['InstallServiceElevated']();
-}
-
-export function IsServiceInstalled() {
-  return window['go']['wailsapp']['App']['IsServiceInstalled']();
 }
 
 export function ListJobStatuses() {
@@ -282,10 +254,6 @@ export function LoadJobsFromJSON(arg1) {
   return window['go']['wailsapp']['App']['LoadJobsFromJSON'](arg1);
 }
 
-export function LoadTemplate(arg1) {
-  return window['go']['wailsapp']['App']['LoadTemplate'](arg1);
-}
-
 export function OpenLogsDirectory() {
   return window['go']['wailsapp']['App']['OpenLogsDirectory']();
 }
@@ -296,10 +264,6 @@ export function ParseDOECasesCSV(arg1) {
 
 export function PauseDaemon() {
   return window['go']['wailsapp']['App']['PauseDaemon']();
-}
-
-export function PreviewCommandPatterns(arg1, arg2) {
-  return window['go']['wailsapp']['App']['PreviewCommandPatterns'](arg1, arg2);
 }
 
 export function PreviewDOECases(arg1, arg2) {
@@ -390,14 +354,6 @@ export function SelectDirectory(arg1) {
   return window['go']['wailsapp']['App']['SelectDirectory'](arg1);
 }
 
-export function SelectDirectoryAndListFiles(arg1) {
-  return window['go']['wailsapp']['App']['SelectDirectoryAndListFiles'](arg1);
-}
-
-export function SelectDirectoryRecursive(arg1) {
-  return window['go']['wailsapp']['App']['SelectDirectoryRecursive'](arg1);
-}
-
 export function SelectFile(arg1) {
   return window['go']['wailsapp']['App']['SelectFile'](arg1);
 }
@@ -408,10 +364,6 @@ export function SelectMultipleFiles(arg1) {
 
 export function SetFileLoggingEnabled(arg1) {
   return window['go']['wailsapp']['App']['SetFileLoggingEnabled'](arg1);
-}
-
-export function StartBulkRun(arg1) {
-  return window['go']['wailsapp']['App']['StartBulkRun'](arg1);
 }
 
 export function StartBulkRunWithOptions(arg1, arg2) {
@@ -464,10 +416,6 @@ export function TriggerDaemonScan() {
 
 export function TriggerProfileRescan() {
   return window['go']['wailsapp']['App']['TriggerProfileRescan']();
-}
-
-export function UninstallServiceElevated() {
-  return window['go']['wailsapp']['App']['UninstallServiceElevated']();
 }
 
 export function UpdateConfig(arg1) {

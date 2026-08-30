@@ -293,58 +293,6 @@ export namespace wailsapp {
 		    return a;
 		}
 	}
-	export class PatternInfoDTO {
-	    fullMatch: string;
-	    number: string;
-	    prefix: string;
-	    suffix: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new PatternInfoDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.fullMatch = source["fullMatch"];
-	        this.number = source["number"];
-	        this.prefix = source["prefix"];
-	        this.suffix = source["suffix"];
-	    }
-	}
-	export class CommandPreviewDTO {
-	    dirName: string;
-	    command: string;
-	    patterns: PatternInfoDTO[];
-	
-	    static createFrom(source: any = {}) {
-	        return new CommandPreviewDTO(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.dirName = source["dirName"];
-	        this.command = source["command"];
-	        this.patterns = this.convertValues(source["patterns"], PatternInfoDTO);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	export class ConfigDTO {
 	    apiBaseUrl: string;
 	    tenantUrl: string;
@@ -1285,7 +1233,6 @@ export namespace wailsapp {
 	        this.fileTags = source["fileTags"];
 	    }
 	}
-	
 	export class PreFlightResultDTO {
 	    apiKeyOk: boolean;
 	    folderOk: boolean;
