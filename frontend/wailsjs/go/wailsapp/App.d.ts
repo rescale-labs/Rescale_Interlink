@@ -3,237 +3,124 @@
 import {wailsapp} from '../models';
 
 export function BuildErrorReport(arg1:string):Promise<string>;
-
 export function CancelAllTransfers():Promise<void>;
-
 export function CancelBatch(arg1:string):Promise<void>;
-
 export function CancelDaemonBatch(arg1:string):Promise<void>;
-
 export function CancelDaemonTransfer(arg1:string):Promise<void>;
-
 export function CancelLocalDirectoryRead():Promise<void>;
-
 export function CancelRun():Promise<void>;
-
 export function CancelTransfer(arg1:string):Promise<void>;
-
 export function CheckFolderExistsForUpload(arg1:string,arg2:string):Promise<wailsapp.FolderExistsCheckDTO>;
-
 export function CheckFoldersExistForUpload(arg1:Array<string>,arg2:string):Promise<Array<wailsapp.FolderExistsCheckDTO>>;
-
 export function CheckForUpdates():Promise<wailsapp.VersionCheckDTO>;
-
 export function CheckLocalFolderExists(arg1:string,arg2:string):Promise<wailsapp.LocalFolderExistsCheckDTO>;
-
 export function ClearCatalogCache():Promise<void>;
-
 export function ClearCompletedTransfers():Promise<void>;
-
 export function ClearSavedAPIKey():Promise<wailsapp.ClearSavedAPIKeyResultDTO>;
-
 export function CreateRemoteFolder(arg1:string,arg2:string):Promise<string>;
-
+export function DefaultDOEMaxCases():Promise<number>;
 export function DeleteRemoteItems(arg1:string,arg2:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
-
 export function DeleteTemplate(arg1:string):Promise<void>;
-
+export function GenerateDOE(arg1:wailsapp.DOEOptionsDTO):Promise<wailsapp.DOEResultDTO>;
 export function GetAnalysisCodes(arg1:string):Promise<wailsapp.AnalysisCodesResultDTO>;
-
 export function GetAppInfo():Promise<wailsapp.AppInfoDTO>;
-
 export function GetAutomations():Promise<wailsapp.AutomationsResultDTO>;
-
 export function GetBatchTasks(arg1:string,arg2:number,arg3:number,arg4:string):Promise<Array<wailsapp.TransferTaskDTO>>;
-
 export function GetConfig():Promise<wailsapp.ConfigDTO>;
-
 export function GetCoreTypes():Promise<wailsapp.CoreTypesResultDTO>;
-
 export function GetCredentialSource():Promise<wailsapp.CredentialSourceDTO>;
-
+export function GetDOEMethods():Promise<Array<wailsapp.DOEMethodDTO>>;
 export function GetDaemonConfig():Promise<wailsapp.DaemonConfigDTO>;
-
 export function GetDaemonLogs(arg1:number):Promise<Array<wailsapp.DaemonLogEntryDTO>>;
-
 export function GetDaemonStatus():Promise<wailsapp.DaemonStatusDTO>;
-
 export function GetDaemonTransferSnapshot():Promise<wailsapp.DaemonTransferSnapshotDTO>;
-
 export function GetDefaultConfigPath():Promise<string>;
-
 export function GetDefaultDownloadFolder():Promise<string>;
-
 export function GetFileLoggingSettings():Promise<wailsapp.FileLoggingSettingsDTO>;
-
 export function GetHistoricalJobRows(arg1:string):Promise<Array<wailsapp.JobRowDTO>>;
-
 export function GetHomeDirectory():Promise<string>;
-
 export function GetJobRows():Promise<Array<wailsapp.JobRowDTO>>;
-
 export function GetJobsStats():Promise<wailsapp.JobsStatsDTO>;
-
 export function GetLocalFilesInfo(arg1:Array<string>):Promise<Array<wailsapp.LocalFileInfoDTO>>;
-
 export function GetLogFileLocation():Promise<string>;
-
 export function GetLogsDirectory():Promise<string>;
-
 export function GetMyJobsFolderID():Promise<string>;
-
 export function GetMyLibraryFolderID():Promise<string>;
-
 export function GetRunHistory():Promise<Array<wailsapp.RunHistoryEntryDTO>>;
-
 export function GetRunStatus():Promise<wailsapp.RunStatusDTO>;
-
 export function GetServiceStatus():Promise<wailsapp.ServiceStatusDTO>;
-
 export function GetTransferBatches():Promise<Array<wailsapp.TransferBatchDTO>>;
-
 export function GetTransferStats():Promise<wailsapp.TransferStatsDTO>;
-
 export function GetTransferTasks():Promise<Array<wailsapp.TransferTaskDTO>>;
-
 export function GetUngroupedTransferTasks():Promise<Array<wailsapp.TransferTaskDTO>>;
-
 export function InstallAndStartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
-
 export function InstallService():Promise<void>;
-
 export function InstallServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
-
 export function IsServiceInstalled():Promise<boolean>;
-
 export function ListJobStatuses():Promise<wailsapp.JobStatusListDTO>;
-
 export function ListJobStatusesPage(arg1:number):Promise<wailsapp.JobStatusListDTO>;
-
 export function ListLocalDirectory(arg1:string):Promise<wailsapp.FolderContentsDTO>;
-
 export function ListLocalDirectoryEx(arg1:string,arg2:boolean):Promise<wailsapp.FolderContentsDTO>;
-
 export function ListRemoteFolder(arg1:string):Promise<wailsapp.FolderContentsDTO>;
-
 export function ListRemoteFolderPage(arg1:string,arg2:string,arg3:number):Promise<wailsapp.FolderContentsDTO>;
-
 export function ListRemoteLegacy(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
-
 export function ListRemoteLegacyWithFilters(arg1:string,arg2:number,arg3:string,arg4:string,arg5:string,arg6:string):Promise<wailsapp.FolderContentsDTO>;
-
 export function ListRemoteTrash(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
-
 export function ListSavedTemplates():Promise<Array<wailsapp.TemplateInfoDTO>>;
-
 export function LoadConfigFromPath(arg1:string):Promise<void>;
-
 export function LoadJobFromJSON(arg1:string):Promise<wailsapp.JobSpecDTO>;
-
 export function LoadJobFromSGE(arg1:string):Promise<wailsapp.JobSpecDTO>;
-
 export function LoadJobsFromCSV(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>;
-
 export function LoadJobsFromJSON(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>;
-
 export function LoadTemplate(arg1:string):Promise<wailsapp.JobSpecDTO>;
-
 export function OpenLogsDirectory():Promise<void>;
-
 export function PauseDaemon():Promise<void>;
-
 export function PreviewCommandPatterns(arg1:string,arg2:Array<string>):Promise<Array<wailsapp.CommandPreviewDTO>>;
-
+export function PreviewDOECases(arg1:wailsapp.DOEOptionsDTO,arg2:number):Promise<wailsapp.DOEResultDTO>;
 export function PurgeTrashItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
-
 export function RecoverTrashItems(arg1:Array<wailsapp.FileItemDTO>):Promise<wailsapp.DeleteResultDTO>;
-
 export function ReloadDaemonConfig():Promise<wailsapp.ReloadConfigResultDTO>;
-
 export function ResetRun():Promise<void>;
-
 export function ResumeDaemon():Promise<void>;
-
 export function RetryFailedInBatch(arg1:string):Promise<void>;
-
 export function RetryFailedInDaemonBatch(arg1:string):Promise<void>;
-
 export function RetryTransfer(arg1:string):Promise<string>;
-
 export function SaveConfig():Promise<void>;
-
 export function SaveConfigAs(arg1:string):Promise<void>;
-
 export function SaveDaemonConfig(arg1:wailsapp.DaemonConfigDTO):Promise<void>;
-
 export function SaveErrorReport(arg1:string):Promise<string>;
-
 export function SaveFile(arg1:string):Promise<string>;
-
 export function SaveJobToJSON(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>;
-
 export function SaveJobToSGE(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>;
-
 export function SaveJobsToCSV(arg1:string,arg2:Array<wailsapp.JobSpecDTO>):Promise<void>;
-
 export function SaveLogExport(arg1:string):Promise<string>;
-
 export function SaveTemplate(arg1:string,arg2:wailsapp.JobSpecDTO):Promise<void>;
-
 export function ScanDirectory(arg1:wailsapp.ScanOptionsDTO,arg2:wailsapp.JobSpecDTO):Promise<wailsapp.ScanResultDTO>;
-
 export function SearchRemoteFolderContents(arg1:string,arg2:string,arg3:string,arg4:number):Promise<wailsapp.FolderContentsDTO>;
-
 export function SelectDirectory(arg1:string):Promise<string>;
-
 export function SelectDirectoryAndListFiles(arg1:string):Promise<Array<string>>;
-
 export function SelectDirectoryRecursive(arg1:string):Promise<Array<string>>;
-
 export function SelectFile(arg1:string):Promise<string>;
-
 export function SelectMultipleFiles(arg1:string):Promise<Array<string>>;
-
 export function SetFileLoggingEnabled(arg1:boolean):Promise<void>;
-
 export function StartBulkRun(arg1:Array<wailsapp.JobSpecDTO>):Promise<string>;
-
 export function StartBulkRunWithOptions(arg1:Array<wailsapp.JobSpecDTO>,arg2:wailsapp.PURRunOptionsDTO):Promise<string>;
-
 export function StartDaemon():Promise<void>;
-
 export function StartFolderDownload(arg1:string,arg2:string,arg3:string,arg4:string):Promise<wailsapp.FolderDownloadResultDTO>;
-
 export function StartFolderUpload(arg1:string,arg2:string,arg3:Array<string>):Promise<wailsapp.FolderUploadResultDTO>;
-
 export function StartServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
-
 export function StartSingleJob(arg1:wailsapp.SingleJobInputDTO):Promise<string>;
-
 export function StartTransfers(arg1:Array<wailsapp.TransferRequestDTO>):Promise<void>;
-
 export function StopDaemon():Promise<void>;
-
 export function StopServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
-
 export function TestAutoDownloadConnection(arg1:string):Promise<void>;
-
 export function TestConnection():Promise<wailsapp.ConnectionResultDTO>;
-
 export function TriggerDaemonScan():Promise<void>;
-
 export function TriggerProfileRescan():Promise<void>;
-
 export function UninstallServiceElevated():Promise<wailsapp.ElevatedServiceResultDTO>;
-
 export function UpdateConfig(arg1:wailsapp.ConfigDTO):Promise<void>;
-
 export function ValidateAutoDownloadPreFlight(arg1:string):Promise<wailsapp.PreFlightResultDTO>;
-
 export function ValidateAutoDownloadSetup():Promise<wailsapp.AutoDownloadValidationDTO>;
-
 export function ValidateJobSpec(arg1:wailsapp.JobSpecDTO):Promise<Array<string>>;
-
 export function ValidateLocalDirectory(arg1:string):Promise<void>;
-
 export function ValidateRemoteFolder(arg1:string):Promise<void>;

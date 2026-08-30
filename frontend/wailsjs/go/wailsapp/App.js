@@ -66,12 +66,20 @@ export function CreateRemoteFolder(arg1, arg2) {
   return window['go']['wailsapp']['App']['CreateRemoteFolder'](arg1, arg2);
 }
 
+export function DefaultDOEMaxCases() {
+  return window['go']['wailsapp']['App']['DefaultDOEMaxCases']();
+}
+
 export function DeleteRemoteItems(arg1, arg2) {
   return window['go']['wailsapp']['App']['DeleteRemoteItems'](arg1, arg2);
 }
 
 export function DeleteTemplate(arg1) {
   return window['go']['wailsapp']['App']['DeleteTemplate'](arg1);
+}
+
+export function GenerateDOE(arg1) {
+  return window['go']['wailsapp']['App']['GenerateDOE'](arg1);
 }
 
 export function GetAnalysisCodes(arg1) {
@@ -100,6 +108,10 @@ export function GetCoreTypes() {
 
 export function GetCredentialSource() {
   return window['go']['wailsapp']['App']['GetCredentialSource']();
+}
+
+export function GetDOEMethods() {
+  return window['go']['wailsapp']['App']['GetDOEMethods']();
 }
 
 export function GetDaemonConfig() {
@@ -284,6 +296,10 @@ export function PauseDaemon() {
 
 export function PreviewCommandPatterns(arg1, arg2) {
   return window['go']['wailsapp']['App']['PreviewCommandPatterns'](arg1, arg2);
+}
+
+export function PreviewDOECases(arg1, arg2) {
+  return window['go']['wailsapp']['App']['PreviewDOECases'](arg1, arg2);
 }
 
 export function PurgeTrashItems(arg1) {
