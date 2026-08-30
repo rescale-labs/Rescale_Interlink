@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -570,5 +571,42 @@ func TestResumeAfterFailureReportsNoFailures(t *testing.T) {
 
 	if got := p.countFailedJobs(); got != 0 {
 		t.Errorf("a clean resume must report no failures, got %d", got)
+	}
+}
+
+// A sweep case legitimately has no Directory, which skips tar and upload — but
+// only when its inputs are accounted for elsewhere. Relaxing that guard to
+// "always skip" let a job with nothing at all reach job creation and submit.
+func TestCheckJobHasInputs(t *testing.T) {
+	empty := models.JobSpec{JobName: "sweep_1"}
+
+	tests := []struct {
+		name       string
+		pipeline   *Pipeline
+		spec       models.JobSpec
+		wantReject bool
+	}{
+		{"nothing at all", &Pipeline{}, empty, true},
+		{"submit-existing bypasses the check", &Pipeline{skipTarUpload: true}, empty, false},
+		{"batch-level common files resolved", &Pipeline{sharedFileIDs: []string{"abc"}}, empty, false},
+		{"per-job file IDs", &Pipeline{}, models.JobSpec{JobName: "s", InputFiles: []string{"abc"}}, false},
+		{"per-job extra file IDs", &Pipeline{}, models.JobSpec{JobName: "s", ExtraInputFileIDs: "abc"}, false},
+		{"a directory to tar", &Pipeline{}, models.JobSpec{JobName: "s", Directory: "/data/run"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.pipeline.checkJobHasInputs(tt.spec)
+
+			if tt.wantReject && err == nil {
+				t.Fatal("expected a job with no inputs to be refused")
+			}
+			if !tt.wantReject && err != nil {
+				t.Fatalf("unexpected rejection: %v", err)
+			}
+			if tt.wantReject && !strings.Contains(err.Error(), tt.spec.JobName) {
+				t.Errorf("error %q does not name the job %q", err, tt.spec.JobName)
+			}
+		})
 	}
 }

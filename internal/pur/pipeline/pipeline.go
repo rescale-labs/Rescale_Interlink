@@ -608,6 +608,15 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			// engine (Single Job localFiles uploads via ReportUploadProgress)
 			// is preserved — only non-terminal statuses flip to "skipped".
 			if jobSpec.Directory == "" {
+				if err := p.checkJobHasInputs(jobSpec); err != nil {
+					p.logf("ERROR", "job", item.state.JobName, "REJECTED: %v", err)
+					item.state.SubmitStatus = "failed"
+					item.state.ErrorMessage = err.Error()
+					p.stateMgr.UpdateState(item.state)
+					p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
+					continue
+				}
+
 				item.state.TarStatus = nextSkipStatus(item.state.TarStatus)
 				item.state.UploadStatus = nextSkipStatus(item.state.UploadStatus)
 				p.stateMgr.UpdateState(item.state)
@@ -744,6 +753,31 @@ func (p *Pipeline) countFailedJobs() int {
 		}
 	}
 	return failed
+}
+
+// checkJobHasInputs rejects a job that would be created with nothing attached.
+//
+// A job with no Directory skips tar and upload, which is right for a DOE sweep
+// or a single job built from pre-uploaded IDs — but only when its inputs are
+// accounted for somewhere: per-job file IDs, per-job extra file IDs, or the
+// batch-level Common Files that ResolveSharedFiles has already resolved by the
+// time the feeder runs. With none of those, the pipeline creates and submits a
+// job carrying no input files at all, which the API accepts.
+//
+// submit-existing keeps its bypass: that mode's premise is that the caller
+// placed the inputs on Rescale itself.
+func (p *Pipeline) checkJobHasInputs(spec models.JobSpec) error {
+	if p.skipTarUpload {
+		return nil
+	}
+	if spec.Directory != "" || len(spec.InputFiles) > 0 ||
+		strings.TrimSpace(spec.ExtraInputFileIDs) != "" || len(p.sharedFileIDs) > 0 {
+		return nil
+	}
+
+	return fmt.Errorf("job %q has no working directory, no input file IDs and no common input files, "+
+		"so it would run with no inputs at all; give it a directory, pre-uploaded file IDs, or pass "+
+		"--common-input-files", spec.JobName)
 }
 
 // retryLogger reports storage retries through the pipeline log so a stalled
