@@ -1,4 +1,5 @@
-// Reusable error summary for CompletedResultsView.
+// Error summary for the PUR tab's results view, which renders it from both the
+// completed-workflow branch and the standalone results view.
 import { useState } from 'react'
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline'
 import type { JobRow } from '../../types/jobs'

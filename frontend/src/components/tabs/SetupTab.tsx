@@ -16,6 +16,7 @@ import {
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 import { ClipboardGetText, EventsOn } from '../../../wailsjs/runtime/runtime';
+import { EVENT_NAMES } from '../../types/events';
 import {
   SelectDirectory,
   SaveConfigAs,
@@ -167,7 +168,7 @@ export function SetupTab() {
 
     // Unsubscribe with the handle EventsOn returns; EventsOff(name) would drop
     // every listener registered for this event, including other components'.
-    const unsubscribeTestResult = EventsOn('interlink:autodownload_test_result', handleTestResult);
+    const unsubscribeTestResult = EventsOn(EVENT_NAMES.AUTODOWNLOAD_TEST_RESULT, handleTestResult);
 
     return () => {
       unsubscribeTestResult();

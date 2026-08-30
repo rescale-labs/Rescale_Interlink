@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { FolderIcon, DocumentIcon, ArrowUpIcon, ArrowDownIcon } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import { wailsapp } from '../../../wailsjs/go/models'
+import { formatSize as formatSizeWith } from '../../utils/formatSize'
 
 // Sort configuration
 export type SortField = 'name' | 'size' | 'modTime' | 'created'
@@ -46,16 +47,10 @@ interface FileListProps {
   onSortChange?: (field: SortField, direction: 'asc' | 'desc') => void  // Callback when sort changes
 }
 
-// Format file size for display.
-// Defensive: handle undefined/NaN values (issue #18).
+// A listing row distinguishes an empty file from one whose size the backend
+// could not report, so the two cases render differently.
 function formatSize(bytes: number): string {
-  if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return '?'
-  if (bytes < 0) return '?'
-  if (bytes === 0) return '-'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  const size = bytes / Math.pow(1024, exp)
-  return `${size.toFixed(exp > 0 ? 1 : 0)} ${units[exp]}`
+  return formatSizeWith(bytes, { zero: '-', invalid: '?' })
 }
 
 // Format date for display

@@ -153,6 +153,7 @@ export const EVENT_NAMES = {
   BATCH_PROGRESS: 'interlink:batch_progress',
   CONFIG_CHANGED: 'interlink:config_changed',
   REPORTABLE_ERROR: 'interlink:reportable_error',
+  AUTODOWNLOAD_TEST_RESULT: 'interlink:autodownload_test_result',
 } as const;
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';

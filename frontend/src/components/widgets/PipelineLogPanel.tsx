@@ -1,4 +1,4 @@
-// Reusable pipeline log panel for RunMonitorView, CompletedResultsView.
+// Reusable pipeline log panel for the PUR tab's run and results views.
 import { useState } from 'react'
 import clsx from 'clsx'
 import type { PipelineLogEntry } from '../../types/jobs'

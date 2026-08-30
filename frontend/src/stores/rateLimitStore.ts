@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { EventsOn } from '../../wailsjs/runtime/runtime';
-import type { LogEventDTO } from '../types/events';
+import { EVENT_NAMES, type LogEventDTO } from '../types/events';
 
 // How long the footer indicator lingers after the last rate-limit event
 // before clearing. Rate-limit events arrive in bursts with gaps between them;
@@ -33,7 +33,7 @@ export const useRateLimitStore = create<RateLimitState>((set) => {
       };
 
       // Use the unsub callback, never EventsOff (would drop other stores' listeners).
-      const unsubLog = EventsOn('interlink:log', handleLog);
+      const unsubLog = EventsOn(EVENT_NAMES.LOG, handleLog);
 
       return () => {
         unsubLog();

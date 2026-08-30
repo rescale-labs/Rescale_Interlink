@@ -1,4 +1,5 @@
-// Duration formatting utilities for RunMonitorView, CompletedResultsView, ActivityTab.
+// Duration formatting utilities for the PUR tab's run and results views and
+// for ActivityTab.
 
 /**
  * Formats a duration in seconds into a human-readable string.

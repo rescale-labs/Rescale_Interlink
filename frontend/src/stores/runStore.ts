@@ -13,8 +13,9 @@ import type {
   QueuedJob,
   PersistedActiveRun,
 } from '../types/run'
+import { makePendingJobRow } from '../utils/jobs'
 import { computeStageStats } from '../utils/stageStats'
-import type { StateChangeEventDTO, LogEventDTO, CompleteEventDTO } from '../types/events'
+import { EVENT_NAMES, type StateChangeEventDTO, type LogEventDTO, type CompleteEventDTO } from '../types/events'
 
 const ACTIVE_RUN_KEY = 'rescale-int-active-run'
 const MAX_COMPLETED_RUNS = 20
@@ -213,7 +214,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
     }
 
     // C9: Use unsub callbacks, NEVER EventsOff (would remove logStore's listeners)
-    const unsubStateChange = EventsOn('interlink:state_change', (data: StateChangeEventDTO) => {
+    const unsubStateChange = EventsOn(EVENT_NAMES.STATE_CHANGE, (data: StateChangeEventDTO) => {
       const { activeRun } = get()
       if (!activeRun || activeRun.status !== 'active') return
 
@@ -262,7 +263,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
     })
 
     // C5: Use correct field names from LogEventDTO (jobName, stage — NOT detail, category)
-    const unsubLog = EventsOn('interlink:log', (data: LogEventDTO) => {
+    const unsubLog = EventsOn(EVENT_NAMES.LOG, (data: LogEventDTO) => {
       const { activeRun } = get()
       if (!activeRun || activeRun.status !== 'active') return
 
@@ -285,7 +286,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       })
     })
 
-    const unsubComplete = EventsOn('interlink:complete', (data: CompleteEventDTO) => {
+    const unsubComplete = EventsOn(EVENT_NAMES.COMPLETE, (data: CompleteEventDTO) => {
       const { activeRun, queuedJob, stopPolling } = get()
       if (!activeRun) return
 
@@ -604,20 +605,11 @@ async function startQueuedJobWithRetry(maxAttempts = 5) {
       if (queuedJob.runType === 'single') {
         const runId = await App.StartSingleJob(queuedJob.input)
         if (runId) {
-          const jobRows: JobRow[] = [{
+          const jobRows: JobRow[] = [makePendingJobRow({
             index: 0,
             directory: '',
             jobName: queuedJob.input.job?.jobName || 'Job',
-            tarStatus: 'pending',
-            uploadStatus: 'pending',
-            uploadProgress: 0,
-            createStatus: 'pending',
-            submitStatus: 'pending',
-            status: 'pending',
-            jobId: '',
-            progress: 0,
-            error: '',
-          }]
+          })]
           useRunStore.getState().registerRun(runId, 'single', 1, jobRows)
           useRunStore.getState().startPolling(1000)
         }
@@ -627,19 +619,10 @@ async function startQueuedJobWithRetry(maxAttempts = 5) {
           queuedJob.input.opts,
         )
         if (runId) {
-          const jobRows: JobRow[] = queuedJob.input.jobs.map((job, i) => ({
+          const jobRows: JobRow[] = queuedJob.input.jobs.map((job, i) => makePendingJobRow({
             index: i,
             directory: job.directory || '',
             jobName: job.jobName || `Job_${i + 1}`,
-            tarStatus: 'pending',
-            uploadStatus: 'pending',
-            uploadProgress: 0,
-            createStatus: 'pending',
-            submitStatus: 'pending',
-            status: 'pending',
-            jobId: '',
-            progress: 0,
-            error: '',
           }))
           useRunStore.getState().registerRun(runId, 'pur', queuedJob.input.jobs.length, jobRows)
           useRunStore.getState().startPolling(3000)

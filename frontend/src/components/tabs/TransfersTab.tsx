@@ -16,15 +16,11 @@ import {
 import clsx from 'clsx'
 import { useTransferStore, TransferTask, TransferBatch, Enumeration, extractDiskSpaceInfo, formatSpeed, formatETA, BATCH_PAGE_SIZE } from '../../stores'
 import { useTabNavigation } from '../../App'
+import { formatSize as formatSizeWith } from '../../utils/formatSize'
 
-// Format file size (issue #18)
+// A transfer always has a byte count, so nothing to show reads as none moved.
 function formatSize(bytes: number): string {
-  // Defensive: handle undefined/NaN values
-  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  const size = bytes / Math.pow(1024, exp)
-  return `${size.toFixed(exp > 0 ? 1 : 0)} ${units[exp]}`
+  return formatSizeWith(bytes, { zero: '0 B', invalid: '0 B' })
 }
 
 // Format number with commas

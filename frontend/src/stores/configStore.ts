@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { wailsapp } from '../../wailsjs/go/models';
 import * as App from '../../wailsjs/go/wailsapp/App';
 import { EventsOn } from '../../wailsjs/runtime/runtime';
+import { EVENT_NAMES } from '../types/events';
 import type { ConnectionResultDTO } from '../types';
 
 interface ConfigState {
@@ -264,7 +265,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
     };
 
-    const unsubscribeConnectionResult = EventsOn('interlink:connection_result', handleConnectionResult);
+    const unsubscribeConnectionResult = EventsOn(EVENT_NAMES.CONNECTION_RESULT, handleConnectionResult);
     set({ _eventListenersSetup: true });
 
     return () => {

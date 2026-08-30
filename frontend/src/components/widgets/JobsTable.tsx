@@ -1,4 +1,4 @@
-// Reusable jobs table for RunMonitorView, CompletedResultsView, ActivityTab.
+// Reusable jobs table for the PUR, Single Job and Activity tabs.
 import clsx from 'clsx'
 import type { JobRow } from '../../types/jobs'
 import { StatusBadge } from './StatusBadge'

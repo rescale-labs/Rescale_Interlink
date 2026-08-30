@@ -1,4 +1,4 @@
-// Reusable pipeline stage progress summary for RunMonitorView, CompletedResultsView.
+// Pipeline stage progress summary for the PUR tab's run view.
 import type { PipelineStageStats } from '../../types/jobs'
 
 export function PipelineStageSummary({ stats, total }: { stats: PipelineStageStats; total: number }) {

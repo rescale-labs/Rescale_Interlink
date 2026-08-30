@@ -1,4 +1,4 @@
-// Reusable job stats summary bar for RunMonitorView, CompletedResultsView.
+// Job stats summary bar for the PUR tab's run view.
 import type { JobRow } from '../../types/jobs'
 
 export function StatsBar({ jobs }: { jobs: JobRow[] }) {
