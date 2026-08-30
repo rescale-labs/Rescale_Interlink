@@ -9,22 +9,26 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/doe"
 )
 
-func TestParseParamSpec_NumericRange(t *testing.T) {
+// A domain containing ':' is a numeric range and anything else is a categorical
+// list, so both forms are one table over the same parse.
+func TestParseParamSpec(t *testing.T) {
 	tests := []struct {
-		name       string
-		spec       string
-		wantName   string
-		wantMin    float64
-		wantMax    float64
-		wantLevels int
+		name string
+		spec string
+		want doe.Parameter
 	}{
-		{"range with levels", "alpha=10:20:5", "alpha", 10, 20, 5},
-		{"range without levels", "alpha=10:20", "alpha", 10, 20, 0},
-		{"decimals", "alpha=0.5:1.25:3", "alpha", 0.5, 1.25, 3},
-		{"negatives", "alpha=-5:-1:2", "alpha", -5, -1, 2},
-		{"exponents", "alpha=1e-3:1e-1", "alpha", 0.001, 0.1, 0},
-		{"whitespace tolerated", " alpha = 10 : 20 : 4 ", "alpha", 10, 20, 4},
-		{"dotted name", "bc.inlet=1:2", "bc.inlet", 1, 2, 0},
+		{"range with levels", "alpha=10:20:5", doe.Parameter{Name: "alpha", Min: 10, Max: 20, Levels: 5}},
+		{"range without levels", "alpha=10:20", doe.Parameter{Name: "alpha", Min: 10, Max: 20}},
+		{"decimals", "alpha=0.5:1.25:3", doe.Parameter{Name: "alpha", Min: 0.5, Max: 1.25, Levels: 3}},
+		{"negatives", "alpha=-5:-1:2", doe.Parameter{Name: "alpha", Min: -5, Max: -1, Levels: 2}},
+		{"exponents", "alpha=1e-3:1e-1", doe.Parameter{Name: "alpha", Min: 0.001, Max: 0.1}},
+		{"whitespace tolerated", " alpha = 10 : 20 : 4 ", doe.Parameter{Name: "alpha", Min: 10, Max: 20, Levels: 4}},
+		{"dotted name", "bc.inlet=1:2", doe.Parameter{Name: "bc.inlet", Min: 1, Max: 2}},
+		{"categorical list", "model=kepsilon,komega,les",
+			doe.Parameter{Name: "model", Values: []string{"kepsilon", "komega", "les"}}},
+		{"categorical single value", "model=kepsilon", doe.Parameter{Name: "model", Values: []string{"kepsilon"}}},
+		{"categorical whitespace trimmed", "model= a , b ", doe.Parameter{Name: "model", Values: []string{"a", "b"}}},
+		{"categorical empty entries dropped", "model=a,,b,", doe.Parameter{Name: "model", Values: []string{"a", "b"}}},
 	}
 
 	for _, tt := range tests {
@@ -34,51 +38,21 @@ func TestParseParamSpec_NumericRange(t *testing.T) {
 				t.Fatalf("parseParamSpec(%q) failed: %v", tt.spec, err)
 			}
 
-			if got.Name != tt.wantName {
-				t.Errorf("Name = %q, want %q", got.Name, tt.wantName)
+			if got.Name != tt.want.Name {
+				t.Errorf("Name = %q, want %q", got.Name, tt.want.Name)
 			}
-			if got.Min != tt.wantMin || got.Max != tt.wantMax {
-				t.Errorf("range = %v:%v, want %v:%v", got.Min, got.Max, tt.wantMin, tt.wantMax)
+			if got.Min != tt.want.Min || got.Max != tt.want.Max {
+				t.Errorf("range = %v:%v, want %v:%v", got.Min, got.Max, tt.want.Min, tt.want.Max)
 			}
-			if got.Levels != tt.wantLevels {
-				t.Errorf("Levels = %d, want %d", got.Levels, tt.wantLevels)
+			if got.Levels != tt.want.Levels {
+				t.Errorf("Levels = %d, want %d", got.Levels, tt.want.Levels)
 			}
-			if got.Values != nil {
-				t.Errorf("Values = %v, want nil for a numeric range", got.Values)
+			if len(got.Values) != len(tt.want.Values) {
+				t.Fatalf("Values = %v, want %v", got.Values, tt.want.Values)
 			}
-		})
-	}
-}
-
-func TestParseParamSpec_Categorical(t *testing.T) {
-	tests := []struct {
-		name       string
-		spec       string
-		wantName   string
-		wantValues []string
-	}{
-		{"list", "model=kepsilon,komega,les", "model", []string{"kepsilon", "komega", "les"}},
-		{"single value", "model=kepsilon", "model", []string{"kepsilon"}},
-		{"whitespace trimmed", "model= a , b ", "model", []string{"a", "b"}},
-		{"empty entries dropped", "model=a,,b,", "model", []string{"a", "b"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseParamSpec(tt.spec)
-			if err != nil {
-				t.Fatalf("parseParamSpec(%q) failed: %v", tt.spec, err)
-			}
-
-			if got.Name != tt.wantName {
-				t.Errorf("Name = %q, want %q", got.Name, tt.wantName)
-			}
-			if len(got.Values) != len(tt.wantValues) {
-				t.Fatalf("Values = %v, want %v", got.Values, tt.wantValues)
-			}
-			for i := range tt.wantValues {
-				if got.Values[i] != tt.wantValues[i] {
-					t.Errorf("Values[%d] = %q, want %q", i, got.Values[i], tt.wantValues[i])
+			for i := range tt.want.Values {
+				if got.Values[i] != tt.want.Values[i] {
+					t.Errorf("Values[%d] = %q, want %q", i, got.Values[i], tt.want.Values[i])
 				}
 			}
 		})
@@ -181,73 +155,21 @@ func TestCheckFormatsMatchParameters(t *testing.T) {
 	}
 }
 
-func TestLoadCasesCSV(t *testing.T) {
+// The parsing itself is the doe package's; what the CLI adds is opening the
+// file, so that is what is checked here.
+func TestParseCasesCSVFile(t *testing.T) {
 	path := writeTempCSV(t, "cases.csv", "alpha,beta\n10,15\n20,25\n")
 
-	names, cases, err := loadCasesCSV(path)
+	names, cases, err := parseCasesCSVFile(path)
 	if err != nil {
-		t.Fatalf("loadCasesCSV() failed: %v", err)
+		t.Fatalf("parseCasesCSVFile() failed: %v", err)
+	}
+	if len(names) != 2 || len(cases) != 2 || cases[0]["alpha"] != "10" {
+		t.Errorf("names = %v, cases = %v", names, cases)
 	}
 
-	if len(names) != 2 || names[0] != "alpha" || names[1] != "beta" {
-		t.Errorf("names = %v, want [alpha beta]", names)
-	}
-	if len(cases) != 2 {
-		t.Fatalf("got %d cases, want 2", len(cases))
-	}
-	if cases[0]["alpha"] != "10" || cases[0]["beta"] != "15" {
-		t.Errorf("case 1 = %v", cases[0])
-	}
-	if cases[1]["alpha"] != "20" || cases[1]["beta"] != "25" {
-		t.Errorf("case 2 = %v", cases[1])
-	}
-}
-
-func TestLoadCasesCSV_TrimsAndSkipsBlankLines(t *testing.T) {
-	path := writeTempCSV(t, "cases.csv", " alpha , beta \n 10 , 15 \n\n20,25\n")
-
-	names, cases, err := loadCasesCSV(path)
-	if err != nil {
-		t.Fatalf("loadCasesCSV() failed: %v", err)
-	}
-
-	if names[0] != "alpha" || names[1] != "beta" {
-		t.Errorf("names = %v, want trimmed [alpha beta]", names)
-	}
-	if len(cases) != 2 {
-		t.Fatalf("got %d cases, want 2", len(cases))
-	}
-	if cases[0]["alpha"] != "10" {
-		t.Errorf("alpha = %q, want %q", cases[0]["alpha"], "10")
-	}
-}
-
-func TestLoadCasesCSV_Rejects(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-	}{
-		{"header only", "alpha,beta\n"},
-		{"empty file", ""},
-		{"unnamed column", "alpha,\n10,15\n"},
-		{"duplicate column", "alpha,alpha\n10,15\n"},
-		{"short row", "alpha,beta\n10\n"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			path := writeTempCSV(t, "cases.csv", tt.content)
-
-			if _, _, err := loadCasesCSV(path); err == nil {
-				t.Error("loadCasesCSV() succeeded, want an error")
-			}
-		})
-	}
-}
-
-func TestLoadCasesCSV_MissingFile(t *testing.T) {
-	if _, _, err := loadCasesCSV(filepath.Join(t.TempDir(), "absent.csv")); err == nil {
-		t.Error("loadCasesCSV() succeeded for a missing file")
+	if _, _, err := parseCasesCSVFile(filepath.Join(t.TempDir(), "absent.csv")); err == nil {
+		t.Error("parseCasesCSVFile() succeeded for a missing file")
 	}
 }
 

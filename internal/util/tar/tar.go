@@ -79,10 +79,12 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 		args = []string{tarFlags, outputPath, "-C", parent, dirname}
 	}
 
-	// On Windows, GNU tar reads the drive-letter colon in an absolute path
-	// (C:\...) as a remote host and fails with "Cannot connect to C: resolve
-	// failed". --force-local keeps colons local. Only GNU tar needs (and
-	// accepts) the flag; see isGNUTar.
+	// GNU tar reads the drive-letter colon in a Windows absolute path (C:\...)
+	// as a remote host and fails with "Cannot connect to C: resolve failed".
+	// --force-local keeps colons local. The gate is the tar flavor rather than
+	// the OS: every path CreateTarGz archives is local, so the flag is harmless
+	// wherever GNU tar is the system tar, and Windows' bsdtar neither needs nor
+	// accepts it. See isGNUTar.
 	if isGNUTar() {
 		args = append([]string{"--force-local"}, args...)
 	}

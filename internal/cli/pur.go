@@ -600,7 +600,7 @@ func (f *uploadTargetFlags) resolve(ctx context.Context, apiClient *api.Client) 
 
 	folderID, err := folder.ResolveOrCreatePath(ctx, apiClient, f.folderParent, f.folder)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to resolve upload folder: %w", err)
+		return "", fileTags, fmt.Errorf("failed to resolve upload folder: %w", err)
 	}
 
 	return folderID, fileTags, nil
@@ -692,7 +692,12 @@ Example:
 					if len(cmdPreview) > 40 {
 						cmdPreview = cmdPreview[:37] + "..."
 					}
-					dirPreview := filepath.Base(job.Directory)
+					// A sweep case has no working directory, and filepath.Base("")
+					// is ".", which reads as the current directory rather than none.
+					dirPreview := "—"
+					if job.Directory != "" {
+						dirPreview = filepath.Base(job.Directory)
+					}
 					fmt.Printf("%-5d %-30s %-20s %-10s %-8.1f %s\n",
 						i+1, job.JobName, dirPreview, job.CoreType, job.WalltimeHours, cmdPreview)
 				}

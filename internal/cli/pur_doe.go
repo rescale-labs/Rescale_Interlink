@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/csv"
 	"fmt"
 	"os"
 	"strconv"
@@ -69,11 +68,12 @@ Methods:
   explicit            cases read from --cases-csv
 
 Shared input files:
-  Pass --base-file-ids with the IDs of an already-uploaded input deck and every
-  case references those files directly. The deck is then transferred once for
-  the whole sweep instead of once per case, and the generated CSV is run with
-  'pur submit-existing'. Without it, every case keeps the template's directory
-  and 'pur run' tars and uploads that directory per case.
+  A sweep never zips a working directory: every case carries the same input deck
+  and differs only in its command. Pass --base-file-ids with the IDs of an
+  already-uploaded deck and every case references those files directly, and the
+  generated CSV is run with 'pur submit-existing'. Without it, the cases carry no
+  input files at all and the deck is supplied once at run time with
+  'pur run --common-input-files'.
 
 Examples:
   rescale-int pur doe --template base.csv --output sweep.csv \
@@ -134,7 +134,7 @@ Examples:
 			// Explicit cases come from a CSV whose header names the parameters, so
 			// the parameter list can be inferred when it was not given explicitly.
 			if casesCSV != "" {
-				names, cases, err := loadCasesCSV(casesCSV)
+				names, cases, err := parseCasesCSVFile(casesCSV)
 				if err != nil {
 					return err
 				}
@@ -226,7 +226,7 @@ Examples:
 	cmd.Flags().IntVar(&samples, "samples", 0, "Number of design points for latin-hypercube, sobol and monte-carlo")
 	cmd.Flags().Uint64Var(&seed, "seed", 0, "Seed for the randomized samplers; the same seed always yields the same sweep")
 	cmd.Flags().IntVar(&centerPoints, "center-points", 0, "Center point repeats for central-composite and box-behnken (default 1)")
-	cmd.Flags().IntVar(&maxCases, "max-cases", 0, fmt.Sprintf("Maximum cases to generate; 0 uses the default of %d, negative removes the limit", doe.DefaultMaxCases))
+	cmd.Flags().IntVar(&maxCases, "max-cases", 0, fmt.Sprintf("Maximum cases to generate; 0 uses the default of %d", doe.DefaultMaxCases))
 	cmd.Flags().StringVar(&jobNameTemplate, "job-name-template", "", "Case name template; may use parameter tokens plus {{__base}} and {{__index}} (default \"{{__base}}_{{__index}}\")")
 	cmd.Flags().StringArrayVar(&tagTemplates, "tag-template", nil, "Per-case job tag, e.g. \"alpha={{alpha}}\" (can repeat)")
 	cmd.Flags().StringVar(&baseFileIDs, "base-file-ids", "", "Comma-separated IDs of already-uploaded input files shared by every case")
@@ -361,59 +361,16 @@ func checkFormatsMatchParameters(formats map[string]string, params []doe.Paramet
 	return nil
 }
 
-// loadCasesCSV reads explicit cases from a CSV whose header names the
-// parameters. Returns the parameter names in column order and one map per row.
-func loadCasesCSV(path string) ([]string, []map[string]string, error) {
+// parseCasesCSVFile opens path and hands it to the shared parser, which is the
+// same one the GUI's pasted-cases box goes through.
+func parseCasesCSVFile(path string) ([]string, []map[string]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open cases CSV: %w", err)
 	}
 	defer file.Close()
 
-	records, err := csv.NewReader(file).ReadAll()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read cases CSV: %w", err)
-	}
-	if len(records) < 2 {
-		return nil, nil, fmt.Errorf("cases CSV must have a header row and at least one case")
-	}
-
-	names := make([]string, 0, len(records[0]))
-	seen := make(map[string]bool, len(records[0]))
-	for _, column := range records[0] {
-		name := strings.TrimSpace(column)
-		if name == "" {
-			return nil, nil, fmt.Errorf("cases CSV has an unnamed column")
-		}
-		if seen[name] {
-			return nil, nil, fmt.Errorf("cases CSV names column %q more than once", name)
-		}
-		seen[name] = true
-		names = append(names, name)
-	}
-
-	cases := make([]map[string]string, 0, len(records)-1)
-	for i, record := range records[1:] {
-		if len(record) == 1 && strings.TrimSpace(record[0]) == "" {
-			continue // Skip blank lines.
-		}
-		if len(record) != len(names) {
-			return nil, nil, fmt.Errorf("cases CSV row %d has %d values but the header has %d columns",
-				i+2, len(record), len(names))
-		}
-
-		values := make(map[string]string, len(names))
-		for j, name := range names {
-			values[name] = strings.TrimSpace(record[j])
-		}
-		cases = append(cases, values)
-	}
-
-	if len(cases) == 0 {
-		return nil, nil, fmt.Errorf("cases CSV has a header but no cases")
-	}
-
-	return names, cases, nil
+	return doe.ParseCasesCSV(file)
 }
 
 // printDOEPreview lists the generated cases and one full rendered command, so
@@ -445,20 +402,22 @@ func printDOEPreview(result doe.Result, opts doe.Options, limit int) {
 		fmt.Printf("... and %d more (use --preview-limit 0 to list all)\n", len(result.Cases)-shown)
 	}
 
-	first := result.Cases[0]
 	fmt.Printf("\nTemplate command:\n  %s\n", opts.Template.Command)
-	fmt.Printf("Case %d command:\n  %s\n", first.Index, first.Command)
+	if len(result.Cases) > 0 {
+		first := result.Cases[0]
+		fmt.Printf("Case %d command:\n  %s\n", first.Index, first.Command)
 
-	if len(first.Tags) > 0 {
-		fmt.Printf("Case %d tags:\n  %s\n", first.Index, strings.Join(first.Tags, ", "))
+		if len(first.Tags) > 0 {
+			fmt.Printf("Case %d tags:\n  %s\n", first.Index, strings.Join(first.Tags, ", "))
+		}
 	}
 
 	if len(opts.BaseFileIDs) > 0 {
 		fmt.Printf("\nShared input files (%d), transferred once for the whole sweep:\n  %s\n",
 			len(opts.BaseFileIDs), strings.Join(opts.BaseFileIDs, ", "))
-	} else if opts.Template.Directory != "" {
-		fmt.Printf("\nEvery case tars and uploads %s; pass --base-file-ids to share one\n"+
-			"already-uploaded input deck instead.\n", opts.Template.Directory)
+	} else {
+		fmt.Printf("\nCases carry no input directory: a sweep never zips a working directory.\n" +
+			"Pass --base-file-ids to reference an already-uploaded deck instead.\n")
 	}
 
 	for _, warning := range result.Warnings {
