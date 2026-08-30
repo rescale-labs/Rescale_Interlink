@@ -2,6 +2,7 @@ package doe
 
 import (
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -32,6 +33,39 @@ func twoLevelOptions() Options {
 			{Name: "beta", Min: 15, Max: 25, Levels: 2},
 		},
 		Method: MethodFullFactorial,
+	}
+}
+
+// A preview must be an exact prefix of the full sweep, and truncation must not
+// hide a fatal problem whose trigger value sits past the limit — otherwise the
+// GUI's Create button goes green on a sweep that full generation then rejects.
+func TestGenerate_RenderLimitIsAnExactPrefixAndStillValidates(t *testing.T) {
+	full := mustGenerate(t, twoLevelOptions())
+
+	limited := twoLevelOptions()
+	limited.RenderLimit = 2
+	preview := mustGenerate(t, limited)
+
+	if preview.CaseCount != full.CaseCount || len(preview.Cases) != 2 {
+		t.Fatalf("CaseCount = %d, len(Cases) = %d; want the full design size %d and 2 rendered",
+			preview.CaseCount, len(preview.Cases), full.CaseCount)
+	}
+	if !reflect.DeepEqual(preview.Cases, full.Cases[:2]) {
+		t.Errorf("rendered cases are not an exact prefix of the full sweep")
+	}
+
+	bad := Options{
+		Template: models.JobSpec{JobName: "base", Command: "run {{m}}"},
+		Parameters: []Parameter{
+			{Name: "m", Values: []string{"ok", strings.Repeat("x", maxJobNameLength+1)}},
+		},
+		Method:          MethodFullFactorial,
+		JobNameTemplate: "n_{{m}}",
+		RenderLimit:     1,
+	}
+	result := Generate(bad)
+	if result.OK() {
+		t.Fatal("a name past the length bound in case 2 went undetected under RenderLimit 1")
 	}
 }
 
@@ -575,9 +609,11 @@ func TestGenerate_EnforcesCaseLimits(t *testing.T) {
 			},
 		},
 		{
+			// MaxCases well past the ceiling, so only the absolute-ceiling check
+			// can reject this one — the row fails if that guard is removed.
 			name: "a design past the absolute ceiling however high the limit is raised",
 			mutate: func(o *Options) {
-				o.MaxCases = absoluteMaxCases
+				o.MaxCases = 1_000_000_000
 				o.Template.Command = "run"
 				o.Parameters = nil
 				for i := 0; i < 40; i++ {
@@ -788,8 +824,8 @@ func TestWithDefaults(t *testing.T) {
 			// withDefaults must pass it through: filling it in would replace the
 			// rejection with a silently different sweep.
 			name: "explicit values are left alone",
-			in:   Options{MaxCases: -1, CenterPoints: 5, JobNameTemplate: "x{{__index}}"},
-			want: Options{MaxCases: -1, CenterPoints: 5, JobNameTemplate: "x{{__index}}"},
+			in:   Options{MaxCases: 7, CenterPoints: 5, JobNameTemplate: "x{{__index}}"},
+			want: Options{MaxCases: 7, CenterPoints: 5, JobNameTemplate: "x{{__index}}"},
 		},
 	}
 

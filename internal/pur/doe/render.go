@@ -33,17 +33,18 @@ var indexSuffix = regexp.MustCompile(`_\d+$`)
 func renderCases(opts Options, points []designPoint) (cases []Case, jobs []models.JobSpec, errs []Problem, warns []Problem) {
 	base := indexSuffix.ReplaceAllString(opts.Template.JobName, "")
 
-	// A preview needs the first page, not the whole sweep. Sampling has already
-	// run over every point, so what is rendered here is an exact prefix of what a
-	// full generation would produce.
+	// A preview needs the first page, not the whole sweep — but validation must
+	// still see every point, or an error whose trigger value sits past the limit
+	// would let a preview report ok for a sweep that full generation rejects.
+	// So the loop walks all points and only the appends are limit-gated; the
+	// savings stay where they matter, in Case and JobSpec construction.
 	rendered := len(points)
 	if opts.RenderLimit > 0 && opts.RenderLimit < rendered {
 		rendered = opts.RenderLimit
 	}
-	points = points[:rendered]
 
-	cases = make([]Case, 0, len(points))
-	jobs = make([]models.JobSpec, 0, len(points))
+	cases = make([]Case, 0, rendered)
+	jobs = make([]models.JobSpec, 0, rendered)
 
 	seenNames := make(map[string]int, len(points))
 	seenValues := make(map[string]int, len(points))
@@ -126,14 +127,16 @@ func renderCases(opts Options, points []designPoint) (cases []Case, jobs []model
 			}
 		}
 
-		cases = append(cases, Case{
-			Index:   index,
-			Values:  values,
-			JobName: jobName,
-			Command: command,
-			Tags:    caseTags,
-		})
-		jobs = append(jobs, buildJobSpec(opts, jobName, command, caseTags))
+		if len(cases) < rendered {
+			cases = append(cases, Case{
+				Index:   index,
+				Values:  values,
+				JobName: jobName,
+				Command: command,
+				Tags:    caseTags,
+			})
+			jobs = append(jobs, buildJobSpec(opts, jobName, command, caseTags))
+		}
 	}
 
 	if duplicateValueCases > 0 {
