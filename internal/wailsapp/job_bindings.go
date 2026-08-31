@@ -66,8 +66,13 @@ type JobSpecDTO struct {
 	OrgCode               string   `json:"orgCode"`
 	Automations           []string `json:"automations"`
 
-	// When InputFiles is non-empty, these files are uploaded instead of tarring Directory
+	// IDs of files already uploaded to Rescale, attached to the job as-is.
 	InputFiles []string `json:"inputFiles,omitempty"`
+
+	// Local paths forming this job's archive, set by file-scan mode. Not
+	// omitempty: an omitted slice arrives in TypeScript as undefined, and code
+	// that reasonably expects an array then crashes on it.
+	LocalInputFiles []string `json:"localInputFiles"`
 
 	TarSubpath string `json:"tarSubpath,omitempty"`
 }
@@ -280,19 +285,37 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: result.Error}
 	}
 
+	// Checked once, before any job is built: a command whose tokens are wrong is
+	// wrong for every file, and a typo must not turn into a batch of jobs each
+	// carrying a literal "{{bse}}" on its command line.
+	warnings := append([]string{}, result.Warnings...)
+	templateWarnings, err := filescan.ValidateCommandTemplate(template.Command)
+	if err != nil {
+		return ScanResultDTO{Error: err.Error()}
+	}
+	warnings = append(warnings, templateWarnings...)
+	warnings = append(warnings, filescan.ValidateJobNameTemplate(template.JobName)...)
+
 	// Convert filescan results to JobSpecDTO
 	var jobs []JobSpecDTO
-	for i, jobFiles := range result.Jobs {
-		job := template
-		job.InputFiles = jobFiles.InputFiles
-		job.Directory = jobFiles.PrimaryDir
+	skipped := append([]string{}, result.SkippedFiles...)
 
-		// Generate job name
-		if template.JobName != "" {
-			job.JobName = fmt.Sprintf("%s_%d", template.JobName, i+1)
-		} else {
-			job.JobName = fmt.Sprintf("Job_%d", i+1)
+	for i, jobFiles := range result.Jobs {
+		command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jobFiles, i+1)
+		if renderErr != nil {
+			// One unrenderable filename costs that file, not the batch.
+			skipped = append(skipped, fmt.Sprintf("%s: %v", filepath.Base(jobFiles.PrimaryFile), renderErr))
+			continue
 		}
+
+		job := template
+		job.Command = command
+		job.JobName = jobName
+		job.Directory = jobFiles.PrimaryDir
+		// The job's archive is exactly its own files; InputFiles means uploaded
+		// file IDs, which these are not.
+		job.LocalInputFiles = jobFiles.InputFiles
+		job.InputFiles = nil
 
 		jobs = append(jobs, job)
 	}
@@ -300,9 +323,9 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 	return ScanResultDTO{
 		Jobs:         jobs,
 		TotalCount:   result.TotalCount,
-		MatchCount:   result.MatchCount,
-		SkippedFiles: result.SkippedFiles,
-		Warnings:     result.Warnings,
+		MatchCount:   len(jobs),
+		SkippedFiles: skipped,
+		Warnings:     warnings,
 	}
 }
 
@@ -1172,6 +1195,7 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles,
+		LocalInputFiles:       j.LocalInputFiles,
 		TarSubpath:            j.TarSubpath,
 	}
 }
@@ -1199,6 +1223,7 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles,
+		LocalInputFiles:       j.LocalInputFiles,
 		TarSubpath:            j.TarSubpath,
 	}
 }
@@ -1418,6 +1443,9 @@ func normalizeJobSpecDTO(job *JobSpecDTO) {
 	}
 	if job.InputFiles == nil {
 		job.InputFiles = []string{}
+	}
+	if job.LocalInputFiles == nil {
+		job.LocalInputFiles = []string{}
 	}
 	if job.CoresPerSlot == 0 {
 		job.CoresPerSlot = 1

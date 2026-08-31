@@ -105,6 +105,16 @@ func LoadJobsCSV(path string) ([]models.JobSpec, error) {
 		job.OrgCode = sanitize.SanitizeField(getCol("orgcode"))
 		job.TarSubpath = getCol("tarsubpath")
 
+		// Semicolon-separated, since a path may legitimately contain a comma.
+		// Optional, so CSVs written before file-scan mode still load.
+		if filesStr := getCol("localinputfiles"); filesStr != "" {
+			for _, file := range strings.Split(filesStr, ";") {
+				if file = sanitize.SanitizeField(file); file != "" {
+					job.LocalInputFiles = append(job.LocalInputFiles, file)
+				}
+			}
+		}
+
 		// Parse tags (comma-separated)
 		if tagsStr := getCol("tags"); tagsStr != "" {
 			tagParts := strings.Split(tagsStr, ",")
@@ -204,7 +214,7 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 		"Directory", "JobName", "AnalysisCode", "AnalysisVersion", "Command",
 		"CoreType", "CoresPerSlot", "WalltimeHours", "Slots", "LicenseSettings",
 		"ExtraInputFileIDs", "OnDemandLicenseSeller", "ProjectID", "OrgCode", "Tags",
-		"NoDecompress", "IsLowPriority", "Submit", "TarSubpath",
+		"NoDecompress", "IsLowPriority", "Submit", "TarSubpath", "LocalInputFiles",
 	}
 	if err := writer.Write(header); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
@@ -232,6 +242,7 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 			strconv.FormatBool(job.IsLowPriority),
 			job.SubmitMode,
 			job.TarSubpath,
+			strings.Join(job.LocalInputFiles, ";"),
 		}
 		if err := writer.Write(row); err != nil {
 			return fmt.Errorf("failed to write job row: %w", err)

@@ -229,3 +229,71 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Errorf("TarSubpath = %s, want %s", reloaded.TarSubpath, originalJob.TarSubpath)
 	}
 }
+
+// Without this the CLI's scan-files -> jobs.csv -> pur run flow loses each job's
+// file list, and every job falls back to archiving its whole directory.
+func TestSaveLoadRoundTrip_LocalInputFiles(t *testing.T) {
+	original := models.JobSpec{
+		Directory:       filepath.Join("scratch", "inputs"),
+		JobName:         "case1",
+		AnalysisCode:    "user_included",
+		Command:         "abaqus job=case1 input=case1.inp",
+		CoreType:        "emerald",
+		CoresPerSlot:    4,
+		WalltimeHours:   1.0,
+		Slots:           1,
+		LicenseSettings: `{"LICENSE": "value"}`,
+		LocalInputFiles: []string{
+			filepath.Join("scratch", "inputs", "case1.inp"),
+			filepath.Join("scratch", "inputs", "case1.mesh"),
+			// Outside Directory, which is the whole point of the field.
+			filepath.Join("scratch", "meshes", "case1.cfg"),
+		},
+	}
+
+	csvPath := filepath.Join(t.TempDir(), "filescan.csv")
+	if err := SaveJobsCSV(csvPath, []models.JobSpec{original}); err != nil {
+		t.Fatalf("SaveJobsCSV() failed: %v", err)
+	}
+
+	loaded, err := LoadJobsCSV(csvPath)
+	if err != nil {
+		t.Fatalf("LoadJobsCSV() failed: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d jobs, want 1", len(loaded))
+	}
+
+	got := loaded[0].LocalInputFiles
+	if len(got) != len(original.LocalInputFiles) {
+		t.Fatalf("LocalInputFiles = %v, want %v", got, original.LocalInputFiles)
+	}
+	for i, want := range original.LocalInputFiles {
+		if got[i] != want {
+			t.Errorf("LocalInputFiles[%d] = %s, want %s", i, got[i], want)
+		}
+	}
+}
+
+// A CSV written before the column existed must still load, since users keep
+// their jobs.csv files around.
+func TestLoadJobsCSV_WithoutLocalInputFilesColumn(t *testing.T) {
+	csvPath := filepath.Join(t.TempDir(), "legacy.csv")
+	content := "Directory,JobName,AnalysisCode,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings\n" +
+		"./Run_1,Run_1,user_included,./run.sh,emerald,4,1.0,1,\"{\"\"LICENSE\"\": \"\"value\"\"}\"\n"
+
+	if err := os.WriteFile(csvPath, []byte(content), 0644); err != nil {
+		t.Fatalf("write CSV: %v", err)
+	}
+
+	loaded, err := LoadJobsCSV(csvPath)
+	if err != nil {
+		t.Fatalf("LoadJobsCSV() failed on a CSV without the column: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d jobs, want 1", len(loaded))
+	}
+	if len(loaded[0].LocalInputFiles) != 0 {
+		t.Errorf("LocalInputFiles = %v, want empty", loaded[0].LocalInputFiles)
+	}
+}
