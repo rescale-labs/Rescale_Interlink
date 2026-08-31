@@ -66,18 +66,6 @@ func (p Problem) Error() string {
 	return fmt.Sprintf("%s: %s", p.Code, p.Message)
 }
 
-// unsafeValueChars are characters that would change the structure of a rendered
-// command rather than just supply a value: redirection, command separators,
-// substitution and quoting. A parameter value containing one of these is
-// rejected, since a sweep value is meant to be a datum, not syntax.
-const unsafeValueChars = "`$;|&><\n\r\"'\\"
-
-// globValueChars are characters a shell expands against the filesystem or the
-// argument list. Numeric output never contains them, but a categorical level or
-// an explicit case value is written by hand, and one that expands is no longer
-// the value the user wrote.
-const globValueChars = "*?[](){}~"
-
 // Rendered output is bounded at the one boundary every surface goes through.
 // A command legitimately gets long — solver flags, paths, mesh names — so it has
 // room to spare; a job name and a tag are labels, and one that runs past these
@@ -372,16 +360,21 @@ func validateValue(param, value string, policy valuePolicy) []Problem {
 		}}
 	}
 
-	unsafe := unsafeValueChars
+	// The character sets live in pattern, shared with file-scan mode, which
+	// substitutes a filename into a command the same way a sweep substitutes a
+	// parameter value. A categorical level is the user's own string and answers
+	// to the full set; numeric output cannot carry a glob character the number
+	// itself did not have.
+	unsafe := pattern.FirstUnsafeStructureChar
 	if policy == policyLiteral {
-		unsafe += globValueChars
+		unsafe = pattern.FirstUnsafeChar
 	}
-	if idx := strings.IndexAny(value, unsafe); idx >= 0 {
+	if bad, found := unsafe(value); found {
 		return []Problem{{
 			Code:  CodeUnsafeValue,
 			Param: param,
 			Message: fmt.Sprintf("value %q contains %q, which would change the structure of the "+
-				"rendered command rather than supply a value", value, string(value[idx])),
+				"rendered command rather than supply a value", value, string(bad)),
 		}}
 	}
 
@@ -389,23 +382,21 @@ func validateValue(param, value string, policy valuePolicy) []Problem {
 	// space splits one argument into two — and that is every kind of space, not
 	// just the plain one: a non-breaking space, a vertical tab and a NUL all
 	// reach the API verbatim and mean something else there.
-	for _, r := range value {
-		switch {
-		case unicode.IsSpace(r):
+	if r, found := pattern.FirstSpaceOrControl(value); found {
+		if unicode.IsSpace(r) {
 			return []Problem{{
 				Code:  CodeValueHasSpace,
 				Param: param,
 				Message: fmt.Sprintf("value %q contains whitespace (%U), which would split into separate "+
 					"command arguments", value, r),
 			}}
-		case unicode.IsControl(r):
-			return []Problem{{
-				Code:  CodeUnsafeValue,
-				Param: param,
-				Message: fmt.Sprintf("value %q contains the control character %U, which does not survive "+
-					"the trip to a command line", value, r),
-			}}
 		}
+		return []Problem{{
+			Code:  CodeUnsafeValue,
+			Param: param,
+			Message: fmt.Sprintf("value %q contains the control character %U, which does not survive "+
+				"the trip to a command line", value, r),
+		}}
 	}
 
 	return nil

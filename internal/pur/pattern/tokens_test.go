@@ -184,3 +184,72 @@ func TestSubstituteTokens_LeavesNumericPatternsAlone(t *testing.T) {
 		t.Errorf("SubstituteTokens() = %q, want %q", got, want)
 	}
 }
+
+// The unsafe-character set is shared by every substitution site, so it is
+// checked here rather than only through one caller's validation.
+func TestFirstUnsafeChar(t *testing.T) {
+	tests := []struct {
+		value string
+		want  byte
+		found bool
+	}{
+		{"case1.inp", 0, false},
+		{"1.5e-3", 0, false},
+		{"a-b.c_d", 0, false},
+		{"$(whoami)", '$', true},
+		{"a;rm -rf /", ';', true},
+		{"out>file", '>', true},
+		{"a|b", '|', true},
+		{"a&b", '&', true},
+		{"`id`", '`', true},
+		{`say "hi"`, '"', true},
+		{"it's", '\'', true},
+		{`back\slash`, '\\', true},
+		{"line\nbreak", '\n', true},
+		{"case*.inp", '*', true},
+		{"case?.inp", '?', true},
+		{"~/case.inp", '~', true},
+	}
+
+	for _, tt := range tests {
+		got, found := FirstUnsafeChar(tt.value)
+		if found != tt.found {
+			t.Errorf("FirstUnsafeChar(%q) found = %v, want %v", tt.value, found, tt.found)
+			continue
+		}
+		if found && got != tt.want {
+			t.Errorf("FirstUnsafeChar(%q) = %q, want %q", tt.value, string(got), string(tt.want))
+		}
+	}
+}
+
+// Only numeric output takes the narrower set; a glob character there can only
+// have come from the literal text of the format, not from the number.
+func TestFirstUnsafeStructureChar_LeavesGlobCharsAlone(t *testing.T) {
+	if _, found := FirstUnsafeStructureChar("case*.inp"); found {
+		t.Error("FirstUnsafeStructureChar() rejected a glob character")
+	}
+	if got, found := FirstUnsafeStructureChar("a;b"); !found || got != ';' {
+		t.Errorf("FirstUnsafeStructureChar(%q) = %q, %v; want ';', true", "a;b", string(got), found)
+	}
+}
+
+func TestHasWhitespace(t *testing.T) {
+	tests := map[string]bool{
+		"case1.inp":     false,
+		"":              false,
+		"my case.inp":   true,
+		"tab\there":     true,
+		"trailing ":     true,
+		"nb\u00a0space": true,
+		"vertical\vtab": true,
+		"nul\x00byte":   true,
+		"unit\x1fsep":   true,
+	}
+
+	for value, want := range tests {
+		if got := HasWhitespace(value); got != want {
+			t.Errorf("HasWhitespace(%q) = %v, want %v", value, got, want)
+		}
+	}
+}

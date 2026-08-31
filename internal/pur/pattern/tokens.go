@@ -3,6 +3,7 @@ package pattern
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // Named-token substitution, kept separate from the numeric pattern detection in
@@ -72,4 +73,71 @@ func SubstituteTokens(s string, values map[string]string) string {
 func tokenName(match string) string {
 	inner := strings.TrimSuffix(strings.TrimPrefix(match, "{{"), "}}")
 	return strings.TrimSpace(inner)
+}
+
+// UnsafeValueChars are characters that would change the structure of a rendered
+// command rather than just supply a value: redirection, command separators,
+// substitution and quoting. A substituted value containing one of these is
+// rejected by callers, since a token value is meant to be a datum, not syntax.
+//
+// This lives here rather than in a caller because every substitution site has
+// the same exposure: a DOE parameter value and a scanned filename both land in
+// a command line the same way.
+const UnsafeValueChars = "`$;|&><\n\r\"'\\"
+
+// GlobValueChars are characters a shell expands against the filesystem or the
+// argument list. A value written by hand — a categorical level, an explicit
+// case value, a filename — that expands is no longer the value the user wrote.
+const GlobValueChars = "*?[](){}~"
+
+// FirstUnsafeChar returns the first character of s a shell would read as syntax
+// rather than as data, and whether one was found. That is both sets: command
+// structure and filename expansion.
+//
+// This is the check for a value written by hand. FirstUnsafeStructureChar is the
+// narrower one, for text whose shape is produced rather than typed.
+func FirstUnsafeChar(s string) (byte, bool) {
+	return firstCharFrom(s, UnsafeValueChars+GlobValueChars)
+}
+
+// FirstUnsafeStructureChar is FirstUnsafeChar without the expansion characters,
+// for a value produced by a numeric format: fmt cannot emit a glob character
+// from a number, so rejecting one there would only ever reject the literal text
+// the format itself carries.
+func FirstUnsafeStructureChar(s string) (byte, bool) {
+	return firstCharFrom(s, UnsafeValueChars)
+}
+
+func firstCharFrom(s, chars string) (byte, bool) {
+	if idx := strings.IndexAny(s, chars); idx >= 0 {
+		return s[idx], true
+	}
+	return 0, false
+}
+
+// FirstSpaceOrControl returns the first rune of s that is whitespace or a
+// control character — whichever appears first — and whether one was found.
+//
+// Quoting is not available to a substituted value (quote characters are in
+// UnsafeValueChars), so any space splits one argument into two, and that is
+// every kind of space, not just the plain one: a non-breaking space and a
+// vertical tab reach the API verbatim and mean something else there. A control
+// character does not survive the trip to a command line at all. Callers that
+// report the two differently tell them apart with unicode.IsSpace, the same
+// test applied here; scanning once keeps the rune reported the earliest one.
+func FirstSpaceOrControl(s string) (rune, bool) {
+	for _, r := range s {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return r, true
+		}
+	}
+	return 0, false
+}
+
+// HasWhitespace reports whether s carries a character that cannot cross into a
+// command line as part of a single argument — any Unicode whitespace, or a
+// control character. See FirstSpaceOrControl for why both count.
+func HasWhitespace(s string) bool {
+	_, found := FirstSpaceOrControl(s)
+	return found
 }
