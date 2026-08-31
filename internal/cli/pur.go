@@ -362,26 +362,34 @@ Examples:
 				template := templateJobs[0]
 				var jobs []models.JobSpec
 
+				// Checked once, before any job is built: a command whose tokens are
+				// wrong is wrong for every file, and it is better to fail here than to
+				// write a CSV of jobs each carrying a literal "{{bse}}" in its command.
+				templateWarnings, err := filescan.ValidateCommandTemplate(template.Command)
+				if err != nil {
+					return fmt.Errorf("template command: %w", err)
+				}
+				for _, w := range append(templateWarnings, filescan.ValidateJobNameTemplate(template.JobName)...) {
+					fmt.Printf("  Warning: %s\n", w)
+				}
+
 				for i, jf := range result.Jobs {
+					command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jf, i+1)
+					if renderErr != nil {
+						// One unrenderable filename costs that file, not the batch.
+						fmt.Printf("  Skipped %s: %v\n", filepath.Base(jf.PrimaryFile), renderErr)
+						continue
+					}
+
 					job := template
+					job.Command = command
+					job.JobName = jobName
 					job.Directory = jf.PrimaryDir
-					if template.JobName != "" {
-						job.JobName = fmt.Sprintf("%s_%d", template.JobName, i+1)
-					} else {
-						job.JobName = fmt.Sprintf("Job_%d", i+1)
-					}
-					// Store input files in extra field (comma-separated relative paths)
-					relFiles := make([]string, len(jf.InputFiles))
-					for j, f := range jf.InputFiles {
-						rel, err := filepath.Rel(jf.PrimaryDir, f)
-						if err != nil {
-							relFiles[j] = f
-						} else {
-							relFiles[j] = rel
-						}
-					}
-					// Note: InputFiles aren't directly in JobSpec, would need model update
-					// For now, we set directory which is the primary use case
+					// The job's archive is exactly its own files, wherever they live:
+					// a secondary pattern can resolve outside PrimaryDir.
+					job.LocalInputFiles = jf.InputFiles
+					job.InputFiles = nil
+
 					jobs = append(jobs, job)
 				}
 
