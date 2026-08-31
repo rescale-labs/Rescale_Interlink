@@ -563,6 +563,7 @@ export namespace wailsapp {
 	    orgCode: string;
 	    automations: string[];
 	    inputFiles?: string[];
+	    localInputFiles: string[];
 	    tarSubpath?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -591,6 +592,7 @@ export namespace wailsapp {
 	        this.orgCode = source["orgCode"];
 	        this.automations = source["automations"];
 	        this.inputFiles = source["inputFiles"];
+	        this.localInputFiles = source["localInputFiles"];
 	        this.tarSubpath = source["tarSubpath"];
 	    }
 	}

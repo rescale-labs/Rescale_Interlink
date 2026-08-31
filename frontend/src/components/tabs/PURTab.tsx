@@ -221,6 +221,8 @@ export function PURTab() {
     scanOptions,
     isScanning,
     scanError,
+    scanSkippedFiles,
+    scanWarnings,
     setWorkflowPath,
     setTemplate,
     goBack,
@@ -860,7 +862,39 @@ export function PURTab() {
                   placeholder="*.inp"
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
-                <p className="mt-1 text-xs text-gray-500">Each matching file creates one job</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  Each matching file creates one job, whose upload holds only that
+                  file and its secondaries. Use Common Files for inputs shared by
+                  every job.
+                </p>
+
+                {/* Token legend: the command is rendered per file, so the tokens
+                    have to be discoverable from here. */}
+                <div className="mt-2 p-3 bg-blue-50 rounded-md">
+                  <h5 className="text-xs font-medium text-blue-700 mb-1">
+                    Command Tokens
+                  </h5>
+                  <p className="text-xs text-blue-600 mb-1">
+                    Tokens in the command and job name are replaced per file. For
+                    inputs/case1.inp:
+                  </p>
+                  <dl className="text-xs text-blue-800 space-y-0.5">
+                    {[
+                      ['{{file}}', 'case1.inp'],
+                      ['{{base}}', 'case1'],
+                      ['{{ext}}', 'inp'],
+                      ['{{dir}}', 'inputs'],
+                      ['{{index}}', '1'],
+                    ].map(([token, value]) => (
+                      <div key={token} className="flex gap-2">
+                        <dt>
+                          <code className="bg-blue-100 px-1 rounded">{token}</code>
+                        </dt>
+                        <dd className="text-blue-600">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
               </div>
             )}
 
@@ -1170,6 +1204,33 @@ export function PURTab() {
           {scanError && (
             <div className="mb-4 mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
               {scanError}
+            </div>
+          )}
+
+          {/* A file the scan declined to turn into a job looks, without this, like
+              a file that simply was not there. */}
+          {(scanSkippedFiles.length > 0 || scanWarnings.length > 0) && (
+            <div className="mb-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-amber-800 dark:text-amber-300 text-sm">
+              {scanSkippedFiles.length > 0 && (
+                <>
+                  <p className="font-medium">
+                    Skipped {scanSkippedFiles.length} file
+                    {scanSkippedFiles.length !== 1 ? 's' : ''}
+                  </p>
+                  <ul className="list-disc ml-5 mt-1 text-xs space-y-0.5">
+                    {scanSkippedFiles.map((skip) => (
+                      <li key={skip}>{skip}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {scanWarnings.length > 0 && (
+                <ul className={clsx('list-disc ml-5 text-xs space-y-0.5', scanSkippedFiles.length > 0 && 'mt-2')}>
+                  {scanWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
 

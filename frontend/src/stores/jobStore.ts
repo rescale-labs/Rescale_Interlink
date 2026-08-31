@@ -232,6 +232,11 @@ interface JobStore {
   scanOptions: ScanOptions
   isScanning: boolean
   scanError: string | null
+  // Files the scan declined to turn into jobs, and non-fatal notes about the
+  // scan. Surfaced because a silent skip looks like a file that simply was not
+  // there.
+  scanSkippedFiles: string[]
+  scanWarnings: string[]
 
   // DOE state
   doeOptions: DOEOptions
@@ -479,6 +484,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
   },
   isScanning: false,
   scanError: null,
+  scanSkippedFiles: [],
+  scanWarnings: [],
 
   doeOptions: {
     method: 'full-factorial',
@@ -580,6 +587,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
       },
       runId: null,
       scanError: null,
+      scanSkippedFiles: [],
+      scanWarnings: [],
     })
   },
 
@@ -624,7 +633,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       return
     }
 
-    set({ isScanning: true, scanError: null })
+    set({ isScanning: true, scanError: null, scanSkippedFiles: [], scanWarnings: [] })
 
     try {
       const secondaryPatternsDTO = scanOptions.secondaryPatterns.map((sp) => ({
@@ -675,6 +684,9 @@ export const useJobStore = create<JobStore>((set, get) => ({
         jobRows,
         workflowState: 'directoriesScanned',
         isScanning: false,
+        // Both are omitempty on the Go side, so absent means none.
+        scanSkippedFiles: result.skippedFiles || [],
+        scanWarnings: result.warnings || [],
       })
 
       // Update memory
