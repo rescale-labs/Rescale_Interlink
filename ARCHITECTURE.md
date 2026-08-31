@@ -169,7 +169,7 @@ rescale-int/
 │   │  ── PUR ──
 │   ├── pur/                       # PUR (Parallel Upload and Run)
 │   │   ├── doe/                   # Design of experiments (parameter sweeps)
-│   │   ├── filescan/              # File scanning
+│   │   ├── filescan/              # Per-file job scanning and command rendering
 │   │   ├── parser/                # SGE script parsing
 │   │   ├── pattern/               # Pattern detection and {{token}} substitution
 │   │   ├── pipeline/              # Pipeline orchestration
@@ -487,6 +487,16 @@ CLI uses `mpb` (multi-progress bars) with per-file bars showing speed and ETA. G
 **One rejection boundary**: `Generate` is where every limit lives — case count, dimensionality, format syntax, value safety and rendered length — so the CLI and the GUI bindings surface the same errors instead of each carrying their own policy. Nothing is clamped silently; an oversized or malformed sweep is reported before any case is built.
 
 **Shared inputs**: a case never carries a `Directory`, so it always takes the pipeline's skip-tar-and-upload path. `BaseFileIDs` points every case at an already-uploaded deck; left empty, the deck arrives as batch-level Common Files, which the pipeline uploads once and attaches to every job. Either way one deck serves the whole sweep instead of being re-uploaded per case.
+
+### 12. Per-File Job Scanning (`internal/pur/filescan/`)
+
+**Purpose**: Turn each file matching a primary pattern into its own job, with its own command and its own upload.
+
+`filescan` is the single backend behind both the GUI's **Job Source → Files** and the CLI's `pur scan-files`, so the two cannot drift. `scanner.go` walks the tree and resolves each primary match's secondary attachments into a `JobFiles`; `render.go` turns that into the job's command and name.
+
+**Command rendering**: `render.go` reuses `pur/pattern`'s `{{name}}` substitution with five built-in tokens derived from the primary file — `{{file}}`, `{{base}}`, `{{ext}}`, `{{dir}}`, `{{index}}`. A token outside that set is a fatal scan error rather than a literal `{{bse}}` on every rendered command line; a command with no tokens at all is only a warning, since an identical command for every file is occasionally intended. A filename whose value would be unsafe on a command line skips that one file instead of failing the batch.
+
+**Upload model**: each job's `LocalInputFiles` holds exactly its own files — primary plus resolved secondaries — and the pipeline archives that list with `tar.CreateTarGzFromFiles`, flattened into the job's working directory, rather than walking `Directory`. Flattening is what lets a secondary pattern reach outside the primary's folder, and `tar.GenerateTarPathForFiles` hashes the whole set so jobs sharing one folder no longer collide on a single tarball. Data genuinely shared by every job belongs in Common Files, which uploads once and attaches to all of them.
 
 ---
 
