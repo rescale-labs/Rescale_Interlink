@@ -119,6 +119,10 @@ type Pipeline struct {
 	pipelineStart time.Time
 	firstTarOnce  sync.Once
 
+	// Logged once rather than per job, since the setting is batch-wide and the
+	// notice would otherwise repeat for every job in a file-scan batch.
+	explicitFilesNoticeOnce sync.Once
+
 	// Callbacks (optional)
 	onProgress    ProgressCallback
 	onLog         LogCallback
@@ -187,6 +191,17 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		if jobs[i].Directory != "" && !filepath.IsAbs(jobs[i].Directory) {
 			if abs, err := pathutil.ResolveAbsolutePath(jobs[i].Directory); err == nil {
 				jobs[i].Directory = abs
+			}
+		}
+
+		// Same reasoning for a job's own file list, which is read from disk by the
+		// tar worker and may point outside Directory.
+		for j, file := range jobs[i].LocalInputFiles {
+			if file == "" || filepath.IsAbs(file) {
+				continue
+			}
+			if abs, err := pathutil.ResolveAbsolutePath(file); err == nil {
+				jobs[i].LocalInputFiles[j] = abs
 			}
 		}
 	}
@@ -589,8 +604,8 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			// directly to job creation. Its inputs come from pre-specified file IDs
 			// (single-job remoteFiles/localFiles mode, or a DOE sweep referencing a
 			// shared deck) and/or batch-level Common Files, both attached at job
-			// creation. Gated on Directory=="" to avoid interfering with file-scan
-			// mode, where InputFiles holds local paths but Directory is also set.
+			// creation. File-scan mode keeps its Directory and so stays on the tar
+			// path; its local paths live in LocalInputFiles, not InputFiles.
 			//
 			// Use nextSkipStatus so a terminal status already written by the
 			// engine (Single Job localFiles uploads via ReportUploadProgress)
@@ -699,40 +714,46 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 			}
 
-			// Resolve tar source directory, applying TarSubpath if set
-			tarSourceDir := item.jobSpec.Directory
-			if item.jobSpec.TarSubpath != "" {
-				tarSourceDir = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
-				// Path traversal guard: prevent ../ escape outside run directory
-				absSource, errAbs := filepath.Abs(tarSourceDir)
-				absRunDir, errRun := filepath.Abs(item.jobSpec.Directory)
-				rel, errRel := filepath.Rel(absRunDir, absSource)
-				if errAbs != nil || errRun != nil || errRel != nil || strings.HasPrefix(rel, "..") {
-					p.logf("ERROR", "tar", item.state.JobName,
-						"REJECTED: tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
-					item.state.TarStatus = "failed"
-					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
-					p.stateMgr.UpdateState(item.state)
-					p.reportStateChange(item.state.JobName, "tar", "failed", "", item.state.ErrorMessage, 0.0)
+			// The archive is built one of two ways, and everything downstream —
+			// upload, FileID, job creation, state, resume — is the same either way.
+			//
+			// A job carrying its own file list archives exactly those files: the set
+			// is already exact, and its members can sit outside Directory (a
+			// secondary pattern such as "../meshes/*.cfg"), so there is nothing for a
+			// directory walk, a TarSubpath or the include/exclude patterns to narrow.
+			// Otherwise Directory is walked, as it always has been.
+			var tarPath string
+			var createArchive func() error
+			var archiveSource string
+
+			if files := item.jobSpec.LocalInputFiles; len(files) > 0 {
+				// Named and hashed per file set, so jobs scanned out of one folder do
+				// not all resolve to the same archive and race over it.
+				tarPath = tar.GenerateTarPathForFiles(files, p.tempDir, p.cfg.TarCompression)
+				archiveSource = fmt.Sprintf("%d file(s)", len(files))
+				createArchive = func() error {
+					if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
+						p.explicitFilesNoticeOnce.Do(func() {
+							p.logf("INFO", "tar", item.state.JobName,
+								"Include/exclude/flatten settings do not apply to jobs with an explicit "+
+									"file list; archiving exactly the listed files")
+						})
+					}
+					return tar.CreateTarGzFromFiles(files, tarPath, p.cfg.TarCompression)
+				}
+			} else {
+				var ok bool
+				tarPath, createArchive, ok = p.directoryArchiver(item)
+				if !ok {
 					p.setActiveWorker("tar", -1)
 					continue
 				}
-				// Verify subpath exists
-				if _, errStat := os.Stat(tarSourceDir); os.IsNotExist(errStat) {
-					p.logf("ERROR", "tar", item.state.JobName,
-						"Tar subpath '%s' does not exist in %s", item.jobSpec.TarSubpath, item.jobSpec.Directory)
-					item.state.TarStatus = "failed"
-					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' does not exist in %s", item.jobSpec.TarSubpath, item.jobSpec.Directory)
-					p.stateMgr.UpdateState(item.state)
-					p.reportStateChange(item.state.JobName, "tar", "failed", "", item.state.ErrorMessage, 0.0)
-					p.setActiveWorker("tar", -1)
-					continue
+				archiveSource = item.jobSpec.Directory
+				if item.jobSpec.TarSubpath != "" {
+					archiveSource = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
 				}
 			}
 
-			tarPath := tar.GenerateTarPath(tarSourceDir, p.tempDir, p.cfg.TarCompression)
 			item.state.TarPath = tarPath
 
 			p.reportStateChange(item.state.JobName, "tar", "in_progress", "", "", 0.0)
@@ -743,26 +764,9 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					time.Since(p.pipelineStart))
 			})
 
-			p.logf("INFO", "tar", item.state.JobName, "Creating archive: %s -> %s", tarSourceDir, tarPath)
+			p.logf("INFO", "tar", item.state.JobName, "Creating archive: %s -> %s", archiveSource, tarPath)
 
-			var err error
-			if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
-				if len(p.cfg.IncludePatterns) > 0 {
-					p.logf("INFO", "tar", item.state.JobName, "Include patterns: %v", p.cfg.IncludePatterns)
-				}
-				if len(p.cfg.ExcludePatterns) > 0 {
-					p.logf("INFO", "tar", item.state.JobName, "Exclude patterns: %v", p.cfg.ExcludePatterns)
-				}
-				if p.cfg.FlattenTar {
-					p.logf("INFO", "tar", item.state.JobName, "Flatten mode enabled")
-				}
-				err = tar.CreateTarGzWithOptions(tarSourceDir, tarPath, p.multiPartMode,
-					p.cfg.IncludePatterns, p.cfg.ExcludePatterns, p.cfg.FlattenTar, p.cfg.TarCompression)
-			} else {
-				err = tar.CreateTarGz(tarSourceDir, tarPath, p.multiPartMode, p.cfg.TarCompression)
-			}
-
-			if err != nil {
+			if err := createArchive(); err != nil {
 				p.logf("ERROR", "tar", item.state.JobName, "Failed: %v", err)
 				item.state.TarStatus = "failed"
 				item.state.SubmitStatus = "failed"
@@ -798,6 +802,69 @@ shutdown:
 		}()
 	}
 	p.mu.Unlock()
+}
+
+// directoryArchiver resolves which directory a job's archive is built from and
+// returns the tar path plus the function that writes it. ok is false when the
+// job's TarSubpath is unusable, in which case the job has already been marked
+// failed and the caller should move on.
+//
+// Split out of tarWorker so the walk-a-directory case and the explicit-file-list
+// case share one path for state, logging and hand-off to the upload queue.
+func (p *Pipeline) directoryArchiver(item *workItem) (tarPath string, createArchive func() error, ok bool) {
+	// fail marks the job failed. The log line and the recorded error differ where
+	// the log carries a REJECTED prefix a reader scans for.
+	fail := func(logMsg, reason string) {
+		p.logf("ERROR", "tar", item.state.JobName, "%s", logMsg)
+		item.state.TarStatus = "failed"
+		item.state.SubmitStatus = "failed"
+		item.state.ErrorMessage = reason
+		p.stateMgr.UpdateState(item.state)
+		p.reportStateChange(item.state.JobName, "tar", "failed", "", reason, 0.0)
+	}
+
+	// Resolve tar source directory, applying TarSubpath if set
+	tarSourceDir := item.jobSpec.Directory
+	if item.jobSpec.TarSubpath != "" {
+		tarSourceDir = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
+		// Path traversal guard: prevent ../ escape outside run directory
+		absSource, errAbs := filepath.Abs(tarSourceDir)
+		absRunDir, errRun := filepath.Abs(item.jobSpec.Directory)
+		rel, errRel := filepath.Rel(absRunDir, absSource)
+		if errAbs != nil || errRun != nil || errRel != nil || strings.HasPrefix(rel, "..") {
+			reason := fmt.Sprintf("tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
+			fail("REJECTED: "+reason, reason)
+			return "", nil, false
+		}
+		// Verify subpath exists
+		if _, errStat := os.Stat(tarSourceDir); os.IsNotExist(errStat) {
+			reason := fmt.Sprintf("tar subpath '%s' does not exist in %s",
+				item.jobSpec.TarSubpath, item.jobSpec.Directory)
+			fail(reason, reason)
+			return "", nil, false
+		}
+	}
+
+	tarPath = tar.GenerateTarPath(tarSourceDir, p.tempDir, p.cfg.TarCompression)
+
+	createArchive = func() error {
+		if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
+			if len(p.cfg.IncludePatterns) > 0 {
+				p.logf("INFO", "tar", item.state.JobName, "Include patterns: %v", p.cfg.IncludePatterns)
+			}
+			if len(p.cfg.ExcludePatterns) > 0 {
+				p.logf("INFO", "tar", item.state.JobName, "Exclude patterns: %v", p.cfg.ExcludePatterns)
+			}
+			if p.cfg.FlattenTar {
+				p.logf("INFO", "tar", item.state.JobName, "Flatten mode enabled")
+			}
+			return tar.CreateTarGzWithOptions(tarSourceDir, tarPath, p.multiPartMode,
+				p.cfg.IncludePatterns, p.cfg.ExcludePatterns, p.cfg.FlattenTar, p.cfg.TarCompression)
+		}
+		return tar.CreateTarGz(tarSourceDir, tarPath, p.multiPartMode, p.cfg.TarCompression)
+	}
+
+	return tarPath, createArchive, true
 }
 
 // uploadWorker processes upload operations.

@@ -25,9 +25,20 @@ type JobSpec struct {
 	OrgCode               string   // Organization code for project assignment
 	Automations           []string // Automation IDs to attach
 
-	// File-based job inputs (for file scanning mode in PUR).
-	// When InputFiles is non-empty, these files are uploaded individually instead of tarring Directory.
+	// InputFiles are IDs of files already uploaded to Rescale, attached to the job
+	// as-is. Used when there is nothing local to archive, which is why the pipeline
+	// only reads them for a job with no Directory.
 	InputFiles []string
+
+	// LocalInputFiles are local paths that together form this job's archive: the
+	// tarball holds exactly these files, flattened into the job's working
+	// directory, and the rest of Directory is not walked. Set by file-scan mode,
+	// where each job owns one file set that may reach outside Directory (a
+	// secondary pattern such as "../meshes/*.cfg").
+	//
+	// Distinct from InputFiles, which means already-uploaded file IDs everywhere
+	// else in the codebase.
+	LocalInputFiles []string
 
 	// Optional subdirectory within each Run_* to tar instead of the full directory.
 	// When set, only the contents of Directory/TarSubpath are archived.
