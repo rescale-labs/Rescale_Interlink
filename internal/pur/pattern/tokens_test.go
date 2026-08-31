@@ -192,3 +192,54 @@ func TestSubstituteTokens_LeavesNumericPatternsAlone(t *testing.T) {
 		t.Errorf("SubstituteTokens() = %q, want %q", got, want)
 	}
 }
+
+// The unsafe-character set is shared by every substitution site, so it is
+// checked here rather than only through one caller's validation.
+func TestFirstUnsafeChar(t *testing.T) {
+	tests := []struct {
+		value string
+		want  byte
+		found bool
+	}{
+		{"case1.inp", 0, false},
+		{"1.5e-3", 0, false},
+		{"a-b.c_d", 0, false},
+		{"$(whoami)", '$', true},
+		{"a;rm -rf /", ';', true},
+		{"out>file", '>', true},
+		{"a|b", '|', true},
+		{"a&b", '&', true},
+		{"`id`", '`', true},
+		{`say "hi"`, '"', true},
+		{"it's", '\'', true},
+		{`back\slash`, '\\', true},
+		{"line\nbreak", '\n', true},
+	}
+
+	for _, tt := range tests {
+		got, found := FirstUnsafeChar(tt.value)
+		if found != tt.found {
+			t.Errorf("FirstUnsafeChar(%q) found = %v, want %v", tt.value, found, tt.found)
+			continue
+		}
+		if found && got != tt.want {
+			t.Errorf("FirstUnsafeChar(%q) = %q, want %q", tt.value, string(got), string(tt.want))
+		}
+	}
+}
+
+func TestHasWhitespace(t *testing.T) {
+	tests := map[string]bool{
+		"case1.inp":   false,
+		"":            false,
+		"my case.inp": true,
+		"tab\there":   true,
+		"trailing ":   true,
+	}
+
+	for value, want := range tests {
+		if got := HasWhitespace(value); got != want {
+			t.Errorf("HasWhitespace(%q) = %v, want %v", value, got, want)
+		}
+	}
+}

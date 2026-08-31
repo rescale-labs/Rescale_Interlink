@@ -73,3 +73,29 @@ func tokenName(match string) string {
 	inner := strings.TrimSuffix(strings.TrimPrefix(match, "{{"), "}}")
 	return strings.TrimSpace(inner)
 }
+
+// UnsafeValueChars are characters that would change the structure of a rendered
+// command rather than just supply a value: redirection, command separators,
+// substitution and quoting. A substituted value containing one of these is
+// rejected by callers, since a token value is meant to be a datum, not syntax.
+//
+// This lives here rather than in a caller because every substitution site has
+// the same exposure: a DOE parameter value and a scanned filename both land in
+// a command line the same way.
+const UnsafeValueChars = "`$;|&><\n\r\"'\\"
+
+// FirstUnsafeChar returns the first character of s drawn from UnsafeValueChars,
+// and whether one was found.
+func FirstUnsafeChar(s string) (byte, bool) {
+	if idx := strings.IndexAny(s, UnsafeValueChars); idx >= 0 {
+		return s[idx], true
+	}
+	return 0, false
+}
+
+// HasWhitespace reports whether s contains a space or tab. Quoting is not
+// available to a substituted value (quote characters are in UnsafeValueChars),
+// so whitespace would silently split one command argument into two.
+func HasWhitespace(s string) bool {
+	return strings.ContainsAny(s, " \t")
+}

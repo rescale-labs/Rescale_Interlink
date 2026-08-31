@@ -57,12 +57,6 @@ func (p Problem) Error() string {
 	return fmt.Sprintf("%s: %s", p.Code, p.Message)
 }
 
-// unsafeValueChars are characters that would change the structure of a rendered
-// command rather than just supply a value: redirection, command separators,
-// substitution and quoting. A parameter value containing one of these is
-// rejected, since a sweep value is meant to be a datum, not syntax.
-const unsafeValueChars = "`$;|&><\n\r\"'\\"
-
 // maxTagCallsBeforeWarning is where per-job tagging starts to be a meaningful
 // share of a sweep's API traffic. Tags are applied one POST per tag per job.
 const maxTagCallsBeforeWarning = 500
@@ -228,18 +222,20 @@ func validateValue(param, value string) []Problem {
 		}}
 	}
 
-	if idx := strings.IndexAny(value, unsafeValueChars); idx >= 0 {
+	// Shared with file-scan mode, which substitutes filenames into a command the
+	// same way a sweep substitutes parameter values.
+	if bad, found := pattern.FirstUnsafeChar(value); found {
 		return []Problem{{
 			Code:  CodeUnsafeValue,
 			Param: param,
 			Message: fmt.Sprintf("value %q contains %q, which would change the structure of the "+
-				"rendered command rather than supply a value", value, string(value[idx])),
+				"rendered command rather than supply a value", value, string(bad)),
 		}}
 	}
 
 	// Quoting is not available (quote characters are rejected above), so a space
 	// would silently split one argument into two.
-	if strings.ContainsAny(value, " \t") {
+	if pattern.HasWhitespace(value) {
 		return []Problem{{
 			Code:  CodeValueHasSpace,
 			Param: param,
