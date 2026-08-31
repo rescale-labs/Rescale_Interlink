@@ -9,6 +9,10 @@ import type { JobSpec, JobRow } from '../types/jobs'
 // read would throw. orgCode is normalized alongside them so a spec restored
 // from an older saved file cannot leave the field undefined.
 //
+// localInputFiles is defaulted for the same reason, and is why the Go field is
+// deliberately not omitempty: a job scanned in file mode carries its own file
+// list, and an absent one has to read as "no files", not as undefined.
+//
 // Every other field passes through, inputFiles and tarSubpath included; that
 // pass-through is what keeps a load/save round-trip lossless.
 export function normalizeJobSpec(spec: JobSpec): JobSpec {
@@ -17,6 +21,7 @@ export function normalizeJobSpec(spec: JobSpec): JobSpec {
     tags: spec.tags || [],
     orgCode: spec.orgCode || '',
     automations: spec.automations || [],
+    localInputFiles: spec.localInputFiles || [],
   }
 }
 
