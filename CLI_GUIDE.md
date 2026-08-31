@@ -1504,6 +1504,48 @@ rescale-int pur scan-files --primary <pattern> [flags]
 - `--overwrite` - Overwrite an existing output file
 - `--json` - Emit the scan result as JSON instead of a printed summary
 
+**Command tokens:**
+The template's command and job name are rendered per file, so each job runs
+against its own input rather than every job repeating one fixed command. For a
+primary file of `inputs/case1.inp`:
+
+| Token | Value |
+| --- | --- |
+| `{{file}}` | `case1.inp` |
+| `{{base}}` | `case1` |
+| `{{ext}}` | `inp` (no leading dot) |
+| `{{dir}}` | `inputs` — the containing folder, which is what tells apart a `case1/model.inp`, `case2/model.inp` layout |
+| `{{index}}` | `1` (1-based) |
+
+```
+template:  abaqus job={{base}} input={{file}} cpus=8
+case1.inp: abaqus job=case1 input=case1.inp cpus=8
+case2.inp: abaqus job=case2 input=case2.inp cpus=8
+```
+
+Values are what the job sees in its working directory, not paths on the
+submitting machine: every job's archive holds exactly its own files — the primary
+plus its resolved secondaries — flattened into the working directory. A secondary
+pattern may therefore point outside the primary file's folder
+(`--secondary "../meshes/*.cfg"`) and still be uploaded. Data genuinely shared by
+every job belongs in `--common-input-files`, which uploads once and attaches to
+all of them.
+
+An unknown token is an error rather than a warning, since substitution leaves
+what it cannot resolve in place: a typo like `{{bse}}` would otherwise submit
+every job with a literal `{{bse}}` on its command line. A command with no tokens
+is accepted with a warning — every job then runs the same command, which is
+occasionally intended. A filename that would restructure the command (a space, or
+a shell metacharacter such as `$`) skips that file and reports why; the rest of
+the batch is unaffected.
+
+A job name containing tokens is rendered the same way. One with no tokens keeps
+the `Name_1`, `Name_2` numbering.
+
+Generated jobs carry their file list in the `LocalInputFiles` column of the jobs
+CSV, semicolon-separated, so `scan-files` → `jobs.csv` → `pur run` round-trips.
+The column is optional on load, so older CSVs still work.
+
 **Examples:**
 ```bash
 # Print a summary of matched primary/secondary files
@@ -1513,8 +1555,10 @@ rescale-int pur scan-files --root /data --primary "*.inp" --secondary "*.mesh"
 rescale-int pur scan-files --root /data --primary "inputs/*.inp" \
   --secondary "*.mesh:required" --secondary "../common.cfg:optional"
 
-# Generate jobs.csv from a template
+# Generate jobs.csv from a template, one rendered command per file
+# (template.csv's Command column: abaqus job={{base}} input={{file}} cpus=8)
 rescale-int pur scan-files --root /data --primary "*.inp" \
+  --secondary "*.mesh:required" \
   --template template.csv --output jobs.csv
 ```
 

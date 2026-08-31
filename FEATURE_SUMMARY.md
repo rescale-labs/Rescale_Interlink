@@ -231,7 +231,7 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Additional Commands
 - `make-dirs-csv` — Auto-generate jobs CSV from directory structure
-- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, summarize the matches, and optionally generate a jobs CSV from a template
+- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, render each job's command from its own file (`{{file}}`, `{{base}}`, `{{ext}}`, `{{dir}}`, `{{index}}`), and optionally generate a jobs CSV from a template. Each job uploads only its own primary plus secondary files
 - `plan` — Validate pipeline (dry-run)
 - `resume` — Resume interrupted pipeline from state file
 - `submit-existing` — Submit jobs using previously uploaded files

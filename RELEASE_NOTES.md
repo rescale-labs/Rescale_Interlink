@@ -23,6 +23,22 @@ Because every case in a sweep shares one input deck, `--base-file-ids` (Shared I
 
 In the GUI, **PUR → Job Source → DOE** builds the sweep with a live case preview, showing the case table, the first case's rendered command and tags, and any validation problems before anything is submitted.
 
+### Per-file commands in PUR file-scan mode (`pur scan-files`, GUI Job Source → Files)
+
+Scanning a tree for input files now renders **each job's command from its own file**, instead of giving every job the template's command verbatim:
+
+```
+template:   abaqus job={{base}} input={{file}} cpus=8
+case1.inp:  abaqus job=case1 input=case1.inp cpus=8
+case2.inp:  abaqus job=case2 input=case2.inp cpus=8
+```
+
+Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged.
+
+Each job also uploads **only its own files** now — its primary file plus the secondary files resolved for it — flattened into its working directory, instead of the whole containing folder. Secondary patterns that reach outside the primary's folder (`../meshes/*.cfg`) are therefore uploaded rather than validated and dropped, and jobs sharing a folder no longer overwrite each other's archive, which previously surfaced as `upload incomplete: received 1 of 9 parts`. Data genuinely shared by every job still belongs in `--common-input-files`, which uploads it once for the batch.
+
+The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load.
+
 ### PUR uploads can target a folder and carry file tags
 
 `pur run` and `pur resume` accept `--folder` (created if missing), `--folder-parent`, and `--file-tags`, so a batch's uploads can be collected in one Rescale folder and tagged as a set.
