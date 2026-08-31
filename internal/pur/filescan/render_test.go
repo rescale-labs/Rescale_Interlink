@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // jobFilesFor builds the JobFiles a scan would produce for one primary file,
@@ -216,6 +218,25 @@ func TestValidateCommandTemplate_UnknownTokenMessage(t *testing.T) {
 	for _, token := range KnownTokens() {
 		if !strings.Contains(err.Error(), "{{"+token+"}}") {
 			t.Errorf("error %v does not list the valid token {{%s}}", err, token)
+		}
+	}
+}
+
+// The CLI prints this error through the crash reporter, whose redactor replaces
+// anything that looks like "token <value>" with [REDACTED]. Phrasing that trips
+// it strips out the typo the user needs to see, so pin the surviving message.
+func TestValidateCommandTemplate_UnknownTokenSurvivesRedaction(t *testing.T) {
+	_, err := ValidateCommandTemplate("abaqus job={{bse}} input={{file}}")
+	if err == nil {
+		t.Fatal("expected an error for an unknown token")
+	}
+	redacted := reporting.RedactError(err.Error())
+	if !strings.Contains(redacted, "{{bse}}") {
+		t.Errorf("redacted error %q no longer names the unknown token", redacted)
+	}
+	for _, token := range KnownTokens() {
+		if !strings.Contains(redacted, "{{"+token+"}}") {
+			t.Errorf("redacted error %q no longer lists {{%s}}", redacted, token)
 		}
 	}
 }

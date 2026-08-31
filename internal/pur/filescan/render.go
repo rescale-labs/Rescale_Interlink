@@ -98,7 +98,10 @@ func ValidateCommandTemplate(command string) (warnings []string, err error) {
 
 	for _, token := range tokens {
 		if !isKnownToken(token) {
-			return nil, fmt.Errorf("command contains unknown token {{%s}}; valid tokens are %s",
+			// The name comes before the word "token" on purpose: reporting's
+			// redactor reads "token <word>" as a credential and would replace the
+			// one detail this error exists to report (reporting/redactor.go:20).
+			return nil, fmt.Errorf("command contains {{%s}}, which is not a file-scan token; valid tokens are %s",
 				token, tokenList())
 		}
 	}
@@ -114,8 +117,8 @@ func ValidateJobNameTemplate(jobName string) []string {
 	var warnings []string
 	for _, token := range pattern.ExtractTokens(jobName) {
 		if !isKnownToken(token) {
-			warnings = append(warnings, fmt.Sprintf("job name references unknown token {{%s}}; "+
-				"valid tokens are %s", token, tokenList()))
+			warnings = append(warnings, fmt.Sprintf("job name references {{%s}}, which is not a "+
+				"file-scan token; valid tokens are %s", token, tokenList()))
 		}
 	}
 	return warnings
