@@ -49,6 +49,15 @@ export interface Automation {
   scriptName: string
 }
 
+// Project from API. remainingAmounts are the platform's own budget lines
+// ("(no budget)", "All: My budget ($100.00 available)") — display strings.
+export interface Project {
+  id: string
+  name: string
+  isDefault: boolean
+  remainingAmounts: string[]
+}
+
 // Secondary pattern for file scanning mode
 export interface SecondaryPattern {
   pattern: string   // Glob pattern, may include subpath (e.g., "*.mesh", "../meshes/*.cfg")
@@ -175,6 +184,8 @@ export const DEFAULT_JOB_TEMPLATE: JobSpec = {
   submitMode: 'create_and_submit',
   isLowPriority: false,
   onDemandLicenseSeller: '',
+  licenseFeatureName: '',
+  licensesPerJob: 0,
   tags: [],
   projectId: '',
   orgCode: '',
@@ -218,12 +229,20 @@ interface JobStore {
   coreTypes: CoreType[]
   analysisCodes: AnalysisCode[]
   automations: Automation[]
+  projects: Project[]
   isLoadingCoreTypes: boolean
   isLoadingAnalysisCodes: boolean
   isLoadingAutomations: boolean
+  isLoadingProjects: boolean
   coreTypesError: string | null
   analysisCodesError: string | null
   automationsError: string | null
+  projectsError: string | null
+  // Whether a scan has been attempted this session. An empty result is a valid
+  // answer, so emptiness cannot be the signal to fetch — an account with no
+  // projects (or no coretypes) would put the fetch-on-open effects into a loop.
+  coreTypesLoaded: boolean
+  projectsLoaded: boolean
 
   // PUR run options
   purRunOptions: PURRunOptions
@@ -290,6 +309,7 @@ interface JobStore {
   fetchCoreTypes: () => Promise<void>
   fetchAnalysisCodes: (search?: string) => Promise<void>
   fetchAutomations: () => Promise<void>
+  fetchProjects: () => Promise<void>
 
   // Actions - Memory
   saveMemory: () => void
@@ -453,12 +473,17 @@ export const useJobStore = create<JobStore>((set, get) => ({
   coreTypes: [],
   analysisCodes: [],
   automations: [],
+  projects: [],
   isLoadingCoreTypes: false,
   isLoadingAnalysisCodes: false,
   isLoadingAutomations: false,
+  isLoadingProjects: false,
   coreTypesError: null,
   analysisCodesError: null,
   automationsError: null,
+  projectsError: null,
+  coreTypesLoaded: false,
+  projectsLoaded: false,
 
   purRunOptions: {
     commonInputFiles: '',
@@ -913,10 +938,16 @@ export const useJobStore = create<JobStore>((set, get) => ({
         submitMode: job.submitMode,
         isLowPriority: job.isLowPriority,
         onDemandLicenseSeller: job.onDemandLicenseSeller,
+        licenseFeatureName: job.licenseFeatureName || '',
+        licensesPerJob: job.licensesPerJob || 0,
         tags: job.tags || [],
         projectId: job.projectId,
         orgCode: job.orgCode || '',
         automations: job.automations || [],
+        // The CSV carries both, and dropping them here would silently undo a
+        // file-scan run saved to CSV and loaded back.
+        localInputFiles: job.localInputFiles || [],
+        tarSubpath: job.tarSubpath || '',
       }))
 
       // Create job rows from the loaded jobs
@@ -974,6 +1005,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
         submitMode: job.submitMode,
         isLowPriority: job.isLowPriority,
         onDemandLicenseSeller: job.onDemandLicenseSeller,
+        licenseFeatureName: job.licenseFeatureName || '',
+        licensesPerJob: job.licensesPerJob || 0,
         tags: job.tags || [],
         projectId: job.projectId,
         orgCode: job.orgCode || '',
@@ -1008,6 +1041,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
         submitMode: job.submitMode,
         isLowPriority: job.isLowPriority,
         onDemandLicenseSeller: job.onDemandLicenseSeller,
+        licenseFeatureName: job.licenseFeatureName || '',
+        licensesPerJob: job.licensesPerJob || 0,
         tags: job.tags || [],
         projectId: job.projectId,
         orgCode: job.orgCode || '',
@@ -1047,7 +1082,9 @@ export const useJobStore = create<JobStore>((set, get) => ({
       console.error('Failed to fetch core types:', errMsg)
       set({ coreTypesError: errMsg })
     } finally {
-      set({ isLoadingCoreTypes: false })
+      // Marked on any outcome, so an account that legitimately returns no
+      // coretypes does not restart the fetch-on-open effect forever.
+      set({ isLoadingCoreTypes: false, coreTypesLoaded: true })
     }
   },
 
@@ -1110,6 +1147,33 @@ export const useJobStore = create<JobStore>((set, get) => ({
     }
   },
 
+  fetchProjects: async () => {
+    set({ isLoadingProjects: true, projectsError: null })
+    try {
+      const result = await App.GetProjects()
+      if (result.error) {
+        console.error('Failed to fetch projects:', result.error)
+        set({ projectsError: result.error })
+        return
+      }
+      const mapped: Project[] = (result.projects || []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        isDefault: p.isDefault,
+        remainingAmounts: p.remainingAmounts || [],
+      }))
+      set({ projects: mapped, projectsError: null })
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error)
+      console.error('Failed to fetch projects:', errMsg)
+      set({ projectsError: errMsg })
+    } finally {
+      // Marked on any outcome, including failure: the button is how a retry
+      // happens, not another pass of the effect.
+      set({ isLoadingProjects: false, projectsLoaded: true })
+    }
+  },
+
   // Memory Actions
   saveMemory: () => {
     const { template, scanOptions } = get()
@@ -1136,7 +1200,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
         const memory = JSON.parse(saved) as WorkflowMemory
         set({
           memory,
-          template: memory.lastTemplate || { ...DEFAULT_JOB_TEMPLATE },
+          // Layered over the defaults, not used raw: a template stored by an
+          // older build is missing any field added since, and the builder reads
+          // those fields directly (a missing string would break .trim()).
+          template: { ...DEFAULT_JOB_TEMPLATE, ...(memory.lastTemplate || {}) },
           scanOptions: {
             ...get().scanOptions,
             rootDir: memory.lastScanDir || '',

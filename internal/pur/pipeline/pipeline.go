@@ -1185,10 +1185,24 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					}
 				}
 
-				// Org-scoped project assignment
+				// Org-scoped project assignment. The org code is an override, not a
+				// requirement: an explicit one (job spec, then config) wins, and
+				// otherwise the client resolves it from the API key, so choosing a
+				// project is enough on its own.
 				orgCode := item.jobSpec.OrgCode
 				if orgCode == "" {
 					orgCode = p.cfg.OrgCode
+				}
+				if orgCode == "" && item.jobSpec.ProjectID != "" {
+					resolved, err := p.apiClient.OrgCode(ctx)
+					if err != nil {
+						// Non-fatal, like an assignment failure itself: the job is
+						// created and runs, it is simply not billed to the project.
+						p.logf("WARN", "job", item.state.JobName,
+							"Cannot assign project %s: %v", item.jobSpec.ProjectID, err)
+					} else {
+						orgCode = resolved
+					}
 				}
 				if orgCode != "" && item.jobSpec.ProjectID != "" {
 					maxAssignRetries := 3
@@ -1297,6 +1311,20 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 		}
 	}
 
+	// A user-defined license feature needs both halves: a name with no count, or a
+	// count with no name, is not a payload the platform accepts, and quietly
+	// dropping half of what the user asked for would submit a job that takes no
+	// license at all.
+	var userLicense any
+	switch {
+	case spec.LicenseFeatureName != "" && spec.LicensesPerJob > 0:
+		userLicense = models.NewUserDefinedLicense(spec.LicenseFeatureName, spec.LicensesPerJob)
+	case spec.LicenseFeatureName != "":
+		return nil, fmt.Errorf("license feature %q needs a licenses-per-job count greater than zero", spec.LicenseFeatureName)
+	case spec.LicensesPerJob > 0:
+		return nil, fmt.Errorf("licenses per job is set to %d but no license feature name was given", spec.LicensesPerJob)
+	}
+
 	// Build job request
 	jobReq := &models.JobRequest{
 		Name: spec.JobName,
@@ -1319,7 +1347,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 				EnvVars:                    licenseEnv,
 				UseRescaleLicense:          false,
 				OnDemandLicenseSeller:      nil,
-				UserDefinedLicenseSettings: nil,
+				UserDefinedLicenseSettings: userLicense,
 			},
 		},
 		IsLowPriority: spec.IsLowPriority,

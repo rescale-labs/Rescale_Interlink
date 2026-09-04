@@ -47,6 +47,26 @@ The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` rou
 
 The flag that uploads a file once and attaches it to every job is now `--common-input-files`, with `--decompress-common` alongside it; the GUI label matches. The old `--extra-input-files` and `--decompress-extras` names still work as hidden aliases but emit a deprecation warning, and passing both a flag and its alias is an error.
 
+### License feature sets on a job
+
+**License Settings** in the job template gained **License Feature Name** and **Licenses Per Job**. Together they submit the job with a user-defined license feature set, so a job checks out a named feature from your own license server:
+
+```json
+"userDefinedLicenseSettings": {
+  "featureSets": [
+    {"name": "USER_SPECIFIED_0", "features": [{"name": "ansys_hpc", "count": 8}]}
+  ]
+}
+```
+
+Both fields are optional, but only meaningful together: a name without a count, or a count without a name, is rejected rather than submitted as a job that quietly takes no license. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
+
+### Job template: project picker and coretype-aware core stepper
+
+The **Project** field is now a dropdown of the projects the API key can see — default project first, each with its remaining budget — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped. The separate Org Code field is gone, since the organization is already implied by the API key.
+
+The **Cores** control now steps through the sizes the selected coretype actually sells (a quarter, half or whole node, then whole nodes above that) instead of counting by one, so the arrows and the keyboard can no longer land on a value the platform rejects.
+
 ---
 
 ## v4.9.8 - May 30, 2026

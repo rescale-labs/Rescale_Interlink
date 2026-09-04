@@ -375,6 +375,8 @@ export function PURTab() {
       submitMode: loaded.submitMode || 'create_and_submit',
       isLowPriority: loaded.isLowPriority || false,
       onDemandLicenseSeller: loaded.onDemandLicenseSeller || '',
+      licenseFeatureName: loaded.licenseFeatureName || '',
+      licensesPerJob: loaded.licensesPerJob || 0,
       tags: loaded.tags || [],
       projectId: loaded.projectId || '',
       orgCode: loaded.orgCode || '',

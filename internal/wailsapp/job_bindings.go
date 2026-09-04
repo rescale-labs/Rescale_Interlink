@@ -61,6 +61,8 @@ type JobSpecDTO struct {
 	SubmitMode            string   `json:"submitMode"`
 	IsLowPriority         bool     `json:"isLowPriority"`
 	OnDemandLicenseSeller string   `json:"onDemandLicenseSeller"`
+	LicenseFeatureName    string   `json:"licenseFeatureName"`
+	LicensesPerJob        int      `json:"licensesPerJob"`
 	Tags                  []string `json:"tags"`
 	ProjectID             string   `json:"projectId"`
 	OrgCode               string   `json:"orgCode"`
@@ -139,6 +141,18 @@ type AnalysisVersionDTO struct {
 	AllowedCoreTypes []string `json:"allowedCoreTypes"`
 }
 
+// ProjectDTO represents a Rescale project a job can be billed to.
+type ProjectDTO struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"isDefault"`
+
+	// Budget lines exactly as the platform formats them. Not omitempty: an
+	// omitted slice arrives in TypeScript as undefined and the dropdown that
+	// maps over it would crash.
+	RemainingAmounts []string `json:"remainingAmounts"`
+}
+
 // AutomationDTO represents a Rescale automation.
 type AutomationDTO struct {
 	ID          string `json:"id"`
@@ -158,6 +172,12 @@ type CoreTypesResultDTO struct {
 type AnalysisCodesResultDTO struct {
 	Codes []AnalysisCodeDTO `json:"codes"`
 	Error string            `json:"error,omitempty"`
+}
+
+// ProjectsResultDTO wraps project results with optional error.
+type ProjectsResultDTO struct {
+	Projects []ProjectDTO `json:"projects"`
+	Error    string       `json:"error,omitempty"`
 }
 
 // AutomationsResultDTO wraps automation results with optional error.
@@ -488,6 +508,40 @@ func (a *App) GetAutomations() AutomationsResultDTO {
 		}
 	}
 	return AutomationsResultDTO{Automations: dtos}
+}
+
+// GetProjects returns the projects this API key may assign jobs to.
+//
+// Not cached here, unlike the hardware and software catalogs: a project created
+// in the web UI should show up on the next open of the template builder rather
+// than after a restart, and the list is one small request.
+func (a *App) GetProjects() ProjectsResultDTO {
+	if a.engine == nil || a.engine.API() == nil {
+		return ProjectsResultDTO{Error: "engine not initialized"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), constants.PaginatedAPITimeout)
+	defer cancel()
+
+	projects, err := a.engine.API().ListProjects(ctx)
+	if err != nil {
+		return ProjectsResultDTO{Error: fmt.Sprintf("failed to fetch projects: %v", err)}
+	}
+
+	dtos := make([]ProjectDTO, len(projects))
+	for i, p := range projects {
+		amounts := p.RemainingAmounts
+		if amounts == nil {
+			amounts = []string{}
+		}
+		dtos[i] = ProjectDTO{
+			ID:               p.ID,
+			Name:             p.Name,
+			IsDefault:        p.IsDefault,
+			RemainingAmounts: amounts,
+		}
+	}
+	return ProjectsResultDTO{Projects: dtos}
 }
 
 // PURRunOptionsDTO contains PUR-specific run configuration beyond the job list.
@@ -1190,6 +1244,8 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		SubmitMode:            j.SubmitMode,
 		IsLowPriority:         j.IsLowPriority,
 		OnDemandLicenseSeller: j.OnDemandLicenseSeller,
+		LicenseFeatureName:    j.LicenseFeatureName,
+		LicensesPerJob:        j.LicensesPerJob,
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
 		OrgCode:               j.OrgCode,
@@ -1218,6 +1274,8 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		SubmitMode:            j.SubmitMode,
 		IsLowPriority:         j.IsLowPriority,
 		OnDemandLicenseSeller: j.OnDemandLicenseSeller,
+		LicenseFeatureName:    j.LicenseFeatureName,
+		LicensesPerJob:        j.LicensesPerJob,
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
 		OrgCode:               j.OrgCode,

@@ -90,6 +90,8 @@ export function GetMyJobsFolderID():Promise<string>;
 
 export function GetMyLibraryFolderID():Promise<string>;
 
+export function GetProjects():Promise<wailsapp.ProjectsResultDTO>;
+
 export function GetRunHistory():Promise<Array<wailsapp.RunHistoryEntryDTO>>;
 
 export function GetRunStatus():Promise<wailsapp.RunStatusDTO>;

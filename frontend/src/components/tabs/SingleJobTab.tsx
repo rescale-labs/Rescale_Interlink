@@ -156,6 +156,8 @@ export function SingleJobTab() {
           submitMode: loadedJob.submitMode,
           isLowPriority: loadedJob.isLowPriority,
           onDemandLicenseSeller: loadedJob.onDemandLicenseSeller,
+          licenseFeatureName: loadedJob.licenseFeatureName || '',
+          licensesPerJob: loadedJob.licensesPerJob || 0,
           tags: loadedJob.tags || [],
           projectId: loadedJob.projectId,
           orgCode: loadedJob.orgCode || '',

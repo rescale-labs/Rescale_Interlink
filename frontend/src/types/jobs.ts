@@ -34,6 +34,13 @@ export interface JobSpec {
   submitMode: string
   isLowPriority: boolean
   onDemandLicenseSeller: string
+
+  // One user-defined license feature: the job checks out licensesPerJob seats of
+  // licenseFeatureName from the customer's own license server. Only meaningful
+  // together — an empty name with a count, or the reverse, is rejected on save.
+  licenseFeatureName: string
+  licensesPerJob: number
+
   tags: string[]
   projectId: string
   orgCode: string
