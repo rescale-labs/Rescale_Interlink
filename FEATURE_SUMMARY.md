@@ -217,18 +217,28 @@ Batch job submission pipeline for parallel computational studies.
 - Concurrent tar/upload/submit workers
 - Context-aware cancellation
 - Tar subpath and scan prefix support
-- Extra input files (upload once, attach to every job)
+- Common input files (upload once, attach to every job)
 - Iterate command patterns (vary commands across runs)
+- Optional remote folder and file tags for a batch's uploads
+
+### Design of Experiments
+- `doe` — Expand one base job into a parameter sweep, one job per case
+- Eight designs: full factorial, one-factor-at-a-time, Latin hypercube, Sobol, Monte Carlo, central composite, Box-Behnken, explicit cases from a CSV
+- Values are rendered into each case's **command line**, not environment variables, so the configuration is visible on the Rescale job page
+- Parameters and `{{token}}`s in the command are checked against each other in both directions
+- Per-case job name and Rescale job tag templates
+- Shared input file IDs so one uploaded deck serves the whole sweep
 
 ### Additional Commands
 - `make-dirs-csv` — Auto-generate jobs CSV from directory structure
-- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, summarize the matches, and optionally generate a jobs CSV from a template
+- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, render each job's command from its own file (`{{file}}`, `{{base}}`, `{{ext}}`, `{{dir}}`, `{{index}}`), and optionally generate a jobs CSV from a template. Each job uploads only its own primary plus secondary files
 - `plan` — Validate pipeline (dry-run)
 - `resume` — Resume interrupted pipeline from state file
 - `submit-existing` — Submit jobs using previously uploaded files
 
 ### GUI PUR Tab
 - Three-step workflow: configure → scan → execute
+- Job source: folders, primary input files, or a DOE parameter sweep with a live case preview
 - Load/Save settings (CSV, JSON, SGE formats)
 - Pipeline Settings (workers, tar options)
 - Real-time monitoring dashboard with live progress

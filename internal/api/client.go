@@ -109,6 +109,10 @@ type Client struct {
 	apiKey     string
 	store      *ratelimit.LimiterStore // Process-level singleton limiter store
 	metrics    *apiMetrics             // API usage tracking
+
+	// Organization code for this API key, resolved on first use. See OrgCode.
+	orgCodeMu sync.Mutex
+	orgCode   string
 }
 
 // NewClient creates a new API client
@@ -671,8 +675,111 @@ func (c *Client) SubmitJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
+// Project is a Rescale project a job's usage can be billed to.
+type Project struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"isDefault"`
+
+	// RemainingAmounts are the platform's own pre-formatted budget lines, e.g.
+	// "All: My budget ($100.00 available)" or "(no budget)". Display strings,
+	// not values to compute with.
+	RemainingAmounts []string `json:"remainingAmounts"`
+}
+
+// ListProjects returns the projects the authenticated user may assign jobs to.
+//
+// The endpoint is user-scoped rather than organization-scoped, so unlike
+// AssignProjectToJob it needs no company code. Paginated like the other list
+// endpoints; most accounts fit in one page.
+func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
+	var allProjects []Project
+	nextURL := "/api/v2/users/me/projects/"
+	pageCount := 0
+
+	for nextURL != "" {
+		pageCount++
+		if pageCount > constants.MaxPaginationPages {
+			log.Printf("Warning: Pagination limit reached after %d pages (%d projects fetched)", pageCount-1, len(allProjects))
+			break
+		}
+
+		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != nethttp.StatusOK {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("list projects failed: status %d: %s", resp.StatusCode, body)
+		}
+
+		var result struct {
+			Count   int       `json:"count"`
+			Next    *string   `json:"next"`
+			Results []Project `json:"results"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode projects response: %w", err)
+		}
+		resp.Body.Close()
+
+		allProjects = append(allProjects, result.Results...)
+
+		if result.Next != nil && *result.Next != "" {
+			nextURL = extractAPIPath(*result.Next)
+		} else {
+			nextURL = ""
+		}
+	}
+
+	return allProjects, nil
+}
+
+// OrgCode returns the organization code the API key belongs to.
+//
+// Org-scoped endpoints carry the code in their path, but it is not something the
+// user should have to look up and type: the key already identifies the account,
+// and /api/v3/users/me/ reports its company code. Resolved once and cached — it
+// cannot change for a given key — so a batch assigning projects to 200 jobs
+// costs one profile request, not 200.
+func (c *Client) OrgCode(ctx context.Context) (string, error) {
+	c.orgCodeMu.Lock()
+	defer c.orgCodeMu.Unlock()
+
+	if c.orgCode != "" {
+		return c.orgCode, nil
+	}
+
+	profile, err := c.GetUserProfile(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve the organization code from the API key: %w", err)
+	}
+	if profile.Company.Code == "" {
+		return "", fmt.Errorf("the API key's user profile reports no company code, so organization-scoped requests cannot be addressed")
+	}
+
+	c.orgCode = profile.Company.Code
+	return c.orgCode, nil
+}
+
 // AssignProjectToJob assigns a project to a job using the organization-scoped endpoint.
+//
+// An empty orgCode is resolved from the API key via OrgCode. Callers pass one
+// only to override that — a configured org_code for an account whose profile
+// reports a different code.
 func (c *Client) AssignProjectToJob(ctx context.Context, orgCode, jobID, projectID string) error {
+	if orgCode == "" {
+		resolved, err := c.OrgCode(ctx)
+		if err != nil {
+			return err
+		}
+		orgCode = resolved
+	}
+
 	path := fmt.Sprintf("/api/v2/organizations/%s/jobs/%s/project-assignment/", orgCode, jobID)
 	body := map[string]string{"projectId": projectID}
 	resp, err := c.doRequest(ctx, "POST", path, body)

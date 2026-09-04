@@ -8,9 +8,11 @@ import {
   ChevronUpIcon,
   BookmarkIcon,
   FolderIcon,
+  PlusIcon,
+  MinusIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, JobSpec, DEFAULT_JOB_TEMPLATE, AnalysisCode } from '../../stores'
+import { useJobStore, JobSpec, DEFAULT_JOB_TEMPLATE, AnalysisCode, Project } from '../../stores'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 
 interface TemplateInfo {
@@ -28,6 +30,10 @@ interface TemplateBuilderProps {
   onClose: () => void
   onSave: (template: JobSpec) => void
 }
+
+// Node size assumed while coretype metadata has not loaded. Only a fallback:
+// once coreTypes is populated the real per-node maximum is used everywhere.
+const DEFAULT_NODE_CORES = 64
 
 // Submit mode options
 const SUBMIT_MODES = [
@@ -144,12 +150,18 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     isLoadingCoreTypes,
     isLoadingAnalysisCodes,
     isLoadingAutomations,
+    projects,
+    isLoadingProjects,
     coreTypesError,
     analysisCodesError,
     automationsError,
+    projectsError,
+    coreTypesLoaded,
+    projectsLoaded,
     fetchCoreTypes,
     fetchAnalysisCodes,
     fetchAutomations,
+    fetchProjects,
   } = useJobStore()
 
   // Form state
@@ -210,11 +222,24 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   }, [isOpen, loadSavedTemplates])
 
   // Load coretype metadata on open so validation of saved templates works without a manual Scan.
+  // Gated on the attempt, not on the list being empty: an empty answer would
+  // otherwise be re-asked on every render. Rescanning is the button's job.
   useEffect(() => {
-    if (isOpen && coreTypes.length === 0 && !coreTypesError && !isLoadingCoreTypes) {
+    if (isOpen && !coreTypesLoaded && !isLoadingCoreTypes) {
       fetchCoreTypes()
     }
-  }, [isOpen, coreTypes.length, coreTypesError, isLoadingCoreTypes, fetchCoreTypes])
+  }, [isOpen, coreTypesLoaded, isLoadingCoreTypes, fetchCoreTypes])
+
+  // Load the account's projects on open: the picker needs them to show anything
+  // at all, and one small request is cheaper than making the user find an ID.
+  // Gated on projectsLoaded rather than an empty list, since "no projects" is a
+  // real answer that would otherwise be re-asked forever. Rescanning after that
+  // is the Scan Projects button's job.
+  useEffect(() => {
+    if (isOpen && !projectsLoaded && !isLoadingProjects) {
+      fetchProjects()
+    }
+  }, [isOpen, projectsLoaded, isLoadingProjects, fetchProjects])
 
   const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
     if (templateInfo.job) {
@@ -310,6 +335,33 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return coreTypes.map((ct) => ct.code)
   }, [coreTypes])
 
+  // Projects, default first and then by name, so the one most jobs belong to is
+  // at the top of the list rather than wherever the API happened to return it.
+  const projectOptions = useMemo(() => {
+    return [...projects].sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+  }, [projects])
+
+  // A project ID the account's list does not contain — a template or CSV written
+  // against another account, or a project since deleted. Kept as an option so
+  // opening the builder does not silently unassign it.
+  const unlistedProjectId = useMemo(() => {
+    if (!template.projectId) return ''
+    return projects.some((p) => p.id === template.projectId) ? '' : template.projectId
+  }, [projects, template.projectId])
+
+  // The budget line is what distinguishes two similarly named projects, so it
+  // belongs in the option text. "(no budget)" adds nothing next to a name.
+  const projectLabel = useCallback((project: Project) => {
+    const budget = project.remainingAmounts.filter((a) => a && a !== '(no budget)')
+    const parts = [project.name]
+    if (project.isDefault) parts.push('(default)')
+    if (budget.length > 0) parts.push(`— ${budget.join('; ')}`)
+    return parts.join(' ')
+  }, [])
+
   // Build version display→code mapping for the dropdown
   const versionMap = useMemo(() => {
     if (!selectedAnalysis) return new Map<string, string>()
@@ -326,19 +378,39 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return Array.from(versionMap.keys())
   }, [versionMap])
 
+  // The core counts this coretype sells within one node, ascending — the
+  // platform's own list (4, 8, 16, 32, 64 for a 64-core node). Above a full node
+  // only whole nodes are valid. Those are the two rules validate() enforces, and
+  // the two the cores stepper walks, so both read them from here.
+  const coreLadder = useMemo(() => {
+    const ct = coreTypes.find((c) => c.code === template.coreType)
+    if (!ct || ct.cores.length === 0) {
+      return [] as number[]
+    }
+    return Array.from(new Set(ct.cores.filter((n) => n > 0))).sort((a, b) => a - b)
+  }, [coreTypes, template.coreType])
+
   // Base unit for cores: max cores per node for selected hardware.
   // Users can enter multiples of this value (64, 128, 192, etc.)
   const coresBaseUnit = useMemo(() => {
-    const ct = coreTypes.find((c) => c.code === template.coreType)
-    if (ct && ct.cores.length > 0) {
-      return Math.max(...ct.cores)
+    if (coreLadder.length > 0) {
+      return coreLadder[coreLadder.length - 1]
     }
-    // Metadata not loaded yet — fall back to the stored value so +/- increments stay sensible.
+    // Metadata not loaded yet — fall back to the stored value so the hint and the
+    // empty-field default are stated in terms of what the user already has.
     if (template.coresPerSlot > 0) {
       return template.coresPerSlot
     }
-    return 64
-  }, [coreTypes, template.coreType, template.coresPerSlot])
+    return DEFAULT_NODE_CORES
+  }, [coreLadder, template.coresPerSlot])
+
+  // Node size the stepper counts in. Deliberately not coresBaseUnit: that one
+  // falls back to the live value, and stepping by the number being stepped would
+  // double it on every click.
+  const nodeCores = coreLadder.length > 0 ? coreLadder[coreLadder.length - 1] : DEFAULT_NODE_CORES
+
+  // Smallest value the coretype accepts, so the stepper cannot walk below it.
+  const coresMin = coreLadder.length > 0 ? coreLadder[0] : 1
 
   // Handle analysis code change
   const handleAnalysisChange = useCallback(
@@ -364,7 +436,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     (coreType: string) => {
       const ct = coreTypes.find((c) => c.code === coreType)
       // Default to max cores (base unit for multiples)
-      const defaultCores = ct && ct.cores.length > 0 ? Math.max(...ct.cores) : 64
+      const defaultCores = ct && ct.cores.length > 0 ? Math.max(...ct.cores) : DEFAULT_NODE_CORES
 
       setTemplate((t) => ({
         ...t,
@@ -393,6 +465,49 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     [coresBaseUnit, updateField]
   )
 
+  // The next valid value up: the next slice within a node while there is one,
+  // then whole nodes. A function of the current value rather than a constant
+  // because the ladder is uneven — 4, 8, 16, 32, 64 has no single step size.
+  const nextCores = useCallback(
+    (current: number) => {
+      const nextSlice = coreLadder.find((c) => c > current)
+      if (nextSlice !== undefined) {
+        return nextSlice
+      }
+      return (Math.floor(current / nodeCores) + 1) * nodeCores
+    },
+    [coreLadder, nodeCores]
+  )
+
+  // The next valid value down, or the current one when nothing smaller is known
+  // to be valid — which is what disables the minus control.
+  const prevCores = useCallback(
+    (current: number) => {
+      if (current > nodeCores) {
+        // Whole nodes on the way down, and Math.ceil so a hand-typed 100 lands on
+        // 64 rather than on another value the platform would reject.
+        return Math.max((Math.ceil(current / nodeCores) - 1) * nodeCores, nodeCores)
+      }
+      const smaller = coreLadder.filter((c) => c < current)
+      if (smaller.length > 0) {
+        return smaller[smaller.length - 1]
+      }
+      return current
+    },
+    [coreLadder, nodeCores]
+  )
+
+  const stepCores = useCallback(
+    (direction: 1 | -1) => {
+      const current = template.coresPerSlot > 0 ? template.coresPerSlot : coresBaseUnit
+      updateField('coresPerSlot', direction > 0 ? nextCores(current) : prevCores(current))
+    },
+    [template.coresPerSlot, coresBaseUnit, nextCores, prevCores, updateField]
+  )
+
+  const coresStepUp = nextCores(template.coresPerSlot)
+  const coresStepDown = prevCores(template.coresPerSlot)
+
   // Validate template — cores allow fractional nodes OR multi-node (multiples of max)
   const validate = useCallback((): string[] => {
     const errs: string[] = []
@@ -414,21 +529,28 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     } else {
       // Only enforce the combinations check once coretype metadata is loaded.
       // Without metadata, trust the stored value — the platform API is the ultimate validator.
-      const ct = coreTypes.find((c) => c.code === template.coreType)
-      if (ct && ct.cores.length > 0) {
-        const maxCores = Math.max(...ct.cores)
-        const isValidFractional = ct.cores.includes(template.coresPerSlot)
-        const isValidMultiNode = template.coresPerSlot % maxCores === 0
+      // Read from the same ladder the stepper walks, so the control cannot offer a
+      // value this then rejects.
+      if (coreLadder.length > 0) {
+        const isValidFractional = coreLadder.includes(template.coresPerSlot)
+        const isValidMultiNode = template.coresPerSlot % nodeCores === 0
         if (!isValidFractional && !isValidMultiNode) {
-          const validOptions = ct.cores.join(', ')
           errs.push(
-            `Cores ${template.coresPerSlot} not valid for coretype '${template.coreType}'. Valid values: ${validOptions} or a multiple of ${maxCores}.`
+            `Cores ${template.coresPerSlot} not valid for coretype '${template.coreType}'. Valid values: ${coreLadder.join(', ')} or a multiple of ${nodeCores}.`
           )
         }
       }
     }
     if (template.walltimeHours <= 0) {
       errs.push('Walltime must be positive')
+    }
+    // A feature set needs both halves. Catching it here says which box is empty,
+    // where BuildJobRequest can only refuse the job later on.
+    if (template.licenseFeatureName.trim() && template.licensesPerJob <= 0) {
+      errs.push('Licenses per job must be 1 or more when a license feature name is set')
+    }
+    if (!template.licenseFeatureName.trim() && template.licensesPerJob > 0) {
+      errs.push('License feature name is required when licenses per job is set')
     }
     if (licenseType === 'CUSTOM' && licenseValue.trim()) {
       if (!parseCustomLicenseEntry(licenseValue)) {
@@ -440,7 +562,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
 
     return errs
-  }, [template, coreTypes, licenseType, licenseValue])
+  }, [template, coreLadder, nodeCores, licenseType, licenseValue])
 
   // Handle save
   const handleSave = useCallback(() => {
@@ -462,9 +584,16 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
       }
     }
 
+    // Trailing spaces in a feature name would reach the license server verbatim,
+    // and a count left behind by a name the user cleared must not be sent alone —
+    // validate() only allows the empty-name case through with a zero count.
+    const licenseFeatureName = template.licenseFeatureName.trim()
+
     const finalTemplate = {
       ...template,
       licenseSettings,
+      licenseFeatureName,
+      licensesPerJob: licenseFeatureName ? template.licensesPerJob : 0,
     }
 
     onSave(finalTemplate)
@@ -559,21 +688,21 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
         {/* Form */}
         <div className="flex-1 overflow-auto p-6 space-y-6">
           {/* Software Configuration */}
+          <div>
+            <label className="block text-sm font-medium mb-1">Job Name</label>
+            <input
+              type="text"
+              value={template.jobName}
+              onChange={(e) => updateField('jobName', e.target.value)}
+              placeholder="Run_1"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
           <section>
             <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 pb-1 border-b border-gray-200 dark:border-gray-700">
               Software Configuration
             </h3>
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium mb-1">Job Name</label>
-                <input
-                  type="text"
-                  value={template.jobName}
-                  onChange={(e) => updateField('jobName', e.target.value)}
-                  placeholder="Run_1"
-                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="block text-sm font-medium">Analysis Code</label>
@@ -672,22 +801,56 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 <div className="relative">
                   <input
                     type="number"
-                    min={1}
-                    step={1}
+                    min={coresMin}
+                    step={Math.max(coresStepUp - template.coresPerSlot, 1)}
                     value={template.coresPerSlot}
                     onChange={(e) => handleCoresChange(Number(e.target.value))}
                     onBlur={(e) => handleCoresChange(Number(e.target.value))}
-                    className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    onKeyDown={(e) => {
+                      // The native arrows count by a fixed step, which lands between
+                      // valid values on an uneven ladder, so they are replaced rather
+                      // than merely re-sized.
+                      if (e.key === 'ArrowUp') {
+                        e.preventDefault()
+                        stepCores(1)
+                      } else if (e.key === 'ArrowDown') {
+                        e.preventDefault()
+                        stepCores(-1)
+                      }
+                    }}
+                    className="w-full pl-3 pr-16 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                   />
-                  <p className="mt-1 text-xs text-gray-500">
-                    {(() => {
-                      const ct = coreTypes.find((c) => c.code === template.coreType)
-                      return ct?.cores.length
-                        ? `Valid: ${ct.cores.join(', ')} or multiples of ${coresBaseUnit}`
-                        : `Multiples of ${coresBaseUnit}`
-                    })()}
-                  </p>
+                  <div className="absolute inset-y-0 right-1 flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => stepCores(-1)}
+                      disabled={coresStepDown >= template.coresPerSlot}
+                      aria-label="Fewer cores"
+                      title={
+                        coresStepDown < template.coresPerSlot
+                          ? `Down to ${coresStepDown} cores`
+                          : `${template.coresPerSlot} is the smallest valid size`
+                      }
+                      className="flex items-center justify-center w-6 h-6 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:hover:bg-transparent"
+                    >
+                      <MinusIcon className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => stepCores(1)}
+                      aria-label="More cores"
+                      title={`Up to ${coresStepUp} cores`}
+                      className="flex items-center justify-center w-6 h-6 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                    >
+                      <PlusIcon className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  {coreLadder.length > 0
+                    ? `Valid: ${coreLadder.join(', ')} or multiples of ${coresBaseUnit}`
+                    : `Multiples of ${coresBaseUnit}`}
+                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Walltime (hours)</label>
@@ -710,24 +873,50 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
             </h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium mb-1">Project ID</label>
-                <input
-                  type="text"
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-sm font-medium">Project</label>
+                  <button
+                    type="button"
+                    onClick={() => fetchProjects()}
+                    disabled={isLoadingProjects}
+                    className="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400 disabled:cursor-not-allowed"
+                  >
+                    {isLoadingProjects ? 'Scanning...' : 'Scan Projects'}
+                  </button>
+                </div>
+                <select
                   value={template.projectId}
                   onChange={(e) => updateField('projectId', e.target.value)}
-                  placeholder="project-id (optional)"
-                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Org Code</label>
-                <input
-                  type="text"
-                  value={template.orgCode || ''}
-                  onChange={(e) => updateField('orgCode', e.target.value)}
-                  placeholder="org-code (optional, for project assignment)"
-                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                  disabled={isLoadingProjects}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 dark:disabled:bg-gray-700"
+                >
+                  <option value="">
+                    {isLoadingProjects ? 'Loading projects…' : 'No project'}
+                  </option>
+                  {projectOptions.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {projectLabel(project)}
+                    </option>
+                  ))}
+                  {unlistedProjectId && (
+                    <option value={unlistedProjectId}>
+                      {unlistedProjectId} (not in this account's projects)
+                    </option>
+                  )}
+                </select>
+                {projectsError ? (
+                  // Retrying is what the header button does, so the error only has
+                  // to say what went wrong and point at it.
+                  <p className="mt-1 text-xs text-red-500">
+                    Could not load projects: {projectsError} — use &quot;Scan Projects&quot; to retry
+                  </p>
+                ) : (
+                  <p className="mt-1 text-xs text-gray-500">
+                    {projects.length === 0 && !isLoadingProjects
+                      ? 'No projects available for this API key'
+                      : 'Optional — jobs are billed to the selected project'}
+                  </p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Tags</label>
@@ -856,6 +1045,45 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     {licenseLoadHint}
                   </p>
                 )}
+              </div>
+            </div>
+
+            {/* Feature set — optional, and only sent when both fields are filled in. */}
+            <div className="grid grid-cols-2 gap-4 mt-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">License Feature Name</label>
+                <input
+                  type="text"
+                  value={template.licenseFeatureName}
+                  onChange={(e) => updateField('licenseFeatureName', e.target.value)}
+                  placeholder="e.g. ansys_hpc"
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  Optional — the feature this job checks out of your license server
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-1">Licenses Per Job</label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  // 0 means "unset", and showing a literal 0 in a box the platform
+                  // would reject reads as a real value.
+                  value={template.licensesPerJob > 0 ? template.licensesPerJob : ''}
+                  onChange={(e) => {
+                    const count = Number(e.target.value)
+                    updateField('licensesPerJob', Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0)
+                  }}
+                  disabled={!template.licenseFeatureName.trim()}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 dark:disabled:bg-gray-700"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  {template.licenseFeatureName.trim()
+                    ? 'Seats checked out per job (1 or more)'
+                    : 'Enter a feature name first'}
+                </p>
               </div>
             </div>
           </section>

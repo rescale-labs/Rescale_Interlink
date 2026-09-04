@@ -66,12 +66,20 @@ export function CreateRemoteFolder(arg1, arg2) {
   return window['go']['wailsapp']['App']['CreateRemoteFolder'](arg1, arg2);
 }
 
+export function DefaultDOEMaxCases() {
+  return window['go']['wailsapp']['App']['DefaultDOEMaxCases']();
+}
+
 export function DeleteRemoteItems(arg1, arg2) {
   return window['go']['wailsapp']['App']['DeleteRemoteItems'](arg1, arg2);
 }
 
 export function DeleteTemplate(arg1) {
   return window['go']['wailsapp']['App']['DeleteTemplate'](arg1);
+}
+
+export function GenerateDOE(arg1) {
+  return window['go']['wailsapp']['App']['GenerateDOE'](arg1);
 }
 
 export function GetAnalysisCodes(arg1) {
@@ -100,6 +108,10 @@ export function GetCoreTypes() {
 
 export function GetCredentialSource() {
   return window['go']['wailsapp']['App']['GetCredentialSource']();
+}
+
+export function GetDOEMethods() {
+  return window['go']['wailsapp']['App']['GetDOEMethods']();
 }
 
 export function GetDaemonConfig() {
@@ -166,6 +178,10 @@ export function GetMyLibraryFolderID() {
   return window['go']['wailsapp']['App']['GetMyLibraryFolderID']();
 }
 
+export function GetProjects() {
+  return window['go']['wailsapp']['App']['GetProjects']();
+}
+
 export function GetRunHistory() {
   return window['go']['wailsapp']['App']['GetRunHistory']();
 }
@@ -196,6 +212,18 @@ export function GetUngroupedTransferTasks() {
 
 export function InstallAndStartServiceElevated() {
   return window['go']['wailsapp']['App']['InstallAndStartServiceElevated']();
+}
+
+export function InstallService() {
+  return window['go']['wailsapp']['App']['InstallService']();
+}
+
+export function InstallServiceElevated() {
+  return window['go']['wailsapp']['App']['InstallServiceElevated']();
+}
+
+export function IsServiceInstalled() {
+  return window['go']['wailsapp']['App']['IsServiceInstalled']();
 }
 
 export function ListLocalDirectory(arg1) {
@@ -260,6 +288,10 @@ export function PauseDaemon() {
 
 export function PreviewCommandPatterns(arg1, arg2) {
   return window['go']['wailsapp']['App']['PreviewCommandPatterns'](arg1, arg2);
+}
+
+export function PreviewDOECases(arg1, arg2) {
+  return window['go']['wailsapp']['App']['PreviewDOECases'](arg1, arg2);
 }
 
 export function PurgeTrashItems(arg1) {
@@ -416,6 +448,10 @@ export function TriggerDaemonScan() {
 
 export function TriggerProfileRescan() {
   return window['go']['wailsapp']['App']['TriggerProfileRescan']();
+}
+
+export function UninstallServiceElevated() {
+  return window['go']['wailsapp']['App']['UninstallServiceElevated']();
 }
 
 export function UpdateConfig(arg1) {

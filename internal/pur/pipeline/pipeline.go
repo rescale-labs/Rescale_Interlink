@@ -22,6 +22,7 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/util/tags"
 	"github.com/rescale/rescale-int/internal/util/tar"
 )
 
@@ -73,10 +74,14 @@ type Pipeline struct {
 	multiPartMode    bool
 	skipTarUpload    bool // true for submit-existing: skip tar/upload, go directly to job creation
 
-	// Shared files attached to all jobs (from --extra-input-files)
-	extraInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
-	sharedFileIDs      []string // Resolved file IDs (after upload of local paths)
-	decompressExtras   bool     // Whether to decompress shared files on cluster
+	// Shared files attached to all jobs (from --common-input-files)
+	commonInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
+	sharedFileIDs       []string // Resolved file IDs (after upload of local paths)
+	decompressCommon    bool     // Whether to decompress shared files on cluster
+
+	// Upload destination and tagging (applies to tars and common input files)
+	uploadFolderID string   // Target folder for uploads ("" = My Library)
+	fileTags       []string // Tags applied to every file this pipeline uploads
 
 	// Cleanup options
 	rmTarOnSuccess bool // Delete local tar file after successful upload
@@ -113,6 +118,10 @@ type Pipeline struct {
 	// Phase timing
 	pipelineStart time.Time
 	firstTarOnce  sync.Once
+
+	// Logged once rather than per job, since the setting is batch-wide and the
+	// notice would otherwise repeat for every job in a file-scan batch.
+	explicitFilesNoticeOnce sync.Once
 
 	// Callbacks (optional)
 	onProgress    ProgressCallback
@@ -174,7 +183,7 @@ func findCommonParent(jobs []models.JobSpec) string {
 // NewPipeline creates a new pipeline.
 // When existingState is non-nil, the pipeline shares the caller's state manager
 // instead of creating a duplicate. CLI callers pass nil.
-func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, extraInputFiles string, decompressExtras bool) (*Pipeline, error) {
+func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpec, stateFile string, multiPartMode bool, existingState *state.Manager, skipTarUpload bool, commonInputFiles string, decompressCommon bool) (*Pipeline, error) {
 	// Normalize all job directories to absolute paths at ingress.
 	// This prevents CWD-dependent failures when paths were generated
 	// with a different working directory (especially GUI mode).
@@ -182,6 +191,17 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		if jobs[i].Directory != "" && !filepath.IsAbs(jobs[i].Directory) {
 			if abs, err := pathutil.ResolveAbsolutePath(jobs[i].Directory); err == nil {
 				jobs[i].Directory = abs
+			}
+		}
+
+		// Same reasoning for a job's own file list, which is read from disk by the
+		// tar worker and may point outside Directory.
+		for j, file := range jobs[i].LocalInputFiles {
+			if file == "" || filepath.IsAbs(file) {
+				continue
+			}
+			if abs, err := pathutil.ResolveAbsolutePath(file); err == nil {
+				jobs[i].LocalInputFiles[j] = abs
 			}
 		}
 	}
@@ -225,7 +245,7 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		tempDir:          tempDir,
 		multiPartMode:    multiPartMode,
 		skipTarUpload:    skipTarUpload,
-		decompressExtras: decompressExtras,
+		decompressCommon: decompressCommon,
 		resourceMgr:      resourceMgr,
 		transferMgr:      transferMgr,
 		feederDone:       make(chan struct{}),
@@ -241,10 +261,10 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		totalJobs:     len(jobs),
 	}
 
-	// Parse extraInputFiles into sharedFileIDs where possible (id: refs only at construction time;
+	// Parse commonInputFiles into sharedFileIDs where possible (id: refs only at construction time;
 	// local paths require ctx and are resolved in ResolveSharedFiles during Run).
-	if extraInputFiles != "" {
-		p.extraInputFilesRaw = extraInputFiles
+	if commonInputFiles != "" {
+		p.commonInputFilesRaw = commonInputFiles
 	}
 
 	return p, nil
@@ -280,6 +300,31 @@ func (p *Pipeline) SetRmTarOnSuccess(rm bool) {
 // When set, uploads are routed through TransferService for queue visibility.
 func (p *Pipeline) SetSyncUploader(u SyncUploader) {
 	p.syncUploader = u
+}
+
+// SetUploadFolderID sets the destination folder for every file this pipeline
+// uploads (job tars and common input files). Empty means My Library.
+// Callers resolve a folder path to an ID with folder.ResolveOrCreatePath.
+func (p *Pipeline) SetUploadFolderID(folderID string) {
+	p.uploadFolderID = folderID
+}
+
+// SetFileTags sets tags applied to every file this pipeline uploads.
+// Tagging is best-effort: failures are logged but never fail an upload.
+func (p *Pipeline) SetFileTags(fileTags []string) {
+	p.fileTags = tags.NormalizeTags(fileTags)
+}
+
+// applyFileTags tags an uploaded file. Only used on the CLI fallback path; the
+// SyncUploader path passes tags through to TransferService, which applies them.
+// Failures are non-fatal, matching job tag handling in jobWorker.
+func (p *Pipeline) applyFileTags(ctx context.Context, fileID, jobName string) {
+	if len(p.fileTags) == 0 || fileID == "" {
+		return
+	}
+	if err := p.apiClient.AddFileTags(ctx, fileID, p.fileTags); err != nil {
+		p.logf("WARN", "upload", jobName, "Failed to tag file %s: %v", fileID, err)
+	}
 }
 
 // logf logs a message, using callback if available.
@@ -391,13 +436,13 @@ func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
 }
 
 // ResolveSharedFiles uploads local paths and collects file IDs from the
-// --extra-input-files flag. Called once at the start of Run() so the
+// --common-input-files flag. Called once at the start of Run() so the
 // resolved IDs are available for every job.
 func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
-	if p.extraInputFilesRaw == "" {
+	if p.commonInputFilesRaw == "" {
 		return nil
 	}
-	items := strings.Split(p.extraInputFilesRaw, ",")
+	items := strings.Split(p.commonInputFilesRaw, ",")
 	seen := make(map[string]bool) // dedupe
 
 	for _, item := range items {
@@ -429,10 +474,12 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 			if p.syncUploader != nil {
 				cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
 					LocalPath:   absPath,
+					FolderID:    p.uploadFolderID,
 					Name:        filepath.Base(absPath),
 					SourceLabel: "PUR",
 					BatchID:     p.batchID,
 					BatchLabel:  p.batchLabel,
+					Tags:        p.fileTags,
 				})
 			} else {
 				// CLI fallback: direct upload.
@@ -445,12 +492,16 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 				ratelimit.GlobalStore().BeginTransferActivity()
 				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 					LocalPath:      absPath,
+					FolderID:       p.uploadFolderID,
 					APIClient:      p.apiClient,
 					TransferHandle: transferHandle,
 					OutputWriter:   io.Discard,
 				})
 				ratelimit.GlobalStore().EndTransferActivity()
 				transferHandle.Complete()
+				if err == nil && cloudFile != nil {
+					p.applyFileTags(ctx, cloudFile.ID, "")
+				}
 			}
 			if err != nil {
 				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
@@ -549,15 +600,17 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				continue
 			}
 
-			// If job has pre-specified input file IDs (single job remoteFiles/localFiles mode),
-			// skip tar/upload and go directly to job creation.
-			// Gated on Directory=="" to avoid interfering with file-scan mode where
-			// InputFiles contains local paths but Directory is also set.
+			// A job with no Directory has nothing to tar, so skip tar/upload and go
+			// directly to job creation. Its inputs come from pre-specified file IDs
+			// (single-job remoteFiles/localFiles mode, or a DOE sweep referencing a
+			// shared deck) and/or batch-level Common Files, both attached at job
+			// creation. File-scan mode keeps its Directory and so stays on the tar
+			// path; its local paths live in LocalInputFiles, not InputFiles.
 			//
 			// Use nextSkipStatus so a terminal status already written by the
 			// engine (Single Job localFiles uploads via ReportUploadProgress)
 			// is preserved — only non-terminal statuses flip to "skipped".
-			if jobSpec.Directory == "" && len(jobSpec.InputFiles) > 0 {
+			if jobSpec.Directory == "" {
 				item.state.TarStatus = nextSkipStatus(item.state.TarStatus)
 				item.state.UploadStatus = nextSkipStatus(item.state.UploadStatus)
 				p.stateMgr.UpdateState(item.state)
@@ -661,40 +714,46 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 			}
 
-			// Resolve tar source directory, applying TarSubpath if set
-			tarSourceDir := item.jobSpec.Directory
-			if item.jobSpec.TarSubpath != "" {
-				tarSourceDir = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
-				// Path traversal guard: prevent ../ escape outside run directory
-				absSource, errAbs := filepath.Abs(tarSourceDir)
-				absRunDir, errRun := filepath.Abs(item.jobSpec.Directory)
-				rel, errRel := filepath.Rel(absRunDir, absSource)
-				if errAbs != nil || errRun != nil || errRel != nil || strings.HasPrefix(rel, "..") {
-					p.logf("ERROR", "tar", item.state.JobName,
-						"REJECTED: tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
-					item.state.TarStatus = "failed"
-					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
-					p.stateMgr.UpdateState(item.state)
-					p.reportStateChange(item.state.JobName, "tar", "failed", "", item.state.ErrorMessage, 0.0)
+			// The archive is built one of two ways, and everything downstream —
+			// upload, FileID, job creation, state, resume — is the same either way.
+			//
+			// A job carrying its own file list archives exactly those files: the set
+			// is already exact, and its members can sit outside Directory (a
+			// secondary pattern such as "../meshes/*.cfg"), so there is nothing for a
+			// directory walk, a TarSubpath or the include/exclude patterns to narrow.
+			// Otherwise Directory is walked, as it always has been.
+			var tarPath string
+			var createArchive func() error
+			var archiveSource string
+
+			if files := item.jobSpec.LocalInputFiles; len(files) > 0 {
+				// Named and hashed per file set, so jobs scanned out of one folder do
+				// not all resolve to the same archive and race over it.
+				tarPath = tar.GenerateTarPathForFiles(files, p.tempDir, p.cfg.TarCompression)
+				archiveSource = fmt.Sprintf("%d file(s)", len(files))
+				createArchive = func() error {
+					if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
+						p.explicitFilesNoticeOnce.Do(func() {
+							p.logf("INFO", "tar", item.state.JobName,
+								"Include/exclude/flatten settings do not apply to jobs with an explicit "+
+									"file list; archiving exactly the listed files")
+						})
+					}
+					return tar.CreateTarGzFromFiles(files, tarPath, p.cfg.TarCompression)
+				}
+			} else {
+				var ok bool
+				tarPath, createArchive, ok = p.directoryArchiver(item)
+				if !ok {
 					p.setActiveWorker("tar", -1)
 					continue
 				}
-				// Verify subpath exists
-				if _, errStat := os.Stat(tarSourceDir); os.IsNotExist(errStat) {
-					p.logf("ERROR", "tar", item.state.JobName,
-						"Tar subpath '%s' does not exist in %s", item.jobSpec.TarSubpath, item.jobSpec.Directory)
-					item.state.TarStatus = "failed"
-					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = fmt.Sprintf("tar subpath '%s' does not exist in %s", item.jobSpec.TarSubpath, item.jobSpec.Directory)
-					p.stateMgr.UpdateState(item.state)
-					p.reportStateChange(item.state.JobName, "tar", "failed", "", item.state.ErrorMessage, 0.0)
-					p.setActiveWorker("tar", -1)
-					continue
+				archiveSource = item.jobSpec.Directory
+				if item.jobSpec.TarSubpath != "" {
+					archiveSource = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
 				}
 			}
 
-			tarPath := tar.GenerateTarPath(tarSourceDir, p.tempDir, p.cfg.TarCompression)
 			item.state.TarPath = tarPath
 
 			p.reportStateChange(item.state.JobName, "tar", "in_progress", "", "", 0.0)
@@ -705,26 +764,9 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					time.Since(p.pipelineStart))
 			})
 
-			p.logf("INFO", "tar", item.state.JobName, "Creating archive: %s -> %s", tarSourceDir, tarPath)
+			p.logf("INFO", "tar", item.state.JobName, "Creating archive: %s -> %s", archiveSource, tarPath)
 
-			var err error
-			if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
-				if len(p.cfg.IncludePatterns) > 0 {
-					p.logf("INFO", "tar", item.state.JobName, "Include patterns: %v", p.cfg.IncludePatterns)
-				}
-				if len(p.cfg.ExcludePatterns) > 0 {
-					p.logf("INFO", "tar", item.state.JobName, "Exclude patterns: %v", p.cfg.ExcludePatterns)
-				}
-				if p.cfg.FlattenTar {
-					p.logf("INFO", "tar", item.state.JobName, "Flatten mode enabled")
-				}
-				err = tar.CreateTarGzWithOptions(tarSourceDir, tarPath, p.multiPartMode,
-					p.cfg.IncludePatterns, p.cfg.ExcludePatterns, p.cfg.FlattenTar, p.cfg.TarCompression)
-			} else {
-				err = tar.CreateTarGz(tarSourceDir, tarPath, p.multiPartMode, p.cfg.TarCompression)
-			}
-
-			if err != nil {
+			if err := createArchive(); err != nil {
 				p.logf("ERROR", "tar", item.state.JobName, "Failed: %v", err)
 				item.state.TarStatus = "failed"
 				item.state.SubmitStatus = "failed"
@@ -760,6 +802,69 @@ shutdown:
 		}()
 	}
 	p.mu.Unlock()
+}
+
+// directoryArchiver resolves which directory a job's archive is built from and
+// returns the tar path plus the function that writes it. ok is false when the
+// job's TarSubpath is unusable, in which case the job has already been marked
+// failed and the caller should move on.
+//
+// Split out of tarWorker so the walk-a-directory case and the explicit-file-list
+// case share one path for state, logging and hand-off to the upload queue.
+func (p *Pipeline) directoryArchiver(item *workItem) (tarPath string, createArchive func() error, ok bool) {
+	// fail marks the job failed. The log line and the recorded error differ where
+	// the log carries a REJECTED prefix a reader scans for.
+	fail := func(logMsg, reason string) {
+		p.logf("ERROR", "tar", item.state.JobName, "%s", logMsg)
+		item.state.TarStatus = "failed"
+		item.state.SubmitStatus = "failed"
+		item.state.ErrorMessage = reason
+		p.stateMgr.UpdateState(item.state)
+		p.reportStateChange(item.state.JobName, "tar", "failed", "", reason, 0.0)
+	}
+
+	// Resolve tar source directory, applying TarSubpath if set
+	tarSourceDir := item.jobSpec.Directory
+	if item.jobSpec.TarSubpath != "" {
+		tarSourceDir = filepath.Join(item.jobSpec.Directory, item.jobSpec.TarSubpath)
+		// Path traversal guard: prevent ../ escape outside run directory
+		absSource, errAbs := filepath.Abs(tarSourceDir)
+		absRunDir, errRun := filepath.Abs(item.jobSpec.Directory)
+		rel, errRel := filepath.Rel(absRunDir, absSource)
+		if errAbs != nil || errRun != nil || errRel != nil || strings.HasPrefix(rel, "..") {
+			reason := fmt.Sprintf("tar subpath '%s' escapes run directory", item.jobSpec.TarSubpath)
+			fail("REJECTED: "+reason, reason)
+			return "", nil, false
+		}
+		// Verify subpath exists
+		if _, errStat := os.Stat(tarSourceDir); os.IsNotExist(errStat) {
+			reason := fmt.Sprintf("tar subpath '%s' does not exist in %s",
+				item.jobSpec.TarSubpath, item.jobSpec.Directory)
+			fail(reason, reason)
+			return "", nil, false
+		}
+	}
+
+	tarPath = tar.GenerateTarPath(tarSourceDir, p.tempDir, p.cfg.TarCompression)
+
+	createArchive = func() error {
+		if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
+			if len(p.cfg.IncludePatterns) > 0 {
+				p.logf("INFO", "tar", item.state.JobName, "Include patterns: %v", p.cfg.IncludePatterns)
+			}
+			if len(p.cfg.ExcludePatterns) > 0 {
+				p.logf("INFO", "tar", item.state.JobName, "Exclude patterns: %v", p.cfg.ExcludePatterns)
+			}
+			if p.cfg.FlattenTar {
+				p.logf("INFO", "tar", item.state.JobName, "Flatten mode enabled")
+			}
+			return tar.CreateTarGzWithOptions(tarSourceDir, tarPath, p.multiPartMode,
+				p.cfg.IncludePatterns, p.cfg.ExcludePatterns, p.cfg.FlattenTar, p.cfg.TarCompression)
+		}
+		return tar.CreateTarGz(tarSourceDir, tarPath, p.multiPartMode, p.cfg.TarCompression)
+	}
+
+	return tarPath, createArchive, true
 }
 
 // uploadWorker processes upload operations.
@@ -828,11 +933,13 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				if p.syncUploader != nil {
 					cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
 						LocalPath:             item.state.TarPath,
+						FolderID:              p.uploadFolderID,
 						Name:                  filepath.Base(item.state.TarPath),
 						SourceLabel:           "PUR",
 						BatchID:               p.batchID,
 						BatchLabel:            p.batchLabel,
 						ExtraProgressCallback: progressCallback,
+						Tags:                  p.fileTags,
 					})
 				} else {
 					// CLI fallback: direct upload.
@@ -843,13 +950,16 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 					ratelimit.GlobalStore().BeginTransferActivity()
 					cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
 						LocalPath:        item.state.TarPath,
-						FolderID:         "",
+						FolderID:         p.uploadFolderID,
 						APIClient:        p.apiClient,
 						ProgressCallback: progressCallback,
 						TransferHandle:   transferHandle,
 						OutputWriter:     io.Discard,
 					})
 					ratelimit.GlobalStore().EndTransferActivity()
+					if err == nil && cloudFile != nil {
+						p.applyFileTags(ctx, cloudFile.ID, item.state.JobName)
+					}
 				}
 
 				if err == nil {
@@ -1025,15 +1135,17 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.logf("INFO", "job", item.state.JobName, "Creating job: %s", item.jobSpec.JobName)
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
-				// When InputFiles are pre-specified (single job remoteFiles/localFiles mode),
-				// use them directly instead of the FileID from upload stage.
+				// With no Directory nothing was tarred/uploaded, so the FileID from
+				// the upload stage is empty; inputs come from any pre-specified file
+				// IDs (possibly none) plus batch-level Common Files, merged in
+				// BuildJobRequest. Otherwise use the uploaded tarball's FileID.
 				var fileIDs []string
-				if item.jobSpec.Directory == "" && len(item.jobSpec.InputFiles) > 0 {
+				if item.jobSpec.Directory == "" {
 					fileIDs = item.jobSpec.InputFiles
 				} else {
 					fileIDs = []string{item.state.FileID}
 				}
-				jobReq, err := BuildJobRequest(item.jobSpec, fileIDs, p.sharedFileIDs, p.decompressExtras)
+				jobReq, err := BuildJobRequest(item.jobSpec, fileIDs, p.sharedFileIDs, p.decompressCommon)
 				if err != nil {
 					p.logf("ERROR", "job", item.state.JobName, "Failed to build request: %v", err)
 					item.state.SubmitStatus = "failed"
@@ -1073,10 +1185,24 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					}
 				}
 
-				// Org-scoped project assignment
+				// Org-scoped project assignment. The org code is an override, not a
+				// requirement: an explicit one (job spec, then config) wins, and
+				// otherwise the client resolves it from the API key, so choosing a
+				// project is enough on its own.
 				orgCode := item.jobSpec.OrgCode
 				if orgCode == "" {
 					orgCode = p.cfg.OrgCode
+				}
+				if orgCode == "" && item.jobSpec.ProjectID != "" {
+					resolved, err := p.apiClient.OrgCode(ctx)
+					if err != nil {
+						// Non-fatal, like an assignment failure itself: the job is
+						// created and runs, it is simply not billed to the project.
+						p.logf("WARN", "job", item.state.JobName,
+							"Cannot assign project %s: %v", item.jobSpec.ProjectID, err)
+					} else {
+						orgCode = resolved
+					}
 				}
 				if orgCode != "" && item.jobSpec.ProjectID != "" {
 					maxAssignRetries := 3
@@ -1129,9 +1255,9 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 // This is the single source of truth for JobSpec -> JobRequest conversion.
 // Used by both GUI (single job tab) and PUR pipeline.
 // fileIDs are the primary input files; ExtraInputFileIDs from spec are also included.
-// sharedFileIDs are pipeline-level shared files (from --extra-input-files) attached to every job.
-// decompressExtras controls whether those shared files are decompressed on the cluster.
-func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []string, decompressExtras bool) (*models.JobRequest, error) {
+// sharedFileIDs are pipeline-level shared files (from --common-input-files) attached to every job.
+// decompressCommon controls whether those shared files are decompressed on the cluster.
+func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []string, decompressCommon bool) (*models.JobRequest, error) {
 	// Parse license settings (optional - empty string is valid)
 	var licenseEnv map[string]string
 	if spec.LicenseSettings != "" {
@@ -1167,7 +1293,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 		}
 	}
 
-	// Add shared files (pipeline-level --extra-input-files), deduplicating
+	// Add shared files (pipeline-level --common-input-files), deduplicating
 	// against files already in the list.
 	if len(sharedFileIDs) > 0 {
 		seen := make(map[string]bool, len(inputFiles))
@@ -1178,11 +1304,25 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 			if !seen[id] {
 				inputFiles = append(inputFiles, models.InputFileRequest{
 					ID:         id,
-					Decompress: decompressExtras,
+					Decompress: decompressCommon,
 				})
 				seen[id] = true
 			}
 		}
+	}
+
+	// A user-defined license feature needs both halves: a name with no count, or a
+	// count with no name, is not a payload the platform accepts, and quietly
+	// dropping half of what the user asked for would submit a job that takes no
+	// license at all.
+	var userLicense any
+	switch {
+	case spec.LicenseFeatureName != "" && spec.LicensesPerJob > 0:
+		userLicense = models.NewUserDefinedLicense(spec.LicenseFeatureName, spec.LicensesPerJob)
+	case spec.LicenseFeatureName != "":
+		return nil, fmt.Errorf("license feature %q needs a licenses-per-job count greater than zero", spec.LicenseFeatureName)
+	case spec.LicensesPerJob > 0:
+		return nil, fmt.Errorf("licenses per job is set to %d but no license feature name was given", spec.LicensesPerJob)
 	}
 
 	// Build job request
@@ -1207,7 +1347,7 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 				EnvVars:                    licenseEnv,
 				UseRescaleLicense:          false,
 				OnDemandLicenseSeller:      nil,
-				UserDefinedLicenseSettings: nil,
+				UserDefinedLicenseSettings: userLicense,
 			},
 		},
 		IsLowPriority: spec.IsLowPriority,

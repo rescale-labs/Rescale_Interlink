@@ -20,14 +20,33 @@ type JobSpec struct {
 	SubmitMode            string // "yes", "no", or "draft"
 	IsLowPriority         bool
 	OnDemandLicenseSeller string
-	Tags                  []string // Job tags
-	ProjectID             string   // Project ID to assign job to
-	OrgCode               string   // Organization code for project assignment
-	Automations           []string // Automation IDs to attach
 
-	// File-based job inputs (for file scanning mode in PUR).
-	// When InputFiles is non-empty, these files are uploaded individually instead of tarring Directory.
+	// LicenseFeatureName and LicensesPerJob describe one user-defined license
+	// feature: the job checks out LicensesPerJob seats of LicenseFeatureName from
+	// the customer's own license server. Optional, and only meaningful together —
+	// see NewUserDefinedLicense for the payload they produce.
+	LicenseFeatureName string
+	LicensesPerJob     int
+
+	Tags        []string // Job tags
+	ProjectID   string   // Project ID to assign job to
+	OrgCode     string   // Organization code for project assignment
+	Automations []string // Automation IDs to attach
+
+	// InputFiles are IDs of files already uploaded to Rescale, attached to the job
+	// as-is. Used when there is nothing local to archive, which is why the pipeline
+	// only reads them for a job with no Directory.
 	InputFiles []string
+
+	// LocalInputFiles are local paths that together form this job's archive: the
+	// tarball holds exactly these files, flattened into the job's working
+	// directory, and the rest of Directory is not walked. Set by file-scan mode,
+	// where each job owns one file set that may reach outside Directory (a
+	// secondary pattern such as "../meshes/*.cfg").
+	//
+	// Distinct from InputFiles, which means already-uploaded file IDs everywhere
+	// else in the codebase.
+	LocalInputFiles []string
 
 	// Optional subdirectory within each Run_* to tar instead of the full directory.
 	// When set, only the contents of Directory/TarSubpath are archived.
@@ -64,14 +83,55 @@ type JobRequest struct {
 
 // JobAnalysisRequest represents an analysis within a job
 type JobAnalysisRequest struct {
-	Command                    string             `json:"command"`
-	Analysis                   AnalysisRequest    `json:"analysis"`
-	Hardware                   HardwareRequest    `json:"hardware"`
-	InputFiles                 []InputFileRequest `json:"inputFiles,omitempty"`
-	EnvVars                    map[string]string  `json:"envVars,omitempty"`
-	UseRescaleLicense          bool               `json:"useRescaleLicense"`
-	OnDemandLicenseSeller      *string            `json:"onDemandLicenseSeller"`
-	UserDefinedLicenseSettings *string            `json:"userDefinedLicenseSettings"`
+	Command               string             `json:"command"`
+	Analysis              AnalysisRequest    `json:"analysis"`
+	Hardware              HardwareRequest    `json:"hardware"`
+	InputFiles            []InputFileRequest `json:"inputFiles,omitempty"`
+	EnvVars               map[string]string  `json:"envVars,omitempty"`
+	UseRescaleLicense     bool               `json:"useRescaleLicense"`
+	OnDemandLicenseSeller *string            `json:"onDemandLicenseSeller"`
+	// UserDefinedLicenseSettings is untyped because two shapes reach the wire: the
+	// legacy SGE path forwards the opaque string it parsed out of a submit script,
+	// while feature sets marshal as the *UserDefinedLicense object below. nil sends
+	// null, which is what the API expects when the job brings no license of its own.
+	UserDefinedLicenseSettings any `json:"userDefinedLicenseSettings"`
+}
+
+// UserSpecifiedFeatureSetName is the name Rescale expects on a feature set the
+// user assembled themselves, as opposed to one derived from a software vendor's
+// published set. The trailing index is part of the literal name.
+const UserSpecifiedFeatureSetName = "USER_SPECIFIED_0"
+
+// UserDefinedLicense is the userDefinedLicenseSettings payload for a job that
+// checks licenses out of the customer's own license server.
+type UserDefinedLicense struct {
+	FeatureSets []LicenseFeatureSet `json:"featureSets"`
+}
+
+// LicenseFeatureSet groups the features a job checks out together.
+type LicenseFeatureSet struct {
+	Name     string           `json:"name"`
+	Features []LicenseFeature `json:"features"`
+}
+
+// LicenseFeature is one named license feature and the number of seats the job
+// takes of it.
+type LicenseFeature struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// NewUserDefinedLicense builds the settings for a single license feature, which
+// is the only shape the job template offers. The feature lands in one
+// user-specified set, matching what the platform sends for a hand-built license
+// configuration.
+func NewUserDefinedLicense(feature string, count int) *UserDefinedLicense {
+	return &UserDefinedLicense{
+		FeatureSets: []LicenseFeatureSet{{
+			Name:     UserSpecifiedFeatureSetName,
+			Features: []LicenseFeature{{Name: feature, Count: count}},
+		}},
+	}
 }
 
 // AnalysisRequest represents software analysis configuration

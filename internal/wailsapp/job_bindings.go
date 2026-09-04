@@ -61,13 +61,20 @@ type JobSpecDTO struct {
 	SubmitMode            string   `json:"submitMode"`
 	IsLowPriority         bool     `json:"isLowPriority"`
 	OnDemandLicenseSeller string   `json:"onDemandLicenseSeller"`
+	LicenseFeatureName    string   `json:"licenseFeatureName"`
+	LicensesPerJob        int      `json:"licensesPerJob"`
 	Tags                  []string `json:"tags"`
 	ProjectID             string   `json:"projectId"`
 	OrgCode               string   `json:"orgCode"`
 	Automations           []string `json:"automations"`
 
-	// When InputFiles is non-empty, these files are uploaded instead of tarring Directory
+	// IDs of files already uploaded to Rescale, attached to the job as-is.
 	InputFiles []string `json:"inputFiles,omitempty"`
+
+	// Local paths forming this job's archive, set by file-scan mode. Not
+	// omitempty: an omitted slice arrives in TypeScript as undefined, and code
+	// that reasonably expects an array then crashes on it.
+	LocalInputFiles []string `json:"localInputFiles"`
 
 	TarSubpath string `json:"tarSubpath,omitempty"`
 }
@@ -134,6 +141,18 @@ type AnalysisVersionDTO struct {
 	AllowedCoreTypes []string `json:"allowedCoreTypes"`
 }
 
+// ProjectDTO represents a Rescale project a job can be billed to.
+type ProjectDTO struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"isDefault"`
+
+	// Budget lines exactly as the platform formats them. Not omitempty: an
+	// omitted slice arrives in TypeScript as undefined and the dropdown that
+	// maps over it would crash.
+	RemainingAmounts []string `json:"remainingAmounts"`
+}
+
 // AutomationDTO represents a Rescale automation.
 type AutomationDTO struct {
 	ID          string `json:"id"`
@@ -153,6 +172,12 @@ type CoreTypesResultDTO struct {
 type AnalysisCodesResultDTO struct {
 	Codes []AnalysisCodeDTO `json:"codes"`
 	Error string            `json:"error,omitempty"`
+}
+
+// ProjectsResultDTO wraps project results with optional error.
+type ProjectsResultDTO struct {
+	Projects []ProjectDTO `json:"projects"`
+	Error    string       `json:"error,omitempty"`
 }
 
 // AutomationsResultDTO wraps automation results with optional error.
@@ -280,19 +305,37 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: result.Error}
 	}
 
+	// Checked once, before any job is built: a command whose tokens are wrong is
+	// wrong for every file, and a typo must not turn into a batch of jobs each
+	// carrying a literal "{{bse}}" on its command line.
+	warnings := append([]string{}, result.Warnings...)
+	templateWarnings, err := filescan.ValidateCommandTemplate(template.Command)
+	if err != nil {
+		return ScanResultDTO{Error: err.Error()}
+	}
+	warnings = append(warnings, templateWarnings...)
+	warnings = append(warnings, filescan.ValidateJobNameTemplate(template.JobName)...)
+
 	// Convert filescan results to JobSpecDTO
 	var jobs []JobSpecDTO
-	for i, jobFiles := range result.Jobs {
-		job := template
-		job.InputFiles = jobFiles.InputFiles
-		job.Directory = jobFiles.PrimaryDir
+	skipped := append([]string{}, result.SkippedFiles...)
 
-		// Generate job name
-		if template.JobName != "" {
-			job.JobName = fmt.Sprintf("%s_%d", template.JobName, i+1)
-		} else {
-			job.JobName = fmt.Sprintf("Job_%d", i+1)
+	for i, jobFiles := range result.Jobs {
+		command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jobFiles, i+1)
+		if renderErr != nil {
+			// One unrenderable filename costs that file, not the batch.
+			skipped = append(skipped, fmt.Sprintf("%s: %v", filepath.Base(jobFiles.PrimaryFile), renderErr))
+			continue
 		}
+
+		job := template
+		job.Command = command
+		job.JobName = jobName
+		job.Directory = jobFiles.PrimaryDir
+		// The job's archive is exactly its own files; InputFiles means uploaded
+		// file IDs, which these are not.
+		job.LocalInputFiles = jobFiles.InputFiles
+		job.InputFiles = nil
 
 		jobs = append(jobs, job)
 	}
@@ -300,9 +343,9 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 	return ScanResultDTO{
 		Jobs:         jobs,
 		TotalCount:   result.TotalCount,
-		MatchCount:   result.MatchCount,
-		SkippedFiles: result.SkippedFiles,
-		Warnings:     result.Warnings,
+		MatchCount:   len(jobs),
+		SkippedFiles: skipped,
+		Warnings:     warnings,
 	}
 }
 
@@ -467,11 +510,49 @@ func (a *App) GetAutomations() AutomationsResultDTO {
 	return AutomationsResultDTO{Automations: dtos}
 }
 
+// GetProjects returns the projects this API key may assign jobs to.
+//
+// Not cached here, unlike the hardware and software catalogs: a project created
+// in the web UI should show up on the next open of the template builder rather
+// than after a restart, and the list is one small request.
+func (a *App) GetProjects() ProjectsResultDTO {
+	if a.engine == nil || a.engine.API() == nil {
+		return ProjectsResultDTO{Error: "engine not initialized"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), constants.PaginatedAPITimeout)
+	defer cancel()
+
+	projects, err := a.engine.API().ListProjects(ctx)
+	if err != nil {
+		return ProjectsResultDTO{Error: fmt.Sprintf("failed to fetch projects: %v", err)}
+	}
+
+	dtos := make([]ProjectDTO, len(projects))
+	for i, p := range projects {
+		amounts := p.RemainingAmounts
+		if amounts == nil {
+			amounts = []string{}
+		}
+		dtos[i] = ProjectDTO{
+			ID:               p.ID,
+			Name:             p.Name,
+			IsDefault:        p.IsDefault,
+			RemainingAmounts: amounts,
+		}
+	}
+	return ProjectsResultDTO{Projects: dtos}
+}
+
 // PURRunOptionsDTO contains PUR-specific run configuration beyond the job list.
 type PURRunOptionsDTO struct {
-	ExtraInputFiles  string `json:"extraInputFiles"`  // Comma-separated paths and/or id:<fileId>
-	DecompressExtras bool   `json:"decompressExtras"` // Whether to decompress extra files on cluster
+	CommonInputFiles string `json:"commonInputFiles"` // Comma-separated paths and/or id:<fileId>, shared by all jobs
+	DecompressCommon bool   `json:"decompressCommon"` // Whether to decompress common files on cluster
 	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`
+
+	UploadFolder       string   `json:"uploadFolder"`       // Remote folder path for this batch's uploads, created if missing
+	UploadFolderParent string   `json:"uploadFolderParent"` // Folder ID uploadFolder resolves beneath (empty = My Library)
+	FileTags           []string `json:"fileTags"`           // Tags applied to every file this batch uploads
 }
 
 // StartBulkRunWithOptions starts a bulk job run with additional PUR options.
@@ -514,9 +595,12 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 	go func() {
 		defer a.engine.EndRun()
 		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, core.RunOptions{
-			ExtraInputFiles:  opts.ExtraInputFiles,
-			DecompressExtras: opts.DecompressExtras,
-			RmTarOnSuccess:   opts.RmTarOnSuccess,
+			CommonInputFiles:   opts.CommonInputFiles,
+			DecompressCommon:   opts.DecompressCommon,
+			RmTarOnSuccess:     opts.RmTarOnSuccess,
+			UploadFolder:       opts.UploadFolder,
+			UploadFolderParent: opts.UploadFolderParent,
+			FileTags:           opts.FileTags,
 		})
 		if err != nil && ctx.Err() == nil {
 			wailsLogger.Error().Err(err).Msg("Pipeline run failed")
@@ -1160,11 +1244,14 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		SubmitMode:            j.SubmitMode,
 		IsLowPriority:         j.IsLowPriority,
 		OnDemandLicenseSeller: j.OnDemandLicenseSeller,
+		LicenseFeatureName:    j.LicenseFeatureName,
+		LicensesPerJob:        j.LicensesPerJob,
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
 		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles,
+		LocalInputFiles:       j.LocalInputFiles,
 		TarSubpath:            j.TarSubpath,
 	}
 }
@@ -1187,11 +1274,14 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		SubmitMode:            j.SubmitMode,
 		IsLowPriority:         j.IsLowPriority,
 		OnDemandLicenseSeller: j.OnDemandLicenseSeller,
+		LicenseFeatureName:    j.LicenseFeatureName,
+		LicensesPerJob:        j.LicensesPerJob,
 		Tags:                  j.Tags,
 		ProjectID:             j.ProjectID,
 		OrgCode:               j.OrgCode,
 		Automations:           j.Automations,
 		InputFiles:            j.InputFiles,
+		LocalInputFiles:       j.LocalInputFiles,
 		TarSubpath:            j.TarSubpath,
 	}
 }
@@ -1411,6 +1501,9 @@ func normalizeJobSpecDTO(job *JobSpecDTO) {
 	}
 	if job.InputFiles == nil {
 		job.InputFiles = []string{}
+	}
+	if job.LocalInputFiles == nil {
+		job.LocalInputFiles = []string{}
 	}
 	if job.CoresPerSlot == 0 {
 		job.CoresPerSlot = 1

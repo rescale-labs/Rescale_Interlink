@@ -1504,6 +1504,48 @@ rescale-int pur scan-files --primary <pattern> [flags]
 - `--overwrite` - Overwrite an existing output file
 - `--json` - Emit the scan result as JSON instead of a printed summary
 
+**Command tokens:**
+The template's command and job name are rendered per file, so each job runs
+against its own input rather than every job repeating one fixed command. For a
+primary file of `inputs/case1.inp`:
+
+| Token | Value |
+| --- | --- |
+| `{{file}}` | `case1.inp` |
+| `{{base}}` | `case1` |
+| `{{ext}}` | `inp` (no leading dot) |
+| `{{dir}}` | `inputs` — the containing folder, which is what tells apart a `case1/model.inp`, `case2/model.inp` layout |
+| `{{index}}` | `1` (1-based) |
+
+```
+template:  abaqus job={{base}} input={{file}} cpus=8
+case1.inp: abaqus job=case1 input=case1.inp cpus=8
+case2.inp: abaqus job=case2 input=case2.inp cpus=8
+```
+
+Values are what the job sees in its working directory, not paths on the
+submitting machine: every job's archive holds exactly its own files — the primary
+plus its resolved secondaries — flattened into the working directory. A secondary
+pattern may therefore point outside the primary file's folder
+(`--secondary "../meshes/*.cfg"`) and still be uploaded. Data genuinely shared by
+every job belongs in `--common-input-files`, which uploads once and attaches to
+all of them.
+
+An unknown token is an error rather than a warning, since substitution leaves
+what it cannot resolve in place: a typo like `{{bse}}` would otherwise submit
+every job with a literal `{{bse}}` on its command line. A command with no tokens
+is accepted with a warning — every job then runs the same command, which is
+occasionally intended. A filename that would restructure the command (a space, or
+a shell metacharacter such as `$`) skips that file and reports why; the rest of
+the batch is unaffected.
+
+A job name containing tokens is rendered the same way. One with no tokens keeps
+the `Name_1`, `Name_2` numbering.
+
+Generated jobs carry their file list in the `LocalInputFiles` column of the jobs
+CSV, semicolon-separated, so `scan-files` → `jobs.csv` → `pur run` round-trips.
+The column is optional on load, so older CSVs still work.
+
 **Examples:**
 ```bash
 # Print a summary of matched primary/secondary files
@@ -1513,9 +1555,100 @@ rescale-int pur scan-files --root /data --primary "*.inp" --secondary "*.mesh"
 rescale-int pur scan-files --root /data --primary "inputs/*.inp" \
   --secondary "*.mesh:required" --secondary "../common.cfg:optional"
 
-# Generate jobs.csv from a template
+# Generate jobs.csv from a template, one rendered command per file
+# (template.csv's Command column: abaqus job={{base}} input={{file}} cpus=8)
 rescale-int pur scan-files --root /data --primary "*.inp" \
+  --secondary "*.mesh:required" \
   --template template.csv --output jobs.csv
+```
+
+#### pur doe
+Expand one base job into a design of experiments (parameter sweep)
+
+```bash
+rescale-int pur doe --template TEMPLATE --param SPEC... [--output OUTPUT | --preview]
+```
+
+The base job's command must contain a `{{name}}` token for each swept parameter.
+Each case renders its own values into that command, so every case's configuration
+is visible in the command line on its Rescale job page:
+
+```
+template:  starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+case 1:    starccm+ -param alpha 10 -param beta 15 -load input.sim
+```
+
+Parameters and command tokens are checked against each other in both directions:
+a swept parameter with no matching token, or a token with no matching parameter,
+is an error rather than a silently wrong job.
+
+**Flags:**
+- `-t, --template string` - Template jobs CSV whose first row is the base job (required)
+- `-o, --output string` - Output jobs CSV file (required unless `--preview`)
+- `--overwrite` - Overwrite existing output file
+- `-m, --method string` - Sampling method (default `full-factorial`)
+- `--param stringArray` - Swept parameter, e.g. `"alpha=10:20:5"` or `"model=a,b,c"` (repeatable)
+- `--param-format stringArray` - Numeric rendering format, e.g. `"alpha=%.3f"` (repeatable, default `%g`)
+- `--samples int` - Design points for `latin-hypercube`, `sobol` and `monte-carlo`
+- `--seed uint` - Seed for the randomized samplers; the same seed always yields the same sweep
+- `--center-points int` - Center point repeats for `central-composite` and `box-behnken` (default 1)
+- `--max-cases int` - Maximum cases; 0 uses the default cap, negative removes the limit
+- `--job-name-template string` - Case name template (default `"{{__base}}_{{__index}}"`)
+- `--tag-template stringArray` - Per-case Rescale job tag, e.g. `"alpha={{alpha}}"` (repeatable)
+- `--base-file-ids string` - Comma-separated IDs of already-uploaded input files shared by every case
+- `--cases-csv string` - CSV of explicit cases, one column per parameter (implies `--method explicit`)
+- `--preview` - Show the generated cases without writing a CSV
+- `--preview-limit int` - How many cases to list; 0 lists all of them (default 20)
+
+**Parameter syntax:**
+| Spec | Meaning |
+|------|---------|
+| `alpha=10:20:5` | Numeric range, 5 levels from 10 to 20 |
+| `alpha=10:20` | Numeric range, the two endpoints |
+| `model=kepsilon,komega,les` | Categorical, one case per value |
+
+**Methods:**
+| Method | Design |
+|--------|--------|
+| `full-factorial` | Every combination of every level |
+| `ofat` | One factor at a time from a baseline |
+| `latin-hypercube` | `--samples` points, every parameter evenly covered |
+| `sobol` | `--samples` low-discrepancy points |
+| `monte-carlo` | `--samples` uniform random points |
+| `central-composite` | Corners, axial points and center, for a quadratic fit |
+| `box-behnken` | Quadratic design avoiding the corners (3+ parameters) |
+| `explicit` | Cases read from `--cases-csv` |
+
+**Name and tag templates** may use any parameter token plus `{{__base}}` (the
+template's job name) and `{{__index}}` (the 1-based case number). Rendered tags
+are applied to that case's Rescale job.
+
+**Shared input files:** every case in a sweep uses the same input deck. Pass
+`--base-file-ids` with the IDs of an already-uploaded deck and each case
+references those files directly, so the deck transfers once for the whole sweep
+instead of once per case; run the result with `pur submit-existing`. Without it,
+every case keeps the template's directory and `pur run` tars and uploads that
+directory per case.
+
+**Examples:**
+```bash
+# 3x3 full factorial written to a jobs CSV
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --param "alpha=10:20:3" --param "beta=15:25:3"
+
+# Preview a 20-point Latin hypercube without writing anything
+rescale-int pur doe --template base.csv --preview \
+  --method latin-hypercube --samples 20 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25"
+
+# Share one uploaded deck across the sweep and tag each job
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --base-file-ids abcde,fghij --tag-template "alpha={{alpha}}" \
+  --param "alpha=10:20:5"
+rescale-int pur submit-existing --jobs-csv sweep.csv
+
+# Cases from a hand-written CSV
+rescale-int pur doe --template base.csv --output sweep.csv --cases-csv cases.csv
 ```
 
 #### pur plan
@@ -1551,8 +1684,11 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file for resume capability
 - `--multipart` - Enable multi-part mode
-- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs
-- `--decompress-extras` - Decompress extra input files on cluster (default: false)
+- `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs
+- `--decompress-common` - Decompress common input files on cluster (default: false)
+- `--folder string` - Remote folder path for this batch's uploads, created if missing (e.g. `"sweeps/alpha-beta"`)
+- `--folder-parent string` - Folder ID that `--folder` is resolved beneath (default: My Library)
+- `--file-tags string` - Comma-separated tags applied to every file this batch uploads
 - `--include-pattern strings` - Only tar files matching glob (repeatable)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
 - `--flatten-tar` - Remove subdirectory structure in tarball
@@ -1563,13 +1699,21 @@ rescale-int pur run --jobs-csv FILE [--state FILE] [--multipart]
 - `--rm-tar-on-success` - Delete local tar after successful upload
 - `--dry-run` - Validate and show plan without executing
 
+> **Deprecated:** `--extra-input-files` and `--decompress-extras` are hidden aliases for
+> `--common-input-files` and `--decompress-common`. They still work but emit a warning;
+> passing a flag together with its alias is an error. Use the `common` names.
+
 **Example:**
 ```bash
 rescale-int pur run --jobs-csv jobs.csv --state state.csv
 
-# With shared extra input files:
+# With common input files shared by every job:
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
-  --extra-input-files "/path/to/shared_script.py,id:AbCdEf123"
+  --common-input-files "/path/to/shared_script.py,id:AbCdEf123"
+
+# Collect the batch's uploads in a folder and tag every file:
+rescale-int pur run --jobs-csv jobs.csv --state state.csv \
+  --folder "sweeps/alpha-beta" --file-tags "sweep-2026-q3,cfd"
 
 # With tar filtering:
 rescale-int pur run --jobs-csv jobs.csv --state state.csv \
@@ -1590,8 +1734,11 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file (required)
 - `--multipart` - Enable multi-part mode
-- `--extra-input-files string` - Comma-separated local paths and/or `id:<fileId>`
-- `--decompress-extras` - Decompress extra input files on cluster
+- `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>`
+- `--decompress-common` - Decompress common input files on cluster
+- `--folder string` - Remote folder path for this batch's uploads, created if missing
+- `--folder-parent string` - Folder ID that `--folder` is resolved beneath (default: My Library)
+- `--file-tags string` - Comma-separated tags applied to every file this batch uploads
 - `--include-pattern strings` - Only tar files matching glob (repeatable)
 - `--exclude-pattern strings` - Exclude files matching glob from tar (repeatable)
 - `--flatten-tar` - Remove subdirectory structure in tarball
@@ -2025,6 +2172,41 @@ rescale-int pur run --jobs-csv jobs.csv --state state.csv
 rescale-int pur resume \
   --jobs-csv jobs.csv \
   --state state.csv
+```
+
+### Parameter Sweep (DOE)
+
+```bash
+# 1. Upload the input deck once; every case will reference these files
+rescale-int upload input.sim
+# note the file ID(s) reported, e.g. AbCdEf
+
+# 2. Preview the design before committing to it. The template's command must
+#    contain a {{token}} per swept parameter, e.g.
+#      starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+rescale-int pur doe \
+  --template base.csv \
+  --method latin-hypercube --samples 24 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25" \
+  --preview
+
+# 3. Generate the sweep, tagging each job with its own values
+rescale-int pur doe \
+  --template base.csv \
+  --output sweep.csv \
+  --method latin-hypercube --samples 24 --seed 7 \
+  --param "alpha=10:20" --param "beta=15:25" \
+  --param-format "alpha=%.2f" \
+  --tag-template "alpha={{alpha}}" --tag-template "beta={{beta}}" \
+  --base-file-ids AbCdEf
+
+# 4. Submit. Tar and upload are skipped because the deck is already on Rescale.
+rescale-int pur submit-existing --jobs-csv sweep.csv --state sweep.state
+
+# Without --base-file-ids the cases keep the template's directory, so run them
+# through the full pipeline instead, and collect the uploads in one folder:
+rescale-int pur run --jobs-csv sweep.csv --state sweep.state \
+  --folder "sweeps/alpha-beta" --file-tags "sweep-2026-q3"
 ```
 
 ### Configuration Management

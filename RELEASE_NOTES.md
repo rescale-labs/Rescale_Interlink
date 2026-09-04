@@ -1,5 +1,74 @@
 # Release Notes - Rescale Interlink
 
+## v4.10.0 (unreleased)
+
+### DOE parameter sweeps in PUR (`pur doe`, GUI sweep builder)
+
+One base job can now be expanded into a design of experiments — one Rescale job per design point — from either the CLI or the PUR tab.
+
+Each case's values are rendered into the **job's command line** rather than passed as environment variables, so the configuration of every case is visible on its Rescale job page:
+
+```
+template:  starccm+ -param alpha {{alpha}} -param beta {{beta}} -load input.sim
+case 1:    starccm+ -param alpha 10 -param beta 15 -load input.sim
+```
+
+Parameters and `{{token}}`s are validated against each other in both directions: a swept parameter with no matching token, and a token with no matching parameter, are both errors rather than silently wrong jobs.
+
+Eight designs are available — full factorial, one-factor-at-a-time, Latin hypercube, Sobol, Monte Carlo, central composite, Box-Behnken, and explicit cases from a CSV. The randomized samplers take a `--seed`, so the same seed always reproduces the same sweep.
+
+Per-case job names and Rescale job tags come from templates that may use any parameter token plus `{{__base}}` and `{{__index}}`, which makes a sweep filterable on the platform by the values that produced it.
+
+Because every case in a sweep shares one input deck, `--base-file-ids` (Shared Input File IDs in the GUI) points every case at an already-uploaded deck, so it transfers once for the whole sweep instead of once per case. A generated sweep is an ordinary jobs CSV, so it runs through the existing `pur run` / `pur submit-existing` pipeline with resume, state and monitoring unchanged.
+
+In the GUI, **PUR → Job Source → DOE** builds the sweep with a live case preview, showing the case table, the first case's rendered command and tags, and any validation problems before anything is submitted.
+
+### Per-file commands in PUR file-scan mode (`pur scan-files`, GUI Job Source → Files)
+
+Scanning a tree for input files now renders **each job's command from its own file**, instead of giving every job the template's command verbatim:
+
+```
+template:   abaqus job={{base}} input={{file}} cpus=8
+case1.inp:  abaqus job=case1 input=case1.inp cpus=8
+case2.inp:  abaqus job=case2 input=case2.inp cpus=8
+```
+
+Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged.
+
+Each job also uploads **only its own files** now — its primary file plus the secondary files resolved for it — flattened into its working directory, instead of the whole containing folder. Secondary patterns that reach outside the primary's folder (`../meshes/*.cfg`) are therefore uploaded rather than validated and dropped, and jobs sharing a folder no longer overwrite each other's archive, which previously surfaced as `upload incomplete: received 1 of 9 parts`. Data genuinely shared by every job still belongs in `--common-input-files`, which uploads it once for the batch.
+
+The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load.
+
+### PUR uploads can target a folder and carry file tags
+
+`pur run` and `pur resume` accept `--folder` (created if missing), `--folder-parent`, and `--file-tags`, so a batch's uploads can be collected in one Rescale folder and tagged as a set.
+
+### `--extra-input-files` renamed to `--common-input-files`
+
+The flag that uploads a file once and attaches it to every job is now `--common-input-files`, with `--decompress-common` alongside it; the GUI label matches. The old `--extra-input-files` and `--decompress-extras` names still work as hidden aliases but emit a deprecation warning, and passing both a flag and its alias is an error.
+
+### License feature sets on a job
+
+**License Settings** in the job template gained **License Feature Name** and **Licenses Per Job**. Together they submit the job with a user-defined license feature set, so a job checks out a named feature from your own license server:
+
+```json
+"userDefinedLicenseSettings": {
+  "featureSets": [
+    {"name": "USER_SPECIFIED_0", "features": [{"name": "ansys_hpc", "count": 8}]}
+  ]
+}
+```
+
+Both fields are optional, but only meaningful together: a name without a count, or a count without a name, is rejected rather than submitted as a job that quietly takes no license. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
+
+### Job template: project picker and coretype-aware core stepper
+
+The **Project** field is now a dropdown of the projects the API key can see — default project first, each with its remaining budget — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped. The separate Org Code field is gone, since the organization is already implied by the API key.
+
+The **Cores** control now steps through the sizes the selected coretype actually sells (a quarter, half or whole node, then whole nodes above that) instead of counting by one, so the arrows and the keyboard can no longer land on a value the platform rejects.
+
+---
+
 ## v4.9.8 - May 30, 2026
 
 ### File Browser Trash Bin, and deletes now go to Trash Bin (#30)

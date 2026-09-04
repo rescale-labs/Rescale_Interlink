@@ -9,7 +9,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 )
+
+// gnuTarOnce caches the one-time detection of whether the `tar` on PATH is GNU
+// tar, so the version probe runs once per process rather than once per archive.
+var (
+	gnuTarOnce sync.Once
+	gnuTar     bool
+)
+
+// isGNUTar reports whether the `tar` binary on PATH is GNU tar.
+//
+// GNU tar interprets any argument containing a colon as a remote `host:path`
+// spec, so a Windows absolute path like `C:\Users\...` makes it try to connect
+// to a host named "C" ("Cannot connect to C: resolve failed"). Passing
+// --force-local disables that. The Windows-native bsdtar does not have this
+// behavior and does not accept --force-local, so the flag must only be added
+// for GNU tar.
+func isGNUTar() bool {
+	gnuTarOnce.Do(func() {
+		out, err := exec.Command("tar", "--version").CombinedOutput()
+		if err == nil && strings.Contains(string(out), "GNU tar") {
+			gnuTar = true
+		}
+	})
+	return gnuTar
+}
 
 // CreateTarGz creates a tar archive of a directory using system tar command
 // This matches the Python PUR behavior of using subprocess tar
@@ -50,6 +77,14 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 		parent := filepath.Dir(sourceDir)
 		dirname := filepath.Base(sourceDir)
 		args = []string{tarFlags, outputPath, "-C", parent, dirname}
+	}
+
+	// On Windows, GNU tar reads the drive-letter colon in an absolute path
+	// (C:\...) as a remote host and fails with "Cannot connect to C: resolve
+	// failed". --force-local keeps colons local. Only GNU tar needs (and
+	// accepts) the flag; see isGNUTar.
+	if isGNUTar() {
+		args = append([]string{"--force-local"}, args...)
 	}
 
 	// Execute tar command
@@ -197,6 +232,120 @@ func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool,
 	return nil
 }
 
+// CreateTarGzFromFiles archives an explicit list of files, each written at the
+// archive root so it lands directly in the job's working directory.
+//
+// This is the archive shape file-scan mode needs: the file set is already known
+// exactly, and its members can come from different directories (a secondary
+// pattern such as "../meshes/*.cfg" resolves outside the primary file's folder).
+// Walking a source directory cannot express either, which is why this does not
+// go through CreateTarGzWithOptions.
+//
+// Flattening means two files can claim the same name, so a duplicate base name
+// is an error rather than a silently dropped input.
+func CreateTarGzFromFiles(files []string, outputPath, compression string) error {
+	if len(files) == 0 {
+		return fmt.Errorf("no files to archive")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create tar file: %w", err)
+	}
+
+	err = writeFilesArchive(outFile, files, compression)
+	if closeErr := outFile.Close(); err == nil && closeErr != nil {
+		err = fmt.Errorf("failed to close tar file: %w", closeErr)
+	}
+
+	if err != nil {
+		// Cleanup happens here, after the handle is closed: Windows refuses to
+		// remove a file while anything still has it open, so deleting inside the
+		// write loop would leave the partial archive behind.
+		os.Remove(outputPath)
+		return err
+	}
+
+	return nil
+}
+
+// writeFilesArchive writes the archive stream, closing its own writers so their
+// buffers are flushed before CreateTarGzFromFiles inspects the result. The gzip
+// and tar writers are closed explicitly rather than by defer because a failure
+// to flush the trailer is a corrupt archive, not something to discard.
+func writeFilesArchive(out io.Writer, files []string, compression string) error {
+	var gzWriter *gzip.Writer
+	var tarWriter *tar.Writer
+	if compression == "none" {
+		tarWriter = tar.NewWriter(out)
+	} else {
+		gzWriter = gzip.NewWriter(out)
+		tarWriter = tar.NewWriter(gzWriter)
+	}
+
+	seen := make(map[string]string, len(files)) // archive name -> source path
+
+	for _, filePath := range files {
+		info, err := os.Stat(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to stat %s: %w", filePath, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("not a regular file: %s (mode=%s)", filePath, info.Mode())
+		}
+
+		name := filepath.Base(filePath)
+		if existing, dup := seen[name]; dup {
+			return fmt.Errorf("duplicate filename '%s' found in '%s' and '%s'", name, existing, filePath)
+		}
+		seen[name] = filePath
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return fmt.Errorf("failed to create tar header for %s: %w", filePath, err)
+		}
+		header.Name = name
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return fmt.Errorf("failed to write tar header for %s: %w", name, err)
+		}
+
+		if err := copyFileInto(tarWriter, filePath); err != nil {
+			return err
+		}
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		return fmt.Errorf("failed to finalize tar: %w", err)
+	}
+	if gzWriter != nil {
+		if err := gzWriter.Close(); err != nil {
+			return fmt.Errorf("failed to finalize gzip stream: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// copyFileInto streams one file into the archive. Split out so the file handle
+// is closed as each file finishes rather than deferred to the end of the loop.
+func copyFileInto(w io.Writer, filePath string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(w, file); err != nil {
+		return fmt.Errorf("failed to write contents of %s: %w", filePath, err)
+	}
+	return nil
+}
+
 // shouldIncludeFile determines if a file should be included based on patterns
 // Logic matches Python PUR:
 //   - If include_patterns specified: ONLY include files matching those patterns
@@ -257,6 +406,47 @@ func GenerateTarPath(directory, basePath, compression string) string {
 	}
 
 	return filepath.Join(basePath, tarName+ext)
+}
+
+// GenerateTarPathForFiles names the archive for an explicit file set, as
+// produced by CreateTarGzFromFiles.
+//
+// The name comes from the first file's stem and the hash covers every member's
+// absolute path, so two jobs drawing different files out of one directory get
+// different archives. GenerateTarPath cannot be used for this: it hashes only
+// the source directory, so every job scanned from the same folder would resolve
+// to a single filename and the tar and upload workers would race over it.
+//
+// The "_<8 hex>.tar[.gz]" shape is required, not cosmetic — pathutil.HasFNVSuffix
+// gates whether the pipeline is willing to delete the file afterwards.
+func GenerateTarPathForFiles(files []string, basePath, compression string) string {
+	h := fnv.New32a()
+
+	stem := "job"
+	for i, file := range files {
+		abs, err := filepath.Abs(file)
+		if err != nil {
+			abs = filepath.Clean(file)
+		}
+		if i == 0 {
+			base := filepath.Base(abs)
+			stem = strings.TrimSuffix(base, filepath.Ext(base))
+			if stem == "" {
+				// A dotfile is all extension by filepath's reckoning (".config"),
+				// which would leave the name starting at the hash separator.
+				stem = strings.TrimPrefix(base, ".")
+			}
+		}
+		h.Write([]byte(abs))
+		h.Write([]byte{0}) // separator, so {"ab","c"} and {"a","bc"} differ
+	}
+
+	ext := ".tar.gz"
+	if compression == "none" {
+		ext = ".tar"
+	}
+
+	return filepath.Join(basePath, fmt.Sprintf("%s_%08x%s", stem, h.Sum32(), ext))
 }
 
 // ValidateTarExists checks if a tar file exists and is valid

@@ -50,6 +50,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 - **Job Watch**: Monitor running jobs and incrementally download output files
 - **Compatibility Mode**: Drop-in replacement for `rescale-cli` (10 commands)
 - **PUR Integration**: Batch job pipeline execution
+- **Design of Experiments**: Expand one base job into a parameter sweep (`pur doe`), with values rendered into each case's command line
 - **Error Reporting**: Diagnostic reports with redacted context for server errors
 - **Adaptive Concurrency**: Automatic thread scaling based on file size distribution
 - **Command Shortcuts**: Quick aliases (`upload`, `download`, `ls`)
@@ -66,7 +67,7 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 - **Six-Tab Interface**:
   - **Setup**: API key, proxy configuration, logging settings, test connection
   - **Single Job**: Configure and submit individual jobs (directory with tar options, local files, or remote files)
-  - **PUR (Parallel Upload Run)**: Batch job pipeline with Pipeline Settings (workers, tar options), directory scanning
+  - **PUR (Parallel Upload Run)**: Batch job pipeline with Pipeline Settings (workers, tar options), directory scanning, DOE sweep builder
   - **File Browser**: Two-pane local/remote file browser with upload/download
   - **Transfers**: Real-time transfer queue with progress, cancel, retry, disk space error banner
   - **Activity**: Live log display with filtering, search, and run history panel
@@ -209,6 +210,12 @@ rescale-int jobs download --id WfbQa --outdir ./results
 rescale-int pur run --jobs-csv jobs.csv --state state.csv
 ```
 
+**Expand one base job into a parameter sweep:**
+```bash
+rescale-int pur doe --template base.csv --output sweep.csv \
+  --param "alpha=10:20:3" --param "beta=15:25:3"
+```
+
 **See [CLI_GUIDE.md](CLI_GUIDE.md) for complete command reference.**
 
 ### GUI Mode
@@ -217,7 +224,7 @@ The GUI provides six tabs:
 
 1. **Setup**: API credentials, proxy settings, logging, daemon control
 2. **Single Job**: Create and submit individual jobs (directory with tar options, local files, or remote files)
-3. **PUR**: Parallel Upload Run - batch job pipeline
+3. **PUR**: Parallel Upload Run - batch job pipeline, from folders, input files, or a DOE parameter sweep
 4. **File Browser**: Two-pane file manager for local and remote files
 5. **Transfers**: Monitor active transfers with progress and controls
 6. **Activity**: View real-time logs with filtering and search

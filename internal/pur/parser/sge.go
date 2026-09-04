@@ -339,9 +339,11 @@ func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
 		ProjectID: m.ProjectID,
 	}
 
-	// Add user-defined license settings if provided
+	// Add user-defined license settings if provided. The script gives these as an
+	// opaque string (a license server address, typically), so they go on the wire
+	// as a JSON string rather than the feature-set object.
 	if m.UserDefinedLicenseSettings != "" {
-		jobReq.JobAnalyses[0].UserDefinedLicenseSettings = &m.UserDefinedLicenseSettings
+		jobReq.JobAnalyses[0].UserDefinedLicenseSettings = m.UserDefinedLicenseSettings
 	}
 
 	// Add automations if specified

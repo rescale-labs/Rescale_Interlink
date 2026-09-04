@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,7 +21,9 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/transfer/folder"
 	"github.com/rescale/rescale-int/internal/util/multipart"
+	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
 // newPURCmd creates the 'pur' command group.
@@ -34,6 +37,7 @@ func newPURCmd() *cobra.Command {
 	// Add PUR subcommands
 	purCmd.AddCommand(newMakeDirsCSVCmd())
 	purCmd.AddCommand(newScanFilesCmd())
+	purCmd.AddCommand(newDOECmd())
 	purCmd.AddCommand(newPlanCmd())
 	purCmd.AddCommand(newRunCmd())
 	purCmd.AddCommand(newResumeCmd())
@@ -358,26 +362,34 @@ Examples:
 				template := templateJobs[0]
 				var jobs []models.JobSpec
 
+				// Checked once, before any job is built: a command whose tokens are
+				// wrong is wrong for every file, and it is better to fail here than to
+				// write a CSV of jobs each carrying a literal "{{bse}}" in its command.
+				templateWarnings, err := filescan.ValidateCommandTemplate(template.Command)
+				if err != nil {
+					return fmt.Errorf("template command: %w", err)
+				}
+				for _, w := range append(templateWarnings, filescan.ValidateJobNameTemplate(template.JobName)...) {
+					fmt.Printf("  Warning: %s\n", w)
+				}
+
 				for i, jf := range result.Jobs {
+					command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jf, i+1)
+					if renderErr != nil {
+						// One unrenderable filename costs that file, not the batch.
+						fmt.Printf("  Skipped %s: %v\n", filepath.Base(jf.PrimaryFile), renderErr)
+						continue
+					}
+
 					job := template
+					job.Command = command
+					job.JobName = jobName
 					job.Directory = jf.PrimaryDir
-					if template.JobName != "" {
-						job.JobName = fmt.Sprintf("%s_%d", template.JobName, i+1)
-					} else {
-						job.JobName = fmt.Sprintf("Job_%d", i+1)
-					}
-					// Store input files in extra field (comma-separated relative paths)
-					relFiles := make([]string, len(jf.InputFiles))
-					for j, f := range jf.InputFiles {
-						rel, err := filepath.Rel(jf.PrimaryDir, f)
-						if err != nil {
-							relFiles[j] = f
-						} else {
-							relFiles[j] = rel
-						}
-					}
-					// Note: InputFiles aren't directly in JobSpec, would need model update
-					// For now, we set directory which is the primary use case
+					// The job's archive is exactly its own files, wherever they live:
+					// a secondary pattern can resolve outside PrimaryDir.
+					job.LocalInputFiles = jf.InputFiles
+					job.InputFiles = nil
+
 					jobs = append(jobs, job)
 				}
 
@@ -520,6 +532,88 @@ Example:
 	return cmd
 }
 
+// commonInputFileFlags holds the batch-level shared input file flags along with
+// their deprecated aliases. Shared by 'pur run' and 'pur resume'.
+type commonInputFileFlags struct {
+	commonInputFiles string
+	decompressCommon bool
+
+	// Deprecated aliases, retained for backwards compatibility.
+	legacyInputFiles string
+	legacyDecompress bool
+}
+
+// register adds --common-input-files/--decompress-common plus the hidden
+// deprecated --extra-input-files/--decompress-extras aliases.
+func (f *commonInputFileFlags) register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.commonInputFiles, "common-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
+	cmd.Flags().BoolVar(&f.decompressCommon, "decompress-common", false, "Decompress common input files on cluster")
+
+	cmd.Flags().StringVar(&f.legacyInputFiles, "extra-input-files", "", "DEPRECATED: Use --common-input-files instead")
+	cmd.Flags().BoolVar(&f.legacyDecompress, "decompress-extras", false, "DEPRECATED: Use --decompress-common instead")
+	cmd.Flags().MarkHidden("extra-input-files")
+	cmd.Flags().MarkHidden("decompress-extras")
+}
+
+// resolve folds any deprecated alias values into the canonical fields.
+// Returns an error when a flag and its deprecated alias are both set.
+func (f *commonInputFileFlags) resolve(cmd *cobra.Command) error {
+	logger := GetLogger()
+
+	if cmd.Flags().Changed("extra-input-files") {
+		if cmd.Flags().Changed("common-input-files") {
+			return fmt.Errorf("--extra-input-files is a deprecated alias for --common-input-files; specify only one")
+		}
+		logger.Warn().Msg("--extra-input-files is deprecated, use --common-input-files instead")
+		f.commonInputFiles = f.legacyInputFiles
+	}
+
+	if cmd.Flags().Changed("decompress-extras") {
+		if cmd.Flags().Changed("decompress-common") {
+			return fmt.Errorf("--decompress-extras is a deprecated alias for --decompress-common; specify only one")
+		}
+		logger.Warn().Msg("--decompress-extras is deprecated, use --decompress-common instead")
+		f.decompressCommon = f.legacyDecompress
+	}
+
+	return nil
+}
+
+// uploadTargetFlags holds the batch-level upload destination and file tagging
+// flags. Shared by 'pur run' and 'pur resume'.
+type uploadTargetFlags struct {
+	folder       string
+	folderParent string
+	fileTags     string
+}
+
+func (f *uploadTargetFlags) register(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.folder, "folder", "", "Remote folder path for this batch's uploads, created if missing (e.g. \"sweeps/alpha-beta\")")
+	cmd.Flags().StringVar(&f.folderParent, "folder-parent", "", "Folder ID that --folder is resolved beneath (default: My Library)")
+	cmd.Flags().StringVar(&f.fileTags, "file-tags", "", "Comma-separated tags applied to every file this batch uploads")
+}
+
+// resolve turns the flags into a destination folder ID and a normalized tag list,
+// creating any missing folder segments. Returns an empty folder ID when neither
+// folder flag was given, which leaves uploads in My Library.
+//
+// Called before the pipeline starts so a bad folder path fails the command up
+// front rather than after tarring is already underway.
+func (f *uploadTargetFlags) resolve(ctx context.Context, apiClient *api.Client) (string, []string, error) {
+	fileTags := tags.ParseCommaSeparated(f.fileTags)
+
+	if f.folder == "" && f.folderParent == "" {
+		return "", fileTags, nil
+	}
+
+	folderID, err := folder.ResolveOrCreatePath(ctx, apiClient, f.folderParent, f.folder)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve upload folder: %w", err)
+	}
+
+	return folderID, fileTags, nil
+}
+
 // newRunCmd creates the 'run' command.
 func newRunCmd() *cobra.Command {
 	var jobsCSV string
@@ -533,8 +627,8 @@ func newRunCmd() *cobra.Command {
 	var uploadWorkers int
 	var jobWorkers int
 	var rmTarOnSuccess bool
-	var extraInputFiles string
-	var decompressExtras bool
+	var sharedFiles commonInputFileFlags
+	var uploadTarget uploadTargetFlags
 	var dryRun bool
 
 	cmd := &cobra.Command{
@@ -549,6 +643,10 @@ Example:
 
 			if jobsCSV == "" {
 				return fmt.Errorf("--jobs-csv is required")
+			}
+
+			if err := sharedFiles.resolve(cmd); err != nil {
+				return err
 			}
 
 			logger.Info().
@@ -617,11 +715,23 @@ Example:
 				return fmt.Errorf("failed to create API client: %w", err)
 			}
 
+			ctx := GetContext()
+
+			// Resolve the upload destination and tags before any work starts, so a
+			// bad folder path fails before tarring begins.
+			folderID, fileTags, err := uploadTarget.resolve(ctx, apiClient)
+			if err != nil {
+				return err
+			}
+
 			// Create pipeline
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, extraInputFiles, decompressExtras)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
+
+			pipe.SetUploadFolderID(folderID)
+			pipe.SetFileTags(fileTags)
 
 			// Apply rm-tar-on-success if set
 			if rmTarOnSuccess {
@@ -629,7 +739,6 @@ Example:
 			}
 
 			// Run pipeline
-			ctx := GetContext()
 			if err := pipe.Run(ctx); err != nil {
 				return fmt.Errorf("pipeline failed: %w", err)
 			}
@@ -651,8 +760,8 @@ Example:
 	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
 	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
-	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
-	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
+	sharedFiles.register(cmd)
+	uploadTarget.register(cmd)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate and show plan without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")
@@ -673,8 +782,8 @@ func newResumeCmd() *cobra.Command {
 	var uploadWorkers int
 	var jobWorkers int
 	var rmTarOnSuccess bool
-	var extraInputFiles string
-	var decompressExtras bool
+	var sharedFiles commonInputFileFlags
+	var uploadTarget uploadTargetFlags
 	var dryRun bool
 
 	cmd := &cobra.Command{
@@ -692,6 +801,10 @@ Example:
 			}
 			if jobsCSV == "" {
 				return fmt.Errorf("--jobs-csv is required")
+			}
+
+			if err := sharedFiles.resolve(cmd); err != nil {
+				return err
 			}
 
 			logger.Info().
@@ -787,11 +900,23 @@ Example:
 				return fmt.Errorf("failed to create API client: %w", err)
 			}
 
+			ctx := GetContext()
+
+			// Resolve the upload destination and tags before any work starts, so a
+			// bad folder path fails before tarring begins.
+			folderID, fileTags, err := uploadTarget.resolve(ctx, apiClient)
+			if err != nil {
+				return err
+			}
+
 			// Create pipeline (will load existing state)
-			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, extraInputFiles, decompressExtras)
+			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, stateFile, multiPart, nil, false, sharedFiles.commonInputFiles, sharedFiles.decompressCommon)
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
 			}
+
+			pipe.SetUploadFolderID(folderID)
+			pipe.SetFileTags(fileTags)
 
 			// Apply rm-tar-on-success if set
 			if rmTarOnSuccess {
@@ -799,7 +924,6 @@ Example:
 			}
 
 			// Run pipeline (will resume from state)
-			ctx := GetContext()
 			if err := pipe.Run(ctx); err != nil {
 				return fmt.Errorf("pipeline failed: %w", err)
 			}
@@ -821,8 +945,8 @@ Example:
 	cmd.Flags().IntVar(&uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
 	cmd.Flags().IntVar(&jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
-	cmd.Flags().StringVar(&extraInputFiles, "extra-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
-	cmd.Flags().BoolVar(&decompressExtras, "decompress-extras", false, "Decompress extra input files on cluster")
+	sharedFiles.register(cmd)
+	uploadTarget.register(cmd)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be resumed without executing")
 
 	cmd.MarkFlagRequired("jobs-csv")

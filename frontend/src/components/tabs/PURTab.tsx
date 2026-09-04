@@ -14,12 +14,13 @@ import {
   CheckIcon,
   ChevronDownIcon,
   EyeIcon,
+  BeakerIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import { useJobStore, useConfigStore, useRunStore } from '../../stores'
 import type { WorkflowState } from '../../types/jobs'
 import { wailsapp } from '../../../wailsjs/go/models'
-import { TemplateBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
+import { TemplateBuilder, DOEBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
 import { formatDuration } from '../../utils/formatDuration'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import * as Runtime from '../../../wailsjs/runtime/runtime'
@@ -220,6 +221,8 @@ export function PURTab() {
     scanOptions,
     isScanning,
     scanError,
+    scanSkippedFiles,
+    scanWarnings,
     setWorkflowPath,
     setTemplate,
     goBack,
@@ -228,6 +231,9 @@ export function PURTab() {
     canGoBack,
     setScanOptions,
     scanDirectory,
+    doePreview,
+    isGeneratingDOE,
+    generateDOE,
     validateJobs,
     startBulkRun,
     cancelRun,
@@ -339,8 +345,18 @@ export function PURTab() {
   }, [loadJobsFromCSV])
 
   const handleCreateNew = useCallback(() => {
+    // Directory scan is the folder/file path; make sure a prior sweep session
+    // does not leave scanMode on 'doe'.
+    setScanOptions({ scanMode: 'folders' })
     setWorkflowPath('createNew')
-  }, [setWorkflowPath])
+  }, [setScanOptions, setWorkflowPath])
+
+  const handleCreateSweep = useCallback(() => {
+    // The dedicated sweep entry builds a base job and expands it into cases; it
+    // never scans directories, so scanMode is DOE from the outset.
+    setScanOptions({ scanMode: 'doe' })
+    setWorkflowPath('createSweep')
+  }, [setScanOptions, setWorkflowPath])
 
   const mapDTOToTemplate = useCallback((loaded: wailsapp.JobSpecDTO) => {
     setTemplate({
@@ -359,6 +375,8 @@ export function PURTab() {
       submitMode: loaded.submitMode || 'create_and_submit',
       isLowPriority: loaded.isLowPriority || false,
       onDemandLicenseSeller: loaded.onDemandLicenseSeller || '',
+      licenseFeatureName: loaded.licenseFeatureName || '',
+      licensesPerJob: loaded.licensesPerJob || 0,
       tags: loaded.tags || [],
       projectId: loaded.projectId || '',
       orgCode: loaded.orgCode || '',
@@ -478,6 +496,13 @@ export function PURTab() {
   const handleScan = useCallback(async () => {
     await scanDirectory()
   }, [scanDirectory])
+
+  // Handle sweep generation. A sweep produces the same job list a scan does, so
+  // it lands in the same 'directoriesScanned' state and the rest of the workflow
+  // is unchanged.
+  const handleGenerateSweep = useCallback(async () => {
+    await generateDOE()
+  }, [generateDOE])
 
   // Handle validation
   const handleValidate = useCallback(async () => {
@@ -602,6 +627,15 @@ export function PURTab() {
               <span className="font-medium">Create Jobs by Scanning</span>
               <span className="text-sm text-gray-500">Scan directories for jobs</span>
             </button>
+            <button
+              onClick={handleCreateSweep}
+              disabled={isLoadingCSV}
+              className="flex flex-col items-center gap-3 p-6 border-2 border-gray-200 dark:border-gray-700 rounded-lg hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors w-56"
+            >
+              <BeakerIcon className="w-12 h-12 text-purple-500" />
+              <span className="font-medium">Create Parameter Sweep</span>
+              <span className="text-sm text-gray-500">One base job, many cases (DOE)</span>
+            </button>
           </div>
         </div>
       )
@@ -697,7 +731,9 @@ export function PURTab() {
       return (
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold">Scan to Create Jobs</h3>
+            <h3 className="text-lg font-semibold">
+              {scanOptions.scanMode === 'doe' ? 'Build Parameter Sweep' : 'Scan to Create Jobs'}
+            </h3>
             <div className="relative">
               <button
                 onClick={() => setShowSaveMenu(!showSaveMenu)}
@@ -737,32 +773,52 @@ export function PURTab() {
             </div>
           )}
 
-          <div className="mb-4">
-            <label className="block text-sm font-medium mb-2">Scan Mode</label>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="scanMode"
-                  checked={scanOptions.scanMode === 'folders'}
-                  onChange={() => setScanOptions({ scanMode: 'folders' })}
-                  className="w-4 h-4 text-blue-500"
-                />
-                <span className="text-sm">Folders (each folder = 1 job)</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="scanMode"
-                  checked={scanOptions.scanMode === 'files'}
-                  onChange={() => setScanOptions({ scanMode: 'files' })}
-                  className="w-4 h-4 text-blue-500"
-                />
-                <span className="text-sm">Files (each file = 1 job)</span>
-              </label>
+          {/* Job Source applies only to directory scanning. The dedicated sweep
+              entry (scanMode 'doe') has no folder/file choice, so the group is
+              hidden there. */}
+          {scanOptions.scanMode !== 'doe' && (
+            <div className="mb-4">
+              <label className="block text-sm font-medium mb-2">Job Source</label>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="scanMode"
+                    checked={scanOptions.scanMode === 'folders'}
+                    onChange={() => setScanOptions({ scanMode: 'folders' })}
+                    className="w-4 h-4 text-blue-500"
+                  />
+                  <span className="text-sm">Folders (each folder = 1 job)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="scanMode"
+                    checked={scanOptions.scanMode === 'files'}
+                    onChange={() => setScanOptions({ scanMode: 'files' })}
+                    className="w-4 h-4 text-blue-500"
+                  />
+                  <span className="text-sm">Files (each file = 1 job)</span>
+                </label>
+              </div>
             </div>
-          </div>
+          )}
 
+          {scanOptions.scanMode === 'doe' && (
+            <div className="mb-6">
+              <p className="text-xs text-gray-500 mb-4">
+                A sweep expands the base job into one case per design point, rendering
+                each case&apos;s values into its command line so the configuration is visible
+                on the Rescale job page. The command needs a{' '}
+                <code>{'{{name}}'}</code> token for every swept parameter. The shared input
+                deck comes from the sweep&apos;s Shared Input File IDs or from Common Files —
+                a sweep never zips a working directory.
+              </p>
+              <DOEBuilder />
+            </div>
+          )}
+
+          {scanOptions.scanMode !== 'doe' && (
           <div className="grid grid-cols-2 gap-6 mb-6">
             <div>
               <label className="block text-sm font-medium mb-1">Root Directory</label>
@@ -808,7 +864,39 @@ export function PURTab() {
                   placeholder="*.inp"
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
-                <p className="mt-1 text-xs text-gray-500">Each matching file creates one job</p>
+                <p className="mt-1 text-xs text-gray-500">
+                  Each matching file creates one job, whose upload holds only that
+                  file and its secondaries. Use Common Files for inputs shared by
+                  every job.
+                </p>
+
+                {/* Token legend: the command is rendered per file, so the tokens
+                    have to be discoverable from here. */}
+                <div className="mt-2 p-3 bg-blue-50 rounded-md">
+                  <h5 className="text-xs font-medium text-blue-700 mb-1">
+                    Command Tokens
+                  </h5>
+                  <p className="text-xs text-blue-600 mb-1">
+                    Tokens in the command and job name are replaced per file. For
+                    inputs/case1.inp:
+                  </p>
+                  <dl className="text-xs text-blue-800 space-y-0.5">
+                    {[
+                      ['{{file}}', 'case1.inp'],
+                      ['{{base}}', 'case1'],
+                      ['{{ext}}', 'inp'],
+                      ['{{dir}}', 'inputs'],
+                      ['{{index}}', '1'],
+                    ].map(([token, value]) => (
+                      <div key={token} className="flex gap-2">
+                        <dt>
+                          <code className="bg-blue-100 px-1 rounded">{token}</code>
+                        </dt>
+                        <dd className="text-blue-600">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
               </div>
             )}
 
@@ -864,6 +952,7 @@ export function PURTab() {
               </>
             )}
           </div>
+          )}
 
           {scanOptions.scanMode === 'files' && (
             <div className="mb-6">
@@ -924,6 +1013,7 @@ export function PURTab() {
             </div>
           )}
 
+          {scanOptions.scanMode !== 'doe' && (
           <div className="flex items-center gap-4 mb-6">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -946,6 +1036,7 @@ export function PURTab() {
               </label>
             )}
           </div>
+          )}
 
           {/* Command Pattern Iteration - only in folder mode */}
           {scanOptions.scanMode === 'folders' && (
@@ -984,15 +1075,24 @@ export function PURTab() {
             </div>
           )}
 
-          {/* Extra Input Files Section */}
+          {/* Common Input Files Section */}
           <div className="border-t pt-4 mt-4 mb-6">
-            <p className="text-xs text-gray-500 mb-3">
-              <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
-              automatically decompressed on the cluster. Extra input files below are shared files uploaded once and
-              attached to every job.
-            </p>
+            {scanOptions.scanMode === 'doe' ? (
+              <p className="text-xs text-gray-500 mb-3">
+                <strong>How PUR handles a sweep:</strong> Cases differ only in their command,
+                so the files below are uploaded once and attached to every case. Unless the
+                sweep uses shared input file IDs, each case still archives and uploads the
+                template&apos;s directory separately.
+              </p>
+            ) : (
+              <p className="text-xs text-gray-500 mb-3">
+                <strong>How PUR handles folders:</strong> Each job folder is archived (tar.gz), uploaded to Rescale, and
+                automatically decompressed on the cluster. Common input files below are shared files uploaded once and
+                attached to every job.
+              </p>
+            )}
             <h4 className="text-sm font-medium text-gray-700 mb-2">
-              Extra Input Files (shared across all jobs)
+              Common Input Files (shared across all jobs)
             </h4>
             <div className="space-y-2">
               <div className="flex gap-2">
@@ -1000,19 +1100,19 @@ export function PURTab() {
                   type="text"
                   className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Comma-separated local paths or id:fileId references"
-                  value={purRunOptions.extraInputFiles}
-                  onChange={(e) => setPURRunOptions({ extraInputFiles: e.target.value })}
+                  value={purRunOptions.commonInputFiles}
+                  onChange={(e) => setPURRunOptions({ commonInputFiles: e.target.value })}
                 />
                 <button
                   type="button"
                   className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm hover:bg-gray-50 dark:hover:bg-gray-700"
                   onClick={async () => {
                     try {
-                      const path = await App.SelectFile('Select extra input file')
+                      const path = await App.SelectFile('Select common input file')
                       if (path) {
-                        const current = purRunOptions.extraInputFiles
+                        const current = purRunOptions.commonInputFiles
                         setPURRunOptions({
-                          extraInputFiles: current ? `${current},${path}` : path,
+                          commonInputFiles: current ? `${current},${path}` : path,
                         })
                       }
                     } catch {
@@ -1026,11 +1126,11 @@ export function PURTab() {
               <label className="flex items-center gap-2 text-sm text-gray-600">
                 <input
                   type="checkbox"
-                  checked={purRunOptions.decompressExtras}
-                  onChange={(e) => setPURRunOptions({ decompressExtras: e.target.checked })}
+                  checked={purRunOptions.decompressCommon}
+                  onChange={(e) => setPURRunOptions({ decompressCommon: e.target.checked })}
                   className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
                 />
-                Decompress extra files on cluster
+                Decompress common files on cluster
               </label>
               <p className="text-xs text-gray-400">
                 These files are uploaded once and attached to every job in the batch.
@@ -1053,6 +1153,54 @@ export function PURTab() {
             </div>
           </div>
 
+          {/* Upload Destination & File Tags Section */}
+          <div className="border-t pt-4 mt-4 mb-6">
+            <h4 className="text-sm font-medium text-gray-700 mb-2">
+              Upload Destination &amp; Tags
+            </h4>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">
+                  Folder (optional)
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g. sweeps/alpha-beta"
+                  value={purRunOptions.uploadFolder}
+                  onChange={(e) => setPURRunOptions({ uploadFolder: e.target.value })}
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  Every file this batch uploads lands here. Missing folders are created;
+                  existing ones are reused. Leave empty to upload to My Library.
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">
+                  File Tags (optional)
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Comma-separated, e.g. sweep-2026-q3,cfd"
+                  value={purRunOptions.fileTags.join(', ')}
+                  onChange={(e) =>
+                    setPURRunOptions({
+                      fileTags: e.target.value
+                        .split(',')
+                        .map((t) => t.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  Applied to every uploaded file. Tagging is best-effort: a failure is
+                  logged but does not fail the run.
+                </p>
+              </div>
+            </div>
+          </div>
+
           <PipelineSettings config={config} updateConfig={updateConfig} saveConfig={saveConfig} />
 
           {scanError && (
@@ -1061,28 +1209,82 @@ export function PURTab() {
             </div>
           )}
 
-          <button
-            onClick={handleScan}
-            disabled={!scanOptions.rootDir || isScanning}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-2 rounded',
-              scanOptions.rootDir && !isScanning
-                ? 'bg-blue-500 text-white hover:bg-blue-600'
-                : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
-            )}
-          >
-            {isScanning ? (
-              <>
-                <ArrowPathIcon className="w-5 h-5 animate-spin" />
-                Scanning...
-              </>
-            ) : (
-              <>
-                <PlayIcon className="w-5 h-5" />
-                Scan to Create Jobs
-              </>
-            )}
-          </button>
+          {/* A file the scan declined to turn into a job looks, without this, like
+              a file that simply was not there. */}
+          {(scanSkippedFiles.length > 0 || scanWarnings.length > 0) && (
+            <div className="mb-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-amber-800 dark:text-amber-300 text-sm">
+              {scanSkippedFiles.length > 0 && (
+                <>
+                  <p className="font-medium">
+                    Skipped {scanSkippedFiles.length} file
+                    {scanSkippedFiles.length !== 1 ? 's' : ''}
+                  </p>
+                  <ul className="list-disc ml-5 mt-1 text-xs space-y-0.5">
+                    {scanSkippedFiles.map((skip) => (
+                      <li key={skip}>{skip}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {scanWarnings.length > 0 && (
+                <ul className={clsx('list-disc ml-5 text-xs space-y-0.5', scanSkippedFiles.length > 0 && 'mt-2')}>
+                  {scanWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {scanOptions.scanMode === 'doe' ? (
+            <button
+              onClick={handleGenerateSweep}
+              disabled={isGeneratingDOE || !doePreview?.ok}
+              className={clsx(
+                'flex items-center gap-2 px-4 py-2 rounded',
+                !isGeneratingDOE && doePreview?.ok
+                  ? 'bg-blue-500 text-white hover:bg-blue-600'
+                  : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
+              )}
+            >
+              {isGeneratingDOE ? (
+                <>
+                  <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                  Generating...
+                </>
+              ) : (
+                <>
+                  <PlayIcon className="w-5 h-5" />
+                  {doePreview?.ok
+                    ? `Create ${doePreview.caseCount} Job${doePreview.caseCount !== 1 ? 's' : ''}`
+                    : 'Create Jobs from Sweep'}
+                </>
+              )}
+            </button>
+          ) : (
+            <button
+              onClick={handleScan}
+              disabled={!scanOptions.rootDir || isScanning}
+              className={clsx(
+                'flex items-center gap-2 px-4 py-2 rounded',
+                scanOptions.rootDir && !isScanning
+                  ? 'bg-blue-500 text-white hover:bg-blue-600'
+                  : 'bg-gray-300 dark:bg-gray-600 text-gray-500 cursor-not-allowed'
+              )}
+            >
+              {isScanning ? (
+                <>
+                  <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                  Scanning...
+                </>
+              ) : (
+                <>
+                  <PlayIcon className="w-5 h-5" />
+                  Scan to Create Jobs
+                </>
+              )}
+            </button>
+          )}
         </div>
       )
     }

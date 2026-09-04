@@ -105,6 +105,27 @@ func LoadJobsCSV(path string) ([]models.JobSpec, error) {
 		job.OrgCode = sanitize.SanitizeField(getCol("orgcode"))
 		job.TarSubpath = getCol("tarsubpath")
 
+		// Semicolon-separated, since a path may legitimately contain a comma.
+		// Optional, so CSVs written before file-scan mode still load.
+		if filesStr := getCol("localinputfiles"); filesStr != "" {
+			for _, file := range strings.Split(filesStr, ";") {
+				if file = sanitize.SanitizeField(file); file != "" {
+					job.LocalInputFiles = append(job.LocalInputFiles, file)
+				}
+			}
+		}
+
+		// User-defined license feature. Both optional, so CSVs written before
+		// feature sets still load, and a blank count reads as "none".
+		job.LicenseFeatureName = sanitize.SanitizeField(getCol("licensefeaturename"))
+		if countStr := getCol("licensesperjob"); countStr != "" {
+			count, err := strconv.Atoi(countStr)
+			if err != nil {
+				return nil, fmt.Errorf("row %d: invalid LicensesPerJob: %s", i+1, countStr)
+			}
+			job.LicensesPerJob = count
+		}
+
 		// Parse tags (comma-separated)
 		if tagsStr := getCol("tags"); tagsStr != "" {
 			tagParts := strings.Split(tagsStr, ",")
@@ -204,7 +225,8 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 		"Directory", "JobName", "AnalysisCode", "AnalysisVersion", "Command",
 		"CoreType", "CoresPerSlot", "WalltimeHours", "Slots", "LicenseSettings",
 		"ExtraInputFileIDs", "OnDemandLicenseSeller", "ProjectID", "OrgCode", "Tags",
-		"NoDecompress", "IsLowPriority", "Submit", "TarSubpath",
+		"NoDecompress", "IsLowPriority", "Submit", "TarSubpath", "LocalInputFiles",
+		"LicenseFeatureName", "LicensesPerJob",
 	}
 	if err := writer.Write(header); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
@@ -232,6 +254,9 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 			strconv.FormatBool(job.IsLowPriority),
 			job.SubmitMode,
 			job.TarSubpath,
+			strings.Join(job.LocalInputFiles, ";"),
+			job.LicenseFeatureName,
+			strconv.Itoa(job.LicensesPerJob),
 		}
 		if err := writer.Write(row); err != nil {
 			return fmt.Errorf("failed to write job row: %w", err)
