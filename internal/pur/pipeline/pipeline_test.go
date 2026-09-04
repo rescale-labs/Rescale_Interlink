@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -606,6 +607,84 @@ func TestCheckJobHasInputs(t *testing.T) {
 			}
 			if tt.wantReject && !strings.Contains(err.Error(), tt.spec.JobName) {
 				t.Errorf("error %q does not name the job %q", err, tt.spec.JobName)
+			}
+		})
+	}
+}
+
+// licenseSpec is a minimal valid spec the feature-set cases vary from.
+func licenseSpec() models.JobSpec {
+	return models.JobSpec{
+		JobName:       "lic",
+		AnalysisCode:  "user_included",
+		Command:       "echo hi",
+		CoreType:      "emerald",
+		CoresPerSlot:  1,
+		Slots:         1,
+		WalltimeHours: 1.0,
+	}
+}
+
+func TestBuildJobRequest_UserDefinedLicenseFeatureSet(t *testing.T) {
+	spec := licenseSpec()
+	spec.LicenseFeatureName = "ansys_hpc"
+	spec.LicensesPerJob = 8
+
+	req, err := BuildJobRequest(spec, nil, nil, false)
+	if err != nil {
+		t.Fatalf("BuildJobRequest() error = %v", err)
+	}
+
+	// Asserted on the marshalled form, since the field's whole purpose is the
+	// exact JSON subtree the platform expects.
+	body, err := json.Marshal(req.JobAnalyses[0].UserDefinedLicenseSettings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	want := `{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`
+	if string(body) != want {
+		t.Errorf("userDefinedLicenseSettings =\n  %s\nwant\n  %s", body, want)
+	}
+}
+
+func TestBuildJobRequest_NoLicenseFeatureSendsNull(t *testing.T) {
+	req, err := BuildJobRequest(licenseSpec(), nil, nil, false)
+	if err != nil {
+		t.Fatalf("BuildJobRequest() error = %v", err)
+	}
+	if req.JobAnalyses[0].UserDefinedLicenseSettings != nil {
+		t.Errorf("userDefinedLicenseSettings = %#v, want nil", req.JobAnalyses[0].UserDefinedLicenseSettings)
+	}
+
+	// nil must reach the wire as an explicit null rather than being dropped.
+	body, err := json.Marshal(req.JobAnalyses[0])
+	if err != nil {
+		t.Fatalf("marshal analysis: %v", err)
+	}
+	if !strings.Contains(string(body), `"userDefinedLicenseSettings":null`) {
+		t.Errorf("analysis JSON missing null license settings: %s", body)
+	}
+}
+
+func TestBuildJobRequest_IncompleteLicenseFeatureIsRejected(t *testing.T) {
+	// Half a feature set would submit a job that quietly takes no license, so
+	// each half on its own is an error rather than a silent drop.
+	cases := []struct {
+		name    string
+		feature string
+		count   int
+	}{
+		{"name without count", "ansys_hpc", 0},
+		{"count without name", "", 4},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := licenseSpec()
+			spec.LicenseFeatureName = c.feature
+			spec.LicensesPerJob = c.count
+
+			if _, err := BuildJobRequest(spec, nil, nil, false); err == nil {
+				t.Fatal("BuildJobRequest() error = nil, want an error")
 			}
 		})
 	}

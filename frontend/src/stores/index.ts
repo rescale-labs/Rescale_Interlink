@@ -16,6 +16,7 @@ export type {
   AnalysisCode,
   AnalysisVersion,
   Automation,
+  Project,
   ScanOptions,
   PURRunOptions,
   WorkflowMemory,

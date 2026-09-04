@@ -13,6 +13,9 @@ import type { JobSpec, JobRow } from '../types/jobs'
 // deliberately not omitempty: a job scanned in file mode carries its own file
 // list, and an absent one has to read as "no files", not as undefined.
 //
+// The license feature pair is defaulted too, so a spec from an older saved file
+// cannot leave the builder reading `.trim()` off undefined.
+//
 // Every other field passes through, inputFiles and tarSubpath included; that
 // pass-through is what keeps a load/save round-trip lossless.
 export function normalizeJobSpec(spec: JobSpec): JobSpec {
@@ -22,6 +25,8 @@ export function normalizeJobSpec(spec: JobSpec): JobSpec {
     orgCode: spec.orgCode || '',
     automations: spec.automations || [],
     localInputFiles: spec.localInputFiles || [],
+    licenseFeatureName: spec.licenseFeatureName || '',
+    licensesPerJob: spec.licensesPerJob || 0,
   }
 }
 
