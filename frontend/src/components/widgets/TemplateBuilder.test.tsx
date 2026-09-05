@@ -206,13 +206,25 @@ describe('TemplateBuilder license feature set', () => {
     renderOpen(validTemplate())
 
     expect(getLicensesPerJobInput()).toBeDisabled()
+    // Unset shows as blank: a literal 0 in a box the platform would reject
+    // reads as a real value.
+    expect(getLicensesPerJobInput().value).toBe('')
     fireEvent.change(getFeatureNameInput(), { target: { value: 'ansys_hpc' } })
     expect(getLicensesPerJobInput()).not.toBeDisabled()
   })
 
-  it('shows an unset count as blank rather than zero', () => {
-    renderOpen(validTemplate())
-    expect(getLicensesPerJobInput().value).toBe('')
+  // The count box is disabled whenever the name is empty, so a count left over
+  // from a name the user cleared would be uneditable — it goes with the name.
+  it('drops the count when the feature name is cleared', () => {
+    const { onSave } = renderOpen(validTemplate())
+
+    fireEvent.change(getFeatureNameInput(), { target: { value: 'ansys_hpc' } })
+    fireEvent.change(getLicensesPerJobInput(), { target: { value: '4' } })
+    fireEvent.change(getFeatureNameInput(), { target: { value: '' } })
+    saveTemplate()
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave.mock.calls[0][0]).toMatchObject({ licenseFeatureName: '', licensesPerJob: 0 })
   })
 })
 
@@ -246,6 +258,8 @@ describe('TemplateBuilder cores stepper', () => {
   it('steps through the coretype slices below a full node', () => {
     renderWithLadder(4)
 
+    // 4 is the smallest slice this coretype sells, so there is nowhere down to go.
+    expect(screen.getByLabelText('Fewer cores')).toBeDisabled()
     fireEvent.click(screen.getByLabelText('More cores'))
     expect(coresValue()).toBe(8)
     fireEvent.click(screen.getByLabelText('More cores'))
@@ -263,11 +277,7 @@ describe('TemplateBuilder cores stepper', () => {
     expect(coresValue()).toBe(192)
     fireEvent.click(screen.getByLabelText('Fewer cores'))
     expect(coresValue()).toBe(128)
-  })
-
-  it('re-enters the slice ladder on the way down through a full node', () => {
-    renderWithLadder(128)
-
+    // And back through a full node, where the slice ladder resumes.
     fireEvent.click(screen.getByLabelText('Fewer cores'))
     expect(coresValue()).toBe(64)
     fireEvent.click(screen.getByLabelText('Fewer cores'))
@@ -290,13 +300,15 @@ describe('TemplateBuilder cores stepper', () => {
     expect(coresValue()).toBe(128)
   })
 
-  it('stops at the smallest slice the coretype sells', () => {
-    renderWithLadder(4)
+  // At 0 the stepper substitutes the node size, so the tooltip has to name the
+  // value a click actually produces rather than the one the raw 0 suggests.
+  it('agrees with the click when the stored value is zero', () => {
+    renderWithLadder(0)
 
-    const down = screen.getByLabelText('Fewer cores')
-    expect(down).toBeDisabled()
-    fireEvent.click(down)
-    expect(coresValue()).toBe(4)
+    const up = screen.getByLabelText('More cores')
+    expect(up).toHaveAttribute('title', 'Up to 128 cores')
+    fireEvent.click(up)
+    expect(coresValue()).toBe(128)
   })
 
   it('takes min and step from the ladder rather than counting by one', () => {
@@ -412,15 +424,31 @@ describe('TemplateBuilder project picker', () => {
     expect(App.GetProjects).toHaveBeenCalledTimes(1)
   })
 
-  it('points a failed scan at the button rather than retrying itself', async () => {
-    useJobStore.setState({ projectsError: 'status 403: forbidden', projectsLoaded: true })
+  // Selecting "No project" must not strand the id the dialog was opened with:
+  // nothing on screen can type one back.
+  it('keeps offering the opened id after "No project" is selected', () => {
+    seedProjects([NO_BUDGET])
+    renderOpen({ ...DEFAULT_JOB_TEMPLATE, projectId: 'pGONE' })
+
+    fireEvent.change(getProjectSelect(), { target: { value: '' } })
+
+    expect(getProjectSelect().value).toBe('')
+    expect(projectOptionText()).toContain("pGONE (not in this account's projects)")
+  })
+
+  it('does not retry after a failed scan', async () => {
+    vi.mocked(App.GetProjects).mockResolvedValueOnce(
+      { projects: null, error: 'status 403: forbidden' } as unknown as wailsapp.ProjectsResultDTO)
+    useJobStore.setState({ projectsLoaded: false })
     renderOpen()
 
-    expect(screen.getByText(/Could not load projects: status 403: forbidden/)).toBeInTheDocument()
+    await waitFor(() => expect(App.GetProjects).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(screen.getByText(/Could not load projects: status 403: forbidden/)).toBeInTheDocument())
     expect(screen.getByText(/use "Scan Projects" to retry/)).toBeInTheDocument()
-    // An error must not put the effect into a fetch loop.
-    await waitFor(() => {
-      expect(App.GetProjects).not.toHaveBeenCalled()
-    })
+    // An error must not put the effect into a fetch loop: the scan counts as
+    // done however it ended, and the button is the retry.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(App.GetProjects).toHaveBeenCalledTimes(1)
   })
 })
