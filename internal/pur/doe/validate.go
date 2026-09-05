@@ -69,7 +69,10 @@ func (p Problem) Error() string {
 // Rendered output is bounded at the one boundary every surface goes through.
 // A command legitimately gets long — solver flags, paths, mesh names — so it has
 // room to spare; a job name and a tag are labels, and one that runs past these
-// lengths is a runaway template rather than a label.
+// lengths is a runaway template rather than a label. The command and job-name
+// figures are pattern.MaxCommandLength/MaxJobNameLength, shared with file-scan
+// rendering so a sweep and a scan cannot disagree on what is too long; the tag
+// bound is DOE's own, as no other surface renders tags.
 const (
 	maxCommandLength = pattern.MaxCommandLength
 	maxJobNameLength = pattern.MaxJobNameLength
