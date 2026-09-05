@@ -552,9 +552,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     if (template.licenseFeatureName.trim() && template.licensesPerJob <= 0) {
       errs.push('Licenses per job must be 1 or more when a license feature name is set')
     }
-    if (!template.licenseFeatureName.trim() && template.licensesPerJob > 0) {
-      errs.push('License feature name is required when licenses per job is set')
-    }
     if (licenseType === 'CUSTOM' && licenseValue.trim()) {
       if (!parseCustomLicenseEntry(licenseValue)) {
         errs.push(
@@ -1060,7 +1057,13 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 <input
                   type="text"
                   value={template.licenseFeatureName}
-                  onChange={(e) => updateField('licenseFeatureName', e.target.value)}
+                  // Clearing the name disables the count box, so the count is
+                  // dropped with it rather than left on screen uneditable.
+                  onChange={(e) => setTemplate((t) => ({
+                    ...t,
+                    licenseFeatureName: e.target.value,
+                    licensesPerJob: e.target.value.trim() ? t.licensesPerJob : 0,
+                  }))}
                   placeholder="e.g. ansys_hpc"
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
