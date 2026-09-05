@@ -693,6 +693,10 @@ func TestBuildJobRequest_IncompleteLicenseFeatureIsRejected(t *testing.T) {
 	}{
 		{"name without count", "ansys_hpc", 0},
 		{"count without name", "", 4},
+		// CSV parsing accepts a negative integer. Treating it as "unset" sent
+		// userDefinedLicenseSettings:null instead of reporting the bad input.
+		{"negative count without name", "", -1},
+		{"negative count with name", "ansys_hpc", -1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

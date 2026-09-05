@@ -1474,7 +1474,9 @@ func BuildJobRequest(spec models.JobSpec, fileIDs []string, sharedFileIDs []stri
 		userLicense = models.NewUserDefinedLicense(spec.LicenseFeatureName, spec.LicensesPerJob)
 	case spec.LicenseFeatureName != "":
 		return nil, fmt.Errorf("license feature %q needs a licenses-per-job count greater than zero", spec.LicenseFeatureName)
-	case spec.LicensesPerJob > 0:
+	case spec.LicensesPerJob != 0:
+		// Not "> 0": CSV parsing accepts a negative integer, and treating that as
+		// "unset" would drop the half-pair silently instead of reporting it.
 		return nil, fmt.Errorf("licenses per job is set to %d but no license feature name was given", spec.LicensesPerJob)
 	}
 
