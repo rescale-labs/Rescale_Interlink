@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/reporting"
 )
 
@@ -266,20 +267,114 @@ func TestRender_RejectsResidualToken(t *testing.T) {
 	}
 }
 
-func TestValidateJobNameTemplate(t *testing.T) {
-	if warnings := ValidateJobNameTemplate("run-{{base}}-{{index}}"); len(warnings) > 0 {
-		t.Errorf("known tokens warned: %v", warnings)
-	}
-	if warnings := ValidateJobNameTemplate("Crash Study"); len(warnings) > 0 {
-		t.Errorf("token-free name warned: %v", warnings)
+// The rendered length limits are DOE's, and they apply here for the same reason:
+// a template multiplies its input, so a filename a byte too long is one the
+// caller must not submit. The boundary cases are checked exactly, since these
+// used to be bounded nowhere on the file-scan path.
+func TestRender_RejectsOverlengthOutput(t *testing.T) {
+	// {{file}} expands to the primary file's name, so a long stem is the input
+	// that grows the rendered result.
+	longFile := func(stemLen int) JobFiles {
+		return jobFilesFor("inputs/" + strings.Repeat("a", stemLen) + ".inp")
 	}
 
-	warnings := ValidateJobNameTemplate("run-{{bse}}")
-	if len(warnings) != 1 {
-		t.Fatalf("warnings = %v, want exactly one", warnings)
+	tests := []struct {
+		name       string
+		command    string
+		jobName    string
+		files      JobFiles
+		wantReject bool
+		wantIn     string
+	}{
+		{
+			name:    "command exactly at the limit",
+			command: strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")) + "{{file}}",
+			jobName: "run",
+			files:   jobFilesFor("inputs/case1.inp"),
+		},
+		{
+			name:       "command one byte over",
+			command:    strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")+1) + "{{file}}",
+			jobName:    "run",
+			files:      jobFilesFor("inputs/case1.inp"),
+			wantReject: true,
+			wantIn:     "command",
+		},
+		{
+			name:    "job name exactly at the limit",
+			command: "solve {{file}}",
+			jobName: "{{base}}",
+			files:   longFile(pattern.MaxJobNameLength),
+		},
+		{
+			name:       "job name one byte over",
+			command:    "solve {{file}}",
+			jobName:    "{{base}}",
+			files:      longFile(pattern.MaxJobNameLength + 1),
+			wantReject: true,
+			wantIn:     "job name",
+		},
+		{
+			// The index suffix is part of the rendered name, so it counts.
+			name:       "untokenized job name over the limit once numbered",
+			command:    "solve {{file}}",
+			jobName:    strings.Repeat("n", pattern.MaxJobNameLength),
+			files:      jobFilesFor("inputs/case1.inp"),
+			wantReject: true,
+			wantIn:     "job name",
+		},
 	}
-	if !strings.Contains(warnings[0], "{{bse}}") {
-		t.Errorf("warning %q does not name the unknown token", warnings[0])
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := Render(tt.command, tt.jobName, tt.files, 1)
+
+			if !tt.wantReject {
+				if err != nil {
+					t.Fatalf("Render: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected an error for overlength rendered output")
+			}
+			if !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("error %q does not say which field was too long", err)
+			}
+		})
+	}
+}
+
+// Render does not depend on the caller having validated the name template
+// either: an unknown token there leaves every job in the scan answering to one
+// literal name, and the name is what progress events are routed by.
+func TestRender_RejectsResidualJobNameToken(t *testing.T) {
+	_, _, err := Render("solve {{file}}", "run-{{bse}}", jobFilesFor("inputs/case1.inp"), 1)
+	if err == nil {
+		t.Fatal("expected an error for an unresolved job name token")
+	}
+	if !strings.Contains(err.Error(), "{{bse}}") {
+		t.Errorf("error %v does not name the unresolved token", err)
+	}
+}
+
+// An unknown name token is fatal rather than advisory: it leaves every job in
+// the scan carrying one literal name, and the name is what progress events and
+// state records are matched by.
+func TestValidateJobNameTemplate(t *testing.T) {
+	if err := ValidateJobNameTemplate("run-{{base}}-{{index}}"); err != nil {
+		t.Errorf("known tokens rejected: %v", err)
+	}
+	if err := ValidateJobNameTemplate("Crash Study"); err != nil {
+		t.Errorf("token-free name rejected: %v", err)
+	}
+
+	err := ValidateJobNameTemplate("run-{{bse}}")
+	if err == nil {
+		t.Fatal("expected an error for an unknown name token")
+	}
+	if !strings.Contains(err.Error(), "{{bse}}") {
+		t.Errorf("error %q does not name the unknown token", err)
 	}
 }
 

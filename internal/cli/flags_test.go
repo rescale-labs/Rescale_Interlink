@@ -1,9 +1,165 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/models"
 )
+
+// scanFilesFixture lays out two subdirectories holding identically named decks
+// and writes the template CSV a scan-files run generates jobs from. It returns
+// the root, the template path and the output path.
+func scanFilesFixture(t *testing.T, jobNameTemplate string) (root, template, output string) {
+	t.Helper()
+
+	root = t.TempDir()
+	for _, dir := range []string{"case1", "case2"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, "model.inp"), []byte("data"), 0644); err != nil {
+			t.Fatalf("write %s deck: %v", dir, err)
+		}
+	}
+
+	template = filepath.Join(root, "template.csv")
+	if err := config.SaveJobsCSV(template, []models.JobSpec{{
+		JobName:       jobNameTemplate,
+		Command:       "solve {{file}}",
+		AnalysisCode:  "user_included",
+		CoreType:      "emerald",
+		CoresPerSlot:  1,
+		Slots:         1,
+		WalltimeHours: 1.0,
+		TarSubpath:    "results",
+	}}); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+
+	return root, template, filepath.Join(root, "jobs.csv")
+}
+
+// runScanFiles executes the scan-files command over the fixture.
+func runScanFiles(t *testing.T, root, template, output string) error {
+	t.Helper()
+
+	cmd := newScanFilesCmd()
+	cmd.SetArgs([]string{
+		"--root", root,
+		"--primary", filepath.Join("*", "model.inp"),
+		"--template", template,
+		"--output", output,
+	})
+	cmd.SetOut(os.NewFile(0, os.DevNull))
+	return cmd.Execute()
+}
+
+// Two directories holding "model.inp" render to one job name under {{base}}.
+// The name is what the pipeline records state by, so the run fails: writing the
+// CSV without the second file would submit a batch short of the one scanned.
+func TestScanFilesRejectsDuplicateJobNames(t *testing.T) {
+	root, template, output := scanFilesFixture(t, "{{base}}")
+
+	err := runScanFiles(t, root, template, output)
+	if err == nil {
+		t.Fatal("expected an error for two files rendering to one job name")
+	}
+	// Both colliding files are named. Here they share a basename, so the message
+	// carries it twice.
+	if strings.Count(err.Error(), "model.inp") != 2 || !strings.Contains(err.Error(), `"model"`) {
+		t.Errorf("error %q does not name both files and the job name they share", err)
+	}
+	if _, statErr := os.Stat(output); statErr == nil {
+		t.Error("a jobs CSV was written despite the collision")
+	}
+
+	// {{dir}} is one of the remedies the error offers, so it must work.
+	root, template, output = scanFilesFixture(t, "{{dir}}-{{base}}")
+	if err := runScanFiles(t, root, template, output); err != nil {
+		t.Fatalf("scan-files with {{dir}}: %v", err)
+	}
+	jobs, err := config.LoadJobsCSV(output)
+	if err != nil {
+		t.Fatalf("load generated CSV: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("%d jobs generated with {{dir}} in the name, want 2", len(jobs))
+	}
+	// The template's subpath has no directory walk to apply to in files mode.
+	if jobs[0].TarSubpath != "" {
+		t.Errorf("TarSubpath = %q, want it cleared", jobs[0].TarSubpath)
+	}
+}
+
+// A CSV saved by a file scan carries LocalInputFiles. Reused as a folder-scan
+// template it used to hand that list to every generated job, and the tar stage
+// prefers the list over Directory — so every job archived the old template's
+// files rather than the run directory it was generated for.
+func TestMakeDirsCSVClearsInheritedFileList(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"Run_1", "Run_2"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	template := filepath.Join(root, "template.csv")
+	if err := config.SaveJobsCSV(template, []models.JobSpec{{
+		JobName:         "run_1",
+		Command:         "./solve.sh",
+		AnalysisCode:    "user_included",
+		CoreType:        "emerald",
+		CoresPerSlot:    1,
+		Slots:           1,
+		WalltimeHours:   1.0,
+		LocalInputFiles: []string{filepath.Join(root, "old", "case.inp")},
+	}}); err != nil {
+		t.Fatalf("write template: %v", err)
+	}
+
+	// Guards the test itself: were the field not round-tripped by the CSV, the
+	// template would reach the command empty and prove nothing.
+	loaded, err := config.LoadJobsCSV(template)
+	if err != nil {
+		t.Fatalf("reload template: %v", err)
+	}
+	if len(loaded[0].LocalInputFiles) == 0 {
+		t.Fatal("the template CSV did not round-trip LocalInputFiles")
+	}
+
+	output := filepath.Join(root, "jobs.csv")
+	cmd := newMakeDirsCSVCmd()
+	cmd.SetArgs([]string{
+		"--template", template,
+		"--output", output,
+		"--pattern", "Run_*",
+		"--cwd", root,
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("make-dirs-csv: %v", err)
+	}
+
+	jobs, err := config.LoadJobsCSV(output)
+	if err != nil {
+		t.Fatalf("load generated CSV: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("%d jobs generated, want 2", len(jobs))
+	}
+	for _, job := range jobs {
+		if len(job.LocalInputFiles) != 0 {
+			t.Errorf("%s kept the template's file list %v, so it would archive those "+
+				"instead of %s", job.JobName, job.LocalInputFiles, job.Directory)
+		}
+		if job.Directory == "" {
+			t.Errorf("%s has no directory to archive", job.JobName)
+		}
+	}
+}
 
 // TestJobsIDAliasParses covers the documented --id alias. It was unusable:
 // --job-id and --id are two pflag entries sharing one variable, and cobra's

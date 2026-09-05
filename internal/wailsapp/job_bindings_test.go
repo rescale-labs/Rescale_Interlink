@@ -27,6 +27,89 @@ func TestScanDirectoryNoEngine(t *testing.T) {
 	}
 }
 
+// filesScanOpts describes a file-mode scan of dir. The pattern is a plain glob
+// relative to RootDir, so a subdirectory has to be spelled out.
+func filesScanOpts(dir, pattern string) ScanOptionsDTO {
+	return ScanOptionsDTO{RootDir: dir, ScanMode: "files", PrimaryPattern: pattern}
+}
+
+// writeScanFile creates one file under dir, making parents as needed.
+func writeScanFile(t *testing.T, dir, name string) {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir for %s: %v", name, err)
+	}
+	if err := os.WriteFile(path, []byte("data"), 0644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+// A job name is an operational identifier: the run store routes progress events
+// by name, so two jobs answering to "model" send each other's updates to
+// whichever row matches first. The whole scan fails on the collision — keeping
+// one of the two would hand back a batch smaller than the one scanned for.
+func TestScanFilesMode_RejectsDuplicateJobNames(t *testing.T) {
+	root := t.TempDir()
+	writeScanFile(t, root, filepath.Join("case1", "model.inp"))
+	writeScanFile(t, root, filepath.Join("case2", "model.inp"))
+
+	app := &App{}
+	result := app.scanFilesMode(filesScanOpts(root, "*/model.inp"), JobSpecDTO{
+		Command: "solve {{file}}",
+		JobName: "{{base}}",
+	})
+
+	if result.Error == "" {
+		t.Fatal("expected an error for two files rendering to one job name")
+	}
+	// Both colliding files are named. Here they share a basename, so the message
+	// carries it twice.
+	if strings.Count(result.Error, "model.inp") != 2 || !strings.Contains(result.Error, `"model"`) {
+		t.Errorf("error %q does not name both files and the job name they share", result.Error)
+	}
+	if len(result.Jobs) != 0 {
+		t.Errorf("%d jobs built from a colliding scan", len(result.Jobs))
+	}
+
+	// {{dir}} is one of the two remedies the message offers, so it must work.
+	result = app.scanFilesMode(filesScanOpts(root, "*/model.inp"), JobSpecDTO{
+		Command: "solve {{file}}",
+		JobName: "{{dir}}-{{base}}",
+	})
+	if result.Error != "" {
+		t.Fatalf("scanFilesMode with {{dir}}: %s", result.Error)
+	}
+	if len(result.Jobs) != 2 {
+		t.Fatalf("%d jobs kept with {{dir}} in the name, want 2 (skipped: %v)",
+			len(result.Jobs), result.SkippedFiles)
+	}
+}
+
+// An unknown token in the name template is wrong for every file in the scan, so
+// it fails the scan once rather than skipping each file in turn.
+func TestScanFilesMode_RejectsUnknownJobNameToken(t *testing.T) {
+	root := t.TempDir()
+	writeScanFile(t, root, "case1.inp")
+
+	app := &App{}
+	result := app.scanFilesMode(filesScanOpts(root, "*.inp"), JobSpecDTO{
+		Command: "solve {{file}}",
+		JobName: "run-{{bse}}",
+	})
+
+	if result.Error == "" {
+		t.Fatal("expected an error for an unknown job name token")
+	}
+	if !strings.Contains(result.Error, "{{bse}}") {
+		t.Errorf("error %q does not name the unknown token", result.Error)
+	}
+	if len(result.Jobs) != 0 {
+		t.Errorf("%d jobs built from a rejected template", len(result.Jobs))
+	}
+}
+
 // =============================================================================
 // Template and normalization tests
 // =============================================================================

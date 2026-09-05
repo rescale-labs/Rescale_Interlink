@@ -372,9 +372,19 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("template command: %w", err)
 				}
-				for _, w := range append(templateWarnings, filescan.ValidateJobNameTemplate(template.JobName)...) {
+				if err := filescan.ValidateJobNameTemplate(template.JobName); err != nil {
+					return fmt.Errorf("template job name: %w", err)
+				}
+				for _, w := range templateWarnings {
 					fmt.Printf("  Warning: %s\n", w)
 				}
+
+				// Job names are operational identifiers, not labels: the pipeline
+				// records state per name, so two jobs answering to one name
+				// misroute each other's updates. A collision fails the run, as it
+				// fails DOE generation: writing the CSV without the second file
+				// would submit a batch quietly smaller than the one scanned.
+				seenNames := make(map[string]string, len(result.Jobs))
 
 				for i, jf := range result.Jobs {
 					command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jf, i+1)
@@ -383,11 +393,21 @@ Examples:
 						fmt.Printf("  Skipped %s: %v\n", filepath.Base(jf.PrimaryFile), renderErr)
 						continue
 					}
+					base := filepath.Base(jf.PrimaryFile)
+					if first, dup := seenNames[jobName]; dup {
+						return fmt.Errorf("%s and %s both render to job name %q; "+
+							"add {{index}} or {{dir}} to the job name template to keep names unique",
+							first, base, jobName)
+					}
+					seenNames[jobName] = base
 
 					job := template
 					job.Command = command
 					job.JobName = jobName
 					job.Directory = jf.PrimaryDir
+					// As in the GUI's files mode: no directory walk here for an
+					// inherited subpath to apply to, and it would reach the CSV.
+					job.TarSubpath = ""
 					// The job's archive is exactly its own files, wherever they live:
 					// a secondary pattern can resolve outside PrimaryDir.
 					job.LocalInputFiles = jf.InputFiles

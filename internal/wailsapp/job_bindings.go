@@ -313,11 +313,19 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: err.Error()}
 	}
 	warnings = append(warnings, templateWarnings...)
-	warnings = append(warnings, filescan.ValidateJobNameTemplate(template.JobName)...)
+	if err := filescan.ValidateJobNameTemplate(template.JobName); err != nil {
+		return ScanResultDTO{Error: err.Error()}
+	}
 
 	// Convert filescan results to JobSpecDTO
 	var jobs []JobSpecDTO
 	skipped := append([]string{}, result.SkippedFiles...)
+	// Job names are operational identifiers, not labels: the run store routes
+	// progress by name, so two jobs answering to one name misroute each other's
+	// updates. A collision fails the whole scan, as it fails DOE generation:
+	// dropping the second file would hand back a batch quietly smaller than the
+	// one the user scanned for.
+	seenNames := make(map[string]string, len(result.Jobs))
 
 	for i, jobFiles := range result.Jobs {
 		command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jobFiles, i+1)
@@ -326,6 +334,13 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 			skipped = append(skipped, fmt.Sprintf("%s: %v", filepath.Base(jobFiles.PrimaryFile), renderErr))
 			continue
 		}
+		base := filepath.Base(jobFiles.PrimaryFile)
+		if first, dup := seenNames[jobName]; dup {
+			return ScanResultDTO{Error: fmt.Sprintf("%s and %s both render to job name %q; "+
+				"add {{index}} or {{dir}} to the job name template to keep names unique",
+				first, base, jobName)}
+		}
+		seenNames[jobName] = base
 
 		job := template
 		job.Command = command

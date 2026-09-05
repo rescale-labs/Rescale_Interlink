@@ -109,19 +109,23 @@ func ValidateCommandTemplate(command string) (warnings []string, err error) {
 	return nil, nil
 }
 
-// ValidateJobNameTemplate reports unknown tokens in a job name template.
+// ValidateJobNameTemplate rejects unknown tokens in a job name template.
 //
-// These are warnings rather than errors: an unresolved token in a name is
-// cosmetic, where one in a command changes what the job runs.
-func ValidateJobNameTemplate(jobName string) []string {
-	var warnings []string
+// A name is not cosmetic here: it is the identifier progress events and state
+// records are matched by, so a template like "run-{{bse}}" leaves every job in
+// the scan with the same literal name and their updates land on whichever row
+// happens to match first. Checked once, up front, so a typo costs one message
+// rather than one skip per scanned file.
+func ValidateJobNameTemplate(jobName string) error {
 	for _, token := range pattern.ExtractTokens(jobName) {
 		if !isKnownToken(token) {
-			warnings = append(warnings, fmt.Sprintf("job name references {{%s}}, which is not a "+
-				"file-scan token; valid tokens are %s", token, tokenList()))
+			// The name comes before the word "token" on purpose; see
+			// ValidateCommandTemplate.
+			return fmt.Errorf("job name contains {{%s}}, which is not a file-scan token; valid tokens are %s",
+				token, tokenList())
 		}
 	}
-	return warnings
+	return nil
 }
 
 // Render produces the command and job name for one scanned file set.
