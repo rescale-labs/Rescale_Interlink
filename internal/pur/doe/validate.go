@@ -71,8 +71,8 @@ func (p Problem) Error() string {
 // room to spare; a job name and a tag are labels, and one that runs past these
 // lengths is a runaway template rather than a label.
 const (
-	maxCommandLength = 32 << 10
-	maxJobNameLength = 128
+	maxCommandLength = pattern.MaxCommandLength
+	maxJobNameLength = pattern.MaxJobNameLength
 	maxTagLength     = 64
 )
 

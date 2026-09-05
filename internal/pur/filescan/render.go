@@ -167,8 +167,26 @@ func Render(commandTemplate, jobNameTemplate string, jf JobFiles, index int) (co
 		return "", "", fmt.Errorf("rendered command still contains {{%s}}; valid tokens are %s",
 			residual[0], tokenList())
 	}
+	if len(command) > pattern.MaxCommandLength {
+		return "", "", fmt.Errorf("rendered command is %d bytes, which exceeds the limit of %d",
+			len(command), pattern.MaxCommandLength)
+	}
 
-	return command, renderJobName(jobNameTemplate, values, index), nil
+	jobName = renderJobName(jobNameTemplate, values, index)
+
+	// The same two post-conditions for the name. A residual token there is not
+	// cosmetic: the name is what progress events and state records are matched
+	// by, so every job in the scan would answer to one literal identifier.
+	if residual := pattern.ExtractTokens(jobName); len(residual) > 0 {
+		return "", "", fmt.Errorf("rendered job name still contains {{%s}}; valid tokens are %s",
+			residual[0], tokenList())
+	}
+	if len(jobName) > pattern.MaxJobNameLength {
+		return "", "", fmt.Errorf("rendered job name is %d bytes, which exceeds the limit of %d",
+			len(jobName), pattern.MaxJobNameLength)
+	}
+
+	return command, jobName, nil
 }
 
 // renderJobName substitutes into the job name, falling back to index numbering

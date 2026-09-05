@@ -90,6 +90,14 @@ const UnsafeValueChars = "`$;|&><\n\r\"'\\"
 // case value, a filename — that expands is no longer the value the user wrote.
 const GlobValueChars = "*?[](){}~"
 
+// Bounds on rendered output, shared by every surface that renders one. Both a
+// DOE sweep and a file scan reach the same job-creation request, so a length one
+// of them refuses is not one the other should submit.
+const (
+	MaxCommandLength = 32 << 10
+	MaxJobNameLength = 128
+)
+
 // FirstUnsafeChar returns the first character of s a shell would read as syntax
 // rather than as data, and whether one was found. That is both sets: command
 // structure and filename expansion.
