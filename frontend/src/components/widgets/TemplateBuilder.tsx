@@ -351,9 +351,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   // against another account, or a project since deleted. Kept as an option so
   // opening the builder does not silently unassign it.
   const unlistedProjectId = useMemo(() => {
-    if (!template.projectId) return ''
-    return projects.some((p) => p.id === template.projectId) ? '' : template.projectId
-  }, [projects, template.projectId])
+    // Also the id the dialog opened with, so selecting "No project" to see what
+    // it does cannot make an unlisted id unrecoverable — nothing can type it back.
+    const id = template.projectId || initialTemplate?.projectId || ''
+    if (!id) return ''
+    return projects.some((p) => p.id === id) ? '' : id
+  }, [projects, template.projectId, initialTemplate])
 
   // The budget line is what distinguishes two similarly named projects, so it
   // belongs in the option text. "(no budget)" adds nothing next to a name.
@@ -899,9 +902,11 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                       {projectLabel(project)}
                     </option>
                   ))}
+                  {/* An id only reads as unlisted once the list has been fetched;
+                      until then it is just an id whose project is not known yet. */}
                   {unlistedProjectId && (
                     <option value={unlistedProjectId}>
-                      {unlistedProjectId} (not in this account's projects)
+                      {unlistedProjectId}{projectsLoaded ? " (not in this account's projects)" : ''}
                     </option>
                   )}
                 </select>
