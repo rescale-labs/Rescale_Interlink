@@ -42,6 +42,7 @@ export function GetJobsStats():Promise<wailsapp.JobsStatsDTO>;
 export function GetLocalFilesInfo(arg1:Array<string>):Promise<Array<wailsapp.LocalFileInfoDTO>>;
 export function GetMyJobsFolderID():Promise<string>;
 export function GetMyLibraryFolderID():Promise<string>;
+export function GetProjects():Promise<wailsapp.ProjectsResultDTO>;
 export function GetRunHistory():Promise<Array<wailsapp.RunHistoryEntryDTO>>;
 export function GetRunStatus():Promise<wailsapp.RunStatusDTO>;
 export function GetServiceStatus():Promise<wailsapp.ServiceStatusDTO>;

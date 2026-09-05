@@ -162,6 +162,10 @@ export function GetMyLibraryFolderID() {
   return window['go']['wailsapp']['App']['GetMyLibraryFolderID']();
 }
 
+export function GetProjects() {
+  return window['go']['wailsapp']['App']['GetProjects']();
+}
+
 export function GetRunHistory() {
   return window['go']['wailsapp']['App']['GetRunHistory']();
 }
