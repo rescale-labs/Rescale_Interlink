@@ -78,144 +78,117 @@ func TestCreateTarGzFromFiles_FlattensExplicitSet(t *testing.T) {
 	writeFile(t, filepath.Join(root, "inputs", "case2.inp"), "other job")
 	writeFile(t, filepath.Join(root, "inputs", "notes.log"), "noise")
 
-	out := filepath.Join(root, "case1_00000000.tar.gz")
-	if err := CreateTarGzFromFiles([]string{primary, sibling, outside}, out, "gzip"); err != nil {
-		t.Fatalf("CreateTarGzFromFiles: %v", err)
-	}
-
-	got := archiveContents(t, out)
 	want := map[string]string{
 		"case1.inp":  "primary",
 		"case1.mesh": "sibling",
 		"case1.cfg":  "outside",
 	}
 
-	if len(got) != len(want) {
-		t.Fatalf("archive has %d entries (%v), want %d", len(got), got, len(want))
+	// Both archive flavors, since the entry set must not depend on compression.
+	for _, flavor := range []struct{ compression, ext string }{{"gzip", ".tar.gz"}, {"none", ".tar"}} {
+		t.Run(flavor.compression, func(t *testing.T) {
+			out := filepath.Join(root, "case1_00000000"+flavor.ext)
+			if err := CreateTarGzFromFiles([]string{primary, sibling, outside}, out, flavor.compression); err != nil {
+				t.Fatalf("CreateTarGzFromFiles: %v", err)
+			}
+
+			got := archiveContents(t, out)
+			if len(got) != len(want) {
+				t.Fatalf("archive has %d entries (%v), want %d", len(got), got, len(want))
+			}
+			for name, contents := range want {
+				if got[name] != contents {
+					t.Errorf("entry %q = %q, want %q", name, got[name], contents)
+				}
+			}
+		})
 	}
-	for name, contents := range want {
-		if got[name] != contents {
-			t.Errorf("entry %q = %q, want %q", name, got[name], contents)
+}
+
+// Every refusal happens before anything is written: a half-written archive is
+// one the pipeline may find and upload.
+func TestCreateTarGzFromFiles_Rejects(t *testing.T) {
+	root := t.TempDir()
+	dupA := writeFile(t, filepath.Join(root, "a", "mesh.cfg"), "a")
+	dupB := writeFile(t, filepath.Join(root, "b", "mesh.cfg"), "b")
+
+	tests := []struct {
+		name   string
+		files  []string
+		wantIn string
+	}{
+		// Flattening makes two same-named files from different folders collide.
+		// Dropping one silently would give a job that is missing an input it was
+		// told it had, so the message has to name the collision.
+		{"duplicate base names", []string{dupA, dupB}, "duplicate filename"},
+		{"a file that is not there", []string{filepath.Join(root, "nope.inp")}, ""},
+		{"an empty list", nil, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "out_00000000.tar.gz")
+
+			err := CreateTarGzFromFiles(tt.files, out, "gzip")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if tt.wantIn != "" && !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("error = %v, want it to mention %q", err, tt.wantIn)
+			}
+			if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+				t.Error("partial archive was left behind after the error")
+			}
+		})
+	}
+}
+
+// The archive path must vary with everything that identifies an archive and with
+// nothing else. The regression this guards: every job scanned out of one folder
+// resolved to a single tar path, so the tar and upload workers raced over one
+// file and uploads arrived truncated.
+func TestGenerateTarPathForFiles_Identity(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "inputs")
+	set1 := []string{filepath.Join(dir, "case1.inp"), filepath.Join(dir, "case1.mesh")}
+	set2 := []string{filepath.Join(dir, "case2.inp"), filepath.Join(dir, "case2.mesh")}
+	path := func(files []string, index int) string {
+		return GenerateTarPathForFiles(files, index, dir, "gzip")
+	}
+
+	distinct := map[string][2]string{
+		"two file sets from one directory": {path(set1, 1), path(set2, 2)},
+		// Two jobs may legitimately run the same input deck with different
+		// commands or core counts. Naming by file set alone gave them one
+		// archive, so one truncated and rewrote it while the other uploaded.
+		"two jobs over one file set": {path(set1, 1), path(set1, 2)},
+		// The member list is hashed with separators, so regrouping the same
+		// characters across names still changes the path.
+		"the same characters regrouped across names": {
+			path([]string{"/d/ab", "/d/c"}, 1), path([]string{"/d/a", "/d/bc"}, 1),
+		},
+		// Compared against the directory-only namer, which is what collided.
+		"against the directory-only namer": {path(set1, 1), GenerateTarPath(dir, dir, "gzip")},
+	}
+	for name, pair := range distinct {
+		if pair[0] == pair[1] {
+			t.Errorf("%s: both resolved to %s", name, pair[0])
 		}
 	}
-}
 
-func TestCreateTarGzFromFiles_Uncompressed(t *testing.T) {
-	root := t.TempDir()
-	primary := writeFile(t, filepath.Join(root, "case1.inp"), "primary")
-
-	out := filepath.Join(root, "case1_00000000.tar")
-	if err := CreateTarGzFromFiles([]string{primary}, out, "none"); err != nil {
-		t.Fatalf("CreateTarGzFromFiles: %v", err)
-	}
-
-	if got := archiveContents(t, out); got["case1.inp"] != "primary" {
-		t.Errorf("entry case1.inp = %q, want %q", got["case1.inp"], "primary")
-	}
-}
-
-// Flattening makes two same-named files from different folders collide. Dropping
-// one silently would give a job that is missing an input it was told it had.
-func TestCreateTarGzFromFiles_RejectsDuplicateBaseNames(t *testing.T) {
-	root := t.TempDir()
-	a := writeFile(t, filepath.Join(root, "a", "mesh.cfg"), "a")
-	b := writeFile(t, filepath.Join(root, "b", "mesh.cfg"), "b")
-
-	out := filepath.Join(root, "dup_00000000.tar.gz")
-	err := CreateTarGzFromFiles([]string{a, b}, out, "gzip")
-	if err == nil {
-		t.Fatal("expected an error for duplicate base names")
-	}
-	if !strings.Contains(err.Error(), "duplicate filename") {
-		t.Errorf("error = %v, want it to mention a duplicate filename", err)
-	}
-	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
-		t.Error("partial archive was left behind after the error")
-	}
-}
-
-func TestCreateTarGzFromFiles_MissingFile(t *testing.T) {
-	root := t.TempDir()
-	out := filepath.Join(root, "missing_00000000.tar.gz")
-
-	err := CreateTarGzFromFiles([]string{filepath.Join(root, "nope.inp")}, out, "gzip")
-	if err == nil {
-		t.Fatal("expected an error for a missing file")
-	}
-	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
-		t.Error("partial archive was left behind after the error")
-	}
-}
-
-func TestCreateTarGzFromFiles_EmptyList(t *testing.T) {
-	if err := CreateTarGzFromFiles(nil, filepath.Join(t.TempDir(), "x.tar.gz"), "gzip"); err == nil {
-		t.Fatal("expected an error for an empty file list")
-	}
-}
-
-// The regression this guards: every job scanned out of one folder used to
-// resolve to a single tar path, so the tar and upload workers raced over one
-// file and uploads arrived truncated.
-func TestGenerateTarPathForFiles_DistinctPerFileSet(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "inputs")
-
-	one := GenerateTarPathForFiles([]string{
-		filepath.Join(dir, "case1.inp"), filepath.Join(dir, "case1.mesh"),
-	}, 1, dir, "gzip")
-	two := GenerateTarPathForFiles([]string{
-		filepath.Join(dir, "case2.inp"), filepath.Join(dir, "case2.mesh"),
-	}, 2, dir, "gzip")
-
-	if one == two {
-		t.Fatalf("two file sets from one directory share the tar path %s", one)
-	}
-
-	// The job index leads, then the primary file's stem, so the log line is
-	// readable and two jobs sharing a file set still get separate archives.
-	if base := filepath.Base(one); !strings.HasPrefix(base, "1_case1_") {
-		t.Errorf("tar name %q does not start with the job index and the primary file's stem", base)
-	}
-
-	// Compare against the directory-only namer, which is what collided.
-	if GenerateTarPath(dir, dir, "gzip") == one {
-		t.Error("file-set path matches the directory-only path")
-	}
-}
-
-// The regression this guards: two jobs may legitimately run the same input deck
-// with different commands or core counts. Naming by file set alone gave them one
-// archive, so one job truncated and rewrote it while the other uploaded, or
-// deleted it after upload before the other had opened it.
-func TestGenerateTarPathForFiles_DistinctPerJobForOneFileSet(t *testing.T) {
-	files := []string{"/data/inputs/case1.inp", "/data/inputs/case1.mesh"}
-
-	one := GenerateTarPathForFiles(files, 1, "/tmp", "gzip")
-	two := GenerateTarPathForFiles(files, 2, "/tmp", "gzip")
-
-	if one == two {
-		t.Fatalf("two jobs sharing one file set share the tar path %s", one)
-	}
-	if !fnvSuffixRe.MatchString(strings.ToLower(filepath.Base(one))) {
-		t.Errorf("%q lacks the FNV suffix safeRemoveTar gates deletion on", filepath.Base(one))
-	}
-}
-
-func TestGenerateTarPathForFiles_Stable(t *testing.T) {
-	files := []string{"/data/inputs/case1.inp", "/data/inputs/case1.mesh"}
-	// Stability is what lets a resumed run recompute the path for a job whose
-	// tar did not finish, so the index must be part of the stable input.
-	if a, b := GenerateTarPathForFiles(files, 3, "/tmp", "gzip"), GenerateTarPathForFiles(files, 3, "/tmp", "gzip"); a != b {
+	// Stability is what lets a resumed run recompute the path for a job whose tar
+	// did not finish, so the index must be part of the stable input.
+	if a, b := path(set1, 3), path(set1, 3); a != b {
 		t.Errorf("not stable across calls: %s vs %s", a, b)
 	}
-}
 
-// A member list is hashed with separators, so regrouping the same characters
-// across names still changes the archive path.
-func TestGenerateTarPathForFiles_SeparatorPreventsAmbiguity(t *testing.T) {
-	a := GenerateTarPathForFiles([]string{"/d/ab", "/d/c"}, 1, "/tmp", "none")
-	b := GenerateTarPathForFiles([]string{"/d/a", "/d/bc"}, 1, "/tmp", "none")
-	if a == b {
-		t.Errorf("ambiguous hash: %s", a)
+	base := filepath.Base(path(set1, 1))
+	// The job index leads, then the primary file's stem, so the log line is
+	// readable and two jobs sharing a file set still get separate archives.
+	if !strings.HasPrefix(base, "1_case1_") {
+		t.Errorf("tar name %q does not start with the job index and the primary file's stem", base)
+	}
+	if !fnvSuffixRe.MatchString(strings.ToLower(base)) {
+		t.Errorf("%q lacks the FNV suffix safeRemoveTar gates deletion on", base)
 	}
 }
 

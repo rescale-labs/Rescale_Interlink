@@ -131,9 +131,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-// Without this the CLI's scan-files -> jobs.csv -> pur run flow loses each job's
-// file list, and every job falls back to archiving its whole directory.
-func TestSaveLoadRoundTrip_LocalInputFiles(t *testing.T) {
+// Both columns arrived with file-scan mode and both are load-bearing at submit
+// time: without LocalInputFiles the CLI's scan-files -> jobs.csv -> pur run flow
+// loses each job's file list and every job falls back to archiving its whole
+// directory, and without the license feature the same flow submits jobs that
+// quietly take no license.
+func TestSaveLoadRoundTrip_FileScanColumns(t *testing.T) {
 	original := models.JobSpec{
 		Directory:       filepath.Join("scratch", "inputs"),
 		JobName:         "case1",
@@ -150,6 +153,8 @@ func TestSaveLoadRoundTrip_LocalInputFiles(t *testing.T) {
 			// Outside Directory, which is the whole point of the field.
 			filepath.Join("scratch", "meshes", "case1.cfg"),
 		},
+		LicenseFeatureName: "ansys_hpc",
+		LicensesPerJob:     8,
 	}
 
 	csvPath := filepath.Join(t.TempDir(), "filescan.csv")
@@ -174,11 +179,17 @@ func TestSaveLoadRoundTrip_LocalInputFiles(t *testing.T) {
 			t.Errorf("LocalInputFiles[%d] = %s, want %s", i, got[i], want)
 		}
 	}
+	if loaded[0].LicenseFeatureName != original.LicenseFeatureName {
+		t.Errorf("LicenseFeatureName = %q, want %q", loaded[0].LicenseFeatureName, original.LicenseFeatureName)
+	}
+	if loaded[0].LicensesPerJob != original.LicensesPerJob {
+		t.Errorf("LicensesPerJob = %d, want %d", loaded[0].LicensesPerJob, original.LicensesPerJob)
+	}
 }
 
-// A CSV written before the column existed must still load, since users keep
+// A CSV written before the columns existed must still load, since users keep
 // their jobs.csv files around.
-func TestLoadJobsCSV_WithoutLocalInputFilesColumn(t *testing.T) {
+func TestLoadJobsCSV_WithoutFileScanColumns(t *testing.T) {
 	csvPath := filepath.Join(t.TempDir(), "legacy.csv")
 	content := "Directory,JobName,AnalysisCode,Command,CoreType,CoresPerSlot,WalltimeHours,Slots,LicenseSettings\n" +
 		"./Run_1,Run_1,user_included,./run.sh,emerald,4,1.0,1,\"{\"\"LICENSE\"\": \"\"value\"\"}\"\n"
@@ -189,7 +200,7 @@ func TestLoadJobsCSV_WithoutLocalInputFilesColumn(t *testing.T) {
 
 	loaded, err := LoadJobsCSV(csvPath)
 	if err != nil {
-		t.Fatalf("LoadJobsCSV() failed on a CSV without the column: %v", err)
+		t.Fatalf("LoadJobsCSV() failed on a CSV without the columns: %v", err)
 	}
 	if len(loaded) != 1 {
 		t.Fatalf("loaded %d jobs, want 1", len(loaded))
@@ -197,45 +208,8 @@ func TestLoadJobsCSV_WithoutLocalInputFilesColumn(t *testing.T) {
 	if len(loaded[0].LocalInputFiles) != 0 {
 		t.Errorf("LocalInputFiles = %v, want empty", loaded[0].LocalInputFiles)
 	}
-	// Same story for the license feature columns, added at the same time.
 	if loaded[0].LicenseFeatureName != "" || loaded[0].LicensesPerJob != 0 {
 		t.Errorf("license feature = %q x %d, want empty",
 			loaded[0].LicenseFeatureName, loaded[0].LicensesPerJob)
-	}
-}
-
-// The license feature drives userDefinedLicenseSettings at submit time, so losing
-// it in the CSV would submit jobs that take no license.
-func TestSaveLoadRoundTrip_LicenseFeature(t *testing.T) {
-	original := models.JobSpec{
-		Directory:          "./Run_1",
-		JobName:            "Run_1",
-		AnalysisCode:       "user_included",
-		Command:            "./run.sh",
-		CoreType:           "emerald",
-		CoresPerSlot:       4,
-		WalltimeHours:      1.0,
-		Slots:              1,
-		LicenseFeatureName: "ansys_hpc",
-		LicensesPerJob:     8,
-	}
-
-	csvPath := filepath.Join(t.TempDir(), "license_feature.csv")
-	if err := SaveJobsCSV(csvPath, []models.JobSpec{original}); err != nil {
-		t.Fatalf("SaveJobsCSV() failed: %v", err)
-	}
-
-	loaded, err := LoadJobsCSV(csvPath)
-	if err != nil {
-		t.Fatalf("LoadJobsCSV() failed: %v", err)
-	}
-	if len(loaded) != 1 {
-		t.Fatalf("loaded %d jobs, want 1", len(loaded))
-	}
-	if loaded[0].LicenseFeatureName != original.LicenseFeatureName {
-		t.Errorf("LicenseFeatureName = %q, want %q", loaded[0].LicenseFeatureName, original.LicenseFeatureName)
-	}
-	if loaded[0].LicensesPerJob != original.LicensesPerJob {
-		t.Errorf("LicensesPerJob = %d, want %d", loaded[0].LicensesPerJob, original.LicensesPerJob)
 	}
 }

@@ -23,47 +23,63 @@ func jobFilesFor(primaryFile string) JobFiles {
 }
 
 func TestSubstitutions(t *testing.T) {
-	got := Substitutions(jobFilesFor("scratch/inputs/case1.inp"), 1)
-
-	want := map[string]string{
-		TokenFile:  "case1.inp",
-		TokenBase:  "case1",
-		TokenExt:   "inp",
-		TokenDir:   "inputs",
-		TokenIndex: "1",
+	tests := []struct {
+		name  string
+		file  string
+		index int
+		want  map[string]string
+	}{
+		{
+			name: "every token comes from the primary file",
+			file: "scratch/inputs/case1.inp", index: 1,
+			want: map[string]string{
+				TokenFile: "case1.inp", TokenBase: "case1", TokenExt: "inp",
+				TokenDir: "inputs", TokenIndex: "1",
+			},
+		},
+		// The layout {{dir}} exists for: the filenames are identical, so only the
+		// containing folder tells these two jobs apart.
+		{
+			name: "identical filenames, first folder",
+			file: "runs/case1/model.inp", index: 1,
+			want: map[string]string{
+				TokenFile: "model.inp", TokenBase: "model", TokenExt: "inp",
+				TokenDir: "case1", TokenIndex: "1",
+			},
+		},
+		{
+			name: "identical filenames, second folder",
+			file: "runs/case2/model.inp", index: 2,
+			want: map[string]string{
+				TokenFile: "model.inp", TokenBase: "model", TokenExt: "inp",
+				TokenDir: "case2", TokenIndex: "2",
+			},
+		},
+		{
+			name: "a file with no extension",
+			file: "inputs/Makefile", index: 1,
+			want: map[string]string{
+				TokenFile: "Makefile", TokenBase: "Makefile", TokenExt: "",
+				TokenDir: "inputs", TokenIndex: "1",
+			},
+		},
 	}
 
-	for token, value := range want {
-		if got[token] != value {
-			t.Errorf("{{%s}} = %q, want %q", token, got[token], value)
-		}
-	}
-	if len(got) != len(want) {
-		t.Errorf("got %d tokens (%v), want %d", len(got), got, len(want))
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Substitutions(jobFilesFor(tt.file), tt.index)
 
-// The layout {{dir}} exists for: the filenames are identical, so only the
-// containing folder tells the jobs apart.
-func TestSubstitutions_DirDistinguishesIdenticalFilenames(t *testing.T) {
-	one := Substitutions(jobFilesFor("runs/case1/model.inp"), 1)
-	two := Substitutions(jobFilesFor("runs/case2/model.inp"), 2)
-
-	if one[TokenFile] != two[TokenFile] {
-		t.Fatalf("test premise: filenames differ (%q, %q)", one[TokenFile], two[TokenFile])
-	}
-	if one[TokenDir] != "case1" || two[TokenDir] != "case2" {
-		t.Errorf("{{dir}} = %q and %q, want case1 and case2", one[TokenDir], two[TokenDir])
-	}
-}
-
-func TestSubstitutions_NoExtension(t *testing.T) {
-	got := Substitutions(jobFilesFor("inputs/Makefile"), 1)
-	if got[TokenExt] != "" {
-		t.Errorf("{{ext}} = %q, want empty", got[TokenExt])
-	}
-	if got[TokenBase] != "Makefile" {
-		t.Errorf("{{base}} = %q, want Makefile", got[TokenBase])
+			for token, value := range tt.want {
+				if got[token] != value {
+					t.Errorf("{{%s}} = %q, want %q", token, got[token], value)
+				}
+			}
+			// Every row states the whole set, so a token added without a value
+			// here cannot slip past unasserted.
+			if len(got) != len(tt.want) {
+				t.Errorf("got %d tokens (%v), want %d", len(got), got, len(tt.want))
+			}
+		})
 	}
 }
 
@@ -76,22 +92,149 @@ func TestSubstitutions_DirFromRelativeScan(t *testing.T) {
 	}
 }
 
-func TestRender_EachTokenReachesTheCommand(t *testing.T) {
-	command, _, err := Render(
-		"solve --in {{file}} --job {{base}} --kind {{ext}} --set {{dir}} --n {{index}}",
-		"", jobFilesFor("scratch/inputs/case1.inp"), 3,
-	)
-	if err != nil {
-		t.Fatalf("Render: %v", err)
+// Render is the whole per-file rendering path: substitution into the command and
+// the job name, the value-safety check over the values it actually substitutes,
+// and the residual-token and length post-conditions on both outputs.
+func TestRender(t *testing.T) {
+	// {{file}} expands to the primary file's name, so a long stem is the input
+	// that grows the rendered result past a limit.
+	longFile := func(stemLen int) JobFiles {
+		return jobFilesFor("inputs/" + strings.Repeat("a", stemLen) + ".inp")
+	}
+	defaultFiles := jobFilesFor("inputs/case1.inp")
+
+	tests := []struct {
+		name        string
+		command     string
+		jobName     string
+		files       JobFiles // zero value means defaultFiles
+		index       int      // zero value means 1
+		wantCommand string
+		wantJobName string
+		wantErr     string // substring the error must carry; empty means no error
+	}{
+		{
+			name:        "every token reaches the command",
+			command:     "solve --in {{file}} --job {{base}} --kind {{ext}} --set {{dir}} --n {{index}}",
+			files:       jobFilesFor("scratch/inputs/case1.inp"),
+			index:       3,
+			wantCommand: "solve --in case1.inp --job case1 --kind inp --set inputs --n 3",
+		},
+		{
+			// A command with no tokens still renders, unchanged: identical
+			// commands are occasionally intended, which is why the validator
+			// warns rather than refusing.
+			name:        "a command with no tokens passes through",
+			command:     "solve --in fixed.inp",
+			wantCommand: "solve --in fixed.inp",
+		},
+
+		// Job names. The first three are the pre-token behavior, preserved so
+		// existing setups are unaffected.
+		{name: "no tokens is numbered", command: "solve {{file}}", jobName: "Crash Study", index: 2, wantJobName: "Crash Study_2"},
+		{name: "empty falls back", command: "solve {{file}}", index: 2, wantJobName: "Job_2"},
+		{name: "whitespace only falls back", command: "solve {{file}}", jobName: "   ", index: 2, wantJobName: "Job_2"},
+		{name: "tokens substitute", command: "solve {{file}}", jobName: "run-{{base}}", index: 2, wantJobName: "run-case1"},
+		{name: "index available", command: "solve {{file}}", jobName: "{{base}}-{{index}}", index: 2, wantJobName: "case1-2"},
+		{name: "numbering suppressed once tokens are used", command: "solve {{file}}", jobName: "{{base}}", index: 2, wantJobName: "case1"},
+
+		// A filename that would restructure the command is this file's problem,
+		// not the batch's, so it comes back as an error the caller records as a
+		// skip — naming the token, which is the only clue to which file it was.
+		{name: "a space in the filename", command: "solve --in {{file}}", files: jobFilesFor("inputs/my case.inp"), wantErr: "{{file}}"},
+		{name: "a substitution in the filename", command: "solve --in {{file}}", files: jobFilesFor("inputs/$(whoami).inp"), wantErr: "{{file}}"},
+		{name: "a separator in the filename", command: "solve --in {{file}}", files: jobFilesFor("inputs/a;b.inp"), wantErr: "{{file}}"},
+		{
+			// The rule applies to the values actually being substituted: a folder
+			// with a space in its name is only a problem if {{dir}} is used.
+			name:  "an unsafe value in a token the command never uses",
+			files: jobFilesFor("my inputs/case1.inp"), command: "solve --in {{file}}",
+			wantCommand: "solve --in case1.inp",
+		},
+		{
+			name:  "the same value once the command does use it",
+			files: jobFilesFor("my inputs/case1.inp"), command: "solve --set {{dir}}",
+			wantErr: "{{dir}}",
+		},
+
+		// Render does not depend on the caller having validated first: an unknown
+		// token would otherwise reach Rescale verbatim, and one left in the name
+		// leaves every job in the scan answering to a single literal identifier.
+		{name: "an unresolved command token", command: "solve --job {{bse}}", wantErr: "{{bse}}"},
+		{name: "an unresolved job name token", command: "solve {{file}}", jobName: "run-{{bse}}", wantErr: "{{bse}}"},
+
+		// The rendered length limits are DOE's, and they apply here for the same
+		// reason: a template multiplies its input, so a filename a byte too long
+		// is one the caller must not submit. Checked at the boundary exactly,
+		// since this path used to be bounded nowhere.
+		{
+			name:    "command exactly at the limit",
+			command: strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")) + "{{file}}",
+			jobName: "run",
+		},
+		{
+			name:    "command one byte over",
+			command: strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")+1) + "{{file}}",
+			jobName: "run",
+			wantErr: "command",
+		},
+		{
+			name:    "job name exactly at the limit",
+			command: "solve {{file}}", jobName: "{{base}}",
+			files: longFile(pattern.MaxJobNameLength),
+		},
+		{
+			name:    "job name one byte over",
+			command: "solve {{file}}", jobName: "{{base}}",
+			files:   longFile(pattern.MaxJobNameLength + 1),
+			wantErr: "job name",
+		},
+		{
+			// The index suffix is part of the rendered name, so it counts.
+			name:    "untokenized job name over the limit once numbered",
+			command: "solve {{file}}", jobName: strings.Repeat("n", pattern.MaxJobNameLength),
+			wantErr: "job name",
+		},
 	}
 
-	want := "solve --in case1.inp --job case1 --kind inp --set inputs --n 3"
-	if command != want {
-		t.Errorf("command = %q, want %q", command, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := tt.files
+			if files.PrimaryFile == "" {
+				files = defaultFiles
+			}
+			index := tt.index
+			if index == 0 {
+				index = 1
+			}
+
+			command, jobName, err := Render(tt.command, tt.jobName, files, index)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("Render(%q, %q) succeeded, want an error", tt.command, tt.jobName)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error %v does not carry %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if tt.wantCommand != "" && command != tt.wantCommand {
+				t.Errorf("command = %q, want %q", command, tt.wantCommand)
+			}
+			if tt.wantJobName != "" && jobName != tt.wantJobName {
+				t.Errorf("job name = %q, want %q", jobName, tt.wantJobName)
+			}
+		})
 	}
 }
 
-// The motivating case: one template, one command per file.
+// The motivating case: one template, one command per file. Kept apart from the
+// table because what it pins is that repeated calls stay independent of each
+// other, which no single-render row can show.
 func TestRender_DistinctCommandPerFile(t *testing.T) {
 	template := "abaqus job={{base}} input={{file}} cpus=8"
 	files := []string{"inputs/case1.inp", "inputs/case2.inp", "inputs/case3.inp"}
@@ -110,70 +253,6 @@ func TestRender_DistinctCommandPerFile(t *testing.T) {
 
 	if len(seen) != len(files) {
 		t.Errorf("got %d distinct commands, want %d", len(seen), len(files))
-	}
-}
-
-func TestRender_JobName(t *testing.T) {
-	tests := []struct {
-		name     string
-		template string
-		want     string
-	}{
-		// Pre-token behavior, preserved so existing setups are unaffected.
-		{"no tokens is numbered", "Crash Study", "Crash Study_2"},
-		{"empty falls back", "", "Job_2"},
-		{"whitespace only falls back", "   ", "Job_2"},
-
-		{"tokens substitute", "run-{{base}}", "run-case1"},
-		{"index available", "{{base}}-{{index}}", "case1-2"},
-		{"numbering suppressed once tokens are used", "{{base}}", "case1"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, jobName, err := Render("solve {{file}}", tt.template, jobFilesFor("inputs/case1.inp"), 2)
-			if err != nil {
-				t.Fatalf("Render: %v", err)
-			}
-			if jobName != tt.want {
-				t.Errorf("job name = %q, want %q", jobName, tt.want)
-			}
-		})
-	}
-}
-
-// A filename that would restructure the command is this file's problem, not the
-// batch's, so it comes back as an error the caller records as a skip.
-func TestRender_RejectsUnsafeFilename(t *testing.T) {
-	tests := map[string]string{
-		"space":        "inputs/my case.inp",
-		"substitution": "inputs/$(whoami).inp",
-		"separator":    "inputs/a;b.inp",
-	}
-
-	for name, file := range tests {
-		t.Run(name, func(t *testing.T) {
-			_, _, err := Render("solve --in {{file}}", "", jobFilesFor(file), 1)
-			if err == nil {
-				t.Fatalf("Render(%q) succeeded, want an error", file)
-			}
-			if !strings.Contains(err.Error(), "{{file}}") {
-				t.Errorf("error %v does not name the offending token", err)
-			}
-		})
-	}
-}
-
-// The unsafe-value rule applies to the values actually being substituted. A
-// folder with a space in its name is only a problem if {{dir}} is used.
-func TestRender_UnusedTokenValueNotChecked(t *testing.T) {
-	jf := jobFilesFor("my inputs/case1.inp")
-
-	if _, _, err := Render("solve --in {{file}}", "", jf, 1); err != nil {
-		t.Errorf("Render rejected a job over a {{dir}} value it never substituted: %v", err)
-	}
-	if _, _, err := Render("solve --set {{dir}}", "", jf, 1); err == nil {
-		t.Error("Render accepted a {{dir}} value containing a space")
 	}
 }
 
@@ -207,154 +286,28 @@ func TestValidateCommandTemplate(t *testing.T) {
 }
 
 // A typo must not submit a batch of jobs carrying a literal "{{bse}}" on their
-// command lines, so the message has to point at the typo and the valid set.
+// command lines, so the message has to point at the typo and the valid set. The
+// CLI prints it through the crash reporter, whose redactor replaces anything
+// that looks like "token <value>" with [REDACTED] — phrasing that trips it
+// strips out the very detail the user needs, so what survives is pinned too.
 func TestValidateCommandTemplate_UnknownTokenMessage(t *testing.T) {
 	_, err := ValidateCommandTemplate("abaqus job={{bse}} input={{file}}")
 	if err == nil {
 		t.Fatal("expected an error for an unknown token")
 	}
-	if !strings.Contains(err.Error(), "{{bse}}") {
-		t.Errorf("error %v does not name the unknown token", err)
-	}
-	for _, token := range KnownTokens() {
-		if !strings.Contains(err.Error(), "{{"+token+"}}") {
-			t.Errorf("error %v does not list the valid token {{%s}}", err, token)
+
+	for _, stage := range []struct{ label, message string }{
+		{"error", err.Error()},
+		{"redacted error", reporting.RedactError(err.Error())},
+	} {
+		if !strings.Contains(stage.message, "{{bse}}") {
+			t.Errorf("%s %q does not name the unknown token", stage.label, stage.message)
 		}
-	}
-}
-
-// The CLI prints this error through the crash reporter, whose redactor replaces
-// anything that looks like "token <value>" with [REDACTED]. Phrasing that trips
-// it strips out the typo the user needs to see, so pin the surviving message.
-func TestValidateCommandTemplate_UnknownTokenSurvivesRedaction(t *testing.T) {
-	_, err := ValidateCommandTemplate("abaqus job={{bse}} input={{file}}")
-	if err == nil {
-		t.Fatal("expected an error for an unknown token")
-	}
-	redacted := reporting.RedactError(err.Error())
-	if !strings.Contains(redacted, "{{bse}}") {
-		t.Errorf("redacted error %q no longer names the unknown token", redacted)
-	}
-	for _, token := range KnownTokens() {
-		if !strings.Contains(redacted, "{{"+token+"}}") {
-			t.Errorf("redacted error %q no longer lists {{%s}}", redacted, token)
+		for _, token := range KnownTokens() {
+			if !strings.Contains(stage.message, "{{"+token+"}}") {
+				t.Errorf("%s %q does not list the valid token {{%s}}", stage.label, stage.message, token)
+			}
 		}
-	}
-}
-
-// A command with no tokens still renders, unchanged: identical commands are
-// occasionally intended, which is why this is a warning and not an error.
-func TestRender_NoTokensPassesThrough(t *testing.T) {
-	template := "solve --in fixed.inp"
-	command, _, err := Render(template, "", jobFilesFor("inputs/case1.inp"), 1)
-	if err != nil {
-		t.Fatalf("Render: %v", err)
-	}
-	if command != template {
-		t.Errorf("command = %q, want it unchanged as %q", command, template)
-	}
-}
-
-// Render does not depend on the caller having validated first: an unknown token
-// would otherwise reach Rescale verbatim.
-func TestRender_RejectsResidualToken(t *testing.T) {
-	_, _, err := Render("solve --job {{bse}}", "", jobFilesFor("inputs/case1.inp"), 1)
-	if err == nil {
-		t.Fatal("expected an error for an unresolved token")
-	}
-	if !strings.Contains(err.Error(), "{{bse}}") {
-		t.Errorf("error %v does not name the unresolved token", err)
-	}
-}
-
-// The rendered length limits are DOE's, and they apply here for the same reason:
-// a template multiplies its input, so a filename a byte too long is one the
-// caller must not submit. The boundary cases are checked exactly, since these
-// used to be bounded nowhere on the file-scan path.
-func TestRender_RejectsOverlengthOutput(t *testing.T) {
-	// {{file}} expands to the primary file's name, so a long stem is the input
-	// that grows the rendered result.
-	longFile := func(stemLen int) JobFiles {
-		return jobFilesFor("inputs/" + strings.Repeat("a", stemLen) + ".inp")
-	}
-
-	tests := []struct {
-		name       string
-		command    string
-		jobName    string
-		files      JobFiles
-		wantReject bool
-		wantIn     string
-	}{
-		{
-			name:    "command exactly at the limit",
-			command: strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")) + "{{file}}",
-			jobName: "run",
-			files:   jobFilesFor("inputs/case1.inp"),
-		},
-		{
-			name:       "command one byte over",
-			command:    strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")+1) + "{{file}}",
-			jobName:    "run",
-			files:      jobFilesFor("inputs/case1.inp"),
-			wantReject: true,
-			wantIn:     "command",
-		},
-		{
-			name:    "job name exactly at the limit",
-			command: "solve {{file}}",
-			jobName: "{{base}}",
-			files:   longFile(pattern.MaxJobNameLength),
-		},
-		{
-			name:       "job name one byte over",
-			command:    "solve {{file}}",
-			jobName:    "{{base}}",
-			files:      longFile(pattern.MaxJobNameLength + 1),
-			wantReject: true,
-			wantIn:     "job name",
-		},
-		{
-			// The index suffix is part of the rendered name, so it counts.
-			name:       "untokenized job name over the limit once numbered",
-			command:    "solve {{file}}",
-			jobName:    strings.Repeat("n", pattern.MaxJobNameLength),
-			files:      jobFilesFor("inputs/case1.inp"),
-			wantReject: true,
-			wantIn:     "job name",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := Render(tt.command, tt.jobName, tt.files, 1)
-
-			if !tt.wantReject {
-				if err != nil {
-					t.Fatalf("Render: %v", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatal("expected an error for overlength rendered output")
-			}
-			if !strings.Contains(err.Error(), tt.wantIn) {
-				t.Errorf("error %q does not say which field was too long", err)
-			}
-		})
-	}
-}
-
-// Render does not depend on the caller having validated the name template
-// either: an unknown token there leaves every job in the scan answering to one
-// literal name, and the name is what progress events are routed by.
-func TestRender_RejectsResidualJobNameToken(t *testing.T) {
-	_, _, err := Render("solve {{file}}", "run-{{bse}}", jobFilesFor("inputs/case1.inp"), 1)
-	if err == nil {
-		t.Fatal("expected an error for an unresolved job name token")
-	}
-	if !strings.Contains(err.Error(), "{{bse}}") {
-		t.Errorf("error %v does not name the unresolved token", err)
 	}
 }
 

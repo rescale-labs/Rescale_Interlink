@@ -191,13 +191,15 @@ func TestOrgCode_ProfileWithoutCompanyCode(t *testing.T) {
 }
 
 // Choosing a project is enough on its own: the assignment path fills in the org
-// code the user used to have to type.
-func TestAssignProjectToJob_ResolvesOrgCodeWhenOmitted(t *testing.T) {
-	assignedPath := ""
+// code the user used to have to type. An explicit code is an override, used
+// verbatim and costing no profile request.
+func TestAssignProjectToJob_OrgCode(t *testing.T) {
+	assignedPath, profileCalls := "", 0
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v3/users/me/":
+			profileCalls++
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"company": map[string]string{"code": "acme"},
@@ -216,38 +218,31 @@ func TestAssignProjectToJob_ResolvesOrgCodeWhenOmitted(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := newTestClient(t, server.URL).AssignProjectToJob(context.Background(), "", "job123", "pCTMk"); err != nil {
-		t.Fatalf("AssignProjectToJob: %v", err)
+	tests := []struct {
+		name             string
+		orgCode          string
+		wantPath         string
+		wantProfileCalls int
+	}{
+		{"omitted, resolved from the profile", "", "/api/v2/organizations/acme/jobs/job123/project-assignment/", 1},
+		{"explicit, used verbatim", "other", "/api/v2/organizations/other/jobs/job123/project-assignment/", 0},
 	}
 
-	want := "/api/v2/organizations/acme/jobs/job123/project-assignment/"
-	if assignedPath != want {
-		t.Errorf("assignment path = %q, want %q", assignedPath, want)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A fresh client per case, since OrgCode caches what it resolved.
+			assignedPath, profileCalls = "", 0
+			client := newTestClient(t, server.URL)
 
-// An explicit code is an override, so it must be used verbatim and cost no
-// profile request.
-func TestAssignProjectToJob_ExplicitOrgCodeWins(t *testing.T) {
-	assignedPath := ""
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v3/users/me/" {
-			t.Error("profile fetched despite an explicit org code")
-			http.Error(w, "unexpected", http.StatusInternalServerError)
-			return
-		}
-		assignedPath = r.URL.Path
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	if err := newTestClient(t, server.URL).AssignProjectToJob(context.Background(), "other", "job123", "pCTMk"); err != nil {
-		t.Fatalf("AssignProjectToJob: %v", err)
-	}
-
-	want := "/api/v2/organizations/other/jobs/job123/project-assignment/"
-	if assignedPath != want {
-		t.Errorf("assignment path = %q, want %q", assignedPath, want)
+			if err := client.AssignProjectToJob(context.Background(), tt.orgCode, "job123", "pCTMk"); err != nil {
+				t.Fatalf("AssignProjectToJob: %v", err)
+			}
+			if assignedPath != tt.wantPath {
+				t.Errorf("assignment path = %q, want %q", assignedPath, tt.wantPath)
+			}
+			if profileCalls != tt.wantProfileCalls {
+				t.Errorf("profile fetched %d times, want %d", profileCalls, tt.wantProfileCalls)
+			}
+		})
 	}
 }
