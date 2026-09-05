@@ -614,18 +614,92 @@ func TestCheckJobHasInputs(t *testing.T) {
 	}
 }
 
-// Rows carrying only a file list have no Directory, and Abs("") resolves to the
-// process working directory — which would site the batch's archives beside the
-// running binary rather than beside its inputs.
-func TestFindCommonParent_FileListOnlyJobs(t *testing.T) {
+// findCommonParent answers with the directory *containing* each job's own
+// directory, so every expectation here sits one level above the job dirs.
+func TestFindCommonParent(t *testing.T) {
 	root := t.TempDir()
-	jobs := []models.JobSpec{
-		{JobName: "a", LocalInputFiles: []string{filepath.Join(root, "a.inp")}},
-		{JobName: "b", LocalInputFiles: []string{filepath.Join(root, "b.inp")}},
+	// The volume root the temp dir lives on: "/" on unix, "C:\" on Windows.
+	vol := filepath.VolumeName(root) + string(filepath.Separator)
+	dirJobs := func(dirs ...string) []models.JobSpec {
+		jobs := make([]models.JobSpec, len(dirs))
+		for i, dir := range dirs {
+			jobs[i] = models.JobSpec{JobName: dir, Directory: filepath.Join(root, dir)}
+		}
+		return jobs
 	}
 
-	if got := findCommonParent(jobs); got != filepath.Dir(root) {
-		t.Errorf("findCommonParent() = %q, want %q", got, filepath.Dir(root))
+	tests := []struct {
+		name string
+		jobs []models.JobSpec
+		want string
+	}{
+		{
+			name: "job directories sharing one parent",
+			jobs: dirJobs(filepath.Join("run", "a"), filepath.Join("run", "b")),
+			want: filepath.Join(root, "run"),
+		},
+		{
+			name: "sibling parents walk up one more level",
+			jobs: dirJobs(filepath.Join("a", "x"), filepath.Join("b", "y")),
+			want: root,
+		},
+		{
+			// "run" is a string prefix of "runner" but not a path prefix; taking
+			// it as one sites the whole batch's archives inside one job's tree.
+			name: "a partial component is not a common parent",
+			jobs: dirJobs(filepath.Join("run", "a"), filepath.Join("runner", "b")),
+			want: root,
+		},
+		{
+			// Rows carrying only a file list have no Directory, and Abs("")
+			// resolves to the process working directory — which would site the
+			// archives beside the running binary rather than beside the inputs.
+			name: "jobs carrying only a file list anchor on their inputs",
+			jobs: []models.JobSpec{
+				{JobName: "a", LocalInputFiles: []string{filepath.Join(root, "a.inp")}},
+				{JobName: "b", LocalInputFiles: []string{filepath.Join(root, "b.inp")}},
+			},
+			want: filepath.Dir(root),
+		},
+		{
+			// One job directory sits directly under the volume root, so the only
+			// shared ancestor is the root itself. Siting the archives there would
+			// write into "/" (or "C:\"); the working directory is the safer home.
+			name: "a job directory at the volume root settles on the working directory",
+			jobs: []models.JobSpec{
+				{JobName: "a", Directory: filepath.Join(vol, "data")},
+				{JobName: "b", Directory: filepath.Join(vol, "scratch", "run1")},
+			},
+			want: ".",
+		},
+		{
+			// The walk reaches the root from the other side here; the answer
+			// must not depend on which job the batch lists first.
+			name: "the same batch with the root-level job listed second",
+			jobs: []models.JobSpec{
+				{JobName: "b", Directory: filepath.Join(vol, "scratch", "run1")},
+				{JobName: "a", Directory: filepath.Join(vol, "data")},
+			},
+			want: ".",
+		},
+		{
+			// Neither parent is the root, so the walk has to climb to it and stop
+			// there rather than spin on Dir(root) == root.
+			name: "parents sharing only the volume root",
+			jobs: []models.JobSpec{
+				{JobName: "a", Directory: filepath.Join(vol, "scratch", "run1")},
+				{JobName: "b", Directory: filepath.Join(vol, "data", "run2")},
+			},
+			want: ".",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := findCommonParent(tt.jobs); got != tt.want {
+				t.Errorf("findCommonParent() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

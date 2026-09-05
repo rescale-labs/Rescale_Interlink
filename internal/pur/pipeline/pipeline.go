@@ -188,15 +188,26 @@ func findCommonParent(jobs []models.JobSpec) string {
 
 	common := absPaths[0]
 	for _, path := range absPaths[1:] {
-		// Find common prefix between common and path
-		for !strings.HasPrefix(path, common) {
-			common = filepath.Dir(common)
-			if common == "." || common == "/" {
+		// A string prefix is not a path prefix: /data/run would otherwise be
+		// accepted as a parent of /data/runner. Only a whole component boundary
+		// counts.
+		for !(path == common || strings.HasPrefix(path, common+string(filepath.Separator))) {
+			parent := filepath.Dir(common)
+			// Dir is idempotent at a filesystem root, and roots differ per
+			// volume ("C:\" on Windows, "/" on unix), so stopping on a literal
+			// "/" would spin forever on two paths from different drives.
+			if parent == common || parent == "." {
 				return "."
 			}
+			common = parent
 		}
 	}
 
+	// A batch whose only shared ancestor is a volume root would site every
+	// archive in "/" or "C:\"; the working directory is the safer home.
+	if filepath.Dir(common) == common {
+		return "."
+	}
 	return common
 }
 
