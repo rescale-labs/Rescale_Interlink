@@ -143,6 +143,17 @@ type workItem struct {
 	state   *models.JobState
 }
 
+// hasLocalArchive reports whether a job builds and uploads a tarball of its own.
+//
+// Two stages have to agree on this: the feeder skips tar/upload without it, and
+// the job worker then takes the job's input file IDs from the spec rather than
+// from the upload. A job carrying an explicit file list has an archive to build
+// whether or not Directory is set — LocalInputFiles holds paths on this machine,
+// where InputFiles holds IDs of files already on Rescale.
+func hasLocalArchive(spec models.JobSpec) bool {
+	return spec.Directory != "" || len(spec.LocalInputFiles) > 0
+}
+
 // findCommonParent finds the common parent directory of all job directories
 func findCommonParent(jobs []models.JobSpec) string {
 	if len(jobs) == 0 {
@@ -152,10 +163,18 @@ func findCommonParent(jobs []models.JobSpec) string {
 	// Get absolute paths and find common parent
 	var absPaths []string
 	for _, job := range jobs {
-		absPath, err := filepath.Abs(job.Directory)
+		dir := job.Directory
+		// A job archiving an explicit file list has no directory of its own.
+		// Deriving one from its first file keeps a batch of such rows anchored on
+		// their inputs, rather than on the process working directory Abs("")
+		// would otherwise resolve to.
+		if dir == "" && len(job.LocalInputFiles) > 0 {
+			dir = filepath.Dir(job.LocalInputFiles[0])
+		}
+		absPath, err := filepath.Abs(dir)
 		if err != nil {
 			// If we can't get absolute path, use the directory as-is
-			absPath = job.Directory
+			absPath = dir
 		}
 		// Get the parent directory (the directory containing Run_X)
 		parent := filepath.Dir(absPath)
@@ -608,17 +627,16 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				continue
 			}
 
-			// A job with no Directory has nothing to tar, so skip tar/upload and go
+			// A job with nothing of its own to archive skips tar/upload and goes
 			// directly to job creation. Its inputs come from pre-specified file IDs
 			// (single-job remoteFiles/localFiles mode, or a DOE sweep referencing a
 			// shared deck) and/or batch-level Common Files, both attached at job
-			// creation. File-scan mode keeps its Directory and so stays on the tar
-			// path; its local paths live in LocalInputFiles, not InputFiles.
+			// creation.
 			//
 			// Use nextSkipStatus so a terminal status already written by the
 			// engine (Single Job localFiles uploads via ReportUploadProgress)
 			// is preserved — only non-terminal statuses flip to "skipped".
-			if jobSpec.Directory == "" {
+			if !hasLocalArchive(jobSpec) {
 				if err := p.checkJobHasInputs(jobSpec); err != nil {
 					p.logf("ERROR", "job", item.state.JobName, "REJECTED: %v", err)
 					item.state.SubmitStatus = "failed"
@@ -768,12 +786,12 @@ func (p *Pipeline) countFailedJobs() int {
 
 // checkJobHasInputs rejects a job that would be created with nothing attached.
 //
-// A job with no Directory skips tar and upload, which is right for a DOE sweep
+// A job with nothing to tar skips tar and upload, which is right for a DOE sweep
 // or a single job built from pre-uploaded IDs — but only when its inputs are
-// accounted for somewhere: per-job file IDs, per-job extra file IDs, or the
-// batch-level Common Files that ResolveSharedFiles has already resolved by the
-// time the feeder runs. With none of those, the pipeline creates and submits a
-// job carrying no input files at all, which the API accepts.
+// accounted for somewhere: an explicit local file list, per-job file IDs, per-job
+// extra file IDs, or the batch-level Common Files that ResolveSharedFiles has
+// already resolved by the time the feeder runs. With none of those, the pipeline
+// creates and submits a job carrying no input files at all, which the API accepts.
 //
 // submit-existing keeps its bypass: that mode's premise is that the caller
 // placed the inputs on Rescale itself.
@@ -781,7 +799,7 @@ func (p *Pipeline) checkJobHasInputs(spec models.JobSpec) error {
 	if p.skipTarUpload {
 		return nil
 	}
-	if spec.Directory != "" || len(spec.InputFiles) > 0 ||
+	if spec.Directory != "" || len(spec.LocalInputFiles) > 0 || len(spec.InputFiles) > 0 ||
 		strings.TrimSpace(spec.ExtraInputFileIDs) != "" || len(p.sharedFileIDs) > 0 {
 		return nil
 	}
@@ -817,8 +835,11 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 
 			p.setActiveWorker("tar", 1)
 
-			// Belt-and-suspenders normalization for paths from legacy CSV/state files
-			if !filepath.IsAbs(item.jobSpec.Directory) {
+			// Belt-and-suspenders normalization for paths from legacy CSV/state
+			// files. Skipped when empty: a job reaching tar on its file list alone
+			// has no directory, and resolving "" would silently adopt the process
+			// working directory as one.
+			if item.jobSpec.Directory != "" && !filepath.IsAbs(item.jobSpec.Directory) {
 				if abs, err := pathutil.ResolveAbsolutePath(item.jobSpec.Directory); err == nil {
 					item.jobSpec.Directory = abs
 					p.logf("WARN", "tar", item.state.JobName,
@@ -1265,12 +1286,13 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.logf("INFO", "job", item.state.JobName, "Creating job: %s", item.jobSpec.JobName)
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
-				// With no Directory nothing was tarred/uploaded, so the FileID from
-				// the upload stage is empty; inputs come from any pre-specified file
-				// IDs (possibly none) plus batch-level Common Files, merged in
-				// BuildJobRequest. Otherwise use the uploaded tarball's FileID.
+				// With nothing of its own to archive, nothing was tarred or
+				// uploaded, so the FileID from the upload stage is empty; inputs
+				// come from any pre-specified file IDs (possibly none) plus
+				// batch-level Common Files, merged in BuildJobRequest. Otherwise
+				// use the uploaded tarball's FileID.
 				var fileIDs []string
-				if item.jobSpec.Directory == "" {
+				if !hasLocalArchive(item.jobSpec) {
 					fileIDs = item.jobSpec.InputFiles
 				} else {
 					fileIDs = []string{item.state.FileID}

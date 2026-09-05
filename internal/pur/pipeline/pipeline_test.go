@@ -593,6 +593,8 @@ func TestCheckJobHasInputs(t *testing.T) {
 		{"per-job file IDs", &Pipeline{}, models.JobSpec{JobName: "s", InputFiles: []string{"abc"}}, false},
 		{"per-job extra file IDs", &Pipeline{}, models.JobSpec{JobName: "s", ExtraInputFileIDs: "abc"}, false},
 		{"a directory to tar", &Pipeline{}, models.JobSpec{JobName: "s", Directory: "/data/run"}, false},
+		{"an explicit file list and no directory", &Pipeline{},
+			models.JobSpec{JobName: "s", LocalInputFiles: []string{"/data/case.inp"}}, false},
 	}
 
 	for _, tt := range tests {
@@ -609,6 +611,21 @@ func TestCheckJobHasInputs(t *testing.T) {
 				t.Errorf("error %q does not name the job %q", err, tt.spec.JobName)
 			}
 		})
+	}
+}
+
+// Rows carrying only a file list have no Directory, and Abs("") resolves to the
+// process working directory — which would site the batch's archives beside the
+// running binary rather than beside its inputs.
+func TestFindCommonParent_FileListOnlyJobs(t *testing.T) {
+	root := t.TempDir()
+	jobs := []models.JobSpec{
+		{JobName: "a", LocalInputFiles: []string{filepath.Join(root, "a.inp")}},
+		{JobName: "b", LocalInputFiles: []string{filepath.Join(root, "b.inp")}},
+	}
+
+	if got := findCommonParent(jobs); got != filepath.Dir(root) {
+		t.Errorf("findCommonParent() = %q, want %q", got, filepath.Dir(root))
 	}
 }
 
