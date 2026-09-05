@@ -64,10 +64,16 @@ func TestScanFilesMode_RejectsDuplicateJobNames(t *testing.T) {
 	if result.Error == "" {
 		t.Fatal("expected an error for two files rendering to one job name")
 	}
-	// Both colliding files are named. Here they share a basename, so the message
-	// carries it twice.
-	if strings.Count(result.Error, "model.inp") != 2 || !strings.Contains(result.Error, `"model"`) {
-		t.Errorf("error %q does not name both files and the job name they share", result.Error)
+	// Both colliding files are named by folder and basename: under {{base}} the
+	// basenames are identical, so the folder is the only thing that tells the
+	// user which two files to look at.
+	for _, want := range []string{filepath.Join("case1", "model.inp"), filepath.Join("case2", "model.inp")} {
+		if !strings.Contains(result.Error, want) {
+			t.Errorf("error %q does not name %s", result.Error, want)
+		}
+	}
+	if !strings.Contains(result.Error, `"model"`) {
+		t.Errorf("error %q does not name the job name they share", result.Error)
 	}
 	if len(result.Jobs) != 0 {
 		t.Errorf("%d jobs built from a colliding scan", len(result.Jobs))

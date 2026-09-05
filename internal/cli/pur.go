@@ -393,13 +393,16 @@ Examples:
 						fmt.Printf("  Skipped %s: %v\n", filepath.Base(jf.PrimaryFile), renderErr)
 						continue
 					}
-					base := filepath.Base(jf.PrimaryFile)
+					// Under {{base}} the colliding files share a basename, so naming
+					// them by basename alone reads as one file colliding with
+					// itself; the parent folder is what tells the two apart.
+					display := filepath.Join(filepath.Base(jf.PrimaryDir), filepath.Base(jf.PrimaryFile))
 					if first, dup := seenNames[jobName]; dup {
 						return fmt.Errorf("%s and %s both render to job name %q; "+
 							"add {{index}} or {{dir}} to the job name template to keep names unique",
-							first, base, jobName)
+							first, display, jobName)
 					}
-					seenNames[jobName] = base
+					seenNames[jobName] = display
 
 					job := template
 					job.Command = command

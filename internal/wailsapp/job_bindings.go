@@ -334,13 +334,16 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 			skipped = append(skipped, fmt.Sprintf("%s: %v", filepath.Base(jobFiles.PrimaryFile), renderErr))
 			continue
 		}
-		base := filepath.Base(jobFiles.PrimaryFile)
+		// Under {{base}} the colliding files share a basename, so naming them by
+		// basename alone reads as one file colliding with itself; the parent
+		// folder is what tells the two apart.
+		display := filepath.Join(filepath.Base(jobFiles.PrimaryDir), filepath.Base(jobFiles.PrimaryFile))
 		if first, dup := seenNames[jobName]; dup {
 			return ScanResultDTO{Error: fmt.Sprintf("%s and %s both render to job name %q; "+
 				"add {{index}} or {{dir}} to the job name template to keep names unique",
-				first, base, jobName)}
+				first, display, jobName)}
 		}
-		seenNames[jobName] = base
+		seenNames[jobName] = display
 
 		job := template
 		job.Command = command
