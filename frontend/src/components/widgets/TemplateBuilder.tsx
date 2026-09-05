@@ -511,8 +511,11 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     [template.coresPerSlot, coresBaseUnit, nextCores, prevCores, updateField]
   )
 
-  const coresStepUp = nextCores(template.coresPerSlot)
-  const coresStepDown = prevCores(template.coresPerSlot)
+  // Same substitution stepCores makes, so the tooltips, the step attribute and
+  // the disabled state describe the value a click would actually produce.
+  const coresStepFrom = template.coresPerSlot > 0 ? template.coresPerSlot : coresBaseUnit
+  const coresStepUp = nextCores(coresStepFrom)
+  const coresStepDown = prevCores(coresStepFrom)
 
   // Validate template — cores allow fractional nodes OR multi-node (multiples of max)
   const validate = useCallback((): string[] => {
@@ -828,12 +831,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                     <button
                       type="button"
                       onClick={() => stepCores(-1)}
-                      disabled={coresStepDown >= template.coresPerSlot}
+                      disabled={coresStepDown >= coresStepFrom}
                       aria-label="Fewer cores"
                       title={
-                        coresStepDown < template.coresPerSlot
+                        coresStepDown < coresStepFrom
                           ? `Down to ${coresStepDown} cores`
-                          : `${template.coresPerSlot} is the smallest valid size`
+                          : `${coresStepFrom} is the smallest valid size`
                       }
                       className="flex items-center justify-center w-6 h-6 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:hover:bg-transparent"
                     >
