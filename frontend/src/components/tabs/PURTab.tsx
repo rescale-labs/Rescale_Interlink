@@ -1351,33 +1351,6 @@ export function PURTab() {
             </div>
           )}
 
-          {/* A file the scan declined to turn into a job looks, without this, like
-              a file that simply was not there. */}
-          {(scanSkippedFiles.length > 0 || scanWarnings.length > 0) && (
-            <div className="mb-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-amber-800 dark:text-amber-300 text-sm">
-              {scanSkippedFiles.length > 0 && (
-                <>
-                  <p className="font-medium">
-                    Skipped {scanSkippedFiles.length} file
-                    {scanSkippedFiles.length !== 1 ? 's' : ''}
-                  </p>
-                  <ul className="list-disc ml-5 mt-1 text-xs space-y-0.5">
-                    {scanSkippedFiles.map((skip) => (
-                      <li key={skip}>{skip}</li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {scanWarnings.length > 0 && (
-                <ul className={clsx('list-disc ml-5 text-xs space-y-0.5', scanSkippedFiles.length > 0 && 'mt-2')}>
-                  {scanWarnings.map((warning) => (
-                    <li key={warning}>{warning}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-
           {scanOptions.scanMode === 'doe' ? (
             <button
               onClick={handleGenerateSweep}
@@ -1476,6 +1449,33 @@ export function PURTab() {
                   ))}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* A file the scan declined to turn into a job looks, without this, like
+              a file that simply was not there. */}
+          {(scanSkippedFiles.length > 0 || scanWarnings.length > 0) && (
+            <div className="mb-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-amber-800 dark:text-amber-300 text-sm">
+              {scanSkippedFiles.length > 0 && (
+                <>
+                  <p className="font-medium">
+                    Skipped {scanSkippedFiles.length} file
+                    {scanSkippedFiles.length !== 1 ? 's' : ''}
+                  </p>
+                  <ul className="list-disc ml-5 mt-1 text-xs space-y-0.5">
+                    {scanSkippedFiles.map((skip) => (
+                      <li key={skip}>{skip}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {scanWarnings.length > 0 && (
+                <ul className={clsx('list-disc ml-5 text-xs space-y-0.5', scanSkippedFiles.length > 0 && 'mt-2')}>
+                  {scanWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
 

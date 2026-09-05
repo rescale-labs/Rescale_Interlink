@@ -778,6 +778,10 @@ export const useJobStore = create<JobStore>((set, get) => ({
         jobRows: toJobRows(jobs),
         workflowState: 'directoriesScanned',
         isGeneratingDOE: false,
+        // Same results view as a file scan, so an earlier scan's skips would
+        // otherwise be reported against these jobs.
+        scanSkippedFiles: [],
+        scanWarnings: [],
       })
     } catch (error) {
       set({
