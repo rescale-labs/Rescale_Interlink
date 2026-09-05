@@ -243,6 +243,42 @@ func TestEngine_ScanToSpecs_AbsolutePaths(t *testing.T) {
 	wantAbsoluteDirs(t, jobs)
 }
 
+// A CSV saved by a file scan carries LocalInputFiles. Reused as a folder-scan
+// template it used to hand that same list to every generated job, and the tar
+// stage prefers the list over Directory — so all of them archived the old
+// template's files and none archived the directory they were scanned from.
+func TestEngine_ScanToSpecs_ClearsInheritedFileList(t *testing.T) {
+	engine := newScanEngine(t)
+
+	tmpDir := t.TempDir()
+	mkRunDirs(t, tmpDir, "Run_1", "Run_2")
+
+	jobs, err := engine.ScanToSpecs(models.JobSpec{
+		JobName:         "test_job_1",
+		LocalInputFiles: []string{filepath.Join("/old", "case.inp")},
+	}, ScanOptions{
+		Pattern:    "Run_*",
+		StartIndex: 1,
+		PartDirs:   []string{tmpDir},
+	})
+	if err != nil {
+		t.Fatalf("ScanToSpecs failed: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("Expected 2 jobs, got %d", len(jobs))
+	}
+
+	for _, job := range jobs {
+		if len(job.LocalInputFiles) != 0 {
+			t.Errorf("%s kept the template's file list %v, so it would archive those "+
+				"instead of %s", job.JobName, job.LocalInputFiles, job.Directory)
+		}
+		if job.Directory == "" {
+			t.Errorf("%s has no directory to archive", job.JobName)
+		}
+	}
+}
+
 // TestEngine_RecursiveScan_SkipDir verifies that nested directories matching
 // the pattern are NOT discovered when using recursive scan (SkipDir behavior).
 // With no PartDirs, the scan root is the working directory.

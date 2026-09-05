@@ -217,13 +217,14 @@ func TestGenerate_RendersTagsPerCase(t *testing.T) {
 	}
 }
 
-// A sweep never tars a per-case directory. Cases carry no Directory either way,
-// which puts them on the pipeline's skip path; what changes with shared file IDs
-// is only where the one shared deck comes from — those IDs, referenced directly,
-// or batch-level Common Files.
+// A sweep never tars anything per case: cases carry neither a Directory nor an
+// inherited local file list, which puts them on the pipeline's skip path. What
+// changes with shared file IDs is only where the one shared deck comes from —
+// those IDs, referenced directly, or batch-level Common Files.
 func TestGenerate_CasesCarryNoDirectory(t *testing.T) {
 	withIDs := twoLevelOptions()
 	withIDs.BaseFileIDs = []string{"file_abc", "file_def"}
+	withIDs.Template.LocalInputFiles = []string{"/data/deck.inp"}
 
 	shared := mustGenerate(t, withIDs)
 	bare := mustGenerate(t, twoLevelOptions())
@@ -234,6 +235,9 @@ func TestGenerate_CasesCarryNoDirectory(t *testing.T) {
 		}
 		if len(job.InputFiles) != 2 || job.InputFiles[0] != "file_abc" || job.InputFiles[1] != "file_def" {
 			t.Errorf("job %d InputFiles = %v, want the shared file IDs", i, job.InputFiles)
+		}
+		if len(job.LocalInputFiles) != 0 {
+			t.Errorf("job %d LocalInputFiles = %v, want none inherited from the template", i, job.LocalInputFiles)
 		}
 	}
 

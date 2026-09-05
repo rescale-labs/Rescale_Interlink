@@ -383,6 +383,11 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 		// Create job from template
 		job := template
 
+		// Each generated job archives the directory found for it. A file-scan
+		// template's file list would otherwise give every one of them the same
+		// inputs, since the tar stage prefers the list over Directory.
+		job.LocalInputFiles = nil
+
 		// Normalize directory path to absolute
 		if absPath, err := pathutil.ResolveAbsolutePath(dir); err == nil {
 			job.Directory = absPath

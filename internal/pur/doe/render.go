@@ -312,6 +312,9 @@ func buildJobSpec(opts Options, jobName, command string, caseTags []string) mode
 
 	spec.Directory = ""
 	spec.TarSubpath = ""
+	// A sweep archives nothing per case, so a list inherited from a file-scan
+	// template would be tarred and uploaded once for every case.
+	spec.LocalInputFiles = nil
 	if len(opts.BaseFileIDs) > 0 {
 		spec.InputFiles = append([]string(nil), opts.BaseFileIDs...)
 	} else {

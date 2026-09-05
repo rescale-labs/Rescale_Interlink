@@ -652,6 +652,12 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 
 	// Clear conflicting fields to prevent loaded templates or CSV carrying
 	// stale directory/InputFiles values into the wrong input mode.
+	//
+	// Single Job has no file-list mode, so a list here can only have come from a
+	// loaded file-scan template, and the tar stage gives it precedence over the
+	// directory this run just selected.
+	jobSpec.LocalInputFiles = nil
+
 	switch input.InputMode {
 	case "directory":
 		jobSpec.Directory = input.Directory

@@ -192,6 +192,9 @@ Examples:
 				job := tmpl
 				job.JobName = r.JobName
 				job.Directory = r.Directory
+				// As in the GUI's directory scan: each job archives the directory
+				// found for it, not a file list inherited from a scan template.
+				job.LocalInputFiles = nil
 
 				// Iterate command patterns if requested
 				if iteratePatterns {
