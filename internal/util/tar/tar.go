@@ -419,9 +419,17 @@ func GenerateTarPath(directory, basePath, compression string) string {
 // the source directory, so every job scanned from the same folder would resolve
 // to a single filename and the tar and upload workers would race over it.
 //
+// index is the job's 1-based position in the batch, and it leads the name
+// because the hash alone is not enough: two jobs may legitimately run the same
+// input deck with different commands or core counts, and without the prefix they
+// would share one archive path — one job truncating and rewriting it while the
+// other uploads, or deleting it after upload before the other has opened it. The
+// caller must keep index stable across a resume, since a job whose tar did not
+// finish recomputes this path rather than reading it back from state.
+//
 // The "_<8 hex>.tar[.gz]" shape is required, not cosmetic — pathutil.HasFNVSuffix
 // gates whether the pipeline is willing to delete the file afterwards.
-func GenerateTarPathForFiles(files []string, basePath, compression string) string {
+func GenerateTarPathForFiles(files []string, index int, basePath, compression string) string {
 	h := fnv.New32a()
 
 	stem := "job"
@@ -448,7 +456,7 @@ func GenerateTarPathForFiles(files []string, basePath, compression string) strin
 		ext = ".tar"
 	}
 
-	return filepath.Join(basePath, fmt.Sprintf("%s_%08x%s", stem, h.Sum32(), ext))
+	return filepath.Join(basePath, fmt.Sprintf("%d_%s_%08x%s", index, stem, h.Sum32(), ext))
 }
 
 // ValidateTarExists checks if a tar file exists and is valid

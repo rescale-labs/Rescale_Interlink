@@ -195,6 +195,73 @@ func TestTarWorker_ExplicitFileListFlattensAcrossDirectories(t *testing.T) {
 	}
 }
 
+// A CSV row may name its files and no directory at all. Such a job still has an
+// archive to build, and the empty Directory must be left alone: resolving it
+// would silently adopt the process working directory, which the job worker would
+// then read as "this job was tarred and uploaded from there".
+func TestTarWorker_ExplicitFileListWithoutDirectory(t *testing.T) {
+	root := t.TempDir()
+	deck := filepath.Join(root, "case1.inp")
+	if err := os.WriteFile(deck, []byte("data"), 0644); err != nil {
+		t.Fatalf("write deck: %v", err)
+	}
+
+	cfg := &config.Config{TarCompression: "gzip"}
+	done := runTarWorker(t, cfg, root, []models.JobSpec{{
+		JobName:         "case1",
+		LocalInputFiles: []string{deck},
+	}})
+
+	if len(done) != 1 {
+		t.Fatalf("%d jobs reached upload, want 1", len(done))
+	}
+	if done[0].state.TarStatus != "success" {
+		t.Fatalf("TarStatus = %q (%s)", done[0].state.TarStatus, done[0].state.ErrorMessage)
+	}
+	if done[0].jobSpec.Directory != "" {
+		t.Errorf("Directory = %q, want it left empty", done[0].jobSpec.Directory)
+	}
+	if !hasLocalArchive(done[0].jobSpec) {
+		t.Error("job worker would treat this job as having nothing uploaded")
+	}
+
+	if got := archiveNames(t, done[0].state.TarPath); len(got) != 1 || got[0] != "case1.inp" {
+		t.Errorf("archive holds %v, want exactly [case1.inp]", got)
+	}
+}
+
+// Two jobs may legitimately run the same deck with different commands or core
+// counts. Naming the archive by file set alone gave them one path, so one job
+// truncated and rewrote it while the other uploaded.
+func TestTarWorker_RepeatedFileSetGetsItsOwnArchive(t *testing.T) {
+	root := t.TempDir()
+	deck := filepath.Join(root, "shared.inp")
+	if err := os.WriteFile(deck, []byte("data"), 0644); err != nil {
+		t.Fatalf("write deck: %v", err)
+	}
+
+	cfg := &config.Config{TarCompression: "gzip"}
+	done := runTarWorker(t, cfg, root, []models.JobSpec{
+		{JobName: "coarse", Directory: root, LocalInputFiles: []string{deck}},
+		{JobName: "fine", Directory: root, LocalInputFiles: []string{deck}},
+	})
+
+	if len(done) != 2 {
+		t.Fatalf("%d jobs reached upload, want 2", len(done))
+	}
+	if done[0].state.TarPath == done[1].state.TarPath {
+		t.Fatalf("both jobs resolved to the same archive %s", done[0].state.TarPath)
+	}
+	for _, item := range done {
+		if item.state.TarStatus != "success" {
+			t.Fatalf("%s: TarStatus = %q (%s)", item.state.JobName, item.state.TarStatus, item.state.ErrorMessage)
+		}
+		if got := archiveNames(t, item.state.TarPath); len(got) != 1 || got[0] != "shared.inp" {
+			t.Errorf("%s: archive holds %v, want exactly [shared.inp]", item.state.JobName, got)
+		}
+	}
+}
+
 // A job with no file list still archives its whole directory, which is every
 // other PUR mode.
 func TestTarWorker_WithoutFileListStillArchivesDirectory(t *testing.T) {

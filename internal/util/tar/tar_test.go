@@ -161,18 +161,19 @@ func TestGenerateTarPathForFiles_DistinctPerFileSet(t *testing.T) {
 
 	one := GenerateTarPathForFiles([]string{
 		filepath.Join(dir, "case1.inp"), filepath.Join(dir, "case1.mesh"),
-	}, dir, "gzip")
+	}, 1, dir, "gzip")
 	two := GenerateTarPathForFiles([]string{
 		filepath.Join(dir, "case2.inp"), filepath.Join(dir, "case2.mesh"),
-	}, dir, "gzip")
+	}, 2, dir, "gzip")
 
 	if one == two {
 		t.Fatalf("two file sets from one directory share the tar path %s", one)
 	}
 
-	// Named after the primary file so the log line is readable.
-	if base := filepath.Base(one); !strings.HasPrefix(base, "case1_") {
-		t.Errorf("tar name %q does not start with the primary file's stem", base)
+	// The job index leads, then the primary file's stem, so the log line is
+	// readable and two jobs sharing a file set still get separate archives.
+	if base := filepath.Base(one); !strings.HasPrefix(base, "1_case1_") {
+		t.Errorf("tar name %q does not start with the job index and the primary file's stem", base)
 	}
 
 	// Compare against the directory-only namer, which is what collided.
@@ -181,9 +182,29 @@ func TestGenerateTarPathForFiles_DistinctPerFileSet(t *testing.T) {
 	}
 }
 
+// The regression this guards: two jobs may legitimately run the same input deck
+// with different commands or core counts. Naming by file set alone gave them one
+// archive, so one job truncated and rewrote it while the other uploaded, or
+// deleted it after upload before the other had opened it.
+func TestGenerateTarPathForFiles_DistinctPerJobForOneFileSet(t *testing.T) {
+	files := []string{"/data/inputs/case1.inp", "/data/inputs/case1.mesh"}
+
+	one := GenerateTarPathForFiles(files, 1, "/tmp", "gzip")
+	two := GenerateTarPathForFiles(files, 2, "/tmp", "gzip")
+
+	if one == two {
+		t.Fatalf("two jobs sharing one file set share the tar path %s", one)
+	}
+	if !fnvSuffixRe.MatchString(strings.ToLower(filepath.Base(one))) {
+		t.Errorf("%q lacks the FNV suffix safeRemoveTar gates deletion on", filepath.Base(one))
+	}
+}
+
 func TestGenerateTarPathForFiles_Stable(t *testing.T) {
 	files := []string{"/data/inputs/case1.inp", "/data/inputs/case1.mesh"}
-	if a, b := GenerateTarPathForFiles(files, "/tmp", "gzip"), GenerateTarPathForFiles(files, "/tmp", "gzip"); a != b {
+	// Stability is what lets a resumed run recompute the path for a job whose
+	// tar did not finish, so the index must be part of the stable input.
+	if a, b := GenerateTarPathForFiles(files, 3, "/tmp", "gzip"), GenerateTarPathForFiles(files, 3, "/tmp", "gzip"); a != b {
 		t.Errorf("not stable across calls: %s vs %s", a, b)
 	}
 }
@@ -191,8 +212,8 @@ func TestGenerateTarPathForFiles_Stable(t *testing.T) {
 // A member list is hashed with separators, so regrouping the same characters
 // across names still changes the archive path.
 func TestGenerateTarPathForFiles_SeparatorPreventsAmbiguity(t *testing.T) {
-	a := GenerateTarPathForFiles([]string{"/d/ab", "/d/c"}, "/tmp", "none")
-	b := GenerateTarPathForFiles([]string{"/d/a", "/d/bc"}, "/tmp", "none")
+	a := GenerateTarPathForFiles([]string{"/d/ab", "/d/c"}, 1, "/tmp", "none")
+	b := GenerateTarPathForFiles([]string{"/d/a", "/d/bc"}, 1, "/tmp", "none")
 	if a == b {
 		t.Errorf("ambiguous hash: %s", a)
 	}
@@ -210,7 +231,7 @@ func TestGenerateTarPathForFiles_KeepsFNVSuffix(t *testing.T) {
 
 	for _, files := range cases {
 		for _, compression := range []string{"gzip", "none"} {
-			got := filepath.Base(GenerateTarPathForFiles(files, "/tmp", compression))
+			got := filepath.Base(GenerateTarPathForFiles(files, 1, "/tmp", compression))
 			if !fnvSuffixRe.MatchString(strings.ToLower(got)) {
 				t.Errorf("GenerateTarPathForFiles(%v, %q) = %q, which lacks the FNV suffix",
 					files, compression, got)

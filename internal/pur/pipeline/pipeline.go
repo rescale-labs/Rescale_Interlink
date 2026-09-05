@@ -877,9 +877,10 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 			var archiveSource string
 
 			if files := item.jobSpec.LocalInputFiles; len(files) > 0 {
-				// Named and hashed per file set, so jobs scanned out of one folder do
-				// not all resolve to the same archive and race over it.
-				tarPath = tar.GenerateTarPathForFiles(files, p.tempDir, p.cfg.TarCompression)
+				// Named per job and hashed per file set, so neither jobs scanned out
+				// of one folder nor two jobs running the same deck resolve to the
+				// same archive and race over it.
+				tarPath = tar.GenerateTarPathForFiles(files, item.index, p.tempDir, p.cfg.TarCompression)
 				archiveSource = fmt.Sprintf("%d file(s)", len(files))
 				createArchive = func() error {
 					if len(p.cfg.IncludePatterns) > 0 || len(p.cfg.ExcludePatterns) > 0 || p.cfg.FlattenTar {
