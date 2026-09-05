@@ -436,6 +436,36 @@ describe('TemplateBuilder project picker', () => {
     expect(projectOptionText()).toContain("pGONE (not in this account's projects)")
   })
 
+  // The same trap sprung from inside the dialog: a template loaded from the
+  // Saved Templates menu brings its own id, which nothing on screen can type
+  // back either once "No project" has dropped it.
+  it('keeps a project id loaded from a saved template after "No project" is selected', async () => {
+    seedProjects([NO_BUDGET])
+    vi.mocked(App.ListSavedTemplates).mockResolvedValueOnce([
+      {
+        name: 'Other account template',
+        path: '/tmp/other.json',
+        description: '',
+        software: '',
+        hardware: '',
+        modTime: '',
+        job: { ...DEFAULT_JOB_TEMPLATE, projectId: 'pGONE' },
+      },
+    ] as unknown as wailsapp.TemplateInfoDTO[])
+    renderOpen()
+
+    fireEvent.click(await screen.findByText(/Saved Templates \(1\)/))
+    fireEvent.click(screen.getByText('Other account template'))
+
+    expect(getProjectSelect().value).toBe('pGONE')
+    expect(projectOptionText()).toContain("pGONE (not in this account's projects)")
+
+    fireEvent.change(getProjectSelect(), { target: { value: '' } })
+
+    expect(getProjectSelect().value).toBe('')
+    expect(projectOptionText()).toContain("pGONE (not in this account's projects)")
+  })
+
   it('does not retry after a failed scan', async () => {
     vi.mocked(App.GetProjects).mockResolvedValueOnce(
       { projects: null, error: 'status 403: forbidden' } as unknown as wailsapp.ProjectsResultDTO)

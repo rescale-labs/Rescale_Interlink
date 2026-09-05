@@ -166,6 +166,8 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
 
   // Form state
   const [template, setTemplate] = useState<JobSpec>(initialTemplate || DEFAULT_JOB_TEMPLATE)
+  // What unlistedProjectId falls back to; see there for why it is held on to.
+  const [anchoredProjectId, setAnchoredProjectId] = useState(initialTemplate?.projectId || '')
   const [tagsInput, setTagsInput] = useState((initialTemplate?.tags ?? []).join(', '))
   const [selectedAnalysis, setSelectedAnalysis] = useState<AnalysisCode | null>(null)
   const [licenseType, setLicenseType] = useState('')
@@ -245,6 +247,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
     if (templateInfo.job) {
       setTemplate(templateInfo.job)
+      setAnchoredProjectId(templateInfo.job.projectId || '')
       setTagsInput((templateInfo.job.tags ?? []).join(', '))
       setLicenseAutoSwitchHint(null)
       setLicenseLoadHint(null)
@@ -302,6 +305,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   useEffect(() => {
     if (initialTemplate) {
       setTemplate(initialTemplate)
+      setAnchoredProjectId(initialTemplate.projectId || '')
       setTagsInput((initialTemplate.tags ?? []).join(', '))
       setLicenseAutoSwitchHint(null)
       setLicenseLoadHint(null)
@@ -353,10 +357,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
   const unlistedProjectId = useMemo(() => {
     // Also the id the dialog opened with, so selecting "No project" to see what
     // it does cannot make an unlisted id unrecoverable — nothing can type it back.
-    const id = template.projectId || initialTemplate?.projectId || ''
+    // A template loaded from the Saved Templates menu re-anchors that fallback,
+    // since its id is just as unrecoverable once the picker drops it.
+    const id = template.projectId || anchoredProjectId
     if (!id) return ''
     return projects.some((p) => p.id === id) ? '' : id
-  }, [projects, template.projectId, initialTemplate])
+  }, [projects, template.projectId, anchoredProjectId])
 
   // The budget line is what distinguishes two similarly named projects, so it
   // belongs in the option text. "(no budget)" adds nothing next to a name.
