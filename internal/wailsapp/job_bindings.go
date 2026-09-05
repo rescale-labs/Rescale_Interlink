@@ -125,10 +125,10 @@ type CoreTypeDTO struct {
 
 // AnalysisCodeDTO represents a software analysis code.
 type AnalysisCodeDTO struct {
-	Code        string              `json:"code"`
-	Name        string              `json:"name"`
-	Description string              `json:"description"`
-	VendorName  string              `json:"vendorName"`
+	Code        string               `json:"code"`
+	Name        string               `json:"name"`
+	Description string               `json:"description"`
+	VendorName  string               `json:"vendorName"`
 	Versions    []AnalysisVersionDTO `json:"versions"`
 }
 
@@ -1011,7 +1011,7 @@ func (a *App) ResetRun() {
 // RunHistoryEntryDTO represents a historical run entry.
 type RunHistoryEntryDTO struct {
 	RunID    string `json:"runId"`
-	RunType  string `json:"runType"`  // "pur" or "single", derived from ID prefix
+	RunType  string `json:"runType"` // "pur" or "single", derived from ID prefix
 	ModTime  string `json:"modTime"`
 	JobCount int    `json:"jobCount"`
 }

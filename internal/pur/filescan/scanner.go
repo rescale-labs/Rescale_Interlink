@@ -23,12 +23,12 @@ type ScanOptions struct {
 
 // JobFiles represents files found for a single job.
 type JobFiles struct {
-	PrimaryFile  string   // Path to the primary file
-	PrimaryDir   string   // Directory containing the primary file
-	PrimaryBase  string   // Base name of primary file (without extension)
-	InputFiles   []string // All input files (primary + resolved secondary files)
-	SkipReason   string   // Non-empty if job should be skipped
-	Warnings     []string // Non-fatal warnings (e.g., optional file missing)
+	PrimaryFile string   // Path to the primary file
+	PrimaryDir  string   // Directory containing the primary file
+	PrimaryBase string   // Base name of primary file (without extension)
+	InputFiles  []string // All input files (primary + resolved secondary files)
+	SkipReason  string   // Non-empty if job should be skipped
+	Warnings    []string // Non-fatal warnings (e.g., optional file missing)
 }
 
 // ScanResult contains the results of a file scan operation.
