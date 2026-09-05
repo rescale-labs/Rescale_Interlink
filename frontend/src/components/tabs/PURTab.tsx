@@ -369,6 +369,8 @@ export function PURTab() {
     const spec = normalizeJobSpec(loaded)
     setTemplate({
       ...spec,
+      // A per-job file list is no more template material than the directory it came from.
+      localInputFiles: [],
       coresPerSlot: spec.coresPerSlot || DEFAULT_JOB_TEMPLATE.coresPerSlot,
       walltimeHours: spec.walltimeHours || DEFAULT_JOB_TEMPLATE.walltimeHours,
       slots: spec.slots || DEFAULT_JOB_TEMPLATE.slots,

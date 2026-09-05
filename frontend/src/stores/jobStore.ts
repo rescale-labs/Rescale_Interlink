@@ -1080,7 +1080,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
           // Layered over the defaults, not used raw: a template stored by an
           // older build is missing any field added since, and the builder reads
           // those fields directly (a missing string would break .trim()).
-          template: { ...DEFAULT_JOB_TEMPLATE, ...(memory.lastTemplate || {}) },
+          template: normalizeJobSpec({ ...DEFAULT_JOB_TEMPLATE, ...(memory.lastTemplate || {}) } as JobSpec),
           scanOptions: {
             ...get().scanOptions,
             rootDir: memory.lastScanDir || '',
