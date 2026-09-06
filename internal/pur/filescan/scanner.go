@@ -27,7 +27,6 @@ type JobFiles struct {
 	PrimaryDir  string   // Directory containing the primary file
 	PrimaryBase string   // Base name of primary file (without extension)
 	InputFiles  []string // All input files (primary + resolved secondary files)
-	SkipReason  string   // Non-empty if job should be skipped
 	Warnings    []string // Non-fatal warnings (e.g., optional file missing)
 }
 
@@ -67,10 +66,9 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		primaryDir := filepath.Dir(primaryFile)
 		primaryBase := strings.TrimSuffix(filepath.Base(primaryFile), filepath.Ext(primaryFile))
 
-		// The archive is flat — every member lands in the job's working directory
-		// under its base name alone, see tar.CreateTarGzFromFiles — so the list
-		// has to be a set of distinct names. Resolved here rather than at tar
-		// time, where the same set fails the job after the run has started.
+		// The archive is flat (tar.CreateTarGzFromFiles), so the list has to be a
+		// set of distinct names. Resolved here rather than at tar time, where the
+		// same set fails the job after the run has started.
 		inputFiles := []string{primaryFile}
 		byName := map[string]string{filepath.Base(primaryFile): primaryFile}
 		var jobWarnings []string

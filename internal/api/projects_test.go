@@ -43,40 +43,44 @@ func projectsHandler() http.HandlerFunc {
 }
 
 func TestListProjects(t *testing.T) {
-	server := httptest.NewServer(projectsHandler())
-	defer server.Close()
+	t.Run("decodes what the endpoint returns", func(t *testing.T) {
+		server := httptest.NewServer(projectsHandler())
+		defer server.Close()
 
-	projects, err := newTestClient(t, server.URL).ListProjects(context.Background())
-	if err != nil {
-		t.Fatalf("ListProjects: %v", err)
-	}
+		projects, err := newTestClient(t, server.URL).ListProjects(context.Background())
+		if err != nil {
+			t.Fatalf("ListProjects: %v", err)
+		}
 
-	if len(projects) != 2 {
-		t.Fatalf("got %d projects, want 2", len(projects))
-	}
-	if projects[0].ID != "pCTMk" || projects[0].Name != "Project without a budget" || !projects[0].IsDefault {
-		t.Errorf("first project = %+v", projects[0])
-	}
-	if projects[1].IsDefault {
-		t.Errorf("second project is marked default: %+v", projects[1])
-	}
-	// The budget lines are what tell two same-named projects apart in the picker,
-	// so they have to survive decoding.
-	if len(projects[1].RemainingAmounts) != 1 ||
-		!strings.Contains(projects[1].RemainingAmounts[0], "$100.00 available") {
-		t.Errorf("remainingAmounts = %v, want the platform's budget line", projects[1].RemainingAmounts)
-	}
+		if len(projects) != 2 {
+			t.Fatalf("got %d projects, want 2", len(projects))
+		}
+		if projects[0].ID != "pCTMk" || projects[0].Name != "Project without a budget" || !projects[0].IsDefault {
+			t.Errorf("first project = %+v", projects[0])
+		}
+		if projects[1].IsDefault {
+			t.Errorf("second project is marked default: %+v", projects[1])
+		}
+		// The budget lines are what tell two same-named projects apart in the
+		// picker, so they have to survive decoding.
+		if len(projects[1].RemainingAmounts) != 1 ||
+			!strings.Contains(projects[1].RemainingAmounts[0], "$100.00 available") {
+			t.Errorf("remainingAmounts = %v, want the platform's budget line", projects[1].RemainingAmounts)
+		}
+	})
 
 	// A refused request is an error, not an empty list: an empty picker reads as
 	// "this account has no projects", which is a different thing entirely.
-	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "no", http.StatusForbidden)
-	}))
-	defer forbidden.Close()
+	t.Run("a refused request is an error", func(t *testing.T) {
+		forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "no", http.StatusForbidden)
+		}))
+		defer forbidden.Close()
 
-	if _, err := newTestClient(t, forbidden.URL).ListProjects(context.Background()); err == nil {
-		t.Error("ListProjects succeeded on a 403")
-	}
+		if _, err := newTestClient(t, forbidden.URL).ListProjects(context.Background()); err == nil {
+			t.Error("ListProjects succeeded on a 403")
+		}
+	})
 }
 
 // Pagination follows the same next-cursor convention as the other list
@@ -126,70 +130,74 @@ func TestListProjects_FollowsPagination(t *testing.T) {
 // The org code is a property of the API key, so it is resolved from the key's
 // own profile rather than asked of the user.
 func TestOrgCode_ResolvesFromProfileAndCaches(t *testing.T) {
-	var mu sync.Mutex
-	profileCalls := 0
+	t.Run("resolved once, however many callers ask", func(t *testing.T) {
+		var mu sync.Mutex
+		profileCalls := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/users/me/" {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		mu.Lock()
-		profileCalls++
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"email":   "someone@example.com",
-			"company": map[string]string{"code": "acme"},
-		})
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL)
-
-	// Concurrent callers, because the pipeline assigns projects from several job
-	// workers at once and none of them should trigger its own profile fetch.
-	var wg sync.WaitGroup
-	codes := make([]string, 5)
-	for i := range codes {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			code, err := client.OrgCode(context.Background())
-			if err != nil {
-				t.Errorf("OrgCode: %v", err)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v3/users/me/" {
+				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
-			codes[i] = code
-		}(i)
-	}
-	wg.Wait()
+			mu.Lock()
+			profileCalls++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"email":   "someone@example.com",
+				"company": map[string]string{"code": "acme"},
+			})
+		}))
+		defer server.Close()
 
-	for i, code := range codes {
-		if code != "acme" {
-			t.Errorf("caller %d got org code %q, want acme", i, code)
+		client := newTestClient(t, server.URL)
+
+		// Concurrent callers, because the pipeline assigns projects from several
+		// job workers at once and none should trigger its own profile fetch.
+		var wg sync.WaitGroup
+		codes := make([]string, 5)
+		for i := range codes {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				code, err := client.OrgCode(context.Background())
+				if err != nil {
+					t.Errorf("OrgCode: %v", err)
+					return
+				}
+				codes[i] = code
+			}(i)
 		}
-	}
+		wg.Wait()
 
-	mu.Lock()
-	if profileCalls != 1 {
-		t.Errorf("profile fetched %d times, want 1 — the code cannot change for a key", profileCalls)
-	}
-	mu.Unlock()
+		for i, code := range codes {
+			if code != "acme" {
+				t.Errorf("caller %d got org code %q, want acme", i, code)
+			}
+		}
+
+		mu.Lock()
+		if profileCalls != 1 {
+			t.Errorf("profile fetched %d times, want 1 — the code cannot change for a key", profileCalls)
+		}
+		mu.Unlock()
+	})
 
 	// A profile with no company code cannot address an org-scoped endpoint, so
 	// it fails rather than building a URL with an empty organization in it.
-	bare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"email": "someone@example.com"})
-	}))
-	defer bare.Close()
+	t.Run("a profile with no company code", func(t *testing.T) {
+		bare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"email": "someone@example.com"})
+		}))
+		defer bare.Close()
 
-	if _, err := newTestClient(t, bare.URL).OrgCode(context.Background()); err == nil {
-		t.Error("OrgCode succeeded on a profile with no company code")
-	} else if !errors.Is(err, ErrOrgCodeUnavailable) {
-		t.Errorf("OrgCode error %q is not ErrOrgCodeUnavailable, so an assignment would retry it", err)
-	}
+		if _, err := newTestClient(t, bare.URL).OrgCode(context.Background()); err == nil {
+			t.Error("OrgCode succeeded on a profile with no company code")
+		} else if !errors.Is(err, ErrOrgCodeUnavailable) {
+			t.Errorf("OrgCode error %q is not ErrOrgCodeUnavailable, so an assignment would retry it", err)
+		}
+	})
 }
 
 // Choosing a project is enough on its own: the assignment path fills in the org

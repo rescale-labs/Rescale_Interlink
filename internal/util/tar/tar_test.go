@@ -117,9 +117,7 @@ func TestCreateTarGzFromFiles_Rejects(t *testing.T) {
 		files  []string
 		wantIn string
 	}{
-		// Flattening makes two same-named files from different folders collide.
-		// Dropping one silently would give a job that is missing an input it was
-		// told it had, so the message has to name the collision.
+		// Named rather than silently dropped; see CreateTarGzFromFiles.
 		{"duplicate base names", []string{dupA, dupB}, "duplicate filename"},
 		{"a file that is not there", []string{filepath.Join(root, "nope.inp")}, "failed to stat"},
 		{"an empty list", nil, "no files to archive"},
@@ -144,9 +142,9 @@ func TestCreateTarGzFromFiles_Rejects(t *testing.T) {
 }
 
 // The archive path must vary with everything that identifies an archive and with
-// nothing else. The regression this guards: every job scanned out of one folder
-// resolved to a single tar path, so the tar and upload workers raced over one
-// file and uploads arrived truncated.
+// nothing else — see GenerateTarPathForFiles for what each part is for. The
+// regression it guards: every job scanned out of one folder resolved to a single
+// tar path, so the workers raced over it and uploads arrived truncated.
 func TestGenerateTarPathForFiles_Identity(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "inputs")
 	set1 := []string{filepath.Join(dir, "case1.inp"), filepath.Join(dir, "case1.mesh")}
@@ -157,10 +155,7 @@ func TestGenerateTarPathForFiles_Identity(t *testing.T) {
 
 	distinct := map[string][2]string{
 		"two file sets from one directory": {path(set1, 1), path(set2, 2)},
-		// Two jobs may legitimately run the same input deck with different
-		// commands or core counts. Naming by file set alone gave them one
-		// archive, so one truncated and rewrote it while the other uploaded.
-		"two jobs over one file set": {path(set1, 1), path(set1, 2)},
+		"two jobs over one file set":       {path(set1, 1), path(set1, 2)},
 		// The member list is hashed with separators, so regrouping the same
 		// characters across names still changes the path.
 		"the same characters regrouped across names": {
@@ -175,15 +170,13 @@ func TestGenerateTarPathForFiles_Identity(t *testing.T) {
 		}
 	}
 
-	// Stability is what lets a resumed run recompute the path for a job whose tar
-	// did not finish, so the index must be part of the stable input.
+	// A resumed run recomputes this path rather than reading it back from state.
 	if a, b := path(set1, 3), path(set1, 3); a != b {
 		t.Errorf("not stable across calls: %s vs %s", a, b)
 	}
 
 	base := filepath.Base(path(set1, 1))
-	// The job index leads, then the primary file's stem, so the log line is
-	// readable and two jobs sharing a file set still get separate archives.
+	// The job index leads, then the primary file's stem.
 	if !strings.HasPrefix(base, "1_case1_") {
 		t.Errorf("tar name %q does not start with the job index and the primary file's stem", base)
 	}
@@ -191,9 +184,8 @@ func TestGenerateTarPathForFiles_Identity(t *testing.T) {
 		t.Errorf("%q lacks the FNV suffix safeRemoveTar gates deletion on", base)
 	}
 
-	// safeRemoveTar gates deletion on that suffix, so every name this produces
-	// has to carry one — and has to be a name os.Create will accept — however
-	// odd the primary file is called.
+	// However odd the primary file is called, the name still has to carry the
+	// suffix and still has to be one os.Create will accept.
 	edge := []struct {
 		name  string
 		files []string
@@ -202,8 +194,7 @@ func TestGenerateTarPathForFiles_Identity(t *testing.T) {
 		{"a name that already looks like an archive", []string{"/data/archive.tar.gz"}},
 		{"no extension", []string{"/data/no-extension"}},
 		// The whole stem used to reach the name, so a long one produced a
-		// basename os.Create refuses — at tar time, long after the scan that
-		// accepted the file.
+		// basename os.Create refuses — long after the scan accepted the file.
 		{"a 240-byte stem", []string{"/data/" + strings.Repeat("a", 240) + ".inp"}},
 	}
 	for _, tc := range edge {

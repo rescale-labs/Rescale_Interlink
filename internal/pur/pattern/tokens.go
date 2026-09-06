@@ -75,14 +75,15 @@ func tokenName(match string) string {
 	return strings.TrimSpace(inner)
 }
 
+// The value rules and the length bounds live here rather than in a caller
+// because every substitution site has the same exposure: a DOE parameter value
+// and a scanned filename land in one command line the same way, and both reach
+// the same job-creation request.
+
 // UnsafeValueChars are characters that would change the structure of a rendered
 // command rather than just supply a value: redirection, command separators,
 // substitution and quoting. A substituted value containing one of these is
 // rejected by callers, since a token value is meant to be a datum, not syntax.
-//
-// This lives here rather than in a caller because every substitution site has
-// the same exposure: a DOE parameter value and a scanned filename both land in
-// a command line the same way.
 const UnsafeValueChars = "`$;|&><\n\r\"'\\"
 
 // GlobValueChars are characters a shell expands against the filesystem or the
@@ -90,9 +91,8 @@ const UnsafeValueChars = "`$;|&><\n\r\"'\\"
 // case value, a filename — that expands is no longer the value the user wrote.
 const GlobValueChars = "*?[](){}~"
 
-// Bounds on rendered output, shared by every surface that renders one. Both a
-// DOE sweep and a file scan reach the same job-creation request, so a length one
-// of them refuses is not one the other should submit.
+// Bounds on rendered output: a length one surface refuses is not one another
+// should submit.
 const (
 	MaxCommandLength = 32 << 10
 	MaxJobNameLength = 128

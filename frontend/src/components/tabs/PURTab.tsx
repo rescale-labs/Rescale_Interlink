@@ -1453,8 +1453,7 @@ export function PURTab() {
             </div>
           )}
 
-          {/* A file the scan declined to turn into a job looks, without this, like
-              a file that simply was not there. */}
+          {/* Surfaced for the reason the store's scanSkippedFiles gives. */}
           {(scanSkippedFiles.length > 0 || scanWarnings.length > 0) && (
             <div className="mb-4 mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded text-amber-800 dark:text-amber-300 text-sm">
               {scanSkippedFiles.length > 0 && (

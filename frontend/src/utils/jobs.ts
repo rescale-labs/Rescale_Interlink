@@ -8,13 +8,10 @@ import type { JobSpec, JobRow } from '../types/jobs'
 // spec that has none while JobSpec declares them present — the first `.length`
 // read would throw. orgCode is normalized alongside them so a spec restored
 // from an older saved file cannot leave the field undefined.
-//
-// localInputFiles is defaulted for the same reason, and is why the Go field is
-// deliberately not omitempty: a job scanned in file mode carries its own file
-// list, and an absent one has to read as "no files", not as undefined.
-//
-// The license feature pair is defaulted too, so a spec from an older saved file
-// cannot leave the builder reading `.trim()` off undefined.
+// localInputFiles and the license feature pair are defaulted for that reason
+// too, so an older saved file cannot leave the builder reading `.trim()` off
+// undefined; the Go DTO carries them for the same reason, see
+// JobSpecDTO.LocalInputFiles.
 //
 // Every other field passes through, inputFiles and tarSubpath included; that
 // pass-through is what keeps a load/save round-trip lossless.

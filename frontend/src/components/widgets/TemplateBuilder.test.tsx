@@ -241,14 +241,12 @@ describe('TemplateBuilder cores stepper', () => {
     // it on save, so a step resolves it onto the ladder rather than adding to it.
     { coreType: 'emerald', start: 100, atFloor: false, clicks: ['down'], expected: [64] },
     { coreType: 'emerald', start: 100, atFloor: false, clicks: ['up'], expected: [128] },
-    // No ladder to read, so the stepper counts in nodes and refuses to guess at
-    // fractions of one.
+    // No ladder to read, so the stepper counts in whole nodes.
     { coreType: 'unknown_coretype', start: 64, atFloor: true, clicks: ['up', 'down'], expected: [128, 64] },
   ])('walks $coreType from $start via $clicks', ({ coreType, start, atFloor, clicks, expected }) => {
     renderWithLadder(0, coreType)
 
-    // The box takes a hand-typed value as given — the ladder is enforced on save
-    // — so a walk can start on it or off it.
+    // The box takes a hand-typed value as given, so a walk can start off-ladder.
     fireEvent.change(getCoresInput(), { target: { value: String(start) } })
     expect(coresValue()).toBe(start)
     expect(screen.getByLabelText('Fewer cores')).toHaveProperty('disabled', atFloor)
@@ -259,9 +257,8 @@ describe('TemplateBuilder cores stepper', () => {
     })
   })
 
-  // At 0 the stepper substitutes the node size, so the tooltip and the step
-  // attribute have to describe the value a click actually produces rather than
-  // the one the raw 0 suggests — a step of 128 counts from a base of 0.
+  // At 0 the stepper substitutes the node size, so the tooltip and step have to
+  // describe the click, not the raw 0 — see coresStepFrom.
   it('agrees with the click when the stored value is zero', () => {
     renderWithLadder(0)
 
@@ -272,9 +269,8 @@ describe('TemplateBuilder cores stepper', () => {
     expect(coresValue()).toBe(128)
   })
 
-  // With no coretype metadata loaded, the stored value is not a per-node
-  // maximum, so stating the hint in terms of it contradicts the control: the
-  // live report was a hint of "Multiples of 4" over a stepper that went 4 → 64.
+  // The live report: a hint of "Multiples of 4" over a stepper that went 4 → 64.
+  // See nodeCores for why the stored value cannot stand in for a node size.
   it('states the assumed node size while coretype metadata has not loaded', () => {
     renderWithLadder(4, 'unknown_coretype')
 
@@ -337,8 +333,7 @@ describe('TemplateBuilder project picker', () => {
     seedProjects([WITH_BUDGET, NO_BUDGET])
     renderOpen()
 
-    // Zebra sorts after Alpha by name but is the default, so it leads. Only the
-    // real budget line reaches the label — "(no budget)" adds nothing.
+    // Zebra sorts after Alpha by name but is the default, so it leads.
     expect(projectOptionText()).toEqual([
       'No project',
       'Zebra project (default)',
@@ -424,9 +419,7 @@ describe('TemplateBuilder project picker', () => {
   })
 
   // A template written by an older build can carry an org code the picker knows
-  // nothing about. Left in place it would address the pipeline at another
-  // account's organization, the assignment would be refused, and the job would
-  // run unassigned — with the picker showing the project the user chose.
+  // nothing about; see handleProjectChange for what that costs.
   it('clears a stored org code when a project is picked', () => {
     seedProjects([NO_BUDGET])
     const { onSave } = renderOpen({ ...validTemplate(), orgCode: 'old-org' })

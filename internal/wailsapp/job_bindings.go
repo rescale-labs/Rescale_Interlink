@@ -70,9 +70,9 @@ type JobSpecDTO struct {
 	// IDs of files already uploaded to Rescale, attached to the job as-is.
 	InputFiles []string `json:"inputFiles,omitempty"`
 
-	// Local paths forming this job's archive, set by file-scan mode. Not
-	// omitempty: an omitted slice arrives in TypeScript as undefined, and code
-	// that reasonably expects an array then crashes on it.
+	// Local paths forming this job's archive; see models.JobSpec. Not omitempty:
+	// an omitted slice arrives in TypeScript as undefined, and code that
+	// reasonably expects an array then crashes on it.
 	LocalInputFiles []string `json:"localInputFiles"`
 
 	TarSubpath string `json:"tarSubpath,omitempty"`
@@ -146,9 +146,8 @@ type ProjectDTO struct {
 	Name      string `json:"name"`
 	IsDefault bool   `json:"isDefault"`
 
-	// Budget lines exactly as the platform formats them. Not omitempty: an
-	// omitted slice arrives in TypeScript as undefined and the dropdown that
-	// maps over it would crash.
+	// Budget lines exactly as the platform formats them. Not omitempty, for the
+	// reason JobSpecDTO.LocalInputFiles gives.
 	RemainingAmounts []string `json:"remainingAmounts"`
 }
 
@@ -302,9 +301,6 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: result.Error}
 	}
 
-	// Rendering, collision-checking and assembly are the same work the CLI's
-	// scan-files does, and both go through one helper so a scan started from
-	// either produces the same jobs.
 	specs, renderSkips, templateWarnings, err := filescan.BuildJobs(dtoToJobSpec(template), result.Jobs)
 	if err != nil {
 		return ScanResultDTO{Error: err.Error()}
@@ -315,8 +311,7 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		jobs = append(jobs, jobSpecToDTO(spec))
 	}
 
-	// A file the template could not render is as skipped as one the scan itself
-	// passed over, so the list the GUI shows holds both.
+	// Render skips are skips too; see the same merge in the CLI's scan-files.
 	skipped := append(append([]string{}, result.SkippedFiles...), renderSkips...)
 	warnings := append(append([]string{}, result.Warnings...), templateWarnings...)
 
@@ -629,10 +624,9 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 
 	// Clear conflicting fields to prevent loaded templates or CSV carrying
 	// stale directory/InputFiles values into the wrong input mode.
-	//
 	// Single Job has no file-list mode, so a list here can only have come from a
-	// loaded file-scan template, and the tar stage gives it precedence over the
-	// directory this run just selected.
+	// loaded file-scan template — and it would take precedence over the directory
+	// this run just selected.
 	jobSpec.LocalInputFiles = nil
 
 	switch input.InputMode {

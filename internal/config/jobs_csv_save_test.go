@@ -144,11 +144,8 @@ func TestLoadJobsCSV_WithoutFileScanColumns(t *testing.T) {
 	}
 }
 
-// A path the jobs CSV cannot carry has to be refused while it is being written:
-// the loss happens on load, where the original is gone. The ";" separator turns
-// one path into two, and sanitizing on load turns an invisible character into a
-// path naming a different file — possibly another job's, whose state record it
-// would then share.
+// A path the jobs CSV cannot carry has to be refused while it is being written,
+// for the reasons SaveJobsCSV gives: by load time the original is gone.
 func TestSaveJobsCSV_RejectsUnrepresentableInputFiles(t *testing.T) {
 	tests := []struct {
 		name string

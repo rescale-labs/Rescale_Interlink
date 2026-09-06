@@ -69,10 +69,8 @@ func (p Problem) Error() string {
 // Rendered output is bounded at the one boundary every surface goes through.
 // A command legitimately gets long — solver flags, paths, mesh names — so it has
 // room to spare; a job name and a tag are labels, and one that runs past these
-// lengths is a runaway template rather than a label. The command and job-name
-// figures are pattern.MaxCommandLength/MaxJobNameLength, shared with file-scan
-// rendering so a sweep and a scan cannot disagree on what is too long; the tag
-// bound is DOE's own, as no other surface renders tags.
+// lengths is a runaway template rather than a label. The tag bound is DOE's own,
+// as no other surface renders tags; the other two come from pattern.
 const (
 	maxCommandLength = pattern.MaxCommandLength
 	maxJobNameLength = pattern.MaxJobNameLength
@@ -363,11 +361,8 @@ func validateValue(param, value string, policy valuePolicy) []Problem {
 		}}
 	}
 
-	// The character sets live in pattern, shared with file-scan mode, which
-	// substitutes a filename into a command the same way a sweep substitutes a
-	// parameter value. A categorical level is the user's own string and answers
-	// to the full set; numeric output cannot carry a glob character the number
-	// itself did not have.
+	// A categorical level is the user's own string and answers to the full set;
+	// numeric output takes the narrower one — see pattern.FirstUnsafeStructureChar.
 	unsafe := pattern.FirstUnsafeStructureChar
 	if policy == policyLiteral {
 		unsafe = pattern.FirstUnsafeChar
@@ -381,10 +376,8 @@ func validateValue(param, value string, policy valuePolicy) []Problem {
 		}}
 	}
 
-	// Quoting is not available (quote characters are rejected above), so any
-	// space splits one argument into two — and that is every kind of space, not
-	// just the plain one: a non-breaking space, a vertical tab and a NUL all
-	// reach the API verbatim and mean something else there.
+	// Whitespace and control characters, reported apart because they fail for
+	// different reasons — see pattern.FirstSpaceOrControl for why both count.
 	if r, found := pattern.FirstSpaceOrControl(value); found {
 		if unicode.IsSpace(r) {
 			return []Problem{{

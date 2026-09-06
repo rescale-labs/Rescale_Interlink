@@ -44,14 +44,10 @@ type JobSpec struct {
 	// only reads them for a job with no Directory.
 	InputFiles []string
 
-	// LocalInputFiles are local paths that together form this job's archive: the
-	// tarball holds exactly these files, flattened into the job's working
-	// directory, and the rest of Directory is not walked. Set by file-scan mode,
-	// where each job owns one file set that may reach outside Directory (a
-	// secondary pattern such as "../meshes/*.cfg").
-	//
-	// Distinct from InputFiles, which means already-uploaded file IDs everywhere
-	// else in the codebase.
+	// LocalInputFiles are local paths that together form this job's archive, in
+	// the shape tar.CreateTarGzFromFiles describes; the rest of Directory is not
+	// walked, and the tar stage prefers this list over Directory. Set by file-scan
+	// mode. Paths on this machine, not the uploaded IDs InputFiles carries.
 	LocalInputFiles []string
 
 	// Optional subdirectory within each Run_* to tar instead of the full directory.

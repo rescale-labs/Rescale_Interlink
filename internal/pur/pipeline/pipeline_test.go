@@ -643,16 +643,15 @@ func TestFindCommonParent(t *testing.T) {
 			want: root,
 		},
 		{
-			// "run" is a string prefix of "runner" but not a path prefix; taking
-			// it as one sites the whole batch's archives inside one job's tree.
+			// Taking the string prefix as a path prefix sites the whole batch's
+			// archives inside one job's tree.
 			name: "a partial component is not a common parent",
 			jobs: dirJobs(filepath.Join("run", "a"), filepath.Join("runner", "b")),
 			want: root,
 		},
 		{
-			// Rows carrying only a file list have no Directory, and Abs("")
-			// resolves to the process working directory — which would site the
-			// archives beside the running binary rather than beside the inputs.
+			// Abs("") would site the archives beside the running binary rather
+			// than beside the inputs.
 			name: "jobs carrying only a file list anchor on their inputs",
 			jobs: []models.JobSpec{
 				{JobName: "a", LocalInputFiles: []string{filepath.Join(root, "a.inp")}},
@@ -661,9 +660,8 @@ func TestFindCommonParent(t *testing.T) {
 			want: filepath.Dir(root),
 		},
 		{
-			// One job directory sits directly under the volume root, so the only
-			// shared ancestor is the root itself. Siting the archives there would
-			// write into "/" (or "C:\"); the working directory is the safer home.
+			// The only shared ancestor is the volume root, which is not a place
+			// to write archives.
 			name: "a job directory at the volume root settles on the working directory",
 			jobs: []models.JobSpec{
 				{JobName: "a", Directory: filepath.Join(vol, "data")},
@@ -722,8 +720,7 @@ func TestBuildJobRequest_UserDefinedLicenseSettings(t *testing.T) {
 
 		{name: "a name without a count", feature: "ansys_hpc"},
 		{name: "a count without a name", count: 4},
-		// CSV parsing accepts a negative integer. Treating it as "unset" sent
-		// userDefinedLicenseSettings:null instead of reporting the bad input.
+		// A negative count used to send null instead of reporting the bad input.
 		{name: "a negative count without a name", count: -1},
 		{name: "a negative count with a name", feature: "ansys_hpc", count: -1},
 	}

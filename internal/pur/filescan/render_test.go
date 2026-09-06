@@ -142,9 +142,9 @@ func TestRender(t *testing.T) {
 		{name: "index available", command: "solve {{file}}", jobName: "{{base}}-{{index}}", index: 2, wantCommand: "solve case1.inp", wantJobName: "case1-2"},
 		{name: "numbering suppressed once tokens are used", command: "solve {{file}}", jobName: "{{base}}", index: 2, wantCommand: "solve case1.inp", wantJobName: "case1"},
 
-		// A filename that would restructure the command is this file's problem,
-		// not the batch's, so it comes back as an error the caller records as a
-		// skip — naming the token, which is the only clue to which file it was.
+		// This file's problem, not the batch's, so it comes back as an error the
+		// caller records as a skip — see Render. The token is named because it is
+		// the only clue to which file it was.
 		{name: "a space in the filename", command: "solve --in {{file}}", files: jobFilesFor("inputs/my case.inp"), wantErr: "{{file}}"},
 		{name: "a substitution in the filename", command: "solve --in {{file}}", files: jobFilesFor("inputs/$(whoami).inp"), wantErr: "{{file}}"},
 		{name: "a separator in the filename", command: "solve --in {{file}}", files: jobFilesFor("inputs/a;b.inp"), wantErr: "{{file}}"},
@@ -162,16 +162,13 @@ func TestRender(t *testing.T) {
 			wantErr: "{{dir}}",
 		},
 
-		// Render does not depend on the caller having validated first: an unknown
-		// token would otherwise reach Rescale verbatim, and one left in the name
-		// leaves every job in the scan answering to a single literal identifier.
+		// Render does not depend on the caller having validated first — see its
+		// post-conditions, and ValidateJobNameTemplate for the name.
 		{name: "an unresolved command token", command: "solve --job {{bse}}", wantErr: "{{bse}}"},
 		{name: "an unresolved job name token", command: "solve {{file}}", jobName: "run-{{bse}}", wantErr: "{{bse}}"},
 
-		// The rendered length limits are DOE's, and they apply here for the same
-		// reason: a template multiplies its input, so a filename a byte too long
-		// is one the caller must not submit. Checked at the boundary exactly,
-		// since this path used to be bounded nowhere.
+		// The bounds are pattern's, shared with DOE, and checked at the boundary
+		// exactly: this path used to be bounded nowhere.
 		{
 			name:        "command exactly at the limit",
 			command:     strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")) + "{{file}}",
@@ -231,8 +228,6 @@ func TestRender(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Render: %v", err)
 			}
-			// Both stated on every row, so no row can pass while silently
-			// asserting nothing about one of the two outputs.
 			if command != tt.wantCommand {
 				t.Errorf("command = %q, want %q", command, tt.wantCommand)
 			}
@@ -271,23 +266,26 @@ func TestValidateCommandTemplate(t *testing.T) {
 	tests := []struct {
 		name     string
 		command  string
-		wantErr  bool
+		wantErr  string // substring the error must carry; empty means no error
 		wantWarn bool
 	}{
-		{"all known tokens", "solve {{file}} {{base}} {{ext}} {{dir}} {{index}}", false, false},
-		{"no tokens warns", "solve --in fixed.inp", false, true},
-		{"empty is an error", "", true, false},
-		{"whitespace only is an error", "  ", true, false},
-		{"unknown token is fatal", "solve --job {{bse}}", true, false},
-		{"DOE token is not a file-scan token", "solve --job {{__base}}", true, false},
-		{"one bad among good is fatal", "solve {{file}} {{nope}}", true, false},
+		{"all known tokens", "solve {{file}} {{base}} {{ext}} {{dir}} {{index}}", "", false},
+		{"no tokens warns", "solve --in fixed.inp", "", true},
+		{"empty is an error", "", "empty", false},
+		{"whitespace only is an error", "  ", "empty", false},
+		{"unknown token is fatal", "solve --job {{bse}}", "{{bse}}", false},
+		{"DOE token is not a file-scan token", "solve --job {{__base}}", "{{__base}}", false},
+		{"one bad among good is fatal", "solve {{file}} {{nope}}", "{{nope}}", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			warnings, err := ValidateCommandTemplate(tt.command)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ValidateCommandTemplate(%q) err = %v, wantErr %v", tt.command, err, tt.wantErr)
+			if (err != nil) != (tt.wantErr != "") {
+				t.Fatalf("ValidateCommandTemplate(%q) err = %v, want error %v", tt.command, err, tt.wantErr != "")
+			}
+			if err != nil && !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not carry %q", err, tt.wantErr)
 			}
 			if (len(warnings) > 0) != tt.wantWarn {
 				t.Errorf("warnings = %v, wantWarn %v", warnings, tt.wantWarn)
@@ -323,8 +321,7 @@ func TestValidateCommandTemplate_UnknownTokenMessage(t *testing.T) {
 }
 
 // An unknown name token is fatal rather than advisory, for the reason
-// ValidateJobNameTemplate gives: it leaves every job in the scan carrying one
-// literal name.
+// ValidateJobNameTemplate gives.
 func TestValidateJobNameTemplate(t *testing.T) {
 	if err := ValidateJobNameTemplate("run-{{base}}-{{index}}"); err != nil {
 		t.Errorf("known tokens rejected: %v", err)
@@ -381,13 +378,8 @@ func TestBuildJobs(t *testing.T) {
 		wantErr     []string // substrings the error must carry
 	}{
 		{
-			name: "one job per file", command: "solve {{file}}", jobName: "{{dir}}-{{base}}",
-			found: colliding, wantNames: []string{"case1-model", "case2-model"},
-		},
-		{
-			// The name is what progress events and state records are matched by,
-			// so two files answering to one fail the batch: building the first
-			// alone would hand back fewer jobs than the scan found.
+			// Two files answering to one name fail the batch rather than quietly
+			// building the first; see ValidateJobNameTemplate.
 			name: "two files rendering to one name", command: "solve {{file}}", jobName: "{{base}}",
 			found: colliding,
 			wantErr: []string{
@@ -396,8 +388,6 @@ func TestBuildJobs(t *testing.T) {
 			},
 		},
 		{
-			// A template typo is wrong for every file, so it fails once instead
-			// of skipping each file in turn.
 			name: "an unknown command token", command: "solve --job {{bse}}", jobName: "{{base}}",
 			found: colliding, wantErr: []string{"{{bse}}", "{{file}}"},
 		},
@@ -406,19 +396,19 @@ func TestBuildJobs(t *testing.T) {
 			found: colliding, wantErr: []string{"{{bse}}", "{{file}}"},
 		},
 		{
-			// One filename that cannot be substituted safely costs that file, not
-			// the batch — and the line names the folder, since in this layout the
-			// base name is the one thing the files have in common.
+			// Costs that file, not the batch, and the line names the folder — see
+			// BuildJobs and displayPath.
 			name: "a file that cannot be rendered", command: "solve {{file}}", jobName: "{{dir}}-{{base}}",
 			found:       []JobFiles{jobFilesFor("case1/my case.inp"), jobFilesFor("case2/good.inp")},
 			wantNames:   []string{"case2-good"},
 			wantSkipped: []string{filepath.Join("case1", "my case.inp")},
 		},
 		{
-			// Every job then runs the same command, which is occasionally what
-			// the user wants, so it warns rather than refusing.
-			name: "a command with no tokens", command: "solve fixed.inp", jobName: "{{dir}}-{{base}}",
-			found: colliding, wantNames: []string{"case1-model", "case2-model"}, wantWarn: true,
+			// One job per file, and a token-free command warns rather than
+			// refusing — see ValidateCommandTemplate.
+			name: "one job per file, and a command with no tokens", command: "solve fixed.inp",
+			jobName: "{{dir}}-{{base}}",
+			found:   colliding, wantNames: []string{"case1-model", "case2-model"}, wantWarn: true,
 		},
 		{
 			name: "an empty command", command: "  ", jobName: "{{base}}",
@@ -486,8 +476,7 @@ func TestBuildJobs_AssemblesFromTheTemplate(t *testing.T) {
 	}
 
 	jf := jobFilesFor("inputs/case1.inp")
-	// A secondary pattern resolves outside the primary's folder, which is the
-	// whole reason the job carries its own file list.
+	// Outside the primary's folder, which the file list exists to allow.
 	jf.InputFiles = append(jf.InputFiles, filepath.FromSlash("meshes/case1.cfg"))
 
 	jobs, _, _, err := BuildJobs(template, []JobFiles{jf})
@@ -509,8 +498,7 @@ func TestBuildJobs_AssemblesFromTheTemplate(t *testing.T) {
 	if job.Directory != jf.PrimaryDir {
 		t.Errorf("Directory = %q, want %q", job.Directory, jf.PrimaryDir)
 	}
-	// A subpath inherited from a loaded template has no directory walk in this
-	// mode to apply to, and would fail the job at the tar stage.
+	// Nothing in this mode for an inherited subpath to apply to; see BuildJobs.
 	if job.TarSubpath != "" {
 		t.Errorf("TarSubpath = %q, want it cleared", job.TarSubpath)
 	}

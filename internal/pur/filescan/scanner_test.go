@@ -77,12 +77,9 @@ func TestScanFiles_BasicScan(t *testing.T) {
 	}
 }
 
-// The archive a job's file list produces is flat, so the list has to be a set of
-// distinct names before the job is offered. Both cases below reached the tar
-// stage instead, where every job in the batch died on "duplicate filename".
+// Both cases below used to reach the tar stage instead, where every job in the
+// batch died on "duplicate filename"; see ScanFiles for why they are caught here.
 func TestScanFiles_SecondaryCollidesWithAnIncludedFile(t *testing.T) {
-	// A wildcard secondary substitutes the primary's stem, so "*.inp" against a
-	// primary of "*.inp" resolves to the primary itself.
 	t.Run("a secondary that resolves to the primary is dropped", func(t *testing.T) {
 		root := t.TempDir()
 		writeScanFile(t, root, "case1.inp")
@@ -109,8 +106,6 @@ func TestScanFiles_SecondaryCollidesWithAnIncludedFile(t *testing.T) {
 		}
 	})
 
-	// Two different files sharing one base name cannot both be archived, so the
-	// job is refused while the batch is still being planned.
 	t.Run("a secondary sharing a base name with another path skips the job", func(t *testing.T) {
 		root := t.TempDir()
 		writeScanFile(t, root, filepath.Join("inputs", "case1.inp"))
@@ -133,8 +128,7 @@ func TestScanFiles_SecondaryCollidesWithAnIncludedFile(t *testing.T) {
 		if len(result.SkippedFiles) != 1 {
 			t.Fatalf("skipped = %v, want one entry", result.SkippedFiles)
 		}
-		// Both paths, because a bare base name here names the very thing the two
-		// files have in common and tells the user nothing about which they are.
+		// Both paths, since a bare base name is what they have in common.
 		for _, want := range []string{
 			filepath.Join(root, "inputs", "case1.inp"),
 			filepath.Join(root, "meshes", "case1.inp"),
@@ -146,10 +140,8 @@ func TestScanFiles_SecondaryCollidesWithAnIncludedFile(t *testing.T) {
 	})
 }
 
-// A scan of "case1/model.inp" and "case2/model.inp" is the layout these
-// messages exist for, and a bare base name makes the two lines byte-identical:
-// the user cannot tell which file each one is about, and the GUI keys its list
-// rows on them. The parent folder is what tells the two apart.
+// A scan of "case1/model.inp" and "case2/model.inp" is the layout displayPath
+// exists for: a bare base name makes the two lines byte-identical.
 func TestScanFiles_SkipsAndWarningsNameTheFolder(t *testing.T) {
 	for _, tt := range []struct {
 		name     string

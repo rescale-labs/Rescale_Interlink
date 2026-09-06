@@ -19,9 +19,6 @@ import (
 // the other 199. err is reserved for what condemns the batch — a template no
 // file can render, or two files that would submit under one name.
 func BuildJobs(template models.JobSpec, found []JobFiles) (jobs []models.JobSpec, skipped []string, warnings []string, err error) {
-	// Checked once, before any job is built: a command whose tokens are wrong is
-	// wrong for every file, and a typo must not become a batch of jobs each
-	// carrying a literal "{{bse}}" on its command line.
 	warnings, err = ValidateCommandTemplate(template.Command)
 	if err != nil {
 		return nil, nil, nil, err
@@ -30,16 +27,12 @@ func BuildJobs(template models.JobSpec, found []JobFiles) (jobs []models.JobSpec
 		return nil, nil, nil, err
 	}
 
-	// Two jobs answering to one name misroute each other's progress and state
-	// updates — see ValidateJobNameTemplate. A collision fails the batch rather
-	// than dropping the second file, as it fails DOE generation: handing back a
-	// batch quietly smaller than the one scanned for is the worse answer.
+	// A collision fails the batch rather than dropping the second file, as it
+	// fails DOE generation: a batch quietly smaller than the one scanned for is
+	// the worse answer. Why one name cannot serve two: ValidateJobNameTemplate.
 	seenNames := make(map[string]string, len(found))
 
 	for i, jf := range found {
-		// Under {{base}} the colliding files share a base name, so naming them
-		// that way reads as one file colliding with itself; the parent folder is
-		// what tells the two apart.
 		display := displayPath(jf.PrimaryDir, jf.PrimaryFile)
 
 		command, jobName, renderErr := Render(template.Command, template.JobName, jf, i+1)
@@ -62,9 +55,8 @@ func BuildJobs(template models.JobSpec, found []JobFiles) (jobs []models.JobSpec
 		// loaded template to apply to; left set it would fail every job at the
 		// tar stage, and the GUI has no field in this mode to clear it.
 		job.TarSubpath = ""
-		// The job's archive is exactly its own files, wherever they live: a
-		// secondary pattern can resolve outside PrimaryDir. InputFiles means IDs
-		// of files already on Rescale, which these are not.
+		// This job's inputs are its own local files, not uploaded IDs; see
+		// models.JobSpec.
 		job.LocalInputFiles = jf.InputFiles
 		job.InputFiles = nil
 

@@ -105,12 +105,11 @@ type tarWorkerCase struct {
 func TestTarWorker(t *testing.T) {
 	tests := []tarWorkerCase{
 		{
-			// The failure this branch exists to prevent: several file-scan jobs
-			// share one PrimaryDir, so before per-file archives they all resolved
-			// to a single tarball and raced over it ("upload incomplete: received
-			// 1 of 9 parts"), each carrying the whole folder rather than its own
-			// two files. unrelated.dat is the file nobody asked for — a directory
-			// walk picks it up, an explicit list must not.
+			// The failure this branch exists to prevent: these three jobs share one
+			// directory, so before per-file archives they raced over a single
+			// tarball ("upload incomplete: received 1 of 9 parts") each holding the
+			// whole folder. unrelated.dat is the file nobody asked for — a
+			// directory walk picks it up, an explicit list must not.
 			name: "an explicit file list archives only that job's own files",
 			files: []string{
 				"inputs/case1.inp", "inputs/case1.mesh",
@@ -130,9 +129,9 @@ func TestTarWorker(t *testing.T) {
 			},
 		},
 		{
-			// A secondary pattern may reach outside the primary file's folder.
-			// Flattening is what makes that work, and it is why those files used
-			// to be validated as present and then never uploaded.
+			// Flattening is what lets a secondary pattern reach outside the
+			// primary's folder, and it is why those files used to be validated as
+			// present and then never uploaded.
 			name:  "an explicit file list flattens across directories",
 			files: []string{"inputs/case1.inp", "meshes/case1.cfg"},
 			jobs: []models.JobSpec{{
@@ -144,19 +143,16 @@ func TestTarWorker(t *testing.T) {
 		},
 		{
 			// A CSV row may name its files and no directory at all. Such a job
-			// still has an archive to build, and the empty Directory must be left
-			// alone: resolving it would silently adopt the process working
-			// directory, which the job worker would then read as "this job was
-			// tarred and uploaded from there".
+			// still has an archive to build, and its empty Directory has to be left
+			// alone — see the normalization guard in tarWorker.
 			name:  "an explicit file list with no directory at all",
 			files: []string{"case1.inp"},
 			jobs:  []models.JobSpec{{JobName: "case1", LocalInputFiles: []string{"case1.inp"}}},
 			want:  map[string][]string{"case1": {"case1.inp"}},
 		},
 		{
-			// Two jobs may legitimately run the same deck with different commands
-			// or core counts. Naming the archive by file set alone gave them one
-			// path, so one job truncated and rewrote it while the other uploaded.
+			// Two jobs legitimately running one deck; see GenerateTarPathForFiles
+			// for why the index has to be in the name.
 			name:  "two jobs over one deck get an archive each",
 			files: []string{"shared.inp"},
 			jobs: []models.JobSpec{
@@ -166,8 +162,7 @@ func TestTarWorker(t *testing.T) {
 			want: map[string][]string{"coarse": {"shared.inp"}, "fine": {"shared.inp"}},
 		},
 		{
-			// A job with no file list still archives its whole directory, which is
-			// every other PUR mode. The walk keeps the directory prefix, unlike
+			// Every other PUR mode: the walk keeps the directory prefix, unlike
 			// the flattened file-list path.
 			name:  "no file list still archives the whole directory",
 			files: []string{"Run_1/a.inp", "Run_1/b.dat"},
@@ -204,13 +199,11 @@ func TestTarWorker(t *testing.T) {
 			jobs := make([]models.JobSpec, len(tt.jobs))
 			wantDir := make(map[string]string, len(tt.jobs))
 			for i, job := range tt.jobs {
-				// An empty Directory stays empty; see the no-directory case.
 				if job.Directory != "" {
 					job.Directory = filepath.Join(root, job.Directory)
 				}
 				if len(job.LocalInputFiles) > 0 {
-					// Copied rather than rewritten in place, so the table stays
-					// reusable across repeated runs of the same case.
+					// Copied, not rewritten in place, so the table stays reusable.
 					resolved := make([]string, len(job.LocalInputFiles))
 					for j, file := range job.LocalInputFiles {
 						resolved[j] = filepath.Join(root, file)

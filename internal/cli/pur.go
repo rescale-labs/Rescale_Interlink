@@ -350,9 +350,6 @@ Examples:
 					return fmt.Errorf("template CSV is empty")
 				}
 
-				// Rendering, collision-checking and assembly are the same work
-				// the GUI's files mode does, and both go through one helper so a
-				// scan started from either produces the same jobs.
 				var renderSkips, templateWarnings []string
 				jobs, renderSkips, templateWarnings, err = filescan.BuildJobs(templateJobs[0], result.Jobs)
 				if err != nil {

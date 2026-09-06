@@ -192,8 +192,7 @@ export const DEFAULT_JOB_TEMPLATE: JobSpec = {
   projectId: '',
   orgCode: '',
   automations: [],
-  // Required on the DTO (deliberately not omitempty), so the default template
-  // has to carry it; file-scan mode is what fills it in.
+  // Always present on the DTO, so the default template carries it too.
   localInputFiles: [],
 }
 
@@ -779,8 +778,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
         jobRows: toJobRows(jobs),
         workflowState: 'directoriesScanned',
         isGeneratingDOE: false,
-        // Same results view as a file scan, so an earlier scan's skips would
-        // otherwise be reported against these jobs.
+        // Same results view, so an earlier scan's skips would be reported here.
         scanSkippedFiles: [],
         scanWarnings: [],
       })
@@ -960,8 +958,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
       console.error('Failed to fetch core types:', errMsg)
       set({ coreTypesError: errMsg })
     } finally {
-      // Marked on any outcome, so an account that legitimately returns no
-      // coretypes does not restart the fetch-on-open effect forever.
       set({ isLoadingCoreTypes: false, coreTypesLoaded: true })
     }
   },
@@ -1046,8 +1042,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       console.error('Failed to fetch projects:', errMsg)
       set({ projectsError: errMsg })
     } finally {
-      // Marked on any outcome, including failure: the button is how a retry
-      // happens, not another pass of the effect.
+      // Marked even on failure: the Scan button is the retry, not the effect.
       set({ isLoadingProjects: false, projectsLoaded: true })
     }
   },

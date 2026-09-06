@@ -100,7 +100,7 @@ func ValidateCommandTemplate(command string) (warnings []string, err error) {
 			"command; add one of %s to vary it per file", tokenList())}, nil
 	}
 
-	if unknown := firstUnknownToken(command); unknown != "" {
+	if unknown := firstUnknownToken(tokens); unknown != "" {
 		// The name comes before the word "token" on purpose: reporting's
 		// redactor reads "token <word>" as a credential and would replace the
 		// one detail this error exists to report (reporting/redactor.go:20).
@@ -119,7 +119,7 @@ func ValidateCommandTemplate(command string) (warnings []string, err error) {
 // happens to match first. Checked once, up front, so a typo costs one message
 // rather than one skip per scanned file.
 func ValidateJobNameTemplate(jobName string) error {
-	if unknown := firstUnknownToken(jobName); unknown != "" {
+	if unknown := firstUnknownToken(pattern.ExtractTokens(jobName)); unknown != "" {
 		// The name comes before the word "token" on purpose; see
 		// ValidateCommandTemplate.
 		return fmt.Errorf("job name contains {{%s}}, which is not a file-scan token; valid tokens are %s",
@@ -207,10 +207,10 @@ func renderJobName(jobNameTemplate string, values map[string]string, index int) 
 	return fmt.Sprintf("%s_%d", jobNameTemplate, index)
 }
 
-// firstUnknownToken returns the first token in s that file-scan mode does not
-// substitute, or "" when every token in s is known.
-func firstUnknownToken(s string) string {
-	for _, token := range pattern.ExtractTokens(s) {
+// firstUnknownToken returns the first of the extracted tokens that file-scan
+// mode does not substitute, or "" when every one of them is known.
+func firstUnknownToken(tokens []string) string {
+	for _, token := range tokens {
 		if !isKnownToken(token) {
 			return token
 		}

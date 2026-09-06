@@ -149,8 +149,7 @@ type workItem struct {
 // Two stages have to agree on this: the feeder skips tar/upload without it, and
 // the job worker then takes the job's input file IDs from the spec rather than
 // from the upload. A job carrying an explicit file list has an archive to build
-// whether or not Directory is set — LocalInputFiles holds paths on this machine,
-// where InputFiles holds IDs of files already on Rescale.
+// whether or not Directory is set; see models.JobSpec.LocalInputFiles.
 func hasLocalArchive(spec models.JobSpec) bool {
 	return spec.Directory != "" || len(spec.LocalInputFiles) > 0
 }
@@ -880,19 +879,15 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 
 			// The archive is built one of two ways, and everything downstream —
 			// upload, FileID, job creation, state, resume — is the same either way.
-			//
-			// A job carrying its own file list archives exactly those files, in
-			// the shape tar.CreateTarGzFromFiles describes, so there is nothing
-			// for a directory walk, a TarSubpath or the include/exclude patterns
-			// to narrow. Otherwise Directory is walked, as it always has been.
+			// A job carrying its own file list archives exactly those files (see
+			// models.JobSpec.LocalInputFiles), so there is nothing for a directory
+			// walk, a TarSubpath or the include/exclude patterns to narrow.
+			// Otherwise Directory is walked, as it always has been.
 			var tarPath string
 			var createArchive func() error
 			var archiveSource string
 
 			if files := item.jobSpec.LocalInputFiles; len(files) > 0 {
-				// Named per job and hashed per file set, so neither jobs scanned out
-				// of one folder nor two jobs running the same deck resolve to the
-				// same archive and race over it.
 				tarPath = tar.GenerateTarPathForFiles(files, item.index, p.tempDir, p.cfg.TarCompression)
 				archiveSource = fmt.Sprintf("%d file(s)", len(files))
 				createArchive = func() error {
@@ -1301,10 +1296,9 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.reportStateChange(item.state.JobName, "create", "in_progress", "", "", 0.0)
 
 				// With nothing of its own to archive, nothing was tarred or
-				// uploaded, so the FileID from the upload stage is empty; inputs
-				// come from any pre-specified file IDs (possibly none) plus
-				// batch-level Common Files, merged in BuildJobRequest. Otherwise
-				// use the uploaded tarball's FileID.
+				// uploaded, so the upload stage's FileID is empty; inputs come from
+				// any pre-specified file IDs (possibly none) plus batch-level Common
+				// Files, merged in BuildJobRequest.
 				var fileIDs []string
 				if !hasLocalArchive(item.jobSpec) {
 					fileIDs = item.jobSpec.InputFiles
@@ -1351,10 +1345,10 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					}
 				}
 
-				// Org-scoped project assignment. An explicit org code overrides —
-				// job spec first, then config — and an empty one is resolved from
-				// the API key by Client.AssignProjectToJob, which owns that
-				// precedence, so choosing a project is enough on its own.
+				// Org-scoped project assignment. An explicit code overrides — job
+				// spec first, then config; an empty one resolves from the API key,
+				// so choosing a project is enough on its own. Precedence is owned
+				// by Client.AssignProjectToJob.
 				if item.jobSpec.ProjectID != "" {
 					orgCode := item.jobSpec.OrgCode
 					if orgCode == "" {
@@ -1368,9 +1362,8 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 							break
 						}
 						p.logf("WARN", "job", item.state.JobName, "Project assignment attempt %d failed: %v", assignAttempt, err)
-						// The code comes from the key's own profile, so a resolve that
-						// failed once fails on every attempt; retrying only stalls the
-						// worker for the back-off.
+						// Not transient, so retrying only stalls the worker for the
+						// back-off; see api.ErrOrgCodeUnavailable.
 						if errors.Is(err, api.ErrOrgCodeUnavailable) {
 							break
 						}

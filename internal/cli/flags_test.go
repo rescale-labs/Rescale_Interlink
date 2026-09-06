@@ -24,19 +24,6 @@ func writeScanDeck(t *testing.T, root, name string) {
 	}
 }
 
-// scanFilesFixture lays out two subdirectories holding identically named decks
-// and writes the template CSV a scan-files run generates jobs from. It returns
-// the root, the template path and the output path.
-func scanFilesFixture(t *testing.T, jobNameTemplate string) (root, template, output string) {
-	t.Helper()
-
-	root = t.TempDir()
-	writeScanDeck(t, root, filepath.Join("case1", "model.inp"))
-	writeScanDeck(t, root, filepath.Join("case2", "model.inp"))
-
-	return root, scanFilesTemplate(t, root, jobNameTemplate), filepath.Join(root, "jobs.csv")
-}
-
 // scanFilesTemplate writes the one-row template CSV a scan-files run generates
 // its jobs from.
 func scanFilesTemplate(t *testing.T, root, jobNameTemplate string) string {
@@ -96,9 +83,9 @@ func runScanFiles(t *testing.T, root, primary, template, output string) (string,
 }
 
 // The summary was printed from the scan's match count, before the template loop
-// rendered anything: a run that skipped every file still announced the full
-// count as "Jobs created" and then generated none. The skip lines named the base
-// name alone, which in this layout is the one thing the files have in common.
+// rendered anything: a run that skipped every file still announced the full count
+// as "Jobs created" and then generated none. The skip lines named the base name
+// alone — see displayPath.
 func TestScanFilesSummaryReportsRenderedJobs(t *testing.T) {
 	root := t.TempDir()
 	// A space in the name cannot be substituted into a command line, so these
@@ -121,16 +108,14 @@ func TestScanFilesSummaryReportsRenderedJobs(t *testing.T) {
 	if len(jobs) != 1 {
 		t.Fatalf("%d jobs generated, want 1", len(jobs))
 	}
-	// The template's subpath has no directory walk to apply to in files mode,
-	// and reaching the CSV set it would fail the job at the tar stage.
+	// Cleared by BuildJobs; reaching the CSV set it would fail the job at tar.
 	if jobs[0].TarSubpath != "" {
 		t.Errorf("TarSubpath = %q, want it cleared", jobs[0].TarSubpath)
 	}
 	if !strings.Contains(out, "Jobs created: 1") {
 		t.Errorf("summary does not report the 1 job actually generated:\n%s", out)
 	}
-	// Each skipped file is named by folder and base name, so the two lines are
-	// distinguishable — and tell the user which deck to rename.
+	// Named by folder and base name, so the two lines can be told apart.
 	for _, want := range []string{
 		filepath.Join("case1", "my case.inp"),
 		filepath.Join("case2", "my case.inp"),
@@ -146,9 +131,13 @@ func TestScanFilesSummaryReportsRenderedJobs(t *testing.T) {
 // reaches the command as a failure and, with it, that no jobs.csv is left behind
 // for a batch that was never built.
 func TestScanFilesRejectsDuplicateJobNames(t *testing.T) {
-	root, template, output := scanFilesFixture(t, "{{base}}")
+	root := t.TempDir()
+	writeScanDeck(t, root, filepath.Join("case1", "model.inp"))
+	writeScanDeck(t, root, filepath.Join("case2", "model.inp"))
+	output := filepath.Join(root, "jobs.csv")
 
-	if _, err := runScanFiles(t, root, filepath.Join("*", "model.inp"), template, output); err == nil {
+	if _, err := runScanFiles(t, root, filepath.Join("*", "model.inp"),
+		scanFilesTemplate(t, root, "{{base}}"), output); err == nil {
 		t.Fatal("expected an error for two files rendering to one job name")
 	}
 	if _, statErr := os.Stat(output); statErr == nil {
@@ -156,10 +145,8 @@ func TestScanFilesRejectsDuplicateJobNames(t *testing.T) {
 	}
 }
 
-// A CSV saved by a file scan carries LocalInputFiles. Reused as a folder-scan
-// template it used to hand that list to every generated job, and the tar stage
-// prefers the list over Directory — so every job archived the old template's
-// files rather than the run directory it was generated for.
+// The same trap as core's ScanToSpecs, from the CLI: a template CSV saved by a
+// file scan used to hand its file list to every generated job.
 func TestMakeDirsCSVClearsInheritedFileList(t *testing.T) {
 	root := t.TempDir()
 	for _, dir := range []string{"Run_1", "Run_2"} {

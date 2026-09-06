@@ -523,8 +523,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     } else {
       // Only once coretype metadata is loaded. Without it, trust the stored
       // value — the platform API is the ultimate validator.
-      // The same ladder the stepper walks, so the control cannot offer a value
-      // this then rejects.
       if (coreLadder.length > 0) {
         const isValidFractional = coreLadder.includes(template.coresPerSlot)
         const isValidMultiNode = template.coresPerSlot % nodeCores === 0
@@ -575,8 +573,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
 
     // Trailing spaces in a feature name would reach the license server verbatim,
-    // and a count left behind by a name the user cleared must not be sent alone —
-    // validate() only allows the empty-name case through with a zero count.
+    // and a name cleared here drops its count rather than sending it alone.
     const licenseFeatureName = template.licenseFeatureName.trim()
 
     const finalTemplate = {

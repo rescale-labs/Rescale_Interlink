@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { wailsapp } from '../../wailsjs/go/models';
 import * as App from '../../wailsjs/go/wailsapp/App';
-// A different API key is a different account; see resetAccountCatalogs.
 import { useJobStore } from './jobStore';
 
 interface ConfigState {
@@ -37,14 +36,12 @@ interface ConfigState {
   selectFile: (title: string) => Promise<string>;
 }
 
-// The one guard for every path that replaces the effective API key: a typed
-// key, the startup fetch, a config file imported over the current one (which
-// routes through fetchConfig) and a cleared saved token. Coretypes and projects
-// belong to the account behind the key, so a key that changed makes them wrong;
-// a key that did not would only cost the pickers a re-scan they do not need.
-// `previous` is null only before the first fetchConfig, when there is nothing
-// cached to invalidate. Nothing is refetched here: the next open of a picker is
-// when that costs.
+// The one guard for every path that replaces the effective API key: a typed key,
+// the startup fetch, a config file imported over the current one (which routes
+// through fetchConfig) and a cleared saved token. A different key is a different
+// account — see resetAccountCatalogs; a key that did not change would only cost
+// the pickers a re-scan they do not need. `previous` is null only before the
+// first fetchConfig, when there is nothing cached to invalidate.
 const resetCatalogsOnAPIKeyChange = (
   previous: wailsapp.ConfigDTO | null,
   nextAPIKey: string,

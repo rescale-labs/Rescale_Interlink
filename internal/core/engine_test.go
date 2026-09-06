@@ -243,10 +243,8 @@ func TestEngine_ScanToSpecs_AbsolutePaths(t *testing.T) {
 	wantAbsoluteDirs(t, jobs)
 }
 
-// A CSV saved by a file scan carries LocalInputFiles. Reused as a folder-scan
-// template it used to hand that same list to every generated job, and the tar
-// stage prefers the list over Directory — so all of them archived the old
-// template's files and none archived the directory they were scanned from.
+// A CSV saved by a file scan carries LocalInputFiles, and reused as a folder-scan
+// template it used to hand that same list to every generated job; see ScanToSpecs.
 func TestEngine_ScanToSpecs_ClearsInheritedFileList(t *testing.T) {
 	engine := newScanEngine(t)
 
