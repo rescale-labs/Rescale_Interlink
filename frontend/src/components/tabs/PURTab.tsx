@@ -1157,7 +1157,8 @@ export function PURTab() {
             </div>
           )}
 
-          {scanOptions.scanMode !== 'doe' && (
+          {/* A file scan globs one pattern under the root, so neither option applies there. */}
+          {scanOptions.scanMode === 'folders' && (
           <div className="flex items-center gap-4 mb-6">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -1168,17 +1169,15 @@ export function PURTab() {
               />
               <span className="text-sm">Recursive scan</span>
             </label>
-            {scanOptions.scanMode === 'folders' && (
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={scanOptions.includeHidden}
-                  onChange={(e) => setScanOptions({ includeHidden: e.target.checked })}
-                  className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
-                />
-                <span className="text-sm">Include hidden directories</span>
-              </label>
-            )}
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={scanOptions.includeHidden}
+                onChange={(e) => setScanOptions({ includeHidden: e.target.checked })}
+                className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
+              />
+              <span className="text-sm">Include hidden directories</span>
+            </label>
           </div>
           )}
 
