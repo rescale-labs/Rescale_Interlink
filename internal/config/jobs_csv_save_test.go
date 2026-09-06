@@ -1,16 +1,23 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/models"
 )
 
+// Everything a jobs CSV carries, written and read back. The comparison is
+// against a whole expected spec rather than field by field, so a column the
+// writer gains without a matching read shows up here instead of going unnoticed.
 func TestSaveLoadRoundTrip(t *testing.T) {
-	// Complex job with all fields
-	originalJob := models.JobSpec{
+	// A fully populated job and a minimal one, so the multi-row write and read
+	// path is covered alongside every field.
+	complete := models.JobSpec{
 		Directory:             "./Run_Complex",
 		JobName:               "ComplexJob",
 		AnalysisCode:          "user_included",
@@ -24,15 +31,14 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		ExtraInputFileIDs:     "file1,file2,file3",
 		OnDemandLicenseSeller: "vendor",
 		ProjectID:             "project123",
+		OrgCode:               "acme",
 		Tags:                  []string{"tag1", "tag2", "tag3"},
 		NoDecompress:          true,
 		IsLowPriority:         true,
 		SubmitMode:            "create_and_submit",
 		TarSubpath:            "output/results",
 	}
-
-	// A second, simpler row keeps the multi-job write/read path covered.
-	secondJob := models.JobSpec{
+	minimal := models.JobSpec{
 		Directory:       "./Run_2",
 		JobName:         "Run_2",
 		AnalysisCode:    "user_included",
@@ -43,101 +49,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		Slots:           2,
 		LicenseSettings: `{"LICENSE": "value"}`,
 	}
-
-	tmpDir := t.TempDir()
-	csvPath := filepath.Join(tmpDir, "roundtrip.csv")
-
-	// Save
-	if err := SaveJobsCSV(csvPath, []models.JobSpec{originalJob, secondJob}); err != nil {
-		t.Fatalf("SaveJobsCSV() failed: %v", err)
-	}
-	if _, err := os.Stat(csvPath); err != nil {
-		t.Fatalf("SaveJobsCSV() did not create file at %s: %v", csvPath, err)
-	}
-
-	// Load
-	loaded, err := LoadJobsCSV(csvPath)
-	if err != nil {
-		t.Fatalf("LoadJobsCSV() failed: %v", err)
-	}
-
-	if len(loaded) != 2 {
-		t.Fatalf("LoadJobsCSV() loaded %d jobs, want 2", len(loaded))
-	}
-	if loaded[1].JobName != secondJob.JobName || loaded[1].CoresPerSlot != secondJob.CoresPerSlot {
-		t.Errorf("second job = %+v, want JobName=%s CoresPerSlot=%d",
-			loaded[1], secondJob.JobName, secondJob.CoresPerSlot)
-	}
-
-	reloaded := loaded[0]
-
-	// Verify all fields
-	if reloaded.Directory != originalJob.Directory {
-		t.Errorf("Directory = %s, want %s", reloaded.Directory, originalJob.Directory)
-	}
-	if reloaded.JobName != originalJob.JobName {
-		t.Errorf("JobName = %s, want %s", reloaded.JobName, originalJob.JobName)
-	}
-	if reloaded.AnalysisCode != originalJob.AnalysisCode {
-		t.Errorf("AnalysisCode = %s, want %s", reloaded.AnalysisCode, originalJob.AnalysisCode)
-	}
-	if reloaded.AnalysisVersion != originalJob.AnalysisVersion {
-		t.Errorf("AnalysisVersion = %s, want %s", reloaded.AnalysisVersion, originalJob.AnalysisVersion)
-	}
-	if reloaded.Command != originalJob.Command {
-		t.Errorf("Command = %s, want %s", reloaded.Command, originalJob.Command)
-	}
-	if reloaded.CoreType != originalJob.CoreType {
-		t.Errorf("CoreType = %s, want %s", reloaded.CoreType, originalJob.CoreType)
-	}
-	if reloaded.CoresPerSlot != originalJob.CoresPerSlot {
-		t.Errorf("CoresPerSlot = %d, want %d", reloaded.CoresPerSlot, originalJob.CoresPerSlot)
-	}
-	if reloaded.WalltimeHours != originalJob.WalltimeHours {
-		t.Errorf("WalltimeHours = %f, want %f", reloaded.WalltimeHours, originalJob.WalltimeHours)
-	}
-	if reloaded.Slots != originalJob.Slots {
-		t.Errorf("Slots = %d, want %d", reloaded.Slots, originalJob.Slots)
-	}
-	if reloaded.ExtraInputFileIDs != originalJob.ExtraInputFileIDs {
-		t.Errorf("ExtraInputFileIDs = %s, want %s", reloaded.ExtraInputFileIDs, originalJob.ExtraInputFileIDs)
-	}
-	if reloaded.OnDemandLicenseSeller != originalJob.OnDemandLicenseSeller {
-		t.Errorf("OnDemandLicenseSeller = %s, want %s", reloaded.OnDemandLicenseSeller, originalJob.OnDemandLicenseSeller)
-	}
-	if reloaded.ProjectID != originalJob.ProjectID {
-		t.Errorf("ProjectID = %s, want %s", reloaded.ProjectID, originalJob.ProjectID)
-	}
-	if reloaded.NoDecompress != originalJob.NoDecompress {
-		t.Errorf("NoDecompress = %v, want %v", reloaded.NoDecompress, originalJob.NoDecompress)
-	}
-	if reloaded.IsLowPriority != originalJob.IsLowPriority {
-		t.Errorf("IsLowPriority = %v, want %v", reloaded.IsLowPriority, originalJob.IsLowPriority)
-	}
-
-	// Tags comparison
-	if len(reloaded.Tags) != len(originalJob.Tags) {
-		t.Errorf("Tags length = %d, want %d", len(reloaded.Tags), len(originalJob.Tags))
-	} else {
-		for i := range originalJob.Tags {
-			if reloaded.Tags[i] != originalJob.Tags[i] {
-				t.Errorf("Tags[%d] = %s, want %s", i, reloaded.Tags[i], originalJob.Tags[i])
-			}
-		}
-	}
-
-	if reloaded.TarSubpath != originalJob.TarSubpath {
-		t.Errorf("TarSubpath = %s, want %s", reloaded.TarSubpath, originalJob.TarSubpath)
-	}
-}
-
-// Both columns arrived with file-scan mode and both are load-bearing at submit
-// time: without LocalInputFiles the CLI's scan-files -> jobs.csv -> pur run flow
-// loses each job's file list and every job falls back to archiving its whole
-// directory, and without the license feature the same flow submits jobs that
-// quietly take no license.
-func TestSaveLoadRoundTrip_FileScanColumns(t *testing.T) {
-	original := models.JobSpec{
+	// Both file-scan columns are load-bearing at submit time: without
+	// LocalInputFiles the scan-files -> jobs.csv -> pur run flow loses each job's
+	// file list and every job falls back to archiving its whole directory, and
+	// without the license feature the same flow submits jobs that quietly take
+	// no license.
+	fileScan := models.JobSpec{
 		Directory:       filepath.Join("scratch", "inputs"),
 		JobName:         "case1",
 		AnalysisCode:    "user_included",
@@ -157,33 +74,46 @@ func TestSaveLoadRoundTrip_FileScanColumns(t *testing.T) {
 		LicensesPerJob:     8,
 	}
 
-	csvPath := filepath.Join(t.TempDir(), "filescan.csv")
-	if err := SaveJobsCSV(csvPath, []models.JobSpec{original}); err != nil {
-		t.Fatalf("SaveJobsCSV() failed: %v", err)
+	// The one value the round trip does not preserve: an unset Submit column
+	// reads as "yes", which is the documented default.
+	minimalLoaded := minimal
+	minimalLoaded.SubmitMode = "yes"
+	fileScanLoaded := fileScan
+	fileScanLoaded.SubmitMode = "yes"
+
+	tests := []struct {
+		name string
+		jobs []models.JobSpec
+		want []models.JobSpec
+	}{
+		{
+			name: "every field, and a second row alongside it",
+			jobs: []models.JobSpec{complete, minimal},
+			want: []models.JobSpec{complete, minimalLoaded},
+		},
+		{
+			name: "the file-scan columns",
+			jobs: []models.JobSpec{fileScan},
+			want: []models.JobSpec{fileScanLoaded},
+		},
 	}
 
-	loaded, err := LoadJobsCSV(csvPath)
-	if err != nil {
-		t.Fatalf("LoadJobsCSV() failed: %v", err)
-	}
-	if len(loaded) != 1 {
-		t.Fatalf("loaded %d jobs, want 1", len(loaded))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			csvPath := filepath.Join(t.TempDir(), "roundtrip.csv")
 
-	got := loaded[0].LocalInputFiles
-	if len(got) != len(original.LocalInputFiles) {
-		t.Fatalf("LocalInputFiles = %v, want %v", got, original.LocalInputFiles)
-	}
-	for i, want := range original.LocalInputFiles {
-		if got[i] != want {
-			t.Errorf("LocalInputFiles[%d] = %s, want %s", i, got[i], want)
-		}
-	}
-	if loaded[0].LicenseFeatureName != original.LicenseFeatureName {
-		t.Errorf("LicenseFeatureName = %q, want %q", loaded[0].LicenseFeatureName, original.LicenseFeatureName)
-	}
-	if loaded[0].LicensesPerJob != original.LicensesPerJob {
-		t.Errorf("LicensesPerJob = %d, want %d", loaded[0].LicensesPerJob, original.LicensesPerJob)
+			if err := SaveJobsCSV(csvPath, tt.jobs); err != nil {
+				t.Fatalf("SaveJobsCSV: %v", err)
+			}
+			loaded, err := LoadJobsCSV(csvPath)
+			if err != nil {
+				t.Fatalf("LoadJobsCSV: %v", err)
+			}
+
+			if !reflect.DeepEqual(loaded, tt.want) {
+				t.Errorf("round trip changed the jobs:\n got %+v\nwant %+v", loaded, tt.want)
+			}
+		})
 	}
 }
 
@@ -211,5 +141,63 @@ func TestLoadJobsCSV_WithoutFileScanColumns(t *testing.T) {
 	if loaded[0].LicenseFeatureName != "" || loaded[0].LicensesPerJob != 0 {
 		t.Errorf("license feature = %q x %d, want empty",
 			loaded[0].LicenseFeatureName, loaded[0].LicensesPerJob)
+	}
+}
+
+// A path the jobs CSV cannot carry has to be refused while it is being written:
+// the loss happens on load, where the original is gone. The ";" separator turns
+// one path into two, and sanitizing on load turns an invisible character into a
+// path naming a different file — possibly another job's, whose state record it
+// would then share.
+func TestSaveJobsCSV_RejectsUnrepresentableInputFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+	}{
+		{"a semicolon splits the entry in two", filepath.Join("scratch", "a;b.inp")},
+		{"an invisible character is stripped on load", filepath.Join("scratch", "case\u200b1.inp")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			csvPath := filepath.Join(t.TempDir(), "jobs.csv")
+			// Seeded, so a refusal that had already truncated the file is visible.
+			const existing = "previous contents"
+			if err := os.WriteFile(csvPath, []byte(existing), 0644); err != nil {
+				t.Fatalf("seed CSV: %v", err)
+			}
+
+			err := SaveJobsCSV(csvPath, []models.JobSpec{{
+				JobName:         "case1",
+				Directory:       "scratch",
+				AnalysisCode:    "user_included",
+				Command:         "./run.sh",
+				CoreType:        "emerald",
+				CoresPerSlot:    1,
+				Slots:           1,
+				WalltimeHours:   1.0,
+				LicenseSettings: `{"LICENSE": "value"}`,
+				LocalInputFiles: []string{tt.file},
+			}})
+			if err == nil {
+				t.Fatal("SaveJobsCSV wrote a path it cannot read back")
+			}
+			// The job and the path, because the user has to find the row, and
+			// the format that does carry it. The path is quoted, which is what
+			// makes an invisible character visible in the message at all.
+			for _, want := range []string{"case1", fmt.Sprintf("%q", tt.file), "JSON"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+
+			data, readErr := os.ReadFile(csvPath)
+			if readErr != nil {
+				t.Fatalf("read CSV back: %v", readErr)
+			}
+			if string(data) != existing {
+				t.Errorf("a refused save still rewrote the file: %q", data)
+			}
+		})
 	}
 }

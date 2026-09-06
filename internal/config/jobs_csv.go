@@ -211,6 +211,24 @@ func ParseLicenseJSON(licenseJSON string) (map[string]string, error) {
 
 // SaveJobsCSV writes job specifications to a CSV file
 func SaveJobsCSV(path string, jobs []models.JobSpec) error {
+	// Checked before the file is created, so a refusal leaves an existing CSV
+	// intact rather than truncated. LocalInputFiles is one ";"-separated field
+	// whose entries are sanitized on the way back in, so a path holding a ";"
+	// reloads as two paths and one holding an invisible character reloads naming
+	// a different file — possibly the same name as another job's, whose state
+	// record it would then share. The loss is only detectable here: by load time
+	// the original is gone.
+	for _, job := range jobs {
+		for _, localFile := range job.LocalInputFiles {
+			if strings.Contains(localFile, ";") || sanitize.SanitizeField(localFile) != localFile {
+				return fmt.Errorf("job %q has the local input file %q, which a jobs CSV cannot carry: "+
+					"the column is \";\"-separated and sanitized on load, so the path would come back "+
+					"naming a different file; write these jobs as JSON, which carries the path verbatim",
+					job.JobName, localFile)
+			}
+		}
+	}
+
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("failed to create jobs CSV: %w", err)
@@ -220,7 +238,6 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	// Write header
 	header := []string{
 		"Directory", "JobName", "AnalysisCode", "AnalysisVersion", "Command",
 		"CoreType", "CoresPerSlot", "WalltimeHours", "Slots", "LicenseSettings",
@@ -232,7 +249,6 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
 
-	// Write data rows
 	for _, job := range jobs {
 		row := []string{
 			job.Directory,
