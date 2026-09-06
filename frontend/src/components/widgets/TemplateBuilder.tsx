@@ -35,14 +35,12 @@ interface TemplateBuilderProps {
 // once coreTypes is populated the real per-node maximum is used everywhere.
 const DEFAULT_NODE_CORES = 64
 
-// Submit mode options
 const SUBMIT_MODES = [
   { value: 'create_and_submit', label: 'Create and Submit' },
   { value: 'create_only', label: 'Create Only (Do Not Submit)' },
   { value: 'draft', label: 'Save as Draft' },
 ]
 
-// Common license types
 const LICENSE_TYPES = [
   { key: '', displayName: 'No License', placeholder: '' },
   { key: 'ANSYS_LICENSE_FILE', displayName: 'ANSYS License', placeholder: 'port@license-server' },
@@ -68,7 +66,6 @@ function parseCustomLicenseEntry(input: string): { key: string; value: string } 
   return { key, value }
 }
 
-// Searchable select component
 interface SearchableSelectProps {
   options: string[]
   value: string
@@ -142,6 +139,29 @@ function SearchableSelect({
   )
 }
 
+// The label + scan-button row each metadata picker carries. Scanning is on
+// request rather than automatic so the user keeps control of when the network
+// calls happen; the button's name is also how the tests reach it.
+function ScanHeader({ label, action, onScan, loading }: {
+  label: string; action: string; onScan: () => void; loading: boolean
+}) {
+  return (
+    <div className="flex items-center justify-between mb-1">
+      <label className="block text-sm font-medium">{label}</label>
+      <button
+        type="button"
+        // Not onClick={onScan}: fetchAnalysisCodes takes a search string, and
+        // React would hand it the click event instead.
+        onClick={() => onScan()}
+        disabled={loading}
+        className="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400 disabled:cursor-not-allowed"
+      >
+        {loading ? 'Scanning...' : action}
+      </button>
+    </div>
+  )
+}
+
 export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: TemplateBuilderProps) {
   const {
     coreTypes,
@@ -164,7 +184,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     fetchProjects,
   } = useJobStore()
 
-  // Form state
   const [template, setTemplate] = useState<JobSpec>(initialTemplate || DEFAULT_JOB_TEMPLATE)
   // What unlistedProjectId falls back to; see there for why it is held on to.
   const [anchoredProjectId, setAnchoredProjectId] = useState(initialTemplate?.projectId || '')
@@ -217,65 +236,64 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
   }, [])
 
-  // Load saved templates when dialog opens
   useEffect(() => {
     if (isOpen) {
       loadSavedTemplates()
     }
   }, [isOpen, loadSavedTemplates])
 
-  // Load coretype metadata on open so validation of saved templates works without a manual Scan.
-  // Gated on the attempt, not on the list being empty: an empty answer would
-  // otherwise be re-asked on every render. Rescanning is the button's job.
+  // Coretype metadata on open, so a saved template validates without a manual
+  // Scan. Gated on coreTypesLoaded — see that flag in jobStore.
   useEffect(() => {
     if (isOpen && !coreTypesLoaded && !isLoadingCoreTypes) {
       fetchCoreTypes()
     }
   }, [isOpen, coreTypesLoaded, isLoadingCoreTypes, fetchCoreTypes])
 
-  // Load the account's projects on open: the picker needs them to show anything
-  // at all, and one small request is cheaper than making the user find an ID.
-  // Gated on projectsLoaded rather than an empty list, since "no projects" is a
-  // real answer that would otherwise be re-asked forever. Rescanning after that
-  // is the Scan Projects button's job.
+  // The account's projects on open: the picker needs them to show anything at
+  // all, and one small request is cheaper than making the user find an ID.
+  // Gated on projectsLoaded — see that flag in jobStore.
   useEffect(() => {
     if (isOpen && !projectsLoaded && !isLoadingProjects) {
       fetchProjects()
     }
   }, [isOpen, projectsLoaded, isLoadingProjects, fetchProjects])
 
-  const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
-    if (templateInfo.job) {
-      setTemplate(templateInfo.job)
-      setAnchoredProjectId(templateInfo.job.projectId || '')
-      setTagsInput((templateInfo.job.tags ?? []).join(', '))
-      setLicenseAutoSwitchHint(null)
-      setLicenseLoadHint(null)
-      if (templateInfo.job.licenseSettings) {
-        try {
-          const parsed = JSON.parse(templateInfo.job.licenseSettings)
-          const key = Object.keys(parsed)[0]
-          if (key) {
-            if (PRESET_LICENSE_KEYS.has(key)) {
-              setLicenseType(key)
-              setLicenseValue(parsed[key] || '')
-              // Explain to the user why the value no longer shows the
-              // KEY= prefix they may have originally typed.
-              setLicenseLoadHint(
-                `This template was saved with ${key}=… — loaded as the ${key} preset with the bare value.`
-              )
-            } else {
-              setLicenseType('CUSTOM')
-              setLicenseValue(`${key}=${parsed[key] || ''}`)
-            }
-          }
-        } catch {
-          // Invalid JSON, ignore
-        }
+  // The one way a whole spec reaches this form, used by both paths that carry
+  // one in: the dialog opening on an initialTemplate, and a pick from the Saved
+  // Templates menu. Kept together so a field added to one cannot be forgotten in
+  // the other.
+  const applyTemplate = useCallback((job: JobSpec) => {
+    setTemplate(job)
+    setAnchoredProjectId(job.projectId || '')
+    setTagsInput((job.tags ?? []).join(', '))
+    setLicenseAutoSwitchHint(null)
+    setLicenseLoadHint(null)
+    if (!job.licenseSettings) return
+    try {
+      const parsed = JSON.parse(job.licenseSettings)
+      const key = Object.keys(parsed)[0]
+      if (!key) return
+      if (PRESET_LICENSE_KEYS.has(key)) {
+        setLicenseType(key)
+        setLicenseValue(parsed[key] || '')
+        setLicenseLoadHint(
+          `This template was saved with ${key}=… — loaded as the ${key} preset with the bare value.`
+        )
+      } else {
+        setLicenseType('CUSTOM')
+        setLicenseValue(`${key}=${parsed[key] || ''}`)
       }
-      setShowSavedTemplates(false)
+    } catch {
+      // Invalid JSON, ignore
     }
   }, [])
+
+  const handleLoadSavedTemplate = useCallback((templateInfo: TemplateInfo) => {
+    if (!templateInfo.job) return
+    applyTemplate(templateInfo.job)
+    setShowSavedTemplates(false)
+  }, [applyTemplate])
 
   const handleSaveTemplate = useCallback(async () => {
     if (!saveTemplateName.trim()) return
@@ -298,42 +316,12 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     }
   }, [loadSavedTemplates])
 
-  // Note: Software/hardware scanning is now user-initiated via Scan buttons
-  // to give users control over when network calls happen
-
-  // Initialize from template
   useEffect(() => {
     if (initialTemplate) {
-      setTemplate(initialTemplate)
-      setAnchoredProjectId(initialTemplate.projectId || '')
-      setTagsInput((initialTemplate.tags ?? []).join(', '))
-      setLicenseAutoSwitchHint(null)
-      setLicenseLoadHint(null)
-      // Parse license settings if present
-      if (initialTemplate.licenseSettings) {
-        try {
-          const parsed = JSON.parse(initialTemplate.licenseSettings)
-          const key = Object.keys(parsed)[0]
-          if (key) {
-            if (PRESET_LICENSE_KEYS.has(key)) {
-              setLicenseType(key)
-              setLicenseValue(parsed[key] || '')
-              setLicenseLoadHint(
-                `This template was saved with ${key}=… — loaded as the ${key} preset with the bare value.`
-              )
-            } else {
-              setLicenseType('CUSTOM')
-              setLicenseValue(`${key}=${parsed[key] || ''}`)
-            }
-          }
-        } catch {
-          // Invalid JSON, ignore
-        }
-      }
+      applyTemplate(initialTemplate)
     }
-  }, [initialTemplate])
+  }, [initialTemplate, applyTemplate])
 
-  // Get options for dropdowns
   const analysisOptions = useMemo(() => {
     return analysisCodes.map((a) => `${a.name} (${a.code})`)
   }, [analysisCodes])
@@ -374,7 +362,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return parts.join(' ')
   }, [])
 
-  // Build version display→code mapping for the dropdown
   const versionMap = useMemo(() => {
     if (!selectedAnalysis) return new Map<string, string>()
     const map = new Map<string, string>()
@@ -402,32 +389,17 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return Array.from(new Set(ct.cores.filter((n) => n > 0))).sort((a, b) => a - b)
   }, [coreTypes, template.coreType])
 
-  // Base unit for cores: max cores per node for selected hardware.
-  // Users can enter multiples of this value (64, 128, 192, etc.)
-  const coresBaseUnit = useMemo(() => {
-    if (coreLadder.length > 0) {
-      return coreLadder[coreLadder.length - 1]
-    }
-    // Metadata not loaded yet — fall back to the stored value so the hint and the
-    // empty-field default are stated in terms of what the user already has.
-    if (template.coresPerSlot > 0) {
-      return template.coresPerSlot
-    }
-    return DEFAULT_NODE_CORES
-  }, [coreLadder, template.coresPerSlot])
-
-  // Node size the stepper counts in. Deliberately not coresBaseUnit: that one
-  // falls back to the live value, and stepping by the number being stepped would
-  // double it on every click.
+  // The one node size the stepper, the hint and the empty-field default all
+  // count in. Never the stored value: it is not a per-node maximum, so a hint of
+  // "Multiples of 4" would stand over a ⊕ that produces 64, and stepping by the
+  // number being stepped would double it on every click.
   const nodeCores = coreLadder.length > 0 ? coreLadder[coreLadder.length - 1] : DEFAULT_NODE_CORES
 
   // Smallest value the coretype accepts, so the stepper cannot walk below it.
   const coresMin = coreLadder.length > 0 ? coreLadder[0] : 1
 
-  // Handle analysis code change
   const handleAnalysisChange = useCallback(
     (displayName: string) => {
-      // Extract code from "Name (code)" format
       const match = displayName.match(/\(([^)]+)\)$/)
       const code = match ? match[1] : displayName
 
@@ -443,11 +415,11 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     [analysisCodes]
   )
 
-  // Handle core type change — defaults to max cores (full node)
+  // A coretype change resets cores to a full node: the count carried over from
+  // the previous coretype is not a size this one necessarily sells.
   const handleCoreTypeChange = useCallback(
     (coreType: string) => {
       const ct = coreTypes.find((c) => c.code === coreType)
-      // Default to max cores (base unit for multiples)
       const defaultCores = ct && ct.cores.length > 0 ? Math.max(...ct.cores) : DEFAULT_NODE_CORES
 
       setTemplate((t) => ({
@@ -459,22 +431,30 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     [coreTypes]
   )
 
-  // Update template field
   const updateField = useCallback(<K extends keyof JobSpec>(key: K, value: JobSpec[K]) => {
     setTemplate((t) => ({ ...t, [key]: value }))
+  }, [])
+
+  // The picker lists this API key's projects, so this key's organization is the
+  // right one for whatever it offers. An orgCode a template carried in from an
+  // older build would otherwise address the pipeline at another organization,
+  // the assignment would be refused, and the job would run unassigned. The field
+  // has no control of its own, so nothing else on screen can correct it; a CSV
+  // or config override never passes through here.
+  const handleProjectChange = useCallback((projectId: string) => {
+    setTemplate((t) => ({ ...t, projectId, orgCode: '' }))
   }, [])
 
   // Allow any positive value — validation happens on save
   const handleCoresChange = useCallback(
     (value: number) => {
       if (value <= 0) {
-        updateField('coresPerSlot', coresBaseUnit)
+        updateField('coresPerSlot', nodeCores)
         return
       }
-      // Allow user to enter any value - validation will check if it's valid
       updateField('coresPerSlot', value)
     },
-    [coresBaseUnit, updateField]
+    [nodeCores, updateField]
   )
 
   // The next valid value up: the next slice within a node while there is one,
@@ -509,21 +489,20 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     [coreLadder, nodeCores]
   )
 
-  const stepCores = useCallback(
-    (direction: 1 | -1) => {
-      const current = template.coresPerSlot > 0 ? template.coresPerSlot : coresBaseUnit
-      updateField('coresPerSlot', direction > 0 ? nextCores(current) : prevCores(current))
-    },
-    [template.coresPerSlot, coresBaseUnit, nextCores, prevCores, updateField]
-  )
-
-  // Same substitution stepCores makes, so the tooltips, the step attribute and
-  // the disabled state describe the value a click would actually produce.
-  const coresStepFrom = template.coresPerSlot > 0 ? template.coresPerSlot : coresBaseUnit
+  // A stored 0 means "unset", so the stepper counts from a node instead. The
+  // tooltips, the step attribute and the disabled state read from the same value,
+  // so they describe the value a click would actually produce.
+  const coresStepFrom = template.coresPerSlot > 0 ? template.coresPerSlot : nodeCores
   const coresStepUp = nextCores(coresStepFrom)
   const coresStepDown = prevCores(coresStepFrom)
 
-  // Validate template — cores allow fractional nodes OR multi-node (multiples of max)
+  const stepCores = useCallback(
+    (direction: 1 | -1) => {
+      updateField('coresPerSlot', direction > 0 ? nextCores(coresStepFrom) : prevCores(coresStepFrom))
+    },
+    [coresStepFrom, nextCores, prevCores, updateField]
+  )
+
   const validate = useCallback((): string[] => {
     const errs: string[] = []
 
@@ -542,10 +521,10 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     if (template.coresPerSlot <= 0) {
       errs.push('Cores must be positive')
     } else {
-      // Only enforce the combinations check once coretype metadata is loaded.
-      // Without metadata, trust the stored value — the platform API is the ultimate validator.
-      // Read from the same ladder the stepper walks, so the control cannot offer a
-      // value this then rejects.
+      // Only once coretype metadata is loaded. Without it, trust the stored
+      // value — the platform API is the ultimate validator.
+      // The same ladder the stepper walks, so the control cannot offer a value
+      // this then rejects.
       if (coreLadder.length > 0) {
         const isValidFractional = coreLadder.includes(template.coresPerSlot)
         const isValidMultiNode = template.coresPerSlot % nodeCores === 0
@@ -576,7 +555,6 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
     return errs
   }, [template, coreLadder, nodeCores, licenseType, licenseValue])
 
-  // Handle save
   const handleSave = useCallback(() => {
     const validationErrors = validate()
     if (validationErrors.length > 0) {
@@ -717,17 +695,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
             </h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-medium">Analysis Code</label>
-                  <button
-                    type="button"
-                    onClick={() => fetchAnalysisCodes()}
-                    disabled={isLoadingAnalysisCodes}
-                    className="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400 disabled:cursor-not-allowed"
-                  >
-                    {isLoadingAnalysisCodes ? 'Scanning...' : 'Scan Software'}
-                  </button>
-                </div>
+                <ScanHeader label="Analysis Code" action="Scan Software" onScan={fetchAnalysisCodes} loading={isLoadingAnalysisCodes} />
                 {isLoadingAnalysisCodes && analysisCodes.length === 0 && (
                   <p className="mb-1 text-xs text-gray-500 italic">
                     First scan may take up to several minutes...
@@ -782,17 +750,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
             </h3>
             <div className="grid grid-cols-3 gap-4">
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-medium">Core Type</label>
-                  <button
-                    type="button"
-                    onClick={() => fetchCoreTypes()}
-                    disabled={isLoadingCoreTypes}
-                    className="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400 disabled:cursor-not-allowed"
-                  >
-                    {isLoadingCoreTypes ? 'Scanning...' : 'Scan Coretypes'}
-                  </button>
-                </div>
+                <ScanHeader label="Core Type" action="Scan Coretypes" onScan={fetchCoreTypes} loading={isLoadingCoreTypes} />
                 {isLoadingCoreTypes && coreTypes.length === 0 && (
                   <p className="mb-1 text-xs text-gray-500 italic">
                     First scan may take up to several minutes...
@@ -815,7 +773,7 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                   <input
                     type="number"
                     min={coresMin}
-                    step={Math.max(coresStepUp - template.coresPerSlot, 1)}
+                    step={Math.max(coresStepUp - coresStepFrom, 1)}
                     value={template.coresPerSlot}
                     onChange={(e) => handleCoresChange(Number(e.target.value))}
                     onBlur={(e) => handleCoresChange(Number(e.target.value))}
@@ -861,8 +819,8 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
                 </div>
                 <p className="mt-1 text-xs text-gray-500">
                   {coreLadder.length > 0
-                    ? `Valid: ${coreLadder.join(', ')} or multiples of ${coresBaseUnit}`
-                    : `Multiples of ${coresBaseUnit}`}
+                    ? `Valid: ${coreLadder.join(', ')} or multiples of ${nodeCores}`
+                    : `Multiples of ${nodeCores}`}
                 </p>
               </div>
               <div>
@@ -886,20 +844,10 @@ export function TemplateBuilder({ isOpen, initialTemplate, onClose, onSave }: Te
             </h3>
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-sm font-medium">Project</label>
-                  <button
-                    type="button"
-                    onClick={() => fetchProjects()}
-                    disabled={isLoadingProjects}
-                    className="text-xs text-blue-600 hover:text-blue-800 disabled:text-gray-400 disabled:cursor-not-allowed"
-                  >
-                    {isLoadingProjects ? 'Scanning...' : 'Scan Projects'}
-                  </button>
-                </div>
+                <ScanHeader label="Project" action="Scan Projects" onScan={fetchProjects} loading={isLoadingProjects} />
                 <select
                   value={template.projectId}
-                  onChange={(e) => updateField('projectId', e.target.value)}
+                  onChange={(e) => handleProjectChange(e.target.value)}
                   disabled={isLoadingProjects}
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 dark:disabled:bg-gray-700"
                 >

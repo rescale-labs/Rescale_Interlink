@@ -314,6 +314,7 @@ interface JobStore {
   fetchAnalysisCodes: (search?: string) => Promise<void>
   fetchAutomations: () => Promise<void>
   fetchProjects: () => Promise<void>
+  resetAccountCatalogs: () => void
 
   // Actions - Memory
   saveMemory: () => void
@@ -1049,6 +1050,34 @@ export const useJobStore = create<JobStore>((set, get) => ({
       // happens, not another pass of the effect.
       set({ isLoadingProjects: false, projectsLoaded: true })
     }
+  },
+
+  // Coretypes and projects belong to one API key's account, so a key change has
+  // to drop them. The flags go with the lists — left set, they would keep the
+  // pickers from re-scanning and the previous account's projects on screen.
+  // Nothing is fetched here: the next open of a picker is when that costs.
+  resetAccountCatalogs: () => {
+    const s = get()
+    // The API-key field calls this per keystroke; once nothing is loaded there
+    // is nothing to drop, and a fresh set would only re-render every subscriber.
+    if (!s.coreTypesLoaded && !s.projectsLoaded &&
+        s.analysisCodes.length === 0 && s.automations.length === 0) {
+      return
+    }
+    set({
+      coreTypes: [],
+      projects: [],
+      // The software and automation lists belong to the account too; they carry
+      // no loaded flag because each is fetched on request, never on open.
+      analysisCodes: [],
+      automations: [],
+      coreTypesLoaded: false,
+      projectsLoaded: false,
+      coreTypesError: null,
+      projectsError: null,
+      analysisCodesError: null,
+      automationsError: null,
+    })
   },
 
   // Memory Actions

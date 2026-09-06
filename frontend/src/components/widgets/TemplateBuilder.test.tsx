@@ -8,16 +8,15 @@ import type { wailsapp } from '../../../wailsjs/go/models'
 import { afterEach, beforeEach } from 'vitest'
 
 beforeEach(() => {
-  // Opening the builder scans for coretypes and projects when neither has been
-  // scanned yet. Only the picker tests care, so the rest start from "already
-  // scanned" to keep a promise resolving after every render out of them.
+  // Only the picker tests care about the scan-on-open effects, so the rest start
+  // from "already scanned" to keep a resolving promise out of every render.
   useJobStore.setState({ coreTypesLoaded: true, projectsLoaded: true })
 })
 
 afterEach(() => {
   cleanup()
-  // Coretype and project metadata are module-level store state, so a seeded
-  // ladder or project list would otherwise leak into the next test.
+  // Store state is module-level, so a seeded ladder or project list would
+  // otherwise leak into the next test.
   useJobStore.setState({
     coreTypes: [],
     coreTypesLoaded: false,
@@ -43,20 +42,20 @@ function renderOpen(initial?: JobSpec) {
   return { ...utils, onClose, onSave }
 }
 
-function getLicenseTypeSelect(): HTMLSelectElement {
-  // The select is the first one to follow the "License Type" label.
-  const label = screen.getByText('License Type')
-  const select = label.parentElement?.querySelector('select')
-  if (!select) throw new Error('License Type select not found')
-  return select as HTMLSelectElement
+// Fields are reached through their visible label, which is what the user reads,
+// rather than a test id. levels is how far up from the label the control's
+// container sits: one for a plain field, two where a scan button shares the
+// label's row.
+function fieldFor<T extends HTMLElement>(label: string, selector: string, levels = 1): T {
+  let scope = screen.getByText(label).parentElement
+  for (let i = 1; i < levels; i++) scope = scope?.parentElement ?? null
+  const field = scope?.querySelector(selector)
+  if (!field) throw new Error(`${label}: no ${selector} found`)
+  return field as T
 }
 
-function getLicenseValueInput(): HTMLInputElement {
-  const label = screen.getByText('License Value')
-  const input = label.parentElement?.querySelector('input')
-  if (!input) throw new Error('License Value input not found')
-  return input as HTMLInputElement
-}
+const getLicenseTypeSelect = () => fieldFor<HTMLSelectElement>('License Type', 'select')
+const getLicenseValueInput = () => fieldFor<HTMLInputElement>('License Value', 'input')
 
 describe('TemplateBuilder license UX', () => {
   it('auto-switches CUSTOM + RLM_LICENSE=value to the RLM preset and shows the switch hint', () => {
@@ -119,31 +118,10 @@ describe('TemplateBuilder license UX', () => {
     fireEvent.change(getLicenseTypeSelect(), { target: { value: 'ANSYS_LICENSE_FILE' } })
     expect(screen.queryByText(/This template was saved with/i)).not.toBeInTheDocument()
   })
-
-  // The CUSTOM-validation-error render test was removed after it hung in
-  // vitest (async mock promises from ListSavedTemplates/GetCoreTypes
-  // accumulate across earlier tests and defer the error render past the
-  // findByText timeout). That cause is gone — the fetch-on-open effects used to
-  // re-fire forever on an empty result, starving timers — so the test can be
-  // restored if the assertion is wanted back. The sharpened error string itself is covered by
-  // a simple source grep in the review checklist — the functional path
-  // (validate() producing the new string for non-KEY=value input) is a
-  // one-line change that doesn't need component-render coverage.
 })
 
-function getFeatureNameInput(): HTMLInputElement {
-  const label = screen.getByText('License Feature Name')
-  const input = label.parentElement?.querySelector('input')
-  if (!input) throw new Error('License Feature Name input not found')
-  return input as HTMLInputElement
-}
-
-function getLicensesPerJobInput(): HTMLInputElement {
-  const label = screen.getByText('Licenses Per Job')
-  const input = label.parentElement?.querySelector('input')
-  if (!input) throw new Error('Licenses Per Job input not found')
-  return input as HTMLInputElement
-}
+const getFeatureNameInput = () => fieldFor<HTMLInputElement>('License Feature Name', 'input')
+const getLicensesPerJobInput = () => fieldFor<HTMLInputElement>('Licenses Per Job', 'input')
 
 function saveTemplate() {
   fireEvent.click(screen.getByText('Use Template'))
@@ -228,8 +206,7 @@ describe('TemplateBuilder license feature set', () => {
   })
 })
 
-// A 64-core node sold in halves and quarters: the gaps between valid sizes are
-// uneven, which is why the control cannot just carry a fixed step.
+// A 64-core node sold in halves and quarters — the uneven ladder.
 const EMERALD = {
   code: 'emerald',
   name: 'Emerald',
@@ -238,77 +215,75 @@ const EMERALD = {
   cores: [4, 8, 16, 32, 64],
 }
 
-function getCoresInput(): HTMLInputElement {
-  const label = screen.getByText('Cores')
-  const input = label.parentElement?.querySelector('input[type="number"]')
-  if (!input) throw new Error('Cores input not found')
-  return input as HTMLInputElement
-}
+const getCoresInput = () => fieldFor<HTMLInputElement>('Cores', 'input[type="number"]')
 
 function coresValue(): number {
   return Number(getCoresInput().value)
 }
 
-function renderWithLadder(coresPerSlot: number) {
+// A coreType the seeded list does not describe leaves the ladder empty, which is
+// the coretype-metadata-not-loaded case.
+function renderWithLadder(coresPerSlot: number, coreType = 'emerald') {
   useJobStore.setState({ coreTypes: [EMERALD] })
-  return renderOpen({ ...DEFAULT_JOB_TEMPLATE, coreType: 'emerald', coresPerSlot })
+  return renderOpen({ ...DEFAULT_JOB_TEMPLATE, coreType, coresPerSlot })
 }
 
 describe('TemplateBuilder cores stepper', () => {
-  it('steps through the coretype slices below a full node', () => {
-    renderWithLadder(4)
+  // Every walk of the stepper: the value hand-typed into the box, whether the
+  // minus control is disabled there, the controls clicked in order and the value
+  // shown after each click. atFloor is where nothing smaller is valid.
+  it.each([
+    // Slices within a node, up and back down.
+    { coreType: 'emerald', start: 4, atFloor: true, clicks: ['up', 'up', 'down'], expected: [8, 16, 8] },
+    // Whole nodes at and above a full node, then back to where the slices resume.
+    { coreType: 'emerald', start: 64, atFloor: false, clicks: ['up', 'up', 'down', 'down', 'down'], expected: [128, 192, 128, 64, 32] },
+    // 100 is neither a slice nor a whole number of nodes; validate() would reject
+    // it on save, so a step resolves it onto the ladder rather than adding to it.
+    { coreType: 'emerald', start: 100, atFloor: false, clicks: ['down'], expected: [64] },
+    { coreType: 'emerald', start: 100, atFloor: false, clicks: ['up'], expected: [128] },
+    // No ladder to read, so the stepper counts in nodes and refuses to guess at
+    // fractions of one.
+    { coreType: 'unknown_coretype', start: 64, atFloor: true, clicks: ['up', 'down'], expected: [128, 64] },
+  ])('walks $coreType from $start via $clicks', ({ coreType, start, atFloor, clicks, expected }) => {
+    renderWithLadder(0, coreType)
 
-    // 4 is the smallest slice this coretype sells, so there is nowhere down to go.
-    expect(screen.getByLabelText('Fewer cores')).toBeDisabled()
-    fireEvent.click(screen.getByLabelText('More cores'))
-    expect(coresValue()).toBe(8)
-    fireEvent.click(screen.getByLabelText('More cores'))
-    expect(coresValue()).toBe(16)
-    fireEvent.click(screen.getByLabelText('Fewer cores'))
-    expect(coresValue()).toBe(8)
+    // The box takes a hand-typed value as given — the ladder is enforced on save
+    // — so a walk can start on it or off it.
+    fireEvent.change(getCoresInput(), { target: { value: String(start) } })
+    expect(coresValue()).toBe(start)
+    expect(screen.getByLabelText('Fewer cores')).toHaveProperty('disabled', atFloor)
+
+    clicks.forEach((direction, i) => {
+      fireEvent.click(screen.getByLabelText(direction === 'up' ? 'More cores' : 'Fewer cores'))
+      expect(coresValue()).toBe(expected[i])
+    })
   })
 
-  it('steps whole nodes at and above a full node', () => {
-    renderWithLadder(64)
-
-    fireEvent.click(screen.getByLabelText('More cores'))
-    expect(coresValue()).toBe(128)
-    fireEvent.click(screen.getByLabelText('More cores'))
-    expect(coresValue()).toBe(192)
-    fireEvent.click(screen.getByLabelText('Fewer cores'))
-    expect(coresValue()).toBe(128)
-    // And back through a full node, where the slice ladder resumes.
-    fireEvent.click(screen.getByLabelText('Fewer cores'))
-    expect(coresValue()).toBe(64)
-    fireEvent.click(screen.getByLabelText('Fewer cores'))
-    expect(coresValue()).toBe(32)
-  })
-
-  it('pulls a hand-typed invalid value onto the ladder', () => {
-    renderWithLadder(64)
-
-    // 100 is neither a slice nor a whole number of nodes; validate() would
-    // reject it on save, so stepping resolves it rather than adding to it.
-    fireEvent.change(getCoresInput(), { target: { value: '100' } })
-    expect(coresValue()).toBe(100)
-
-    fireEvent.click(screen.getByLabelText('Fewer cores'))
-    expect(coresValue()).toBe(64)
-
-    fireEvent.change(getCoresInput(), { target: { value: '100' } })
-    fireEvent.click(screen.getByLabelText('More cores'))
-    expect(coresValue()).toBe(128)
-  })
-
-  // At 0 the stepper substitutes the node size, so the tooltip has to name the
-  // value a click actually produces rather than the one the raw 0 suggests.
+  // At 0 the stepper substitutes the node size, so the tooltip and the step
+  // attribute have to describe the value a click actually produces rather than
+  // the one the raw 0 suggests — a step of 128 counts from a base of 0.
   it('agrees with the click when the stored value is zero', () => {
     renderWithLadder(0)
 
     const up = screen.getByLabelText('More cores')
     expect(up).toHaveAttribute('title', 'Up to 128 cores')
+    expect(getCoresInput().step).toBe('64')
     fireEvent.click(up)
     expect(coresValue()).toBe(128)
+  })
+
+  // With no coretype metadata loaded, the stored value is not a per-node
+  // maximum, so stating the hint in terms of it contradicts the control: the
+  // live report was a hint of "Multiples of 4" over a stepper that went 4 → 64.
+  it('states the assumed node size while coretype metadata has not loaded', () => {
+    renderWithLadder(4, 'unknown_coretype')
+
+    expect(screen.getByText('Multiples of 64')).toBeInTheDocument()
+    expect(screen.getByLabelText('More cores')).toHaveAttribute('title', 'Up to 64 cores')
+
+    // An empty or negative box falls back to the same assumed node size.
+    fireEvent.change(getCoresInput(), { target: { value: '0' } })
+    expect(coresValue()).toBe(64)
   })
 
   it('takes min and step from the ladder rather than counting by one', () => {
@@ -328,18 +303,6 @@ describe('TemplateBuilder cores stepper', () => {
     fireEvent.keyDown(getCoresInput(), { key: 'ArrowDown' })
     expect(coresValue()).toBe(16)
   })
-
-  it('steps whole nodes when coretype metadata has not loaded', () => {
-    // No ladder to read, so the stepper counts in nodes and refuses to guess at
-    // fractions of one.
-    renderOpen({ ...DEFAULT_JOB_TEMPLATE, coreType: 'unknown_coretype', coresPerSlot: 64 })
-
-    expect(screen.getByLabelText('Fewer cores')).toBeDisabled()
-    fireEvent.click(screen.getByLabelText('More cores'))
-    expect(coresValue()).toBe(128)
-    fireEvent.click(screen.getByLabelText('Fewer cores'))
-    expect(coresValue()).toBe(64)
-  })
 })
 
 const NO_BUDGET: Project = {
@@ -356,19 +319,15 @@ const WITH_BUDGET: Project = {
   remainingAmounts: ['All: My budget ($100.00 available)'],
 }
 
-function getProjectSelect(): HTMLSelectElement {
-  const label = screen.getByText('Project')
-  const select = label.parentElement?.parentElement?.querySelector('select')
-  if (!select) throw new Error('Project select not found')
-  return select as HTMLSelectElement
-}
+// Two levels up: the Project label shares its row with the Scan Projects button.
+const getProjectSelect = () => fieldFor<HTMLSelectElement>('Project', 'select', 2)
 
 function projectOptionText(): string[] {
   return Array.from(getProjectSelect().options).map((o) => o.textContent?.trim() ?? '')
 }
 
-// projectsLoaded marks the scan as already done, which is what keeps the
-// fetch-on-open effect out of the way of a seeded list.
+// projectsLoaded marks the scan as already done, so the effect leaves the
+// seeded list alone.
 function seedProjects(projects: Project[]) {
   useJobStore.setState({ projects, projectsLoaded: true })
 }
@@ -413,8 +372,7 @@ describe('TemplateBuilder project picker', () => {
   })
 
   it('scans once on open and does not re-ask an account with no projects', async () => {
-    // The mock resolves to an empty list, which is a real answer. Gating the
-    // effect on the list being empty would make this an endless fetch loop.
+    // The mock resolves to an empty list, which is a real answer.
     useJobStore.setState({ projectsLoaded: false })
     renderOpen()
     await waitFor(() => {
@@ -424,8 +382,8 @@ describe('TemplateBuilder project picker', () => {
     expect(App.GetProjects).toHaveBeenCalledTimes(1)
   })
 
-  // Selecting "No project" must not strand the id the dialog was opened with:
-  // nothing on screen can type one back.
+  // The id the dialog opened with must survive "No project" — see
+  // unlistedProjectId for why it cannot be typed back.
   it('keeps offering the opened id after "No project" is selected', () => {
     seedProjects([NO_BUDGET])
     renderOpen({ ...DEFAULT_JOB_TEMPLATE, projectId: 'pGONE' })
@@ -436,9 +394,8 @@ describe('TemplateBuilder project picker', () => {
     expect(projectOptionText()).toContain("pGONE (not in this account's projects)")
   })
 
-  // The same trap sprung from inside the dialog: a template loaded from the
-  // Saved Templates menu brings its own id, which nothing on screen can type
-  // back either once "No project" has dropped it.
+  // The same trap sprung from inside the dialog, by a template that brings its
+  // own id in.
   it('keeps a project id loaded from a saved template after "No project" is selected', async () => {
     seedProjects([NO_BUDGET])
     vi.mocked(App.ListSavedTemplates).mockResolvedValueOnce([
@@ -466,6 +423,21 @@ describe('TemplateBuilder project picker', () => {
     expect(projectOptionText()).toContain("pGONE (not in this account's projects)")
   })
 
+  // A template written by an older build can carry an org code the picker knows
+  // nothing about. Left in place it would address the pipeline at another
+  // account's organization, the assignment would be refused, and the job would
+  // run unassigned — with the picker showing the project the user chose.
+  it('clears a stored org code when a project is picked', () => {
+    seedProjects([NO_BUDGET])
+    const { onSave } = renderOpen({ ...validTemplate(), orgCode: 'old-org' })
+
+    fireEvent.change(getProjectSelect(), { target: { value: NO_BUDGET.id } })
+    saveTemplate()
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave.mock.calls[0][0]).toMatchObject({ projectId: NO_BUDGET.id, orgCode: '' })
+  })
+
   it('does not retry after a failed scan', async () => {
     vi.mocked(App.GetProjects).mockResolvedValueOnce(
       { projects: null, error: 'status 403: forbidden' } as unknown as wailsapp.ProjectsResultDTO)
@@ -476,9 +448,16 @@ describe('TemplateBuilder project picker', () => {
     await waitFor(() =>
       expect(screen.getByText(/Could not load projects: status 403: forbidden/)).toBeInTheDocument())
     expect(screen.getByText(/use "Scan Projects" to retry/)).toBeInTheDocument()
-    // An error must not put the effect into a fetch loop: the scan counts as
-    // done however it ended, and the button is the retry.
+    // A failed scan still counts as done; the button is the retry.
     await new Promise((r) => setTimeout(r, 50))
     expect(App.GetProjects).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('TemplateBuilder scan headers', () => {
+  it('asks for the software catalog with an empty search, not the click event', () => {
+    renderOpen()
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Software' }))
+    expect(App.GetAnalysisCodes).toHaveBeenCalledWith('')
   })
 })

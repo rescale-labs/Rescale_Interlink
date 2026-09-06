@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { wailsapp } from '../../wailsjs/go/models';
 import * as App from '../../wailsjs/go/wailsapp/App';
+// A different API key is a different account; see resetAccountCatalogs.
+import { useJobStore } from './jobStore';
 
 interface ConfigState {
   // Data
@@ -35,6 +37,22 @@ interface ConfigState {
   selectFile: (title: string) => Promise<string>;
 }
 
+// The one guard for every path that replaces the effective API key: a typed
+// key, the startup fetch, a config file imported over the current one (which
+// routes through fetchConfig) and a cleared saved token. Coretypes and projects
+// belong to the account behind the key, so a key that changed makes them wrong;
+// a key that did not would only cost the pickers a re-scan they do not need.
+// `previous` is null only before the first fetchConfig, when there is nothing
+// cached to invalidate. Nothing is refetched here: the next open of a picker is
+// when that costs.
+const resetCatalogsOnAPIKeyChange = (
+  previous: wailsapp.ConfigDTO | null,
+  nextAPIKey: string,
+) => {
+  if (!previous || nextAPIKey === (previous.apiKey || '')) return;
+  useJobStore.getState().resetAccountCatalogs();
+};
+
 export const useConfigStore = create<ConfigState>((set, get) => ({
   // Initial state
   config: null,
@@ -58,6 +76,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         App.GetConfig(),
         App.GetCredentialSource(),
       ]);
+      resetCatalogsOnAPIKeyChange(get().config, config.apiKey || '');
       set({ config, credentialSource, isLoading: false });
     } catch (err) {
       set({
@@ -98,6 +117,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const stateUpdates: Partial<ConfigState> = { config: newConfig };
     if (Object.prototype.hasOwnProperty.call(updates, 'apiKey')) {
       const nextAPIKey = updates.apiKey || '';
+      resetCatalogsOnAPIKeyChange(config, nextAPIKey);
       stateUpdates.credentialSource = new wailsapp.CredentialSourceDTO({
         ...(credentialSource || {}),
         source: nextAPIKey ? 'direct-input' : '',
@@ -139,6 +159,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     try {
       const result = await App.ClearSavedAPIKey();
       const config = await App.GetConfig();
+      resetCatalogsOnAPIKeyChange(get().config, config.apiKey || '');
       set({
         config,
         credentialSource: result.credentialSource,
@@ -164,6 +185,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       await App.LoadConfigFromPath(path);
+      // The imported file can carry another account's key; fetchConfig is where
+      // that reaches the store, so the guard runs there rather than again here.
       await get().fetchConfig();
     } catch (err) {
       set({
