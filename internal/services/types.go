@@ -22,7 +22,6 @@ type TransferState string
 
 // Source label constants for transfer origin tracking.
 const (
-	SourceLabelPUR         = "PUR"
 	SourceLabelSingleJob   = "SingleJob"
 	SourceLabelFileBrowser = "FileBrowser"
 	// SourceLabelDaemon identifies auto-download transfers initiated by the
@@ -186,16 +185,6 @@ type FileItem struct {
 	Owner        string    // Owner email address
 	DateInserted time.Time // Creation date
 }
-
-// BrowseMode indicates the remote browsing context.
-type BrowseMode string
-
-const (
-	BrowseModeLibrary BrowseMode = "library" // My Library (folders)
-	BrowseModeJobs    BrowseMode = "jobs"    // My Jobs
-	BrowseModeLegacy  BrowseMode = "legacy"  // Legacy flat file list
-	BrowseModeTrash   BrowseMode = "trash"   // Trash bin
-)
 
 // FolderContents represents the contents of a folder.
 type FolderContents struct {

@@ -4,15 +4,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
-	"net"
 	nethttp "net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -26,13 +22,13 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
+	"github.com/rescale/rescale-int/internal/cloud/providers/testsupport"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
-	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
 // The pre-encrypt upload paths talk to the AWS SDK directly, so the only seam
@@ -243,21 +239,6 @@ func (f *fakeS3Backend) totalStagedBytes() int64 {
 	return total
 }
 
-// redirectingHTTPClient sends every request to addr whatever hostname the SDK
-// resolved. The provider refreshes credentials before every attempt, and that
-// rebuilds the SDK client against the real S3 endpoint template, so overriding
-// only the first client's endpoint would point the second call at real S3.
-func redirectingHTTPClient(addr string) *nethttp.Client {
-	return &nethttp.Client{
-		Transport: &nethttp.Transport{
-			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, addr)
-			},
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-}
-
 // newFakeCredentialsAPI stands in for the Rescale API's credential endpoint,
 // which the provider calls through the shared credential manager before every
 // attempt.
@@ -273,7 +254,7 @@ func newFakeCredentialsAPI(t *testing.T) *api.Client {
 
 func newTestS3Client(t *testing.T, server *httptest.Server) *S3Client {
 	t.Helper()
-	httpClient := redirectingHTTPClient(server.Listener.Addr().String())
+	httpClient := testsupport.RedirectingHTTPClient(server.Listener.Addr().String())
 	apiClient := newFakeCredentialsAPI(t)
 
 	return &S3Client{
@@ -301,20 +282,6 @@ func newTestS3Client(t *testing.T, server *httptest.Server) *S3Client {
 // this is the smallest size that reproduces what those uploads hit without
 // putting a gigabyte through the test.
 var oversizedPartSize = int64(constants.ChunkSize + constants.PartSizeAlignment)
-
-// writeTestFile writes size bytes of position-dependent data, so a part that
-// lands at the wrong offset does not hash the same as the right one.
-func writeTestFile(t *testing.T, path string, size int64) []byte {
-	t.Helper()
-	data := make([]byte, size)
-	for i := range data {
-		data[i] = byte(i*31 + 7)
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	return data
-}
 
 // expectedPartHashes splits data the way a correct reader would.
 func expectedPartHashes(data []byte, partSize int64) [][32]byte {
@@ -348,24 +315,6 @@ func (f *fakeS3Backend) assertPartsMatch(t *testing.T, want [][32]byte) {
 	}
 }
 
-// multiThreadedHandle returns a transfer handle with more than one thread. The
-// thread count comes from the pool's view of a large file, which is independent
-// of how many bytes the test actually pushes through the reader.
-func multiThreadedHandle(t *testing.T) *internaltransfer.Transfer {
-	t.Helper()
-	resourceMgr := resources.NewManager(resources.Config{
-		MaxThreads:   8,
-		AutoScale:    true,
-		CPUCores:     8,
-		MemoryBudget: 8 * 1024 * 1024 * 1024,
-	})
-	handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(2*constants.LargeFile1GB, 1)
-	if handle.GetThreads() <= 1 {
-		t.Fatalf("expected a multi-threaded handle, got %d thread(s)", handle.GetThreads())
-	}
-	return handle
-}
-
 func testUploadParams(t *testing.T, localPath, encryptedPath string, plan *resources.UploadPlan) transfer.EncryptedFileUploadParams {
 	t.Helper()
 	return transfer.EncryptedFileUploadParams{
@@ -392,10 +341,10 @@ func TestPreEncryptConcurrentUploadsEveryPart(t *testing.T) {
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 	encryptedSize := 2*oversizedPartSize + 4*1024*1024
-	data := writeTestFile(t, encryptedPath, encryptedSize)
-	writeTestFile(t, localPath, encryptedSize)
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
 
-	handle := multiThreadedHandle(t)
+	handle := testsupport.MultiThreadedHandle(t)
 	params := testUploadParams(t, localPath, encryptedPath, &resources.UploadPlan{
 		PartSize:   oversizedPartSize,
 		WorkerCap:  4,
@@ -452,8 +401,8 @@ func TestPreEncryptSequentialUploadsEveryPart(t *testing.T) {
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 	encryptedSize := 2*oversizedPartSize + 4*1024*1024
-	data := writeTestFile(t, encryptedPath, encryptedSize)
-	writeTestFile(t, localPath, encryptedSize)
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
 
 	params := testUploadParams(t, localPath, encryptedPath, &resources.UploadPlan{PartSize: oversizedPartSize})
 
@@ -497,8 +446,8 @@ func TestPreEncryptRefusesToCompleteShortUpload(t *testing.T) {
 			encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 			actualSize := oversizedPartSize + 1024*1024
-			writeTestFile(t, encryptedPath, actualSize)
-			writeTestFile(t, localPath, actualSize)
+			testsupport.WriteTestFile(t, encryptedPath, actualSize)
+			testsupport.WriteTestFile(t, localPath, actualSize)
 
 			// The caller believes the encrypted file is a part longer than it is.
 			claimedSize := actualSize + oversizedPartSize
@@ -513,7 +462,7 @@ func TestPreEncryptRefusesToCompleteShortUpload(t *testing.T) {
 
 			var err error
 			if tt.concurrent {
-				params.TransferHandle = multiThreadedHandle(t)
+				params.TransferHandle = testsupport.MultiThreadedHandle(t)
 				err = provider.uploadEncryptedMultipartConcurrent(context.Background(), s3Client, params, objectKey, claimedSize)
 			} else {
 				err = provider.uploadEncryptedMultipart(context.Background(), s3Client, params, objectKey, claimedSize)
@@ -553,11 +502,11 @@ func TestPreEncryptConcurrentDiscardsResumeStateForAnotherObject(t *testing.T) {
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 	encryptedSize := 2*oversizedPartSize + 4*1024*1024
-	data := writeTestFile(t, encryptedPath, encryptedSize)
-	writeTestFile(t, localPath, encryptedSize)
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
 
 	staleKey := state.BuildObjectKey(testPathBase, filepath.Base(localPath), "previous-suffix")
-	writeResumeState(t, localPath, &state.UploadResumeState{
+	testsupport.WriteResumeState(t, localPath, &state.UploadResumeState{
 		LocalPath:      localPath,
 		EncryptedPath:  encryptedPath,
 		ObjectKey:      staleKey,
@@ -577,7 +526,7 @@ func TestPreEncryptConcurrentDiscardsResumeStateForAnotherObject(t *testing.T) {
 		WorkerCap:  4,
 		QueueDepth: 4,
 	})
-	params.TransferHandle = multiThreadedHandle(t)
+	params.TransferHandle = testsupport.MultiThreadedHandle(t)
 
 	provider := &Provider{}
 	objectKey := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
@@ -619,10 +568,10 @@ func TestPreEncryptSequentialIgnoresResumeStateForAnotherObject(t *testing.T) {
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 	encryptedSize := 2*oversizedPartSize + 4*1024*1024
-	data := writeTestFile(t, encryptedPath, encryptedSize)
-	writeTestFile(t, localPath, encryptedSize)
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
 
-	writeResumeState(t, localPath, &state.UploadResumeState{
+	testsupport.WriteResumeState(t, localPath, &state.UploadResumeState{
 		LocalPath:      localPath,
 		EncryptedPath:  encryptedPath,
 		ObjectKey:      state.BuildObjectKey(testPathBase, filepath.Base(localPath), "previous-suffix"),
@@ -702,8 +651,8 @@ func TestPreEncryptRejectsOversizedFileBeforeAnyRequest(t *testing.T) {
 	tmpDir := t.TempDir()
 	localPath := filepath.Join(tmpDir, "source.dat")
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
-	writeTestFile(t, encryptedPath, 1024)
-	writeTestFile(t, localPath, 1024)
+	testsupport.WriteTestFile(t, encryptedPath, 1024)
+	testsupport.WriteTestFile(t, localPath, 1024)
 
 	// No plan, so the provider plans on the spot — against a size S3 cannot hold.
 	params := testUploadParams(t, localPath, encryptedPath, nil)
@@ -719,17 +668,6 @@ func TestPreEncryptRejectsOversizedFileBeforeAnyRequest(t *testing.T) {
 	defer backend.mu.Unlock()
 	if backend.requests != 0 {
 		t.Errorf("%d request(s) reached the backend before the file was refused", backend.requests)
-	}
-}
-
-func writeResumeState(t *testing.T, localPath string, resumeState *state.UploadResumeState) {
-	t.Helper()
-	data, err := json.Marshal(resumeState)
-	if err != nil {
-		t.Fatalf("failed to marshal resume state: %v", err)
-	}
-	if err := os.WriteFile(localPath+".upload.resume", data, 0600); err != nil {
-		t.Fatalf("failed to write resume state: %v", err)
 	}
 }
 
@@ -756,15 +694,15 @@ func TestPreEncryptConcurrentHonorsPlanWorkerCap(t *testing.T) {
 			encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 			encryptedSize := 2*oversizedPartSize + 4*1024*1024
-			data := writeTestFile(t, encryptedPath, encryptedSize)
-			writeTestFile(t, localPath, encryptedSize)
+			data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+			testsupport.WriteTestFile(t, localPath, encryptedSize)
 
 			params := testUploadParams(t, localPath, encryptedPath, &resources.UploadPlan{
 				PartSize:   oversizedPartSize,
 				WorkerCap:  tt.workerCap,
 				QueueDepth: 2,
 			})
-			params.TransferHandle = multiThreadedHandle(t)
+			params.TransferHandle = testsupport.MultiThreadedHandle(t)
 
 			provider := &Provider{}
 			objectKey := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)

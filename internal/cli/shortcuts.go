@@ -130,56 +130,8 @@ Examples:
   rescale-int ls --limit 10
   rescale-int ls -n 20`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Directly call the jobs list logic instead of delegating to a new command
-			logger := GetLogger()
-
-			// Get API client
-			apiClient, err := getAPIClient()
-			if err != nil {
-				return err
-			}
-
-			ctx := GetContext()
-
-			// List jobs
-			logger.Info().Msg("Fetching jobs")
-			jobs, err := apiClient.ListJobs(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to list jobs: %w", err)
-			}
-
-			if len(jobs) == 0 {
-				fmt.Println("No jobs found")
-				return nil
-			}
-
-			// Display jobs
-			fmt.Printf("Found %d job(s):\n\n", len(jobs))
-
-			displayCount := len(jobs)
-			if limit > 0 && limit < len(jobs) {
-				displayCount = limit
-			}
-
-			for i := 0; i < displayCount; i++ {
-				job := jobs[i]
-				fmt.Printf("Job #%d:\n", i+1)
-				fmt.Printf("  ID: %s\n", job.ID)
-				fmt.Printf("  Name: %s\n", job.Name)
-				fmt.Printf("  Status: %s\n", job.JobStatus.Status)
-				fmt.Printf("  Created: %s\n", job.CreatedAt)
-				fmt.Printf("  Owner: %s\n", job.Owner)
-				if job.JobStatus.Content != "" {
-					fmt.Printf("  Status Reason: %s\n", job.JobStatus.Content)
-				}
-				fmt.Println()
-			}
-
-			if limit > 0 && limit < len(jobs) {
-				fmt.Printf("(Showing %d of %d jobs. Use --limit to change)\n", displayCount, len(jobs))
-			}
-
-			return nil
+			// Run the jobs list logic directly instead of delegating to a new command
+			return runJobsList(limit)
 		},
 	}
 

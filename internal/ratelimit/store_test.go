@@ -22,39 +22,39 @@ func TestStoreReturnsSameLimiterForSameKey(t *testing.T) {
 	}
 }
 
-func TestStoreDifferentScopesReturnDifferentLimiters(t *testing.T) {
-	ResetGlobalStore()
-	s := GlobalStore()
+// TestStoreDistinctKeysReturnDifferentLimiters varies one part of the
+// {baseURL, apiKey, scope} limiter key at a time: each on its own must yield a
+// different limiter instance.
+func TestStoreDistinctKeysReturnDifferentLimiters(t *testing.T) {
+	const baseURL, apiKey = "https://platform.rescale.com", "key-abc"
 
-	l1 := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
-	l2 := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeJobSubmission)
-
-	if l1 == l2 {
-		t.Error("different scopes should return different limiter instances")
+	tests := []struct {
+		axis    string
+		baseURL string
+		apiKey  string
+		scope   Scope
+		want    string
+	}{
+		{"scope", baseURL, apiKey, ScopeJobSubmission,
+			"different scopes should return different limiter instances"},
+		{"apiKey", baseURL, "key-xyz", ScopeUser,
+			"different API keys should return different limiter instances (separate quotas)"},
+		{"baseURL", "https://staging.rescale.com", apiKey, ScopeUser,
+			"different base URLs should return different limiter instances"},
 	}
-}
 
-func TestStoreDifferentAPIKeysReturnDifferentLimiters(t *testing.T) {
-	ResetGlobalStore()
-	s := GlobalStore()
+	for _, tt := range tests {
+		t.Run(tt.axis, func(t *testing.T) {
+			ResetGlobalStore()
+			s := GlobalStore()
 
-	l1 := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
-	l2 := s.GetLimiter("https://platform.rescale.com", "key-xyz", ScopeUser)
+			l1 := s.GetLimiter(baseURL, apiKey, ScopeUser)
+			l2 := s.GetLimiter(tt.baseURL, tt.apiKey, tt.scope)
 
-	if l1 == l2 {
-		t.Error("different API keys should return different limiter instances (separate quotas)")
-	}
-}
-
-func TestStoreDifferentBaseURLsReturnDifferentLimiters(t *testing.T) {
-	ResetGlobalStore()
-	s := GlobalStore()
-
-	l1 := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
-	l2 := s.GetLimiter("https://staging.rescale.com", "key-abc", ScopeUser)
-
-	if l1 == l2 {
-		t.Error("different base URLs should return different limiter instances")
+			if l1 == l2 {
+				t.Error(tt.want)
+			}
+		})
 	}
 }
 

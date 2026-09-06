@@ -1,5 +1,3 @@
-//go:build windows
-
 // Package wailsapp provides the Wails-based GUI for Rescale Interlink.
 package wailsapp
 
@@ -24,7 +22,7 @@ var (
 )
 
 // InitFileLogger initializes file-based logging with rotation.
-// Location: %LOCALAPPDATA%\Rescale\Interlink\logs
+// Location: ~/.config/rescale/logs/ (Unix) or %LOCALAPPDATA%\Rescale\Interlink\logs (Windows)
 func InitFileLogger() error {
 	fileLoggerMu.Lock()
 
@@ -129,4 +127,3 @@ func GetLogFilePath() string {
 	}
 	return ""
 }
-

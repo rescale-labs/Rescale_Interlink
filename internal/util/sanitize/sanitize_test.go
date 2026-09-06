@@ -56,16 +56,8 @@ func TestSanitizeCommand(t *testing.T) {
 			expected: "command with tabs",
 		},
 		{
-			name:     "Trim leading whitespace",
-			input:    "   command",
-			expected: "command",
-		},
-		{
-			name:     "Trim trailing whitespace",
-			input:    "command   ",
-			expected: "command",
-		},
-		{
+			// Fails unless both ends are trimmed, so it carries the
+			// leading-only and trailing-only claims too.
 			name:     "Trim both",
 			input:    "  command  ",
 			expected: "command",

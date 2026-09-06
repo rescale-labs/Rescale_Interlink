@@ -97,8 +97,6 @@ export interface DOEMethod {
   usesLevels: boolean
   usesCenterPoints: boolean
   usesCases: boolean
-  minParameters: number
-  maxParameters: number
 }
 
 // DOE sweep configuration

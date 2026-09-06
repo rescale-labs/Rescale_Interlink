@@ -206,35 +206,32 @@ func TestRedactTimelineEntry_LogEvent(t *testing.T) {
 	}
 }
 
-func TestRedactTimeline_LimitsEntries(t *testing.T) {
-	rawEvents := make([]events.Event, 30)
-	for i := range rawEvents {
-		rawEvents[i] = &events.LogEvent{
-			BaseEvent: events.BaseEvent{EventType: events.EventLog, Time: time.Now()},
-			Level:     events.InfoLevel,
-			Message:   "test message",
-		}
+func TestRedactTimeline_EntryLimit(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+		want  int
+	}{
+		{"more events than the limit", 30, 20},
+		{"fewer events than the limit", 5, 5},
 	}
 
-	entries := RedactTimeline(rawEvents, 20)
-	if len(entries) != 20 {
-		t.Errorf("expected 20 entries, got %d", len(entries))
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawEvents := make([]events.Event, tt.count)
+			for i := range rawEvents {
+				rawEvents[i] = &events.LogEvent{
+					BaseEvent: events.BaseEvent{EventType: events.EventLog, Time: time.Now()},
+					Level:     events.InfoLevel,
+					Message:   "test message",
+				}
+			}
 
-func TestRedactTimeline_FewerThanLimit(t *testing.T) {
-	rawEvents := make([]events.Event, 5)
-	for i := range rawEvents {
-		rawEvents[i] = &events.LogEvent{
-			BaseEvent: events.BaseEvent{EventType: events.EventLog, Time: time.Now()},
-			Level:     events.InfoLevel,
-			Message:   "test",
-		}
-	}
-
-	entries := RedactTimeline(rawEvents, 20)
-	if len(entries) != 5 {
-		t.Errorf("expected 5 entries, got %d", len(entries))
+			entries := RedactTimeline(rawEvents, 20)
+			if len(entries) != tt.want {
+				t.Errorf("expected %d entries, got %d", tt.want, len(entries))
+			}
+		})
 	}
 }
 

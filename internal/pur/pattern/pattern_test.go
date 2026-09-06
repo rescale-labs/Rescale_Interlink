@@ -58,8 +58,11 @@ func TestDetectNumericPatterns(t *testing.T) {
 			},
 		},
 		{
-			name:          "Filter python3",
-			command:       "python3 script.py",
+			// One row per denylisted command would prove nothing extra: the
+			// count must be 0, so a single command carrying all of them fails
+			// if any one of them is detected as a sweep.
+			name:          "Filter versioned commands",
+			command:       "python3 script.py gcc4 node18",
 			expectedCount: 0,
 			checkPatterns: func(patterns []PatternInfo) bool {
 				return true
@@ -76,14 +79,6 @@ func TestDetectNumericPatterns(t *testing.T) {
 		{
 			name:          "Filter year",
 			command:       "data-2024.csv",
-			expectedCount: 0,
-			checkPatterns: func(patterns []PatternInfo) bool {
-				return true
-			},
-		},
-		{
-			name:          "Filter version",
-			command:       "gcc4 node18",
 			expectedCount: 0,
 			checkPatterns: func(patterns []PatternInfo) bool {
 				return true

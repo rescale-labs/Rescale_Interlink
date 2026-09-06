@@ -295,7 +295,6 @@ type JobFile struct {
 	RelativePath         string              `json:"relativePath,omitempty"`
 	Path                 string              `json:"path"` // S3/Azure path
 	EncodedEncryptionKey string              `json:"encodedEncryptionKey"`
-	DownloadURL          string              `json:"downloadUrl,omitempty"`
 	DecryptedSize        int64               `json:"decryptedSize"`
 	PathParts            *CloudFilePathParts `json:"pathParts,omitempty"`
 	Storage              *CloudFileStorage   `json:"storage,omitempty"`

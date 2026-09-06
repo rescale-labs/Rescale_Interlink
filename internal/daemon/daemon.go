@@ -49,9 +49,6 @@ type Config struct {
 	// LogFile is the path to write daemon logs (empty = stdout)
 	LogFile string
 
-	// Verbose enables debug logging
-	Verbose bool
-
 	// When set, jobs must pass eligibility checks to be downloaded
 	Eligibility *EligibilityConfig
 }

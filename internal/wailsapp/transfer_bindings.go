@@ -90,15 +90,6 @@ func (a *App) CancelTransfer(taskID string) error {
 	return ts.CancelTransfer(taskID)
 }
 
-func (a *App) CancelAllTransfers() {
-	ts, err := a.transferService()
-	if err != nil {
-		return
-	}
-
-	ts.CancelAll()
-}
-
 // RetryTransfer retries a failed or cancelled transfer.
 // Returns the new task ID.
 func (a *App) RetryTransfer(taskID string) (string, error) {

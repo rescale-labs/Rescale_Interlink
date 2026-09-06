@@ -77,13 +77,9 @@ func newSyncCmd() *cobra.Command {
 	return cmd
 }
 
-// runCompatWatchPoll delegates polling-mode sync to the shared watch engine.
-func runCompatWatchPoll(ctx context.Context, jobID string, opts compatDownloadOpts, intervalSec int, client *api.Client, cc *CompatContext) error {
-	cfg := watch.Config{
-		Interval: time.Duration(intervalSec) * time.Second,
-	}
-
-	statusFn := func(ctx context.Context, jID string) (string, error) {
+// compatSyncStatusFn reports a job's current status for the watch engine.
+func compatSyncStatusFn(client *api.Client) watch.StatusFunc {
+	return func(ctx context.Context, jID string) (string, error) {
 		statuses, err := client.GetJobStatuses(ctx, jID)
 		if err != nil {
 			return "", err
@@ -93,12 +89,13 @@ func runCompatWatchPoll(ctx context.Context, jobID string, opts compatDownloadOp
 		}
 		return statuses[0].Status, nil
 	}
+}
 
-	downloadFn := func(ctx context.Context, jID string) error {
-		return compatDownloadByJobID(ctx, jID, opts, client, cc)
-	}
-
-	cb := &watch.Callbacks{
+// compatSyncCallbacks builds the watch callbacks both sync modes report with.
+// errorLabel names the failing step in the OnError line, which is the only
+// wording the two modes do not share.
+func compatSyncCallbacks(cc *CompatContext, errorLabel string) *watch.Callbacks {
+	return &watch.Callbacks{
 		OnStatusChange: func(jID, oldStatus, newStatus string) {
 			cc.Printf("%s - Job %s: %s -> %s\n",
 				FormatSLF4JTimestamp(time.Now()), jID, oldStatus, newStatus)
@@ -113,12 +110,24 @@ func runCompatWatchPoll(ctx context.Context, jobID string, opts compatDownloadOp
 			cc.Printf("Job %s reached terminal status: %s\n", jID, finalStatus)
 		},
 		OnError: func(jID string, err error) {
-			cc.Printf("%s - sync status check error for %s: %v\n",
-				FormatSLF4JTimestamp(time.Now()), jID, err)
+			cc.Printf("%s - %s for %s: %v\n",
+				FormatSLF4JTimestamp(time.Now()), errorLabel, jID, err)
 		},
 	}
+}
 
-	return watch.WatchJob(ctx, jobID, cfg, statusFn, downloadFn, cb)
+// runCompatWatchPoll delegates polling-mode sync to the shared watch engine.
+func runCompatWatchPoll(ctx context.Context, jobID string, opts compatDownloadOpts, intervalSec int, client *api.Client, cc *CompatContext) error {
+	cfg := watch.Config{
+		Interval: time.Duration(intervalSec) * time.Second,
+	}
+
+	downloadFn := func(ctx context.Context, jID string) error {
+		return compatDownloadByJobID(ctx, jID, opts, client, cc)
+	}
+
+	return watch.WatchJob(ctx, jobID, cfg, compatSyncStatusFn(client), downloadFn,
+		compatSyncCallbacks(cc, "sync status check error"))
 }
 
 // runCompatNewerThan delegates newer-than-job-id sync to the shared watch engine.
@@ -142,17 +151,6 @@ func runCompatNewerThan(cmd *cobra.Command, refJobID, outputDir string, syncInte
 	// WatchNewerThan will process all jobs once and exit if all are terminal.
 	if cfg.Interval <= 0 {
 		cfg.Interval = constants.MinWatchInterval
-	}
-
-	statusFn := func(ctx context.Context, jID string) (string, error) {
-		statuses, err := client.GetJobStatuses(ctx, jID)
-		if err != nil {
-			return "", err
-		}
-		if len(statuses) == 0 {
-			return "", fmt.Errorf("no status entries for job %s", jID)
-		}
-		return statuses[0].Status, nil
 	}
 
 	lister := func(ctx context.Context, refID string) ([]watch.JobInfo, error) {
@@ -201,25 +199,6 @@ func runCompatNewerThan(cmd *cobra.Command, refJobID, outputDir string, syncInte
 		}
 	}
 
-	cb := &watch.Callbacks{
-		OnStatusChange: func(jID, oldStatus, newStatus string) {
-			cc.Printf("%s - Job %s: %s -> %s\n",
-				FormatSLF4JTimestamp(time.Now()), jID, oldStatus, newStatus)
-		},
-		OnDownloadPass: func(jID string, err error) {
-			if err != nil {
-				cc.Printf("%s - sync download error for %s: %v\n",
-					FormatSLF4JTimestamp(time.Now()), jID, err)
-			}
-		},
-		OnTerminal: func(jID, finalStatus string) {
-			cc.Printf("Job %s reached terminal status: %s\n", jID, finalStatus)
-		},
-		OnError: func(jID string, err error) {
-			cc.Printf("%s - sync error for %s: %v\n",
-				FormatSLF4JTimestamp(time.Now()), jID, err)
-		},
-	}
-
-	return watch.WatchNewerThan(ctx, refJobID, cfg, lister, statusFn, dlFactory, cb)
+	return watch.WatchNewerThan(ctx, refJobID, cfg, lister, compatSyncStatusFn(client), dlFactory,
+		compatSyncCallbacks(cc, "sync error"))
 }

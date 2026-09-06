@@ -32,13 +32,6 @@ export interface StateChangeEventDTO {
   uploadProgress: number;
 }
 
-export interface ErrorEventDTO {
-  timestamp: string;
-  jobName: string;
-  stage: string;
-  message: string;
-}
-
 export interface CompleteEventDTO {
   timestamp: string;
   totalJobs: number;
@@ -72,22 +65,6 @@ export interface EnumerationEventDTO {
   phase?: string; // "scanning", "creating_folders", "complete", "error"
   foldersTotal?: number;
   foldersCreated?: number;
-}
-
-export interface ScanProgressEventDTO {
-  timestamp: string;
-  scanType: 'software' | 'hardware';
-  page: number;
-  itemsFound: number;
-  isComplete: boolean;
-  isCached: boolean;
-  error?: string;
-}
-
-export interface ConfigChangedEventDTO {
-  timestamp: string;
-  source: string;
-  email: string;
 }
 
 export interface SanitizedTimelineEntry {

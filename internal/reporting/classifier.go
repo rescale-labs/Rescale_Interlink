@@ -14,7 +14,6 @@ type ErrorCategory string
 const (
 	CategoryTransfer    ErrorCategory = "transfer"
 	CategoryJobCreate   ErrorCategory = "job_create"
-	CategoryJobSubmit   ErrorCategory = "job_submit"
 	CategoryPURPipeline ErrorCategory = "pur_pipeline"
 	CategoryAuth        ErrorCategory = "auth"
 )

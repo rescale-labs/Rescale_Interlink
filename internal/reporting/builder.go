@@ -36,9 +36,7 @@ type ErrorReport struct {
 	ErrorClass   string `json:"errorClass"`
 
 	// Runtime facts (allowlisted only)
-	MaxConcurrent  int `json:"maxConcurrent,omitempty"`
-	FailedCount    int `json:"failedCount,omitempty"`
-	SucceededCount int `json:"succeededCount,omitempty"`
+	MaxConcurrent int `json:"maxConcurrent,omitempty"`
 
 	// Timeline (last 20 events, redacted — GUI only, empty for CLI/daemon)
 	Timeline []events.SanitizedTimelineEntry `json:"timeline"`

@@ -201,24 +201,6 @@ func TestParity_ListInfoAnalyses(t *testing.T) {
 	}
 }
 
-func TestParity_ListFilesCompleted(t *testing.T) {
-	requireAPIKey(t)
-	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
-
-	out, code := runCompat(t, "-q", "list-files", "-j", jobID)
-	// Completed job should have no active run → exit 33
-	if code != ExitCodeCompatError {
-		t.Logf("list-files output: %s", out)
-		// May succeed if runs endpoint returns runs — both outcomes acceptable
-		t.Logf("exit code %d (expected %d for 'no active run')", code, ExitCodeCompatError)
-	}
-	if code == ExitCodeCompatError {
-		if !strings.Contains(out, "no active run") && !strings.Contains(fmt.Sprintf("%v", out), "no active run") {
-			t.Logf("unexpected error for completed job: %s", out)
-		}
-	}
-}
-
 func TestParity_ListFilesRunning(t *testing.T) {
 	requireAPIKey(t)
 	jobID := requireEnvID(t, "RESCALE_RUNNING_JOB_ID")
@@ -411,20 +393,5 @@ func TestParity_SyncNewerThan(t *testing.T) {
 		if jobDirCount > cliJobDirs {
 			t.Errorf("INT has more job dirs than CLI: INT=%d CLI=%d", jobDirCount, cliJobDirs)
 		}
-	}
-}
-
-func TestParity_DownloadFileExactName(t *testing.T) {
-	requireAPIKey(t)
-	jobID := requireEnvID(t, "RESCALE_TEST_JOB_ID")
-
-	// First get the file list to find a real filename
-	tmpDir := t.TempDir()
-
-	// Try downloading with an exact filename that likely exists
-	out, code := runCompat(t, "-q", "download-file", "-j", jobID, "-f", "process_output.log", "-o", tmpDir)
-	if code != 0 {
-		// If no file matches, that's OK — the test verifies the filter mechanism
-		t.Logf("download-file -f returned code %d (file may not exist): %s", code, out)
 	}
 }

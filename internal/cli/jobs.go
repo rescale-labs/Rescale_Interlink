@@ -68,61 +68,67 @@ Example:
   # List first 10 jobs
   rescale-int jobs list --limit 10`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			logger := GetLogger()
-
-			// Get API client
-			apiClient, err := getAPIClient()
-			if err != nil {
-				return err
-			}
-
-			ctx := GetContext()
-
-			// List jobs
-			logger.Info().Msg("Fetching jobs")
-			jobs, err := apiClient.ListJobs(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to list jobs: %w", err)
-			}
-
-			if len(jobs) == 0 {
-				fmt.Println("No jobs found")
-				return nil
-			}
-
-			// Display jobs
-			fmt.Printf("Found %d job(s):\n\n", len(jobs))
-
-			displayCount := len(jobs)
-			if limit > 0 && limit < len(jobs) {
-				displayCount = limit
-			}
-
-			for i := 0; i < displayCount; i++ {
-				job := jobs[i]
-				fmt.Printf("Job #%d:\n", i+1)
-				fmt.Printf("  ID: %s\n", job.ID)
-				fmt.Printf("  Name: %s\n", job.Name)
-				fmt.Printf("  Status: %s\n", job.JobStatus.Status)
-				fmt.Printf("  Created: %s\n", job.CreatedAt)
-				fmt.Printf("  Owner: %s\n", job.Owner)
-				if job.JobStatus.Content != "" {
-					fmt.Printf("  Status Reason: %s\n", job.JobStatus.Content)
-				}
-				fmt.Println()
-			}
-
-			if limit > 0 && limit < len(jobs) {
-				fmt.Printf("(Showing %d of %d jobs. Use --limit to change)\n", displayCount, len(jobs))
-			}
-
-			return nil
+			return runJobsList(limit)
 		},
 	}
 
 	cmd.Flags().IntVarP(&limit, "limit", "n", 0, "Limit number of jobs displayed (0 = all)")
 
 	return cmd
+}
+
+// runJobsList fetches and prints the account's jobs, showing at most limit of
+// them (limit <= 0 shows all). Shared by 'jobs list' and the 'ls' shortcut.
+func runJobsList(limit int) error {
+	logger := GetLogger()
+
+	// Get API client
+	apiClient, err := getAPIClient()
+	if err != nil {
+		return err
+	}
+
+	ctx := GetContext()
+
+	// List jobs
+	logger.Info().Msg("Fetching jobs")
+	jobs, err := apiClient.ListJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list jobs: %w", err)
+	}
+
+	if len(jobs) == 0 {
+		fmt.Println("No jobs found")
+		return nil
+	}
+
+	// Display jobs
+	fmt.Printf("Found %d job(s):\n\n", len(jobs))
+
+	displayCount := len(jobs)
+	if limit > 0 && limit < len(jobs) {
+		displayCount = limit
+	}
+
+	for i := 0; i < displayCount; i++ {
+		job := jobs[i]
+		fmt.Printf("Job #%d:\n", i+1)
+		fmt.Printf("  ID: %s\n", job.ID)
+		fmt.Printf("  Name: %s\n", job.Name)
+		fmt.Printf("  Status: %s\n", job.JobStatus.Status)
+		fmt.Printf("  Created: %s\n", job.CreatedAt)
+		fmt.Printf("  Owner: %s\n", job.Owner)
+		if job.JobStatus.Content != "" {
+			fmt.Printf("  Status Reason: %s\n", job.JobStatus.Content)
+		}
+		fmt.Println()
+	}
+
+	if limit > 0 && limit < len(jobs) {
+		fmt.Printf("(Showing %d of %d jobs. Use --limit to change)\n", displayCount, len(jobs))
+	}
+
+	return nil
 }
 
 // rejectBothIDSpellings errors when one invocation uses both --job-id and its
@@ -1038,23 +1044,24 @@ Examples:
 	return cmd
 }
 
-// runCreateOnlyWorkflow handles creating a job without submitting
-func runCreateOnlyWorkflow(
+// uploadAndCreateJob uploads any input files, associates them with the job
+// request, and creates the job. Shared by the create-only and submit workflows,
+// which differ only in what they do with the created job.
+func uploadAndCreateJob(
 	ctx context.Context,
 	jobReq *models.JobRequest,
 	inputFiles []string,
-	noTar bool,
 	maxConcurrent int,
 	apiClient *api.Client,
 	logger *logging.Logger,
-) error {
+) (*models.JobResponse, error) {
 	// Upload files if specified
 	var uploadedFileIDs []string
 	if len(inputFiles) > 0 {
 		logger.Info().Int("count", len(inputFiles)).Msg("Uploading input files")
 		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
-			return fmt.Errorf("file upload failed: %w", err)
+			return nil, fmt.Errorf("file upload failed: %w", err)
 		}
 		uploadedFileIDs = fileIDs
 
@@ -1070,11 +1077,29 @@ func runCreateOnlyWorkflow(
 		fmt.Printf("\n✓ Uploaded %d file(s)\n\n", len(uploadedFileIDs))
 	}
 
-	// Create job (don't submit)
+	// Create job
 	logger.Info().Str("name", jobReq.Name).Msg("Creating job")
 	jobResp, err := apiClient.CreateJob(ctx, *jobReq)
 	if err != nil {
-		return fmt.Errorf("failed to create job: %w", err)
+		return nil, fmt.Errorf("failed to create job: %w", err)
+	}
+
+	return jobResp, nil
+}
+
+// runCreateOnlyWorkflow handles creating a job without submitting
+func runCreateOnlyWorkflow(
+	ctx context.Context,
+	jobReq *models.JobRequest,
+	inputFiles []string,
+	noTar bool,
+	maxConcurrent int,
+	apiClient *api.Client,
+	logger *logging.Logger,
+) error {
+	jobResp, err := uploadAndCreateJob(ctx, jobReq, inputFiles, maxConcurrent, apiClient, logger)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("✓ Job created (not submitted)\n")
@@ -1096,33 +1121,9 @@ func runSubmitWorkflow(
 	apiClient *api.Client,
 	logger *logging.Logger,
 ) error {
-	// Upload files if specified
-	var uploadedFileIDs []string
-	if len(inputFiles) > 0 {
-		logger.Info().Int("count", len(inputFiles)).Msg("Uploading input files")
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
-		if err != nil {
-			return fmt.Errorf("file upload failed: %w", err)
-		}
-		uploadedFileIDs = fileIDs
-
-		// Associate files with job
-		if len(jobReq.JobAnalyses) > 0 {
-			inputFileRequests := make([]models.InputFileRequest, len(uploadedFileIDs))
-			for i, fileID := range uploadedFileIDs {
-				inputFileRequests[i] = models.InputFileRequest{ID: fileID}
-			}
-			jobReq.JobAnalyses[0].InputFiles = inputFileRequests
-			logger.Info().Int("count", len(uploadedFileIDs)).Msg("Associated files with job")
-		}
-		fmt.Printf("\n✓ Uploaded %d file(s)\n\n", len(uploadedFileIDs))
-	}
-
-	// Create job
-	logger.Info().Str("name", jobReq.Name).Msg("Creating job")
-	jobResp, err := apiClient.CreateJob(ctx, *jobReq)
+	jobResp, err := uploadAndCreateJob(ctx, jobReq, inputFiles, maxConcurrent, apiClient, logger)
 	if err != nil {
-		return fmt.Errorf("failed to create job: %w", err)
+		return err
 	}
 
 	fmt.Printf("✓ Job created: %s\n", jobResp.ID)

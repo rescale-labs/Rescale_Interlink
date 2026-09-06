@@ -42,14 +42,6 @@ func TestCanonicalTextCoverage(t *testing.T) {
 	}
 }
 
-func TestHintForKnownCodes(t *testing.T) {
-	// Every code should resolve without panicking. Empty hints are allowed
-	// (some errors speak for themselves).
-	for _, code := range allCodes {
-		_ = HintFor(code)
-	}
-}
-
 func TestHintForUnknownCode(t *testing.T) {
 	if got := HintFor(ErrorCode("this_code_does_not_exist")); got != "" {
 		t.Errorf("HintFor unknown code = %q, want \"\"", got)

@@ -129,14 +129,13 @@ func shouldProbeResolvedDirectory(mode fs.FileMode, isDir bool) bool {
 
 // FileEntry represents a file or directory in the local filesystem.
 type FileEntry struct {
-	Path       string      // Full path to the file
-	Name       string      // Base name of the file
-	Size       int64       // Size in bytes (0 for directories, target size for symlinks)
-	IsDir      bool        // True if this is a directory (or symlink to directory)
-	ModTime    time.Time   // Last modification time
-	Mode       fs.FileMode // File mode/permissions
-	IsSymlink  bool        // True if this is a symbolic link
-	LinkTarget string      // Target path for symlinks (empty if not a symlink or resolution failed)
+	Path      string      // Full path to the file
+	Name      string      // Base name of the file
+	Size      int64       // Size in bytes (0 for directories, target size for symlinks)
+	IsDir     bool        // True if this is a directory (or symlink to directory)
+	ModTime   time.Time   // Last modification time
+	Mode      fs.FileMode // File mode/permissions
+	IsSymlink bool        // True if this is a symbolic link
 }
 
 // entryInfo is a helper struct for ListDirectoryEx internal use.
@@ -552,6 +551,56 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 	return dirs, files, skipped, errs
 }
 
+// symlinkedEntry is the per-entry state both symlinked-tree walks compute
+// before they diverge on how they report it.
+type symlinkedEntry struct {
+	originalPath string
+	name         string
+	fileInfo     os.FileInfo
+	isSymlink    bool
+}
+
+// resolveSymlinkedEntry maps an entry inside a resolved symlink target back to
+// the path the caller sees and applies the skip rules both walks share. A nil
+// entry means "not reported": the WalkDir callback returns skipErr instead —
+// nil to continue, filepath.SkipDir to prune a hidden directory.
+func resolveSymlinkedEntry(resolvedRoot, originalRoot, resolvedPath string,
+	d fs.DirEntry, opts WalkOptions) (*symlinkedEntry, error) {
+	// Skip root itself
+	if resolvedPath == resolvedRoot {
+		return nil, nil
+	}
+
+	// Compute the original path by replacing the resolved prefix with the original prefix
+	relPath, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil {
+		return nil, nil
+	}
+	originalPath := filepath.Join(originalRoot, relPath)
+	name := d.Name()
+
+	// Hidden handling (same as main walk)
+	if !opts.IncludeHidden && IsHiddenName(name) {
+		if d.IsDir() && opts.SkipHiddenDirs {
+			return nil, filepath.SkipDir
+		}
+		return nil, nil
+	}
+
+	// Symlink handling within the symlinked tree
+	fileInfo, err := os.Lstat(resolvedPath)
+	if err != nil {
+		return nil, nil
+	}
+
+	return &symlinkedEntry{
+		originalPath: originalPath,
+		name:         name,
+		fileInfo:     fileInfo,
+		isSymlink:    fileInfo.Mode()&os.ModeSymlink != 0,
+	}, nil
+}
+
 // walkSymlinkedDir walks a resolved symlink target directory, emitting entries
 // with paths rewritten to use the original symlink path prefix.
 // This ensures the orchestrator builds correct remote folder structure.
@@ -578,34 +627,11 @@ func walkSymlinkedDir(
 		default:
 		}
 
-		// Skip root itself
-		if resolvedPath == resolvedRoot {
-			return nil
+		se, skipErr := resolveSymlinkedEntry(resolvedRoot, originalRoot, resolvedPath, d, opts)
+		if se == nil {
+			return skipErr
 		}
-
-		// Compute the original path by replacing the resolved prefix with the original prefix
-		relPath, err := filepath.Rel(resolvedRoot, resolvedPath)
-		if err != nil {
-			return nil
-		}
-		originalPath := filepath.Join(originalRoot, relPath)
-		name := d.Name()
-
-		// Hidden handling (same as main walk)
-		if !opts.IncludeHidden && IsHiddenName(name) {
-			if d.IsDir() && opts.SkipHiddenDirs {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Symlink handling within the symlinked tree
-		fileInfo, err := os.Lstat(resolvedPath)
-		if err != nil {
-			return nil
-		}
-
-		isSymlink := fileInfo.Mode()&os.ModeSymlink != 0
+		originalPath, name, fileInfo, isSymlink := se.originalPath, se.name, se.fileInfo, se.isSymlink
 
 		if isSymlink {
 			realInfo, statErr := os.Stat(resolvedPath)
@@ -709,30 +735,11 @@ func collectSymlinkedDir(
 			return nil
 		}
 
-		if resolvedPath == resolvedRoot {
-			return nil
+		se, skipErr := resolveSymlinkedEntry(resolvedRoot, originalRoot, resolvedPath, d, opts)
+		if se == nil {
+			return skipErr
 		}
-
-		relPath, err := filepath.Rel(resolvedRoot, resolvedPath)
-		if err != nil {
-			return nil
-		}
-		originalPath := filepath.Join(originalRoot, relPath)
-		name := d.Name()
-
-		if !opts.IncludeHidden && IsHiddenName(name) {
-			if d.IsDir() && opts.SkipHiddenDirs {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		fileInfo, err := os.Lstat(resolvedPath)
-		if err != nil {
-			return nil
-		}
-
-		isSymlink := fileInfo.Mode()&os.ModeSymlink != 0
+		originalPath, name, fileInfo, isSymlink := se.originalPath, se.name, se.fileInfo, se.isSymlink
 
 		if isSymlink {
 			realInfo, statErr := os.Stat(resolvedPath)

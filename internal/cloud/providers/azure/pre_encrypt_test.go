@@ -3,14 +3,10 @@ package azure
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"encoding/json"
 	"encoding/xml"
 	"io"
-	"net"
 	nethttp "net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,13 +19,13 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
+	"github.com/rescale/rescale-int/internal/cloud/providers/testsupport"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
-	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
 // The pre-encrypt upload paths talk to the Azure SDK directly, so the only seam
@@ -166,21 +162,6 @@ func (f *fakeBlobBackend) assertCommittedBlocksMatch(t *testing.T, want [][32]by
 	}
 }
 
-// redirectingHTTPClient sends every request to addr whatever hostname the SDK
-// resolved. The provider refreshes credentials before every attempt, and that
-// rebuilds the SDK client against the real blob endpoint template, so overriding
-// only the first client's endpoint would point the second call at real Azure.
-func redirectingHTTPClient(addr string) *nethttp.Client {
-	return &nethttp.Client{
-		Transport: &nethttp.Transport{
-			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, addr)
-			},
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-}
-
 // newFakeCredentialsAPI stands in for the Rescale API's credential endpoint,
 // which the provider calls through the shared credential manager before every
 // attempt.
@@ -196,7 +177,7 @@ func newFakeCredentialsAPI(t *testing.T) *api.Client {
 
 func newTestAzureClient(t *testing.T, server *httptest.Server) *AzureClient {
 	t.Helper()
-	httpClient := redirectingHTTPClient(server.Listener.Addr().String())
+	httpClient := testsupport.RedirectingHTTPClient(server.Listener.Addr().String())
 	apiClient := newFakeCredentialsAPI(t)
 
 	storageInfo := &models.StorageInfo{
@@ -230,20 +211,6 @@ func newTestAzureClient(t *testing.T, server *httptest.Server) *AzureClient {
 // size) per iteration, and only a wide enough gap leaves the file short.
 var oversizedBlockSize = int64(2 * constants.ChunkSize)
 
-// writeTestFile writes size bytes of position-dependent data, so a block that
-// lands at the wrong offset does not hash the same as the right one.
-func writeTestFile(t *testing.T, path string, size int64) []byte {
-	t.Helper()
-	data := make([]byte, size)
-	for i := range data {
-		data[i] = byte(i*31 + 7)
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-	return data
-}
-
 // expectedBlockHashes splits data the way a correct reader would.
 func expectedBlockHashes(data []byte, blockSize int64) [][32]byte {
 	var hashes [][32]byte
@@ -257,24 +224,6 @@ func expectedBlockHashes(data []byte, blockSize int64) [][32]byte {
 	return hashes
 }
 
-// multiThreadedHandle returns a transfer handle with more than one thread. The
-// thread count comes from the pool's view of a large file, which is independent
-// of how many bytes the test actually pushes through the reader.
-func multiThreadedHandle(t *testing.T) *internaltransfer.Transfer {
-	t.Helper()
-	resourceMgr := resources.NewManager(resources.Config{
-		MaxThreads:   8,
-		AutoScale:    true,
-		CPUCores:     8,
-		MemoryBudget: 8 * 1024 * 1024 * 1024,
-	})
-	handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(2*constants.LargeFile1GB, 1)
-	if handle.GetThreads() <= 1 {
-		t.Fatalf("expected a multi-threaded handle, got %d thread(s)", handle.GetThreads())
-	}
-	return handle
-}
-
 func testUploadParams(localPath, encryptedPath string, plan *resources.UploadPlan) transfer.EncryptedFileUploadParams {
 	return transfer.EncryptedFileUploadParams{
 		LocalPath:     localPath,
@@ -283,17 +232,6 @@ func testUploadParams(localPath, encryptedPath string, plan *resources.UploadPla
 		IV:            make([]byte, 16),
 		RandomSuffix:  "suffix",
 		Plan:          plan,
-	}
-}
-
-func writeResumeState(t *testing.T, localPath string, resumeState *state.UploadResumeState) {
-	t.Helper()
-	data, err := json.Marshal(resumeState)
-	if err != nil {
-		t.Fatalf("failed to marshal resume state: %v", err)
-	}
-	if err := os.WriteFile(localPath+".upload.resume", data, 0600); err != nil {
-		t.Fatalf("failed to write resume state: %v", err)
 	}
 }
 
@@ -311,8 +249,8 @@ func TestPreEncryptBlockBlobStagesEveryBlock(t *testing.T) {
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 	encryptedSize := oversizedBlockSize + 6*1024*1024
-	data := writeTestFile(t, encryptedPath, encryptedSize)
-	writeTestFile(t, localPath, encryptedSize)
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
 
 	params := testUploadParams(localPath, encryptedPath, &resources.UploadPlan{PartSize: oversizedBlockSize})
 	provider := &Provider{}
@@ -355,15 +293,15 @@ func TestPreEncryptBlockBlobConcurrentStagesEveryBlock(t *testing.T) {
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 	encryptedSize := oversizedBlockSize + 6*1024*1024
-	data := writeTestFile(t, encryptedPath, encryptedSize)
-	writeTestFile(t, localPath, encryptedSize)
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
 
 	params := testUploadParams(localPath, encryptedPath, &resources.UploadPlan{
 		PartSize:   oversizedBlockSize,
 		WorkerCap:  4,
 		QueueDepth: 4,
 	})
-	params.TransferHandle = multiThreadedHandle(t)
+	params.TransferHandle = testsupport.MultiThreadedHandle(t)
 
 	provider := &Provider{}
 	pathForRescale := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
@@ -414,8 +352,8 @@ func TestPreEncryptBlockBlobRefusesToCommitShortUpload(t *testing.T) {
 			encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 			actualSize := oversizedBlockSize - 24*1024*1024
-			writeTestFile(t, encryptedPath, actualSize)
-			writeTestFile(t, localPath, actualSize)
+			testsupport.WriteTestFile(t, encryptedPath, actualSize)
+			testsupport.WriteTestFile(t, localPath, actualSize)
 
 			// The caller believes the encrypted file is a block longer than it is.
 			claimedSize := actualSize + oversizedBlockSize
@@ -430,7 +368,7 @@ func TestPreEncryptBlockBlobRefusesToCommitShortUpload(t *testing.T) {
 
 			var err error
 			if tt.concurrent {
-				params.TransferHandle = multiThreadedHandle(t)
+				params.TransferHandle = testsupport.MultiThreadedHandle(t)
 				err = provider.uploadEncryptedBlockBlobConcurrent(context.Background(), azureClient, params, "blob", pathForRescale, claimedSize)
 			} else {
 				err = provider.uploadEncryptedBlockBlob(context.Background(), azureClient, params, "blob", pathForRescale, claimedSize)
@@ -475,10 +413,10 @@ func TestPreEncryptBlockBlobIgnoresResumeStateForAnotherObject(t *testing.T) {
 			encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 			encryptedSize := oversizedBlockSize + 6*1024*1024
-			data := writeTestFile(t, encryptedPath, encryptedSize)
-			writeTestFile(t, localPath, encryptedSize)
+			data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+			testsupport.WriteTestFile(t, localPath, encryptedSize)
 
-			writeResumeState(t, localPath, &state.UploadResumeState{
+			testsupport.WriteResumeState(t, localPath, &state.UploadResumeState{
 				LocalPath:     localPath,
 				EncryptedPath: encryptedPath,
 				ObjectKey:     state.BuildObjectKey(testPathBase, filepath.Base(localPath), "previous-suffix"),
@@ -502,7 +440,7 @@ func TestPreEncryptBlockBlobIgnoresResumeStateForAnotherObject(t *testing.T) {
 
 			var err error
 			if tt.concurrent {
-				params.TransferHandle = multiThreadedHandle(t)
+				params.TransferHandle = testsupport.MultiThreadedHandle(t)
 				err = provider.uploadEncryptedBlockBlobConcurrent(context.Background(), azureClient, params, "blob", pathForRescale, encryptedSize)
 			} else {
 				err = provider.uploadEncryptedBlockBlob(context.Background(), azureClient, params, "blob", pathForRescale, encryptedSize)
@@ -572,8 +510,8 @@ func TestPreEncryptRejectsOversizedFileBeforeAnyRequest(t *testing.T) {
 	tmpDir := t.TempDir()
 	localPath := filepath.Join(tmpDir, "source.dat")
 	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
-	writeTestFile(t, encryptedPath, 1024)
-	writeTestFile(t, localPath, 1024)
+	testsupport.WriteTestFile(t, encryptedPath, 1024)
+	testsupport.WriteTestFile(t, localPath, 1024)
 
 	// No plan, so the provider plans on the spot — against a size Azure cannot hold.
 	params := testUploadParams(localPath, encryptedPath, nil)
@@ -616,15 +554,15 @@ func TestPreEncryptBlockBlobConcurrentHonorsPlanWorkerCap(t *testing.T) {
 			encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
 
 			encryptedSize := oversizedBlockSize + 6*1024*1024
-			data := writeTestFile(t, encryptedPath, encryptedSize)
-			writeTestFile(t, localPath, encryptedSize)
+			data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+			testsupport.WriteTestFile(t, localPath, encryptedSize)
 
 			params := testUploadParams(localPath, encryptedPath, &resources.UploadPlan{
 				PartSize:   oversizedBlockSize,
 				WorkerCap:  tt.workerCap,
 				QueueDepth: 2,
 			})
-			params.TransferHandle = multiThreadedHandle(t)
+			params.TransferHandle = testsupport.MultiThreadedHandle(t)
 
 			provider := &Provider{}
 			pathForRescale := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)

@@ -27,17 +27,15 @@ import (
 
 // DirectoryMapping tracks local path to remote folder ID
 type DirectoryMapping struct {
-	LocalPath      string
-	RemoteFolderID string
-	Created        bool
+	LocalPath string
+	Created   bool
 }
 
 // UploadTask represents a file to upload
 type UploadTask struct {
-	LocalPath      string
-	RelativePath   string // Relative to root
-	RemoteFolderID string
-	Size           int64
+	LocalPath    string
+	RelativePath string // Relative to root
+	Size         int64
 }
 
 // UploadResult tracks what happened during upload
@@ -482,6 +480,26 @@ func uploadFiles(
 		abortUpload()
 	}
 
+	// resolveConflict asks what to do about a remote file of the same name,
+	// naming the folder the user sees. ok is false when the prompt itself
+	// failed — it has already been recorded against fpath, and the caller must
+	// stop working on that file.
+	resolveConflict := func(fpath, relativePath, fileName string) (action FileConflictAction, ok bool) {
+		action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
+			folderPath := filepath.Dir(relativePath)
+			if folderPath == "." {
+				folderPath = filepath.Base(rootPath)
+			}
+			return promptFileConflict(fileName, folderPath)
+		})
+		if promptErr != nil {
+			logger.Error().Err(promptErr).Msg("Error prompting user")
+			recordError(fpath, promptErr)
+			return action, false
+		}
+		return action, true
+	}
+
 	warmUploadCredentials(ctx, apiClient, logger)
 	if resourceMgr == nil {
 		panic("uploadFiles: resourceMgr is required (use CreateResourceManager())")
@@ -560,16 +578,8 @@ func uploadFiles(
 
 		// SAFE MODE: Handle conflicts BEFORE upload
 		if cfg.CheckConflictsBeforeUpload && exists {
-			action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
-				folderPath := filepath.Dir(relativePath)
-				if folderPath == "." {
-					folderPath = filepath.Base(rootPath)
-				}
-				return promptFileConflict(fileName, folderPath)
-			})
-			if promptErr != nil {
-				logger.Error().Err(promptErr).Msg("Error prompting user")
-				recordError(fpath, promptErr)
+			action, ok := resolveConflict(fpath, relativePath, fileName)
+			if !ok {
 				return nil
 			}
 
@@ -688,16 +698,8 @@ func uploadFiles(
 					return nil
 				}
 
-				action, promptErr := fileConflictResolver.Resolve(func() (FileConflictAction, error) {
-					folderPath := filepath.Dir(relativePath)
-					if folderPath == "." {
-						folderPath = filepath.Base(rootPath)
-					}
-					return promptFileConflict(fileName, folderPath)
-				})
-				if promptErr != nil {
-					logger.Error().Err(promptErr).Msg("Error prompting user")
-					recordError(fpath, promptErr)
+				action, ok := resolveConflict(fpath, relativePath, fileName)
+				if !ok {
 					return nil
 				}
 

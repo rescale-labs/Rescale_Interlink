@@ -102,11 +102,6 @@ var localDirCancelFunc context.CancelFunc
 // Used to avoid clearing a newer operation's cancel function.
 var localDirGeneration int64
 
-// ListLocalDirectory returns the contents of a local directory.
-func (a *App) ListLocalDirectory(path string) FolderContentsDTO {
-	return a.ListLocalDirectoryEx(path, false)
-}
-
 // ListLocalDirectoryEx returns the contents of a local directory with options.
 // Features: timeout protection (prevents UI freeze on hung mounts), hidden file
 // filtering, cancellation support (previous operation cancelled when new one starts),

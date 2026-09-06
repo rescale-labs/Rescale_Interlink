@@ -15,7 +15,6 @@ const (
 	EventProgress    EventType = "progress"
 	EventLog         EventType = "log"
 	EventStateChange EventType = "state_change"
-	EventError       EventType = "error"
 	EventComplete    EventType = "complete"
 
 	// Transfer queue events
@@ -122,10 +121,9 @@ type StateChangeEvent struct {
 // ErrorEvent represents error conditions
 type ErrorEvent struct {
 	BaseEvent
-	JobName   string
-	Stage     string
-	Error     error
-	Retryable bool
+	JobName string
+	Stage   string
+	Error   error
 }
 
 // CompleteEvent represents pipeline completion

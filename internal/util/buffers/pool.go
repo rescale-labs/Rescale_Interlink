@@ -112,12 +112,3 @@ func PutSmallBuffer(buf *[]byte) {
 		smallPool.Put(buf)
 	}
 }
-
-// Stats returns current buffer pool statistics
-// Useful for monitoring and debugging memory usage
-type Stats struct {
-	ChunkBufferSize  int   // Size of chunk buffers (bytes)
-	SmallBufferSize  int   // Size of small buffers (bytes)
-	ChunkAllocations int64 // Total chunk buffer allocations (new creates)
-	SmallAllocations int64 // Total small buffer allocations (new creates)
-}

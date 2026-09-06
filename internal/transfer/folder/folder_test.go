@@ -2,9 +2,6 @@ package folder
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/localfs"
@@ -49,55 +46,5 @@ func TestCreateFolderStructureStreaming_RootEvent(t *testing.T) {
 	}
 	if created != 0 {
 		t.Errorf("created = %d, want 0 (no sub-dirs)", created)
-	}
-}
-
-// TestProcessFolder_DepthCalculation verifies depth used in FolderReadyEvent.
-// Duplicated from internal/cli/folder_upload_helper_test.go for first-party coverage.
-func TestProcessFolder_DepthCalculation(t *testing.T) {
-	tests := []struct {
-		path     string
-		expected int
-	}{
-		{"/root/a", strings.Count("/root/a", string(os.PathSeparator))},
-		{"/root/a/b/c", strings.Count("/root/a/b/c", string(os.PathSeparator))},
-	}
-
-	for _, tt := range tests {
-		depth := strings.Count(tt.path, string(os.PathSeparator))
-		if depth != tt.expected {
-			t.Errorf("depth(%q) = %d, want %d", tt.path, depth, tt.expected)
-		}
-	}
-}
-
-// TestWalkStreamDirectoryOrdering verifies filepath.WalkDir guarantees
-// parent-before-child ordering, which CreateFolderStructureStreaming relies on.
-// Duplicated from internal/cli/folder_upload_helper_test.go for first-party coverage.
-func TestWalkStreamDirectoryOrdering(t *testing.T) {
-	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "a", "b", "c", "d"), 0755)
-	os.MkdirAll(filepath.Join(root, "a", "b", "e"), 0755)
-	os.MkdirAll(filepath.Join(root, "x", "y"), 0755)
-
-	ctx := context.Background()
-	dirChan, _, _, _ := localfs.WalkStream(ctx, root, localfs.WalkOptions{
-		IncludeHidden: true,
-	})
-
-	var dirOrder []string
-	for d := range dirChan {
-		rel, _ := filepath.Rel(root, d.Path)
-		dirOrder = append(dirOrder, rel)
-	}
-
-	// Verify each directory appears after its parent
-	seen := map[string]bool{".": true}
-	for _, d := range dirOrder {
-		parent := filepath.Dir(d)
-		if !seen[parent] {
-			t.Errorf("directory %q appeared before parent %q; order: %v", d, parent, dirOrder)
-		}
-		seen[d] = true
 	}
 }

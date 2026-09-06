@@ -20,23 +20,39 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
-// TestNewClientRejectsEmptyBaseURL verifies that NewClient fails with a clear error
-// when APIBaseURL is empty, instead of creating a broken client that produces
-// "unsupported protocol scheme" errors on every request.
-func TestNewClientRejectsEmptyBaseURL(t *testing.T) {
-	cfg := &config.Config{
-		APIBaseURL: "",
-		APIKey:     "test-key",
-		ProxyMode:  "no-proxy",
+// TestNewClientRejectsBadBaseURL verifies that NewClient fails with a clear
+// error instead of creating a broken client: an empty APIBaseURL would produce
+// "unsupported protocol scheme" errors on every request, and a URL outside the
+// allowlist — localhost gets no exemption — must be refused outright.
+func TestNewClientRejectsBadBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		reason  string
+		wantErr string
+	}{
+		{"empty", "", "empty APIBaseURL", "API base URL is empty"},
+		{"not_allowlisted", "https://evil.example.com", "non-allowlisted URL", "invalid platform URL"},
+		{"localhost", "http://127.0.0.1:12345", "localhost URL (no exemption)", "invalid platform URL"},
 	}
 
-	_, err := NewClient(cfg)
-	if err == nil {
-		t.Fatal("NewClient() should return error for empty APIBaseURL")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				APIBaseURL: tt.baseURL,
+				APIKey:     "test-key",
+				ProxyMode:  "no-proxy",
+			}
 
-	if !strings.Contains(err.Error(), "API base URL is empty") {
-		t.Errorf("NewClient() error = %q, want error containing 'API base URL is empty'", err.Error())
+			_, err := NewClient(cfg)
+			if err == nil {
+				t.Fatalf("NewClient() should return error for %s", tt.reason)
+			}
+
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("NewClient() error = %q, want error containing %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -756,37 +772,6 @@ func TestListFolderContentsStreaming_ContextCancellation(t *testing.T) {
 	)
 	if err != context.Canceled {
 		t.Errorf("error = %v, want context.Canceled", err)
-	}
-}
-
-// NewClient rejects non-allowlisted platform URLs
-func TestNewClient_RejectsInvalidPlatformURL(t *testing.T) {
-	cfg := &config.Config{
-		APIBaseURL: "https://evil.example.com",
-		APIKey:     "test-key",
-		ProxyMode:  "no-proxy",
-	}
-	_, err := NewClient(cfg)
-	if err == nil {
-		t.Fatal("NewClient() should reject non-allowlisted URL")
-	}
-	if !strings.Contains(err.Error(), "invalid platform URL") {
-		t.Errorf("error = %q, want 'invalid platform URL'", err.Error())
-	}
-}
-
-func TestNewClient_RejectsLocalhostURL(t *testing.T) {
-	cfg := &config.Config{
-		APIBaseURL: "http://127.0.0.1:12345",
-		APIKey:     "test-key",
-		ProxyMode:  "no-proxy",
-	}
-	_, err := NewClient(cfg)
-	if err == nil {
-		t.Fatal("NewClient() should reject localhost URL (no exemption)")
-	}
-	if !strings.Contains(err.Error(), "invalid platform URL") {
-		t.Errorf("error = %q, want 'invalid platform URL'", err.Error())
 	}
 }
 
