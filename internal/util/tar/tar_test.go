@@ -121,8 +121,8 @@ func TestCreateTarGzFromFiles_Rejects(t *testing.T) {
 		// Dropping one silently would give a job that is missing an input it was
 		// told it had, so the message has to name the collision.
 		{"duplicate base names", []string{dupA, dupB}, "duplicate filename"},
-		{"a file that is not there", []string{filepath.Join(root, "nope.inp")}, ""},
-		{"an empty list", nil, ""},
+		{"a file that is not there", []string{filepath.Join(root, "nope.inp")}, "failed to stat"},
+		{"an empty list", nil, "no files to archive"},
 	}
 
 	for _, tt := range tests {
@@ -133,7 +133,7 @@ func TestCreateTarGzFromFiles_Rejects(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected an error")
 			}
-			if tt.wantIn != "" && !strings.Contains(err.Error(), tt.wantIn) {
+			if !strings.Contains(err.Error(), tt.wantIn) {
 				t.Errorf("error = %v, want it to mention %q", err, tt.wantIn)
 			}
 			if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
@@ -190,24 +190,32 @@ func TestGenerateTarPathForFiles_Identity(t *testing.T) {
 	if !fnvSuffixRe.MatchString(strings.ToLower(base)) {
 		t.Errorf("%q lacks the FNV suffix safeRemoveTar gates deletion on", base)
 	}
-}
 
-// safeRemoveTar refuses to delete a file whose name lacks the hash suffix, so a
-// name this function produces must always carry one.
-func TestGenerateTarPathForFiles_KeepsFNVSuffix(t *testing.T) {
-	cases := [][]string{
-		{"/data/case1.inp"},
-		{"/data/.config"},        // all extension by filepath's reckoning
-		{"/data/archive.tar.gz"}, // already looks like an archive
-		{"/data/no-extension"},
+	// safeRemoveTar gates deletion on that suffix, so every name this produces
+	// has to carry one — and has to be a name os.Create will accept — however
+	// odd the primary file is called.
+	edge := []struct {
+		name  string
+		files []string
+	}{
+		{"a dotfile", []string{"/data/.config"}}, // all extension by filepath's reckoning
+		{"a name that already looks like an archive", []string{"/data/archive.tar.gz"}},
+		{"no extension", []string{"/data/no-extension"}},
+		// The whole stem used to reach the name, so a long one produced a
+		// basename os.Create refuses — at tar time, long after the scan that
+		// accepted the file.
+		{"a 240-byte stem", []string{"/data/" + strings.Repeat("a", 240) + ".inp"}},
 	}
-
-	for _, files := range cases {
+	for _, tc := range edge {
 		for _, compression := range []string{"gzip", "none"} {
-			got := filepath.Base(GenerateTarPathForFiles(files, 1, "/tmp", compression))
+			got := filepath.Base(GenerateTarPathForFiles(tc.files, 1, "/tmp", compression))
 			if !fnvSuffixRe.MatchString(strings.ToLower(got)) {
-				t.Errorf("GenerateTarPathForFiles(%v, %q) = %q, which lacks the FNV suffix",
-					files, compression, got)
+				t.Errorf("%s (%q) = %q, which lacks the FNV suffix", tc.name, compression, got)
+			}
+			// 255 bytes is the per-component limit os.Create fails at.
+			if len(got) >= 255 {
+				t.Errorf("%s (%q) = a %d-byte name, which the filesystem will not create",
+					tc.name, compression, len(got))
 			}
 		}
 	}

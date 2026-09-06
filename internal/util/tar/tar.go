@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // gnuTarOnce caches the one-time detection of whether the `tar` on PATH is GNU
@@ -196,30 +197,19 @@ func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool,
 			tarPath = filepath.Join(dirName, relPath)
 		}
 
-		// Create tar header
 		header, err := tar.FileInfoHeader(fileInfo, "")
 		if err != nil {
 			return fmt.Errorf("failed to create tar header: %w", err)
 		}
-
-		// Set the header name
 		header.Name = tarPath
 
-		// Write header
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return fmt.Errorf("failed to write tar header: %w", err)
 		}
 
-		// Write file contents if it's a regular file
 		if fileInfo.Mode().IsRegular() {
-			file, err := os.Open(filePath)
-			if err != nil {
-				return fmt.Errorf("failed to open file: %w", err)
-			}
-			defer file.Close()
-
-			if _, err := io.Copy(tarWriter, file); err != nil {
-				return fmt.Errorf("failed to write file contents: %w", err)
+			if err := copyFileInto(tarWriter, filePath); err != nil {
+				return err
 			}
 		}
 
@@ -430,6 +420,8 @@ func GenerateTarPath(directory, basePath, compression string) string {
 // The "_<8 hex>.tar[.gz]" shape is required, not cosmetic — pathutil.HasFNVSuffix
 // gates whether the pipeline is willing to delete the file afterwards.
 func GenerateTarPathForFiles(files []string, index int, basePath, compression string) string {
+	const maxStemBytes = 64
+
 	h := fnv.New32a()
 
 	stem := "job"
@@ -445,6 +437,18 @@ func GenerateTarPathForFiles(files []string, index int, basePath, compression st
 				// A dotfile is all extension by filepath's reckoning (".config"),
 				// which would leave the name starting at the hash separator.
 				stem = strings.TrimPrefix(base, ".")
+			}
+			// The stem is here to be read, not to identify: the index and the
+			// hash do that. So a long one is cut rather than making a basename
+			// past the filesystem's 255-byte component limit, which os.Create
+			// refuses at tar time although the scan that produced it succeeded.
+			// Cut at a rune boundary, so the name stays valid UTF-8.
+			if len(stem) > maxStemBytes {
+				cut := maxStemBytes
+				for cut > 0 && !utf8.RuneStart(stem[cut]) {
+					cut--
+				}
+				stem = stem[:cut]
 			}
 		}
 		h.Write([]byte(abs))
