@@ -279,7 +279,6 @@ Examples:
 				return fmt.Errorf("--primary is required")
 			}
 
-			// Parse secondary patterns
 			patterns := make([]filescan.SecondaryPattern, 0, len(secondaryPatterns))
 			for _, sp := range secondaryPatterns {
 				required := true
@@ -296,7 +295,6 @@ Examples:
 				})
 			}
 
-			// Default root to current directory
 			if rootDir == "" {
 				var err error
 				rootDir, err = os.Getwd()
@@ -311,7 +309,6 @@ Examples:
 				Int("secondaryCount", len(patterns)).
 				Msg("Scanning for files")
 
-			// Perform scan using shared backend
 			result := filescan.ScanFiles(filescan.ScanOptions{
 				RootDir:           rootDir,
 				PrimaryPattern:    primaryPattern,
@@ -322,32 +319,23 @@ Examples:
 				return fmt.Errorf("scan failed: %s", result.Error)
 			}
 
-			// Output results
 			if outputJSON {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(result)
 			}
 
-			// Print summary
-			fmt.Printf("\nScan Results:\n")
-			fmt.Printf("  Total primary files found: %d\n", result.TotalCount)
-			fmt.Printf("  Jobs created: %d\n", result.MatchCount)
-			if len(result.SkippedFiles) > 0 {
-				fmt.Printf("  Skipped: %d\n", len(result.SkippedFiles))
-				for _, skip := range result.SkippedFiles {
-					fmt.Printf("    - %s\n", skip)
-				}
-			}
-			if len(result.Warnings) > 0 {
-				fmt.Printf("  Warnings:\n")
-				for _, w := range result.Warnings {
-					fmt.Printf("    - %s\n", w)
-				}
-			}
+			generate := templatePath != "" && outputPath != ""
 
-			// If template and output specified, generate jobs CSV
-			if templatePath != "" && outputPath != "" {
+			// The jobs are built before anything is printed, so the summary can
+			// report the count the CSV will actually hold: rendering skips files
+			// the scan matched, and the scan's own count announced jobs the run
+			// then declined to generate.
+			var jobs []models.JobSpec
+			skipped := append([]string(nil), result.SkippedFiles...)
+			warnings := result.Warnings
+
+			if generate {
 				if !overwrite {
 					if _, err := os.Stat(outputPath); err == nil {
 						return fmt.Errorf("output file %s exists (use --overwrite)", outputPath)
@@ -362,70 +350,48 @@ Examples:
 					return fmt.Errorf("template CSV is empty")
 				}
 
-				template := templateJobs[0]
-				var jobs []models.JobSpec
-
-				// Checked once, before any job is built: a command whose tokens are
-				// wrong is wrong for every file, and it is better to fail here than to
-				// write a CSV of jobs each carrying a literal "{{bse}}" in its command.
-				templateWarnings, err := filescan.ValidateCommandTemplate(template.Command)
+				// Rendering, collision-checking and assembly are the same work
+				// the GUI's files mode does, and both go through one helper so a
+				// scan started from either produces the same jobs.
+				var renderSkips, templateWarnings []string
+				jobs, renderSkips, templateWarnings, err = filescan.BuildJobs(templateJobs[0], result.Jobs)
 				if err != nil {
-					return fmt.Errorf("template command: %w", err)
+					return err
 				}
-				if err := filescan.ValidateJobNameTemplate(template.JobName); err != nil {
-					return fmt.Errorf("template job name: %w", err)
+				// A file the template could not render is as skipped as one the
+				// scan itself passed over, so the summary reports them together.
+				skipped = append(skipped, renderSkips...)
+				warnings = append(warnings, templateWarnings...)
+			}
+
+			created := result.MatchCount
+			if generate {
+				created = len(jobs)
+			}
+
+			fmt.Printf("\nScan Results:\n")
+			fmt.Printf("  Total primary files found: %d\n", result.TotalCount)
+			fmt.Printf("  Jobs created: %d\n", created)
+			if len(skipped) > 0 {
+				fmt.Printf("  Skipped: %d\n", len(skipped))
+				for _, skip := range skipped {
+					fmt.Printf("    - %s\n", skip)
 				}
-				for _, w := range templateWarnings {
-					fmt.Printf("  Warning: %s\n", w)
+			}
+			if len(warnings) > 0 {
+				fmt.Printf("  Warnings:\n")
+				for _, w := range warnings {
+					fmt.Printf("    - %s\n", w)
 				}
+			}
 
-				// Job names are operational identifiers, not labels: the pipeline
-				// records state per name, so two jobs answering to one name
-				// misroute each other's updates. A collision fails the run, as it
-				// fails DOE generation: writing the CSV without the second file
-				// would submit a batch quietly smaller than the one scanned.
-				seenNames := make(map[string]string, len(result.Jobs))
-
-				for i, jf := range result.Jobs {
-					command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jf, i+1)
-					if renderErr != nil {
-						// One unrenderable filename costs that file, not the batch.
-						fmt.Printf("  Skipped %s: %v\n", filepath.Base(jf.PrimaryFile), renderErr)
-						continue
-					}
-					// Under {{base}} the colliding files share a basename, so naming
-					// them by basename alone reads as one file colliding with
-					// itself; the parent folder is what tells the two apart.
-					display := filepath.Join(filepath.Base(jf.PrimaryDir), filepath.Base(jf.PrimaryFile))
-					if first, dup := seenNames[jobName]; dup {
-						return fmt.Errorf("%s and %s both render to job name %q; "+
-							"add {{index}} or {{dir}} to the job name template to keep names unique",
-							first, display, jobName)
-					}
-					seenNames[jobName] = display
-
-					job := template
-					job.Command = command
-					job.JobName = jobName
-					job.Directory = jf.PrimaryDir
-					// As in the GUI's files mode: no directory walk here for an
-					// inherited subpath to apply to, and it would reach the CSV.
-					job.TarSubpath = ""
-					// The job's archive is exactly its own files, wherever they live:
-					// a secondary pattern can resolve outside PrimaryDir.
-					job.LocalInputFiles = jf.InputFiles
-					job.InputFiles = nil
-
-					jobs = append(jobs, job)
-				}
-
+			if generate {
 				if err := config.SaveJobsCSV(outputPath, jobs); err != nil {
 					return fmt.Errorf("failed to save jobs CSV: %w", err)
 				}
 
 				fmt.Printf("\n✓ Generated %d jobs in %s\n", len(jobs), outputPath)
 			} else {
-				// Print job details
 				fmt.Printf("\nJobs:\n")
 				for i, jf := range result.Jobs {
 					fmt.Printf("  [%d] %s\n", i+1, filepath.Base(jf.PrimaryFile))

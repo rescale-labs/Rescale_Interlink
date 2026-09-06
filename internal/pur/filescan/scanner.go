@@ -48,11 +48,7 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		return ScanResult{Error: "primary file pattern is required"}
 	}
 
-	// Build the glob pattern
-	pattern := filepath.Join(opts.RootDir, opts.PrimaryPattern)
-
-	// Find all primary files matching the pattern
-	primaryFiles, err := filepath.Glob(pattern)
+	primaryFiles, err := filepath.Glob(filepath.Join(opts.RootDir, opts.PrimaryPattern))
 	if err != nil {
 		return ScanResult{Error: fmt.Sprintf("invalid primary pattern: %v", err)}
 	}
@@ -71,20 +67,23 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		primaryDir := filepath.Dir(primaryFile)
 		primaryBase := strings.TrimSuffix(filepath.Base(primaryFile), filepath.Ext(primaryFile))
 
-		// Collect all input files for this job
+		// The archive is flat — every member lands in the job's working directory
+		// under its base name alone, see tar.CreateTarGzFromFiles — so the list
+		// has to be a set of distinct names. Resolved here rather than at tar
+		// time, where the same set fails the job after the run has started.
 		inputFiles := []string{primaryFile}
+		byName := map[string]string{filepath.Base(primaryFile): primaryFile}
 		var jobWarnings []string
 		skipJob := false
 		skipReason := ""
 
-		// Process secondary patterns
 		for _, secPattern := range opts.SecondaryPatterns {
 			secondaryFiles, warning, skip := ResolveSecondaryPattern(
 				primaryDir, primaryBase, primaryFile, secPattern,
 			)
 
 			if skip != "" {
-				skipReason = fmt.Sprintf("%s: %s", filepath.Base(primaryFile), skip)
+				skipReason = fmt.Sprintf("%s: %s", displayPath(primaryDir, primaryFile), skip)
 				skipJob = true
 				break
 			}
@@ -93,7 +92,27 @@ func ScanFiles(opts ScanOptions) ScanResult {
 				jobWarnings = append(jobWarnings, warning)
 			}
 
-			inputFiles = append(inputFiles, secondaryFiles...)
+			for _, secondaryFile := range secondaryFiles {
+				name := filepath.Base(secondaryFile)
+				existing, taken := byName[name]
+				if taken && existing == secondaryFile {
+					// The same file reached the set twice: a wildcard secondary
+					// substitutes the primary's stem, so "*.inp" against a primary
+					// of "*.inp" resolves to the primary itself. Nothing is lost.
+					continue
+				}
+				if taken {
+					skipReason = fmt.Sprintf("%s: %s and %s would both be archived as %q",
+						displayPath(primaryDir, primaryFile), existing, secondaryFile, name)
+					skipJob = true
+					break
+				}
+				byName[name] = secondaryFile
+				inputFiles = append(inputFiles, secondaryFile)
+			}
+			if skipJob {
+				break
+			}
 		}
 
 		if skipJob {
@@ -128,32 +147,35 @@ func ResolveSecondaryPattern(
 	primaryDir, primaryBase, primaryFile string,
 	pattern SecondaryPattern,
 ) ([]string, string, string) {
-	// Determine if pattern is a wildcard or literal
-	hasWildcard := strings.Contains(pattern.Pattern, "*")
-
-	var resolvedPattern string
-	if hasWildcard {
-		// Replace * with primary file's base name
+	// A "*" stands for the primary file's stem, which is what attaches
+	// "case1.mesh" to "case1.inp"; a pattern without one names a fixed file
+	// every job in the scan shares.
+	resolvedPattern := pattern.Pattern
+	if strings.Contains(pattern.Pattern, "*") {
 		resolvedPattern = strings.ReplaceAll(pattern.Pattern, "*", primaryBase)
-	} else {
-		// Literal pattern - use as-is
-		resolvedPattern = pattern.Pattern
 	}
 
-	// Resolve path relative to primary file's directory
-	fullPath := filepath.Join(primaryDir, resolvedPattern)
+	// Relative to the primary file's folder, and cleaned, so a subpath pattern
+	// such as "../meshes/*.cfg" resolves the way it reads.
+	fullPath := filepath.Clean(filepath.Join(primaryDir, resolvedPattern))
 
-	// Clean the path (handles ../ etc.)
-	fullPath = filepath.Clean(fullPath)
-
-	// Check if file exists
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 		if pattern.Required {
 			return nil, "", fmt.Sprintf("required secondary file not found: %s", resolvedPattern)
 		}
-		// Optional file missing - warn and continue
-		return nil, fmt.Sprintf("%s: optional file not found: %s", filepath.Base(primaryFile), resolvedPattern), ""
+		return nil, fmt.Sprintf("%s: optional file not found: %s", displayPath(primaryDir, primaryFile), resolvedPattern), ""
 	}
 
 	return []string{fullPath}, "", ""
+}
+
+// displayPath names a primary file as "<parent folder>/<basename>".
+//
+// A bare base name is ambiguous exactly where these messages matter: the layout
+// a scan pattern like "*/model.inp" exists for gives every match the same base
+// name, so lines about two different files would otherwise be byte-identical —
+// indistinguishable to the reader, and one React key to the GUI list rendering
+// them.
+func displayPath(primaryDir, primaryFile string) string {
+	return filepath.Join(filepath.Base(primaryDir), filepath.Base(primaryFile))
 }

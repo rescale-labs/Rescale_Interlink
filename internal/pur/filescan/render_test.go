@@ -2,9 +2,11 @@ package filescan
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/pattern"
 	"github.com/rescale/rescale-int/internal/reporting"
 )
@@ -109,9 +111,9 @@ func TestRender(t *testing.T) {
 		jobName     string
 		files       JobFiles // zero value means defaultFiles
 		index       int      // zero value means 1
-		wantCommand string
-		wantJobName string
-		wantErr     string // substring the error must carry; empty means no error
+		wantCommand string   // stated on every non-error row, and asserted exactly
+		wantJobName string   // likewise
+		wantErr     string   // substring the error must carry; empty means no error
 	}{
 		{
 			name:        "every token reaches the command",
@@ -119,6 +121,7 @@ func TestRender(t *testing.T) {
 			files:       jobFilesFor("scratch/inputs/case1.inp"),
 			index:       3,
 			wantCommand: "solve --in case1.inp --job case1 --kind inp --set inputs --n 3",
+			wantJobName: "Job_3",
 		},
 		{
 			// A command with no tokens still renders, unchanged: identical
@@ -127,16 +130,17 @@ func TestRender(t *testing.T) {
 			name:        "a command with no tokens passes through",
 			command:     "solve --in fixed.inp",
 			wantCommand: "solve --in fixed.inp",
+			wantJobName: "Job_1",
 		},
 
 		// Job names. The first three are the pre-token behavior, preserved so
 		// existing setups are unaffected.
-		{name: "no tokens is numbered", command: "solve {{file}}", jobName: "Crash Study", index: 2, wantJobName: "Crash Study_2"},
-		{name: "empty falls back", command: "solve {{file}}", index: 2, wantJobName: "Job_2"},
-		{name: "whitespace only falls back", command: "solve {{file}}", jobName: "   ", index: 2, wantJobName: "Job_2"},
-		{name: "tokens substitute", command: "solve {{file}}", jobName: "run-{{base}}", index: 2, wantJobName: "run-case1"},
-		{name: "index available", command: "solve {{file}}", jobName: "{{base}}-{{index}}", index: 2, wantJobName: "case1-2"},
-		{name: "numbering suppressed once tokens are used", command: "solve {{file}}", jobName: "{{base}}", index: 2, wantJobName: "case1"},
+		{name: "no tokens is numbered", command: "solve {{file}}", jobName: "Crash Study", index: 2, wantCommand: "solve case1.inp", wantJobName: "Crash Study_2"},
+		{name: "empty falls back", command: "solve {{file}}", index: 2, wantCommand: "solve case1.inp", wantJobName: "Job_2"},
+		{name: "whitespace only falls back", command: "solve {{file}}", jobName: "   ", index: 2, wantCommand: "solve case1.inp", wantJobName: "Job_2"},
+		{name: "tokens substitute", command: "solve {{file}}", jobName: "run-{{base}}", index: 2, wantCommand: "solve case1.inp", wantJobName: "run-case1"},
+		{name: "index available", command: "solve {{file}}", jobName: "{{base}}-{{index}}", index: 2, wantCommand: "solve case1.inp", wantJobName: "case1-2"},
+		{name: "numbering suppressed once tokens are used", command: "solve {{file}}", jobName: "{{base}}", index: 2, wantCommand: "solve case1.inp", wantJobName: "case1"},
 
 		// A filename that would restructure the command is this file's problem,
 		// not the batch's, so it comes back as an error the caller records as a
@@ -150,6 +154,7 @@ func TestRender(t *testing.T) {
 			name:  "an unsafe value in a token the command never uses",
 			files: jobFilesFor("my inputs/case1.inp"), command: "solve --in {{file}}",
 			wantCommand: "solve --in case1.inp",
+			wantJobName: "Job_1",
 		},
 		{
 			name:  "the same value once the command does use it",
@@ -168,9 +173,11 @@ func TestRender(t *testing.T) {
 		// is one the caller must not submit. Checked at the boundary exactly,
 		// since this path used to be bounded nowhere.
 		{
-			name:    "command exactly at the limit",
-			command: strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")) + "{{file}}",
-			jobName: "run",
+			name:        "command exactly at the limit",
+			command:     strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")) + "{{file}}",
+			jobName:     "run",
+			wantCommand: strings.Repeat("x", pattern.MaxCommandLength-len("case1.inp")) + "case1.inp",
+			wantJobName: "run_1",
 		},
 		{
 			name:    "command one byte over",
@@ -181,7 +188,9 @@ func TestRender(t *testing.T) {
 		{
 			name:    "job name exactly at the limit",
 			command: "solve {{file}}", jobName: "{{base}}",
-			files: longFile(pattern.MaxJobNameLength),
+			files:       longFile(pattern.MaxJobNameLength),
+			wantCommand: "solve " + strings.Repeat("a", pattern.MaxJobNameLength) + ".inp",
+			wantJobName: strings.Repeat("a", pattern.MaxJobNameLength),
 		},
 		{
 			name:    "job name one byte over",
@@ -222,10 +231,12 @@ func TestRender(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Render: %v", err)
 			}
-			if tt.wantCommand != "" && command != tt.wantCommand {
+			// Both stated on every row, so no row can pass while silently
+			// asserting nothing about one of the two outputs.
+			if command != tt.wantCommand {
 				t.Errorf("command = %q, want %q", command, tt.wantCommand)
 			}
-			if tt.wantJobName != "" && jobName != tt.wantJobName {
+			if jobName != tt.wantJobName {
 				t.Errorf("job name = %q, want %q", jobName, tt.wantJobName)
 			}
 		})
@@ -311,9 +322,9 @@ func TestValidateCommandTemplate_UnknownTokenMessage(t *testing.T) {
 	}
 }
 
-// An unknown name token is fatal rather than advisory: it leaves every job in
-// the scan carrying one literal name, and the name is what progress events and
-// state records are matched by.
+// An unknown name token is fatal rather than advisory, for the reason
+// ValidateJobNameTemplate gives: it leaves every job in the scan carrying one
+// literal name.
 func TestValidateJobNameTemplate(t *testing.T) {
 	if err := ValidateJobNameTemplate("run-{{base}}-{{index}}"); err != nil {
 		t.Errorf("known tokens rejected: %v", err)
@@ -348,5 +359,166 @@ func TestKnownTokensAgreeWithSubstitutions(t *testing.T) {
 		if !isKnownToken(token) {
 			t.Errorf("Substitutions supplies {{%s}}, which KnownTokens does not list", token)
 		}
+	}
+}
+
+// BuildJobs is the whole of file-scan assembly, and the CLI's scan-files and the
+// GUI's files mode both go through it — so what it refuses, what it skips and
+// what it builds is stated here once, rather than once per caller.
+func TestBuildJobs(t *testing.T) {
+	// The layout the collision exists for: identical base names in sibling
+	// folders, which is what a "*/model.inp" scan is written to find.
+	colliding := []JobFiles{jobFilesFor("case1/model.inp"), jobFilesFor("case2/model.inp")}
+
+	tests := []struct {
+		name        string
+		command     string
+		jobName     string
+		found       []JobFiles
+		wantNames   []string // job names built, in order
+		wantSkipped []string // one substring per skipped file, in order
+		wantWarn    bool
+		wantErr     []string // substrings the error must carry
+	}{
+		{
+			name: "one job per file", command: "solve {{file}}", jobName: "{{dir}}-{{base}}",
+			found: colliding, wantNames: []string{"case1-model", "case2-model"},
+		},
+		{
+			// The name is what progress events and state records are matched by,
+			// so two files answering to one fail the batch: building the first
+			// alone would hand back fewer jobs than the scan found.
+			name: "two files rendering to one name", command: "solve {{file}}", jobName: "{{base}}",
+			found: colliding,
+			wantErr: []string{
+				filepath.Join("case1", "model.inp"), filepath.Join("case2", "model.inp"),
+				`"model"`, "{{index}}", "{{dir}}",
+			},
+		},
+		{
+			// A template typo is wrong for every file, so it fails once instead
+			// of skipping each file in turn.
+			name: "an unknown command token", command: "solve --job {{bse}}", jobName: "{{base}}",
+			found: colliding, wantErr: []string{"{{bse}}", "{{file}}"},
+		},
+		{
+			name: "an unknown job name token", command: "solve {{file}}", jobName: "run-{{bse}}",
+			found: colliding, wantErr: []string{"{{bse}}", "{{file}}"},
+		},
+		{
+			// One filename that cannot be substituted safely costs that file, not
+			// the batch — and the line names the folder, since in this layout the
+			// base name is the one thing the files have in common.
+			name: "a file that cannot be rendered", command: "solve {{file}}", jobName: "{{dir}}-{{base}}",
+			found:       []JobFiles{jobFilesFor("case1/my case.inp"), jobFilesFor("case2/good.inp")},
+			wantNames:   []string{"case2-good"},
+			wantSkipped: []string{filepath.Join("case1", "my case.inp")},
+		},
+		{
+			// Every job then runs the same command, which is occasionally what
+			// the user wants, so it warns rather than refusing.
+			name: "a command with no tokens", command: "solve fixed.inp", jobName: "{{dir}}-{{base}}",
+			found: colliding, wantNames: []string{"case1-model", "case2-model"}, wantWarn: true,
+		},
+		{
+			name: "an empty command", command: "  ", jobName: "{{base}}",
+			found: colliding, wantErr: []string{"empty"},
+		},
+		{name: "nothing found", command: "solve {{file}}", jobName: "{{base}}"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jobs, skipped, warnings, err := BuildJobs(
+				models.JobSpec{Command: tt.command, JobName: tt.jobName}, tt.found)
+
+			if len(tt.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("BuildJobs succeeded, want an error")
+				}
+				for _, want := range tt.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not carry %q", err, want)
+					}
+				}
+				if len(jobs) > 0 {
+					t.Errorf("%d jobs built from a refused scan", len(jobs))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BuildJobs: %v", err)
+			}
+
+			var names []string
+			for _, job := range jobs {
+				names = append(names, job.JobName)
+			}
+			if !reflect.DeepEqual(names, tt.wantNames) {
+				t.Errorf("job names = %v, want %v", names, tt.wantNames)
+			}
+			if len(skipped) != len(tt.wantSkipped) {
+				t.Fatalf("skipped = %v, want %d entries", skipped, len(tt.wantSkipped))
+			}
+			for i, want := range tt.wantSkipped {
+				if !strings.Contains(skipped[i], want) {
+					t.Errorf("skipped[%d] = %q does not name %s", i, skipped[i], want)
+				}
+			}
+			if (len(warnings) > 0) != tt.wantWarn {
+				t.Errorf("warnings = %v, wantWarn %v", warnings, tt.wantWarn)
+			}
+		})
+	}
+}
+
+// The assembled job: the template's own fields carry over untouched, and the
+// ones the scan owns are taken from the file set.
+func TestBuildJobs_AssemblesFromTheTemplate(t *testing.T) {
+	template := models.JobSpec{
+		Command:      "solve {{file}}",
+		JobName:      "{{base}}",
+		AnalysisCode: "user_included",
+		CoreType:     "emerald",
+		CoresPerSlot: 4,
+		TarSubpath:   "results",
+		InputFiles:   []string{"already-uploaded"},
+	}
+
+	jf := jobFilesFor("inputs/case1.inp")
+	// A secondary pattern resolves outside the primary's folder, which is the
+	// whole reason the job carries its own file list.
+	jf.InputFiles = append(jf.InputFiles, filepath.FromSlash("meshes/case1.cfg"))
+
+	jobs, _, _, err := BuildJobs(template, []JobFiles{jf})
+	if err != nil {
+		t.Fatalf("BuildJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("%d jobs, want 1", len(jobs))
+	}
+
+	job := jobs[0]
+	if job.AnalysisCode != template.AnalysisCode || job.CoreType != template.CoreType ||
+		job.CoresPerSlot != template.CoresPerSlot {
+		t.Errorf("template fields not carried over: %+v", job)
+	}
+	if job.Command != "solve case1.inp" || job.JobName != "case1" {
+		t.Errorf("command = %q, job name = %q", job.Command, job.JobName)
+	}
+	if job.Directory != jf.PrimaryDir {
+		t.Errorf("Directory = %q, want %q", job.Directory, jf.PrimaryDir)
+	}
+	// A subpath inherited from a loaded template has no directory walk in this
+	// mode to apply to, and would fail the job at the tar stage.
+	if job.TarSubpath != "" {
+		t.Errorf("TarSubpath = %q, want it cleared", job.TarSubpath)
+	}
+	if !reflect.DeepEqual(job.LocalInputFiles, jf.InputFiles) {
+		t.Errorf("LocalInputFiles = %v, want %v", job.LocalInputFiles, jf.InputFiles)
+	}
+	// InputFiles means IDs of files already on Rescale, which these are not.
+	if job.InputFiles != nil {
+		t.Errorf("InputFiles = %v, want it cleared", job.InputFiles)
 	}
 }

@@ -284,7 +284,6 @@ func (a *App) ScanDirectory(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 
 // scanFilesMode handles file-based scanning for PUR.
 func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResultDTO {
-	// Convert DTO patterns to filescan patterns
 	patterns := make([]filescan.SecondaryPattern, len(opts.SecondaryPatterns))
 	for i, p := range opts.SecondaryPatterns {
 		patterns[i] = filescan.SecondaryPattern{
@@ -293,7 +292,6 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		}
 	}
 
-	// Use shared filescan package
 	result := filescan.ScanFiles(filescan.ScanOptions{
 		RootDir:           opts.RootDir,
 		PrimaryPattern:    opts.PrimaryPattern,
@@ -304,62 +302,23 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		return ScanResultDTO{Error: result.Error}
 	}
 
-	// Checked once, before any job is built: a command whose tokens are wrong is
-	// wrong for every file, and a typo must not turn into a batch of jobs each
-	// carrying a literal "{{bse}}" on its command line.
-	warnings := append([]string{}, result.Warnings...)
-	templateWarnings, err := filescan.ValidateCommandTemplate(template.Command)
+	// Rendering, collision-checking and assembly are the same work the CLI's
+	// scan-files does, and both go through one helper so a scan started from
+	// either produces the same jobs.
+	specs, renderSkips, templateWarnings, err := filescan.BuildJobs(dtoToJobSpec(template), result.Jobs)
 	if err != nil {
 		return ScanResultDTO{Error: err.Error()}
 	}
-	warnings = append(warnings, templateWarnings...)
-	if err := filescan.ValidateJobNameTemplate(template.JobName); err != nil {
-		return ScanResultDTO{Error: err.Error()}
-	}
 
-	// Convert filescan results to JobSpecDTO
 	var jobs []JobSpecDTO
-	skipped := append([]string{}, result.SkippedFiles...)
-	// Job names are operational identifiers, not labels: the run store routes
-	// progress by name, so two jobs answering to one name misroute each other's
-	// updates. A collision fails the whole scan, as it fails DOE generation:
-	// dropping the second file would hand back a batch quietly smaller than the
-	// one the user scanned for.
-	seenNames := make(map[string]string, len(result.Jobs))
-
-	for i, jobFiles := range result.Jobs {
-		command, jobName, renderErr := filescan.Render(template.Command, template.JobName, jobFiles, i+1)
-		if renderErr != nil {
-			// One unrenderable filename costs that file, not the batch.
-			skipped = append(skipped, fmt.Sprintf("%s: %v", filepath.Base(jobFiles.PrimaryFile), renderErr))
-			continue
-		}
-		// Under {{base}} the colliding files share a basename, so naming them by
-		// basename alone reads as one file colliding with itself; the parent
-		// folder is what tells the two apart.
-		display := filepath.Join(filepath.Base(jobFiles.PrimaryDir), filepath.Base(jobFiles.PrimaryFile))
-		if first, dup := seenNames[jobName]; dup {
-			return ScanResultDTO{Error: fmt.Sprintf("%s and %s both render to job name %q; "+
-				"add {{index}} or {{dir}} to the job name template to keep names unique",
-				first, display, jobName)}
-		}
-		seenNames[jobName] = display
-
-		job := template
-		job.Command = command
-		job.JobName = jobName
-		job.Directory = jobFiles.PrimaryDir
-		// Files mode tars the matched files directly; a subpath inherited from
-		// a loaded template has no directory to apply to and would fail every
-		// job at the tar stage, with no UI field in this mode to clear it.
-		job.TarSubpath = ""
-		// The job's archive is exactly its own files; InputFiles means uploaded
-		// file IDs, which these are not.
-		job.LocalInputFiles = jobFiles.InputFiles
-		job.InputFiles = nil
-
-		jobs = append(jobs, job)
+	for _, spec := range specs {
+		jobs = append(jobs, jobSpecToDTO(spec))
 	}
+
+	// A file the template could not render is as skipped as one the scan itself
+	// passed over, so the list the GUI shows holds both.
+	skipped := append(append([]string{}, result.SkippedFiles...), renderSkips...)
+	warnings := append(append([]string{}, result.Warnings...), templateWarnings...)
 
 	return ScanResultDTO{
 		Jobs:         jobs,

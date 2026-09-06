@@ -3,6 +3,7 @@ package filescan
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -34,9 +35,12 @@ func KnownTokens() []string {
 
 // Substitutions returns the token values for one job.
 //
-// Every value is what the job sees in its working directory rather than a path
-// on the submitting machine: the archive is flattened, so the primary file
-// arrives as a bare name no matter which directory it was scanned from.
+// The file tokens are what the job sees in its working directory rather than
+// paths on the submitting machine: the archive is flattened, so the primary file
+// arrives as a bare name no matter which directory it was scanned from. {{dir}}
+// and {{index}} are not — {{dir}} names a folder on the submitting machine that
+// the flattened archive does not reproduce, and {{index}} is the job's position
+// in the batch. Both exist to tell jobs apart, not to be paths the job can use.
 func Substitutions(jf JobFiles, index int) map[string]string {
 	name := filepath.Base(jf.PrimaryFile)
 
@@ -96,14 +100,12 @@ func ValidateCommandTemplate(command string) (warnings []string, err error) {
 			"command; add one of %s to vary it per file", tokenList())}, nil
 	}
 
-	for _, token := range tokens {
-		if !isKnownToken(token) {
-			// The name comes before the word "token" on purpose: reporting's
-			// redactor reads "token <word>" as a credential and would replace the
-			// one detail this error exists to report (reporting/redactor.go:20).
-			return nil, fmt.Errorf("command contains {{%s}}, which is not a file-scan token; valid tokens are %s",
-				token, tokenList())
-		}
+	if unknown := firstUnknownToken(command); unknown != "" {
+		// The name comes before the word "token" on purpose: reporting's
+		// redactor reads "token <word>" as a credential and would replace the
+		// one detail this error exists to report (reporting/redactor.go:20).
+		return nil, fmt.Errorf("command contains {{%s}}, which is not a file-scan token; valid tokens are %s",
+			unknown, tokenList())
 	}
 
 	return nil, nil
@@ -117,13 +119,11 @@ func ValidateCommandTemplate(command string) (warnings []string, err error) {
 // happens to match first. Checked once, up front, so a typo costs one message
 // rather than one skip per scanned file.
 func ValidateJobNameTemplate(jobName string) error {
-	for _, token := range pattern.ExtractTokens(jobName) {
-		if !isKnownToken(token) {
-			// The name comes before the word "token" on purpose; see
-			// ValidateCommandTemplate.
-			return fmt.Errorf("job name contains {{%s}}, which is not a file-scan token; valid tokens are %s",
-				token, tokenList())
-		}
+	if unknown := firstUnknownToken(jobName); unknown != "" {
+		// The name comes before the word "token" on purpose; see
+		// ValidateCommandTemplate.
+		return fmt.Errorf("job name contains {{%s}}, which is not a file-scan token; valid tokens are %s",
+			unknown, tokenList())
 	}
 	return nil
 }
@@ -178,9 +178,8 @@ func Render(commandTemplate, jobNameTemplate string, jf JobFiles, index int) (co
 
 	jobName = renderJobName(jobNameTemplate, values, index)
 
-	// The same two post-conditions for the name. A residual token there is not
-	// cosmetic: the name is what progress events and state records are matched
-	// by, so every job in the scan would answer to one literal identifier.
+	// The same two post-conditions for the name, and a residual token there is
+	// no more cosmetic than one in the command — see ValidateJobNameTemplate.
 	if residual := pattern.ExtractTokens(jobName); len(residual) > 0 {
 		return "", "", fmt.Errorf("rendered job name still contains {{%s}}; valid tokens are %s",
 			residual[0], tokenList())
@@ -208,13 +207,19 @@ func renderJobName(jobNameTemplate string, values map[string]string, index int) 
 	return fmt.Sprintf("%s_%d", jobNameTemplate, index)
 }
 
-func isKnownToken(name string) bool {
-	for _, known := range KnownTokens() {
-		if name == known {
-			return true
+// firstUnknownToken returns the first token in s that file-scan mode does not
+// substitute, or "" when every token in s is known.
+func firstUnknownToken(s string) string {
+	for _, token := range pattern.ExtractTokens(s) {
+		if !isKnownToken(token) {
+			return token
 		}
 	}
-	return false
+	return ""
+}
+
+func isKnownToken(name string) bool {
+	return slices.Contains(KnownTokens(), name)
 }
 
 // tokenList renders the valid tokens for an error message: "{{file}}, {{base}}, ...".

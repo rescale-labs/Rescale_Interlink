@@ -46,11 +46,11 @@ func writeScanFile(t *testing.T, dir, name string) {
 	}
 }
 
-// A job name is an operational identifier: the run store routes progress events
-// by name, so two jobs answering to "model" send each other's updates to
-// whichever row matches first. The whole scan fails on the collision — keeping
-// one of the two would hand back a batch smaller than the one scanned for.
-func TestScanFilesMode_RejectsDuplicateJobNames(t *testing.T) {
+// The GUI's files mode is filescan.BuildJobs behind a DTO conversion. What that
+// helper refuses, skips and builds is covered once in its own package; what this
+// pins is that a refusal reaches the GUI as an error, and that the jobs it does
+// build arrive as DTOs carrying their own file lists.
+func TestScanFilesMode_SurfacesBuildJobsResults(t *testing.T) {
 	root := t.TempDir()
 	writeScanFile(t, root, filepath.Join("case1", "model.inp"))
 	writeScanFile(t, root, filepath.Join("case2", "model.inp"))
@@ -60,23 +60,11 @@ func TestScanFilesMode_RejectsDuplicateJobNames(t *testing.T) {
 		Command: "solve {{file}}",
 		JobName: "{{base}}",
 	})
-
 	if result.Error == "" {
-		t.Fatal("expected an error for two files rendering to one job name")
-	}
-	// Both colliding files are named by folder and basename: under {{base}} the
-	// basenames are identical, so the folder is the only thing that tells the
-	// user which two files to look at.
-	for _, want := range []string{filepath.Join("case1", "model.inp"), filepath.Join("case2", "model.inp")} {
-		if !strings.Contains(result.Error, want) {
-			t.Errorf("error %q does not name %s", result.Error, want)
-		}
-	}
-	if !strings.Contains(result.Error, `"model"`) {
-		t.Errorf("error %q does not name the job name they share", result.Error)
+		t.Fatal("two files rendering to one job name were accepted")
 	}
 	if len(result.Jobs) != 0 {
-		t.Errorf("%d jobs built from a colliding scan", len(result.Jobs))
+		t.Errorf("%d jobs built from a refused scan", len(result.Jobs))
 	}
 
 	// {{dir}} is one of the two remedies the message offers, so it must work.
@@ -91,28 +79,11 @@ func TestScanFilesMode_RejectsDuplicateJobNames(t *testing.T) {
 		t.Fatalf("%d jobs kept with {{dir}} in the name, want 2 (skipped: %v)",
 			len(result.Jobs), result.SkippedFiles)
 	}
-}
-
-// An unknown token in the name template is wrong for every file in the scan, so
-// it fails the scan once rather than skipping each file in turn.
-func TestScanFilesMode_RejectsUnknownJobNameToken(t *testing.T) {
-	root := t.TempDir()
-	writeScanFile(t, root, "case1.inp")
-
-	app := &App{}
-	result := app.scanFilesMode(filesScanOpts(root, "*.inp"), JobSpecDTO{
-		Command: "solve {{file}}",
-		JobName: "run-{{bse}}",
-	})
-
-	if result.Error == "" {
-		t.Fatal("expected an error for an unknown job name token")
-	}
-	if !strings.Contains(result.Error, "{{bse}}") {
-		t.Errorf("error %q does not name the unknown token", result.Error)
-	}
-	if len(result.Jobs) != 0 {
-		t.Errorf("%d jobs built from a rejected template", len(result.Jobs))
+	for _, job := range result.Jobs {
+		if len(job.LocalInputFiles) != 1 {
+			t.Errorf("job %s carries %v, want just its own primary file",
+				job.JobName, job.LocalInputFiles)
+		}
 	}
 }
 
