@@ -38,13 +38,6 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
   SelectDirectory: vi.fn(() => Promise.resolve('')),
 
   // File browser bindings
-  ListLocalDirectory: vi.fn(() => Promise.resolve({
-    folderId: '/home/user',
-    folderPath: '/home/user',
-    items: [],
-    hasMore: false,
-    nextCursor: '',
-  })),
   ListLocalDirectoryEx: vi.fn(() => Promise.resolve({
     folderId: '/home/user',
     folderPath: '/home/user',
@@ -123,7 +116,6 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
   // Transfer bindings
   StartTransfers: vi.fn(() => Promise.resolve()),
   CancelTransfer: vi.fn(() => Promise.resolve()),
-  CancelAllTransfers: vi.fn(() => Promise.resolve()),
   RetryTransfer: vi.fn(() => Promise.resolve('new-task-123')),
   GetTransferStats: vi.fn(() => Promise.resolve({
     queued: 0,

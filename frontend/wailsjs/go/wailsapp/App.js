@@ -6,10 +6,6 @@ export function BuildErrorReport(arg1) {
   return window['go']['wailsapp']['App']['BuildErrorReport'](arg1);
 }
 
-export function CancelAllTransfers() {
-  return window['go']['wailsapp']['App']['CancelAllTransfers']();
-}
-
 export function CancelBatch(arg1) {
   return window['go']['wailsapp']['App']['CancelBatch'](arg1);
 }
@@ -204,10 +200,6 @@ export function ListJobStatuses() {
 
 export function ListJobStatusesPage(arg1) {
   return window['go']['wailsapp']['App']['ListJobStatusesPage'](arg1);
-}
-
-export function ListLocalDirectory(arg1) {
-  return window['go']['wailsapp']['App']['ListLocalDirectory'](arg1);
 }
 
 export function ListLocalDirectoryEx(arg1, arg2) {

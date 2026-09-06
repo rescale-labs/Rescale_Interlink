@@ -24,6 +24,9 @@ export function normalizeJobSpec(spec: JobSpec): JobSpec {
     localInputFiles: spec.localInputFiles || [],
     licenseFeatureName: spec.licenseFeatureName || '',
     licensesPerJob: spec.licensesPerJob || 0,
+    cidrRule: spec.cidrRule || '',
+    publicKey: spec.publicKey || '',
+    sshPort: spec.sshPort || 0,
   }
 }
 

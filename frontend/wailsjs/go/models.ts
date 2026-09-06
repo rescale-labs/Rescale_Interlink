@@ -529,6 +529,9 @@ export namespace wailsapp {
 	    inputFiles?: string[];
 	    localInputFiles: string[];
 	    tarSubpath?: string;
+	    cidrRule: string;
+	    publicKey: string;
+	    sshPort: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new JobSpecDTO(source);
@@ -560,6 +563,9 @@ export namespace wailsapp {
 	        this.inputFiles = source["inputFiles"];
 	        this.localInputFiles = source["localInputFiles"];
 	        this.tarSubpath = source["tarSubpath"];
+	        this.cidrRule = source["cidrRule"];
+	        this.publicKey = source["publicKey"];
+	        this.sshPort = source["sshPort"];
 	    }
 	}
 	export class DOEOptionsDTO {
@@ -1433,7 +1439,6 @@ export namespace wailsapp {
 	    jobs: JobSpecDTO[];
 	    totalCount: number;
 	    matchCount: number;
-	    invalidDirs: string[];
 	    error?: string;
 	    skippedFiles?: string[];
 	    warnings?: string[];
@@ -1447,7 +1452,6 @@ export namespace wailsapp {
 	        this.jobs = this.convertValues(source["jobs"], JobSpecDTO);
 	        this.totalCount = source["totalCount"];
 	        this.matchCount = source["matchCount"];
-	        this.invalidDirs = source["invalidDirs"];
 	        this.error = source["error"];
 	        this.skippedFiles = source["skippedFiles"];
 	        this.warnings = source["warnings"];

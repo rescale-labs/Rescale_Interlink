@@ -194,6 +194,11 @@ export const DEFAULT_JOB_TEMPLATE: JobSpec = {
   automations: [],
   // Always present on the DTO, so the default template carries it too.
   localInputFiles: [],
+  // SSH access, carried for SGE-loaded and saved jobs; the GUI has no fields
+  // for them, so they pass through unchanged.
+  cidrRule: '',
+  publicKey: '',
+  sshPort: 0,
 }
 
 // Workflow memory - persisted values between sessions
