@@ -1,6 +1,9 @@
 import { create } from 'zustand'
 import * as App from '../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../wailsjs/go/models'
+// Only read inside actions, never while this module is evaluated: configStore
+// imports this store back, and one of the two is always the partial one.
+import { useConfigStore } from './configStore'
 
 // Re-exported here for backward compatibility with existing imports.
 import type {
@@ -58,6 +61,24 @@ export interface Project {
   name: string
   isDefault: boolean
   remainingAmounts: string[]
+}
+
+// Everything one API key's account answered with: the four lists, the flags that
+// say a scan was attempted and whatever each scan reported. Kept as a single
+// value because they are set aside and put back together — a list restored
+// without its flag would be re-scanned at once, and a list restored without its
+// error would be an empty picker with nothing to say why.
+interface AccountCatalogs {
+  coreTypes: CoreType[]
+  projects: Project[]
+  analysisCodes: AnalysisCode[]
+  automations: Automation[]
+  coreTypesLoaded: boolean
+  projectsLoaded: boolean
+  coreTypesError: string | null
+  projectsError: string | null
+  analysisCodesError: string | null
+  automationsError: string | null
 }
 
 // Secondary pattern for file scanning mode
@@ -250,6 +271,13 @@ interface JobStore {
   // projects (or no coretypes) would put the fetch-on-open effects into a loop.
   coreTypesLoaded: boolean
   projectsLoaded: boolean
+  // The API key the catalogs above were fetched under, null until a fetch has
+  // completed. This, not whatever the API-key field held a keystroke ago, is
+  // what a new key is compared against — see syncCatalogsToAPIKey.
+  catalogAPIKey: string | null
+  // Those catalogs while the field holds some other key: kept rather than
+  // thrown away, so an edit put right does not cost a re-scan.
+  heldCatalogs: AccountCatalogs | null
 
   // PUR run options
   purRunOptions: PURRunOptions
@@ -317,6 +345,7 @@ interface JobStore {
   fetchAutomations: () => Promise<void>
   fetchProjects: () => Promise<void>
   resetAccountCatalogs: () => void
+  syncCatalogsToAPIKey: (nextAPIKey: string) => void
 
   // Actions - Memory
   saveMemory: () => void
@@ -436,6 +465,18 @@ function toJobRows(jobs: JobSpec[]): JobRow[] {
   )
 }
 
+// What every catalog fetch records as it finishes: the lists now on screen are
+// the answer for the key in effect, and any catalogs held for an older key can
+// never be shown again — a fetch is how an account switch is completed.
+// Recorded on failure too: the empty list is that key's answer as far as the
+// pickers are concerned, and it is that key's Scan button that retries.
+function fetchedUnderCurrentAPIKey(): Pick<JobStore, 'catalogAPIKey' | 'heldCatalogs'> {
+  return {
+    catalogAPIKey: useConfigStore.getState().config?.apiKey || '',
+    heldCatalogs: null,
+  }
+}
+
 export const useJobStore = create<JobStore>((set, get) => ({
   // Initial state
   workflowState: 'initial',
@@ -476,6 +517,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
   projectsError: null,
   coreTypesLoaded: false,
   projectsLoaded: false,
+  catalogAPIKey: null,
+  heldCatalogs: null,
 
   purRunOptions: {
     commonInputFiles: '',
@@ -961,7 +1004,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       console.error('Failed to fetch core types:', errMsg)
       set({ coreTypesError: errMsg })
     } finally {
-      set({ isLoadingCoreTypes: false, coreTypesLoaded: true })
+      set({ isLoadingCoreTypes: false, coreTypesLoaded: true, ...fetchedUnderCurrentAPIKey() })
     }
   },
 
@@ -993,7 +1036,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       console.error('Failed to fetch analysis codes:', errMsg)
       set({ analysisCodesError: errMsg })
     } finally {
-      set({ isLoadingAnalysisCodes: false })
+      set({ isLoadingAnalysisCodes: false, ...fetchedUnderCurrentAPIKey() })
     }
   },
 
@@ -1020,7 +1063,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       console.error('Failed to fetch automations:', errMsg)
       set({ automationsError: errMsg })
     } finally {
-      set({ isLoadingAutomations: false })
+      set({ isLoadingAutomations: false, ...fetchedUnderCurrentAPIKey() })
     }
   },
 
@@ -1046,7 +1089,7 @@ export const useJobStore = create<JobStore>((set, get) => ({
       set({ projectsError: errMsg })
     } finally {
       // Marked even on failure: the Scan button is the retry, not the effect.
-      set({ isLoadingProjects: false, projectsLoaded: true })
+      set({ isLoadingProjects: false, projectsLoaded: true, ...fetchedUnderCurrentAPIKey() })
     }
   },
 
@@ -1056,8 +1099,8 @@ export const useJobStore = create<JobStore>((set, get) => ({
   // Nothing is fetched here: the next open of a picker is when that costs.
   resetAccountCatalogs: () => {
     const s = get()
-    // The API-key field calls this per keystroke; once nothing is loaded there
-    // is nothing to drop, and a fresh set would only re-render every subscriber.
+    // Once nothing is loaded there is nothing to drop, and a fresh set would
+    // only re-render every subscriber.
     if (!s.coreTypesLoaded && !s.projectsLoaded &&
         s.analysisCodes.length === 0 && s.automations.length === 0) {
       return
@@ -1076,6 +1119,44 @@ export const useJobStore = create<JobStore>((set, get) => ({
       analysisCodesError: null,
       automationsError: null,
     })
+  },
+
+  // Points the catalogs at the key the app is now working under. The comparison
+  // is against the key they were fetched under, never against whatever the
+  // API-key field held a keystroke ago: measured against the field, the first
+  // character typed into it counts as an account switch, and the same is true of
+  // the backspace that undoes it, so an edit put right cost the catalogs.
+  syncCatalogsToAPIKey: (nextAPIKey: string) => {
+    const s = get()
+    // Nothing has been fetched, so nothing on screen can belong to an account.
+    if (s.catalogAPIKey === null) return
+
+    if (nextAPIKey === s.catalogAPIKey) {
+      // The key the catalogs answer for is back. They were only set aside, so
+      // this costs no request — which is the point of keeping them.
+      if (s.heldCatalogs) set({ ...s.heldCatalogs, heldCatalogs: null })
+      return
+    }
+
+    // Already set aside for catalogAPIKey; every further edit is one more key
+    // that is not it.
+    if (s.heldCatalogs) return
+
+    set({
+      heldCatalogs: {
+        coreTypes: s.coreTypes,
+        projects: s.projects,
+        analysisCodes: s.analysisCodes,
+        automations: s.automations,
+        coreTypesLoaded: s.coreTypesLoaded,
+        projectsLoaded: s.projectsLoaded,
+        coreTypesError: s.coreTypesError,
+        projectsError: s.projectsError,
+        analysisCodesError: s.analysisCodesError,
+        automationsError: s.automationsError,
+      },
+    })
+    get().resetAccountCatalogs()
   },
 
   // Memory Actions

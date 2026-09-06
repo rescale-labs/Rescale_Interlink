@@ -268,6 +268,10 @@ export function PURTab() {
   const [showLoadMenu, setShowLoadMenu] = useState(false)
   const [showSaveMenu, setShowSaveMenu] = useState(false)
   const [loadSaveError, setLoadSaveError] = useState<string | null>(null)
+  // Kept apart from loadSaveError, which the template load/save handlers raise
+  // in the earlier steps: their message would otherwise still be on screen next
+  // to the Export button a scan and a validation later, naming an unrelated file.
+  const [exportError, setExportError] = useState<string | null>(null)
   const [monitorBannerCollapsed, setMonitorBannerCollapsed] = useState(false)
 
   const effectiveView = useMemo(() => {
@@ -519,10 +523,14 @@ export function PURTab() {
     try {
       const path = await App.SaveFile('Save Jobs CSV')
       if (!path) return // User cancelled
+      setExportError(null)
 
       await saveJobsToCSV(path)
     } catch (error) {
-      console.error('Failed to export CSV:', error)
+      // The save can be refused outright — a local input path the ";"-separated
+      // column would reload as a different file — and nothing was written, so
+      // the refusal has to reach the user rather than only the console.
+      setExportError(error instanceof Error ? error.message : String(error))
     }
   }, [saveJobsToCSV])
 
@@ -1525,6 +1533,12 @@ export function PURTab() {
               )}
             </div>
           </div>
+
+          {exportError && (
+            <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-red-700 dark:text-red-400 text-sm">
+              {exportError}
+            </div>
+          )}
 
           {queueStatus && (
             <div className={clsx(

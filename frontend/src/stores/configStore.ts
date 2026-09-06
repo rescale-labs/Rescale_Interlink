@@ -39,15 +39,10 @@ interface ConfigState {
 // The one guard for every path that replaces the effective API key: a typed key,
 // the startup fetch, a config file imported over the current one (which routes
 // through fetchConfig) and a cleared saved token. A different key is a different
-// account — see resetAccountCatalogs; a key that did not change would only cost
-// the pickers a re-scan they do not need. `previous` is null only before the
-// first fetchConfig, when there is nothing cached to invalidate.
-const resetCatalogsOnAPIKeyChange = (
-  previous: wailsapp.ConfigDTO | null,
-  nextAPIKey: string,
-) => {
-  if (!previous || nextAPIKey === (previous.apiKey || '')) return;
-  useJobStore.getState().resetAccountCatalogs();
+// account — see syncCatalogsToAPIKey, which owns the comparison because the key
+// the catalogs answer for is the store's to remember, not this one's.
+const syncCatalogsToAPIKey = (nextAPIKey: string) => {
+  useJobStore.getState().syncCatalogsToAPIKey(nextAPIKey);
 };
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -73,7 +68,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         App.GetConfig(),
         App.GetCredentialSource(),
       ]);
-      resetCatalogsOnAPIKeyChange(get().config, config.apiKey || '');
+      syncCatalogsToAPIKey(config.apiKey || '');
       set({ config, credentialSource, isLoading: false });
     } catch (err) {
       set({
@@ -114,7 +109,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const stateUpdates: Partial<ConfigState> = { config: newConfig };
     if (Object.prototype.hasOwnProperty.call(updates, 'apiKey')) {
       const nextAPIKey = updates.apiKey || '';
-      resetCatalogsOnAPIKeyChange(config, nextAPIKey);
+      syncCatalogsToAPIKey(nextAPIKey);
       stateUpdates.credentialSource = new wailsapp.CredentialSourceDTO({
         ...(credentialSource || {}),
         source: nextAPIKey ? 'direct-input' : '',
@@ -156,7 +151,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     try {
       const result = await App.ClearSavedAPIKey();
       const config = await App.GetConfig();
-      resetCatalogsOnAPIKeyChange(get().config, config.apiKey || '');
+      syncCatalogsToAPIKey(config.apiKey || '');
       set({
         config,
         credentialSource: result.credentialSource,

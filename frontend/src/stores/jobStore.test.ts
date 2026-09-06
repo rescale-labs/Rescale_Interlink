@@ -9,6 +9,7 @@ const app = vi.hoisted(() => ({
   GetConfig: vi.fn(),
   GetCredentialSource: vi.fn(),
   LoadConfigFromPath: vi.fn(),
+  GetProjects: vi.fn(),
 }))
 
 vi.mock('../../wailsjs/go/wailsapp/App', () => app)
@@ -23,6 +24,8 @@ afterEach(() => {
     projectsLoaded: false,
     coreTypesError: null,
     projectsError: null,
+    catalogAPIKey: null,
+    heldCatalogs: null,
   })
   useConfigStore.setState({ config: null })
 })
@@ -66,11 +69,13 @@ describe('configStore.loadConfigFromFile', () => {
       app.GetCredentialSource.mockResolvedValue(new wailsapp.CredentialSourceDTO({}))
     }
 
-    // Signed in to account A, with its project list already scanned.
+    // Signed in to account A, with its project list already scanned under that
+    // key — which is what the catalogs are measured against.
     useConfigStore.setState({ config: new wailsapp.ConfigDTO({ apiKey: 'key-A' }) })
     useJobStore.setState({
       projects: [{ id: 'pA', name: 'Account A project', isDefault: true, remainingAmounts: [] }],
       projectsLoaded: true,
+      catalogAPIKey: 'key-A',
     })
 
     // Re-importing the same account's config is not a key change, so the
@@ -84,6 +89,45 @@ describe('configStore.loadConfigFromFile', () => {
     // projects, which is the stale list this import used to leave on screen.
     fileHoldingKey('key-B')
     await useConfigStore.getState().loadConfigFromFile('/cfg/account-b.json')
+    expect(useJobStore.getState().projects).toEqual([])
+    expect(useJobStore.getState().projectsLoaded).toBe(false)
+  })
+})
+
+describe('configStore.updateConfig typing in the API key field', () => {
+  // The key a catalog answers for is recorded by the fetch itself, so each test
+  // starts from a real fetch rather than a planted list.
+  const scanProjectsUnder = async (apiKey: string) => {
+    useConfigStore.setState({ config: new wailsapp.ConfigDTO({ apiKey }) })
+    app.GetProjects.mockResolvedValue({
+      projects: [{ id: 'pA', name: 'Account A project', isDefault: true, remainingAmounts: [] }],
+      error: '',
+    })
+    await useJobStore.getState().fetchProjects()
+  }
+
+  it('keeps the lists when the field is edited and put back to the fetched key', async () => {
+    await scanProjectsUnder('key-A')
+
+    // One character typed into the field, then backspaced away.
+    useConfigStore.getState().updateConfig({ apiKey: 'key-Ax' })
+    // While the field holds a key the list does not answer for, the picker must
+    // not offer it — the list is only set aside, not thrown away.
+    expect(useJobStore.getState().projects).toEqual([])
+
+    useConfigStore.getState().updateConfig({ apiKey: 'key-A' })
+
+    expect(useJobStore.getState().projects).toHaveLength(1)
+    // The flag goes back with the list: left false, the picker would re-scan for
+    // what it already has.
+    expect(useJobStore.getState().projectsLoaded).toBe(true)
+  })
+
+  it('drops the lists once the field holds a genuinely different key', async () => {
+    await scanProjectsUnder('key-A')
+
+    useConfigStore.getState().updateConfig({ apiKey: 'key-B' })
+
     expect(useJobStore.getState().projects).toEqual([])
     expect(useJobStore.getState().projectsLoaded).toBe(false)
   })
