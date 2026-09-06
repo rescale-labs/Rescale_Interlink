@@ -1771,13 +1771,14 @@ case1.inp: abaqus job=case1 input=case1.inp cpus=8
 case2.inp: abaqus job=case2 input=case2.inp cpus=8
 ```
 
-Values are what the job sees in its working directory, not paths on the
-submitting machine: every job's archive holds exactly its own files — the primary
-plus its resolved secondaries — flattened into the working directory. A secondary
-pattern may therefore point outside the primary file's folder
-(`--secondary "../meshes/*.cfg"`) and still be uploaded. Data genuinely shared by
-every job belongs in `--common-input-files`, which uploads once and attaches to
-all of them.
+No token resolves to a path on the submitting machine. Every job's archive holds
+exactly its own files — the primary plus its resolved secondaries — flattened
+into the working directory, so `{{file}}` is the bare name the job will find
+there. A secondary pattern may therefore point outside the primary file's folder
+(`--secondary "../meshes/*.cfg"`) and still be uploaded; `{{dir}}` names the
+folder the primary was scanned from, which is a label for telling jobs apart
+rather than a folder the job has. Data genuinely shared by every job belongs in
+`--common-input-files`, which uploads once and attaches to all of them.
 
 An unknown token is an error rather than a warning, since substitution leaves
 what it cannot resolve in place: a typo like `{{bse}}` would otherwise submit
@@ -1787,8 +1788,11 @@ occasionally intended. A filename that would restructure the command (a space, o
 a shell metacharacter such as `$`) skips that file and reports why; the rest of
 the batch is unaffected.
 
-A job name containing tokens is rendered the same way. One with no tokens keeps
-the `Name_1`, `Name_2` numbering.
+A job name containing tokens is rendered the same way, and an unknown token there
+is an error too. Two files that render to one job name are an error as well,
+naming both files and suggesting `{{index}}` or `{{dir}}`: the pipeline records
+state and progress per job name, so a duplicate would misroute one job's updates
+onto the other. A job name with no tokens keeps the `Name_1`, `Name_2` numbering.
 
 Generated jobs carry their file list in the `LocalInputFiles` column of the jobs
 CSV, semicolon-separated, so `scan-files` → `jobs.csv` → `pur run` round-trips.

@@ -25,7 +25,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 
 ## What's New in v4.9.9
 
-- **Design of experiments in PUR.** One base job can be expanded into a parameter sweep — one Rescale job per design point — from the CLI (`pur doe`) or the PUR tab's sweep builder, with each case's values rendered into its own command line. Eight designs, per-case job name and tag templates, and one shared input deck for the whole sweep.
+- **Parameter sweeps and per-file commands in PUR.** One base job can be expanded into a parameter sweep — one Rescale job per design point — from the CLI (`pur doe`) or the PUR tab's sweep builder, with each case's values rendered into its own command line. Eight designs, per-case job name and tag templates, and one shared input deck for the whole sweep. File-scan mode (`pur scan-files`, or Job Source → Files in the PUR tab) now renders each job's command and name from its own input file, and uploads only that file and the secondaries resolved for it instead of the whole containing folder.
 - **New Job Status tab.** The GUI gains a dedicated tab listing your most recent jobs with status, dates and a name/ID filter, loading a page at a time rather than fetching everything up front.
 - **File Browser: search, owner filter, sorting and better pagination.** The remote pane can search by file name, restrict a listing to your own files or files shared with you, and sort by name, size or upload date, with the pagination cursor carried through search.
 - **Transfers tell the truth about what happened.** A cancelled folder transfer now reads as cancelled rather than as a clean completion, on the batch row and in the CLI. Storage retries and API rate-limit throttling are surfaced instead of silently stalling a transfer ([#22](https://github.com/rescale-labs/Rescale_Interlink/issues/22)), including for the detached auto-download daemon.
@@ -34,6 +34,7 @@ A unified tool combining comprehensive command-line interface and graphical inte
 - **Disk space refusals now agree with themselves.** A download could be refused with "need 292366 MB, have 312832 MB available" — need below have. The pre-flight check's own figures are reported verbatim, and free space is measured on the download directory's filesystem rather than its parent ([#34](https://github.com/rescale-labs/Rescale_Interlink/issues/34)).
 - **Upload integrity, and much larger files.** Multipart part size now scales with the file instead of capping at 64 MB, so uploads are no longer limited to 640 GB on S3 or 3.2 TB on Azure by part-count ceilings, and a file beyond a backend's maximum is refused up front rather than failing mid-transfer. Every upload path now verifies that all bytes and all parts arrived before the file is registered, so a short read during upload or encryption can no longer commit a truncated object.
 - **Job submission carries SSH access settings.** `cidrRule`, `publicKey` and `sshPort` from a job file or an SGE script now reach the API instead of being dropped during decode ([#43](https://github.com/rescale-labs/Rescale_Interlink/issues/43)).
+- **Job templates: license features, a project picker, and a coretype-aware core stepper.** A job can check a named feature out of your own license server, the project is chosen from a dropdown of the projects the API key can see rather than typed as an ID (the organization code is resolved from the key, so its field is gone), and the Cores control steps through the sizes the selected coretype actually offers.
 - **Linux AppImage renders on hosts with a different WebKit.** The AppImage now bundles the WebKitGTK helper processes it forks, with a release gate that verifies they resolve their libraries from inside the bundle. Previously a host WebKit mismatch left a window that painted but never rendered content.
 - **Toolchain pinned; tag builds gated on tests.** A checksum-verified Go 1.26.7 toolchain, pinned Node 20 (also checksum-verified on the Linux build), deterministic `npm ci` installs, and a release pipeline that runs the full test suite before it builds or signs anything.
 
@@ -77,7 +78,7 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 - **Seven-Tab Interface**:
   - **Setup**: API key, proxy configuration, logging settings, test connection, auto-download daemon
   - **Single Job**: Configure and submit individual jobs (directory with tar options, local files, or remote files)
-  - **PUR (Multiple Jobs)**: Batch job pipeline (PUR = Parallel Upload and Run) with Pipeline Settings (workers, tar options), directory scanning, and a DOE parameter sweep builder
+  - **PUR (Multiple Jobs)**: Batch job pipeline (PUR = Parallel Upload and Run) with Pipeline Settings (workers, tar options), folder and file scanning, and a DOE parameter sweep builder
   - **Job Status**: Paged listing of your recent jobs with status, dates and a name/ID filter
   - **File Browser**: Two-pane local/remote file browser with upload/download
   - **Transfers**: Real-time transfer queue with progress, cancel, retry, disk space error banner

@@ -55,11 +55,13 @@ case1.inp:  abaqus job=case1 input=case1.inp cpus=8
 case2.inp:  abaqus job=case2 input=case2.inp cpus=8
 ```
 
-Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged.
+Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. Two files that render to the same job name fail the scan too: a job name is the identifier progress and state are tracked by, so a duplicate would misroute one job's updates onto the other. That message names both files by folder and file name — `case1/model.inp` and `case2/model.inp` under a bare `{{base}}` — and suggests adding `{{index}}` or `{{dir}}`. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged.
 
 Each job also uploads **only its own files** now — its primary file plus the secondary files resolved for it — flattened into its working directory, instead of the whole containing folder. Secondary patterns that reach outside the primary's folder (`../meshes/*.cfg`) are therefore uploaded rather than validated and dropped, and jobs sharing a folder no longer overwrite each other's archive, which previously surfaced as `upload incomplete: received 1 of 9 parts`. Data genuinely shared by every job still belongs in `--common-input-files`, which uploads it once for the batch.
 
 The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load.
+
+In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason.
 
 ### PUR uploads can target a folder and carry file tags
 
@@ -201,9 +203,11 @@ Both fields are optional, but only meaningful together: a name without a count, 
 
 ### Job template: project picker and coretype-aware core stepper
 
-The **Project** field is now a dropdown of the projects the API key can see — default project first, each with its remaining budget — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped. The separate Org Code field is gone, since the organization is already implied by the API key.
+The **Project** field is now a dropdown of the projects the API key can see — the default project first, and each project's remaining budget alongside its name where the platform reports one — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped.
 
-The **Cores** control now steps through the sizes the selected coretype actually sells (a quarter, half or whole node, then whole nodes above that) instead of counting by one, so the arrows and the keyboard can no longer land on a value the platform rejects.
+The **Org Code** field has left the job template. It only ever existed to address the project-assignment endpoint, and the organization code is now resolved from the API key's own user profile and reused for the rest of the run, so choosing a project is all that is required. The field itself is preserved everywhere it was already written down — the `OrgCode` column of a jobs CSV, `org_code` in a PUR config file, and saved GUI templates — and an explicit value still overrides the resolved one, for an account whose profile reports a different code.
+
+The **Cores** control now steps through the core counts the selected coretype actually offers within a node, and whole nodes above that, instead of counting by one, so neither the stepper buttons nor the arrow keys can land on a value the platform rejects.
 
 ---
 
