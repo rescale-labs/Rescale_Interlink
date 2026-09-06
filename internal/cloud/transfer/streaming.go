@@ -13,8 +13,6 @@ import (
 // Uses CBC chaining (Rescale-compatible) instead of HKDF per-part derivation.
 type StreamingEncryptionState struct {
 	encryptor *encryption.CBCStreamingEncryptor
-	partSize  int64
-	partCount int64 // Track how many parts have been encrypted (for isFinal detection)
 }
 
 // NewStreamingEncryptionState creates encryption state for a new upload.
@@ -26,11 +24,7 @@ func NewStreamingEncryptionState(partSize int64) (*StreamingEncryptionState, err
 		return nil, fmt.Errorf("failed to create CBC streaming encryptor: %w", err)
 	}
 
-	return &StreamingEncryptionState{
-		encryptor: encryptor,
-		partSize:  partSize,
-		partCount: 0,
-	}, nil
+	return &StreamingEncryptionState{encryptor: encryptor}, nil
 }
 
 // NewStreamingEncryptionStateFromKey creates encryption state for resuming an upload.
@@ -42,11 +36,7 @@ func NewStreamingEncryptionStateFromKey(key, initialIV, currentIV []byte, partSi
 		return nil, fmt.Errorf("failed to create CBC streaming encryptor with key: %w", err)
 	}
 
-	return &StreamingEncryptionState{
-		encryptor: encryptor,
-		partSize:  partSize,
-		partCount: 0,
-	}, nil
+	return &StreamingEncryptionState{encryptor: encryptor}, nil
 }
 
 // EncryptPart encrypts a single part with CBC chaining.
@@ -59,12 +49,7 @@ func NewStreamingEncryptionStateFromKey(key, initialIV, currentIV []byte, partSi
 // Note: Unlike the legacy HKDF-based encryption, this does NOT accept partIndex
 // because CBC chaining requires sequential encryption and tracks state internally.
 func (s *StreamingEncryptionState) EncryptPart(plaintext []byte, isFinal bool) ([]byte, error) {
-	ciphertext, err := s.encryptor.EncryptPart(plaintext, isFinal)
-	if err != nil {
-		return nil, err
-	}
-	s.partCount++
-	return ciphertext, nil
+	return s.encryptor.EncryptPart(plaintext, isFinal)
 }
 
 // GetKey returns the encryption key (for Rescale API storage).

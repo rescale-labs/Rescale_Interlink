@@ -990,3 +990,88 @@ func TestUploadPreEncryptReleasesPlannedMemory(t *testing.T) {
 		})
 	}
 }
+
+// The registered DecryptedSize is the stat taken before the transfer and the
+// registered SHA-512 is computed by re-reading the file after it. A file that
+// changes in between is registered with a size and a checksum that describe
+// neither the uploaded bytes nor each other, and every later download of it
+// fails verification with nothing to point at. Refusing the registration keeps
+// the mismatch out of the library and names the file that moved.
+func TestCheckSourceUnchanged(t *testing.T) {
+	// The pre-upload stat UploadFile passes in.
+	statOf := func(t *testing.T, path string) os.FileInfo {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		return info
+	}
+
+	newFile := func(t *testing.T, contents string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "case.inp")
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+
+	t.Run("untouched during the upload", func(t *testing.T) {
+		path := newFile(t, "input deck")
+		if err := checkSourceUnchanged(path, statOf(t, path)); err != nil {
+			t.Errorf("checkSourceUnchanged on an untouched file: %v", err)
+		}
+	})
+
+	t.Run("grew during the upload", func(t *testing.T) {
+		path := newFile(t, "input deck")
+		before := statOf(t, path)
+
+		if err := os.WriteFile(path, []byte("input deck, revised"), 0644); err != nil {
+			t.Fatalf("rewrite: %v", err)
+		}
+
+		err := checkSourceUnchanged(path, before)
+		if err == nil {
+			t.Fatal("a file that grew mid-upload was accepted for registration")
+		}
+		if !strings.Contains(err.Error(), filepath.Base(path)) {
+			t.Errorf("error = %v, want it to name %s", err, filepath.Base(path))
+		}
+		if !strings.Contains(err.Error(), "changed during") {
+			t.Errorf("error = %v, want it to say the file changed during the upload", err)
+		}
+	})
+
+	t.Run("rewritten at the same size during the upload", func(t *testing.T) {
+		path := newFile(t, "input deck")
+		before := statOf(t, path)
+
+		// Same length, different bytes: the size still matches, so the
+		// modification time is what is left to catch it.
+		if err := os.WriteFile(path, []byte("INPUT DECK"), 0644); err != nil {
+			t.Fatalf("rewrite: %v", err)
+		}
+		if err := os.Chtimes(path, time.Now(), before.ModTime().Add(time.Second)); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+
+		if err := checkSourceUnchanged(path, before); err == nil {
+			t.Fatal("a file rewritten at the same size mid-upload was accepted for registration")
+		}
+	})
+
+	t.Run("gone by the end of the upload", func(t *testing.T) {
+		path := newFile(t, "input deck")
+		before := statOf(t, path)
+
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+
+		if err := checkSourceUnchanged(path, before); err == nil {
+			t.Fatal("a file that vanished mid-upload was accepted for registration")
+		}
+	})
+}

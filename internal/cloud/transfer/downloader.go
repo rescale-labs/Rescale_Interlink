@@ -927,39 +927,33 @@ func (d *Downloader) downloadStreamingConcurrent(
 	// Calculate number of parts
 	numParts := (encryptedSize + encryptedPartSize - 1) / encryptedPartSize
 
-	// Calculate total plaintext size for file pre-allocation
-	// Last part may be smaller, so we calculate based on part count
-	var totalPlaintextSize int64
-	for partIdx := int64(0); partIdx < numParts; partIdx++ {
-		encStart := partIdx * encryptedPartSize
-		encEnd := encStart + encryptedPartSize
-		if encEnd > encryptedSize {
-			encEnd = encryptedSize
-		}
-		partEncryptedSize := encEnd - encStart
-		// Remove PKCS7 padding (1-16 bytes per part)
-		// Worst case: each part has 16 bytes of padding, best case: 1 byte
-		// For accurate size, we'd need to download and decrypt, so estimate
-		// The file will be truncated to correct size after last part
-		if partIdx == numParts-1 {
-			// Last part: estimate based on encrypted size minus padding
-			totalPlaintextSize += partEncryptedSize - 1 // At least 1 byte padding
-		} else {
-			// Full parts: plaintext = partSize exactly
-			totalPlaintextSize += prep.PartSize
-		}
-	}
+	// Download into a scratch file beside the destination rather than into the
+	// destination itself. The first act below is to pre-allocate the whole part
+	// span, so a part that never arrives would otherwise leave a full-size file
+	// holed with zeros exactly where the finished download belongs — and a file
+	// whose size matches DecryptedSize is one the daemon adopts on the next run
+	// instead of fetching again. Same directory, so the rename at the end is
+	// atomic.
+	partialPath := prep.Params.LocalPath + ".partial"
 
 	// Create output file and pre-allocate
-	outFile, err := os.OpenFile(prep.Params.LocalPath, os.O_CREATE|os.O_RDWR, 0644)
+	outFile, err := os.OpenFile(partialPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	// Track whether we successfully closed the file (see downloadCBCStreaming for explanation)
 	fileClosed := false
+	renamed := false
 	defer func() {
 		if !fileClosed {
 			_ = outFile.Close()
+		}
+		// Nothing reads the scratch file back — every attempt downloads all of
+		// the parts, so there is no resume that would adopt it — which makes a
+		// leftover pure litter. Removed after the close, because Windows refuses
+		// to remove a file anything still holds open.
+		if !renamed {
+			_ = os.Remove(partialPath)
 		}
 	}()
 
@@ -1207,6 +1201,13 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}
 	fileClosed = true
 
+	// Every part is written, the size is final, the hash is computed and the
+	// bytes are on disk: only now does the scratch file become the download.
+	if err := os.Rename(partialPath, prep.Params.LocalPath); err != nil {
+		return fmt.Errorf("failed to move the completed download into place: %w", err)
+	}
+	renamed = true
+
 	// Report 100% progress
 	if prep.Params.ProgressCallback != nil {
 		prep.Params.ProgressCallback(1.0)
@@ -1249,42 +1250,6 @@ type StreamingPartDownloader interface {
 	// progressCallback (optional) is called with bytes downloaded for smooth progress.
 	// Pass nil if progress tracking is not needed (e.g., during chunk size probing).
 	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error)
-}
-
-// StreamingDownloadInitParams contains parameters for initializing a streaming download.
-type StreamingDownloadInitParams struct {
-	RemotePath   string    // Cloud storage path
-	LocalPath    string    // Where to save the decrypted file
-	MasterKey    []byte    // Master encryption key
-	FileID       []byte    // File identifier for key derivation
-	PartSize     int64     // Size of each encrypted part
-	OutputWriter io.Writer // Optional output for status messages
-}
-
-// StreamingDownload represents an in-progress streaming download.
-type StreamingDownload struct {
-	// Download identifiers
-	RemotePath string // Path in cloud storage
-	LocalPath  string // Local destination path
-
-	// Decryption state
-	MasterKey []byte // Master encryption key
-	FileID    []byte // File identifier for key derivation
-	PartSize  int64  // Size of each plaintext part
-
-	// File info
-	EncryptedSize int64 // Total encrypted size
-	TotalParts    int64 // Number of parts
-
-	// Provider-specific data
-	ProviderData interface{}
-}
-
-// PartDownloadResult contains the result of downloading a single part.
-type PartDownloadResult struct {
-	PartIndex int64  // 0-based part index
-	Plaintext []byte // Decrypted data for this part
-	Size      int64  // Size of decrypted data
 }
 
 // LegacyDownloader extends CloudTransfer with legacy format (v0) download support.

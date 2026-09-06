@@ -92,7 +92,6 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 		index int64
 		tag   string
 		size  int64
-		err   error
 	}
 
 	// Channels for coordination
@@ -158,7 +157,6 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 					index: job.index,
 					tag:   tag,
 					size:  int64(len(job.data)),
-					err:   nil,
 				}
 			}
 		}(i)
@@ -230,11 +228,6 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 
 	// Collect all results
 	for result := range resultChan {
-		if result.err != nil {
-			setError(result.err)
-			break
-		}
-
 		// Record the staged part with the caller
 		resultsMu.Lock()
 		cfg.RecordPart(result.index, result.tag)

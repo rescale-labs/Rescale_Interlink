@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,24 +79,21 @@ func TestDownloaderDownloadValidation(t *testing.T) {
 	downloader := NewDownloader(mock)
 
 	tests := []struct {
-		name        string
-		params      cloud.DownloadParams
-		expectError bool
-		errorMsg    string
+		name     string
+		params   cloud.DownloadParams
+		errorMsg string
 	}{
 		{
-			name:        "empty remote path",
-			params:      cloud.DownloadParams{},
-			expectError: true,
-			errorMsg:    "remote path is required",
+			name:     "empty remote path",
+			params:   cloud.DownloadParams{},
+			errorMsg: "remote path is required",
 		},
 		{
 			name: "empty local path",
 			params: cloud.DownloadParams{
 				RemotePath: "/remote/file.txt",
 			},
-			expectError: true,
-			errorMsg:    "local path is required",
+			errorMsg: "local path is required",
 		},
 		{
 			name: "missing file info",
@@ -103,8 +101,7 @@ func TestDownloaderDownloadValidation(t *testing.T) {
 				RemotePath: "/remote/file.txt",
 				LocalPath:  "/local/file.txt",
 			},
-			expectError: true,
-			errorMsg:    "file info is required",
+			errorMsg: "file info is required",
 		},
 		{
 			name: "missing encryption key",
@@ -113,22 +110,15 @@ func TestDownloaderDownloadValidation(t *testing.T) {
 				LocalPath:  "/local/file.txt",
 				FileInfo:   &models.CloudFile{},
 			},
-			expectError: true,
-			errorMsg:    "encryption key is required",
+			errorMsg: "encryption key is required",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := downloader.Download(context.Background(), tt.params)
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("expected error containing '%s', got nil", tt.errorMsg)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				}
+			if err == nil {
+				t.Errorf("expected error containing '%s', got nil", tt.errorMsg)
 			}
 		})
 	}
@@ -433,5 +423,151 @@ func TestDownloadCBCStreamingDefersChecksumToCaller(t *testing.T) {
 	}
 	if !bytes.Equal(got, plaintext) {
 		t.Errorf("downloaded %d bytes, want %d", len(got), len(plaintext))
+	}
+}
+
+// mockHKDFPartDownloader serves an HKDF (v1) object one encrypted part at a
+// time, and can refuse one of them so the concurrent path fails partway.
+type mockHKDFPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+	failFrom   int64 // refuse any range at or after this offset; -1 serves everything
+}
+
+func (m *mockHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
+	return int64(len(m.ciphertext)), nil
+}
+
+func (m *mockHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+	if m.failFrom >= 0 && offset >= m.failFrom {
+		return nil, fmt.Errorf("range at %d: connection reset by peer", offset)
+	}
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	return out, nil
+}
+
+// hkdfObject builds a multi-part HKDF object the concurrent path can take apart:
+// the parts are exactly partSize of plaintext each, so the encrypted part size
+// the downloader computes lines up with the concatenated ciphertext.
+func hkdfObject(t *testing.T, plaintext []byte, partSize int64) (ciphertext []byte, masterKey, fileID []byte) {
+	t.Helper()
+
+	enc, err := encryption.NewStreamingEncryptor(partSize)
+	if err != nil {
+		t.Fatalf("NewStreamingEncryptor: %v", err)
+	}
+
+	for i, off := int64(0), int64(0); off < int64(len(plaintext)); i, off = i+1, off+partSize {
+		end := off + partSize
+		if end > int64(len(plaintext)) {
+			end = int64(len(plaintext))
+		}
+		part, err := enc.EncryptPart(i, plaintext[off:end])
+		if err != nil {
+			t.Fatalf("EncryptPart(%d): %v", i, err)
+		}
+		ciphertext = append(ciphertext, part...)
+	}
+
+	return ciphertext, enc.GetMasterKey(), enc.GetFileId()
+}
+
+// The concurrent HKDF path used to download straight into LocalPath, and its
+// first act was to pre-allocate that file to the full part span. A part that
+// failed left the whole allocation behind: a file at the destination, the size
+// the platform says the file has, holed with zeros where the parts never
+// arrived. The daemon accepts an existing file whose size matches DecryptedSize,
+// so the next run adopted the holed file instead of fetching it again. Writing
+// to a .partial alongside it and renaming only once the download's own checks
+// pass means a failure leaves nothing at the destination to adopt.
+func TestDownloadStreamingConcurrentLeavesNothingBehindOnFailure(t *testing.T) {
+	const partSize = int64(64)
+	// A whole number of parts, so the pre-allocation is exactly DecryptedSize —
+	// the size at which the daemon adopts a file it finds already there.
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24)
+
+	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	mock := &mockHKDFPartDownloader{ciphertext: ciphertext, failFrom: 0}
+	mock.formatVersion = 1
+	mock.partSize = partSize
+
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 1,
+		PartSize:      partSize,
+		EncryptionKey: masterKey,
+	}
+
+	err := NewDownloader(mock).downloadStreamingConcurrent(context.Background(), prep, 4, mock, fileID)
+	if err == nil {
+		t.Fatal("expected the refused part to fail the download")
+	}
+
+	if info, statErr := os.Stat(localPath); statErr == nil {
+		t.Errorf("failed download left a %d-byte file at the destination; the daemon adopts one whose size matches DecryptedSize (%d)",
+			info.Size(), len(plaintext))
+	} else if !os.IsNotExist(statErr) {
+		t.Errorf("stat %s: %v", localPath, statErr)
+	}
+
+	if _, statErr := os.Stat(localPath + ".partial"); !os.IsNotExist(statErr) {
+		t.Error("failed download left its .partial file behind; nothing reads it back, so it is litter")
+	}
+}
+
+// The success half of the same contract: the bytes end up at LocalPath, whole,
+// and the scratch file is gone.
+func TestDownloadStreamingConcurrentRenamesIntoPlace(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("interlink"), 40) // 360 bytes: six parts, the last one short
+
+	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	mock := &mockHKDFPartDownloader{ciphertext: ciphertext, failFrom: -1}
+	mock.formatVersion = 1
+	mock.partSize = partSize
+
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 1,
+		PartSize:      partSize,
+		EncryptionKey: masterKey,
+	}
+
+	if err := NewDownloader(mock).downloadStreamingConcurrent(context.Background(), prep, 4, mock, fileID); err != nil {
+		t.Fatalf("downloadStreamingConcurrent: %v", err)
+	}
+
+	got, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read downloaded file: %v", readErr)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("downloaded %d bytes, want %d", len(got), len(plaintext))
+	}
+
+	if _, statErr := os.Stat(localPath + ".partial"); !os.IsNotExist(statErr) {
+		t.Error("successful download left its .partial file behind")
+	}
+
+	want := sha512.Sum512(plaintext)
+	if !strings.EqualFold(prep.ComputedHash, hex.EncodeToString(want[:])) {
+		t.Errorf("computed hash = %q, want %q", prep.ComputedHash, hex.EncodeToString(want[:]))
 	}
 }

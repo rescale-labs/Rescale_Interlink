@@ -129,20 +129,40 @@ func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool,
 	if err != nil {
 		return fmt.Errorf("failed to create tar file: %w", err)
 	}
-	defer outFile.Close()
 
+	err = writeDirArchive(outFile, sourceDir, useAbsolutePaths, includePatterns, excludePatterns, flatten, compression)
+	if closeErr := outFile.Close(); err == nil && closeErr != nil {
+		err = fmt.Errorf("failed to close tar file: %w", closeErr)
+	}
+
+	if err != nil {
+		// Cleanup happens here, after the handle is closed: Windows refuses to
+		// remove a file while anything still has it open, so deleting inside the
+		// write loop would leave the partial archive behind.
+		os.Remove(outputPath)
+		return fmt.Errorf("failed to create tar: %w", err)
+	}
+
+	return nil
+}
+
+// writeDirArchive writes the walked-directory archive stream, closing its own
+// writers so their buffers are flushed before CreateTarGzWithOptions inspects
+// the result. The gzip and tar writers are closed explicitly rather than by
+// defer because a failure to flush the trailer is a corrupt archive, not
+// something to discard — see writeFilesArchive, which does the same.
+func writeDirArchive(out io.Writer, sourceDir string, useAbsolutePaths bool, includePatterns, excludePatterns []string, flatten bool, compression string) error {
 	// Create tar writer (with or without compression based on config)
+	var gzWriter *gzip.Writer
 	var tarWriter *tar.Writer
 	if compression == "none" {
 		// No compression - write directly to file
-		tarWriter = tar.NewWriter(outFile)
+		tarWriter = tar.NewWriter(out)
 	} else {
 		// With gzip compression (default)
-		gzWriter := gzip.NewWriter(outFile)
-		defer gzWriter.Close()
+		gzWriter = gzip.NewWriter(out)
 		tarWriter = tar.NewWriter(gzWriter)
 	}
-	defer tarWriter.Close()
 
 	// Track filenames in flatten mode to detect duplicates
 	fileNames := make(map[string]string) // filename -> original_path
@@ -150,7 +170,7 @@ func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool,
 	// Walk the source directory
 	dirName := filepath.Base(sourceDir)
 
-	err = filepath.Walk(sourceDir, func(filePath string, fileInfo os.FileInfo, err error) error {
+	err := filepath.Walk(sourceDir, func(filePath string, fileInfo os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -197,11 +217,23 @@ func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool,
 			tarPath = filepath.Join(dirName, relPath)
 		}
 
-		header, err := tar.FileInfoHeader(fileInfo, "")
+		// A symlink's target is not in its FileInfo, and a header without one
+		// extracts as a link to nothing.
+		linkTarget := ""
+		if fileInfo.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err = os.Readlink(filePath)
+			if err != nil {
+				return fmt.Errorf("failed to read link target of %s: %w", filePath, err)
+			}
+		}
+
+		header, err := tar.FileInfoHeader(fileInfo, linkTarget)
 		if err != nil {
 			return fmt.Errorf("failed to create tar header: %w", err)
 		}
-		header.Name = tarPath
+		// Tar entry names are slash-separated on every platform, so a name built
+		// with the host separator would ship backslashes from Windows.
+		header.Name = filepath.ToSlash(tarPath)
 
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return fmt.Errorf("failed to write tar header: %w", err)
@@ -215,10 +247,17 @@ func CreateTarGzWithOptions(sourceDir, outputPath string, useAbsolutePaths bool,
 
 		return nil
 	})
-
 	if err != nil {
-		os.Remove(outputPath) // Clean up partial file
-		return fmt.Errorf("failed to create tar: %w", err)
+		return err
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		return fmt.Errorf("failed to finalize tar: %w", err)
+	}
+	if gzWriter != nil {
+		if err := gzWriter.Close(); err != nil {
+			return fmt.Errorf("failed to finalize gzip stream: %w", err)
+		}
 	}
 
 	return nil

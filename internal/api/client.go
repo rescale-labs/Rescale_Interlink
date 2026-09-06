@@ -997,8 +997,7 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d projects fetched)", pageCount-1, len(allProjects))
-			break
+			return nil, fmt.Errorf("projects listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
@@ -1036,10 +1035,12 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 	return allProjects, nil
 }
 
-// ErrOrgCodeUnavailable marks a failure to learn the organization code from the
-// API key. It is not transient — the code comes from the key's own profile — so
-// a caller that retries an org-scoped request on other failures has no reason
-// to retry this one.
+// ErrOrgCodeUnavailable marks a key whose own profile carries no organization
+// code. It is not transient — the profile answered, and its answer is that
+// there is no code — so a caller that retries an org-scoped request on other
+// failures has no reason to retry this one. A profile that could not be
+// fetched is a different thing and is not marked with it: that one may well
+// succeed on the next attempt.
 var ErrOrgCodeUnavailable = errors.New("organization code unavailable")
 
 // OrgCode returns the organization code the API key belongs to.
@@ -1059,7 +1060,7 @@ func (c *Client) OrgCode(ctx context.Context) (string, error) {
 
 	profile, err := c.GetUserProfile(ctx)
 	if err != nil {
-		return "", fmt.Errorf("%w: failed to resolve it from the API key: %w", ErrOrgCodeUnavailable, err)
+		return "", fmt.Errorf("failed to resolve the organization code from the API key: %w", err)
 	}
 	if profile.Company.Code == "" {
 		return "", fmt.Errorf("%w: the API key's user profile reports no company code", ErrOrgCodeUnavailable)
@@ -1130,8 +1131,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
 		// Pagination safety: prevent infinite loops from malformed API responses
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d jobs fetched)", pageCount-1, len(allJobs))
-			break
+			return nil, fmt.Errorf("jobs listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 		if pageCount == constants.PaginationWarningThreshold {
 			log.Printf("Warning: Approaching pagination limit (page %d of %d)", pageCount, constants.MaxPaginationPages)
@@ -1218,8 +1218,7 @@ func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]mo
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d jobs fetched)", pageCount-1, len(allJobs))
-			break
+			return nil, fmt.Errorf("jobs listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
@@ -1303,8 +1302,7 @@ func (c *Client) GetCoreTypes(ctx context.Context, includeInactive bool) ([]mode
 		// Pagination safety: prevent infinite loops from malformed API responses
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d core types fetched)", pageCount-1, len(allCoreTypes))
-			break
+			return nil, fmt.Errorf("core types listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
@@ -1350,8 +1348,7 @@ func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d analyses fetched)", pageCount-1, len(allAnalyses))
-			break
+			return nil, fmt.Errorf("analyses listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 		if pageCount == constants.PaginationWarningThreshold {
 			log.Printf("Warning: Approaching pagination limit (page %d of %d)", pageCount, constants.MaxPaginationPages)
@@ -2359,8 +2356,7 @@ func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFi
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d files fetched)", pageCount-1, len(allFiles))
-			break
+			return nil, fmt.Errorf("job files listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 		if pageCount == constants.PaginationWarningThreshold {
 			log.Printf("Warning: Approaching pagination limit (page %d of %d)", pageCount, constants.MaxPaginationPages)
@@ -2411,7 +2407,7 @@ func (c *Client) GetJobRuns(ctx context.Context, jobID string) ([]models.JobRun,
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			break
+			return nil, fmt.Errorf("job runs listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
@@ -2459,7 +2455,7 @@ func (c *Client) GetRunFiles(ctx context.Context, jobID, runID string) ([]models
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			break
+			return nil, fmt.Errorf("run files listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)

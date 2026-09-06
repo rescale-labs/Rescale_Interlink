@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	nethttp "net/http"
 
 	"github.com/rescale/rescale-int/internal/constants"
@@ -22,8 +21,7 @@ func (c *Client) paginateRaw(ctx context.Context, startURL string) ([]json.RawMe
 	for nextURL != "" {
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
-			log.Printf("Warning: Pagination limit reached after %d pages (%d raw results fetched)", pageCount-1, len(all))
-			break
+			return nil, fmt.Errorf("listing incomplete after %d pages", constants.MaxPaginationPages)
 		}
 
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)

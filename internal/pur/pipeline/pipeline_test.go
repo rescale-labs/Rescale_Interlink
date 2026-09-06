@@ -225,6 +225,41 @@ func TestPipeline_LogCallbackNotCalledWhenNil(t *testing.T) {
 	p.logf("INFO", "pipeline", "", "Test message without callback")
 }
 
+// Every stage transition the GUI draws arrives through this one call, so each
+// field has to reach the callback in the position the callback expects — and a
+// pipeline running without a callback must not care.
+func TestPipeline_StateChangeCallback(t *testing.T) {
+	type change struct {
+		jobName, stage, status, jobID, errorMessage string
+		uploadProgress                              float64
+	}
+
+	var got []change
+	p := &Pipeline{activeWorkers: make(map[string]int)}
+	p.SetStateChangeCallback(func(jobName, stage, status, jobID, errorMessage string, uploadProgress float64) {
+		got = append(got, change{jobName, stage, status, jobID, errorMessage, uploadProgress})
+	})
+
+	p.reportStateChange("Run_1", "upload", "in_progress", "abcde", "", 0.25)
+	p.reportStateChange("Run_1", "submit", "failed", "abcde", "walltime exceeded", 1.0)
+
+	want := []change{
+		{"Run_1", "upload", "in_progress", "abcde", "", 0.25},
+		{"Run_1", "submit", "failed", "abcde", "walltime exceeded", 1.0},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("callback saw %d changes, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("change %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	// No callback set: a headless run reports to nobody rather than panicking.
+	(&Pipeline{activeWorkers: make(map[string]int)}).reportStateChange("Run_2", "tar", "completed", "", "", 1.0)
+}
+
 func TestPipeline_VersionResolutionMap(t *testing.T) {
 	// Test that the resolved versions map is built correctly
 	mock := &mockAnalysisResolver{
@@ -610,6 +645,26 @@ func TestCheckJobHasInputs(t *testing.T) {
 				t.Errorf("error %q does not name the job %q", err, tt.spec.JobName)
 			}
 		})
+	}
+}
+
+// The state file records archive paths under this directory, so it must be
+// absolute even when the jobs share nothing below a volume root.
+func TestTarballDirIsAbsolute(t *testing.T) {
+	vol := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+	jobs := []models.JobSpec{
+		{JobName: "a", Directory: filepath.Join(vol, "data")},
+		{JobName: "b", Directory: filepath.Join(vol, "scratch", "run1")},
+	}
+	if got := findCommonParent(jobs); got != "." {
+		t.Fatalf("findCommonParent() = %q, want \".\" for this layout", got)
+	}
+	dir, err := tarballDir(jobs)
+	if err != nil {
+		t.Fatalf("tarballDir: %v", err)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Errorf("tarballDir() = %q, want an absolute path", dir)
 	}
 }
 

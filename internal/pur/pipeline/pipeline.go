@@ -154,6 +154,19 @@ func hasLocalArchive(spec models.JobSpec) bool {
 	return spec.Directory != "" || len(spec.LocalInputFiles) > 0
 }
 
+// tarballDir is where a batch's archives are written: the jobs' common parent,
+// made absolute. findCommonParent answers "." when the jobs share no ancestor
+// below a volume root, and a relative directory would be recorded into the
+// state file's archive paths, which a resume from another working directory
+// could not find.
+func tarballDir(jobs []models.JobSpec) (string, error) {
+	dir, err := filepath.Abs(findCommonParent(jobs))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve tarball directory: %w", err)
+	}
+	return dir, nil
+}
+
 // findCommonParent finds the common parent directory of all job directories
 func findCommonParent(jobs []models.JobSpec) string {
 	if len(jobs) == 0 {
@@ -182,10 +195,6 @@ func findCommonParent(jobs []models.JobSpec) string {
 	}
 
 	// Find common prefix
-	if len(absPaths) == 0 {
-		return "."
-	}
-
 	common := absPaths[0]
 	for _, path := range absPaths[1:] {
 		// A string prefix is not a path prefix: /data/run would otherwise be
@@ -276,10 +285,10 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 	}
 
 	// Find common parent directory of all jobs - this is where tarballs will be created
-	commonParent := findCommonParent(jobs)
-
-	// Use the common parent directly as the temp directory (no subdirectory)
-	tempDir := commonParent
+	tempDir, err := tarballDir(jobs)
+	if err != nil {
+		return nil, err
+	}
 
 	// Ensure the directory exists (it should already, but be safe)
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
@@ -397,12 +406,8 @@ func nextSkipStatus(current string) string {
 
 // reportStateChange reports a state change, using callback if available
 func (p *Pipeline) reportStateChange(jobName, stage, newStatus, jobID, errorMessage string, uploadProgress float64) {
-	log.Printf("[DEBUG] reportStateChange called: job=%s, stage=%s, status=%s, jobID=%s, err=%s, progress=%.2f",
-		jobName, stage, newStatus, jobID, errorMessage, uploadProgress)
 	if p.onStateChange != nil {
 		p.onStateChange(jobName, stage, newStatus, jobID, errorMessage, uploadProgress)
-	} else {
-		log.Printf("[DEBUG] reportStateChange: no callback set!")
 	}
 }
 

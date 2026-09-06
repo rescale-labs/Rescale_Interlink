@@ -3,10 +3,13 @@ package tar
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -138,6 +141,165 @@ func TestCreateTarGzFromFiles_Rejects(t *testing.T) {
 				t.Error("partial archive was left behind after the error")
 			}
 		})
+	}
+}
+
+// archiveHeaders reads an archive back as name -> header, for the parts of an
+// entry that are not its contents (link targets, types).
+func archiveHeaders(t *testing.T, path string) map[string]*tar.Header {
+	t.Helper()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	defer f.Close()
+
+	var r io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			t.Fatalf("gzip reader: %v", err)
+		}
+		defer gz.Close()
+		r = gz
+	}
+
+	out := make(map[string]*tar.Header)
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read archive: %v", err)
+		}
+		out[hdr.Name] = hdr
+	}
+	return out
+}
+
+// countingWriter records how many bytes a complete archive takes, so a test can
+// place a budget exactly one byte short of it.
+type countingWriter struct{ n int64 }
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	return len(p), nil
+}
+
+// budgetWriter accepts writes until the budget is spent, then fails every write
+// the way a volume that has just filled up does.
+type budgetWriter struct {
+	budget  int64
+	written int64
+}
+
+var errNoSpace = errors.New("no space left on device")
+
+func (b *budgetWriter) Write(p []byte) (int, error) {
+	if b.written+int64(len(p)) > b.budget {
+		return 0, errNoSpace
+	}
+	b.written += int64(len(p))
+	return len(p), nil
+}
+
+// A write that fails while the archive is being finalized — the tar padding or
+// the gzip trailer — is the disk filling up on the last block. Discarding it
+// returns a truncated archive as a success, and the pipeline uploads it.
+func TestCreateTarGzWithOptions_FinalizationFailure(t *testing.T) {
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "case.inp"), strings.Repeat("input deck\n", 200))
+	writeFile(t, filepath.Join(source, "sub", "mesh.cfg"), strings.Repeat("mesh\n", 200))
+
+	for _, compression := range []string{"gzip", "none"} {
+		t.Run(compression, func(t *testing.T) {
+			// One byte short of the whole stream, so every entry is written and
+			// only the closing block fails. A smaller budget would fail during a
+			// file body instead, which the walk already reports.
+			var counter countingWriter
+			if err := writeDirArchive(&counter, source, false, nil, nil, false, compression); err != nil {
+				t.Fatalf("sizing run: %v", err)
+			}
+
+			budget := &budgetWriter{budget: counter.n - 1}
+			err := writeDirArchive(budget, source, false, nil, nil, false, compression)
+			if err == nil {
+				t.Fatal("archive finalization failed but the archiver reported success")
+			}
+			if !errors.Is(err, errNoSpace) {
+				t.Errorf("error = %v, want it to carry %v", err, errNoSpace)
+			}
+		})
+	}
+}
+
+// The partial archive has to go, and it can only go once nothing holds it open:
+// Windows refuses to remove a file with a live handle, so a removal ordered
+// before the closes leaves the truncated archive at the path the pipeline reads.
+func TestCreateTarGzWithOptions_RemovesPartialArchive(t *testing.T) {
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "a", "mesh.cfg"), "a")
+	writeFile(t, filepath.Join(source, "b", "mesh.cfg"), "b")
+
+	out := filepath.Join(t.TempDir(), "out_00000000.tar.gz")
+
+	// Flatten mode makes the two mesh.cfg files collide, which the walk refuses.
+	err := CreateTarGzWithOptions(source, out, false, nil, nil, true, "gzip")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "duplicate filename") {
+		t.Errorf("error = %v, want it to mention the duplicate", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Error("partial archive was left behind after the error")
+	}
+}
+
+// Tar entry names are slash-separated whatever the host separator is, and a
+// symlink entry without its target is a link to nothing once extracted.
+func TestCreateTarGzWithOptions_EntryNamesAndSymlinks(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "run")
+	writeFile(t, filepath.Join(source, "inputs", "case.inp"), "deck")
+
+	link := filepath.Join(source, "inputs", "latest.inp")
+	if err := os.Symlink("case.inp", link); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+
+	out := filepath.Join(t.TempDir(), "run_00000000.tar.gz")
+	if err := CreateTarGzWithOptions(source, out, false, nil, nil, false, "gzip"); err != nil {
+		t.Fatalf("CreateTarGzWithOptions: %v", err)
+	}
+
+	headers := archiveHeaders(t, out)
+
+	// path.Join, not filepath.Join: the expected name is the archive's, not the
+	// host's, and on Windows the two disagree.
+	wantName := path.Join("run", "inputs", "latest.inp")
+	hdr, ok := headers[wantName]
+	if !ok {
+		names := make([]string, 0, len(headers))
+		for name := range headers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		t.Fatalf("no entry named %q; archive holds %v", wantName, names)
+	}
+	if hdr.Typeflag != tar.TypeSymlink {
+		t.Errorf("%s recorded as type %q, want a symlink", wantName, hdr.Typeflag)
+	}
+	if hdr.Linkname != "case.inp" {
+		t.Errorf("%s links to %q, want case.inp — an empty target extracts as a link to nothing", wantName, hdr.Linkname)
+	}
+
+	for name := range headers {
+		if strings.Contains(name, `\`) {
+			t.Errorf("entry name %q uses the host separator; tar names are always slash-separated", name)
+		}
 	}
 }
 

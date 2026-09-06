@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,46 +96,36 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 
 	// Hash calculation is deferred until after upload completes — see hashTimer below.
 
-	debugStart := time.Now()
-	fileName := filepath.Base(params.LocalPath)
-
 	initTimer := cloud.StartTimer(params.OutputWriter, "Upload initialization")
 
 	// Get the global credential manager (caches user profile, credentials, and folders)
 	credManager := credentials.GetManager(params.APIClient)
 
 	// Get user profile to determine storage type (cached for 5 minutes)
-	t1 := time.Now()
 	profile, err := credManager.GetUserProfile(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user profile: %w", err)
 	}
-	log.Printf("[DEBUG] %s: GetUserProfile took %v", fileName, time.Since(t1))
 
 	// Skip GetRootFolders() when caller provides FolderID (batch uploads always do).
 	// GetRootFolders is only needed to resolve MyLibrary as default target.
 	var targetFolder string
 	if params.FolderID != "" {
 		targetFolder = params.FolderID
-		log.Printf("[DEBUG] %s: GetRootFolders skipped (FolderID provided)", fileName)
 	} else {
-		t2 := time.Now()
 		folders, err := credManager.GetRootFolders(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get root folders: %w", err)
 		}
 		targetFolder = folders.MyLibrary
-		log.Printf("[DEBUG] %s: GetRootFolders took %v", fileName, time.Since(t2))
 	}
 
 	// Create provider using factory
-	t3 := time.Now()
 	factory := providers.NewFactory()
 	provider, err := factory.NewTransferFromStorageInfo(ctx, &profile.DefaultStorage, params.APIClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
-	log.Printf("[DEBUG] %s: CreateProvider took %v", fileName, time.Since(t3))
 
 	// Retries happen several layers down in the provider client; hand it the
 	// caller's hooks so a stalled transfer is visible instead of silent.
@@ -146,7 +135,6 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 			OnRetry: params.OnRetry,
 		})
 	}
-	log.Printf("[DEBUG] %s: Total init took %v", fileName, time.Since(debugStart))
 
 	initTimer.StopWithMessage("backend=%s", profile.DefaultStorage.StorageType)
 
@@ -179,6 +167,9 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 		return nil, fmt.Errorf("failed to calculate file hash: %w", err)
 	}
 	hashTimer.StopWithThroughput(fileInfo.Size())
+	if err := checkSourceUnchanged(params.LocalPath, fileInfo); err != nil {
+		return nil, err
+	}
 
 	// Build file registration request
 	filename := filepath.Base(params.LocalPath)
@@ -235,6 +226,34 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	return cloudFile, nil
 }
 
+// checkSourceUnchanged reports that the file moved under the upload.
+//
+// The registration carries the size from the stat taken before the transfer and
+// a SHA-512 computed by re-reading the file after it. If the file changed in
+// between, those two describe neither the uploaded bytes nor each other, and
+// every later download of it fails verification with nothing to point at. So a
+// source that moved fails the upload instead: a failed upload can be retried,
+// while a bad registration is discovered much later by whoever downloads it.
+//
+// Size and modification time are what a stat can tell us. A rewrite that
+// restores both would still slip through — catching that needs the hash to be
+// computed from the bytes as they are uploaded, which this path does not do.
+func checkSourceUnchanged(path string, before os.FileInfo) error {
+	after, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("failed to re-check %s after the upload: %w", filepath.Base(path), err)
+	}
+
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		return fmt.Errorf("%s changed during the upload (size %d→%d, modified %s→%s); "+
+			"not registering it, because the recorded size and checksum would not match the uploaded bytes",
+			filepath.Base(path), before.Size(), after.Size(),
+			before.ModTime().Format(time.RFC3339Nano), after.ModTime().Format(time.RFC3339Nano))
+	}
+
+	return nil
+}
+
 // progressInterpolator provides smooth progress updates at regular intervals (500ms),
 // tracking real-time upload progress. This ensures the UI always shows responsive
 // progress even when individual parts take seconds to upload.
@@ -244,9 +263,6 @@ type progressInterpolator struct {
 	totalBytes     int64
 	confirmedBytes int64         // Bytes from completed parts
 	inflightBytes  int64         // Bytes currently being uploaded (atomic)
-	startTime      time.Time     // When transfer started
-	lastConfirmAt  time.Time     // When last part completed
-	speed          float64       // Estimated speed (bytes/sec), EMA
 	done           chan struct{} // Signal to stop the interpolator
 	stopped        bool          // Prevent double-close
 }
@@ -255,11 +271,9 @@ type progressInterpolator struct {
 // at least every 500ms with estimated progress.
 func newProgressInterpolator(callback cloud.ProgressCallback, totalBytes int64) *progressInterpolator {
 	return &progressInterpolator{
-		callback:      callback,
-		totalBytes:    totalBytes,
-		startTime:     time.Now(),
-		lastConfirmAt: time.Now(),
-		done:          make(chan struct{}),
+		callback:   callback,
+		totalBytes: totalBytes,
+		done:       make(chan struct{}),
 	}
 }
 
@@ -323,27 +337,12 @@ func (pi *progressInterpolator) ConfirmBytes(partSize int64) {
 	pi.mu.Lock()
 	defer pi.mu.Unlock()
 
-	elapsed := time.Since(pi.lastConfirmAt)
-
 	if pi.inflightBytes >= partSize {
 		pi.inflightBytes -= partSize
 	} else {
 		pi.inflightBytes = 0 // Safety: don't go negative
 	}
 	pi.confirmedBytes += partSize
-	pi.lastConfirmAt = time.Now()
-
-	// Update speed estimate using exponential moving average (alpha = 0.3)
-	// This gives more weight to recent measurements for responsiveness
-	if elapsed.Seconds() > 0.01 { // Avoid division by near-zero
-		instantSpeed := float64(partSize) / elapsed.Seconds()
-		if pi.speed == 0 {
-			pi.speed = instantSpeed
-		} else {
-			// EMA: new = alpha * current + (1-alpha) * old
-			pi.speed = 0.3*instantSpeed + 0.7*pi.speed
-		}
-	}
 
 	// No immediate callback here — the ticker (emitInterpolated) handles all progress emission.
 	// Emitting from here would cause progress to jump backwards because the ticker uses
@@ -413,9 +412,6 @@ var openUploadSource = func(path string) (io.ReadCloser, error) {
 // uploadStreaming uses the StreamingConcurrentUploader interface for streaming uploads.
 // Encryption is sequential (CBC constraint), but uploads happen in parallel.
 func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params UploadParams, fileSize int64) (*cloud.UploadResult, error) {
-	fileName := filepath.Base(params.LocalPath)
-	streamStart := time.Now()
-
 	// Cast to StreamingConcurrentUploader
 	streamingUploader, ok := provider.(transfer.StreamingConcurrentUploader)
 	if !ok {
@@ -450,16 +446,12 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		Plan:         &plan,
 	}
 
-	log.Printf("[DEBUG] %s: Starting InitStreamingUpload", fileName)
-	t1 := time.Now()
 	uploadState, err := streamingUploader.InitStreamingUpload(ctx, initParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize streaming upload: %w", err)
 	}
-	log.Printf("[DEBUG] %s: InitStreamingUpload took %v", fileName, time.Since(t1))
 
 	streamInitTimer.StopWithMessage("parts=%d part_size=%s", uploadState.TotalParts, cloud.FormatBytes(int64(uploadState.PartSize)))
-	log.Printf("[DEBUG] %s: Streaming init complete, starting transfer at %v since start", fileName, time.Since(streamStart))
 
 	// Progress interpolator provides smooth updates every 500ms, ensuring responsive
 	// feedback even when individual parts take seconds to upload.
@@ -510,7 +502,6 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		defer close(encryptedChan)
 		buffer := make([]byte, uploadState.PartSize)
 		var partIndex int64 = 0
-		encryptFirstLogged := false
 
 		for {
 			// Check for context cancellation
@@ -567,12 +558,6 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 					return
 				}
 
-				if !encryptFirstLogged {
-					log.Printf("[DEBUG] %s: First encrypted part ready at %v since stream start (part 0, %d bytes)",
-						fileName, time.Since(streamStart), len(ciphertext))
-					encryptFirstLogged = true
-				}
-
 				// Send encrypted part to upload workers
 				select {
 				case encryptedChan <- encryptedPart{
@@ -598,8 +583,6 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	}()
 
 	var workerCount int32 = int32(concurrency)
-	var firstUploadStartLogged int32 = 0
-	var firstUploadDoneLogged int32 = 0
 
 	// Upload worker function - shared by initial workers and dynamically spawned workers
 	uploadWorker := func(workerID int) {
@@ -611,12 +594,6 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 			default:
 			}
 
-			// Log first upload start
-			if atomic.CompareAndSwapInt32(&firstUploadStartLogged, 0, 1) {
-				log.Printf("[DEBUG] %s: First upload STARTING at %v since stream start (part %d)",
-					fileName, time.Since(streamStart), enc.partIndex)
-			}
-
 			// Upload this encrypted part
 			partResult, uploadErr := streamingUploader.UploadCiphertext(uploadCtx, uploadState, enc.partIndex, enc.ciphertext)
 
@@ -625,12 +602,6 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 				cancelUpload()
 				resultChan <- uploadResult{partIndex: enc.partIndex, err: uploadErr}
 				return
-			}
-
-			// Log first upload complete
-			if atomic.CompareAndSwapInt32(&firstUploadDoneLogged, 0, 1) {
-				log.Printf("[DEBUG] %s: First upload COMPLETE at %v since stream start (part %d)",
-					fileName, time.Since(streamStart), enc.partIndex)
 			}
 
 			// Send success result
@@ -713,7 +684,6 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	partsMap := make(map[int64]*transfer.PartResult)
 	completedCount := 0
 
-	firstProgressLogged := false
 	for res := range resultChan {
 		if res.err != nil {
 			// Error already recorded in firstErr, just continue draining
@@ -726,11 +696,6 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		completedCount++
 
 		if progressInterp != nil {
-			if !firstProgressLogged {
-				log.Printf("[DEBUG] %s: FIRST part complete at %v since stream start (part %d/%d)",
-					fileName, time.Since(streamStart), completedCount, uploadState.TotalParts)
-				firstProgressLogged = true
-			}
 			progressInterp.ConfirmBytes(res.plainSize)
 		}
 	}

@@ -32,7 +32,7 @@ type RemoteFileTask struct {
 // ScanEvent represents a single discovery from the streaming scanner.
 type ScanEvent struct {
 	Folder *RemoteFolderInfo // Non-nil for folder discovery
-	File   *RemoteFileTask  // Non-nil for file discovery
+	File   *RemoteFileTask   // Non-nil for file discovery
 }
 
 // ScanProgress reports cumulative scan progress.
@@ -50,50 +50,7 @@ func ScanRemoteFolderRecursive(
 	folderID string,
 	relativePath string,
 ) ([]RemoteFolderInfo, []RemoteFileTask, error) {
-	folders := make([]RemoteFolderInfo, 0)
-	files := make([]RemoteFileTask, 0)
-
-	// Get folder contents (all pages — critical for folders with >2000 items)
-	contents, err := apiClient.ListFolderContentsAll(ctx, folderID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list folder contents: %w", err)
-	}
-
-	// Process subfolders
-	for _, folder := range contents.Folders {
-		folderRelPath := filepath.Join(relativePath, folder.Name)
-		folders = append(folders, RemoteFolderInfo{
-			FolderID:     folder.ID,
-			Name:         folder.Name,
-			RelativePath: folderRelPath,
-		})
-
-		// Recursively scan subfolder
-		subFolders, subFiles, err := ScanRemoteFolderRecursive(ctx, apiClient, folder.ID, folderRelPath)
-		if err != nil {
-			return nil, nil, err
-		}
-		folders = append(folders, subFolders...)
-		files = append(files, subFiles...)
-	}
-
-	// Process files
-	for _, file := range contents.Files {
-		// Validate filename from API to prevent path traversal
-		if err := validation.ValidateFilename(file.Name); err != nil {
-			return nil, nil, fmt.Errorf("invalid filename from API: %w", err)
-		}
-		fileRelPath := filepath.Join(relativePath, file.Name)
-		files = append(files, RemoteFileTask{
-			FileID:       file.ID,
-			Name:         file.Name,
-			RelativePath: fileRelPath,
-			Size:         file.DecryptedSize,
-			CloudFile:    file.ToCloudFile(),
-		})
-	}
-
-	return folders, files, nil
+	return scanRemoteFolderRecursiveImpl(ctx, apiClient, folderID, relativePath, nil)
 }
 
 // ScanRemoteFolderRecursiveWithProgress is like ScanRemoteFolderRecursive but calls

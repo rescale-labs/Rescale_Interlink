@@ -13,9 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"path/filepath"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -49,17 +47,11 @@ func (p *Provider) UploadLimits() resources.UploadLimits {
 // Uses CBC chaining format compatible with Rescale platform.
 // Metadata stores `iv` (base64) for Rescale decryption compatibility.
 func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.StreamingUploadInitParams) (*transfer.StreamingUpload, error) {
-	fileName := filepath.Base(params.LocalPath)
-	initStart := time.Now()
-
 	// Get or create S3 client
-	t1 := time.Now()
 	s3Client, err := p.getOrCreateS3Client(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get S3 client: %w", err)
 	}
-	log.Printf("[DEBUG] %s: getOrCreateS3Client took %v", fileName, time.Since(t1))
-	_ = initStart // use later
 
 	// Generate random suffix for object key
 	randomSuffix, err := encryption.GenerateSecureRandomString(22)
@@ -88,7 +80,6 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	// Create multipart upload on S3 with retry.
 	// Metadata uses `iv` field for Rescale compatibility.
 	// `streamingformat: cbc` enables streaming download (no temp file).
-	t2 := time.Now()
 	var createResp *s3.CreateMultipartUploadOutput
 	err = s3Client.RetryWithBackoff(ctx, "CreateMultipartUpload", func() error {
 		var err error
@@ -106,8 +97,6 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	if err != nil {
 		return nil, fmt.Errorf("failed to create multipart upload: %w", err)
 	}
-	log.Printf("[DEBUG] %s: CreateMultipartUpload took %v", fileName, time.Since(t2))
-	log.Printf("[DEBUG] %s: InitStreamingUpload total took %v", fileName, time.Since(initStart))
 
 	// Calculate total parts
 	totalParts := transfer.CalculateTotalParts(params.FileSize, partSize)
@@ -177,8 +166,6 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 
 	// S3 uses 1-based part numbers
 	partNumber := int32(partIndex + 1)
-	uploadStart := time.Now()
-	fileName := filepath.Base(uploadState.LocalPath)
 
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
@@ -215,15 +202,6 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload part %d: %w", partNumber, err)
-	}
-
-	// Log part upload timing for first few parts to diagnose slowness
-	if partNumber <= 3 {
-		elapsed := time.Since(uploadStart)
-		sizeMB := float64(len(ciphertext)) / (1024 * 1024)
-		speedMBps := sizeMB / elapsed.Seconds()
-		log.Printf("[DEBUG] %s: UploadPart %d completed in %v (%.1f MB at %.1f MB/s)",
-			fileName, partNumber, elapsed, sizeMB, speedMBps)
 	}
 
 	return &transfer.PartResult{

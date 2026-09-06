@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/constants"
 )
 
 // projectsHandler serves the shape the real endpoint returns, on the one path
@@ -127,6 +129,45 @@ func TestListProjects_FollowsPagination(t *testing.T) {
 	}
 }
 
+// A listing that runs past the page cap has not been listed. Returning what was
+// collected so far as a success hands the caller a partial inventory it cannot
+// tell from a complete one — a job download that quietly fetches part of its
+// files, or a project list missing the project the user is looking for.
+func TestListProjects_PageLimitIsAnError(t *testing.T) {
+	pages := 0
+
+	// A cursor that never runs out, which is what a malformed or looping
+	// endpoint gives the client.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"count": 1,
+			"next":  "/api/v2/users/me/projects/?page=next",
+			"results": []map[string]interface{}{
+				{"id": "pCTMk", "name": "one of very many"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	projects, err := newTestClient(t, server.URL).ListProjects(context.Background())
+	if err == nil {
+		t.Fatalf("ListProjects returned %d projects and no error after %d pages, so a truncated listing reads as complete", len(projects), pages)
+	}
+	if !strings.Contains(err.Error(), "listing incomplete") {
+		t.Errorf("error = %v, want it to say the listing is incomplete", err)
+	}
+	if projects != nil {
+		t.Errorf("got %d projects alongside the error; a partial listing must not be returned", len(projects))
+	}
+	// The cap is checked before each request, so the last page fetched is the
+	// cap itself and the refusal costs no extra call.
+	if pages != constants.MaxPaginationPages {
+		t.Errorf("fetched %d pages, want the %d-page cap", pages, constants.MaxPaginationPages)
+	}
+}
+
 // The org code is a property of the API key, so it is resolved from the key's
 // own profile rather than asked of the user.
 func TestOrgCode_ResolvesFromProfileAndCaches(t *testing.T) {
@@ -197,6 +238,42 @@ func TestOrgCode_ResolvesFromProfileAndCaches(t *testing.T) {
 		} else if !errors.Is(err, ErrOrgCodeUnavailable) {
 			t.Errorf("OrgCode error %q is not ErrOrgCodeUnavailable, so an assignment would retry it", err)
 		}
+	})
+
+	// A profile that could not be fetched says nothing about the key: the next
+	// attempt may well succeed. Marking it with the sentinel would stop the
+	// assignment loop on a blip that the loop is there to ride out.
+	t.Run("a profile fetch that fails is retryable", func(t *testing.T) {
+		t.Run("server error", func(t *testing.T) {
+			down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+			}))
+			defer down.Close()
+
+			_, err := newTestClient(t, down.URL).OrgCode(context.Background())
+			if err == nil {
+				t.Fatal("OrgCode succeeded against a 503 profile endpoint")
+			}
+			if errors.Is(err, ErrOrgCodeUnavailable) {
+				t.Errorf("OrgCode error %q is ErrOrgCodeUnavailable, so an assignment would give up on a transient 503", err)
+			}
+		})
+
+		t.Run("transport failure", func(t *testing.T) {
+			// Closed before the call, so the request fails to connect at all —
+			// the shape of a network blip rather than an answer from the API.
+			gone := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			url := gone.URL
+			gone.Close()
+
+			_, err := newTestClient(t, url).OrgCode(context.Background())
+			if err == nil {
+				t.Fatal("OrgCode succeeded against an unreachable profile endpoint")
+			}
+			if errors.Is(err, ErrOrgCodeUnavailable) {
+				t.Errorf("OrgCode error %q is ErrOrgCodeUnavailable, so an assignment would give up on a network failure", err)
+			}
+		})
 	})
 }
 
