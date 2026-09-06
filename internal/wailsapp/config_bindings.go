@@ -137,6 +137,12 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 		return err
 	}
 
+	// The cached catalogs belong to the account the old key named, so a new key
+	// has to invalidate them. Test Connection also clears them, but it is
+	// optional: without this, changing keys and going straight to the job form
+	// shows account A's coretypes and software beside account B's projects.
+	apiKeyChanged := a.config.APIKey != cfg.APIKey
+
 	// Track if API-related settings changed — these affect the API client and require engine update
 	apiSettingsChanged := a.config.APIKey != cfg.APIKey ||
 		a.config.APIBaseURL != cfg.APIBaseURL ||
@@ -184,6 +190,10 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	}
 	if a.config.APIBaseURL == "" && a.config.TenantURL != "" {
 		a.config.APIBaseURL = a.config.TenantURL
+	}
+
+	if apiKeyChanged {
+		a.ClearCatalogCache()
 	}
 
 	// Update timing system when DetailedLogging changes

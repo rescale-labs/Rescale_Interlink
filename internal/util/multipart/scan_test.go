@@ -3,6 +3,8 @@ package multipart
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -161,6 +163,113 @@ func TestScanDirectories(t *testing.T) {
 			}
 			if tt.validate != nil {
 				tt.validate(t, results)
+			}
+		})
+	}
+}
+
+// The scan root names one directory; it is not part of the pattern. Joining the
+// two before globbing made the root's own characters syntax, so a project
+// folder called "proj [v2]" read as a character class and the scan returned run
+// directories from the sibling "proj v" instead.
+func TestScanDirectories_RootMetacharactersAreLiteral(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		root  string // the project directory the scan is pointed at
+		decoy string // the sibling the joined pattern matched instead
+	}{
+		{"character class", "proj [v2]", "proj v"},
+		{"single-character wildcard", "proj?x", "projAx"},
+		{"star", "proj*x", "projAx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.ContainsAny(tt.root, `?*`) {
+				t.Skip("Windows filenames cannot contain ? or *")
+			}
+
+			base := t.TempDir()
+			mkdirs(t, base, []string{
+				filepath.Join(tt.root, "Run_1"),
+				filepath.Join(tt.decoy, "Run_9"),
+			}, nil)
+
+			results, err := ScanDirectories(ScanOpts{
+				SingleDir:   filepath.Join(base, tt.root),
+				Pattern:     "Run_*",
+				BaseJobName: "job",
+				StartIndex:  1,
+			})
+			if err != nil {
+				t.Fatalf("ScanDirectories failed: %v", err)
+			}
+			if len(results) != 1 {
+				t.Fatalf("%d results, want 1: %v", len(results), results)
+			}
+			want := filepath.Join(base, tt.root, "Run_1")
+			if results[0].Directory != want {
+				t.Errorf("Directory = %s, want %s", results[0].Directory, want)
+			}
+		})
+	}
+}
+
+// The multi-directory scan is the path `pur make-dirs-csv --part-dirs` takes,
+// and it joined the part directory onto the pattern just as the single-directory
+// scan did; the same bracketed folder must not scan its sibling here either.
+func TestCollectAllRunDirectories_RootMetacharactersAreLiteral(t *testing.T) {
+	base := t.TempDir()
+	mkdirs(t, base, []string{
+		filepath.Join("proj [v2]", "Run_1"),
+		filepath.Join("proj v", "Run_9"),
+	}, nil)
+
+	runs, err := CollectAllRunDirectories([]string{filepath.Join(base, "proj [v2]")}, "", "Run_*")
+	if err != nil {
+		t.Fatalf("CollectAllRunDirectories: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RunName != "Run_1" {
+		t.Fatalf("runs = %+v, want only Run_1 under the bracketed project", runs)
+	}
+}
+
+// The pattern is matched inside the scan root, so one that names somewhere else
+// cannot be honored; the joined form used to reach outside the root silently.
+func TestScanDirectories_PatternMustStayUnderTheRoot(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		pattern func(base string) string
+		wantErr string
+	}{
+		{
+			name:    "absolute",
+			pattern: func(base string) string { return filepath.Join(base, "Run_*") },
+			wantErr: "absolute path",
+		},
+		{
+			name:    "climbing out of the root",
+			pattern: func(string) string { return filepath.Join("..", "Run_*") },
+			wantErr: "outside the scan root",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			mkdirs(t, base, []string{"Run_7", filepath.Join("proj", "Run_1")}, nil)
+
+			pattern := tt.pattern(base)
+			results, err := ScanDirectories(ScanOpts{
+				SingleDir:   filepath.Join(base, "proj"),
+				Pattern:     pattern,
+				BaseJobName: "job",
+				StartIndex:  1,
+			})
+			if err == nil {
+				t.Fatalf("pattern %q was accepted: %v", pattern, results)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not say %q", err, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), pattern) {
+				t.Errorf("error %q does not name the pattern %q", err, pattern)
 			}
 		})
 	}

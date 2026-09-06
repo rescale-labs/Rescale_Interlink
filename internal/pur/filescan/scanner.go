@@ -6,12 +6,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/rescale/rescale-int/internal/util/glob"
 )
 
 // SecondaryPattern represents a secondary file pattern for file-based scanning.
 type SecondaryPattern struct {
-	Pattern  string // Glob pattern, may include subpath (e.g., "*.mesh", "../meshes/*.cfg")
-	Required bool   // If true, skip job when file missing; if false, warn and continue
+	// Pattern is resolved per primary file rather than globbed: a "*" is
+	// replaced by that file's stem and the result is stat'ed. It may include a
+	// subpath (e.g., "*.mesh", "../meshes/*.cfg").
+	Pattern string
+
+	// Required, when true, skips the job if the file is missing; when false it
+	// warns and continues.
+	Required bool
 }
 
 // ScanOptions configures a file scan operation.
@@ -47,7 +55,7 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		return ScanResult{Error: "primary file pattern is required"}
 	}
 
-	primaryFiles, err := filepath.Glob(filepath.Join(opts.RootDir, opts.PrimaryPattern))
+	primaryFiles, err := glob.UnderRoot(opts.RootDir, opts.PrimaryPattern)
 	if err != nil {
 		return ScanResult{Error: fmt.Sprintf("invalid primary pattern: %v", err)}
 	}
@@ -65,6 +73,15 @@ func ScanFiles(opts ScanOptions) ScanResult {
 	for _, primaryFile := range primaryFiles {
 		primaryDir := filepath.Dir(primaryFile)
 		primaryBase := strings.TrimSuffix(filepath.Base(primaryFile), filepath.Ext(primaryFile))
+
+		// A glob matches directories as readily as files, and "model.inp/" is
+		// not something the archive can carry: attaching it failed the job at
+		// tar time, after the run had started.
+		if info, err := os.Stat(primaryFile); err == nil && !info.Mode().IsRegular() {
+			skippedFiles = append(skippedFiles, fmt.Sprintf("%s: %s",
+				displayPath(primaryDir, primaryFile), notRegularReason(info)))
+			continue
+		}
 
 		// The archive is flat (tar.CreateTarGzFromFiles), so the list has to be a
 		// set of distinct names. Resolved here rather than at tar time, where the
@@ -157,14 +174,35 @@ func ResolveSecondaryPattern(
 	// such as "../meshes/*.cfg" resolves the way it reads.
 	fullPath := filepath.Clean(filepath.Join(primaryDir, resolvedPattern))
 
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	info, err := os.Stat(fullPath)
+	if os.IsNotExist(err) {
 		if pattern.Required {
 			return nil, "", fmt.Sprintf("required secondary file not found: %s", resolvedPattern)
 		}
 		return nil, fmt.Sprintf("%s: optional file not found: %s", displayPath(primaryDir, primaryFile), resolvedPattern), ""
 	}
 
+	// Existing but not a file: the same tar-time failure a directory primary
+	// causes, so it is caught here for the same reason.
+	if err == nil && !info.Mode().IsRegular() {
+		if pattern.Required {
+			return nil, "", fmt.Sprintf("required secondary file %s %s", resolvedPattern, notRegularReason(info))
+		}
+		return nil, fmt.Sprintf("%s: optional file %s %s",
+			displayPath(primaryDir, primaryFile), resolvedPattern, notRegularReason(info)), ""
+	}
+
 	return []string{fullPath}, "", ""
+}
+
+// notRegularReason says why a matched path cannot be archived, naming the case
+// that actually happens rather than leaving the user to work out what a
+// non-regular file is.
+func notRegularReason(info os.FileInfo) string {
+	if info.IsDir() {
+		return "is a directory, not a file"
+	}
+	return "is not a regular file"
 }
 
 // displayPath names a primary file as "<parent folder>/<basename>".

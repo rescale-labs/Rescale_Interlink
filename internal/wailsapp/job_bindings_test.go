@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/models"
 )
 
 // TestScanDirectoryNoEngine verifies ScanDirectory returns error when engine is nil.
@@ -319,12 +321,104 @@ func TestGetHistoricalJobRows_MissingFile(t *testing.T) {
 	}
 }
 
-func TestGetRunHistory_EmptyDir(t *testing.T) {
+// TestGetRunHistory pins the home directory so the result does not depend on
+// whatever the developer's own states directory holds: a missing directory
+// yields an empty list rather than a panic, and a directory yields one entry
+// per .state file with the run type and job count read off it.
+func TestGetRunHistory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+
 	app := &App{}
-	// This should return empty slice, not panic, even if states dir doesn't exist
-	results := app.GetRunHistory()
-	if results == nil {
-		// nil is acceptable too, but empty slice is preferred
-		t.Log("GetRunHistory returned nil for missing dir (acceptable)")
+
+	if got := app.GetRunHistory(); len(got) != 0 {
+		t.Fatalf("GetRunHistory() with no states directory = %+v, want no entries", got)
+	}
+
+	statesDir := filepath.Join(home, ".rescale-int", "states")
+	if err := os.MkdirAll(statesDir, 0700); err != nil {
+		t.Fatalf("failed to create states dir: %v", err)
+	}
+	// Header row plus two job rows.
+	if err := os.WriteFile(filepath.Join(statesDir, "single_abc.state"),
+		[]byte("header\nrow1\nrow2\n"), 0600); err != nil {
+		t.Fatalf("failed to write state file: %v", err)
+	}
+	// Anything that is not a .state file is not a run.
+	if err := os.WriteFile(filepath.Join(statesDir, "notes.txt"), []byte("ignore\n"), 0600); err != nil {
+		t.Fatalf("failed to write decoy file: %v", err)
+	}
+
+	got := app.GetRunHistory()
+	if len(got) != 1 {
+		t.Fatalf("GetRunHistory() returned %d entries, want 1: %+v", len(got), got)
+	}
+	if got[0].RunID != "single_abc" || got[0].RunType != "single" || got[0].JobCount != 2 {
+		t.Errorf("GetRunHistory()[0] = %+v, want runID single_abc, runType single, jobCount 2", got[0])
+	}
+}
+
+// The DTO is the only path between the GUI and models.JobSpec, so a field
+// missing from it is dropped in both directions: an SGE script's SSH directives
+// reached the editor and then vanished on save, silently.
+func TestJobSpecDTORoundTrip_CarriesEveryField(t *testing.T) {
+	spec := models.JobSpec{
+		Directory:             "/work/case1",
+		JobName:               "case1",
+		AnalysisCode:          "user_included",
+		AnalysisVersion:       "1.0",
+		Command:               "./run.sh",
+		CoreType:              "emerald",
+		CoresPerSlot:          4,
+		WalltimeHours:         2.5,
+		Slots:                 2,
+		LicenseSettings:       `{"seats":1}`,
+		ExtraInputFileIDs:     "abc,def",
+		NoDecompress:          true,
+		SubmitMode:            "draft",
+		IsLowPriority:         true,
+		OnDemandLicenseSeller: "rescale",
+		LicenseFeatureName:    "abaqus",
+		LicensesPerJob:        4,
+		Tags:                  []string{"cfd"},
+		ProjectID:             "proj-1",
+		OrgCode:               "acme",
+		Automations:           []string{"auto-1"},
+		InputFiles:            []string{"file-1"},
+		LocalInputFiles:       []string{"/work/case1/model.inp"},
+		TarSubpath:            "outputs",
+		CIDRRule:              "10.0.0.0/8",
+		PublicKey:             "ssh-ed25519 AAAAC3Nz",
+		SSHPort:               2222,
+	}
+
+	if got := dtoToJobSpec(jobSpecToDTO(spec)); !reflect.DeepEqual(got, spec) {
+		t.Errorf("round trip lost fields:\n got %+v\nwant %+v", got, spec)
+	}
+}
+
+// The three SSH fields are the ones the DTO was missing; named individually so
+// a regression says which one went.
+func TestJobSpecDTO_CarriesSSHFields(t *testing.T) {
+	dto := jobSpecToDTO(models.JobSpec{
+		CIDRRule:  "10.0.0.0/8",
+		PublicKey: "ssh-ed25519 AAAAC3Nz",
+		SSHPort:   2222,
+	})
+
+	if dto.CIDRRule != "10.0.0.0/8" {
+		t.Errorf("CIDRRule = %q, want the rule the job was given", dto.CIDRRule)
+	}
+	if dto.PublicKey != "ssh-ed25519 AAAAC3Nz" {
+		t.Errorf("PublicKey = %q, want the key the job was given", dto.PublicKey)
+	}
+	if dto.SSHPort != 2222 {
+		t.Errorf("SSHPort = %d, want 2222", dto.SSHPort)
+	}
+
+	spec := dtoToJobSpec(dto)
+	if spec.CIDRRule != "10.0.0.0/8" || spec.PublicKey != "ssh-ed25519 AAAAC3Nz" || spec.SSHPort != 2222 {
+		t.Errorf("dtoToJobSpec dropped the SSH fields: %+v", spec)
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
+	"github.com/rescale/rescale-int/internal/util/glob"
 	"github.com/rescale/rescale-int/internal/util/multipart"
 )
 
@@ -265,6 +266,30 @@ type ScanOptions struct {
 	TarSubpath        string   // Subdirectory within each Run_* to tar (optional)
 }
 
+// rejectResidualTokens fails a scanned spec that still carries a {{...}}
+// placeholder.
+//
+// Folder scans substitute nothing — they pair one template with one directory
+// each — so a template written for file-scan or DOE mode is a mode mix-up, not
+// a value that failed to resolve. Naming the offending placeholder and the two
+// modes that do substitute is the whole fix the user needs.
+func rejectResidualTokens(job models.JobSpec) error {
+	if residual := pattern.ExtractTokens(job.Command); len(residual) > 0 {
+		// The placeholder comes before the word "token" on purpose: reporting's
+		// redactor reads "token <word>" as a credential and would replace the
+		// one detail this error exists to report (reporting/redactor.go:20).
+		return fmt.Errorf("command contains {{%s}}, which a folder scan does not substitute; "+
+			"use 'pur scan-files' for per-file placeholders or 'pur doe' for swept parameters",
+			residual[0])
+	}
+	if residual := pattern.ExtractTokens(job.JobName); len(residual) > 0 {
+		return fmt.Errorf("job name contains {{%s}}, which a folder scan does not substitute; "+
+			"use 'pur scan-files' for per-file placeholders or 'pur doe' for swept parameters",
+			residual[0])
+	}
+	return nil
+}
+
 // ScanToSpecs generates job specs from a directory scan, without writing CSV.
 func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]models.JobSpec, error) {
 	e.publishLog(events.InfoLevel, "Starting in-memory directory scan...", "scan", "")
@@ -322,7 +347,7 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 		}
 	} else {
 		// Non-recursive mode - single level glob
-		matches, err := filepath.Glob(filepath.Join(scanRoot, opts.Pattern))
+		matches, err := glob.UnderRoot(scanRoot, opts.Pattern)
 		if err != nil {
 			e.publishLog(events.ErrorLevel, fmt.Sprintf("Failed to glob: %v", err), "scan", "")
 			return nil, err
@@ -403,6 +428,16 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 
 		if opts.TarSubpath != "" {
 			job.TarSubpath = opts.TarSubpath
+		}
+
+		// A folder scan copies the command through and only numbers the name, so
+		// anything still in braces here reaches the platform verbatim: the job
+		// runs "solve {{base}}.inp" and fails on the cluster. Checked on the
+		// built spec rather than the template because the command can still be
+		// rewritten above.
+		if err := rejectResidualTokens(job); err != nil {
+			e.publishLog(events.ErrorLevel, err.Error(), "scan", "")
+			return nil, err
 		}
 
 		jobs = append(jobs, job)

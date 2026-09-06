@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -240,5 +241,208 @@ func TestResolveSecondaryPattern(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A scan root names one directory; it is not part of the pattern. Joining the
+// two before globbing made the root's own characters syntax, so a root of
+// "proj [v2]" read as a character class and the scan returned the sibling
+// "proj v" instead — silently, since it found files either way.
+func TestScanFiles_RootMetacharactersAreLiteral(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		root  string // the directory the scan is pointed at
+		decoy string // the sibling the joined pattern matched instead
+	}{
+		{"character class", "proj [v2]", "proj v"},
+		{"single-character wildcard", "proj?x", "projAx"},
+		{"star", "proj*x", "projAx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.ContainsAny(tt.root, `?*`) {
+				t.Skip("Windows filenames cannot contain ? or *")
+			}
+
+			base := t.TempDir()
+			writeScanFile(t, base, filepath.Join(tt.root, "wanted.inp"))
+			writeScanFile(t, base, filepath.Join(tt.decoy, "decoy.inp"))
+
+			result := ScanFiles(ScanOptions{
+				RootDir:        filepath.Join(base, tt.root),
+				PrimaryPattern: "*.inp",
+			})
+
+			if result.Error != "" {
+				t.Fatalf("unexpected error: %s", result.Error)
+			}
+			if len(result.Jobs) != 1 {
+				t.Fatalf("%d jobs, want 1: %v", len(result.Jobs), result.Jobs)
+			}
+			want := filepath.Join(base, tt.root, "wanted.inp")
+			if got := result.Jobs[0].PrimaryFile; got != want {
+				t.Errorf("PrimaryFile = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+// The pattern is matched inside the root, so one that names somewhere else
+// cannot be honored. Saying so beats matching the wrong files or matching
+// nothing with no explanation.
+func TestScanFiles_PrimaryPatternMustStayUnderTheRoot(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		pattern func(root string) string
+		wantErr string
+	}{
+		{
+			name:    "absolute",
+			pattern: func(root string) string { return filepath.Join(root, "cases", "*.inp") },
+			wantErr: "absolute path",
+		},
+		{
+			// The joined form reached outside the root and found loose.inp.
+			name:    "climbing out of the root",
+			pattern: func(string) string { return filepath.Join("..", "*.inp") },
+			wantErr: "outside the scan root",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeScanFile(t, root, filepath.Join("cases", "model.inp"))
+			writeScanFile(t, root, "loose.inp")
+
+			pattern := tt.pattern(root)
+			result := ScanFiles(ScanOptions{
+				RootDir:        filepath.Join(root, "cases"),
+				PrimaryPattern: pattern,
+			})
+
+			if result.Error == "" {
+				t.Fatalf("pattern %q was accepted: %v", pattern, result.Jobs)
+			}
+			if !strings.Contains(result.Error, tt.wantErr) {
+				t.Errorf("error %q does not say %q", result.Error, tt.wantErr)
+			}
+			if !strings.Contains(result.Error, pattern) {
+				t.Errorf("error %q does not name the pattern %q", result.Error, pattern)
+			}
+		})
+	}
+}
+
+// A glob matches directories as readily as files, and "model.mesh/" attached as
+// an input used to fail the job at tar time — after the run had started, which
+// is the expensive place to find out.
+func TestScanFiles_DirectoriesAreNotInputFiles(t *testing.T) {
+	t.Run("a directory matched as a primary is skipped", func(t *testing.T) {
+		root := t.TempDir()
+		writeScanFile(t, root, "case1.inp")
+		if err := os.MkdirAll(filepath.Join(root, "case2.inp"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "*.inp"})
+
+		if result.Error != "" {
+			t.Fatalf("unexpected error: %s", result.Error)
+		}
+		if len(result.Jobs) != 1 {
+			t.Fatalf("%d jobs, want 1 (skipped: %v)", len(result.Jobs), result.SkippedFiles)
+		}
+		if got := result.Jobs[0].PrimaryFile; got != filepath.Join(root, "case1.inp") {
+			t.Errorf("PrimaryFile = %s, want case1.inp", got)
+		}
+		if len(result.SkippedFiles) != 1 {
+			t.Fatalf("skipped = %v, want one entry", result.SkippedFiles)
+		}
+		if !strings.Contains(result.SkippedFiles[0], "case2.inp") ||
+			!strings.Contains(result.SkippedFiles[0], "directory") {
+			t.Errorf("skip reason %q does not say case2.inp is a directory", result.SkippedFiles[0])
+		}
+	})
+
+	t.Run("a directory matched as a required secondary skips the job", func(t *testing.T) {
+		root := t.TempDir()
+		writeScanFile(t, root, "case1.inp")
+		if err := os.MkdirAll(filepath.Join(root, "case1.mesh"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		result := ScanFiles(ScanOptions{
+			RootDir:           root,
+			PrimaryPattern:    "*.inp",
+			SecondaryPatterns: []SecondaryPattern{{Pattern: "*.mesh", Required: true}},
+		})
+
+		if len(result.Jobs) != 0 {
+			t.Fatalf("%d jobs built with a directory as an input: %v",
+				len(result.Jobs), result.Jobs[0].InputFiles)
+		}
+		if len(result.SkippedFiles) != 1 {
+			t.Fatalf("skipped = %v, want one entry", result.SkippedFiles)
+		}
+		if !strings.Contains(result.SkippedFiles[0], "directory") {
+			t.Errorf("skip reason %q does not say the secondary is a directory", result.SkippedFiles[0])
+		}
+	})
+
+	t.Run("a directory matched as an optional secondary warns", func(t *testing.T) {
+		root := t.TempDir()
+		writeScanFile(t, root, "case1.inp")
+		if err := os.MkdirAll(filepath.Join(root, "case1.mesh"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		result := ScanFiles(ScanOptions{
+			RootDir:           root,
+			PrimaryPattern:    "*.inp",
+			SecondaryPatterns: []SecondaryPattern{{Pattern: "*.mesh", Required: false}},
+		})
+
+		if len(result.Jobs) != 1 {
+			t.Fatalf("%d jobs, want 1 (skipped: %v)", len(result.Jobs), result.SkippedFiles)
+		}
+		if got := result.Jobs[0].InputFiles; len(got) != 1 {
+			t.Errorf("InputFiles = %v, want the primary alone", got)
+		}
+		if len(result.Warnings) != 1 {
+			t.Fatalf("warnings = %v, want one entry", result.Warnings)
+		}
+		if !strings.Contains(result.Warnings[0], "directory") {
+			t.Errorf("warning %q does not say the secondary is a directory", result.Warnings[0])
+		}
+	})
+}
+
+// A pattern fs.Glob cannot parse is reported rather than read as "no matches",
+// which is the same distinction the root checks above exist to keep.
+func TestScanFiles_MalformedPrimaryPatternIsReported(t *testing.T) {
+	root := t.TempDir()
+	writeScanFile(t, root, "case1.inp")
+
+	result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "[.inp"})
+
+	if result.Error == "" {
+		t.Fatalf("an unparseable pattern was accepted: %v", result.Jobs)
+	}
+	if !strings.Contains(result.Error, "invalid primary pattern") {
+		t.Errorf("error %q does not say the pattern is invalid", result.Error)
+	}
+}
+
+// The skip reason has to hold for a match that is neither a file nor a
+// directory. os.DevNull is the one such path every platform has.
+func TestNotRegularReason_NonDirectory(t *testing.T) {
+	info, err := os.Stat(os.DevNull)
+	if err != nil {
+		t.Skipf("cannot stat %s: %v", os.DevNull, err)
+	}
+	if info.Mode().IsRegular() {
+		t.Skipf("%s is a regular file here", os.DevNull)
+	}
+
+	if got := notRegularReason(info); got != "is not a regular file" {
+		t.Errorf("notRegularReason(%s) = %q", os.DevNull, got)
 	}
 }

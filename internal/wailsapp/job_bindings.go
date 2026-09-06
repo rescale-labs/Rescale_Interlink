@@ -76,11 +76,17 @@ type JobSpecDTO struct {
 	LocalInputFiles []string `json:"localInputFiles"`
 
 	TarSubpath string `json:"tarSubpath,omitempty"`
+
+	// Inbound SSH access, carried through to models.JobSpec and named after the
+	// API keys, as it is there.
+	CIDRRule  string `json:"cidrRule"`
+	PublicKey string `json:"publicKey"`
+	SSHPort   int    `json:"sshPort"`
 }
 
 // SecondaryPatternDTO represents a secondary file pattern for file-based scanning.
 type SecondaryPatternDTO struct {
-	Pattern  string `json:"pattern"`  // Glob pattern, may include subpath (e.g., "*.mesh", "../meshes/*.cfg")
+	Pattern  string `json:"pattern"`  // "*" stands for the primary file's stem; a subpath is allowed (e.g., "*.mesh", "../meshes/*.cfg"); substituted and stat'ed, never globbed
 	Required bool   `json:"required"` // If true, skip job when file missing; if false, warn and continue
 }
 
@@ -104,11 +110,10 @@ type ScanOptionsDTO struct {
 
 // ScanResultDTO is the result of a directory scan.
 type ScanResultDTO struct {
-	Jobs        []JobSpecDTO `json:"jobs"`
-	TotalCount  int          `json:"totalCount"`
-	MatchCount  int          `json:"matchCount"`
-	InvalidDirs []string     `json:"invalidDirs"`
-	Error       string       `json:"error,omitempty"`
+	Jobs       []JobSpecDTO `json:"jobs"`
+	TotalCount int          `json:"totalCount"`
+	MatchCount int          `json:"matchCount"`
+	Error      string       `json:"error,omitempty"`
 
 	SkippedFiles []string `json:"skippedFiles,omitempty"` // Primary files skipped due to missing required secondaries
 	Warnings     []string `json:"warnings,omitempty"`     // Warnings for missing optional secondaries
@@ -1128,6 +1133,9 @@ func jobSpecToDTO(j models.JobSpec) JobSpecDTO {
 		InputFiles:            j.InputFiles,
 		LocalInputFiles:       j.LocalInputFiles,
 		TarSubpath:            j.TarSubpath,
+		CIDRRule:              j.CIDRRule,
+		PublicKey:             j.PublicKey,
+		SSHPort:               j.SSHPort,
 	}
 }
 
@@ -1158,6 +1166,9 @@ func dtoToJobSpec(j JobSpecDTO) models.JobSpec {
 		InputFiles:            j.InputFiles,
 		LocalInputFiles:       j.LocalInputFiles,
 		TarSubpath:            j.TarSubpath,
+		CIDRRule:              j.CIDRRule,
+		PublicKey:             j.PublicKey,
+		SSHPort:               j.SSHPort,
 	}
 }
 

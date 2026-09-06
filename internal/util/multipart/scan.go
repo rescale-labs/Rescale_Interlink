@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/rescale/rescale-int/internal/localfs"
+	"github.com/rescale/rescale-int/internal/util/glob"
 )
 
 // ScanResult holds a validated, named job entry from directory scanning.
@@ -98,7 +99,7 @@ func ScanDirectories(opts ScanOpts) ([]ScanResult, error) {
 		}
 
 		// Glob for matching directories
-		matches, err := filepath.Glob(filepath.Join(scanRoot, opts.Pattern))
+		matches, err := glob.UnderRoot(scanRoot, opts.Pattern)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan %s: %w", scanRoot, err)
 		}

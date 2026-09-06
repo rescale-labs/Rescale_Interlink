@@ -395,3 +395,51 @@ func TestRejectBothIDSpellingsIgnoresCommandsWithoutAlias(t *testing.T) {
 		t.Errorf("no --id flag on this command, so nothing to reject: %v", err)
 	}
 }
+
+// "✓ Generated 0 jobs" wrote a header-only CSV and reported success. LoadJobsCSV
+// refuses that file, and with --overwrite writing it had already replaced
+// whatever the user had there.
+func TestScanFilesWritesNothingWhenEveryFileIsSkipped(t *testing.T) {
+	root := t.TempDir()
+	writeScanDeck(t, root, "case1.inp")
+
+	output := filepath.Join(root, "jobs.csv")
+	const existing = "previous contents"
+	if err := os.WriteFile(output, []byte(existing), 0644); err != nil {
+		t.Fatalf("seed output: %v", err)
+	}
+
+	cmd := newScanFilesCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SilenceUsage = true
+	// The required secondary does not exist, so the one matched file is skipped
+	// and no job survives to be written.
+	cmd.SetArgs([]string{
+		"--root", root,
+		"--primary", "*.inp",
+		"--secondary", "*.mesh",
+		"--template", scanFilesTemplate(t, root, "{{base}}"),
+		"--output", output,
+		"--overwrite",
+	})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("scan-files reported success having built no jobs")
+	}
+	if !strings.Contains(err.Error(), "skipped") {
+		t.Errorf("error %q does not say the files were skipped", err)
+	}
+	if !strings.Contains(err.Error(), output) {
+		t.Errorf("error %q does not name the file it did not write", err)
+	}
+
+	data, readErr := os.ReadFile(output)
+	if readErr != nil {
+		t.Fatalf("read output back: %v", readErr)
+	}
+	if string(data) != existing {
+		t.Errorf("a run that generated nothing still replaced the file: %q", data)
+	}
+}

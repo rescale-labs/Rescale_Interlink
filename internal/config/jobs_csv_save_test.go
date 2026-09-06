@@ -37,6 +37,11 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		IsLowPriority:         true,
 		SubmitMode:            "create_and_submit",
 		TarSubpath:            "output/results",
+		Automations:           []string{"auto-1", "auto-2"},
+		InputFiles:            []string{"file-abc", "file-def"},
+		CIDRRule:              "10.0.0.0/8",
+		PublicKey:             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 user@host",
+		SSHPort:               2222,
 	}
 	minimal := models.JobSpec{
 		Directory:       "./Run_2",
@@ -142,6 +147,14 @@ func TestLoadJobsCSV_WithoutFileScanColumns(t *testing.T) {
 		t.Errorf("license feature = %q x %d, want empty",
 			loaded[0].LicenseFeatureName, loaded[0].LicensesPerJob)
 	}
+	if len(loaded[0].Automations) != 0 || len(loaded[0].InputFiles) != 0 {
+		t.Errorf("automations = %v, input files = %v, want empty",
+			loaded[0].Automations, loaded[0].InputFiles)
+	}
+	if loaded[0].CIDRRule != "" || loaded[0].PublicKey != "" || loaded[0].SSHPort != 0 {
+		t.Errorf("SSH access = %q / %q / %d, want empty",
+			loaded[0].CIDRRule, loaded[0].PublicKey, loaded[0].SSHPort)
+	}
 }
 
 // A path the jobs CSV cannot carry has to be refused while it is being written,
@@ -149,10 +162,27 @@ func TestLoadJobsCSV_WithoutFileScanColumns(t *testing.T) {
 func TestSaveJobsCSV_RejectsUnrepresentableInputFiles(t *testing.T) {
 	tests := []struct {
 		name string
-		file string
+		// value is the entry the CSV cannot carry; set puts it in one column.
+		value string
+		set   func(*models.JobSpec, string)
 	}{
-		{"a semicolon splits the entry in two", filepath.Join("scratch", "a;b.inp")},
-		{"an invisible character is stripped on load", filepath.Join("scratch", "case\u200b1.inp")},
+		{
+			"a semicolon splits a local input file in two", filepath.Join("scratch", "a;b.inp"),
+			func(j *models.JobSpec, v string) { j.LocalInputFiles = []string{v} },
+		},
+		{
+			"an invisible character in a local input file is stripped on load",
+			filepath.Join("scratch", "case\u200b1.inp"),
+			func(j *models.JobSpec, v string) { j.LocalInputFiles = []string{v} },
+		},
+		{
+			"a semicolon splits an automation id in two", "auto;1",
+			func(j *models.JobSpec, v string) { j.Automations = []string{v} },
+		},
+		{
+			"a semicolon splits an input file id in two", "file;1",
+			func(j *models.JobSpec, v string) { j.InputFiles = []string{v} },
+		},
 	}
 
 	for _, tt := range tests {
@@ -164,7 +194,7 @@ func TestSaveJobsCSV_RejectsUnrepresentableInputFiles(t *testing.T) {
 				t.Fatalf("seed CSV: %v", err)
 			}
 
-			err := SaveJobsCSV(csvPath, []models.JobSpec{{
+			job := models.JobSpec{
 				JobName:         "case1",
 				Directory:       "scratch",
 				AnalysisCode:    "user_included",
@@ -174,18 +204,28 @@ func TestSaveJobsCSV_RejectsUnrepresentableInputFiles(t *testing.T) {
 				Slots:           1,
 				WalltimeHours:   1.0,
 				LicenseSettings: `{"LICENSE": "value"}`,
-				LocalInputFiles: []string{tt.file},
-			}})
-			if err == nil {
-				t.Fatal("SaveJobsCSV wrote a path it cannot read back")
 			}
-			// The job and the path, because the user has to find the row, and
-			// the format that does carry it. The path is quoted, which is what
-			// makes an invisible character visible in the message at all.
-			for _, want := range []string{"case1", fmt.Sprintf("%q", tt.file), "JSON"} {
+			tt.set(&job, tt.value)
+
+			err := SaveJobsCSV(csvPath, []models.JobSpec{job})
+			if err == nil {
+				t.Fatal("SaveJobsCSV wrote a value it cannot read back")
+			}
+			// The job and the value, because the user has to find the row. The
+			// value is quoted, which is what makes an invisible character
+			// visible in the message at all.
+			for _, want := range []string{"case1", fmt.Sprintf("%q", tt.value)} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not mention %q", err, want)
 				}
+			}
+			// Advice the user can act on. Nothing writes a jobs JSON, so the
+			// only way out is to change the value.
+			if strings.Contains(err.Error(), "JSON") {
+				t.Errorf("error %q sends the user to a format nothing writes", err)
+			}
+			if !strings.Contains(err.Error(), "rename") {
+				t.Errorf("error %q does not say what to do about it", err)
 			}
 
 			data, readErr := os.ReadFile(csvPath)

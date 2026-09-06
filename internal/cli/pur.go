@@ -383,6 +383,15 @@ Examples:
 			}
 
 			if generate {
+				// Nothing built means every matched file was skipped, and the
+				// reasons are listed above. Writing anyway produced a header-only
+				// CSV that LoadJobsCSV refuses — and under --overwrite that write
+				// had already destroyed a working file.
+				if len(jobs) == 0 {
+					return fmt.Errorf("no jobs to write to %s: all %d matched files were skipped, "+
+						"for the reasons listed above", outputPath, result.TotalCount)
+				}
+
 				if err := config.SaveJobsCSV(outputPath, jobs); err != nil {
 					return fmt.Errorf("failed to save jobs CSV: %w", err)
 				}

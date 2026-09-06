@@ -79,3 +79,42 @@ func TestExpandPatterns(t *testing.T) {
 		})
 	}
 }
+
+// UnderRoot exists because joining the root onto the pattern makes the root's
+// own name part of the pattern; the bracketed folder here is the failing case.
+func TestUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	wanted := filepath.Join(root, "proj [v2]", "cases", "wanted.inp")
+	decoy := filepath.Join(root, "proj v", "cases", "decoy.inp")
+	for _, f := range []string{wanted, decoy} {
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := UnderRoot(filepath.Join(root, "proj [v2]"), "cases/*.inp")
+	if err != nil {
+		t.Fatalf("UnderRoot: %v", err)
+	}
+	if len(got) != 1 || got[0] != wanted {
+		t.Errorf("UnderRoot() = %v, want only %s", got, wanted)
+	}
+
+	// An empty root means the working directory, as filepath.Glob would treat it.
+	if _, err := UnderRoot("", "*.nonexistent-extension"); err != nil {
+		t.Errorf("UnderRoot with an empty root: %v", err)
+	}
+	// A malformed pattern is reported, not silently unmatched.
+	if _, err := UnderRoot(root, "["); err == nil {
+		t.Error("UnderRoot accepted a malformed pattern")
+	}
+
+	for _, bad := range []string{"../cases/*.inp", filepath.Join(root, "cases", "*.inp")} {
+		if _, err := UnderRoot(filepath.Join(root, "proj [v2]"), bad); err == nil {
+			t.Errorf("UnderRoot accepted %q, which names files outside the root", bad)
+		}
+	}
+}

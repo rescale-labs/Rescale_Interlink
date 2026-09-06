@@ -57,10 +57,9 @@ type App struct {
 	runMu     sync.Mutex
 	runCancel context.CancelFunc
 
-	catalogCacheMu    sync.RWMutex
-	cachedCoreTypes   []CoreTypeDTO
-	cachedAnalyses    []AnalysisCodeDTO
-	cachedAutomations []AutomationDTO
+	catalogCacheMu  sync.RWMutex
+	cachedCoreTypes []CoreTypeDTO
+	cachedAnalyses  []AnalysisCodeDTO
 
 	reporter *reporting.Reporter
 
@@ -194,7 +193,6 @@ func (a *App) ClearCatalogCache() {
 	defer a.catalogCacheMu.Unlock()
 	a.cachedCoreTypes = nil
 	a.cachedAnalyses = nil
-	a.cachedAutomations = nil
 }
 
 // startup is called when the app starts. The context is saved

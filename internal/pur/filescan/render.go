@@ -145,20 +145,25 @@ func Render(commandTemplate, jobNameTemplate string, jf JobFiles, index int) (co
 	// A filename lands in the command line exactly as a swept parameter value
 	// does, so it answers to the same rule: a token supplies a datum, never
 	// syntax. Checked before substituting, so the offending token can be named,
-	// and only for tokens the command actually uses — a folder with a space in
+	// and only for tokens the templates actually use — a folder with a space in
 	// its name is nobody's problem unless {{dir}} is being substituted.
-	for _, token := range pattern.ExtractTokens(commandTemplate) {
+	//
+	// Either template, not just the command: a value the command would have been
+	// refused for is no safer in the job name, which is the identifier progress
+	// events and state records are matched by.
+	for _, token := range usedTokens(commandTemplate, jobNameTemplate) {
 		value, known := values[token]
 		if !known {
 			continue // ValidateCommandTemplate's business, reported below.
 		}
 		if bad, found := pattern.FirstUnsafeChar(value); found {
-			return "", "", fmt.Errorf("{{%s}} is %q, which contains %q and would change the structure "+
-				"of the rendered command rather than supply a value", token, value, string(bad))
+			return "", "", fmt.Errorf("{{%s}} is %q, which contains %q, so it would change the "+
+				"structure of what it is substituted into rather than supply a value",
+				token, value, string(bad))
 		}
 		if pattern.HasWhitespace(value) {
-			return "", "", fmt.Errorf("{{%s}} is %q, which contains whitespace and would split into "+
-				"separate command arguments", token, value)
+			return "", "", fmt.Errorf("{{%s}} is %q, which contains whitespace, so it cannot be "+
+				"substituted into a command line or a job name as one value", token, value)
 		}
 	}
 
@@ -190,6 +195,19 @@ func Render(commandTemplate, jobNameTemplate string, jf JobFiles, index int) (co
 	}
 
 	return command, jobName, nil
+}
+
+// usedTokens returns every token either template substitutes, command order
+// first and without repeats, so one value is checked once however often it is
+// used.
+func usedTokens(commandTemplate, jobNameTemplate string) []string {
+	tokens := pattern.ExtractTokens(commandTemplate)
+	for _, token := range pattern.ExtractTokens(jobNameTemplate) {
+		if !slices.Contains(tokens, token) {
+			tokens = append(tokens, token)
+		}
+	}
+	return tokens
 }
 
 // renderJobName substitutes into the job name, falling back to index numbering

@@ -202,6 +202,14 @@ test:
 	@echo "Running tests [FIPS 140-3]..."
 	@$(GOFIPS) go test $(FIPS_BUILD_TAGS) -v ./...
 
+# Run tests under the race detector (FIPS 140-3 mode).
+# ./internal/... rather than ./...: the race detector is for the concurrent
+# pipeline, and cmd/ is thin wiring that only slows the run down.
+.PHONY: test-race
+test-race:
+	@echo "Running tests with the race detector [FIPS 140-3]..."
+	@$(GOFIPS) go test -race $(FIPS_BUILD_TAGS) ./internal/...
+
 # Run tests with coverage (FIPS 140-3 mode)
 .PHONY: test-coverage
 test-coverage:
@@ -370,6 +378,7 @@ help:
 	@echo "Development Targets:"
 	@echo "  check                   Quick compile check (no binary output)"
 	@echo "  test                    Run all tests (FIPS mode)"
+	@echo "  test-race               Run internal tests under the race detector"
 	@echo "  test-coverage           Run tests with coverage report"
 	@echo "  fmt                     Format code with go fmt"
 	@echo "  lint                    Lint code (requires golangci-lint)"

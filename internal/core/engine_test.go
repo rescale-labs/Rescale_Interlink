@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -435,6 +437,130 @@ func TestEngine_RunContext(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			engine, _ := NewEngine(nil)
 			tc.run(t, engine)
+		})
+	}
+}
+
+// The scan root names one directory; it is not part of the pattern. Joining the
+// two before globbing made the root's own characters syntax, so a project
+// folder called "proj [v2]" read as a character class and the scan generated
+// jobs for the sibling "proj v" — directories that exist, so nothing looked
+// wrong until the jobs ran on the wrong data.
+func TestEngine_ScanToSpecs_RootMetacharactersAreLiteral(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		root  string // the project directory the scan is pointed at
+		decoy string // the sibling the joined pattern matched instead
+	}{
+		{"character class", "proj [v2]", "proj v"},
+		{"single-character wildcard", "proj?x", "projAx"},
+		{"star", "proj*x", "projAx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.ContainsAny(tt.root, `?*`) {
+				t.Skip("Windows filenames cannot contain ? or *")
+			}
+
+			engine := newScanEngine(t)
+			base := t.TempDir()
+			mkRunDirs(t, base, filepath.Join(tt.root, "Run_1"), filepath.Join(tt.decoy, "Run_9"))
+
+			jobs, err := engine.ScanToSpecs(models.JobSpec{JobName: "test_job_1"}, ScanOptions{
+				Pattern:    "Run_*",
+				StartIndex: 1,
+				PartDirs:   []string{filepath.Join(base, tt.root)},
+			})
+			if err != nil {
+				t.Fatalf("ScanToSpecs failed: %v", err)
+			}
+			if len(jobs) != 1 {
+				t.Fatalf("%d jobs, want 1: %v", len(jobs), jobs)
+			}
+			// Suffix rather than equality: scanned directories are resolved to
+			// absolute paths, and on macOS the temp root is a symlink.
+			want := filepath.Join(tt.root, "Run_1")
+			if got := jobs[0].Directory; !strings.HasSuffix(got, want) {
+				t.Errorf("Directory = %s, want one ending in %s", got, want)
+			}
+		})
+	}
+}
+
+// The pattern is matched inside the scan root, so one that names somewhere else
+// cannot be honored; the joined form used to reach outside the root silently.
+func TestEngine_ScanToSpecs_PatternMustStayUnderTheRoot(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		pattern func(base string) string
+		wantErr string
+	}{
+		{
+			name:    "absolute",
+			pattern: func(base string) string { return filepath.Join(base, "Run_*") },
+			wantErr: "absolute path",
+		},
+		{
+			name:    "climbing out of the root",
+			pattern: func(string) string { return filepath.Join("..", "Run_*") },
+			wantErr: "outside the scan root",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			engine := newScanEngine(t)
+			base := t.TempDir()
+			mkRunDirs(t, base, "Run_7", filepath.Join("proj", "Run_1"))
+
+			pattern := tt.pattern(base)
+			jobs, err := engine.ScanToSpecs(models.JobSpec{JobName: "test_job_1"}, ScanOptions{
+				Pattern:    pattern,
+				StartIndex: 1,
+				PartDirs:   []string{filepath.Join(base, "proj")},
+			})
+			if err == nil {
+				t.Fatalf("pattern %q was accepted: %v", pattern, jobs)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not say %q", err, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), pattern) {
+				t.Errorf("error %q does not name the pattern %q", err, pattern)
+			}
+		})
+	}
+}
+
+// A folder scan copies the template's command through unchanged and numbers the
+// job name, so a file-scan or DOE template picked by mistake used to submit
+// every job with literal braces on its command line.
+func TestEngine_ScanToSpecs_RejectsUnsubstitutedTokens(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		template models.JobSpec
+	}{
+		{"in the command", models.JobSpec{JobName: "run_1", Command: "solve {{base}}.inp"}},
+		{"in the job name", models.JobSpec{JobName: "run-{{base}}_1", Command: "./run.sh"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			engine := newScanEngine(t)
+			base := t.TempDir()
+			mkRunDirs(t, base, "Run_1", "Run_2")
+
+			jobs, err := engine.ScanToSpecs(tt.template, ScanOptions{
+				Pattern:    "Run_*",
+				StartIndex: 1,
+				PartDirs:   []string{base},
+			})
+			if err == nil {
+				t.Fatalf("template was accepted: %v", jobs)
+			}
+			if !strings.Contains(err.Error(), "{{base}}") {
+				t.Errorf("error %q does not name the offending {{base}}", err)
+			}
+			// The message has to point somewhere: these templates belong to the
+			// two modes that do substitute.
+			if !strings.Contains(err.Error(), "scan-files") || !strings.Contains(err.Error(), "doe") {
+				t.Errorf("error %q does not name the modes that substitute tokens", err)
+			}
 		})
 	}
 }

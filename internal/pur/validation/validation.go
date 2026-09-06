@@ -50,6 +50,23 @@ func ValidateJobSpec(job models.JobSpec) []string {
 		errors = append(errors, "Walltime must be positive")
 	}
 
+	// A user-defined license needs both halves, the same pair BuildJobRequest
+	// refuses. Repeated here rather than deferred to it because that check runs
+	// per job after the archive has been built and uploaded, so a CSV that
+	// validates cleanly would otherwise fail every job at the last step.
+	switch {
+	case job.LicenseFeatureName != "" && job.LicensesPerJob > 0:
+		// A complete pair.
+	case job.LicenseFeatureName != "":
+		errors = append(errors, fmt.Sprintf("license feature %q needs a licenses-per-job count greater than zero",
+			job.LicenseFeatureName))
+	case job.LicensesPerJob != 0:
+		// Not "> 0": CSV parsing accepts a negative integer, and treating that as
+		// "unset" would drop the half-pair silently instead of reporting it.
+		errors = append(errors, fmt.Sprintf("licenses per job is set to %d but no license feature name was given",
+			job.LicensesPerJob))
+	}
+
 	// Validate submitMode using the same logic as pipeline.NormalizeSubmitMode.
 	if job.SubmitMode != "" {
 		switch strings.ToLower(strings.TrimSpace(job.SubmitMode)) {

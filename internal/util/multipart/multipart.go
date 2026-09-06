@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/rescale/rescale-int/internal/localfs"
+	"github.com/rescale/rescale-int/internal/util/glob"
 )
 
 // RunDirectoryEntry represents a run directory from a specific project
@@ -59,7 +60,7 @@ func CollectAllRunDirectories(partDirs []string, runSubpath, subdirPattern strin
 		}
 
 		// Find run directories
-		matches, err := filepath.Glob(filepath.Join(scanPath, subdirPattern))
+		matches, err := glob.UnderRoot(scanPath, subdirPattern)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan %s: %w", scanPath, err)
 		}

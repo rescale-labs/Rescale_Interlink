@@ -217,3 +217,37 @@ func TestDialogBinding_MutexReleasedAfterError(t *testing.T) {
 		t.Errorf("second call: mutex not released after first errored; got busy error %q", err.Error())
 	}
 }
+
+// The catalogs belong to the account the key names. Clearing them only on a
+// successful Test Connection left the coretypes and software of account A on
+// screen next to the projects of account B, with nothing to say which was which.
+func TestUpdateConfig_ClearsCatalogCacheWhenTheAPIKeyChanges(t *testing.T) {
+	testLogger(t)
+
+	for _, tt := range []struct {
+		name       string
+		newKey     string
+		wantCached bool
+	}{
+		{"a different key", "key-b", false},
+		{"the same key", "key-a", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &App{config: &config.Config{APIKey: "key-a"}}
+			app.cachedCoreTypes = []CoreTypeDTO{{Code: "emerald"}}
+			app.cachedAnalyses = []AnalysisCodeDTO{{Code: "user_included"}}
+
+			if err := app.UpdateConfig(ConfigDTO{APIKey: tt.newKey}); err != nil {
+				t.Fatalf("UpdateConfig: %v", err)
+			}
+
+			app.catalogCacheMu.RLock()
+			defer app.catalogCacheMu.RUnlock()
+			gotCached := len(app.cachedCoreTypes) > 0 || len(app.cachedAnalyses) > 0
+			if gotCached != tt.wantCached {
+				t.Errorf("catalogs cached = %v, want %v (coreTypes=%v analyses=%v)",
+					gotCached, tt.wantCached, app.cachedCoreTypes, app.cachedAnalyses)
+			}
+		})
+	}
+}

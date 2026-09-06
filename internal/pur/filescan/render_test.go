@@ -510,3 +510,33 @@ func TestBuildJobs_AssemblesFromTheTemplate(t *testing.T) {
 		t.Errorf("InputFiles = %v, want it cleared", job.InputFiles)
 	}
 }
+
+// A value was only checked when the command used it, so "run-{{dir}}" over a
+// folder called "case 3" rendered a job name with a space in it — while the
+// same value in the command would have skipped the file.
+func TestRender_ChecksValuesUsedByEitherTemplate(t *testing.T) {
+	jf := jobFilesFor("scratch/case 3/model.inp")
+
+	for _, tt := range []struct {
+		name    string
+		command string
+		jobName string
+	}{
+		{"used by the command", "solve --set {{dir}}", "run"},
+		{"used only by the job name", "solve --in model.inp", "run-{{dir}}"},
+		{"used by both", "solve --set {{dir}}", "run-{{dir}}"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			command, jobName, err := Render(tt.command, tt.jobName, jf, 1)
+			if err == nil {
+				t.Fatalf("rendered %q / %q from a folder named with a space", command, jobName)
+			}
+			if !strings.Contains(err.Error(), "whitespace") {
+				t.Errorf("error %q does not say the value contains whitespace", err)
+			}
+			if !strings.Contains(err.Error(), "{{dir}}") {
+				t.Errorf("error %q does not name the offending {{dir}}", err)
+			}
+		})
+	}
+}

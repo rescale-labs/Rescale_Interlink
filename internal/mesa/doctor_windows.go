@@ -13,6 +13,8 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 // Doctor runs comprehensive Mesa diagnostics and prints results.
@@ -32,7 +34,9 @@ import (
 // 11. Final diagnosis and recommendations
 func Doctor() {
 	fmt.Println("=" + strings.Repeat("=", 79))
-	fmt.Println("                 MESA SOFTWARE RENDERING DIAGNOSTICS v4.0.0")
+	// The build's own version, not a literal: a diagnostic report pasted into a
+	// bug is read for which build produced it.
+	fmt.Printf("                 MESA SOFTWARE RENDERING DIAGNOSTICS %s\n", version.Version)
 	fmt.Println("=" + strings.Repeat("=", 79))
 	fmt.Println()
 	fmt.Println("This comprehensive diagnostic reveals WHY Mesa may not be working on Windows.")
@@ -853,10 +857,10 @@ func printPEImports(dllPath string) {
 
 // Windows API procedures (kernel32 is declared in mesa_windows.go)
 var (
-	procGetModuleHandleW       = kernel32.NewProc("GetModuleHandleW")
+	procGetModuleHandleW         = kernel32.NewProc("GetModuleHandleW")
 	procCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
-	procModule32FirstW         = kernel32.NewProc("Module32FirstW")
-	procModule32NextW          = kernel32.NewProc("Module32NextW")
+	procModule32FirstW           = kernel32.NewProc("Module32FirstW")
+	procModule32NextW            = kernel32.NewProc("Module32NextW")
 )
 
 // Constants for CreateToolhelp32Snapshot

@@ -115,6 +115,36 @@ func LoadJobsCSV(path string) ([]models.JobSpec, error) {
 			}
 		}
 
+		// Automations and InputFiles are ID lists, ";"-separated for the same
+		// reason LocalInputFiles is. Optional, so CSVs written before these
+		// columns existed still load.
+		if autoStr := getCol("automations"); autoStr != "" {
+			for _, id := range strings.Split(autoStr, ";") {
+				if id = sanitize.SanitizeField(id); id != "" {
+					job.Automations = append(job.Automations, id)
+				}
+			}
+		}
+		if idsStr := getCol("inputfiles"); idsStr != "" {
+			for _, id := range strings.Split(idsStr, ";") {
+				if id = sanitize.SanitizeField(id); id != "" {
+					job.InputFiles = append(job.InputFiles, id)
+				}
+			}
+		}
+
+		// Inbound SSH access, kept verbatim: these go straight to the API, and a
+		// public key is not ours to normalize.
+		job.CIDRRule = getCol("cidrrule")
+		job.PublicKey = getCol("publickey")
+		if portStr := getCol("sshport"); portStr != "" {
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				return nil, fmt.Errorf("row %d: invalid SSHPort: %s", i+1, portStr)
+			}
+			job.SSHPort = port
+		}
+
 		// User-defined license feature. Both optional, so CSVs written before
 		// feature sets still load, and a blank count reads as "none".
 		job.LicenseFeatureName = sanitize.SanitizeField(getCol("licensefeaturename"))
@@ -212,19 +242,30 @@ func ParseLicenseJSON(licenseJSON string) (map[string]string, error) {
 // SaveJobsCSV writes job specifications to a CSV file
 func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 	// Checked before the file is created, so a refusal leaves an existing CSV
-	// intact rather than truncated. LocalInputFiles is one ";"-separated field
-	// whose entries are sanitized on the way back in, so a path holding a ";"
-	// reloads as two paths and one holding an invisible character reloads naming
-	// a different file — possibly the same name as another job's, whose state
-	// record it would then share. The loss is only detectable here: by load time
-	// the original is gone.
+	// intact rather than truncated. Each list column is one ";"-separated field
+	// whose entries are sanitized on the way back in, so an entry holding a ";"
+	// reloads as two entries and one holding an invisible character reloads as a
+	// different value — for a path, possibly the same name as another job's,
+	// whose state record it would then share. The loss is only detectable here:
+	// by load time the original is gone.
 	for _, job := range jobs {
-		for _, localFile := range job.LocalInputFiles {
-			if strings.Contains(localFile, ";") || sanitize.SanitizeField(localFile) != localFile {
-				return fmt.Errorf("job %q has the local input file %q, which a jobs CSV cannot carry: "+
-					"the column is \";\"-separated and sanitized on load, so the path would come back "+
-					"naming a different file; write these jobs as JSON, which carries the path verbatim",
-					job.JobName, localFile)
+		for _, column := range []struct {
+			label   string
+			entries []string
+		}{
+			{"local input file", job.LocalInputFiles},
+			{"automation", job.Automations},
+			{"input file id", job.InputFiles},
+		} {
+			for _, entry := range column.entries {
+				if strings.Contains(entry, ";") || sanitize.SanitizeField(entry) != entry {
+					// No advice to write JSON: nothing in the CLI or the GUI
+					// writes a jobs JSON, so the only way out is the value.
+					return fmt.Errorf("job %q has the %s %q, which a jobs CSV cannot carry: "+
+						"the column is \";\"-separated and sanitized on load, so the value would come "+
+						"back changed; rename or shorten it, or leave it out of the job",
+						job.JobName, column.label, entry)
+				}
 			}
 		}
 	}
@@ -243,7 +284,8 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 		"CoreType", "CoresPerSlot", "WalltimeHours", "Slots", "LicenseSettings",
 		"ExtraInputFileIDs", "OnDemandLicenseSeller", "ProjectID", "OrgCode", "Tags",
 		"NoDecompress", "IsLowPriority", "Submit", "TarSubpath", "LocalInputFiles",
-		"LicenseFeatureName", "LicensesPerJob",
+		"LicenseFeatureName", "LicensesPerJob", "Automations", "InputFiles",
+		"CIDRRule", "PublicKey", "SSHPort",
 	}
 	if err := writer.Write(header); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
@@ -273,6 +315,11 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 			strings.Join(job.LocalInputFiles, ";"),
 			job.LicenseFeatureName,
 			strconv.Itoa(job.LicensesPerJob),
+			strings.Join(job.Automations, ";"),
+			strings.Join(job.InputFiles, ";"),
+			job.CIDRRule,
+			job.PublicKey,
+			strconv.Itoa(job.SSHPort),
 		}
 		if err := writer.Write(row); err != nil {
 			return fmt.Errorf("failed to write job row: %w", err)
