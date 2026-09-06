@@ -1043,6 +1043,12 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 // and /api/v3/users/me/ reports its company code. Resolved once and cached — it
 // cannot change for a given key — so a batch assigning projects to 200 jobs
 // costs one profile request, not 200.
+// ErrOrgCodeUnavailable marks a failure to learn the organization code from the
+// API key. It is not transient — the code comes from the key's own profile — so
+// a caller that retries an org-scoped request on other failures has no reason
+// to retry this one.
+var ErrOrgCodeUnavailable = errors.New("organization code unavailable")
+
 func (c *Client) OrgCode(ctx context.Context) (string, error) {
 	c.orgCodeMu.Lock()
 	defer c.orgCodeMu.Unlock()
@@ -1053,10 +1059,10 @@ func (c *Client) OrgCode(ctx context.Context) (string, error) {
 
 	profile, err := c.GetUserProfile(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve the organization code from the API key: %w", err)
+		return "", fmt.Errorf("%w: failed to resolve it from the API key: %w", ErrOrgCodeUnavailable, err)
 	}
 	if profile.Company.Code == "" {
-		return "", fmt.Errorf("the API key's user profile reports no company code, so organization-scoped requests cannot be addressed")
+		return "", fmt.Errorf("%w: the API key's user profile reports no company code", ErrOrgCodeUnavailable)
 	}
 
 	c.orgCode = profile.Company.Code

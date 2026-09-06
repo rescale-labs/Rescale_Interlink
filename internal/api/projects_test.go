@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,8 +13,7 @@ import (
 
 // projectsHandler serves the shape the real endpoint returns, on the one path
 // this feature depends on.
-func projectsHandler(t *testing.T) http.HandlerFunc {
-	t.Helper()
+func projectsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v2/users/me/projects/" {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -43,7 +43,7 @@ func projectsHandler(t *testing.T) http.HandlerFunc {
 }
 
 func TestListProjects(t *testing.T) {
-	server := httptest.NewServer(projectsHandler(t))
+	server := httptest.NewServer(projectsHandler())
 	defer server.Close()
 
 	projects, err := newTestClient(t, server.URL).ListProjects(context.Background())
@@ -65,6 +65,17 @@ func TestListProjects(t *testing.T) {
 	if len(projects[1].RemainingAmounts) != 1 ||
 		!strings.Contains(projects[1].RemainingAmounts[0], "$100.00 available") {
 		t.Errorf("remainingAmounts = %v, want the platform's budget line", projects[1].RemainingAmounts)
+	}
+
+	// A refused request is an error, not an empty list: an empty picker reads as
+	// "this account has no projects", which is a different thing entirely.
+	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no", http.StatusForbidden)
+	}))
+	defer forbidden.Close()
+
+	if _, err := newTestClient(t, forbidden.URL).ListProjects(context.Background()); err == nil {
+		t.Error("ListProjects succeeded on a 403")
 	}
 }
 
@@ -109,17 +120,6 @@ func TestListProjects_FollowsPagination(t *testing.T) {
 	}
 	if len(projects) != 2 || projects[1].ID != "second" {
 		t.Errorf("got %+v, want both pages", projects)
-	}
-}
-
-func TestListProjects_ErrorStatus(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "no", http.StatusForbidden)
-	}))
-	defer server.Close()
-
-	if _, err := newTestClient(t, server.URL).ListProjects(context.Background()); err == nil {
-		t.Fatal("ListProjects succeeded on a 403")
 	}
 }
 
@@ -172,21 +172,23 @@ func TestOrgCode_ResolvesFromProfileAndCaches(t *testing.T) {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
 	if profileCalls != 1 {
 		t.Errorf("profile fetched %d times, want 1 — the code cannot change for a key", profileCalls)
 	}
-}
+	mu.Unlock()
 
-func TestOrgCode_ProfileWithoutCompanyCode(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// A profile with no company code cannot address an org-scoped endpoint, so
+	// it fails rather than building a URL with an empty organization in it.
+	bare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"email": "someone@example.com"})
 	}))
-	defer server.Close()
+	defer bare.Close()
 
-	if _, err := newTestClient(t, server.URL).OrgCode(context.Background()); err == nil {
-		t.Fatal("OrgCode succeeded on a profile with no company code")
+	if _, err := newTestClient(t, bare.URL).OrgCode(context.Background()); err == nil {
+		t.Error("OrgCode succeeded on a profile with no company code")
+	} else if !errors.Is(err, ErrOrgCodeUnavailable) {
+		t.Errorf("OrgCode error %q is not ErrOrgCodeUnavailable, so an assignment would retry it", err)
 	}
 }
 

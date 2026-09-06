@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -797,12 +798,14 @@ func (p *Pipeline) countFailedJobs() int {
 
 // checkJobHasInputs rejects a job that would be created with nothing attached.
 //
-// A job with nothing to tar skips tar and upload, which is right for a DOE sweep
-// or a single job built from pre-uploaded IDs — but only when its inputs are
-// accounted for somewhere: an explicit local file list, per-job file IDs, per-job
-// extra file IDs, or the batch-level Common Files that ResolveSharedFiles has
-// already resolved by the time the feeder runs. With none of those, the pipeline
-// creates and submits a job carrying no input files at all, which the API accepts.
+// Precondition: the job has no archive of its own to build. The feeder calls
+// this only where hasLocalArchive(spec) is false, so a working directory and a
+// local file list are already ruled out and what is left to account for the
+// job's inputs is per-job file IDs, per-job extra file IDs, or the batch-level
+// Common Files that ResolveSharedFiles has resolved by the time the feeder runs.
+// Skipping tar and upload is right for a DOE sweep or a single job built from
+// pre-uploaded IDs; with none of those, the pipeline creates and submits a job
+// carrying no input files at all, which the API accepts.
 //
 // submit-existing keeps its bypass: that mode's premise is that the caller
 // placed the inputs on Rescale itself.
@@ -810,8 +813,8 @@ func (p *Pipeline) checkJobHasInputs(spec models.JobSpec) error {
 	if p.skipTarUpload {
 		return nil
 	}
-	if spec.Directory != "" || len(spec.LocalInputFiles) > 0 || len(spec.InputFiles) > 0 ||
-		strings.TrimSpace(spec.ExtraInputFileIDs) != "" || len(p.sharedFileIDs) > 0 {
+	if len(spec.InputFiles) > 0 || strings.TrimSpace(spec.ExtraInputFileIDs) != "" ||
+		len(p.sharedFileIDs) > 0 {
 		return nil
 	}
 
@@ -878,11 +881,10 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 			// The archive is built one of two ways, and everything downstream —
 			// upload, FileID, job creation, state, resume — is the same either way.
 			//
-			// A job carrying its own file list archives exactly those files: the set
-			// is already exact, and its members can sit outside Directory (a
-			// secondary pattern such as "../meshes/*.cfg"), so there is nothing for a
-			// directory walk, a TarSubpath or the include/exclude patterns to narrow.
-			// Otherwise Directory is walked, as it always has been.
+			// A job carrying its own file list archives exactly those files, in
+			// the shape tar.CreateTarGzFromFiles describes, so there is nothing
+			// for a directory walk, a TarSubpath or the include/exclude patterns
+			// to narrow. Otherwise Directory is walked, as it always has been.
 			var tarPath string
 			var createArchive func() error
 			var archiveSource string
@@ -1349,34 +1351,29 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					}
 				}
 
-				// Org-scoped project assignment. The org code is an override, not a
-				// requirement: an explicit one (job spec, then config) wins, and
-				// otherwise the client resolves it from the API key, so choosing a
-				// project is enough on its own.
-				orgCode := item.jobSpec.OrgCode
-				if orgCode == "" {
-					orgCode = p.cfg.OrgCode
-				}
-				if orgCode == "" && item.jobSpec.ProjectID != "" {
-					resolved, err := p.apiClient.OrgCode(ctx)
-					if err != nil {
-						// Non-fatal, like an assignment failure itself: the job is
-						// created and runs, it is simply not billed to the project.
-						p.logf("WARN", "job", item.state.JobName,
-							"Cannot assign project %s: %v", item.jobSpec.ProjectID, err)
-					} else {
-						orgCode = resolved
+				// Org-scoped project assignment. An explicit org code overrides —
+				// job spec first, then config — and an empty one is resolved from
+				// the API key by Client.AssignProjectToJob, which owns that
+				// precedence, so choosing a project is enough on its own.
+				if item.jobSpec.ProjectID != "" {
+					orgCode := item.jobSpec.OrgCode
+					if orgCode == "" {
+						orgCode = p.cfg.OrgCode
 					}
-				}
-				if orgCode != "" && item.jobSpec.ProjectID != "" {
 					maxAssignRetries := 3
 					for assignAttempt := 1; assignAttempt <= maxAssignRetries; assignAttempt++ {
 						err := p.apiClient.AssignProjectToJob(ctx, orgCode, item.state.JobID, item.jobSpec.ProjectID)
 						if err == nil {
-							p.logf("INFO", "job", item.state.JobName, "Project assignment successful (org=%s)", orgCode)
+							p.logf("INFO", "job", item.state.JobName, "Project assignment successful")
 							break
 						}
 						p.logf("WARN", "job", item.state.JobName, "Project assignment attempt %d failed: %v", assignAttempt, err)
+						// The code comes from the key's own profile, so a resolve that
+						// failed once fails on every attempt; retrying only stalls the
+						// worker for the back-off.
+						if errors.Is(err, api.ErrOrgCodeUnavailable) {
+							break
+						}
 						if assignAttempt < maxAssignRetries {
 							time.Sleep(time.Duration(min(60, 1<<uint(assignAttempt))) * time.Second)
 						}

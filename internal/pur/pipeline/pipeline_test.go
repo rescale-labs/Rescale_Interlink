@@ -578,6 +578,8 @@ func TestResumeAfterFailureReportsNoFailures(t *testing.T) {
 // A sweep case legitimately has no Directory, which skips tar and upload — but
 // only when its inputs are accounted for elsewhere. Relaxing that guard to
 // "always skip" let a job with nothing at all reach job creation and submit.
+// Every case here is one the feeder reaches: a job with a directory or a file
+// list of its own never gets this far, see checkJobHasInputs.
 func TestCheckJobHasInputs(t *testing.T) {
 	empty := models.JobSpec{JobName: "sweep_1"}
 
@@ -592,9 +594,6 @@ func TestCheckJobHasInputs(t *testing.T) {
 		{"batch-level common files resolved", &Pipeline{sharedFileIDs: []string{"abc"}}, empty, false},
 		{"per-job file IDs", &Pipeline{}, models.JobSpec{JobName: "s", InputFiles: []string{"abc"}}, false},
 		{"per-job extra file IDs", &Pipeline{}, models.JobSpec{JobName: "s", ExtraInputFileIDs: "abc"}, false},
-		{"a directory to tar", &Pipeline{}, models.JobSpec{JobName: "s", Directory: "/data/run"}, false},
-		{"an explicit file list and no directory", &Pipeline{},
-			models.JobSpec{JobName: "s", LocalInputFiles: []string{"/data/case.inp"}}, false},
 	}
 
 	for _, tt := range tests {
