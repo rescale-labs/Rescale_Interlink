@@ -118,13 +118,23 @@ Terminal_*.txt
 *_session*.txt
 *_log*.txt
 
-# Any file that might contain credentials
-*token*
-*secret*
-*credential*
-*password*
+# Files that might contain credentials. Data files only: the earlier bare
+# wildcards also hid Go source (internal/cloud/credentials/, models/credentials.go,
+# a credentials test file) from git add, worktrees and CI.
+*token*.txt
+*token*.json
+*token*.env
+*secret*.txt
+*secret*.json
+*secret*.env
+*credential*.txt
+*credential*.json
+*credential*.csv
+*credential*.env
+*password*.txt
+*password*.json
 *.key
-!*.tsx
+*.pem
 !*.ts
 # Explicit exceptions: source files that manage token-file permissions
 # (not token files themselves) — matched by *token* above but must be
