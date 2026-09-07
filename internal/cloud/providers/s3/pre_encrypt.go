@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -146,13 +147,7 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	partSize := plan.PartSize
 	totalParts := transfer.CalculateTotalParts(encryptedSize, partSize)
 
-	// Try to load resume state. A stateless attempt reads none: nothing excludes
-	// a second invocation from the same sidecar, so what it describes may be an
-	// upload that is still being filled.
-	var existingState *state.UploadResumeState
-	if !params.Stateless {
-		existingState, _ = state.LoadUploadState(params.LocalPath)
-	}
+	existingState, _ := resumeStateFor(params)
 	var uploadID string
 	var completedParts []types.CompletedPart
 	var alreadyOnS3 map[int32]string
@@ -224,6 +219,11 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		uploadID = *createResp.UploadId
 		createdAt = time.Now()
 	}
+
+	// A stateless attempt has no checkpoint to come back to, so on the way out it
+	// discards whatever it has neither committed nor already aborted.
+	settled := false
+	defer func() { discardStatelessUpload(ctx, s3Client, params, objectKey, uploadID, settled) }()
 
 	// Report initial progress
 	if params.ProgressCallback != nil {
@@ -316,6 +316,7 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		abortCtx, cancelAbort := abortContext(ctx)
 		abortS3Upload(abortCtx, s3Client, objectKey, uploadID)
 		cancelAbort()
+		settled = true
 		return fmt.Errorf("refusing to complete upload of %s: %w", objectKey, err)
 	}
 
@@ -335,6 +336,7 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		return completionFailure(params, objectKey, err)
 	}
 
+	settled = true
 	return nil
 }
 
@@ -376,16 +378,10 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
 
-	// Try to load resume state (keyed by ORIGINAL file path, not encrypted path).
-	// A stateless attempt reads none: nothing excludes a second invocation from
-	// the same sidecar, so what it describes may be an upload still being filled.
-	var existingState *state.UploadResumeState
-	if !params.Stateless {
-		var loadErr error
-		existingState, loadErr = state.LoadUploadState(params.LocalPath)
-		if loadErr != nil {
-			log.Printf("Warning: Failed to load resume state: %v", loadErr)
-		}
+	// Keyed by ORIGINAL file path, not encrypted path.
+	existingState, loadErr := resumeStateFor(params)
+	if loadErr != nil {
+		log.Printf("Warning: Failed to load resume state: %v", loadErr)
 	}
 	var uploadID string
 	var completedParts []types.CompletedPart
@@ -401,7 +397,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		// Resuming it would interleave two encryptions into one object; the parts
 		// already sent there are unusable, so drop the whole thing and start over.
 		log.Printf("Resume state is for a previous upload (%s), starting fresh", existingState.ObjectKey)
-		if existingState.UploadID != "" {
+		if existingState.UploadID != "" && p.checkpointBelongsHere(existingState, s3Client.PathBase()) {
 			abortCtx, cancelAbort := abortContext(ctx)
 			abortS3Upload(abortCtx, s3Client, existingState.ObjectKey, existingState.UploadID)
 			cancelAbort()
@@ -514,6 +510,11 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	// every part is already on S3 and only the assembly has to be asked for
 	// again. The one upload that must not survive is one whose part list does
 	// not cover the file, and that is aborted where it is refused.
+	//
+	// A stateless attempt is the exception: it records no resume state, so
+	// nothing can ever come back to the upload it opened.
+	settled := false
+	defer func() { discardStatelessUpload(ctx, s3Client, params, objectKey, uploadID, settled) }()
 
 	// If resuming, seek to the position after the last completed part
 	if resuming && startPart > 1 {
@@ -619,6 +620,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		abortCtx, cancelAbort := abortContext(ctx)
 		abortS3Upload(abortCtx, s3Client, objectKey, uploadID)
 		cancelAbort()
+		settled = true
 		return fmt.Errorf("refusing to complete upload of %s: %w", objectKey, verifyErr)
 	}
 
@@ -638,6 +640,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	if err != nil {
 		return fmt.Errorf("failed to complete multipart upload: %w", completionFailure(params, objectKey, err))
 	}
+	settled = true
 
 	// Delete resume state on successful upload
 	if !params.Stateless {
@@ -753,6 +756,59 @@ func startFreshAfterVanishedUpload(params transfer.EncryptedFileUploadParams, ob
 			filepath.Base(params.LocalPath))
 	}
 	retireCheckpoint(params, objectKey)
+}
+
+// resumeStateFor loads the checkpoint beside a source, or nothing at all when
+// this attempt must not read it. A stateless attempt holds no lock on that
+// sidecar, so what it describes may be an upload still being filled; one the
+// caller has already judged and could not delete must treat it as absent, since
+// adopting it continues what the caller refused and retiring it discards an
+// upload identity this destination may not own.
+func resumeStateFor(params transfer.EncryptedFileUploadParams) (*state.UploadResumeState, error) {
+	if params.Stateless || params.IgnoreResumeState {
+		return nil, nil
+	}
+	return state.LoadUploadState(params.LocalPath)
+}
+
+// checkpointBelongsHere reports whether a resume state was going to the
+// destination this provider uploads to — the rule the orchestrator applies
+// before it retires anything, repeated here for the abort this file issues on
+// its own account.
+//
+// An abort names a key and an upload ID inside one bucket. Addressed to another
+// destination it finds nothing, which is the answer a discarded upload also
+// gives: the upload it was meant to retire stays open while its only local
+// record is deleted. A state written before v4.9.9 records no destination, so
+// its object key is the only evidence — and evidence only where this destination
+// gives keys a prefix of its own.
+func (p *Provider) checkpointBelongsHere(saved *state.UploadResumeState, pathBase string) bool {
+	storageID, container := p.storageID(), p.storageContainer()
+	if storageID == "" && container == "" {
+		// Nothing to compare against: this provider was not told where it is.
+		return true
+	}
+	if saved.StorageID != "" || saved.Container != "" {
+		return saved.StorageID == storageID && saved.Container == container
+	}
+	return pathBase != "" && strings.HasPrefix(saved.ObjectKey, pathBase+"/")
+}
+
+// discardStatelessUpload aborts the multipart upload an unsettled stateless
+// attempt opened. A stateless attempt records no checkpoint, so nothing can ever
+// come back to what it opened: kept for a retry that has no record to retry
+// from, it would sit on S3 until the seven-day sweep. The streaming path
+// discards its checkpoint-free upload for the same reason.
+//
+// settled is an upload already dealt with — committed, or aborted where its part
+// list was refused.
+func discardStatelessUpload(ctx context.Context, s3Client *S3Client, params transfer.EncryptedFileUploadParams, objectKey, uploadID string, settled bool) {
+	if !params.Stateless || settled || uploadID == "" {
+		return
+	}
+	abortCtx, cancelAbort := abortContext(ctx)
+	defer cancelAbort()
+	abortS3Upload(abortCtx, s3Client, objectKey, uploadID)
 }
 
 // retireCheckpoint deletes the resume state beside a source. A stateless attempt

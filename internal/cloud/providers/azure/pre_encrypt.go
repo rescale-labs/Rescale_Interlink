@@ -234,6 +234,21 @@ func startFreshAfterVanishedUpload(params transfer.EncryptedFileUploadParams, bl
 	retireCheckpoint(params, blobPath)
 }
 
+// resumeStateFor loads the checkpoint beside a source, or nothing at all when
+// this attempt must not read it. A stateless attempt holds no lock on that
+// sidecar, so what it describes may be an upload still being filled; one the
+// caller has already judged and could not delete must treat it as absent, since
+// adopting it continues what the caller refused.
+//
+// There is nothing to retire here even so: staged blocks carry no upload ID for
+// an abort to name, and uncommitted ones expire on their own after seven days.
+func resumeStateFor(params transfer.EncryptedFileUploadParams) (*state.UploadResumeState, error) {
+	if params.Stateless || params.IgnoreResumeState {
+		return nil, nil
+	}
+	return state.LoadUploadState(params.LocalPath)
+}
+
 // retireCheckpoint deletes the resume state beside a source. A stateless attempt
 // has none of its own: that sidecar belongs to whoever holds the upload lock it
 // could not take.
@@ -319,13 +334,7 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 	blockSize := plan.PartSize
 	totalBlocks := transfer.CalculateTotalParts(encryptedSize, blockSize)
 
-	// Try to load resume state. A stateless attempt reads none: nothing excludes
-	// a second invocation from the same sidecar, so what it describes may be an
-	// upload that is still being filled.
-	var existingState *state.UploadResumeState
-	if !params.Stateless {
-		existingState, _ = state.LoadUploadState(params.LocalPath)
-	}
+	existingState, _ := resumeStateFor(params)
 	var blockIDs []string
 	var alreadyStaged map[int64]string
 	var uploadedBytes int64 = 0
@@ -531,16 +540,9 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
 
-	// Try to load resume state. A stateless attempt reads none: nothing excludes
-	// a second invocation from the same sidecar, so what it describes may be an
-	// upload that is still being filled.
-	var existingState *state.UploadResumeState
-	if !params.Stateless {
-		var loadErr error
-		existingState, loadErr = state.LoadUploadState(params.LocalPath)
-		if loadErr != nil {
-			log.Printf("Warning: Failed to load resume state: %v", loadErr)
-		}
+	existingState, loadErr := resumeStateFor(params)
+	if loadErr != nil {
+		log.Printf("Warning: Failed to load resume state: %v", loadErr)
 	}
 	var alreadyStaged map[int64]string
 	var uploadedBytes int64 = 0

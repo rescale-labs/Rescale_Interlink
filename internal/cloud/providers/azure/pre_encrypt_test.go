@@ -1266,3 +1266,42 @@ func TestPreEncryptKeepsTheCheckpointWhenTheBlockProbeFails(t *testing.T) {
 		})
 	}
 }
+
+// TestPreEncryptIgnoresACheckpointTheCallerRejected is finding 4 at the Azure
+// provider. The caller judged the checkpoint beside this source unusable and
+// could not delete it, so the record is still on disk while describing an upload
+// this attempt must not continue. There is nothing to abort here — uncommitted
+// blocks are named by no upload ID and simply expire — so adoption is the whole
+// of it, and a checkpoint that WOULD otherwise be resumed is what proves it.
+func TestPreEncryptIgnoresACheckpointTheCallerRejected(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			// The checkpoint would pass the liveness probe.
+			backend.uncommittedBlocks = []string{testBlockID(0), testBlockID(1)}
+			azureClient := newTestAzureClient(t, server)
+
+			encryptedSize := 3 * resumeBlockSize
+			fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumeBlockSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, resumeBlockSize,
+				[]string{testBlockID(0), testBlockID(1)}, 2*resumeBlockSize)
+
+			fixture.params.IgnoreResumeState = true
+			if err := fixture.run(t, azureClient, tt.concurrent); err != nil {
+				t.Fatalf("the upload failed: %v", err)
+			}
+
+			want := []string{testBlockID(0), testBlockID(1), testBlockID(2)}
+			if got := backend.stagedBlockIDs(); !slices.Equal(got, want) {
+				t.Errorf("staged %d block(s), want the whole file from an attempt that must not resume", len(got))
+			}
+		})
+	}
+}

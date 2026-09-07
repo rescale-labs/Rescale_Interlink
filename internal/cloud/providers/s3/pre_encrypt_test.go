@@ -88,6 +88,12 @@ type fakeS3Backend struct {
 	// authentication error, the shape a rejected credential arrives in.
 	rejectOncePerPart bool
 	rejectedParts     map[int32]bool
+
+	// refusePartsFrom fails every attempt at this part number and above with an
+	// error the retry classifier reads as fatal, which is how an attempt gives
+	// up with an upload already open and parts already staged. Zero refuses
+	// nothing.
+	refusePartsFrom int32
 }
 
 // createdUploadID names the nth multipart upload this backend opened. A planted
@@ -145,6 +151,12 @@ func (f *fakeS3Backend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) 
 			_, _ = io.Copy(io.Discard, r.Body)
 			writeXML(w, nethttp.StatusForbidden,
 				`<Error><Code>ExpiredToken</Code><Message>The provided token has expired</Message></Error>`)
+			return
+		}
+		if f.refusePartsFrom > 0 && int32(partNumber) >= f.refusePartsFrom {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeXML(w, nethttp.StatusBadRequest,
+				`<Error><Code>InvalidPart</Code><Message>the part was refused</Message></Error>`)
 			return
 		}
 
@@ -1469,6 +1481,150 @@ func TestPreEncryptKeepsTheCheckpointWhenTheResumeProbeFails(t *testing.T) {
 			}
 			if saved.UploadID != testUploadID {
 				t.Errorf("the checkpoint names upload %q, want the interrupted one", saved.UploadID)
+			}
+		})
+	}
+}
+
+// TestPreEncryptIgnoresACheckpointTheCallerRejected is finding 4 at the
+// provider. The caller judged the checkpoint beside this source unusable and
+// could not delete it, so the record is still on disk while describing an upload
+// this attempt must not touch: adopting it continues what the caller refused,
+// and retiring it discards an identity this destination may not own. Both paths
+// have to read that sidecar as absent — which a checkpoint they WOULD otherwise
+// resume is what proves.
+func TestPreEncryptIgnoresACheckpointTheCallerRejected(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeS3Backend(t)
+			backend.listPartsLive = true // the checkpoint would pass the liveness probe
+			s3Client := newTestS3Client(t, server)
+
+			encryptedSize := 3 * resumePartSize
+			fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumePartSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, resumePartSize, []state.CompletedPart{
+				{PartNumber: 1, ETag: "etag-1"},
+				{PartNumber: 2, ETag: "etag-2"},
+			}, 2*resumePartSize)
+
+			fixture.params.IgnoreResumeState = true
+			if err := fixture.run(t, s3Client, tt.concurrent); err != nil {
+				t.Fatalf("the upload failed: %v", err)
+			}
+
+			if got := backend.stagedPartNumbers(); !slices.Equal(got, []int32{1, 2, 3}) {
+				t.Errorf("staged parts %v, want the whole file from an attempt that must not resume", got)
+			}
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			for _, abort := range backend.aborts {
+				if abort.uploadID == testUploadID {
+					t.Errorf("the rejected checkpoint's upload was retired through this attempt: %+v", backend.aborts)
+				}
+			}
+		})
+	}
+}
+
+// TestPreEncryptDoesNotDiscardAnotherDestinationsUpload pins the remaining abort
+// site. The abort this provider issues names the bucket it was built for, where
+// another destination's upload ID is simply absent — an answer that reads as
+// retirement while the upload it was meant to discard stays open. The
+// orchestrator applies this same rule before it retires anything.
+func TestPreEncryptDoesNotDiscardAnotherDestinationsUpload(t *testing.T) {
+	backend, server := newFakeS3Backend(t)
+	backend.listPartsLive = true
+	s3Client := newTestS3Client(t, server)
+
+	encryptedSize := 3 * resumePartSize
+	fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+		PartSize:   resumePartSize,
+		WorkerCap:  4,
+		QueueDepth: 4,
+	})
+	foreignKey := state.BuildObjectKey(testPathBase, filepath.Base(fixture.localPath), "previous-suffix")
+	testsupport.WriteResumeState(t, fixture.localPath, &state.UploadResumeState{
+		LocalPath:      fixture.localPath,
+		EncryptedPath:  fixture.encryptedPath,
+		ObjectKey:      foreignKey,
+		UploadID:       "another-destination-upload",
+		TotalSize:      encryptedSize,
+		OriginalSize:   encryptedSize,
+		SourceModTime:  fixture.params.SourceModTime,
+		UploadedBytes:  resumePartSize,
+		CompletedParts: []state.CompletedPart{{PartNumber: 1, ETag: "etag-1"}},
+		PartSize:       resumePartSize,
+		RandomSuffix:   "previous-suffix",
+		CreatedAt:      fixture.createdAt,
+		LastUpdate:     time.Now(),
+		StorageType:    "S3Storage",
+		StorageID:      "storage-A",
+		Container:      "bucket-a",
+	})
+
+	fixture.params.TransferHandle = testsupport.MultiThreadedHandle(t)
+	provider := &Provider{storageInfo: &models.StorageInfo{
+		ID:                 "storage-B",
+		StorageType:        "S3Storage",
+		ConnectionSettings: models.ConnectionSettings{Container: testBucket, PathBase: testPathBase},
+	}}
+	if err := provider.uploadEncryptedMultipartConcurrent(context.Background(), s3Client, fixture.params, fixture.objectKey, encryptedSize); err != nil {
+		t.Fatalf("the upload failed: %v", err)
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	for _, abort := range backend.aborts {
+		if abort.uploadID == "another-destination-upload" {
+			t.Errorf("another destination's upload was retired through this one: %+v", backend.aborts)
+		}
+	}
+}
+
+// TestPreEncryptStatelessFailureDiscardsItsOwnUpload is the G2/H2 cleanup
+// asymmetry. A stateless attempt writes no checkpoint, so the multipart upload
+// it opened is one nothing can ever come back to: kept for a retry that has no
+// record to retry from, it sits on S3 until the seven-day sweep. The streaming
+// path already discards its checkpoint-free upload.
+func TestPreEncryptStatelessFailureDiscardsItsOwnUpload(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeS3Backend(t)
+			backend.refusePartsFrom = 2
+			s3Client := newTestS3Client(t, server)
+
+			encryptedSize := 3 * resumePartSize
+			fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumePartSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.params.Stateless = true
+
+			if err := fixture.run(t, s3Client, tt.concurrent); err == nil {
+				t.Fatal("a refused part was reported as success")
+			}
+
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			discarded := false
+			for _, abort := range backend.aborts {
+				if abort.uploadID == createdUploadID(1) && abort.key == fixture.objectKey {
+					discarded = true
+				}
+			}
+			if !discarded {
+				t.Errorf("the upload of an attempt that recorded nothing was left open on S3: aborts = %+v", backend.aborts)
 			}
 		})
 	}

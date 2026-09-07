@@ -1096,6 +1096,19 @@ type resumableFakeUploader struct {
 	partSize       int64
 	failAfterParts int // parts to stage in a failing attempt before giving up
 
+	// storageID and storageContainer name the destination this provider uploads
+	// to, which is what it records in the checkpoints it writes — as the real
+	// providers do, so that a checkpoint can be told apart from another
+	// destination's.
+	storageID        string
+	storageContainer string
+
+	// abortRequests is every upload ID this provider discarded on its own
+	// account, reading a checkpoint that names an object it is not filling.
+	// The real S3 concurrent path does exactly that, addressed through the
+	// destination it was built for.
+	abortRequests []string
+
 	// backend is shared with the streaming fake when a test needs the two modes
 	// to meet over one source, which is where the cross-mode leftovers live.
 	backend *fakeStreamingBackend
@@ -1167,12 +1180,23 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 		return nil, fmt.Errorf("fake provider: %w", err)
 	}
 
-	// A stateless attempt holds no lock on this source, so the real providers
-	// neither read nor write the checkpoint beside it; this one does the same.
+	// A stateless attempt holds no lock on this source, and one whose caller has
+	// already judged the checkpoint has to treat it as absent; the real
+	// providers read it in neither case, so this one does the same.
 	var completed []state.CompletedPart
 	var uploadedBytes int64
-	if saved, _ := state.LoadUploadState(params.LocalPath); !params.Stateless && saved != nil && saved.ObjectKey == objectKey {
-		if err := state.ValidateUploadState(saved, params.LocalPath); err == nil {
+	if saved, _ := state.LoadUploadState(params.LocalPath); !params.Stateless && !params.IgnoreResumeState && saved != nil {
+		switch {
+		case saved.ObjectKey != objectKey:
+			// The checkpoint describes a different object, so its parts are
+			// unusable. The real S3 concurrent path discards that upload — an
+			// abort addressed through the destination THIS provider was built
+			// for — and deletes the record.
+			if saved.UploadID != "" {
+				f.abortRequests = append(f.abortRequests, saved.UploadID)
+			}
+			state.DeleteUploadState(params.LocalPath)
+		case state.ValidateUploadState(saved, params.LocalPath) == nil:
 			completed = saved.CompletedParts
 			uploadedBytes = saved.UploadedBytes
 		}
@@ -1207,7 +1231,9 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 		stagedThisAttempt++
 
 		if !params.Stateless {
-			if err := state.SaveUploadState(&state.UploadResumeState{
+			// A checkpoint that cannot be written costs the ability to resume,
+			// not the upload: the real providers drop this error too.
+			state.SaveUploadState(&state.UploadResumeState{
 				LocalPath:      params.LocalPath,
 				EncryptedPath:  params.EncryptedPath,
 				ObjectKey:      objectKey,
@@ -1224,9 +1250,9 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 				CreatedAt:      time.Now(),
 				LastUpdate:     time.Now(),
 				StorageType:    "FakeStorage",
-			}, params.LocalPath); err != nil {
-				return nil, err
-			}
+				StorageID:      f.storageID,
+				Container:      f.storageContainer,
+			}, params.LocalPath)
 		}
 
 		if f.failAfterParts > 0 && stagedThisAttempt >= f.failAfterParts {
@@ -2592,17 +2618,21 @@ func TestUploadStreamingRunsWithoutALockOnAReadOnlySource(t *testing.T) {
 	}
 }
 
-// unlockableSource lays out a source that can be uploaded but whose upload lock
-// cannot be created, and returns the path the caller uploads and the seal that
-// takes the write permission off the directory the lock would live in. Sealing
-// is separate so a checkpoint can be left behind first.
+// unlockableSource lays out a source that can be uploaded, and returns the path
+// the caller uploads along with two seals: the first takes the write permission
+// off the directory the upload lock would live in, the second off the directory
+// the resume state lives in. Sealing is separate so a checkpoint can be left
+// behind first.
 //
 // A symlinked source separates the two directories: the lock keys on the
-// canonical path and the sidecar on the caller's spelling, so the checkpoint
-// stays writable while the lock cannot be created — which is what makes "the
-// unlocked attempt does not touch the checkpoint" observable rather than merely
-// impossible.
-func unlockableSource(t *testing.T, data []byte, viaSymlink bool) (string, func()) {
+// canonical path and the sidecar on the caller's spelling. Sealing the lock
+// directory leaves the checkpoint writable while the lock cannot be created —
+// which is what makes "the unlocked attempt does not touch the checkpoint"
+// observable rather than merely impossible. Sealing the state directory is the
+// inverse: the lock is taken as usual, and the checkpoint beside the source can
+// be neither rewritten nor deleted. Without the symlink the two directories are
+// one and both seals are the same.
+func unlockableSource(t *testing.T, data []byte, viaSymlink bool) (string, func(), func()) {
 	t.Helper()
 	root := t.TempDir()
 	sourceDir := filepath.Join(root, "source")
@@ -2614,7 +2644,7 @@ func unlockableSource(t *testing.T, data []byte, viaSymlink bool) (string, func(
 		t.Fatalf("failed to write the source: %v", err)
 	}
 
-	localPath := sourcePath
+	localPath, stateDir := sourcePath, sourceDir
 	if viaSymlink {
 		linkDir := filepath.Join(root, "links")
 		if err := os.Mkdir(linkDir, 0700); err != nil {
@@ -2624,15 +2654,19 @@ func unlockableSource(t *testing.T, data []byte, viaSymlink bool) (string, func(
 		if err := os.Symlink(sourcePath, localPath); err != nil {
 			t.Fatalf("failed to link the source: %v", err)
 		}
+		stateDir = linkDir
 	}
 
-	return localPath, func() {
-		if err := os.Chmod(sourceDir, 0500); err != nil {
-			t.Fatalf("failed to make the source directory read-only: %v", err)
+	seal := func(dir string) func() {
+		return func() {
+			if err := os.Chmod(dir, 0500); err != nil {
+				t.Fatalf("failed to make %s read-only: %v", dir, err)
+			}
+			// Before TempDir's own cleanup, which cannot remove the file otherwise.
+			t.Cleanup(func() { os.Chmod(dir, 0700) })
 		}
-		// Before TempDir's own cleanup, which cannot remove the file otherwise.
-		t.Cleanup(func() { os.Chmod(sourceDir, 0700) })
 	}
+	return localPath, seal(sourceDir), seal(stateDir)
 }
 
 // TestUploadStreamingIsStatelessWithoutALock is D2 on the streaming side. The
@@ -2662,7 +2696,7 @@ func TestUploadStreamingIsStatelessWithoutALock(t *testing.T) {
 			for i := range data {
 				data[i] = byte(i*7 + 1)
 			}
-			localPath, seal := unlockableSource(t, data, tt.viaSymlink)
+			localPath, seal, _ := unlockableSource(t, data, tt.viaSymlink)
 
 			backend := newFakeStreamingBackend()
 			interrupted := interruptOnce(t, backend, UploadParams{LocalPath: localPath}, data, partSize, 2)
@@ -2728,7 +2762,7 @@ func TestUploadPreEncryptIsStatelessWithoutALock(t *testing.T) {
 			for i := range data {
 				data[i] = byte(i*3 + 2)
 			}
-			localPath, seal := unlockableSource(t, data, tt.viaSymlink)
+			localPath, seal, _ := unlockableSource(t, data, tt.viaSymlink)
 
 			fake := &resumableFakeUploader{partSize: partSize, failAfterParts: 2}
 			params := UploadParams{LocalPath: localPath, PreEncrypt: true}
@@ -2769,6 +2803,107 @@ func TestUploadPreEncryptIsStatelessWithoutALock(t *testing.T) {
 				t.Error("the unlocked attempt rewrote a checkpoint it does not own")
 			}
 		})
+	}
+}
+
+// TestUploadPreEncryptKeepsARejectedCheckpointFromTheProvider is D4's remaining
+// bypass. The wrapper holds the lock, judges the checkpoint — it was going to
+// another destination — and declines to retire it through this one, but the
+// directory the sidecar lives in is read-only and the record cannot be deleted.
+// The provider then reloads that record and retires the other destination's
+// upload through this one: an upload ID absent here answers as though it had
+// been discarded, while the upload it named stays open.
+//
+// The permissions are the inverse of the stateless cases above: the canonical
+// directory the lock lives in is writable, so the attempt is an ordinary locked
+// one, and only the caller-spelled directory beside the symlink is sealed.
+func TestUploadPreEncryptKeepsARejectedCheckpointFromTheProvider(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not stop file creation on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory regardless")
+	}
+
+	const partSize = 64
+	data := make([]byte, 4*partSize)
+	for i := range data {
+		data[i] = byte(i*5 + 3)
+	}
+	localPath, _, sealStateDir := unlockableSource(t, data, true)
+
+	toA := UploadParams{
+		LocalPath:        localPath,
+		PreEncrypt:       true,
+		StorageID:        "storage-A",
+		StorageContainer: "bucket-a",
+		StoragePathBase:  "uploads",
+	}
+	first := &resumableFakeUploader{partSize: partSize, failAfterParts: 2, storageID: "storage-A", storageContainer: "bucket-a"}
+	if _, err := uploadPreEncrypt(context.Background(), first, toA, int64(len(data))); err == nil {
+		t.Fatal("expected the interrupted attempt to fail")
+	}
+	stranded := loadStreamingState(t, localPath)
+	if stranded == nil {
+		t.Fatal("the interrupted attempt recorded nothing to resume from")
+	}
+	checkpoint, err := os.ReadFile(localPath + ".upload.resume")
+	if err != nil {
+		t.Fatalf("the interrupted attempt left no checkpoint: %v", err)
+	}
+	sealStateDir()
+
+	var out bytes.Buffer
+	toB := UploadParams{
+		LocalPath:        localPath,
+		PreEncrypt:       true,
+		StorageID:        "storage-B",
+		StorageContainer: "bucket-b",
+		StoragePathBase:  "uploads",
+		OutputWriter:     &out,
+	}
+	second := &resumableFakeUploader{partSize: partSize, storageID: "storage-B", storageContainer: "bucket-b"}
+	if _, err := uploadPreEncrypt(context.Background(), second, toB, int64(len(data))); err != nil {
+		t.Fatalf("the upload to the second destination failed: %v", err)
+	}
+
+	second.mu.Lock()
+	defer second.mu.Unlock()
+	if len(second.abortRequests) != 0 {
+		t.Errorf("the second destination was asked to discard %v, which is the first destination's upload", second.abortRequests)
+	}
+	if len(second.attempts) != 1 {
+		t.Fatalf("the second destination's provider ran %d times, want 1", len(second.attempts))
+	}
+	fresh := second.attempts[0]
+	if fresh.objectKey == stranded.ObjectKey {
+		t.Error("the upload to the second destination filled the first destination's object")
+	}
+	if fresh.resumedFrom != 0 {
+		t.Errorf("the fresh attempt resumed from %d parts of another destination's upload", fresh.resumedFrom)
+	}
+	// Five parts, not four: CBC padding pushes the ciphertext of a file that
+	// divides evenly into the part size one block past the last whole part.
+	staged := 0
+	for _, part := range second.staged {
+		if part.objectKey == fresh.objectKey {
+			staged++
+		}
+	}
+	if staged != 5 {
+		t.Errorf("the fresh attempt staged %d parts, want all 5 of the ciphertext", staged)
+	}
+	after, err := os.ReadFile(localPath + ".upload.resume")
+	if err != nil {
+		t.Errorf("the first destination's checkpoint was deleted: %v", err)
+	} else if !bytes.Equal(after, checkpoint) {
+		t.Error("the first destination's checkpoint was rewritten")
+	}
+	if !strings.Contains(out.String(), "different destination") {
+		t.Errorf("output did not say why the upload started over: %q", out.String())
+	}
+	if !strings.Contains(out.String(), stranded.ObjectKey) {
+		t.Errorf("output did not say that the interrupted upload was left where it was: %q", out.String())
 	}
 }
 

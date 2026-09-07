@@ -432,11 +432,13 @@ func planStreamingUpload(handle *internaltransfer.Transfer, fileSize, partSize i
 // acquireSourceLock takes the upload lock for a source, or reports that there is
 // no lock to be had.
 //
-// A directory that cannot hold a lock file cannot hold a resume state either, so
-// there is no checkpoint two invocations could share and nothing the lock would
-// have protected — while refusing would fail an upload that a read-only or full
-// source directory has always been able to run. Contention is a different answer
-// and is still refused.
+// The lock path is canonical while the resume state keys on the caller's
+// spelling of the source, so a directory that cannot hold the lock may hold a
+// perfectly writable checkpoint. What makes running without the lock safe is not
+// the directories but the attempt: an unlocked one is stateless, and reads,
+// writes and retires no shared state whatever they allow — while refusing would
+// fail an upload that a read-only or full source directory has always been able
+// to run. Contention is a different answer and is still refused.
 func acquireSourceLock(localPath string) (*state.UploadLock, error) {
 	lock, err := state.AcquireUploadLock(localPath)
 	if err == nil {
@@ -1476,6 +1478,11 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 	if !stateless {
 		resumed = resumePreEncryptArtifacts(ctx, preEncryptUploader, params, sourceInfo)
 	}
+	// A checkpoint judged here and left on disk must not reach the provider: it
+	// would adopt what this run refused, or retire an upload identity that may
+	// belong to another destination — the abort for which, issued through this
+	// one, finds nothing and reads as a retirement.
+	ignoreResumeState := resumed.ignoreState
 
 	encryptionKey, iv, randomSuffix, encryptedPath := resumed.encryptionKey, resumed.iv, resumed.randomSuffix, resumed.encryptedPath
 	if !resumed.usable {
@@ -1542,7 +1549,9 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		if params.OutputWriter != nil {
 			fmt.Fprintf(params.OutputWriter, "Restarting the upload of %s: %v\n", filepath.Base(params.LocalPath), err)
 		}
-		retireResumedUpload(ctx, preEncryptUploader, params)
+		if stillOnDisk := retireResumedUpload(ctx, preEncryptUploader, params); stillOnDisk {
+			ignoreResumeState = true
+		}
 		// Nothing records the ciphertext any more; the provider's own checkpoint
 		// is what will keep it for a retry, as it does for a fresh attempt.
 		keepEncrypted = false
@@ -1566,7 +1575,9 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		TransferHandle:   params.TransferHandle,
 		OutputWriter:     params.OutputWriter,
 		Plan:             &plan,
-		Stateless:        stateless,
+
+		Stateless:         stateless,
+		IgnoreResumeState: ignoreResumeState,
 	}
 
 	uploadTimer := cloud.StartTimer(params.OutputWriter, "Pre-encrypt upload")
@@ -1604,19 +1615,23 @@ type preEncryptResume struct {
 	// partSize is the size that attempt cut the ciphertext into. The providers
 	// resume against it, so the plan has to be made for it too.
 	partSize int64
+	// ignoreState says a checkpoint was judged unusable here and could not be
+	// deleted, so it is still on disk for the provider to find.
+	ignoreState bool
 }
 
 // retireResumedUpload discards the backend upload the resume state names and
-// deletes the state. The ciphertext is left where it is: it is still a correct
-// encryption of this source under this attempt's key, so what is being given up
-// on is only the geometry it was being sent with.
-func retireResumedUpload(ctx context.Context, uploader transfer.PreEncryptUploader, params UploadParams) {
+// deletes the state, reporting whether that record is still on disk afterwards.
+// The ciphertext is left where it is: it is still a correct encryption of this
+// source under this attempt's key, so what is being given up on is only the
+// geometry it was being sent with.
+func retireResumedUpload(ctx context.Context, uploader transfer.PreEncryptUploader, params UploadParams) bool {
 	saved, err := state.LoadUploadState(params.LocalPath)
 	if err != nil || saved == nil {
-		return
+		return false
 	}
 	retireBackendUpload(ctx, uploader, params, saved)
-	state.DeleteUploadState(params.LocalPath)
+	return state.DeleteUploadState(params.LocalPath) != nil
 }
 
 // resumePreEncryptArtifacts recovers the object identity, encryption parameters
@@ -1632,9 +1647,11 @@ func resumePreEncryptArtifacts(ctx context.Context, uploader transfer.PreEncrypt
 		return preEncryptResume{}
 	}
 
-	abandon := func() {
+	// A record that could not be deleted is still on disk, having just been
+	// judged unusable here: the provider has to be told to read it as absent.
+	abandon := func() preEncryptResume {
 		retireBackendUpload(ctx, uploader, params, saved)
-		abandonPreEncryptState(saved, params.LocalPath)
+		return preEncryptResume{ignoreState: abandonPreEncryptState(saved, params.LocalPath) != nil}
 	}
 
 	if reason := preEncryptResumeBlocker(saved, params.LocalPath, sourceInfo, uploader.StorageType(), params.destination()); reason != "" {
@@ -1642,15 +1659,13 @@ func resumePreEncryptArtifacts(ctx context.Context, uploader transfer.PreEncrypt
 			fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: %s\n",
 				filepath.Base(params.LocalPath), reason)
 		}
-		abandon()
-		return preEncryptResume{}
+		return abandon()
 	}
 
 	encryptionKey, keyErr := encryption.DecodeBase64(saved.EncryptionKey)
 	iv, ivErr := encryption.DecodeBase64(saved.IV)
 	if keyErr != nil || ivErr != nil {
-		abandon()
-		return preEncryptResume{}
+		return abandon()
 	}
 
 	return preEncryptResume{
@@ -1709,12 +1724,12 @@ func preEncryptResumeBlocker(saved *state.UploadResumeState, localPath string, s
 }
 
 // abandonPreEncryptState retires a state that can no longer be resumed, along
-// with the ciphertext it named.
-func abandonPreEncryptState(saved *state.UploadResumeState, localPath string) {
+// with the ciphertext it named, and reports whether the record could be deleted.
+func abandonPreEncryptState(saved *state.UploadResumeState, localPath string) error {
 	if isEncryptedTempFile(saved.EncryptedPath, localPath) {
 		os.Remove(saved.EncryptedPath)
 	}
-	state.DeleteUploadState(localPath)
+	return state.DeleteUploadState(localPath)
 }
 
 // isEncryptedTempFile reports whether a path in a state file names a ciphertext

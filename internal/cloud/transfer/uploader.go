@@ -207,6 +207,16 @@ type EncryptedFileUploadParams struct {
 	// resumed, and the checkpoint it would touch belongs to whoever else is
 	// running.
 	Stateless bool
+
+	// IgnoreResumeState says the caller has already judged the resume state
+	// beside this source unusable — it was going somewhere else, or describes a
+	// file that has since changed — and could not delete it. A provider must
+	// treat that sidecar as absent: adopting it would continue an upload the
+	// caller refused, and retiring it would discard an upload identity this
+	// destination may not own. Unlike Stateless this attempt does hold the
+	// upload lock, so its own checkpoint lifecycle is unchanged: the record the
+	// caller could not remove is one it may overwrite and delete.
+	IgnoreResumeState bool
 }
 
 // UploadPlan is the geometry this upload must run with. It comes from the
