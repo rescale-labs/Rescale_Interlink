@@ -628,10 +628,13 @@ func TestAcquireUploadLock_DoesNotTakeOverAnUnwrittenLock(t *testing.T) {
 	}()
 	<-judged
 
-	// The winner's replacement file: created, not yet written.
-	if err := os.WriteFile(lockFilePath, nil, 0600); err != nil {
-		t.Fatalf("plant an unwritten lock file: %v", err)
+	// The winner's replacement file: created, not yet written. It replaces the
+	// abandoned lock rather than truncating it, which is what an acquirer that
+	// clears a pathname and creates a lock there actually leaves behind.
+	if err := os.Remove(lockFilePath); err != nil {
+		t.Fatalf("clear the abandoned lock: %v", err)
 	}
+	plantOwnerlessLock(t, lockFilePath, time.Now())
 	close(release)
 
 	late := <-lateDone
@@ -644,59 +647,159 @@ func TestAcquireUploadLock_DoesNotTakeOverAnUnwrittenLock(t *testing.T) {
 	}
 }
 
-// TestAcquireUploadLock_ClearsTheMarkerOfACrashedTaker covers the marker's own
-// abandonment. A taker that dies between claiming the marker and finishing the
-// takeover would otherwise leave a file that blocks every later reclamation of
-// that lock for good.
-func TestAcquireUploadLock_ClearsTheMarkerOfACrashedTaker(t *testing.T) {
-	const deadPID = 424247
-	localPath := plantAbandonedLock(t, deadPID)
-	markerPath := localPath + ".upload.lock" + takeoverMarkerSuffix
+// TestAcquireUploadLock_DoesNotClearALockThatReplacedTheJudgedOne is the
+// identity half of the takeover. A lock whose writer died before recording who
+// it is, past the grace window, is judged abandoned; before the taker acts, that
+// file is released and another acquirer creates its own lock at the pathname and
+// has not written it yet. Both files are empty, so equal bytes say the record is
+// unchanged — and the taker deletes a lock whose owner is alive and goes on
+// writing into a file that is no longer at the path.
+func TestAcquireUploadLock_DoesNotClearALockThatReplacedTheJudgedOne(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	lockFilePath := localPath + ".upload.lock"
+	plantOwnerlessLock(t, lockFilePath, time.Now().Add(-time.Hour))
 
-	marker, err := json.Marshal(uploadLockState{
-		ProcessID:  deadPID,
-		OwnerToken: "taker-that-crashed",
-		AcquiredAt: time.Now().Add(-time.Hour),
-		LocalPath:  localPath,
+	var once sync.Once
+	var replacement os.FileInfo
+	parkTakeoverAt(t, takeoverJudged, "taker", func() {
+		once.Do(func() {
+			// The owner-less file is released and a fresh lock, not yet written,
+			// takes the pathname: a different file with the same bytes.
+			if err := os.Remove(lockFilePath); err != nil {
+				t.Errorf("release the owner-less lock: %v", err)
+				return
+			}
+			plantOwnerlessLock(t, lockFilePath, time.Now())
+			var err error
+			if replacement, err = os.Stat(lockFilePath); err != nil {
+				t.Errorf("stat the replacement lock: %v", err)
+			}
+		})
 	})
+
+	taker, err := acquireAs(localPath, 900001, "taker")
+	if err == nil {
+		ReleaseUploadLock(taker)
+		t.Fatal("the taker owns a lock that had replaced the one it judged abandoned")
+	}
+
+	current, statErr := os.Stat(lockFilePath)
+	if statErr != nil {
+		t.Fatalf("the replacement lock was cleared from under its owner: %v", statErr)
+	}
+	if !os.SameFile(replacement, current) {
+		t.Error("the file at the lock pathname is not the replacement the taker had to leave alone")
+	}
+}
+
+// plantOwnerlessLock leaves a lock file its writer never recorded an owner in,
+// dated so the caller can decide whether it is still inside the grace window.
+func plantOwnerlessLock(t *testing.T, lockFilePath string, written time.Time) {
+	t.Helper()
+	if err := os.WriteFile(lockFilePath, nil, 0600); err != nil {
+		t.Fatalf("plant an owner-less lock: %v", err)
+	}
+	if err := os.Chtimes(lockFilePath, written, written); err != nil {
+		t.Fatalf("date the owner-less lock: %v", err)
+	}
+}
+
+// TestAcquireUploadLock_ProceedsPastTheGuardOfACrashedTaker covers what a taker
+// that dies mid-reclamation leaves behind. Every file-based exclusion this
+// protocol tried before needed a rule for clearing its own leftovers, and the
+// leftover then blocked the next taker until that rule fired. The OS drops the
+// guard's lock when the holder's descriptors close — which is what dying does —
+// so the file it leaves holds nothing back.
+func TestAcquireUploadLock_ProceedsPastTheGuardOfACrashedTaker(t *testing.T) {
+	localPath := plantAbandonedLock(t, 424247)
+	guardPath := localPath + ".upload.lock" + guardSuffix
+
+	crashed, err := os.OpenFile(guardPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		t.Fatalf("marshal marker: %v", err)
+		t.Fatalf("open the crashed taker's guard: %v", err)
 	}
-	if err := os.WriteFile(markerPath, marker, 0600); err != nil {
-		t.Fatalf("plant marker: %v", err)
+	if err := lockGuardFile(crashed); err != nil {
+		t.Fatalf("the crashed taker could not take its guard: %v", err)
 	}
-	stale := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(markerPath, stale, stale); err != nil {
-		t.Fatalf("age the marker: %v", err)
+	// Its descriptors close, as they do for any process that ends. Nothing
+	// removes the file.
+	if err := crashed.Close(); err != nil {
+		t.Fatalf("close the crashed taker's guard: %v", err)
 	}
 
 	lock, err := AcquireUploadLock(localPath)
 	if err != nil {
-		t.Fatalf("a marker its creator died holding still blocks the lock: %v", err)
+		t.Fatalf("a guard its holder died on still blocks the lock: %v", err)
 	}
 	defer ReleaseUploadLock(lock)
 
 	if got := readLockFile(t, localPath); got.ProcessID != os.Getpid() {
 		t.Errorf("lock file names PID %d, want this process (%d)", got.ProcessID, os.Getpid())
 	}
-	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
-		t.Errorf("the crashed taker's marker was left in place: %v", err)
+}
+
+// TestAcquireUploadLock_RefusesReclamationWithoutAnOSLock pins the interim
+// answer on a filesystem that carries no lock at all. Creating a lock still
+// excludes everyone — O_EXCL is the filesystem's own guarantee — but clearing
+// one cannot be made exclusive, and clearing it anyway is how two owners appear.
+func TestAcquireUploadLock_RefusesReclamationWithoutAnOSLock(t *testing.T) {
+	withoutGuardLock := func(t *testing.T) {
+		t.Helper()
+		previous := lockGuard
+		lockGuard = func(*os.File) error { return errGuardLockUnsupported }
+		t.Cleanup(func() { lockGuard = previous })
 	}
+
+	t.Run("creating a lock still works", func(t *testing.T) {
+		withoutGuardLock(t)
+		localPath := filepath.Join(t.TempDir(), "testfile.bin")
+
+		lock, err := AcquireUploadLock(localPath)
+		if err != nil {
+			t.Fatalf("refused a lock nothing else holds: %v", err)
+		}
+		defer ReleaseUploadLock(lock)
+
+		if got := readLockFile(t, localPath); got.ProcessID != os.Getpid() {
+			t.Errorf("lock file names PID %d, want this process (%d)", got.ProcessID, os.Getpid())
+		}
+	})
+
+	t.Run("reclaiming an abandoned lock is refused", func(t *testing.T) {
+		localPath := plantAbandonedLock(t, 424251)
+		lockFilePath := localPath + ".upload.lock"
+		withoutGuardLock(t)
+
+		lock, err := AcquireUploadLock(localPath)
+		if err == nil {
+			ReleaseUploadLock(lock)
+			t.Fatal("cleared an abandoned lock on a filesystem that cannot serialize clearing it")
+		}
+		if errors.Is(err, ErrUploadLockUnavailable) {
+			t.Errorf("a lock that exists is reported as no lock at all: %v", err)
+		}
+		if !strings.Contains(err.Error(), lockFilePath) {
+			t.Errorf("the refusal %q does not name the file to delete (%s)", err, lockFilePath)
+		}
+		if got := readLockFile(t, localPath); got.OwnerToken != "owner-that-crashed" {
+			t.Errorf("the abandoned lock was cleared anyway; it now names %q", got.OwnerToken)
+		}
+	})
 }
 
 // TestAcquireUploadLock_SerializesTakersOfOneAbandonedLock pins the rule the
-// marker exists for: several acquirers can judge one dead record abandoned, and
+// guard exists for: several acquirers can judge one dead record abandoned, and
 // only one of them may act on that judgement.
 func TestAcquireUploadLock_SerializesTakersOfOneAbandonedLock(t *testing.T) {
 	t.Run("a taker that is clearing the lock excludes the others", func(t *testing.T) {
 		localPath := plantAbandonedLock(t, 424248)
 
-		marked := make(chan struct{})
+		guarded := make(chan struct{})
 		release := make(chan struct{})
 		var once sync.Once
-		parkTakeoverAt(t, takeoverMarked, "holder", func() {
+		parkTakeoverAt(t, takeoverGuarded, "holder", func() {
 			once.Do(func() {
-				close(marked)
+				close(guarded)
 				<-release
 			})
 		})
@@ -706,24 +809,40 @@ func TestAcquireUploadLock_SerializesTakersOfOneAbandonedLock(t *testing.T) {
 			lock, err := acquireAs(localPath, 900001, "holder")
 			holderDone <- lockOutcome{lock, err}
 		}()
-		<-marked
+		<-guarded
 
-		other, err := acquireAs(localPath, 900002, "other-taker")
-		if err == nil {
-			ReleaseUploadLock(other)
-			t.Fatal("a second acquirer cleared a lock that was already being cleared")
-		}
-		if !strings.Contains(err.Error(), "clearing the lock") {
-			t.Errorf("the refusal %q does not say the lock is already being cleared", err)
+		// The other taker has judged the same record and reaches for the guard.
+		// It must get no further while the holder is inside it: the judgement it
+		// is carrying is exactly what stops being true in there.
+		otherDone := make(chan lockOutcome, 1)
+		go func() {
+			lock, err := acquireAs(localPath, 900002, "other-taker")
+			otherDone <- lockOutcome{lock, err}
+		}()
+		select {
+		case got := <-otherDone:
+			if got.err == nil {
+				ReleaseUploadLock(got.lock)
+			}
+			t.Fatalf("a second taker got through the guard while it was held: %v", got.err)
+		case <-time.After(100 * time.Millisecond):
 		}
 		close(release)
 
 		holder := <-holderDone
 		if holder.err != nil {
-			t.Fatalf("the taker holding the marker did not get the lock: %v", holder.err)
+			t.Fatalf("the taker holding the guard did not get the lock: %v", holder.err)
+		}
+		other := <-otherDone
+		if other.err == nil {
+			ReleaseUploadLock(other.lock)
+			t.Fatal("both takers own the upload")
+		}
+		if !strings.Contains(other.err.Error(), "another process") {
+			t.Errorf("the second taker's refusal %q does not name the live owner", other.err)
 		}
 		if got := readLockFile(t, localPath); got.OwnerToken != "holder" {
-			t.Errorf("lock file names owner %q, want the taker that held the marker", got.OwnerToken)
+			t.Errorf("lock file names owner %q, want the taker that held the guard", got.OwnerToken)
 		}
 	})
 
@@ -805,6 +924,34 @@ func TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated(t *testing.T) {
 		}
 	})
 
+	t.Run("an existing lock in a directory that refuses a guard", func(t *testing.T) {
+		dir := t.TempDir()
+		localPath := filepath.Join(dir, "testfile.bin")
+		const deadPID = 424252
+		withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+		writeLockFile(t, localPath, uploadLockState{
+			ProcessID:  deadPID,
+			OwnerToken: "owner-that-crashed",
+			AcquiredAt: time.Now(),
+			LocalPath:  localPath,
+		})
+		denyNewFilesIn(t, dir)
+
+		lock, err := AcquireUploadLock(localPath)
+		if err == nil {
+			ReleaseUploadLock(lock)
+			t.Fatal("cleared an abandoned lock in a directory that will not hold the guard")
+		}
+		// The lock file is right there. Reporting that nothing holds the upload
+		// is what the sentinel means, and it is not true here.
+		if errors.Is(err, ErrUploadLockUnavailable) {
+			t.Errorf("an existing lock that cannot be guarded is reported as no lock at all: %v", err)
+		}
+		if !strings.Contains(err.Error(), "cannot clear the abandoned upload lock") {
+			t.Errorf("the refusal %q is not the one that reaches for the guard", err)
+		}
+	})
+
 	t.Run("an existing lock that cannot be read", func(t *testing.T) {
 		localPath := filepath.Join(t.TempDir(), "testfile.bin")
 		// A lock file whose contents no reader can get at. Whether an owner is
@@ -827,18 +974,28 @@ func TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated(t *testing.T) {
 // denyingDirectory returns a directory that will not accept a new file.
 func denyingDirectory(t *testing.T) string {
 	t.Helper()
+	dir := filepath.Join(t.TempDir(), "read-only")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatalf("create read-only directory: %v", err)
+	}
+	denyNewFilesIn(t, dir)
+	return dir
+}
+
+// denyNewFilesIn stops a directory accepting new files, whatever it already
+// holds, so a test can put a lock somewhere the guard beside it cannot go.
+func denyNewFilesIn(t *testing.T, dir string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permissions do not deny file creation on Windows")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root, which ignores directory permissions")
 	}
-	dir := filepath.Join(t.TempDir(), "read-only")
-	if err := os.Mkdir(dir, 0500); err != nil {
-		t.Fatalf("create read-only directory: %v", err)
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("deny new files in %s: %v", dir, err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
-	return dir
 }
 
 // TestAcquireUploadLock_RefusesAliasOfHeldPath pins path identity. Exclusion
