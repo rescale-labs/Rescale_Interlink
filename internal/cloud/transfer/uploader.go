@@ -106,6 +106,17 @@ type StreamingUploadResumeParams struct {
 	PartSize     int64     // Part size from resume state
 	RandomSuffix string    // Random suffix from resume state
 	OutputWriter io.Writer // Optional output for status messages
+
+	// CompletedParts is the contiguous prefix of parts the interrupted attempt
+	// got onto the backend, in index order, as it recorded them.
+	//
+	// It is here for backends that identify a staged part by something they
+	// chose rather than by its position: Azure commits a list of block IDs, and
+	// a resumed upload that only knew the IDs of the parts IT staged would
+	// commit a list with holes where the first attempt's blocks are. S3 needs
+	// nothing from this — its parts are addressed by part number — but the
+	// orchestrator has the list either way, so both providers are handed it.
+	CompletedParts []*PartResult
 }
 
 // StreamingUpload represents an in-progress streaming multipart upload.
@@ -120,6 +131,15 @@ type StreamingUpload struct {
 	InitialIV []byte // Initial IV for CBC chaining (stored in metadata)
 	FileID    []byte // DEPRECATED: File identifier for legacy HKDF derivation
 	PartSize  int64  // Size of each part in bytes
+
+	// EncryptState is the CBC chain this upload is encrypting through, exposed
+	// so the orchestrator can read the chain position after each part and
+	// checkpoint it with the parts the backend has accepted. Nothing else can
+	// reach it: the encryptor itself lives in ProviderData, which is opaque
+	// here. A provider that leaves this nil is uploading in one shot as far as
+	// the orchestrator is concerned — its uploads still work, they just cannot
+	// be resumed, because nothing would know where to pick the chain back up.
+	EncryptState *StreamingEncryptionState
 
 	// File info
 	LocalPath    string

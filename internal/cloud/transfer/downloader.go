@@ -305,9 +305,21 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		return err
 	}
 
+	// The partial ciphertext is the artifact a retry resumes from: the chunked
+	// driver records which chunks it holds in a .download.resume sidecar beside
+	// it, and the CLI guide promises a rerun fetches only the missing ones.
+	// Removing it on every return made that sidecar describe a file that was no
+	// longer there, so every documented v0 resume in fact started from zero.
+	// Arm the removal only once the plaintext has been written from it, or once
+	// this attempt has decided the bytes are not worth coming back to.
+	dropEncrypted := false
+
 	// Retry cleanup of temp file with backoff for Windows file locking.
 	// Log the actual error even when OutputWriter is nil.
 	defer func() {
+		if !dropEncrypted {
+			return
+		}
 		var lastErr error
 		for i := 0; i < 3; i++ {
 			if lastErr = os.Remove(encryptedPath); lastErr == nil || os.IsNotExist(lastErr) {
@@ -364,6 +376,12 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 	// stale cache data.
 	computedHash, err := encryption.DecryptFileWithHash(encryptedPath, localPath, prep.EncryptionKey, prep.IV)
 	if err != nil {
+		// A whole ciphertext that this key will not decrypt is not something a
+		// retry can make progress on — the same bytes would fail the same way
+		// forever — so this attempt abandons it rather than resuming from it.
+		// The exception is a write that the filesystem refused: the ciphertext
+		// is fine there, only the room for the plaintext was missing.
+		dropEncrypted = !storage.IsDiskFullError(err)
 		// Same as the download branch above: the OS refused the write, so the
 		// figures describe the plaintext that still had to fit and the free space
 		// on targetDir's own filesystem.
@@ -376,6 +394,9 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		}
 		return fmt.Errorf("decryption failed: %w", err)
 	}
+	// Verified completion: the plaintext has been written from this ciphertext,
+	// so there is nothing left for it to describe.
+	dropEncrypted = true
 	prep.ComputedHash = computedHash
 
 	// Complete transfer handle if provided

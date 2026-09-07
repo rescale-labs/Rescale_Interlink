@@ -171,6 +171,21 @@ func (e *CBCStreamingEncryptor) GetInitialIV() []byte {
 	return result
 }
 
+// GetCurrentIV returns the chaining position: the IV the next part will be
+// encrypted under, which is the last ciphertext block of the part just
+// encrypted.
+//
+// This is what an interrupted upload has to record to be resumable.
+// NewCBCStreamingEncryptorWithKey can pick the chain back up from any part
+// boundary, but only if something saved the IV at that boundary — the key and
+// the initial IV alone place an encryptor at part 0, and re-encrypting from
+// there would produce different bytes for every part already on the backend.
+func (e *CBCStreamingEncryptor) GetCurrentIV() []byte {
+	result := make([]byte, IVSize)
+	copy(result, e.currentIV)
+	return result
+}
+
 // CBCStreamingDecryptor provides streaming decryption with CBC chaining.
 // Used for decrypting files uploaded with CBCStreamingEncryptor.
 type CBCStreamingDecryptor struct {

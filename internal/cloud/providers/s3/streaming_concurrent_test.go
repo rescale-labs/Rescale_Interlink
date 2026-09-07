@@ -3,11 +3,21 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
+	nethttp "net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
+	"github.com/rescale/rescale-int/internal/crypto"
 )
 
 // TestUploadProgressReaderSeek verifies that uploadProgressReader implements
@@ -184,5 +194,135 @@ func TestUploadCiphertextReportsEachByteOnceAcrossRetries(t *testing.T) {
 	if got := reported.Load(); got != int64(len(ciphertext)) {
 		t.Errorf("progress reported %d bytes for a %d-byte part: the failed attempt's bytes were counted as well",
 			got, len(ciphertext))
+	}
+}
+
+// hkdfObjectBackend serves one v1 (HKDF) object over ranged GETs and reports a
+// different ETag from a chosen range onwards, which is an object being replaced
+// under a download that is made of many requests.
+type hkdfObjectBackend struct {
+	mu sync.Mutex
+
+	ciphertext []byte
+	metadata   map[string]string
+	replaceAt  int // range index from which the ETag changes; 0 disables
+	ranges     int
+}
+
+func (h *hkdfObjectBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
+	h.mu.Lock()
+	etag := `"version-one"`
+	if r.Method == nethttp.MethodGet {
+		h.ranges++
+		if h.replaceAt > 0 && h.ranges >= h.replaceAt {
+			etag = `"version-two"`
+		}
+	}
+	h.mu.Unlock()
+
+	w.Header().Set("ETag", etag)
+	for name, value := range h.metadata {
+		w.Header().Set("x-amz-meta-"+name, value)
+	}
+
+	switch r.Method {
+	case nethttp.MethodHead:
+		w.Header().Set("Content-Length", strconv.Itoa(len(h.ciphertext)))
+		w.WriteHeader(nethttp.StatusOK)
+
+	case nethttp.MethodGet:
+		start, end := 0, len(h.ciphertext)-1
+		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
+		if end >= len(h.ciphertext) {
+			end = len(h.ciphertext) - 1
+		}
+		body := h.ciphertext[start : end+1]
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(h.ciphertext)))
+		w.WriteHeader(nethttp.StatusPartialContent)
+		_, _ = w.Write(body)
+
+	default:
+		w.WriteHeader(nethttp.StatusNotImplemented)
+	}
+}
+
+// newHKDFObject builds a v1 object of parts plaintext parts, the master key it
+// was written under, and the plaintext a correct download produces.
+func newHKDFObject(t *testing.T, parts int, partSize int64) (*hkdfObjectBackend, []byte, []byte) {
+	t.Helper()
+
+	encryptor, err := encryption.NewStreamingEncryptor(partSize)
+	if err != nil {
+		t.Fatalf("NewStreamingEncryptor: %v", err)
+	}
+
+	plaintext := make([]byte, int64(parts)*partSize)
+	for i := range plaintext {
+		plaintext[i] = byte(i*11 + 3)
+	}
+
+	var ciphertext []byte
+	for index := 0; index < parts; index++ {
+		part, err := encryptor.EncryptPart(int64(index), plaintext[int64(index)*partSize:int64(index+1)*partSize])
+		if err != nil {
+			t.Fatalf("EncryptPart(%d): %v", index, err)
+		}
+		ciphertext = append(ciphertext, part...)
+	}
+
+	return &hkdfObjectBackend{
+		ciphertext: ciphertext,
+		metadata: map[string]string{
+			"formatversion": "1",
+			"fileid":        base64.StdEncoding.EncodeToString(encryptor.GetFileId()),
+			"partsize":      strconv.FormatInt(partSize, 10),
+		},
+	}, encryptor.GetMasterKey(), plaintext
+}
+
+// TestDownloadStreamingAbortsWhenTheObjectIsReplaced is the v1 half of pinning a
+// ranged download to one version. The concurrent chunked paths already refuse a
+// file stitched from two objects; this one fetched every part with no version
+// condition at all, so an object replaced partway through was assembled from
+// both versions and — with the size right and no per-file checksum guaranteed —
+// nothing afterwards noticed.
+func TestDownloadStreamingAbortsWhenTheObjectIsReplaced(t *testing.T) {
+	backend, masterKey, _ := newHKDFObject(t, 3, 64)
+	backend.replaceAt = 2 // the first range is the pin; the second is the new object
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestS3Client(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, s3Client: client}
+
+	localPath := filepath.Join(t.TempDir(), "downloaded.dat")
+	err := provider.DownloadStreaming(context.Background(), "object.dat", localPath, masterKey, nil)
+	if !errors.Is(err, transfer.ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+}
+
+// TestDownloadStreamingReadsOneVersionThrough is the other side of the pin: an
+// object that does not change downloads exactly as before.
+func TestDownloadStreamingReadsOneVersionThrough(t *testing.T) {
+	backend, masterKey, plaintext := newHKDFObject(t, 3, 64)
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestS3Client(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, s3Client: client}
+
+	localPath := filepath.Join(t.TempDir(), "downloaded.dat")
+	if err := provider.DownloadStreaming(context.Background(), "object.dat", localPath, masterKey, nil); err != nil {
+		t.Fatalf("DownloadStreaming: %v", err)
+	}
+
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read the downloaded file: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("downloaded %d bytes, want the %d the object holds", len(got), len(plaintext))
 	}
 }

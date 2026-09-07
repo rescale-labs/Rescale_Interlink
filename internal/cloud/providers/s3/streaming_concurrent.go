@@ -110,6 +110,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 		StoragePath:  objectKey,
 		MasterKey:    encryptState.GetKey(),
 		InitialIV:    encryptState.GetInitialIV(),
+		EncryptState: encryptState,
 		FileID:       nil, // Not used in CBC format
 		PartSize:     partSize,
 		LocalPath:    params.LocalPath,
@@ -299,6 +300,11 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 	// Calculate total parts
 	totalParts := transfer.CalculateTotalParts(params.FileSize, params.PartSize)
 
+	// params.CompletedParts is deliberately unused: S3 addresses a staged part
+	// by its part number, so the parts the first attempt uploaded are already
+	// where CompleteMultipartUpload will look for them. Azure, which commits a
+	// list of identifiers it was given, does have to restore them.
+
 	if params.OutputWriter != nil {
 		fmt.Fprintf(params.OutputWriter, "Resuming streaming upload: %d parts of %d MB\n",
 			totalParts, params.PartSize/(1024*1024))
@@ -309,6 +315,7 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 		StoragePath:  params.StoragePath,
 		MasterKey:    params.MasterKey,
 		InitialIV:    params.InitialIV,
+		EncryptState: encryptState,
 		FileID:       nil, // Not used in CBC format
 		PartSize:     params.PartSize,
 		LocalPath:    params.LocalPath,
@@ -404,13 +411,18 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 		},
 		// GetObjectRangeOnce is the non-retrying variant: the shared driver owns
 		// the retry loop and the per-attempt timeout.
-		Open: func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, remotePath, offset, offset+length-1, "")
-			if err != nil {
-				return nil, err
-			}
-			return resp.Body, nil
-		},
+		//
+		// Every range has to come back carrying the same ETag, so an object
+		// replaced while this download runs aborts it instead of writing a file
+		// stitched from two versions. The pin starts empty and the first range
+		// sets it, rather than being seeded from the Stat above: the driver
+		// refreshes credentials before it stats, and doing our own HEAD first
+		// would move that call ahead of the refresh. The window that leaves —
+		// a replacement between the Stat and the first range — is not silent
+		// anyway, because the fileId this format derives its part keys from
+		// comes from the Stat, and the new object's parts will not decrypt
+		// under the old one's.
+		Open: transfer.PinObjectVersion(rangeReaderWithETag(s3Client, remotePath), ""),
 	})
 }
 

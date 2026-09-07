@@ -3,6 +3,7 @@
 package transfer
 
 import (
+	"crypto/aes"
 	"fmt"
 
 	"github.com/rescale/rescale-int/internal/crypto"
@@ -63,10 +64,29 @@ func (s *StreamingEncryptionState) GetInitialIV() []byte {
 	return s.encryptor.GetInitialIV()
 }
 
+// GetCurrentIV returns the chaining position: the IV the next part will be
+// encrypted under. An upload checkpoints this alongside the parts the backend
+// has accepted, because it is the only thing that lets a later attempt continue
+// the chain instead of restarting it — see CBCStreamingEncryptor.GetCurrentIV.
+func (s *StreamingEncryptionState) GetCurrentIV() []byte {
+	return s.encryptor.GetCurrentIV()
+}
+
 // CalculateTotalParts calculates the number of parts needed for a file.
 func CalculateTotalParts(fileSize, partSize int64) int64 {
 	if fileSize == 0 {
 		return 1 // Empty files still have one part
 	}
 	return (fileSize + partSize - 1) / partSize
+}
+
+// CiphertextSize is how long the object a streaming upload assembles from a
+// file of fileSize plaintext bytes will be.
+//
+// CBC neither pads nor grows a part that is already a whole number of blocks,
+// and every part but the last is one — EncryptPart refuses a non-final part
+// that is not. So the only growth is the PKCS7 padding on the final part, which
+// is between 1 and 16 bytes and is always there, including for an empty file.
+func CiphertextSize(fileSize int64) int64 {
+	return fileSize + aes.BlockSize - fileSize%aes.BlockSize
 }

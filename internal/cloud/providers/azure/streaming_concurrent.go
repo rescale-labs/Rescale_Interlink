@@ -116,6 +116,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 		StoragePath:  storagePath,
 		MasterKey:    encryptState.GetKey(),
 		InitialIV:    encryptState.GetInitialIV(),
+		EncryptState: encryptState,
 		FileID:       nil, // Not used in CBC format
 		PartSize:     partSize,
 		LocalPath:    params.LocalPath,
@@ -221,6 +222,13 @@ func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *tra
 		blockIDs[part.PartIndex] = providerData.blockIDs[part.PartIndex]
 	}
 
+	// An empty slot is a block this attempt neither staged nor restored from a
+	// resume state; committing the list anyway drops that block's bytes from
+	// the blob without failing anything.
+	if err := transfer.VerifyBlockList(blockIDs); err != nil {
+		return nil, err
+	}
+
 	// Metadata uses `iv` field for Rescale compatibility.
 	// `streamingformat: cbc` enables streaming download (no temp file).
 	metadata := map[string]*string{
@@ -301,14 +309,25 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 			totalParts, params.PartSize/(1024*1024))
 	}
 
-	// Pre-allocate block IDs slice
+	// Pre-allocate block IDs slice and put back the identifiers the interrupted
+	// attempt staged its blocks under. CommitBlockList assembles the blob from
+	// the list it is handed, not from whatever happens to be staged, so without
+	// this the commit would name only the blocks THIS attempt staged and the
+	// resumed blob would be missing every earlier block's bytes.
 	blockIDs := make([]string, totalParts)
+	for _, part := range params.CompletedParts {
+		if part == nil || part.PartIndex < 0 || part.PartIndex >= totalParts {
+			continue
+		}
+		blockIDs[part.PartIndex] = part.ETag
+	}
 
 	return &transfer.StreamingUpload{
 		UploadID:     "", // Azure doesn't have upload IDs like S3
 		StoragePath:  params.StoragePath,
 		MasterKey:    params.MasterKey,
 		InitialIV:    params.InitialIV,
+		EncryptState: encryptState,
 		FileID:       nil, // Not used in CBC format
 		PartSize:     params.PartSize,
 		LocalPath:    params.LocalPath,
@@ -410,13 +429,18 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 		},
 		// DownloadRangeOnce is the non-retrying variant: the shared driver owns
 		// the retry loop and the per-attempt timeout.
-		Open: func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
-			if err != nil {
-				return nil, err
-			}
-			return resp.Body, nil
-		},
+		//
+		// Every range has to come back carrying the same ETag, so a blob
+		// replaced while this download runs aborts it instead of writing a file
+		// stitched from two versions. The pin starts empty and the first range
+		// sets it, rather than being seeded from the Stat above: the driver
+		// refreshes credentials before it stats, and doing our own properties
+		// call first would move it ahead of the refresh. The window that leaves
+		// — a replacement between the Stat and the first range — is not silent
+		// anyway, because the fileId this format derives its part keys from
+		// comes from the Stat, and the new blob's parts will not decrypt under
+		// the old one's.
+		Open: transfer.PinObjectVersion(rangeReaderWithETag(azureClient, remotePath), ""),
 	})
 }
 

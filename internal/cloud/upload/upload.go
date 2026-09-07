@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -418,12 +419,23 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		return nil, fmt.Errorf("provider does not support streaming upload")
 	}
 
+	sourceInfo, err := os.Stat(params.LocalPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+
 	streamInitTimer := cloud.StartTimer(params.OutputWriter, "Streaming upload init")
 
 	concurrency := 4
 	if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
 		concurrency = params.TransferHandle.GetThreads()
 	}
+
+	// Read what an interrupted attempt left behind before planning: a resumed
+	// upload is stuck with the part size the first attempt chained through and
+	// stamped into the object's metadata, so what this run would have planned
+	// for is advisory once there is a state to continue.
+	resumed := loadStreamingResume(ctx, streamingUploader, params, sourceInfo, fileSize)
 
 	// Plan before anything is opened on the backend. A file too large for the
 	// storage type, or a machine that cannot hold one working set, has to fail
@@ -434,24 +446,55 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		return nil, err
 	}
 	defer releasePlan()
+
+	var uploadState *transfer.StreamingUpload
+	if resumed.usable {
+		uploadState, err = reopenStreamingUpload(ctx, streamingUploader, params, resumed)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if uploadState != nil {
+		// Resuming: the part size is the interrupted upload's, whatever this run
+		// would have chosen.
+		plan = fitPipelineToPartSize(plan, uploadState.PartSize)
+	}
 	if concurrency > plan.WorkerCap {
 		concurrency = plan.WorkerCap
 	}
 
-	// Initialize streaming upload
-	initParams := transfer.StreamingUploadInitParams{
-		LocalPath:    params.LocalPath,
-		FileSize:     fileSize,
-		OutputWriter: params.OutputWriter,
-		Plan:         &plan,
-	}
+	if uploadState == nil {
+		// Either there was nothing to resume, or what there was is gone from the
+		// backend. Whatever this run uploads belongs to a new object, so no part
+		// of the old attempt counts towards it.
+		resumed = streamingResume{}
 
-	uploadState, err := streamingUploader.InitStreamingUpload(ctx, initParams)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize streaming upload: %w", err)
+		initParams := transfer.StreamingUploadInitParams{
+			LocalPath:    params.LocalPath,
+			FileSize:     fileSize,
+			OutputWriter: params.OutputWriter,
+			Plan:         &plan,
+		}
+
+		uploadState, err = streamingUploader.InitStreamingUpload(ctx, initParams)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize streaming upload: %w", err)
+		}
 	}
 
 	streamInitTimer.StopWithMessage("parts=%d part_size=%s", uploadState.TotalParts, cloud.FormatBytes(int64(uploadState.PartSize)))
+
+	// The prefix a previous attempt got onto the backend. This run encrypts and
+	// uploads only what comes after it, and the completion below counts both.
+	startPart := int64(len(resumed.parts))
+	checkpoint := &streamingCheckpointer{
+		params:      params,
+		upload:      uploadState,
+		sourceInfo:  sourceInfo,
+		storageType: streamingUploader.StorageType(),
+		createdAt:   resumed.createdAt,
+		recorded:    startPart > 0,
+	}
 
 	// Progress interpolator provides smooth updates every 500ms, ensuring responsive
 	// feedback even when individual parts take seconds to upload.
@@ -471,6 +514,13 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		// This changes GUI status from "Preparing" to "0.00%" so users know
 		// the transfer has started, even before the first part completes.
 		params.ProgressCallback(0.0)
+
+		// A resumed upload starts part of the way through the file. Without
+		// crediting what the previous attempt transferred, progress would begin
+		// at zero and stop short of the whole file when this run finishes.
+		if resumedBytes := resumedPlaintextBytes(startPart, uploadState.PartSize, fileSize); resumedBytes > 0 {
+			progressInterp.ConfirmBytes(resumedBytes)
+		}
 	}
 
 	file, err := openUploadSource(params.LocalPath)
@@ -478,6 +528,12 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
+
+	if startPart > 0 {
+		if err := skipUploadedPrefix(file, startPart*uploadState.PartSize); err != nil {
+			return nil, fmt.Errorf("failed to seek to part %d of %s: %w", startPart, filepath.Base(params.LocalPath), err)
+		}
+	}
 
 	cloud.TimingLog(params.OutputWriter, "Upload workers: %d threads (max %d)", concurrency, plan.WorkerCap)
 
@@ -496,12 +552,30 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	var firstErr error
 	var errOnce sync.Once
 
+	// chainIV[i] is where the CBC chain stood after part i was encrypted, which
+	// is what a checkpoint covering parts 0..i has to record. It cannot be read
+	// when that part's upload lands: encryption runs ahead of the uploads, so
+	// the chain has already moved on by then. Only the encryption goroutine
+	// writes it, and each entry reaches the collector below through the same
+	// channel sends that carry the part it belongs to.
+	//
+	// recordChainIV is what keeps a source that grew under the upload from
+	// indexing past the end of it. That case is caught properly by the
+	// completeness check below and by checkSourceUnchanged after it; nothing
+	// about it should be a panic in a goroutine.
+	chainIV := make([][]byte, uploadState.TotalParts)
+	recordChainIV := func(partIndex int64) {
+		if partIndex >= 0 && partIndex < int64(len(chainIV)) {
+			chainIV[partIndex] = currentChainIV(uploadState)
+		}
+	}
+
 	// Encryption goroutine: reads file, encrypts parts, sends to channel
 	// Must be sequential due to CBC chaining constraint
 	go func() {
 		defer close(encryptedChan)
 		buffer := make([]byte, uploadState.PartSize)
-		var partIndex int64 = 0
+		partIndex := startPart
 
 		for {
 			// Check for context cancellation
@@ -534,6 +608,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 					cancelUpload()
 					return
 				}
+				recordChainIV(0)
 				select {
 				case encryptedChan <- encryptedPart{
 					partIndex:  0,
@@ -557,6 +632,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 					cancelUpload()
 					return
 				}
+				recordChainIV(partIndex)
 
 				// Send encrypted part to upload workers
 				select {
@@ -680,9 +756,19 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		close(resultChan)
 	}()
 
-	// Collect results - parts may arrive out of order due to parallel uploads
+	// Collect results - parts may arrive out of order due to parallel uploads.
+	// The map starts holding whatever an interrupted attempt already got onto
+	// the backend, so what it counts is always resumed plus this run.
 	partsMap := make(map[int64]*transfer.PartResult)
-	completedCount := 0
+	for _, part := range resumed.parts {
+		partsMap[part.PartIndex] = part
+	}
+
+	// prefix is how many parts from 0 upwards are on the backend without a gap.
+	// Parts finish out of order under concurrency, so the set of completed parts
+	// is not somewhere an upload can be resumed from — only this prefix is,
+	// because the chain IV names one boundary and the source is re-read from it.
+	prefix := startPart
 
 	for res := range resultChan {
 		if res.err != nil {
@@ -693,16 +779,36 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		// Update size to plaintext size for accurate tracking
 		res.result.Size = res.plainSize
 		partsMap[res.partIndex] = res.result
-		completedCount++
 
 		if progressInterp != nil {
 			progressInterp.ConfirmBytes(res.plainSize)
 		}
+
+		grown := false
+		for partsMap[prefix] != nil {
+			prefix++
+			grown = true
+		}
+		// A provider that does not expose its chain position leaves chainIV
+		// empty; its uploads run exactly as before, they just cannot be resumed,
+		// because nothing would know where to pick the chain back up. A prefix
+		// past the planned part count means the source grew under the upload,
+		// which the completeness check below is what answers.
+		if grown && prefix <= uploadState.TotalParts && chainIV[prefix-1] != nil {
+			checkpoint.save(orderedParts(partsMap, prefix), chainIV[prefix-1])
+		}
 	}
+
+	// An attempt that checkpointed nothing has left nothing behind that a retry
+	// could find, so the parts it did upload are already unreachable: discard
+	// the backend upload instead of leaving it to the backend's own expiry. A
+	// cancelled upload is discarded whether or not it checkpointed — nobody is
+	// coming back for one the caller stopped.
+	discard := !checkpoint.recorded || ctx.Err() != nil
 
 	// Check for errors
 	if firstErr != nil {
-		_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
 		return nil, firstErr
 	}
 
@@ -710,39 +816,457 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// This can happen if the user cancels the upload or a timeout occurs.
 	select {
 	case <-ctx.Done():
-		_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, true)
 		return nil, fmt.Errorf("upload cancelled: %w", ctx.Err())
 	default:
 	}
 
-	// Verify we received ALL expected parts before completing.
-	// This prevents truncated uploads from being registered as complete files.
-	// If any parts are missing (due to context cancellation, network issues, etc.),
-	// we must abort to avoid creating corrupted files in cloud storage.
+	// Verify we hold ALL expected parts before completing — the ones this run
+	// uploaded and the ones it resumed. This prevents truncated uploads from
+	// being registered as complete files; both backends assemble whatever subset
+	// of parts they are handed and report success.
 	expectedParts := int(uploadState.TotalParts)
 	if len(partsMap) != expectedParts {
-		_ = streamingUploader.AbortStreamingUpload(ctx, uploadState)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
 		return nil, fmt.Errorf("upload incomplete: received %d of %d parts (upload was interrupted or cancelled)",
 			len(partsMap), expectedParts)
 	}
 
 	// Convert map to ordered slice for completion
-	parts := make([]*transfer.PartResult, len(partsMap))
-	for idx, part := range partsMap {
-		parts[idx] = part
-	}
+	parts := orderedParts(partsMap, uploadState.TotalParts)
 
 	completeTimer := cloud.StartTimer(params.OutputWriter, "Streaming upload complete")
 
 	// Complete upload
 	result, err := streamingUploader.CompleteStreamingUpload(ctx, uploadState, parts)
 	if err != nil {
+		// The parts are all still on the backend and the checkpoint still
+		// describes them, so a retry finishes from here rather than re-sending
+		// the file.
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
 		return nil, fmt.Errorf("failed to complete streaming upload: %w", err)
 	}
 
 	completeTimer.StopWithMessage("parts=%d", len(parts))
 
+	// Verified completion: the object is assembled, so its checkpoint describes
+	// an upload that no longer exists.
+	state.DeleteUploadState(params.LocalPath)
+
 	return result, nil
+}
+
+// orderedParts lays the first count parts out in index order, which is the order
+// both backends assemble an object in.
+func orderedParts(parts map[int64]*transfer.PartResult, count int64) []*transfer.PartResult {
+	ordered := make([]*transfer.PartResult, count)
+	for i := int64(0); i < count; i++ {
+		ordered[i] = parts[i]
+	}
+	return ordered
+}
+
+// currentChainIV reports where the CBC chain stands, or nil for a provider that
+// does not expose it — see StreamingUpload.EncryptState.
+func currentChainIV(uploadState *transfer.StreamingUpload) []byte {
+	if uploadState.EncryptState == nil {
+		return nil
+	}
+	return uploadState.EncryptState.GetCurrentIV()
+}
+
+// resumedPlaintextBytes is how much of the file the parts before startPart hold.
+func resumedPlaintextBytes(startPart, partSize, fileSize int64) int64 {
+	bytes := startPart * partSize
+	if bytes > fileSize {
+		return fileSize
+	}
+	return bytes
+}
+
+// skipUploadedPrefix positions the source at the first part this attempt has to
+// send. Seeking is the whole point of resuming: reading the earlier parts only
+// to throw them away would cost as much I/O as uploading them again. The source
+// arrives as a plain io.ReadCloser because the seam that supplies it exists so
+// tests can feed the encrypt loop a reader that returns short reads, and such a
+// reader cannot seek — hence the fallback that reads the prefix away.
+func skipUploadedPrefix(file io.Reader, offset int64) error {
+	if seeker, ok := file.(io.Seeker); ok {
+		_, err := seeker.Seek(offset, io.SeekStart)
+		return err
+	}
+	_, err := io.CopyN(io.Discard, file, offset)
+	return err
+}
+
+// endStreamingUpload closes out an attempt that produced no object.
+//
+// discard=false is the ordinary failure: the parts stay on the backend and the
+// checkpoint stays on disk, because together they are what lets the next
+// attempt carry on instead of re-sending the file. discard=true is for an
+// upload nothing will come back to — one the caller cancelled, or one that
+// never got a checkpoint written — where the parts would otherwise sit on the
+// backend until its own expiry swept them.
+func endStreamingUpload(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, uploadState *transfer.StreamingUpload, discard bool) {
+	if !discard {
+		return
+	}
+	// Not ctx: the usual reason to be here is that ctx was cancelled, and an
+	// abort issued on a cancelled context never reaches the backend — which is
+	// exactly the case the abort exists for.
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), constants.PartOperationTimeout)
+	defer cancel()
+
+	if err := uploader.AbortStreamingUpload(abortCtx, uploadState); err != nil {
+		log.Printf("Warning: failed to abort the streaming upload of %s (%s): %v",
+			filepath.Base(params.LocalPath), uploadState.StoragePath, err)
+	}
+	state.DeleteUploadState(params.LocalPath)
+}
+
+// fitPipelineToPartSize narrows a plan to the part size a resumed upload is
+// stuck with. Part size is fixed for the life of an object — CBC chains through
+// it and the object's metadata states it — so a resumed attempt cannot adopt the
+// one this run would have planned. The memory the plan reserved was sized
+// against the planned part size, so when the saved parts are the larger of the
+// two, the same number of workers and queued parts would hold more than was
+// budgeted for; carrying fewer of them keeps the reservation honest.
+func fitPipelineToPartSize(plan resources.UploadPlan, partSize int64) resources.UploadPlan {
+	if partSize <= 0 {
+		return plan
+	}
+	if plan.PartSize > 0 && partSize > plan.PartSize {
+		fits := func(count int) int {
+			scaled := int(int64(count) * plan.PartSize / partSize)
+			if scaled < 1 {
+				return 1
+			}
+			return scaled
+		}
+		plan.WorkerCap = fits(plan.WorkerCap)
+		plan.QueueDepth = fits(plan.QueueDepth)
+	}
+	plan.PartSize = partSize
+	return plan
+}
+
+// streamingResume is what an interrupted streaming attempt left behind for this
+// source: the object it was filling, the encryption chain at the boundary it
+// reached, and the parts the backend accepted before it stopped.
+type streamingResume struct {
+	usable    bool
+	saved     *state.UploadResumeState
+	masterKey []byte
+	initialIV []byte
+	chainIV   []byte
+	parts     []*transfer.PartResult
+	createdAt time.Time
+}
+
+// loadStreamingResume recovers the object identity and encryption chain of an
+// interrupted streaming upload of this exact source, so this run can continue
+// the parts the backend already accepted instead of sending the file again.
+//
+// Anything it cannot fully match is abandoned rather than adapted: a checkpoint
+// that no longer describes the file we are about to register can only be
+// finished as an object nothing will ask for.
+func loadStreamingResume(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, sourceInfo os.FileInfo, fileSize int64) streamingResume {
+	saved, err := state.LoadUploadState(params.LocalPath)
+	if err != nil || saved == nil {
+		return streamingResume{}
+	}
+
+	if reason := streamingResumeBlocker(saved, params.LocalPath, sourceInfo, uploader.StorageType(), fileSize); reason != "" {
+		if params.OutputWriter != nil {
+			fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: %s\n",
+				filepath.Base(params.LocalPath), reason)
+		}
+		abandonStreamingState(ctx, uploader, params, saved)
+		return streamingResume{}
+	}
+
+	masterKey, keyErr := encryption.DecodeBase64(saved.MasterKey)
+	initialIV, ivErr := encryption.DecodeBase64(saved.InitialIV)
+	chainIV, chainErr := encryption.DecodeBase64(saved.ChainIV)
+	if keyErr != nil || ivErr != nil || chainErr != nil {
+		if params.OutputWriter != nil {
+			fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: the saved encryption chain cannot be read\n",
+				filepath.Base(params.LocalPath))
+		}
+		abandonStreamingState(ctx, uploader, params, saved)
+		return streamingResume{}
+	}
+
+	parts := make([]*transfer.PartResult, 0, len(saved.StreamingParts))
+	for _, part := range saved.StreamingParts {
+		parts = append(parts, &transfer.PartResult{
+			PartIndex: part.PartIndex,
+			// Both backends number a part one above its index; the state records
+			// the index, because that is what the encryption chain counts in.
+			PartNumber: int32(part.PartIndex + 1),
+			ETag:       part.Handle,
+		})
+	}
+
+	return streamingResume{
+		usable:    true,
+		saved:     saved,
+		masterKey: masterKey,
+		initialIV: initialIV,
+		chainIV:   chainIV,
+		parts:     parts,
+		// The backend's own expiry runs from when the upload was opened, not
+		// from the last checkpoint, so the age this state is judged on has to
+		// survive every checkpoint and every resume.
+		createdAt: saved.CreatedAt,
+	}
+}
+
+// streamingResumeBlocker names the reason this state cannot be resumed, or ""
+// when it can. Every check answers the same question: do the parts already on
+// the backend still describe the file we are about to register?
+//
+// state.ValidateUploadState is deliberately not called here even though the
+// checks overlap: its streaming branch demands the file_id of the HKDF format,
+// which a CBC upload has never had, so it rejects every state this path writes.
+func streamingResumeBlocker(saved *state.UploadResumeState, localPath string, sourceInfo os.FileInfo, storageType string, fileSize int64) string {
+	if saved.FormatVersion != 1 {
+		return "the saved state belongs to a pre-encrypt upload"
+	}
+	// The object identity in the state is one backend's; handing it to another
+	// would name a different object and strand the first backend's parts.
+	if saved.StorageType != "" && saved.StorageType != storageType {
+		return "the interrupted upload was going to " + saved.StorageType
+	}
+	if saved.LocalPath != localPath {
+		return "the saved state describes another file"
+	}
+	if saved.OriginalSize != fileSize {
+		return fmt.Sprintf("the file has changed size since the interrupted upload (was %d, now %d)", saved.OriginalSize, fileSize)
+	}
+	// State written before v4.9.9 has no modification time, and size alone
+	// cannot tell an edited file from the one those parts were cut from.
+	if saved.SourceModTime.IsZero() {
+		return "the saved state predates modification-time tracking"
+	}
+	if !saved.SourceModTime.Equal(sourceInfo.ModTime()) {
+		return "the file has been modified since the interrupted upload"
+	}
+	// Both backends discard an unfinished upload after seven days, so a state
+	// older than that describes parts that are no longer there to continue.
+	if time.Since(saved.CreatedAt) > state.MaxResumeAge {
+		return "the interrupted upload has expired"
+	}
+	if saved.ObjectKey == "" {
+		return "the saved state does not name the object the interrupted upload was filling"
+	}
+	if saved.PartSize <= 0 {
+		return "the saved state does not say what part size the interrupted upload used"
+	}
+	if saved.MasterKey == "" || saved.InitialIV == "" || saved.ChainIV == "" {
+		return "the saved state does not carry the encryption chain of the interrupted upload"
+	}
+	if len(saved.StreamingParts) == 0 {
+		return "the interrupted upload has no completed parts to continue from"
+	}
+	// The chain IV describes one boundary, and the source is re-read from it, so
+	// only an unbroken run of parts from the start can be continued. A list that
+	// is anything else describes a different upload than the chain IV does.
+	for i, part := range saved.StreamingParts {
+		if part.PartIndex != int64(i) || part.Handle == "" {
+			return "the saved parts of the interrupted upload are not an unbroken run from its start"
+		}
+	}
+	if int64(len(saved.StreamingParts)) > transfer.CalculateTotalParts(fileSize, saved.PartSize) {
+		return "the interrupted upload recorded more parts than the file has"
+	}
+	return ""
+}
+
+// abandonStreamingState retires a state that can no longer be resumed and
+// discards the backend upload it was filling: those parts belong to an object
+// nothing will ever ask for, and until they are aborted they occupy storage on
+// the backend until its own seven-day expiry sweeps them.
+//
+// Addressing that upload takes the same encryption parameters a resume does,
+// because a provider hands back a handle or nothing at all. A state too damaged
+// to rebuild one from is simply dropped and its parts left to that expiry —
+// keeping a state we have already decided not to trust would only make every
+// later attempt re-examine it.
+func abandonStreamingState(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, saved *state.UploadResumeState) {
+	if saved.FormatVersion != 1 {
+		// A pre-encrypt state also names an encrypted copy on disk, which is
+		// retired with it. Its own helper is what knows one of ours from
+		// anything else a state file's path field might point at.
+		abandonPreEncryptState(saved, params.LocalPath)
+		return
+	}
+
+	if saved.StorageType == uploader.StorageType() {
+		if handle := streamingHandleFromState(ctx, uploader, params, saved); handle != nil {
+			abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), constants.PartOperationTimeout)
+			if err := uploader.AbortStreamingUpload(abortCtx, handle); err != nil {
+				log.Printf("Warning: failed to abort the abandoned upload of %s (%s): %v",
+					filepath.Base(params.LocalPath), saved.ObjectKey, err)
+			}
+			cancel()
+		}
+	}
+
+	state.DeleteUploadState(params.LocalPath)
+}
+
+// streamingHandleFromState rebuilds the provider's handle on a saved upload, or
+// returns nil when the state does not carry enough to address it.
+func streamingHandleFromState(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, saved *state.UploadResumeState) *transfer.StreamingUpload {
+	masterKey, keyErr := encryption.DecodeBase64(saved.MasterKey)
+	initialIV, ivErr := encryption.DecodeBase64(saved.InitialIV)
+	chainIV, chainErr := encryption.DecodeBase64(saved.ChainIV)
+	if keyErr != nil || ivErr != nil || chainErr != nil {
+		return nil
+	}
+
+	handle, err := uploader.InitStreamingUploadFromState(ctx, transfer.StreamingUploadResumeParams{
+		LocalPath:   params.LocalPath,
+		FileSize:    saved.OriginalSize,
+		StoragePath: saved.ObjectKey,
+		UploadID:    saved.UploadID,
+		MasterKey:   masterKey,
+		InitialIV:   initialIV,
+		CurrentIV:   chainIV,
+		PartSize:    saved.PartSize,
+		// No OutputWriter: this handle exists only to be aborted, and
+		// announcing a resume that is not happening would be a lie.
+	})
+	if err != nil {
+		return nil
+	}
+	return handle
+}
+
+// reopenStreamingUpload reopens the backend upload an interrupted attempt left
+// behind.
+//
+// It returns (nil, nil) when that upload is no longer there to continue: the
+// state is retired and the caller starts a fresh object, which always produces a
+// correct upload and costs only the bytes already sent. It returns an error only
+// when the backend could not be reached to find out — a credential blip is not a
+// reason to throw away a resume, and the retry that follows will find the
+// checkpoint still in place.
+func reopenStreamingUpload(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, resumed streamingResume) (*transfer.StreamingUpload, error) {
+	saved := resumed.saved
+	name := filepath.Base(params.LocalPath)
+
+	exists, err := uploader.ValidateStreamingUploadExists(ctx, saved.UploadID, saved.ObjectKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check the interrupted upload of %s: %w", name, err)
+	}
+	if !exists {
+		if params.OutputWriter != nil {
+			fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: %s no longer holds the interrupted upload\n",
+				name, saved.StorageType)
+		}
+		// Nothing to abort — the backend has already discarded it.
+		state.DeleteUploadState(params.LocalPath)
+		return nil, nil
+	}
+
+	uploadState, err := uploader.InitStreamingUploadFromState(ctx, transfer.StreamingUploadResumeParams{
+		LocalPath:      params.LocalPath,
+		FileSize:       saved.OriginalSize,
+		StoragePath:    saved.ObjectKey,
+		UploadID:       saved.UploadID,
+		MasterKey:      resumed.masterKey,
+		InitialIV:      resumed.initialIV,
+		CurrentIV:      resumed.chainIV,
+		PartSize:       saved.PartSize,
+		RandomSuffix:   saved.RandomSuffix,
+		CompletedParts: resumed.parts,
+		OutputWriter:   params.OutputWriter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to resume the interrupted upload of %s: %w", name, err)
+	}
+
+	if params.OutputWriter != nil {
+		fmt.Fprintf(params.OutputWriter, "Continuing the upload of %s from part %d of %d\n",
+			name, len(resumed.parts)+1, uploadState.TotalParts)
+	}
+	return uploadState, nil
+}
+
+// streamingCheckpointer writes where a streaming upload has got to, so a later
+// attempt can pick the same object up rather than start another one.
+type streamingCheckpointer struct {
+	params      UploadParams
+	upload      *transfer.StreamingUpload
+	sourceInfo  os.FileInfo
+	storageType string
+	createdAt   time.Time
+
+	// recorded reports that a checkpoint a retry could find exists — either one
+	// this attempt wrote, or the one it resumed from.
+	recorded bool
+	warned   bool
+}
+
+// save records the contiguous prefix of parts the backend has accepted, along
+// with the chain position at that boundary.
+//
+// Failing to write it does not fail the upload. The state file sits next to the
+// source, which may be on a read-only or full filesystem, and a streaming upload
+// has never had to write anything there to succeed; what is lost is only the
+// ability to resume, which is why it is reported once rather than per part.
+func (c *streamingCheckpointer) save(prefix []*transfer.PartResult, chainIV []byte) {
+	if len(prefix) == 0 || len(chainIV) == 0 {
+		return
+	}
+	if c.createdAt.IsZero() {
+		c.createdAt = time.Now()
+	}
+
+	parts := make([]state.StreamingPart, 0, len(prefix))
+	for _, part := range prefix {
+		parts = append(parts, state.StreamingPart{PartIndex: part.PartIndex, Handle: part.ETag})
+	}
+
+	// Every part but the last is a whole part of ciphertext; only a prefix that
+	// reaches the end of the file carries the padding CBC adds.
+	uploaded := int64(len(prefix)) * c.upload.PartSize
+	if int64(len(prefix)) == c.upload.TotalParts {
+		uploaded = transfer.CiphertextSize(c.upload.TotalSize)
+	}
+
+	err := state.SaveUploadState(&state.UploadResumeState{
+		LocalPath:      c.params.LocalPath,
+		ObjectKey:      c.upload.StoragePath,
+		UploadID:       c.upload.UploadID,
+		OriginalSize:   c.upload.TotalSize,
+		TotalSize:      transfer.CiphertextSize(c.upload.TotalSize),
+		SourceModTime:  c.sourceInfo.ModTime(),
+		UploadedBytes:  uploaded,
+		RandomSuffix:   c.upload.RandomSuffix,
+		CreatedAt:      c.createdAt,
+		LastUpdate:     time.Now(),
+		StorageType:    c.storageType,
+		FormatVersion:  1,
+		MasterKey:      encryption.EncodeBase64(c.upload.MasterKey),
+		PartSize:       c.upload.PartSize,
+		InitialIV:      encryption.EncodeBase64(c.upload.InitialIV),
+		ChainIV:        encryption.EncodeBase64(chainIV),
+		StreamingParts: parts,
+		ProcessID:      os.Getpid(),
+	}, c.params.LocalPath)
+
+	if err != nil {
+		if !c.warned {
+			c.warned = true
+			log.Printf("Warning: cannot record the progress of the upload of %s, so an interrupted attempt will start over: %v",
+				filepath.Base(c.params.LocalPath), err)
+		}
+		return
+	}
+	c.recorded = true
 }
 
 // uploadPreEncrypt uses the PreEncryptUploader interface for pre-encrypted uploads.

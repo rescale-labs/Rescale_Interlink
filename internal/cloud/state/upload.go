@@ -49,6 +49,23 @@ type UploadResumeState struct {
 	FileId        string `json:"file_id"`        // Base64-encoded file identifier (v1 only)
 	PartSize      int64  `json:"part_size"`      // Bytes per plaintext part (v1 only)
 
+	// InitialIV is the base64 IV the object's metadata carries, which is where
+	// a download starts the chain. It is separate from IV above, which belongs
+	// to the pre-encrypt (v0) format and describes a whole encrypted file.
+	InitialIV string `json:"initial_iv,omitempty"`
+	// ChainIV is the base64 CBC chaining position at the checkpoint boundary:
+	// the last ciphertext block of StreamingParts' final part. Without it the
+	// key and initial IV only place an encryptor at part 0, so a resumed
+	// attempt would produce different bytes for every part already accepted.
+	// Absent in any state this version did not write, which is why a v1 state
+	// without it is abandoned rather than guessed at.
+	ChainIV string `json:"chain_iv,omitempty"`
+	// StreamingParts is the CONTIGUOUS prefix of parts the backend has
+	// accepted, in index order. Parts finish out of order under concurrency, so
+	// a set of completed parts is not a resume point: only a prefix is, because
+	// the chain IV names one boundary and the source is re-read from it.
+	StreamingParts []StreamingPart `json:"streaming_parts,omitempty"`
+
 	// Process locking fields
 	ProcessID      int       `json:"process_id"`       // PID of owning process
 	LockAcquiredAt time.Time `json:"lock_acquired_at"` // When lock was acquired
@@ -58,6 +75,21 @@ type UploadResumeState struct {
 type CompletedPart struct {
 	PartNumber int32  `json:"part_number"`
 	ETag       string `json:"etag"`
+}
+
+// StreamingPart is one part of a streaming (v1) upload that the backend has
+// accepted, named by the index the encryption chain gives it rather than by its
+// position in a list — a resumed attempt has to line its own parts up with
+// these, and a list that only carried order could not survive being read back
+// out of order.
+//
+// Handle is whatever the backend needs to assemble that part later: the S3
+// ETag, or the Azure block ID the attempt staged the block under. Both
+// backends already report it in the same field of a part result, so one list
+// serves both.
+type StreamingPart struct {
+	PartIndex int64  `json:"part_index"`
+	Handle    string `json:"handle"`
 }
 
 // MaxResumeAge is the maximum age of a resume state before it's considered expired.

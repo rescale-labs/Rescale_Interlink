@@ -633,13 +633,13 @@ func TestCalculateEncryptedPartSize(t *testing.T) {
 		plaintextSize int64
 		expectedSize  int64
 	}{
-		{0, 16},   // Empty -> 16 bytes padding
-		{1, 16},   // 1 byte -> 15 padding = 16 total
-		{15, 16},  // 15 bytes -> 1 padding = 16 total
-		{16, 32},  // 16 bytes -> 16 padding (full block) = 32 total
-		{17, 32},  // 17 bytes -> 15 padding = 32 total
-		{31, 32},  // 31 bytes -> 1 padding = 32 total
-		{32, 48},  // 32 bytes -> 16 padding = 48 total
+		{0, 16},    // Empty -> 16 bytes padding
+		{1, 16},    // 1 byte -> 15 padding = 16 total
+		{15, 16},   // 15 bytes -> 1 padding = 16 total
+		{16, 32},   // 16 bytes -> 16 padding (full block) = 32 total
+		{17, 32},   // 17 bytes -> 15 padding = 32 total
+		{31, 32},   // 31 bytes -> 1 padding = 32 total
+		{32, 48},   // 32 bytes -> 16 padding = 48 total
 		{100, 112}, // 100 bytes -> 12 padding = 112 total
 	}
 
@@ -798,5 +798,56 @@ func TestEncryptorGetters_ReturnCopies(t *testing.T) {
 	fileId2 := enc.GetFileId()
 	if !bytes.Equal(fileId2, originalFileId) {
 		t.Error("GetFileId() returns reference instead of copy")
+	}
+}
+
+// TestGetCurrentIVResumesTheChain covers what makes a streaming upload
+// resumable. The key and the initial IV place an encryptor at part 0; only the
+// chain position at a part boundary lets a second encryptor continue from there
+// and produce the same bytes the first one would have.
+func TestGetCurrentIVResumesTheChain(t *testing.T) {
+	first, err := NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+
+	partOne := bytes.Repeat([]byte{0xA5}, 64)
+	partTwo := bytes.Repeat([]byte{0x5A}, 48)
+
+	cipherOne, err := first.EncryptPart(partOne, false)
+	if err != nil {
+		t.Fatalf("EncryptPart(0): %v", err)
+	}
+
+	// The chain position is the last ciphertext block, which is what CBC feeds
+	// into the next part.
+	chainIV := first.GetCurrentIV()
+	if !bytes.Equal(chainIV, cipherOne[len(cipherOne)-aes.BlockSize:]) {
+		t.Fatalf("GetCurrentIV = %x, want the last ciphertext block %x",
+			chainIV, cipherOne[len(cipherOne)-aes.BlockSize:])
+	}
+
+	// Mutating what the caller was handed must not move the encryptor.
+	chainIV[0] ^= 0xFF
+	if bytes.Equal(first.GetCurrentIV(), chainIV) {
+		t.Fatal("GetCurrentIV handed out the encryptor's own IV")
+	}
+	chainIV[0] ^= 0xFF
+
+	resumed, err := NewCBCStreamingEncryptorWithKey(first.GetKey(), first.GetInitialIV(), chainIV)
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptorWithKey: %v", err)
+	}
+
+	want, err := first.EncryptPart(partTwo, true)
+	if err != nil {
+		t.Fatalf("EncryptPart(1): %v", err)
+	}
+	got, err := resumed.EncryptPart(partTwo, true)
+	if err != nil {
+		t.Fatalf("resumed EncryptPart(1): %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("an encryptor resumed from the chain position produced different bytes")
 	}
 }

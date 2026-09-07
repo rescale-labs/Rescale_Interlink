@@ -69,12 +69,19 @@ func (m *mockStreamingDownloader) DownloadStreaming(ctx context.Context, remoteP
 type mockLegacyDownloader struct {
 	mockStreamingDownloader
 	ciphertext              []byte
+	downloadErr             error
 	downloadEncryptedCalled bool
 }
 
 func (m *mockLegacyDownloader) DownloadEncryptedFile(ctx context.Context, params LegacyDownloadParams) error {
 	m.downloadEncryptedCalled = true
-	return os.WriteFile(params.EncryptedPath, m.ciphertext, 0644)
+	if err := os.WriteFile(params.EncryptedPath, m.ciphertext, 0644); err != nil {
+		return err
+	}
+	// downloadErr stands in for a transfer that got some of the object onto
+	// disk and then lost the connection: the bytes it did fetch are still
+	// there, which is the whole point of a resumable download.
+	return m.downloadErr
 }
 
 // TestNewDownloader tests downloader creation.
@@ -302,6 +309,68 @@ func TestSafetyNetEncryptedCleanup(t *testing.T) {
 	// Verify the output file is untouched
 	if _, err := os.Stat(localPath); os.IsNotExist(err) {
 		t.Error("output file should not be removed by safety-net cleanup")
+	}
+}
+
+// TestDownloadLegacyKeepsPartialCiphertextOnFailure is the regression for a
+// resume that could never happen. The CLI guide promises that an interrupted v0
+// download re-requests only the chunks it is missing, and the chunk driver does
+// record them in a .download.resume sidecar next to the partial ciphertext — but
+// downloadLegacy removed that ciphertext on every return, so the sidecar always
+// described a file that was no longer on disk and every retry started from zero.
+func TestDownloadLegacyKeepsPartialCiphertextOnFailure(t *testing.T) {
+	partial := []byte("the first few chunks of the object")
+
+	mock := &mockLegacyDownloader{ciphertext: partial, downloadErr: fmt.Errorf("connection reset")}
+	mock.formatVersion = 0
+	localPath := filepath.Join(t.TempDir(), "file.txt")
+
+	_, err := NewDownloader(mock).Download(context.Background(), cloud.DownloadParams{
+		RemotePath: "/remote/file.txt",
+		LocalPath:  localPath,
+		FileInfo: &models.CloudFile{
+			EncodedEncryptionKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+			IV:                   base64.StdEncoding.EncodeToString(make([]byte, 16)),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected the download to fail")
+	}
+
+	kept, readErr := os.ReadFile(localPath + ".encrypted")
+	if readErr != nil {
+		t.Fatalf("the partial ciphertext a retry resumes from is gone: %v", readErr)
+	}
+	if !bytes.Equal(kept, partial) {
+		t.Errorf("kept %q, want the %d bytes the attempt had fetched", kept, len(partial))
+	}
+}
+
+// TestDownloadLegacyDropsCiphertextThatCannotBeDecrypted covers the other half of
+// the rule: ciphertext that is complete but will not decrypt with this key is not
+// something a retry can make progress on, so keeping it would leave a file on
+// disk that every later attempt re-reads and re-fails on.
+func TestDownloadLegacyDropsCiphertextThatCannotBeDecrypted(t *testing.T) {
+	// Not ciphertext at all: 17 bytes is not a whole number of AES blocks, so
+	// decryption refuses it outright.
+	mock := &mockLegacyDownloader{ciphertext: []byte("not a block long")}
+	mock.formatVersion = 0
+	localPath := filepath.Join(t.TempDir(), "file.txt")
+
+	_, err := NewDownloader(mock).Download(context.Background(), cloud.DownloadParams{
+		RemotePath: "/remote/file.txt",
+		LocalPath:  localPath,
+		FileInfo: &models.CloudFile{
+			EncodedEncryptionKey: base64.StdEncoding.EncodeToString(make([]byte, 32)),
+			IV:                   base64.StdEncoding.EncodeToString(make([]byte, 16)),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected decryption to fail")
+	}
+
+	if _, statErr := os.Stat(localPath + ".encrypted"); !os.IsNotExist(statErr) {
+		t.Errorf("ciphertext that cannot be decrypted was kept: %v", statErr)
 	}
 }
 
