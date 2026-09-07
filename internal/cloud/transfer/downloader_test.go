@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -438,11 +439,11 @@ type mockCBCPartDownloader struct {
 	ciphertext []byte
 }
 
-func (m *mockCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
-	return int64(len(m.ciphertext)), nil
+func (m *mockCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *mockCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+func (m *mockCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
 	end := offset + length
 	if end > int64(len(m.ciphertext)) {
 		end = int64(len(m.ciphertext))
@@ -520,11 +521,11 @@ type mockHKDFPartDownloader struct {
 	failFrom   int64 // refuse any range at or after this offset; -1 serves everything
 }
 
-func (m *mockHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
-	return int64(len(m.ciphertext)), nil
+func (m *mockHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *mockHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+func (m *mockHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
 	if m.failFrom >= 0 && offset >= m.failFrom {
 		return nil, fmt.Errorf("range at %d: connection reset by peer", offset)
 	}
@@ -671,11 +672,11 @@ type stallingCBCPartDownloader struct {
 	started int
 }
 
-func (m *stallingCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
-	return int64(len(m.ciphertext)), nil
+func (m *stallingCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *stallingCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+func (m *stallingCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
 	m.mu.Lock()
 	m.started++
 	m.mu.Unlock()
@@ -780,6 +781,125 @@ func TestDownloadCBCStreamingBoundsTheReorderWindow(t *testing.T) {
 	}
 }
 
+// replacedCBCPartDownloader serves a v2 object that is replaced under the
+// download. Ranges below replacedTo come from a second, unrelated encryption of
+// the same length — the shape of a re-upload under the same path. A range asked
+// for under the version GetEncryptedSize reported answers the way a pinned
+// provider answers; an unpinned one hands over the new object's bytes, the way
+// this path answered when there was no version to compare against.
+type replacedCBCPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext  []byte // the version GetEncryptedSize measured
+	replacement []byte // the object that took its place, same length
+	replacedTo  int64
+}
+
+const cbcPinnedVersion = `"version-one"`
+
+func (m *replacedCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
+}
+
+func (m *replacedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+	source := m.ciphertext
+	if offset < m.replacedTo {
+		if version != "" {
+			return nil, ErrObjectReplaced
+		}
+		source = m.replacement
+	}
+
+	end := offset + length
+	if end > int64(len(source)) {
+		end = int64(len(source))
+	}
+	out := make([]byte, end-offset)
+	copy(out, source[offset:end])
+	if progressCallback != nil {
+		progressCallback(int64(len(out)))
+	}
+	return out, nil
+}
+
+// The v2 path reads the object's size once and then fetches its parts as
+// independent ranges. Replace the object in between and every range fetched
+// afterwards comes from the new one, and CBC does not notice: padding is only
+// validated on the final part, so as long as that part still comes from the
+// object the download started on, the mixture decrypts, lands at full length
+// and is reported as a finished download. A per-file checksum is the only thing
+// that would catch it and not every file carries one.
+func TestDownloadCBCStreamingAbortsWhenTheObjectIsReplaced(t *testing.T) {
+	const partSize = int64(64)
+	// Six whole parts plus the padding block, so the replaced first part is
+	// nowhere near the final one.
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4*6)
+
+	enc, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+
+	// The object that takes its place: same length, its own key and IV, so its
+	// bytes are unrelated ciphertext under the key this download decrypts with.
+	other, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	replacement, err := other.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+
+	mock := &replacedCBCPartDownloader{ciphertext: ciphertext, replacement: replacement, replacedTo: partSize}
+	mock.formatVersion = 2
+	mock.partSize = partSize
+
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "results.dat")
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 2,
+		PartSize:      partSize,
+		EncryptionKey: enc.GetKey(),
+		IV:            enc.GetInitialIV(),
+	}
+
+	err = NewDownloader(mock).downloadCBCStreaming(context.Background(), prep)
+	if !errors.Is(err, ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+
+	// The v2 path writes straight to the destination, so an aborted download has
+	// to leave something visibly short of the file that was asked for rather
+	// than a full-length one the next run would adopt.
+	got, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read the destination: %v", readErr)
+	}
+	if len(got) >= len(plaintext) {
+		t.Errorf("destination holds %d bytes of a %d-byte file: the aborted download left a full-length file behind",
+			len(got), len(plaintext))
+	}
+
+	// The v2 path keeps no resume state, so nothing beside the destination may
+	// be left claiming the parts this attempt got through.
+	entries, dirErr := os.ReadDir(dir)
+	if dirErr != nil {
+		t.Fatalf("read the destination directory: %v", dirErr)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(localPath) {
+		t.Errorf("destination directory holds %v, want only the destination file", entries)
+	}
+}
+
 // cancellingHKDFPartDownloader serves an HKDF (v1) object and cancels the
 // download's own context once the first range is in hand, which is what a user
 // pressing Ctrl-C or a shutdown between two part requests looks like from
@@ -793,11 +913,11 @@ type cancellingHKDFPartDownloader struct {
 	served int
 }
 
-func (m *cancellingHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
-	return int64(len(m.ciphertext)), nil
+func (m *cancellingHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *cancellingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+func (m *cancellingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
 	end := offset + length
 	if end > int64(len(m.ciphertext)) {
 		end = int64(len(m.ciphertext))
@@ -875,11 +995,11 @@ type slowFailHKDFPartDownloader struct {
 	ciphertext []byte
 }
 
-func (m *slowFailHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
-	return int64(len(m.ciphertext)), nil
+func (m *slowFailHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *slowFailHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+func (m *slowFailHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
 	time.Sleep(50 * time.Millisecond)
 	return nil, fmt.Errorf("range at %d: connection reset by peer", offset)
 }

@@ -209,6 +209,13 @@ type hkdfObjectBackend struct {
 	ranges     int
 }
 
+// rangeCount reports how many ranged GETs the backend has served.
+func (h *hkdfObjectBackend) rangeCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ranges
+}
+
 func (h *hkdfObjectBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
 	h.mu.Lock()
 	etag := `"version-one"`
@@ -324,5 +331,68 @@ func TestDownloadStreamingReadsOneVersionThrough(t *testing.T) {
 	}
 	if !bytes.Equal(got, plaintext) {
 		t.Errorf("downloaded %d bytes, want the %d the object holds", len(got), len(plaintext))
+	}
+}
+
+// TestGetEncryptedSizeAndRangeAbortWhenTheObjectIsReplaced is the v2 (CBC) half
+// of pinning a ranged download to one version. That path reads the object's
+// size once and then fetches its parts as independent ranges with no version
+// carried between them, so an object replaced under it — a re-upload at the
+// same path — was decrypted into one file from two versions. Only the sizes and
+// the ETags matter here, not what the bytes decrypt to.
+func TestGetEncryptedSizeAndRangeAbortWhenTheObjectIsReplaced(t *testing.T) {
+	backend, _, _ := newHKDFObject(t, 3, 64)
+	backend.replaceAt = 1 // the HEAD reports the first version, every range the second
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestS3Client(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, s3Client: client}
+	ctx := context.Background()
+
+	size, version, err := provider.GetEncryptedSize(ctx, "object.dat")
+	if err != nil {
+		t.Fatalf("GetEncryptedSize: %v", err)
+	}
+	if size != int64(len(backend.ciphertext)) {
+		t.Errorf("size = %d, want the %d bytes the object holds", size, len(backend.ciphertext))
+	}
+	if version != `"version-one"` {
+		t.Fatalf("version = %q, want the ETag the HEAD reported", version)
+	}
+
+	_, err = provider.DownloadEncryptedRange(ctx, "object.dat", 0, 64, version, nil)
+	if !errors.Is(err, transfer.ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+	// A replaced object is not a transient failure: retrying spends the budget
+	// on a range that cannot come back right.
+	if got := backend.rangeCount(); got != 1 {
+		t.Errorf("%d ranges were fetched, want exactly the one attempt", got)
+	}
+}
+
+// TestDownloadEncryptedRangeReadsThePinnedVersion is the other side of the pin:
+// a range of the object the size call measured is served as before.
+func TestDownloadEncryptedRangeReadsThePinnedVersion(t *testing.T) {
+	backend, _, _ := newHKDFObject(t, 3, 64)
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestS3Client(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, s3Client: client}
+	ctx := context.Background()
+
+	_, version, err := provider.GetEncryptedSize(ctx, "object.dat")
+	if err != nil {
+		t.Fatalf("GetEncryptedSize: %v", err)
+	}
+
+	got, err := provider.DownloadEncryptedRange(ctx, "object.dat", 64, 64, version, nil)
+	if err != nil {
+		t.Fatalf("DownloadEncryptedRange: %v", err)
+	}
+	if !bytes.Equal(got, backend.ciphertext[64:128]) {
+		t.Errorf("range [64-128) came back as %d bytes that are not the object's", len(got))
 	}
 }

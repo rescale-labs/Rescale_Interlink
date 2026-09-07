@@ -65,6 +65,11 @@ type DownloadPrep struct {
 
 	// Cached encrypted size from verification probe, avoids redundant HEAD request in downloadCBCStreaming
 	EncryptedSize int64
+
+	// ObjectVersion is the version EncryptedSize was measured against, and what
+	// every part fetch of that download is pinned to. Empty when the backend
+	// reported none.
+	ObjectVersion string
 }
 
 // Download downloads and decrypts a file using the configured provider.
@@ -206,11 +211,12 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 			partDownloader, hasPartDownload := d.provider.(StreamingPartDownloader)
 			if hasPartDownload {
 				// Get encrypted size for verification probe
-				encryptedSize, sizeErr := partDownloader.GetEncryptedSize(ctx, params.RemotePath)
+				encryptedSize, objectVersion, sizeErr := partDownloader.GetEncryptedSize(ctx, params.RemotePath)
 				if sizeErr == nil && encryptedSize > 0 {
 					prep.EncryptedSize = encryptedSize // Cache for downloadCBCStreaming to avoid redundant HEAD
+					prep.ObjectVersion = objectVersion // The version that size was measured against, and what the parts are pinned to
 					// Run quick 32-byte verification probe
-					verifyErr := d.verifyDecryptionQuick(ctx, partDownloader, params.RemotePath, encryptedSize, effectiveIV, encryptionKey)
+					verifyErr := d.verifyDecryptionQuick(ctx, partDownloader, params.RemotePath, encryptedSize, objectVersion, effectiveIV, encryptionKey)
 					if verifyErr != nil {
 						// Verification failed - file cannot be decrypted with this key/IV
 						// Return early with clear error message
@@ -430,6 +436,7 @@ func (d *Downloader) verifyDecryptionQuick(
 	partDownloader StreamingPartDownloader,
 	remotePath string,
 	encryptedSize int64,
+	objectVersion string,
 	initialIV []byte,
 	encryptionKey []byte,
 ) error {
@@ -454,7 +461,7 @@ func (d *Downloader) verifyDecryptionQuick(
 	}
 
 	// Download probe bytes
-	probeData, err := partDownloader.DownloadEncryptedRange(ctx, remotePath, probeStart, probeSize, nil)
+	probeData, err := partDownloader.DownloadEncryptedRange(ctx, remotePath, probeStart, probeSize, objectVersion, nil)
 	if err != nil {
 		return fmt.Errorf("verification probe failed: %w", err)
 	}
@@ -518,9 +525,10 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 
 	// Use cached encrypted size from verification probe if available, avoiding a redundant HEAD request
 	encryptedSize := prep.EncryptedSize
+	objectVersion := prep.ObjectVersion
 	if encryptedSize == 0 {
 		var err error
-		encryptedSize, err = partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
+		encryptedSize, objectVersion, err = partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
 		if err != nil {
 			return fmt.Errorf("failed to get encrypted size: %w", err)
 		}
@@ -675,8 +683,12 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			}
 
 			// Download this part (with streaming progress callback)
+			// objectVersion pins every part to the object GetEncryptedSize
+			// measured: a part that comes from a re-upload aborts the download
+			// instead of being decrypted into the file alongside the parts of
+			// the version it replaced.
 			ciphertext, downloadErr := partDownloader.DownloadEncryptedRange(
-				downloadCtx, prep.Params.RemotePath, job.startByte, job.length, progressCallback)
+				downloadCtx, prep.Params.RemotePath, job.startByte, job.length, objectVersion, progressCallback)
 
 			if downloadErr != nil {
 				errOnce.Do(func() { firstErr = fmt.Errorf("failed to download part %d: %w", job.partIndex, downloadErr) })
@@ -981,7 +993,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}
 
 	// Get streaming metadata from provider
-	encryptedSize, err := partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
+	encryptedSize, objectVersion, err := partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
 	if err != nil {
 		return fmt.Errorf("failed to get encrypted file size: %w", err)
 	}
@@ -1125,6 +1137,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 					prep.Params.RemotePath,
 					job.encryptedStart,
 					job.encryptedEnd-job.encryptedStart,
+					objectVersion,
 					nil, // Progress callback not used for HKDF format
 				)
 				if err != nil {
@@ -1337,16 +1350,22 @@ type StreamingConcurrentDownloader interface {
 type StreamingPartDownloader interface {
 	StreamingConcurrentDownloader
 
-	// GetEncryptedSize returns the total encrypted size of the file in cloud storage.
+	// GetEncryptedSize returns the total encrypted size of the file in cloud
+	// storage, and the version of the object it measured — the S3 or Azure
+	// ETag, empty when the backend reported none.
 	// This is needed to calculate the number of parts for concurrent download.
-	GetEncryptedSize(ctx context.Context, remotePath string) (int64, error)
+	GetEncryptedSize(ctx context.Context, remotePath string) (size int64, version string, err error)
 
 	// DownloadEncryptedRange downloads a specific byte range of the encrypted file.
 	// Used by the concurrent download orchestrator to download individual parts.
 	// Returns the raw encrypted bytes for the specified range.
+	// version pins the range to one version of the object: a range that comes
+	// back from a different one fails with ErrObjectReplaced instead of being
+	// decrypted into a file alongside parts of the version it replaced. Empty
+	// means unpinned, for a backend that reports no version at all.
 	// progressCallback (optional) is called with bytes downloaded for smooth progress.
 	// Pass nil if progress tracking is not needed (e.g., during chunk size probing).
-	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error)
+	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error)
 }
 
 // LegacyDownloader extends CloudTransfer with legacy format (v0) download support.

@@ -214,6 +214,13 @@ type hkdfBlobBackend struct {
 	ranges     int
 }
 
+// rangeCount reports how many ranged GETs the backend has served.
+func (h *hkdfBlobBackend) rangeCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ranges
+}
+
 func (h *hkdfBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
 	h.mu.Lock()
 	etag := `"version-one"`
@@ -332,5 +339,68 @@ func TestDownloadStreamingReadsOneVersionThrough(t *testing.T) {
 	}
 	if !bytes.Equal(got, plaintext) {
 		t.Errorf("downloaded %d bytes, want the %d the blob holds", len(got), len(plaintext))
+	}
+}
+
+// TestGetEncryptedSizeAndRangeAbortWhenTheBlobIsReplaced is the v2 (CBC) half of
+// pinning a ranged download to one version. That path reads the blob's size once
+// and then fetches its parts as independent ranges with no version carried
+// between them, so a blob replaced under it — a re-upload at the same path — was
+// decrypted into one file from two versions. Only the sizes and the ETags matter
+// here, not what the bytes decrypt to.
+func TestGetEncryptedSizeAndRangeAbortWhenTheBlobIsReplaced(t *testing.T) {
+	backend, _, _ := newHKDFBlob(t, 3, 64)
+	backend.replaceAt = 1 // the properties call reports the first version, every range the second
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestAzureClient(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, azureClient: client}
+	ctx := context.Background()
+
+	size, version, err := provider.GetEncryptedSize(ctx, "blob.dat")
+	if err != nil {
+		t.Fatalf("GetEncryptedSize: %v", err)
+	}
+	if size != int64(len(backend.ciphertext)) {
+		t.Errorf("size = %d, want the %d bytes the blob holds", size, len(backend.ciphertext))
+	}
+	if version != `"version-one"` {
+		t.Fatalf("version = %q, want the ETag the properties call reported", version)
+	}
+
+	_, err = provider.DownloadEncryptedRange(ctx, "blob.dat", 0, 64, version, nil)
+	if !errors.Is(err, transfer.ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+	// A replaced blob is not a transient failure: retrying spends the budget on
+	// a range that cannot come back right.
+	if got := backend.rangeCount(); got != 1 {
+		t.Errorf("%d ranges were fetched, want exactly the one attempt", got)
+	}
+}
+
+// TestDownloadEncryptedRangeReadsThePinnedVersion is the other side of the pin:
+// a range of the blob the size call measured is served as before.
+func TestDownloadEncryptedRangeReadsThePinnedVersion(t *testing.T) {
+	backend, _, _ := newHKDFBlob(t, 3, 64)
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestAzureClient(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, azureClient: client}
+	ctx := context.Background()
+
+	_, version, err := provider.GetEncryptedSize(ctx, "blob.dat")
+	if err != nil {
+		t.Fatalf("GetEncryptedSize: %v", err)
+	}
+
+	got, err := provider.DownloadEncryptedRange(ctx, "blob.dat", 64, 64, version, nil)
+	if err != nil {
+		t.Fatalf("DownloadEncryptedRange: %v", err)
+	}
+	if !bytes.Equal(got, backend.ciphertext[64:128]) {
+		t.Errorf("range [64-128) came back as %d bytes that are not the blob's", len(got))
 	}
 }

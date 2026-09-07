@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"log"
 	"path/filepath"
 	"time"
@@ -450,27 +449,28 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 // to download individual encrypted parts in parallel.
 // =============================================================================
 
-// GetEncryptedSize returns the total encrypted size of the blob in Azure.
+// GetEncryptedSize returns the total encrypted size of the blob in Azure, and the
+// ETag of the blob it measured, which the parts of that download are pinned to.
 // This is used by the concurrent download orchestrator to calculate the number of parts.
-func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
+func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
 	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get Azure client: %w", err)
+		return 0, "", fmt.Errorf("failed to get Azure client: %w", err)
 	}
 
 	// Ensure fresh credentials
 	if err := azureClient.EnsureFreshCredentials(ctx); err != nil {
-		return 0, fmt.Errorf("failed to refresh credentials: %w", err)
+		return 0, "", fmt.Errorf("failed to refresh credentials: %w", err)
 	}
 
 	// Get blob properties
 	props, err := azureClient.GetBlobProperties(ctx, remotePath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get blob properties: %w", err)
+		return 0, "", fmt.Errorf("failed to get blob properties: %w", err)
 	}
 
-	return props.ContentLength, nil
+	return props.ContentLength, props.ETag, nil
 }
 
 // DownloadEncryptedRange downloads a specific byte range of the encrypted blob from Azure.
@@ -478,7 +478,7 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // The range is: [offset, offset+length).
 // progressCallback (optional) is called with bytes downloaded for smooth progress.
 // Wraps request+read+close in single retry with progress rollback on failure.
-func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
 	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
 	if err != nil {
@@ -487,12 +487,11 @@ func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string
 
 	// DownloadRangeOnce is the non-retrying variant: FetchRangeWithRetry owns
 	// the retry loop, the per-attempt timeout, and the progress rollback.
+	//
+	// The range has to come back carrying the version the caller pinned to, so
+	// a blob replaced part way through a download aborts it instead of having
+	// parts of two blobs decrypted into one file. An empty version leaves the
+	// range unpinned, for a backend that reports no ETag at all.
 	return transfer.FetchRangeWithRetry(ctx, azureClient.RetryWithBackoff, offset, length, progressCallback,
-		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
-			if err != nil {
-				return nil, err
-			}
-			return resp.Body, nil
-		})
+		transfer.PinObjectVersion(rangeReaderWithETag(azureClient, remotePath), version))
 }
