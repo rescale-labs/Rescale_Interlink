@@ -541,19 +541,33 @@ func reclaimStaleLock(lockFilePath, localPath string, owner uploadLockState, dat
 		// presents exactly this, and waiting out a grace period only turns a
 		// live upload into one two processes run.
 		return nil, unidentifiedLockError(localPath, lockFilePath, judged)
+	case existing.ProcessID == owner.ProcessID && existing.OwnerToken == owner.OwnerToken:
+		// This run of this process wrote that record, and nothing here can
+		// tell it from a lock this run still holds: two spellings of one
+		// source file — data.bin and DATA.BIN on a case-insensitive volume —
+		// get two keys in the in-process map and meet on the one lock file
+		// they share. A release that failed to remove its file leaves the same
+		// record, and is refused the same way until the file is deleted.
+		return nil, fmt.Errorf("upload of %s is already in progress in this process; its lock is %s", localPath, lockFilePath)
 	case !inThisPIDDomain(existing, owner.PIDDomain):
 		return nil, foreignLockError(localPath, lockFilePath, existing)
-	case existing.ProcessID != owner.ProcessID && isProcessRunning(existing.ProcessID):
-		return nil, fmt.Errorf("upload locked by another process (PID %d) since %s",
-			existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
+	case existing.ProcessID != owner.ProcessID:
+		liveness, probeErr := probeProcessLiveness(existing.ProcessID)
+		switch liveness {
+		case livenessAlive:
+			return nil, fmt.Errorf("upload locked by another process (PID %d) since %s",
+				existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
+		case livenessUnknown:
+			return nil, undecidedLockError(localPath, lockFilePath, existing, probeErr)
+		}
 	}
 
 	// Nothing owns it, and it was written in this PID domain — so the PID it
-	// names is one this process could test. A lock naming our own PID cannot
-	// belong to a live owner other than us, and a live one of ours would have
-	// been caught by the in-process claim before we got here: either it is ours
-	// and released, or the OS gave us a dead process's PID, and refusing would
-	// wedge every retry after a crash.
+	// names is one this process could test, and it said gone. A lock naming our
+	// own PID and not our own token is not a live owner either: this run's own
+	// is refused above, so what is left is a released lock of ours or a PID the
+	// OS has since handed us, and refusing would wedge every retry after a
+	// crash.
 	takeoverStep(takeoverJudged, owner)
 	return takeStaleLock(lockFilePath, localPath, owner, data, record)
 }
@@ -580,6 +594,20 @@ func foreignLockError(localPath, lockFilePath string, existing uploadLockState) 
 		"if that upload is not running, delete %s to release it",
 		localPath, existing.ProcessID, orUnknown(existing.Host), orUnknown(existing.Owner),
 		existing.AcquiredAt.Format(time.RFC3339), lockFilePath)
+}
+
+// undecidedLockError refuses a lock whose owner this system would not answer
+// about. A probe that is refused has established nothing: Windows answers access
+// denied for a live process of another login, an elevated one or a protected
+// one, and taking that for "no such process" is what clears a running upload's
+// lock. So the answer is the same as for a lock this process may not judge —
+// who holds it, and the file to delete if nobody does.
+func undecidedLockError(localPath, lockFilePath string, existing uploadLockState, err error) error {
+	return fmt.Errorf("upload of %s is locked by PID %d on host %s as user %s since %s, "+
+		"and this system will not say whether that process is still running (%v); "+
+		"if that upload is not running, delete %s to release it",
+		localPath, existing.ProcessID, orUnknown(existing.Host), orUnknown(existing.Owner),
+		existing.AcquiredAt.Format(time.RFC3339), err, lockFilePath)
 }
 
 // unidentifiedLockError refuses a lock file that names no owner at all: there is
@@ -744,37 +772,6 @@ func ReleaseUploadLock(lock *UploadLock) {
 	}
 	if err := os.Remove(lock.LockFilePath); err != nil && !os.IsNotExist(err) {
 		log.Printf("Warning: Failed to release upload lock: %v", err)
-	}
-}
-
-// isProcessRunning is a variable so a test can decide which PIDs are alive:
-// a lock's owner has to be a process the test cannot create or kill portably.
-var isProcessRunning = func(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		// Unix never fails here. On Windows this is OpenProcess failing, which
-		// means there is no such process.
-		return false
-	}
-
-	err = process.Signal(syscall.Signal(0))
-	switch {
-	case err == nil:
-		return true
-	case errors.Is(err, os.ErrProcessDone), errors.Is(err, syscall.ESRCH):
-		return false
-	case errors.Is(err, syscall.EPERM):
-		return true // Alive, just owned by another user.
-	default:
-		// Windows refuses signal 0 outright, so the only evidence there is the
-		// handle FindProcess opened above — and it only opens for a process
-		// that exists. Reading that as "dead", which is what comparing the
-		// error against nil did, let any second process take a live owner's
-		// lock on Windows.
-		return true
 	}
 }
 

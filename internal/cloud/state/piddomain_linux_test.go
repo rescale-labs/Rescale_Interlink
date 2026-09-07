@@ -103,6 +103,58 @@ func TestReadPIDDomain_WithoutTheParts(t *testing.T) {
 	})
 }
 
+// TestReadPIDDomain_RefusesAMachineIDThatIsNotOne covers what a file can hold
+// besides an identifier. systemd writes the literal "uninitialized" into images
+// whose identifier is deferred to first boot, and container images ship exactly
+// that: two hosts reading it report one machine, and the initial PID namespace
+// number they also share is a kernel constant, so the whole domain would match
+// and each would read the other's live PIDs as dead.
+func TestReadPIDDomain_RefusesAMachineIDThatIsNotOne(t *testing.T) {
+	cases := []struct {
+		name     string
+		contents string
+	}{
+		{"the systemd uninitialized marker", "uninitialized\n"},
+		{"all zeros", "00000000000000000000000000000000\n"},
+		{"a truncated identifier", "1cd67aa9d1b04b8f9a2c\n"},
+		{"not hexadecimal at all", "not-hex-at-all\n"},
+		{"upper case, which systemd never writes", "1CD67AA9D1B04B8F9A2C0E5F6B7D8E90\n"},
+		{"an identifier with something after it", "1cd67aa9d1b04b8f9a2c0e5f6b7d8e90 stale\n"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			withMachineIDFiles(t, writeMachineID(t, testCase.contents))
+			withPIDNamespaceLink(t, "pid:[4026531836]")
+
+			if domain, err := readPIDDomain(); err == nil {
+				t.Fatalf("reported domain %q from a machine-id file holding %q", domain, testCase.contents)
+			}
+		})
+	}
+}
+
+// TestReadPIDDomain_PassesAnInvalidMachineIDForTheFallback pins that an invalid
+// primary file does not end the search. An image that ships an uninitialized
+// /etc/machine-id can still carry the D-Bus identifier its first boot wrote.
+func TestReadPIDDomain_PassesAnInvalidMachineIDForTheFallback(t *testing.T) {
+	withMachineIDFiles(t,
+		writeMachineID(t, "uninitialized\n"),
+		writeMachineID(t, "8f0142bc5e3a47d1b6c9a0f2e4d7c531\n"))
+	withPIDNamespaceLink(t, "pid:[4026531836]")
+
+	domain, err := readPIDDomain()
+	if err != nil {
+		t.Fatalf("readPIDDomain failed with a valid identifier behind an invalid one: %v", err)
+	}
+	if !strings.Contains(domain, "8f0142bc5e3a47d1b6c9a0f2e4d7c531") {
+		t.Errorf("the domain %q does not carry the identifier the fallback file holds", domain)
+	}
+	if strings.Contains(domain, "uninitialized") {
+		t.Errorf("the domain %q carries the marker systemd writes for no identifier", domain)
+	}
+}
+
 // TestReadPIDDomain_FallsBackToTheSecondMachineIDFile covers the systems that
 // keep the identifier only where D-Bus put it.
 func TestReadPIDDomain_FallsBackToTheSecondMachineIDFile(t *testing.T) {

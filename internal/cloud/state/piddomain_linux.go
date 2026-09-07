@@ -37,10 +37,12 @@ func readPIDDomain() (string, error) {
 	return machine + " " + namespace, nil
 }
 
-// readMachineID reads the first of the machine-id files that holds one. An
-// empty file is not an identifier: systemd creates it empty on first boot of an
-// image, and reporting the empty string would put every machine still in that
-// state into one domain.
+// readMachineID reads the first of the machine-id files that holds one. A file
+// that holds something else is not an identifier and does not end the search:
+// systemd leaves the file empty until an image's first boot commits one and
+// writes the literal "uninitialized" into images whose identifier is deferred,
+// so any of those strings would put every machine still in that state — every
+// container started from one image — into a single domain.
 func readMachineID() (string, error) {
 	var last error
 	for _, path := range machineIDFiles {
@@ -49,10 +51,32 @@ func readMachineID() (string, error) {
 			last = err
 			continue
 		}
-		if id := strings.TrimSpace(string(data)); id != "" {
+		if id := strings.TrimSpace(string(data)); isMachineID(id) {
 			return id, nil
 		}
 		last = fmt.Errorf("%s holds no machine identifier", path)
 	}
 	return "", fmt.Errorf("cannot read the machine identifier: %w", last)
+}
+
+// isMachineID reports whether a string is one, as systemd defines it: exactly 32
+// lowercase hexadecimal characters, not all zero. Upper case is rejected rather
+// than folded, because a file holding one was not written by systemd and there
+// is no reason to believe the rest of it either. "uninitialized", a truncated
+// identifier and anything else fail on the same rule.
+func isMachineID(id string) bool {
+	if len(id) != 32 {
+		return false
+	}
+	zero := true
+	for _, character := range id {
+		switch {
+		case character >= '1' && character <= '9', character >= 'a' && character <= 'f':
+			zero = false
+		case character == '0':
+		default:
+			return false
+		}
+	}
+	return !zero
 }

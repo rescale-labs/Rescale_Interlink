@@ -301,13 +301,25 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 // =============================================================================
 
 // withProcessLiveness swaps the liveness probe for the duration of a test, so a
-// lock can be owned by a PID that is definitely alive or definitely gone
-// without the test having to find real ones.
-func withProcessLiveness(t *testing.T, probe func(int) bool) {
+// lock can be owned by a PID that is definitely alive, definitely gone, or one
+// the system will not answer about, without the test having to find real ones.
+func withProcessLiveness(t *testing.T, probe func(int) (processLiveness, error)) {
 	t.Helper()
-	previous := isProcessRunning
-	isProcessRunning = probe
-	t.Cleanup(func() { isProcessRunning = previous })
+	previous := probeProcessLiveness
+	probeProcessLiveness = probe
+	t.Cleanup(func() { probeProcessLiveness = previous })
+}
+
+// livenessOf answers the probe from a plain "is this one alive" predicate: a
+// system that answers at all, which is what every test but the undecided one
+// wants.
+func livenessOf(alive func(int) bool) func(int) (processLiveness, error) {
+	return func(pid int) (processLiveness, error) {
+		if alive(pid) {
+			return livenessAlive, nil
+		}
+		return livenessDead, nil
+	}
 }
 
 // writeLockFile plants a lock file the way another owner would have left it.
@@ -440,7 +452,7 @@ func TestAcquireUploadLock_RefusesSecondTransferInSameProcess(t *testing.T) {
 // window is still running, and a large file routinely takes longer than that.
 func TestAcquireUploadLock_KeepsLiveOwnerRegardlessOfAge(t *testing.T) {
 	const ownerPID = 424242
-	withProcessLiveness(t, func(pid int) bool { return pid == ownerPID })
+	withProcessLiveness(t, livenessOf(func(pid int) bool { return pid == ownerPID }))
 
 	localPath := filepath.Join(t.TempDir(), "testfile.bin")
 	writeLockFile(t, localPath, uploadLockState{
@@ -469,7 +481,7 @@ func TestAcquireUploadLock_KeepsLiveOwnerRegardlessOfAge(t *testing.T) {
 // was written.
 func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
 	const deadPID = 424243
-	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+	withProcessLiveness(t, livenessOf(func(pid int) bool { return pid != deadPID }))
 
 	localPath := filepath.Join(t.TempDir(), "testfile.bin")
 	writeLockFile(t, localPath, uploadLockState{
@@ -501,7 +513,7 @@ func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
 // business, not this rule's.
 func TestAcquireUploadLock_TakesOverADeadLockOfAnotherLogin(t *testing.T) {
 	const deadPID = 424255
-	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+	withProcessLiveness(t, livenessOf(func(pid int) bool { return pid != deadPID }))
 
 	localPath := filepath.Join(t.TempDir(), "testfile.bin")
 	writeLockFile(t, localPath, uploadLockState{
@@ -586,7 +598,7 @@ func TestAcquireUploadLock_TakeoverCannotEvictTheWinner(t *testing.T) {
 // looks from here.
 func plantAbandonedLock(t *testing.T, deadPID int) string {
 	t.Helper()
-	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+	withProcessLiveness(t, livenessOf(func(pid int) bool { return pid != deadPID }))
 
 	localPath := filepath.Join(t.TempDir(), "testfile.bin")
 	if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
@@ -822,7 +834,7 @@ func TestAcquireUploadLock_RefusesReclamationWithoutAPIDDomain(t *testing.T) {
 		// process that can name its own must not adopt it. This is the record's
 		// full v4.9.9 shape — host, user, token, everything but the domain.
 		const deadPID = 424254
-		withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+		withProcessLiveness(t, livenessOf(func(pid int) bool { return pid != deadPID }))
 		localPath := filepath.Join(t.TempDir(), "testfile.bin")
 
 		withoutAPIDDomain(t)
@@ -841,6 +853,36 @@ func TestAcquireUploadLock_RefusesReclamationWithoutAPIDDomain(t *testing.T) {
 		if err == nil {
 			ReleaseUploadLock(lock)
 			t.Fatal("adopted a record that names no PID domain")
+		}
+		if got := readLockFile(t, localPath); got.OwnerToken != "owner-that-crashed" {
+			t.Errorf("the record was cleared anyway; it now names %q", got.OwnerToken)
+		}
+	})
+
+	t.Run("two processes that cannot name a domain do not adopt each other's records", func(t *testing.T) {
+		// A record naming no domain and a process naming none are not thereby
+		// in one domain: they can be two machines that both could not say,
+		// sharing one home, and the PID in the record is a live process on
+		// the other one. "No domain" must equal nothing, not itself.
+		const deadPID = 424256
+		withProcessLiveness(t, livenessOf(func(pid int) bool { return pid != deadPID }))
+		localPath := filepath.Join(t.TempDir(), "testfile.bin")
+
+		withoutAPIDDomain(t)
+		writeLockFile(t, localPath, uploadLockState{
+			ProcessID:  deadPID,
+			OwnerToken: "owner-that-crashed",
+			Host:       lockHost,
+			Owner:      lockOwner,
+			PIDDomain:  currentPIDDomain(),
+			AcquiredAt: time.Now().Add(-time.Hour),
+			LocalPath:  localPath,
+		})
+
+		lock, err := AcquireUploadLock(localPath)
+		if err == nil {
+			ReleaseUploadLock(lock)
+			t.Fatal("adopted a record naming no PID domain while naming none itself")
 		}
 		if got := readLockFile(t, localPath); got.OwnerToken != "owner-that-crashed" {
 			t.Errorf("the record was cleared anyway; it now names %q", got.OwnerToken)
@@ -1167,7 +1209,7 @@ func TestAcquireUploadLock_RecordsWhoItBelongsTo(t *testing.T) {
 // alive, which is when it costs two owners of one upload.
 func TestAcquireUploadLock_RefusesALockItsCreatorHasNotWrittenYet(t *testing.T) {
 	const creatorPID = 900001
-	withProcessLiveness(t, func(pid int) bool { return pid == creatorPID })
+	withProcessLiveness(t, livenessOf(func(pid int) bool { return pid == creatorPID }))
 
 	localPath := filepath.Join(t.TempDir(), "testfile.bin")
 	lockFilePath := localPath + ".upload.lock"
@@ -1219,13 +1261,14 @@ func TestAcquireUploadLock_RefusesALockItsCreatorHasNotWrittenYet(t *testing.T) 
 	ReleaseUploadLock(creator.lock)
 }
 
-// TestAcquireUploadLock_TakesOverItsOwnPIDsLock pins the same-PID rule. A lock
-// naming this process's own PID cannot belong to a live owner other than us: a
-// live one of ours is caught by the in-process claim long before the file is
-// read, so what is left is either our own released lock or one the OS has since
-// handed our PID to. Refusing it would wedge every retry after a crash.
+// TestAcquireUploadLock_TakesOverItsOwnPIDsLock pins the same-PID rule for a
+// record that names our PID and another run's token. A live owner other than
+// us cannot have written it, and this run's own lock is refused before the rule
+// is reached because its token is ours, so what is left is a lock of an earlier
+// run of this process, or one the OS has since handed our PID to. Refusing it
+// would wedge every retry after a crash.
 func TestAcquireUploadLock_TakesOverItsOwnPIDsLock(t *testing.T) {
-	withProcessLiveness(t, func(int) bool { return true })
+	withProcessLiveness(t, livenessOf(func(int) bool { return true }))
 
 	localPath := filepath.Join(t.TempDir(), "testfile.bin")
 	writeLockFile(t, localPath, uploadLockState{
@@ -1246,6 +1289,156 @@ func TestAcquireUploadLock_TakesOverItsOwnPIDsLock(t *testing.T) {
 
 	if got := readLockFile(t, localPath); got.OwnerToken != processLockToken {
 		t.Errorf("lock file names owner %q, want this run of the process", got.OwnerToken)
+	}
+}
+
+// TestAcquireUploadLock_RefusesTheLiveLockOfThisRun is the same-process alias
+// sequence. Two spellings of one source file get two keys in the in-process map
+// and meet on the one lock file they share, so the second acquisition reads a
+// record naming our own PID and our own token. That is this run's live lock,
+// however the map missed it, and clearing it puts two uploads of one file in one
+// process.
+func TestAcquireUploadLock_RefusesTheLiveLockOfThisRun(t *testing.T) {
+	withProcessLiveness(t, livenessOf(func(int) bool { return true }))
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	writeLockFile(t, localPath, uploadLockState{
+		ProcessID:  os.Getpid(),
+		OwnerToken: processLockToken,
+		Host:       lockHost,
+		Owner:      lockOwner,
+		PIDDomain:  currentPIDDomain(),
+		AcquiredAt: time.Now().Add(-time.Minute),
+		LocalPath:  localPath,
+	})
+	before := readLockBytes(t, localPath)
+
+	lock, err := AcquireUploadLock(localPath)
+	if err == nil {
+		ReleaseUploadLock(lock)
+		t.Fatal("cleared a lock this very run of the process still holds")
+	}
+	if !strings.Contains(err.Error(), "already in progress in this process") {
+		t.Errorf("the refusal %q does not say the upload is already running here", err)
+	}
+	if after := readLockBytes(t, localPath); after != before {
+		t.Errorf("the lock file was rewritten:\n%s", after)
+	}
+	if left := siblingsOf(t, localPath); len(left) != 1 {
+		t.Errorf("the refusal left %v beside the source, want only the lock it would not take", left)
+	}
+}
+
+// TestAcquireUploadLock_RefusesACaseAliasOfItsOwnLock is that sequence on a real
+// volume rather than a planted record: macOS volumes are case-insensitive by
+// default, and the symlink resolver keeps the caller's spelling, so data.bin and
+// DATA.BIN are two in-process keys naming one lock file.
+func TestAcquireUploadLock_RefusesACaseAliasOfItsOwnLock(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("volumes are case-insensitive by default on macOS")
+	}
+	dir := t.TempDir()
+	spelled, alias := filepath.Join(dir, "data.bin"), filepath.Join(dir, "DATA.BIN")
+	if err := os.WriteFile(spelled, []byte("x"), 0600); err != nil {
+		t.Fatalf("write the source file: %v", err)
+	}
+	one, err := os.Stat(spelled)
+	if err != nil {
+		t.Fatalf("stat the source file: %v", err)
+	}
+	other, err := os.Stat(alias)
+	if err != nil || !os.SameFile(one, other) {
+		t.Skip("this volume is case-sensitive, so the two spellings are two files")
+	}
+
+	lock, err := AcquireUploadLock(spelled)
+	if err != nil {
+		t.Fatalf("could not acquire the first lock: %v", err)
+	}
+	defer ReleaseUploadLock(lock)
+	before, err := os.ReadFile(lock.LockFilePath)
+	if err != nil {
+		t.Fatalf("read the lock record: %v", err)
+	}
+
+	second, err := AcquireUploadLock(alias)
+	if err == nil {
+		ReleaseUploadLock(second)
+		t.Fatal("a second spelling of the source took the lock the first one holds")
+	}
+	after, err := os.ReadFile(lock.LockFilePath)
+	if err != nil {
+		t.Fatalf("read the lock record after the refusal: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the alias rewrote the live lock:\n%s", after)
+	}
+	var got uploadLockState
+	if err := json.Unmarshal(after, &got); err != nil {
+		t.Fatalf("parse the lock record: %v", err)
+	}
+	if got.LocalPath != spelled {
+		t.Errorf("the lock names %q, want the spelling that acquired it %q", got.LocalPath, spelled)
+	}
+}
+
+// readLockBytes reads a lock file as written, for the refusals that must leave
+// it exactly as they found it.
+func readLockBytes(t *testing.T, localPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(localPath + ".upload.lock")
+	if err != nil {
+		t.Fatalf("read the lock file: %v", err)
+	}
+	return string(data)
+}
+
+// TestAcquireUploadLock_RefusesAnOwnerTheSystemWillNotAnswerAbout covers the
+// probe that cannot decide. Windows answers ERROR_ACCESS_DENIED for a live
+// process of another login, an elevated one or a protected one, and reading
+// that as "no such process" lets the next acquirer take a running upload's
+// lock. Only positive evidence of absence may reclaim.
+func TestAcquireUploadLock_RefusesAnOwnerTheSystemWillNotAnswerAbout(t *testing.T) {
+	const ownerPID = 424277
+	withProcessLiveness(t, func(pid int) (processLiveness, error) {
+		if pid == ownerPID {
+			return livenessUnknown, errors.New("cannot open the process with PID 424277: Access is denied.")
+		}
+		return livenessAlive, nil
+	})
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	lockFilePath := localPath + ".upload.lock"
+	acquired := time.Now().Add(-time.Hour)
+	writeLockFile(t, localPath, uploadLockState{
+		ProcessID:  ownerPID,
+		OwnerToken: "an-owner-this-login-cannot-open",
+		Host:       lockHost,
+		Owner:      lockOwner + "-someone-else",
+		PIDDomain:  currentPIDDomain(),
+		AcquiredAt: acquired,
+		LocalPath:  localPath,
+	})
+	before := readLockBytes(t, localPath)
+
+	lock, err := AcquireUploadLock(localPath)
+	if err == nil {
+		ReleaseUploadLock(lock)
+		t.Fatal("cleared a lock whose owner the system would not answer about")
+	}
+	if errors.Is(err, ErrUploadLockUnavailable) {
+		t.Errorf("a lock that exists is reported as no lock at all: %v", err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("%d", ownerPID), lockHost, lockOwner + "-someone-else",
+		acquired.Format(time.RFC3339), lockFilePath, "Access is denied.",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not name %q", err, want)
+		}
+	}
+	if after := readLockBytes(t, localPath); after != before {
+		t.Errorf("the lock file was rewritten:\n%s", after)
 	}
 }
 
@@ -1367,7 +1560,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherPIDDomain(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			// The owner is gone as far as this machine can tell, which is the
 			// judgement that used to be enough to clear it.
-			withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+			withProcessLiveness(t, livenessOf(func(pid int) bool { return pid != deadPID }))
 			withPIDDomain(t, thisDomain)
 			localPath := filepath.Join(t.TempDir(), "testfile.bin")
 			lockFilePath := localPath + ".upload.lock"
