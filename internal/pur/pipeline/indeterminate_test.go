@@ -558,14 +558,14 @@ func remoteInputJobSpec() models.JobSpec {
 // seedUnconfirmedWithoutArchive writes the state left behind by a job that built
 // no archive of its own — a DOE sweep, a remote-input single job or a
 // submit-existing row — and whose creation was never confirmed.
-func seedUnconfirmedWithoutArchive(t *testing.T, stateFile string, spec models.JobSpec, cause string) {
+func seedUnconfirmedWithoutArchive(t *testing.T, stateFile string, spec models.JobSpec, submitStatus, cause string) {
 	t.Helper()
 
 	mgr := state.NewManager(stateFile)
 	st := mgr.InitializeState(1, spec.JobName, spec.Directory)
 	st.TarStatus = "skipped"
 	st.UploadStatus = "skipped"
-	st.SubmitStatus = state.SubmitStatusIndeterminate
+	st.SubmitStatus = submitStatus
 	st.ErrorMessage = cause
 	if err := mgr.UpdateState(st); err != nil {
 		t.Fatalf("seed state: %v", err)
@@ -663,7 +663,7 @@ func TestRecreationKeepsTheUnconfirmedRecordUntilTheWorkerRecordsItsIntent(t *te
 
 			stateFile := filepath.Join(root, "state.csv")
 			spec := remoteInputJobSpec()
-			seedUnconfirmedWithoutArchive(t, stateFile, spec, cause)
+			seedUnconfirmedWithoutArchive(t, stateFile, spec, state.SubmitStatusIndeterminate, cause)
 
 			opts := PipelineOptions{
 				StateFile:             stateFile,
@@ -785,5 +785,161 @@ func TestRecreationThatCannotBuildItsRequestKeepsTheUnconfirmedRecord(t *testing
 	}
 	if runErr == nil || !strings.Contains(runErr.Error(), "job_1") {
 		t.Errorf("run verdict = %v, want it to name job_1", runErr)
+	}
+}
+
+// TestRecreationRejectedForNoInputsKeepsTheUnconfirmedRecord covers the feeder's
+// own pre-request write: the job's inputs were edited away between the two runs,
+// so checkJobHasInputs rejects it before any intent or request. Recording a
+// plain failure there replaces the unconfirmed creation with a record the next
+// resume creates from with no flag at all — restoring the inputs would then
+// create the job the user was told to check the platform for.
+func TestRecreationRejectedForNoInputsKeepsTheUnconfirmedRecord(t *testing.T) {
+	const cause = "job may have been created: the platform took the request and the answer was lost"
+
+	for _, unconfirmed := range []string{state.SubmitStatusCreating, state.SubmitStatusIndeterminate} {
+		t.Run(unconfirmed, func(t *testing.T) {
+			root := namespaceTestRoot(t)
+			work := filepath.Join(root, "work")
+			if err := os.MkdirAll(work, 0o755); err != nil {
+				t.Fatalf("mkdir work: %v", err)
+			}
+			// The job has no directory of its own, so the batch sites its
+			// archive directory on the process working directory.
+			t.Chdir(work)
+
+			var mu sync.Mutex
+			creates := 0
+			server := answeringServer(&creates, &mu)
+			defer server.Close()
+
+			stateFile := filepath.Join(root, "state.csv")
+			spec := remoteInputJobSpec()
+			seedUnconfirmedWithoutArchive(t, stateFile, spec, unconfirmed, cause)
+
+			// The edit: the row's remote input file IDs are gone, so the job
+			// would be created carrying nothing.
+			stripped := spec
+			stripped.InputFiles = nil
+
+			p, lines, runErr := runBatchWith(t, []models.JobSpec{stripped}, stateFile, server.URL, true)
+
+			mu.Lock()
+			got := creates
+			mu.Unlock()
+			if got != 0 {
+				t.Fatalf("platform received %d create request(s), want 0", got)
+			}
+			if !containsAll(lines, "REJECTED", "no input file IDs") {
+				t.Fatalf("the feeder never rejected the job, so this proves nothing; lines: %v", lines)
+			}
+
+			st := stateOf(t, stateFile, 1)
+			if st.SubmitStatus != unconfirmed {
+				t.Errorf("SubmitStatus = %q, want it still %q: nothing was sent, so nothing was resolved",
+					st.SubmitStatus, unconfirmed)
+			}
+			if st.JobID != "" {
+				t.Errorf("JobID = %q, want empty", st.JobID)
+			}
+			if st.ErrorMessage != cause {
+				t.Errorf("ErrorMessage = %q, want the unconfirmed creation's own %q", st.ErrorMessage, cause)
+			}
+			if failed := p.countFailedJobs(); failed != 0 {
+				t.Errorf("run counts %d plain failure(s), want 0: the job may exist", failed)
+			}
+			if runErr == nil || !strings.Contains(runErr.Error(), "job_1") {
+				t.Errorf("run verdict = %v, want it to name job_1", runErr)
+			}
+
+			// What that record is for: the inputs come back, and the next resume
+			// without the flag still leaves the job alone and says so.
+			resumed, resumeLines, resumeErr := runBatch(t, []models.JobSpec{spec}, stateFile, server.URL)
+
+			mu.Lock()
+			got = creates
+			mu.Unlock()
+			if got != 0 {
+				t.Errorf("job created %d time(s) on an unflagged resume, want 0", got)
+			}
+			if resumeErr == nil || !strings.Contains(resumeErr.Error(), "job_1") {
+				t.Errorf("resume verdict = %v, want it to name job_1", resumeErr)
+			}
+			if !containsAll(resumeLines, "job_1", "--recreate-indeterminate") {
+				t.Errorf("no log line names the job and how to create it again; lines: %v", resumeLines)
+			}
+			if failed := resumed.countFailedJobs(); failed != 0 {
+				t.Errorf("resume counts %d plain failure(s), want 0: the job may exist", failed)
+			}
+
+			// And with the inputs restored the flag still creates it once.
+			if _, _, err := runBatchWith(t, []models.JobSpec{spec}, stateFile, server.URL, true); err != nil {
+				t.Errorf("resume with --recreate-indeterminate: %v", err)
+			}
+
+			mu.Lock()
+			got = creates
+			mu.Unlock()
+			if got != 1 {
+				t.Fatalf("job created %d time(s) in total, want 1", got)
+			}
+			done := stateOf(t, stateFile, 1)
+			if done.JobID != "job-abc" {
+				t.Errorf("JobID = %q, want %q", done.JobID, "job-abc")
+			}
+			if state.MayAlreadyExist(done) {
+				t.Errorf("SubmitStatus = %q, want the created job's own status", done.SubmitStatus)
+			}
+			if done.ErrorMessage != "" {
+				t.Errorf("ErrorMessage = %q, want it cleared with the ambiguity", done.ErrorMessage)
+			}
+		})
+	}
+}
+
+// TestOrdinaryJobWithNoInputsStillFails is the control for the same rejection
+// outside a recreation: nothing may exist on the platform, so the job fails on
+// disk and in the count exactly as it did before.
+func TestOrdinaryJobWithNoInputsStillFails(t *testing.T) {
+	root := namespaceTestRoot(t)
+	work := filepath.Join(root, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatalf("mkdir work: %v", err)
+	}
+	t.Chdir(work)
+
+	var mu sync.Mutex
+	creates := 0
+	server := answeringServer(&creates, &mu)
+	defer server.Close()
+
+	stateFile := filepath.Join(root, "state.csv")
+	spec := remoteInputJobSpec()
+	spec.InputFiles = nil
+
+	p, lines, runErr := runBatch(t, []models.JobSpec{spec}, stateFile, server.URL)
+
+	mu.Lock()
+	got := creates
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("platform received %d create request(s), want 0", got)
+	}
+	if !containsAll(lines, "REJECTED", "no input file IDs") {
+		t.Fatalf("the feeder never rejected the job, so this proves nothing; lines: %v", lines)
+	}
+
+	st := stateOf(t, stateFile, 1)
+	if st.SubmitStatus != "failed" {
+		t.Errorf("SubmitStatus = %q, want %q", st.SubmitStatus, "failed")
+	}
+	if !strings.Contains(st.ErrorMessage, "no inputs at all") {
+		t.Errorf("ErrorMessage = %q, want the rejection's own reason", st.ErrorMessage)
+	}
+	if failed := p.countFailedJobs(); failed != 1 {
+		t.Errorf("run counts %d failure(s), want 1", failed)
+	}
+	if runErr == nil || !strings.Contains(runErr.Error(), "1 of 1 job(s) failed") {
+		t.Errorf("run verdict = %v, want it to report the failure", runErr)
 	}
 }

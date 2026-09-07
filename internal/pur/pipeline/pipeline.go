@@ -749,10 +749,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			if !hasLocalArchive(jobSpec) {
 				if err := p.checkJobHasInputs(jobSpec); err != nil {
 					p.logf("ERROR", "job", item.state.JobName, "REJECTED: %v", err)
-					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = err.Error()
-					p.stateMgr.UpdateState(item.state)
-					p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
+					// Nothing is sent from here, so a job being created again
+					// keeps the unconfirmed record this run was authorized to
+					// supersede rather than a failure the next resume creates
+					// from with no flag.
+					p.failBeforeCreate(item, err.Error())
 					continue
 				}
 
