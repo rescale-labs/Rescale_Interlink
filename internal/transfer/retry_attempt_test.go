@@ -114,6 +114,141 @@ func TestRetryWaitsForTheCancelledAttemptToFinish(t *testing.T) {
 	}
 }
 
+// TestCancelAllStopsAClaimedRetry covers N9. A retry claimed while the
+// cancelled attempt is still unwinding sits on a task that is already terminal,
+// so a Cancel All sweep skips it — and releaseAttempt then starts the transfer
+// the user just stopped everything to avoid.
+func TestCancelAllStopsAClaimedRetry(t *testing.T) {
+	queue := NewQueue(nil)
+	executor := newScriptedExecutor()
+	queue.SetRetryExecutor(executor)
+
+	task := queue.TrackTransfer("run.tar.gz", 1024, TaskTypeDownload, "file-1", "/tmp/run.tar.gz")
+
+	_, cancel := context.WithCancel(context.Background())
+	queue.SetCancel(task.ID, cancel)
+	if !queue.Activate(task.ID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+	queue.StartTransfer(task.ID)
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	// The retry is claimed while the cancelled attempt is still unwinding.
+	if _, err := queue.Retry(task.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+
+	queue.CancelAll()
+
+	// Only now does the old attempt return.
+	queue.FailIfNotTerminal(task.ID, context.Canceled)
+
+	if _, started := executor.awaitStart(t, 200*time.Millisecond); started {
+		t.Fatal("the claimed retry started after Cancel All")
+	}
+	if got := task.GetState(); got != TaskCancelled {
+		t.Errorf("task state = %q, want %q", got, TaskCancelled)
+	}
+}
+
+// TestCancelBatchStopsAClaimedRetry is the same sequence through the per-batch
+// sweep, which likewise walks past a task the claim has already made terminal.
+func TestCancelBatchStopsAClaimedRetry(t *testing.T) {
+	queue := NewQueue(nil)
+	executor := newScriptedExecutor()
+	queue.SetRetryExecutor(executor)
+
+	task := queue.TrackTransferWithBatch("run.tar.gz", 1024, TaskTypeDownload, "file-1",
+		"/tmp/run.tar.gz", "Library", "batch-1", "Batch 1")
+
+	_, cancel := context.WithCancel(context.Background())
+	queue.SetCancel(task.ID, cancel)
+	if !queue.Activate(task.ID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+	queue.StartTransfer(task.ID)
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := queue.Retry(task.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+
+	if err := queue.CancelBatch("batch-1"); err != nil {
+		t.Fatalf("CancelBatch: %v", err)
+	}
+
+	queue.FailIfNotTerminal(task.ID, context.Canceled)
+
+	if _, started := executor.awaitStart(t, 200*time.Millisecond); started {
+		t.Fatal("the claimed retry started after the batch was cancelled")
+	}
+}
+
+// TestCancelStopsAClaimedRetry is the single-task sweep. The task is already
+// terminal by the time the claim exists, so cancelling it used to report that it
+// was not cancellable and leave the pending attempt to run regardless.
+func TestCancelStopsAClaimedRetry(t *testing.T) {
+	queue := NewQueue(nil)
+	executor := newScriptedExecutor()
+	queue.SetRetryExecutor(executor)
+
+	task := queue.TrackTransfer("run.tar.gz", 1024, TaskTypeDownload, "file-1", "/tmp/run.tar.gz")
+
+	_, cancel := context.WithCancel(context.Background())
+	queue.SetCancel(task.ID, cancel)
+	if !queue.Activate(task.ID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+	queue.StartTransfer(task.ID)
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := queue.Retry(task.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("second Cancel: %v", err)
+	}
+
+	queue.FailIfNotTerminal(task.ID, context.Canceled)
+
+	if _, started := executor.awaitStart(t, 200*time.Millisecond); started {
+		t.Fatal("the claimed retry started after the task was cancelled again")
+	}
+}
+
+// TestRetryAfterCancelAllStillRuns is the boundary: dropping pending claims must
+// not cost the user the deliberate retry they ask for afterwards.
+func TestRetryAfterCancelAllStillRuns(t *testing.T) {
+	queue := NewQueue(nil)
+	executor := newScriptedExecutor()
+	queue.SetRetryExecutor(executor)
+
+	task := queue.TrackTransfer("run.tar.gz", 1024, TaskTypeDownload, "file-1", "/tmp/run.tar.gz")
+
+	_, cancel := context.WithCancel(context.Background())
+	queue.SetCancel(task.ID, cancel)
+	if !queue.Activate(task.ID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+	queue.StartTransfer(task.ID)
+	queue.CancelAll()
+
+	if _, err := queue.Retry(task.ID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	queue.FailIfNotTerminal(task.ID, context.Canceled)
+
+	if _, started := executor.awaitStart(t, 2*time.Second); !started {
+		t.Fatal("a retry requested after Cancel All never started")
+	}
+	close(executor.proceed)
+}
+
 // TestRepeatedRetryClaimsOneAttempt covers the other half of F12: the retryable
 // check and the claim have to be one step. Several retry requests for the same
 // task — a double click, or a batch retry overlapping a single one — must leave

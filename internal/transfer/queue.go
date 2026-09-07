@@ -418,6 +418,11 @@ func (q *Queue) Cancel(taskID string) error {
 		return errors.New("task not found")
 	}
 	cancelFn := q.cancelFuncs[taskID]
+	// A retry claimed while the previous attempt unwinds is a transfer waiting to
+	// start, on a task the claim has already left terminal. Dropping the claim is
+	// what makes this cancel stick; without it releaseAttempt starts it anyway.
+	_, claimDropped := q.claimedRetries[taskID]
+	delete(q.claimedRetries, taskID)
 	cancelled := task.cancelIfNotTerminal()
 	if cancelled {
 		delete(q.cancelFuncs, taskID)
@@ -425,6 +430,9 @@ func (q *Queue) Cancel(taskID string) error {
 	q.mu.Unlock()
 
 	if !cancelled {
+		if claimDropped {
+			return nil
+		}
 		return errors.New("task is not cancellable")
 	}
 	if cancelFn != nil {
@@ -457,6 +465,11 @@ func (q *Queue) CancelAll() {
 	cancelFns := make([]context.CancelFunc, 0)
 	var cancelled []*TransferTask
 	for _, task := range q.tasks {
+		// A claimed retry sits on a task the claim left terminal, so the state
+		// filter below never reaches it and releaseAttempt would start it after
+		// this sweep.
+		delete(q.claimedRetries, task.ID)
+
 		state := task.GetState()
 		if state != TaskActive && state != TaskInitializing && state != TaskQueued {
 			continue
@@ -1012,6 +1025,9 @@ func (q *Queue) CancelBatch(batchID string) error {
 		if task.BatchID != batchID {
 			continue
 		}
+		// Same reason as CancelAll: a claimed retry is a pending start on a task
+		// that is already terminal, and the check below would walk past it.
+		delete(q.claimedRetries, task.ID)
 		if task.IsTerminal() {
 			continue
 		}

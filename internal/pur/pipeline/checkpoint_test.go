@@ -190,3 +190,107 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 		t.Errorf("run counts %d failed job(s), want 1", failed)
 	}
 }
+
+// TestSubmitCheckpointFailureIsReportedAndNotCounted covers F6's last stage.
+// Nothing irreversible is left to stop once the job is running, so the failure
+// has to be reported instead: the state file still shows the job pending, and a
+// resume from it submits the running job a second time. The run must not count
+// the job done either, which is what tells the user something needs attention.
+func TestSubmitCheckpointFailureIsReportedAndNotCounted(t *testing.T) {
+	root := namespaceTestRoot(t)
+	runDir := filepath.Join(root, "Run_1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run: %v", err)
+	}
+
+	var mu sync.Mutex
+	var created, submitted int
+	server := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/submit/") {
+			submitted++
+			w.WriteHeader(nethttp.StatusOK)
+			return
+		}
+		created++
+		w.WriteHeader(nethttp.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"job-second"}`))
+	}))
+	defer server.Close()
+
+	stateFile := filepath.Join(root, "state.csv")
+	spec := models.JobSpec{
+		JobName:         "job_1",
+		Directory:       runDir,
+		AnalysisCode:    "user_included",
+		AnalysisVersion: "1.0",
+		Command:         "./run.sh",
+		CoreType:        "emerald",
+		CoresPerSlot:    4,
+		Slots:           1,
+		WalltimeHours:   1,
+		SubmitMode:      "submit",
+	}
+	p := newBatch(t, []models.JobSpec{spec}, stateFile)
+	p.apiClient = api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+
+	var logMu sync.Mutex
+	var errorLines []string
+	p.SetLogCallback(func(level, message, stage, jobName string) {
+		if level != "ERROR" {
+			return
+		}
+		logMu.Lock()
+		defer logMu.Unlock()
+		errorLines = append(errorLines, message)
+	})
+
+	// The job exists on the platform already; only its submission is left.
+	st := p.stateMgr.InitializeState(1, "job_1", runDir)
+	st.TarStatus = "success"
+	st.UploadStatus = "success"
+	st.FileID = "file-123"
+	st.JobID = "job-abc"
+	if err := p.stateMgr.UpdateState(st); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	breakStateWrites(t, stateFile)
+
+	close(p.feederDone)
+	p.jobQueue <- &workItem{index: 1, jobSpec: spec, state: st}
+	close(p.jobQueue)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go p.jobWorker(context.Background(), &wg, 0)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if created != 0 {
+		t.Errorf("job created %d times, want 0 — it already existed", created)
+	}
+	if submitted != 1 {
+		t.Fatalf("job submitted %d times, want 1", submitted)
+	}
+
+	logMu.Lock()
+	defer logMu.Unlock()
+	named := false
+	for _, line := range errorLines {
+		if strings.Contains(line, "job-abc") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("no ERROR line names the submitted job; logged %q", errorLines)
+	}
+	if p.completedJobs != 0 {
+		t.Errorf("the run counted %d job(s) done although the submission was never recorded", p.completedJobs)
+	}
+	if failed := p.countFailedJobs(); failed != 1 {
+		t.Errorf("run counts %d failed job(s), want 1", failed)
+	}
+}

@@ -949,6 +949,17 @@ const registerFileAttempts = 3
 // of the same name and size registered earlier is not adopted.
 const registerReconcileWindow = 10 * time.Minute
 
+// registerLookupMaxPages bounds the reconciliation search. The folder is
+// searched by the registered name, so a match is normally on the first page;
+// the bound stops a folder the platform keeps paginating from stalling an
+// upload, and an exhausted bound is reported rather than treated as a "no".
+const registerLookupMaxPages = 10
+
+// errRecordUnconfirmed marks a create the platform accepted — it answered 2xx —
+// whose body could not be read or parsed. The record exists; only its ID is
+// missing, so the request must not be sent again.
+var errRecordUnconfirmed = errors.New("the platform accepted the request but its response could not be read")
+
 // RegisterFile creates the platform's record of an uploaded file.
 //
 // A failure that may have been delivered is reconciled rather than repeated:
@@ -961,7 +972,7 @@ func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequ
 
 	for attempt := 1; ; attempt++ {
 		file, err := c.registerFileOnce(ctx, fileReq)
-		if err == nil || !isAmbiguousDelivery(err) {
+		if err == nil || !isAmbiguousDelivery(ctx, err) {
 			return file, err
 		}
 
@@ -973,6 +984,12 @@ func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequ
 		if existing != nil {
 			return existing, nil
 		}
+		if errors.Is(err, errRecordUnconfirmed) {
+			// The platform accepted this one, so a second attempt would leave a
+			// second record describing the same uploaded bytes.
+			return nil, fmt.Errorf("registering %q was accepted but no record of it could be found: %w",
+				fileReq.Name, err)
+		}
 		if attempt >= registerFileAttempts {
 			return nil, err
 		}
@@ -982,10 +999,21 @@ func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequ
 }
 
 // isAmbiguousDelivery reports a request that may have reached the platform and
-// been acted on before the connection failed.
-func isAmbiguousDelivery(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// been acted on before the caller learned what it did.
+//
+// ctx is the caller's, and a deadline or cancellation belonging to it ends the
+// call outright: there is nothing to reconcile against, since the lookup would
+// run on that same dead context. A deadline that fired while the caller's
+// context is still alive is the client's own whole-request ceiling
+// (constants.HTTPClientTimeout, set by http.ConfigureHTTPClient), which
+// net/http also reports as context.DeadlineExceeded and which can expire long
+// after the platform received the request.
+func isAmbiguousDelivery(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
 		return false
+	}
+	if errors.Is(err, errRecordUnconfirmed) {
+		return true
 	}
 	// A response, however bad, means the platform answered and the caller knows
 	// where it stands; only a transport failure is ambiguous.
@@ -999,10 +1027,16 @@ func isAmbiguousDelivery(err error) bool {
 // findRegisteredFile looks for the record a registration request would have
 // created, or nil when the platform holds no such record.
 //
-// Identity is the request's own terms — the name and decrypted size, in the
-// folder it targeted — plus recency, since the platform allows same-named files
-// and an older one must not be adopted as this upload's. A record with no
-// upload date yet is accepted: registration precedes the platform stamping one.
+// What identifies the record is the stored object the request named — its path
+// in its container, on its storage — not its name and size, which the platform
+// lets two uploads of different content share. Adopting a namesake would hand
+// the caller a file ID describing someone else's bytes. Name, size, folder and
+// recency only narrow the search; a record with no upload date yet is accepted,
+// since registration precedes the platform stamping one.
+//
+// A negative answer has to be a complete one: every page is read before
+// reporting that nothing was created, and a search that cannot be completed —
+// or two records that cannot be told apart — is an error rather than a "no".
 func (c *Client) findRegisteredFile(ctx context.Context, fileReq *models.CloudFileRequest, notBefore time.Time) (*models.CloudFile, error) {
 	folderID := fileReq.CurrentFolderID
 	if folderID == "" {
@@ -1013,24 +1047,115 @@ func (c *Client) findRegisteredFile(ctx context.Context, fileReq *models.CloudFi
 		folderID = roots.MyLibrary
 	}
 
-	contents, err := c.SearchFolderContents(ctx, folderID, fileReq.Name, "", 100)
-	if err != nil {
-		return nil, fmt.Errorf("failed to search folder %s: %w", folderID, err)
+	var adopted *models.CloudFile
+	adoptedIsListing := false
+	pageURL := ""
+	for page := 1; ; page++ {
+		contents, err := c.SearchFolderContents(ctx, folderID, fileReq.Name, pageURL, 100)
+		if err != nil {
+			return nil, fmt.Errorf("failed to search folder %s: %w", folderID, err)
+		}
+
+		for _, candidate := range contents.Files {
+			if candidate.Name != fileReq.Name || candidate.DecryptedSize != fileReq.DecryptedSize {
+				continue
+			}
+			if !candidate.DateUploaded.IsZero() && candidate.DateUploaded.Before(notBefore) {
+				continue
+			}
+
+			record := &models.CloudFile{
+				ID:            candidate.ID,
+				PathParts:     candidate.PathParts,
+				Storage:       candidate.Storage,
+				FileChecksums: candidate.FileChecksums,
+			}
+			fromListing := true
+			same, known := describesSameObject(fileReq, record)
+			if !known {
+				// The listing did not carry a storage path; the record itself does.
+				record, err = c.GetFileInfo(ctx, candidate.ID)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read file %s: %w", candidate.ID, err)
+				}
+				fromListing = false
+				same, known = describesSameObject(fileReq, record)
+			}
+			if !known {
+				return nil, fmt.Errorf("record %s has the registered name and size but names no stored object, "+
+					"so it cannot be told apart from another upload", candidate.ID)
+			}
+			if !same {
+				continue
+			}
+			if adopted != nil {
+				return nil, fmt.Errorf("records %s and %s both name %s, so neither can be adopted as this registration's",
+					adopted.ID, record.ID, fileReq.PathParts.Path)
+			}
+			adopted = record
+			adoptedIsListing = fromListing
+		}
+
+		if contents.NextURL == "" {
+			break
+		}
+		if page >= registerLookupMaxPages {
+			return nil, fmt.Errorf("folder %s still had results for %q after %d pages",
+				folderID, fileReq.Name, registerLookupMaxPages)
+		}
+		pageURL = contents.NextURL
 	}
 
-	for _, candidate := range contents.Files {
-		if candidate.Name != fileReq.Name || candidate.DecryptedSize != fileReq.DecryptedSize {
-			continue
-		}
-		if !candidate.DateUploaded.IsZero() && candidate.DateUploaded.Before(notBefore) {
-			continue
-		}
-		// The listing carries less than a registration response does, and the
-		// caller's next step is to upload against this record.
-		return c.GetFileInfo(ctx, candidate.ID)
+	if adopted == nil || !adoptedIsListing {
+		return adopted, nil
 	}
+	// The listing carries less than a registration response does, and the
+	// caller's next step is to upload against this record.
+	return c.GetFileInfo(ctx, adopted.ID)
+}
 
-	return nil, nil
+// describesSameObject reports whether a platform record describes the object
+// this registration named, and whether the record says enough to tell.
+//
+// The storage path in its container is the discriminator: two uploads of
+// different content may share a name and a size, but never a path. Storage
+// identity and checksums are compared where both sides carry them; a record
+// carrying no path at all cannot be told apart from a namesake and is reported
+// as unknown rather than guessed at.
+func describesSameObject(fileReq *models.CloudFileRequest, record *models.CloudFile) (same, known bool) {
+	if fileReq.PathParts.Path == "" || record.PathParts == nil || record.PathParts.Path == "" {
+		return false, false
+	}
+	if record.PathParts.Path != fileReq.PathParts.Path {
+		return false, true
+	}
+	if record.PathParts.Container != "" && fileReq.PathParts.Container != "" &&
+		record.PathParts.Container != fileReq.PathParts.Container {
+		return false, true
+	}
+	if record.Storage != nil {
+		if record.Storage.ID != "" && fileReq.Storage.ID != "" && record.Storage.ID != fileReq.Storage.ID {
+			return false, true
+		}
+		if record.Storage.StorageType != "" && fileReq.Storage.StorageType != "" &&
+			record.Storage.StorageType != fileReq.Storage.StorageType {
+			return false, true
+		}
+	}
+	return checksumsAgree(fileReq.FileChecksums, record.FileChecksums), true
+}
+
+// checksumsAgree reports whether the hashes the two sides both carry are equal.
+// A hash function only one side carries says nothing either way.
+func checksumsAgree(want, got []models.FileChecksum) bool {
+	for _, w := range want {
+		for _, g := range got {
+			if strings.EqualFold(w.HashFunction, g.HashFunction) && !strings.EqualFold(w.FileHash, g.FileHash) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // registerFileOnce performs a single registration request.
@@ -1045,7 +1170,7 @@ func (c *Client) registerFileOnce(ctx context.Context, fileReq *models.CloudFile
 	if resp.StatusCode == nethttp.StatusCreated || resp.StatusCode == nethttp.StatusOK {
 		var file models.CloudFile
 		if err := json.NewDecoder(resp.Body).Decode(&file); err != nil {
-			return nil, fmt.Errorf("failed to decode file response: %w", err)
+			return nil, fmt.Errorf("%w: failed to decode file response: %v", errRecordUnconfirmed, err)
 		}
 		return &file, nil
 	}
@@ -1102,7 +1227,7 @@ func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*mode
 	jobReq.NormalizeAutomations() // Ensure environmentVariables is always present
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/jobs/", jobReq)
 	if err != nil {
-		if isAmbiguousDelivery(err) {
+		if isAmbiguousDelivery(ctx, err) {
 			return nil, fmt.Errorf("%w: %q — the request reached the platform but the connection "+
 				"failed before it answered; check for a job named %q before creating it again: %w",
 				ErrJobMayExist, jobReq.Name, jobReq.Name, err)
@@ -1126,7 +1251,11 @@ func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*mode
 
 	var job models.JobResponse
 	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
-		return nil, fmt.Errorf("failed to decode job response: %w", err)
+		// The platform answered 2xx, so the job exists; the answer naming it did
+		// not survive. Nothing identifies it to look it up by, so the caller checks.
+		return nil, fmt.Errorf("%w: %q — the platform accepted the job but its response "+
+			"could not be read; check for a job named %q before creating it again: %v",
+			ErrJobMayExist, jobReq.Name, jobReq.Name, err)
 	}
 
 	return &job, nil
