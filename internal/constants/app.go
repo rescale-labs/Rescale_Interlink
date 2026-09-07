@@ -128,6 +128,13 @@ const (
 	// PartOperationTimeout - timeout for individual part uploads/downloads (10 minutes)
 	PartOperationTimeout = 10 * time.Minute
 
+	// AbortOperationTimeout bounds an abort issued after the caller's context is
+	// already cancelled. Such an abort has to run on a detached context to reach
+	// the backend at all, so its timeout is how long a cancelled transfer keeps
+	// its goroutine alive after the user pressed cancel — a single request, not
+	// a part transfer, so the part budget is far too long to wait there.
+	AbortOperationTimeout = 60 * time.Second
+
 	// ProgressUpdateInterval - how often progress updates are checked/emitted (500ms)
 	ProgressUpdateInterval = 500 * time.Millisecond
 )

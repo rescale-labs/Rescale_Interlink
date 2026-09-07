@@ -1107,3 +1107,25 @@ func TestPreEncryptConcurrentKeepsMultipartAfterCompletionFailure(t *testing.T) 
 		t.Errorf("completed with parts %v, want the whole object", backend.committed)
 	}
 }
+
+// TestAbortContextUsesTheAbortDeadline is F-3 at the provider: a detached abort
+// bounded by the ten-minute part budget holds the transfer goroutine open long
+// after the caller gave up on it.
+func TestAbortContextUsesTheAbortDeadline(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	abortCtx, cancelAbort := abortContext(cancelled)
+	defer cancelAbort()
+
+	if err := abortCtx.Err(); err != nil {
+		t.Fatalf("the abort context inherited the cancellation: %v", err)
+	}
+	deadline, ok := abortCtx.Deadline()
+	if !ok {
+		t.Fatal("the abort context carries no deadline")
+	}
+	if left := time.Until(deadline); left > constants.AbortOperationTimeout {
+		t.Errorf("the abort was given %s to run, want at most the %s abort deadline", left, constants.AbortOperationTimeout)
+	}
+}

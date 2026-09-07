@@ -743,6 +743,9 @@ type azureResumeFixture struct {
 	data           []byte
 	params         transfer.EncryptedFileUploadParams
 	pathForRescale string
+	// createdAt is when the interrupted attempt opened its upload, which is what
+	// the seven-day expiry both backends enforce is measured from.
+	createdAt time.Time
 }
 
 func newAzureResumeFixture(t *testing.T, encryptedSize int64, plan *resources.UploadPlan) *azureResumeFixture {
@@ -767,6 +770,7 @@ func newAzureResumeFixture(t *testing.T, encryptedSize int64, plan *resources.Up
 		data:           data,
 		params:         params,
 		pathForRescale: state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix),
+		createdAt:      time.Now(),
 	}
 }
 
@@ -784,7 +788,7 @@ func (f *azureResumeFixture) writeState(t *testing.T, blockSize int64, blockIDs 
 		BlockIDs:      blockIDs,
 		PartSize:      blockSize,
 		RandomSuffix:  f.params.RandomSuffix,
-		CreatedAt:     time.Now(),
+		CreatedAt:     f.createdAt,
 		LastUpdate:    time.Now(),
 		StorageType:   "AzureStorage",
 	})
@@ -933,4 +937,34 @@ func TestPreEncryptBlockBlobResumeWithoutBlockSizeStartsFresh(t *testing.T) {
 			backend.assertCommittedBlocksMatch(t, expectedBlockHashes(fixture.data, resumeBlockSize))
 		})
 	}
+}
+
+// TestPreEncryptBlockBlobConcurrentValidatesResumeState: the concurrent path
+// judged a checkpoint on the object key and the block geometry alone, so it
+// continued one Azure had already dropped — uncommitted blocks live seven days —
+// and committed a block list naming blocks the service no longer holds. S3's
+// concurrent path has always run the same state validation first.
+func TestPreEncryptBlockBlobConcurrentValidatesResumeState(t *testing.T) {
+	backend, server := newFakeBlobBackend(t)
+	azureClient := newTestAzureClient(t, server)
+
+	encryptedSize := 3 * resumeBlockSize
+	fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+		PartSize:   resumeBlockSize,
+		WorkerCap:  4,
+		QueueDepth: 4,
+	})
+	fixture.createdAt = time.Now().Add(-state.MaxResumeAge - time.Hour)
+	fixture.writeState(t, resumeBlockSize,
+		[]string{testBlockID(0), testBlockID(1)}, 2*resumeBlockSize)
+
+	if err := fixture.run(t, azureClient, true); err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	want := []string{testBlockID(0), testBlockID(1), testBlockID(2)}
+	if got := backend.stagedBlockIDs(); !slices.Equal(got, want) {
+		t.Errorf("staged %d block(s), want the whole file re-sent after an expired checkpoint", len(got))
+	}
+	backend.assertCommittedBlocksMatch(t, expectedBlockHashes(fixture.data, resumeBlockSize))
 }

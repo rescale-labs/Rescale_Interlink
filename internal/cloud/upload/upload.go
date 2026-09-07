@@ -3,6 +3,7 @@ package upload
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -57,6 +58,16 @@ type UploadParams struct {
 	// false (default) = streaming encryption (no temp file, saves disk space)
 	// true = pre-encryption (creates temp file, compatible with legacy clients)
 	PreEncrypt bool
+
+	// Where this upload is going, filled in by UploadFile from the storage the
+	// provider was built for. The resume state and the upload lock key on the
+	// local path alone, so one source uploaded to two destinations meets on one
+	// sidecar; these are what tell the two apart. StoragePathBase is the prefix
+	// this destination builds object keys under, which is the only evidence a
+	// state written before v4.9.9 carries about where it was going.
+	StorageID        string
+	StorageContainer string
+	StoragePathBase  string
 }
 
 // UploadFile is THE ONLY canonical entry point for uploading files to Rescale cloud storage.
@@ -136,6 +147,13 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 			OnRetry: params.OnRetry,
 		})
 	}
+
+	// Where the provider is going, which is what tells a resume state left by an
+	// upload of this same source to another destination apart from one this run
+	// can continue.
+	params.StorageID = profile.DefaultStorage.ID
+	params.StorageContainer = profile.DefaultStorage.ConnectionSettings.Container
+	params.StoragePathBase = destinationPathBase(&profile.DefaultStorage)
 
 	initTimer.StopWithMessage("backend=%s", profile.DefaultStorage.StorageType)
 
@@ -225,6 +243,16 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	overallTimer.StopWithThroughput(fileInfo.Size())
 
 	return cloudFile, nil
+}
+
+// destinationPathBase is the prefix a storage builds the object keys it
+// registers under. The two backends read it from different fields: an Azure blob
+// path comes from PathPartsBase, an S3 key from PathBase.
+func destinationPathBase(storage *models.StorageInfo) string {
+	if storage.StorageType == "AzureStorage" {
+		return storage.ConnectionSettings.PathPartsBase
+	}
+	return storage.ConnectionSettings.PathBase
 }
 
 // checkSourceUnchanged reports that the file moved under the upload.
@@ -380,11 +408,15 @@ type uploadResult struct {
 // reserved. With a transfer handle the memory comes out of the shared pool, so
 // several large uploads at once cannot each budget against the whole machine;
 // without one there is no pool to share and the plan is advisory.
-func planStreamingUpload(handle *internaltransfer.Transfer, fileSize int64, threads int, limits resources.UploadLimits) (resources.UploadPlan, func(), error) {
+// A non-zero partSize is a resumed upload's: the plan has to be made for the
+// parts this attempt will actually hold, since CBC chains through that size and
+// the object's metadata states it.
+func planStreamingUpload(handle *internaltransfer.Transfer, fileSize, partSize int64, threads int, limits resources.UploadLimits) (resources.UploadPlan, func(), error) {
 	req := resources.UploadPlanRequest{
 		FileSize: fileSize,
 		Threads:  threads,
 		Limits:   limits,
+		PartSize: partSize,
 	}
 	if handle == nil {
 		plan, err := resources.PlanUpload(req)
@@ -395,6 +427,27 @@ func planStreamingUpload(handle *internaltransfer.Transfer, fileSize int64, thre
 		return resources.UploadPlan{}, func() {}, err
 	}
 	return plan, handle.ReleaseUploadPlan, nil
+}
+
+// acquireSourceLock takes the upload lock for a source, or reports that there is
+// no lock to be had.
+//
+// A directory that cannot hold a lock file cannot hold a resume state either, so
+// there is no checkpoint two invocations could share and nothing the lock would
+// have protected — while refusing would fail an upload that a read-only or full
+// source directory has always been able to run. Contention is a different answer
+// and is still refused.
+func acquireSourceLock(localPath string) (*state.UploadLock, error) {
+	lock, err := state.AcquireUploadLock(localPath)
+	if err == nil {
+		return lock, nil
+	}
+	if !errors.Is(err, state.ErrUploadLockUnavailable) {
+		return nil, fmt.Errorf("failed to acquire upload lock: %w", err)
+	}
+	log.Printf("Uploading %s without an upload lock, so this attempt cannot be resumed: %v",
+		filepath.Base(localPath), err)
+	return nil, nil
 }
 
 // openUploadSource opens the plaintext byte source for a streaming upload.
@@ -429,9 +482,9 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// that read it would fill the SAME object as this one and abort it on its
 	// way out. The lock is taken before anything is loaded, restored or
 	// abandoned, and held until the upload has been completed or given up on.
-	uploadLock, err := state.AcquireUploadLock(params.LocalPath)
+	uploadLock, err := acquireSourceLock(params.LocalPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to acquire upload lock: %w", err)
+		return nil, err
 	}
 	defer state.ReleaseUploadLock(uploadLock)
 
@@ -452,28 +505,35 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// storage type, or a machine that cannot hold one working set, has to fail
 	// here — the part-count limits are only hit after every earlier part has
 	// already been transferred.
-	plan, releasePlan, err := planStreamingUpload(params.TransferHandle, fileSize, concurrency, streamingUploader.UploadLimits())
+	plan, releasePlan, err := planStreamingUpload(params.TransferHandle, fileSize, 0, concurrency, streamingUploader.UploadLimits())
 	if err != nil {
 		return nil, err
 	}
-	defer releasePlan()
+	defer func() { releasePlan() }()
 
 	// Resuming means running with the interrupted upload's part size, whatever
-	// this run would have chosen, so the pipeline is refitted to it before the
-	// upload is reopened. A part size this run cannot afford to hold is the one
-	// case where a resume costs more than it saves: a fresh object is always
-	// correct, and only the bytes already sent are lost.
-	fitted := plan
+	// this run would have chosen, so the plan is made again with that size fixed:
+	// the workers, the queue and the memory reserved for them all have to be
+	// sized for the parts this attempt will actually hold. Planning again for the
+	// same transfer replaces its own reservation rather than adding to it, so the
+	// first plan's memory is credited back before the second is judged — and if
+	// the second is refused, the first is still held.
+	//
+	// A part size this machine cannot plan for at all is the one case where a
+	// resume costs more than it saves: a fresh object is always correct, and only
+	// the bytes already sent are lost.
 	if resumed.usable {
-		var affordable bool
-		fitted, affordable = fitPipelineToPartSize(plan, resumed.saved.PartSize)
-		if !affordable {
+		resumedPlan, releaseResumed, planErr := planStreamingUpload(
+			params.TransferHandle, fileSize, resumed.saved.PartSize, concurrency, streamingUploader.UploadLimits())
+		if planErr != nil {
 			if params.OutputWriter != nil {
-				fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: there is not enough transfer memory to continue it in %d MB parts\n",
-					filepath.Base(params.LocalPath), resumed.saved.PartSize/constants.PartSizeAlignment)
+				fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: there is not enough transfer memory to continue it in %d MB parts (%v)\n",
+					filepath.Base(params.LocalPath), resumed.saved.PartSize/constants.PartSizeAlignment, planErr)
 			}
 			abandonStreamingState(ctx, streamingUploader, params, resumed.saved)
 			resumed = streamingResume{}
+		} else {
+			plan, releasePlan = resumedPlan, releaseResumed
 		}
 	}
 
@@ -483,9 +543,14 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		if err != nil {
 			return nil, err
 		}
-	}
-	if uploadState != nil {
-		plan = fitted
+		if uploadState == nil {
+			// The backend has already discarded that upload, so what follows is a
+			// new object and is not stuck with the old one's part size.
+			plan, releasePlan, err = planStreamingUpload(params.TransferHandle, fileSize, 0, concurrency, streamingUploader.UploadLimits())
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	if concurrency > plan.WorkerCap {
 		concurrency = plan.WorkerCap
@@ -830,9 +895,9 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// An attempt that checkpointed nothing has left nothing behind that a retry
 	// could find, so the parts it did upload are already unreachable: discard
 	// the backend upload instead of leaving it to the backend's own expiry. A
-	// cancelled upload is discarded whether or not it checkpointed — nobody is
-	// coming back for one the caller stopped.
-	discard := !checkpoint.recorded || ctx.Err() != nil
+	// cancelled attempt that did checkpoint is the one a retry comes back to, so
+	// it keeps both — the same answer the pre-encrypt mode gives.
+	discard := !checkpoint.recorded
 
 	// Check for errors
 	if firstErr != nil {
@@ -844,7 +909,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// This can happen if the user cancels the upload or a timeout occurs.
 	select {
 	case <-ctx.Done():
-		endStreamingUpload(ctx, streamingUploader, params, uploadState, true)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
 		return nil, fmt.Errorf("upload cancelled: %w", ctx.Err())
 	default:
 	}
@@ -942,7 +1007,7 @@ func endStreamingUpload(ctx context.Context, uploader transfer.StreamingConcurre
 	// Not ctx: the usual reason to be here is that ctx was cancelled, and an
 	// abort issued on a cancelled context never reaches the backend — which is
 	// exactly the case the abort exists for.
-	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), constants.PartOperationTimeout)
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), constants.AbortOperationTimeout)
 	defer cancel()
 
 	if err := uploader.AbortStreamingUpload(abortCtx, uploadState); err != nil {
@@ -952,64 +1017,41 @@ func endStreamingUpload(ctx context.Context, uploader transfer.StreamingConcurre
 	state.DeleteUploadState(params.LocalPath)
 }
 
-// inFlightBytes is the peak part-buffer memory a plan permits: the queued parts,
-// the parts the workers hold, and the transient buffers the encrypt stage keeps
-// outside both. It is the same formula the planner reserved against, which is
-// what makes it the ceiling a refitted pipeline has to stay under.
-func inFlightBytes(plan resources.UploadPlan) int64 {
-	return (int64(plan.QueueDepth) + int64(plan.WorkerCap) + constants.UploadPipelineTransientParts) * plan.PartSize
-}
-
-// fitPipelineToPartSize narrows a plan to the part size a resumed upload is
-// stuck with, and reports whether the memory the plan holds can carry it. Part
-// size is fixed for the life of an object — CBC chains through it and the
-// object's metadata states it — so a resumed attempt cannot adopt the one this
-// run would have planned.
-//
-// Scaling only the queue and the workers is not enough: the transient buffers
-// scale with the part size too, so a pipeline fitted that way can hold several
-// times the memory that was reserved for it. What has to stay inside the
-// reservation is the whole working set, and below one queued part and one worker
-// there is no pipeline left — a saved part size that far past the reservation is
-// one this run cannot continue at all.
-func fitPipelineToPartSize(plan resources.UploadPlan, partSize int64) (resources.UploadPlan, bool) {
-	if partSize <= 0 {
-		return plan, false
-	}
-	if plan.PartSize <= 0 || partSize <= plan.PartSize {
-		// Smaller parts only ever free memory.
-		plan.PartSize = partSize
-		return plan, true
-	}
-
-	// Parts of the saved size the reservation can hold in the queue and the
-	// workers together, once the encrypt stage has taken its transients off the
-	// top — the same subtraction the planner makes.
-	affordable := inFlightBytes(plan)/partSize - constants.UploadPipelineTransientParts
-	if affordable < 2 {
-		return plan, false
-	}
-
-	// Squeeze the queue first and the workers only when that is not enough,
-	// which is the order the planner squeezes them in.
-	if int64(plan.QueueDepth+plan.WorkerCap) > affordable {
-		if affordable-int64(plan.WorkerCap) >= 1 {
-			plan.QueueDepth = int(affordable) - plan.WorkerCap
-		} else {
-			plan.QueueDepth = 1
-			plan.WorkerCap = int(affordable) - 1
-		}
-	}
-	plan.PartSize = partSize
-	return plan, true
-}
-
 // backendUploadAborter is a provider that can discard an upload addressed only
 // by what a resume state records about it — the remote path and, where the
 // backend has one, the upload ID. Both providers implement it; the assertion is
 // what keeps a provider that cannot from having to.
 type backendUploadAborter interface {
 	AbortUploadByID(ctx context.Context, uploadID, storagePath string) error
+}
+
+// retireBackendUpload discards the upload a resume state names, before the state
+// that is its only record is deleted. Both upload modes reach this, in both
+// directions: whichever mode runs next is the one holding a provider handle, and
+// a state it cannot resume still names parts the backend is holding until its
+// own seven-day expiry sweeps them.
+//
+// The upload is addressed by the identity the state records rather than by a
+// rebuilt handle — that is all a state from the other mode has, and a state
+// damaged enough to be abandoned may not carry the encryption parameters a
+// rebuild needs. The identity belongs to one backend, though: handing it to
+// another would name a different object, so a state that names a different
+// backend, or none, is left to that backend's expiry.
+func retireBackendUpload(ctx context.Context, uploader interface{ StorageType() string }, params UploadParams, saved *state.UploadResumeState) {
+	aborter, ok := uploader.(backendUploadAborter)
+	if !ok || saved.ObjectKey == "" || saved.StorageType != uploader.StorageType() {
+		return
+	}
+
+	// Not ctx: retirement often runs on the way out of a cancelled upload, and an
+	// abort issued on a cancelled context never reaches the backend.
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), constants.AbortOperationTimeout)
+	defer cancel()
+
+	if err := aborter.AbortUploadByID(abortCtx, saved.UploadID, saved.ObjectKey); err != nil {
+		log.Printf("Warning: failed to abort the abandoned upload of %s (%s): %v",
+			filepath.Base(params.LocalPath), saved.ObjectKey, err)
+	}
 }
 
 // streamingResume is what an interrupted streaming attempt left behind for this
@@ -1038,7 +1080,7 @@ func loadStreamingResume(ctx context.Context, uploader transfer.StreamingConcurr
 		return streamingResume{}
 	}
 
-	if reason := streamingResumeBlocker(saved, params.LocalPath, sourceInfo, uploader.StorageType(), fileSize); reason != "" {
+	if reason := streamingResumeBlocker(saved, params.LocalPath, sourceInfo, uploader.StorageType(), params.destination(), fileSize); reason != "" {
 		if params.OutputWriter != nil {
 			fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: %s\n",
 				filepath.Base(params.LocalPath), reason)
@@ -1084,6 +1126,52 @@ func loadStreamingResume(ctx context.Context, uploader transfer.StreamingConcurr
 	}
 }
 
+// uploadDestination is where this run is uploading to: the storage record the
+// object is registered against, the container it lives in, and the prefix that
+// destination builds object keys under.
+type uploadDestination struct {
+	storageID string
+	container string
+	pathBase  string
+}
+
+func (p UploadParams) destination() uploadDestination {
+	return uploadDestination{
+		storageID: p.StorageID,
+		container: p.StorageContainer,
+		pathBase:  p.StoragePathBase,
+	}
+}
+
+// destinationBlocker names the reason a saved state was going somewhere other
+// than this run is, or "" when it was going here.
+//
+// The state file and the upload lock key on the local path alone, so one source
+// uploaded to two destinations meets on one sidecar. Continuing it would hand
+// this destination the object key — and, on S3, the multipart upload ID — of the
+// other one, and register whatever came of that under a path this destination
+// never wrote.
+func destinationBlocker(saved *state.UploadResumeState, dest uploadDestination) string {
+	if dest.storageID == "" && dest.container == "" {
+		// Nothing to compare against: this run was not told where it is going.
+		return ""
+	}
+	if saved.StorageID != "" || saved.Container != "" {
+		if saved.StorageID != dest.storageID || saved.Container != dest.container {
+			return "the interrupted upload was going to a different destination"
+		}
+		return ""
+	}
+	// A state written before v4.9.9 does not record where it was going, so its
+	// object key is the only evidence — and it is evidence only where this
+	// destination gives keys a prefix of its own. Anywhere else the two cannot
+	// be told apart, and guessing wrong is what strands an upload.
+	if dest.pathBase == "" || !strings.HasPrefix(saved.ObjectKey, dest.pathBase+"/") {
+		return "the interrupted upload does not record which destination it was going to"
+	}
+	return ""
+}
+
 // streamingResumeBlocker names the reason this state cannot be resumed, or ""
 // when it can. Every check answers the same question: do the parts already on
 // the backend still describe the file we are about to register?
@@ -1091,7 +1179,7 @@ func loadStreamingResume(ctx context.Context, uploader transfer.StreamingConcurr
 // state.ValidateUploadState is deliberately not called here even though the
 // checks overlap: its streaming branch demands the file_id of the HKDF format,
 // which a CBC upload has never had, so it rejects every state this path writes.
-func streamingResumeBlocker(saved *state.UploadResumeState, localPath string, sourceInfo os.FileInfo, storageType string, fileSize int64) string {
+func streamingResumeBlocker(saved *state.UploadResumeState, localPath string, sourceInfo os.FileInfo, storageType string, dest uploadDestination, fileSize int64) string {
 	if saved.FormatVersion != 1 {
 		return "the saved state belongs to a pre-encrypt upload"
 	}
@@ -1099,6 +1187,9 @@ func streamingResumeBlocker(saved *state.UploadResumeState, localPath string, so
 	// would name a different object and strand the first backend's parts.
 	if saved.StorageType != "" && saved.StorageType != storageType {
 		return "the interrupted upload was going to " + saved.StorageType
+	}
+	if reason := destinationBlocker(saved, dest); reason != "" {
+		return reason
 	}
 	if saved.LocalPath != localPath {
 		return "the saved state describes another file"
@@ -1168,21 +1259,7 @@ func streamingResumeBlocker(saved *state.UploadResumeState, localPath string, so
 // all a pre-encrypt state has, and deleting its sidecar without using it is what
 // stranded that mode's multipart uploads when a streaming attempt followed one.
 func abandonStreamingState(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, saved *state.UploadResumeState) {
-	// Not ctx: abandonment often runs on the way out of a cancelled upload, and
-	// an abort issued on a cancelled context never reaches the backend.
-	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), constants.PartOperationTimeout)
-	defer cancel()
-
-	// The object identity in the state is one backend's; handing it to another
-	// would name a different object. A state that does not say which backend it
-	// belongs to is left to that backend's own expiry.
-	if aborter, ok := uploader.(backendUploadAborter); ok &&
-		saved.ObjectKey != "" && saved.StorageType == uploader.StorageType() {
-		if err := aborter.AbortUploadByID(abortCtx, saved.UploadID, saved.ObjectKey); err != nil {
-			log.Printf("Warning: failed to abort the abandoned upload of %s (%s): %v",
-				filepath.Base(params.LocalPath), saved.ObjectKey, err)
-		}
-	}
+	retireBackendUpload(ctx, uploader, params, saved)
 
 	if saved.FormatVersion != 1 {
 		// A pre-encrypt state also names an encrypted copy on disk, which is
@@ -1306,6 +1383,8 @@ func (c *streamingCheckpointer) save(prefix []*transfer.PartResult, chainIV []by
 		CreatedAt:      c.createdAt,
 		LastUpdate:     time.Now(),
 		StorageType:    c.storageType,
+		StorageID:      c.params.StorageID,
+		Container:      c.params.StorageContainer,
 		FormatVersion:  1,
 		MasterKey:      encryption.EncodeBase64(c.upload.MasterKey),
 		PartSize:       c.upload.PartSize,
@@ -1342,21 +1421,20 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 	// Examining and retiring the artifacts of an interrupted attempt is the same
 	// exclusive step as the transfer that follows it: without the lock, a second
 	// invocation could delete the ciphertext and state of an upload that is
-	// still running. The provider takes this same lock for the transfer itself
-	// and it is not re-entrant, so it is handed over rather than nested.
-	uploadLock, err := state.AcquireUploadLock(params.LocalPath)
+	// still running. One acquisition covers both, which is why the providers no
+	// longer take this same non-re-entrant lock for the transfer itself.
+	uploadLock, err := acquireSourceLock(params.LocalPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to acquire upload lock: %w", err)
+		return nil, err
 	}
-	releaseLock := sync.OnceFunc(func() { state.ReleaseUploadLock(uploadLock) })
-	defer releaseLock()
+	defer state.ReleaseUploadLock(uploadLock)
 
 	// Recovery belongs here, not in the providers: they can only compare the
 	// object key they were handed against the one in the state, and every
 	// attempt used to arrive with a freshly generated key, IV and suffix. That
 	// made the state describe a DIFFERENT ciphertext by construction, so the
 	// parts the backend had already accepted were always discarded.
-	resumed := resumePreEncryptArtifacts(params, sourceInfo, preEncryptUploader.StorageType())
+	resumed := resumePreEncryptArtifacts(ctx, preEncryptUploader, params, sourceInfo)
 
 	encryptionKey, iv, randomSuffix, encryptedPath := resumed.encryptionKey, resumed.iv, resumed.randomSuffix, resumed.encryptedPath
 	if !resumed.usable {
@@ -1412,7 +1490,23 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 	if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
 		threads = params.TransferHandle.GetThreads()
 	}
-	plan, releasePlan, err := planStreamingUpload(params.TransferHandle, encryptedInfo.Size(), threads, preEncryptUploader.UploadLimits())
+	// The providers adopt the part size out of the resume state, so the workers
+	// and the queue have to be planned — and the memory reserved — for that size
+	// rather than for the one this run would have chosen. A size this machine
+	// cannot plan for retires the interrupted upload and its checkpoint; the
+	// ciphertext is still this object's, so the provider simply opens a fresh
+	// upload for it.
+	plan, releasePlan, err := planStreamingUpload(params.TransferHandle, encryptedInfo.Size(), resumed.partSize, threads, preEncryptUploader.UploadLimits())
+	if err != nil && resumed.partSize > 0 {
+		if params.OutputWriter != nil {
+			fmt.Fprintf(params.OutputWriter, "Restarting the upload of %s: %v\n", filepath.Base(params.LocalPath), err)
+		}
+		retireResumedUpload(ctx, preEncryptUploader, params)
+		// Nothing records the ciphertext any more; the provider's own checkpoint
+		// is what will keep it for a retry, as it does for a fresh attempt.
+		keepEncrypted = false
+		plan, releasePlan, err = planStreamingUpload(params.TransferHandle, encryptedInfo.Size(), 0, threads, preEncryptUploader.UploadLimits())
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1435,8 +1529,8 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 
 	uploadTimer := cloud.StartTimer(params.OutputWriter, "Pre-encrypt upload")
 
-	// Upload encrypted file, which takes the lock this call has been holding.
-	releaseLock()
+	// Upload encrypted file, under the lock this call has been holding since
+	// before the artifacts of the interrupted attempt were examined.
 	result, err := preEncryptUploader.UploadEncryptedFile(ctx, uploadParams)
 	if err != nil {
 		// Keep the ciphertext for the retry that the state file describes. An
@@ -1462,6 +1556,22 @@ type preEncryptResume struct {
 	iv            []byte
 	randomSuffix  string
 	encryptedPath string
+	// partSize is the size that attempt cut the ciphertext into. The providers
+	// resume against it, so the plan has to be made for it too.
+	partSize int64
+}
+
+// retireResumedUpload discards the backend upload the resume state names and
+// deletes the state. The ciphertext is left where it is: it is still a correct
+// encryption of this source under this attempt's key, so what is being given up
+// on is only the geometry it was being sent with.
+func retireResumedUpload(ctx context.Context, uploader transfer.PreEncryptUploader, params UploadParams) {
+	saved, err := state.LoadUploadState(params.LocalPath)
+	if err != nil || saved == nil {
+		return
+	}
+	retireBackendUpload(ctx, uploader, params, saved)
+	state.DeleteUploadState(params.LocalPath)
 }
 
 // resumePreEncryptArtifacts recovers the object identity, encryption parameters
@@ -1471,25 +1581,30 @@ type preEncryptResume struct {
 // Anything it cannot fully match is abandoned rather than adapted: state and
 // ciphertext are deleted together, because a ciphertext whose identity no
 // longer applies can only be finished as an object nothing will ask for.
-func resumePreEncryptArtifacts(params UploadParams, sourceInfo os.FileInfo, storageType string) preEncryptResume {
+func resumePreEncryptArtifacts(ctx context.Context, uploader transfer.PreEncryptUploader, params UploadParams, sourceInfo os.FileInfo) preEncryptResume {
 	saved, err := state.LoadUploadState(params.LocalPath)
 	if err != nil || saved == nil {
 		return preEncryptResume{}
 	}
 
-	if reason := preEncryptResumeBlocker(saved, params.LocalPath, sourceInfo, storageType); reason != "" {
+	abandon := func() {
+		retireBackendUpload(ctx, uploader, params, saved)
+		abandonPreEncryptState(saved, params.LocalPath)
+	}
+
+	if reason := preEncryptResumeBlocker(saved, params.LocalPath, sourceInfo, uploader.StorageType(), params.destination()); reason != "" {
 		if params.OutputWriter != nil {
 			fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: %s\n",
 				filepath.Base(params.LocalPath), reason)
 		}
-		abandonPreEncryptState(saved, params.LocalPath)
+		abandon()
 		return preEncryptResume{}
 	}
 
 	encryptionKey, keyErr := encryption.DecodeBase64(saved.EncryptionKey)
 	iv, ivErr := encryption.DecodeBase64(saved.IV)
 	if keyErr != nil || ivErr != nil {
-		abandonPreEncryptState(saved, params.LocalPath)
+		abandon()
 		return preEncryptResume{}
 	}
 
@@ -1499,13 +1614,14 @@ func resumePreEncryptArtifacts(params UploadParams, sourceInfo os.FileInfo, stor
 		iv:            iv,
 		randomSuffix:  saved.RandomSuffix,
 		encryptedPath: saved.EncryptedPath,
+		partSize:      saved.PartSize,
 	}
 }
 
 // preEncryptResumeBlocker names the reason this state cannot be resumed, or ""
 // when it can. Every check answers the same question: do these saved bytes
 // still describe the file we are about to register?
-func preEncryptResumeBlocker(saved *state.UploadResumeState, localPath string, sourceInfo os.FileInfo, storageType string) string {
+func preEncryptResumeBlocker(saved *state.UploadResumeState, localPath string, sourceInfo os.FileInfo, storageType string, dest uploadDestination) string {
 	if saved.FormatVersion != 0 {
 		return "the saved state belongs to a streaming upload"
 	}
@@ -1513,6 +1629,9 @@ func preEncryptResumeBlocker(saved *state.UploadResumeState, localPath string, s
 	// would name a different object and strand the first backend's parts.
 	if saved.StorageType != "" && saved.StorageType != storageType {
 		return "the interrupted upload was going to " + saved.StorageType
+	}
+	if reason := destinationBlocker(saved, dest); reason != "" {
+		return reason
 	}
 	if err := state.ValidateUploadState(saved, localPath); err != nil {
 		return err.Error()

@@ -701,3 +701,52 @@ func TestPlanUploadRejectsUnsetLimits(t *testing.T) {
 		t.Fatal("expected planning to fail when the backend reports no limits")
 	}
 }
+
+// TestPlanUploadHonoursARequestedPartSize is the resume case. The part size of an
+// upload being continued is already decided by the object it is filling — CBC
+// chains through it and the object's metadata states it — so the plan is made
+// for that size, with the pipeline and the reservation fitted to it rather than
+// to the size this run would have chosen. The backend's two ceilings and the
+// minimum-memory rule still apply to it.
+func TestPlanUploadHonoursARequestedPartSize(t *testing.T) {
+	mgr := planTestManager(t, 2*gib)
+
+	free := planOne(t, mgr, "resumed", 4*gib, 8, s3Limits)
+	fixed, err := mgr.PlanUpload("resumed", UploadPlanRequest{
+		FileSize: 4 * gib, Threads: 8, Limits: s3Limits, PartSize: 64 * mib,
+	})
+	if err != nil {
+		t.Fatalf("planning for the saved part size: %v", err)
+	}
+
+	if fixed.PartSize != 64*mib {
+		t.Errorf("PartSize = %d, want the %d the resumed upload has to run with", fixed.PartSize, 64*mib)
+	}
+	if free.PartSize == fixed.PartSize {
+		t.Fatalf("the requested part size matches the one the planner chooses anyway (%d), so this proves nothing", free.PartSize)
+	}
+	if fixed.inFlightBytes() > 2*gib {
+		t.Errorf("the plan holds %d bytes of the %d budget", fixed.inFlightBytes(), 2*gib)
+	}
+	if got, want := mgr.GetAvailableUploadMemory(), 2*gib-fixed.inFlightBytes(); got != want {
+		t.Errorf("available memory = %d, want %d: replanning replaces a transfer's reservation rather than adding to it", got, want)
+	}
+
+	if _, err := mgr.PlanUpload("too-big", UploadPlanRequest{
+		FileSize: 4 * gib, Threads: 8, Limits: s3Limits, PartSize: s3Limits.MaxPartSize + mib,
+	}); err == nil {
+		t.Error("a part size above the backend's per-part limit was planned for")
+	}
+	if _, err := mgr.PlanUpload("too-many", UploadPlanRequest{
+		FileSize: 20 * gib, Threads: 8, Limits: s3Limits, PartSize: mib,
+	}); err == nil {
+		t.Error("a part size that would take more parts than the backend accepts was planned for")
+	}
+
+	small := planTestManager(t, 128*mib)
+	if _, err := small.PlanUpload("no-room", UploadPlanRequest{
+		FileSize: 4 * gib, Threads: 8, Limits: s3Limits, PartSize: 64 * mib,
+	}); err == nil {
+		t.Error("a part size the machine cannot hold one pipeline of was planned for")
+	}
+}

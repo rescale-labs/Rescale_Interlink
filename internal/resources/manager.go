@@ -509,6 +509,15 @@ type UploadPlanRequest struct {
 	FileSize int64        // Plaintext size of the file
 	Threads  int          // Upload workers the caller intends to start
 	Limits   UploadLimits // Ceilings of the backend the file is going to
+
+	// PartSize, when non-zero, is the part size the plan must run with — a
+	// resumed upload's. Part size is fixed for the life of an object: CBC chains
+	// through it and the object's metadata states it, so a resumed attempt
+	// cannot adopt the size this run would otherwise have chosen. The plan is
+	// still checked against the backend's per-part and part-count limits and
+	// against the memory budget, and the pipeline is still fitted to what is
+	// left, so a size this machine cannot hold is refused rather than run.
+	PartSize int64
 }
 
 // UploadPlan is the geometry a streaming upload must run with.
@@ -683,6 +692,23 @@ func planUpload(req UploadPlanRequest, sizingBudget, pipelineBudget uint64, work
 	partSize := calculateDynamicChunkSize(req.FileSize, constants.MaxThreadsPerFile, sizingBudget)
 	if floor > partSize {
 		partSize = floor
+	}
+
+	// A resumed upload arrives with its part size already decided, and the same
+	// two ceilings still apply to it — a backend that would refuse those parts,
+	// or refuse that many of them, refuses them just as readily on the way back.
+	if req.PartSize > 0 {
+		partSize = req.PartSize
+		if partSize > req.Limits.MaxPartSize {
+			return UploadPlan{}, fmt.Errorf(
+				"cannot continue an upload in %d MB parts: %s accepts at most %d MB per part",
+				partSize/mib, req.Limits.StorageType, req.Limits.MaxPartSize/mib)
+		}
+		if (req.FileSize+partSize-1)/partSize > req.Limits.MaxParts {
+			return UploadPlan{}, fmt.Errorf(
+				"cannot continue an upload in %d MB parts: this file would take more than the %d parts %s accepts",
+				partSize/mib, req.Limits.MaxParts, req.Limits.StorageType)
+		}
 	}
 
 	// The scaler can grow past the caller's thread count, so the cap has to cover

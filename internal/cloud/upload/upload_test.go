@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1095,6 +1096,15 @@ type resumableFakeUploader struct {
 	partSize       int64
 	failAfterParts int // parts to stage in a failing attempt before giving up
 
+	// backend is shared with the streaming fake when a test needs the two modes
+	// to meet over one source, which is where the cross-mode leftovers live.
+	backend *fakeStreamingBackend
+
+	// duringUpload runs inside UploadEncryptedFile, where the provider does its
+	// work: what the orchestrator still holds at that point is what the provider
+	// is protected by.
+	duringUpload func()
+
 	attempts []preEncryptAttempt
 	staged   []stagedFakePart
 }
@@ -1106,6 +1116,7 @@ type preEncryptAttempt struct {
 	randomSuffix  string
 	objectKey     string
 	resumedFrom   int
+	planPartSize  int64
 }
 
 type stagedFakePart struct {
@@ -1124,7 +1135,28 @@ func (f *resumableFakeUploader) UploadLimits() resources.UploadLimits {
 	}
 }
 
+// AbortUploadByID discards an upload named only by the identity a resume state
+// records, which is all a state left by the other upload mode carries.
+func (f *resumableFakeUploader) AbortUploadByID(ctx context.Context, uploadID, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("the abort never reached the backend: %w", err)
+	}
+	if f.backend == nil {
+		return nil
+	}
+	f.backend.mu.Lock()
+	defer f.backend.mu.Unlock()
+	if upload := f.backend.uploads[uploadID]; upload != nil {
+		upload.aborted = true
+	}
+	return nil
+}
+
 func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params transfer.EncryptedFileUploadParams) (*cloud.UploadResult, error) {
+	if f.duringUpload != nil {
+		f.duringUpload()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -1151,6 +1183,9 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 		randomSuffix:  params.RandomSuffix,
 		objectKey:     objectKey,
 		resumedFrom:   len(completed),
+	}
+	if params.Plan != nil {
+		attempt.planPartSize = params.Plan.PartSize
 	}
 
 	stagedThisAttempt := 0
@@ -1179,6 +1214,7 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 			SourceModTime:  params.SourceModTime,
 			UploadedBytes:  uploadedBytes,
 			CompletedParts: completed,
+			PartSize:       f.partSize,
 			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
 			IV:             encryption.EncodeBase64(params.IV),
 			RandomSuffix:   params.RandomSuffix,
@@ -1460,6 +1496,14 @@ type resumableStreamingUploader struct {
 	encrypted   []int64
 	uploaded    []int64
 	resumedFrom []*transfer.PartResult
+
+	// abortDeadline is how long the last abort's context had left to run, which
+	// is what bounds a cancelled transfer once the abort is detached from it.
+	abortDeadline time.Duration
+
+	// initPartSize is the part size the plan carried when a fresh upload was
+	// opened, which is the geometry the whole object is then stuck with.
+	initPartSize int64
 }
 
 func newResumableStreamingUploader(backend *fakeStreamingBackend, partSize int64) *resumableStreamingUploader {
@@ -1493,6 +1537,9 @@ func (u *resumableStreamingUploader) InitStreamingUpload(_ context.Context, para
 
 	u.mu.Lock()
 	u.uploadID = uploadID
+	if params.Plan != nil {
+		u.initPartSize = params.Plan.PartSize
+	}
 	u.mu.Unlock()
 
 	return &transfer.StreamingUpload{
@@ -1637,6 +1684,11 @@ func (u *resumableStreamingUploader) AbortUploadByID(ctx context.Context, upload
 func (u *resumableStreamingUploader) abort(ctx context.Context, uploadID string) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("the abort never reached the backend: %w", err)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		u.mu.Lock()
+		u.abortDeadline = time.Until(deadline)
+		u.mu.Unlock()
 	}
 
 	u.backend.mu.Lock()
@@ -1948,36 +2000,96 @@ func TestUploadStreamingDiscardsAnUploadNothingCanReturnTo(t *testing.T) {
 	}
 }
 
-// TestUploadStreamingAbortsOnCancellation: nobody is coming back for an upload
-// the caller stopped, so its parts are discarded rather than left on the backend.
-func TestUploadStreamingAbortsOnCancellation(t *testing.T) {
+// TestUploadStreamingKeepsACancelledUploadResumable: a cancelled attempt is
+// precisely the one a retry comes back to, so a checkpointed one keeps both its
+// checkpoint and its parts. Discarding them made every Ctrl-C throw away the
+// whole transfer, and left the two upload modes disagreeing — a cancelled
+// pre-encrypt attempt has always kept its state.
+func TestUploadStreamingKeepsACancelledUploadResumable(t *testing.T) {
+	const partSize = 64
+	localPath, data := writeStreamingSource(t, 4*partSize)
+	backend := newFakeStreamingBackend()
+
+	first := newResumableStreamingUploader(backend, partSize)
+	// The last part waits for a release only this test could give, so the
+	// cancellation lands while the first three are already checkpointed.
+	first.holdPart = 3
+	first.holdUntil = math.MaxInt32
+
+	params := UploadParams{LocalPath: localPath}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := uploadStreaming(ctx, first, params, int64(len(data)))
+		done <- err
+	}()
+	waitForCheckpoint(t, localPath, 3)
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("expected the cancelled upload to fail")
+	}
+
+	if backend.get(first.uploadID).aborted {
+		t.Error("a cancelled upload was discarded on the backend, so its parts cannot be continued")
+	}
+	saved := loadStreamingState(t, localPath)
+	if saved == nil {
+		t.Fatal("a cancelled upload deleted the checkpoint a retry needs")
+	}
+	if len(saved.StreamingParts) != 3 {
+		t.Errorf("the checkpoint holds %d parts, want the 3 that landed", len(saved.StreamingParts))
+	}
+
+	// What the kept state is for: the retry continues the same object.
+	second := newResumableStreamingUploader(backend, partSize)
+	result, err := uploadStreaming(context.Background(), second, params, int64(len(data)))
+	if err != nil {
+		t.Fatalf("the retry of a cancelled upload failed: %v", err)
+	}
+	if second.uploadID != first.uploadID {
+		t.Fatalf("the retry started upload %q instead of continuing %q", second.uploadID, first.uploadID)
+	}
+	if len(second.uploaded) != 1 {
+		t.Errorf("the retry sent %d parts, want only the one the cancellation stopped", len(second.uploaded))
+	}
+	object := backend.object(t, first.uploadID)
+	want := uninterruptedCiphertext(t, data, result.EncryptionKey, result.IV, partSize)
+	if !bytes.Equal(object, want) {
+		t.Errorf("the resumed object is %d bytes and differs from the %d an uninterrupted upload writes", len(object), len(want))
+	}
+}
+
+// TestUploadStreamingDiscardsACancelledUploadWithNoCheckpoint is the other half:
+// parts that landed out of order never form a prefix, so nothing was
+// checkpointed and nothing can come back for them.
+func TestUploadStreamingDiscardsACancelledUploadWithNoCheckpoint(t *testing.T) {
 	const partSize = 64
 	localPath, data := writeStreamingSource(t, 4*partSize)
 	backend := newFakeStreamingBackend()
 
 	uploader := newResumableStreamingUploader(backend, partSize)
-	// Part 2 is held until the other three finish, which never happens: the
-	// cancellation below lands while it waits.
-	uploader.holdPart = 2
-	uploader.holdUntil = 4
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		waitForParts(uploader, 2)
-		cancel()
-	}()
+	// Part 0 never lands, so the parts that do are not a prefix of anything.
+	uploader.holdPart = 0
+	uploader.holdUntil = math.MaxInt32
 
 	params := UploadParams{LocalPath: localPath}
-	_, err := uploadStreaming(ctx, uploader, params, int64(len(data)))
-	if err == nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := uploadStreaming(ctx, uploader, params, int64(len(data)))
+		done <- err
+	}()
+	waitForParts(uploader, 3)
+	cancel()
+	if err := <-done; err == nil {
 		t.Fatal("expected the cancelled upload to fail")
 	}
 
 	if !backend.get(uploader.uploadID).aborted {
-		t.Error("a cancelled upload was left open on the backend")
+		t.Error("an upload nothing can return to was left open on the backend")
 	}
 	if saved := loadStreamingState(t, localPath); saved != nil {
-		t.Errorf("a cancelled upload left a checkpoint behind: %+v", saved)
+		t.Errorf("a checkpoint was left behind for an upload that was aborted: %+v", saved)
 	}
 }
 
@@ -1994,17 +2106,16 @@ func waitForParts(uploader *resumableStreamingUploader, count int) {
 	}
 }
 
-// TestPreEncryptDoesNotAbortAResumableStreamingUpload guards the interaction
+// TestPreEncryptRetiresAnInterruptedStreamingUpload guards the interaction
 // between the two upload modes now that both leave a resume state behind.
 //
-// The pre-encrypt provider aborts the multipart upload a state names when that
-// state describes a different object than the one it is about to fill — which is
-// every streaming state, since the two modes never share an object key. What
-// stops it reaching a streaming upload is that the orchestrator retires the
-// state before the provider is ever handed it. If that ordering changed, running
-// a pre-encrypt upload of a file would silently destroy the interrupted
-// streaming upload of the same file.
-func TestPreEncryptDoesNotAbortAResumableStreamingUpload(t *testing.T) {
+// The orchestrator retires the streaming state before the provider is ever
+// handed it, so the provider cannot act on an object identity that is not its
+// own — but that sidecar is the only record of the multipart upload the
+// streaming attempt opened, so deleting it without retiring that upload stranded
+// those parts until the backend's own seven-day expiry swept them. Both cross-
+// mode directions now retire the backend upload before deleting its only record.
+func TestPreEncryptRetiresAnInterruptedStreamingUpload(t *testing.T) {
 	const partSize = 64
 	localPath, data := writeStreamingSource(t, 4*partSize)
 	backend := newFakeStreamingBackend()
@@ -2018,7 +2129,7 @@ func TestPreEncryptDoesNotAbortAResumableStreamingUpload(t *testing.T) {
 		t.Fatal("the streaming attempt recorded nothing")
 	}
 
-	preEncrypt := &resumableFakeUploader{partSize: partSize}
+	preEncrypt := &resumableFakeUploader{partSize: partSize, backend: backend}
 	if _, err := uploadPreEncrypt(context.Background(), preEncrypt, UploadParams{LocalPath: localPath}, int64(len(data))); err != nil {
 		t.Fatalf("the pre-encrypt upload failed: %v", err)
 	}
@@ -2033,8 +2144,8 @@ func TestPreEncryptDoesNotAbortAResumableStreamingUpload(t *testing.T) {
 	if preEncrypt.attempts[0].resumedFrom != 0 {
 		t.Errorf("the pre-encrypt upload resumed %d parts of a streaming upload", preEncrypt.attempts[0].resumedFrom)
 	}
-	if upload := backend.get(interrupted.uploadID); upload.aborted {
-		t.Error("a pre-encrypt upload aborted the streaming upload of the same file")
+	if upload := backend.get(interrupted.uploadID); !upload.aborted {
+		t.Error("the streaming upload was orphaned: its only record was deleted without retiring it on the backend")
 	}
 }
 
@@ -2355,61 +2466,21 @@ func TestStreamingResumeBlockerHonoursTheSevenDayBoundary(t *testing.T) {
 	}
 
 	saved.CreatedAt = time.Now().Add(-state.MaxResumeAge + time.Second)
-	if reason := streamingResumeBlocker(saved, localPath, sourceInfo, "FakeStorage", int64(len(data))); reason != "" {
+	if reason := streamingResumeBlocker(saved, localPath, sourceInfo, "FakeStorage", uploadDestination{}, int64(len(data))); reason != "" {
 		t.Errorf("a state a second inside the seven-day window was refused: %s", reason)
 	}
 
 	saved.CreatedAt = time.Now().Add(-state.MaxResumeAge - time.Second)
-	if reason := streamingResumeBlocker(saved, localPath, sourceInfo, "FakeStorage", int64(len(data))); !strings.Contains(reason, "expired") {
+	if reason := streamingResumeBlocker(saved, localPath, sourceInfo, "FakeStorage", uploadDestination{}, int64(len(data))); !strings.Contains(reason, "expired") {
 		t.Errorf("a state a second outside the seven-day window was accepted (reason %q)", reason)
 	}
 }
 
-// TestFitPipelineToPartSizeStaysInsideTheReservation is N8. A resumed upload is
-// stuck with the part size of the attempt it continues, and the pipeline was
-// narrowed for it by scaling the queue and the workers — but the four transient
-// part buffers the encrypt stage holds scale with the part size too, and the
-// memory reserved for the plan does not change at all. The plan the planner's
-// own example produces then needs 384 MiB of the 144 MiB it reserved.
-func TestFitPipelineToPartSizeStaysInsideTheReservation(t *testing.T) {
-	const mib = 1024 * 1024
-	plan := resources.UploadPlan{PartSize: 16 * mib, WorkerCap: 4, QueueDepth: 1}
-	reserved := inFlightBytes(plan)
-
-	fitted, ok := fitPipelineToPartSize(plan, 64*mib)
-	if ok && inFlightBytes(fitted) > reserved {
-		t.Errorf("a plan holding %d MiB was fitted to a pipeline of %d workers and %d queued parts of %d MiB, which holds %d MiB",
-			reserved/mib, fitted.WorkerCap, fitted.QueueDepth, fitted.PartSize/mib, inFlightBytes(fitted)/mib)
-	}
-
-	// A part size the reservation can still hold is fitted, not refused: a
-	// resume is only worth giving up on when the memory is genuinely not there.
-	// It takes an unsqueezed plan to afford the larger parts, since the four
-	// transients alone cost four times what they did.
-	wide := resources.UploadPlan{PartSize: 16 * mib, WorkerCap: 16, QueueDepth: 12}
-	fitted, ok = fitPipelineToPartSize(wide, 32*mib)
-	if !ok {
-		t.Fatal("a part size the reservation can hold was refused")
-	}
-	if fitted.PartSize != 32*mib || fitted.WorkerCap < 1 || fitted.QueueDepth < 1 {
-		t.Errorf("fitted plan %+v, want at least one worker and one queued part of the saved size", fitted)
-	}
-	if inFlightBytes(fitted) > inFlightBytes(wide) {
-		t.Errorf("the fitted pipeline holds %d MiB of the %d MiB reserved", inFlightBytes(fitted)/mib, inFlightBytes(wide)/mib)
-	}
-
-	// A smaller saved part size only ever frees memory.
-	fitted, ok = fitPipelineToPartSize(plan, 8*mib)
-	if !ok || fitted.WorkerCap != plan.WorkerCap || fitted.QueueDepth != plan.QueueDepth {
-		t.Errorf("fitting to a smaller part size narrowed the pipeline: %+v", fitted)
-	}
-}
-
 // TestUploadStreamingStartsFreshWhenTheSavedPartSizeDoesNotFit is N8 end to end:
-// a checkpoint whose part size this run cannot afford to hold is retired instead
-// of resumed. Continuing it would run a pipeline several times the size of the
-// memory reserved for it, which on a machine already short of memory is the
-// case the reservation exists to prevent.
+// a checkpoint whose part size this machine cannot plan a pipeline for at all is
+// retired instead of resumed. Running it anyway would hold several times the
+// memory reserved for it, which on a machine already short of memory is the case
+// the reservation exists to prevent.
 func TestUploadStreamingStartsFreshWhenTheSavedPartSizeDoesNotFit(t *testing.T) {
 	const partSize = 64
 	const mib = 1024 * 1024
@@ -2451,5 +2522,485 @@ func TestUploadStreamingStartsFreshWhenTheSavedPartSizeDoesNotFit(t *testing.T) 
 	}
 	if got := resourceMgr.GetAvailableUploadMemory(); got != 160*mib {
 		t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(160*mib))
+	}
+}
+
+// TestUploadStreamingRunsWithoutALockOnAReadOnlySource: streaming uploads now
+// create <source>.upload.lock beside the source, so a read-only or full source
+// directory fails an upload that used to run. Such a directory cannot hold a
+// resume state either, so there is no checkpoint two invocations could share and
+// nothing the lock would have protected.
+func TestUploadStreamingRunsWithoutALockOnAReadOnlySource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not stop file creation on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory regardless")
+	}
+
+	const partSize = 64
+	dir := t.TempDir()
+	data := make([]byte, 3*partSize)
+	for i := range data {
+		data[i] = byte(i*7 + 1)
+	}
+	localPath := filepath.Join(dir, "streamed.dat")
+	if err := os.WriteFile(localPath, data, 0644); err != nil {
+		t.Fatalf("failed to write the source: %v", err)
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("failed to make the source directory read-only: %v", err)
+	}
+	// Before TempDir's own cleanup, which cannot remove the file otherwise.
+	t.Cleanup(func() { os.Chmod(dir, 0700) })
+
+	backend := newFakeStreamingBackend()
+	uploader := newResumableStreamingUploader(backend, partSize)
+	result, err := uploadStreaming(context.Background(), uploader, UploadParams{LocalPath: localPath}, int64(len(data)))
+	if err != nil {
+		t.Fatalf("an upload whose source directory cannot hold a lock file failed: %v", err)
+	}
+
+	object := backend.object(t, uploader.uploadID)
+	want := uninterruptedCiphertext(t, data, result.EncryptionKey, result.IV, partSize)
+	if !bytes.Equal(object, want) {
+		t.Errorf("the object is %d bytes and differs from the %d an uninterrupted upload writes", len(object), len(want))
+	}
+}
+
+// TestUploadPreEncryptHoldsTheLockAcrossTheTransfer: the orchestrator used to
+// hand the lock to the provider immediately before UploadEncryptedFile, because
+// the lock is not re-entrant and both wanted it. Nothing excluded a second
+// invocation in the window between the release and the provider's acquisition —
+// and a second invocation is the one that retires this attempt's ciphertext and
+// state.
+func TestUploadPreEncryptHoldsTheLockAcrossTheTransfer(t *testing.T) {
+	const partSize = 64
+	localPath, data := writeStreamingSource(t, 3*partSize)
+
+	provider := &resumableFakeUploader{partSize: partSize}
+	provider.duringUpload = func() {
+		lock, err := state.AcquireUploadLock(localPath)
+		if err == nil {
+			state.ReleaseUploadLock(lock)
+			t.Error("the source was not locked while the provider was uploading it")
+		}
+	}
+
+	if _, err := uploadPreEncrypt(context.Background(), provider, UploadParams{LocalPath: localPath}, int64(len(data))); err != nil {
+		t.Fatalf("the pre-encrypt upload failed: %v", err)
+	}
+}
+
+// abortRanWithin reports how long the fake's last abort was given.
+func (u *resumableStreamingUploader) abortRanWithin(t *testing.T) time.Duration {
+	t.Helper()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.abortDeadline <= 0 {
+		t.Fatal("the abort was issued on a context with no deadline")
+	}
+	return u.abortDeadline
+}
+
+// TestStreamingAbortsRunOnTheAbortDeadline is F-3. An abort issued after the
+// caller's context was cancelled has to run detached from it, so its own timeout
+// is how long the transfer goroutine stays alive after the user pressed cancel.
+// It was the ten-minute part budget, which is a whole part transfer's worth of
+// waiting for one request that will not answer.
+func TestStreamingAbortsRunOnTheAbortDeadline(t *testing.T) {
+	const partSize = 64
+
+	t.Run("ending an upload nothing can return to", func(t *testing.T) {
+		localPath, data := writeStreamingSource(t, 3*partSize)
+		backend := newFakeStreamingBackend()
+
+		uploader := newResumableStreamingUploader(backend, partSize)
+		uploader.failFrom = 0 // nothing lands, so the attempt is discarded on the way out
+		if _, err := uploadStreaming(context.Background(), uploader, UploadParams{LocalPath: localPath}, int64(len(data))); err == nil {
+			t.Fatal("expected the attempt to fail")
+		}
+
+		if got := uploader.abortRanWithin(t); got > constants.AbortOperationTimeout {
+			t.Errorf("the abort was given %s to run, want at most the %s abort deadline", got, constants.AbortOperationTimeout)
+		}
+	})
+
+	t.Run("abandoning a state that cannot be resumed", func(t *testing.T) {
+		localPath, data := writeStreamingSource(t, 4*partSize)
+		backend := newFakeStreamingBackend()
+		params := UploadParams{LocalPath: localPath}
+
+		interruptOnce(t, backend, params, data, partSize, 2)
+		rewriteStreamingState(t, localPath, func(saved *state.UploadResumeState) {
+			saved.PartSize = 0
+		})
+
+		second := newResumableStreamingUploader(backend, partSize)
+		if _, err := uploadStreaming(context.Background(), second, params, int64(len(data))); err != nil {
+			t.Fatalf("the fresh attempt failed: %v", err)
+		}
+
+		if got := second.abortRanWithin(t); got > constants.AbortOperationTimeout {
+			t.Errorf("the abort was given %s to run, want at most the %s abort deadline", got, constants.AbortOperationTimeout)
+		}
+	})
+}
+
+// TestUploadStreamingStartsFreshForADifferentDestination: the resume state and
+// the upload lock key on the local path alone, so one source uploaded to two
+// destinations meets on one sidecar. Continuing it hands the second destination
+// the object key — and, on S3, the multipart upload ID — of the first, and
+// registers whatever the second destination assembles under the first's path.
+func TestUploadStreamingStartsFreshForADifferentDestination(t *testing.T) {
+	const partSize = 64
+	localPath, data := writeStreamingSource(t, 4*partSize)
+	backend := newFakeStreamingBackend()
+
+	toA := UploadParams{
+		LocalPath:        localPath,
+		StorageID:        "storage-A",
+		StorageContainer: "bucket-a",
+		StoragePathBase:  "fake/path",
+	}
+	interrupted := interruptOnce(t, backend, toA, data, partSize, 2)
+	strandedKey := loadStreamingState(t, localPath).ObjectKey
+
+	var out bytes.Buffer
+	toB := UploadParams{
+		LocalPath:        localPath,
+		StorageID:        "storage-B",
+		StorageContainer: "bucket-b",
+		StoragePathBase:  "fake/path",
+		OutputWriter:     &out,
+	}
+	second := newResumableStreamingUploader(backend, partSize)
+	result, err := uploadStreaming(context.Background(), second, toB, int64(len(data)))
+	if err != nil {
+		t.Fatalf("the upload to the second destination failed: %v", err)
+	}
+
+	if second.uploadID == interrupted {
+		t.Fatal("continued an upload that was going to another destination")
+	}
+	if result.StoragePath == strandedKey {
+		t.Error("the upload to the second destination was registered under the first destination's object key")
+	}
+	if !backend.get(interrupted).aborted {
+		t.Error("the upload to the first destination was left open on the backend")
+	}
+	if !strings.Contains(out.String(), "different destination") {
+		t.Errorf("output did not say why the upload started over: %q", out.String())
+	}
+	if len(second.uploaded) != 4 {
+		t.Errorf("the fresh attempt sent %d parts, want all 4 of them", len(second.uploaded))
+	}
+	object := backend.object(t, second.uploadID)
+	want := uninterruptedCiphertext(t, data, result.EncryptionKey, result.IV, partSize)
+	if !bytes.Equal(object, want) {
+		t.Errorf("the fresh object is %d bytes and differs from the %d an uninterrupted upload writes", len(object), len(want))
+	}
+}
+
+// TestDestinationBlockerTellsTwoDestinationsApart covers the rule both resume
+// blockers share. A state that records where it was going is judged on that; one
+// written before v4.9.9 records nothing, and its object key is evidence only
+// where this destination gives keys a prefix of its own.
+func TestDestinationBlockerTellsTwoDestinationsApart(t *testing.T) {
+	here := uploadDestination{storageID: "storage-A", container: "bucket-a", pathBase: "uploads"}
+
+	for _, tt := range []struct {
+		name    string
+		saved   state.UploadResumeState
+		dest    uploadDestination
+		blocked bool
+	}{
+		{
+			name:  "the same destination",
+			saved: state.UploadResumeState{StorageID: "storage-A", Container: "bucket-a"},
+			dest:  here,
+		},
+		{
+			name:    "another storage record",
+			saved:   state.UploadResumeState{StorageID: "storage-B", Container: "bucket-a"},
+			dest:    here,
+			blocked: true,
+		},
+		{
+			name:    "another container",
+			saved:   state.UploadResumeState{StorageID: "storage-A", Container: "bucket-b"},
+			dest:    here,
+			blocked: true,
+		},
+		{
+			name:  "a shipped state whose key is under this path base",
+			saved: state.UploadResumeState{ObjectKey: "uploads/source.dat-suffix"},
+			dest:  here,
+		},
+		{
+			name:    "a shipped state whose key is somewhere else",
+			saved:   state.UploadResumeState{ObjectKey: "elsewhere/source.dat-suffix"},
+			dest:    here,
+			blocked: true,
+		},
+		{
+			name:    "a shipped state and a destination with no path base to judge by",
+			saved:   state.UploadResumeState{ObjectKey: "source.dat-suffix"},
+			dest:    uploadDestination{storageID: "storage-A", container: "bucket-a"},
+			blocked: true,
+		},
+		{
+			name:  "a run that was not told where it is going",
+			saved: state.UploadResumeState{StorageID: "storage-B", Container: "bucket-b"},
+			dest:  uploadDestination{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := destinationBlocker(&tt.saved, tt.dest)
+			if tt.blocked && reason == "" {
+				t.Error("the state was accepted for a destination it does not describe")
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("the state was refused for its own destination: %s", reason)
+			}
+		})
+	}
+}
+
+// TestPreEncryptResumeBlockerRefusesAnotherDestination: the pre-encrypt half of
+// the same rule. The ciphertext beside the source is reusable, which is exactly
+// what makes continuing it under another destination's object identity possible.
+func TestPreEncryptResumeBlockerRefusesAnotherDestination(t *testing.T) {
+	localPath, data := writeStreamingSource(t, 128)
+	sourceInfo, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("failed to stat the source: %v", err)
+	}
+	encryptedPath := localPath + ".encrypted"
+	if err := os.WriteFile(encryptedPath, data, 0600); err != nil {
+		t.Fatalf("failed to write the encrypted copy: %v", err)
+	}
+
+	saved := &state.UploadResumeState{
+		LocalPath:     localPath,
+		EncryptedPath: encryptedPath,
+		ObjectKey:     "uploads/streamed.dat-suffix",
+		OriginalSize:  int64(len(data)),
+		TotalSize:     int64(len(data)),
+		SourceModTime: sourceInfo.ModTime(),
+		EncryptionKey: "key",
+		IV:            "iv",
+		RandomSuffix:  "suffix",
+		CreatedAt:     time.Now(),
+		StorageType:   "FakeStorage",
+		StorageID:     "storage-A",
+		Container:     "bucket-a",
+	}
+	here := uploadDestination{storageID: "storage-A", container: "bucket-a", pathBase: "uploads"}
+	if reason := preEncryptResumeBlocker(saved, localPath, sourceInfo, "FakeStorage", here); reason != "" {
+		t.Fatalf("a state for this destination was refused: %s", reason)
+	}
+
+	elsewhere := uploadDestination{storageID: "storage-B", container: "bucket-b", pathBase: "uploads"}
+	if reason := preEncryptResumeBlocker(saved, localPath, sourceInfo, "FakeStorage", elsewhere); !strings.Contains(reason, "different destination") {
+		t.Errorf("a state for another destination was accepted (reason %q)", reason)
+	}
+}
+
+// TestUploadStreamingResumesUnderAReplannedPartSize is N8's follow-through. A
+// resumed upload runs with the part size the interrupted attempt chained
+// through, and fitting that size inside the reservation the fresh plan already
+// made refuses far more resumes than the machine cannot afford: the reservation
+// was sized for 16 MB parts, so 64 MB ones never fit it however wide the
+// pipeline is squeezed. Planning again with the part size fixed reserves for the
+// parts this attempt will actually hold, and only a machine that cannot hold the
+// narrowest such pipeline starts over.
+func TestUploadStreamingResumesUnderAReplannedPartSize(t *testing.T) {
+	const partSize = 64
+	const mib = 1024 * 1024
+	localPath, data := writeStreamingSource(t, 4*partSize)
+	backend := newFakeStreamingBackend()
+
+	// Enough for the narrowest pipeline of 64 MB parts — (1 queued + 1 worker +
+	// 4 transients) x 64 MB — and no more.
+	resourceMgr := resources.NewManager(resources.Config{
+		MaxThreads:   8,
+		AutoScale:    true,
+		CPUCores:     8,
+		MemoryBudget: 512 * mib,
+	})
+	handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(int64(len(data)), 1)
+	defer handle.Complete()
+
+	params := UploadParams{LocalPath: localPath, TransferHandle: handle}
+	interrupted := interruptOnce(t, backend, params, data, partSize, 2)
+	rewriteStreamingState(t, localPath, func(saved *state.UploadResumeState) {
+		saved.PartSize = 64 * mib
+		saved.StreamingParts = saved.StreamingParts[:1]
+	})
+
+	second := newResumableStreamingUploader(backend, partSize)
+	var out bytes.Buffer
+	params.OutputWriter = &out
+	if _, err := uploadStreaming(context.Background(), second, params, int64(len(data))); err != nil {
+		t.Fatalf("the resumed attempt failed: %v", err)
+	}
+
+	if second.uploadID != interrupted {
+		t.Fatalf("started upload %q instead of continuing %q, which this machine has the memory for: %q",
+			second.uploadID, interrupted, out.String())
+	}
+	if got := resourceMgr.GetAvailableUploadMemory(); got != 512*mib {
+		t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(512*mib))
+	}
+}
+
+// TestUploadPreEncryptPlansForTheSavedPartSize is the pre-encrypt twin of the
+// re-plan. The providers resume against the part size the checkpoint records, so
+// a plan made for the size this run would have chosen sizes the workers, the
+// queue and the memory reservation for parts the pipeline never holds.
+func TestUploadPreEncryptPlansForTheSavedPartSize(t *testing.T) {
+	const mib = 1024 * 1024
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "replan.dat")
+	plaintext := make([]byte, 300)
+	if err := os.WriteFile(source, plaintext, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	resourceMgr := resources.NewManager(resources.Config{
+		MaxThreads:   8,
+		AutoScale:    true,
+		CPUCores:     8,
+		MemoryBudget: 512 * mib,
+	})
+	handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(int64(len(plaintext)), 1)
+	defer handle.Complete()
+
+	fake := &resumableFakeUploader{partSize: 64, failAfterParts: 2}
+	params := UploadParams{LocalPath: source, PreEncrypt: true, TransferHandle: handle}
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(plaintext))); err == nil {
+		t.Fatal("first attempt was expected to fail")
+	}
+
+	fake.failAfterParts = 0
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(plaintext))); err != nil {
+		t.Fatalf("second attempt failed: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	second := fake.attempts[1]
+	if second.resumedFrom == 0 {
+		t.Fatal("the second attempt did not resume, so there is no saved part size to plan for")
+	}
+	if second.planPartSize != fake.partSize {
+		t.Errorf("the resumed attempt was planned for %d-byte parts, want the %d-byte parts the checkpoint records",
+			second.planPartSize, fake.partSize)
+	}
+	if got := resourceMgr.GetAvailableUploadMemory(); got != 512*mib {
+		t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(512*mib))
+	}
+}
+
+// TestUploadPreEncryptRestartsWhenTheSavedPartSizeCannotBePlanned: a checkpoint
+// whose part size this machine cannot plan for cannot be continued, so the
+// backend upload it names is retired and the provider opens a fresh one — the
+// ciphertext beside the source is still this object's and is reused.
+func TestUploadPreEncryptRestartsWhenTheSavedPartSizeCannotBePlanned(t *testing.T) {
+	const mib = 1024 * 1024
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "toobig.dat")
+	plaintext := make([]byte, 300)
+	if err := os.WriteFile(source, plaintext, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	resourceMgr := resources.NewManager(resources.Config{
+		MaxThreads:   8,
+		AutoScale:    true,
+		CPUCores:     8,
+		MemoryBudget: 160 * mib,
+	})
+	handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(int64(len(plaintext)), 1)
+	defer handle.Complete()
+
+	fake := &resumableFakeUploader{partSize: 64, failAfterParts: 2}
+	params := UploadParams{LocalPath: source, PreEncrypt: true, TransferHandle: handle}
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(plaintext))); err == nil {
+		t.Fatal("first attempt was expected to fail")
+	}
+	// A part size no pipeline on this machine can hold: (1 + 1 + 4) x 64 MB is
+	// well past the whole budget.
+	rewriteStreamingState(t, source, func(saved *state.UploadResumeState) {
+		saved.PartSize = 64 * mib
+	})
+
+	fake.failAfterParts = 0
+	var out bytes.Buffer
+	params.OutputWriter = &out
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(plaintext))); err != nil {
+		t.Fatalf("second attempt failed: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "Restarting the upload") {
+		t.Errorf("output did not say the interrupted upload was given up on: %q", out.String())
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	second := fake.attempts[1]
+	if second.resumedFrom != 0 {
+		t.Errorf("the second attempt resumed %d parts it had no memory to hold", second.resumedFrom)
+	}
+	if second.encryptedPath != fake.attempts[0].encryptedPath {
+		t.Error("the ciphertext of the interrupted attempt was discarded and made again")
+	}
+	if got := resourceMgr.GetAvailableUploadMemory(); got != 160*mib {
+		t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(160*mib))
+	}
+}
+
+// TestUploadStreamingPlansAfreshWhenTheBackendLostTheUpload: the plan made for a
+// resume is made for the interrupted upload's part size. When that upload turns
+// out to be gone, what follows is a new object — and planning it with the dead
+// one's geometry would stamp a part size into its metadata that this run never
+// chose, and hold the memory that size needs for the whole transfer.
+func TestUploadStreamingPlansAfreshWhenTheBackendLostTheUpload(t *testing.T) {
+	const partSize = 64
+	const mib = 1024 * 1024
+	localPath, data := writeStreamingSource(t, 4*partSize)
+	backend := newFakeStreamingBackend()
+
+	resourceMgr := resources.NewManager(resources.Config{
+		MaxThreads:   8,
+		AutoScale:    true,
+		CPUCores:     8,
+		MemoryBudget: 512 * mib,
+	})
+	handle := internaltransfer.NewManager(resourceMgr).AllocateTransfer(int64(len(data)), 1)
+	defer handle.Complete()
+
+	params := UploadParams{LocalPath: localPath, TransferHandle: handle}
+	interrupted := interruptOnce(t, backend, params, data, partSize, 2)
+	rewriteStreamingState(t, localPath, func(saved *state.UploadResumeState) {
+		saved.PartSize = 64 * mib
+		saved.StreamingParts = saved.StreamingParts[:1]
+	})
+	backend.forget(interrupted)
+
+	second := newResumableStreamingUploader(backend, partSize)
+	if _, err := uploadStreaming(context.Background(), second, params, int64(len(data))); err != nil {
+		t.Fatalf("the fresh attempt failed: %v", err)
+	}
+
+	if second.initPartSize == 64*mib {
+		t.Error("the fresh object was opened with the part size of the upload the backend had already dropped")
+	}
+	if second.initPartSize != constants.MinChunkSize {
+		t.Errorf("the fresh object was opened with %d-byte parts, want the %d this run plans for",
+			second.initPartSize, int64(constants.MinChunkSize))
+	}
+	if got := resourceMgr.GetAvailableUploadMemory(); got != 512*mib {
+		t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(512*mib))
 	}
 }

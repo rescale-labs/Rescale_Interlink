@@ -271,6 +271,8 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 			CreatedAt:      createdAt,
 			LastUpdate:     time.Now(),
 			StorageType:    "S3Storage",
+			StorageID:      p.storageID(),
+			Container:      p.storageContainer(),
 		}
 		state.SaveUploadState(currentState, params.LocalPath)
 	}
@@ -335,13 +337,6 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
-
-	// Acquire upload lock to prevent concurrent uploads of the same file
-	uploadLock, lockErr := state.AcquireUploadLock(params.LocalPath)
-	if lockErr != nil {
-		return fmt.Errorf("failed to acquire upload lock: %w", lockErr)
-	}
-	defer state.ReleaseUploadLock(uploadLock)
 
 	// Try to load resume state (keyed by ORIGINAL file path, not encrypted path)
 	existingState, loadErr := state.LoadUploadState(params.LocalPath)
@@ -451,8 +446,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			CreatedAt:      createdAt,
 			LastUpdate:     time.Now(),
 			StorageType:    "S3Storage",
+			StorageID:      p.storageID(),
+			Container:      p.storageContainer(),
 			ProcessID:      os.Getpid(),
-			LockAcquiredAt: uploadLock.AcquiredAt,
 		}
 		state.SaveUploadState(initialState, params.LocalPath)
 
@@ -544,8 +540,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				CreatedAt:      createdAt,
 				LastUpdate:     time.Now(),
 				StorageType:    "S3Storage",
+				StorageID:      p.storageID(),
+				Container:      p.storageContainer(),
 				ProcessID:      os.Getpid(),
-				LockAcquiredAt: uploadLock.AcquiredAt,
 			}
 			state.SaveUploadState(currentState, params.LocalPath)
 		},
@@ -675,7 +672,7 @@ func resumeS3Parts(saved *state.UploadResumeState, totalSize int64) (s3Resume, b
 // request issued on a cancelled context never leaves the process — so the upload
 // it was meant to discard would stay open.
 func abortContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), constants.PartOperationTimeout)
+	return context.WithTimeout(context.WithoutCancel(ctx), constants.AbortOperationTimeout)
 }
 
 // abortS3Upload discards a multipart upload the caller has decided not to
@@ -723,4 +720,23 @@ func convertFromCompletedParts(parts []types.CompletedPart) []state.CompletedPar
 		}
 	}
 	return result
+}
+
+// storageID and storageContainer name the destination this provider uploads to.
+// A resume state records them so that an upload of the same source to another
+// destination — the sidecar keys on the local path alone — is not continued as
+// this one. A provider built without its storage info records neither, which
+// reads as "not recorded" rather than as a different destination.
+func (p *Provider) storageID() string {
+	if p.storageInfo == nil {
+		return ""
+	}
+	return p.storageInfo.ID
+}
+
+func (p *Provider) storageContainer() string {
+	if p.storageInfo == nil {
+		return ""
+	}
+	return p.storageInfo.ConnectionSettings.Container
 }

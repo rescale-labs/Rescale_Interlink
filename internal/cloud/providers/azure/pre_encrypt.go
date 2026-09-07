@@ -353,6 +353,8 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 			CreatedAt:     createdAt,
 			LastUpdate:    time.Now(),
 			StorageType:   "AzureStorage",
+			StorageID:     p.storageID(),
+			Container:     p.storageContainer(),
 		}
 		state.SaveUploadState(currentState, params.LocalPath)
 	}
@@ -420,13 +422,6 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
 
-	// Acquire upload lock to prevent concurrent uploads of the same file
-	uploadLock, lockErr := state.AcquireUploadLock(params.LocalPath)
-	if lockErr != nil {
-		return fmt.Errorf("failed to acquire upload lock: %w", lockErr)
-	}
-	defer state.ReleaseUploadLock(uploadLock)
-
 	// Try to load resume state
 	existingState, loadErr := state.LoadUploadState(params.LocalPath)
 	if loadErr != nil {
@@ -439,7 +434,15 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	var createdAt time.Time
 
 	if existingState != nil && existingState.ObjectKey == pathForRescale {
-		if resume, ok := resumeAzureBlocks(existingState, totalSize); ok {
+		// The object key and the block geometry say the checkpoint describes this
+		// upload; they say nothing about whether it still describes this file, or
+		// whether the service still holds the blocks — uncommitted blocks live
+		// seven days. Committing a list naming blocks Azure has dropped is how a
+		// blob ends up short. S3's concurrent path runs this same check.
+		resume, ok := resumeAzureBlocks(existingState, totalSize)
+		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
+			log.Printf("Resume state validation failed, starting fresh: %v", err)
+		} else if ok {
 			partSize = resume.blockSize
 			totalBlocks = transfer.CalculateTotalParts(totalSize, partSize)
 			alreadyStaged = resume.completed
@@ -528,23 +531,24 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				}
 			}
 			currentState := &state.UploadResumeState{
-				LocalPath:      params.LocalPath,
-				EncryptedPath:  params.EncryptedPath,
-				ObjectKey:      pathForRescale,
-				TotalSize:      totalSize,
-				OriginalSize:   params.OriginalSize,
-				SourceModTime:  params.SourceModTime,
-				UploadedBytes:  uploaded,
-				BlockIDs:       currentBlockIDs,
-				PartSize:       partSize,
-				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
-				IV:             encryption.EncodeBase64(params.IV),
-				RandomSuffix:   params.RandomSuffix,
-				CreatedAt:      createdAt,
-				LastUpdate:     time.Now(),
-				StorageType:    "AzureStorage",
-				ProcessID:      os.Getpid(),
-				LockAcquiredAt: uploadLock.AcquiredAt,
+				LocalPath:     params.LocalPath,
+				EncryptedPath: params.EncryptedPath,
+				ObjectKey:     pathForRescale,
+				TotalSize:     totalSize,
+				OriginalSize:  params.OriginalSize,
+				SourceModTime: params.SourceModTime,
+				UploadedBytes: uploaded,
+				BlockIDs:      currentBlockIDs,
+				PartSize:      partSize,
+				EncryptionKey: encryption.EncodeBase64(params.EncryptionKey),
+				IV:            encryption.EncodeBase64(params.IV),
+				RandomSuffix:  params.RandomSuffix,
+				CreatedAt:     createdAt,
+				LastUpdate:    time.Now(),
+				StorageType:   "AzureStorage",
+				StorageID:     p.storageID(),
+				Container:     p.storageContainer(),
+				ProcessID:     os.Getpid(),
 			}
 			state.SaveUploadState(currentState, params.LocalPath)
 		},
@@ -588,4 +592,23 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	}
 
 	return nil
+}
+
+// storageID and storageContainer name the destination this provider uploads to.
+// A resume state records them so that an upload of the same source to another
+// destination — the sidecar keys on the local path alone — is not continued as
+// this one. A provider built without its storage info records neither, which
+// reads as "not recorded" rather than as a different destination.
+func (p *Provider) storageID() string {
+	if p.storageInfo == nil {
+		return ""
+	}
+	return p.storageInfo.ID
+}
+
+func (p *Provider) storageContainer() string {
+	if p.storageInfo == nil {
+		return ""
+	}
+	return p.storageInfo.ConnectionSettings.Container
 }

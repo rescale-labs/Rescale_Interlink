@@ -45,6 +45,13 @@ type UploadResumeState struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	LastUpdate     time.Time       `json:"last_update"`
 	StorageType    string          `json:"storage_type"` // "S3Storage" or "AzureStorage"
+	// StorageID and Container name the destination the interrupted attempt was
+	// filling. This file and the upload lock both key on the local path alone,
+	// so one source uploaded to two destinations shares one sidecar — and the
+	// object key and upload ID recorded here belong to whichever destination
+	// wrote them. Absent in state written before v4.9.9.
+	StorageID string `json:"storage_id,omitempty"`
+	Container string `json:"container,omitempty"`
 
 	// Streaming encryption fields (FormatVersion=1)
 	FormatVersion int    `json:"format_version"` // 0=legacy, 1=streaming
@@ -117,6 +124,13 @@ const lockOwnerlessGrace = 30 * time.Second
 // abandoned lock and race for the create again, so a pathological loop of
 // owners appearing and dying cannot spin here forever.
 const lockTakeoverAttempts = 8
+
+// ErrUploadLockUnavailable reports that the lock file could not be created,
+// written or read at all — a read-only or full source directory. Nothing holds
+// the upload in that case; there is simply nowhere to record that we do, which
+// is a different answer from the contention errors and one a caller may choose
+// to carry on past.
+var ErrUploadLockUnavailable = errors.New("the source directory cannot hold an upload lock")
 
 // =============================================================================
 // Basic I/O functions - these are the core operations needed everywhere
@@ -380,7 +394,7 @@ func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*
 				// A lock nobody can read is worse than no lock: remove it so the
 				// next attempt is not blocked by our own half-written file.
 				os.Remove(lockFilePath)
-				return nil, fmt.Errorf("failed to write lock file: %w", writeErr)
+				return nil, fmt.Errorf("%w: failed to write lock file: %w", ErrUploadLockUnavailable, writeErr)
 			}
 			return &UploadLock{
 				LockFilePath: lockFilePath,
@@ -390,7 +404,7 @@ func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*
 			}, nil
 		}
 		if !os.IsExist(err) {
-			return nil, fmt.Errorf("failed to create lock file: %w", err)
+			return nil, fmt.Errorf("%w: failed to create lock file: %w", ErrUploadLockUnavailable, err)
 		}
 
 		// Someone else got there first. Only clear it if its owner is gone.
@@ -420,7 +434,7 @@ func clearAbandonedLock(lockFilePath string, owner uploadLockState) error {
 		if os.IsNotExist(err) {
 			return nil // Released while we looked; try to create it again.
 		}
-		return fmt.Errorf("failed to read upload lock: %w", err)
+		return fmt.Errorf("%w: failed to read upload lock: %w", ErrUploadLockUnavailable, err)
 	}
 
 	var existing uploadLockState
@@ -462,7 +476,7 @@ func takeAbandonedLock(lockFilePath string, observed uploadLockState) error {
 		if os.IsNotExist(err) {
 			return nil // Another acquirer moved it first; race for the create.
 		}
-		return fmt.Errorf("failed to clear abandoned upload lock: %w", err)
+		return fmt.Errorf("%w: failed to clear abandoned upload lock: %w", ErrUploadLockUnavailable, err)
 	}
 
 	var moved uploadLockState
@@ -472,13 +486,15 @@ func takeAbandonedLock(lockFilePath string, observed uploadLockState) error {
 		// this rename, so what we moved aside belongs to whoever took it. Put it
 		// back and let the caller judge the lock again.
 		if restoreErr := os.Rename(stalePath, lockFilePath); restoreErr != nil {
+			// Not ErrUploadLockUnavailable: something does own this upload, and
+			// carrying on without a lock is exactly what must not happen there.
 			return fmt.Errorf("upload lock was retaken while being cleared and could not be restored: %w", restoreErr)
 		}
 		return nil
 	}
 
 	if err := os.Remove(stalePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to clear abandoned upload lock: %w", err)
+		return fmt.Errorf("%w: failed to clear abandoned upload lock: %w", ErrUploadLockUnavailable, err)
 	}
 	return nil
 }
