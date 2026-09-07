@@ -147,6 +147,13 @@ type workItem struct {
 	index   int
 	jobSpec models.JobSpec
 	state   *models.JobState
+
+	// recreate carries --recreate-indeterminate's authorization for this one
+	// job, in memory only. The unconfirmed creation it replaces stays on disk
+	// until the worker records the intent to send the new request, so an
+	// interruption before that leaves a record the next resume still refuses to
+	// create from.
+	recreate bool
 }
 
 // hasLocalArchive reports whether a job builds and uploads a tarball of its own.
@@ -686,6 +693,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			// nothing identifies it to look it up by. The job is named here with
 			// what to check, and creating it again takes an explicit flag from
 			// someone who has checked.
+			recreate := false
 			if mayAlreadyExist(state) {
 				if !p.recreateIndeterminate {
 					p.logf("WARN", "job", state.JobName,
@@ -699,18 +707,19 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				p.logf("WARN", "job", state.JobName,
 					"Creating %q again: --recreate-indeterminate says it is not on the platform",
 					state.JobName)
-				// Cleared for this run only. What is on disk stays the
-				// unconfirmed creation until the worker records the intent to
-				// send the new request, so a death in between still leaves a job
-				// no later resume recreates on its own.
-				state.SubmitStatus = "pending"
-				state.ErrorMessage = ""
+				// Authorization only, carried on the item: the feeder's own
+				// checkpoints below would otherwise write a cleared status to
+				// disk, and a death between one of those and the worker's intent
+				// leaves an ordinary pending job the next resume creates with no
+				// flag at all.
+				recreate = true
 			}
 
 			item := &workItem{
-				index:   index,
-				jobSpec: jobSpec,
-				state:   state,
+				index:    index,
+				jobSpec:  jobSpec,
+				state:    state,
+				recreate: recreate,
 			}
 
 			// Submit-existing mode — skip tar/upload, go directly to job creation
@@ -969,23 +978,50 @@ func (p *Pipeline) recordIndeterminateCreate(item *workItem, cause error) {
 // is why a refused record refuses the request too — the job certainly does not
 // exist yet, so the item fails and the next resume retries it.
 func (p *Pipeline) recordCreateIntent(item *workItem) (string, error) {
-	previous := item.state.SubmitStatus
+	before := item.state.SubmitStatus
+	// A job being created again still carries the unconfirmed record on disk;
+	// this request's own outcome is what replaces it, so the status to restore
+	// is an ordinary new job's rather than the ambiguity being superseded.
+	outcome := before
+	if item.recreate {
+		outcome = "pending"
+	}
 	item.state.SubmitStatus = state.SubmitStatusCreating
 
 	if err := p.stateMgr.UpdateState(item.state); err != nil {
 		reason := fmt.Sprintf("could not record the job creation before sending it: %v", err)
 		p.logf("ERROR", "job", item.state.JobName, "%s", reason)
 
-		item.state.SubmitStatus = "failed"
-		item.state.ErrorMessage = reason
-		// The same write is about to fail again; this is for the in-memory map
-		// countFailedJobs reads, which UpdateState owns.
-		_ = p.stateMgr.UpdateState(item.state)
-
-		p.reportStateChange(item.state.JobName, "create", "failed", "", reason, 0.0)
-		return previous, errors.New(reason)
+		item.state.SubmitStatus = before
+		p.failBeforeCreate(item, reason)
+		return outcome, errors.New(reason)
 	}
-	return previous, nil
+	return outcome, nil
+}
+
+// failBeforeCreate records a create-stage failure whose request never went out.
+//
+// A job this run was authorized to create again keeps the unconfirmed record it
+// started from: nothing was sent, so that creation is still the one someone has
+// to check the platform for, and a plain failure in its place is a record the
+// next resume creates from with no flag at all.
+func (p *Pipeline) failBeforeCreate(item *workItem, reason string) {
+	if item.recreate {
+		p.logf("WARN", "job", item.state.JobName,
+			"%q was not created again; the creation a previous run could not confirm still stands",
+			item.state.JobName)
+		p.reportStateChange(item.state.JobName, "create", state.SubmitStatusIndeterminate, "", reason, 0.0)
+		return
+	}
+
+	item.state.SubmitStatus = "failed"
+	item.state.ErrorMessage = reason
+	// Where the state file is what failed, the same write is about to fail
+	// again; this is for the in-memory map countFailedJobs reads, which
+	// UpdateState owns.
+	_ = p.stateMgr.UpdateState(item.state)
+
+	p.reportStateChange(item.state.JobName, "create", "failed", "", reason, 0.0)
 }
 
 // checkJobHasInputs rejects a job that would be created with nothing attached.
@@ -1554,10 +1590,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				jobReq, err := BuildJobRequest(item.jobSpec, fileIDs, p.sharedFileIDs, p.decompressCommon)
 				if err != nil {
 					p.logf("ERROR", "job", item.state.JobName, "Failed to build request: %v", err)
-					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = err.Error()
-					p.stateMgr.UpdateState(item.state)
-					p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
+					p.failBeforeCreate(item, err.Error())
 					p.setActiveWorker("job", -1)
 					continue
 				}
@@ -1586,8 +1619,13 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 
 				item.state.JobID = jobResp.ID
 				// The outcome replaces the intent: the platform named the job,
-				// so there is nothing left for anyone to check for.
+				// so there is nothing left for anyone to check for — including
+				// the unconfirmed creation a recreation was authorized to
+				// supersede, whose cause goes with it.
 				item.state.SubmitStatus = previousSubmitStatus
+				if item.recreate {
+					item.state.ErrorMessage = ""
+				}
 				// Before submission: a job whose ID exists only in memory is a
 				// job a restart creates and submits all over again.
 				if err := p.checkpoint(item, "create"); err != nil {

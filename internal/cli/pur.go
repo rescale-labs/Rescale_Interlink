@@ -922,6 +922,7 @@ func newSubmitExistingCmd() *cobra.Command {
 	var jobsCSV string
 	var stateFile string
 	var ids string
+	var recreateIndeterminate bool
 
 	cmd := &cobra.Command{
 		Use:   "submit-existing",
@@ -1016,8 +1017,9 @@ Example:
 			// The pipeline will skip tar and upload, only create and submit jobs
 			logger.Info().Msg("Creating pipeline (submit-existing mode)")
 			pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
-				StateFile:     stateFile,
-				SkipTarUpload: true,
+				StateFile:             stateFile,
+				SkipTarUpload:         true,
+				RecreateIndeterminate: recreateIndeterminate,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to create pipeline: %w", err)
@@ -1039,6 +1041,9 @@ Example:
 	cmd.Flags().StringVar(&jobsCSV, "jobs-csv", "jobs.csv", "Jobs CSV file (must contain extrainputfileids column)")
 	cmd.Flags().StringVar(&stateFile, "state", "submit_existing_state.csv", "State file")
 	cmd.Flags().StringVar(&ids, "ids", "", "Comma-separated job IDs to submit directly")
+	cmd.Flags().BoolVar(&recreateIndeterminate, "recreate-indeterminate", false,
+		"Create every job in the batch a previous run could not confirm, not a chosen one; "+
+			"use only after checking the platform for each of them")
 
 	return cmd
 }

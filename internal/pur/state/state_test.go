@@ -230,6 +230,7 @@ func TestMayAlreadyExist(t *testing.T) {
 		"sent, never answered":  {&models.JobState{SubmitStatus: SubmitStatusIndeterminate}, true},
 		"recorded as going out": {&models.JobState{SubmitStatus: SubmitStatusCreating}, true},
 		"named by the platform": {&models.JobState{SubmitStatus: SubmitStatusCreating, JobID: "job-abc"}, false},
+		"answered late":         {&models.JobState{SubmitStatus: SubmitStatusIndeterminate, JobID: "job-abc"}, false},
 		"not attempted":         {&models.JobState{SubmitStatus: "pending"}, false},
 		"failed outright":       {&models.JobState{SubmitStatus: "failed"}, false},
 		"created and submitted": {&models.JobState{SubmitStatus: "success", JobID: "job-abc"}, false},

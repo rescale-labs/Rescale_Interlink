@@ -955,6 +955,10 @@ type jobStats struct {
 // IsUnconfirmedCreate reports whether a SubmitStatus means the job's creation
 // was never resolved either way: a job left between the create-intent
 // checkpoint and the platform's answer means the same as an indeterminate one.
+//
+// This is the status half of the rule only. A caller holding the whole record
+// classifies it with state.MayAlreadyExist, which also requires that no job ID
+// came back — the platform naming the job is what resolves the ambiguity.
 func IsUnconfirmedCreate(submitStatus string) bool {
 	return submitStatus == state.SubmitStatusIndeterminate || submitStatus == state.SubmitStatusCreating
 }
@@ -1001,7 +1005,7 @@ func (e *Engine) getJobStats() jobStats {
 			stats.Failed++
 		case job.SubmitStatus == "skipped":
 			stats.Completed++ // create-only mode
-		case IsUnconfirmedCreate(job.SubmitStatus):
+		case state.MayAlreadyExist(job):
 			stats.Unconfirmed++
 		default:
 			if job.TarStatus == "failed" || job.UploadStatus == "failed" {

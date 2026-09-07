@@ -81,12 +81,17 @@ func runBatch(t *testing.T, jobs []models.JobSpec, stateFile, apiURL string) (*P
 
 func runBatchWith(t *testing.T, jobs []models.JobSpec, stateFile, apiURL string, recreate bool) (*Pipeline, []string, error) {
 	t.Helper()
-
-	cfg := &config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}
-	p, err := NewPipeline(cfg, nil, jobs, PipelineOptions{
+	return runBatchOpts(t, jobs, apiURL, PipelineOptions{
 		StateFile:             stateFile,
 		RecreateIndeterminate: recreate,
 	})
+}
+
+func runBatchOpts(t *testing.T, jobs []models.JobSpec, apiURL string, opts PipelineOptions) (*Pipeline, []string, error) {
+	t.Helper()
+
+	cfg := &config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}
+	p, err := NewPipeline(cfg, nil, jobs, opts)
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
@@ -528,5 +533,257 @@ func TestOrdinaryCreateRecordsTheIntentBeforeTheRequest(t *testing.T) {
 	}
 	if st.SubmitStatus == "creating" {
 		t.Errorf("SubmitStatus = %q, want the job ID to have replaced the intent", st.SubmitStatus)
+	}
+}
+
+// remoteInputJobSpec is a job with nothing of its own to archive: its inputs are
+// files already on the platform, as a DOE sweep's or a remote-input single job's
+// are. The feeder skips tar and upload for such a job — and checkpoints that
+// skip before any worker sees it.
+func remoteInputJobSpec() models.JobSpec {
+	return models.JobSpec{
+		JobName:         "job_1",
+		AnalysisCode:    "user_included",
+		AnalysisVersion: "1.0",
+		Command:         "./run.sh",
+		CoreType:        "emerald",
+		CoresPerSlot:    4,
+		Slots:           1,
+		WalltimeHours:   1,
+		SubmitMode:      "create_only",
+		InputFiles:      []string{"file-remote-1"},
+	}
+}
+
+// seedUnconfirmedWithoutArchive writes the state left behind by a job that built
+// no archive of its own — a DOE sweep, a remote-input single job or a
+// submit-existing row — and whose creation was never confirmed.
+func seedUnconfirmedWithoutArchive(t *testing.T, stateFile string, spec models.JobSpec, cause string) {
+	t.Helper()
+
+	mgr := state.NewManager(stateFile)
+	st := mgr.InitializeState(1, spec.JobName, spec.Directory)
+	st.TarStatus = "skipped"
+	st.UploadStatus = "skipped"
+	st.SubmitStatus = state.SubmitStatusIndeterminate
+	st.ErrorMessage = cause
+	if err := mgr.UpdateState(st); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+}
+
+// heldResolver keeps every job worker at the first thing it waits for — version
+// resolution — so no create intent is recorded while the test is looking at the
+// window before it.
+type heldResolver struct{ release chan struct{} }
+
+func (r *heldResolver) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
+	<-r.release
+	return nil, nil
+}
+
+// runInterruptedAtFeederCheckpoint runs a batch and cancels it the moment the
+// feeder has checkpointed its job, which is the window a cancel or a death falls
+// into before the worker records its create intent. It reports whether that
+// checkpoint happened at all, so a test cannot pass because the feeder never got
+// there.
+func runInterruptedAtFeederCheckpoint(t *testing.T, jobs []models.JobSpec, apiURL string, opts PipelineOptions) bool {
+	t.Helper()
+
+	cfg := &config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}
+	p, err := NewPipeline(cfg, nil, jobs, opts)
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	p.apiClient = api.NewClientForTest(&config.Config{APIBaseURL: apiURL, APIKey: "test"})
+	held := &heldResolver{release: make(chan struct{})}
+	p.analysisResolver = held
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	checkpointed := false
+	p.SetStateChangeCallback(func(jobName, stage, newStatus, jobID, errorMessage string, uploadProgress float64) {
+		if stage != "tar" || newStatus != "skipped" {
+			return
+		}
+		mu.Lock()
+		checkpointed = true
+		mu.Unlock()
+		cancel()
+	})
+
+	if err := p.Run(ctx); err != nil {
+		t.Fatalf("cancelled run reported %v, want no verdict", err)
+	}
+	close(held.release)
+	<-p.versionsResolved
+
+	mu.Lock()
+	defer mu.Unlock()
+	return checkpointed
+}
+
+// TestRecreationKeepsTheUnconfirmedRecordUntilTheWorkerRecordsItsIntent covers
+// the two routes whose feeder checkpoints sit between the recreation
+// authorization and the worker's create intent: a job with no archive of its own
+// (DOE, remote inputs) and submit-existing.
+//
+// --recreate-indeterminate is this run's permission to create the job again, not
+// a new fact about the platform. Until the worker has recorded that it is
+// sending the request, what is on disk is still the creation nobody has
+// reconciled, and an interruption in between has to leave it that way: an
+// ordinary "pending" there is one the next resume creates from with no flag at
+// all.
+func TestRecreationKeepsTheUnconfirmedRecordUntilTheWorkerRecordsItsIntent(t *testing.T) {
+	const cause = "job may have been created: the platform took the request and the answer was lost"
+
+	for _, tc := range []struct {
+		name          string
+		skipTarUpload bool
+	}{
+		{name: "remote inputs", skipTarUpload: false},
+		{name: "submit existing", skipTarUpload: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := namespaceTestRoot(t)
+			work := filepath.Join(root, "work")
+			if err := os.MkdirAll(work, 0o755); err != nil {
+				t.Fatalf("mkdir work: %v", err)
+			}
+			// The job has no directory of its own, so the batch sites its
+			// archive directory on the process working directory.
+			t.Chdir(work)
+
+			var mu sync.Mutex
+			creates := 0
+			server := answeringServer(&creates, &mu)
+			defer server.Close()
+
+			stateFile := filepath.Join(root, "state.csv")
+			spec := remoteInputJobSpec()
+			seedUnconfirmedWithoutArchive(t, stateFile, spec, cause)
+
+			opts := PipelineOptions{
+				StateFile:             stateFile,
+				SkipTarUpload:         tc.skipTarUpload,
+				RecreateIndeterminate: true,
+			}
+			if !runInterruptedAtFeederCheckpoint(t, []models.JobSpec{spec}, server.URL, opts) {
+				t.Fatal("the feeder never checkpointed this job, so this proves nothing")
+			}
+
+			st := stateOf(t, stateFile, 1)
+			if st.SubmitStatus != state.SubmitStatusIndeterminate {
+				t.Errorf("after the feeder's checkpoint the state file says SubmitStatus = %q, want %q: "+
+					"nothing had been sent yet", st.SubmitStatus, state.SubmitStatusIndeterminate)
+			}
+			if st.JobID != "" {
+				t.Errorf("JobID = %q, want empty", st.JobID)
+			}
+			if st.ErrorMessage != cause {
+				t.Errorf("ErrorMessage = %q, want the unconfirmed creation's own %q", st.ErrorMessage, cause)
+			}
+
+			// What that record is for: the next resume, without the flag,
+			// leaves the job alone and says so.
+			resumeOpts := PipelineOptions{StateFile: stateFile, SkipTarUpload: tc.skipTarUpload}
+			resumed, lines, resumeErr := runBatchOpts(t, []models.JobSpec{spec}, server.URL, resumeOpts)
+
+			mu.Lock()
+			got := creates
+			mu.Unlock()
+			if got != 0 {
+				t.Errorf("job created %d time(s) on an unflagged resume, want 0", got)
+			}
+			if resumeErr == nil || !strings.Contains(resumeErr.Error(), "job_1") {
+				t.Errorf("resume verdict = %v, want it to name job_1", resumeErr)
+			}
+			if !containsAll(lines, "job_1", "--recreate-indeterminate") {
+				t.Errorf("no log line names the job and how to create it again; lines: %v", lines)
+			}
+			if failed := resumed.countFailedJobs(); failed != 0 {
+				t.Errorf("resume counts %d plain failure(s), want 0: the job may exist", failed)
+			}
+
+			// And the flag still does its job when the run is left alone: one
+			// creation, and the outcome replaces the unconfirmed record.
+			if _, _, err := runBatchOpts(t, []models.JobSpec{spec}, server.URL, opts); err != nil {
+				t.Errorf("resume with --recreate-indeterminate: %v", err)
+			}
+
+			mu.Lock()
+			got = creates
+			mu.Unlock()
+			if got != 1 {
+				t.Fatalf("job created %d time(s) in total, want 1", got)
+			}
+			done := stateOf(t, stateFile, 1)
+			if done.JobID != "job-abc" {
+				t.Errorf("JobID = %q, want %q", done.JobID, "job-abc")
+			}
+			if state.MayAlreadyExist(done) {
+				t.Errorf("SubmitStatus = %q, want the created job's own status", done.SubmitStatus)
+			}
+			if done.ErrorMessage != "" {
+				t.Errorf("ErrorMessage = %q, want it cleared with the ambiguity", done.ErrorMessage)
+			}
+		})
+	}
+}
+
+// TestRecreationThatCannotBuildItsRequestKeepsTheUnconfirmedRecord covers the
+// other write that precedes the create intent: the job spec no longer builds a
+// request, because the row was edited between the two runs. Nothing is sent, so
+// the earlier creation is still the one to check the platform for — recording an
+// ordinary failure over it is a record the next resume retries with no flag.
+func TestRecreationThatCannotBuildItsRequestKeepsTheUnconfirmedRecord(t *testing.T) {
+	const cause = "job may have been created: the platform took the request and the answer was lost"
+
+	root := namespaceTestRoot(t)
+	runDir := filepath.Join(root, "Run_1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run: %v", err)
+	}
+
+	var mu sync.Mutex
+	creates := 0
+	server := answeringServer(&creates, &mu)
+	defer server.Close()
+
+	stateFile := filepath.Join(root, "state.csv")
+	spec := uploadedJobSpec(runDir)
+	seedReadyToCreate(t, stateFile, filepath.Join(root, "job_1.tar.gz"), spec,
+		state.SubmitStatusIndeterminate, cause)
+
+	// The edit: license settings the request builder rejects.
+	spec.LicenseSettings = "{not json"
+
+	p, lines, runErr := runBatchWith(t, []models.JobSpec{spec}, stateFile, server.URL, true)
+
+	mu.Lock()
+	got := creates
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("platform received %d create request(s), want 0", got)
+	}
+	if !containsAll(lines, "Failed to build request") {
+		t.Fatalf("the run never reached the request builder, so this proves nothing; lines: %v", lines)
+	}
+
+	st := stateOf(t, stateFile, 1)
+	if st.SubmitStatus != state.SubmitStatusIndeterminate {
+		t.Errorf("SubmitStatus = %q, want it still %q: nothing was sent, so nothing was resolved",
+			st.SubmitStatus, state.SubmitStatusIndeterminate)
+	}
+	if st.ErrorMessage != cause {
+		t.Errorf("ErrorMessage = %q, want the unconfirmed creation's own %q", st.ErrorMessage, cause)
+	}
+	if failed := p.countFailedJobs(); failed != 0 {
+		t.Errorf("run counts %d plain failure(s), want 0: the job may exist", failed)
+	}
+	if runErr == nil || !strings.Contains(runErr.Error(), "job_1") {
+		t.Errorf("run verdict = %v, want it to name job_1", runErr)
 	}
 }

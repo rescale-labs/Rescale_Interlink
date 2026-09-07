@@ -99,3 +99,34 @@ func TestCompleteEventCarriesUnconfirmedCreations(t *testing.T) {
 		t.Fatal("no completion event")
 	}
 }
+
+// A "creating" row that carries a job ID is an ordinary created job: the
+// platform named it, so there is nothing for anyone to reconcile. The pipeline
+// and the CLI have always read it that way — state.MayAlreadyExist excludes a
+// known ID — and a classification here that looked only at the status called
+// the same record unconfirmed, telling the user to go looking for a job the run
+// can already point at.
+func TestGetRunStatsExcludesCreatingRowsWithAKnownJobID(t *testing.T) {
+	e, _ := NewEngine(nil)
+	seedRun(t, e, state.SubmitStatusCreating, state.SubmitStatusCreating)
+
+	// The first job's creation was answered.
+	st := e.GetState()
+	js := st.GetState(1)
+	js.JobID = "job-abc"
+	if err := st.UpdateState(js); err != nil {
+		t.Fatalf("UpdateState: %v", err)
+	}
+
+	total, completed, failed, pending, unconfirmed := e.GetRunStats()
+
+	if unconfirmed != 1 {
+		t.Errorf("unconfirmed = %d, want 1: only the row with no job ID is one to check the platform for", unconfirmed)
+	}
+	// The named job is work this run has not finished, which is what the CLI's
+	// own resume analysis calls it.
+	if total != 2 || completed != 0 || failed != 0 || pending != 1 {
+		t.Errorf("total/completed/failed/pending = %d/%d/%d/%d, want 2/0/0/1",
+			total, completed, failed, pending)
+	}
+}
