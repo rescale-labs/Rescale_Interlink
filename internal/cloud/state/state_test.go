@@ -318,13 +318,27 @@ func writeLockFile(t *testing.T, localPath string, lock uploadLockState) {
 	}
 }
 
+// guardPathOf names the guard an acquirer of localPath will take, which is what
+// a planted record has to claim to be one this machine may clear.
+func guardPathOf(t *testing.T, localPath string) string {
+	t.Helper()
+	guardPath, err := guardPathFor(lockFilePathFor(localPath))
+	if err != nil {
+		t.Fatalf("name the guard: %v", err)
+	}
+	return guardPath
+}
+
 // acquireAs acquires the on-disk lock as an owner this process is not, which is
 // how a test stands in for a second process: AcquireUploadLock would be stopped
-// by the in-process claim long before the file is consulted.
+// by the in-process claim long before the file is consulted. It resolves the
+// lock path the way acquisition does, so it reaches the same guard.
 func acquireAs(localPath string, pid int, token string) (*UploadLock, error) {
-	return acquireLockFile(localPath+".upload.lock", localPath, uploadLockState{
+	return acquireLockFile(lockFilePathFor(localPath), localPath, uploadLockState{
 		ProcessID:  pid,
 		OwnerToken: token,
+		Host:       lockHost,
+		Owner:      lockOwner,
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -438,6 +452,9 @@ func TestAcquireUploadLock_KeepsLiveOwnerRegardlessOfAge(t *testing.T) {
 	writeLockFile(t, localPath, uploadLockState{
 		ProcessID:  ownerPID,
 		OwnerToken: "owner-of-a-running-upload",
+		Host:       lockHost,
+		Owner:      lockOwner,
+		Guard:      guardPathOf(t, localPath),
 		AcquiredAt: time.Now().Add(-2 * time.Hour),
 		LocalPath:  localPath,
 	})
@@ -464,6 +481,9 @@ func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
 	writeLockFile(t, localPath, uploadLockState{
 		ProcessID:  deadPID,
 		OwnerToken: "owner-that-crashed",
+		Host:       lockHost,
+		Owner:      lockOwner,
+		Guard:      guardPathOf(t, localPath),
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -480,32 +500,24 @@ func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
 }
 
 // TestAcquireUploadLock_TakeoverCannotEvictTheWinner is the cross-process
-// takeover race. Two acquirers read the same abandoned record; the first clears
-// it and starts its upload; the second then reaches the clearing step it had
-// already decided on and removes the lock the first one is holding. Both own
-// the same resume state, and the later one aborts the earlier one's multipart
-// upload as stale. The acquirers are driven below AcquireUploadLock because the
-// in-process claim is what stands in for the second process.
+// takeover race. Two acquirers read the same abandoned record; one clears it and
+// starts its upload; the other then reaches the clearing step it had already
+// decided on and removes the lock the first one is holding. Both own the same
+// resume state, and the later one aborts the earlier one's multipart upload as
+// stale. Judging under the guard is what makes that unreachable: the window
+// where the judgement stops being true is inside it. The acquirers are driven
+// below AcquireUploadLock because the in-process claim is what stands in for the
+// second process.
 func TestAcquireUploadLock_TakeoverCannotEvictTheWinner(t *testing.T) {
-	const deadPID = 424244
-	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
-
-	localPath := filepath.Join(t.TempDir(), "testfile.bin")
-	if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
-		t.Fatalf("write source file: %v", err)
-	}
-	writeLockFile(t, localPath, uploadLockState{
-		ProcessID:  deadPID,
-		OwnerToken: "owner-that-crashed",
-		AcquiredAt: time.Now(),
-		LocalPath:  localPath,
-	})
+	localPath := plantAbandonedLock(t, 424244)
 
 	parked := make(chan struct{})
 	release := make(chan struct{})
-	var once sync.Once
+	var parkOnce, releaseOnce sync.Once
+	releaseTheTaker := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseTheTaker()
 	parkTakeoverAt(t, takeoverJudged, "late-taker", func() {
-		once.Do(func() {
+		parkOnce.Do(func() {
 			close(parked)
 			<-release
 		})
@@ -519,25 +531,41 @@ func TestAcquireUploadLock_TakeoverCannotEvictTheWinner(t *testing.T) {
 
 	<-parked
 
-	early, err := acquireAs(localPath, 900001, "early-taker")
-	if err != nil {
-		t.Fatalf("the first acquirer could not clear the abandoned lock: %v", err)
+	earlyDone := make(chan lockOutcome, 1)
+	go func() {
+		lock, err := acquireAs(localPath, 900001, "early-taker")
+		earlyDone <- lockOutcome{lock, err}
+	}()
+	select {
+	case got := <-earlyDone:
+		if got.err == nil {
+			ReleaseUploadLock(got.lock)
+		}
+		t.Fatalf("a second acquirer reached the lock while the first was taking it: %v", got.err)
+	case <-time.After(100 * time.Millisecond):
 	}
-	close(release)
+	releaseTheTaker()
 
 	late := <-lateDone
-	if late.err == nil {
-		t.Errorf("both acquirers own the lock: the late one took it from PID %d", early.ProcessID)
-	} else if !strings.Contains(late.err.Error(), "another process") {
-		t.Errorf("the late acquirer's refusal %q does not name the live owner", late.err)
+	if late.err != nil {
+		t.Fatalf("the acquirer that judged the abandoned lock did not get it: %v", late.err)
 	}
-	if got := readLockFile(t, localPath); got.OwnerToken != "early-taker" {
+	early := <-earlyDone
+	if early.err == nil {
+		ReleaseUploadLock(early.lock)
+		t.Errorf("both acquirers own the lock: the second one took it from PID %d", late.lock.ProcessID)
+	} else if !strings.Contains(early.err.Error(), "another process") {
+		t.Errorf("the second acquirer's refusal %q does not name the live owner", early.err)
+	}
+	if got := readLockFile(t, localPath); got.OwnerToken != "late-taker" {
 		t.Errorf("lock file names owner %q, want the acquirer that won it", got.OwnerToken)
 	}
 }
 
 // plantAbandonedLock leaves a lock file whose owner has died, which is the one
-// state an acquirer is allowed to take over.
+// state an acquirer is allowed to take over: this machine, this user, and a PID
+// that is gone. Another machine's or another user's is refused however dead its
+// PID looks from here.
 func plantAbandonedLock(t *testing.T, deadPID int) string {
 	t.Helper()
 	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
@@ -549,6 +577,9 @@ func plantAbandonedLock(t *testing.T, deadPID int) string {
 	writeLockFile(t, localPath, uploadLockState{
 		ProcessID:  deadPID,
 		OwnerToken: "owner-that-crashed",
+		Host:       lockHost,
+		Owner:      lockOwner,
+		Guard:      guardPathOf(t, localPath),
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -561,37 +592,23 @@ func plantAbandonedLock(t *testing.T, deadPID int) string {
 // reaches the clearing step it had already decided on and frees the pathname —
 // and a third creates the lock while it is free. Whatever the second one then
 // puts back lands on top of the third's lock, and two acquirers are left
-// believing they own the same upload and the same resume state.
+// believing they own the same upload and the same resume state. Under the guard
+// there is no such window: neither the acquirer carrying a judgement of its own
+// nor one arriving fresh can reach the pathname while it is being taken.
 func TestAcquireUploadLock_TakeoverCannotStrandTwoOwners(t *testing.T) {
 	localPath := plantAbandonedLock(t, 424245)
 
 	judged := make(chan struct{})
 	release := make(chan struct{})
-	gapDone := make(chan lockOutcome, 1)
-	var judgedOnce, gapOnce sync.Once
-	// The acquirer that creates the lock while the pathname is free. It runs
-	// inside the clearing window when there is one, and after it otherwise.
-	fillTheGap := func() {
-		gapOnce.Do(func() {
-			lock, err := acquireAs(localPath, 900003, "gap-filler")
-			gapDone <- lockOutcome{lock, err}
+	var parkOnce, releaseOnce sync.Once
+	releaseTheTaker := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseTheTaker()
+	parkTakeoverAt(t, takeoverJudged, "second-taker", func() {
+		parkOnce.Do(func() {
+			close(judged)
+			<-release
 		})
-	}
-	lockTakeoverStep = func(phase string, owner uploadLockState) {
-		if owner.OwnerToken != "second-taker" {
-			return
-		}
-		switch phase {
-		case takeoverJudged:
-			judgedOnce.Do(func() {
-				close(judged)
-				<-release
-			})
-		case takeoverCleared:
-			fillTheGap()
-		}
-	}
-	t.Cleanup(func() { lockTakeoverStep = nil })
+	})
 
 	secondDone := make(chan lockOutcome, 1)
 	go func() {
@@ -600,18 +617,35 @@ func TestAcquireUploadLock_TakeoverCannotStrandTwoOwners(t *testing.T) {
 	}()
 	<-judged
 
-	first := lockOutcome{}
-	first.lock, first.err = acquireAs(localPath, 900001, "first-taker")
-	if first.err != nil {
-		t.Fatalf("the first acquirer could not take over the abandoned lock: %v", first.err)
+	firstDone := make(chan lockOutcome, 1)
+	go func() {
+		lock, err := acquireAs(localPath, 900001, "first-taker")
+		firstDone <- lockOutcome{lock, err}
+	}()
+	gapDone := make(chan lockOutcome, 1)
+	go func() {
+		lock, err := acquireAs(localPath, 900003, "gap-filler")
+		gapDone <- lockOutcome{lock, err}
+	}()
+	select {
+	case got := <-firstDone:
+		if got.err == nil {
+			ReleaseUploadLock(got.lock)
+		}
+		t.Fatalf("an acquirer carrying its own judgement acted on it while the lock was being taken: %v", got.err)
+	case got := <-gapDone:
+		if got.err == nil {
+			ReleaseUploadLock(got.lock)
+		}
+		t.Fatalf("an acquirer created a lock while the pathname was being taken: %v", got.err)
+	case <-time.After(100 * time.Millisecond):
 	}
-	close(release)
-	second := <-secondDone
-	fillTheGap()
-	gap := <-gapDone
+	releaseTheTaker()
 
 	owners := map[string]bool{}
-	for token, got := range map[string]lockOutcome{"first-taker": first, "second-taker": second, "gap-filler": gap} {
+	for token, got := range map[string]lockOutcome{
+		"first-taker": <-firstDone, "second-taker": <-secondDone, "gap-filler": <-gapDone,
+	} {
 		if got.err == nil && got.lock != nil {
 			owners[token] = true
 		}
@@ -672,25 +706,25 @@ func TestAcquireUploadLock_DoesNotTakeOverAnUnwrittenLock(t *testing.T) {
 }
 
 // TestAcquireUploadLock_DoesNotClearALockThatReplacedTheJudgedOne is the
-// identity half of the takeover. A lock whose writer died before recording who
-// it is, past the grace window, is judged abandoned; before the taker acts, that
-// file is released and another acquirer creates its own lock at the pathname and
-// has not written it yet. Both files are empty, so equal bytes say the record is
-// unchanged — and the taker deletes a lock whose owner is alive and goes on
-// writing into a file that is no longer at the path.
+// identity half of the takeover. A dead owner's lock is judged abandoned; before
+// the taker acts, that file is released and an acquirer the guard does not cover
+// — another machine on the mount, a filesystem with no lock — creates its own at
+// the pathname and has not written it yet. The judged record and the fresh one
+// are not the same file, and neither the identity check nor the record re-read
+// may be talked out of that by what the bytes say.
 func TestAcquireUploadLock_DoesNotClearALockThatReplacedTheJudgedOne(t *testing.T) {
-	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	localPath := plantAbandonedLock(t, 424250)
 	lockFilePath := localPath + ".upload.lock"
-	plantOwnerlessLock(t, lockFilePath, time.Now().Add(-time.Hour))
 
 	var once sync.Once
 	var replacement os.FileInfo
 	parkTakeoverAt(t, takeoverJudged, "taker", func() {
 		once.Do(func() {
-			// The owner-less file is released and a fresh lock, not yet written,
-			// takes the pathname: a different file with the same bytes.
+			// The judged file is released and a fresh lock, not yet written,
+			// takes the pathname: a different file with different bytes from
+			// the record that was judged.
 			if err := os.Remove(lockFilePath); err != nil {
-				t.Errorf("release the owner-less lock: %v", err)
+				t.Errorf("release the judged lock: %v", err)
 				return
 			}
 			plantOwnerlessLock(t, lockFilePath, time.Now())
@@ -792,6 +826,22 @@ func TestAcquireUploadLock_RefusesReclamationWithoutAnOSLock(t *testing.T) {
 		}
 	})
 
+	t.Run("creating a lock still works with nowhere to keep the guard", func(t *testing.T) {
+		// The other half of the same rule: the guard's directory, not its lock.
+		withGuardDirectory(t, filepath.Join(denyingDirectory(t), guardDirName))
+		localPath := filepath.Join(t.TempDir(), "testfile.bin")
+
+		lock, err := AcquireUploadLock(localPath)
+		if err != nil {
+			t.Fatalf("refused a lock nothing else holds: %v", err)
+		}
+		defer ReleaseUploadLock(lock)
+
+		if got := readLockFile(t, localPath); got.ProcessID != os.Getpid() {
+			t.Errorf("lock file names PID %d, want this process (%d)", got.ProcessID, os.Getpid())
+		}
+	})
+
 	t.Run("reclaiming an abandoned lock is refused", func(t *testing.T) {
 		localPath := plantAbandonedLock(t, 424251)
 		lockFilePath := localPath + ".upload.lock"
@@ -879,7 +929,17 @@ func TestAcquireUploadLock_SerializesTakersOfOneAbandonedLock(t *testing.T) {
 		var once sync.Once
 		gap := lockOutcome{}
 		parkTakeoverAt(t, takeoverCleared, "taker", func() {
-			once.Do(func() { gap.lock, gap.err = acquireAs(localPath, 900002, "gap-filler") })
+			once.Do(func() {
+				// The pathname is free for as long as the taker is between
+				// removing and creating, and only an acquirer the guard does not
+				// cover can still be there — one whose filesystem carries no
+				// lock, or another machine's. It creates, and the taker must
+				// then find a live owner rather than its own free pathname.
+				previous := lockGuard
+				lockGuard = func(*os.File) error { return errGuardLockUnsupported }
+				defer func() { lockGuard = previous }()
+				gap.lock, gap.err = acquireAs(localPath, 900002, "gap-filler")
+			})
 		})
 
 		taker, err := acquireAs(localPath, 900001, "taker")
@@ -1094,6 +1154,290 @@ func TestAcquireUploadLock_RefusesAliasOfHeldPath(t *testing.T) {
 			t.Fatal("a symlinked spelling of the same file acquired a second lock")
 		}
 	})
+}
+
+// withGuardWaitLimit shortens the bound on waiting for another acquirer's
+// guard, so a test can reach the refusal without waiting out the real one.
+func withGuardWaitLimit(t *testing.T, limit time.Duration) {
+	t.Helper()
+	previous := guardWaitLimit
+	guardWaitLimit = limit
+	t.Cleanup(func() { guardWaitLimit = previous })
+}
+
+// TestAcquireUploadLock_RecordsTheHostAndUserItBelongsTo pins the two fields
+// that decide whether a lock may be reclaimed automatically. Without them a
+// record says only "PID 4711", which is a different upload on every machine.
+func TestAcquireUploadLock_RecordsTheHostAndUserItBelongsTo(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+
+	lock, err := AcquireUploadLock(localPath)
+	if err != nil {
+		t.Fatalf("AcquireUploadLock failed: %v", err)
+	}
+	defer ReleaseUploadLock(lock)
+
+	got := readLockFile(t, localPath)
+	if got.Host == "" || got.Host != lockHost {
+		t.Errorf("lock file names host %q, want this machine %q", got.Host, lockHost)
+	}
+	if got.Owner == "" || got.Owner != lockOwner {
+		t.Errorf("lock file names owner %q, want this user %q", got.Owner, lockOwner)
+	}
+}
+
+// TestAcquireUploadLock_WaitsForACreatorToRecordItsOwner is the delayed-creator
+// sequence. An acquirer wins the create, stalls before writing the record, and
+// the file it holds is now older than the grace a record with no owner is given.
+// Judging that file outside the exclusion reads it as abandoned — and the
+// creator then writes its record into a file that has been unlinked, and returns
+// success. Both own the upload. Nothing may judge a lock while its creator is
+// still inside the protocol that writes it.
+func TestAcquireUploadLock_WaitsForACreatorToRecordItsOwner(t *testing.T) {
+	const creatorPID = 900001
+	withProcessLiveness(t, func(pid int) bool { return pid == creatorPID })
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	lockFilePath := localPath + ".upload.lock"
+
+	created := make(chan struct{})
+	release := make(chan struct{})
+	var parkOnce, releaseOnce sync.Once
+	releaseTheCreator := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseTheCreator()
+	parkTakeoverAt(t, takeoverCreated, "creator", func() {
+		parkOnce.Do(func() {
+			close(created)
+			<-release
+		})
+	})
+
+	creatorDone := make(chan lockOutcome, 1)
+	go func() {
+		lock, err := acquireAs(localPath, creatorPID, "creator")
+		creatorDone <- lockOutcome{lock, err}
+	}()
+	<-created
+
+	// The creator holds a file it has not written. Age it past the grace an
+	// unidentified lock is given, which is what a stalled creator presents.
+	aged := time.Now().Add(-2 * lockOwnerlessGrace)
+	if err := os.Chtimes(lockFilePath, aged, aged); err != nil {
+		t.Fatalf("age the unwritten lock: %v", err)
+	}
+
+	reclaimerDone := make(chan lockOutcome, 1)
+	go func() {
+		lock, err := acquireAs(localPath, 900002, "reclaimer")
+		reclaimerDone <- lockOutcome{lock, err}
+	}()
+	select {
+	case got := <-reclaimerDone:
+		if got.err == nil {
+			ReleaseUploadLock(got.lock)
+			t.Fatal("a reclaimer took a lock whose creator had not written its record yet")
+		}
+		t.Fatalf("a reclaimer judged a lock whose creator was still writing it: %v", got.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseTheCreator()
+
+	creator := <-creatorDone
+	if creator.err != nil {
+		t.Fatalf("the creator did not get the lock it created: %v", creator.err)
+	}
+	reclaimer := <-reclaimerDone
+	if reclaimer.err == nil {
+		ReleaseUploadLock(reclaimer.lock)
+		t.Error("both the creator and the reclaimer own the upload")
+	}
+	if got := readLockFile(t, localPath); got.OwnerToken != "creator" {
+		t.Errorf("lock file names owner %q, want the creator that wrote it", got.OwnerToken)
+	}
+}
+
+// TestAcquireUploadLock_RefusesALockFromAnotherGuardDomain covers the locks this
+// acquisition may not clear on its own. Reclaiming is a check-then-act that only
+// the guard makes safe, and two acquirers that do not take the same guard can
+// both judge one record abandoned and each remove the other's replacement. A PID
+// from another host is not evidence of anything here either. So a record whose
+// writer held another guard — and a record from before this version, which names
+// none — is refused, with what an operator needs to decide whether to delete it.
+func TestAcquireUploadLock_RefusesALockFromAnotherGuardDomain(t *testing.T) {
+	const deadPID = 424260
+	acquired := time.Now().Add(-time.Hour).Round(time.Second)
+
+	cases := []struct {
+		name  string
+		plant func(t *testing.T, localPath string)
+		names []string
+	}{
+		{
+			name: "another machine",
+			plant: func(t *testing.T, localPath string) {
+				writeLockFile(t, localPath, uploadLockState{
+					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
+					Host: "another-host", Owner: lockOwner,
+					AcquiredAt: acquired, LocalPath: localPath,
+				})
+			},
+			names: []string{"another-host", lockOwner},
+		},
+		{
+			name: "another login on this machine",
+			plant: func(t *testing.T, localPath string) {
+				writeLockFile(t, localPath, uploadLockState{
+					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
+					Host: lockHost, Owner: lockOwner + "-someone-else",
+					AcquiredAt: acquired, LocalPath: localPath,
+				})
+			},
+			names: []string{lockHost, lockOwner + "-someone-else"},
+		},
+		{
+			name: "another state directory of this login",
+			plant: func(t *testing.T, localPath string) {
+				// One uid can resolve two state directories — a different
+				// XDG_CONFIG_HOME, a service account's environment — and one
+				// file can be reached through two mount spellings that hash to
+				// two guards. Same host, same user, and still nothing that
+				// makes two reclaimers of this lock take turns.
+				writeLockFile(t, localPath, uploadLockState{
+					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
+					Host: lockHost, Owner: lockOwner,
+					Guard:      filepath.Join(t.TempDir(), "elsewhere.guard"),
+					AcquiredAt: acquired, LocalPath: localPath,
+				})
+			},
+			names: []string{lockHost, lockOwner},
+		},
+		{
+			name: "a record written before this version",
+			plant: func(t *testing.T, localPath string) {
+				t.Helper()
+				// The shipped format, literally: process_id, owner_token,
+				// acquired_at, local_path and no domain of any kind.
+				shipped := fmt.Sprintf("{\n  \"process_id\": %d,\n  \"owner_token\": %q,\n  \"acquired_at\": %q,\n  \"local_path\": %q\n}",
+					deadPID, "owner-elsewhere", acquired.Format(time.RFC3339Nano), localPath)
+				if err := os.WriteFile(localPath+".upload.lock", []byte(shipped), 0600); err != nil {
+					t.Fatalf("plant a shipped-format lock: %v", err)
+				}
+			},
+			names: []string{"unknown"},
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			// The owner is gone as far as this machine can tell, which is the
+			// judgement that used to be enough to clear it.
+			withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+			localPath := filepath.Join(t.TempDir(), "testfile.bin")
+			lockFilePath := localPath + ".upload.lock"
+			testCase.plant(t, localPath)
+
+			lock, err := AcquireUploadLock(localPath)
+			if err == nil {
+				ReleaseUploadLock(lock)
+				t.Fatal("cleared a lock this machine cannot serialize itself against")
+			}
+			if errors.Is(err, ErrUploadLockUnavailable) {
+				t.Errorf("a lock that exists is reported as no lock at all: %v", err)
+			}
+			wanted := append([]string{
+				fmt.Sprintf("%d", deadPID), acquired.Format(time.RFC3339), lockFilePath,
+			}, testCase.names...)
+			for _, want := range wanted {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal %q does not name %q", err, want)
+				}
+			}
+			if got := readLockFile(t, localPath); got.OwnerToken != "owner-elsewhere" {
+				t.Errorf("the foreign lock was cleared anyway; it now names %q", got.OwnerToken)
+			}
+		})
+	}
+}
+
+// TestAcquireUploadLock_RefusesALockThatNamesNoOwner is the last shape a record
+// can take: a file its creator never wrote into. Every creator that shares this
+// guard writes under it, so one still empty past the grace was left either by an
+// acquirer outside the guard or by a crash between the two steps — and there is
+// no host, user or PID in it to tell those apart. Age alone used to be enough to
+// clear it; a lock created outside our exclusion cannot be cleared inside it.
+func TestAcquireUploadLock_RefusesALockThatNamesNoOwner(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	lockFilePath := localPath + ".upload.lock"
+	written := time.Now().Add(-time.Hour).Round(time.Second)
+	plantOwnerlessLock(t, lockFilePath, written)
+
+	lock, err := AcquireUploadLock(localPath)
+	if err == nil {
+		ReleaseUploadLock(lock)
+		t.Fatal("cleared a lock file whose creator is unknown")
+	}
+	if errors.Is(err, ErrUploadLockUnavailable) {
+		t.Errorf("a lock that exists is reported as no lock at all: %v", err)
+	}
+	for _, want := range []string{written.Format(time.RFC3339), lockFilePath} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not name %q", err, want)
+		}
+	}
+	if _, err := os.Stat(lockFilePath); err != nil {
+		t.Errorf("the lock was cleared anyway: %v", err)
+	}
+}
+
+// TestAcquireUploadLock_BoundsTheWaitForAnotherAcquirersGuard pins the wait.
+// Every acquisition now runs under the guard, so an acquirer that stalls while
+// holding it would otherwise park every other transfer of that file for as long
+// as it lives — with nothing returned to a caller that has been cancelled.
+func TestAcquireUploadLock_BoundsTheWaitForAnotherAcquirersGuard(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	lockFilePath := localPath + ".upload.lock"
+	guardPath, err := guardPathFor(lockFilePathFor(localPath))
+	if err != nil {
+		t.Fatalf("name the guard: %v", err)
+	}
+
+	holder, err := os.OpenFile(guardPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("open the other acquirer's guard: %v", err)
+	}
+	defer holder.Close()
+	if err := lockGuardFile(holder); err != nil {
+		if errors.Is(err, errGuardLockUnsupported) {
+			t.Skipf("this filesystem carries no lock: %v", err)
+		}
+		t.Fatalf("the other acquirer could not take the guard: %v", err)
+	}
+
+	withGuardWaitLimit(t, 50*time.Millisecond)
+	lock, err := AcquireUploadLock(localPath)
+	if err == nil {
+		ReleaseUploadLock(lock)
+		t.Fatal("acquired the lock while another acquirer held the guard")
+	}
+	if !strings.Contains(err.Error(), "another transfer is acquiring the lock") {
+		t.Errorf("the refusal %q does not say the guard is held", err)
+	}
+	if errors.Is(err, ErrUploadLockUnavailable) {
+		t.Errorf("a bounded wait is reported as no lock at all: %v", err)
+	}
+	if _, err := os.Stat(lockFilePath); !os.IsNotExist(err) {
+		t.Errorf("the refused acquisition left a lock file behind: %v", err)
+	}
+
+	// The refusal must not wedge the file for this process either.
+	if err := unlockGuardFile(holder); err != nil {
+		t.Fatalf("release the other acquirer's guard: %v", err)
+	}
+	after, err := AcquireUploadLock(localPath)
+	if err != nil {
+		t.Fatalf("the refused acquisition left the file locked in this process: %v", err)
+	}
+	ReleaseUploadLock(after)
 }
 
 // TestValidateDownloadStateRejectsClaimsPastEOF covers the half of the sidecar
