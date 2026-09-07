@@ -1804,3 +1804,64 @@ func TestGetBatchTasksClonesOnlyTheRequestedPage(t *testing.T) {
 		t.Errorf("first page of a %d-task batch allocated %d bytes, want <= %d", batchSize, best, maxBytes)
 	}
 }
+
+// TestClearingATaskDropsItsCancelFunction pins the bookkeeping a clear owes the
+// map it shares with the executors. A clear can land between an executor's
+// SetCancel and its terminal call: it removes the task and the attempt record,
+// and the executor's terminal call is then refused for a task it no longer owns
+// — so whoever removed the attempt has to take the cancel function with it, or
+// one context.CancelFunc is retained forever under a task ID that is gone.
+func TestClearingATaskDropsItsCancelFunction(t *testing.T) {
+	// A task registered into a cancelled batch is terminal from birth, which is
+	// how an executor comes to hold an attempt on a task a clear can remove.
+	registerTerminal := func(t *testing.T, q *Queue, batchID string) (*TransferTask, Attempt) {
+		t.Helper()
+		if err := q.CancelBatch(batchID); err != nil {
+			t.Fatalf("CancelBatch: %v", err)
+		}
+		task := q.TrackTransferWithBatch("f.dat", 1, TaskTypeUpload, "/src/f.dat", "folder", "", batchID, "")
+		if !task.IsTerminal() {
+			t.Fatalf("task state = %q, want a terminal task", task.GetState())
+		}
+		attempt, owned := q.BeginAttempt(task.ID, NoAttempt)
+		if !owned {
+			t.Fatal("BeginAttempt: an unowned task should have been claimable")
+		}
+		attempt.SetCancel(func() {})
+		return task, attempt
+	}
+
+	retained := func(t *testing.T, q *Queue, taskID string) bool {
+		t.Helper()
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		_, held := q.cancelFuncs[taskID]
+		return held
+	}
+
+	t.Run("ClearCompleted", func(t *testing.T) {
+		q := NewQueue(nil)
+		task, attempt := registerTerminal(t, q, "batch-cleared")
+
+		q.ClearCompleted()
+		attempt.ClearCancel()
+
+		if retained(t, q, task.ID) {
+			t.Error("the cleared task left its cancel function behind")
+		}
+	})
+
+	t.Run("ClearBatchTerminalTasks", func(t *testing.T) {
+		q := NewQueue(nil)
+		task, attempt := registerTerminal(t, q, "batch-swept")
+
+		if removed := q.ClearBatchTerminalTasks("batch-swept"); removed != 1 {
+			t.Fatalf("ClearBatchTerminalTasks removed %d tasks, want 1", removed)
+		}
+		attempt.ClearCancel()
+
+		if retained(t, q, task.ID) {
+			t.Error("the swept task left its cancel function behind")
+		}
+	})
+}

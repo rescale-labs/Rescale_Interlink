@@ -12,7 +12,31 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/config"
 )
+
+// TestMain keeps the guards these tests create out of the state directory of
+// whoever is running them.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "upload-lock-guards-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create a guard directory for the tests: %v\n", err)
+		os.Exit(1)
+	}
+	guardDirectory = func() (string, error) { return dir, nil }
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// withGuardDirectory points the guards at a directory of the test's choosing.
+func withGuardDirectory(t *testing.T, dir string) {
+	t.Helper()
+	previous := guardDirectory
+	guardDirectory = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { guardDirectory = previous })
+}
 
 // TestUploadState_FilePermissions verifies that upload state files are created with secure permissions (0600).
 func TestUploadState_FilePermissions(t *testing.T) {
@@ -712,7 +736,10 @@ func plantOwnerlessLock(t *testing.T, lockFilePath string, written time.Time) {
 // so the file it leaves holds nothing back.
 func TestAcquireUploadLock_ProceedsPastTheGuardOfACrashedTaker(t *testing.T) {
 	localPath := plantAbandonedLock(t, 424247)
-	guardPath := localPath + ".upload.lock" + guardSuffix
+	guardPath, err := guardPathFor(lockFilePathFor(localPath))
+	if err != nil {
+		t.Fatalf("name the guard: %v", err)
+	}
 
 	crashed, err := os.OpenFile(guardPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -924,23 +951,14 @@ func TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated(t *testing.T) {
 		}
 	})
 
-	t.Run("an existing lock in a directory that refuses a guard", func(t *testing.T) {
-		dir := t.TempDir()
-		localPath := filepath.Join(dir, "testfile.bin")
-		const deadPID = 424252
-		withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
-		writeLockFile(t, localPath, uploadLockState{
-			ProcessID:  deadPID,
-			OwnerToken: "owner-that-crashed",
-			AcquiredAt: time.Now(),
-			LocalPath:  localPath,
-		})
-		denyNewFilesIn(t, dir)
+	t.Run("an existing lock whose guard cannot be created", func(t *testing.T) {
+		localPath := plantAbandonedLock(t, 424252)
+		withGuardDirectory(t, denyingDirectory(t))
 
 		lock, err := AcquireUploadLock(localPath)
 		if err == nil {
 			ReleaseUploadLock(lock)
-			t.Fatal("cleared an abandoned lock in a directory that will not hold the guard")
+			t.Fatal("cleared an abandoned lock with nothing to guard the clearing")
 		}
 		// The lock file is right there. Reporting that nothing holds the upload
 		// is what the sentinel means, and it is not true here.
@@ -949,6 +967,30 @@ func TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "cannot clear the abandoned upload lock") {
 			t.Errorf("the refusal %q is not the one that reaches for the guard", err)
+		}
+	})
+
+	t.Run("an existing lock with no directory to guard it", func(t *testing.T) {
+		localPath := plantAbandonedLock(t, 424254)
+		// A state directory that cannot be created is refused the way a
+		// filesystem with no lock is: the lock is still there, and only its
+		// owner or a hand-deletion can release it.
+		withGuardDirectory(t, filepath.Join(denyingDirectory(t), guardDirName))
+		lockFilePath := localPath + ".upload.lock"
+
+		lock, err := AcquireUploadLock(localPath)
+		if err == nil {
+			ReleaseUploadLock(lock)
+			t.Fatal("cleared an abandoned lock with nowhere to keep the guard")
+		}
+		if errors.Is(err, ErrUploadLockUnavailable) {
+			t.Errorf("an existing lock that cannot be guarded is reported as no lock at all: %v", err)
+		}
+		if !strings.Contains(err.Error(), lockFilePath) {
+			t.Errorf("the refusal %q does not name the file to delete (%s)", err, lockFilePath)
+		}
+		if got := readLockFile(t, localPath); got.OwnerToken != "owner-that-crashed" {
+			t.Errorf("the abandoned lock was cleared anyway; it now names %q", got.OwnerToken)
 		}
 	})
 
@@ -983,7 +1025,7 @@ func denyingDirectory(t *testing.T) string {
 }
 
 // denyNewFilesIn stops a directory accepting new files, whatever it already
-// holds, so a test can put a lock somewhere the guard beside it cannot go.
+// holds, so a test can stand in for a directory that will hold no guard.
 func denyNewFilesIn(t *testing.T, dir string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -1431,5 +1473,57 @@ func TestShippedFixturesCarryTheirPathsOnEveryPlatform(t *testing.T) {
 				t.Errorf("the fixture carries encrypted_path %q, want %q", fields.EncryptedPath, windowsPath+".encrypted")
 			}
 		})
+	}
+}
+
+// TestGuardsLiveInTheApplicationsOwnDirectory pins the other half of that: the
+// place they go instead. It is the per-user directory the application already
+// keeps its own files in, so a guard is never left in the user's data and never
+// depends on the source's filesystem carrying a lock.
+func TestGuardsLiveInTheApplicationsOwnDirectory(t *testing.T) {
+	dir, err := applicationGuardDirectory()
+	if err != nil {
+		t.Skipf("this environment has no per-user directory: %v", err)
+	}
+	if want := filepath.Join(filepath.Dir(config.ReportDirectory()), guardDirName); dir != want {
+		t.Errorf("the guards go to %q, want %q — where the application keeps its other per-user state", dir, want)
+	}
+}
+
+// TestAcquireUploadLock_LeavesNothingBesideTheSource pins where the guard
+// lives. It is never removed — that is what keeps every acquirer locking the
+// same file — so a guard beside the source is a permanent empty file in the
+// user's own directory, and one a later folder upload would enumerate as
+// something to transfer.
+func TestAcquireUploadLock_LeavesNothingBesideTheSource(t *testing.T) {
+	localPath := plantAbandonedLock(t, 424253)
+
+	lock, err := AcquireUploadLock(localPath)
+	if err != nil {
+		t.Fatalf("reclaim an abandoned lock: %v", err)
+	}
+	ReleaseUploadLock(lock)
+
+	entries, err := os.ReadDir(filepath.Dir(localPath))
+	if err != nil {
+		t.Fatalf("read the source directory: %v", err)
+	}
+	remaining := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		remaining = append(remaining, entry.Name())
+	}
+	if len(remaining) != 1 || remaining[0] != filepath.Base(localPath) {
+		t.Errorf("the reclamation left %v beside the source, want only %q",
+			remaining, filepath.Base(localPath))
+	}
+
+	// It is in the application's own directory instead, under the name every
+	// acquirer of this source resolves to.
+	guardPath, err := guardPathFor(lockFilePathFor(localPath))
+	if err != nil {
+		t.Fatalf("name the guard: %v", err)
+	}
+	if _, err := os.Stat(guardPath); err != nil {
+		t.Errorf("the guard the reclamation held is not in the lock directory: %v", err)
 	}
 }

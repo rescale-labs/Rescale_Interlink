@@ -7,6 +7,7 @@ package state
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -546,9 +547,15 @@ const (
 	takeoverCleared = "cleared"
 )
 
-// guardSuffix names the file whose OS lock serializes reclaiming a lock,
-// alongside the lock it covers.
+// guardSuffix names the file whose OS lock serializes reclaiming a lock.
 const guardSuffix = ".guard"
+
+// guardDirName is the subdirectory of the application's per-user directory that
+// holds the guards. They live there rather than beside the source they cover
+// because a guard is never removed — that is what keeps every acquirer locking
+// one file — and a permanent empty file next to the user's data is one a later
+// folder upload would enumerate as something to transfer.
+const guardDirName = "locks"
 
 // errGuardLockUnsupported reports a filesystem that carries no OS lock, so
 // nothing here can serialize two reclaimers of one lock file.
@@ -557,6 +564,53 @@ var errGuardLockUnsupported = errors.New("this filesystem does not support file 
 // lockGuard takes the guard's OS lock. It is a variable so a test can stand in
 // for a filesystem that has none.
 var lockGuard = lockGuardFile
+
+// guardDirectory resolves the directory the guards live in. It is a variable so
+// a test can keep its guards out of the real one.
+var guardDirectory = applicationGuardDirectory
+
+// applicationGuardDirectory places the guards under the same per-user directory
+// as the application's other state — %LOCALAPPDATA%\Rescale\Interlink on
+// Windows, os.UserConfigDir()/rescale elsewhere, as config.ReportDirectory
+// resolves its own sibling. The rule is repeated here rather than imported
+// because this package exists to break an import cycle and carries no
+// dependencies of its own.
+func applicationGuardDirectory() (string, error) {
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", err
+			}
+			localAppData = filepath.Join(home, "AppData", "Local")
+		}
+		return filepath.Join(localAppData, "Rescale", "Interlink", guardDirName), nil
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "rescale", guardDirName), nil
+}
+
+// guardPathFor names the guard of one lock and makes sure the directory holding
+// it exists. The name is a hash of the lock's own path — which acquisition has
+// already resolved to the canonical source path — so that every acquirer of one
+// source reaches the same guard while the name carries no directory of its own.
+// It folds through localLockKey, so the two spellings Windows counts as one
+// file, which already share a lock, share a guard too.
+func guardPathFor(lockFilePath string) (string, error) {
+	dir, err := guardDirectory()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	key := sha256.Sum256([]byte(localLockKey(lockFilePath)))
+	return filepath.Join(dir, hex.EncodeToString(key[:])+guardSuffix), nil
+}
 
 func takeoverStep(phase string, owner uploadLockState) {
 	if lockTakeoverStep != nil {
@@ -581,12 +635,18 @@ func takeoverStep(phase string, owner uploadLockState) {
 //
 // A nil lock with a nil error means exactly that: judge the lock again.
 func takeAbandonedLock(lockFilePath, localPath string, owner uploadLockState, data []byte, judged os.FileInfo) (*UploadLock, error) {
-	guard, err := holdGuard(lockFilePath)
+	guardPath, err := guardPathFor(lockFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot clear the abandoned upload lock of %s: there is nowhere to keep the guard "+
+			"whose lock makes clearing it safe: %w; delete %s by hand to release the upload",
+			localPath, err, lockFilePath)
+	}
+	guard, err := holdGuard(guardPath)
 	if err != nil {
 		if errors.Is(err, errGuardLockUnsupported) {
 			return nil, fmt.Errorf("cannot clear the abandoned upload lock of %s: this filesystem cannot lock %s, "+
 				"which is what makes clearing it safe; delete %s by hand to release the upload",
-				localPath, lockFilePath+guardSuffix, lockFilePath)
+				localPath, guardPath, lockFilePath)
 		}
 		return nil, fmt.Errorf("cannot clear the abandoned upload lock of %s: %w", localPath, err)
 	}
@@ -615,8 +675,8 @@ func takeAbandonedLock(lockFilePath, localPath string, owner uploadLockState, da
 	return createLockFile(lockFilePath, localPath, owner, data)
 }
 
-// holdGuard opens the guard beside a lock file and takes its OS lock, waiting
-// for whichever acquirer holds it.
+// holdGuard opens a lock's guard and takes its OS lock, waiting for whichever
+// acquirer holds it.
 //
 // The guard is a file of its own because this protocol creates and removes the
 // lock file: an exclusion taken on a file that is about to be unlinked stops
@@ -628,8 +688,8 @@ func takeAbandonedLock(lockFilePath, localPath string, owner uploadLockState, da
 // be created is never evidence that nothing holds the upload: an existing lock
 // file is what brought us here, and ErrUploadLockUnavailable stays reserved for
 // a lock that is missing.
-func holdGuard(lockFilePath string) (*os.File, error) {
-	file, err := os.OpenFile(lockFilePath+guardSuffix, os.O_CREATE|os.O_RDWR, 0600)
+func holdGuard(guardPath string) (*os.File, error) {
+	file, err := os.OpenFile(guardPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}

@@ -2,7 +2,9 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -925,4 +927,151 @@ func TestAFailedRetryDispatchLeavesARunningAttemptAlone(t *testing.T) {
 	default:
 		t.Error("the running attempt's cancellation was gone by the time the user cancelled")
 	}
+}
+
+// TestARefusedDispatchTouchesNothingOfTheRunningAttempt is the service-side half
+// of the ownership gate. A dispatch of a task another attempt is already running
+// must return having recorded nothing: registering its own cancel function over
+// the running one, and then clearing it on the way out, leaves the transfer that
+// is actually running with no cancellation the user can reach.
+func TestARefusedDispatchTouchesNothingOfTheRunningAttempt(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	defer eventBus.Close()
+
+	ts := NewTransferService(&api.Client{}, eventBus, TransferServiceConfig{MaxConcurrent: 1})
+
+	req := TransferRequest{
+		Type:        TransferTypeDownload,
+		Source:      "file-1",
+		Dest:        t.TempDir(),
+		Name:        "run.tar.gz",
+		Size:        1024,
+		SourceLabel: SourceLabelFileBrowser,
+	}
+	taskID := ts.registerDownloadTask(req)
+
+	// The attempt that holds the task, transferring it.
+	running, owned := ts.queue.BeginAttempt(taskID, transfer.NoAttempt)
+	if !owned {
+		t.Fatal("BeginAttempt: an unowned task should have been claimable")
+	}
+	stopped := make(chan struct{})
+	running.SetCancel(func() { close(stopped) })
+	if !ts.queue.Activate(taskID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+
+	// A second dispatch of the same task, scheduled by nobody.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ts.executeTask(context.Background(), req, taskID, transfer.NoAttempt, &api.Client{}, 1, ts.downloadDirection())
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the dispatch went on to run a task another attempt was already running")
+	}
+
+	if task, ok := ts.queue.GetTask(taskID); !ok {
+		t.Fatal("the task is gone from the queue")
+	} else if task.State != transfer.TaskInitializing {
+		t.Errorf("task state = %q, want %q — the refused dispatch reported for the running attempt",
+			task.State, transfer.TaskInitializing)
+	}
+	if err := ts.CancelTransfer(taskID); err != nil {
+		t.Fatalf("cancelling the running attempt: %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("the running attempt's cancellation was gone by the time the user cancelled")
+	}
+}
+
+// TestUploadFileSyncReportsThroughItsOwnAttempt covers the synchronous upload's
+// half of the same bookkeeping. It registers the task it runs, so every state it
+// records has to go through the attempt it claimed for it — and the paths that
+// give up before the transfer starts have to hand that attempt back, or the task
+// stays owned by an upload that is no longer running.
+func TestUploadFileSyncReportsThroughItsOwnAttempt(t *testing.T) {
+	newService := func(t *testing.T) *TransferService {
+		t.Helper()
+		eventBus := events.NewEventBus(100)
+		t.Cleanup(eventBus.Close)
+		return NewTransferService(&api.Client{}, eventBus, TransferServiceConfig{MaxConcurrent: 1})
+	}
+
+	// The upload registers its own task, so the queue's only entry is the one it
+	// claimed an attempt for.
+	onlyTaskID := func(t *testing.T, ts *TransferService) string {
+		t.Helper()
+		tasks := ts.queue.GetTasks()
+		if len(tasks) != 1 {
+			t.Fatalf("the queue holds %d tasks, want the one the upload registered", len(tasks))
+		}
+		return tasks[0].ID
+	}
+
+	taskState := func(t *testing.T, ts *TransferService, taskID string) transfer.TaskState {
+		t.Helper()
+		task, ok := ts.queue.GetTask(taskID)
+		if !ok {
+			t.Fatal("the task the upload registered is gone from the queue")
+		}
+		return task.State
+	}
+
+	t.Run("cancelled before it gets a slot", func(t *testing.T) {
+		ts := newService(t)
+		ts.semaphore <- struct{}{} // the only slot is taken, so the wait is the cancellable one
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := ts.UploadFileSync(ctx, TransferRequest{
+			Source: filepath.Join(t.TempDir(), "payload.bin"),
+			Dest:   "folder-1",
+			Name:   "payload.bin",
+		}, UploadFileSyncParams{})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("UploadFileSync returned %v, want the cancellation", err)
+		}
+
+		taskID := onlyTaskID(t, ts)
+		if got := taskState(t, ts, taskID); got != transfer.TaskFailed {
+			t.Errorf("task state = %q, want %q", got, transfer.TaskFailed)
+		}
+		if _, owned := ts.queue.BeginAttempt(taskID, transfer.NoAttempt); !owned {
+			t.Error("the abandoned upload left the task owned by an attempt that is no longer running")
+		}
+	})
+
+	t.Run("registered into a cancelled batch", func(t *testing.T) {
+		ts := newService(t)
+		const batchID = "batch-cancelled"
+		if err := ts.CancelBatch(batchID); err != nil {
+			t.Fatalf("CancelBatch: %v", err)
+		}
+
+		_, err := ts.UploadFileSync(context.Background(), TransferRequest{
+			Source:  filepath.Join(t.TempDir(), "payload.bin"),
+			Dest:    "folder-1",
+			Name:    "payload.bin",
+			BatchID: batchID,
+		}, UploadFileSyncParams{})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("UploadFileSync returned %v, want the cancellation", err)
+		}
+
+		// The task was terminal before the upload claimed it, so the attempt is
+		// given up without a terminal transition of its own.
+		taskID := onlyTaskID(t, ts)
+		if got := taskState(t, ts, taskID); got != transfer.TaskCancelled {
+			t.Errorf("task state = %q, want %q", got, transfer.TaskCancelled)
+		}
+		if _, owned := ts.queue.BeginAttempt(taskID, transfer.NoAttempt); !owned {
+			t.Error("the upload that never started left the task owned")
+		}
+	})
 }

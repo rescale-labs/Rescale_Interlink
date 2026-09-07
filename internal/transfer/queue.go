@@ -738,9 +738,12 @@ func (q *Queue) ClearCompleted() {
 			delete(q.tasksByID, task.ID)
 			// A retry claimed for a task that is being removed has nothing left
 			// to run; dropping it also keeps these maps from outliving the queue
-			// entries they are keyed by.
+			// entries they are keyed by. The cancel function goes with the
+			// attempt record: once that is gone the executor holding it is
+			// refused, so its terminal call would never remove it.
 			delete(q.claimedRetries, task.ID)
 			delete(q.runningAttempts, task.ID)
+			delete(q.cancelFuncs, task.ID)
 		}
 	}
 	q.tasks = filtered
@@ -790,6 +793,7 @@ func (q *Queue) ClearBatchTerminalTasks(batchID string) int {
 			delete(q.tasksByID, task.ID)
 			delete(q.claimedRetries, task.ID)
 			delete(q.runningAttempts, task.ID)
+			delete(q.cancelFuncs, task.ID)
 			removed++
 			continue
 		}
