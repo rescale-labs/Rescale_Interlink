@@ -780,7 +780,9 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	// for byte-level progress. Progress reflects actual network I/O.
 	progressTicker := time.NewTicker(constants.ProgressUpdateInterval)
 	progressDone := make(chan struct{})
+	progressStopped := make(chan struct{})
 	go func() {
+		defer close(progressStopped)
 		defer progressTicker.Stop()
 		for {
 			select {
@@ -800,7 +802,11 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			}
 		}
 	}()
-	defer close(progressDone)
+	// Join it, not just signal it — see downloadStreamingConcurrent.
+	defer func() {
+		close(progressDone)
+		<-progressStopped
+	}()
 
 	// Report 0% progress immediately so users see the transfer has started.
 	if prep.Params.ProgressCallback != nil {
@@ -1092,7 +1098,9 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}
 
 	progressDone := make(chan struct{})
+	progressStopped := make(chan struct{})
 	go func() {
+		defer close(progressStopped)
 		for {
 			select {
 			case <-progressTicker.C:
@@ -1105,7 +1113,13 @@ func (d *Downloader) downloadStreamingConcurrent(
 			}
 		}
 	}()
-	defer close(progressDone)
+	// Join it, not just signal it: the callback belongs to the caller, and one
+	// that runs after this download has returned reports progress for a transfer
+	// that is over — to a progress bar that may already have been torn down.
+	defer func() {
+		close(progressDone)
+		<-progressStopped
+	}()
 
 	// Report 0% progress immediately so users see the transfer has started.
 	if prep.Params.ProgressCallback != nil {

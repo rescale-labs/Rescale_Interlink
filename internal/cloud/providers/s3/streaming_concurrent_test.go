@@ -396,3 +396,76 @@ func TestDownloadEncryptedRangeReadsThePinnedVersion(t *testing.T) {
 		t.Errorf("range [64-128) came back as %d bytes that are not the object's", len(got))
 	}
 }
+
+// listPartsBackend answers the one question a resume asks S3: is this multipart
+// upload still there? A missing one is a NoSuchUpload, which is an answer rather
+// than a failure — the upload has expired or been aborted, and the caller has to
+// start a fresh object rather than keep retrying an unusable resume.
+type listPartsBackend struct {
+	mu      sync.Mutex
+	present bool
+	calls   int
+}
+
+func (b *listPartsBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if r.Method != nethttp.MethodGet || !r.URL.Query().Has("uploadId") {
+		w.WriteHeader(nethttp.StatusNotImplemented)
+		return
+	}
+
+	b.mu.Lock()
+	b.calls++
+	present := b.present
+	b.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/xml")
+	if !present {
+		w.WriteHeader(nethttp.StatusNotFound)
+		fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchUpload</Code><Message>The specified upload does not exist.</Message></Error>`)
+		return
+	}
+	w.WriteHeader(nethttp.StatusOK)
+	fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?><ListPartsResult><Bucket>`+testBucket+`</Bucket></ListPartsResult>`)
+}
+
+func (b *listPartsBackend) requestCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+// TestValidateStreamingUploadExistsReportsAVanishedUpload pins the resume-path
+// check: a multipart upload the backend no longer holds is reported as absent
+// rather than as an error, so the orchestrator retires the state and starts one
+// fresh object instead of failing every attempt against the same missing upload.
+func TestValidateStreamingUploadExistsReportsAVanishedUpload(t *testing.T) {
+	backend := &listPartsBackend{}
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+
+	provider := &Provider{s3Client: newTestS3Client(t, server)}
+	ctx := context.Background()
+
+	exists, err := provider.ValidateStreamingUploadExists(ctx, testUploadID, testPathBase+"/object")
+	if err != nil {
+		t.Fatalf("checking a multipart upload the backend has dropped failed: %v", err)
+	}
+	if exists {
+		t.Error("a resume was allowed against a multipart upload the backend no longer holds")
+	}
+	if backend.requestCount() == 0 {
+		t.Error("the check never asked the backend whether the upload is still there")
+	}
+
+	backend.mu.Lock()
+	backend.present = true
+	backend.mu.Unlock()
+
+	exists, err = provider.ValidateStreamingUploadExists(ctx, testUploadID, testPathBase+"/object")
+	if err != nil {
+		t.Fatalf("checking a live multipart upload failed: %v", err)
+	}
+	if !exists {
+		t.Error("a resume was refused although its multipart upload is still open")
+	}
+}

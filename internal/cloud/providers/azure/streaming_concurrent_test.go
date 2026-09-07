@@ -404,3 +404,116 @@ func TestDownloadEncryptedRangeReadsThePinnedVersion(t *testing.T) {
 		t.Errorf("range [64-128) came back as %d bytes that are not the blob's", len(got))
 	}
 }
+
+// blockListBackend answers the one question a resume has to ask Azure: which of
+// this blob's blocks are staged but not yet committed. Uncommitted blocks are
+// what a streaming upload leaves behind, and they are what the service discards
+// after seven days.
+type blockListBackend struct {
+	mu          sync.Mutex
+	uncommitted []string
+	notFound    bool
+	calls       int
+}
+
+func (b *blockListBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
+	if r.Method != nethttp.MethodGet || r.URL.Query().Get("comp") != "blocklist" {
+		w.WriteHeader(nethttp.StatusNotImplemented)
+		return
+	}
+
+	b.mu.Lock()
+	b.calls++
+	notFound := b.notFound
+	staged := slices.Clone(b.uncommitted)
+	b.mu.Unlock()
+
+	if notFound {
+		w.Header().Set("x-ms-error-code", "BlobNotFound")
+		w.WriteHeader(nethttp.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(nethttp.StatusOK)
+	fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?><BlockList><CommittedBlocks/><UncommittedBlocks>`)
+	for _, id := range staged {
+		fmt.Fprintf(w, `<Block><Name>%s</Name><Size>64</Size></Block>`, id)
+	}
+	fmt.Fprint(w, `</UncommittedBlocks></BlockList>`)
+}
+
+func (b *blockListBackend) requestCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+func blockListTestProvider(t *testing.T, backend *blockListBackend) *Provider {
+	t.Helper()
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestAzureClient(t, server)
+
+	return &Provider{
+		storageInfo: &models.StorageInfo{
+			StorageType: "AzureStorage",
+			ConnectionSettings: models.ConnectionSettings{
+				Container:     testContainer,
+				AccountName:   testAccount,
+				PathPartsBase: testPathBase,
+			},
+		},
+		apiClient:   client.apiClient,
+		azureClient: client,
+	}
+}
+
+// TestValidateStreamingUploadExistsChecksTheStagedBlocks is the Azure half of
+// resuming against an upload the backend no longer holds. S3 asks ListParts and
+// is told NoSuchUpload; Azure answered yes without asking anything, so a state
+// whose blocks the service had already discarded was resumed — and the commit
+// that followed named blocks that are not there.
+func TestValidateStreamingUploadExistsChecksTheStagedBlocks(t *testing.T) {
+	const blobPath = testPathBase + "/streamed.dat-suffix"
+	ctx := context.Background()
+
+	backend := &blockListBackend{}
+	provider := blockListTestProvider(t, backend)
+
+	exists, err := provider.ValidateStreamingUploadExists(ctx, "", blobPath)
+	if err != nil {
+		t.Fatalf("checking a blob with no staged blocks failed: %v", err)
+	}
+	if exists {
+		t.Error("a resume was allowed against a blob whose staged blocks are gone")
+	}
+	if backend.requestCount() == 0 {
+		t.Error("the check never asked the service whether the blocks are still there")
+	}
+
+	backend.mu.Lock()
+	backend.uncommitted = []string{base64.StdEncoding.EncodeToString([]byte("block-0000000000"))}
+	backend.mu.Unlock()
+
+	exists, err = provider.ValidateStreamingUploadExists(ctx, "", blobPath)
+	if err != nil {
+		t.Fatalf("checking a blob with staged blocks failed: %v", err)
+	}
+	if !exists {
+		t.Error("a resume was refused although the blocks it continues are still staged")
+	}
+
+	// A blob that was never created at all is the same answer: start fresh.
+	backend.mu.Lock()
+	backend.notFound = true
+	backend.mu.Unlock()
+
+	exists, err = provider.ValidateStreamingUploadExists(ctx, "", blobPath)
+	if err != nil {
+		t.Fatalf("checking a blob that does not exist failed: %v", err)
+	}
+	if exists {
+		t.Error("a resume was allowed against a blob that does not exist")
+	}
+}

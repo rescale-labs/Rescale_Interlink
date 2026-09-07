@@ -1042,3 +1042,98 @@ func TestDownloadStreamingConcurrentJoinsProducerOnFailure(t *testing.T) {
 
 	waitForGoroutines(t, baseline)
 }
+
+// tickingHKDFPartDownloader serves every range at once except the last, which it
+// holds until the progress ticker has been let into the callback. That is what
+// puts the ticker goroutine inside the callback at the moment the download
+// finishes, which is the only moment at which joining it can be observed.
+type tickingHKDFPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+	entered    chan struct{}
+}
+
+func (m *tickingHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
+}
+
+func (m *tickingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+	end := offset + length
+	if end >= int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+		select {
+		case <-m.entered:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Second):
+			return nil, fmt.Errorf("the progress ticker never reached the callback")
+		}
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	return out, nil
+}
+
+// TestDownloadStreamingConcurrentJoinsTheProgressTicker is the F8 residual: the
+// driver closed the ticker's stop channel on the way out without waiting for the
+// goroutine to see it. The callback it calls belongs to the caller — a progress
+// bar, a queue entry — and calling it after the download has returned reports
+// progress for a transfer that is over, on a goroutine nothing is waiting for.
+func TestDownloadStreamingConcurrentJoinsTheProgressTicker(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("interlink"), 64) // nine parts, the last one short
+	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
+
+	mock := &tickingHKDFPartDownloader{ciphertext: ciphertext, entered: entered}
+	mock.formatVersion = 1
+	mock.partSize = partSize
+
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  filepath.Join(t.TempDir(), "results.dat"),
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+			ProgressCallback: func(progress float64) {
+				// Only the ticker reports a fraction of the way through; the
+				// driver's own 0% and 100% reports must not be held up.
+				if progress <= 0 || progress >= 1 {
+					return
+				}
+				enterOnce.Do(func() { close(entered) })
+				<-release
+			},
+		},
+		FormatVersion: 1,
+		PartSize:      partSize,
+		EncryptionKey: masterKey,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- NewDownloader(mock).downloadStreamingConcurrent(context.Background(), prep, 4, mock, fileID)
+	}()
+
+	select {
+	case err := <-done:
+		close(release)
+		t.Fatalf("the download returned (err=%v) while its progress goroutine was still inside the callback", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+
+	got, err := os.ReadFile(prep.Params.LocalPath)
+	if err != nil {
+		t.Fatalf("reading the downloaded file: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("downloaded %d bytes, want the %d of the source", len(got), len(plaintext))
+	}
+}

@@ -127,3 +127,54 @@ func TestRejectedCredentialIsReplacedOncePerBurst(t *testing.T) {
 		t.Errorf("credentials were fetched %d time(s), want 2: %d rejected parts must coalesce into one replacement", got, parts)
 	}
 }
+
+// TestLateRejectionLeavesTheReplacementCredentialInPlace is N6. The retry
+// wrapper invalidated whatever credential was current when the rejection came
+// back, not the one the attempt actually ran on. A part rejected on generation
+// G, whose rejection is released after G has already been replaced by H,
+// therefore dropped the healthy H and cost the transfer another fetch — and
+// under a burst, one per late rejection.
+func TestLateRejectionLeavesTheReplacementCredentialInPlace(t *testing.T) {
+	_, server := newFakeS3Backend(t)
+	apiClient, fetches := newCountingCredentialsAPI(t)
+	s3Client := newTestS3ClientWithAPI(t, server, apiClient)
+	ctx := context.Background()
+
+	// Generation G: what the attempt below runs on.
+	if err := s3Client.EnsureFreshCredentials(ctx); err != nil {
+		t.Fatalf("failed to install the first credential: %v", err)
+	}
+	generationG := s3Client.appliedCreds
+
+	replacement := generationG
+	rejected := false
+	err := s3Client.RetryWithBackoff(ctx, "UploadPart 1", func() error {
+		if rejected {
+			return nil
+		}
+		rejected = true
+
+		// While this attempt is in flight, another one replaces G with H.
+		s3Client.credManager.InvalidateS3Credentials(generationG)
+		if err := s3Client.EnsureFreshCredentials(ctx); err != nil {
+			t.Fatalf("failed to install the replacement credential: %v", err)
+		}
+		replacement = s3Client.appliedCreds
+
+		// Only now does the backend's rejection of generation G arrive.
+		return fmt.Errorf("operation error S3: UploadPart, https response error StatusCode: 403, api error AccessDenied: authentication failed")
+	})
+	if err != nil {
+		t.Fatalf("the upload did not recover from a rejected credential: %v", err)
+	}
+	if replacement == generationG {
+		t.Fatal("the test never installed a replacement credential")
+	}
+
+	if got := fetches.Load(); got != 2 {
+		t.Errorf("credentials were fetched %d time(s), want 2: a rejection of the generation the attempt used must not drop its replacement", got)
+	}
+	if s3Client.appliedCreds != replacement {
+		t.Error("the retry rebuilt the client around a credential other than the replacement that was already installed")
+	}
+}

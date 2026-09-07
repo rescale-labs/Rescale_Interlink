@@ -273,6 +273,39 @@ func (p *Provider) AbortStreamingUpload(ctx context.Context, uploadState *transf
 	return nil
 }
 
+// AbortUploadByID discards a multipart upload addressed only by what a resume
+// state records about it. AbortStreamingUpload needs a handle, and building one
+// takes the encryption parameters a resume needs — which a state damaged enough
+// to be abandoned may not have. S3 needs neither to drop an upload: the object
+// key and the upload ID are the whole identity.
+func (p *Provider) AbortUploadByID(ctx context.Context, uploadID, storagePath string) error {
+	if uploadID == "" || storagePath == "" {
+		// A state that names no multipart upload has nothing on the backend to
+		// retire — an upload that never got past creation, or an Azure state.
+		return nil
+	}
+
+	s3Client, err := p.getOrCreateS3Client(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get S3 client: %w", err)
+	}
+
+	_, err = s3Client.Client().AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(s3Client.Bucket()),
+		Key:      aws.String(storagePath),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		if isNoSuchUpload(err) {
+			// Already gone, which is the state we were asking for.
+			return nil
+		}
+		return fmt.Errorf("failed to abort multipart upload: %w", err)
+	}
+
+	return nil
+}
+
 // InitStreamingUploadFromState resumes a streaming upload with existing encryption params.
 // Uses CBC chaining with InitialIV and CurrentIV for resume support.
 func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params transfer.StreamingUploadResumeParams) (*transfer.StreamingUpload, error) {
@@ -347,10 +380,7 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 	})
 
 	if err != nil {
-		// Check if this is a "NoSuchUpload" error (upload expired or doesn't exist)
-		// AWS SDK v2 uses smithy error types
-		var noSuchUpload *types.NoSuchUpload
-		if ok := errors.As(err, &noSuchUpload); ok {
+		if isNoSuchUpload(err) {
 			return false, nil // Upload doesn't exist, but this isn't an error condition
 		}
 		// Some other error occurred
@@ -358,6 +388,31 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 	}
 
 	return true, nil
+}
+
+// apiErrorCode is the code-carrying part of the SDK's error types. It is
+// declared here rather than pulled from smithy-go because the code is all this
+// needs, and both the modelled errors and the generic fallback expose it.
+type apiErrorCode interface {
+	ErrorCode() string
+}
+
+// isNoSuchUpload reports the one answer that is not a failure: the multipart
+// upload is not there any more, so there is nothing to resume or abort.
+//
+// The code has to be read, not just the type. Only the operations whose model
+// declares NoSuchUpload deserialize it into *types.NoSuchUpload — AbortMultipartUpload
+// does, ListParts does not, and reports exactly the same condition as a generic
+// API error carrying the code. Matching only the type meant the resume check
+// turned a vanished upload into a hard error, which failed the upload instead of
+// retiring the state — so every later attempt failed the same way.
+func isNoSuchUpload(err error) bool {
+	var noSuchUpload *types.NoSuchUpload
+	if errors.As(err, &noSuchUpload) {
+		return true
+	}
+	var apiErr apiErrorCode
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload"
 }
 
 // =============================================================================

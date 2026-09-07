@@ -1,9 +1,18 @@
 package azure
 
 import (
+	"context"
+	"fmt"
+	nethttp "net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/credentials"
+	"github.com/rescale/rescale-int/internal/cloud/providers/testsupport"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -152,5 +161,94 @@ func TestGetPerFileSASToken(t *testing.T) {
 				t.Errorf("GetPerFileSASToken() = %q, want %q", got, tt.wantSAS)
 			}
 		})
+	}
+}
+
+// newCountingAzureCredentialsAPI is the credential endpoint with a counter and a
+// different SAS token per response, so a test can see how many replacements the
+// storage credential actually went through.
+func newCountingAzureCredentialsAPI(t *testing.T) (*api.Client, *atomic.Int32) {
+	t.Helper()
+
+	var fetches atomic.Int32
+	server := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		generation := fetches.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"storageType":"AzureStorage","sasToken":"sv=2021-06-08&sig=test-%d"}`, generation)
+	}))
+	t.Cleanup(server.Close)
+
+	return api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"}), &fetches
+}
+
+// newCredentialTestAzureClient is an AzureClient whose blob endpoint is a stub:
+// these tests drive RetryWithBackoff directly, so the only traffic that matters
+// is the credential fetching.
+func newCredentialTestAzureClient(t *testing.T, apiClient *api.Client) *AzureClient {
+	t.Helper()
+	server := httptest.NewTLSServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, _ *nethttp.Request) {
+		w.WriteHeader(nethttp.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	return &AzureClient{
+		storageInfo: &models.StorageInfo{
+			StorageType: "AzureStorage",
+			ConnectionSettings: models.ConnectionSettings{
+				Container:   testContainer,
+				AccountName: testAccount,
+			},
+		},
+		credManager: credentials.GetManager(apiClient),
+		apiClient:   apiClient,
+		httpClient:  testsupport.RedirectingHTTPClient(server.Listener.Addr().String()),
+	}
+}
+
+// TestLateRejectionLeavesTheReplacementCredentialInPlace is N6 on Azure. The
+// retry wrapper invalidated whatever SAS token was current when the rejection
+// came back, not the one the attempt actually ran on: a block rejected on
+// generation G, released after G had been replaced by H, dropped the healthy H.
+func TestLateRejectionLeavesTheReplacementCredentialInPlace(t *testing.T) {
+	apiClient, fetches := newCountingAzureCredentialsAPI(t)
+	azureClient := newCredentialTestAzureClient(t, apiClient)
+	ctx := context.Background()
+
+	// Generation G: what the attempt below runs on.
+	if err := azureClient.EnsureFreshCredentials(ctx); err != nil {
+		t.Fatalf("failed to install the first credential: %v", err)
+	}
+	generationG := azureClient.appliedCreds
+
+	replacement := generationG
+	rejected := false
+	err := azureClient.RetryWithBackoff(ctx, "StageBlock 1", func() error {
+		if rejected {
+			return nil
+		}
+		rejected = true
+
+		// While this attempt is in flight, another one replaces G with H.
+		azureClient.credManager.InvalidateAzureCredentials(generationG)
+		if err := azureClient.EnsureFreshCredentials(ctx); err != nil {
+			t.Fatalf("failed to install the replacement credential: %v", err)
+		}
+		replacement = azureClient.appliedCreds
+
+		// Only now does the service's rejection of generation G arrive.
+		return fmt.Errorf("PUT https://testaccount.blob.core.windows.net/: 403 Server failed to authenticate the request, ERROR CODE: AuthenticationFailed")
+	})
+	if err != nil {
+		t.Fatalf("the upload did not recover from a rejected credential: %v", err)
+	}
+	if replacement == generationG {
+		t.Fatal("the test never installed a replacement credential")
+	}
+
+	if got := fetches.Load(); got != 2 {
+		t.Errorf("credentials were fetched %d time(s), want 2: a rejection of the generation the attempt used must not drop its replacement", got)
+	}
+	if azureClient.appliedCreds != replacement {
+		t.Error("the retry rebuilt the client around a credential other than the replacement that was already installed")
 	}
 }

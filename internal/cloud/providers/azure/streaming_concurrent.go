@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -269,6 +270,14 @@ func (p *Provider) AbortStreamingUpload(ctx context.Context, uploadState *transf
 	return nil
 }
 
+// AbortUploadByID is the identity-addressed abort the orchestrator uses to
+// retire an upload it has decided to abandon. Azure has nothing to abort: a
+// block that is staged but never committed belongs to no blob, cannot be
+// deleted on its own, and the service discards it after seven days.
+func (p *Provider) AbortUploadByID(ctx context.Context, uploadID, storagePath string) error {
+	return nil
+}
+
 // InitStreamingUploadFromState resumes a streaming upload with existing encryption params.
 // Uses CBC chaining with InitialIV and CurrentIV for resume support.
 func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params transfer.StreamingUploadResumeParams) (*transfer.StreamingUpload, error) {
@@ -344,23 +353,52 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 }
 
 // ValidateStreamingUploadExists checks if a streaming upload can be resumed.
-// For Azure: blocks auto-expire after 7 days, so we validate via state age check.
-// The state validation (in state/upload.go) already enforces MaxResumeAge of 7 days,
-// which aligns with Azure's uncommitted block retention period.
-// Returns (exists, error) where exists=false means upload expired and should start fresh.
+//
+// Azure has no upload ID: what an interrupted streaming upload leaves behind is
+// a set of staged, uncommitted blocks on the blob, which the service discards
+// after seven days. So the question S3 answers with ListParts is answered here
+// by asking for the uncommitted block list — a blob with none of them has
+// nothing to continue, whatever the state file says.
+//
+// Age alone cannot stand in for that. The blocks can be gone well before the
+// seven days are up: the blob may have been committed, replaced or deleted since,
+// and the service's own retention runs from when each block was staged. Resuming
+// against blocks that are not there produces a commit naming them, which fails
+// after the rest of the file has been sent — the state has to be retired instead.
+//
+// Returns (exists, error) where exists=false means the upload is gone and the
+// caller should start fresh.
 func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, storagePath string) (bool, error) {
-	// Azure doesn't have an explicit upload ID like S3's multipart uploads.
-	// Uncommitted blocks are automatically cleaned up after ~7 days.
-	// The resume state validation already checks age < MaxResumeAge (7 days),
-	// so if we reach here, the state is valid and blocks should still exist.
-	//
-	// We could optionally list the staged blocks to verify they exist, but:
-	// 1. It adds latency and API calls
-	// 2. Deterministic encryption means we can re-upload any missing blocks
-	// 3. State validation already handles the age check
-	//
-	// For simplicity and consistency with the Azure cleanup model, we return true.
-	return true, nil
+	azureClient, err := p.getOrCreateAzureClient(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to get Azure client: %w", err)
+	}
+	if err := azureClient.EnsureFreshCredentials(ctx); err != nil {
+		return false, fmt.Errorf("failed to refresh credentials: %w", err)
+	}
+
+	blobName := filepath.Base(storagePath)
+	staged := 0
+	err = azureClient.RetryWithBackoff(ctx, "GetBlockList", func() error {
+		blockBlobClient := azureClient.Client().ServiceClient().
+			NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobName)
+		resp, listErr := blockBlobClient.GetBlockList(ctx, blockblob.BlockListTypeUncommitted, nil)
+		if listErr != nil {
+			if bloberror.HasCode(listErr, bloberror.BlobNotFound) {
+				// Nothing was ever staged, or it has all been swept.
+				staged = 0
+				return nil
+			}
+			return listErr
+		}
+		staged = len(resp.UncommittedBlocks)
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to check the staged blocks of %s: %w", blobName, err)
+	}
+
+	return staged > 0, nil
 }
 
 // readSeekCloser wraps bytes.Reader to implement io.ReadSeekCloser

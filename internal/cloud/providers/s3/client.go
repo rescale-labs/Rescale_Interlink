@@ -233,26 +233,36 @@ func (c *S3Client) EnsureFreshCredentials(ctx context.Context) error {
 // been rejected and the attempts ran out with no replacement ever fetched.
 func (c *S3Client) RetryWithBackoff(ctx context.Context, operation string, fn func() error) error {
 	return cloudtransfer.RetryWithBackoff(ctx, operation, c.retryObserver, c.EnsureFreshCredentials, func() error {
+		// The credential this attempt is about to run on, read before it runs.
+		// Another request can install a replacement while this one is in flight,
+		// and invalidating whatever is current when the rejection finally
+		// arrives would drop that healthy replacement instead of the credential
+		// the backend actually refused.
+		attemptCreds := c.currentCredentials()
 		err := fn()
 		if err != nil && http.ClassifyError(err) == http.ErrorTypeCredential {
-			c.invalidateAppliedCredentials()
+			c.invalidateCredentials(attemptCreds)
 		}
 		return err
 	})
 }
 
-// invalidateAppliedCredentials asks the shared cache to forget the credential
-// this client last built its S3 client with. The manager drops it once per
-// credential, so a burst of rejected parts costs one replacement fetch.
-func (c *S3Client) invalidateAppliedCredentials() {
+// currentCredentials is the credential the client is built around right now.
+func (c *S3Client) currentCredentials() *models.S3Credentials {
 	c.clientMu.Lock()
-	applied := c.appliedCreds
-	c.clientMu.Unlock()
+	defer c.clientMu.Unlock()
+	return c.appliedCreds
+}
 
-	if applied == nil || c.credManager == nil {
+// invalidateCredentials asks the shared cache to forget one rejected credential.
+// The manager matches on identity and drops it once, so a burst of rejected
+// parts on one credential costs one replacement fetch — and a rejection that
+// names a credential the cache has already replaced changes nothing.
+func (c *S3Client) invalidateCredentials(rejected *models.S3Credentials) {
+	if rejected == nil || c.credManager == nil {
 		return
 	}
-	c.credManager.InvalidateS3Credentials(applied)
+	c.credManager.InvalidateS3Credentials(rejected)
 }
 
 // TraceContext adds HTTP connection tracing when DEBUG_HTTP=true.
