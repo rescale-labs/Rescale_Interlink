@@ -289,7 +289,7 @@ func (ts *TransferService) executePreRegisteredBatch(ctx context.Context, items 
 	numWorkers := transfer.ComputedWorkers(items, cfg)
 
 	transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item preRegItem) error {
-		ts.executeTask(ctx, item.req, item.taskID, apiClient, numWorkers, dir)
+		ts.executeTask(ctx, item.req, item.taskID, transfer.NoAttempt, apiClient, numWorkers, dir)
 		return nil // errors handled internally via queue.Fail
 	})
 
@@ -419,7 +419,7 @@ func (ts *TransferService) startStreamingBatch(
 			if wc < 1 {
 				wc = 1
 			}
-			ts.executeTask(ctx, item.req, item.taskID, apiClient, wc, dir)
+			ts.executeTask(ctx, item.req, item.taskID, transfer.NoAttempt, apiClient, wc, dir)
 			return nil // errors handled internally via queue.Fail
 		})
 		log.Printf("[BATCH] Streaming %s batch complete: %s", dir.label, batchID)
@@ -533,13 +533,15 @@ type taskExecution struct {
 // and ensures every early-return path after SetCancel() transitions the task
 // to a terminal state if it isn't already terminal. The direction's run func
 // performs the transfer itself and owns the terminal transition from there on.
-func (ts *TransferService) executeTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client, workerCount int, dir transferDirection) {
+func (ts *TransferService) executeTask(ctx context.Context, req TransferRequest, taskID string, token transfer.AttemptToken, apiClient *api.Client, workerCount int, dir transferDirection) {
 	fileName := dir.fileName(req)
 
-	// Claim the task before doing anything to it. A task another attempt already
-	// holds is that attempt's to finish — a second executor writing to it is
-	// what used to take the first one's cancel function away.
-	attempt, owned := ts.queue.BeginAttempt(taskID)
+	// Claim the task before doing anything to it, presenting the attempt the
+	// queue reserved for this dispatch (transfer.NoAttempt for a dispatch the
+	// queue did not schedule). A task another attempt already holds — or one
+	// reserved for a dispatch that has not entered yet — is not this one's to
+	// touch.
+	attempt, owned := ts.queue.BeginAttempt(taskID, token)
 	if !owned {
 		ts.logger.Warn().Str("task", taskID).Str("file", fileName).
 			Msgf("Skipping %s: another attempt is already running this task", dir.name)
@@ -716,7 +718,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 	}
 
 	// Claim the freshly registered task for this attempt.
-	attempt, owned := ts.queue.BeginAttempt(taskID)
+	attempt, owned := ts.queue.BeginAttempt(taskID, transfer.NoAttempt)
 	if !owned {
 		return nil, fmt.Errorf("transfer task %s is already being run by another attempt", taskID)
 	}
@@ -899,16 +901,20 @@ func (ts *TransferService) runDownload(x taskExecution) {
 
 // ExecuteRetry implements transfer.RetryExecutor.
 // Called by the queue when a user requests retry on a failed task.
-func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
+func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask, token transfer.AttemptToken) {
 	ts.mu.RLock()
 	apiClient := ts.apiClient
 	ts.mu.RUnlock()
 
 	if apiClient == nil {
-		// Nothing entered the attempt the queue reserved for this dispatch, so
-		// the failure has to release it — otherwise the task stays owned by an
-		// executor that never ran.
-		ts.queue.Fail(task.ID, fmt.Errorf("API client not configured"))
+		// This dispatch is giving up before it entered, so it has to hand back
+		// the attempt the queue reserved for it — otherwise the task stays owned
+		// by an executor that never ran. Through the token: if the reservation
+		// is no longer this dispatch's, the task belongs to the attempt that
+		// holds it and reporting a failure on it would end a live transfer.
+		if attempt, owned := ts.queue.BeginAttempt(task.ID, token); owned {
+			attempt.Fail(fmt.Errorf("API client not configured"))
+		}
 		return
 	}
 
@@ -929,7 +935,7 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 			// Tags live on the task precisely so a retry still applies them.
 			Tags: task.GetTags(),
 		}
-		ts.executeUploadRetry(ctx, req, task.ID, apiClient)
+		ts.executeUploadRetry(ctx, req, task.ID, token, apiClient)
 	} else {
 		req := TransferRequest{
 			Type:   TransferTypeDownload,
@@ -938,22 +944,22 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 			Name:   task.Name,
 			Size:   task.Size,
 		}
-		ts.executeDownloadRetry(ctx, req, task.ID, apiClient)
+		ts.executeDownloadRetry(ctx, req, task.ID, token, apiClient)
 	}
 }
 
 // executeUploadRetry delegates to executeTask with the existing task ID.
 // The task was already reset to TaskQueued by queue.Retry().
 // workerCount=1 — retry is single-file outside batch, gets full thread pool.
-func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
-	ts.executeTask(ctx, req, taskID, apiClient, 1, ts.uploadDirection())
+func (ts *TransferService) executeUploadRetry(ctx context.Context, req TransferRequest, taskID string, token transfer.AttemptToken, apiClient *api.Client) {
+	ts.executeTask(ctx, req, taskID, token, apiClient, 1, ts.uploadDirection())
 }
 
 // executeDownloadRetry delegates to executeTask with the existing task ID.
 // The task was already reset to TaskQueued by queue.Retry().
 // workerCount=1 — retry is single-file outside batch, gets full thread pool.
-func (ts *TransferService) executeDownloadRetry(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client) {
-	ts.executeTask(ctx, req, taskID, apiClient, 1, ts.downloadDirection())
+func (ts *TransferService) executeDownloadRetry(ctx context.Context, req TransferRequest, taskID string, token transfer.AttemptToken, apiClient *api.Client) {
+	ts.executeTask(ctx, req, taskID, token, apiClient, 1, ts.downloadDirection())
 }
 
 func (ts *TransferService) CancelTransfer(taskID string) error {

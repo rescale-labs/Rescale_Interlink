@@ -483,7 +483,7 @@ func newMockRetryExecutor() *mockRetryExecutor {
 	}
 }
 
-func (m *mockRetryExecutor) ExecuteRetry(task *TransferTask) {
+func (m *mockRetryExecutor) ExecuteRetry(task *TransferTask, _ AttemptToken) {
 	m.mu.Lock()
 	m.executed = append(m.executed, task)
 	m.mu.Unlock()
@@ -1607,7 +1607,7 @@ type tagCapturingExecutor struct {
 	captured chan []string
 }
 
-func (e tagCapturingExecutor) ExecuteRetry(task *TransferTask) {
+func (e tagCapturingExecutor) ExecuteRetry(task *TransferTask, _ AttemptToken) {
 	e.captured <- task.GetTags()
 }
 

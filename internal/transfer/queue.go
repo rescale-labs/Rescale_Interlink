@@ -17,8 +17,11 @@ import (
 type RetryExecutor interface {
 	// ExecuteRetry starts execution of a retry task.
 	// The task is already tracked in the queue with state TaskQueued.
-	// The executor should call queue.SetCancel(), UpdateProgress(), Complete()/Fail().
-	ExecuteRetry(task *TransferTask)
+	// token is the attempt the queue reserved for this dispatch: the executor
+	// presents it to BeginAttempt to take the task, and reports through the
+	// resulting Attempt — including when it gives up before starting, which is
+	// what releases the reservation.
+	ExecuteRetry(task *TransferTask, token AttemptToken)
 }
 
 // QueueStats holds statistics about the transfer queue.
@@ -58,12 +61,13 @@ type Queue struct {
 	cancelFuncs map[string]context.CancelFunc
 
 	// runningAttempts holds the attempt that owns each task an executor is
-	// working on. The entry appears when the queue reserves the attempt —
-	// before the executor is dispatched, so a retry requested in the gap before
-	// it enters waits rather than starting a second one — and is removed when
-	// the owning executor reaches a terminal call, which is later than the
-	// task's own terminal state: a cancelled task's executor keeps unwinding
-	// after the cancel.
+	// working on. The entry appears when the queue reserves the attempt for a
+	// dispatch it schedules — before that executor starts, so a retry requested
+	// in the gap before it enters waits rather than starting a second one — or
+	// when an executor the queue did not schedule claims an unheld task. It is
+	// removed when the owning executor reaches a terminal call, which is later
+	// than the task's own terminal state: a cancelled task's executor keeps
+	// unwinding after the cancel.
 	runningAttempts map[string]attemptRecord
 
 	// nextAttempt mints attempt tokens. Guarded by mu.
@@ -253,10 +257,11 @@ func (q *Queue) StartTransfer(taskID string) {
 // AttemptToken identifies one execution attempt on a task.
 type AttemptToken uint64
 
-// noAttempt is the token of a caller that never reserved one. It is scoped to
+// NoAttempt is the token of a caller that never reserved one. It is scoped to
 // nothing, so its calls are always carried out — which is what a task with no
-// executor behind it, and the queue's own bookkeeping, rely on.
-const noAttempt AttemptToken = 0
+// executor behind it, and the queue's own bookkeeping, rely on — and it takes a
+// task at BeginAttempt only while no other attempt holds it.
+const NoAttempt AttemptToken = 0
 
 // attemptRecord is the queue's record of who may write a task. entered marks
 // the moment the executor the token was minted for actually started, so a
@@ -277,22 +282,30 @@ type Attempt struct {
 }
 
 // BeginAttempt claims a task for the executor about to run it and returns the
-// handle it must use for the rest of the attempt. It adopts the reservation the
-// queue made when it scheduled that executor, or takes a fresh one for an
-// executor the queue did not schedule.
+// handle it must use for the rest of the attempt. A dispatch the queue
+// scheduled presents the token it was given and adopts that reservation and no
+// other; a dispatch the queue did not schedule (NoAttempt) takes a fresh
+// attempt, and only while the task is unheld.
 //
-// ok is false when another attempt already holds the task. The caller must then
-// neither run it nor touch it: the attempt that holds it owns its outcome.
-func (q *Queue) BeginAttempt(taskID string) (Attempt, bool) {
+// ok is false when another attempt holds the task — running, or reserved for a
+// dispatch that has not entered yet. The caller must then neither run it nor
+// touch it: the attempt that holds it owns its outcome. Adopting someone else's
+// reservation is what used to let a cancelled initial executor consume the
+// retry that replaced it and then release the task with the retry gone.
+func (q *Queue) BeginAttempt(taskID string, token AttemptToken) (Attempt, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	rec, held := q.runningAttempts[taskID]
-	if held && rec.entered {
-		return Attempt{}, false
-	}
-	if !held {
+	if token == NoAttempt {
+		if held {
+			return Attempt{}, false
+		}
 		rec = attemptRecord{token: q.mintAttemptLocked()}
+	} else if !held || rec.token != token || rec.entered {
+		// The reservation this dispatch was given is gone, or something else
+		// already entered it.
+		return Attempt{}, false
 	}
 	rec.entered = true
 	q.runningAttempts[taskID] = rec
@@ -325,13 +338,15 @@ func (q *Queue) mintAttemptLocked() AttemptToken {
 // reserveAttemptLocked records that an attempt is about to be dispatched for a
 // task, so a retry requested before that executor enters waits for it instead
 // of starting a second one. Caller holds q.mu.
-func (q *Queue) reserveAttemptLocked(taskID string) {
-	q.runningAttempts[taskID] = attemptRecord{token: q.mintAttemptLocked()}
+func (q *Queue) reserveAttemptLocked(taskID string) AttemptToken {
+	token := q.mintAttemptLocked()
+	q.runningAttempts[taskID] = attemptRecord{token: token}
+	return token
 }
 
 // ownsAttemptLocked reports whether token may write this task. Caller holds q.mu.
 func (q *Queue) ownsAttemptLocked(taskID string, token AttemptToken) bool {
-	if token == noAttempt {
+	if token == NoAttempt {
 		return true
 	}
 	rec, held := q.runningAttempts[taskID]
@@ -345,7 +360,7 @@ func (q *Queue) ownsAttemptLocked(taskID string, token AttemptToken) bool {
 // terminal call, this task has a writer, and a retry claimed in between waits
 // rather than starting a second one.
 func (q *Queue) SetCancel(taskID string, cancelFn context.CancelFunc) {
-	q.setCancel(taskID, noAttempt, cancelFn)
+	q.setCancel(taskID, NoAttempt, cancelFn)
 }
 
 func (q *Queue) setCancel(taskID string, token AttemptToken, cancelFn context.CancelFunc) {
@@ -366,7 +381,7 @@ func (q *Queue) setCancel(taskID string, token AttemptToken, cancelFn context.Ca
 // ClearCancel removes a stale cancel fn entry for a task.
 // Used on early-return paths where the task is already terminal (e.g., cancelled by CancelBatch).
 func (q *Queue) ClearCancel(taskID string) {
-	q.clearCancel(taskID, noAttempt)
+	q.clearCancel(taskID, NoAttempt)
 }
 
 func (q *Queue) clearCancel(taskID string, token AttemptToken) {
@@ -401,6 +416,7 @@ func (q *Queue) releaseAttempt(taskID string, token AttemptToken) {
 	_, claimed := q.claimedRetries[taskID]
 	task := q.tasksByID[taskID]
 	executor := q.retryExecutor
+	var retryToken AttemptToken
 	if claimed {
 		delete(q.claimedRetries, taskID)
 	}
@@ -412,7 +428,7 @@ func (q *Queue) releaseAttempt(taskID string, token AttemptToken) {
 		task.resetForRetry()
 		// Reserved under the same lock as the reset: a retry requested before
 		// this executor enters has to wait for it, not run alongside it.
-		q.reserveAttemptLocked(taskID)
+		retryToken = q.reserveAttemptLocked(taskID)
 	} else {
 		claimed = false
 	}
@@ -422,7 +438,7 @@ func (q *Queue) releaseAttempt(taskID string, token AttemptToken) {
 		return
 	}
 	q.publishTransferEvent(events.EventTransferQueued, task)
-	go executor.ExecuteRetry(task)
+	go executor.ExecuteRetry(task, retryToken)
 }
 
 // FailIfNotTerminal atomically checks if a task is non-terminal and transitions to Failed.
@@ -430,7 +446,7 @@ func (q *Queue) releaseAttempt(taskID string, token AttemptToken) {
 // Avoids TOCTOU race between IsTerminal check and Fail call. Used on cancel/error paths
 // after SetCancel() where CancelBatch may have already set the task to TaskCancelled.
 func (q *Queue) FailIfNotTerminal(taskID string, err error) bool {
-	return q.failIfNotTerminal(taskID, noAttempt, err)
+	return q.failIfNotTerminal(taskID, NoAttempt, err)
 }
 
 func (q *Queue) failIfNotTerminal(taskID string, token AttemptToken, err error) bool {
@@ -499,7 +515,7 @@ func (q *Queue) UpdateProgress(taskID string, progress float64) {
 // Terminal-guarded: a task the user already cancelled stays cancelled even if
 // its in-flight transfer went on to finish.
 func (q *Queue) Complete(taskID string) {
-	q.complete(taskID, noAttempt)
+	q.complete(taskID, NoAttempt)
 }
 
 func (q *Queue) complete(taskID string, token AttemptToken) {
@@ -533,7 +549,7 @@ func (q *Queue) complete(taskID string, token AttemptToken) {
 // Terminal-guarded: after a cancel, the transfer often reports a secondary
 // error (unexpected EOF, connection reset) that must not overwrite Cancelled.
 func (q *Queue) Fail(taskID string, err error) {
-	q.fail(taskID, noAttempt, err)
+	q.fail(taskID, NoAttempt, err)
 }
 
 func (q *Queue) fail(taskID string, token AttemptToken, err error) {
@@ -694,13 +710,13 @@ func (q *Queue) Retry(taskID string) (string, error) {
 	// Reserved before the dispatch below: a cancel-then-retry in the gap before
 	// this executor enters must wait for it rather than start a second one on
 	// the same task, whose cleanup would take this one's cancellation away.
-	q.reserveAttemptLocked(taskID)
+	token := q.reserveAttemptLocked(taskID)
 	q.mu.Unlock()
 
 	q.publishTransferEvent(events.EventTransferQueued, task)
 
 	// Execute retry via executor (in goroutine to not block)
-	go executor.ExecuteRetry(task)
+	go executor.ExecuteRetry(task, token)
 
 	return taskID, nil
 }

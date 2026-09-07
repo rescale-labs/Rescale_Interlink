@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
@@ -737,4 +738,191 @@ func TestCancelBatchAnchorsCancelledPlaceholder(t *testing.T) {
 		return
 	}
 	t.Fatal("cancelled batch left no record at all")
+}
+
+// gatedRetryExecutor holds a retry dispatch at the door and then runs the real
+// service path. It lets a test work inside the window between the queue
+// reserving that dispatch's attempt and the dispatch entering it.
+type gatedRetryExecutor struct {
+	ts       *TransferService
+	entered  chan struct{}
+	proceed  chan struct{}
+	returned chan struct{}
+}
+
+func (g *gatedRetryExecutor) ExecuteRetry(task *transfer.TransferTask, token transfer.AttemptToken) {
+	close(g.entered)
+	<-g.proceed
+	g.ts.ExecuteRetry(task, token)
+	close(g.returned)
+}
+
+// TestAnInitialDispatchDoesNotTakeTheRetrysAttempt covers D6's remaining half at
+// the service level. An initial executor pauses before claiming its task; the
+// user cancels it and asks for it again, so the queue reserves an attempt for
+// the retry it dispatches. The initial executor then resumes: if it adopts that
+// reservation, the real retry is refused and returns, and the initial executor —
+// whose own context died with the cancellation — releases the task. The retry
+// the user was promised has disappeared.
+func TestAnInitialDispatchDoesNotTakeTheRetrysAttempt(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	defer eventBus.Close()
+
+	ts := NewTransferService(&api.Client{}, eventBus, TransferServiceConfig{MaxConcurrent: 1})
+
+	// Occupy the only transfer slot, so an executor that claims the task parks
+	// there holding it instead of running a transfer this test cannot serve.
+	ts.semaphore <- struct{}{}
+
+	gate := &gatedRetryExecutor{
+		ts:       ts,
+		entered:  make(chan struct{}),
+		proceed:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+	ts.queue.SetRetryExecutor(gate)
+
+	req := TransferRequest{
+		Type:        TransferTypeDownload,
+		Source:      "file-1",
+		Dest:        t.TempDir(),
+		Name:        "run.tar.gz",
+		Size:        1024,
+		SourceLabel: SourceLabelFileBrowser,
+	}
+	taskID := ts.registerDownloadTask(req)
+
+	if err := ts.CancelTransfer(taskID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := ts.queue.Retry(taskID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	<-gate.entered // the retry's attempt is reserved and nothing has entered it
+
+	// The initial executor resumes exactly where it paused.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	initialDone := make(chan struct{})
+	go func() {
+		defer close(initialDone)
+		ts.executeTask(ctx, req, taskID, transfer.NoAttempt, &api.Client{}, 1, ts.downloadDirection())
+	}()
+	select {
+	case <-initialDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the initial dispatch took the attempt the queue reserved for the retry")
+	}
+
+	// The retry now enters and holds the task: it waits for a slot rather than
+	// finding its own attempt gone and returning.
+	close(gate.proceed)
+	select {
+	case <-gate.returned:
+		t.Fatal("the retry dispatch was refused its own attempt and never ran")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// And the user can still stop the transfer they asked for.
+	if err := ts.CancelTransfer(taskID); err != nil {
+		t.Fatalf("cancelling the running retry: %v", err)
+	}
+	select {
+	case <-gate.returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelling the task never reached the retry that was running it")
+	}
+	task, ok := ts.queue.GetTask(taskID)
+	if !ok {
+		t.Fatal("the task is gone from the queue")
+	}
+	if task.State != transfer.TaskCancelled {
+		t.Errorf("task state = %q, want %q", task.State, transfer.TaskCancelled)
+	}
+}
+
+// TestAFailedRetryDispatchReleasesItsOwnAttempt covers the pre-entry failure
+// path: a dispatch that gives up before it enters — here for want of an API
+// client — has to hand back the attempt the queue reserved for it, or the task
+// stays owned by an executor that never ran.
+func TestAFailedRetryDispatchReleasesItsOwnAttempt(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	defer eventBus.Close()
+
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{MaxConcurrent: 1})
+
+	req := TransferRequest{
+		Type:        TransferTypeDownload,
+		Source:      "file-1",
+		Dest:        t.TempDir(),
+		Name:        "run.tar.gz",
+		Size:        1024,
+		SourceLabel: SourceLabelFileBrowser,
+	}
+	taskID := ts.registerDownloadTask(req)
+
+	if err := ts.CancelTransfer(taskID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := ts.queue.Retry(taskID); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		task, ok := ts.queue.GetTask(taskID)
+		if ok && task.State == transfer.TaskFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the retry dispatch never recorded its failure (state %q)", task.State)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if _, owned := ts.queue.BeginAttempt(taskID, transfer.NoAttempt); !owned {
+		t.Fatal("the failed dispatch left the task owned by an attempt that never ran")
+	}
+}
+
+// TestAFailedRetryDispatchLeavesARunningAttemptAlone is the ownership half of
+// the same path. A dispatch whose reservation is no longer its own cannot claim
+// that nothing entered: reporting its failure unscoped ends a transfer another
+// attempt is running and takes that attempt's cancellation with it.
+func TestAFailedRetryDispatchLeavesARunningAttemptAlone(t *testing.T) {
+	eventBus := events.NewEventBus(100)
+	defer eventBus.Close()
+
+	ts := NewTransferService(nil, eventBus, TransferServiceConfig{MaxConcurrent: 1})
+
+	task := ts.queue.TrackTransferWithLabel("run.tar.gz", 1024, transfer.TaskTypeDownload,
+		"file-1", t.TempDir(), SourceLabelFileBrowser)
+
+	// An attempt takes the task and starts transferring.
+	running, owned := ts.queue.BeginAttempt(task.ID, transfer.NoAttempt)
+	if !owned {
+		t.Fatal("BeginAttempt: an unowned task should have been claimable")
+	}
+	stopped := make(chan struct{})
+	running.SetCancel(func() { close(stopped) })
+	if !ts.queue.Activate(task.ID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+
+	// A retry dispatch whose reservation is gone finds no API client and fails
+	// before entering.
+	ts.ExecuteRetry(task, transfer.AttemptToken(1<<32))
+
+	if got := task.GetState(); got != transfer.TaskInitializing {
+		t.Errorf("task state = %q, want %q — a dispatch that never entered reported for the running attempt",
+			got, transfer.TaskInitializing)
+	}
+	if err := ts.CancelTransfer(task.ID); err != nil {
+		t.Fatalf("cancelling the running attempt: %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("the running attempt's cancellation was gone by the time the user cancelled")
+	}
 }

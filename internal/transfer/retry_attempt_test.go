@@ -26,7 +26,7 @@ func newScriptedExecutor() *scriptedExecutor {
 	}
 }
 
-func (e *scriptedExecutor) ExecuteRetry(task *TransferTask) {
+func (e *scriptedExecutor) ExecuteRetry(task *TransferTask, _ AttemptToken) {
 	e.mu.Lock()
 	e.runs++
 	e.sawState = append(e.sawState, task.GetState())
@@ -337,7 +337,7 @@ func TestASupersededAttemptCannotDisownTheCurrentOne(t *testing.T) {
 
 	// The first attempt starts and gives the task up with no terminal state, the
 	// way an executor that lost the Activate race does.
-	first, owned := queue.BeginAttempt(task.ID)
+	first, owned := queue.BeginAttempt(task.ID, NoAttempt)
 	if !owned {
 		t.Fatal("BeginAttempt: an unowned task should have been claimable")
 	}
@@ -345,7 +345,7 @@ func TestASupersededAttemptCannotDisownTheCurrentOne(t *testing.T) {
 	first.ClearCancel()
 
 	// The second attempt takes over and starts transferring.
-	second, owned := queue.BeginAttempt(task.ID)
+	second, owned := queue.BeginAttempt(task.ID, NoAttempt)
 	if !owned {
 		t.Fatal("BeginAttempt: a released task should have been claimable again")
 	}
@@ -354,7 +354,7 @@ func TestASupersededAttemptCannotDisownTheCurrentOne(t *testing.T) {
 	if !queue.Activate(task.ID) {
 		t.Fatal("Activate: the task should have been queued")
 	}
-	if _, extra := queue.BeginAttempt(task.ID); extra {
+	if _, extra := queue.BeginAttempt(task.ID, NoAttempt); extra {
 		t.Error("BeginAttempt handed out a second claim on a task an attempt is running")
 	}
 
