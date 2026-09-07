@@ -16,40 +16,30 @@ import (
 	"time"
 )
 
-// TestMain keeps the installation identifier these tests take out of the
-// configuration directory of whoever is running them, through the same
-// environment the directory is resolved from — there is no seam of any other
-// kind, so that a test cannot be redirected by a route production has not got.
-// Only the directory it made itself is removed.
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "upload-lock-config-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create a configuration directory for the tests: %v\n", err)
-		os.Exit(1)
-	}
-	for _, name := range configDirectoryVariables {
-		os.Setenv(name, dir)
-	}
-	code := m.Run()
-	_ = os.RemoveAll(dir)
-	os.Exit(code)
+// withPIDDomain stands in for the identity the operating system gives this
+// process, which is how a test is another machine or another PID namespace
+// without being one. It is the same seam production reads through; nothing
+// about it depends on the platform the test runs on.
+func withPIDDomain(t *testing.T, domain string) {
+	t.Helper()
+	replacePIDDomain(t, func() (string, error) { return domain, nil })
 }
 
-// configDirectoryVariables are the environment variables the per-user
-// configuration directory is resolved from, on every platform: the home
-// directory on Unix, the local application data of the account on Windows.
-var configDirectoryVariables = []string{"HOME", "USERPROFILE", "LOCALAPPDATA"}
-
-// withoutAnInstallationIdentifier leaves the process with nowhere to keep one,
-// which is what a home directory the OS will not name looks like from here.
-func withoutAnInstallationIdentifier(t *testing.T) {
+// withoutAPIDDomain leaves the process unable to say which processes its PID is
+// numbered among, which is what a system with no machine identifier — or, on
+// Linux, no readable PID namespace — presents from here.
+func withoutAPIDDomain(t *testing.T) {
 	t.Helper()
-	for _, name := range configDirectoryVariables {
-		t.Setenv(name, "")
-	}
-	if currentInstallID() != "" {
-		t.Skip("this platform resolves a configuration directory without the environment")
-	}
+	replacePIDDomain(t, func() (string, error) {
+		return "", errors.New("this system names no PID domain")
+	})
+}
+
+func replacePIDDomain(t *testing.T, read func() (string, error)) {
+	t.Helper()
+	previous := pidDomain
+	pidDomain = read
+	t.Cleanup(func() { pidDomain = previous })
 }
 
 // TestUploadState_FilePermissions verifies that upload state files are created with secure permissions (0600).
@@ -342,7 +332,7 @@ func acquireAs(localPath string, pid int, token string) (*UploadLock, error) {
 		OwnerToken: token,
 		Host:       lockHost,
 		Owner:      lockOwner,
-		InstallID:  currentInstallID(),
+		PIDDomain:  currentPIDDomain(),
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -458,7 +448,7 @@ func TestAcquireUploadLock_KeepsLiveOwnerRegardlessOfAge(t *testing.T) {
 		OwnerToken: "owner-of-a-running-upload",
 		Host:       lockHost,
 		Owner:      lockOwner,
-		InstallID:  currentInstallID(),
+		PIDDomain:  currentPIDDomain(),
 		AcquiredAt: time.Now().Add(-2 * time.Hour),
 		LocalPath:  localPath,
 	})
@@ -487,7 +477,7 @@ func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
 		OwnerToken: "owner-that-crashed",
 		Host:       lockHost,
 		Owner:      lockOwner,
-		InstallID:  currentInstallID(),
+		PIDDomain:  currentPIDDomain(),
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -495,6 +485,38 @@ func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
 	lock, err := AcquireUploadLock(localPath)
 	if err != nil {
 		t.Fatalf("refused a lock whose owner is gone: %v", err)
+	}
+	defer ReleaseUploadLock(lock)
+
+	if got := readLockFile(t, localPath); got.ProcessID != os.Getpid() {
+		t.Errorf("lock file names PID %d, want this process (%d)", got.ProcessID, os.Getpid())
+	}
+}
+
+// TestAcquireUploadLock_TakesOverADeadLockOfAnotherLogin pins where the domain
+// boundary is drawn, which is not where the previous identifier drew it. PIDs
+// are numbered per kernel, not per account: a lock left by another user of this
+// machine names a PID this process can test, and one the kernel says is gone is
+// gone for both of them. Whether it may be deleted is then the directory's
+// business, not this rule's.
+func TestAcquireUploadLock_TakesOverADeadLockOfAnotherLogin(t *testing.T) {
+	const deadPID = 424255
+	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	writeLockFile(t, localPath, uploadLockState{
+		ProcessID:  deadPID,
+		OwnerToken: "another-logins-upload-that-crashed",
+		Host:       lockHost,
+		Owner:      lockOwner + "-someone-else",
+		PIDDomain:  currentPIDDomain(),
+		AcquiredAt: time.Now(),
+		LocalPath:  localPath,
+	})
+
+	lock, err := AcquireUploadLock(localPath)
+	if err != nil {
+		t.Fatalf("refused a lock whose owner is gone on this very machine: %v", err)
 	}
 	defer ReleaseUploadLock(lock)
 
@@ -559,9 +581,9 @@ func TestAcquireUploadLock_TakeoverCannotEvictTheWinner(t *testing.T) {
 }
 
 // plantAbandonedLock leaves a lock file whose owner has died, which is the one
-// state an acquirer is allowed to take over: this machine, this user, and a PID
-// that is gone. Another machine's or another user's is refused however dead its
-// PID looks from here.
+// state an acquirer is allowed to take over: this PID domain, and a PID inside
+// it that is gone. A record from another domain is refused however dead its PID
+// looks from here.
 func plantAbandonedLock(t *testing.T, deadPID int) string {
 	t.Helper()
 	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
@@ -575,7 +597,7 @@ func plantAbandonedLock(t *testing.T, deadPID int) string {
 		OwnerToken: "owner-that-crashed",
 		Host:       lockHost,
 		Owner:      lockOwner,
-		InstallID:  currentInstallID(),
+		PIDDomain:  currentPIDDomain(),
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -747,14 +769,14 @@ func plantOwnerlessLock(t *testing.T, lockFilePath string, written time.Time) {
 	}
 }
 
-// TestAcquireUploadLock_RefusesReclamationWithoutAnInstallationIdentifier pins
-// the answer when this process cannot establish which installation it belongs
-// to. Creating a lock still excludes everyone — O_EXCL is the filesystem's own
-// guarantee — but a PID is only meaningful inside one installation, so with none
-// to compare against there is nothing that makes a record's owner provably gone.
-func TestAcquireUploadLock_RefusesReclamationWithoutAnInstallationIdentifier(t *testing.T) {
+// TestAcquireUploadLock_RefusesReclamationWithoutAPIDDomain pins the answer
+// when the system will not say which processes this one's PID is numbered
+// among. Creating a lock still excludes everyone — O_EXCL is the filesystem's
+// own guarantee — but with no domain to compare against there is nothing that
+// makes another record's owner provably gone.
+func TestAcquireUploadLock_RefusesReclamationWithoutAPIDDomain(t *testing.T) {
 	t.Run("creating a lock still works", func(t *testing.T) {
-		withoutAnInstallationIdentifier(t)
+		withoutAPIDDomain(t)
 		localPath := filepath.Join(t.TempDir(), "testfile.bin")
 
 		lock, err := AcquireUploadLock(localPath)
@@ -767,21 +789,21 @@ func TestAcquireUploadLock_RefusesReclamationWithoutAnInstallationIdentifier(t *
 		if got.ProcessID != os.Getpid() {
 			t.Errorf("lock file names PID %d, want this process (%d)", got.ProcessID, os.Getpid())
 		}
-		// And it records no installation, so nothing reclaims it later either.
-		if got.InstallID != "" {
-			t.Errorf("lock file names installation %q, want none to have been established", got.InstallID)
+		// And it names no domain, so nothing reclaims it later either.
+		if got.PIDDomain != "" {
+			t.Errorf("lock file names PID domain %q, want none to have been established", got.PIDDomain)
 		}
 	})
 
 	t.Run("reclaiming a stale lock is refused", func(t *testing.T) {
 		localPath := plantAbandonedLock(t, 424251)
 		lockFilePath := localPath + ".upload.lock"
-		withoutAnInstallationIdentifier(t)
+		withoutAPIDDomain(t)
 
 		lock, err := AcquireUploadLock(localPath)
 		if err == nil {
 			ReleaseUploadLock(lock)
-			t.Fatal("cleared a lock without establishing which installation its PID belongs to")
+			t.Fatal("cleared a lock without establishing which processes its PID is numbered among")
 		}
 		if errors.Is(err, ErrUploadLockUnavailable) {
 			t.Errorf("a lock that exists is reported as no lock at all: %v", err)
@@ -794,22 +816,34 @@ func TestAcquireUploadLock_RefusesReclamationWithoutAnInstallationIdentifier(t *
 		}
 	})
 
-	t.Run("an identifier that goes missing is made again", func(t *testing.T) {
-		// The identifier is read on every acquisition rather than kept, so a
-		// configuration directory that is wiped between transfers costs the
-		// ability to reclaim what the old identifier wrote — and nothing else.
-		t.Setenv("HOME", t.TempDir())
-		first := currentInstallID()
-		if first == "" {
-			t.Skip("this platform resolves no configuration directory from the environment")
-		}
-		if again := currentInstallID(); again != first {
-			t.Errorf("a second acquisition belongs to installation %q, want the one already recorded %q", again, first)
-		}
+	t.Run("a record written by such a process is refused later too", func(t *testing.T) {
+		// The refusal is symmetric, and deliberately so: a record naming no
+		// domain cannot be told apart from one written on another machine, so a
+		// process that can name its own must not adopt it. This is the record's
+		// full v4.9.9 shape — host, user, token, everything but the domain.
+		const deadPID = 424254
+		withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+		localPath := filepath.Join(t.TempDir(), "testfile.bin")
 
-		t.Setenv("HOME", t.TempDir())
-		if replaced := currentInstallID(); replaced == first {
-			t.Error("a fresh configuration directory reported the identifier of the old one")
+		withoutAPIDDomain(t)
+		writeLockFile(t, localPath, uploadLockState{
+			ProcessID:  deadPID,
+			OwnerToken: "owner-that-crashed",
+			Host:       lockHost,
+			Owner:      lockOwner,
+			PIDDomain:  currentPIDDomain(),
+			AcquiredAt: time.Now(),
+			LocalPath:  localPath,
+		})
+		withPIDDomain(t, "machine-1cd67aa9 pid:[4026531836]")
+
+		lock, err := AcquireUploadLock(localPath)
+		if err == nil {
+			ReleaseUploadLock(lock)
+			t.Fatal("adopted a record that names no PID domain")
+		}
+		if got := readLockFile(t, localPath); got.OwnerToken != "owner-that-crashed" {
+			t.Errorf("the record was cleared anyway; it now names %q", got.OwnerToken)
 		}
 	})
 }
@@ -1104,10 +1138,23 @@ func TestAcquireUploadLock_RecordsWhoItBelongsTo(t *testing.T) {
 	if got.Owner == "" || got.Owner != lockOwner {
 		t.Errorf("lock file names owner %q, want this user %q", got.Owner, lockOwner)
 	}
-	// The installation is the one field a reclamation is decided on, because it
+	// The PID domain is the one field a reclamation is decided on, because it
 	// is the only one that says a PID here means anything.
-	if got.InstallID == "" || got.InstallID != currentInstallID() {
-		t.Errorf("lock file names installation %q, want this one %q", got.InstallID, currentInstallID())
+	if got.PIDDomain == "" || got.PIDDomain != currentPIDDomain() {
+		t.Errorf("lock file names PID domain %q, want this one %q", got.PIDDomain, currentPIDDomain())
+	}
+
+	// And it is on disk under that name: the key is the format, and a record
+	// whose domain arrived under some other one reads back as naming none.
+	record, err := os.ReadFile(localPath + ".upload.lock")
+	if err != nil {
+		t.Fatalf("read the lock file: %v", err)
+	}
+	if !strings.Contains(string(record), `"pid_domain"`) {
+		t.Errorf("the lock file does not carry a pid_domain key:\n%s", record)
+	}
+	if strings.Contains(string(record), `"install_id"`) || strings.Contains(string(record), `"guard"`) {
+		t.Errorf("the lock file still carries an identity this version does not decide on:\n%s", record)
 	}
 }
 
@@ -1186,7 +1233,7 @@ func TestAcquireUploadLock_TakesOverItsOwnPIDsLock(t *testing.T) {
 		OwnerToken: "a-run-of-this-process-that-crashed",
 		Host:       lockHost,
 		Owner:      lockOwner,
-		InstallID:  currentInstallID(),
+		PIDDomain:  currentPIDDomain(),
 		AcquiredAt: time.Now().Add(-time.Hour),
 		LocalPath:  localPath,
 	})
@@ -1202,16 +1249,22 @@ func TestAcquireUploadLock_TakesOverItsOwnPIDsLock(t *testing.T) {
 	}
 }
 
-// TestAcquireUploadLock_RefusesALockFromAnotherInstallation covers the locks
-// this acquisition may not clear on its own. A PID is only meaningful inside the
-// installation that issued it: two machines can be configured with one hostname
-// and can carry one uid, so a record whose every string matches this acquirer's
-// can still name a process running on the other machine, where nothing here can
-// see it. So a record naming another installation — and a record from before
-// this version, which names none — is refused, with what an operator needs to
+// TestAcquireUploadLock_RefusesALockFromAnotherPIDDomain covers the locks this
+// acquisition may not clear on its own. A PID is only meaningful among the
+// processes the same kernel numbered: two machines can be configured with one
+// hostname and can carry one uid, and one home directory can be mounted on both
+// of them, so a record whose every string matches this acquirer's can still name
+// a process running on the other machine — where nothing here can see it, and
+// where "no such process" is the answer this machine gives about a live upload.
+// So a record naming another domain — and one from before this version, or from
+// an interim build, which name none — is refused, with what an operator needs to
 // decide whether to delete it.
-func TestAcquireUploadLock_RefusesALockFromAnotherInstallation(t *testing.T) {
+func TestAcquireUploadLock_RefusesALockFromAnotherPIDDomain(t *testing.T) {
 	const deadPID = 424260
+	// This machine, as the operating system named it, and the same machine
+	// running the containers that share it.
+	const thisDomain = "machine-1cd67aa9 pid:[4026531836]"
+	const anotherNamespaceHere = "machine-1cd67aa9 pid:[4026532210]"
 	acquired := time.Now().Add(-time.Hour).Round(time.Second)
 
 	cases := []struct {
@@ -1222,52 +1275,68 @@ func TestAcquireUploadLock_RefusesALockFromAnotherInstallation(t *testing.T) {
 		{
 			name: "another machine that answers to this machine's name",
 			plant: func(t *testing.T, localPath string) {
-				// Same hostname, same uid, same mount spelling: every string
-				// the older rule compared matches, and the PID still belongs to
-				// a process on the other machine.
+				// Same hostname, same uid, same mount spelling, and — with one
+				// home directory between them — the same of anything either of
+				// them writes down. The PID still belongs to a process on the
+				// other machine.
 				writeLockFile(t, localPath, uploadLockState{
 					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
 					Host: lockHost, Owner: lockOwner,
-					InstallID:  "the-other-machines-installation",
+					PIDDomain:  "machine-8f0142bc pid:[4026531836]",
 					AcquiredAt: acquired, LocalPath: localPath,
 				})
 			},
 			names: []string{lockHost, lockOwner},
 		},
 		{
-			name: "another machine",
+			name: "another PID namespace on this machine",
 			plant: func(t *testing.T, localPath string) {
+				// Two containers on one host: one machine identifier, one
+				// mounted source, and two independent runs of PID numbering.
 				writeLockFile(t, localPath, uploadLockState{
 					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
-					Host: "another-host", Owner: lockOwner,
-					InstallID:  "another-installation",
+					Host: lockHost, Owner: lockOwner,
+					PIDDomain:  anotherNamespaceHere,
 					AcquiredAt: acquired, LocalPath: localPath,
 				})
 			},
-			names: []string{"another-host", lockOwner},
+			names: []string{lockHost, lockOwner},
 		},
 		{
-			name: "another login on this machine",
+			name: "another machine and another login",
 			plant: func(t *testing.T, localPath string) {
-				// The configuration directory is per user, so a second login of
-				// this machine is a second installation by construction.
 				writeLockFile(t, localPath, uploadLockState{
 					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
-					Host: lockHost, Owner: lockOwner + "-someone-else",
-					InstallID:  "the-other-logins-installation",
+					Host: "another-host", Owner: lockOwner + "-someone-else",
+					PIDDomain:  "machine-8f0142bc pid:[4026531836]",
 					AcquiredAt: acquired, LocalPath: localPath,
 				})
 			},
-			names: []string{lockHost, lockOwner + "-someone-else"},
+			names: []string{"another-host", lockOwner + "-someone-else"},
+		},
+		{
+			name: "a lock written while an installation identifier decided it",
+			plant: func(t *testing.T, localPath string) {
+				// The interim format of this release: an identifier kept in the
+				// user's configuration directory, which two machines mounting
+				// one home read identically. A record carrying it names no PID
+				// domain — refused once, by hand, rather than cleared. No build
+				// that wrote one was released.
+				interim := fmt.Sprintf("{\n  \"process_id\": %d,\n  \"owner_token\": %q,\n  \"host\": %q,\n  \"owner\": %q,\n  \"install_id\": %q,\n  \"acquired_at\": %q,\n  \"local_path\": %q\n}",
+					deadPID, "owner-elsewhere", lockHost, lockOwner,
+					"c9d2f0a17b4e6538c9d2f0a17b4e6538",
+					acquired.Format(time.RFC3339Nano), localPath)
+				if err := os.WriteFile(localPath+".upload.lock", []byte(interim), 0600); err != nil {
+					t.Fatalf("plant an interim-format lock: %v", err)
+				}
+			},
+			names: []string{lockHost, lockOwner},
 		},
 		{
 			name: "a lock written while a guard file decided it",
 			plant: func(t *testing.T, localPath string) {
-				// The interim format of this release: host, user and the guard
-				// whose OS lock its writer held. No guard file survives every
-				// cleaner, so the field is gone and a record carrying it names
-				// no installation — refused once, by hand, rather than cleared.
-				// No build that wrote one was released.
+				// The other interim format: host, user and the guard whose OS
+				// lock its writer held.
 				interim := fmt.Sprintf("{\n  \"process_id\": %d,\n  \"owner_token\": %q,\n  \"host\": %q,\n  \"owner\": %q,\n  \"guard\": %q,\n  \"acquired_at\": %q,\n  \"local_path\": %q\n}",
 					deadPID, "owner-elsewhere", lockHost, lockOwner,
 					filepath.Join(t.TempDir(), "elsewhere.guard"),
@@ -1283,7 +1352,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherInstallation(t *testing.T) {
 			plant: func(t *testing.T, localPath string) {
 				t.Helper()
 				// The shipped format, literally: process_id, owner_token,
-				// acquired_at, local_path and no installation of any kind.
+				// acquired_at, local_path and no identity of any kind.
 				shipped := fmt.Sprintf("{\n  \"process_id\": %d,\n  \"owner_token\": %q,\n  \"acquired_at\": %q,\n  \"local_path\": %q\n}",
 					deadPID, "owner-elsewhere", acquired.Format(time.RFC3339Nano), localPath)
 				if err := os.WriteFile(localPath+".upload.lock", []byte(shipped), 0600); err != nil {
@@ -1299,6 +1368,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherInstallation(t *testing.T) {
 			// The owner is gone as far as this machine can tell, which is the
 			// judgement that used to be enough to clear it.
 			withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+			withPIDDomain(t, thisDomain)
 			localPath := filepath.Join(t.TempDir(), "testfile.bin")
 			lockFilePath := localPath + ".upload.lock"
 			testCase.plant(t, localPath)
@@ -1306,7 +1376,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherInstallation(t *testing.T) {
 			lock, err := AcquireUploadLock(localPath)
 			if err == nil {
 				ReleaseUploadLock(lock)
-				t.Fatal("cleared a lock whose PID belongs to an installation this one cannot see into")
+				t.Fatal("cleared a lock whose PID was numbered somewhere this process cannot see into")
 			}
 			if errors.Is(err, ErrUploadLockUnavailable) {
 				t.Errorf("a lock that exists is reported as no lock at all: %v", err)
@@ -1330,7 +1400,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherInstallation(t *testing.T) {
 }
 
 // TestAcquireUploadLock_RefusesALockThatNamesNoOwner is the last shape a record
-// can take: a file its creator never wrote into. There is no installation, user
+// can take: a file its creator never wrote into. There is no domain, user
 // or PID in it to judge, and no age at which that changes — a creator between
 // its O_EXCL and its write presents exactly this, and so does a file left by
 // something that is not this program at all. Age alone used to be enough to

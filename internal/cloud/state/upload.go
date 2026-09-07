@@ -25,8 +25,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/rescale/rescale-int/internal/config"
 )
 
 // UploadResumeState tracks the state of an in-progress upload for resumption.
@@ -275,17 +273,16 @@ type uploadLockState struct {
 	ProcessID  int    `json:"process_id"`
 	OwnerToken string `json:"owner_token,omitempty"`
 	// Host and Owner name the machine and the user the owning process runs as,
-	// and InstallID the installation it belongs to. A PID is only meaningful
-	// inside one installation: two machines can be configured with the same
-	// hostname and can carry the same uid, so host and user are what an
-	// operator reads and the installation identifier is what decides whether
-	// the PID may be tested for liveness at all. A record carrying no
-	// installation identifier was written before v4.9.9 — or by a v4.9.9
-	// process that had nowhere to keep one — and is never reclaimed
-	// automatically.
+	// and PIDDomain the set of processes its PID is numbered among. A PID is
+	// only meaningful inside one such domain: two machines can be configured
+	// with the same hostname and can carry the same uid, so host and user are
+	// what an operator reads, and the domain is what decides whether the PID
+	// may be tested for liveness at all. A record carrying no domain was
+	// written before v4.9.9 — or by a v4.9.9 process whose system would not
+	// name one — and is never reclaimed automatically.
 	Host       string    `json:"host,omitempty"`
 	Owner      string    `json:"owner,omitempty"`
-	InstallID  string    `json:"install_id,omitempty"`
+	PIDDomain  string    `json:"pid_domain,omitempty"`
 	AcquiredAt time.Time `json:"acquired_at"`
 	LocalPath  string    `json:"local_path"`
 }
@@ -410,10 +407,11 @@ func localLockKey(lockFilePath string) string {
 //
 // An existing lock is only taken over when its owner is provably gone, never
 // because it is old: a multi-hour upload is still an owner — and only when that
-// owner belongs to this installation, because that is the only place a PID can
-// be tested for liveness. Anything else — another installation, a record written
-// before this version, a file its creator never wrote a record into — is refused
-// with the file to delete rather than taken.
+// owner was numbered among the same processes this one is, because that is the
+// only place a PID can be tested for liveness. Anything else — another machine
+// or PID namespace, a record written before this version, a file its creator
+// never wrote a record into — is refused with the file to delete rather than
+// taken.
 func AcquireUploadLock(localPath string) (*UploadLock, error) {
 	lockFilePath := lockFilePathFor(localPath)
 
@@ -426,7 +424,7 @@ func AcquireUploadLock(localPath string) (*UploadLock, error) {
 		OwnerToken: processLockToken,
 		Host:       lockHost,
 		Owner:      lockOwner,
-		InstallID:  currentInstallID(),
+		PIDDomain:  currentPIDDomain(),
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -435,19 +433,6 @@ func AcquireUploadLock(localPath string) (*UploadLock, error) {
 		return nil, err
 	}
 	return lock, nil
-}
-
-// currentInstallID names the installation this process belongs to, or nothing
-// when there is nowhere to keep the identifier. Nothing is lost for creation:
-// only reclamation consults it, so a process without one takes locks as usual
-// and reclaims none — and the records it writes are reclaimed by nobody either,
-// which is the safe direction for both.
-func currentInstallID() string {
-	id, err := config.InstallID()
-	if err != nil {
-		return ""
-	}
-	return id
 }
 
 // acquireLockFile creates the lock file, or reclaims one whose owner is gone and
@@ -556,15 +541,15 @@ func reclaimStaleLock(lockFilePath, localPath string, owner uploadLockState, dat
 		// presents exactly this, and waiting out a grace period only turns a
 		// live upload into one two processes run.
 		return nil, unidentifiedLockError(localPath, lockFilePath, judged)
-	case !inThisInstallation(existing, owner.InstallID):
+	case !inThisPIDDomain(existing, owner.PIDDomain):
 		return nil, foreignLockError(localPath, lockFilePath, existing)
 	case existing.ProcessID != owner.ProcessID && isProcessRunning(existing.ProcessID):
 		return nil, fmt.Errorf("upload locked by another process (PID %d) since %s",
 			existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
 	}
 
-	// Nothing owns it, and it was written by this installation — so the PID it
-	// names is one this machine could test. A lock naming our own PID cannot
+	// Nothing owns it, and it was written in this PID domain — so the PID it
+	// names is one this process could test. A lock naming our own PID cannot
 	// belong to a live owner other than us, and a live one of ours would have
 	// been caught by the in-process claim before we got here: either it is ours
 	// and released, or the OS gave us a dead process's PID, and refusing would
@@ -573,21 +558,23 @@ func reclaimStaleLock(lockFilePath, localPath string, owner uploadLockState, dat
 	return takeStaleLock(lockFilePath, localPath, owner, data, record)
 }
 
-// inThisInstallation reports whether a record was written by the installation
-// this process belongs to, which is the only place its PID means anything. Host
-// and user do not establish that: two machines can be configured with one
-// hostname and can carry one uid, and a PID recorded on one of them names a
-// different process — or none — on the other. A record naming no installation
-// was written before v4.9.9, when there was none to name.
-func inThisInstallation(existing uploadLockState, installID string) bool {
-	return installID != "" && existing.InstallID == installID
+// inThisPIDDomain reports whether a record was written among the processes this
+// one is numbered with, which is the only place its PID means anything. Host and
+// user do not establish that: two machines can be configured with one hostname
+// and can carry one uid, and a PID recorded on one of them names a different
+// process — or none — on the other. Neither does anything this program writes
+// down: a home directory mounted on both machines carries one file to both. A
+// record naming no domain was written before v4.9.9, when there was none to
+// name.
+func inThisPIDDomain(existing uploadLockState, domain string) bool {
+	return domain != "" && existing.PIDDomain == domain
 }
 
 // foreignLockError refuses a lock that this process must not clear on its own.
-// A PID recorded by another installation names a process of ours or none at all,
-// so its liveness establishes nothing, and two installations reclaiming one
-// record could each remove the other's replacement. What is left is to say who
-// holds it and leave the decision to whoever can make it.
+// A PID recorded in another domain names a process of ours or none at all, so
+// its liveness establishes nothing, and two domains reclaiming one record could
+// each remove the other's replacement. What is left is to say who holds it and
+// leave the decision to whoever can make it.
 func foreignLockError(localPath, lockFilePath string, existing uploadLockState) error {
 	return fmt.Errorf("upload of %s is locked by PID %d on host %s as user %s since %s; "+
 		"if that upload is not running, delete %s to release it",
@@ -596,8 +583,8 @@ func foreignLockError(localPath, lockFilePath string, existing uploadLockState) 
 }
 
 // unidentifiedLockError refuses a lock file that names no owner at all: there is
-// no installation, user or PID in it to judge, so nothing here can establish
-// that clearing it is safe, however long ago it was written.
+// no domain, user or PID in it to judge, so nothing here can establish that
+// clearing it is safe, however long ago it was written.
 func unidentifiedLockError(localPath, lockFilePath string, judged os.FileInfo) error {
 	return fmt.Errorf("upload of %s is locked by a record that names no owner, written %s; "+
 		"if no upload of that file is running, delete %s to release it",

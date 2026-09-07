@@ -26,25 +26,6 @@ import (
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
-// TestMain keeps the installation identifier the upload locks these tests take
-// out of the configuration directory of whoever runs them. That directory is
-// resolved from the environment, which is the only handle this package has on it
-// — the seam belongs to internal/cloud/state — and only the directory made here
-// is removed.
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "upload-lock-config-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create a configuration directory for the tests: %v\n", err)
-		os.Exit(1)
-	}
-	for _, name := range []string{"HOME", "USERPROFILE", "LOCALAPPDATA"} {
-		os.Setenv(name, dir)
-	}
-	code := m.Run()
-	_ = os.RemoveAll(dir)
-	os.Exit(code)
-}
-
 // TestUploadLockLeavesNothingBesideTheSource pins, from the package that takes
 // the real upload locks, that taking one puts nothing in the user's own
 // directory but the lock itself. Whatever a reclamation needs beside the source
