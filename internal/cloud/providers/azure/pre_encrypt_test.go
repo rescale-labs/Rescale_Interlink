@@ -968,3 +968,31 @@ func TestPreEncryptBlockBlobConcurrentValidatesResumeState(t *testing.T) {
 	}
 	backend.assertCommittedBlocksMatch(t, expectedBlockHashes(fixture.data, resumeBlockSize))
 }
+
+// TestPreEncryptBlockBlobSequentialValidatesResumeState is the same expiry on
+// the sequential path, which a checkpoint the concurrent path wrote reaches
+// whenever the thread count changes between runs.
+func TestPreEncryptBlockBlobSequentialValidatesResumeState(t *testing.T) {
+	backend, server := newFakeBlobBackend(t)
+	azureClient := newTestAzureClient(t, server)
+
+	encryptedSize := 3 * resumeBlockSize
+	fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+		PartSize:   resumeBlockSize,
+		WorkerCap:  4,
+		QueueDepth: 4,
+	})
+	fixture.createdAt = time.Now().Add(-state.MaxResumeAge - time.Hour)
+	fixture.writeState(t, resumeBlockSize,
+		[]string{testBlockID(0), testBlockID(1)}, 2*resumeBlockSize)
+
+	if err := fixture.run(t, azureClient, false); err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	want := []string{testBlockID(0), testBlockID(1), testBlockID(2)}
+	if got := backend.stagedBlockIDs(); !slices.Equal(got, want) {
+		t.Errorf("staged %d block(s), want the whole file re-sent after an expired checkpoint", len(got))
+	}
+	backend.assertCommittedBlocksMatch(t, expectedBlockHashes(fixture.data, resumeBlockSize))
+}

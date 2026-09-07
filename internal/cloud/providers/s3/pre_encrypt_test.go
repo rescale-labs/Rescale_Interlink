@@ -859,6 +859,9 @@ type s3ResumeFixture struct {
 	data          []byte
 	params        transfer.EncryptedFileUploadParams
 	objectKey     string
+	// createdAt is when the interrupted attempt opened its upload, which is what
+	// the seven-day expiry both backends enforce is measured from.
+	createdAt time.Time
 }
 
 func newS3ResumeFixture(t *testing.T, encryptedSize int64, plan *resources.UploadPlan) *s3ResumeFixture {
@@ -883,6 +886,7 @@ func newS3ResumeFixture(t *testing.T, encryptedSize int64, plan *resources.Uploa
 		data:          data,
 		params:        params,
 		objectKey:     state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix),
+		createdAt:     time.Now(),
 	}
 }
 
@@ -901,7 +905,7 @@ func (f *s3ResumeFixture) writeState(t *testing.T, partSize int64, completed []s
 		CompletedParts: completed,
 		PartSize:       partSize,
 		RandomSuffix:   f.params.RandomSuffix,
-		CreatedAt:      time.Now(),
+		CreatedAt:      f.createdAt,
 		LastUpdate:     time.Now(),
 		StorageType:    "S3Storage",
 	})
@@ -1058,6 +1062,49 @@ func TestPreEncryptResumeWithoutPartSizeStartsFresh(t *testing.T) {
 			}
 			backend.assertPartsMatch(t, expectedPartHashes(fixture.data, oversizedPartSize))
 		})
+	}
+}
+
+// TestPreEncryptSequentialValidatesResumeState: the sequential path judged a
+// checkpoint on the object key and the part geometry alone, so it continued one
+// S3 had already dropped — an unfinished multipart upload lives seven days — and
+// completed a part list naming parts the service no longer holds. A checkpoint
+// the concurrent path wrote lands here whenever the thread count changes between
+// runs, and that path has always run this same state validation first.
+func TestPreEncryptSequentialValidatesResumeState(t *testing.T) {
+	backend, server := newFakeS3Backend(t)
+	s3Client := newTestS3Client(t, server)
+
+	encryptedSize := 2*oversizedPartSize + 4*1024*1024
+	fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+		PartSize:   oversizedPartSize,
+		WorkerCap:  4,
+		QueueDepth: 4,
+	})
+	fixture.createdAt = time.Now().Add(-state.MaxResumeAge - time.Hour)
+	fixture.writeState(t, oversizedPartSize, []state.CompletedPart{
+		{PartNumber: 1, ETag: "etag-1"},
+		{PartNumber: 2, ETag: "etag-2"},
+	}, 2*oversizedPartSize)
+
+	if err := fixture.run(t, s3Client, false); err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	if got := backend.stagedPartNumbers(); !slices.Equal(got, []int32{1, 2, 3}) {
+		t.Errorf("staged parts %v, want the whole file re-sent after an expired checkpoint", got)
+	}
+	backend.assertPartsMatch(t, expectedPartHashes(fixture.data, oversizedPartSize))
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if !slices.Equal(backend.committed, []int32{1, 2, 3}) {
+		t.Errorf("completed with parts %v, want the whole object", backend.committed)
+	}
+	for _, number := range backend.committed {
+		if _, staged := backend.parts[number]; !staged {
+			t.Errorf("completed part %d was never staged", number)
+		}
 	}
 }
 

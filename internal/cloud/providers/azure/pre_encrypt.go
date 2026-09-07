@@ -255,7 +255,15 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 	var createdAt time.Time
 
 	if existingState != nil && existingState.ObjectKey == pathForRescale {
-		if resume, ok := resumeAzureBlocks(existingState, encryptedSize); ok {
+		// The object key and the block geometry say the checkpoint describes this
+		// upload; they say nothing about whether it still describes this file, or
+		// whether the service still holds the blocks — uncommitted blocks live
+		// seven days. A checkpoint the concurrent path wrote arrives here whenever
+		// the thread count changes between runs, and that path validates first.
+		resume, ok := resumeAzureBlocks(existingState, encryptedSize)
+		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
+			log.Printf("Resume state validation failed, starting fresh: %v", err)
+		} else if ok {
 			blockSize = resume.blockSize
 			totalBlocks = transfer.CalculateTotalParts(encryptedSize, blockSize)
 			alreadyStaged = resume.completed

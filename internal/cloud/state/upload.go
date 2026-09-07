@@ -33,9 +33,11 @@ type UploadResumeState struct {
 	// SourceModTime is the source file's modification time when the encrypted
 	// copy was made. Size alone cannot tell an edited file from the one this
 	// ciphertext describes, and resuming across such an edit would upload the
-	// old bytes under a registration describing the new ones. Absent in state
-	// written before v4.9.9, which is why a state without it is not resumed.
-	SourceModTime  time.Time       `json:"source_mod_time,omitempty"`
+	// old bytes under a registration describing the new ones. State written
+	// before v4.9.9 has no such key at all, and this version writes the zero
+	// time when it has none to record; either way the loader reads back a zero
+	// value, which is why such a state is not resumed.
+	SourceModTime  time.Time       `json:"source_mod_time"`
 	UploadedBytes  int64           `json:"uploaded_bytes"`  // Bytes uploaded so far
 	CompletedParts []CompletedPart `json:"completed_parts"` // S3 parts
 	BlockIDs       []string        `json:"block_ids"`       // Azure uncommitted block IDs

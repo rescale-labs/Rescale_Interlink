@@ -691,6 +691,46 @@ const shippedStreamingUploadState = `{
   "lock_acquired_at": "%s"
 }`
 
+// TestSourceModTimeIsWrittenEvenWhenZero pins what an unset modification time
+// actually costs on disk. encoding/json has no empty case for a struct, so the
+// zero time.Time is always written out; what makes such a state unresumable is
+// the loader's IsZero check, not a missing key.
+func TestSourceModTimeIsWrittenEvenWhenZero(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "testfile.bin")
+	if err := os.WriteFile(localPath, []byte("test content"), 0600); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	if err := SaveUploadState(&UploadResumeState{LocalPath: localPath}, localPath); err != nil {
+		t.Fatalf("SaveUploadState failed: %v", err)
+	}
+	raw, err := os.ReadFile(localPath + ".upload.resume")
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("the sidecar is not an object: %v", err)
+	}
+
+	value, present := fields["source_mod_time"]
+	if !present {
+		t.Fatal("source_mod_time is missing from the sidecar")
+	}
+	if string(value) != `"0001-01-01T00:00:00Z"` {
+		t.Errorf("an unset source_mod_time is written as %s", value)
+	}
+
+	loaded, err := LoadUploadState(localPath)
+	if err != nil || loaded == nil {
+		t.Fatalf("LoadUploadState failed: %v", err)
+	}
+	if !loaded.SourceModTime.IsZero() {
+		t.Error("the loader read a modification time back out of a state that carries none")
+	}
+}
+
 // TestShippedUploadStateLoadsAndCarriesNoResumePoint pins what a sidecar from
 // the shipped release means to this version. It has to parse — a state that
 // failed to load would be reported as a corrupt file rather than a fresh upload

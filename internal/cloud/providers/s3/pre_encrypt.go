@@ -153,7 +153,15 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	var createdAt time.Time
 
 	if existingState != nil && existingState.UploadID != "" && existingState.ObjectKey == objectKey {
-		if resume, ok := resumeS3Parts(existingState, encryptedSize); ok {
+		// The object key and the part geometry say the checkpoint describes this
+		// upload; they say nothing about whether it still describes this file, or
+		// whether S3 still holds the parts — an unfinished multipart upload lives
+		// seven days. A checkpoint the concurrent path wrote arrives here whenever
+		// the thread count changes between runs, and that path validates first.
+		resume, ok := resumeS3Parts(existingState, encryptedSize)
+		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
+			log.Printf("Resume state validation failed, starting fresh: %v", err)
+		} else if ok {
 			uploadID = existingState.UploadID
 			partSize = resume.partSize
 			totalParts = transfer.CalculateTotalParts(encryptedSize, partSize)
