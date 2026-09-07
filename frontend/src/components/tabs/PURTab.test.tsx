@@ -86,6 +86,15 @@ const doneRow = (jobName: string, index = 2): JobRow => ({
   error: '',
 })
 
+// An ordinary failure: the create call came back with a refusal.
+const failedRow = (jobName: string, index = 3): JobRow => ({
+  ...unconfirmedRow(jobName, index),
+  createStatus: 'failed',
+  submitStatus: 'failed',
+  status: 'failed',
+  error: 'create rejected: invalid analysis code',
+})
+
 describe('PURTab results for unconfirmed creations', () => {
   it('names the unconfirmed creations instead of reporting a clean completion', () => {
     useRunStore.setState({
@@ -136,7 +145,20 @@ describe('PURTab results for unconfirmed creations', () => {
 
     render(<PURTab />)
 
-    expect(screen.queryByText(/jobs failed \(/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /jobs? failed/i })).toBeNull()
+  })
+
+  // Control for the assertion above: the same query finds the panel when the
+  // run really did fail, so its absence there is evidence and not a blind spot.
+  it('still shows the failure panel for an ordinary failure', () => {
+    useJobStore.setState({
+      workflowState: 'completed',
+      jobRows: [failedRow('Run_1'), doneRow('Run_2')],
+    })
+
+    render(<PURTab />)
+
+    expect(screen.getByRole('button', { name: /jobs? failed/i })).toHaveTextContent('1 job failed')
   })
 
   it('does not count the ambiguity as a failure in the fallback tally', () => {

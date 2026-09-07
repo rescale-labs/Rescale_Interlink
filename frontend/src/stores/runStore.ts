@@ -64,8 +64,12 @@ function countRows(rows: JobRow[]): TerminalCounts {
     completed: rows.filter((j) =>
       j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
     ).length,
+    // A create call answered with a rejection is a failure even while the row's
+    // submit status is a poll's stale 'creating' — the same answer that stops
+    // isUnconfirmedRow counting the row as unresolved.
     failed: rows.filter((j) =>
-      j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
+      j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' ||
+      j.createStatus === 'failed'
     ).length,
     unconfirmed: rows.filter(isUnconfirmedRow).length,
   }
@@ -557,12 +561,20 @@ export const useRunStore = create<RunStore>((set, get) => ({
         get().stopPolling()
         return
       }
+      const { runId } = activeRun
 
       try {
         const [status, rows] = await Promise.all([
           App.GetRunStatus(),
           App.GetJobRows(),
         ])
+
+        // The run this poll was issued for may have finished, been cancelled or
+        // been replaced by another while the call was outstanding. Its snapshot
+        // is older than whatever ended the run, so it is dropped rather than
+        // applied over the finalized rows and counts.
+        const settled = get().activeRun
+        if (!settled || settled.status !== 'active' || settled.runId !== runId) return
 
         set((prev) => {
           if (!prev.activeRun) return prev

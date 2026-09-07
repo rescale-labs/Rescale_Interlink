@@ -141,6 +141,33 @@ function completeEvent(overrides: Record<string, unknown> = {}) {
   }
 }
 
+// A poll whose two bindings answer only when the test says so, so that a run
+// can finish, be cancelled or be replaced while the poll is outstanding.
+function deferredPoll() {
+  let resolveStatus!: (value: unknown) => void
+  let resolveRows!: (value: unknown) => void
+  app.GetRunStatus.mockReturnValue(new Promise((r) => { resolveStatus = r }))
+  app.GetJobRows.mockReturnValue(new Promise((r) => { resolveRows = r }))
+  return {
+    answer: async (status: unknown, rows: JobRow[]) => {
+      resolveStatus(status)
+      resolveRows(rows)
+      // Let the poll's continuation run to completion.
+      for (let i = 0; i < 10; i++) await Promise.resolve()
+    },
+  }
+}
+
+// What GetRunStatus reported while the run was still going.
+const runningStatus = {
+  state: 'running',
+  totalJobs: 1,
+  successJobs: 0,
+  failedJobs: 0,
+  unconfirmedJobs: 1,
+  durationMs: 500,
+}
+
 afterEach(() => {
   useRunStore.getState().stopPolling()
   useRunStore.setState({
@@ -153,6 +180,7 @@ afterEach(() => {
   })
   runtime.handlers.clear()
   vi.clearAllMocks()
+  vi.useRealTimers()
 })
 
 describe('isUnconfirmedRow', () => {
@@ -251,6 +279,22 @@ describe('runStore finalization: completion event', () => {
     const [run] = useRunStore.getState().completedRuns
     expect(run.finalStatus).toBe('unconfirmed')
     expect(run.unconfirmedJobs).toBe(2)
+  })
+
+  it('counts a definite create rejection as a failure when the event omits the counts', () => {
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_10', 'pur', 1, [
+      staleCreatingRow('job_1', { createStatus: 'failed', error: 'create rejected' }),
+    ])
+
+    // An older backend: the event reports on a run but carries no counts.
+    runtime.handlers.get('interlink:complete')!({ timestamp: '', totalJobs: 1, durationMs: 1000 })
+
+    const [run] = useRunStore.getState().completedRuns
+    expect(run.finalStatus).toBe('failed')
+    expect(run.failedJobs).toBe(1)
+    expect(run.unconfirmedJobs).toBe(0)
   })
 
   it('keeps reporting a failed run as failed', () => {
@@ -374,6 +418,30 @@ describe('runStore finalization: polling fallback', () => {
     expect(run.unconfirmedJobs).toBe(1)
   })
 
+  it('counts a definite create rejection as a failure when the engine reports on no run', async () => {
+    // Stale 'creating' submit status, tar and upload done, and a create call the
+    // platform answered with a rejection: neither completed, nor unconfirmed.
+    const rows = [staleCreatingRow('job_1', { createStatus: 'failed', error: 'create rejected' })]
+    app.GetJobRows.mockResolvedValue(rows)
+    app.GetRunStatus.mockResolvedValue({
+      state: 'idle',
+      totalJobs: 0,
+      successJobs: 0,
+      failedJobs: 0,
+      unconfirmedJobs: 0,
+      durationMs: 0,
+    })
+
+    useRunStore.getState().registerRun('run_10p', 'pur', 1, rows)
+    useRunStore.getState().startPolling(60_000)
+
+    await vi.waitFor(() => expect(useRunStore.getState().completedRuns).toHaveLength(1))
+    const [run] = useRunStore.getState().completedRuns
+    expect(run.finalStatus).toBe('failed')
+    expect(run.failedJobs).toBe(1)
+    expect(run.unconfirmedJobs).toBe(0)
+  })
+
   it('leaves an ordinary idle run completed', async () => {
     const rows = [doneRow('job_1'), doneRow('job_2')]
     app.GetJobRows.mockResolvedValue(rows)
@@ -391,5 +459,103 @@ describe('runStore finalization: polling fallback', () => {
 
     await vi.waitFor(() => expect(useRunStore.getState().completedRuns).toHaveLength(1))
     expect(useRunStore.getState().completedRuns[0].finalStatus).toBe('completed')
+  })
+})
+
+describe('runStore polling: a poll still outstanding when the run ends', () => {
+  it('leaves the counts the completion event finalized alone', async () => {
+    // The rows are the snapshot taken while the create call was outstanding;
+    // the completion event carries the answer to it.
+    const stale = [staleCreatingRow('job_1')]
+    const poll = deferredPoll()
+
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_c1', 'pur', 1, stale)
+    store.startPolling(60_000)
+
+    runtime.handlers.get('interlink:complete')!(
+      completeEvent({ totalJobs: 1, successJobs: 1, failedJobs: 0, unconfirmedJobs: 0 })
+    )
+    expect(useRunStore.getState().activeRun?.completedJobs).toBe(1)
+
+    await poll.answer(runningStatus, stale)
+
+    const run = useRunStore.getState().activeRun!
+    expect(run.status).toBe('completed')
+    expect(run.completedJobs).toBe(1)
+    expect(run.unconfirmedJobs).toBe(0)
+  })
+
+  it('leaves the counts of a failed run alone', async () => {
+    const stale = [staleCreatingRow('job_1', { error: 'create rejected' })]
+    const poll = deferredPoll()
+
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_c2', 'pur', 1, stale)
+    store.startPolling(60_000)
+
+    runtime.handlers.get('interlink:complete')!(
+      completeEvent({ totalJobs: 1, successJobs: 0, failedJobs: 1, unconfirmedJobs: 0 })
+    )
+
+    await poll.answer(runningStatus, stale)
+
+    const run = useRunStore.getState().activeRun!
+    expect(run.status).toBe('failed')
+    expect(run.failedJobs).toBe(1)
+    expect(run.unconfirmedJobs).toBe(0)
+  })
+
+  it('does not take a cancelled run back to the snapshot it was cancelled from', async () => {
+    // Cancel waits five seconds for the completion event; fake timers keep that
+    // wait out of the test without leaving it pending afterwards.
+    vi.useFakeTimers()
+    const before = [baseRow({ jobName: 'job_1' }), baseRow({ jobName: 'job_2' })]
+    const poll = deferredPoll()
+
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_c3', 'pur', 2, before)
+    store.startPolling(60_000)
+
+    // The first job finishes after the poll was issued, then the user cancels.
+    runtime.handlers.get('interlink:state_change')!({
+      timestamp: '', jobName: 'job_1', oldStatus: 'creating', newStatus: 'completed',
+      stage: 'submit', jobId: 'job-1', uploadProgress: 0,
+    })
+    expect(useRunStore.getState().activeRun?.completedJobs).toBe(1)
+    void store.cancelRun()
+    expect(useRunStore.getState().activeRun?.status).toBe('cancelled')
+
+    await poll.answer(runningStatus, before)
+
+    const run = useRunStore.getState().activeRun!
+    expect(run.status).toBe('cancelled')
+    expect(run.completedJobs).toBe(1)
+    expect(run.jobRows[0].submitStatus).toBe('completed')
+  })
+
+  it('does not apply the snapshot of a run that another run has replaced', async () => {
+    const stale = [staleCreatingRow('job_a')]
+    const poll = deferredPoll()
+
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_a', 'pur', 1, stale)
+    store.startPolling(60_000)
+
+    runtime.handlers.get('interlink:complete')!(
+      completeEvent({ totalJobs: 1, successJobs: 1, failedJobs: 0, unconfirmedJobs: 0 })
+    )
+    store.registerRun('run_b', 'pur', 1, [baseRow({ jobName: 'job_b' })])
+
+    await poll.answer(runningStatus, stale)
+
+    const run = useRunStore.getState().activeRun!
+    expect(run.runId).toBe('run_b')
+    expect(run.jobRows.map((r) => r.jobName)).toEqual(['job_b'])
+    expect(run.unconfirmedJobs).toBe(0)
   })
 })

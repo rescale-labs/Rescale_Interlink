@@ -81,6 +81,39 @@ describe('SingleJobTab with an unconfirmed creation', () => {
     expect(useSingleJobStore.getState().state).toBe('initial')
   })
 
+  it('takes the workflow to its final step and offers no cancellation', () => {
+    singleRun('unconfirmed', [unconfirmedRow])
+
+    render(<SingleJobTab />)
+
+    // The run is over: the step indicator is on 'Complete' and the view that
+    // reports the ambiguity is a terminal one.
+    expect(useSingleJobStore.getState().state).toBe('completed')
+    expect(screen.queryByRole('button', { name: /^cancel$/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /submit another job/i })).toBeInTheDocument()
+  })
+
+  it('sends a cancelled run to the failure view, not the unconfirmed one', () => {
+    singleRun('cancelled', [row({ submitStatus: 'cancelled', status: 'cancelled', jobId: '' })])
+
+    render(<SingleJobTab />)
+
+    expect(useSingleJobStore.getState().state).toBe('failed')
+    expect(screen.getByText('Job Submission Failed')).toBeInTheDocument()
+    expect(screen.queryByText(/could not be confirmed as created/)).toBeNull()
+  })
+
+  it('sends a failed run to the failure view', () => {
+    singleRun('failed', [row({ submitStatus: 'failed', status: 'failed', jobId: '', error: 'create rejected' })])
+
+    render(<SingleJobTab />)
+
+    expect(useSingleJobStore.getState().state).toBe('failed')
+    expect(screen.getByText('Job Submission Failed')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument()
+    expect(screen.queryByText(/could not be confirmed as created/)).toBeNull()
+  })
+
   it('leaves an ordinary completed single job alone', () => {
     singleRun('completed', [row()])
 

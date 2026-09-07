@@ -1004,7 +1004,7 @@ export function SingleJobTab() {
     // Executing — status-aware: adapts header and buttons when run transitions to terminal state
     if (state === 'executing') {
       const isTerminal = activeRun && activeRun.runType === 'single' &&
-        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled')
+        isTerminalRunState(activeRun.status)
 
       return (
         <div className="flex flex-col items-center justify-center h-full">
