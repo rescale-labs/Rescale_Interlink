@@ -2,9 +2,12 @@ package state
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/models"
 )
@@ -119,5 +122,91 @@ func TestHandedOutStateDoesNotReachTheManager(t *testing.T) {
 					index, stored.JobID)
 			}
 		})
+	}
+}
+
+// TestStateWrittenBeforeIndeterminateLoadsUnchanged pins the compatibility
+// claim behind SubmitStatusIndeterminate: it is another value in a column that
+// already exists, so a state file an earlier binary wrote reads back exactly as
+// it did. The fixture is literal for that reason — a file this test constructed
+// through the manager would only prove the manager agrees with itself.
+func TestStateWrittenBeforeIndeterminateLoadsUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.csv")
+	fixture := "Index,JobName,Directory,TarPath,TarStatus,FileID,UploadStatus,JobID,SubmitStatus,ExtraFileIDs,ErrorMessage,LastUpdated\n" +
+		"1,job_1,/runs/Run_1,/runs/job_1.tar.gz,success,file-1,success,job-abc,success,extra-1,,2026-01-02T03:04:05Z\n" +
+		"2,job_2,/runs/Run_2,,pending,,pending,,failed,,tar failed,2026-01-02T03:04:06Z\n"
+	if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	mgr := NewManager(path)
+	if err := mgr.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := map[int]models.JobState{
+		1: {Index: 1, JobName: "job_1", Directory: "/runs/Run_1", TarPath: "/runs/job_1.tar.gz",
+			TarStatus: "success", FileID: "file-1", UploadStatus: "success", JobID: "job-abc",
+			SubmitStatus: "success", ExtraFileIDs: "extra-1",
+			LastUpdated: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		2: {Index: 2, JobName: "job_2", Directory: "/runs/Run_2", TarStatus: "pending",
+			UploadStatus: "pending", SubmitStatus: "failed", ErrorMessage: "tar failed",
+			LastUpdated: time.Date(2026, 1, 2, 3, 4, 6, 0, time.UTC)},
+	}
+	for index, expected := range want {
+		got := mgr.GetState(index)
+		if got == nil {
+			t.Fatalf("job %d missing after load", index)
+		}
+		if !got.LastUpdated.Equal(expected.LastUpdated) {
+			t.Errorf("job %d LastUpdated = %s, want %s", index, got.LastUpdated, expected.LastUpdated)
+		}
+		got.LastUpdated = expected.LastUpdated
+		if *got != expected {
+			t.Errorf("job %d loaded as %+v, want %+v", index, *got, expected)
+		}
+	}
+}
+
+// TestIndeterminateStatusSurvivesTheStateFile is the other half: the new value
+// is written and read back like any other, without changing the columns a
+// state file has.
+func TestIndeterminateStatusSurvivesTheStateFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.csv")
+	mgr := NewManager(path)
+	st := mgr.InitializeState(1, "job_1", "/runs/Run_1")
+	st.TarStatus = "success"
+	st.UploadStatus = "success"
+	st.SubmitStatus = SubmitStatusIndeterminate
+	st.ErrorMessage = "job may have been created"
+	if err := mgr.UpdateState(st); err != nil {
+		t.Fatalf("UpdateState: %v", err)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	header := strings.SplitN(string(written), "\n", 2)[0]
+	if got := len(strings.Split(header, ",")); got != 12 {
+		t.Errorf("state file header has %d columns, want the unchanged 12: %s", got, header)
+	}
+
+	reread := NewManager(path)
+	if err := reread.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := reread.GetState(1)
+	if got == nil {
+		t.Fatal("job 1 missing after reload")
+	}
+	if got.SubmitStatus != SubmitStatusIndeterminate {
+		t.Errorf("SubmitStatus = %q, want %q", got.SubmitStatus, SubmitStatusIndeterminate)
+	}
+	if got.ErrorMessage != "job may have been created" {
+		t.Errorf("ErrorMessage = %q, want it preserved", got.ErrorMessage)
+	}
+	if got.JobID != "" {
+		t.Errorf("JobID = %q, want empty", got.JobID)
 	}
 }

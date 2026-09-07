@@ -12,6 +12,15 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 )
 
+// SubmitStatusIndeterminate marks a job whose creation may or may not have
+// taken effect: the platform had the request and its answer never came back, so
+// there is no job ID to record and no way to tell "nothing was created" from
+// "created, and unknown to us". Creating it again would bill a duplicate.
+//
+// It is another SubmitStatus value rather than another column, so a state file
+// written before it — or by an older binary — loads exactly as it did.
+const SubmitStatusIndeterminate = "indeterminate"
+
 // Manager manages job state persistence
 type Manager struct {
 	filePath string

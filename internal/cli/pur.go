@@ -631,6 +631,10 @@ type purPipelineFlags struct {
 	sharedFiles     commonInputFileFlags
 	uploadTarget    uploadTargetFlags
 	dryRun          bool
+
+	// recreateIndeterminate says the user has checked the platform for the jobs
+	// a previous run could not confirm and found none of them there.
+	recreateIndeterminate bool
 }
 
 // register adds the shared flags. The --state and --dry-run descriptions are
@@ -647,6 +651,8 @@ func (f *purPipelineFlags) register(cmd *cobra.Command, stateUsage, dryRunUsage 
 	cmd.Flags().IntVar(&f.uploadWorkers, "upload-workers", 0, "Number of parallel upload workers (default from config)")
 	cmd.Flags().IntVar(&f.jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&f.rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
+	cmd.Flags().BoolVar(&f.recreateIndeterminate, "recreate-indeterminate", false,
+		"Create the jobs a previous run could not confirm; use only after checking the platform for them")
 	f.sharedFiles.register(cmd)
 	f.uploadTarget.register(cmd)
 	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, dryRunUsage)
@@ -717,13 +723,14 @@ func (f *purPipelineFlags) runPipeline(cfg *config.Config, jobs []models.JobSpec
 	}
 
 	pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
-		StateFile:        f.stateFile,
-		MultiPartMode:    f.multiPart,
-		CommonInputFiles: f.sharedFiles.commonInputFiles,
-		DecompressCommon: f.sharedFiles.decompressCommon,
-		UploadFolderID:   folderID,
-		FileTags:         fileTags,
-		RmTarOnSuccess:   f.rmTarOnSuccess,
+		StateFile:             f.stateFile,
+		MultiPartMode:         f.multiPart,
+		CommonInputFiles:      f.sharedFiles.commonInputFiles,
+		DecompressCommon:      f.sharedFiles.decompressCommon,
+		UploadFolderID:        folderID,
+		FileTags:              fileTags,
+		RmTarOnSuccess:        f.rmTarOnSuccess,
+		RecreateIndeterminate: f.recreateIndeterminate,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create pipeline: %w", err)
@@ -846,11 +853,21 @@ Example:
 				}
 
 				needsTar, needsUpload, needsCreate, needsSubmit, complete := 0, 0, 0, 0, 0
+				var unconfirmed []string
 				for i := range jobs {
 					idx := i + 1
 					st := stateMgr.GetState(idx)
 					if st == nil {
 						needsTar++
+						continue
+					}
+					if st.SubmitStatus == state.SubmitStatusIndeterminate {
+						// Work this resume will not do: the platform may hold the
+						// job already, so only --recreate-indeterminate creates it.
+						unconfirmed = append(unconfirmed, st.JobName)
+						if f.recreateIndeterminate {
+							needsCreate++
+						}
 						continue
 					}
 					if st.TarStatus == "success" && st.UploadStatus == "success" && st.JobID != "" && st.SubmitStatus == "success" {
@@ -874,6 +891,16 @@ Example:
 				fmt.Printf("Need job create:  %d\n", needsCreate)
 				fmt.Printf("Need submit:      %d\n", needsSubmit)
 				fmt.Printf("Remaining:        %d\n", needsTar+needsUpload+needsCreate+needsSubmit)
+				if len(unconfirmed) > 0 {
+					fmt.Printf("\nCould not be confirmed as created: %d\n", len(unconfirmed))
+					for _, name := range unconfirmed {
+						fmt.Printf("  %s\n", name)
+					}
+					if !f.recreateIndeterminate {
+						fmt.Println("Check the platform for a job of each name; resume with " +
+							"--recreate-indeterminate to create the ones that are not there.")
+					}
+				}
 				fmt.Println("\n(dry-run mode: no work was performed)")
 				return nil
 			}

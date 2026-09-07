@@ -89,6 +89,10 @@ type Pipeline struct {
 	// Cleanup options
 	rmTarOnSuccess bool // Delete local tar file after successful upload
 
+	// Create the jobs a previous run could not confirm; see
+	// PipelineOptions.RecreateIndeterminate.
+	recreateIndeterminate bool
+
 	// Resource and transfer management
 	resourceMgr *resources.Manager
 	transferMgr *transfer.Manager
@@ -297,6 +301,12 @@ type PipelineOptions struct {
 
 	// RmTarOnSuccess deletes the local tar file after a successful upload.
 	RmTarOnSuccess bool
+
+	// RecreateIndeterminate creates the jobs a previous run could not confirm
+	// (state.SubmitStatusIndeterminate) rather than reporting and skipping them.
+	// The caller is saying it has checked the platform and they are not there;
+	// nothing else sets it, so a resume never recreates one on its own.
+	RecreateIndeterminate bool
 }
 
 // NewPipeline creates a new pipeline.
@@ -381,11 +391,12 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		uploadWorkers:       cfg.UploadWorkers,
 		jobWorkers:          cfg.JobWorkers,
 		// Dynamic queue sizes based on worker count for better throughput
-		tarQueue:      make(chan *workItem, cfg.TarWorkers*constants.DefaultQueueMultiplier),
-		uploadQueue:   make(chan *workItem, cfg.UploadWorkers*constants.DefaultQueueMultiplier),
-		jobQueue:      make(chan *workItem, cfg.JobWorkers*constants.DefaultQueueMultiplier),
-		activeWorkers: make(map[string]int),
-		totalJobs:     len(jobs),
+		tarQueue:              make(chan *workItem, cfg.TarWorkers*constants.DefaultQueueMultiplier),
+		uploadQueue:           make(chan *workItem, cfg.UploadWorkers*constants.DefaultQueueMultiplier),
+		jobQueue:              make(chan *workItem, cfg.JobWorkers*constants.DefaultQueueMultiplier),
+		activeWorkers:         make(map[string]int),
+		totalJobs:             len(jobs),
+		recreateIndeterminate: opts.RecreateIndeterminate,
 	}, nil
 }
 
@@ -669,6 +680,28 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				p.stateMgr.UpdateState(state)
 			}
 
+			// A creation a previous run could not confirm is not retried on its
+			// own: the platform may be running and billing that job already, and
+			// nothing identifies it to look it up by. The job is named here with
+			// what to check, and creating it again takes an explicit flag from
+			// someone who has checked.
+			if mayAlreadyExist(state) {
+				if !p.recreateIndeterminate {
+					p.logf("WARN", "job", state.JobName,
+						"Skipped: a previous run could not confirm whether %q was created (%s). "+
+							"Check the platform for a job of that name; if there is none, resume "+
+							"with --recreate-indeterminate to create it.",
+						state.JobName, state.ErrorMessage)
+					continue
+				}
+				p.logf("WARN", "job", state.JobName,
+					"Creating %q again: --recreate-indeterminate says it is not on the platform",
+					state.JobName)
+				state.SubmitStatus = "pending"
+				state.ErrorMessage = ""
+				p.stateMgr.UpdateState(state)
+			}
+
 			item := &workItem{
 				index:   index,
 				jobSpec: jobSpec,
@@ -774,11 +807,32 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// is meant to keep.
 	os.Remove(p.tempDir)
 
+	// A job that may already exist is neither done nor failed, so it is counted
+	// and named on its own: only someone looking at the platform can say which
+	// of the two it is, and until they do the batch is not finished.
+	unconfirmed := p.indeterminateJobNames()
+	if len(unconfirmed) > 0 {
+		p.logf("WARN", "pipeline", "", "%d of %d job(s) could not be confirmed as created: %s. "+
+			"Check the platform for a job of each name; resume with --recreate-indeterminate "+
+			"to create the ones that are not there.",
+			len(unconfirmed), p.totalJobs, strings.Join(unconfirmed, ", "))
+	}
+
 	// A run where jobs failed is not a successful run. Without this the CLI
 	// prints "Pipeline completed" and exits 0 even when every job failed.
 	// A cancelled run is the user's own doing, so it is not reported as failure.
-	if failed := p.countFailedJobs(); failed > 0 && ctx.Err() == nil {
-		return fmt.Errorf("%d of %d job(s) failed", failed, p.totalJobs)
+	if ctx.Err() == nil {
+		var problems []string
+		if failed := p.countFailedJobs(); failed > 0 {
+			problems = append(problems, fmt.Sprintf("%d of %d job(s) failed", failed, p.totalJobs))
+		}
+		if len(unconfirmed) > 0 {
+			problems = append(problems, fmt.Sprintf("%d job(s) could not be confirmed as created: %s",
+				len(unconfirmed), strings.Join(unconfirmed, ", ")))
+		}
+		if len(problems) > 0 {
+			return errors.New(strings.Join(problems, "; "))
+		}
 	}
 
 	return nil
@@ -851,6 +905,54 @@ func (p *Pipeline) countFailedJobs() int {
 		}
 	}
 	return failed
+}
+
+// mayAlreadyExist reports a job whose creation a previous run could not
+// confirm. Written as a function because the feeder's own local variable hides
+// the state package.
+func mayAlreadyExist(st *models.JobState) bool {
+	return st != nil && st.SubmitStatus == state.SubmitStatusIndeterminate
+}
+
+// indeterminateJobNames names the jobs this run could not confirm the creation
+// of, in state order. They are counted apart from failures: a failure is work
+// to retry, while these may be running and billing already.
+func (p *Pipeline) indeterminateJobNames() []string {
+	if p.stateMgr == nil {
+		return nil
+	}
+	var names []string
+	for _, st := range p.stateMgr.GetAllStates() {
+		if mayAlreadyExist(st) {
+			names = append(names, st.JobName)
+		}
+	}
+	return names
+}
+
+// recordIndeterminateCreate durably records a creation whose outcome the
+// platform never confirmed: it had the request and its answer never came back.
+// There is no job ID to record and no name the platform enforces as unique to
+// look the job up by, so the run keeps the ambiguity rather than a failure it
+// would silently retry — a resume reports the job and skips it, and only
+// --recreate-indeterminate creates it again.
+func (p *Pipeline) recordIndeterminateCreate(item *workItem, cause error) {
+	item.state.SubmitStatus = state.SubmitStatusIndeterminate
+	item.state.ErrorMessage = cause.Error()
+
+	p.logf("ERROR", "job", item.state.JobName,
+		"Creation could not be confirmed: %v; this run will not create it again", cause)
+
+	if err := p.stateMgr.UpdateState(item.state); err != nil {
+		// The ambiguity did not reach disk, so a resume sees a job that was
+		// never attempted and creates it a second time.
+		p.logf("ERROR", "job", item.state.JobName,
+			"Could not record that %q may already exist (%v); check the platform for it "+
+				"before resuming, which would otherwise create it again",
+			item.state.JobName, err)
+	}
+	p.reportStateChange(item.state.JobName, "create", state.SubmitStatusIndeterminate, "",
+		item.state.ErrorMessage, 0.0)
 }
 
 // checkJobHasInputs rejects a job that would be created with nothing attached.
@@ -1429,6 +1531,11 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 
 				jobResp, err := p.apiClient.CreateJob(ctx, *jobReq)
 				if err != nil {
+					if errors.Is(err, api.ErrJobMayExist) {
+						p.recordIndeterminateCreate(item, err)
+						p.setActiveWorker("job", -1)
+						continue
+					}
 					p.logf("ERROR", "job", item.state.JobName, "Failed to create: %v", err)
 					item.state.SubmitStatus = "failed"
 					item.state.ErrorMessage = err.Error()
