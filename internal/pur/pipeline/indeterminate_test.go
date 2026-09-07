@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -301,5 +302,231 @@ func TestIndeterminateJobsAreCountedApartFromFailures(t *testing.T) {
 	got := p.indeterminateJobNames()
 	if len(got) != 1 || got[0] != "job_unconfirmed" {
 		t.Errorf("indeterminateJobNames() = %v, want [job_unconfirmed]", got)
+	}
+}
+
+// seedReadyToCreate writes the state of a job whose archive is built, uploaded
+// and still on disk, so job creation is the only stage left and nothing before
+// the create request needs to write state. That is what lets these tests take
+// the state file away at exactly the create.
+func seedReadyToCreate(t *testing.T, stateFile, tarPath string, spec models.JobSpec, submitStatus, errorMessage string) {
+	t.Helper()
+
+	if err := os.WriteFile(tarPath, []byte("archive"), 0o644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	mgr := state.NewManager(stateFile)
+	st := mgr.InitializeState(1, spec.JobName, spec.Directory)
+	st.TarStatus = "success"
+	st.TarPath = tarPath
+	st.UploadStatus = "success"
+	st.FileID = "file-123"
+	st.SubmitStatus = submitStatus
+	st.ErrorMessage = errorMessage
+	if err := mgr.UpdateState(st); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+}
+
+// answeringServer names every job it is asked to create and counts the
+// requests.
+func answeringServer(creates *int, mu *sync.Mutex) *httptest.Server {
+	return httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if !isCreate(r) {
+			w.WriteHeader(nethttp.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		mu.Lock()
+		*creates++
+		mu.Unlock()
+		w.WriteHeader(nethttp.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"job-abc"}`))
+	}))
+}
+
+// TestCreateIntentThatCannotBeRecordedSendsNoRequest covers the state file that
+// stops taking writes just before job creation. The create request is not
+// idempotent, so sending it without a durable record of having sent it leaves a
+// job the next resume creates a second time: the run must refuse the request
+// instead.
+func TestCreateIntentThatCannotBeRecordedSendsNoRequest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory does not refuse writes on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only directory")
+	}
+
+	root := namespaceTestRoot(t)
+	runDir := filepath.Join(root, "Run_1")
+	stateDir := filepath.Join(root, "state")
+	for _, dir := range []string{runDir, stateDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	var mu sync.Mutex
+	creates := 0
+	server := answeringServer(&creates, &mu)
+	defer server.Close()
+
+	stateFile := filepath.Join(stateDir, "state.csv")
+	spec := uploadedJobSpec(runDir)
+	seedReadyToCreate(t, stateFile, filepath.Join(root, "job_1.tar.gz"), spec, "pending", "")
+
+	// The state directory stops taking writes between the last checkpoint and
+	// the create.
+	if err := os.Chmod(stateDir, 0o500); err != nil {
+		t.Fatalf("chmod state dir: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(stateDir, 0o700) })
+
+	_, lines, runErr := runBatch(t, []models.JobSpec{spec}, stateFile, server.URL)
+
+	mu.Lock()
+	got := creates
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("platform received %d create request(s), want 0: the run could not record sending one", got)
+	}
+	if !containsAll(lines, "Creating job", "job_1") {
+		t.Fatalf("the run never reached job creation, so this proves nothing; lines: %v", lines)
+	}
+	if !containsAll(lines, "could not record the job creation before sending it") {
+		t.Errorf("no log line says why the request was not sent; lines: %v", lines)
+	}
+	if runErr == nil {
+		t.Error("a run that could not create its job reported success")
+	}
+}
+
+// TestCreatingLeftBehindByADeathIsNotRecreated covers the process that died
+// between handing the create request over and learning its outcome. All the
+// state file holds is the intent, which says exactly as much as an
+// unanswered request: the platform may be running the job already.
+func TestCreatingLeftBehindByADeathIsNotRecreated(t *testing.T) {
+	root := namespaceTestRoot(t)
+	runDir := filepath.Join(root, "Run_1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run: %v", err)
+	}
+
+	var mu sync.Mutex
+	creates := 0
+	server := answeringServer(&creates, &mu)
+	defer server.Close()
+
+	stateFile := filepath.Join(root, "state.csv")
+	spec := uploadedJobSpec(runDir)
+	seedReadyToCreate(t, stateFile, filepath.Join(root, "job_1.tar.gz"), spec, "creating", "")
+
+	resumed, lines, resumeErr := runBatch(t, []models.JobSpec{spec}, stateFile, server.URL)
+
+	mu.Lock()
+	got := creates
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("job created %d time(s) on an ordinary resume, want 0", got)
+	}
+	if resumeErr == nil || !strings.Contains(resumeErr.Error(), "job_1") {
+		t.Errorf("resume verdict = %v, want it to name job_1", resumeErr)
+	}
+	if !containsAll(lines, "job_1", "--recreate-indeterminate") {
+		t.Errorf("no log line names the job and how to create it again; lines: %v", lines)
+	}
+	if failed := resumed.countFailedJobs(); failed != 0 {
+		t.Errorf("resume counts %d plain failure(s), want 0: the job may exist", failed)
+	}
+
+	// The user checked the platform, found nothing, and says so. That creates
+	// the job once.
+	_, _, flagErr := runBatchWith(t, []models.JobSpec{spec}, stateFile, server.URL, true)
+	if flagErr != nil {
+		t.Errorf("resume with --recreate-indeterminate: %v", flagErr)
+	}
+
+	mu.Lock()
+	got = creates
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("job created %d time(s) in total, want 1", got)
+	}
+	st := stateOf(t, stateFile, 1)
+	if st.JobID != "job-abc" {
+		t.Errorf("JobID = %q, want %q", st.JobID, "job-abc")
+	}
+	if st.SubmitStatus == "creating" || st.SubmitStatus == state.SubmitStatusIndeterminate {
+		t.Errorf("SubmitStatus = %q, want the outcome to have replaced the intent", st.SubmitStatus)
+	}
+}
+
+// TestOrdinaryCreateRecordsTheIntentBeforeTheRequest is the other side of the
+// refusal: the ordinary path still ends at the job ID, and the state file
+// already carries the creation while the platform holds the request. The
+// server reads the file it would be resumed from.
+func TestOrdinaryCreateRecordsTheIntentBeforeTheRequest(t *testing.T) {
+	root := namespaceTestRoot(t)
+	runDir := filepath.Join(root, "Run_1")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run: %v", err)
+	}
+	stateFile := filepath.Join(root, "state.csv")
+
+	var mu sync.Mutex
+	creates := 0
+	onDisk := models.JobState{}
+	server := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if !isCreate(r) {
+			w.WriteHeader(nethttp.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		mgr := state.NewManager(stateFile)
+		if err := mgr.Load(); err == nil {
+			if st := mgr.GetState(1); st != nil {
+				mu.Lock()
+				onDisk = *st
+				mu.Unlock()
+			}
+		}
+		mu.Lock()
+		creates++
+		mu.Unlock()
+		w.WriteHeader(nethttp.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"job-abc"}`))
+	}))
+	defer server.Close()
+
+	spec := uploadedJobSpec(runDir)
+	seedReadyToCreate(t, stateFile, filepath.Join(root, "job_1.tar.gz"), spec, "pending", "")
+
+	_, _, runErr := runBatch(t, []models.JobSpec{spec}, stateFile, server.URL)
+	if runErr != nil {
+		t.Errorf("ordinary run: %v", runErr)
+	}
+
+	mu.Lock()
+	got := creates
+	seen := onDisk
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("job created %d time(s), want 1", got)
+	}
+	if seen.SubmitStatus != "creating" {
+		t.Errorf("while the platform held the request the state file said %q, want %q",
+			seen.SubmitStatus, "creating")
+	}
+	if seen.JobID != "" {
+		t.Errorf("JobID = %q before the platform answered, want empty", seen.JobID)
+	}
+
+	st := stateOf(t, stateFile, 1)
+	if st.JobID != "job-abc" {
+		t.Errorf("JobID = %q, want %q", st.JobID, "job-abc")
+	}
+	if st.SubmitStatus == "creating" {
+		t.Errorf("SubmitStatus = %q, want the job ID to have replaced the intent", st.SubmitStatus)
 	}
 }

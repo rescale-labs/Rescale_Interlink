@@ -168,45 +168,77 @@ func TestStateWrittenBeforeIndeterminateLoadsUnchanged(t *testing.T) {
 	}
 }
 
-// TestIndeterminateStatusSurvivesTheStateFile is the other half: the new value
-// is written and read back like any other, without changing the columns a
-// state file has.
-func TestIndeterminateStatusSurvivesTheStateFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.csv")
-	mgr := NewManager(path)
-	st := mgr.InitializeState(1, "job_1", "/runs/Run_1")
-	st.TarStatus = "success"
-	st.UploadStatus = "success"
-	st.SubmitStatus = SubmitStatusIndeterminate
-	st.ErrorMessage = "job may have been created"
-	if err := mgr.UpdateState(st); err != nil {
-		t.Fatalf("UpdateState: %v", err)
-	}
+// TestUnconfirmedStatusesSurviveTheStateFile is the other half: both values a
+// job's creation can be left at are written and read back like any other,
+// without changing the columns a state file has.
+func TestUnconfirmedStatusesSurviveTheStateFile(t *testing.T) {
+	for _, status := range []string{SubmitStatusIndeterminate, SubmitStatusCreating} {
+		t.Run(status, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.csv")
+			mgr := NewManager(path)
+			st := mgr.InitializeState(1, "job_1", "/runs/Run_1")
+			st.TarStatus = "success"
+			st.UploadStatus = "success"
+			st.SubmitStatus = status
+			st.ErrorMessage = "job may have been created"
+			if err := mgr.UpdateState(st); err != nil {
+				t.Fatalf("UpdateState: %v", err)
+			}
 
-	written, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read state: %v", err)
-	}
-	header := strings.SplitN(string(written), "\n", 2)[0]
-	if got := len(strings.Split(header, ",")); got != 12 {
-		t.Errorf("state file header has %d columns, want the unchanged 12: %s", got, header)
-	}
+			written, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read state: %v", err)
+			}
+			header := strings.SplitN(string(written), "\n", 2)[0]
+			if got := len(strings.Split(header, ",")); got != 12 {
+				t.Errorf("state file header has %d columns, want the unchanged 12: %s", got, header)
+			}
 
-	reread := NewManager(path)
-	if err := reread.Load(); err != nil {
-		t.Fatalf("Load: %v", err)
+			reread := NewManager(path)
+			if err := reread.Load(); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got := reread.GetState(1)
+			if got == nil {
+				t.Fatal("job 1 missing after reload")
+			}
+			if got.SubmitStatus != status {
+				t.Errorf("SubmitStatus = %q, want %q", got.SubmitStatus, status)
+			}
+			if got.ErrorMessage != "job may have been created" {
+				t.Errorf("ErrorMessage = %q, want it preserved", got.ErrorMessage)
+			}
+			if got.JobID != "" {
+				t.Errorf("JobID = %q, want empty", got.JobID)
+			}
+			if !MayAlreadyExist(got) {
+				t.Errorf("a job reloaded at %q is not treated as possibly created", status)
+			}
+		})
 	}
-	got := reread.GetState(1)
-	if got == nil {
-		t.Fatal("job 1 missing after reload")
-	}
-	if got.SubmitStatus != SubmitStatusIndeterminate {
-		t.Errorf("SubmitStatus = %q, want %q", got.SubmitStatus, SubmitStatusIndeterminate)
-	}
-	if got.ErrorMessage != "job may have been created" {
-		t.Errorf("ErrorMessage = %q, want it preserved", got.ErrorMessage)
-	}
-	if got.JobID != "" {
-		t.Errorf("JobID = %q, want empty", got.JobID)
+}
+
+// TestMayAlreadyExist pins what the pipeline and the CLI both ask of a loaded
+// state: a creation that went out, or was recorded as going out, and never came
+// back with a job ID. Answering yes to anything else would skip work a resume
+// owes; answering no to either would create a job the platform may be running.
+func TestMayAlreadyExist(t *testing.T) {
+	for name, tc := range map[string]struct {
+		st   *models.JobState
+		want bool
+	}{
+		"sent, never answered":  {&models.JobState{SubmitStatus: SubmitStatusIndeterminate}, true},
+		"recorded as going out": {&models.JobState{SubmitStatus: SubmitStatusCreating}, true},
+		"named by the platform": {&models.JobState{SubmitStatus: SubmitStatusCreating, JobID: "job-abc"}, false},
+		"not attempted":         {&models.JobState{SubmitStatus: "pending"}, false},
+		"failed outright":       {&models.JobState{SubmitStatus: "failed"}, false},
+		"created and submitted": {&models.JobState{SubmitStatus: "success", JobID: "job-abc"}, false},
+		"absent":                {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := MayAlreadyExist(tc.st); got != tc.want {
+				t.Errorf("MayAlreadyExist() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

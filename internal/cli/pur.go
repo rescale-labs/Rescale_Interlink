@@ -652,7 +652,8 @@ func (f *purPipelineFlags) register(cmd *cobra.Command, stateUsage, dryRunUsage 
 	cmd.Flags().IntVar(&f.jobWorkers, "job-workers", 0, "Number of parallel job creation workers (default from config)")
 	cmd.Flags().BoolVar(&f.rmTarOnSuccess, "rm-tar-on-success", false, "Delete local tar file after successful upload")
 	cmd.Flags().BoolVar(&f.recreateIndeterminate, "recreate-indeterminate", false,
-		"Create the jobs a previous run could not confirm; use only after checking the platform for them")
+		"Create every job in the batch a previous run could not confirm, not a chosen one; "+
+			"use only after checking the platform for each of them")
 	f.sharedFiles.register(cmd)
 	f.uploadTarget.register(cmd)
 	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, dryRunUsage)
@@ -861,7 +862,7 @@ Example:
 						needsTar++
 						continue
 					}
-					if st.SubmitStatus == state.SubmitStatusIndeterminate {
+					if state.MayAlreadyExist(st) {
 						// Work this resume will not do: the platform may hold the
 						// job already, so only --recreate-indeterminate creates it.
 						unconfirmed = append(unconfirmed, st.JobName)
@@ -897,8 +898,9 @@ Example:
 						fmt.Printf("  %s\n", name)
 					}
 					if !f.recreateIndeterminate {
-						fmt.Println("Check the platform for a job of each name; resume with " +
-							"--recreate-indeterminate to create the ones that are not there.")
+						fmt.Println("Check the platform for a job of each name; " +
+							"--recreate-indeterminate creates every job listed here, " +
+							"so use it only once none of them are there.")
 					}
 				}
 				fmt.Println("\n(dry-run mode: no work was performed)")

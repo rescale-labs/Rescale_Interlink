@@ -118,15 +118,24 @@ func TestUploadCheckpointFailureStopsBeforeDestructiveSteps(t *testing.T) {
 // sequence: the job is created but its ID does not reach disk. Submitting it
 // then starts work whose only record is in memory, and a restart creates and
 // submits the job a second time.
+//
+// Checkpoint writes break while the platform holds the create request, because
+// that is now the only way into this sequence: writes already broken when the
+// worker reaches creation stop the request itself (see
+// TestCreateIntentThatCannotBeRecordedSendsNoRequest). What is left on disk is
+// the intent recorded before the request, which a resume reads as a creation to
+// check rather than one to repeat.
 func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 	root := namespaceTestRoot(t)
 	runDir := filepath.Join(root, "Run_1")
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run: %v", err)
 	}
+	stateFile := filepath.Join(root, "state.csv")
 
 	var mu sync.Mutex
 	var created, submitted int
+	var breakErr error
 	server := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -136,13 +145,15 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 			w.WriteHeader(nethttp.StatusOK)
 		default:
 			created++
+			if err := os.MkdirAll(stateFile+".tmp", 0o755); err != nil {
+				breakErr = err
+			}
 			w.WriteHeader(nethttp.StatusCreated)
 			_, _ = w.Write([]byte(`{"id":"job-abc"}`))
 		}
 	}))
 	defer server.Close()
 
-	stateFile := filepath.Join(root, "state.csv")
 	spec := models.JobSpec{
 		JobName:         "job_1",
 		Directory:       runDir,
@@ -167,8 +178,6 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 		t.Fatalf("seed state: %v", err)
 	}
 
-	breakStateWrites(t, stateFile)
-
 	close(p.feederDone)
 	p.jobQueue <- &workItem{index: 1, jobSpec: spec, state: st}
 	close(p.jobQueue)
@@ -180,6 +189,9 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	if breakErr != nil {
+		t.Fatalf("break state writes: %v", breakErr)
+	}
 	if created != 1 {
 		t.Fatalf("job created %d times, want 1", created)
 	}
@@ -188,6 +200,15 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 	}
 	if failed := p.countFailedJobs(); failed != 1 {
 		t.Errorf("run counts %d failed job(s), want 1", failed)
+	}
+
+	onDisk := stateOf(t, stateFile, 1)
+	if onDisk.JobID != "" {
+		t.Errorf("JobID = %q on disk, want empty: the checkpoint failed", onDisk.JobID)
+	}
+	if onDisk.SubmitStatus != "creating" {
+		t.Errorf("on disk SubmitStatus = %q, want %q: a resume must not create the job again",
+			onDisk.SubmitStatus, "creating")
 	}
 }
 

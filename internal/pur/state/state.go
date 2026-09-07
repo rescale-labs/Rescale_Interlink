@@ -21,6 +21,26 @@ import (
 // written before it — or by an older binary — loads exactly as it did.
 const SubmitStatusIndeterminate = "indeterminate"
 
+// SubmitStatusCreating records the intent to create the job, written before the
+// create request goes out. The request carries no idempotency key, so an intent
+// held only in memory is one a restart cannot see: a checkpoint that fails, or a
+// death between delivery and the answer, would otherwise leave an ordinary
+// pending job the next resume creates a second time. The known outcome — a job
+// ID, a failure, or SubmitStatusIndeterminate — replaces it.
+const SubmitStatusCreating = "creating"
+
+// MayAlreadyExist reports a job the platform may be running without this run
+// knowing it: the creation was recorded as going out, or went out and was never
+// answered, and no job ID came back to name it by. Such a job is never created
+// again on its own; only --recreate-indeterminate does that, from someone who
+// has checked the platform for it.
+func MayAlreadyExist(st *models.JobState) bool {
+	if st == nil || st.JobID != "" {
+		return false
+	}
+	return st.SubmitStatus == SubmitStatusCreating || st.SubmitStatus == SubmitStatusIndeterminate
+}
+
 // Manager manages job state persistence
 type Manager struct {
 	filePath string

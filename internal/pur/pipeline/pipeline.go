@@ -303,8 +303,9 @@ type PipelineOptions struct {
 	RmTarOnSuccess bool
 
 	// RecreateIndeterminate creates the jobs a previous run could not confirm
-	// (state.SubmitStatusIndeterminate) rather than reporting and skipping them.
-	// The caller is saying it has checked the platform and they are not there;
+	// (state.MayAlreadyExist) rather than reporting and skipping them. It is
+	// batch-wide: every such job in the batch is created, not a chosen one. The
+	// caller is saying it has checked the platform and none of them are there;
 	// nothing else sets it, so a resume never recreates one on its own.
 	RecreateIndeterminate bool
 }
@@ -689,17 +690,21 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				if !p.recreateIndeterminate {
 					p.logf("WARN", "job", state.JobName,
 						"Skipped: a previous run could not confirm whether %q was created (%s). "+
-							"Check the platform for a job of that name; if there is none, resume "+
-							"with --recreate-indeterminate to create it.",
+							"Check the platform for a job of that name; once every unconfirmed job "+
+							"in this batch has been checked, resume with --recreate-indeterminate, "+
+							"which creates all of them.",
 						state.JobName, state.ErrorMessage)
 					continue
 				}
 				p.logf("WARN", "job", state.JobName,
 					"Creating %q again: --recreate-indeterminate says it is not on the platform",
 					state.JobName)
+				// Cleared for this run only. What is on disk stays the
+				// unconfirmed creation until the worker records the intent to
+				// send the new request, so a death in between still leaves a job
+				// no later resume recreates on its own.
 				state.SubmitStatus = "pending"
 				state.ErrorMessage = ""
-				p.stateMgr.UpdateState(state)
 			}
 
 			item := &workItem{
@@ -813,8 +818,8 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	unconfirmed := p.indeterminateJobNames()
 	if len(unconfirmed) > 0 {
 		p.logf("WARN", "pipeline", "", "%d of %d job(s) could not be confirmed as created: %s. "+
-			"Check the platform for a job of each name; resume with --recreate-indeterminate "+
-			"to create the ones that are not there.",
+			"Check the platform for a job of each name; --recreate-indeterminate creates every "+
+			"one of them on the next resume, so use it only once none of them are there.",
 			len(unconfirmed), p.totalJobs, strings.Join(unconfirmed, ", "))
 	}
 
@@ -911,7 +916,7 @@ func (p *Pipeline) countFailedJobs() int {
 // confirm. Written as a function because the feeder's own local variable hides
 // the state package.
 func mayAlreadyExist(st *models.JobState) bool {
-	return st != nil && st.SubmitStatus == state.SubmitStatusIndeterminate
+	return state.MayAlreadyExist(st)
 }
 
 // indeterminateJobNames names the jobs this run could not confirm the creation
@@ -944,15 +949,43 @@ func (p *Pipeline) recordIndeterminateCreate(item *workItem, cause error) {
 		"Creation could not be confirmed: %v; this run will not create it again", cause)
 
 	if err := p.stateMgr.UpdateState(item.state); err != nil {
-		// The ambiguity did not reach disk, so a resume sees a job that was
-		// never attempted and creates it a second time.
+		// The ambiguity itself did not reach disk, but the intent recorded
+		// before the request did, and a resume reads that the same way.
 		p.logf("ERROR", "job", item.state.JobName,
-			"Could not record that %q may already exist (%v); check the platform for it "+
-				"before resuming, which would otherwise create it again",
+			"Could not record that %q may already exist (%v); the creation recorded before "+
+				"the request still stops a resume from creating it again",
 			item.state.JobName, err)
 	}
 	p.reportStateChange(item.state.JobName, "create", state.SubmitStatusIndeterminate, "",
 		item.state.ErrorMessage, 0.0)
+}
+
+// recordCreateIntent puts the creation on disk before the request that performs
+// it, and reports the status to restore once the platform names the job.
+//
+// CreateJob carries no idempotency key and the platform enforces no unique job
+// name, so an intent that never reached the state file is one a restart cannot
+// see: it would find an ordinary pending job and create it a second time. That
+// is why a refused record refuses the request too — the job certainly does not
+// exist yet, so the item fails and the next resume retries it.
+func (p *Pipeline) recordCreateIntent(item *workItem) (string, error) {
+	previous := item.state.SubmitStatus
+	item.state.SubmitStatus = state.SubmitStatusCreating
+
+	if err := p.stateMgr.UpdateState(item.state); err != nil {
+		reason := fmt.Sprintf("could not record the job creation before sending it: %v", err)
+		p.logf("ERROR", "job", item.state.JobName, "%s", reason)
+
+		item.state.SubmitStatus = "failed"
+		item.state.ErrorMessage = reason
+		// The same write is about to fail again; this is for the in-memory map
+		// countFailedJobs reads, which UpdateState owns.
+		_ = p.stateMgr.UpdateState(item.state)
+
+		p.reportStateChange(item.state.JobName, "create", "failed", "", reason, 0.0)
+		return previous, errors.New(reason)
+	}
+	return previous, nil
 }
 
 // checkJobHasInputs rejects a job that would be created with nothing attached.
@@ -1529,6 +1562,12 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					continue
 				}
 
+				previousSubmitStatus, err := p.recordCreateIntent(item)
+				if err != nil {
+					p.setActiveWorker("job", -1)
+					continue
+				}
+
 				jobResp, err := p.apiClient.CreateJob(ctx, *jobReq)
 				if err != nil {
 					if errors.Is(err, api.ErrJobMayExist) {
@@ -1546,6 +1585,9 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 
 				item.state.JobID = jobResp.ID
+				// The outcome replaces the intent: the platform named the job,
+				// so there is nothing left for anyone to check for.
+				item.state.SubmitStatus = previousSubmitStatus
 				// Before submission: a job whose ID exists only in memory is a
 				// job a restart creates and submits all over again.
 				if err := p.checkpoint(item, "create"); err != nil {

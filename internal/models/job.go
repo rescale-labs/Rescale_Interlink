@@ -72,7 +72,7 @@ type JobState struct {
 	UploadStatus   string  // "pending", "success", "failed"
 	UploadProgress float64 // 0.0-100.0 upload percentage (transient, not persisted)
 	JobID          string
-	SubmitStatus   string // "pending", "success", "failed", "skipped"
+	SubmitStatus   string // "pending", "creating", "success", "failed", "skipped", "indeterminate"
 	ExtraFileIDs   string
 	ErrorMessage   string
 	LastUpdated    time.Time
