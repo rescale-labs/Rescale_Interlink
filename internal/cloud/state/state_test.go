@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,30 +13,44 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/rescale/rescale-int/internal/config"
 )
 
-// TestMain keeps the guards these tests create out of the state directory of
-// whoever is running them.
+// TestMain keeps the guards these tests create out of the directory of whoever
+// is running them, through the same environment variable the placement reads —
+// there is no seam of any other kind, so that a test cannot be redirected by a
+// route production has not got.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "upload-lock-guards-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create a guard directory for the tests: %v\n", err)
 		os.Exit(1)
 	}
-	guardDirectory = func() (string, error) { return dir, nil }
+	os.Setenv("XDG_RUNTIME_DIR", dir)
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
 
-// withGuardDirectory points the guards at a directory of the test's choosing.
-func withGuardDirectory(t *testing.T, dir string) {
+// guardsIn lists the guard files a directory tree holds.
+func guardsIn(t *testing.T, dir string) []string {
 	t.Helper()
-	previous := guardDirectory
-	guardDirectory = func() (string, error) { return dir, nil }
-	t.Cleanup(func() { guardDirectory = previous })
+	var guards []string
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		switch {
+		case os.IsNotExist(err):
+			return nil
+		case err != nil:
+			return err
+		}
+		if !entry.IsDir() && strings.HasSuffix(path, guardSuffix) {
+			guards = append(guards, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the guards in %s: %v", dir, err)
+	}
+	return guards
 }
 
 // TestUploadState_FilePermissions verifies that upload state files are created with secure permissions (0600).
@@ -828,7 +843,7 @@ func TestAcquireUploadLock_RefusesReclamationWithoutAnOSLock(t *testing.T) {
 
 	t.Run("creating a lock still works with nowhere to keep the guard", func(t *testing.T) {
 		// The other half of the same rule: the guard's directory, not its lock.
-		withGuardDirectory(t, filepath.Join(denyingDirectory(t), guardDirName))
+		t.Setenv("XDG_RUNTIME_DIR", denyingDirectory(t))
 		localPath := filepath.Join(t.TempDir(), "testfile.bin")
 
 		lock, err := AcquireUploadLock(localPath)
@@ -1012,8 +1027,16 @@ func TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated(t *testing.T) {
 	})
 
 	t.Run("an existing lock whose guard cannot be created", func(t *testing.T) {
+		// A guard directory that exists and will hold nothing new, which is not
+		// the same failure as one that cannot be created at all.
+		runtimeDir := t.TempDir()
+		guards := filepath.Join(runtimeDir, guardRuntimeDirName, guardDirName)
+		if err := os.MkdirAll(guards, 0700); err != nil {
+			t.Fatalf("create the guard directory: %v", err)
+		}
+		denyNewFilesIn(t, guards)
+		t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 		localPath := plantAbandonedLock(t, 424252)
-		withGuardDirectory(t, denyingDirectory(t))
 
 		lock, err := AcquireUploadLock(localPath)
 		if err == nil {
@@ -1032,10 +1055,10 @@ func TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated(t *testing.T) {
 
 	t.Run("an existing lock with no directory to guard it", func(t *testing.T) {
 		localPath := plantAbandonedLock(t, 424254)
-		// A state directory that cannot be created is refused the way a
+		// A guard directory that cannot be created is refused the way a
 		// filesystem with no lock is: the lock is still there, and only its
 		// owner or a hand-deletion can release it.
-		withGuardDirectory(t, filepath.Join(denyingDirectory(t), guardDirName))
+		t.Setenv("XDG_RUNTIME_DIR", denyingDirectory(t))
 		lockFilePath := localPath + ".upload.lock"
 
 		lock, err := AcquireUploadLock(localPath)
@@ -1295,17 +1318,39 @@ func TestAcquireUploadLock_RefusesALockFromAnotherGuardDomain(t *testing.T) {
 			names: []string{lockHost, lockOwner + "-someone-else"},
 		},
 		{
-			name: "another state directory of this login",
+			name: "another guard directory of this login",
 			plant: func(t *testing.T, localPath string) {
-				// One uid can resolve two state directories — a different
-				// XDG_CONFIG_HOME, a service account's environment — and one
-				// file can be reached through two mount spellings that hash to
-				// two guards. Same host, same user, and still nothing that
+				// One uid can resolve two guard directories — an interactive
+				// login has a runtime directory and a cron job has none — and
+				// one file can be reached through two mount spellings that hash
+				// to two guards. Same host, same user, and still nothing that
 				// makes two reclaimers of this lock take turns.
 				writeLockFile(t, localPath, uploadLockState{
 					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
 					Host: lockHost, Owner: lockOwner,
 					Guard:      filepath.Join(t.TempDir(), "elsewhere.guard"),
+					AcquiredAt: acquired, LocalPath: localPath,
+				})
+			},
+			names: []string{lockHost, lockOwner},
+		},
+		{
+			name: "a lock written while the guards lived in the config directory",
+			plant: func(t *testing.T, localPath string) {
+				// The guard moved to a directory the system clears, so its path
+				// changed, so a record written against the old one names a guard
+				// this acquisition does not hold. It is refused once, by hand,
+				// rather than cleared — the same answer any other unshared guard
+				// gets. No build with the old location was released.
+				configDir, err := os.UserConfigDir()
+				if err != nil {
+					t.Skipf("this environment has no configuration directory: %v", err)
+				}
+				writeLockFile(t, localPath, uploadLockState{
+					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
+					Host: lockHost, Owner: lockOwner,
+					Guard: filepath.Join(configDir, "rescale", guardDirName,
+						filepath.Base(guardPathOf(t, localPath))),
 					AcquiredAt: acquired, LocalPath: localPath,
 				})
 			},
@@ -1820,17 +1865,80 @@ func TestShippedFixturesCarryTheirPathsOnEveryPlatform(t *testing.T) {
 	}
 }
 
-// TestGuardsLiveInTheApplicationsOwnDirectory pins the other half of that: the
-// place they go instead. It is the per-user directory the application already
-// keeps its own files in, so a guard is never left in the user's data and never
-// depends on the source's filesystem carrying a lock.
-func TestGuardsLiveInTheApplicationsOwnDirectory(t *testing.T) {
-	dir, err := applicationGuardDirectory()
+// TestGuardsLiveWhereTheSystemClearsThem pins where the guards go. Every
+// acquisition takes one and none is ever removed, so one accumulates per source
+// path ever uploaded — which is only sustainable in a directory the operating
+// system empties by itself. Under the user's own configuration directory, where
+// they used to go, they stayed forever.
+func TestGuardsLiveWhereTheSystemClearsThem(t *testing.T) {
+	t.Run("the runtime directory of a login that has one", func(t *testing.T) {
+		runtimeDir := t.TempDir()
+		t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+		dir := guardDirectory()
+		if want := filepath.Join(runtimeDir, guardRuntimeDirName, guardDirName); dir != want {
+			t.Errorf("the guards go to %q, want %q — the directory the login's session owns", dir, want)
+		}
+	})
+
+	t.Run("a runtime directory that is not a path is no runtime directory", func(t *testing.T) {
+		t.Setenv("XDG_RUNTIME_DIR", filepath.Join("relative", "runtime"))
+
+		dir := guardDirectory()
+		if !filepath.IsAbs(dir) {
+			t.Errorf("the guards go to %q, which is wherever the process happens to be working", dir)
+		}
+	})
+
+	t.Run("a directory of this user's under the temporary directory otherwise", func(t *testing.T) {
+		t.Setenv("XDG_RUNTIME_DIR", "")
+
+		dir := guardDirectory()
+		if parent, want := filepath.Dir(dir), filepath.Clean(os.TempDir()); parent != want {
+			t.Errorf("the guards go under %q, want the temporary directory %q — the one a reboot clears", parent, want)
+		}
+		// The temporary directory is shared on a Linux login that has no runtime
+		// directory, so the owner is in the name and the mode keeps others out.
+		if !strings.Contains(filepath.Base(dir), guardOwnerSegment()) {
+			t.Errorf("the guard directory %q does not name the user (%s) it belongs to", filepath.Base(dir), guardOwnerSegment())
+		}
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatalf("create the guard directory: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat the guard directory: %v", err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+			t.Errorf("the guard directory is mode %#o, want nothing for group or other", info.Mode().Perm())
+		}
+	})
+}
+
+// TestAcquireUploadLock_KeepsEveryGuardWhereTheEnvironmentSays pins that the
+// placement is decided by the environment at the moment of the acquisition and
+// by nothing else. It is what lets a test — and the suite of any package that
+// takes a real lock — keep its guards out of the directory of whoever runs it.
+func TestAcquireUploadLock_KeepsEveryGuardWhereTheEnvironmentSays(t *testing.T) {
+	elsewhere := guardDirectory()
+	before := len(guardsIn(t, elsewhere))
+
+	mine := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", mine)
+
+	localPath := plantAbandonedLock(t, 424255)
+	lock, err := AcquireUploadLock(localPath)
 	if err != nil {
-		t.Skipf("this environment has no per-user directory: %v", err)
+		t.Fatalf("reclaim an abandoned lock: %v", err)
 	}
-	if want := filepath.Join(filepath.Dir(config.ReportDirectory()), guardDirName); dir != want {
-		t.Errorf("the guards go to %q, want %q — where the application keeps its other per-user state", dir, want)
+	ReleaseUploadLock(lock)
+
+	if got := guardsIn(t, mine); len(got) != 1 {
+		t.Errorf("the acquisition left %v under %s, want exactly the one guard it took", got, mine)
+	}
+	if got := guardsIn(t, elsewhere); len(got) != before {
+		t.Errorf("the acquisition left a guard in %s, which the environment no longer names: %v", elsewhere, got)
 	}
 }
 

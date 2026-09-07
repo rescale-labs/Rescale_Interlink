@@ -285,7 +285,7 @@ type uploadLockState struct {
 	// is only meaningful on the host that issued it, and clearing a lock can
 	// only be serialized against acquirers that take the same guard: the host
 	// and the user are what an operator reads, and the guard is what actually
-	// decides it — two logins of one uid with different config directories, or
+	// decides it — two logins of one uid with different runtime directories, or
 	// two spellings of one mount, resolve different guards. A record carrying
 	// none of them was written before v4.9.9 and is never reclaimed
 	// automatically.
@@ -695,12 +695,16 @@ var guardWaitLimit = 30 * time.Second
 // guardSuffix names the file whose OS lock serializes reclaiming a lock.
 const guardSuffix = ".guard"
 
-// guardDirName is the subdirectory of the application's per-user directory that
-// holds the guards. They live there rather than beside the source they cover
-// because a guard is never removed — that is what keeps every acquirer locking
-// one file — and a permanent empty file next to the user's data is one a later
-// folder upload would enumerate as something to transfer.
-const guardDirName = "locks"
+// The directory the guards live in, named in guardDirectory. They live away from
+// the source they cover because a guard is never removed — that is what keeps
+// every acquirer locking one file — and a permanent empty file next to the
+// user's data is one a later folder upload would enumerate as something to
+// transfer.
+const (
+	guardDirName        = "locks"
+	guardRuntimeDirName = "rescale-int"
+	guardTempDirPrefix  = "rescale-int-locks-"
+)
 
 // errGuardLockUnsupported reports a filesystem that carries no OS lock, so
 // nothing here can serialize two reclaimers of one lock file.
@@ -720,33 +724,65 @@ const guardPollInterval = 5 * time.Millisecond
 // for a filesystem that has none.
 var lockGuard = lockGuardFile
 
-// guardDirectory resolves the directory the guards live in. It is a variable so
-// a test can keep its guards out of the real one.
-var guardDirectory = applicationGuardDirectory
+// guardDirectory places the guards where the system clears them: the login's
+// runtime directory when it has one, and a directory of this user's under the
+// temporary directory otherwise — macOS's per-user $TMPDIR, %TEMP% on Windows,
+// the shared /tmp on a Linux login with no runtime directory, which is why the
+// owner is in the name and the mode keeps everyone else out. Nothing here
+// removes a guard and every acquisition takes one, so they accumulate one per
+// source path ever uploaded; a directory the user keeps would grow without
+// bound, and nothing is lost when this one is emptied, because a guard holds no
+// state and matters only while an acquisition holds its OS lock.
+//
+// A sweeper cannot take a guard out from under an acquisition that is using it:
+// it deletes by age, an acquisition opens the guard as its first step and holds
+// it for the milliseconds of the acquisition and never across a transfer, so
+// every guard old enough to be swept is one nobody holds.
+//
+// The environment is read on every call rather than once, so that a test — in
+// this package or any other that takes a real lock — can point the guards at a
+// directory of its own and be sure nothing reaches the real one.
+func guardDirectory() string {
+	// A relative runtime directory is not one: joining it would put the guards
+	// under whatever the working directory happens to be, which is the kind of
+	// place they must never accumulate in.
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(runtimeDir) {
+		return filepath.Join(runtimeDir, guardRuntimeDirName, guardDirName)
+	}
+	return filepath.Join(os.TempDir(), guardTempDirPrefix+guardOwnerSegment())
+}
 
-// applicationGuardDirectory places the guards under the same per-user directory
-// as the application's other state — %LOCALAPPDATA%\Rescale\Interlink on
-// Windows, os.UserConfigDir()/rescale elsewhere, as config.ReportDirectory
-// resolves its own sibling. The rule is repeated here rather than imported
-// because this package exists to break an import cycle and carries no
-// dependencies of its own.
-func applicationGuardDirectory() (string, error) {
-	if runtime.GOOS == "windows" {
-		localAppData := os.Getenv("LOCALAPPDATA")
-		if localAppData == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return "", err
-			}
-			localAppData = filepath.Join(home, "AppData", "Local")
+// guardOwnerSegment names this user inside a directory name. A Windows account
+// can carry its domain and a backslash with it, which would otherwise put the
+// guards a level down.
+func guardOwnerSegment() string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '-'
 		}
-		return filepath.Join(localAppData, "Rescale", "Interlink", guardDirName), nil
-	}
-	configDir, err := os.UserConfigDir()
+	}, lockOwner)
+}
+
+// checkGuardDirectory refuses a guard directory that is not this user's own.
+// MkdirAll is content with whatever it finds, and the temporary directory a
+// Linux login without a runtime directory falls back to is shared, so another
+// user can get there first: a symlink, or a directory they may write to, would
+// let them hold the guard of every upload this user starts.
+func checkGuardDirectory(dir string) error {
+	info, err := os.Lstat(dir)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return filepath.Join(configDir, "rescale", guardDirName), nil
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("%s is open to other users (mode %#o)", dir, info.Mode().Perm())
+	}
+	return nil
 }
 
 // guardPathFor names the guard of one lock and makes sure the directory holding
@@ -756,11 +792,11 @@ func applicationGuardDirectory() (string, error) {
 // It folds through localLockKey, so the two spellings Windows counts as one
 // file, which already share a lock, share a guard too.
 func guardPathFor(lockFilePath string) (string, error) {
-	dir, err := guardDirectory()
-	if err != nil {
+	dir := guardDirectory()
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := checkGuardDirectory(dir); err != nil {
 		return "", err
 	}
 	key := sha256.Sum256([]byte(localLockKey(lockFilePath)))
