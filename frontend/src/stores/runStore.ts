@@ -28,6 +28,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// PUR statuses for a job whose creation the platform never confirmed:
+// 'creating' is written before the create call, 'indeterminate' when the answer
+// to it was lost. Either way nobody knows whether the job exists.
+const UNCONFIRMED_CREATE_STATUSES = new Set(['indeterminate', 'creating'])
+
+/**
+ * Whether a row's job creation was left unresolved. Both stage fields are read
+ * because the create-stage event carries the status before any poll has copied
+ * it into the row's submit status. Exported for unit testing.
+ */
+export function isUnconfirmedRow(row: JobRow): boolean {
+  const submit = row.submitStatus
+  if (submit === 'completed' || submit === 'success' || submit === 'skipped' || submit === 'failed') {
+    return false
+  }
+  return UNCONFIRMED_CREATE_STATUSES.has(submit) || UNCONFIRMED_CREATE_STATUSES.has(row.createStatus)
+}
+
 /**
  * Merge a polled JobRow snapshot into the store's existing row. Exported
  * for unit testing.
@@ -114,6 +132,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       totalJobs,
       completedJobs: 0,
       failedJobs: 0,
+      unconfirmedJobs: 0,
       durationMs: 0,
       jobRows: initialJobRows,
       pipelineStageStats: computeStageStats(initialJobRows),
@@ -194,6 +213,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
         totalJobs: current.totalJobs,
         completedJobs: completedCount,
         failedJobs: failedCount,
+        unconfirmedJobs: current.jobRows.filter(isUnconfirmedRow).length,
         durationMs: Date.now() - current.startTime,
         jobRows: [...current.jobRows],
         finalStatus: 'cancelled',
@@ -256,6 +276,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
             pipelineStageStats: stageStats,
             completedJobs,
             failedJobs,
+            unconfirmedJobs: jobRows.filter(isUnconfirmedRow).length,
             durationMs: Date.now() - prev.activeRun.startTime,
           },
         }
@@ -298,6 +319,12 @@ export const useRunStore = create<RunStore>((set, get) => ({
       const failedCount = activeRun.jobRows.filter((j) =>
         j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
       ).length
+      // The engine's count is authoritative — a row may not have been polled
+      // since its create call — but the rows are used when it is absent.
+      const unconfirmedCount = Math.max(
+        activeRun.jobRows.filter(isUnconfirmedRow).length,
+        (data && data.unconfirmedJobs) || 0
+      )
 
       // Determine final status — respect if already set to 'cancelled' (C1)
       let finalStatus: CompletedRun['finalStatus']
@@ -305,6 +332,10 @@ export const useRunStore = create<RunStore>((set, get) => ({
         finalStatus = 'cancelled'
       } else if (failedCount > 0 || (data && data.failedJobs > 0)) {
         finalStatus = 'failed'
+      } else if (unconfirmedCount > 0) {
+        // Nothing failed, but the platform may hold jobs this run cannot
+        // account for: not a completion.
+        finalStatus = 'unconfirmed'
       } else {
         finalStatus = 'completed'
       }
@@ -317,6 +348,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
         totalJobs: activeRun.totalJobs,
         completedJobs: completedCount,
         failedJobs: failedCount,
+        unconfirmedJobs: unconfirmedCount,
         durationMs: Date.now() - activeRun.startTime,
         jobRows: [...activeRun.jobRows],
         finalStatus,
@@ -328,6 +360,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
           status: finalStatus as RunState,
           completedJobs: completedCount,
           failedJobs: failedCount,
+          unconfirmedJobs: unconfirmedCount,
           durationMs: Date.now() - prev.activeRun.startTime,
         } : null,
         completedRuns: [completedRun, ...prev.completedRuns].slice(0, MAX_COMPLETED_RUNS),
@@ -391,6 +424,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
           totalJobs: persisted.totalJobs,
           completedJobs: 0,
           failedJobs: 0,
+          unconfirmedJobs: jobRows.filter(isUnconfirmedRow).length,
           durationMs: Date.now() - persisted.startTime,
           jobRows,
           pipelineStageStats: computeStageStats(jobRows),
@@ -427,13 +461,16 @@ export const useRunStore = create<RunStore>((set, get) => ({
           const failed = jobRows.filter((j) =>
             j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.submitStatus === 'failed'
           ).length
-          const pending = jobRows.length - completed - failed
+          const unconfirmed = jobRows.filter(isUnconfirmedRow).length
+          const pending = jobRows.length - completed - failed - unconfirmed
 
           let finalStatus: CompletedRun['finalStatus']
           if (pending > 0) {
             finalStatus = 'interrupted' // Run was cut short by app close/crash
           } else if (failed > 0) {
             finalStatus = 'failed'
+          } else if (unconfirmed > 0) {
+            finalStatus = 'unconfirmed'
           } else {
             finalStatus = 'completed'
           }
@@ -446,6 +483,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
             totalJobs: persisted.totalJobs,
             completedJobs: completed,
             failedJobs: failed,
+            unconfirmedJobs: unconfirmed,
             durationMs: Date.now() - persisted.startTime,
             jobRows,
             finalStatus,
@@ -510,13 +548,15 @@ export const useRunStore = create<RunStore>((set, get) => ({
               pipelineStageStats: stageStats,
               completedJobs,
               failedJobs,
+              unconfirmedJobs: mergedRows.filter(isUnconfirmedRow).length,
               durationMs: Date.now() - prev.activeRun.startTime,
             },
           }
         })
 
         // Check for terminal state — finalize if complete event hasn't already
-        if (status.state === 'completed' || status.state === 'failed' || status.state === 'idle') {
+        if (status.state === 'completed' || status.state === 'failed' ||
+            status.state === 'unconfirmed' || status.state === 'idle') {
           const currentRun = get().activeRun
           if (currentRun && currentRun.status === 'active') {
             // Poll detected completion — finalize the run
@@ -530,10 +570,17 @@ export const useRunStore = create<RunStore>((set, get) => ({
             const failedCount = jobRows.filter((j) =>
               j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
             ).length
+            const unconfirmedCount = Math.max(
+              jobRows.filter(isUnconfirmedRow).length,
+              status.unconfirmedJobs || 0
+            )
 
             let finalStatus: CompletedRun['finalStatus']
             if (failedCount > 0) {
               finalStatus = 'failed'
+            } else if (unconfirmedCount > 0) {
+              // An idle poll over unresolved creations is not a completion.
+              finalStatus = 'unconfirmed'
             } else {
               finalStatus = 'completed'
             }
@@ -546,6 +593,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
               totalJobs: currentRun.totalJobs,
               completedJobs: completedCount,
               failedJobs: failedCount,
+              unconfirmedJobs: unconfirmedCount,
               durationMs: Date.now() - currentRun.startTime,
               jobRows: [...jobRows],
               finalStatus,
@@ -557,6 +605,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
                 status: finalStatus as RunState,
                 completedJobs: completedCount,
                 failedJobs: failedCount,
+                unconfirmedJobs: unconfirmedCount,
                 durationMs: Date.now() - prev.activeRun.startTime,
               } : null,
               completedRuns: [completedRun, ...prev.completedRuns].slice(0, MAX_COMPLETED_RUNS),

@@ -132,7 +132,11 @@ type CompleteEvent struct {
 	TotalJobs   int
 	SuccessJobs int
 	FailedJobs  int
-	Duration    time.Duration
+	// UnconfirmedJobs counts jobs whose creation the platform never confirmed.
+	// They are neither successes nor failures, and a run holding any of them
+	// has not completed cleanly.
+	UnconfirmedJobs int
+	Duration        time.Duration
 }
 
 // TransferEvent represents transfer queue events.

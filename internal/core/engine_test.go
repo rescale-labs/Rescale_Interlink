@@ -410,10 +410,10 @@ func TestEngine_RunContext(t *testing.T) {
 		{
 			name: "get_run_stats_with_no_run",
 			run: func(t *testing.T, engine *Engine) {
-				total, completed, failed, pending := engine.GetRunStats()
-				if total != 0 || completed != 0 || failed != 0 || pending != 0 {
-					t.Errorf("Expected all zeros, got total=%d, completed=%d, failed=%d, pending=%d",
-						total, completed, failed, pending)
+				total, completed, failed, pending, unconfirmed := engine.GetRunStats()
+				if total != 0 || completed != 0 || failed != 0 || pending != 0 || unconfirmed != 0 {
+					t.Errorf("Expected all zeros, got total=%d, completed=%d, failed=%d, pending=%d, unconfirmed=%d",
+						total, completed, failed, pending, unconfirmed)
 				}
 			},
 		},

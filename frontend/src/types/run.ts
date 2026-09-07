@@ -4,7 +4,13 @@ import type { JobRow, PipelineStageStats, PipelineLogEntry } from './jobs'
 import type { wailsapp } from '../../wailsjs/go/models'
 
 export type RunType = 'pur' | 'single'
-export type RunState = 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+// 'unconfirmed': the run is over and nothing failed, but the platform never
+// confirmed one or more job creations. It is terminal, and it is not a success.
+export type RunState = 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unconfirmed'
+
+export function isTerminalRunState(status: RunState): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'unconfirmed'
+}
 
 export interface ActiveRun {
   runId: string
@@ -14,6 +20,7 @@ export interface ActiveRun {
   totalJobs: number
   completedJobs: number
   failedJobs: number
+  unconfirmedJobs: number    // Creations the platform never confirmed
   durationMs: number
   error?: string
   jobRows: JobRow[]
@@ -30,10 +37,11 @@ export interface CompletedRun {
   totalJobs: number
   completedJobs: number
   failedJobs: number
+  unconfirmedJobs: number
   durationMs: number
   error?: string
   jobRows: JobRow[]          // Snapshot at completion
-  finalStatus: 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  finalStatus: 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unconfirmed'
 }
 
 // Discriminated union for type-safe queue (C6). Inputs are deep-copied at queue time

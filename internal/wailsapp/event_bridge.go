@@ -270,20 +270,22 @@ func errorEventToDTO(e *events.ErrorEvent) ErrorEventDTO {
 
 // CompleteEventDTO is the JSON-safe version of events.CompleteEvent.
 type CompleteEventDTO struct {
-	Timestamp   string `json:"timestamp"`
-	TotalJobs   int    `json:"totalJobs"`
-	SuccessJobs int    `json:"successJobs"`
-	FailedJobs  int    `json:"failedJobs"`
-	DurationMs  int64  `json:"durationMs"`
+	Timestamp       string `json:"timestamp"`
+	TotalJobs       int    `json:"totalJobs"`
+	SuccessJobs     int    `json:"successJobs"`
+	FailedJobs      int    `json:"failedJobs"`
+	UnconfirmedJobs int    `json:"unconfirmedJobs"`
+	DurationMs      int64  `json:"durationMs"`
 }
 
 func completeEventToDTO(e *events.CompleteEvent) CompleteEventDTO {
 	return CompleteEventDTO{
-		Timestamp:   e.Timestamp().Format(time.RFC3339Nano),
-		TotalJobs:   e.TotalJobs,
-		SuccessJobs: e.SuccessJobs,
-		FailedJobs:  e.FailedJobs,
-		DurationMs:  e.Duration.Milliseconds(),
+		Timestamp:       e.Timestamp().Format(time.RFC3339Nano),
+		TotalJobs:       e.TotalJobs,
+		SuccessJobs:     e.SuccessJobs,
+		FailedJobs:      e.FailedJobs,
+		UnconfirmedJobs: e.UnconfirmedJobs,
+		DurationMs:      e.Duration.Milliseconds(),
 	}
 }
 

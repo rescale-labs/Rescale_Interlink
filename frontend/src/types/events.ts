@@ -37,6 +37,7 @@ export interface CompleteEventDTO {
   totalJobs: number;
   successJobs: number;
   failedJobs: number;
+  unconfirmedJobs: number;
   durationMs: number;
 }
 

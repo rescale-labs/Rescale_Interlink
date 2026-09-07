@@ -17,9 +17,9 @@ import {
   BeakerIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, useConfigStore, useRunStore, DEFAULT_JOB_TEMPLATE } from '../../stores'
+import { useJobStore, useConfigStore, useRunStore, isUnconfirmedRow, DEFAULT_JOB_TEMPLATE } from '../../stores'
 import type { JobRow, PipelineLogEntry, PipelineStageStats, WorkflowState } from '../../types/jobs'
-import type { RunState } from '../../types/run'
+import { isTerminalRunState, type RunState } from '../../types/run'
 import { wailsapp } from '../../../wailsjs/go/models'
 import { TemplateBuilder, DOEBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
 import { formatDuration } from '../../utils/formatDuration'
@@ -286,8 +286,7 @@ export function PURTab() {
       return 'choice' as const
     }
 
-    if (activeRun && activeRun.runType === 'pur' &&
-        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled')) {
+    if (activeRun && activeRun.runType === 'pur' && isTerminalRunState(activeRun.status)) {
       return 'results' as const
     }
 
@@ -303,8 +302,7 @@ export function PURTab() {
   // workflowState is set to 'executing' by startBulkRun but never transitions
   // to 'completed' on normal pipeline completion — only on cancel. This bridges the gap.
   useEffect(() => {
-    if (activeRun && activeRun.runType === 'pur' &&
-        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') &&
+    if (activeRun && activeRun.runType === 'pur' && isTerminalRunState(activeRun.status) &&
         workflowState === 'executing') {
       useJobStore.setState({ workflowState: 'completed' })
     }
@@ -590,6 +588,7 @@ export function PURTab() {
                 : status === 'completed' ? 'Pipeline Complete'
                 : status === 'failed' ? 'Pipeline Failed'
                 : status === 'cancelled' ? 'Pipeline Cancelled'
+                : status === 'unconfirmed' ? 'Pipeline Finished with Unconfirmed Creations'
                 : 'Pipeline Status'}
             </h3>
             <p className="text-sm text-gray-500">
@@ -659,16 +658,24 @@ export function PURTab() {
   // standalone Run Results view. cancelledCount is null on the surfaces that do
   // not report a cancelled tally at all, which is not the same as reporting zero.
   const renderPipelineResultsView = ({
-    rows, completedCount, failedCount, wasCancelled, cancelledCount, logs,
+    rows, completedCount, failedCount, unconfirmedCount, wasCancelled, cancelledCount, logs,
   }: {
     rows: JobRow[]
     completedCount: number
     failedCount: number
+    unconfirmedCount: number
     wasCancelled: boolean
     cancelledCount: number | null
     logs: PipelineLogEntry[]
   }) => {
-    const allSuccess = failedCount === 0
+    const allSuccess = failedCount === 0 && unconfirmedCount === 0
+    const headline = wasCancelled
+      ? 'Pipeline Cancelled'
+      : allSuccess
+        ? 'Pipeline Complete!'
+        : failedCount > 0
+          ? 'Pipeline Complete with Errors'
+          : 'Pipeline Finished with Unconfirmed Creations'
 
     return (
       <div className="p-6">
@@ -680,18 +687,27 @@ export function PURTab() {
           ) : (
             <ExclamationTriangleIcon className="w-16 h-16 text-yellow-500 mb-4" />
           )}
-          <h3 className="text-lg font-semibold mb-2">
-            {wasCancelled
-              ? 'Pipeline Cancelled'
-              : allSuccess
-                ? 'Pipeline Complete!'
-                : 'Pipeline Complete with Errors'}
-          </h3>
+          <h3 className="text-lg font-semibold mb-2">{headline}</h3>
           <p className="text-sm text-gray-500">
             {completedCount} succeeded, {failedCount} failed
+            {unconfirmedCount > 0 && `, ${unconfirmedCount} unconfirmed`}
             {cancelledCount !== null && `, ${cancelledCount} cancelled`}
           </p>
         </div>
+
+        {unconfirmedCount > 0 && (
+          <div className="mb-6 p-4 rounded border border-yellow-300 bg-yellow-50 dark:border-yellow-800 dark:bg-yellow-900/20 text-sm text-yellow-800 dark:text-yellow-300">
+            <p className="font-medium">
+              {unconfirmedCount} job(s) could not be confirmed as created
+            </p>
+            <p className="mt-1">
+              The platform accepted the request but the answer was lost, so the job may or may not
+              exist. Check the platform for a job of each name listed below. Nothing is created again
+              on its own: to create the ones that are not there, resume the batch with
+              <code className="mx-1 px-1 rounded bg-yellow-100 dark:bg-yellow-900/40">--recreate-indeterminate</code>.
+            </p>
+          </div>
+        )}
 
         <ErrorSummary jobs={rows} />
         <JobsTable jobs={rows} />
@@ -1585,8 +1601,7 @@ export function PURTab() {
         stageStats: runData ? runData.pipelineStageStats : null,
         logs: runData ? runData.pipelineLogs : [],
         showCancel: runData?.status === 'active',
-        showViewResults: runData !== null &&
-          (runData.status === 'completed' || runData.status === 'failed' || runData.status === 'cancelled'),
+        showViewResults: runData !== null && isTerminalRunState(runData.status),
       })
     }
 
@@ -1596,8 +1611,12 @@ export function PURTab() {
       const completedCount = runData ? runData.completedJobs : displayRows.filter((j) =>
         j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
       ).length
+      const unconfirmedCount = runData ? runData.unconfirmedJobs : displayRows.filter(isUnconfirmedRow).length
+      // An unconfirmed creation carries the platform's ambiguity text in the
+      // row's error, which this tally would otherwise read as a failure.
       const failedCount = runData ? runData.failedJobs : displayRows.filter((j) =>
-        j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.error
+        !isUnconfirmedRow(j) &&
+        (j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.error)
       ).length
       const wasCancelled = runData?.status === 'cancelled' || runStatus.state === 'cancelled'
 
@@ -1605,8 +1624,11 @@ export function PURTab() {
         rows: displayRows,
         completedCount,
         failedCount,
+        unconfirmedCount,
         wasCancelled,
-        cancelledCount: wasCancelled ? displayRows.length - completedCount - failedCount : null,
+        cancelledCount: wasCancelled
+          ? displayRows.length - completedCount - failedCount - unconfirmedCount
+          : null,
         logs: runData ? runData.pipelineLogs : [],
       })
     }
@@ -1663,7 +1685,7 @@ export function PURTab() {
       stageStats: activeRun.pipelineStageStats,
       logs: activeRun.pipelineLogs,
       showCancel: activeRun.status === 'active',
-      showViewResults: activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled',
+      showViewResults: isTerminalRunState(activeRun.status),
     })
   }
 
@@ -1674,6 +1696,7 @@ export function PURTab() {
       rows: activeRun.jobRows,
       completedCount: activeRun.completedJobs,
       failedCount: activeRun.failedJobs,
+      unconfirmedCount: activeRun.unconfirmedJobs,
       wasCancelled: activeRun.status === 'cancelled',
       cancelledCount: null,
       logs: activeRun.pipelineLogs,

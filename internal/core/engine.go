@@ -596,20 +596,8 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	// Stop monitoring
 	e.stopMonitoring()
 
-	// Get final stats
-	stats := e.getJobStats()
-
 	// Emit completion event
-	e.eventBus.Publish(&events.CompleteEvent{
-		BaseEvent: events.BaseEvent{
-			EventType: events.EventComplete,
-			Time:      time.Now(),
-		},
-		TotalJobs:   stats.Total,
-		SuccessJobs: stats.Completed,
-		FailedJobs:  stats.Failed,
-		Duration:    duration,
-	})
+	stats := e.publishComplete(duration)
 
 	// Only report if all jobs failed, not cancelled, and there were jobs to run.
 	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
@@ -886,37 +874,9 @@ func (e *Engine) ResetRun() {
 
 // GetRunStats returns current job statistics for the active run.
 // Returns zeros if no run is active.
-func (e *Engine) GetRunStats() (total, completed, failed, pending int) {
-	e.mu.RLock()
-	st := e.state
-	e.mu.RUnlock()
-
-	if st == nil {
-		return 0, 0, 0, 0
-	}
-
-	jobs := st.GetAllStates()
-	total = len(jobs)
-
-	for _, job := range jobs {
-		switch job.SubmitStatus {
-		case "success", "completed":
-			completed++
-		case "failed":
-			failed++
-		case "skipped":
-			completed++ // create-only mode: skipped submit counts as completed
-		default:
-			// Belt-and-suspenders for upstream failures that didn't set SubmitStatus
-			if job.TarStatus == "failed" || job.UploadStatus == "failed" {
-				failed++
-			} else {
-				pending++
-			}
-		}
-	}
-
-	return total, completed, failed, pending
+func (e *Engine) GetRunStats() (total, completed, failed, pending, unconfirmed int) {
+	stats := e.getJobStats()
+	return stats.Total, stats.Completed, stats.Failed, stats.Pending, stats.Unconfirmed
 }
 
 // Private helper methods
@@ -986,9 +946,40 @@ type jobStats struct {
 	Completed int
 	Failed    int
 	Pending   int
+	// Unconfirmed counts jobs the platform may or may not hold: their creation
+	// was neither confirmed nor refused, so they are not done, not failed and
+	// not waiting for this run to do anything more with them.
+	Unconfirmed int
 }
 
-// getJobStats returns pipeline job statistics using the same SubmitStatus-based logic as GetRunStats().
+// IsUnconfirmedCreate reports whether a SubmitStatus means the job's creation
+// was never resolved either way: a job left between the create-intent
+// checkpoint and the platform's answer means the same as an indeterminate one.
+func IsUnconfirmedCreate(submitStatus string) bool {
+	return submitStatus == state.SubmitStatusIndeterminate || submitStatus == state.SubmitStatusCreating
+}
+
+// publishComplete emits the run's completion event and returns the statistics it reported.
+func (e *Engine) publishComplete(duration time.Duration) jobStats {
+	stats := e.getJobStats()
+
+	e.eventBus.Publish(&events.CompleteEvent{
+		BaseEvent: events.BaseEvent{
+			EventType: events.EventComplete,
+			Time:      time.Now(),
+		},
+		TotalJobs:       stats.Total,
+		SuccessJobs:     stats.Completed,
+		FailedJobs:      stats.Failed,
+		UnconfirmedJobs: stats.Unconfirmed,
+		Duration:        duration,
+	})
+
+	return stats
+}
+
+// getJobStats returns pipeline job statistics from the run's job states. It is the
+// one classification of SubmitStatus: GetRunStats and the completion event both read it.
 func (e *Engine) getJobStats() jobStats {
 	e.mu.RLock()
 	st := e.state
@@ -1003,13 +994,15 @@ func (e *Engine) getJobStats() jobStats {
 	stats.Total = len(jobs)
 
 	for _, job := range jobs {
-		switch job.SubmitStatus {
-		case "success", "completed":
+		switch {
+		case job.SubmitStatus == "success" || job.SubmitStatus == "completed":
 			stats.Completed++
-		case "failed":
+		case job.SubmitStatus == "failed":
 			stats.Failed++
-		case "skipped":
+		case job.SubmitStatus == "skipped":
 			stats.Completed++ // create-only mode
+		case IsUnconfirmedCreate(job.SubmitStatus):
+			stats.Unconfirmed++
 		default:
 			if job.TarStatus == "failed" || job.UploadStatus == "failed" {
 				stats.Failed++

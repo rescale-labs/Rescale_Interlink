@@ -1171,6 +1171,7 @@ export namespace wailsapp {
 	    inProgress: number;
 	    pending: number;
 	    failed: number;
+	    unconfirmed: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new JobsStatsDTO(source);
@@ -1183,6 +1184,7 @@ export namespace wailsapp {
 	        this.inProgress = source["inProgress"];
 	        this.pending = source["pending"];
 	        this.failed = source["failed"];
+	        this.unconfirmed = source["unconfirmed"];
 	    }
 	}
 	export class LocalFileInfoDTO {
@@ -1354,6 +1356,7 @@ export namespace wailsapp {
 	    totalJobs: number;
 	    successJobs: number;
 	    failedJobs: number;
+	    unconfirmedJobs: number;
 	    durationMs: number;
 	    error?: string;
 	
@@ -1367,6 +1370,7 @@ export namespace wailsapp {
 	        this.totalJobs = source["totalJobs"];
 	        this.successJobs = source["successJobs"];
 	        this.failedJobs = source["failedJobs"];
+	        this.unconfirmedJobs = source["unconfirmedJobs"];
 	        this.durationMs = source["durationMs"];
 	        this.error = source["error"];
 	    }

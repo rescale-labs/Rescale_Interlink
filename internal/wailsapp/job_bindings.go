@@ -191,12 +191,13 @@ type AutomationsResultDTO struct {
 
 // RunStatusDTO represents the status of a pipeline run.
 type RunStatusDTO struct {
-	State       string `json:"state"` // "idle", "running", "completed", "failed"
-	TotalJobs   int    `json:"totalJobs"`
-	SuccessJobs int    `json:"successJobs"`
-	FailedJobs  int    `json:"failedJobs"`
-	DurationMs  int64  `json:"durationMs"`
-	Error       string `json:"error,omitempty"`
+	State           string `json:"state"` // "idle", "running", "completed", "failed", "unconfirmed"
+	TotalJobs       int    `json:"totalJobs"`
+	SuccessJobs     int    `json:"successJobs"`
+	FailedJobs      int    `json:"failedJobs"`
+	UnconfirmedJobs int    `json:"unconfirmedJobs"`
+	DurationMs      int64  `json:"durationMs"`
+	Error           string `json:"error,omitempty"`
 }
 
 // JobRowDTO represents a job row for the jobs table.
@@ -882,12 +883,13 @@ func (a *App) GetRunStatus() RunStatusDTO {
 	}
 
 	runCtx := a.engine.GetRunContext()
-	total, completed, failed, pending := a.engine.GetRunStats()
+	total, completed, failed, pending, unconfirmed := a.engine.GetRunStats()
 
 	status := RunStatusDTO{
-		TotalJobs:   total,
-		SuccessJobs: completed,
-		FailedJobs:  failed,
+		TotalJobs:       total,
+		SuccessJobs:     completed,
+		FailedJobs:      failed,
+		UnconfirmedJobs: unconfirmed,
 	}
 
 	if runCtx != nil {
@@ -903,14 +905,20 @@ func (a *App) GetRunStatus() RunStatusDTO {
 				status.State = "failed"
 				// Populate error from job state so GUI can display
 				// the actual API error instead of a generic message.
+				// An unconfirmed creation keeps its ambiguity message in the
+				// same column, which is not this run's failure.
 				if st := a.engine.GetState(); st != nil {
 					for _, js := range st.GetAllStates() {
-						if js.ErrorMessage != "" {
+						if js.ErrorMessage != "" && !core.IsUnconfirmedCreate(js.SubmitStatus) {
 							status.Error = js.ErrorMessage
 							break
 						}
 					}
 				}
+			} else if unconfirmed > 0 {
+				// Not idle: there is no work left for this run to do, and no
+				// clean completion either — the platform may hold these jobs.
+				status.State = "unconfirmed"
 			} else {
 				status.State = "completed"
 			}
@@ -1318,7 +1326,7 @@ func (a *App) GetJobsStats() JobsStatsDTO {
 		return JobsStatsDTO{}
 	}
 
-	total, completed, failed, pending := a.engine.GetRunStats()
+	total, completed, failed, pending, unconfirmed := a.engine.GetRunStats()
 
 	// Check if run is active for in-progress count
 	inProgress := 0
@@ -1329,11 +1337,12 @@ func (a *App) GetJobsStats() JobsStatsDTO {
 	}
 
 	return JobsStatsDTO{
-		Total:      total,
-		Completed:  completed,
-		InProgress: inProgress,
-		Pending:    pending,
-		Failed:     failed,
+		Total:       total,
+		Completed:   completed,
+		InProgress:  inProgress,
+		Pending:     pending,
+		Failed:      failed,
+		Unconfirmed: unconfirmed,
 	}
 }
 
@@ -1344,6 +1353,9 @@ type JobsStatsDTO struct {
 	InProgress int `json:"inProgress"`
 	Pending    int `json:"pending"`
 	Failed     int `json:"failed"`
+	// Unconfirmed keeps jobs whose creation was never resolved out of the other
+	// buckets, so the counts still add up to Total.
+	Unconfirmed int `json:"unconfirmed"`
 }
 
 // =============================================================================
