@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -247,6 +248,136 @@ func TestRetryAfterCancelAllStillRuns(t *testing.T) {
 		t.Fatal("a retry requested after Cancel All never started")
 	}
 	close(executor.proceed)
+}
+
+// TestASecondRetryDoesNotOverlapAScheduledAttempt covers D6. A retry is
+// scheduled, the user cancels before its executor has registered anything, and
+// asks for another retry. With no record of the scheduled attempt the queue
+// starts a second one: both reach SetCancel, only one wins Activate, and the
+// loser's cleanup takes the winner's cancel function with it — leaving a
+// running transfer the user can no longer stop.
+func TestASecondRetryDoesNotOverlapAScheduledAttempt(t *testing.T) {
+	queue := NewQueue(nil)
+	executor := newScriptedExecutor()
+	queue.SetRetryExecutor(executor)
+
+	task := queue.TrackTransfer("run.tar.gz", 1024, TaskTypeDownload, "file-1", "/tmp/run.tar.gz")
+
+	// A first attempt that fails, leaving the task retryable and unowned.
+	queue.SetCancel(task.ID, func() {})
+	if !queue.Activate(task.ID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+	queue.Fail(task.ID, errors.New("500 internal server error"))
+
+	// The first retry is scheduled. Its executor is held at the door, before it
+	// registers a cancellation — that gap is the whole finding.
+	if _, err := queue.Retry(task.ID); err != nil {
+		t.Fatalf("first Retry: %v", err)
+	}
+	if _, started := executor.awaitStart(t, 2*time.Second); !started {
+		t.Fatal("the first retry was never scheduled")
+	}
+
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := queue.Retry(task.ID); err != nil {
+		t.Fatalf("second Retry: %v", err)
+	}
+	if _, started := executor.awaitStart(t, 200*time.Millisecond); started {
+		t.Fatal("a second attempt was scheduled while the first had not entered yet")
+	}
+
+	// The scheduled attempt now enters, finds the task cancelled under it and
+	// gives it up. Only then does the retry claimed behind it start.
+	close(executor.proceed)
+	queue.SetCancel(task.ID, func() { t.Error("the superseded attempt's cancellation was invoked") })
+	if queue.Activate(task.ID) {
+		t.Fatal("Activate: a cancelled task should not be claimable")
+	}
+	queue.ClearCancel(task.ID)
+
+	retried, started := executor.awaitStart(t, 2*time.Second)
+	if !started {
+		t.Fatal("the retry claimed behind the scheduled attempt never started")
+	}
+	if got := retried.GetState(); got != TaskQueued {
+		t.Errorf("the retry started with state %q, want %q", got, TaskQueued)
+	}
+
+	// The attempt that did run keeps its own cancellation, so the user can still
+	// stop it.
+	stopped := make(chan struct{})
+	queue.SetCancel(task.ID, func() { close(stopped) })
+	if !queue.Activate(task.ID) {
+		t.Fatal("Activate: the retried task should have been queued")
+	}
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("cancelling the running retry: %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("cancelling the running attempt never reached its cancellation")
+	}
+	if got := executor.runCount(); got != 2 {
+		t.Errorf("%d retry attempts ran, want 2 (one scheduled, one claimed behind it)", got)
+	}
+}
+
+// TestASupersededAttemptCannotDisownTheCurrentOne pins the ownership half of
+// D6. An executor that has already given the task up must not be able to take
+// the attempt that replaced it apart: removing its cancellation leaves a
+// running transfer with nothing to stop it, and reporting an outcome on its
+// behalf ends a transfer that is still going.
+func TestASupersededAttemptCannotDisownTheCurrentOne(t *testing.T) {
+	queue := NewQueue(nil)
+	task := queue.TrackTransfer("run.tar.gz", 1024, TaskTypeDownload, "file-1", "/tmp/run.tar.gz")
+
+	// The first attempt starts and gives the task up with no terminal state, the
+	// way an executor that lost the Activate race does.
+	first, owned := queue.BeginAttempt(task.ID)
+	if !owned {
+		t.Fatal("BeginAttempt: an unowned task should have been claimable")
+	}
+	first.SetCancel(func() { t.Error("the superseded attempt's cancellation was invoked") })
+	first.ClearCancel()
+
+	// The second attempt takes over and starts transferring.
+	second, owned := queue.BeginAttempt(task.ID)
+	if !owned {
+		t.Fatal("BeginAttempt: a released task should have been claimable again")
+	}
+	stopped := make(chan struct{})
+	second.SetCancel(func() { close(stopped) })
+	if !queue.Activate(task.ID) {
+		t.Fatal("Activate: the task should have been queued")
+	}
+	if _, extra := queue.BeginAttempt(task.ID); extra {
+		t.Error("BeginAttempt handed out a second claim on a task an attempt is running")
+	}
+
+	// Everything the first attempt does from here is about a task it no longer owns.
+	first.ClearCancel()
+	if first.FailIfNotTerminal(context.Canceled) {
+		t.Error("a superseded attempt failed the task the current one is running")
+	}
+	first.Fail(errors.New("unexpected EOF"))
+	first.Complete()
+
+	if got := task.GetState(); got != TaskInitializing {
+		t.Errorf("task state = %q, want %q — a superseded attempt reported for the running one",
+			got, TaskInitializing)
+	}
+	if err := queue.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("the running attempt's cancellation was gone by the time the user cancelled")
+	}
 }
 
 // TestRepeatedRetryClaimsOneAttempt covers the other half of F12: the retryable

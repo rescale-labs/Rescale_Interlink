@@ -971,9 +971,18 @@ func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequ
 	sent := time.Now()
 
 	for attempt := 1; ; attempt++ {
+		live := ctx.Err() == nil
 		file, err := c.registerFileOnce(ctx, fileReq)
-		if err == nil || !isAmbiguousDelivery(ctx, err) {
+		if err == nil || !isAmbiguousDelivery(live, err) {
 			return file, err
+		}
+		if ctx.Err() != nil {
+			// The caller ended the call after the request was handed over.
+			// Confirming what the platform did with it needs the context that
+			// just died, so the record may exist and this call cannot find out.
+			return nil, fmt.Errorf(
+				"registering %q was cancelled after the request was sent and could not be confirmed: %w",
+				fileReq.Name, err)
 		}
 
 		existing, lookupErr := c.findRegisteredFile(ctx, fileReq, sent.Add(-registerReconcileWindow))
@@ -1001,15 +1010,16 @@ func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequ
 // isAmbiguousDelivery reports a request that may have reached the platform and
 // been acted on before the caller learned what it did.
 //
-// ctx is the caller's, and a deadline or cancellation belonging to it ends the
-// call outright: there is nothing to reconcile against, since the lookup would
-// run on that same dead context. A deadline that fired while the caller's
-// context is still alive is the client's own whole-request ceiling
-// (constants.HTTPClientTimeout, set by http.ConfigureHTTPClient), which
-// net/http also reports as context.DeadlineExceeded and which can expire long
-// after the platform received the request.
-func isAmbiguousDelivery(ctx context.Context, err error) bool {
-	if err == nil || ctx.Err() != nil {
+// live is whether the caller's context was still alive when the request was
+// handed over: a call that started on a dead context sent nothing. From there
+// on only a dial that never connected and a name that never resolved are proof
+// that nothing was delivered. A cancellation or deadline arriving mid-flight is
+// not: it cannot be told from one that arrives after the platform already acted,
+// so it is reported as possible delivery rather than a plain cancellation. That
+// the caller can no longer reconcile is a separate question from whether there
+// is anything to reconcile — the call site answers it.
+func isAmbiguousDelivery(live bool, err error) bool {
+	if err == nil || !live {
 		return false
 	}
 	if errors.Is(err, errRecordUnconfirmed) {
@@ -1225,12 +1235,19 @@ var ErrJobMayExist = errors.New("job may have been created")
 
 func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*models.JobResponse, error) {
 	jobReq.NormalizeAutomations() // Ensure environmentVariables is always present
+	live := ctx.Err() == nil
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/jobs/", jobReq)
 	if err != nil {
-		if isAmbiguousDelivery(ctx, err) {
-			return nil, fmt.Errorf("%w: %q — the request reached the platform but the connection "+
-				"failed before it answered; check for a job named %q before creating it again: %w",
-				ErrJobMayExist, jobReq.Name, jobReq.Name, err)
+		if isAmbiguousDelivery(live, err) {
+			ended := "the connection failed before it answered"
+			if ctx.Err() != nil {
+				// The caller walked away mid-flight. The platform still had the
+				// request, and may have created the job anyway.
+				ended = "the call ended before it answered"
+			}
+			return nil, fmt.Errorf("%w: %q — the request reached the platform but %s; "+
+				"check for a job named %q before creating it again: %w",
+				ErrJobMayExist, jobReq.Name, ended, jobReq.Name, err)
 		}
 		return nil, err
 	}

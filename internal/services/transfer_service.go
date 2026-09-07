@@ -517,8 +517,12 @@ type taskExecution struct {
 	ctx     context.Context
 	taskCtx context.Context
 
-	req         TransferRequest
-	taskID      string
+	req    TransferRequest
+	taskID string
+	// attempt is this execution's ownership of the task. Every state the run
+	// func records goes through it, so a superseded attempt cannot report on a
+	// task that has moved on.
+	attempt     transfer.Attempt
 	fileName    string
 	apiClient   *api.Client
 	workerCount int
@@ -532,18 +536,28 @@ type taskExecution struct {
 func (ts *TransferService) executeTask(ctx context.Context, req TransferRequest, taskID string, apiClient *api.Client, workerCount int, dir transferDirection) {
 	fileName := dir.fileName(req)
 
+	// Claim the task before doing anything to it. A task another attempt already
+	// holds is that attempt's to finish — a second executor writing to it is
+	// what used to take the first one's cancel function away.
+	attempt, owned := ts.queue.BeginAttempt(taskID)
+	if !owned {
+		ts.logger.Warn().Str("task", taskID).Str("file", fileName).
+			Msgf("Skipping %s: another attempt is already running this task", dir.name)
+		return
+	}
+
 	// Create derived context for cancel support
 	taskCtx, taskCancel := context.WithCancel(ctx)
 	defer taskCancel()
 
 	// Set cancel fn early — enables CancelBatch to cancel even while queued
-	ts.queue.SetCancel(taskID, taskCancel)
+	attempt.SetCancel(taskCancel)
 
 	// Panic recovery — must transition to terminal after SetCancel
 	defer func() {
 		if r := recover(); r != nil {
 			ts.logger.Error().Msgf("PANIC in %s for %s: %v", dir.name, fileName, r)
-			ts.queue.FailIfNotTerminal(taskID, fmt.Errorf("panic: %v", r))
+			attempt.FailIfNotTerminal(fmt.Errorf("panic: %v", r))
 		}
 	}()
 
@@ -557,7 +571,7 @@ func (ts *TransferService) executeTask(ctx context.Context, req TransferRequest,
 	case <-taskCtx.Done():
 		// Atomic terminal transition — CancelBatch may have set TaskCancelled,
 		// but other cancellations (parent timeout, shutdown) won't.
-		ts.queue.FailIfNotTerminal(taskID, taskCtx.Err())
+		attempt.FailIfNotTerminal(taskCtx.Err())
 		return
 	}
 
@@ -576,14 +590,14 @@ func (ts *TransferService) executeTask(ctx context.Context, req TransferRequest,
 	// Atomic claim: only transition TaskQueued → TaskInitializing
 	if !ts.queue.Activate(taskID) {
 		// Task already terminal (e.g., CancelBatch ran while we waited for semaphore)
-		ts.queue.ClearCancel(taskID)
+		attempt.ClearCancel()
 		return
 	}
 
 	// Check cancellation after activation
 	select {
 	case <-taskCtx.Done():
-		ts.queue.FailIfNotTerminal(taskID, taskCtx.Err())
+		attempt.FailIfNotTerminal(taskCtx.Err())
 		return
 	default:
 	}
@@ -611,6 +625,7 @@ func (ts *TransferService) executeTask(ctx context.Context, req TransferRequest,
 		taskCtx:     taskCtx,
 		req:         req,
 		taskID:      taskID,
+		attempt:     attempt,
 		fileName:    fileName,
 		apiClient:   apiClient,
 		workerCount: workerCount,
@@ -623,7 +638,7 @@ func (ts *TransferService) runUpload(x taskExecution) {
 	// Get file info for transfer allocation
 	fileInfo, err := os.Stat(x.req.Source)
 	if err != nil {
-		ts.queue.Fail(x.taskID, fmt.Errorf("failed to stat file: %w", err))
+		x.attempt.Fail(fmt.Errorf("failed to stat file: %w", err))
 		return
 	}
 
@@ -648,10 +663,10 @@ func (ts *TransferService) runUpload(x taskExecution) {
 	if err != nil {
 		// Don't overwrite cancelled state with failed
 		if errors.Is(err, context.Canceled) {
-			ts.queue.FailIfNotTerminal(x.taskID, err)
+			x.attempt.FailIfNotTerminal(err)
 			return
 		}
-		ts.queue.Fail(x.taskID, err)
+		x.attempt.Fail(err)
 		ts.logger.Error().Err(err).Str("path", x.req.Source).Msg("Upload failed")
 		return
 	}
@@ -659,7 +674,7 @@ func (ts *TransferService) runUpload(x taskExecution) {
 	// Apply tags after successful upload (non-fatal)
 	ts.applyTags(x.ctx, x.apiClient, cloudFile.ID, x.req.Tags, x.fileName)
 
-	ts.queue.Complete(x.taskID)
+	x.attempt.Complete()
 	ts.logger.Info().Str("path", x.req.Source).Msg("File uploaded")
 }
 
@@ -700,16 +715,22 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 		ts.queue.SetTaskTags(taskID, req.Tags)
 	}
 
+	// Claim the freshly registered task for this attempt.
+	attempt, owned := ts.queue.BeginAttempt(taskID)
+	if !owned {
+		return nil, fmt.Errorf("transfer task %s is already being run by another attempt", taskID)
+	}
+
 	// Create derived context for cancel support
 	uploadCtx, uploadCancel := context.WithCancel(ctx)
 	defer uploadCancel()
-	ts.queue.SetCancel(taskID, uploadCancel)
+	attempt.SetCancel(uploadCancel)
 
 	// Acquire semaphore slot (unified concurrency with File Browser)
 	select {
 	case ts.semaphore <- struct{}{}:
 	case <-uploadCtx.Done():
-		ts.queue.FailIfNotTerminal(taskID, uploadCtx.Err())
+		attempt.FailIfNotTerminal(uploadCtx.Err())
 		return nil, uploadCtx.Err()
 	}
 	atomic.AddInt32(&ts.activeSlots, 1)
@@ -725,7 +746,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 	}()
 
 	if !ts.queue.Activate(taskID) {
-		ts.queue.ClearCancel(taskID)
+		attempt.ClearCancel()
 		if err := uploadCtx.Err(); err != nil {
 			return nil, err
 		}
@@ -735,7 +756,7 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 	// Get file info for transfer handle allocation
 	fileInfo, err := os.Stat(req.Source)
 	if err != nil {
-		ts.queue.Fail(taskID, fmt.Errorf("failed to stat file: %w", err))
+		attempt.Fail(fmt.Errorf("failed to stat file: %w", err))
 		return nil, fmt.Errorf("failed to stat file: %w", err)
 	}
 
@@ -769,17 +790,17 @@ func (ts *TransferService) UploadFileSync(ctx context.Context, req TransferReque
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			ts.queue.FailIfNotTerminal(taskID, err)
+			attempt.FailIfNotTerminal(err)
 			return nil, err
 		}
-		ts.queue.Fail(taskID, err)
+		attempt.Fail(err)
 		return nil, err
 	}
 
 	// Apply tags after successful upload (non-fatal)
 	ts.applyTags(ctx, apiClient, cloudFile.ID, req.Tags, fileName)
 
-	ts.queue.Complete(taskID)
+	attempt.Complete()
 	return cloudFile, nil
 }
 
@@ -865,13 +886,13 @@ func (ts *TransferService) runDownload(x taskExecution) {
 	if err != nil {
 		// Don't overwrite cancelled state with failed
 		if errors.Is(err, context.Canceled) {
-			ts.queue.FailIfNotTerminal(x.taskID, err)
+			x.attempt.FailIfNotTerminal(err)
 			return
 		}
-		ts.queue.Fail(x.taskID, err)
+		x.attempt.Fail(err)
 		ts.logger.Error().Err(err).Str("file_id", x.req.Source).Str("name", x.fileName).Msg("Download failed")
 	} else {
-		ts.queue.Complete(x.taskID)
+		x.attempt.Complete()
 		ts.logger.Info().Str("file_id", x.req.Source).Str("local_path", x.req.Dest).Msg("File downloaded")
 	}
 }
@@ -884,6 +905,9 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask) {
 	ts.mu.RUnlock()
 
 	if apiClient == nil {
+		// Nothing entered the attempt the queue reserved for this dispatch, so
+		// the failure has to release it — otherwise the task stays owned by an
+		// executor that never ran.
 		ts.queue.Fail(task.ID, fmt.Errorf("API client not configured"))
 		return
 	}

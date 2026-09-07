@@ -594,6 +594,153 @@ func TestCreateJobReportsATruncatedSuccess(t *testing.T) {
 	}
 }
 
+// stallAfterRequest accepts the request in full, announces that the platform
+// now holds it, and never answers. It is the delivered-then-abandoned case: the
+// platform may act on the request at any moment, and the caller walks away
+// without ever learning whether it did.
+func stallAfterRequest(arrived chan<- struct{}, release <-chan struct{}) http.HandlerFunc {
+	var once sync.Once
+	return func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		once.Do(func() { close(arrived) })
+		<-release
+	}
+}
+
+// TestRegisterFileReportsAPossibleRecordWhenTheCallerCancels covers D7 for
+// registration. The POST was delivered; the caller then cancelled while waiting
+// for the answer. Reported as a plain cancellation, a resumed run registers the
+// same uploaded bytes a second time, so the caller has to be told the record may
+// already exist — without a lookup, which would run on the context that just died.
+func TestRegisterFileReportsAPossibleRecordWhenTheCallerCancels(t *testing.T) {
+	handler := newCountingHandler()
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	handler.on("POST /api/v3/files/", stallAfterRequest(arrived, release))
+	handler.on("GET /api/v3/folders/folder-1/contents/search/", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the lookup ran on the caller's cancelled context")
+		writeJSON(t, w, map[string]any{"results": []map[string]any{}})
+	})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(release) })
+
+	client := newRetryingTestClient(t, server.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-arrived
+		cancel()
+	}()
+
+	_, err := client.RegisterFile(ctx, storedAt("Run_17.tar.gz", 4096, "uploads/mine.tar.gz"))
+	if err == nil {
+		t.Fatal("RegisterFile reported success although the caller cancelled it")
+	}
+	if !strings.Contains(err.Error(), "could not be confirmed") {
+		t.Errorf("error %q does not report that the registration may have taken effect", err)
+	}
+	if !strings.Contains(err.Error(), "Run_17.tar.gz") {
+		t.Errorf("error %q does not name the file whose record may exist", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error %q no longer reports that the caller cancelled the call", err)
+	}
+	if got := handler.count("POST /api/v3/files/"); got != 1 {
+		t.Errorf("the platform received %d registrations, want 1", got)
+	}
+}
+
+// TestCreateJobReportsAPossibleJobWhenTheCallerCancels is D7 for job creation.
+// A job the platform may have created and started charging for must not be
+// reported as a plain cancellation: the caller has to look before creating it
+// again.
+func TestCreateJobReportsAPossibleJobWhenTheCallerCancels(t *testing.T) {
+	handler := newCountingHandler()
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	handler.on("POST /api/v3/jobs/", stallAfterRequest(arrived, release))
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(release) })
+
+	client := newRetryingTestClient(t, server.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-arrived
+		cancel()
+	}()
+
+	_, err := client.CreateJob(ctx, models.JobRequest{Name: "Run_17"})
+	if err == nil {
+		t.Fatal("CreateJob reported success although the caller cancelled it")
+	}
+	if !errors.Is(err, ErrJobMayExist) {
+		t.Errorf("error %q does not report that the job may exist", err)
+	}
+	if !strings.Contains(err.Error(), "Run_17") {
+		t.Errorf("error %q does not name the job the caller has to look for", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error %q no longer reports that the caller cancelled the call", err)
+	}
+	if got := handler.count("POST /api/v3/jobs/"); got != 1 {
+		t.Errorf("the platform received %d job creations, want 1", got)
+	}
+}
+
+// TestCreateJobDoesNotClaimAJobItNeverSent is the boundary of the two tests
+// above: a request that never left carries nothing, so telling the user to go
+// looking for a job would be a false alarm. Covers both proofs — a context that
+// was already dead when the call started, and a dial that never connected.
+func TestCreateJobDoesNotClaimAJobItNeverSent(t *testing.T) {
+	handler := newCountingHandler()
+	handler.on("POST /api/v3/jobs/", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("a call on a dead context reached the platform")
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	t.Run("the caller's context was already cancelled", func(t *testing.T) {
+		client := newRetryingTestClient(t, server.URL)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := client.CreateJob(ctx, models.JobRequest{Name: "Run_17"})
+		if err == nil {
+			t.Fatal("CreateJob reported success on a cancelled context")
+		}
+		if errors.Is(err, ErrJobMayExist) {
+			t.Errorf("error %q claims a job may exist for a request that was never sent", err)
+		}
+	})
+
+	t.Run("the dial never connected", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a port: %v", err)
+		}
+		addr := listener.Addr().String()
+		if err := listener.Close(); err != nil {
+			t.Fatalf("close the listener: %v", err)
+		}
+
+		client := newRetryingTestClient(t, "http://"+addr)
+
+		_, err = client.CreateJob(context.Background(), models.JobRequest{Name: "Run_17"})
+		if err == nil {
+			t.Fatal("CreateJob reported success although nothing was listening")
+		}
+		if errors.Is(err, ErrJobMayExist) {
+			t.Errorf("error %q claims a job may exist for a dial that never connected", err)
+		}
+	})
+}
+
 // writeJSON answers with a JSON body, failing the test rather than the request
 // if it cannot be encoded.
 func writeJSON(t *testing.T, w http.ResponseWriter, body any) {
