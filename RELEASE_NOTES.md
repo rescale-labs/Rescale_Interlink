@@ -21,7 +21,8 @@ Parameters and `{{token}}`s are validated against each other in both directions:
 parameter with no matching token, and a token with no matching parameter, are both errors
 rather than silently wrong jobs. An unknown token in the job-name or tag template is
 an error too, and a token that survives substitution anywhere is fatal rather than
-shipped as literal text.
+shipped as literal text. A rendered command over 32 KiB or a job name over 128 bytes is
+refused before anything is submitted.
 
 Eight designs are available — full factorial, one-factor-at-a-time, Latin hypercube,
 Sobol, Monte Carlo, central composite, Box-Behnken, and explicit cases from a CSV. The
@@ -39,7 +40,8 @@ already-uploaded deck; leave it unset and the deck is supplied once at run time 
 `pur run --common-input-files`. Either way it transfers once for the whole sweep instead
 of once per case. A generated sweep is an ordinary jobs CSV, so it runs through the
 existing `pur run` / `pur submit-existing` pipeline with resume, state and monitoring
-unchanged.
+unchanged. The help text and the preview describe this: neither claims that a case
+uploads the template's directory.
 
 In the GUI, **PUR → Create Parameter Sweep** builds the sweep with a live case preview,
 showing the case table, the first case's rendered command and tags, and any validation
@@ -47,7 +49,7 @@ problems before anything is submitted.
 
 ### Per-file commands in PUR file-scan mode (`pur scan-files`, GUI Job Source → Files)
 
-Scanning a tree for input files now renders **each job's command from its own file**, instead of giving every job the template's command verbatim:
+Scanning a tree for input files now renders **each job's command from its own file**, instead of giving every job the template's command verbatim. Contributed by @ctusa-rescale as part of [PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66).
 
 ```
 template:   abaqus job={{base}} input={{file}} cpus=8
@@ -55,19 +57,20 @@ case1.inp:  abaqus job=case1 input=case1.inp cpus=8
 case2.inp:  abaqus job=case2 input=case2.inp cpus=8
 ```
 
-Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. Two files that render to the same job name fail the scan too: a job name is the identifier progress and state are tracked by, so a duplicate would misroute one job's updates onto the other. That message names both files by folder and file name — `case1/model.inp` and `case2/model.inp` under a bare `{{base}}` — and suggests adding `{{index}}` or `{{dir}}`. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged.
+Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. Two files that render to the same job name fail the scan too: a job name is the identifier progress and state are tracked by, so a duplicate would misroute one job's updates onto the other. That message names both files by folder and file name — `case1/model.inp` and `case2/model.inp` under a bare `{{base}}` — and suggests adding `{{index}}` or `{{dir}}`. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged. The same command and name length limits apply as in a sweep.
 
-Each job also uploads **only its own files** now — its primary file plus the secondary files resolved for it — flattened into its working directory, instead of the whole containing folder. Secondary patterns that reach outside the primary's folder (`../meshes/*.cfg`) are therefore uploaded rather than validated and dropped, and jobs sharing a folder no longer overwrite each other's archive, which previously surfaced as `upload incomplete: received 1 of 9 parts`. Data genuinely shared by every job still belongs in `--common-input-files`, which uploads it once for the batch.
+Each job also uploads **only its own files** now — its primary file plus the secondary files resolved for it — flattened into its working directory, instead of the whole containing folder. Secondary patterns that reach outside the primary's folder (`../meshes/*.cfg`) are therefore uploaded rather than validated and dropped, and jobs sharing a folder no longer overwrite each other's archive, which previously surfaced as `upload incomplete: received 1 of 9 parts`. A secondary pattern that resolves to the primary file itself is dropped rather than listed twice, and two different files that would flatten onto one name skip the job at scan time with both paths named. Data genuinely shared by every job still belongs in `--common-input-files`, which uploads it once for the batch.
 
-The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load.
+The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load. A path the column cannot carry — one containing a semicolon — is refused when the CSV is written, naming the job and the path, since the JSON job file carries any path. A CSV loaded as a template no longer carries its first job's file list, or a tar subpath a file scan never uses, into the folder scans and sweeps built from it.
 
-In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason.
+In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason and its parent folder. The **Recursive** and **hidden directories** options appear only for a folder scan, since a file scan never read them.
 
 ### PUR uploads can target a folder and carry file tags
 
 `pur run` and `pur resume` accept `--folder` (created if missing), `--folder-parent`, and
 `--file-tags`, so a batch's uploads can be collected in one Rescale folder and tagged as a
-set. The PUR tab carries the same upload-folder and file-tag fields.
+set. The PUR tab carries the same upload-folder and file-tag fields. Contributed by
+@ctusa-rescale as part of [PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66).
 
 ### `--extra-input-files` renamed to `--common-input-files`
 
@@ -75,6 +78,44 @@ The flag that uploads a file once and attaches it to every job is now
 `--common-input-files`, with `--decompress-common` alongside it; the GUI label matches.
 The old `--extra-input-files` and `--decompress-extras` names still work as hidden aliases
 but emit a deprecation warning, and passing both a flag and its alias is an error.
+Contributed by @ctusa-rescale as part of
+[PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66).
+
+### PUR pipeline fixes
+
+- A scan root whose name contains `[`, `]`, `?` or `*` was joined into the file pattern, so
+  a root such as `proj [v2]` silently scanned its sibling `proj v` and would have uploaded
+  the wrong project's decks as a success. Every scan now matches the pattern inside the
+  root, and a pattern that is absolute or escapes the root is an error.
+- A resumed run no longer reports the previous run's failures: a batch that failed at the
+  tar or upload stage, was resumed and completed cleanly used to finish with
+  "N of M job(s) failed" and exit 1.
+- A job that would run with no inputs at all — no directory, no per-job files and no
+  common files — is refused with an error naming it. `submit-existing` keeps its bypass,
+  since its inputs are already on Rescale.
+- Folder scans refuse a `{{token}}` in the command or job name instead of submitting it
+  verbatim, and the license feature pair is validated when the plan is built, so a bad
+  CSV fails before the uploads rather than after every one of them.
+- The jobs CSV gains columns for automations, input file IDs and the SSH fields it used to
+  drop, and a scan that builds no jobs no longer writes an empty file over a good one.
+  Directories matched as input files are skipped with a reason. In the GUI, the
+  **Export CSV** refusal is shown beside the button instead of disappearing into the
+  console.
+- A run in which every job failed is reported as failed from every GUI entry point, and
+  resolving the upload folder no longer freezes the GUI while the platform answers.
+- On Windows, GNU tar read the drive-letter colon in an absolute path as a remote host
+  and failed with "Cannot connect to C:"; the archiver now passes `--force-local` when it
+  detects GNU tar. Contributed by @ctusa-rescale.
+- A transient failure reading the account profile no longer stops the project-assignment
+  retry; only a profile with no company code does.
+- An archive name is kept within the filesystem's limit — a long primary file name
+  produced a name the filesystem refused after the scan had succeeded — and each job's
+  archive is named after its row as well as its file set. The batch's archive directory
+  is resolved to an absolute path, so a resume from another working directory finds it.
+- A batch stages its archives in a directory of its own under the input files' common
+  parent (`.rescale-int-<hash>/`, keyed by the batch's state file), so two batches over
+  one deck no longer overwrite or delete each other's archives, and the pipeline stops an
+  item when a checkpoint cannot be written before an irreversible step.
 
 ### Linux GUI: blank window fixed (#31)
 
@@ -92,6 +133,11 @@ A new **Job Status** tab lists your Rescale jobs with their current status, newe
 fifty at a time with on-demand paging. Contributed by @hjung-rescale
 ([PR #62](https://github.com/rescale-labs/Rescale_Interlink/pull/62)).
 
+After merge: each page is requested on its own (deep pages no longer re-fetch every
+earlier page), a refresh landing while **Load Next** is in flight no longer leaves the
+button disabled, and the latest status reason is chosen by its timestamp rather than by
+comparing date strings with mixed UTC offsets.
+
 ### File Browser: search, owner filtering, and sorting (#65)
 
 The File Browser's remote pane can now search folder contents by name in My Library, My
@@ -101,18 +147,46 @@ by name, size, or created date from the column headers; the other views keep the
 existing client-side column sorting. Contributed by @jbeardslee-rescale
 ([PR #65](https://github.com/rescale-labs/Rescale_Interlink/pull/65)).
 
+After merge: a failed search or legacy listing is reported as an error instead of shown as
+an empty library; the list header stays pinned and the list stays virtualized while
+scrolling; a search typed just before switching views no longer lands in the other view;
+the File ID column appears only in the remote pane; and legacy listings no longer send an
+owner filter when none is selected.
+
 ### Transfers: cancellation and status accuracy (#24, #27, #28)
 
 - Cancel and Cancel All now stop queued and in-flight work promptly on every path.
 - Cancelled batches show **Cancelled** end to end — including batches cancelled before
   their folder scan registered any files, which previously vanished or showed Completed.
 - Local filesystem errors and user cancellations no longer raise the error-report modal.
+  In the other direction, real failures that the error filters used to hide are reported
+  again: `files upload` with two or more failed files reported nothing at all.
+- A newly queued transfer appears in the Transfers tab promptly. The tab's poll no longer
+  stacks requests when one runs long, and paging a large batch's rows no longer copies
+  the whole batch while holding up progress updates.
+- A row carrying an error survives until **Clear Completed** acknowledges it, and that
+  button appears for a finished folder scan even when no file was queued.
+
+### GUI responsiveness and correctness
+
+- The Setup and Activity tabs poll only while they are visible; they used to keep polling
+  for the rest of the session after one visit.
+- A store update in one tab no longer re-renders every other tab, including the File
+  Browser tables and the Transfers list.
+- The remote file picker forgets its resolved workspace, listing and selection when the
+  API key changes, so a job cannot be submitted with file IDs from the previous account,
+  and a slow folder listing that arrives after you have navigated away no longer replaces
+  the newer view.
+- Changing the API key drops the coretype, project and software catalogs so the pickers
+  cannot show the previous account's entries. Editing the key and restoring it brings the
+  catalogs back without a rescan.
 
 ### CLI: visible retries, intact progress bars, truthful exit codes (#22, #23)
 
 - Persistent storage or API errors are retried with visible, attempt-numbered notices and
   a bounded retry budget, and the server's own error message is preserved when a call
-  finally gives up — uploads no longer hang for minutes with no output.
+  finally gives up — uploads no longer hang for minutes with no output. The same retry
+  notices are shown in the GUI.
 - API responses that arrive after the retry budget is spent are delivered instead of
   discarded; terminal errors such as 404 no longer surface as "retries exhausted".
 - Log output is routed around the progress bars, so bars no longer shred into multi-line
@@ -122,6 +196,15 @@ existing client-side column sorting. Contributed by @jbeardslee-rescale
   or misstated their input have been fixed.
 - `files delete` checks a file exists before hunting for its parent folder — deleting a
   nonexistent ID now fails in a single API call instead of walking the library.
+- Rate limiting: a cooldown the platform imposes while requests are already queued is
+  honored instead of ignored, degraded mode is announced once on entry and once on exit,
+  and a detached daemon's rate-limit and retry notices reach its log instead of being
+  discarded.
+- Paging through API results works when the configured platform host differs from the
+  canonical one only by letter case; every page after the first used to fail.
+- A rejected file tag reports the server's explanation instead of a bare status code.
+- Exported log files carry a date-and-time name, so two exports on one day no longer
+  collide, and per-request proxy routing lines are logged only with `RESCALE_DEBUG`.
 
 ### Auto-download reliability
 
@@ -129,6 +212,15 @@ existing client-side column sorting. Contributed by @jbeardslee-rescale
   instead of silently going idle, and the staleness of the last error is shown.
 - Downloads started by a poll are no longer cut off by the poll's own time budget, so
   files that take longer than one polling interval complete instead of restarting.
+- A download batch that registered no work (every file already on disk) no longer wedges
+  the poll loop; the daemon used to stay alive but never scan again. Batch IDs are unique
+  per attempt, so a job that failed once can be recorded as downloaded later and stale
+  failures no longer raise an error report on every poll, and a completed job with no
+  output files is tagged like any other finished job.
+- **Scan now** reports why a scan did not start (stopped, paused, or one already
+  running), **Save all settings** asks the running daemon to reload and reports what
+  happened, and setup validates the download folder with a write probe rather than a
+  stat, so a read-only folder is refused before the first download fails.
 - The daemon's persistent state is now bounded. As part of this, the lifetime
   `JobsDownloaded` counter becomes a trailing counter covering roughly the last 37 days.
 - Known limitation: when running as a Windows service, some low-level log lines do not
@@ -147,7 +239,12 @@ existing client-side column sorting. Contributed by @jbeardslee-rescale
   ([PR #63](https://github.com/rescale-labs/Rescale_Interlink/pull/63)).
 - SSH access fields in job files — CIDR rule, public key, SSH port — are carried into the
   create call instead of being silently dropped, and unknown top-level keys in a
-  `--job-file` produce a warning (#43).
+  `--job-file` produce a warning (#43). The GUI's job template carries the same fields,
+  so the SSH directives of an SGE script survive the GUI.
+- Template fields no longer die silently on the GUI's load paths: the tar subpath and the
+  input file list were dropped on every template load and emptied on a CSV round trip.
+- End-to-end monitoring (`submit -E`, `jobs monitor`, compat mode) ends when a job reaches
+  Stopped or Force Stopped instead of polling forever; only Completed counts as success.
 
 ### Disk-space errors report real numbers (#34)
 
@@ -174,6 +271,11 @@ disk-full.
   All read paths now use full-read semantics.
 - Streaming uploads read every part exactly full before encrypting it; short reads from
   network filesystems can no longer produce undersized parts or failed completion checks.
+- A source file that changes while it is being uploaded is refused instead of registered
+  with a size taken before the transfer and a checksum computed after it.
+- A disk-full error during the final flush of a job archive no longer uploads a truncated
+  archive marked as success, and archive entries use forward-slash names on Windows and
+  carry symlink targets.
 - The File Browser uploads only to the folder it is actually showing. Switching between
   Jobs and My Library, or navigating while a folder is still loading, can no longer send
   files to the previous view's folder (which for job output folders failed with an
@@ -181,15 +283,90 @@ disk-full.
   disabled until the destination has loaded, and the confirmation dialog names the exact
   folder that will receive the files.
 
+### Download integrity
+
+- A download whose checksum or size does not match what the platform recorded is moved
+  out of the way instead of being left in place as if it were good, and the error says
+  where it went.
+- File names reported by the platform are validated before they are used as local paths,
+  so a malformed name cannot write outside the download folder.
+- Every download verifies the byte count it received before it is reported complete, and
+  the S3 and Azure download paths now share one implementation.
+- A failed concurrent download no longer leaves a full-size file with holes at the
+  destination; it writes to a `.partial` name and renames on completion.
+- Folder downloads and compat-mode downloads skip an existing local file only when its
+  size matches the remote file.
+- Paginated listings that hit the page limit return an error instead of a truncated
+  result presented as success.
+
+### Transfer hardening: resume, cancellation and object identity
+
+- Interrupted streaming uploads (the default mode) now resume on S3 and Azure. Each
+  completed part is recorded as it lands, the next attempt continues from the last
+  contiguous part and produces the same encrypted object an uninterrupted upload would.
+  A cancelled upload keeps its checkpoint and its uploaded parts too, so retrying after
+  a cancel continues instead of re-sending the file; the record beside the source file
+  (`<file>.upload.resume`) and the parts on the backend are dropped when the source file
+  changes, when the record is older than seven days, or when the retry completes.
+- Pre-encrypted uploads resume from their encrypted copy when the source file is
+  unchanged, whatever order the parts completed in, instead of starting over. A resume
+  is planned against the part size it was interrupted with, so a retry that runs
+  beside other transfers continues with fewer workers rather than starting over.
+- An upload from a directory that cannot hold the lock and resume files (read-only or
+  full) runs without them instead of failing; such an upload cannot be resumed.
+  Cancelling a transfer waits at most a minute for the backend to acknowledge the
+  abort, instead of up to ten.
+- Two transfers of one file can no longer run against the same upload: the upload lock
+  is exclusive across processes, a live owner is never displaced (Windows previously
+  treated every other process as gone), and a second transfer of the file within one
+  process is refused. A lock left by a crashed transfer on this same machine is cleared
+  once its owner's process is gone. A lock written on another machine or by a release
+  before this one, whose owner's process id the operating system has since reused, or
+  whose owner's process this user is not allowed to inspect (another login on Windows),
+  is never cleared automatically: the error names the process, host, user and time it
+  was taken, and the `<file>.upload.lock` beside the source file to delete if that
+  upload is not running. After upgrading, a stale lock left by an earlier release
+  therefore needs that one manual step, and on macOS so does a lock left by a crash
+  before a reboot. Two machines restored from one image, including containers started
+  from an image that ships a fixed `/etc/machine-id`, count as one machine for this
+  purpose and do not protect a shared source file against each other, as before.
+- A file replaced in storage while it is being downloaded aborts the download on every
+  download path, instead of splicing parts of two objects into one file.
+- Cancelling a download is reported as a cancellation, never as a completed file. A
+  download that did not receive every part fails and keeps its resume state, and a
+  resume record that claims more bytes than the partial file holds is discarded.
+- Concurrent downloads bound how far they fetch ahead of a slow part, so a stalled part
+  no longer holds the rest of the file in memory.
+- Rejected storage credentials are refreshed once for the whole transfer instead of
+  never, and upload progress no longer double-counts a retried part.
+- A file registration or job submission whose response was lost is reconciled against
+  the platform instead of repeated: the registration adopts only the record of its own
+  stored object, and a job that may already exist is reported rather than submitted
+  twice. The HTTP client's own request timeout is no longer mistaken for proof that a
+  request never left, and neither is a cancellation that lands after the request was
+  sent. A PUR job whose creation could not be confirmed is recorded as such, named at
+  the end of the run and in `pur resume --dry-run`, and never created again on resume
+  unless `--recreate-indeterminate` says it is not on the platform.
+- Retrying a cancelled transfer waits for the previous attempt to finish unwinding,
+  Cancel, Cancel Batch and Cancel All also cancel a retry that is still waiting to
+  start, a failed folder creation ends a folder upload with an error instead of hanging,
+  and the worker pool shrinks when the transfer count drops.
+- Files already present locally are verified against the platform's checksum before the
+  daemon skips downloading them.
+
 ### Build and security
 
 Go toolchain 1.26.7 with refreshed dependencies (resolves all Dependabot alerts open at
 release time); release builds are produced from deterministic, checksum-verified inputs,
 and every tagged build now runs the full Go and frontend test suites before packaging.
+The release workflow grants its signing identity only to the job that signs, and refuses
+a tag that does not match the version the binaries report. The README shipped inside each
+platform archive is now the same document. On Windows, a failure to re-launch the GUI's
+helper process reports an error instead of panicking.
 
-### License feature sets on a job
+### License feature sets on a job (#67)
 
-**License Settings** in the job template gained **License Feature Name** and **Licenses Per Job**. Together they submit the job with a user-defined license feature set, so a job checks out a named feature from your own license server:
+**License Settings** in the job template gained **License Feature Name** and **Licenses Per Job**. Together they submit the job with a user-defined license feature set, so a job checks out a named feature from your own license server. Contributed by @ctusa-rescale.
 
 ```json
 "userDefinedLicenseSettings": {
@@ -199,15 +376,20 @@ and every tagged build now runs the full Go and frontend test suites before pack
 }
 ```
 
-Both fields are optional, but only meaningful together: a name without a count, or a count without a name, is rejected rather than submitted as a job that quietly takes no license. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
+Both fields are optional, but only meaningful together: a name without a count, or a count without a name — including a negative count in a jobs CSV — is rejected rather than submitted as a job that quietly takes no license. Clearing the feature name in the GUI releases the count, so the dialog cannot trap you in an error nothing on screen can clear. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
 
 ### Job template: project picker and coretype-aware core stepper
 
-The **Project** field is now a dropdown of the projects the API key can see — the default project first, and each project's remaining budget alongside its name where the platform reports one — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped.
+The **Project** field is now a dropdown of the projects the API key can see — the default project first, and each project's remaining budget alongside its name where the platform reports one — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped. Contributed by @ctusa-rescale.
 
-The **Org Code** field has left the job template. It only ever existed to address the project-assignment endpoint, and the organization code is now resolved from the API key's own user profile and reused for the rest of the run, so choosing a project is all that is required. The field itself is preserved everywhere it was already written down — the `OrgCode` column of a jobs CSV, `org_code` in a PUR config file, and saved GUI templates — and an explicit value still overrides the resolved one, for an account whose profile reports a different code.
+The **Org Code** field has left the job template. It only ever existed to address the project-assignment endpoint, and the organization code is now resolved from the API key's own user profile and reused for the rest of the run, so choosing a project is all that is required. The field itself is preserved everywhere it was already written down — the `OrgCode` column of a jobs CSV, `org_code` in a PUR config file, and saved GUI templates — and an explicit value still overrides the resolved one, for an account whose profile reports a different code. Picking a project from the picker clears an organization code inherited from an older template, since the picker lists this key's projects.
 
-The **Cores** control now steps through the core counts the selected coretype actually offers within a node, and whole nodes above that, instead of counting by one, so neither the stepper buttons nor the arrow keys can land on a value the platform rejects.
+The **Cores** control now steps through the core counts the selected coretype actually offers within a node, and whole nodes above that, instead of counting by one, so neither the stepper buttons nor the arrow keys can land on a value the platform rejects. Without coretype metadata the stepper, its hint and the empty-field default all use one node size.
+
+### Documentation (#33)
+
+README, ARCHITECTURE, the CLI guide, TESTING, FEATURE_SUMMARY and SECURITY were audited
+claim by claim against the code and corrected where they had drifted.
 
 ---
 
