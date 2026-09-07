@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -27,64 +26,53 @@ import (
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
 
-// guardTestDirectory is the runtime directory TestMain points the upload locks
-// of this package's tests at.
-var guardTestDirectory string
-
-// TestMain keeps the guards of the upload locks these tests take out of the
-// directory of whoever runs them. The guard's placement reads the environment,
-// which is the only handle this package has on it — the seam itself belongs to
-// internal/cloud/state — and a guard is never removed, so a suite that did not
-// redirect it left one file per source path behind for good.
+// TestMain keeps the installation identifier the upload locks these tests take
+// out of the configuration directory of whoever runs them. That directory is
+// resolved from the environment, which is the only handle this package has on it
+// — the seam belongs to internal/cloud/state — and only the directory made here
+// is removed.
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "upload-lock-guards-*")
+	dir, err := os.MkdirTemp("", "upload-lock-config-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "create a guard directory for the tests: %v\n", err)
+		fmt.Fprintf(os.Stderr, "create a configuration directory for the tests: %v\n", err)
 		os.Exit(1)
 	}
-	os.Setenv("XDG_RUNTIME_DIR", dir)
-	guardTestDirectory = dir
+	for _, name := range []string{"HOME", "USERPROFILE", "LOCALAPPDATA"} {
+		os.Setenv(name, dir)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
 
-// TestUploadLockGuardsStayInTheTestsOwnDirectory pins the redirection above
-// against the code that honours it: the guard of a real lock taken by this
-// package appears where the environment says, and so nowhere else.
-func TestUploadLockGuardsStayInTheTestsOwnDirectory(t *testing.T) {
+// TestUploadLockLeavesNothingBesideTheSource pins, from the package that takes
+// the real upload locks, that taking one puts nothing in the user's own
+// directory but the lock itself. Whatever a reclamation needs beside the source
+// is removed on its way out; a file that stayed there would be one a later
+// folder upload enumerates as something to transfer.
+func TestUploadLockLeavesNothingBesideTheSource(t *testing.T) {
 	localPath, _ := writeStreamingSource(t, 16)
-	before := guardsInTestDirectory(t)
 
 	lock, err := state.AcquireUploadLock(localPath)
 	if err != nil {
 		t.Fatalf("failed to take an upload lock: %v", err)
 	}
-	state.ReleaseUploadLock(lock)
+	defer state.ReleaseUploadLock(lock)
 
-	if got := guardsInTestDirectory(t); got != before+1 {
-		t.Errorf("the lock of %s left %d guard(s) under %s, want the one it took — anything else it left is in the directory of whoever ran this",
-			localPath, got-before, guardTestDirectory)
-	}
-}
-
-// guardsInTestDirectory counts the guards under the directory TestMain named.
-func guardsInTestDirectory(t *testing.T) int {
-	t.Helper()
-	guards := 0
-	err := filepath.WalkDir(guardTestDirectory, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !entry.IsDir() && strings.HasSuffix(path, ".guard") {
-			guards++
-		}
-		return nil
-	})
+	entries, err := os.ReadDir(filepath.Dir(localPath))
 	if err != nil {
-		t.Fatalf("read the test's guard directory: %v", err)
+		t.Fatalf("read the source directory: %v", err)
 	}
-	return guards
+	base := filepath.Base(localPath)
+	want := map[string]bool{base: true, base + ".upload.lock": true}
+	if len(entries) != len(want) {
+		t.Errorf("taking the lock of %s left %d files beside it, want the source and its lock", base, len(entries))
+	}
+	for _, entry := range entries {
+		if !want[entry.Name()] {
+			t.Errorf("taking the lock left %q beside the source", entry.Name())
+		}
+	}
 }
 
 // fakeStreamingUploader implements transfer.StreamingConcurrentUploader

@@ -25,6 +25,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 // UploadResumeState tracks the state of an in-progress upload for resumption.
@@ -119,14 +121,6 @@ type StreamingPart struct {
 // MaxResumeAge is the maximum age of a resume state before it's considered expired.
 // Aligned with AWS multipart upload expiry (7 days) and Azure uncommitted block expiry (7 days).
 const MaxResumeAge = 7 * 24 * time.Hour
-
-// lockOwnerlessGrace is how long a lock file that names no owner is honoured
-// before it is treated as abandoned. Such a file only exists when its writer
-// died between creating it and recording who it is, so there is no owner whose
-// liveness could be checked; the only alternative to a time bound here is a
-// lock that nothing can ever clear. An identified owner is never evicted on
-// elapsed time — a large upload holds its lock for as long as it takes.
-const lockOwnerlessGrace = 30 * time.Second
 
 // lockTakeoverAttempts bounds how many times acquisition will clear an
 // abandoned lock and race for the create again, so a pathological loop of
@@ -281,17 +275,17 @@ type uploadLockState struct {
 	ProcessID  int    `json:"process_id"`
 	OwnerToken string `json:"owner_token,omitempty"`
 	// Host and Owner name the machine and the user the owning process runs as,
-	// and Guard the file whose OS lock it held while writing this record. A PID
-	// is only meaningful on the host that issued it, and clearing a lock can
-	// only be serialized against acquirers that take the same guard: the host
-	// and the user are what an operator reads, and the guard is what actually
-	// decides it — two logins of one uid with different runtime directories, or
-	// two spellings of one mount, resolve different guards. A record carrying
-	// none of them was written before v4.9.9 and is never reclaimed
+	// and InstallID the installation it belongs to. A PID is only meaningful
+	// inside one installation: two machines can be configured with the same
+	// hostname and can carry the same uid, so host and user are what an
+	// operator reads and the installation identifier is what decides whether
+	// the PID may be tested for liveness at all. A record carrying no
+	// installation identifier was written before v4.9.9 — or by a v4.9.9
+	// process that had nowhere to keep one — and is never reclaimed
 	// automatically.
 	Host       string    `json:"host,omitempty"`
 	Owner      string    `json:"owner,omitempty"`
-	Guard      string    `json:"guard,omitempty"`
+	InstallID  string    `json:"install_id,omitempty"`
 	AcquiredAt time.Time `json:"acquired_at"`
 	LocalPath  string    `json:"local_path"`
 }
@@ -302,19 +296,16 @@ type uploadLockState struct {
 // name the PID of the run that finds it.
 var processLockToken = newLockToken()
 
-// lockHost and lockOwner name the guard domain this process acquires in: the
-// machine and the user account. Reclaiming another domain's lock cannot be
-// serialized against that domain's acquirers, and a PID from another host says
-// nothing about whether anything is running here, so a record naming a domain
-// other than this one is never taken automatically. They are variables so a test
+// lockHost and lockOwner name the machine and the user account a lock record is
+// written by. Nothing is decided on them — an operator reads them to judge
+// whether the upload they name is still running. They are variables so a test
 // can stand in for another machine or another login.
 var (
 	lockHost  = currentLockHost()
 	lockOwner = currentLockOwner()
 )
 
-// currentLockHost names this machine, or nothing when the OS will not say —
-// in which case no record can match this domain and none is ever reclaimed.
+// currentLockHost names this machine, or nothing when the OS will not say.
 func currentLockHost() string {
 	host, err := os.Hostname()
 	if err != nil {
@@ -419,11 +410,10 @@ func localLockKey(lockFilePath string) string {
 //
 // An existing lock is only taken over when its owner is provably gone, never
 // because it is old: a multi-hour upload is still an owner — and only when that
-// owner ran here, as this user. Clearing a lock is a check followed by an act,
-// which is only safe under an exclusion every acquirer that could contest it
-// shares; the guard is that exclusion and it covers one user on one machine.
-// Anything from outside it, including a lock written before this version, is
-// refused with the file to delete rather than taken.
+// owner belongs to this installation, because that is the only place a PID can
+// be tested for liveness. Anything else — another installation, a record written
+// before this version, a file its creator never wrote a record into — is refused
+// with the file to delete rather than taken.
 func AcquireUploadLock(localPath string) (*UploadLock, error) {
 	lockFilePath := lockFilePathFor(localPath)
 
@@ -436,6 +426,7 @@ func AcquireUploadLock(localPath string) (*UploadLock, error) {
 		OwnerToken: processLockToken,
 		Host:       lockHost,
 		Owner:      lockOwner,
+		InstallID:  currentInstallID(),
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	})
@@ -446,26 +437,24 @@ func AcquireUploadLock(localPath string) (*UploadLock, error) {
 	return lock, nil
 }
 
-// acquireLockFile runs the whole acquisition under the guard's OS lock:
-// inspecting the existing record, judging it, clearing it, creating the file and
-// writing the record into it. Nothing narrower serializes a check against an
-// act — O_EXCL keeps two creators apart, but not a creator against a reclaimer
-// judging the file that creator has just made and not yet written, which is how
-// a stalled creator came to be read as abandoned and unlinked while it was alive.
-//
-// A guard the filesystem will not keep or lock is not fatal. Creation still
-// excludes through O_EXCL, and the step that needs the guard — clearing someone
-// else's lock — is refused instead.
-func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*UploadLock, error) {
-	guard, guardPath, guardErr := holdGuardFor(lockFilePath)
-	if guard != nil {
-		defer releaseGuard(guard)
-		newLock.Guard = guardPath
-		takeoverStep(takeoverGuarded, newLock)
-	} else if errors.Is(guardErr, errGuardBusy) {
-		return nil, fmt.Errorf("another transfer is acquiring the lock of %s", localPath)
+// currentInstallID names the installation this process belongs to, or nothing
+// when there is nowhere to keep the identifier. Nothing is lost for creation:
+// only reclamation consults it, so a process without one takes locks as usual
+// and reclaims none — and the records it writes are reclaimed by nobody either,
+// which is the safe direction for both.
+func currentInstallID() string {
+	id, err := config.InstallID()
+	if err != nil {
+		return ""
 	}
+	return id
+}
 
+// acquireLockFile creates the lock file, or reclaims one whose owner is gone and
+// then creates it. Creating with O_EXCL is the whole cross-process exclusion:
+// it is the one step of this two acquirers cannot both win, and everything else
+// here exists to decide whether the pathname may be freed for it.
+func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*UploadLock, error) {
 	data, err := json.MarshalIndent(newLock, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode lock file: %w", err)
@@ -479,12 +468,9 @@ func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*
 		if lock != nil {
 			return lock, nil
 		}
-		if guard == nil {
-			return nil, unguardedReclamationError(localPath, lockFilePath, guardErr)
-		}
 
 		// Someone else got there first. Only clear it if its owner is gone.
-		lock, err = clearAbandonedLock(lockFilePath, localPath, guardPath, newLock, data)
+		lock, err = reclaimStaleLock(lockFilePath, localPath, newLock, data)
 		if err != nil {
 			return nil, err
 		}
@@ -546,12 +532,13 @@ func writeAndClose(file *os.File, data []byte) error {
 	return closeErr
 }
 
-// clearAbandonedLock takes an existing lock file over when nothing owns it any
+// reclaimStaleLock takes an existing lock file over when nothing owns it any
 // more, and reports an error when something does — or when nothing here can
-// establish that nothing does. The caller holds the guard. A nil lock with a nil
-// error means the caller should race for the create again — not that it owns
+// establish that nothing does. Judging is a read and takes nothing: every
+// refusal below leaves the file exactly as it was found. A nil lock with a nil
+// error means the caller should judge the pathname again — not that it owns
 // anything.
-func clearAbandonedLock(lockFilePath, localPath, guardPath string, owner uploadLockState, data []byte) (*UploadLock, error) {
+func reclaimStaleLock(lockFilePath, localPath string, owner uploadLockState, data []byte) (*UploadLock, error) {
 	judged, record, err := readLockRecord(lockFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -563,48 +550,43 @@ func clearAbandonedLock(lockFilePath, localPath, guardPath string, owner uploadL
 	var existing uploadLockState
 	switch {
 	case json.Unmarshal(record, &existing) != nil || existing.ProcessID <= 0:
-		// A file its creator has not written a record into. Every creator that
-		// shares our guard writes under it, so this one does not — and the
-		// grace window, which is all that is left of the older rule, now only
-		// chooses the wording.
-		if time.Since(judged.ModTime()) < lockOwnerlessGrace {
-			return nil, fmt.Errorf("upload of %s is locked by an owner that has not identified itself yet", localPath)
-		}
+		// A file its creator has not written a record into yet, or one written
+		// by something else entirely. There is no owner in it to test and no
+		// age at which that changes: a creator between its O_EXCL and its write
+		// presents exactly this, and waiting out a grace period only turns a
+		// live upload into one two processes run.
 		return nil, unidentifiedLockError(localPath, lockFilePath, judged)
-	case !inThisGuardDomain(existing, guardPath):
+	case !inThisInstallation(existing, owner.InstallID):
 		return nil, foreignLockError(localPath, lockFilePath, existing)
 	case existing.ProcessID != owner.ProcessID && isProcessRunning(existing.ProcessID):
 		return nil, fmt.Errorf("upload locked by another process (PID %d) since %s",
 			existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
 	}
 
-	// Nothing owns it, and it was written here by this user — so every acquirer
-	// that could contest it takes the guard this one holds. A lock naming our
-	// own PID cannot belong to a live owner other than us, and a live one of
-	// ours would have been caught by the in-process claim before we got here:
-	// either it is ours and released, or the OS gave us a dead process's PID,
-	// and refusing would wedge every retry after a crash.
+	// Nothing owns it, and it was written by this installation — so the PID it
+	// names is one this machine could test. A lock naming our own PID cannot
+	// belong to a live owner other than us, and a live one of ours would have
+	// been caught by the in-process claim before we got here: either it is ours
+	// and released, or the OS gave us a dead process's PID, and refusing would
+	// wedge every retry after a crash.
 	takeoverStep(takeoverJudged, owner)
-	return takeAbandonedLock(lockFilePath, localPath, owner, data, judged, record)
+	return takeStaleLock(lockFilePath, localPath, owner, data, record)
 }
 
-// inThisGuardDomain reports whether a record was written on this machine, by the
-// user this process runs as, holding the very guard this acquisition holds — the
-// only writers a reclamation here is serialized against. Host and user alone do
-// not establish that: one uid with two config directories, or one file reached
-// through two mount spellings, resolves two guards and neither excludes the
-// other. A record naming none of the three was written before v4.9.9, when there
-// was nothing to name.
-func inThisGuardDomain(existing uploadLockState, guardPath string) bool {
-	return lockHost != "" && lockOwner != "" && guardPath != "" &&
-		existing.Host == lockHost && existing.Owner == lockOwner && existing.Guard == guardPath
+// inThisInstallation reports whether a record was written by the installation
+// this process belongs to, which is the only place its PID means anything. Host
+// and user do not establish that: two machines can be configured with one
+// hostname and can carry one uid, and a PID recorded on one of them names a
+// different process — or none — on the other. A record naming no installation
+// was written before v4.9.9, when there was none to name.
+func inThisInstallation(existing uploadLockState, installID string) bool {
+	return installID != "" && existing.InstallID == installID
 }
 
 // foreignLockError refuses a lock that this process must not clear on its own.
-// Two acquirers that do not share a guard cannot be serialized against each
-// other, so both could judge one record abandoned and each remove the other's
-// replacement; and a PID recorded on another host names a process of ours or
-// none at all, so its liveness establishes nothing. What is left is to say who
+// A PID recorded by another installation names a process of ours or none at all,
+// so its liveness establishes nothing, and two installations reclaiming one
+// record could each remove the other's replacement. What is left is to say who
 // holds it and leave the decision to whoever can make it.
 func foreignLockError(localPath, lockFilePath string, existing uploadLockState) error {
 	return fmt.Errorf("upload of %s is locked by PID %d on host %s as user %s since %s; "+
@@ -613,9 +595,9 @@ func foreignLockError(localPath, lockFilePath string, existing uploadLockState) 
 		existing.AcquiredAt.Format(time.RFC3339), lockFilePath)
 }
 
-// unidentifiedLockError refuses a lock file that names no owner at all and is
-// past the grace: there is no host, user or PID in it to judge, so nothing here
-// can establish that clearing it is safe.
+// unidentifiedLockError refuses a lock file that names no owner at all: there is
+// no installation, user or PID in it to judge, so nothing here can establish
+// that clearing it is safe, however long ago it was written.
 func unidentifiedLockError(localPath, lockFilePath string, judged os.FileInfo) error {
 	return fmt.Errorf("upload of %s is locked by a record that names no owner, written %s; "+
 		"if no upload of that file is running, delete %s to release it",
@@ -668,140 +650,20 @@ func inspectionError(localPath string, err error) error {
 // Only a test sets it.
 var lockTakeoverStep func(phase string, owner uploadLockState)
 
-// The phases in the order acquisition reaches them: guarded, then created for an
-// acquirer that finds the pathname free, or judged and cleared and then created
-// for one that has to reclaim it first.
+// The phases in the order acquisition reaches them: created for an acquirer that
+// finds the pathname free, or judged and cleared and then created for one that
+// has to reclaim it first.
 const (
-	// takeoverGuarded: this acquirer holds the guard's OS lock, so it is the
-	// only one of its user and machine that may touch this lock at all.
-	takeoverGuarded = "guarded"
-	// takeoverJudged: the existing record has been judged abandoned under the
-	// guard and nothing has been taken yet.
+	// takeoverJudged: the existing record has been judged stale and nothing has
+	// been taken yet, so the judgement can still stop being true.
 	takeoverJudged = "judged"
-	// takeoverCleared: the abandoned lock is gone and the fresh one is not in
-	// place yet, so the pathname is free to anyone the guard does not cover.
+	// takeoverCleared: the stale lock is gone and the fresh one is not in place
+	// yet, so the pathname is free to anyone.
 	takeoverCleared = "cleared"
 	// takeoverCreated: the lock file exists and the record naming its owner is
 	// not written into it yet, which is the window a stalled creator sits in.
 	takeoverCreated = "created"
 )
-
-// guardWaitLimit bounds how long an acquisition waits for the acquirer holding
-// the guard. Waiting without a bound leaves a cancelled transfer parked behind a
-// holder that has stalled, with nothing to return to the caller; the bound turns
-// that into a refusal. It is a variable so a test need not wait it out.
-var guardWaitLimit = 30 * time.Second
-
-// guardSuffix names the file whose OS lock serializes reclaiming a lock.
-const guardSuffix = ".guard"
-
-// The directory the guards live in, named in guardDirectory. They live away from
-// the source they cover because a guard is never removed — that is what keeps
-// every acquirer locking one file — and a permanent empty file next to the
-// user's data is one a later folder upload would enumerate as something to
-// transfer.
-const (
-	guardDirName        = "locks"
-	guardRuntimeDirName = "rescale-int"
-	guardTempDirPrefix  = "rescale-int-locks-"
-)
-
-// errGuardLockUnsupported reports a filesystem that carries no OS lock, so
-// nothing here can serialize two reclaimers of one lock file.
-var errGuardLockUnsupported = errors.New("this filesystem does not support file locking")
-
-// errGuardBusy reports that another acquirer holds the guard at this moment. It
-// is what the bounded wait counts down against, and never means the guard is
-// unusable.
-var errGuardBusy = errors.New("another acquirer holds the guard")
-
-// guardPollInterval is how often a held guard is retried. Short enough that the
-// microseconds an ordinary acquisition holds it are not noticed, long enough
-// that waiting out a stalled holder is not a spin.
-const guardPollInterval = 5 * time.Millisecond
-
-// lockGuard takes the guard's OS lock. It is a variable so a test can stand in
-// for a filesystem that has none.
-var lockGuard = lockGuardFile
-
-// guardDirectory places the guards where the system clears them: the login's
-// runtime directory when it has one, and a directory of this user's under the
-// temporary directory otherwise — macOS's per-user $TMPDIR, %TEMP% on Windows,
-// the shared /tmp on a Linux login with no runtime directory, which is why the
-// owner is in the name and the mode keeps everyone else out. Nothing here
-// removes a guard and every acquisition takes one, so they accumulate one per
-// source path ever uploaded; a directory the user keeps would grow without
-// bound, and nothing is lost when this one is emptied, because a guard holds no
-// state and matters only while an acquisition holds its OS lock.
-//
-// A sweeper cannot take a guard out from under an acquisition that is using it:
-// it deletes by age, an acquisition opens the guard as its first step and holds
-// it for the milliseconds of the acquisition and never across a transfer, so
-// every guard old enough to be swept is one nobody holds.
-//
-// The environment is read on every call rather than once, so that a test — in
-// this package or any other that takes a real lock — can point the guards at a
-// directory of its own and be sure nothing reaches the real one.
-func guardDirectory() string {
-	// A relative runtime directory is not one: joining it would put the guards
-	// under whatever the working directory happens to be, which is the kind of
-	// place they must never accumulate in.
-	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(runtimeDir) {
-		return filepath.Join(runtimeDir, guardRuntimeDirName, guardDirName)
-	}
-	return filepath.Join(os.TempDir(), guardTempDirPrefix+guardOwnerSegment())
-}
-
-// guardOwnerSegment names this user inside a directory name. A Windows account
-// can carry its domain and a backslash with it, which would otherwise put the
-// guards a level down.
-func guardOwnerSegment() string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '.', r == '_', r == '-':
-			return r
-		default:
-			return '-'
-		}
-	}, lockOwner)
-}
-
-// checkGuardDirectory refuses a guard directory that is not this user's own.
-// MkdirAll is content with whatever it finds, and the temporary directory a
-// Linux login without a runtime directory falls back to is shared, so another
-// user can get there first: a symlink, or a directory they may write to, would
-// let them hold the guard of every upload this user starts.
-func checkGuardDirectory(dir string) error {
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
-		return fmt.Errorf("%s is open to other users (mode %#o)", dir, info.Mode().Perm())
-	}
-	return nil
-}
-
-// guardPathFor names the guard of one lock and makes sure the directory holding
-// it exists. The name is a hash of the lock's own path — which acquisition has
-// already resolved to the canonical source path — so that every acquirer of one
-// source reaches the same guard while the name carries no directory of its own.
-// It folds through localLockKey, so the two spellings Windows counts as one
-// file, which already share a lock, share a guard too.
-func guardPathFor(lockFilePath string) (string, error) {
-	dir := guardDirectory()
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", err
-	}
-	if err := checkGuardDirectory(dir); err != nil {
-		return "", err
-	}
-	key := sha256.Sum256([]byte(localLockKey(lockFilePath)))
-	return filepath.Join(dir, hex.EncodeToString(key[:])+guardSuffix), nil
-}
 
 func takeoverStep(phase string, owner uploadLockState) {
 	if lockTakeoverStep != nil {
@@ -809,27 +671,49 @@ func takeoverStep(phase string, owner uploadLockState) {
 	}
 }
 
-// takeAbandonedLock clears a lock file the caller has judged abandoned and puts
-// the caller's own in its place. The caller holds the guard, so no acquirer of
-// this user's, on this machine, is inspecting, creating or writing the pathname
-// while this runs — and no other kind of acquirer ever reaches here.
+// staleSuffix begins the name of the claim a reclaimer takes on the record it
+// has judged stale. The rest of the name is that record's own digest, so every
+// reclaimer of one record reaches for one name and no two records share one.
+const staleSuffix = ".stale-"
+
+// takeStaleLock replaces a lock file the caller has judged stale with the
+// caller's own.
 //
-// Nothing here renames or moves the existing lock, and nothing decides identity
-// by bytes alone. Both of those have already been tried: a rename replaces
-// whatever is at its destination, and two empty files — an old record its writer
-// never filled in and a lock an acquirer has just created — carry the same bytes
-// and are not the same file. The file has to be the one that was judged, by
-// os.SameFile against the stat taken at judgement and by its record still
-// reading the same; anything else means an acquirer outside our guard has had
-// the pathname, and the caller judges again.
+// Judging is a read and replacing is a write, and the pathname alone keeps no
+// second reclaimer out in between. Every earlier attempt at closing that gap
+// failed for the same reason: moving the lock out of the way takes whatever is
+// at the pathname, including the live lock a faster reclaimer has already put
+// there, and a guard file placed anywhere the system will keep it is a file the
+// system also clears, which splits the exclusion in two. What decides it here is
+// an O_EXCL create of a name derived from the judged record: exactly one
+// reclaimer of that record can hold it, it is taken before the lock file is
+// touched at all, and a reclaimer that loses has changed nothing.
 //
-// A nil lock with a nil error means exactly that: judge the lock again.
-func takeAbandonedLock(lockFilePath, localPath string, owner uploadLockState, data []byte,
-	judged os.FileInfo, judgedRecord []byte) (*UploadLock, error) {
-	current, record, err := readLockRecord(lockFilePath)
+// Holding it, the record cannot change under us. The only processes that remove
+// a lock file are its own owner — which this one has established is gone — and
+// the reclaimer holding this claim. So the re-read below either finds the record
+// that was judged, and it is ours to clear, or finds that another acquirer has
+// already been through here, and the caller judges what it left instead.
+//
+// A nil lock with a nil error means exactly that: judge the pathname again.
+func takeStaleLock(lockFilePath, localPath string, owner uploadLockState, data, judged []byte) (*UploadLock, error) {
+	digest := sha256.Sum256(judged)
+	claimPath := lockFilePath + staleSuffix + hex.EncodeToString(digest[:8])
+
+	claim, err := os.OpenFile(claimPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil, reclamationInProgressError(localPath, claimPath)
+		}
+		return nil, fmt.Errorf("cannot clear the abandoned upload lock of %s: %w", localPath, err)
+	}
+	_ = claim.Close()
+	defer os.Remove(claimPath)
+
+	current, err := os.ReadFile(lockFilePath)
 	switch {
 	case err == nil:
-		if !os.SameFile(judged, current) || !bytes.Equal(record, judgedRecord) {
+		if !bytes.Equal(current, judged) {
 			return nil, nil
 		}
 	case os.IsNotExist(err):
@@ -846,74 +730,13 @@ func takeAbandonedLock(lockFilePath, localPath string, owner uploadLockState, da
 	return createLockFile(lockFilePath, localPath, owner, data)
 }
 
-// unguardedReclamationError refuses to clear a lock without the guard whose lock
-// makes clearing it safe. It is never ErrUploadLockUnavailable: the lock file is
-// right there, so "nothing holds this upload" is not true of it.
-func unguardedReclamationError(localPath, lockFilePath string, guardErr error) error {
-	return fmt.Errorf("cannot clear the abandoned upload lock of %s: %w; delete %s by hand to release the upload",
-		localPath, guardErr, lockFilePath)
-}
-
-// holdGuardFor takes the guard that covers one lock, and says why not when it
-// cannot. The two reasons are not alike: a guard another acquirer is holding
-// past the wait bound refuses the acquisition outright, while a guard the
-// filesystem will not keep or lock leaves creation to O_EXCL and costs only
-// reclamation.
-func holdGuardFor(lockFilePath string) (*os.File, string, error) {
-	guardPath, err := guardPathFor(lockFilePath)
-	if err != nil {
-		return nil, "", fmt.Errorf("there is nowhere to keep the guard whose lock makes clearing it safe: %w", err)
-	}
-	guard, err := holdGuard(guardPath)
-	switch {
-	case err == nil:
-		return guard, guardPath, nil
-	case errors.Is(err, errGuardLockUnsupported):
-		return nil, "", fmt.Errorf("this filesystem cannot lock %s, which is what makes clearing it safe", guardPath)
-	default:
-		return nil, "", err
-	}
-}
-
-// holdGuard opens a lock's guard and takes its OS lock, waiting up to
-// guardWaitLimit for whichever acquirer holds it and reporting errGuardBusy if
-// that runs out.
-//
-// The guard is a file of its own because this protocol creates and removes the
-// lock file: an exclusion taken on a file that is about to be unlinked stops
-// excluding anyone the moment the pathname is reused, which is how each earlier
-// attempt at this ended with two owners. The guard is never removed, so every
-// acquirer that opens the pathname gets the same file to lock, and it holds
-// nothing — the lock file with its record is still the whole cross-process
-// ownership signal. A guard that cannot be opened is never evidence that nothing
-// holds the upload, so ErrUploadLockUnavailable stays reserved for a lock file
-// the filesystem refuses to create.
-//
-// The wait is a poll because neither flock nor LockFileEx has a form that gives
-// up after a while, and an unbounded one leaves a cancelled transfer parked
-// behind a holder that has stalled.
-func holdGuard(guardPath string) (*os.File, error) {
-	file, err := os.OpenFile(guardPath, os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, err
-	}
-	deadline := time.Now().Add(guardWaitLimit)
-	for {
-		err := lockGuard(file)
-		if err == nil {
-			return file, nil
-		}
-		if !errors.Is(err, errGuardBusy) || !time.Now().Before(deadline) {
-			_ = file.Close()
-			return nil, err
-		}
-		time.Sleep(guardPollInterval)
-	}
-}
-
-func releaseGuard(file *os.File) {
-	_ = unlockGuardFile(file)
-	_ = file.Close()
+// reclamationInProgressError refuses to reclaim a lock another acquirer is
+// already reclaiming. The claim is held for the microseconds between judging a
+// record and replacing it, so this is ordinarily a transient answer; one an
+// acquirer died holding is not, which is why the file is named.
+func reclamationInProgressError(localPath, claimPath string) error {
+	return fmt.Errorf("the upload lock of %s is being reclaimed by another transfer; "+
+		"if none is running, delete %s to release it", localPath, claimPath)
 }
 
 // ReleaseUploadLock releases an upload lock.

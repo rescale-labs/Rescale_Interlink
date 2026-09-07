@@ -2,9 +2,14 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // LogDirectory returns the unified log directory for all Interlink logs.
@@ -93,4 +98,77 @@ func ReportDirectory() string {
 // EnsureReportDirectory creates the report directory if it doesn't exist.
 func EnsureReportDirectory() error {
 	return os.MkdirAll(ReportDirectory(), 0700)
+}
+
+// installIDFile names the installation identifier inside the per-user
+// configuration directory, beside apiconfig and the token.
+const installIDFile = "install-id"
+
+// InstallID returns the identifier of the installation this process belongs to:
+// a random string written once into this user's configuration directory and read
+// back on every later call.
+//
+// It exists because no other string identifies the place a PID means something.
+// Two machines can be configured with the same hostname and can carry the same
+// uid, so a record naming both still says nothing about whether the process it
+// names is running here; an identifier generated here does. The configuration
+// directory is already per user, so the identifier is per user per installation
+// — which is the boundary a PID is meaningful inside.
+//
+// Two processes creating it at once do not disagree: the file is created with
+// O_EXCL and the loser reads the winner's.
+func InstallID() (string, error) {
+	dir := getConfigDir()
+	if dir == "" {
+		return "", errors.New("there is no configuration directory to keep the installation identifier in")
+	}
+	path := filepath.Join(dir, installIDFile)
+
+	id, err := readInstallID(path)
+	switch {
+	case err == nil:
+		return id, nil
+	case !os.IsNotExist(err):
+		return "", err
+	}
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create %s: %w", dir, err)
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("failed to generate an installation identifier: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return readInstallID(path)
+		}
+		return "", fmt.Errorf("failed to create %s: %w", path, err)
+	}
+	id = hex.EncodeToString(buf)
+	_, writeErr := file.WriteString(id)
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		// A half-written identifier would be read back as this installation's
+		// by one process and as another's by the next.
+		_ = os.Remove(path)
+		return "", fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	return id, nil
+}
+
+// readInstallID reads an identifier that is already on disk. A file holding
+// nothing usable is not an identifier: reporting one would let every
+// installation whose file is empty answer to the same name.
+func readInstallID(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return "", fmt.Errorf("%s holds no installation identifier", path)
+	}
+	return id, nil
 }
