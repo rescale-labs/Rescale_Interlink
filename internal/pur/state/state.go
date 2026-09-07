@@ -173,26 +173,65 @@ func (m *Manager) saveUnlocked() error {
 	return nil
 }
 
-// GetState returns the state for a given job index
+// FilePath is the file this manager persists to.
+//
+// It is what identifies a run: the pipeline derives its archive namespace from
+// it so two batches over the same inputs do not write one archive, and a resume
+// lands on the batch's own archives again. Set at construction and never
+// written afterwards, so it needs no lock.
+func (m *Manager) FilePath() string {
+	return m.filePath
+}
+
+// GetState returns a snapshot of the state for a given job index, or nil when
+// the index is unknown.
+//
+// A snapshot, not the manager's own object: handing out the stored pointer put
+// it beyond the reach of this lock, so a worker recording an upload's file ID
+// wrote fields that another worker's checkpoint was serializing at the same
+// moment. Callers change their snapshot and hand it back through UpdateState,
+// which is where the manager takes the change.
 func (m *Manager) GetState(index int) *models.JobState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.states[index]
+
+	stored, ok := m.states[index]
+	if !ok {
+		return nil
+	}
+	snapshot := *stored
+	return &snapshot
 }
 
-// UpdateState updates the state for a given job
+// UpdateState takes a caller's snapshot as the job's new state and checkpoints
+// it. The snapshot is copied in, so the caller may go on using its own object
+// without reaching what a later checkpoint serializes.
 func (m *Manager) UpdateState(state *models.JobState) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state.LastUpdated = time.Now()
-	m.states[state.Index] = state
+	stored := *state
+
+	// UploadProgress is the one field the manager owns rather than the caller:
+	// UpdateUploadProgressByName writes it live while a transfer runs, and it is
+	// never written to the CSV. A snapshot taken before that transfer started
+	// carries zero, which used to be harmless because the caller held the very
+	// object being updated. Zero therefore means "this snapshot says nothing
+	// about progress" and leaves the live figure alone.
+	if stored.UploadProgress == 0 {
+		if previous, ok := m.states[state.Index]; ok {
+			stored.UploadProgress = previous.UploadProgress
+		}
+	}
+
+	m.states[state.Index] = &stored
 
 	// Save immediately for persistence (while still holding lock to prevent race)
 	return m.saveUnlocked()
 }
 
-// InitializeState initializes state for a new job
+// InitializeState initializes state for a new job and returns a snapshot of it.
 func (m *Manager) InitializeState(index int, jobName, directory string) *models.JobState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -208,10 +247,13 @@ func (m *Manager) InitializeState(index int, jobName, directory string) *models.
 	}
 
 	m.states[index] = state
-	return state
+	snapshot := *state
+	return &snapshot
 }
 
-// GetAllStates returns all job states sorted by index
+// GetAllStates returns snapshots of all job states, sorted by index. As with
+// GetState, changing one changes nothing here until it is passed to
+// UpdateState.
 func (m *Manager) GetAllStates() []*models.JobState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -225,7 +267,8 @@ func (m *Manager) GetAllStates() []*models.JobState {
 
 	states := make([]*models.JobState, 0, len(m.states))
 	for _, idx := range indices {
-		states = append(states, m.states[idx])
+		snapshot := *m.states[idx]
+		states = append(states, &snapshot)
 	}
 	return states
 }

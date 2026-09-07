@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -167,6 +168,44 @@ func tarballDir(jobs []models.JobSpec) (string, error) {
 	return dir, nil
 }
 
+// archiveNamespacePrefix marks a directory as one a batch's archives live in.
+// safeRemoveTar tests for it, so the name is load-bearing rather than cosmetic.
+const archiveNamespacePrefix = ".rescale-int-"
+
+// archiveNamespace names the directory a batch writes its archives to, inside
+// the jobs' common parent.
+//
+// An archive's filename identifies a job within its batch — the row index and
+// the hash of its source paths — but says nothing about which batch. Two runs
+// over one file list therefore resolved to a single path, and one process would
+// truncate and rewrite the archive another was uploading, or delete it after
+// upload before the other had opened it. Different state files did not separate
+// them, because the state file did not reach the name.
+//
+// The state file is what already identifies a run: it is the file a resume
+// reads back. Hashing its absolute path gives each batch a directory of its own
+// and gives a resumed batch the same one, so an unfinished archive is
+// recomputed to the path it had before.
+//
+// With no state file there is nothing to resume, so a value unique to this
+// process stands in. That is the case with no other protection at all: two
+// concurrent stateless runs over one file list share every input the name is
+// built from.
+func archiveNamespace(statePath string) string {
+	seed := strings.TrimSpace(statePath)
+	if seed != "" {
+		if abs, err := filepath.Abs(seed); err == nil {
+			seed = abs
+		}
+	} else {
+		seed = fmt.Sprintf("pid-%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+
+	h := fnv.New32a()
+	h.Write([]byte(seed))
+	return fmt.Sprintf("%s%08x", archiveNamespacePrefix, h.Sum32())
+}
+
 // findCommonParent finds the common parent directory of all job directories
 func findCommonParent(jobs []models.JobSpec) string {
 	if len(jobs) == 0 {
@@ -284,25 +323,33 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 		}
 	}
 
-	// Find common parent directory of all jobs - this is where tarballs will be created
-	tempDir, err := tarballDir(jobs)
+	// Find common parent directory of all jobs - this is where the batch's
+	// archive directory is created
+	commonParent, err := tarballDir(jobs)
 	if err != nil {
 		return nil, err
 	}
 
-	// Ensure the directory exists (it should already, but be safe)
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to access tarball directory: %w", err)
-	}
-
 	// Use existing state manager if provided (shared with Engine/GUI),
-	// otherwise create a new one (CLI paths).
+	// otherwise create a new one (CLI paths). Resolved before the archive
+	// directory because that directory is named after the state file.
 	stateMgr := opts.ExistingState
 	if stateMgr == nil {
 		stateMgr = state.NewManager(opts.StateFile)
 		if err := stateMgr.Load(); err != nil {
 			return nil, fmt.Errorf("failed to load state: %w", err)
 		}
+	}
+
+	statePath := opts.StateFile
+	if statePath == "" {
+		statePath = stateMgr.FilePath()
+	}
+	tempDir := filepath.Join(commonParent, archiveNamespace(statePath))
+
+	// Ensure the directory exists (it should already, but be safe)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to access tarball directory: %w", err)
 	}
 
 	// Initialize resource and transfer managers for efficient upload management
@@ -720,6 +767,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 
 	p.logf("INFO", "pipeline", "", "Pipeline completed: %d/%d jobs finished in %v",
 		p.completedJobs, p.totalJobs, time.Since(p.pipelineStart))
+
+	// The batch's archive directory sits in the user's own tree, so an empty one
+	// is not left behind. os.Remove refuses a directory that still holds
+	// anything, which is exactly the archives a run without --rm-tar-on-success
+	// is meant to keep.
+	os.Remove(p.tempDir)
 
 	// A run where jobs failed is not a successful run. Without this the CLI
 	// prints "Pipeline completed" and exits 0 even when every job failed.
@@ -1175,7 +1228,16 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 			item.state.FileID = cloudFile.ID
 			item.state.UploadStatus = "success"
 			item.state.ErrorMessage = ""
-			p.stateMgr.UpdateState(item.state)
+			// Before the archive is deleted and before the job is created: an
+			// unrecorded file ID means a restart re-uploads, which it cannot do
+			// once the archive is gone, and cannot attach what was uploaded.
+			if err := p.checkpoint(item, "upload"); err != nil {
+				p.setActiveWorker("upload", -1)
+				if transferHandle != nil {
+					transferHandle.Complete()
+				}
+				continue
+			}
 			p.reportStateChange(item.state.JobName, "upload", "completed", "", "", 1.0)
 			p.logf("INFO", "upload", item.state.JobName, "Success: File ID %s", cloudFile.ID)
 
@@ -1211,6 +1273,37 @@ shutdown:
 	p.mu.Unlock()
 }
 
+// checkpoint persists the item's state and reports whether the pipeline may go
+// on to the next irreversible step with it.
+//
+// The state file is the run's only record of what has already happened, so a
+// write that failed has to stop the item before anything that cannot be undone:
+// deleting the archive that was just uploaded, creating a job whose ID would
+// exist only in memory, or submitting one. Each of those left a restart with
+// nothing to work from — an archive to upload that is gone, or a second job for
+// work the platform is already running.
+//
+// The item is marked failed so the end-of-run count reports it, and a resume
+// retries the stage. Retrying is safe precisely because nothing reached disk.
+func (p *Pipeline) checkpoint(item *workItem, stage string) error {
+	err := p.stateMgr.UpdateState(item.state)
+	if err == nil {
+		return nil
+	}
+
+	reason := fmt.Sprintf("could not record %s state: %v", stage, err)
+	p.logf("ERROR", stage, item.state.JobName, "%s", reason)
+
+	item.state.SubmitStatus = "failed"
+	item.state.ErrorMessage = reason
+	// The same write is about to fail again; this is for the in-memory map
+	// countFailedJobs reads, which UpdateState owns.
+	_ = p.stateMgr.UpdateState(item.state)
+
+	p.reportStateChange(item.state.JobName, stage, "failed", item.state.JobID, reason, 0.0)
+	return errors.New(reason)
+}
+
 // safeRemoveTar safely deletes a tar file with multiple guardrails.
 func (p *Pipeline) safeRemoveTar(tarPath, jobName string) error {
 	// 1. Canonical path: resolve symlinks, get absolute path
@@ -1223,10 +1316,23 @@ func (p *Pipeline) safeRemoveTar(tarPath, jobName string) error {
 		return fmt.Errorf("cannot get absolute path for %s: %w", tarPath, err)
 	}
 
-	// 2. Must be under the pipeline's tempDir
-	tempDirAbs, _ := filepath.Abs(p.tempDir)
-	if !strings.HasPrefix(canonical, tempDirAbs+string(filepath.Separator)) && canonical != tempDirAbs {
-		return fmt.Errorf("path %s is not under tempDir %s", canonical, tempDirAbs)
+	// 2. Must sit directly in this batch's own archive directory. That is the
+	// ownership test: a filename shape can be arrived at by coincidence, but
+	// only this batch writes into the directory archiveNamespace named for it.
+	// Both sides are symlink-resolved because canonical already is, and a
+	// symlinked parent would otherwise never compare equal.
+	nsDir, err := filepath.Abs(p.tempDir)
+	if err != nil {
+		return fmt.Errorf("cannot get absolute path for %s: %w", p.tempDir, err)
+	}
+	if resolved, errNS := filepath.EvalSymlinks(nsDir); errNS == nil {
+		nsDir = resolved
+	}
+	if !strings.HasPrefix(filepath.Base(nsDir), archiveNamespacePrefix) {
+		return fmt.Errorf("%s is not an Interlink archive directory", nsDir)
+	}
+	if filepath.Dir(canonical) != nsDir {
+		return fmt.Errorf("path %s is not in this batch's archive directory %s", canonical, nsDir)
 	}
 
 	// 3. Must be a regular file (not directory, symlink, etc.)
@@ -1333,7 +1439,12 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 
 				item.state.JobID = jobResp.ID
-				p.stateMgr.UpdateState(item.state)
+				// Before submission: a job whose ID exists only in memory is a
+				// job a restart creates and submits all over again.
+				if err := p.checkpoint(item, "create"); err != nil {
+					p.setActiveWorker("job", -1)
+					continue
+				}
 				p.reportStateChange(item.state.JobName, "create", "completed", jobResp.ID, "", 0.0)
 				p.logf("INFO", "job", item.state.JobName, "Created: Job ID %s", jobResp.ID)
 
@@ -1396,7 +1507,18 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 
 				item.state.SubmitStatus = "success"
-				p.stateMgr.UpdateState(item.state)
+				if err := p.checkpoint(item, "submit"); err != nil {
+					// Nothing irreversible is left to stop, but the run must not
+					// call this job done: the state file still shows it pending,
+					// so a resume submits the running job a second time unless
+					// someone reconciles it first. Hence the job ID in the line.
+					p.logf("ERROR", "job", item.state.JobName,
+						"Job %s was submitted but its state could not be recorded; "+
+							"a resume from this state file would submit it again",
+						item.state.JobID)
+					p.setActiveWorker("job", -1)
+					continue
+				}
 				p.reportStateChange(item.state.JobName, "submit", "completed", item.state.JobID, "", 0.0)
 				p.logf("INFO", "job", item.state.JobName, "Submitted successfully")
 			} else if item.state.SubmitStatus != "success" && item.state.SubmitStatus != "failed" {

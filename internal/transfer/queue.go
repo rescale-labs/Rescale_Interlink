@@ -57,6 +57,17 @@ type Queue struct {
 	// Cancel functions for active tasks
 	cancelFuncs map[string]context.CancelFunc
 
+	// runningAttempts holds the tasks an executor is currently working on. An
+	// entry appears when the executor registers its cancel function and is
+	// removed when the executor reaches a terminal call, which is later than
+	// the task's own terminal state: a cancelled task's executor keeps
+	// unwinding after the cancel.
+	runningAttempts map[string]struct{}
+
+	// claimedRetries are retries requested while the previous attempt was still
+	// unwinding. They start when it releases the task; see Retry.
+	claimedRetries map[string]struct{}
+
 	// Retry executor (set by GUI to handle retry requests)
 	retryExecutor RetryExecutor
 
@@ -100,6 +111,8 @@ func NewQueue(eventBus *events.EventBus) *Queue {
 		tasks:                 make([]*TransferTask, 0),
 		tasksByID:             make(map[string]*TransferTask),
 		cancelFuncs:           make(map[string]context.CancelFunc),
+		runningAttempts:       make(map[string]struct{}),
+		claimedRetries:        make(map[string]struct{}),
 		batchCancelFuncs:      make(map[string]context.CancelFunc),
 		batchScanInProgress:   make(map[string]bool),
 		cancelledBatches:      make(map[string]struct{}),
@@ -234,18 +247,58 @@ func (q *Queue) StartTransfer(taskID string) {
 
 // SetCancel stores the cancel function for an active task.
 // Call this after creating context.WithCancel() for the transfer.
+//
+// It also marks the start of an attempt: from here until the executor's
+// terminal call, this task has a writer, and a retry claimed in between waits
+// rather than starting a second one.
 func (q *Queue) SetCancel(taskID string, cancelFn context.CancelFunc) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.cancelFuncs[taskID] = cancelFn
+	q.runningAttempts[taskID] = struct{}{}
 }
 
 // ClearCancel removes a stale cancel fn entry for a task.
 // Used on early-return paths where the task is already terminal (e.g., cancelled by CancelBatch).
 func (q *Queue) ClearCancel(taskID string) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	delete(q.cancelFuncs, taskID)
+	q.mu.Unlock()
+
+	q.releaseAttempt(taskID)
+}
+
+// releaseAttempt records that the executor working on this task has finished
+// and starts the retry claimed while it was unwinding, if there was one.
+//
+// Call it after publishing the attempt's own terminal event: starting the retry
+// resets the very fields that event reports.
+func (q *Queue) releaseAttempt(taskID string) {
+	q.mu.Lock()
+	delete(q.runningAttempts, taskID)
+
+	_, claimed := q.claimedRetries[taskID]
+	task := q.tasksByID[taskID]
+	executor := q.retryExecutor
+	if claimed {
+		delete(q.claimedRetries, taskID)
+	}
+	if claimed && task != nil && executor != nil {
+		// Reset only now. Until the previous attempt released the task, its own
+		// terminal call would have landed on the reset state — which is how a
+		// cancelled download's late "context canceled" failed the retry that
+		// had replaced it.
+		task.resetForRetry()
+	} else {
+		claimed = false
+	}
+	q.mu.Unlock()
+
+	if !claimed {
+		return
+	}
+	q.publishTransferEvent(events.EventTransferQueued, task)
+	go executor.ExecuteRetry(task)
 }
 
 // FailIfNotTerminal atomically checks if a task is non-terminal and transitions to Failed.
@@ -255,15 +308,15 @@ func (q *Queue) ClearCancel(taskID string) {
 func (q *Queue) FailIfNotTerminal(taskID string, err error) bool {
 	q.mu.Lock()
 	task, exists := q.tasksByID[taskID]
-	if !exists || task == nil || !task.failIfNotTerminal(err) {
-		delete(q.cancelFuncs, taskID) // Cleanup
-		q.mu.Unlock()
-		return false
-	}
-	delete(q.cancelFuncs, taskID)
+	failed := exists && task != nil && task.failIfNotTerminal(err)
+	delete(q.cancelFuncs, taskID) // Cleanup
 	q.mu.Unlock()
-	q.publishTransferEvent(events.EventTransferFailed, task)
-	return true
+
+	if failed {
+		q.publishTransferEvent(events.EventTransferFailed, task)
+	}
+	q.releaseAttempt(taskID)
+	return failed
 }
 
 // UpdateSize updates a task's total size. Used when the size isn't known at
@@ -333,6 +386,7 @@ func (q *Queue) Complete(taskID string) {
 	if completed {
 		q.publishTransferEvent(events.EventTransferCompleted, task)
 	}
+	q.releaseAttempt(taskID)
 }
 
 // Fail marks a task as failed with an error.
@@ -351,6 +405,7 @@ func (q *Queue) Fail(taskID string, err error) {
 	if failed {
 		q.publishTransferEvent(events.EventTransferFailed, task)
 	}
+	q.releaseAttempt(taskID)
 }
 
 // Cancel cancels an active, initializing, or queued task by calling its stored cancel function.
@@ -432,32 +487,55 @@ func (q *Queue) CancelAll() {
 // Retry resets a failed or cancelled task and re-queues it for execution.
 // Reuses the same task entry instead of creating a duplicate.
 // Returns the same task ID (not a new one).
+//
+// The claim is made in one step with the retryable check, under q.mu: two
+// requests for the same task used to both pass the check and start an executor,
+// leaving two attempts writing to one destination.
+//
+// A retry claimed while the previous attempt is still unwinding does not start
+// here. Cancelling a task leaves its executor running for a while yet, and that
+// executor reports through the task ID the retry reuses — its late
+// "context canceled" would fail the attempt that replaced it, and take the
+// replacement's cancel function with it. releaseAttempt starts the retry once
+// the previous attempt is actually done.
 func (q *Queue) Retry(taskID string) (string, error) {
 	q.mu.Lock()
-	originalTask, exists := q.tasksByID[taskID]
-	executor := q.retryExecutor
-	q.mu.Unlock()
 
-	if !exists || originalTask == nil {
+	task, exists := q.tasksByID[taskID]
+	if !exists || task == nil {
+		q.mu.Unlock()
 		return "", errors.New("task not found")
 	}
-
-	if !originalTask.CanRetry() {
+	executor := q.retryExecutor
+	if executor == nil {
+		q.mu.Unlock()
+		return "", errors.New("no retry executor configured")
+	}
+	if _, claimed := q.claimedRetries[taskID]; claimed {
+		// Already claimed by an earlier request. Reported as success: the task
+		// is going to run again, which is what the caller asked for.
+		q.mu.Unlock()
+		return taskID, nil
+	}
+	if !task.CanRetry() {
+		q.mu.Unlock()
 		return "", errors.New("task cannot be retried")
 	}
-
-	if executor == nil {
-		return "", errors.New("no retry executor configured")
+	if _, running := q.runningAttempts[taskID]; running {
+		q.claimedRetries[taskID] = struct{}{}
+		q.mu.Unlock()
+		return taskID, nil
 	}
 
 	// Reset the existing task instead of creating a new one,
 	// keeping a single entry in the queue instead of duplicates.
-	originalTask.resetForRetry()
+	task.resetForRetry()
+	q.mu.Unlock()
 
-	q.publishTransferEvent(events.EventTransferQueued, originalTask)
+	q.publishTransferEvent(events.EventTransferQueued, task)
 
 	// Execute retry via executor (in goroutine to not block)
-	go executor.ExecuteRetry(originalTask)
+	go executor.ExecuteRetry(task)
 
 	return taskID, nil
 }
@@ -477,6 +555,11 @@ func (q *Queue) ClearCompleted() {
 			}
 		} else {
 			delete(q.tasksByID, task.ID)
+			// A retry claimed for a task that is being removed has nothing left
+			// to run; dropping it also keeps these maps from outliving the queue
+			// entries they are keyed by.
+			delete(q.claimedRetries, task.ID)
+			delete(q.runningAttempts, task.ID)
 		}
 	}
 	q.tasks = filtered
@@ -524,6 +607,8 @@ func (q *Queue) ClearBatchTerminalTasks(batchID string) int {
 	for _, task := range q.tasks {
 		if task.BatchID == batchID && task.IsTerminal() {
 			delete(q.tasksByID, task.ID)
+			delete(q.claimedRetries, task.ID)
+			delete(q.runningAttempts, task.ID)
 			removed++
 			continue
 		}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	nethttp "net/http"
 	neturl "net/url"
 	"os"
@@ -112,6 +113,60 @@ type retryBudgetKey struct{}
 // Stamp after any rate limiter wait: queuing for a token is not retrying.
 func withRetryBudget(ctx context.Context) context.Context {
 	return context.WithValue(ctx, retryBudgetKey{}, time.Now())
+}
+
+// nonIdempotentCreateKey marks a context whose request mints a new record on
+// the platform.
+type nonIdempotentCreateKey struct{}
+
+// withNonIdempotentCreate marks ctx as belonging to a request that creates a
+// record. Carried on the context rather than read off the request because
+// go-retryablehttp reports a transport failure with a nil response, and the
+// context is then the only part of the failed attempt the policy still has.
+func withNonIdempotentCreate(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nonIdempotentCreateKey{}, true)
+}
+
+// isNonIdempotentCreate reports whether repeating this request could leave the
+// platform holding two records where the caller asked for one.
+func isNonIdempotentCreate(ctx context.Context) bool {
+	marked, _ := ctx.Value(nonIdempotentCreateKey{}).(bool)
+	return marked
+}
+
+// createsPlatformRecord reports whether a request mints a new file or job.
+//
+// Only the collection endpoints: POSTs further down those trees act on a record
+// that already exists (a tag, a submission) and repeating one cannot mint a
+// second.
+func createsPlatformRecord(method, path string) bool {
+	if method != nethttp.MethodPost {
+		return false
+	}
+	switch strings.TrimSuffix(path, "/") {
+	case "/api/v3/files", "/api/v3/jobs":
+		return true
+	}
+	return false
+}
+
+// requestNeverLeft reports that a transport failure happened before the request
+// could reach the platform, so nothing can have acted on it.
+//
+// A dial that never connected and a name that never resolved are the two cases
+// that say so. Everything else — a timeout, a reset, a connection closed with
+// no response — leaves it unknown whether the platform received the request and
+// acted on it, which for a create means a retry can mint a duplicate.
+func requestNeverLeft(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	return false
 }
 
 // retryPolicy holds what go-retryablehttp's callbacks need: the shared limiter
@@ -221,6 +276,14 @@ func (p *retryPolicy) checkRetry(ctx context.Context, resp *nethttp.Response, er
 func (p *retryPolicy) classify(ctx context.Context, resp *nethttp.Response, err error) (bool, error) {
 	// Retry transport/connection errors (all methods)
 	if err != nil {
+		// Except where the request may already have been delivered and the
+		// platform may already have acted on it. There is no idempotency key to
+		// make a second create harmless, and the caller keeps only the last
+		// response's ID, so the earlier records would exist untracked. The
+		// caller is handed the failure instead, to reconcile or report.
+		if isNonIdempotentCreate(ctx) && !requestNeverLeft(err) {
+			return false, nil
+		}
 		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 	}
 
@@ -630,6 +693,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	// for a token is not retrying, and must not spend the budget.
 	ctx = withRetryBudget(ctx)
 
+	// Tell the retry policy which requests it must not repeat blindly; see
+	// createsPlatformRecord.
+	if createsPlatformRecord(method, path) {
+		ctx = withNonIdempotentCreate(ctx)
+	}
+
 	url := c.baseURL + path
 	req, err := nethttp.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
@@ -869,7 +938,103 @@ func (c *Client) FindItemParentFolder(ctx context.Context, itemID string, isFold
 	return "", fmt.Errorf("could not locate item %s under the library — it may be in a job folder or the ID is incorrect", itemID)
 }
 
+// registerFileAttempts bounds the reconcile-then-retry loop in RegisterFile.
+// Each round costs a listing of the target folder, and a platform dropping
+// every connection is not going to be talked round by a fourth try.
+const registerFileAttempts = 3
+
+// registerReconcileWindow is how far back RegisterFile will believe a record it
+// finds belongs to the request it just sent. Wide enough for a request that
+// stalled before the connection dropped, narrow enough that an unrelated file
+// of the same name and size registered earlier is not adopted.
+const registerReconcileWindow = 10 * time.Minute
+
+// RegisterFile creates the platform's record of an uploaded file.
+//
+// A failure that may have been delivered is reconciled rather than repeated:
+// the record it would have created is looked up and adopted. Registering twice
+// would leave a second record describing the same uploaded bytes, which nothing
+// tracks and the caller never learns about, since it keeps only the ID of the
+// last response.
 func (c *Client) RegisterFile(ctx context.Context, fileReq *models.CloudFileRequest) (*models.CloudFile, error) {
+	sent := time.Now()
+
+	for attempt := 1; ; attempt++ {
+		file, err := c.registerFileOnce(ctx, fileReq)
+		if err == nil || !isAmbiguousDelivery(err) {
+			return file, err
+		}
+
+		existing, lookupErr := c.findRegisteredFile(ctx, fileReq, sent.Add(-registerReconcileWindow))
+		if lookupErr != nil {
+			return nil, fmt.Errorf("registering %q failed and could not be confirmed: %w (registration error: %v)",
+				fileReq.Name, lookupErr, err)
+		}
+		if existing != nil {
+			return existing, nil
+		}
+		if attempt >= registerFileAttempts {
+			return nil, err
+		}
+		// Nothing was created, so the request did not take effect and sending
+		// it again cannot duplicate anything.
+	}
+}
+
+// isAmbiguousDelivery reports a request that may have reached the platform and
+// been acted on before the connection failed.
+func isAmbiguousDelivery(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// A response, however bad, means the platform answered and the caller knows
+	// where it stands; only a transport failure is ambiguous.
+	var urlErr *neturl.Error
+	if !errors.As(err, &urlErr) {
+		return false
+	}
+	return !requestNeverLeft(err)
+}
+
+// findRegisteredFile looks for the record a registration request would have
+// created, or nil when the platform holds no such record.
+//
+// Identity is the request's own terms — the name and decrypted size, in the
+// folder it targeted — plus recency, since the platform allows same-named files
+// and an older one must not be adopted as this upload's. A record with no
+// upload date yet is accepted: registration precedes the platform stamping one.
+func (c *Client) findRegisteredFile(ctx context.Context, fileReq *models.CloudFileRequest, notBefore time.Time) (*models.CloudFile, error) {
+	folderID := fileReq.CurrentFolderID
+	if folderID == "" {
+		roots, err := c.GetRootFolders(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve library root: %w", err)
+		}
+		folderID = roots.MyLibrary
+	}
+
+	contents, err := c.SearchFolderContents(ctx, folderID, fileReq.Name, "", 100)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search folder %s: %w", folderID, err)
+	}
+
+	for _, candidate := range contents.Files {
+		if candidate.Name != fileReq.Name || candidate.DecryptedSize != fileReq.DecryptedSize {
+			continue
+		}
+		if !candidate.DateUploaded.IsZero() && candidate.DateUploaded.Before(notBefore) {
+			continue
+		}
+		// The listing carries less than a registration response does, and the
+		// caller's next step is to upload against this record.
+		return c.GetFileInfo(ctx, candidate.ID)
+	}
+
+	return nil, nil
+}
+
+// registerFileOnce performs a single registration request.
+func (c *Client) registerFileOnce(ctx context.Context, fileReq *models.CloudFileRequest) (*models.CloudFile, error) {
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/files/", fileReq)
 	if err != nil {
 		return nil, err
@@ -926,10 +1091,22 @@ func (c *Client) GetFileInfo(ctx context.Context, fileID string) (*models.CloudF
 	return &file, nil
 }
 
+// ErrJobMayExist marks a job creation whose outcome the client cannot know: the
+// request reached the platform, or may have, and the connection failed before
+// the answer came back. There is no idempotency key to make a second attempt
+// safe and no name to look the job up by that the platform enforces as unique,
+// so the caller is told to check rather than handed a silent duplicate.
+var ErrJobMayExist = errors.New("job may have been created")
+
 func (c *Client) CreateJob(ctx context.Context, jobReq models.JobRequest) (*models.JobResponse, error) {
 	jobReq.NormalizeAutomations() // Ensure environmentVariables is always present
 	resp, err := c.doRequest(ctx, "POST", "/api/v3/jobs/", jobReq)
 	if err != nil {
+		if isAmbiguousDelivery(err) {
+			return nil, fmt.Errorf("%w: %q — the request reached the platform but the connection "+
+				"failed before it answered; check for a job named %q before creating it again: %w",
+				ErrJobMayExist, jobReq.Name, jobReq.Name, err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()

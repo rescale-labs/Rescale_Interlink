@@ -142,7 +142,7 @@ func (a *AdaptiveWorkerCount) Load() int {
 //   - Sample size: first 20 items consumed (or all items if channel closes before 20)
 //   - After sampling: compute adaptive target via ComputeBatchConcurrency on sampled sizes
 //   - Scale-up: spawn additional workers immediately (up to adaptive target)
-//   - Scale-down: excess workers drain naturally (no kill, just don't refill)
+//   - Scale-down: surplus workers retire after finishing their current item
 //   - Resample cadence: every 50 additional items
 //   - Fallback when FileSize()==0: treat as small file (use DefaultMaxConcurrent)
 //   - Max scale-up per interval: double current workers (capped at MaxWorkers)
@@ -196,6 +196,26 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 	// WaitGroup tracks all workers.
 	var workerWg sync.WaitGroup
 
+	// retireIfSurplus reports whether this worker should stop, having claimed
+	// the reduction so two surplus workers cannot both retire against it.
+	//
+	// A worker that keeps taking items holds the concurrency the batch started
+	// at for the rest of the run: reducing the advertised target did nothing to
+	// how many transfers were actually in flight, so a stream that began with
+	// small files ran its large files eight at a time. One worker is always
+	// kept, or the dispatcher would block on a channel nobody reads.
+	retireIfSurplus := func() bool {
+		for {
+			active := activeWorkers.Load()
+			if active <= 1 || active <= adaptive.value.Load() {
+				return false
+			}
+			if activeWorkers.CompareAndSwap(active, active-1) {
+				return true
+			}
+		}
+	}
+
 	// Worker function.
 	workerFn := func() {
 		defer workerWg.Done()
@@ -210,6 +230,11 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 				errMu.Unlock()
 			} else {
 				completed.Add(1)
+			}
+			// Checked between transfers, never during one: a running transfer
+			// is finished rather than abandoned.
+			if retireIfSurplus() {
+				return
 			}
 		}
 	}
@@ -247,7 +272,9 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 			return
 		}
 		toSpawn := target - current
-		activeWorkers.Store(int32(target))
+		// Added, not stored: a surplus worker may be retiring itself against
+		// the same counter, and a store would put its decrement back.
+		activeWorkers.Add(int32(toSpawn))
 		adaptive.value.Store(int32(target))
 		for i := 0; i < toSpawn; i++ {
 			workerWg.Add(1)
@@ -326,10 +353,10 @@ func RunBatchFromChannel[T WorkItem](ctx context.Context, ch <-chan T, cfg Batch
 				if target > current && ctx.Err() == nil {
 					spawnMore(target)
 				} else if target < current {
-					// Scale-down: just update the adaptive count;
-					// workers drain naturally when dispatch channel closes.
+					// Scale-down: publishing the target is the whole mechanism.
+					// Workers read it between items and the surplus retire.
 					adaptive.value.Store(int32(target))
-					log.Printf("[BATCH] %s: adaptive target reduced to %d (active workers: %d, will drain)",
+					log.Printf("[BATCH] %s: adaptive target reduced to %d (active workers: %d, retiring)",
 						cfg.Label, target, current)
 				}
 

@@ -117,8 +117,20 @@ func RunOrchestrator[T any](
 ) (dispatchDone <-chan struct{}, result *OrchestratorResult) {
 	orchResult := &OrchestratorResult{}
 
+	// discoveryCtx stops the walk once nothing is left to consume it, and is
+	// derived from ctx so the caller's own cancel still reaches the walker.
+	//
+	// Part A is the only reader of dirChan. When it stops reading — which it
+	// does on the first folder-creation failure — the walker fills its
+	// directory buffer and blocks, and a blocked walker never closes fileChan,
+	// which Part C waits on. The upload then neither finished nor failed. Part A
+	// cancels this on its way out, so the walker unblocks and closes its
+	// channels. Cancelling it is not the caller's cancel: ctx is what
+	// Cancelled and the error reporting below are judged against.
+	discoveryCtx, stopDiscovery := context.WithCancel(ctx)
+
 	// Start streaming walk — directories and files arrive as they're discovered.
-	dirChan, fileChan, skippedChan, walkErrChan := localfs.WalkStream(ctx, cfg.RootPath, localfs.WalkOptions{
+	dirChan, fileChan, skippedChan, walkErrChan := localfs.WalkStream(discoveryCtx, cfg.RootPath, localfs.WalkOptions{
 		IncludeHidden:  cfg.IncludeHidden,
 		SkipHiddenDirs: true,
 		FollowSymlinks: true,
@@ -157,6 +169,10 @@ func RunOrchestrator[T any](
 	// Sole owner of folderReadyChan (closes it via defer).
 	conflictMode := cfg.ConflictMode
 	go func() {
+		// Last out: the walk has no other consumer of its directories, so it
+		// stops when this goroutine does — whether directories ran out or a
+		// failure stopped it reading them.
+		defer stopDiscovery()
 		defer close(folderReadyChan)
 		_, created, err := CreateFolderStructureStreaming(
 			ctx, cfg.APIClient, cfg.Cache, cfg.RootPath, dirChan, cfg.RootRemoteID,
