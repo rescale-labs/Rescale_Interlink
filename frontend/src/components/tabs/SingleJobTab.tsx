@@ -7,6 +7,7 @@ import {
   StopIcon,
   CheckCircleIcon,
   XCircleIcon,
+  ExclamationTriangleIcon,
   ArrowPathIcon,
   FolderOpenIcon,
   DocumentArrowDownIcon,
@@ -21,6 +22,7 @@ import { useJobStore, useConfigStore } from '../../stores'
 import type { JobSpec } from '../../stores'
 import { useSingleJobStore } from '../../stores/singleJobStore'
 import { useRunStore } from '../../stores/runStore'
+import { isTerminalRunState } from '../../types/run'
 import { TemplateBuilder, RemoteFilePicker, JobsTable } from '../widgets'
 import { formatSize } from '../../utils/formatSize'
 import { normalizeJobSpec } from '../../utils/jobs'
@@ -109,12 +111,14 @@ export function SingleJobTab() {
   // to 'completed' on normal run completion — only on cancel. This syncs the gap.
   useEffect(() => {
     if (activeRun && activeRun.runType === 'single' &&
-        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled') &&
+        isTerminalRunState(activeRun.status) &&
         state === 'executing') {
-      if (activeRun.status === 'completed') {
-        setState('completed')
-      } else {
+      // An unconfirmed creation ends the workflow like a completion does; it is
+      // the results view, not the step, that says the job may not exist.
+      if (activeRun.status === 'failed' || activeRun.status === 'cancelled') {
         setState('failed')
+      } else {
+        setState('completed')
       }
     }
   }, [activeRun?.status, state, setState])
@@ -387,10 +391,9 @@ export function SingleJobTab() {
     }
   }, [cancelRun, setState, setError])
 
-  // Guard: only clear activeRun if it's a completed/failed/cancelled single-job run — never kill an active PUR run.
+  // Guard: only clear activeRun if it's a terminal single-job run — never kill an active PUR run.
   const handleStartOver = useCallback(async () => {
-    if (activeRun && activeRun.runType === 'single' &&
-        (activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'cancelled')) {
+    if (activeRun && activeRun.runType === 'single' && isTerminalRunState(activeRun.status)) {
       await clearActiveRun()
     }
     resetSingleJob()
@@ -960,6 +963,40 @@ export function SingleJobTab() {
               {isRunActive ? 'Queue Job' : 'Submit Job'}
             </button>
           </div>
+        </div>
+      )
+    }
+
+    // A single job goes through the same pipeline as a PUR batch, so its run can
+    // end with the creation unresolved. That is neither the success view nor the
+    // failure view, and it is terminal: no spinner, no Cancel.
+    if (activeRun?.runType === 'single' && activeRun.status === 'unconfirmed' &&
+        (state === 'executing' || state === 'completed')) {
+      const jobName = activeRun.jobRows[0]?.jobName || job.jobName
+      return (
+        <div className="flex flex-col items-center justify-center h-full">
+          <ExclamationTriangleIcon className="w-16 h-16 text-yellow-500 mb-4" />
+          <h3 className="text-lg font-semibold mb-2">Job Creation Unconfirmed</h3>
+          <div className="max-w-md mb-6 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded text-yellow-800 dark:text-yellow-300 text-sm">
+            <p className="font-medium">{jobName} could not be confirmed as created</p>
+            <p className="mt-1">
+              The request may or may not have reached the platform, so the job may or may not
+              exist. Check the platform for a job of this name. Nothing is created again on its
+              own — submit the job again only if it is not there.
+            </p>
+          </div>
+          {activeRun.jobRows.length > 0 && (
+            <div className="w-full max-w-3xl mb-6">
+              <JobsTable jobs={activeRun.jobRows} />
+            </div>
+          )}
+          <button
+            onClick={handleStartOver}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+          >
+            <ArrowPathIcon className="w-5 h-5" />
+            Submit Another Job
+          </button>
         </div>
       )
     }

@@ -114,6 +114,31 @@ describe('PURTab results for unconfirmed creations', () => {
     expect(screen.queryByText('Pipeline Complete!')).toBeNull()
   })
 
+  it('does not claim the platform took the request, and says the flag is batch-wide', () => {
+    useJobStore.setState({
+      workflowState: 'completed',
+      jobRows: [unconfirmedRow('Run_1'), unconfirmedRow('Run_2', 2)],
+    })
+
+    render(<PURTab />)
+
+    // The notice's own opening claim; a row's error text is the backend's.
+    expect(screen.queryByText(/^The platform accepted the request/)).toBeNull()
+    expect(screen.getByText(/may or may not have reached the platform/)).toBeInTheDocument()
+    expect(screen.getByText(/creates every unconfirmed job in the batch/)).toBeInTheDocument()
+  })
+
+  it('leaves the unconfirmed creations out of the failure panel', () => {
+    useJobStore.setState({
+      workflowState: 'completed',
+      jobRows: [unconfirmedRow('Run_1'), unconfirmedRow('Run_2', 2)],
+    })
+
+    render(<PURTab />)
+
+    expect(screen.queryByText(/jobs failed \(/)).toBeNull()
+  })
+
   it('does not count the ambiguity as a failure in the fallback tally', () => {
     useJobStore.setState({
       workflowState: 'completed',

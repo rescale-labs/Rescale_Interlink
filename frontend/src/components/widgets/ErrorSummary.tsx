@@ -3,9 +3,13 @@
 import { useState } from 'react'
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline'
 import type { JobRow } from '../../types/jobs'
+import { isUnconfirmedRow } from '../../stores/runStore'
 
 export function ErrorSummary({ jobs }: { jobs: JobRow[] }) {
-  const failedJobs = jobs.filter((j) => j.error)
+  // A creation the platform never confirmed carries its ambiguity text in the
+  // same column a failure's message uses. The results notice accounts for those
+  // rows; counting them here reports failures the run did not have.
+  const failedJobs = jobs.filter((j) => j.error && !isUnconfirmedRow(j))
   const [expanded, setExpanded] = useState(false)
 
   if (failedJobs.length === 0) return null

@@ -33,6 +33,9 @@ function sleep(ms: number): Promise<void> {
 // to it was lost. Either way nobody knows whether the job exists.
 const UNCONFIRMED_CREATE_STATUSES = new Set(['indeterminate', 'creating'])
 
+// Create-stage outcomes that answer the question either way.
+const RESOLVED_CREATE_STATUSES = new Set(['completed', 'success', 'failed'])
+
 /**
  * Whether a row's job creation was left unresolved. Both stage fields are read
  * because the create-stage event carries the status before any poll has copied
@@ -43,7 +46,55 @@ export function isUnconfirmedRow(row: JobRow): boolean {
   if (submit === 'completed' || submit === 'success' || submit === 'skipped' || submit === 'failed') {
     return false
   }
+  // A known job id, or a create call that was answered, resolves the row
+  // whatever its submit status says: a poll taken while that call was still
+  // outstanding goes on reading 'creating' after the answer has arrived.
+  if (row.jobId || RESOLVED_CREATE_STATUSES.has(row.createStatus)) return false
   return UNCONFIRMED_CREATE_STATUSES.has(submit) || UNCONFIRMED_CREATE_STATUSES.has(row.createStatus)
+}
+
+interface TerminalCounts {
+  completed: number
+  failed: number
+  unconfirmed: number
+}
+
+function countRows(rows: JobRow[]): TerminalCounts {
+  return {
+    completed: rows.filter((j) =>
+      j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
+    ).length,
+    failed: rows.filter((j) =>
+      j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
+    ).length,
+    unconfirmed: rows.filter(isUnconfirmedRow).length,
+  }
+}
+
+/**
+ * A finished run's terminal counts. The backend is authoritative for every
+ * field it reports, an explicit zero included — the rows are a snapshot, and
+ * one taken while a create call was outstanding still reads 'creating' after
+ * the answer arrived. Rows stand in for a field an older backend omits, and
+ * for a report that covers no run at all (totalJobs 0: no engine, or a run
+ * already reset).
+ */
+function terminalCounts(
+  report: {
+    totalJobs?: number
+    successJobs?: number
+    failedJobs?: number
+    unconfirmedJobs?: number
+  } | null | undefined,
+  rows: JobRow[],
+): TerminalCounts {
+  const fromRows = countRows(rows)
+  if (!report || !report.totalJobs) return fromRows
+  return {
+    completed: typeof report.successJobs === 'number' ? report.successJobs : fromRows.completed,
+    failed: typeof report.failedJobs === 'number' ? report.failedJobs : fromRows.failed,
+    unconfirmed: typeof report.unconfirmedJobs === 'number' ? report.unconfirmedJobs : fromRows.unconfirmed,
+  }
 }
 
 /**
@@ -313,24 +364,17 @@ export const useRunStore = create<RunStore>((set, get) => ({
 
       stopPolling()
 
-      const completedCount = activeRun.jobRows.filter((j) =>
-        j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-      ).length
-      const failedCount = activeRun.jobRows.filter((j) =>
-        j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
-      ).length
-      // The engine's count is authoritative — a row may not have been polled
-      // since its create call — but the rows are used when it is absent.
-      const unconfirmedCount = Math.max(
-        activeRun.jobRows.filter(isUnconfirmedRow).length,
-        (data && data.unconfirmedJobs) || 0
-      )
+      const {
+        completed: completedCount,
+        failed: failedCount,
+        unconfirmed: unconfirmedCount,
+      } = terminalCounts(data, activeRun.jobRows)
 
       // Determine final status — respect if already set to 'cancelled' (C1)
       let finalStatus: CompletedRun['finalStatus']
       if (activeRun.status === 'cancelled') {
         finalStatus = 'cancelled'
-      } else if (failedCount > 0 || (data && data.failedJobs > 0)) {
+      } else if (failedCount > 0) {
         finalStatus = 'failed'
       } else if (unconfirmedCount > 0) {
         // Nothing failed, but the platform may hold jobs this run cannot
@@ -564,16 +608,11 @@ export const useRunStore = create<RunStore>((set, get) => ({
             stopPolling()
 
             const jobRows = currentRun.jobRows
-            const completedCount = jobRows.filter((j) =>
-              j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-            ).length
-            const failedCount = jobRows.filter((j) =>
-              j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
-            ).length
-            const unconfirmedCount = Math.max(
-              jobRows.filter(isUnconfirmedRow).length,
-              status.unconfirmedJobs || 0
-            )
+            const {
+              completed: completedCount,
+              failed: failedCount,
+              unconfirmed: unconfirmedCount,
+            } = terminalCounts(status, jobRows)
 
             let finalStatus: CompletedRun['finalStatus']
             if (failedCount > 0) {

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { mergePolledJobRow, useRunStore } from './runStore'
+import { isUnconfirmedRow, mergePolledJobRow, useRunStore } from './runStore'
 import type { JobRow } from '../types/jobs'
 
 // The shared setup mock hands out a fresh unsubscribe per EventsOn call and
@@ -105,6 +105,19 @@ function unconfirmedRow(jobName: string): JobRow {
   })
 }
 
+// What a poll taken while the create call was still outstanding leaves behind:
+// the state file said 'creating', and the answer arrived after the snapshot.
+function staleCreatingRow(jobName: string, overrides: Partial<JobRow> = {}): JobRow {
+  return baseRow({
+    jobName,
+    tarStatus: 'completed',
+    uploadStatus: 'completed',
+    createStatus: 'creating',
+    submitStatus: 'creating',
+    ...overrides,
+  })
+}
+
 function doneRow(jobName: string): JobRow {
   return baseRow({
     jobName,
@@ -142,6 +155,21 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+describe('isUnconfirmedRow', () => {
+  it('is true for a create the platform never answered', () => {
+    expect(isUnconfirmedRow(unconfirmedRow('job_1'))).toBe(true)
+  })
+
+  it('is false for a row that carries a job id', () => {
+    expect(isUnconfirmedRow(staleCreatingRow('job_1', { jobId: 'job-abc' }))).toBe(false)
+  })
+
+  it('is false once the create call has been answered either way', () => {
+    expect(isUnconfirmedRow(staleCreatingRow('job_1', { createStatus: 'completed' }))).toBe(false)
+    expect(isUnconfirmedRow(staleCreatingRow('job_2', { createStatus: 'failed' }))).toBe(false)
+  })
+})
+
 describe('runStore finalization: completion event', () => {
   it('records a batch whose creations were never confirmed as unconfirmed, not completed', () => {
     const store = useRunStore.getState()
@@ -171,6 +199,58 @@ describe('runStore finalization: completion event', () => {
     const { completedRuns } = useRunStore.getState()
     expect(completedRuns[0].finalStatus).toBe('completed')
     expect(completedRuns[0].unconfirmedJobs).toBe(0)
+  })
+
+  it('records a create-only run the backend counted as a success as completed', () => {
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    // Create succeeded and submission was skipped without a submit-stage event,
+    // so the row's submit status is still the poll's stale 'creating'.
+    store.registerRun('run_7', 'pur', 1, [
+      staleCreatingRow('job_1', { createStatus: 'completed', jobId: 'job-abc' }),
+    ])
+
+    runtime.handlers.get('interlink:complete')!(
+      completeEvent({ totalJobs: 1, successJobs: 1, failedJobs: 0, unconfirmedJobs: 0 })
+    )
+
+    const { activeRun, completedRuns } = useRunStore.getState()
+    expect(completedRuns[0].finalStatus).toBe('completed')
+    expect(completedRuns[0].completedJobs).toBe(1)
+    expect(completedRuns[0].unconfirmedJobs).toBe(0)
+    expect(activeRun?.status).toBe('completed')
+  })
+
+  it('counts a definite create rejection as the failure the backend reported', () => {
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_8', 'pur', 1, [
+      staleCreatingRow('job_1', { createStatus: 'failed', error: 'create rejected' }),
+    ])
+
+    runtime.handlers.get('interlink:complete')!(
+      completeEvent({ totalJobs: 1, successJobs: 0, failedJobs: 1, unconfirmedJobs: 0 })
+    )
+
+    const [run] = useRunStore.getState().completedRuns
+    expect(run.finalStatus).toBe('failed')
+    expect(run.failedJobs).toBe(1)
+    expect(run.unconfirmedJobs).toBe(0)
+  })
+
+  it('counts the rows when the backend does not report the unconfirmed field', () => {
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_9', 'pur', 2, [unconfirmedRow('job_1'), unconfirmedRow('job_2')])
+
+    // An older backend: the event carries no unconfirmed count at all.
+    runtime.handlers.get('interlink:complete')!({
+      timestamp: '', totalJobs: 2, successJobs: 0, failedJobs: 0, durationMs: 1000,
+    })
+
+    const [run] = useRunStore.getState().completedRuns
+    expect(run.finalStatus).toBe('unconfirmed')
+    expect(run.unconfirmedJobs).toBe(2)
   })
 
   it('keeps reporting a failed run as failed', () => {
@@ -229,6 +309,69 @@ describe('runStore finalization: polling fallback', () => {
 
     await vi.waitFor(() => expect(useRunStore.getState().completedRuns).toHaveLength(1))
     expect(useRunStore.getState().completedRuns[0].finalStatus).toBe('unconfirmed')
+  })
+
+  it('respects a backend failure count over a stale creating row', async () => {
+    const rows = [staleCreatingRow('job_1', { error: 'create rejected' })]
+    app.GetJobRows.mockResolvedValue(rows)
+    app.GetRunStatus.mockResolvedValue({
+      state: 'failed',
+      totalJobs: 1,
+      successJobs: 0,
+      failedJobs: 1,
+      unconfirmedJobs: 0,
+      durationMs: 1000,
+    })
+
+    useRunStore.getState().registerRun('run_7p', 'pur', 1, rows)
+    useRunStore.getState().startPolling(60_000)
+
+    await vi.waitFor(() => expect(useRunStore.getState().completedRuns).toHaveLength(1))
+    const [run] = useRunStore.getState().completedRuns
+    expect(run.finalStatus).toBe('failed')
+    expect(run.failedJobs).toBe(1)
+    expect(run.unconfirmedJobs).toBe(0)
+  })
+
+  it('counts the rows when the engine reports on no run at all', async () => {
+    const rows = [unconfirmedRow('job_1')]
+    app.GetJobRows.mockResolvedValue(rows)
+    // What GetRunStatus returns with no engine or nothing loaded: zeros that
+    // report on nothing, not a run whose counts are all zero.
+    app.GetRunStatus.mockResolvedValue({
+      state: 'idle',
+      totalJobs: 0,
+      successJobs: 0,
+      failedJobs: 0,
+      unconfirmedJobs: 0,
+      durationMs: 0,
+    })
+
+    useRunStore.getState().registerRun('run_9p', 'pur', 1, rows)
+    useRunStore.getState().startPolling(60_000)
+
+    await vi.waitFor(() => expect(useRunStore.getState().completedRuns).toHaveLength(1))
+    expect(useRunStore.getState().completedRuns[0].finalStatus).toBe('unconfirmed')
+  })
+
+  it('counts the rows when the poll does not report the unconfirmed field', async () => {
+    const rows = [unconfirmedRow('job_1')]
+    app.GetJobRows.mockResolvedValue(rows)
+    app.GetRunStatus.mockResolvedValue({
+      state: 'idle',
+      totalJobs: 1,
+      successJobs: 0,
+      failedJobs: 0,
+      durationMs: 1000,
+    })
+
+    useRunStore.getState().registerRun('run_8p', 'pur', 1, rows)
+    useRunStore.getState().startPolling(60_000)
+
+    await vi.waitFor(() => expect(useRunStore.getState().completedRuns).toHaveLength(1))
+    const [run] = useRunStore.getState().completedRuns
+    expect(run.finalStatus).toBe('unconfirmed')
+    expect(run.unconfirmedJobs).toBe(1)
   })
 
   it('leaves an ordinary idle run completed', async () => {

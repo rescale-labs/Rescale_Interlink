@@ -701,10 +701,12 @@ export function PURTab() {
               {unconfirmedCount} job(s) could not be confirmed as created
             </p>
             <p className="mt-1">
-              The platform accepted the request but the answer was lost, so the job may or may not
-              exist. Check the platform for a job of each name listed below. Nothing is created again
-              on its own: to create the ones that are not there, resume the batch with
-              <code className="mx-1 px-1 rounded bg-yellow-100 dark:bg-yellow-900/40">--recreate-indeterminate</code>.
+              The request may or may not have reached the platform, so each job listed below may or
+              may not exist. Check the platform for a job of each name. Nothing is created again on
+              its own, and the flag is batch-wide: resuming with
+              <code className="mx-1 px-1 rounded bg-yellow-100 dark:bg-yellow-900/40">--recreate-indeterminate</code>
+              creates every unconfirmed job in the batch again, duplicating any the platform already
+              holds.
             </p>
           </div>
         )}
