@@ -8,7 +8,6 @@
 package s3
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -156,8 +155,9 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 // UploadCiphertext uploads already-encrypted data to cloud storage.
 // Can be called concurrently with EncryptStreamingPart (pipelining).
 // Separated from encryption to enable pipelining.
-// Reader is created inside the retry closure with io.ReadSeeker support so the
-// AWS SDK can rewind the stream on transient errors (fixes "stream not seekable" failures).
+// The body is an io.ReadSeeker so the AWS SDK can rewind the stream on
+// transient errors (fixes "stream not seekable" failures), and comes from the
+// attempt tracker so an outer retry does not report the same bytes twice.
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*s3ProviderData)
 	if !ok {
@@ -174,33 +174,29 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	partCtx = TraceContext(partCtx, fmt.Sprintf("UploadPart %d", partNumber))
 
 	// Upload the part using S3Client.
-	// Reader created inside closure so each retry attempt gets a fresh reader.
-	// Uses uploadProgressReader (io.ReadSeeker) so AWS SDK can rewind on transient errors.
 	var uploadResp *s3.UploadPartOutput
+	attempt := transfer.NewUploadAttemptProgress(uploadState.ByteProgressCallback)
 	err := providerData.s3Client.RetryWithBackoff(partCtx, fmt.Sprintf("UploadPart %d", partNumber), func() error {
-		// Create fresh reader per attempt (enables retry after partial read)
-		var bodyReader io.ReadSeeker = bytes.NewReader(ciphertext)
-		if uploadState.ByteProgressCallback != nil {
-			bodyReader = &transfer.UploadProgressReader{
-				Reader:    bytes.NewReader(ciphertext),
-				Callback:  uploadState.ByteProgressCallback,
-				Threshold: transfer.ProgressReaderThreshold,
-			}
-		}
-
+		// Fresh reader per attempt, because the SDK cannot re-send a drained
+		// body. Getting it from the attempt tracker is what withdraws the
+		// previous attempt's reported bytes: nothing else can, since that
+		// reader is gone by now.
 		var err error
 		uploadResp, err = providerData.s3Client.Client().UploadPart(partCtx, &s3.UploadPartInput{
 			Bucket:        aws.String(providerData.bucket),
 			Key:           aws.String(uploadState.StoragePath),
 			PartNumber:    aws.Int32(partNumber),
 			UploadId:      aws.String(uploadState.UploadID),
-			Body:          bodyReader,
+			Body:          attempt.NewReader(ciphertext),
 			ContentLength: aws.Int64(int64(len(ciphertext))),
 		})
 		return err
 	})
 
 	if err != nil {
+		// The part is not going up: its last attempt's bytes have to come back
+		// out of the total.
+		attempt.Rollback()
 		return nil, fmt.Errorf("failed to upload part %d: %w", partNumber, err)
 	}
 

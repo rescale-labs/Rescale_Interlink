@@ -281,3 +281,87 @@ func TestEnsureFresh_RepeatedCallsNoCaching(t *testing.T) {
 		t.Errorf("After second call: expected still 1 API call (cached), got %d", callCount.Load())
 	}
 }
+
+// --- v4.9.9: error-driven invalidation (F15) ---
+
+// TestInvalidateS3CredentialsDropsOnlyTheRejectedGeneration pins what makes a
+// burst of failing parts cost one replacement: the invalidation names the
+// credential that was rejected, so whoever reports the same rejection after a
+// replacement has arrived cannot throw the replacement away.
+func TestInvalidateS3CredentialsDropsOnlyTheRejectedGeneration(t *testing.T) {
+	mgr, server, callCount := newTestManagerWithServer(t)
+	defer server.Close()
+
+	ctx := context.Background()
+	rejected, err := mgr.GetS3Credentials(ctx)
+	if err != nil {
+		t.Fatalf("GetS3Credentials: %v", err)
+	}
+	if _, err := mgr.GetS3Credentials(ctx); err != nil {
+		t.Fatalf("GetS3Credentials: %v", err)
+	}
+	if callCount.Load() != 1 {
+		t.Fatalf("setup fetched %d times, want 1 (the second call is cached)", callCount.Load())
+	}
+
+	if !mgr.InvalidateS3Credentials(rejected) {
+		t.Fatal("the credential that was served was not recognised as the one to drop")
+	}
+
+	replacement, err := mgr.GetS3Credentials(ctx)
+	if err != nil {
+		t.Fatalf("GetS3Credentials after invalidation: %v", err)
+	}
+	if callCount.Load() != 2 {
+		t.Errorf("fetched %d times, want a replacement fetch after the rejection", callCount.Load())
+	}
+	if replacement == rejected {
+		t.Error("the rejected credential was served again")
+	}
+
+	// A second part reporting the same rejection must not discard the
+	// replacement that has already been fetched.
+	if mgr.InvalidateS3Credentials(rejected) {
+		t.Error("a stale rejection dropped the replacement credential")
+	}
+	if _, err := mgr.GetS3Credentials(ctx); err != nil {
+		t.Fatalf("GetS3Credentials: %v", err)
+	}
+	if callCount.Load() != 2 {
+		t.Errorf("fetched %d times, want the replacement to still be cached", callCount.Load())
+	}
+}
+
+// TestInvalidateAzureCredentialsDropsPerFileEntry covers the cross-storage
+// cache: per-file SAS tokens live in their own entry, and the rejected one is
+// the entry that has to go.
+func TestInvalidateAzureCredentialsDropsPerFileEntry(t *testing.T) {
+	mgr, server, _ := newTestManagerWithServer(t)
+	defer server.Close()
+
+	rejected := &models.AzureCredentials{SASToken: "rejected"}
+	other := &models.AzureCredentials{SASToken: "other"}
+
+	mgr.mu.Lock()
+	mgr.storageAzureCreds["storage:file-a"] = rejected
+	mgr.storageAzureCreds["storage:file-b"] = other
+	mgr.storageCredsRefresh["storage:file-a"] = time.Now()
+	mgr.storageCredsRefresh["storage:file-b"] = time.Now()
+	mgr.mu.Unlock()
+
+	if !mgr.InvalidateAzureCredentials(rejected) {
+		t.Fatal("the rejected per-file token was not dropped")
+	}
+
+	mgr.mu.RLock()
+	defer mgr.mu.RUnlock()
+	if _, present := mgr.storageAzureCreds["storage:file-a"]; present {
+		t.Error("the rejected entry survived invalidation")
+	}
+	if _, present := mgr.storageCredsRefresh["storage:file-a"]; present {
+		t.Error("the rejected entry's timestamp survived, so a refill would look fresh")
+	}
+	if mgr.storageAzureCreds["storage:file-b"] != other {
+		t.Error("another file's credentials were dropped as well")
+	}
+}

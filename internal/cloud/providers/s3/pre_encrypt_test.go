@@ -9,6 +9,7 @@ import (
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -64,11 +65,16 @@ type fakeS3Backend struct {
 
 	// listPartsLive decides whether a resume probe finds the old upload alive.
 	listPartsLive bool
+
+	// rejectOncePerPart fails the first attempt at each part with an
+	// authentication error, the shape a rejected credential arrives in.
+	rejectOncePerPart bool
+	rejectedParts     map[int32]bool
 }
 
 func newFakeS3Backend(t *testing.T) (*fakeS3Backend, *httptest.Server) {
 	t.Helper()
-	backend := &fakeS3Backend{parts: make(map[int32]stagedPart)}
+	backend := &fakeS3Backend{parts: make(map[int32]stagedPart), rejectedParts: make(map[int32]bool)}
 	// TLS, because the client the provider rebuilds on every credential refresh
 	// addresses the real S3 endpoint template, which is https.
 	server := httptest.NewTLSServer(backend)
@@ -96,6 +102,19 @@ func (f *fakeS3Backend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) 
 			w.WriteHeader(nethttp.StatusBadRequest)
 			return
 		}
+		f.mu.Lock()
+		reject := f.rejectOncePerPart && !f.rejectedParts[int32(partNumber)]
+		if reject {
+			f.rejectedParts[int32(partNumber)] = true
+		}
+		f.mu.Unlock()
+		if reject {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeXML(w, nethttp.StatusForbidden,
+				`<Error><Code>ExpiredToken</Code><Message>The provided token has expired</Message></Error>`)
+			return
+		}
+
 		size, sum, err := hashRequestPayload(r)
 		if err != nil {
 			w.WriteHeader(nethttp.StatusInternalServerError)
@@ -254,8 +273,12 @@ func newFakeCredentialsAPI(t *testing.T) *api.Client {
 
 func newTestS3Client(t *testing.T, server *httptest.Server) *S3Client {
 	t.Helper()
+	return newTestS3ClientWithAPI(t, server, newFakeCredentialsAPI(t))
+}
+
+func newTestS3ClientWithAPI(t *testing.T, server *httptest.Server, apiClient *api.Client) *S3Client {
+	t.Helper()
 	httpClient := testsupport.RedirectingHTTPClient(server.Listener.Addr().String())
-	apiClient := newFakeCredentialsAPI(t)
 
 	return &S3Client{
 		client: awss3.New(awss3.Options{
@@ -715,5 +738,92 @@ func TestPreEncryptConcurrentHonorsPlanWorkerCap(t *testing.T) {
 			}
 			backend.assertPartsMatch(t, expectedPartHashes(data, oversizedPartSize))
 		})
+	}
+}
+
+// TestPreEncryptConcurrentResumesMatchingUpload is the other half of F10: once
+// the orchestrator hands the provider back the identity of the interrupted
+// attempt, the parts already accepted must not be sent again. Only the missing
+// ones go over the wire, and the completion still assembles the whole object.
+func TestPreEncryptConcurrentResumesMatchingUpload(t *testing.T) {
+	backend, server := newFakeS3Backend(t)
+	backend.listPartsLive = true // the interrupted upload is still open on S3
+	s3Client := newTestS3Client(t, server)
+
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "source.dat")
+	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
+
+	encryptedSize := 2*oversizedPartSize + 4*1024*1024
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
+
+	params := testUploadParams(t, localPath, encryptedPath, &resources.UploadPlan{
+		PartSize:   oversizedPartSize,
+		WorkerCap:  4,
+		QueueDepth: 4,
+	})
+	params.TransferHandle = testsupport.MultiThreadedHandle(t)
+
+	sourceInfo, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	params.SourceModTime = sourceInfo.ModTime()
+
+	objectKey := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
+	testsupport.WriteResumeState(t, localPath, &state.UploadResumeState{
+		LocalPath:      localPath,
+		EncryptedPath:  encryptedPath,
+		ObjectKey:      objectKey,
+		UploadID:       testUploadID,
+		TotalSize:      encryptedSize,
+		OriginalSize:   encryptedSize,
+		SourceModTime:  params.SourceModTime,
+		UploadedBytes:  oversizedPartSize,
+		CompletedParts: []state.CompletedPart{{PartNumber: 1, ETag: "etag-1"}},
+		RandomSuffix:   params.RandomSuffix,
+		CreatedAt:      time.Now(),
+		LastUpdate:     time.Now(),
+		StorageType:    "S3Storage",
+	})
+
+	provider := &Provider{}
+	if err := provider.uploadEncryptedMultipartConcurrent(context.Background(), s3Client, params, objectKey, encryptedSize); err != nil {
+		t.Fatalf("resumed upload failed: %v", err)
+	}
+
+	// Part 1 was already on S3; staging it again would pay for it twice.
+	wantParts := expectedPartHashes(data, oversizedPartSize)
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+
+	if len(backend.parts) != 2 {
+		t.Fatalf("staged %d parts, want only the 2 that were missing", len(backend.parts))
+	}
+	for _, number := range []int32{2, 3} {
+		staged, ok := backend.parts[number]
+		if !ok {
+			t.Fatalf("part %d was never staged", number)
+		}
+		if staged.sum != wantParts[number-1] {
+			t.Errorf("part %d holds different bytes than the file at that offset", number)
+		}
+	}
+	if _, restaged := backend.parts[1]; restaged {
+		t.Error("part 1 was uploaded again even though the resume state listed it as complete")
+	}
+
+	if backend.commits != 1 {
+		t.Fatalf("CompleteMultipartUpload called %d times, want 1", backend.commits)
+	}
+	if len(backend.committed) != len(wantParts) {
+		t.Errorf("completed with %d parts, want the whole %d-part object", len(backend.committed), len(wantParts))
+	}
+	if len(backend.aborts) != 0 {
+		t.Errorf("the resumed upload was aborted: %+v", backend.aborts)
+	}
+	if state.UploadResumeStateExists(localPath) {
+		t.Error("the resume state survived a completed upload")
 	}
 }

@@ -2,6 +2,7 @@ package s3
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -145,5 +146,43 @@ func TestUploadProgressReaderThreshold(t *testing.T) {
 	}
 	if totalReported != int64(len(data)) {
 		t.Fatalf("total reported = %d, want %d", totalReported, len(data))
+	}
+}
+
+// TestUploadCiphertextReportsEachByteOnceAcrossRetries is the F18 regression.
+// The progress reader knows how to withdraw what it reported, but only through
+// its own Seek — and an outer retry does not seek, it builds a new reader and
+// drops the old one. The bytes the failed attempt reported stayed in the total
+// and the retry added them again, so a transfer could show 100% before the file
+// had been sent.
+func TestUploadCiphertextReportsEachByteOnceAcrossRetries(t *testing.T) {
+	backend, server := newFakeS3Backend(t)
+	backend.rejectOncePerPart = true // the first attempt fails after reading the body
+	s3Client := newTestS3Client(t, server)
+
+	ciphertext := make([]byte, 3*1024*1024)
+	for i := range ciphertext {
+		ciphertext[i] = byte(i)
+	}
+
+	var reported atomic.Int64
+	uploadState := &transfer.StreamingUpload{
+		UploadID:             testUploadID,
+		StoragePath:          testPathBase + "/object",
+		ByteProgressCallback: func(n int64) { reported.Add(n) },
+		ProviderData: &s3ProviderData{
+			bucket:   testBucket,
+			s3Client: s3Client,
+		},
+	}
+
+	provider := &Provider{}
+	if _, err := provider.UploadCiphertext(context.Background(), uploadState, 0, ciphertext); err != nil {
+		t.Fatalf("part did not recover from the rejected attempt: %v", err)
+	}
+
+	if got := reported.Load(); got != int64(len(ciphertext)) {
+		t.Errorf("progress reported %d bytes for a %d-byte part: the failed attempt's bytes were counted as well",
+			got, len(ciphertext))
 	}
 }

@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/crypto"
 	"github.com/rescale/rescale-int/internal/resources"
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
@@ -1074,4 +1076,280 @@ func TestCheckSourceUnchanged(t *testing.T) {
 			t.Fatal("a file that vanished mid-upload was accepted for registration")
 		}
 	})
+}
+
+// =============================================================================
+// Pre-encrypt resume (F10)
+// =============================================================================
+
+// resumableFakeUploader is a pre-encrypt provider that behaves the way the real
+// ones do around resume state: it stages parts of the encrypted copy, saves the
+// state after each, and continues from the parts already recorded when the
+// state describes the same object. What it adds is a record of every attempt
+// and every staged part, so a test can see whether a second run reused the
+// first run's identity or started a new object.
+type resumableFakeUploader struct {
+	mu sync.Mutex
+
+	partSize       int64
+	failAfterParts int // parts to stage in a failing attempt before giving up
+
+	attempts []preEncryptAttempt
+	staged   []stagedFakePart
+}
+
+type preEncryptAttempt struct {
+	encryptedPath string
+	encryptionKey []byte
+	iv            []byte
+	randomSuffix  string
+	objectKey     string
+	resumedFrom   int
+}
+
+type stagedFakePart struct {
+	objectKey  string
+	partNumber int32
+	data       []byte
+}
+
+func (f *resumableFakeUploader) StorageType() string { return "FakeStorage" }
+
+func (f *resumableFakeUploader) UploadLimits() resources.UploadLimits {
+	return resources.UploadLimits{
+		StorageType: "FakeStorage",
+		MaxParts:    constants.MaxS3UploadParts,
+		MaxPartSize: constants.MaxS3PlaintextPartSize,
+	}
+}
+
+func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params transfer.EncryptedFileUploadParams) (*cloud.UploadResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	objectKey := state.BuildObjectKey("uploads", filepath.Base(params.LocalPath), params.RandomSuffix)
+
+	encrypted, err := os.ReadFile(params.EncryptedPath)
+	if err != nil {
+		return nil, fmt.Errorf("fake provider: %w", err)
+	}
+
+	var completed []state.CompletedPart
+	var uploadedBytes int64
+	if saved, _ := state.LoadUploadState(params.LocalPath); saved != nil && saved.ObjectKey == objectKey {
+		if err := state.ValidateUploadState(saved, params.LocalPath); err == nil {
+			completed = saved.CompletedParts
+			uploadedBytes = saved.UploadedBytes
+		}
+	}
+
+	attempt := preEncryptAttempt{
+		encryptedPath: params.EncryptedPath,
+		encryptionKey: params.EncryptionKey,
+		iv:            params.IV,
+		randomSuffix:  params.RandomSuffix,
+		objectKey:     objectKey,
+		resumedFrom:   len(completed),
+	}
+
+	stagedThisAttempt := 0
+	for uploadedBytes < int64(len(encrypted)) {
+		end := uploadedBytes + f.partSize
+		if end > int64(len(encrypted)) {
+			end = int64(len(encrypted))
+		}
+		partNumber := int32(len(completed)) + 1
+		f.staged = append(f.staged, stagedFakePart{
+			objectKey:  objectKey,
+			partNumber: partNumber,
+			data:       append([]byte(nil), encrypted[uploadedBytes:end]...),
+		})
+		completed = append(completed, state.CompletedPart{PartNumber: partNumber, ETag: fmt.Sprintf("etag-%d", partNumber)})
+		uploadedBytes = end
+		stagedThisAttempt++
+
+		if err := state.SaveUploadState(&state.UploadResumeState{
+			LocalPath:      params.LocalPath,
+			EncryptedPath:  params.EncryptedPath,
+			ObjectKey:      objectKey,
+			UploadID:       "fake-upload-id",
+			TotalSize:      int64(len(encrypted)),
+			OriginalSize:   params.OriginalSize,
+			SourceModTime:  params.SourceModTime,
+			UploadedBytes:  uploadedBytes,
+			CompletedParts: completed,
+			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
+			IV:             encryption.EncodeBase64(params.IV),
+			RandomSuffix:   params.RandomSuffix,
+			CreatedAt:      time.Now(),
+			LastUpdate:     time.Now(),
+			StorageType:    "FakeStorage",
+		}, params.LocalPath); err != nil {
+			return nil, err
+		}
+
+		if f.failAfterParts > 0 && stagedThisAttempt >= f.failAfterParts {
+			f.attempts = append(f.attempts, attempt)
+			return nil, errors.New("fake provider: connection reset")
+		}
+	}
+
+	f.attempts = append(f.attempts, attempt)
+	state.DeleteUploadState(params.LocalPath)
+	return &cloud.UploadResult{
+		StoragePath:   objectKey,
+		EncryptionKey: params.EncryptionKey,
+		IV:            params.IV,
+	}, nil
+}
+
+// TestUploadPreEncryptResumesInterruptedUpload is the F10 regression: the
+// orchestrator generated a fresh key, IV and object suffix on every attempt and
+// deleted the encrypted copy on the way out, so the parts the backend had
+// already accepted described ciphertext nothing would ever ask for again.
+func TestUploadPreEncryptResumesInterruptedUpload(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "resume.dat")
+	plaintext := make([]byte, 300)
+	for i := range plaintext {
+		plaintext[i] = byte(i)
+	}
+	if err := os.WriteFile(source, plaintext, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	fake := &resumableFakeUploader{partSize: 64, failAfterParts: 2}
+	params := UploadParams{LocalPath: source, PreEncrypt: true}
+
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(plaintext))); err == nil {
+		t.Fatal("first attempt was expected to fail")
+	}
+
+	fake.mu.Lock()
+	if len(fake.attempts) != 1 {
+		fake.mu.Unlock()
+		t.Fatalf("provider saw %d attempts, want 1", len(fake.attempts))
+	}
+	first := fake.attempts[0]
+	fake.mu.Unlock()
+
+	// The encrypted copy is the artifact the retry needs; deleting it on an
+	// ordinary failure is what forced every retry to start over.
+	encryptedAfterFailure, err := os.ReadFile(first.encryptedPath)
+	if err != nil {
+		t.Fatalf("the encrypted copy was discarded on failure: %v", err)
+	}
+	if !state.UploadResumeStateExists(source) {
+		t.Fatal("the resume state was discarded on failure")
+	}
+
+	fake.failAfterParts = 0
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(plaintext))); err != nil {
+		t.Fatalf("second attempt failed: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+
+	if len(fake.attempts) != 2 {
+		t.Fatalf("provider saw %d attempts, want 2", len(fake.attempts))
+	}
+	second := fake.attempts[1]
+
+	if second.randomSuffix != first.randomSuffix {
+		t.Errorf("object suffix changed between attempts (%q then %q): the parts already sent belong to the first object",
+			first.randomSuffix, second.randomSuffix)
+	}
+	if !bytes.Equal(second.encryptionKey, first.encryptionKey) {
+		t.Error("the retry was given a different encryption key, so its parts are a different ciphertext")
+	}
+	if !bytes.Equal(second.iv, first.iv) {
+		t.Error("the retry was given a different IV, so its parts are a different ciphertext")
+	}
+	if second.encryptedPath != first.encryptedPath {
+		t.Errorf("the retry re-encrypted into %q instead of reusing %q", second.encryptedPath, first.encryptedPath)
+	}
+	if second.resumedFrom != 2 {
+		t.Errorf("the retry resumed from %d completed parts, want the 2 the first attempt staged", second.resumedFrom)
+	}
+
+	// Exactly the whole ciphertext, once, in order, under one object key.
+	var assembled []byte
+	for i, part := range fake.staged {
+		if part.objectKey != first.objectKey {
+			t.Fatalf("part %d went to object %q, want %q", i+1, part.objectKey, first.objectKey)
+		}
+		if part.partNumber != int32(i+1) {
+			t.Fatalf("staged part %d is numbered %d", i+1, part.partNumber)
+		}
+		assembled = append(assembled, part.data...)
+	}
+	if !bytes.Equal(assembled, encryptedAfterFailure) {
+		t.Errorf("the staged parts assemble to %d bytes, want the %d-byte encrypted file",
+			len(assembled), len(encryptedAfterFailure))
+	}
+
+	// Verified completion is what retires the artifacts.
+	if state.UploadResumeStateExists(source) {
+		t.Error("the resume state survived a completed upload")
+	}
+	if _, err := os.Stat(first.encryptedPath); !os.IsNotExist(err) {
+		t.Errorf("the encrypted copy survived a completed upload: %v", err)
+	}
+}
+
+// TestUploadPreEncryptAbandonsStateWhenSourceChanged covers the other side: the
+// ciphertext of an earlier version of the file must never be finished under a
+// registration that describes the current one.
+func TestUploadPreEncryptAbandonsStateWhenSourceChanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	source := filepath.Join(tmpDir, "changed.dat")
+	plaintext := make([]byte, 300)
+	if err := os.WriteFile(source, plaintext, 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	fake := &resumableFakeUploader{partSize: 64, failAfterParts: 2}
+	params := UploadParams{LocalPath: source, PreEncrypt: true}
+
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(plaintext))); err == nil {
+		t.Fatal("first attempt was expected to fail")
+	}
+
+	fake.mu.Lock()
+	first := fake.attempts[0]
+	fake.mu.Unlock()
+
+	// Same length, different content and a later modification time: the size
+	// check alone cannot see this.
+	rewritten := make([]byte, len(plaintext))
+	for i := range rewritten {
+		rewritten[i] = 0xAB
+	}
+	if err := os.WriteFile(source, rewritten, 0644); err != nil {
+		t.Fatalf("failed to rewrite test file: %v", err)
+	}
+	later := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(source, later, later); err != nil {
+		t.Fatalf("failed to age test file: %v", err)
+	}
+
+	fake.failAfterParts = 0
+	if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(rewritten))); err != nil {
+		t.Fatalf("second attempt failed: %v", err)
+	}
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	second := fake.attempts[1]
+
+	if second.randomSuffix == first.randomSuffix {
+		t.Error("the changed file was uploaded under the interrupted upload's object identity")
+	}
+	if second.resumedFrom != 0 {
+		t.Errorf("the changed file resumed from %d parts of the previous version", second.resumedFrom)
+	}
+	if _, err := os.Stat(first.encryptedPath); !os.IsNotExist(err) {
+		t.Errorf("the abandoned encrypted copy was left behind: %v", err)
+	}
 }

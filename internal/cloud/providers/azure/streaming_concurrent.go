@@ -156,7 +156,8 @@ func (p *Provider) EncryptStreamingPart(ctx context.Context, uploadState *transf
 // UploadCiphertext uploads already-encrypted data to cloud storage.
 // Can be called concurrently with EncryptStreamingPart (pipelining).
 // Separated from encryption to enable pipelining.
-// Uses progressReadSeekCloser to track bytes in real-time via ByteProgressCallback.
+// The body comes from the attempt tracker, which reports bytes in real time via
+// ByteProgressCallback and withdraws what a failed attempt reported.
 func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.StreamingUpload, partIndex int64, ciphertext []byte) (*transfer.PartResult, error) {
 	providerData, ok := uploadState.ProviderData.(*azureProviderData)
 	if !ok {
@@ -175,27 +176,23 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 	}
 
 	// Stage the block using AzureClient
+	attempt := transfer.NewUploadAttemptProgress(uploadState.ByteProgressCallback)
 	err := providerData.azureClient.RetryWithBackoff(partCtx, fmt.Sprintf("StageBlock %d", partIndex), func() error {
 		client := providerData.azureClient.Client()
 		blockBlobClient := client.ServiceClient().NewContainerClient(providerData.container).NewBlockBlobClient(providerData.blobPath)
 
-		// Use progress-tracking reader if callback is set
-		var reader io.ReadSeekCloser
-		if uploadState.ByteProgressCallback != nil {
-			reader = &transfer.UploadProgressReader{
-				Reader:    bytes.NewReader(ciphertext),
-				Callback:  uploadState.ByteProgressCallback,
-				Threshold: transfer.ProgressReaderThreshold,
-			}
-		} else {
-			reader = &readSeekCloser{Reader: bytes.NewReader(ciphertext)}
-		}
-
-		_, err := blockBlobClient.StageBlock(partCtx, blockID, reader, nil)
+		// Fresh reader per attempt, because the SDK cannot re-send a drained
+		// body. Getting it from the attempt tracker is what withdraws the
+		// previous attempt's reported bytes: nothing else can, since that
+		// reader is gone by now.
+		_, err := blockBlobClient.StageBlock(partCtx, blockID, attempt.NewReader(ciphertext), nil)
 		return err
 	})
 
 	if err != nil {
+		// The block is not going up: its last attempt's bytes have to come back
+		// out of the total.
+		attempt.Rollback()
 		return nil, fmt.Errorf("failed to stage block %d: %w", partIndex, err)
 	}
 

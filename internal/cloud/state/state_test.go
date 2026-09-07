@@ -2,8 +2,10 @@
 package state
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -259,6 +261,164 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 	}
 	if loaded.FormatVersion != original.FormatVersion {
 		t.Errorf("FormatVersion: expected %d, got %d", original.FormatVersion, loaded.FormatVersion)
+	}
+}
+
+// =============================================================================
+// Upload lock ownership (F9)
+// =============================================================================
+
+// withProcessLiveness swaps the liveness probe for the duration of a test, so a
+// lock can be owned by a PID that is definitely alive or definitely gone
+// without the test having to find real ones.
+func withProcessLiveness(t *testing.T, probe func(int) bool) {
+	t.Helper()
+	previous := isProcessRunning
+	isProcessRunning = probe
+	t.Cleanup(func() { isProcessRunning = previous })
+}
+
+// writeLockFile plants a lock file the way another owner would have left it.
+func writeLockFile(t *testing.T, localPath string, lock uploadLockState) {
+	t.Helper()
+	data, err := json.MarshalIndent(lock, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal lock: %v", err)
+	}
+	if err := os.WriteFile(localPath+".upload.lock", data, 0600); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+}
+
+func readLockFile(t *testing.T, localPath string) uploadLockState {
+	t.Helper()
+	data, err := os.ReadFile(localPath + ".upload.lock")
+	if err != nil {
+		t.Fatalf("read lock file: %v", err)
+	}
+	var lock uploadLockState
+	if err := json.Unmarshal(data, &lock); err != nil {
+		t.Fatalf("unmarshal lock file: %v", err)
+	}
+	return lock
+}
+
+// TestAcquireUploadLock_ConcurrentAcquirersGetExactlyOne is the race the
+// check-then-write acquisition lost: every acquirer saw no lock, then each
+// wrote and renamed its own over the others'. Two transfers that both believe
+// they own the file share one resume-state path, and the later one aborts the
+// earlier one's upload as stale.
+func TestAcquireUploadLock_ConcurrentAcquirersGetExactlyOne(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+
+	const acquirers = 8
+	var wg sync.WaitGroup
+	locks := make([]*UploadLock, acquirers)
+	errs := make([]error, acquirers)
+	start := make(chan struct{})
+
+	wg.Add(acquirers)
+	for i := 0; i < acquirers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			locks[idx], errs[idx] = AcquireUploadLock(localPath)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	granted := 0
+	for i := range locks {
+		if errs[i] == nil && locks[i] != nil {
+			granted++
+		}
+	}
+	if granted != 1 {
+		t.Fatalf("%d of %d acquirers got the lock, want exactly 1", granted, acquirers)
+	}
+
+	// The winner's lock file must survive the losers: an acquirer that clears
+	// the lock before writing its own leaves the holder owning nothing.
+	if got := readLockFile(t, localPath); got.ProcessID != os.Getpid() || got.OwnerToken != processLockToken {
+		t.Errorf("lock file names PID %d token %q, want this process", got.ProcessID, got.OwnerToken)
+	}
+
+	for i := range locks {
+		if errs[i] == nil {
+			ReleaseUploadLock(locks[i])
+		}
+	}
+}
+
+// TestAcquireUploadLock_RefusesSecondTransferInSameProcess covers the explicit
+// same-PID bypass: two transfers of one file inside one process were both
+// allowed to own its lock.
+func TestAcquireUploadLock_RefusesSecondTransferInSameProcess(t *testing.T) {
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+
+	first, err := AcquireUploadLock(localPath)
+	if err != nil {
+		t.Fatalf("first AcquireUploadLock failed: %v", err)
+	}
+	defer ReleaseUploadLock(first)
+
+	second, err := AcquireUploadLock(localPath)
+	if err == nil {
+		ReleaseUploadLock(second)
+		t.Fatal("a second transfer in this process acquired the same lock")
+	}
+}
+
+// TestAcquireUploadLock_KeepsLiveOwnerRegardlessOfAge pins the age rule: an
+// upload that has held its lock for longer than the old 30-minute staleness
+// window is still running, and a large file routinely takes longer than that.
+func TestAcquireUploadLock_KeepsLiveOwnerRegardlessOfAge(t *testing.T) {
+	const ownerPID = 424242
+	withProcessLiveness(t, func(pid int) bool { return pid == ownerPID })
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	writeLockFile(t, localPath, uploadLockState{
+		ProcessID:  ownerPID,
+		OwnerToken: "owner-of-a-running-upload",
+		AcquiredAt: time.Now().Add(-2 * time.Hour),
+		LocalPath:  localPath,
+	})
+
+	lock, err := AcquireUploadLock(localPath)
+	if err == nil {
+		ReleaseUploadLock(lock)
+		t.Fatal("took the lock from an owner that is still running")
+	}
+
+	if got := readLockFile(t, localPath); got.ProcessID != ownerPID {
+		t.Errorf("lock file now names PID %d, want the live owner %d", got.ProcessID, ownerPID)
+	}
+}
+
+// TestAcquireUploadLock_TakesOverLockOfDeadOwner is the other half: a lock left
+// behind by a process that died must not block the retry, however recently it
+// was written.
+func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
+	const deadPID = 424243
+	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	writeLockFile(t, localPath, uploadLockState{
+		ProcessID:  deadPID,
+		OwnerToken: "owner-that-crashed",
+		AcquiredAt: time.Now(),
+		LocalPath:  localPath,
+	})
+
+	lock, err := AcquireUploadLock(localPath)
+	if err != nil {
+		t.Fatalf("refused a lock whose owner is gone: %v", err)
+	}
+	defer ReleaseUploadLock(lock)
+
+	if got := readLockFile(t, localPath); got.ProcessID != os.Getpid() {
+		t.Errorf("lock file names PID %d, want this process (%d)", got.ProcessID, os.Getpid())
 	}
 }
 

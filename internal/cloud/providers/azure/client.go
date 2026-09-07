@@ -46,6 +46,11 @@ type AzureClient struct {
 	httpClient  *nethttp.Client   // Shared HTTP client for connection reuse
 	clientMu    sync.Mutex        // Protects client updates during credential refresh
 
+	// appliedCreds is the credential the current client was built with, so a
+	// rejection can name exactly which one the shared cache must forget.
+	// Guarded by clientMu, like client itself.
+	appliedCreds *models.AzureCredentials
+
 	// retryObserver reports retries to whoever started the transfer. Set at
 	// construction and never mutated, so it is safe to read from the concurrent
 	// block workers without a lock.
@@ -258,14 +263,41 @@ func (c *AzureClient) EnsureFreshCredentials(ctx context.Context) error {
 	}
 
 	c.client = client
+	c.appliedCreds = creds
 	return nil
 }
 
 // RetryWithBackoff executes a function with exponential backoff retry logic.
 // Delegates to the shared implementation so both storage backends retry,
 // refresh credentials, and report attempts identically.
+//
+// A rejected SAS token is dropped from the shared cache here. The refresh that
+// runs before the next attempt reads through that cache, which serves the same
+// token for its whole ten-minute lifetime: without this, every retry of an
+// authentication failure rebuilt the client around the token that had just been
+// rejected and the attempts ran out with no replacement ever fetched.
 func (c *AzureClient) RetryWithBackoff(ctx context.Context, operation string, fn func() error) error {
-	return cloudtransfer.RetryWithBackoff(ctx, operation, c.retryObserver, c.EnsureFreshCredentials, fn)
+	return cloudtransfer.RetryWithBackoff(ctx, operation, c.retryObserver, c.EnsureFreshCredentials, func() error {
+		err := fn()
+		if err != nil && http.ClassifyError(err) == http.ErrorTypeCredential {
+			c.invalidateAppliedCredentials()
+		}
+		return err
+	})
+}
+
+// invalidateAppliedCredentials asks the shared cache to forget the credential
+// this client last built its blob client with. The manager drops it once per
+// credential, so a burst of rejected blocks costs one replacement fetch.
+func (c *AzureClient) invalidateAppliedCredentials() {
+	c.clientMu.Lock()
+	applied := c.appliedCreds
+	c.clientMu.Unlock()
+
+	if applied == nil || c.credManager == nil {
+		return
+	}
+	c.credManager.InvalidateAzureCredentials(applied)
 }
 
 // =============================================================================

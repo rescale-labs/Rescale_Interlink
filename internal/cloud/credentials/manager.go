@@ -157,6 +157,70 @@ func (m *Manager) GetAzureCredentials(ctx context.Context) (*models.AzureCredent
 	return m.azureCredentials, nil
 }
 
+// InvalidateS3Credentials drops the cached S3 credential the caller was served
+// after the storage backend rejected it, so the next getter call fetches a
+// replacement instead of re-serving the rejected one until its cache lifetime
+// expires. It reports whether it dropped anything.
+//
+// Identity decides, not the clock: only the exact credential that was rejected
+// is dropped. A burst of parts failing on one credential therefore invalidates
+// it once — the first caller drops it and the rest match nothing — and a part
+// that reports its rejection after a replacement has already been fetched
+// cannot throw that replacement away.
+func (m *Manager) InvalidateS3Credentials(rejected *models.S3Credentials) bool {
+	if rejected == nil {
+		return false
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.s3Credentials == rejected {
+		m.s3Credentials = nil
+		return true
+	}
+	for key, creds := range m.storageS3Creds {
+		if creds == rejected {
+			m.dropStorageCredsLocked(key)
+			return true
+		}
+	}
+	return false
+}
+
+// InvalidateAzureCredentials is InvalidateS3Credentials for Azure: a rejected
+// SAS token must not be handed back to the retry that is trying to replace it.
+func (m *Manager) InvalidateAzureCredentials(rejected *models.AzureCredentials) bool {
+	if rejected == nil {
+		return false
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.azureCredentials == rejected {
+		m.azureCredentials = nil
+		return true
+	}
+	for key, creds := range m.storageAzureCreds {
+		if creds == rejected {
+			m.dropStorageCredsLocked(key)
+			return true
+		}
+	}
+	return false
+}
+
+// dropStorageCredsLocked forgets one storage's cache entry. Both provider maps
+// and the timestamp are filled by the same API response, so they are dropped
+// together; leaving the timestamp would let the entry look fresh again as soon
+// as anything refilled one of the maps. Caller must hold m.mu.
+func (m *Manager) dropStorageCredsLocked(key string) {
+	delete(m.storageS3Creds, key)
+	delete(m.storageAzureCreds, key)
+	delete(m.storageCredsRefresh, key)
+}
+
 // ForceRefresh forces an immediate credential refresh, bypassing the cache
 // Useful for recovering from token expiration errors or when credentials are known to be invalid
 func (m *Manager) ForceRefresh(ctx context.Context) error {

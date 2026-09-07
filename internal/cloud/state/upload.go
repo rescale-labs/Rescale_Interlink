@@ -6,10 +6,14 @@
 package state
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -17,12 +21,18 @@ import (
 // UploadResumeState tracks the state of an in-progress upload for resumption.
 // Supports both legacy (FormatVersion=0) and streaming (FormatVersion=1) encryption.
 type UploadResumeState struct {
-	LocalPath      string          `json:"local_path"`      // Original source file path
-	EncryptedPath  string          `json:"encrypted_path"`  // Encrypted temp file path (legacy v0 only)
-	ObjectKey      string          `json:"object_key"`      // S3 object key or Azure blob path
-	UploadID       string          `json:"upload_id"`       // S3 multipart upload ID (empty for Azure)
-	TotalSize      int64           `json:"total_size"`      // Size of encrypted file
-	OriginalSize   int64           `json:"original_size"`   // Size of original file (for validation)
+	LocalPath     string `json:"local_path"`     // Original source file path
+	EncryptedPath string `json:"encrypted_path"` // Encrypted temp file path (legacy v0 only)
+	ObjectKey     string `json:"object_key"`     // S3 object key or Azure blob path
+	UploadID      string `json:"upload_id"`      // S3 multipart upload ID (empty for Azure)
+	TotalSize     int64  `json:"total_size"`     // Size of encrypted file
+	OriginalSize  int64  `json:"original_size"`  // Size of original file (for validation)
+	// SourceModTime is the source file's modification time when the encrypted
+	// copy was made. Size alone cannot tell an edited file from the one this
+	// ciphertext describes, and resuming across such an edit would upload the
+	// old bytes under a registration describing the new ones. Absent in state
+	// written before v4.9.9, which is why a state without it is not resumed.
+	SourceModTime  time.Time       `json:"source_mod_time,omitempty"`
 	UploadedBytes  int64           `json:"uploaded_bytes"`  // Bytes uploaded so far
 	CompletedParts []CompletedPart `json:"completed_parts"` // S3 parts
 	BlockIDs       []string        `json:"block_ids"`       // Azure uncommitted block IDs
@@ -54,8 +64,18 @@ type CompletedPart struct {
 // Aligned with AWS multipart upload expiry (7 days) and Azure uncommitted block expiry (7 days).
 const MaxResumeAge = 7 * 24 * time.Hour
 
-// LockStaleTimeout is how long a lock can be held before it's considered stale.
-const LockStaleTimeout = 30 * time.Minute
+// lockOwnerlessGrace is how long a lock file that names no owner is honoured
+// before it is treated as abandoned. Such a file only exists when its writer
+// died between creating it and recording who it is, so there is no owner whose
+// liveness could be checked; the only alternative to a time bound here is a
+// lock that nothing can ever clear. An identified owner is never evicted on
+// elapsed time — a large upload holds its lock for as long as it takes.
+const lockOwnerlessGrace = 30 * time.Second
+
+// lockTakeoverAttempts bounds how many times acquisition will clear an
+// abandoned lock and race for the create again, so a pathological loop of
+// owners appearing and dying cannot spin here forever.
+const lockTakeoverAttempts = 8
 
 // =============================================================================
 // Basic I/O functions - these are the core operations needed everywhere
@@ -188,55 +208,181 @@ func ValidateUploadState(state *UploadResumeState, localPath string) error {
 type UploadLock struct {
 	LockFilePath string
 	ProcessID    int
+	OwnerToken   string
 	AcquiredAt   time.Time
 }
 
 type uploadLockState struct {
 	ProcessID  int       `json:"process_id"`
+	OwnerToken string    `json:"owner_token,omitempty"`
 	AcquiredAt time.Time `json:"acquired_at"`
 	LocalPath  string    `json:"local_path"`
 }
 
+// processLockToken tells this run of the process apart from any other owner
+// that ever wrote a lock file. A PID cannot do that on its own: the OS hands a
+// dead process's PID to a new one, so a lock left behind by a crashed run can
+// name the PID of the run that finds it.
+var processLockToken = newLockToken()
+
+// heldLocks records the lock files this process currently owns. The file alone
+// cannot exclude a second transfer of the same path here: our own PID is by
+// definition alive, so an on-disk check that honoured it would deadlock every
+// retry after a crash, and one that ignored it would let two transfers in this
+// process share one resume state.
+var (
+	heldLocksMu sync.Mutex
+	heldLocks   = make(map[string]struct{})
+)
+
+func newLockToken() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		// Only reachable if the system entropy source is broken. Time and PID
+		// are a weaker token but still distinguish this run from a lock file
+		// written by an earlier one, which is all the token is for.
+		return fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+// claimLocalLock reserves a lock path for this process, reporting whether the
+// caller got it. The reservation is released by releaseLocalLock.
+func claimLocalLock(lockFilePath string) bool {
+	heldLocksMu.Lock()
+	defer heldLocksMu.Unlock()
+	if _, held := heldLocks[lockFilePath]; held {
+		return false
+	}
+	heldLocks[lockFilePath] = struct{}{}
+	return true
+}
+
+func releaseLocalLock(lockFilePath string) {
+	heldLocksMu.Lock()
+	delete(heldLocks, lockFilePath)
+	heldLocksMu.Unlock()
+}
+
 // AcquireUploadLock attempts to acquire an exclusive lock for uploading a file.
+//
+// Ownership is established by creating the lock file with O_EXCL, which is the
+// only step here that two acquirers cannot both win. Writing a temporary file
+// and renaming it cannot exclude anyone: rename replaces whatever is at the
+// destination, so both acquirers would succeed and both would believe they own
+// the upload — and two owners of one resume-state path means the second aborts
+// the first's multipart upload as stale.
+//
+// An existing lock is only taken over when its owner is provably gone, never
+// because it is old: a multi-hour upload is still an owner.
 func AcquireUploadLock(localPath string) (*UploadLock, error) {
 	lockFilePath := localPath + ".upload.lock"
-	currentPID := os.Getpid()
 
-	// Check existing lock
-	if data, err := os.ReadFile(lockFilePath); err == nil {
-		var existingLock uploadLockState
-		if json.Unmarshal(data, &existingLock) == nil {
-			lockAge := time.Since(existingLock.AcquiredAt)
-			if lockAge < LockStaleTimeout && isProcessRunning(existingLock.ProcessID) && existingLock.ProcessID != currentPID {
-				return nil, fmt.Errorf("upload locked by another process (PID %d)", existingLock.ProcessID)
-			}
-		}
-		os.Remove(lockFilePath)
+	if !claimLocalLock(lockFilePath) {
+		return nil, fmt.Errorf("upload of %s is already in progress in this process", localPath)
 	}
 
-	// Create new lock
+	lock, err := acquireLockFile(lockFilePath, localPath)
+	if err != nil {
+		releaseLocalLock(lockFilePath)
+		return nil, err
+	}
+	return lock, nil
+}
+
+func acquireLockFile(lockFilePath, localPath string) (*UploadLock, error) {
 	newLock := uploadLockState{
-		ProcessID:  currentPID,
+		ProcessID:  os.Getpid(),
+		OwnerToken: processLockToken,
 		AcquiredAt: time.Now(),
 		LocalPath:  localPath,
 	}
-
-	data, _ := json.MarshalIndent(newLock, "", "  ")
-	tmpFilePath := lockFilePath + ".tmp"
-	if err := os.WriteFile(tmpFilePath, data, 0600); err != nil {
-		return nil, fmt.Errorf("failed to write lock file: %w", err)
+	data, err := json.MarshalIndent(newLock, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode lock file: %w", err)
 	}
 
-	if err := os.Rename(tmpFilePath, lockFilePath); err != nil {
-		os.Remove(tmpFilePath)
-		return nil, fmt.Errorf("failed to create lock file: %w", err)
+	for attempt := 0; attempt < lockTakeoverAttempts; attempt++ {
+		file, err := os.OpenFile(lockFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			writeErr := writeAndClose(file, data)
+			if writeErr != nil {
+				// A lock nobody can read is worse than no lock: remove it so the
+				// next attempt is not blocked by our own half-written file.
+				os.Remove(lockFilePath)
+				return nil, fmt.Errorf("failed to write lock file: %w", writeErr)
+			}
+			return &UploadLock{
+				LockFilePath: lockFilePath,
+				ProcessID:    newLock.ProcessID,
+				OwnerToken:   newLock.OwnerToken,
+				AcquiredAt:   newLock.AcquiredAt,
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("failed to create lock file: %w", err)
+		}
+
+		// Someone else got there first. Only clear it if its owner is gone.
+		if err := clearAbandonedLock(lockFilePath, newLock.ProcessID); err != nil {
+			return nil, err
+		}
 	}
 
-	return &UploadLock{
-		LockFilePath: lockFilePath,
-		ProcessID:    currentPID,
-		AcquiredAt:   newLock.AcquiredAt,
-	}, nil
+	return nil, fmt.Errorf("could not acquire upload lock for %s: it kept being retaken", localPath)
+}
+
+func writeAndClose(file *os.File, data []byte) error {
+	_, writeErr := file.Write(data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
+}
+
+// clearAbandonedLock removes an existing lock file when nothing owns it any
+// more, and reports an error when something does. Returning nil means the
+// caller should race for the create again — not that the caller owns anything.
+func clearAbandonedLock(lockFilePath string, currentPID int) error {
+	data, err := os.ReadFile(lockFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // Released while we looked; try to create it again.
+		}
+		return fmt.Errorf("failed to read upload lock: %w", err)
+	}
+
+	var existing uploadLockState
+	if json.Unmarshal(data, &existing) != nil || existing.ProcessID <= 0 {
+		if info, statErr := os.Stat(lockFilePath); statErr == nil && time.Since(info.ModTime()) < lockOwnerlessGrace {
+			return fmt.Errorf("upload of %s is locked by an owner that has not identified itself yet", existing.LocalPath)
+		}
+		return removeLockFile(lockFilePath)
+	}
+
+	// A lock naming our own PID cannot belong to a live owner other than us,
+	// and a live one of ours would have been caught by the in-process claim
+	// before we got here. Either it is ours and released, or the OS gave us a
+	// dead process's PID — both are safe to take over, and refusing would wedge
+	// every retry after a crash.
+	if existing.ProcessID == currentPID {
+		return removeLockFile(lockFilePath)
+	}
+
+	if isProcessRunning(existing.ProcessID) {
+		return fmt.Errorf("upload locked by another process (PID %d) since %s",
+			existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
+	}
+
+	return removeLockFile(lockFilePath)
+}
+
+func removeLockFile(lockFilePath string) error {
+	if err := os.Remove(lockFilePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to clear abandoned upload lock: %w", err)
+	}
+	return nil
 }
 
 // ReleaseUploadLock releases an upload lock.
@@ -244,10 +390,15 @@ func ReleaseUploadLock(lock *UploadLock) {
 	if lock == nil {
 		return
 	}
+	defer releaseLocalLock(lock.LockFilePath)
+
 	if data, err := os.ReadFile(lock.LockFilePath); err == nil {
 		var currentLock uploadLockState
-		if json.Unmarshal(data, &currentLock) == nil && currentLock.ProcessID != lock.ProcessID {
-			return // Lock taken by another process
+		// The token, not just the PID: a lock retaken by a later process that
+		// happens to have our PID is not ours to delete.
+		if json.Unmarshal(data, &currentLock) == nil &&
+			(currentLock.ProcessID != lock.ProcessID || currentLock.OwnerToken != lock.OwnerToken) {
+			return // Lock taken by another owner
 		}
 	}
 	if err := os.Remove(lock.LockFilePath); err != nil && !os.IsNotExist(err) {
@@ -255,15 +406,35 @@ func ReleaseUploadLock(lock *UploadLock) {
 	}
 }
 
-func isProcessRunning(pid int) bool {
+// isProcessRunning is a variable so a test can decide which PIDs are alive:
+// a lock's owner has to be a process the test cannot create or kill portably.
+var isProcessRunning = func(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
+		// Unix never fails here. On Windows this is OpenProcess failing, which
+		// means there is no such process.
 		return false
 	}
-	return process.Signal(syscall.Signal(0)) == nil
+
+	err = process.Signal(syscall.Signal(0))
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, os.ErrProcessDone), errors.Is(err, syscall.ESRCH):
+		return false
+	case errors.Is(err, syscall.EPERM):
+		return true // Alive, just owned by another user.
+	default:
+		// Windows refuses signal 0 outright, so the only evidence there is the
+		// handle FindProcess opened above — and it only opens for a process
+		// that exists. Reading that as "dead", which is what comparing the
+		// error against nil did, let any second process take a live owner's
+		// lock on Windows.
+		return true
+	}
 }
 
 // =============================================================================

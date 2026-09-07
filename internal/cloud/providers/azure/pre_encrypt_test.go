@@ -3,14 +3,17 @@ package azure
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/xml"
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,11 +55,16 @@ type fakeBlobBackend struct {
 	committed []string
 	commits   int
 	requests  int
+
+	// rejectOncePerBlock fails the first attempt at each block with an
+	// authentication error, the shape a rejected SAS token arrives in.
+	rejectOncePerBlock bool
+	rejectedBlocks     map[string]bool
 }
 
 func newFakeBlobBackend(t *testing.T) (*fakeBlobBackend, *httptest.Server) {
 	t.Helper()
-	backend := &fakeBlobBackend{blocks: make(map[string]stagedBlock)}
+	backend := &fakeBlobBackend{blocks: make(map[string]stagedBlock), rejectedBlocks: make(map[string]bool)}
 	// TLS, because the client the provider rebuilds on every credential refresh
 	// addresses the real blob endpoint template, which is https.
 	server := httptest.NewTLSServer(backend)
@@ -73,6 +81,20 @@ func (f *fakeBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request
 
 	switch {
 	case r.Method == nethttp.MethodPut && query.Get("comp") == "block":
+		blockID := query.Get("blockid")
+		f.mu.Lock()
+		reject := f.rejectOncePerBlock && !f.rejectedBlocks[blockID]
+		if reject {
+			f.rejectedBlocks[blockID] = true
+		}
+		f.mu.Unlock()
+		if reject {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("x-ms-error-code", "AuthenticationFailed")
+			w.WriteHeader(nethttp.StatusForbidden)
+			return
+		}
+
 		hasher := sha256.New()
 		size, err := io.Copy(hasher, r.Body)
 		if err != nil {
@@ -575,5 +597,117 @@ func TestPreEncryptBlockBlobConcurrentHonorsPlanWorkerCap(t *testing.T) {
 			}
 			backend.assertCommittedBlocksMatch(t, expectedBlockHashes(data, oversizedBlockSize))
 		})
+	}
+}
+
+// TestPreEncryptBlockBlobConcurrentResumesMatchingUpload is the Azure half of
+// F10: with the interrupted upload's identity restored, the blocks already
+// staged are not staged again, and the commit still lists the whole blob.
+func TestPreEncryptBlockBlobConcurrentResumesMatchingUpload(t *testing.T) {
+	backend, server := newFakeBlobBackend(t)
+	azureClient := newTestAzureClient(t, server)
+
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "source.dat")
+	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
+
+	encryptedSize := oversizedBlockSize + 6*1024*1024
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
+
+	params := testUploadParams(localPath, encryptedPath, &resources.UploadPlan{
+		PartSize:   oversizedBlockSize,
+		WorkerCap:  4,
+		QueueDepth: 4,
+	})
+	params.TransferHandle = testsupport.MultiThreadedHandle(t)
+
+	sourceInfo, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	params.SourceModTime = sourceInfo.ModTime()
+
+	pathForRescale := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
+	firstBlockID := base64.StdEncoding.EncodeToString([]byte("block-000000"))
+	testsupport.WriteResumeState(t, localPath, &state.UploadResumeState{
+		LocalPath:     localPath,
+		EncryptedPath: encryptedPath,
+		ObjectKey:     pathForRescale,
+		TotalSize:     encryptedSize,
+		OriginalSize:  encryptedSize,
+		SourceModTime: params.SourceModTime,
+		UploadedBytes: oversizedBlockSize,
+		BlockIDs:      []string{firstBlockID},
+		RandomSuffix:  params.RandomSuffix,
+		CreatedAt:     time.Now(),
+		LastUpdate:    time.Now(),
+		StorageType:   "AzureStorage",
+	})
+
+	provider := &Provider{}
+	if err := provider.uploadEncryptedBlockBlobConcurrent(context.Background(), azureClient, params, "blob", pathForRescale, encryptedSize); err != nil {
+		t.Fatalf("resumed block blob upload failed: %v", err)
+	}
+
+	wantBlocks := expectedBlockHashes(data, oversizedBlockSize)
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+
+	if len(backend.blocks) != 1 {
+		t.Fatalf("staged %d blocks, want only the 1 that was missing", len(backend.blocks))
+	}
+	if _, restaged := backend.blocks[firstBlockID]; restaged {
+		t.Error("the first block was staged again even though the resume state listed it as complete")
+	}
+	if len(backend.committed) != len(wantBlocks) {
+		t.Fatalf("committed %d blocks, want the whole %d-block blob", len(backend.committed), len(wantBlocks))
+	}
+	if backend.committed[0] != firstBlockID {
+		t.Errorf("commit lists %q first, want the block the interrupted upload staged (%q)", backend.committed[0], firstBlockID)
+	}
+	if backend.commits != 1 {
+		t.Errorf("CommitBlockList called %d times, want 1", backend.commits)
+	}
+	if state.UploadResumeStateExists(localPath) {
+		t.Error("the resume state survived a completed upload")
+	}
+}
+
+// TestUploadCiphertextReportsEachByteOnceAcrossRetries is the Azure half of
+// F18: an outer retry replaces the progress reader, and only the discarded
+// reader knew how to withdraw what it had reported.
+func TestUploadCiphertextReportsEachByteOnceAcrossRetries(t *testing.T) {
+	backend, server := newFakeBlobBackend(t)
+	backend.rejectOncePerBlock = true // the first attempt fails after reading the body
+	azureClient := newTestAzureClient(t, server)
+
+	ciphertext := make([]byte, 3*1024*1024)
+	for i := range ciphertext {
+		ciphertext[i] = byte(i)
+	}
+
+	var reported atomic.Int64
+	uploadState := &transfer.StreamingUpload{
+		StoragePath:          "blob",
+		TotalParts:           1,
+		ByteProgressCallback: func(n int64) { reported.Add(n) },
+		ProviderData: &azureProviderData{
+			container:   testContainer,
+			blobPath:    "blob",
+			azureClient: azureClient,
+			blockIDs:    make([]string, 1),
+		},
+	}
+
+	provider := &Provider{}
+	if _, err := provider.UploadCiphertext(context.Background(), uploadState, 0, ciphertext); err != nil {
+		t.Fatalf("block did not recover from the rejected attempt: %v", err)
+	}
+
+	if got := reported.Load(); got != int64(len(ciphertext)) {
+		t.Errorf("progress reported %d bytes for a %d-byte block: the failed attempt's bytes were counted as well",
+			got, len(ciphertext))
 	}
 }

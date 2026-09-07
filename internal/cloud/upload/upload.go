@@ -753,30 +753,59 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		return nil, fmt.Errorf("provider does not support pre-encrypt upload")
 	}
 
-	// Generate encryption key and IV
-	encryptionKey, iv, randomSuffix, err := GenerateEncryptionParams()
+	sourceInfo, err := os.Stat(params.LocalPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate encryption params: %w", err)
+		return nil, fmt.Errorf("failed to stat file: %w", err)
 	}
 
-	// Create encrypted temp file
-	encryptedPath, err := CreateEncryptedTempFile(params.LocalPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer os.Remove(encryptedPath)
+	// Recovery belongs here, not in the providers: they can only compare the
+	// object key they were handed against the one in the state, and every
+	// attempt used to arrive with a freshly generated key, IV and suffix. That
+	// made the state describe a DIFFERENT ciphertext by construction, so the
+	// parts the backend had already accepted were always discarded.
+	resumed := resumePreEncryptArtifacts(params, sourceInfo, preEncryptUploader.StorageType())
 
-	encryptTimer := cloud.StartTimer(params.OutputWriter, "Pre-encryption")
+	encryptionKey, iv, randomSuffix, encryptedPath := resumed.encryptionKey, resumed.iv, resumed.randomSuffix, resumed.encryptedPath
+	if !resumed.usable {
+		encryptionKey, iv, randomSuffix, err = GenerateEncryptionParams()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate encryption params: %w", err)
+		}
 
-	// Encrypt file
-	if params.OutputWriter != nil {
-		fmt.Fprintf(params.OutputWriter, "Encrypting file (%s)...\n", filepath.Base(params.LocalPath))
-	}
-	if err := encryption.EncryptFile(params.LocalPath, encryptedPath, encryptionKey, iv); err != nil {
-		return nil, fmt.Errorf("failed to encrypt file: %w", err)
+		encryptedPath, err = CreateEncryptedTempFile(params.LocalPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create temp file: %w", err)
+		}
 	}
 
-	encryptTimer.StopWithThroughput(fileSize)
+	// The encrypted copy is the artifact a retry needs, so it outlives a failed
+	// attempt — but only while a resume state names it, since nothing would
+	// ever come back for one that is not recorded anywhere. A reused copy
+	// starts out described by the state that produced it, so anything that goes
+	// wrong before the upload even starts leaves it in place.
+	keepEncrypted := resumed.usable
+	defer func() {
+		if !keepEncrypted {
+			os.Remove(encryptedPath)
+		}
+	}()
+
+	if !resumed.usable {
+		encryptTimer := cloud.StartTimer(params.OutputWriter, "Pre-encryption")
+
+		// Encrypt file
+		if params.OutputWriter != nil {
+			fmt.Fprintf(params.OutputWriter, "Encrypting file (%s)...\n", filepath.Base(params.LocalPath))
+		}
+		if err := encryption.EncryptFile(params.LocalPath, encryptedPath, encryptionKey, iv); err != nil {
+			return nil, fmt.Errorf("failed to encrypt file: %w", err)
+		}
+
+		encryptTimer.StopWithThroughput(fileSize)
+	} else if params.OutputWriter != nil {
+		fmt.Fprintf(params.OutputWriter, "Reusing the encrypted copy of %s from the interrupted upload\n",
+			filepath.Base(params.LocalPath))
+	}
 
 	// Plan against the ciphertext, which is what the backend splits into parts.
 	// Planning here rather than from the plaintext size keeps the part count
@@ -804,6 +833,7 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		IV:               iv,
 		RandomSuffix:     randomSuffix,
 		OriginalSize:     fileSize,
+		SourceModTime:    sourceInfo.ModTime(),
 		ProgressCallback: params.ProgressCallback,
 		TransferHandle:   params.TransferHandle,
 		OutputWriter:     params.OutputWriter,
@@ -815,13 +845,134 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 	// Upload encrypted file
 	result, err := preEncryptUploader.UploadEncryptedFile(ctx, uploadParams)
 	if err != nil {
+		// Keep the ciphertext for the retry that the state file describes. An
+		// attempt that failed before it checkpointed anything has nothing to
+		// come back to, so its copy is not worth the disk.
+		keepEncrypted = preEncryptStateNames(params.LocalPath, encryptedPath)
 		return nil, fmt.Errorf("failed to upload encrypted file: %w", err)
 	}
 
 	uploadTimer.StopWithThroughput(fileSize)
 
-	// Clean up resume state
+	// Verified completion: the artifacts have nothing left to describe.
+	keepEncrypted = false
 	state.DeleteUploadState(params.LocalPath)
 
 	return result, nil
+}
+
+// preEncryptResume is what an interrupted attempt left behind for this source.
+type preEncryptResume struct {
+	usable        bool
+	encryptionKey []byte
+	iv            []byte
+	randomSuffix  string
+	encryptedPath string
+}
+
+// resumePreEncryptArtifacts recovers the object identity, encryption parameters
+// and encrypted copy of an interrupted upload of this exact source, so the
+// provider can continue the parts it already accepted.
+//
+// Anything it cannot fully match is abandoned rather than adapted: state and
+// ciphertext are deleted together, because a ciphertext whose identity no
+// longer applies can only be finished as an object nothing will ask for.
+func resumePreEncryptArtifacts(params UploadParams, sourceInfo os.FileInfo, storageType string) preEncryptResume {
+	saved, err := state.LoadUploadState(params.LocalPath)
+	if err != nil || saved == nil {
+		return preEncryptResume{}
+	}
+
+	if reason := preEncryptResumeBlocker(saved, params.LocalPath, sourceInfo, storageType); reason != "" {
+		if params.OutputWriter != nil {
+			fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: %s\n",
+				filepath.Base(params.LocalPath), reason)
+		}
+		abandonPreEncryptState(saved, params.LocalPath)
+		return preEncryptResume{}
+	}
+
+	encryptionKey, keyErr := encryption.DecodeBase64(saved.EncryptionKey)
+	iv, ivErr := encryption.DecodeBase64(saved.IV)
+	if keyErr != nil || ivErr != nil {
+		abandonPreEncryptState(saved, params.LocalPath)
+		return preEncryptResume{}
+	}
+
+	return preEncryptResume{
+		usable:        true,
+		encryptionKey: encryptionKey,
+		iv:            iv,
+		randomSuffix:  saved.RandomSuffix,
+		encryptedPath: saved.EncryptedPath,
+	}
+}
+
+// preEncryptResumeBlocker names the reason this state cannot be resumed, or ""
+// when it can. Every check answers the same question: do these saved bytes
+// still describe the file we are about to register?
+func preEncryptResumeBlocker(saved *state.UploadResumeState, localPath string, sourceInfo os.FileInfo, storageType string) string {
+	if saved.FormatVersion != 0 {
+		return "the saved state belongs to a streaming upload"
+	}
+	// The object identity in the state is one backend's; handing it to another
+	// would name a different object and strand the first backend's parts.
+	if saved.StorageType != "" && saved.StorageType != storageType {
+		return "the interrupted upload was going to " + saved.StorageType
+	}
+	if err := state.ValidateUploadState(saved, localPath); err != nil {
+		return err.Error()
+	}
+	if saved.EncryptionKey == "" || saved.IV == "" || saved.RandomSuffix == "" {
+		return "the saved state does not carry the encryption parameters of the interrupted upload"
+	}
+	if !isEncryptedTempFile(saved.EncryptedPath, localPath) {
+		return "the interrupted upload recorded no encrypted copy of its own"
+	}
+	// State written before v4.9.9 has no modification time, and size alone
+	// cannot tell an edited file from the one the ciphertext describes.
+	if saved.SourceModTime.IsZero() {
+		return "the saved state predates modification-time tracking"
+	}
+	if !saved.SourceModTime.Equal(sourceInfo.ModTime()) {
+		return "the file has been modified since the interrupted upload"
+	}
+	// ValidateUploadState only checks that the encrypted copy exists. A
+	// truncated one would be uploaded as a short object and registered under
+	// the whole file's checksum.
+	encInfo, err := os.Stat(saved.EncryptedPath)
+	if err != nil {
+		return "the encrypted copy of the interrupted upload is gone"
+	}
+	if encInfo.Size() != saved.TotalSize {
+		return "the encrypted copy of the interrupted upload is the wrong size"
+	}
+	return ""
+}
+
+// abandonPreEncryptState retires a state that can no longer be resumed, along
+// with the ciphertext it named.
+func abandonPreEncryptState(saved *state.UploadResumeState, localPath string) {
+	if isEncryptedTempFile(saved.EncryptedPath, localPath) {
+		os.Remove(saved.EncryptedPath)
+	}
+	state.DeleteUploadState(localPath)
+}
+
+// isEncryptedTempFile reports whether a path in a state file names a ciphertext
+// this package made. CreateEncryptedTempFile is the only writer of that field
+// and always names it "*.encrypted", so a state file that points anywhere else
+// — at the source above all — must not be uploaded as ciphertext or deleted as
+// scratch.
+func isEncryptedTempFile(encryptedPath, localPath string) bool {
+	return encryptedPath != "" &&
+		encryptedPath != localPath &&
+		strings.HasSuffix(encryptedPath, ".encrypted")
+}
+
+// preEncryptStateNames reports whether a resume state describes this ciphertext,
+// which is what makes keeping the ciphertext worthwhile.
+func preEncryptStateNames(localPath, encryptedPath string) bool {
+	saved, err := state.LoadUploadState(localPath)
+	return err == nil && saved != nil && saved.EncryptedPath == encryptedPath
 }

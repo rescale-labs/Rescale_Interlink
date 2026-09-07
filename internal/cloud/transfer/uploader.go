@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/constants"
@@ -169,6 +170,7 @@ type EncryptedFileUploadParams struct {
 	IV               []byte             // IV (for cloud metadata)
 	RandomSuffix     string             // Pre-generated random suffix for storage path
 	OriginalSize     int64              // Original file size (for resume state)
+	SourceModTime    time.Time          // Source modification time when the encrypted copy was made (for resume state)
 	TransferHandle   *transfer.Transfer // For concurrency
 	ProgressCallback func(float64)      // Progress reporting
 	OutputWriter     io.Writer          // Status messages
