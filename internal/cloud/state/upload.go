@@ -6,11 +6,13 @@
 package state
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -127,11 +129,13 @@ const lockOwnerlessGrace = 30 * time.Second
 // owners appearing and dying cannot spin here forever.
 const lockTakeoverAttempts = 8
 
-// ErrUploadLockUnavailable reports that the lock file could not be created,
-// written or read at all — a read-only or full source directory. Nothing holds
-// the upload in that case; there is simply nowhere to record that we do, which
-// is a different answer from the contention errors and one a caller may choose
-// to carry on past.
+// ErrUploadLockUnavailable reports that there is no lock file and the directory
+// refuses to take one — read-only, full, unwritable or gone. Nothing holds the
+// upload in that case; there is simply nowhere to record that we do, which is a
+// different answer from the contention errors and one a caller may choose to
+// carry on past. It never covers a lock file that exists: one we cannot read,
+// decode or clear may have a live owner behind it, and there is no answer to
+// carry on past there.
 var ErrUploadLockUnavailable = errors.New("the source directory cannot hold an upload lock")
 
 // =============================================================================
@@ -389,33 +393,65 @@ func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*
 	}
 
 	for attempt := 0; attempt < lockTakeoverAttempts; attempt++ {
-		file, err := os.OpenFile(lockFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err == nil {
-			writeErr := writeAndClose(file, data)
-			if writeErr != nil {
-				// A lock nobody can read is worse than no lock: remove it so the
-				// next attempt is not blocked by our own half-written file.
-				os.Remove(lockFilePath)
-				return nil, fmt.Errorf("%w: failed to write lock file: %w", ErrUploadLockUnavailable, writeErr)
-			}
-			return &UploadLock{
-				LockFilePath: lockFilePath,
-				ProcessID:    newLock.ProcessID,
-				OwnerToken:   newLock.OwnerToken,
-				AcquiredAt:   newLock.AcquiredAt,
-			}, nil
+		lock, err := createLockFile(lockFilePath, localPath, newLock, data)
+		if err != nil {
+			return nil, err
 		}
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("%w: failed to create lock file: %w", ErrUploadLockUnavailable, err)
+		if lock != nil {
+			return lock, nil
 		}
 
 		// Someone else got there first. Only clear it if its owner is gone.
-		if err := clearAbandonedLock(lockFilePath, newLock); err != nil {
+		lock, err = clearAbandonedLock(lockFilePath, localPath, newLock, data)
+		if err != nil {
 			return nil, err
+		}
+		if lock != nil {
+			return lock, nil
 		}
 	}
 
 	return nil, fmt.Errorf("could not acquire upload lock for %s: it kept being retaken", localPath)
+}
+
+// createLockFile creates the lock file and records the owner in it. A nil lock
+// with a nil error means the file is already there.
+func createLockFile(lockFilePath, localPath string, newLock uploadLockState, data []byte) (*UploadLock, error) {
+	file, err := os.OpenFile(lockFilePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil, nil
+		}
+		return nil, lockCreationError(localPath, "create", err)
+	}
+	if writeErr := writeAndClose(file, data); writeErr != nil {
+		// A lock nobody can read is worse than no lock: remove it so the next
+		// attempt is not blocked by our own half-written file.
+		os.Remove(lockFilePath)
+		return nil, lockCreationError(localPath, "write", writeErr)
+	}
+	return &UploadLock{
+		LockFilePath: lockFilePath,
+		ProcessID:    newLock.ProcessID,
+		OwnerToken:   newLock.OwnerToken,
+		AcquiredAt:   newLock.AcquiredAt,
+	}, nil
+}
+
+// lockCreationError reports a failure to put a new lock file in place. It is
+// only ErrUploadLockUnavailable when the filesystem itself refused to hold the
+// file, because that is the one class of failure that also establishes there is
+// no lock — and so no owner — at the path. Anything else is a plain refusal:
+// the caller may carry on without a lock it could not create, never without one
+// whose absence it could not establish.
+func lockCreationError(localPath, verb string, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrPermission), errors.Is(err, fs.ErrNotExist),
+		errors.Is(err, syscall.EROFS), errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+		return fmt.Errorf("%w: failed to %s lock file: %w", ErrUploadLockUnavailable, verb, err)
+	default:
+		return fmt.Errorf("cannot %s the upload lock of %s: %w", verb, localPath, err)
+	}
 }
 
 func writeAndClose(file *os.File, data []byte) error {
@@ -427,25 +463,30 @@ func writeAndClose(file *os.File, data []byte) error {
 	return closeErr
 }
 
-// clearAbandonedLock removes an existing lock file when nothing owns it any
-// more, and reports an error when something does. Returning nil means the
-// caller should race for the create again — not that the caller owns anything.
-func clearAbandonedLock(lockFilePath string, owner uploadLockState) error {
-	data, err := os.ReadFile(lockFilePath)
+// clearAbandonedLock takes an existing lock file over when nothing owns it any
+// more, and reports an error when something does. A nil lock with a nil error
+// means the caller should race for the create again — not that it owns
+// anything.
+func clearAbandonedLock(lockFilePath, localPath string, owner uploadLockState, data []byte) (*UploadLock, error) {
+	judged, err := os.ReadFile(lockFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // Released while we looked; try to create it again.
+			return nil, nil // Released while we looked; try to create it again.
 		}
-		return fmt.Errorf("%w: failed to read upload lock: %w", ErrUploadLockUnavailable, err)
+		return nil, inspectionError(localPath, err)
 	}
 
 	var existing uploadLockState
-	if json.Unmarshal(data, &existing) != nil || existing.ProcessID <= 0 {
-		if info, statErr := os.Stat(lockFilePath); statErr == nil && time.Since(info.ModTime()) < lockOwnerlessGrace {
-			return fmt.Errorf("upload of %s is locked by an owner that has not identified itself yet", existing.LocalPath)
+	if json.Unmarshal(judged, &existing) != nil || existing.ProcessID <= 0 {
+		young, statErr := youngerThanGrace(lockFilePath)
+		if statErr != nil {
+			return nil, inspectionError(localPath, statErr)
+		}
+		if young {
+			return nil, fmt.Errorf("upload of %s is locked by an owner that has not identified itself yet", localPath)
 		}
 	} else if existing.ProcessID != owner.ProcessID && isProcessRunning(existing.ProcessID) {
-		return fmt.Errorf("upload locked by another process (PID %d) since %s",
+		return nil, fmt.Errorf("upload locked by another process (PID %d) since %s",
 			existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
 	}
 
@@ -454,51 +495,166 @@ func clearAbandonedLock(lockFilePath string, owner uploadLockState) error {
 	// in-process claim before we got here: either it is ours and released, or
 	// the OS gave us a dead process's PID, and refusing would wedge every retry
 	// after a crash.
-	if beforeLockTakeover != nil {
-		beforeLockTakeover(owner)
-	}
-	return takeAbandonedLock(lockFilePath, existing)
+	takeoverStep(takeoverJudged, owner)
+	return takeAbandonedLock(lockFilePath, localPath, owner, data, judged)
 }
 
-// beforeLockTakeover runs between reading the record that judged a lock
-// abandoned and clearing that file. Only a test sets it: that window is where
-// two acquirers which both read the same dead owner have to be serialized.
-var beforeLockTakeover func(owner uploadLockState)
+// inspectionError reports that an existing lock could not be read or examined.
+// It is deliberately not ErrUploadLockUnavailable: a lock we cannot inspect may
+// have a live owner behind it, and that is the one case which must never be
+// read as "nothing holds this upload, carry on without a lock".
+func inspectionError(localPath string, err error) error {
+	return fmt.Errorf("cannot inspect the existing upload lock of %s: %w", localPath, err)
+}
 
-// takeAbandonedLock clears a lock file the caller has judged abandoned, without
-// letting two judgements of the same record both take effect. Removing the path
-// is not that step: two acquirers that read the same dead owner both remove,
-// and the second removes whatever the first put there — the first one's live
-// lock. Renaming is, because the source stops existing the moment the winner's
-// rename lands, so the loser either finds nothing to move or finds a different
-// record under the same name.
-func takeAbandonedLock(lockFilePath string, observed uploadLockState) error {
-	stalePath := lockFilePath + ".stale-" + newLockToken()
-	if err := os.Rename(lockFilePath, stalePath); err != nil {
+// youngerThanGrace reports whether a file was last written inside the grace
+// window. It is how both a lock that names no owner and a marker left by a
+// crashed taker are judged: neither carries an owner whose liveness could be
+// checked, so elapsed time is the only evidence there is.
+func youngerThanGrace(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // Another acquirer moved it first; race for the create.
+			return false, nil
 		}
-		return fmt.Errorf("%w: failed to clear abandoned upload lock: %w", ErrUploadLockUnavailable, err)
+		return false, err
+	}
+	return time.Since(info.ModTime()) < lockOwnerlessGrace, nil
+}
+
+// lockTakeoverStep runs at the points of an abandoned-lock takeover where the
+// interleaving of a second acquirer decides whether two of them can end up
+// owning one upload. Only a test sets it.
+var lockTakeoverStep func(phase string, owner uploadLockState)
+
+const (
+	// takeoverJudged: the existing record has been judged abandoned and nothing
+	// has been taken yet.
+	takeoverJudged = "judged"
+	// takeoverMarked: this acquirer holds the takeover marker, so it is the only
+	// one that may act on its judgement.
+	takeoverMarked = "marked"
+	// takeoverCleared: the abandoned lock is gone and the fresh one is not in
+	// place yet, so the pathname is free for anyone to create.
+	takeoverCleared = "cleared"
+)
+
+// takeoverMarkerSuffix names the file that serializes taking over an abandoned
+// lock, alongside the lock it clears.
+const takeoverMarkerSuffix = ".takeover"
+
+func takeoverStep(phase string, owner uploadLockState) {
+	if lockTakeoverStep != nil {
+		lockTakeoverStep(phase, owner)
+	}
+}
+
+// takeAbandonedLock clears a lock file the caller has judged abandoned and puts
+// the caller's own in its place, without letting two judgements of the same
+// record both take effect.
+//
+// Nothing here renames or moves the existing lock. A rename replaces whatever
+// is at its destination, so an acquirer that moved a lock aside and put it back
+// would overwrite any lock created while the pathname was free, and the two
+// owners it left would share one resume state. The takeover marker is what
+// serializes instead: it is created with O_EXCL, so only one of the acquirers
+// that judged a record abandoned may act on that judgement, and it is held
+// until the fresh lock has been written, so the pathname is never free outside
+// the marker's cover. Losing the create at the end means someone else took the
+// free pathname, which the caller finds by judging the lock again.
+//
+// A nil lock with a nil error means exactly that: judge the lock again.
+func takeAbandonedLock(lockFilePath, localPath string, owner uploadLockState, data, judged []byte) (*UploadLock, error) {
+	markerPath := lockFilePath + takeoverMarkerSuffix
+	if err := acquireTakeoverMarker(markerPath, localPath, owner, data); err != nil {
+		return nil, err
+	}
+	defer os.Remove(markerPath)
+	takeoverStep(takeoverMarked, owner)
+
+	// The record has to still be the one that was judged abandoned: the lock may
+	// have been released and retaken while we reached for the marker.
+	current, err := os.ReadFile(lockFilePath)
+	switch {
+	case err == nil:
+		if !bytes.Equal(current, judged) {
+			return nil, nil
+		}
+	case os.IsNotExist(err):
+		return nil, nil
+	default:
+		return nil, inspectionError(localPath, err)
 	}
 
-	var moved uploadLockState
-	if data, readErr := os.ReadFile(stalePath); readErr == nil && json.Unmarshal(data, &moved) == nil &&
-		(moved.ProcessID != observed.ProcessID || moved.OwnerToken != observed.OwnerToken) {
-		// The lock was retaken between the read that judged it abandoned and
-		// this rename, so what we moved aside belongs to whoever took it. Put it
-		// back and let the caller judge the lock again.
-		if restoreErr := os.Rename(stalePath, lockFilePath); restoreErr != nil {
-			// Not ErrUploadLockUnavailable: something does own this upload, and
-			// carrying on without a lock is exactly what must not happen there.
-			return fmt.Errorf("upload lock was retaken while being cleared and could not be restored: %w", restoreErr)
+	if err := os.Remove(lockFilePath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("cannot clear the abandoned upload lock of %s: %w", localPath, err)
+	}
+	takeoverStep(takeoverCleared, owner)
+
+	return createLockFile(lockFilePath, localPath, owner, data)
+}
+
+// acquireTakeoverMarker claims the right to clear one abandoned lock, and
+// reports a refusal when another acquirer already holds it. The marker carries
+// the same record its holder is about to install, so a marker left behind by a
+// taker that died names the process to check for liveness.
+func acquireTakeoverMarker(markerPath, localPath string, owner uploadLockState, data []byte) error {
+	// Two passes: one to find the marker, one to claim it after clearing a
+	// marker whose creator is gone.
+	for attempt := 0; attempt < 2; attempt++ {
+		file, err := os.OpenFile(markerPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			if writeErr := writeAndClose(file, data); writeErr != nil {
+				os.Remove(markerPath)
+				return fmt.Errorf("cannot clear the abandoned upload lock of %s: %w", localPath, writeErr)
+			}
+			return nil
 		}
-		return nil
+		if !os.IsExist(err) {
+			return fmt.Errorf("cannot clear the abandoned upload lock of %s: %w", localPath, err)
+		}
+
+		cleared, err := clearAbandonedTakeoverMarker(markerPath, owner)
+		if err != nil {
+			return inspectionError(localPath, err)
+		}
+		if !cleared {
+			return fmt.Errorf("another process is clearing the lock of %s", localPath)
+		}
+	}
+	return fmt.Errorf("another process is clearing the lock of %s", localPath)
+}
+
+// clearAbandonedTakeoverMarker removes a marker whose creator died mid-takeover,
+// reporting whether the marker is gone. A live taker's marker is honoured
+// however old it is; a dead one is only cleared once it is past the grace
+// window, so a marker still being written is never mistaken for one nobody will
+// finish.
+func clearAbandonedTakeoverMarker(markerPath string, owner uploadLockState) (bool, error) {
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil // The taker finished while we looked.
+		}
+		return false, err
 	}
 
-	if err := os.Remove(stalePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("%w: failed to clear abandoned upload lock: %w", ErrUploadLockUnavailable, err)
+	var taker uploadLockState
+	if json.Unmarshal(data, &taker) == nil && taker.ProcessID > 0 &&
+		taker.ProcessID != owner.ProcessID && isProcessRunning(taker.ProcessID) {
+		return false, nil
 	}
-	return nil
+	young, err := youngerThanGrace(markerPath)
+	if err != nil {
+		return false, err
+	}
+	if young {
+		return false, nil
+	}
+	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	return true, nil
 }
 
 // ReleaseUploadLock releases an upload lock.

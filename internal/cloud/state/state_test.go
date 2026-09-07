@@ -3,9 +3,11 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -292,6 +294,35 @@ func writeLockFile(t *testing.T, localPath string, lock uploadLockState) {
 	}
 }
 
+// acquireAs acquires the on-disk lock as an owner this process is not, which is
+// how a test stands in for a second process: AcquireUploadLock would be stopped
+// by the in-process claim long before the file is consulted.
+func acquireAs(localPath string, pid int, token string) (*UploadLock, error) {
+	return acquireLockFile(localPath+".upload.lock", localPath, uploadLockState{
+		ProcessID:  pid,
+		OwnerToken: token,
+		AcquiredAt: time.Now(),
+		LocalPath:  localPath,
+	})
+}
+
+type lockOutcome struct {
+	lock *UploadLock
+	err  error
+}
+
+// parkTakeoverAt runs park when the named owner reaches a phase of the takeover,
+// so a test can decide what another acquirer does inside that window.
+func parkTakeoverAt(t *testing.T, phase, token string, park func()) {
+	t.Helper()
+	lockTakeoverStep = func(atPhase string, owner uploadLockState) {
+		if atPhase == phase && owner.OwnerToken == token {
+			park()
+		}
+	}
+	t.Cleanup(func() { lockTakeoverStep = nil })
+}
+
 func readLockFile(t *testing.T, localPath string) uploadLockState {
 	t.Helper()
 	data, err := os.ReadFile(localPath + ".upload.lock")
@@ -449,41 +480,22 @@ func TestAcquireUploadLock_TakeoverCannotEvictTheWinner(t *testing.T) {
 	parked := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	beforeLockTakeover = func(owner uploadLockState) {
-		if owner.OwnerToken != "late-taker" {
-			return
-		}
+	parkTakeoverAt(t, takeoverJudged, "late-taker", func() {
 		once.Do(func() {
 			close(parked)
 			<-release
 		})
-	}
-	t.Cleanup(func() { beforeLockTakeover = nil })
+	})
 
-	lockFilePath := localPath + ".upload.lock"
-	type outcome struct {
-		lock *UploadLock
-		err  error
-	}
-	lateDone := make(chan outcome, 1)
+	lateDone := make(chan lockOutcome, 1)
 	go func() {
-		lock, err := acquireLockFile(lockFilePath, localPath, uploadLockState{
-			ProcessID:  900002,
-			OwnerToken: "late-taker",
-			AcquiredAt: time.Now(),
-			LocalPath:  localPath,
-		})
-		lateDone <- outcome{lock, err}
+		lock, err := acquireAs(localPath, 900002, "late-taker")
+		lateDone <- lockOutcome{lock, err}
 	}()
 
 	<-parked
 
-	early, err := acquireLockFile(lockFilePath, localPath, uploadLockState{
-		ProcessID:  900001,
-		OwnerToken: "early-taker",
-		AcquiredAt: time.Now(),
-		LocalPath:  localPath,
-	})
+	early, err := acquireAs(localPath, 900001, "early-taker")
 	if err != nil {
 		t.Fatalf("the first acquirer could not clear the abandoned lock: %v", err)
 	}
@@ -498,6 +510,335 @@ func TestAcquireUploadLock_TakeoverCannotEvictTheWinner(t *testing.T) {
 	if got := readLockFile(t, localPath); got.OwnerToken != "early-taker" {
 		t.Errorf("lock file names owner %q, want the acquirer that won it", got.OwnerToken)
 	}
+}
+
+// plantAbandonedLock leaves a lock file whose owner has died, which is the one
+// state an acquirer is allowed to take over.
+func plantAbandonedLock(t *testing.T, deadPID int) string {
+	t.Helper()
+	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	writeLockFile(t, localPath, uploadLockState{
+		ProcessID:  deadPID,
+		OwnerToken: "owner-that-crashed",
+		AcquiredAt: time.Now(),
+		LocalPath:  localPath,
+	})
+	return localPath
+}
+
+// TestAcquireUploadLock_TakeoverCannotStrandTwoOwners is the three-party
+// takeover sequence. One acquirer clears the dead owner and installs its own
+// lock; a second, still holding the judgement it made of that dead record,
+// reaches the clearing step it had already decided on and frees the pathname —
+// and a third creates the lock while it is free. Whatever the second one then
+// puts back lands on top of the third's lock, and two acquirers are left
+// believing they own the same upload and the same resume state.
+func TestAcquireUploadLock_TakeoverCannotStrandTwoOwners(t *testing.T) {
+	localPath := plantAbandonedLock(t, 424245)
+
+	judged := make(chan struct{})
+	release := make(chan struct{})
+	gapDone := make(chan lockOutcome, 1)
+	var judgedOnce, gapOnce sync.Once
+	// The acquirer that creates the lock while the pathname is free. It runs
+	// inside the clearing window when there is one, and after it otherwise.
+	fillTheGap := func() {
+		gapOnce.Do(func() {
+			lock, err := acquireAs(localPath, 900003, "gap-filler")
+			gapDone <- lockOutcome{lock, err}
+		})
+	}
+	lockTakeoverStep = func(phase string, owner uploadLockState) {
+		if owner.OwnerToken != "second-taker" {
+			return
+		}
+		switch phase {
+		case takeoverJudged:
+			judgedOnce.Do(func() {
+				close(judged)
+				<-release
+			})
+		case takeoverCleared:
+			fillTheGap()
+		}
+	}
+	t.Cleanup(func() { lockTakeoverStep = nil })
+
+	secondDone := make(chan lockOutcome, 1)
+	go func() {
+		lock, err := acquireAs(localPath, 900002, "second-taker")
+		secondDone <- lockOutcome{lock, err}
+	}()
+	<-judged
+
+	first := lockOutcome{}
+	first.lock, first.err = acquireAs(localPath, 900001, "first-taker")
+	if first.err != nil {
+		t.Fatalf("the first acquirer could not take over the abandoned lock: %v", first.err)
+	}
+	close(release)
+	second := <-secondDone
+	fillTheGap()
+	gap := <-gapDone
+
+	owners := map[string]bool{}
+	for token, got := range map[string]lockOutcome{"first-taker": first, "second-taker": second, "gap-filler": gap} {
+		if got.err == nil && got.lock != nil {
+			owners[token] = true
+		}
+	}
+	if len(owners) != 1 {
+		t.Fatalf("%d acquirers own the upload (%v), want exactly 1", len(owners), owners)
+	}
+	if got := readLockFile(t, localPath); !owners[got.OwnerToken] {
+		t.Errorf("lock file names owner %q, which is not the acquirer that was granted the lock (%v)", got.OwnerToken, owners)
+	}
+}
+
+// TestAcquireUploadLock_DoesNotTakeOverAnUnwrittenLock is the pre-write half of
+// the same race. The acquirer that took the abandoned lock over has created its
+// replacement file with O_EXCL but has not written the record into it yet. A
+// second acquirer, still holding its judgement of the dead owner, must not read
+// that empty file as one more thing to clear: clearing it unlinks a lock whose
+// owner goes on writing into a file that is no longer at the path, and reports
+// success — while the pathname it no longer holds is free to be taken.
+func TestAcquireUploadLock_DoesNotTakeOverAnUnwrittenLock(t *testing.T) {
+	localPath := plantAbandonedLock(t, 424246)
+	lockFilePath := localPath + ".upload.lock"
+
+	judged := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	parkTakeoverAt(t, takeoverJudged, "late-taker", func() {
+		once.Do(func() {
+			close(judged)
+			<-release
+		})
+	})
+
+	lateDone := make(chan lockOutcome, 1)
+	go func() {
+		lock, err := acquireAs(localPath, 900002, "late-taker")
+		lateDone <- lockOutcome{lock, err}
+	}()
+	<-judged
+
+	// The winner's replacement file: created, not yet written.
+	if err := os.WriteFile(lockFilePath, nil, 0600); err != nil {
+		t.Fatalf("plant an unwritten lock file: %v", err)
+	}
+	close(release)
+
+	late := <-lateDone
+	if late.err == nil {
+		ReleaseUploadLock(late.lock)
+		t.Fatal("an acquirer took over a lock file whose owner had not written it yet")
+	}
+	if _, err := os.Stat(lockFilePath); err != nil {
+		t.Errorf("the unwritten lock was cleared from under its owner: %v", err)
+	}
+}
+
+// TestAcquireUploadLock_ClearsTheMarkerOfACrashedTaker covers the marker's own
+// abandonment. A taker that dies between claiming the marker and finishing the
+// takeover would otherwise leave a file that blocks every later reclamation of
+// that lock for good.
+func TestAcquireUploadLock_ClearsTheMarkerOfACrashedTaker(t *testing.T) {
+	const deadPID = 424247
+	localPath := plantAbandonedLock(t, deadPID)
+	markerPath := localPath + ".upload.lock" + takeoverMarkerSuffix
+
+	marker, err := json.Marshal(uploadLockState{
+		ProcessID:  deadPID,
+		OwnerToken: "taker-that-crashed",
+		AcquiredAt: time.Now().Add(-time.Hour),
+		LocalPath:  localPath,
+	})
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	if err := os.WriteFile(markerPath, marker, 0600); err != nil {
+		t.Fatalf("plant marker: %v", err)
+	}
+	stale := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(markerPath, stale, stale); err != nil {
+		t.Fatalf("age the marker: %v", err)
+	}
+
+	lock, err := AcquireUploadLock(localPath)
+	if err != nil {
+		t.Fatalf("a marker its creator died holding still blocks the lock: %v", err)
+	}
+	defer ReleaseUploadLock(lock)
+
+	if got := readLockFile(t, localPath); got.ProcessID != os.Getpid() {
+		t.Errorf("lock file names PID %d, want this process (%d)", got.ProcessID, os.Getpid())
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Errorf("the crashed taker's marker was left in place: %v", err)
+	}
+}
+
+// TestAcquireUploadLock_SerializesTakersOfOneAbandonedLock pins the rule the
+// marker exists for: several acquirers can judge one dead record abandoned, and
+// only one of them may act on that judgement.
+func TestAcquireUploadLock_SerializesTakersOfOneAbandonedLock(t *testing.T) {
+	t.Run("a taker that is clearing the lock excludes the others", func(t *testing.T) {
+		localPath := plantAbandonedLock(t, 424248)
+
+		marked := make(chan struct{})
+		release := make(chan struct{})
+		var once sync.Once
+		parkTakeoverAt(t, takeoverMarked, "holder", func() {
+			once.Do(func() {
+				close(marked)
+				<-release
+			})
+		})
+
+		holderDone := make(chan lockOutcome, 1)
+		go func() {
+			lock, err := acquireAs(localPath, 900001, "holder")
+			holderDone <- lockOutcome{lock, err}
+		}()
+		<-marked
+
+		other, err := acquireAs(localPath, 900002, "other-taker")
+		if err == nil {
+			ReleaseUploadLock(other)
+			t.Fatal("a second acquirer cleared a lock that was already being cleared")
+		}
+		if !strings.Contains(err.Error(), "clearing the lock") {
+			t.Errorf("the refusal %q does not say the lock is already being cleared", err)
+		}
+		close(release)
+
+		holder := <-holderDone
+		if holder.err != nil {
+			t.Fatalf("the taker holding the marker did not get the lock: %v", holder.err)
+		}
+		if got := readLockFile(t, localPath); got.OwnerToken != "holder" {
+			t.Errorf("lock file names owner %q, want the taker that held the marker", got.OwnerToken)
+		}
+	})
+
+	t.Run("a lock created while the taker was clearing it wins", func(t *testing.T) {
+		localPath := plantAbandonedLock(t, 424249)
+
+		var once sync.Once
+		gap := lockOutcome{}
+		parkTakeoverAt(t, takeoverCleared, "taker", func() {
+			once.Do(func() { gap.lock, gap.err = acquireAs(localPath, 900002, "gap-filler") })
+		})
+
+		taker, err := acquireAs(localPath, 900001, "taker")
+		if err == nil {
+			ReleaseUploadLock(taker)
+			t.Fatal("the taker owns a lock another acquirer created while it was clearing the pathname")
+		}
+		if gap.err != nil {
+			t.Fatalf("the acquirer that found the pathname free did not get the lock: %v", gap.err)
+		}
+		if got := readLockFile(t, localPath); got.OwnerToken != "gap-filler" {
+			t.Errorf("lock file names owner %q, want the acquirer that created it", got.OwnerToken)
+		}
+	})
+
+	t.Run("concurrent takers", func(t *testing.T) {
+		localPath := plantAbandonedLock(t, 424249)
+
+		const takers = 8
+		var wg sync.WaitGroup
+		results := make([]lockOutcome, takers)
+		start := make(chan struct{})
+		wg.Add(takers)
+		for i := 0; i < takers; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				<-start
+				lock, err := acquireAs(localPath, 900100+idx, fmt.Sprintf("taker-%d", idx))
+				results[idx] = lockOutcome{lock, err}
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		granted := ""
+		for _, got := range results {
+			if got.err == nil && got.lock != nil {
+				if granted != "" {
+					t.Fatalf("two takers own the abandoned lock: %q and %q", granted, got.lock.OwnerToken)
+				}
+				granted = got.lock.OwnerToken
+			}
+		}
+		if granted == "" {
+			t.Fatal("no taker reclaimed a lock whose owner is gone")
+		}
+		if got := readLockFile(t, localPath); got.OwnerToken != granted {
+			t.Errorf("lock file names owner %q, want the taker that was granted the lock %q", got.OwnerToken, granted)
+		}
+	})
+}
+
+// TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated pins what the
+// caller is told apart. Reporting an unavailable lock means nothing holds this
+// upload and the caller may run without one; that is only true when there is no
+// lock file and the directory refuses to take one. A lock file that exists but
+// cannot be inspected may have a live owner behind it, and reading it as "no
+// lock at all" is what puts two transfers on one upload.
+func TestAcquireUploadLock_UnavailableOnlyWhenNoLockCanBeCreated(t *testing.T) {
+	t.Run("no lock and a directory that refuses one", func(t *testing.T) {
+		dir := denyingDirectory(t)
+		lock, err := AcquireUploadLock(filepath.Join(dir, "testfile.bin"))
+		if err == nil {
+			ReleaseUploadLock(lock)
+			t.Fatal("acquired a lock in a directory that cannot hold one")
+		}
+		if !errors.Is(err, ErrUploadLockUnavailable) {
+			t.Errorf("a directory that will not hold a lock reports %q, want an unavailable lock", err)
+		}
+	})
+
+	t.Run("an existing lock that cannot be read", func(t *testing.T) {
+		localPath := filepath.Join(t.TempDir(), "testfile.bin")
+		// A lock file whose contents no reader can get at. Whether an owner is
+		// behind it is exactly what cannot be established here.
+		if err := os.Mkdir(localPath+".upload.lock", 0700); err != nil {
+			t.Fatalf("plant an unreadable lock: %v", err)
+		}
+
+		lock, err := AcquireUploadLock(localPath)
+		if err == nil {
+			ReleaseUploadLock(lock)
+			t.Fatal("acquired an upload lock that could not be inspected")
+		}
+		if errors.Is(err, ErrUploadLockUnavailable) {
+			t.Errorf("an existing lock that cannot be inspected is reported as no lock at all: %v", err)
+		}
+	})
+}
+
+// denyingDirectory returns a directory that will not accept a new file.
+func denyingDirectory(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permissions do not deny file creation on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which ignores directory permissions")
+	}
+	dir := filepath.Join(t.TempDir(), "read-only")
+	if err := os.Mkdir(dir, 0500); err != nil {
+		t.Fatalf("create read-only directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	return dir
 }
 
 // TestAcquireUploadLock_RefusesAliasOfHeldPath pins path identity. Exclusion
@@ -637,10 +978,30 @@ func TestValidateDownloadStateRejectsClaimsPastEOF(t *testing.T) {
 // field: the JSON names come from the struct tags at round4-base. Editing a
 // state this version generated would not test the same thing, because the
 // fields this version added would be there to remove rather than never written.
+// Their substitution slots stand where a JSON string goes, quotes and all —
+// see fillShippedFixture.
+
+// fillShippedFixture substitutes values into a shipped-format fixture. Each one
+// is JSON-encoded rather than dropped between quotes in the literal: the
+// backslashes in a Windows path are escape sequences to a JSON reader, so a
+// fixture built that way either stops parsing or carries a path that is not the
+// one the test wrote.
+func fillShippedFixture(t *testing.T, template string, values ...string) string {
+	t.Helper()
+	encoded := make([]any, len(values))
+	for i, value := range values {
+		quoted, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("encode fixture value %q: %v", value, err)
+		}
+		encoded[i] = string(quoted)
+	}
+	return fmt.Sprintf(template, encoded...)
+}
 
 const shippedPreEncryptUploadState = `{
-  "local_path": "%s",
-  "encrypted_path": "%s",
+  "local_path": %s,
+  "encrypted_path": %s,
   "object_key": "uploads/testfile.bin-abc123",
   "upload_id": "shipped-upload-id",
   "total_size": 12,
@@ -656,19 +1017,19 @@ const shippedPreEncryptUploadState = `{
   "encryption_key": "dGVzdC1lbmNyeXB0aW9uLWtleQ==",
   "iv": "dGVzdC1pdg==",
   "random_suffix": "abc123",
-  "created_at": "%s",
-  "last_update": "%s",
+  "created_at": %s,
+  "last_update": %s,
   "storage_type": "S3Storage",
   "format_version": 0,
   "master_key": "",
   "file_id": "",
   "part_size": 0,
   "process_id": 4242,
-  "lock_acquired_at": "%s"
+  "lock_acquired_at": %s
 }`
 
 const shippedStreamingUploadState = `{
-  "local_path": "%s",
+  "local_path": %s,
   "encrypted_path": "",
   "object_key": "uploads/testfile.bin-abc123",
   "upload_id": "shipped-upload-id",
@@ -680,15 +1041,15 @@ const shippedStreamingUploadState = `{
   "encryption_key": "",
   "iv": "",
   "random_suffix": "abc123",
-  "created_at": "%s",
-  "last_update": "%s",
+  "created_at": %s,
+  "last_update": %s,
   "storage_type": "S3Storage",
   "format_version": 1,
   "master_key": "dGVzdC1tYXN0ZXIta2V5",
   "file_id": "dGVzdC1maWxlLWlk",
   "part_size": 1048576,
   "process_id": 4242,
-  "lock_acquired_at": "%s"
+  "lock_acquired_at": %s
 }`
 
 // TestSourceModTimeIsWrittenEvenWhenZero pins what an unset modification time
@@ -761,9 +1122,9 @@ func TestShippedUploadStateLoadsAndCarriesNoResumePoint(t *testing.T) {
 			stamp := time.Now().UTC().Format(time.RFC3339Nano)
 			var shipped string
 			if tt.v1 {
-				shipped = fmt.Sprintf(tt.template, localPath, stamp, stamp, stamp)
+				shipped = fillShippedFixture(t, tt.template, localPath, stamp, stamp, stamp)
 			} else {
-				shipped = fmt.Sprintf(tt.template, localPath, encryptedPath, stamp, stamp, stamp)
+				shipped = fillShippedFixture(t, tt.template, localPath, encryptedPath, stamp, stamp, stamp)
 			}
 			if err := os.WriteFile(localPath+".upload.resume", []byte(shipped), 0600); err != nil {
 				t.Fatalf("write shipped state: %v", err)
@@ -799,29 +1160,29 @@ func TestShippedUploadStateLoadsAndCarriesNoResumePoint(t *testing.T) {
 }
 
 const shippedSequentialDownloadState = `{
-  "local_path": "%s",
-  "encrypted_path": "%s",
+  "local_path": %s,
+  "encrypted_path": %s,
   "remote_path": "uploads/testfile.bin",
   "file_id": "file-123",
   "total_size": 32,
   "downloaded_bytes": 16,
   "etag": "shipped-etag",
-  "created_at": "%s",
-  "last_update": "%s",
+  "created_at": %s,
+  "last_update": %s,
   "storage_type": "S3Storage",
   "format_version": 0
 }`
 
 const shippedConcurrentDownloadState = `{
-  "local_path": "%s",
-  "encrypted_path": "%s",
+  "local_path": %s,
+  "encrypted_path": %s,
   "remote_path": "uploads/testfile.bin",
   "file_id": "file-123",
   "total_size": 32,
   "downloaded_bytes": 16,
   "etag": "shipped-etag",
-  "created_at": "%s",
-  "last_update": "%s",
+  "created_at": %s,
+  "last_update": %s,
   "storage_type": "S3Storage",
   "chunk_size": 8,
   "completed_chunks": [0, 1],
@@ -855,7 +1216,7 @@ func TestShippedDownloadSidecarStillValidates(t *testing.T) {
 			}
 
 			stamp := time.Now().UTC().Format(time.RFC3339Nano)
-			shipped := fmt.Sprintf(tt.template, localPath, encryptedPath, stamp, stamp)
+			shipped := fillShippedFixture(t, tt.template, localPath, encryptedPath, stamp, stamp)
 			if err := os.WriteFile(localPath+".download.resume", []byte(shipped), 0600); err != nil {
 				t.Fatalf("write shipped state: %v", err)
 			}
@@ -872,6 +1233,45 @@ func TestShippedDownloadSidecarStillValidates(t *testing.T) {
 			}
 			if loaded.ETag != "shipped-etag" || loaded.DownloadedBytes != 16 {
 				t.Errorf("shipped fields did not survive the load: %+v", loaded)
+			}
+		})
+	}
+}
+
+// TestShippedFixturesCarryTheirPathsOnEveryPlatform pins the fixtures
+// themselves rather than the loader. They are literal JSON with the test's paths
+// substituted in, and on Windows those paths are full of backslashes: a fixture
+// that drops them between quotes in the literal stops parsing, and the
+// compatibility tests then fail for a reason that has nothing to do with
+// compatibility.
+func TestShippedFixturesCarryTheirPathsOnEveryPlatform(t *testing.T) {
+	const windowsPath = `C:\Users\rescale\Uploads\testfile.bin`
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+
+	tests := []struct {
+		name   string
+		filled string
+	}{
+		{"pre-encrypt upload", fillShippedFixture(t, shippedPreEncryptUploadState, windowsPath, windowsPath+".encrypted", stamp, stamp, stamp)},
+		{"streaming upload", fillShippedFixture(t, shippedStreamingUploadState, windowsPath, stamp, stamp, stamp)},
+		{"sequential download", fillShippedFixture(t, shippedSequentialDownloadState, windowsPath, windowsPath+".encrypted", stamp, stamp)},
+		{"concurrent download", fillShippedFixture(t, shippedConcurrentDownloadState, windowsPath, windowsPath+".encrypted", stamp, stamp)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var fields struct {
+				LocalPath     string `json:"local_path"`
+				EncryptedPath string `json:"encrypted_path"`
+			}
+			if err := json.Unmarshal([]byte(tt.filled), &fields); err != nil {
+				t.Fatalf("the fixture does not parse with a Windows source path: %v", err)
+			}
+			if fields.LocalPath != windowsPath {
+				t.Errorf("the fixture carries local_path %q, want %q", fields.LocalPath, windowsPath)
+			}
+			if fields.EncryptedPath != "" && fields.EncryptedPath != windowsPath+".encrypted" {
+				t.Errorf("the fixture carries encrypted_path %q, want %q", fields.EncryptedPath, windowsPath+".encrypted")
 			}
 		})
 	}
