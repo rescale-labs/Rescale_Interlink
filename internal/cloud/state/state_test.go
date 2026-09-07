@@ -3,8 +3,10 @@ package state
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -422,6 +424,138 @@ func TestAcquireUploadLock_TakesOverLockOfDeadOwner(t *testing.T) {
 	}
 }
 
+// TestAcquireUploadLock_TakeoverCannotEvictTheWinner is the cross-process
+// takeover race. Two acquirers read the same abandoned record; the first clears
+// it and starts its upload; the second then reaches the clearing step it had
+// already decided on and removes the lock the first one is holding. Both own
+// the same resume state, and the later one aborts the earlier one's multipart
+// upload as stale. The acquirers are driven below AcquireUploadLock because the
+// in-process claim is what stands in for the second process.
+func TestAcquireUploadLock_TakeoverCannotEvictTheWinner(t *testing.T) {
+	const deadPID = 424244
+	withProcessLiveness(t, func(pid int) bool { return pid != deadPID })
+
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	writeLockFile(t, localPath, uploadLockState{
+		ProcessID:  deadPID,
+		OwnerToken: "owner-that-crashed",
+		AcquiredAt: time.Now(),
+		LocalPath:  localPath,
+	})
+
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	beforeLockTakeover = func(owner uploadLockState) {
+		if owner.OwnerToken != "late-taker" {
+			return
+		}
+		once.Do(func() {
+			close(parked)
+			<-release
+		})
+	}
+	t.Cleanup(func() { beforeLockTakeover = nil })
+
+	lockFilePath := localPath + ".upload.lock"
+	type outcome struct {
+		lock *UploadLock
+		err  error
+	}
+	lateDone := make(chan outcome, 1)
+	go func() {
+		lock, err := acquireLockFile(lockFilePath, localPath, uploadLockState{
+			ProcessID:  900002,
+			OwnerToken: "late-taker",
+			AcquiredAt: time.Now(),
+			LocalPath:  localPath,
+		})
+		lateDone <- outcome{lock, err}
+	}()
+
+	<-parked
+
+	early, err := acquireLockFile(lockFilePath, localPath, uploadLockState{
+		ProcessID:  900001,
+		OwnerToken: "early-taker",
+		AcquiredAt: time.Now(),
+		LocalPath:  localPath,
+	})
+	if err != nil {
+		t.Fatalf("the first acquirer could not clear the abandoned lock: %v", err)
+	}
+	close(release)
+
+	late := <-lateDone
+	if late.err == nil {
+		t.Errorf("both acquirers own the lock: the late one took it from PID %d", early.ProcessID)
+	} else if !strings.Contains(late.err.Error(), "another process") {
+		t.Errorf("the late acquirer's refusal %q does not name the live owner", late.err)
+	}
+	if got := readLockFile(t, localPath); got.OwnerToken != "early-taker" {
+		t.Errorf("lock file names owner %q, want the acquirer that won it", got.OwnerToken)
+	}
+}
+
+// TestAcquireUploadLock_RefusesAliasOfHeldPath pins path identity. Exclusion
+// keyed on the caller's spelling gives every alias of one file its own
+// in-process key, and the two spellings then meet again on the one lock file
+// they share — where the same-PID branch reads this process's own live lock and
+// clears it. Two transfers of one file end up owning one resume state.
+func TestAcquireUploadLock_RefusesAliasOfHeldPath(t *testing.T) {
+	t.Run("relative spelling", func(t *testing.T) {
+		dir := t.TempDir()
+		localPath := filepath.Join(dir, "testfile.bin")
+		if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
+			t.Fatalf("write source file: %v", err)
+		}
+
+		held, err := AcquireUploadLock(localPath)
+		if err != nil {
+			t.Fatalf("first AcquireUploadLock failed: %v", err)
+		}
+		defer ReleaseUploadLock(held)
+
+		t.Chdir(dir)
+		alias, err := AcquireUploadLock("testfile.bin")
+		if err == nil {
+			ReleaseUploadLock(alias)
+			t.Fatal("a relative spelling of the same file acquired a second lock")
+		}
+	})
+
+	t.Run("symlinked directory", func(t *testing.T) {
+		dir := t.TempDir()
+		realDir := filepath.Join(dir, "real")
+		if err := os.Mkdir(realDir, 0700); err != nil {
+			t.Fatalf("create directory: %v", err)
+		}
+		localPath := filepath.Join(realDir, "testfile.bin")
+		if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
+			t.Fatalf("write source file: %v", err)
+		}
+		linkDir := filepath.Join(dir, "link")
+		if err := os.Symlink(realDir, linkDir); err != nil {
+			t.Skipf("this platform will not create a symlink: %v", err)
+		}
+
+		held, err := AcquireUploadLock(localPath)
+		if err != nil {
+			t.Fatalf("first AcquireUploadLock failed: %v", err)
+		}
+		defer ReleaseUploadLock(held)
+
+		alias, err := AcquireUploadLock(filepath.Join(linkDir, "testfile.bin"))
+		if err == nil {
+			ReleaseUploadLock(alias)
+			t.Fatal("a symlinked spelling of the same file acquired a second lock")
+		}
+	})
+}
+
 // TestValidateDownloadStateRejectsClaimsPastEOF covers the half of the sidecar
 // check that was missing. Validation rejected a partial file LARGER than the
 // object, but accepted one smaller than the bytes the sidecar claimed were in
@@ -490,6 +624,214 @@ func TestValidateDownloadStateRejectsClaimsPastEOF(t *testing.T) {
 			}
 			if !tt.wantReject && err != nil {
 				t.Fatalf("ValidateDownloadState: %v", err)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Shipped-format compatibility
+// =============================================================================
+
+// The literals below are the sidecars the shipped release writes, field for
+// field: the JSON names come from the struct tags at round4-base. Editing a
+// state this version generated would not test the same thing, because the
+// fields this version added would be there to remove rather than never written.
+
+const shippedPreEncryptUploadState = `{
+  "local_path": "%s",
+  "encrypted_path": "%s",
+  "object_key": "uploads/testfile.bin-abc123",
+  "upload_id": "shipped-upload-id",
+  "total_size": 12,
+  "original_size": 12,
+  "uploaded_bytes": 4,
+  "completed_parts": [
+    {
+      "part_number": 1,
+      "etag": "shipped-etag"
+    }
+  ],
+  "block_ids": null,
+  "encryption_key": "dGVzdC1lbmNyeXB0aW9uLWtleQ==",
+  "iv": "dGVzdC1pdg==",
+  "random_suffix": "abc123",
+  "created_at": "%s",
+  "last_update": "%s",
+  "storage_type": "S3Storage",
+  "format_version": 0,
+  "master_key": "",
+  "file_id": "",
+  "part_size": 0,
+  "process_id": 4242,
+  "lock_acquired_at": "%s"
+}`
+
+const shippedStreamingUploadState = `{
+  "local_path": "%s",
+  "encrypted_path": "",
+  "object_key": "uploads/testfile.bin-abc123",
+  "upload_id": "shipped-upload-id",
+  "total_size": 12,
+  "original_size": 12,
+  "uploaded_bytes": 4,
+  "completed_parts": null,
+  "block_ids": null,
+  "encryption_key": "",
+  "iv": "",
+  "random_suffix": "abc123",
+  "created_at": "%s",
+  "last_update": "%s",
+  "storage_type": "S3Storage",
+  "format_version": 1,
+  "master_key": "dGVzdC1tYXN0ZXIta2V5",
+  "file_id": "dGVzdC1maWxlLWlk",
+  "part_size": 1048576,
+  "process_id": 4242,
+  "lock_acquired_at": "%s"
+}`
+
+// TestShippedUploadStateLoadsAndCarriesNoResumePoint pins what a sidecar from
+// the shipped release means to this version. It has to parse — a state that
+// failed to load would be reported as a corrupt file rather than a fresh upload
+// — and it has to carry none of the fields a resume is decided on, so nothing
+// downstream can reconstruct a part geometry or an encryption position from it.
+func TestShippedUploadStateLoadsAndCarriesNoResumePoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		v1       bool
+	}{
+		{name: "pre-encrypt", template: shippedPreEncryptUploadState},
+		{name: "streaming", template: shippedStreamingUploadState, v1: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			localPath := filepath.Join(dir, "testfile.bin")
+			encryptedPath := filepath.Join(dir, "testfile.bin.encrypted")
+			if err := os.WriteFile(localPath, []byte("test content"), 0600); err != nil {
+				t.Fatalf("write source file: %v", err)
+			}
+			if err := os.WriteFile(encryptedPath, []byte("test content"), 0600); err != nil {
+				t.Fatalf("write encrypted file: %v", err)
+			}
+
+			stamp := time.Now().UTC().Format(time.RFC3339Nano)
+			var shipped string
+			if tt.v1 {
+				shipped = fmt.Sprintf(tt.template, localPath, stamp, stamp, stamp)
+			} else {
+				shipped = fmt.Sprintf(tt.template, localPath, encryptedPath, stamp, stamp, stamp)
+			}
+			if err := os.WriteFile(localPath+".upload.resume", []byte(shipped), 0600); err != nil {
+				t.Fatalf("write shipped state: %v", err)
+			}
+
+			loaded, err := LoadUploadState(localPath)
+			if err != nil {
+				t.Fatalf("a sidecar from the shipped release no longer loads: %v", err)
+			}
+			if loaded == nil {
+				t.Fatal("LoadUploadState returned nil for an existing sidecar")
+			}
+			if loaded.ObjectKey != "uploads/testfile.bin-abc123" || loaded.UploadID != "shipped-upload-id" {
+				t.Errorf("shipped fields did not survive the load: %+v", loaded)
+			}
+			if err := ValidateUploadState(loaded, localPath); err != nil {
+				t.Errorf("a shipped sidecar is reported as unusable rather than unresumable: %v", err)
+			}
+
+			// Nothing here can place a resumed attempt.
+			if !loaded.SourceModTime.IsZero() {
+				t.Error("the shipped format carries no source modification time")
+			}
+			if !tt.v1 && loaded.PartSize != 0 {
+				t.Error("the shipped pre-encrypt format records no part size")
+			}
+			if loaded.InitialIV != "" || loaded.ChainIV != "" || len(loaded.StreamingParts) != 0 {
+				t.Errorf("the shipped format carries no chain position: initial_iv=%q chain_iv=%q parts=%d",
+					loaded.InitialIV, loaded.ChainIV, len(loaded.StreamingParts))
+			}
+		})
+	}
+}
+
+const shippedSequentialDownloadState = `{
+  "local_path": "%s",
+  "encrypted_path": "%s",
+  "remote_path": "uploads/testfile.bin",
+  "file_id": "file-123",
+  "total_size": 32,
+  "downloaded_bytes": 16,
+  "etag": "shipped-etag",
+  "created_at": "%s",
+  "last_update": "%s",
+  "storage_type": "S3Storage",
+  "format_version": 0
+}`
+
+const shippedConcurrentDownloadState = `{
+  "local_path": "%s",
+  "encrypted_path": "%s",
+  "remote_path": "uploads/testfile.bin",
+  "file_id": "file-123",
+  "total_size": 32,
+  "downloaded_bytes": 16,
+  "etag": "shipped-etag",
+  "created_at": "%s",
+  "last_update": "%s",
+  "storage_type": "S3Storage",
+  "chunk_size": 8,
+  "completed_chunks": [0, 1],
+  "format_version": 0
+}`
+
+// TestShippedDownloadSidecarStillValidates is the other half: the download
+// sidecar gained no required field, so one written by the shipped release has to
+// validate exactly as it did. The concurrent shape is the one at risk — it
+// records completed chunks and no byte ranges, and the claim check this version
+// added reads the chunk list.
+func TestShippedDownloadSidecarStillValidates(t *testing.T) {
+	tests := []struct {
+		name          string
+		template      string
+		encryptedSize int
+	}{
+		// Sequential downloads write exactly what they claim.
+		{name: "sequential", template: shippedSequentialDownloadState, encryptedSize: 16},
+		// Concurrent downloads pre-allocate the whole file and fill it in.
+		{name: "concurrent", template: shippedConcurrentDownloadState, encryptedSize: 32},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			localPath := filepath.Join(dir, "testfile.bin")
+			encryptedPath := filepath.Join(dir, "testfile.bin.encrypted")
+			if err := os.WriteFile(encryptedPath, make([]byte, tt.encryptedSize), 0600); err != nil {
+				t.Fatalf("write encrypted file: %v", err)
+			}
+
+			stamp := time.Now().UTC().Format(time.RFC3339Nano)
+			shipped := fmt.Sprintf(tt.template, localPath, encryptedPath, stamp, stamp)
+			if err := os.WriteFile(localPath+".download.resume", []byte(shipped), 0600); err != nil {
+				t.Fatalf("write shipped state: %v", err)
+			}
+
+			loaded, err := LoadDownloadState(localPath)
+			if err != nil {
+				t.Fatalf("a sidecar from the shipped release no longer loads: %v", err)
+			}
+			if loaded == nil {
+				t.Fatal("LoadDownloadState returned nil for an existing sidecar")
+			}
+			if err := ValidateDownloadState(loaded, localPath); err != nil {
+				t.Errorf("a shipped download sidecar no longer validates: %v", err)
+			}
+			if loaded.ETag != "shipped-etag" || loaded.DownloadedBytes != 16 {
+				t.Errorf("shipped fields did not survive the load: %+v", loaded)
 			}
 		})
 	}

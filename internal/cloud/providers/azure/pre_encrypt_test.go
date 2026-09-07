@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/xml"
+	"fmt"
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
@@ -639,6 +640,7 @@ func TestPreEncryptBlockBlobConcurrentResumesMatchingUpload(t *testing.T) {
 		SourceModTime: params.SourceModTime,
 		UploadedBytes: oversizedBlockSize,
 		BlockIDs:      []string{firstBlockID},
+		PartSize:      oversizedBlockSize,
 		RandomSuffix:  params.RandomSuffix,
 		CreatedAt:     time.Now(),
 		LastUpdate:    time.Now(),
@@ -709,5 +711,226 @@ func TestUploadCiphertextReportsEachByteOnceAcrossRetries(t *testing.T) {
 	if got := reported.Load(); got != int64(len(ciphertext)) {
 		t.Errorf("progress reported %d bytes for a %d-byte block: the failed attempt's bytes were counted as well",
 			got, len(ciphertext))
+	}
+}
+
+// resumeBlockSize is a small block size for the resume-geometry tests. They are
+// about which blocks go over the wire and in what order, not about the pooled
+// buffer, so they do not need the oversized blocks the reader regressions use.
+const resumeBlockSize = int64(4 * 1024 * 1024)
+
+func testBlockID(index int) string {
+	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("block-%06d", index)))
+}
+
+// stagedBlockIDs returns the block IDs that reached the wire, in order.
+func (f *fakeBlobBackend) stagedBlockIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ids := make([]string, 0, len(f.blocks))
+	for id := range f.blocks {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// azureResumeFixture is a source, its ciphertext and the params the next attempt
+// runs with, shared by the resume-geometry tests below.
+type azureResumeFixture struct {
+	localPath      string
+	encryptedPath  string
+	data           []byte
+	params         transfer.EncryptedFileUploadParams
+	pathForRescale string
+}
+
+func newAzureResumeFixture(t *testing.T, encryptedSize int64, plan *resources.UploadPlan) *azureResumeFixture {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "source.dat")
+	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
+
+	params := testUploadParams(localPath, encryptedPath, plan)
+	sourceInfo, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	params.SourceModTime = sourceInfo.ModTime()
+
+	return &azureResumeFixture{
+		localPath:      localPath,
+		encryptedPath:  encryptedPath,
+		data:           data,
+		params:         params,
+		pathForRescale: state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix),
+	}
+}
+
+// writeState plants the checkpoint an interrupted attempt left behind.
+func (f *azureResumeFixture) writeState(t *testing.T, blockSize int64, blockIDs []string, uploadedBytes int64) {
+	t.Helper()
+	testsupport.WriteResumeState(t, f.localPath, &state.UploadResumeState{
+		LocalPath:     f.localPath,
+		EncryptedPath: f.encryptedPath,
+		ObjectKey:     f.pathForRescale,
+		TotalSize:     int64(len(f.data)),
+		OriginalSize:  int64(len(f.data)),
+		SourceModTime: f.params.SourceModTime,
+		UploadedBytes: uploadedBytes,
+		BlockIDs:      blockIDs,
+		PartSize:      blockSize,
+		RandomSuffix:  f.params.RandomSuffix,
+		CreatedAt:     time.Now(),
+		LastUpdate:    time.Now(),
+		StorageType:   "AzureStorage",
+	})
+}
+
+func (f *azureResumeFixture) run(t *testing.T, azureClient *AzureClient, concurrent bool) error {
+	t.Helper()
+	provider := &Provider{}
+	if concurrent {
+		f.params.TransferHandle = testsupport.MultiThreadedHandle(t)
+		return provider.uploadEncryptedBlockBlobConcurrent(context.Background(), azureClient, f.params, "blob", f.pathForRescale, int64(len(f.data)))
+	}
+	return provider.uploadEncryptedBlockBlob(context.Background(), azureClient, f.params, "blob", f.pathForRescale, int64(len(f.data)))
+}
+
+// TestPreEncryptBlockBlobResumesBlocksWithAGap is the out-of-order half of the
+// resume. The checkpoint keeps the bytes of every completed block but compacts
+// their IDs into a list without indices, so a gap makes the count and the byte
+// total describe different geometries: the attempt restarts at the wrong offset
+// and commits a block list that is not the file.
+func TestPreEncryptBlockBlobResumesBlocksWithAGap(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			azureClient := newTestAzureClient(t, server)
+
+			encryptedSize := 3*resumeBlockSize + 1024*1024
+			fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumeBlockSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			// Blocks 0, 1 and 3 landed; block 2 never did. The list carries no
+			// indices, so only the IDs say which blocks these are.
+			fixture.writeState(t, resumeBlockSize,
+				[]string{testBlockID(0), testBlockID(1), testBlockID(3)},
+				encryptedSize-resumeBlockSize)
+
+			if err := fixture.run(t, azureClient, tt.concurrent); err != nil {
+				t.Fatalf("resumed upload failed: %v", err)
+			}
+
+			if got := backend.stagedBlockIDs(); !slices.Equal(got, []string{testBlockID(2)}) {
+				t.Errorf("staged %d block(s), want only the missing block 2", len(got))
+			}
+			wantBlocks := expectedBlockHashes(fixture.data, resumeBlockSize)
+
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			if staged, ok := backend.blocks[testBlockID(2)]; !ok {
+				t.Fatal("the missing block was never staged")
+			} else if staged.sum != wantBlocks[2] {
+				t.Error("block 2 holds different bytes than the file at that offset")
+			}
+			want := []string{testBlockID(0), testBlockID(1), testBlockID(2), testBlockID(3)}
+			if !slices.Equal(backend.committed, want) {
+				t.Errorf("committed block list is not the file in index order: %v", backend.committed)
+			}
+			if backend.commits != 1 {
+				t.Errorf("CommitBlockList called %d times, want 1", backend.commits)
+			}
+		})
+	}
+}
+
+// TestPreEncryptBlockBlobResumeUsesSavedBlockSize pins the geometry to the
+// checkpoint. The plan is recomputed on every attempt, and blocks cut with a
+// different size do not line up with the ones the backend already holds.
+func TestPreEncryptBlockBlobResumeUsesSavedBlockSize(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			azureClient := newTestAzureClient(t, server)
+
+			encryptedSize := 2*resumeBlockSize + 1024*1024
+			// This attempt plans smaller blocks than the interrupted one used.
+			fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumeBlockSize / 2,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, resumeBlockSize, []string{testBlockID(0)}, resumeBlockSize)
+
+			if err := fixture.run(t, azureClient, tt.concurrent); err != nil {
+				t.Fatalf("resumed upload failed: %v", err)
+			}
+
+			if got := backend.stagedBlockIDs(); !slices.Equal(got, []string{testBlockID(1), testBlockID(2)}) {
+				t.Errorf("staged %d block(s), want the 2 the checkpoint was missing", len(got))
+			}
+			wantBlocks := expectedBlockHashes(fixture.data, resumeBlockSize)
+
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			for _, index := range []int{1, 2} {
+				staged, ok := backend.blocks[testBlockID(index)]
+				if !ok {
+					t.Fatalf("block %d was never staged", index)
+				}
+				if staged.sum != wantBlocks[index] {
+					t.Errorf("block %d was cut with the plan's block size, not the checkpoint's", index)
+				}
+			}
+			want := []string{testBlockID(0), testBlockID(1), testBlockID(2)}
+			if !slices.Equal(backend.committed, want) {
+				t.Errorf("committed block list is %v, want the 3 blocks the saved size gives", backend.committed)
+			}
+		})
+	}
+}
+
+// TestPreEncryptBlockBlobResumeWithoutBlockSizeStartsFresh covers checkpoints
+// written before the block size was recorded. Nothing says how the blocks
+// already staged were cut, so continuing them is a guess.
+func TestPreEncryptBlockBlobResumeWithoutBlockSizeStartsFresh(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			azureClient := newTestAzureClient(t, server)
+
+			encryptedSize := 2*resumeBlockSize + 1024*1024
+			fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumeBlockSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, 0, []string{testBlockID(0)}, resumeBlockSize)
+
+			if err := fixture.run(t, azureClient, tt.concurrent); err != nil {
+				t.Fatalf("upload failed: %v", err)
+			}
+
+			want := []string{testBlockID(0), testBlockID(1), testBlockID(2)}
+			if got := backend.stagedBlockIDs(); !slices.Equal(got, want) {
+				t.Errorf("staged %d block(s), want the whole file re-sent", len(got))
+			}
+			backend.assertCommittedBlocksMatch(t, expectedBlockHashes(fixture.data, resumeBlockSize))
+		})
 	}
 }

@@ -66,6 +66,10 @@ type fakeS3Backend struct {
 	// listPartsLive decides whether a resume probe finds the old upload alive.
 	listPartsLive bool
 
+	// failCompletion refuses CompleteMultipartUpload with an error the retry
+	// classifier reads as fatal, the shape a rejected part list arrives in.
+	failCompletion bool
+
 	// rejectOncePerPart fails the first attempt at each part with an
 	// authentication error, the shape a rejected credential arrives in.
 	rejectOncePerPart bool
@@ -129,6 +133,12 @@ func (f *fakeS3Backend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) 
 		w.WriteHeader(nethttp.StatusOK)
 
 	case r.Method == nethttp.MethodPost && query.Get("uploadId") != "":
+		if f.failCompletion {
+			_, _ = io.Copy(io.Discard, r.Body)
+			writeXML(w, nethttp.StatusBadRequest,
+				`<Error><Code>MalformedXML</Code><Message>the part list was rejected</Message></Error>`)
+			return
+		}
 		var body struct {
 			Parts []struct {
 				PartNumber int32 `xml:"PartNumber"`
@@ -246,6 +256,18 @@ func (f *fakeS3Backend) partSizes(t *testing.T) []int64 {
 		sizes[number-1] = part.size
 	}
 	return sizes
+}
+
+// stagedPartNumbers returns the part numbers that reached the wire, in order.
+func (f *fakeS3Backend) stagedPartNumbers() []int32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	numbers := make([]int32, 0, len(f.parts))
+	for number := range f.parts {
+		numbers = append(numbers, number)
+	}
+	slices.Sort(numbers)
+	return numbers
 }
 
 func (f *fakeS3Backend) totalStagedBytes() int64 {
@@ -782,6 +804,7 @@ func TestPreEncryptConcurrentResumesMatchingUpload(t *testing.T) {
 		SourceModTime:  params.SourceModTime,
 		UploadedBytes:  oversizedPartSize,
 		CompletedParts: []state.CompletedPart{{PartNumber: 1, ETag: "etag-1"}},
+		PartSize:       oversizedPartSize,
 		RandomSuffix:   params.RandomSuffix,
 		CreatedAt:      time.Now(),
 		LastUpdate:     time.Now(),
@@ -825,5 +848,262 @@ func TestPreEncryptConcurrentResumesMatchingUpload(t *testing.T) {
 	}
 	if state.UploadResumeStateExists(localPath) {
 		t.Error("the resume state survived a completed upload")
+	}
+}
+
+// s3ResumeFixture is a source, its ciphertext and the params the next attempt
+// runs with, shared by the resume-geometry tests below.
+type s3ResumeFixture struct {
+	localPath     string
+	encryptedPath string
+	data          []byte
+	params        transfer.EncryptedFileUploadParams
+	objectKey     string
+}
+
+func newS3ResumeFixture(t *testing.T, encryptedSize int64, plan *resources.UploadPlan) *s3ResumeFixture {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "source.dat")
+	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
+	data := testsupport.WriteTestFile(t, encryptedPath, encryptedSize)
+	testsupport.WriteTestFile(t, localPath, encryptedSize)
+
+	params := testUploadParams(t, localPath, encryptedPath, plan)
+	sourceInfo, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("stat source: %v", err)
+	}
+	params.SourceModTime = sourceInfo.ModTime()
+
+	return &s3ResumeFixture{
+		localPath:     localPath,
+		encryptedPath: encryptedPath,
+		data:          data,
+		params:        params,
+		objectKey:     state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix),
+	}
+}
+
+// writeState plants the checkpoint an interrupted attempt left behind.
+func (f *s3ResumeFixture) writeState(t *testing.T, partSize int64, completed []state.CompletedPart, uploadedBytes int64) {
+	t.Helper()
+	testsupport.WriteResumeState(t, f.localPath, &state.UploadResumeState{
+		LocalPath:      f.localPath,
+		EncryptedPath:  f.encryptedPath,
+		ObjectKey:      f.objectKey,
+		UploadID:       testUploadID,
+		TotalSize:      int64(len(f.data)),
+		OriginalSize:   int64(len(f.data)),
+		SourceModTime:  f.params.SourceModTime,
+		UploadedBytes:  uploadedBytes,
+		CompletedParts: completed,
+		PartSize:       partSize,
+		RandomSuffix:   f.params.RandomSuffix,
+		CreatedAt:      time.Now(),
+		LastUpdate:     time.Now(),
+		StorageType:    "S3Storage",
+	})
+}
+
+func (f *s3ResumeFixture) run(t *testing.T, s3Client *S3Client, concurrent bool) error {
+	t.Helper()
+	provider := &Provider{}
+	if concurrent {
+		f.params.TransferHandle = testsupport.MultiThreadedHandle(t)
+		return provider.uploadEncryptedMultipartConcurrent(context.Background(), s3Client, f.params, f.objectKey, int64(len(f.data)))
+	}
+	return provider.uploadEncryptedMultipart(context.Background(), s3Client, f.params, f.objectKey, int64(len(f.data)))
+}
+
+// TestPreEncryptResumesPartsWithAGap is the out-of-order half of the resume.
+// Parts finish in whatever order the backend answers, so the recorded list is
+// not a prefix: resuming after len(CompletedParts) re-reads from the wrong
+// offset and re-sends a part number that is already taken, and the completeness
+// guard then refuses the retry instead of repairing it.
+func TestPreEncryptResumesPartsWithAGap(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeS3Backend(t)
+			backend.listPartsLive = true
+			s3Client := newTestS3Client(t, server)
+
+			encryptedSize := 3*oversizedPartSize + 4*1024*1024
+			fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   oversizedPartSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			// Recorded in completion order, which is what the concurrent path
+			// writes: part 4 answered first, and part 3 never landed.
+			fixture.writeState(t, oversizedPartSize, []state.CompletedPart{
+				{PartNumber: 4, ETag: "etag-4"},
+				{PartNumber: 1, ETag: "etag-1"},
+				{PartNumber: 2, ETag: "etag-2"},
+			}, encryptedSize-oversizedPartSize)
+
+			if err := fixture.run(t, s3Client, tt.concurrent); err != nil {
+				t.Fatalf("resumed upload failed: %v", err)
+			}
+
+			if got := backend.stagedPartNumbers(); !slices.Equal(got, []int32{3}) {
+				t.Errorf("staged parts %v, want only the missing part 3", got)
+			}
+			wantParts := expectedPartHashes(fixture.data, oversizedPartSize)
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			if staged, ok := backend.parts[3]; !ok {
+				t.Fatal("the missing part was never staged")
+			} else if staged.sum != wantParts[2] {
+				t.Error("part 3 holds different bytes than the file at that offset")
+			}
+			if !slices.Equal(backend.committed, []int32{1, 2, 3, 4}) {
+				t.Errorf("completed with parts %v, want the whole object in order", backend.committed)
+			}
+			if backend.commits != 1 {
+				t.Errorf("CompleteMultipartUpload called %d times, want 1", backend.commits)
+			}
+			if len(backend.aborts) != 0 {
+				t.Errorf("the resumed upload was aborted: %+v", backend.aborts)
+			}
+		})
+	}
+}
+
+// TestPreEncryptResumeUsesSavedPartSize pins the geometry to the checkpoint.
+// The plan is recomputed on every attempt and a different memory budget yields a
+// different part size, but the parts already on the backend were cut with the
+// old one: reading the file with the new size lines nothing up.
+func TestPreEncryptResumeUsesSavedPartSize(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeS3Backend(t)
+			backend.listPartsLive = true
+			s3Client := newTestS3Client(t, server)
+
+			savedPartSize := oversizedPartSize
+			encryptedSize := 2*savedPartSize + 4*1024*1024
+			// This attempt plans smaller parts than the interrupted one used.
+			fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   savedPartSize / 2,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, savedPartSize, []state.CompletedPart{
+				{PartNumber: 1, ETag: "etag-1"},
+			}, savedPartSize)
+
+			if err := fixture.run(t, s3Client, tt.concurrent); err != nil {
+				t.Fatalf("resumed upload failed: %v", err)
+			}
+
+			if got := backend.stagedPartNumbers(); !slices.Equal(got, []int32{2, 3}) {
+				t.Errorf("staged parts %v, want the 2 the checkpoint was missing", got)
+			}
+			wantParts := expectedPartHashes(fixture.data, savedPartSize)
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			for _, number := range []int32{2, 3} {
+				staged, ok := backend.parts[number]
+				if !ok {
+					t.Fatalf("part %d was never staged", number)
+				}
+				if staged.sum != wantParts[number-1] {
+					t.Errorf("part %d was cut with the plan's part size, not the checkpoint's", number)
+				}
+			}
+			if !slices.Equal(backend.committed, []int32{1, 2, 3}) {
+				t.Errorf("completed with parts %v, want the 3 parts the saved size gives", backend.committed)
+			}
+		})
+	}
+}
+
+// TestPreEncryptResumeWithoutPartSizeStartsFresh covers checkpoints written
+// before the part size was recorded. Nothing says how the parts already on the
+// backend were cut, so continuing them is a guess; the whole file goes up again.
+func TestPreEncryptResumeWithoutPartSizeStartsFresh(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeS3Backend(t)
+			backend.listPartsLive = true // the old upload would pass the liveness probe
+			s3Client := newTestS3Client(t, server)
+
+			encryptedSize := 2*oversizedPartSize + 4*1024*1024
+			fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   oversizedPartSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, 0, []state.CompletedPart{
+				{PartNumber: 1, ETag: "etag-1"},
+			}, oversizedPartSize)
+
+			if err := fixture.run(t, s3Client, tt.concurrent); err != nil {
+				t.Fatalf("upload failed: %v", err)
+			}
+
+			if got := backend.stagedPartNumbers(); !slices.Equal(got, []int32{1, 2, 3}) {
+				t.Errorf("staged parts %v, want the whole file re-sent", got)
+			}
+			backend.assertPartsMatch(t, expectedPartHashes(fixture.data, oversizedPartSize))
+		})
+	}
+}
+
+// TestPreEncryptConcurrentKeepsMultipartAfterCompletionFailure is the cleanup
+// boundary. A rejected CompleteMultipartUpload armed the deferred abort while
+// the wrapper kept the state and the ciphertext for the retry, so the checkpoint
+// named an upload that no longer existed and the retry had to send every part
+// again.
+func TestPreEncryptConcurrentKeepsMultipartAfterCompletionFailure(t *testing.T) {
+	backend, server := newFakeS3Backend(t)
+	backend.failCompletion = true
+	s3Client := newTestS3Client(t, server)
+
+	encryptedSize := 2*oversizedPartSize + 4*1024*1024
+	fixture := newS3ResumeFixture(t, encryptedSize, &resources.UploadPlan{
+		PartSize:   oversizedPartSize,
+		WorkerCap:  4,
+		QueueDepth: 4,
+	})
+
+	if err := fixture.run(t, s3Client, true); err == nil {
+		t.Fatal("a rejected completion was reported as success")
+	}
+
+	backend.mu.Lock()
+	if len(backend.aborts) != 0 {
+		t.Errorf("the multipart upload the retry needs was aborted: %+v", backend.aborts)
+	}
+	backend.mu.Unlock()
+
+	if !state.UploadResumeStateExists(fixture.localPath) {
+		t.Fatal("the resume state was discarded, leaving nothing to retry")
+	}
+
+	// The retry finds the upload alive and only has to complete it again.
+	backend.failCompletion = false
+	backend.listPartsLive = true
+	if err := fixture.run(t, s3Client, true); err != nil {
+		t.Fatalf("the retry could not complete the upload the first attempt staged: %v", err)
+	}
+	if got := backend.stagedPartNumbers(); !slices.Equal(got, []int32{1, 2, 3}) {
+		t.Errorf("staged parts %v across both attempts, want each part sent once", got)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if !slices.Equal(backend.committed, []int32{1, 2, 3}) {
+		t.Errorf("completed with parts %v, want the whole object", backend.committed)
 	}
 }

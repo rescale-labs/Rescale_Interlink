@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -47,7 +50,13 @@ type UploadResumeState struct {
 	FormatVersion int    `json:"format_version"` // 0=legacy, 1=streaming
 	MasterKey     string `json:"master_key"`     // Base64-encoded master key (v1 only)
 	FileId        string `json:"file_id"`        // Base64-encoded file identifier (v1 only)
-	PartSize      int64  `json:"part_size"`      // Bytes per plaintext part (v1 only)
+	// PartSize is the size the attempt cut its parts to: plaintext parts for a
+	// streaming (v1) upload, ciphertext parts or Azure blocks for a pre-encrypt
+	// (v0) one. Both resumes need it — the plan is recomputed on every attempt,
+	// and parts cut to a different size line up with nothing the backend holds.
+	// Absent in state written before v4.9.9, which is why such a state is not
+	// resumed.
+	PartSize int64 `json:"part_size"`
 
 	// InitialIV is the base64 IV the object's metadata carries, which is where
 	// a download starts the chain. It is separate from IV above, which belongs
@@ -281,19 +290,49 @@ func newLockToken() string {
 // claimLocalLock reserves a lock path for this process, reporting whether the
 // caller got it. The reservation is released by releaseLocalLock.
 func claimLocalLock(lockFilePath string) bool {
+	key := localLockKey(lockFilePath)
 	heldLocksMu.Lock()
 	defer heldLocksMu.Unlock()
-	if _, held := heldLocks[lockFilePath]; held {
+	if _, held := heldLocks[key]; held {
 		return false
 	}
-	heldLocks[lockFilePath] = struct{}{}
+	heldLocks[key] = struct{}{}
 	return true
 }
 
 func releaseLocalLock(lockFilePath string) {
+	key := localLockKey(lockFilePath)
 	heldLocksMu.Lock()
-	delete(heldLocks, lockFilePath)
+	delete(heldLocks, key)
 	heldLocksMu.Unlock()
+}
+
+// lockFilePathFor derives the lock file for a source path, resolved so that two
+// spellings of one file name one lock: relative against absolute, or through a
+// symlinked directory. Honouring the caller's spelling gave each alias its own
+// in-process key, and the aliases then met on the single lock file they share —
+// where the same-PID branch reads this process's own live lock and clears it.
+func lockFilePathFor(localPath string) string {
+	resolved := filepath.Clean(localPath)
+	if abs, err := filepath.Abs(resolved); err == nil {
+		resolved = abs
+	}
+	// Only when the path exists; a source that is about to be created has no
+	// links to follow and Abs is as canonical as it gets.
+	if evaluated, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = evaluated
+	}
+	return resolved + ".upload.lock"
+}
+
+// localLockKey is the identity heldLocks files a lock under. Windows paths that
+// differ only in case name the same file, so a key that did not fold case there
+// would let one spelling claim a lock this process already holds under another.
+func localLockKey(lockFilePath string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(lockFilePath)
+	}
+	return lockFilePath
 }
 
 // AcquireUploadLock attempts to acquire an exclusive lock for uploading a file.
@@ -308,13 +347,18 @@ func releaseLocalLock(lockFilePath string) {
 // An existing lock is only taken over when its owner is provably gone, never
 // because it is old: a multi-hour upload is still an owner.
 func AcquireUploadLock(localPath string) (*UploadLock, error) {
-	lockFilePath := localPath + ".upload.lock"
+	lockFilePath := lockFilePathFor(localPath)
 
 	if !claimLocalLock(lockFilePath) {
 		return nil, fmt.Errorf("upload of %s is already in progress in this process", localPath)
 	}
 
-	lock, err := acquireLockFile(lockFilePath, localPath)
+	lock, err := acquireLockFile(lockFilePath, localPath, uploadLockState{
+		ProcessID:  os.Getpid(),
+		OwnerToken: processLockToken,
+		AcquiredAt: time.Now(),
+		LocalPath:  localPath,
+	})
 	if err != nil {
 		releaseLocalLock(lockFilePath)
 		return nil, err
@@ -322,13 +366,7 @@ func AcquireUploadLock(localPath string) (*UploadLock, error) {
 	return lock, nil
 }
 
-func acquireLockFile(lockFilePath, localPath string) (*UploadLock, error) {
-	newLock := uploadLockState{
-		ProcessID:  os.Getpid(),
-		OwnerToken: processLockToken,
-		AcquiredAt: time.Now(),
-		LocalPath:  localPath,
-	}
+func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*UploadLock, error) {
 	data, err := json.MarshalIndent(newLock, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode lock file: %w", err)
@@ -356,7 +394,7 @@ func acquireLockFile(lockFilePath, localPath string) (*UploadLock, error) {
 		}
 
 		// Someone else got there first. Only clear it if its owner is gone.
-		if err := clearAbandonedLock(lockFilePath, newLock.ProcessID); err != nil {
+		if err := clearAbandonedLock(lockFilePath, newLock); err != nil {
 			return nil, err
 		}
 	}
@@ -376,7 +414,7 @@ func writeAndClose(file *os.File, data []byte) error {
 // clearAbandonedLock removes an existing lock file when nothing owns it any
 // more, and reports an error when something does. Returning nil means the
 // caller should race for the create again — not that the caller owns anything.
-func clearAbandonedLock(lockFilePath string, currentPID int) error {
+func clearAbandonedLock(lockFilePath string, owner uploadLockState) error {
 	data, err := os.ReadFile(lockFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -390,28 +428,56 @@ func clearAbandonedLock(lockFilePath string, currentPID int) error {
 		if info, statErr := os.Stat(lockFilePath); statErr == nil && time.Since(info.ModTime()) < lockOwnerlessGrace {
 			return fmt.Errorf("upload of %s is locked by an owner that has not identified itself yet", existing.LocalPath)
 		}
-		return removeLockFile(lockFilePath)
-	}
-
-	// A lock naming our own PID cannot belong to a live owner other than us,
-	// and a live one of ours would have been caught by the in-process claim
-	// before we got here. Either it is ours and released, or the OS gave us a
-	// dead process's PID — both are safe to take over, and refusing would wedge
-	// every retry after a crash.
-	if existing.ProcessID == currentPID {
-		return removeLockFile(lockFilePath)
-	}
-
-	if isProcessRunning(existing.ProcessID) {
+	} else if existing.ProcessID != owner.ProcessID && isProcessRunning(existing.ProcessID) {
 		return fmt.Errorf("upload locked by another process (PID %d) since %s",
 			existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
 	}
 
-	return removeLockFile(lockFilePath)
+	// Nothing owns it. A lock naming our own PID cannot belong to a live owner
+	// other than us, and a live one of ours would have been caught by the
+	// in-process claim before we got here: either it is ours and released, or
+	// the OS gave us a dead process's PID, and refusing would wedge every retry
+	// after a crash.
+	if beforeLockTakeover != nil {
+		beforeLockTakeover(owner)
+	}
+	return takeAbandonedLock(lockFilePath, existing)
 }
 
-func removeLockFile(lockFilePath string) error {
-	if err := os.Remove(lockFilePath); err != nil && !os.IsNotExist(err) {
+// beforeLockTakeover runs between reading the record that judged a lock
+// abandoned and clearing that file. Only a test sets it: that window is where
+// two acquirers which both read the same dead owner have to be serialized.
+var beforeLockTakeover func(owner uploadLockState)
+
+// takeAbandonedLock clears a lock file the caller has judged abandoned, without
+// letting two judgements of the same record both take effect. Removing the path
+// is not that step: two acquirers that read the same dead owner both remove,
+// and the second removes whatever the first put there — the first one's live
+// lock. Renaming is, because the source stops existing the moment the winner's
+// rename lands, so the loser either finds nothing to move or finds a different
+// record under the same name.
+func takeAbandonedLock(lockFilePath string, observed uploadLockState) error {
+	stalePath := lockFilePath + ".stale-" + newLockToken()
+	if err := os.Rename(lockFilePath, stalePath); err != nil {
+		if os.IsNotExist(err) {
+			return nil // Another acquirer moved it first; race for the create.
+		}
+		return fmt.Errorf("failed to clear abandoned upload lock: %w", err)
+	}
+
+	var moved uploadLockState
+	if data, readErr := os.ReadFile(stalePath); readErr == nil && json.Unmarshal(data, &moved) == nil &&
+		(moved.ProcessID != observed.ProcessID || moved.OwnerToken != observed.OwnerToken) {
+		// The lock was retaken between the read that judged it abandoned and
+		// this rename, so what we moved aside belongs to whoever took it. Put it
+		// back and let the caller judge the lock again.
+		if restoreErr := os.Rename(stalePath, lockFilePath); restoreErr != nil {
+			return fmt.Errorf("upload lock was retaken while being cleared and could not be restored: %w", restoreErr)
+		}
+		return nil
+	}
+
+	if err := os.Remove(stalePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to clear abandoned upload lock: %w", err)
 	}
 	return nil

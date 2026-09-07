@@ -14,6 +14,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -100,6 +102,91 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 	}, nil
 }
 
+// blockIDForIndex names the block at a zero-based index. Both upload paths have
+// always staged under this scheme, which is what lets an index be read back out
+// of a checkpoint that only keeps a flat list of IDs.
+func blockIDForIndex(index int64) string {
+	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("block-%06d", index)))
+}
+
+func blockIndexFromID(blockID string) (int64, error) {
+	decoded, err := base64.StdEncoding.DecodeString(blockID)
+	if err != nil {
+		return 0, fmt.Errorf("block ID %q is not base64: %w", blockID, err)
+	}
+	digits, ok := strings.CutPrefix(string(decoded), "block-")
+	if !ok {
+		return 0, fmt.Errorf("block ID %q was not staged by this client", blockID)
+	}
+	index, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || index < 0 {
+		return 0, fmt.Errorf("block ID %q carries no index", blockID)
+	}
+	return index, nil
+}
+
+// azureResume is the geometry an interrupted attempt left behind: the block size
+// it cut the ciphertext with, the blocks Azure is already holding keyed by
+// index, and the index of the first block no attempt has covered.
+type azureResume struct {
+	blockSize    int64
+	completed    map[int64]string
+	firstMissing int64
+}
+
+// blocksBefore returns the staged block IDs below an index, in index order,
+// which is the prefix the resumed run will not read again.
+func (r azureResume) blocksBefore(index int64) []string {
+	blocks := make([]string, 0, index)
+	for i := int64(0); i < index; i++ {
+		blocks = append(blocks, r.completed[i])
+	}
+	return blocks
+}
+
+// resumeAzureBlocks reads an interrupted attempt's geometry out of its
+// checkpoint, reporting false when the checkpoint cannot say what that geometry
+// was — which means a fresh upload.
+//
+// The checkpoint keeps a flat list of block IDs, so the count of that list is
+// not a resume point: blocks are staged out of order under concurrency and the
+// list is compacted, so a gap makes the count and the byte total describe
+// different geometries. Each ID names its own index, and that is what is used.
+// The block size has to come from the checkpoint too — the plan is recomputed on
+// every attempt, and blocks cut to a different size line up with nothing Azure
+// is already holding.
+func resumeAzureBlocks(saved *state.UploadResumeState, totalSize int64) (azureResume, bool) {
+	if saved == nil || saved.PartSize <= 0 || len(saved.BlockIDs) == 0 {
+		return azureResume{}, false
+	}
+
+	totalBlocks := transfer.CalculateTotalParts(totalSize, saved.PartSize)
+	completed := make(map[int64]string, len(saved.BlockIDs))
+	for _, blockID := range saved.BlockIDs {
+		index, err := blockIndexFromID(blockID)
+		if err == nil && index >= totalBlocks {
+			err = fmt.Errorf("block ID %q is past the %d blocks this file takes", blockID, totalBlocks)
+		}
+		if err != nil {
+			// One ID this client cannot place leaves the whole list unplaced:
+			// committing a block list that is a guess is how a blob ends up
+			// holding the wrong bytes and reporting success.
+			log.Printf("Resume state holds a block that cannot be placed, starting fresh: %v", err)
+			return azureResume{}, false
+		}
+		completed[index] = blockID
+	}
+
+	firstMissing := int64(0)
+	for ; firstMissing < totalBlocks; firstMissing++ {
+		if _, done := completed[firstMissing]; !done {
+			break
+		}
+	}
+
+	return azureResume{blockSize: saved.PartSize, completed: completed, firstMissing: firstMissing}, true
+}
+
 // uploadEncryptedSingleBlob uploads an encrypted file as a single blob.
 // Uses AzureClient directly.
 func (p *Provider) uploadEncryptedSingleBlob(ctx context.Context, azureClient *AzureClient, filePath, blobPath string, iv []byte, progressCallback func(float64)) error {
@@ -161,24 +248,29 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 	// Try to load resume state
 	existingState, _ := state.LoadUploadState(params.LocalPath)
 	var blockIDs []string
+	var alreadyStaged map[int64]string
 	var uploadedBytes int64 = 0
 	startBlock := int64(0)
 	resuming := false
 	var createdAt time.Time
 
-	if existingState != nil && len(existingState.BlockIDs) > 0 && existingState.ObjectKey == pathForRescale {
-		// Resume existing upload
-		blockIDs = existingState.BlockIDs
-		uploadedBytes = existingState.UploadedBytes
-		startBlock = int64(len(blockIDs))
-		resuming = true
-		createdAt = existingState.CreatedAt
+	if existingState != nil && existingState.ObjectKey == pathForRescale {
+		if resume, ok := resumeAzureBlocks(existingState, encryptedSize); ok {
+			blockSize = resume.blockSize
+			totalBlocks = transfer.CalculateTotalParts(encryptedSize, blockSize)
+			alreadyStaged = resume.completed
+			startBlock = resume.firstMissing
+			blockIDs = resume.blocksBefore(startBlock)
+			uploadedBytes = min(startBlock*blockSize, encryptedSize)
+			resuming = true
+			createdAt = existingState.CreatedAt
 
-		if _, err := file.Seek(uploadedBytes, 0); err != nil {
-			return fmt.Errorf("failed to seek in file: %w", err)
-		}
-		if params.OutputWriter != nil {
-			fmt.Fprintf(params.OutputWriter, "Resuming upload from block %d/%d\n", startBlock+1, totalBlocks)
+			if _, err := file.Seek(startBlock*blockSize, 0); err != nil {
+				return fmt.Errorf("failed to seek in file: %w", err)
+			}
+			if params.OutputWriter != nil {
+				fmt.Fprintf(params.OutputWriter, "Resuming upload from block %d/%d\n", startBlock+1, totalBlocks)
+			}
 		}
 	}
 
@@ -208,8 +300,19 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 			break
 		}
 
+		// Already staged by the interrupted attempt: the read above keeps the
+		// byte count covering the file, but nothing is sent again.
+		if staged, done := alreadyStaged[blockNum]; done {
+			blockIDs = append(blockIDs, staged)
+			uploadedBytes += int64(n)
+			if params.ProgressCallback != nil {
+				params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
+			}
+			continue
+		}
+
 		// Generate block ID
-		blockID := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("block-%06d", blockNum)))
+		blockID := blockIDForIndex(blockNum)
 
 		// Make a copy for upload
 		blockData := make([]byte, n)
@@ -243,6 +346,7 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 			SourceModTime: params.SourceModTime,
 			UploadedBytes: uploadedBytes,
 			BlockIDs:      blockIDs,
+			PartSize:      blockSize,
 			EncryptionKey: encryption.EncodeBase64(params.EncryptionKey),
 			IV:            encryption.EncodeBase64(params.IV),
 			RandomSuffix:  params.RandomSuffix,
@@ -328,29 +432,32 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	if loadErr != nil {
 		log.Printf("Warning: Failed to load resume state: %v", loadErr)
 	}
-	var blockIDs []string
+	var alreadyStaged map[int64]string
 	var uploadedBytes int64 = 0
 	startBlock := int64(0)
 	resuming := false
 	var createdAt time.Time
 
-	if existingState != nil && len(existingState.BlockIDs) > 0 && existingState.ObjectKey == pathForRescale {
-		// Resume existing upload
-		blockIDs = existingState.BlockIDs
-		uploadedBytes = existingState.UploadedBytes
-		startBlock = int64(len(blockIDs))
-		resuming = true
-		createdAt = existingState.CreatedAt
+	if existingState != nil && existingState.ObjectKey == pathForRescale {
+		if resume, ok := resumeAzureBlocks(existingState, totalSize); ok {
+			partSize = resume.blockSize
+			totalBlocks = transfer.CalculateTotalParts(totalSize, partSize)
+			alreadyStaged = resume.completed
+			startBlock = resume.firstMissing
+			uploadedBytes = min(startBlock*partSize, totalSize)
+			resuming = true
+			createdAt = existingState.CreatedAt
 
-		if _, err := file.Seek(uploadedBytes, 0); err != nil {
-			return fmt.Errorf("failed to seek to resume position: %w", err)
-		}
+			if _, err := file.Seek(startBlock*partSize, 0); err != nil {
+				return fmt.Errorf("failed to seek to resume position: %w", err)
+			}
 
-		if params.OutputWriter != nil {
-			fmt.Fprintf(params.OutputWriter, "Resuming upload from block %d/%d (%.1f%%) with %d concurrent threads\n",
-				startBlock+1, totalBlocks,
-				float64(uploadedBytes)/float64(totalSize)*100,
-				concurrency)
+			if params.OutputWriter != nil {
+				fmt.Fprintf(params.OutputWriter, "Resuming upload from block %d/%d (%.1f%%) with %d concurrent threads\n",
+					startBlock+1, totalBlocks,
+					float64(uploadedBytes)/float64(totalSize)*100,
+					concurrency)
+			}
 		}
 	}
 
@@ -361,11 +468,13 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 		}
 	}
 
-	// Pre-allocate blockIDs slice for ordering
+	// Pre-allocate blockIDs slice for ordering. Its length comes from the block
+	// size the resume settled on, so a plan that would have chosen a different
+	// one cannot leave the restored blocks hanging off the end of it.
 	allBlockIDs := make([]string, totalBlocks)
 	// Copy existing block IDs from resume state
-	for i := int64(0); i < startBlock; i++ {
-		allBlockIDs[i] = blockIDs[i]
+	for index := int64(0); index < startBlock; index++ {
+		allBlockIDs[index] = alreadyStaged[index]
 	}
 
 	// Stage every block through the shared concurrent pipeline.
@@ -379,7 +488,13 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 		QueueDepth:    plan.QueueDepth,
 		WorkerLabel:   "Azure upload worker",
 		StagePart: func(blockCtx context.Context, part transfer.PartAssignment) (string, error) {
-			blockID := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("block-%06d", part.Index)))
+			// Already staged by the interrupted attempt. The pipeline still
+			// reads this block so the staged byte count covers the file, but
+			// sending it again is what the resume is here to avoid.
+			if staged, done := alreadyStaged[part.Index]; done {
+				return staged, nil
+			}
+			blockID := blockIDForIndex(part.Index)
 
 			stageErr := azureClient.RetryWithBackoff(blockCtx, fmt.Sprintf("StageBlock %d/%d", part.Index+1, totalBlocks), func() error {
 				client := azureClient.Client()
@@ -402,11 +517,14 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 			}
 		},
 		SaveState: func(uploaded int64, staged int) {
-			// Build current block IDs list (only completed blocks)
-			currentBlockIDs := make([]string, 0, staged+int(startBlock))
-			for i := int64(0); i < int64(staged)+startBlock; i++ {
-				if allBlockIDs[i] != "" {
-					currentBlockIDs = append(currentBlockIDs, allBlockIDs[i])
+			// Every slot that holds a block, not the first `staged` of them:
+			// blocks land out of order, so a count says nothing about which
+			// indices are filled. Each ID carries its own index, which is what
+			// lets the next attempt put this list back where it belongs.
+			currentBlockIDs := make([]string, 0, len(allBlockIDs))
+			for _, blockID := range allBlockIDs {
+				if blockID != "" {
+					currentBlockIDs = append(currentBlockIDs, blockID)
 				}
 			}
 			currentState := &state.UploadResumeState{
@@ -418,6 +536,7 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				SourceModTime:  params.SourceModTime,
 				UploadedBytes:  uploaded,
 				BlockIDs:       currentBlockIDs,
+				PartSize:       partSize,
 				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
 				IV:             encryption.EncodeBase64(params.IV),
 				RandomSuffix:   params.RandomSuffix,

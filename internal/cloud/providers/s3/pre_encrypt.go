@@ -146,25 +146,30 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	existingState, _ := state.LoadUploadState(params.LocalPath)
 	var uploadID string
 	var completedParts []types.CompletedPart
+	var alreadyOnS3 map[int32]string
 	var uploadedBytes int64 = 0
 	startPart := int32(1)
 	resuming := false
 	var createdAt time.Time
 
 	if existingState != nil && existingState.UploadID != "" && existingState.ObjectKey == objectKey {
-		// Resume existing upload
-		uploadID = existingState.UploadID
-		uploadedBytes = existingState.UploadedBytes
-		completedParts = convertToCompletedParts(existingState.CompletedParts)
-		startPart = int32(len(completedParts)) + 1
-		resuming = true
-		createdAt = existingState.CreatedAt
+		if resume, ok := resumeS3Parts(existingState, encryptedSize); ok {
+			uploadID = existingState.UploadID
+			partSize = resume.partSize
+			totalParts = transfer.CalculateTotalParts(encryptedSize, partSize)
+			alreadyOnS3 = resume.completed
+			startPart = int32(resume.firstMissing) + 1
+			completedParts = resume.partsBefore(resume.firstMissing)
+			uploadedBytes = min(resume.firstMissing*partSize, encryptedSize)
+			resuming = true
+			createdAt = existingState.CreatedAt
 
-		if _, err := file.Seek(uploadedBytes, 0); err != nil {
-			return fmt.Errorf("failed to seek in file: %w", err)
-		}
-		if params.OutputWriter != nil {
-			fmt.Fprintf(params.OutputWriter, "Resuming upload from part %d/%d\n", startPart, totalParts)
+			if _, err := file.Seek(resume.firstMissing*partSize, 0); err != nil {
+				return fmt.Errorf("failed to seek in file: %w", err)
+			}
+			if params.OutputWriter != nil {
+				fmt.Fprintf(params.OutputWriter, "Resuming upload from part %d/%d\n", startPart, totalParts)
+			}
 		}
 	}
 
@@ -204,6 +209,17 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		}
 		if n == 0 {
 			break
+		}
+
+		// Already accepted by the interrupted attempt: the read above keeps the
+		// byte count covering the file, but nothing is sent again.
+		if etag, done := alreadyOnS3[partNum]; done {
+			completedParts = append(completedParts, types.CompletedPart{
+				ETag:       aws.String(etag),
+				PartNumber: aws.Int32(partNum),
+			})
+			uploadedBytes += int64(n)
+			continue
 		}
 
 		// Make a copy for upload
@@ -248,6 +264,7 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 			SourceModTime:  params.SourceModTime,
 			UploadedBytes:  uploadedBytes,
 			CompletedParts: convertFromCompletedParts(completedParts),
+			PartSize:       partSize,
 			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
 			IV:             encryption.EncodeBase64(params.IV),
 			RandomSuffix:   params.RandomSuffix,
@@ -259,7 +276,9 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	}
 
 	if err := verifyS3PartsComplete(uploadedBytes, encryptedSize, completedParts, totalParts); err != nil {
-		abortS3Upload(ctx, s3Client, objectKey, uploadID)
+		abortCtx, cancelAbort := abortContext(ctx)
+		abortS3Upload(abortCtx, s3Client, objectKey, uploadID)
+		cancelAbort()
 		return fmt.Errorf("refusing to complete upload of %s: %w", objectKey, err)
 	}
 
@@ -331,6 +350,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	}
 	var uploadID string
 	var completedParts []types.CompletedPart
+	var alreadyOnS3 map[int32]string
 	var uploadedBytes int64 = 0
 	startPart := int32(1)
 	resuming := false
@@ -353,8 +373,11 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 
 	if existingState != nil {
 		// Validate resume state
+		resume, resumable := resumeS3Parts(existingState, totalSize)
 		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
 			log.Printf("Resume state validation failed, starting fresh: %v", err)
+		} else if !resumable {
+			log.Printf("Resume state does not record the part size it used, starting fresh")
 		} else {
 			// Verify upload still exists on S3
 			_, listErr := s3Client.Client().ListParts(ctx, &s3.ListPartsInput{
@@ -366,9 +389,12 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			if listErr == nil {
 				// Valid resume state and upload exists!
 				uploadID = existingState.UploadID
-				completedParts = convertToCompletedParts(existingState.CompletedParts)
-				uploadedBytes = existingState.UploadedBytes
-				startPart = int32(len(existingState.CompletedParts)) + 1
+				partSize = resume.partSize
+				totalParts = int32(transfer.CalculateTotalParts(totalSize, partSize))
+				alreadyOnS3 = resume.completed
+				completedParts = resume.partsBefore(resume.firstMissing)
+				uploadedBytes = min(resume.firstMissing*partSize, totalSize)
+				startPart = int32(resume.firstMissing) + 1
 				resuming = true
 				createdAt = existingState.CreatedAt
 
@@ -418,6 +444,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			SourceModTime:  params.SourceModTime,
 			UploadedBytes:  0,
 			CompletedParts: []state.CompletedPart{},
+			PartSize:       partSize,
 			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
 			IV:             encryption.EncodeBase64(params.IV),
 			RandomSuffix:   params.RandomSuffix,
@@ -436,18 +463,12 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		}
 	}
 
-	// Ensure upload is aborted if we fail fatally (but keep resume state)
-	defer func() {
-		if err != nil {
-			// Only abort if we actually failed (not on successful completion)
-			s3Client.Client().AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-				Bucket:   aws.String(s3Client.Bucket()),
-				Key:      aws.String(objectKey),
-				UploadId: aws.String(uploadID),
-			})
-			// Keep resume state so user can retry
-		}
-	}()
+	// Nothing here aborts the multipart upload on the way out. A failed attempt
+	// leaves a resume state naming this upload ID, and the retry the wrapper
+	// keeps the ciphertext for continues it: a failed COMPLETION above all, where
+	// every part is already on S3 and only the assembly has to be asked for
+	// again. The one upload that must not survive is one whose part list does
+	// not cover the file, and that is aborted where it is refused.
 
 	// If resuming, seek to the position after the last completed part
 	if resuming && startPart > 1 {
@@ -470,6 +491,12 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		WorkerLabel:   "upload worker",
 		StagePart: func(partCtx context.Context, part transfer.PartAssignment) (string, error) {
 			partNumber := int32(part.Index) + 1
+			// Already accepted by the interrupted attempt. The pipeline still
+			// reads this part so the staged byte count covers the file, but
+			// paying for it twice is exactly what the resume is here to avoid.
+			if etag, done := alreadyOnS3[partNumber]; done {
+				return etag, nil
+			}
 			var uploadResp *s3.UploadPartOutput
 
 			// Add HTTP tracing if DEBUG_HTTP is enabled
@@ -510,6 +537,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				SourceModTime:  params.SourceModTime,
 				UploadedBytes:  uploaded,
 				CompletedParts: convertFromCompletedParts(completedParts),
+				PartSize:       partSize,
 				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
 				IV:             encryption.EncodeBase64(params.IV),
 				RandomSuffix:   params.RandomSuffix,
@@ -523,8 +551,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		},
 	})
 
-	// Not assigned to err: the deferred abort stays disarmed so the upload ID in
-	// the resume state is still valid to retry against.
+	// The upload ID in the resume state is still valid to retry against.
 	if pipelineErr != nil {
 		return pipelineErr
 	}
@@ -537,10 +564,13 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	// The pipeline's producer stops on the first short read, so anything that
 	// makes a read return early — a mis-sized buffer, a truncated temp file —
 	// ends with a part list S3 would happily assemble into a shorter object and
-	// report as the whole file. Assigning err here also arms the deferred abort.
-	if err = verifyS3PartsComplete(stagedBytes, totalSize, completedParts, int64(totalParts)); err != nil {
-		err = fmt.Errorf("refusing to complete upload of %s: %w", objectKey, err)
-		return err
+	// report as the whole file. Such an upload has nothing left to resume, so it
+	// is the one this function does abort.
+	if verifyErr := verifyS3PartsComplete(stagedBytes, totalSize, completedParts, int64(totalParts)); verifyErr != nil {
+		abortCtx, cancelAbort := abortContext(ctx)
+		abortS3Upload(abortCtx, s3Client, objectKey, uploadID)
+		cancelAbort()
+		return fmt.Errorf("refusing to complete upload of %s: %w", objectKey, verifyErr)
 	}
 
 	// Complete multipart upload with retry
@@ -565,8 +595,6 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		log.Printf("Warning: Failed to delete resume state after successful upload: %v", delErr)
 	}
 
-	// Clear error to prevent defer from aborting successful upload
-	err = nil
 	return nil
 }
 
@@ -584,6 +612,70 @@ func verifyS3PartsComplete(uploadedBytes, encryptedSize int64, parts []types.Com
 		}
 	}
 	return transfer.VerifyPartSequence(partNumbers)
+}
+
+// s3Resume is the geometry an interrupted attempt left behind: the part size it
+// cut the ciphertext with, the parts S3 has already accepted keyed by part
+// number, and the index of the first part no attempt has covered.
+type s3Resume struct {
+	partSize     int64
+	completed    map[int32]string
+	firstMissing int64
+}
+
+// partsBefore returns the accepted parts below a zero-based index, in part-number
+// order — the prefix the resumed run will not read again. Order is the point:
+// the sequential path completes the list it built without sorting it, and S3
+// assembles the object in the order the list is given.
+func (r s3Resume) partsBefore(index int64) []types.CompletedPart {
+	parts := make([]types.CompletedPart, 0, index)
+	for i := int64(0); i < index; i++ {
+		number := int32(i) + 1
+		parts = append(parts, types.CompletedPart{ETag: aws.String(r.completed[number]), PartNumber: aws.Int32(number)})
+	}
+	return parts
+}
+
+// resumeS3Parts reads an interrupted attempt's geometry out of its checkpoint,
+// reporting false when the checkpoint cannot say what that geometry was — which
+// means a fresh upload.
+//
+// Parts finish out of order under concurrency, so the recorded list is a set and
+// not a prefix: the resume point is the first index missing from it, and an
+// accepted part above that point is skipped rather than sent again. The part
+// size has to come from the checkpoint too. The plan is recomputed on every
+// attempt against the memory the machine has then, and parts cut to a different
+// size line up with nothing S3 is already holding.
+func resumeS3Parts(saved *state.UploadResumeState, totalSize int64) (s3Resume, bool) {
+	if saved == nil || saved.PartSize <= 0 {
+		return s3Resume{}, false
+	}
+
+	totalParts := transfer.CalculateTotalParts(totalSize, saved.PartSize)
+	completed := make(map[int32]string, len(saved.CompletedParts))
+	for _, part := range saved.CompletedParts {
+		if part.ETag == "" || part.PartNumber < 1 || int64(part.PartNumber) > totalParts {
+			continue
+		}
+		completed[part.PartNumber] = part.ETag
+	}
+
+	firstMissing := int64(0)
+	for ; firstMissing < totalParts; firstMissing++ {
+		if _, done := completed[int32(firstMissing)+1]; !done {
+			break
+		}
+	}
+
+	return s3Resume{partSize: saved.PartSize, completed: completed, firstMissing: firstMissing}, true
+}
+
+// abortContext detaches an abort from the attempt that is giving up. The failure
+// that reaches an abort is often the cancellation of that very context, and a
+// request issued on a cancelled context never leaves the process — so the upload
+// it was meant to discard would stay open.
+func abortContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), constants.PartOperationTimeout)
 }
 
 // abortS3Upload discards a multipart upload the caller has decided not to
