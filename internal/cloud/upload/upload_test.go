@@ -1167,9 +1167,11 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 		return nil, fmt.Errorf("fake provider: %w", err)
 	}
 
+	// A stateless attempt holds no lock on this source, so the real providers
+	// neither read nor write the checkpoint beside it; this one does the same.
 	var completed []state.CompletedPart
 	var uploadedBytes int64
-	if saved, _ := state.LoadUploadState(params.LocalPath); saved != nil && saved.ObjectKey == objectKey {
+	if saved, _ := state.LoadUploadState(params.LocalPath); !params.Stateless && saved != nil && saved.ObjectKey == objectKey {
 		if err := state.ValidateUploadState(saved, params.LocalPath); err == nil {
 			completed = saved.CompletedParts
 			uploadedBytes = saved.UploadedBytes
@@ -1204,25 +1206,27 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 		uploadedBytes = end
 		stagedThisAttempt++
 
-		if err := state.SaveUploadState(&state.UploadResumeState{
-			LocalPath:      params.LocalPath,
-			EncryptedPath:  params.EncryptedPath,
-			ObjectKey:      objectKey,
-			UploadID:       "fake-upload-id",
-			TotalSize:      int64(len(encrypted)),
-			OriginalSize:   params.OriginalSize,
-			SourceModTime:  params.SourceModTime,
-			UploadedBytes:  uploadedBytes,
-			CompletedParts: completed,
-			PartSize:       f.partSize,
-			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
-			IV:             encryption.EncodeBase64(params.IV),
-			RandomSuffix:   params.RandomSuffix,
-			CreatedAt:      time.Now(),
-			LastUpdate:     time.Now(),
-			StorageType:    "FakeStorage",
-		}, params.LocalPath); err != nil {
-			return nil, err
+		if !params.Stateless {
+			if err := state.SaveUploadState(&state.UploadResumeState{
+				LocalPath:      params.LocalPath,
+				EncryptedPath:  params.EncryptedPath,
+				ObjectKey:      objectKey,
+				UploadID:       "fake-upload-id",
+				TotalSize:      int64(len(encrypted)),
+				OriginalSize:   params.OriginalSize,
+				SourceModTime:  params.SourceModTime,
+				UploadedBytes:  uploadedBytes,
+				CompletedParts: completed,
+				PartSize:       f.partSize,
+				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
+				IV:             encryption.EncodeBase64(params.IV),
+				RandomSuffix:   params.RandomSuffix,
+				CreatedAt:      time.Now(),
+				LastUpdate:     time.Now(),
+				StorageType:    "FakeStorage",
+			}, params.LocalPath); err != nil {
+				return nil, err
+			}
 		}
 
 		if f.failAfterParts > 0 && stagedThisAttempt >= f.failAfterParts {
@@ -1232,7 +1236,9 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 	}
 
 	f.attempts = append(f.attempts, attempt)
-	state.DeleteUploadState(params.LocalPath)
+	if !params.Stateless {
+		state.DeleteUploadState(params.LocalPath)
+	}
 	return &cloud.UploadResult{
 		StoragePath:   objectKey,
 		EncryptionKey: params.EncryptionKey,
@@ -1410,6 +1416,11 @@ type fakeStreamingBackend struct {
 }
 
 type fakeBackendUpload struct {
+	// bucket is the namespace this upload lives in. An upload ID names an upload
+	// within one bucket or container; addressed through another one it is simply
+	// absent, which is what makes a retirement sent to the wrong destination
+	// look like a successful one.
+	bucket    string
 	objectKey string
 	parts     map[int64][]byte // ciphertext, by part index
 	handles   map[int64]string // what the backend named each part
@@ -1421,12 +1432,13 @@ func newFakeStreamingBackend() *fakeStreamingBackend {
 	return &fakeStreamingBackend{uploads: make(map[string]*fakeBackendUpload)}
 }
 
-func (b *fakeStreamingBackend) create(objectKey string) (string, *fakeBackendUpload) {
+func (b *fakeStreamingBackend) create(bucket, objectKey string) (string, *fakeBackendUpload) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.next++
 	id := fmt.Sprintf("upload-%d", b.next)
 	upload := &fakeBackendUpload{
+		bucket:    bucket,
 		objectKey: objectKey,
 		parts:     make(map[int64][]byte),
 		handles:   make(map[int64]string),
@@ -1474,6 +1486,11 @@ type resumableStreamingUploader struct {
 	backend  *fakeStreamingBackend
 	partSize int64
 
+	// bucket is the namespace this provider addresses uploads in — the storage
+	// it was built for. Tests that upload one source to two destinations give
+	// their two providers different ones.
+	bucket string
+
 	// failFrom interrupts the attempt at a known boundary: every part from this
 	// index upwards fails, and waits for the parts below it to land first, so
 	// the backend is left holding exactly that prefix however the workers
@@ -1496,6 +1513,10 @@ type resumableStreamingUploader struct {
 	encrypted   []int64
 	uploaded    []int64
 	resumedFrom []*transfer.PartResult
+
+	// abortRequests is every upload ID this provider was asked to discard,
+	// whether or not its own bucket holds one by that name.
+	abortRequests []string
 
 	// abortDeadline is how long the last abort's context had left to run, which
 	// is what bounds a cancelled transfer once the abort is detached from it.
@@ -1533,7 +1554,7 @@ func (u *resumableStreamingUploader) InitStreamingUpload(_ context.Context, para
 		return nil, err
 	}
 	suffix := fmt.Sprintf("suffix-%d", len(u.backend.uploads)+1)
-	uploadID, _ := u.backend.create("fake/path/" + filepath.Base(params.LocalPath) + "-" + suffix)
+	uploadID, _ := u.backend.create(u.bucket, "fake/path/"+filepath.Base(params.LocalPath)+"-"+suffix)
 
 	u.mu.Lock()
 	u.uploadID = uploadID
@@ -1584,7 +1605,7 @@ func (u *resumableStreamingUploader) InitStreamingUploadFromState(_ context.Cont
 
 func (u *resumableStreamingUploader) ValidateStreamingUploadExists(_ context.Context, uploadID, _ string) (bool, error) {
 	upload := u.backend.get(uploadID)
-	return upload != nil && !upload.aborted, nil
+	return upload != nil && upload.bucket == u.bucket && !upload.aborted, nil
 }
 
 func (u *resumableStreamingUploader) EncryptStreamingPart(_ context.Context, uploadState *transfer.StreamingUpload, partIndex int64, plaintext []byte) ([]byte, error) {
@@ -1685,15 +1706,18 @@ func (u *resumableStreamingUploader) abort(ctx context.Context, uploadID string)
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("the abort never reached the backend: %w", err)
 	}
+	u.mu.Lock()
+	u.abortRequests = append(u.abortRequests, uploadID)
 	if deadline, ok := ctx.Deadline(); ok {
-		u.mu.Lock()
 		u.abortDeadline = time.Until(deadline)
-		u.mu.Unlock()
 	}
+	u.mu.Unlock()
 
 	u.backend.mu.Lock()
 	defer u.backend.mu.Unlock()
-	if upload := u.backend.uploads[uploadID]; upload != nil {
+	// An upload ID this provider's bucket does not hold is simply absent, which
+	// both backends report as NoSuchUpload and both providers read as success.
+	if upload := u.backend.uploads[uploadID]; upload != nil && upload.bucket == u.bucket {
 		upload.aborted = true
 	}
 	return nil
@@ -2417,7 +2441,7 @@ func TestStreamingAbandonmentRetiresAPreEncryptMultipart(t *testing.T) {
 	localPath, data := writeStreamingSource(t, 3*partSize)
 	backend := newFakeStreamingBackend()
 
-	stranded, upload := backend.create("fake/path/streamed.dat-preencrypt")
+	stranded, upload := backend.create("", "fake/path/streamed.dat-preencrypt")
 	encryptedPath := localPath + ".encrypted"
 	if err := os.WriteFile(encryptedPath, []byte("ciphertext"), 0600); err != nil {
 		t.Fatalf("failed to write the encrypted copy: %v", err)
@@ -2568,6 +2592,186 @@ func TestUploadStreamingRunsWithoutALockOnAReadOnlySource(t *testing.T) {
 	}
 }
 
+// unlockableSource lays out a source that can be uploaded but whose upload lock
+// cannot be created, and returns the path the caller uploads and the seal that
+// takes the write permission off the directory the lock would live in. Sealing
+// is separate so a checkpoint can be left behind first.
+//
+// A symlinked source separates the two directories: the lock keys on the
+// canonical path and the sidecar on the caller's spelling, so the checkpoint
+// stays writable while the lock cannot be created — which is what makes "the
+// unlocked attempt does not touch the checkpoint" observable rather than merely
+// impossible.
+func unlockableSource(t *testing.T, data []byte, viaSymlink bool) (string, func()) {
+	t.Helper()
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.Mkdir(sourceDir, 0700); err != nil {
+		t.Fatalf("failed to create the source directory: %v", err)
+	}
+	sourcePath := filepath.Join(sourceDir, "unlockable.dat")
+	if err := os.WriteFile(sourcePath, data, 0644); err != nil {
+		t.Fatalf("failed to write the source: %v", err)
+	}
+
+	localPath := sourcePath
+	if viaSymlink {
+		linkDir := filepath.Join(root, "links")
+		if err := os.Mkdir(linkDir, 0700); err != nil {
+			t.Fatalf("failed to create the link directory: %v", err)
+		}
+		localPath = filepath.Join(linkDir, "unlockable.dat")
+		if err := os.Symlink(sourcePath, localPath); err != nil {
+			t.Fatalf("failed to link the source: %v", err)
+		}
+	}
+
+	return localPath, func() {
+		if err := os.Chmod(sourceDir, 0500); err != nil {
+			t.Fatalf("failed to make the source directory read-only: %v", err)
+		}
+		// Before TempDir's own cleanup, which cannot remove the file otherwise.
+		t.Cleanup(func() { os.Chmod(sourceDir, 0700) })
+	}
+}
+
+// TestUploadStreamingIsStatelessWithoutALock is D2 on the streaming side. The
+// lock could not be created, so nothing excludes a second invocation — but the
+// checkpoint beside the source is readable, and a directory can become
+// read-only AFTER one was written. Continuing it means two invocations filling
+// one backend upload; rewriting or deleting it means one destroying the other's
+// only record.
+func TestUploadStreamingIsStatelessWithoutALock(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		viaSymlink bool
+	}{
+		{name: "a source directory that became read-only"},
+		{name: "a symlinked source whose lock directory is read-only", viaSymlink: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("directory permissions do not stop file creation on Windows")
+			}
+			if os.Geteuid() == 0 {
+				t.Skip("root writes into a read-only directory regardless")
+			}
+
+			const partSize = 64
+			data := make([]byte, 4*partSize)
+			for i := range data {
+				data[i] = byte(i*7 + 1)
+			}
+			localPath, seal := unlockableSource(t, data, tt.viaSymlink)
+
+			backend := newFakeStreamingBackend()
+			interrupted := interruptOnce(t, backend, UploadParams{LocalPath: localPath}, data, partSize, 2)
+			checkpoint, err := os.ReadFile(localPath + ".upload.resume")
+			if err != nil {
+				t.Fatalf("the interrupted attempt left no checkpoint: %v", err)
+			}
+			seal()
+
+			second := newResumableStreamingUploader(backend, partSize)
+			result, err := uploadStreaming(context.Background(), second, UploadParams{LocalPath: localPath}, int64(len(data)))
+			if err != nil {
+				t.Fatalf("the unlocked attempt failed: %v", err)
+			}
+
+			if second.uploadID == interrupted {
+				t.Error("the unlocked attempt continued a checkpoint it holds no lock on, so two invocations fill one backend upload")
+			}
+			if len(second.uploaded) != 4 {
+				t.Errorf("the unlocked attempt sent %d parts, want all 4 of a fresh upload", len(second.uploaded))
+			}
+			if backend.get(interrupted).aborted {
+				t.Error("the unlocked attempt retired an upload another invocation may still be filling")
+			}
+			after, err := os.ReadFile(localPath + ".upload.resume")
+			if err != nil {
+				t.Errorf("the unlocked attempt deleted a checkpoint it does not own: %v", err)
+			} else if !bytes.Equal(after, checkpoint) {
+				t.Error("the unlocked attempt rewrote a checkpoint it does not own")
+			}
+
+			object := backend.object(t, second.uploadID)
+			want := uninterruptedCiphertext(t, data, result.EncryptionKey, result.IV, partSize)
+			if !bytes.Equal(object, want) {
+				t.Errorf("the object is %d bytes and differs from the %d an uninterrupted upload writes", len(object), len(want))
+			}
+		})
+	}
+}
+
+// TestUploadPreEncryptIsStatelessWithoutALock is D2 on the pre-encrypt side,
+// where the checkpoint lifecycle belongs to the provider: an unlocked attempt
+// has to reach it as stateless too, or it reuses the object identity and
+// encrypted copy of an attempt it cannot exclude.
+func TestUploadPreEncryptIsStatelessWithoutALock(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		viaSymlink bool
+	}{
+		{name: "a source directory that became read-only"},
+		{name: "a symlinked source whose lock directory is read-only", viaSymlink: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("directory permissions do not stop file creation on Windows")
+			}
+			if os.Geteuid() == 0 {
+				t.Skip("root writes into a read-only directory regardless")
+			}
+
+			const partSize = 64
+			data := make([]byte, 4*partSize)
+			for i := range data {
+				data[i] = byte(i*3 + 2)
+			}
+			localPath, seal := unlockableSource(t, data, tt.viaSymlink)
+
+			fake := &resumableFakeUploader{partSize: partSize, failAfterParts: 2}
+			params := UploadParams{LocalPath: localPath, PreEncrypt: true}
+			if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(data))); err == nil {
+				t.Fatal("the interrupted attempt was expected to fail")
+			}
+			checkpoint, err := os.ReadFile(localPath + ".upload.resume")
+			if err != nil {
+				t.Fatalf("the interrupted attempt left no checkpoint: %v", err)
+			}
+			seal()
+
+			fake.failAfterParts = 0
+			if _, err := uploadPreEncrypt(context.Background(), fake, params, int64(len(data))); err != nil {
+				t.Fatalf("the unlocked attempt failed: %v", err)
+			}
+
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if len(fake.attempts) != 2 {
+				t.Fatalf("the provider ran %d times, want 2", len(fake.attempts))
+			}
+			first, second := fake.attempts[0], fake.attempts[1]
+
+			if second.randomSuffix == first.randomSuffix {
+				t.Error("the unlocked attempt filled the object of a checkpoint it holds no lock on")
+			}
+			if second.encryptedPath == first.encryptedPath {
+				t.Error("the unlocked attempt reused the encrypted copy of an attempt it cannot exclude")
+			}
+			if second.resumedFrom != 0 {
+				t.Errorf("the unlocked attempt resumed from %d parts of an upload it does not own", second.resumedFrom)
+			}
+			after, err := os.ReadFile(localPath + ".upload.resume")
+			if err != nil {
+				t.Errorf("the unlocked attempt deleted a checkpoint it does not own: %v", err)
+			} else if !bytes.Equal(after, checkpoint) {
+				t.Error("the unlocked attempt rewrote a checkpoint it does not own")
+			}
+		})
+	}
+}
+
 // TestUploadPreEncryptHoldsTheLockAcrossTheTransfer: the orchestrator used to
 // hand the lock to the provider immediately before UploadEncryptedFile, because
 // the lock is not re-entrant and both wanted it. Nothing excluded a second
@@ -2663,7 +2867,16 @@ func TestUploadStreamingStartsFreshForADifferentDestination(t *testing.T) {
 		StorageContainer: "bucket-a",
 		StoragePathBase:  "fake/path",
 	}
-	interrupted := interruptOnce(t, backend, toA, data, partSize, 2)
+	first := newResumableStreamingUploader(backend, partSize)
+	first.bucket = "bucket-a"
+	first.failFrom = 2
+	if _, err := uploadStreaming(context.Background(), first, toA, int64(len(data))); err == nil {
+		t.Fatal("expected the interrupted attempt to fail")
+	}
+	interrupted := first.uploadID
+	if loadStreamingState(t, localPath) == nil {
+		t.Fatal("the interrupted attempt recorded nothing to resume from")
+	}
 	strandedKey := loadStreamingState(t, localPath).ObjectKey
 
 	var out bytes.Buffer
@@ -2675,6 +2888,7 @@ func TestUploadStreamingStartsFreshForADifferentDestination(t *testing.T) {
 		OutputWriter:     &out,
 	}
 	second := newResumableStreamingUploader(backend, partSize)
+	second.bucket = "bucket-b"
 	result, err := uploadStreaming(context.Background(), second, toB, int64(len(data)))
 	if err != nil {
 		t.Fatalf("the upload to the second destination failed: %v", err)
@@ -2686,11 +2900,20 @@ func TestUploadStreamingStartsFreshForADifferentDestination(t *testing.T) {
 	if result.StoragePath == strandedKey {
 		t.Error("the upload to the second destination was registered under the first destination's object key")
 	}
-	if !backend.get(interrupted).aborted {
-		t.Error("the upload to the first destination was left open on the backend")
+	// D4: the abort this provider issues names ITS bucket, where the first
+	// destination's upload ID is absent — an answer that reads as retirement
+	// while that upload stays open, and its only local record is deleted.
+	if len(second.abortRequests) != 0 {
+		t.Errorf("the second destination was asked to discard %v, which is the first destination's upload", second.abortRequests)
+	}
+	if backend.get(interrupted).aborted {
+		t.Error("the first destination's upload was discarded through the second destination's provider")
 	}
 	if !strings.Contains(out.String(), "different destination") {
 		t.Errorf("output did not say why the upload started over: %q", out.String())
+	}
+	if !strings.Contains(out.String(), strandedKey) {
+		t.Errorf("output did not say that the interrupted upload was left where it was: %q", out.String())
 	}
 	if len(second.uploaded) != 4 {
 		t.Errorf("the fresh attempt sent %d parts, want all 4 of them", len(second.uploaded))

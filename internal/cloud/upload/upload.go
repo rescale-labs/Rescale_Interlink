@@ -487,6 +487,8 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		return nil, err
 	}
 	defer state.ReleaseUploadLock(uploadLock)
+	// Without the lock this attempt is stateless: see acquireSourceLock.
+	stateless := uploadLock == nil
 
 	streamInitTimer := cloud.StartTimer(params.OutputWriter, "Streaming upload init")
 
@@ -499,7 +501,10 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// upload is stuck with the part size the first attempt chained through and
 	// stamped into the object's metadata, so what this run would have planned
 	// for is advisory once there is a state to continue.
-	resumed := loadStreamingResume(ctx, streamingUploader, params, sourceInfo, fileSize)
+	var resumed streamingResume
+	if !stateless {
+		resumed = loadStreamingResume(ctx, streamingUploader, params, sourceInfo, fileSize)
+	}
 
 	// Plan before anything is opened on the backend. A file too large for the
 	// storage type, or a machine that cannot hold one working set, has to fail
@@ -587,6 +592,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		storageType: streamingUploader.StorageType(),
 		createdAt:   resumed.createdAt,
 		recorded:    startPart > 0,
+		stateless:   stateless,
 	}
 
 	// Progress interpolator provides smooth updates every 500ms, ensuring responsive
@@ -901,7 +907,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 
 	// Check for errors
 	if firstErr != nil {
-		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard, stateless)
 		return nil, firstErr
 	}
 
@@ -909,7 +915,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// This can happen if the user cancels the upload or a timeout occurs.
 	select {
 	case <-ctx.Done():
-		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard, stateless)
 		return nil, fmt.Errorf("upload cancelled: %w", ctx.Err())
 	default:
 	}
@@ -920,7 +926,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// of parts they are handed and report success.
 	expectedParts := int(uploadState.TotalParts)
 	if len(partsMap) != expectedParts {
-		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard, stateless)
 		return nil, fmt.Errorf("upload incomplete: received %d of %d parts (upload was interrupted or cancelled)",
 			len(partsMap), expectedParts)
 	}
@@ -936,7 +942,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 		// The parts are all still on the backend and the checkpoint still
 		// describes them, so a retry finishes from here rather than re-sending
 		// the file.
-		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard)
+		endStreamingUpload(ctx, streamingUploader, params, uploadState, discard, stateless)
 		return nil, fmt.Errorf("failed to complete streaming upload: %w", err)
 	}
 
@@ -944,7 +950,9 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 
 	// Verified completion: the object is assembled, so its checkpoint describes
 	// an upload that no longer exists.
-	state.DeleteUploadState(params.LocalPath)
+	if !stateless {
+		state.DeleteUploadState(params.LocalPath)
+	}
 
 	return result, nil
 }
@@ -994,13 +1002,16 @@ func skipUploadedPrefix(file io.Reader, offset int64) error {
 
 // endStreamingUpload closes out an attempt that produced no object.
 //
-// discard=false is the ordinary failure: the parts stay on the backend and the
-// checkpoint stays on disk, because together they are what lets the next
-// attempt carry on instead of re-sending the file. discard=true is for an
-// upload nothing will come back to — one the caller cancelled, or one that
-// never got a checkpoint written — where the parts would otherwise sit on the
-// backend until its own expiry swept them.
-func endStreamingUpload(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, uploadState *transfer.StreamingUpload, discard bool) {
+// discard=false is the ordinary failure, and a cancellation that already
+// checkpointed: the parts stay on the backend and the checkpoint stays on
+// disk, because together they are what lets the next attempt carry on instead
+// of re-sending the file. discard=true is for an upload nothing will come back
+// to — one that never got a checkpoint written — where the parts would
+// otherwise sit on the backend until its own expiry swept them.
+//
+// stateless=true is an attempt with no upload lock: it discards the upload it
+// opened, but the sidecar it would delete is not its own.
+func endStreamingUpload(ctx context.Context, uploader transfer.StreamingConcurrentUploader, params UploadParams, uploadState *transfer.StreamingUpload, discard, stateless bool) {
 	if !discard {
 		return
 	}
@@ -1014,7 +1025,9 @@ func endStreamingUpload(ctx context.Context, uploader transfer.StreamingConcurre
 		log.Printf("Warning: failed to abort the streaming upload of %s (%s): %v",
 			filepath.Base(params.LocalPath), uploadState.StoragePath, err)
 	}
-	state.DeleteUploadState(params.LocalPath)
+	if !stateless {
+		state.DeleteUploadState(params.LocalPath)
+	}
 }
 
 // backendUploadAborter is a provider that can discard an upload addressed only
@@ -1037,9 +1050,26 @@ type backendUploadAborter interface {
 // rebuild needs. The identity belongs to one backend, though: handing it to
 // another would name a different object, so a state that names a different
 // backend, or none, is left to that backend's expiry.
+//
+// One destination of that backend, in fact. The abort this provider issues names
+// the bucket or container it was built for, and an upload ID that destination
+// never held is simply absent there — an answer that reads as retirement while
+// the upload it was meant to discard stays open, its only local record then
+// deleted. So a state that was going somewhere else is left to its own
+// destination's expiry, and said to be.
 func retireBackendUpload(ctx context.Context, uploader interface{ StorageType() string }, params UploadParams, saved *state.UploadResumeState) {
 	aborter, ok := uploader.(backendUploadAborter)
 	if !ok || saved.ObjectKey == "" || saved.StorageType != uploader.StorageType() {
+		return
+	}
+	if reason := destinationBlocker(saved, params.destination()); reason != "" {
+		notice := fmt.Sprintf("Leaving the interrupted upload of %s (%s) for its own destination to expire: %s\n",
+			filepath.Base(params.LocalPath), saved.ObjectKey, reason)
+		if params.OutputWriter != nil {
+			fmt.Fprint(params.OutputWriter, notice)
+		} else {
+			log.Print(notice)
+		}
 		return
 	}
 
@@ -1342,6 +1372,10 @@ type streamingCheckpointer struct {
 	// this attempt wrote, or the one it resumed from.
 	recorded bool
 	warned   bool
+
+	// stateless is an attempt holding no upload lock, which records nothing: the
+	// sidecar it would write to is not excluded from another invocation.
+	stateless bool
 }
 
 // save records the contiguous prefix of parts the backend has accepted, along
@@ -1352,7 +1386,7 @@ type streamingCheckpointer struct {
 // has never had to write anything there to succeed; what is lost is only the
 // ability to resume, which is why it is reported once rather than per part.
 func (c *streamingCheckpointer) save(prefix []*transfer.PartResult, chainIV []byte) {
-	if len(prefix) == 0 || len(chainIV) == 0 {
+	if c.stateless || len(prefix) == 0 || len(chainIV) == 0 {
 		return
 	}
 	if c.createdAt.IsZero() {
@@ -1428,13 +1462,20 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		return nil, err
 	}
 	defer state.ReleaseUploadLock(uploadLock)
+	// Without the lock this attempt is stateless — see acquireSourceLock — and
+	// the provider has to be told, because the checkpoint lifecycle of this mode
+	// is the provider's.
+	stateless := uploadLock == nil
 
 	// Recovery belongs here, not in the providers: they can only compare the
 	// object key they were handed against the one in the state, and every
 	// attempt used to arrive with a freshly generated key, IV and suffix. That
 	// made the state describe a DIFFERENT ciphertext by construction, so the
 	// parts the backend had already accepted were always discarded.
-	resumed := resumePreEncryptArtifacts(ctx, preEncryptUploader, params, sourceInfo)
+	var resumed preEncryptResume
+	if !stateless {
+		resumed = resumePreEncryptArtifacts(ctx, preEncryptUploader, params, sourceInfo)
+	}
 
 	encryptionKey, iv, randomSuffix, encryptedPath := resumed.encryptionKey, resumed.iv, resumed.randomSuffix, resumed.encryptedPath
 	if !resumed.usable {
@@ -1525,6 +1566,7 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 		TransferHandle:   params.TransferHandle,
 		OutputWriter:     params.OutputWriter,
 		Plan:             &plan,
+		Stateless:        stateless,
 	}
 
 	uploadTimer := cloud.StartTimer(params.OutputWriter, "Pre-encrypt upload")
@@ -1535,8 +1577,9 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 	if err != nil {
 		// Keep the ciphertext for the retry that the state file describes. An
 		// attempt that failed before it checkpointed anything has nothing to
-		// come back to, so its copy is not worth the disk.
-		keepEncrypted = preEncryptStateNames(params.LocalPath, encryptedPath)
+		// come back to, so its copy is not worth the disk — and a stateless
+		// attempt never had one.
+		keepEncrypted = !stateless && preEncryptStateNames(params.LocalPath, encryptedPath)
 		return nil, fmt.Errorf("failed to upload encrypted file: %w", err)
 	}
 
@@ -1544,7 +1587,9 @@ func uploadPreEncrypt(ctx context.Context, provider cloud.CloudTransfer, params 
 
 	// Verified completion: the artifacts have nothing left to describe.
 	keepEncrypted = false
-	state.DeleteUploadState(params.LocalPath)
+	if !stateless {
+		state.DeleteUploadState(params.LocalPath)
+	}
 
 	return result, nil
 }

@@ -70,8 +70,12 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 		return nil, fmt.Errorf("S3 upload failed: %w", err)
 	}
 
-	// Delete resume state after successful upload
-	state.DeleteUploadState(params.LocalPath)
+	// Delete resume state after successful upload. A stateless attempt has none
+	// of its own: the sidecar beside this source belongs to whoever holds the
+	// upload lock this one could not take.
+	if !params.Stateless {
+		state.DeleteUploadState(params.LocalPath)
+	}
 
 	return &cloud.UploadResult{
 		StoragePath:   objectKey,
@@ -142,8 +146,13 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	partSize := plan.PartSize
 	totalParts := transfer.CalculateTotalParts(encryptedSize, partSize)
 
-	// Try to load resume state
-	existingState, _ := state.LoadUploadState(params.LocalPath)
+	// Try to load resume state. A stateless attempt reads none: nothing excludes
+	// a second invocation from the same sidecar, so what it describes may be an
+	// upload that is still being filled.
+	var existingState *state.UploadResumeState
+	if !params.Stateless {
+		existingState, _ = state.LoadUploadState(params.LocalPath)
+	}
 	var uploadID string
 	var completedParts []types.CompletedPart
 	var alreadyOnS3 map[int32]string
@@ -161,7 +170,21 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		resume, ok := resumeS3Parts(existingState, encryptedSize)
 		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
 			log.Printf("Resume state validation failed, starting fresh: %v", err)
-		} else if ok {
+			ok = false
+		}
+		if ok {
+			live, existsErr := multipartUploadExists(ctx, s3Client, existingState.ObjectKey, existingState.UploadID)
+			if existsErr != nil {
+				// Not a reason to throw the resume away: the parts may all still
+				// be there, and the retry will find this checkpoint in place.
+				return fmt.Errorf("failed to check the interrupted upload of %s: %w", objectKey, existsErr)
+			}
+			if !live {
+				startFreshAfterVanishedUpload(params, objectKey)
+				ok = false
+			}
+		}
+		if ok {
 			uploadID = existingState.UploadID
 			partSize = resume.partSize
 			totalParts = transfer.CalculateTotalParts(encryptedSize, partSize)
@@ -261,6 +284,10 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 			params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
 		}
 
+		if params.Stateless {
+			continue
+		}
+
 		// Save resume state
 		currentState := &state.UploadResumeState{
 			LocalPath:      params.LocalPath,
@@ -304,8 +331,11 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		})
 		return err
 	})
+	if err != nil {
+		return completionFailure(params, objectKey, err)
+	}
 
-	return err
+	return nil
 }
 
 // uploadEncryptedMultipartConcurrent uploads an encrypted file using concurrent
@@ -346,10 +376,16 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
 
-	// Try to load resume state (keyed by ORIGINAL file path, not encrypted path)
-	existingState, loadErr := state.LoadUploadState(params.LocalPath)
-	if loadErr != nil {
-		log.Printf("Warning: Failed to load resume state: %v", loadErr)
+	// Try to load resume state (keyed by ORIGINAL file path, not encrypted path).
+	// A stateless attempt reads none: nothing excludes a second invocation from
+	// the same sidecar, so what it describes may be an upload still being filled.
+	var existingState *state.UploadResumeState
+	if !params.Stateless {
+		var loadErr error
+		existingState, loadErr = state.LoadUploadState(params.LocalPath)
+		if loadErr != nil {
+			log.Printf("Warning: Failed to load resume state: %v", loadErr)
+		}
 	}
 	var uploadID string
 	var completedParts []types.CompletedPart
@@ -366,7 +402,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		// already sent there are unusable, so drop the whole thing and start over.
 		log.Printf("Resume state is for a previous upload (%s), starting fresh", existingState.ObjectKey)
 		if existingState.UploadID != "" {
-			abortS3Upload(ctx, s3Client, existingState.ObjectKey, existingState.UploadID)
+			abortCtx, cancelAbort := abortContext(ctx)
+			abortS3Upload(abortCtx, s3Client, existingState.ObjectKey, existingState.UploadID)
+			cancelAbort()
 		}
 		if delErr := state.DeleteUploadState(params.LocalPath); delErr != nil {
 			log.Printf("Warning: Failed to delete stale resume state: %v", delErr)
@@ -379,39 +417,40 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		resume, resumable := resumeS3Parts(existingState, totalSize)
 		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
 			log.Printf("Resume state validation failed, starting fresh: %v", err)
+			resumable = false
 		} else if !resumable {
 			log.Printf("Resume state does not record the part size it used, starting fresh")
-		} else {
-			// Verify upload still exists on S3
-			_, listErr := s3Client.Client().ListParts(ctx, &s3.ListPartsInput{
-				Bucket:   aws.String(s3Client.Bucket()),
-				Key:      aws.String(existingState.ObjectKey),
-				UploadId: aws.String(existingState.UploadID),
-			})
+		}
+		if resumable {
+			// Verify upload still exists on S3. A check that could not be made
+			// is not an answer: it used to start a fresh upload, throwing away
+			// parts that may all still be there and leaving that upload open.
+			live, existsErr := multipartUploadExists(ctx, s3Client, existingState.ObjectKey, existingState.UploadID)
+			if existsErr != nil {
+				return fmt.Errorf("failed to check the interrupted upload of %s: %w", objectKey, existsErr)
+			}
+			if !live {
+				startFreshAfterVanishedUpload(params, objectKey)
+				resumable = false
+			}
+		}
+		if resumable {
+			// Valid resume state and upload exists!
+			uploadID = existingState.UploadID
+			partSize = resume.partSize
+			totalParts = int32(transfer.CalculateTotalParts(totalSize, partSize))
+			alreadyOnS3 = resume.completed
+			completedParts = resume.partsBefore(resume.firstMissing)
+			uploadedBytes = min(resume.firstMissing*partSize, totalSize)
+			startPart = int32(resume.firstMissing) + 1
+			resuming = true
+			createdAt = existingState.CreatedAt
 
-			if listErr == nil {
-				// Valid resume state and upload exists!
-				uploadID = existingState.UploadID
-				partSize = resume.partSize
-				totalParts = int32(transfer.CalculateTotalParts(totalSize, partSize))
-				alreadyOnS3 = resume.completed
-				completedParts = resume.partsBefore(resume.firstMissing)
-				uploadedBytes = min(resume.firstMissing*partSize, totalSize)
-				startPart = int32(resume.firstMissing) + 1
-				resuming = true
-				createdAt = existingState.CreatedAt
-
-				if params.OutputWriter != nil {
-					fmt.Fprintf(params.OutputWriter, "Resuming upload from part %d/%d (%.1f%%) with %d concurrent threads\n",
-						startPart, totalParts,
-						float64(uploadedBytes)/float64(totalSize)*100,
-						concurrency)
-				}
-			} else {
-				// Upload ID expired or invalid, will start fresh
-				if params.OutputWriter != nil {
-					fmt.Fprintf(params.OutputWriter, "Previous upload expired, starting fresh upload with %d concurrent threads\n", concurrency)
-				}
+			if params.OutputWriter != nil {
+				fmt.Fprintf(params.OutputWriter, "Resuming upload from part %d/%d (%.1f%%) with %d concurrent threads\n",
+					startPart, totalParts,
+					float64(uploadedBytes)/float64(totalSize)*100,
+					concurrency)
 			}
 		}
 	}
@@ -458,7 +497,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			Container:      p.storageContainer(),
 			ProcessID:      os.Getpid(),
 		}
-		state.SaveUploadState(initialState, params.LocalPath)
+		if !params.Stateless {
+			state.SaveUploadState(initialState, params.LocalPath)
+		}
 
 		// Inform user about concurrent upload
 		if params.OutputWriter != nil {
@@ -531,6 +572,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			})
 		},
 		SaveState: func(uploaded int64, staged int) {
+			if params.Stateless {
+				return
+			}
 			currentState := &state.UploadResumeState{
 				LocalPath:      params.LocalPath,
 				EncryptedPath:  params.EncryptedPath,
@@ -592,12 +636,14 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to complete multipart upload: %w", err)
+		return fmt.Errorf("failed to complete multipart upload: %w", completionFailure(params, objectKey, err))
 	}
 
 	// Delete resume state on successful upload
-	if delErr := state.DeleteUploadState(params.LocalPath); delErr != nil {
-		log.Printf("Warning: Failed to delete resume state after successful upload: %v", delErr)
+	if !params.Stateless {
+		if delErr := state.DeleteUploadState(params.LocalPath); delErr != nil {
+			log.Printf("Warning: Failed to delete resume state after successful upload: %v", delErr)
+		}
 	}
 
 	return nil
@@ -673,6 +719,68 @@ func resumeS3Parts(saved *state.UploadResumeState, totalSize int64) (s3Resume, b
 	}
 
 	return s3Resume{partSize: saved.PartSize, completed: completed, firstMissing: firstMissing}, true
+}
+
+// multipartUploadExists reports whether S3 still holds the upload a checkpoint
+// names, distinguishing "gone" from "could not be asked".
+//
+// A checkpoint records what this client did, not what S3 kept: a completion that
+// succeeded while its response was lost leaves one naming an upload that no
+// longer exists, and so does the seven-day sweep. Restoring it skips every
+// staged part, repeats the completion, fails, and leaves the same checkpoint
+// behind — the same failure on every attempt after that.
+func multipartUploadExists(ctx context.Context, s3Client *S3Client, objectKey, uploadID string) (bool, error) {
+	_, err := s3Client.Client().ListParts(ctx, &s3.ListPartsInput{
+		Bucket:   aws.String(s3Client.Bucket()),
+		Key:      aws.String(objectKey),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		if isNoSuchUpload(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// startFreshAfterVanishedUpload retires the checkpoint of an upload S3 no longer
+// holds. There is nothing to abort, and keeping it would only send the next
+// attempt back to the same missing upload ID.
+func startFreshAfterVanishedUpload(params transfer.EncryptedFileUploadParams, objectKey string) {
+	if params.OutputWriter != nil {
+		fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: S3 no longer holds the interrupted upload\n",
+			filepath.Base(params.LocalPath))
+	}
+	retireCheckpoint(params, objectKey)
+}
+
+// retireCheckpoint deletes the resume state beside a source. A stateless attempt
+// has none of its own: that sidecar belongs to whoever holds the upload lock it
+// could not take.
+func retireCheckpoint(params transfer.EncryptedFileUploadParams, objectKey string) {
+	if params.Stateless {
+		return
+	}
+	if err := state.DeleteUploadState(params.LocalPath); err != nil {
+		log.Printf("Warning: failed to delete the resume state of %s: %v", objectKey, err)
+	}
+}
+
+// completionFailure reports a rejected completion, retiring the checkpoint when
+// the rejection says the upload is gone.
+//
+// An ordinary rejection keeps it: every part is still on S3, and the checkpoint
+// is what lets the retry ask for the assembly again. NoSuchUpload is the one
+// that cannot be retried — it is the answer a second completion of an upload
+// already assembled gets, and it would be the answer to every attempt after
+// this one for as long as the checkpoint names that upload.
+func completionFailure(params transfer.EncryptedFileUploadParams, objectKey string, err error) error {
+	if isNoSuchUpload(err) {
+		retireCheckpoint(params, objectKey)
+		return fmt.Errorf("S3 no longer holds the upload of %s to complete: %w", objectKey, err)
+	}
+	return err
 }
 
 // abortContext detaches an abort from the attempt that is giving up. The failure

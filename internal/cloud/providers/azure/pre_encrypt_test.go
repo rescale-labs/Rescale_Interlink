@@ -61,6 +61,20 @@ type fakeBlobBackend struct {
 	// authentication error, the shape a rejected SAS token arrives in.
 	rejectOncePerBlock bool
 	rejectedBlocks     map[string]bool
+
+	// uncommittedBlocks is what a resume probe finds the service still holding.
+	// Empty is the answer after a commit consumed them, or after the seven-day
+	// sweep: the blob's uncommitted blocks are gone.
+	uncommittedBlocks []string
+
+	// blockListBroken answers a resume probe with a failure rather than an
+	// answer: the blocks may or may not still be staged.
+	blockListBroken bool
+
+	// rejectUnstagedBlocks refuses a commit whose list names a block this
+	// backend never received, which is what Azure does with a list naming blocks
+	// it no longer holds.
+	rejectUnstagedBlocks bool
 }
 
 func newFakeBlobBackend(t *testing.T) (*fakeBlobBackend, *httptest.Server) {
@@ -112,6 +126,25 @@ func (f *fakeBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request
 		w.Header().Set("x-ms-request-server-encrypted", "true")
 		w.WriteHeader(nethttp.StatusCreated)
 
+	case r.Method == nethttp.MethodGet && query.Get("comp") == "blocklist":
+		if f.blockListBroken {
+			// Refused outright rather than with a retryable code: the probe gets
+			// no answer, and the test does not spend the retry budget finding
+			// that out.
+			w.Header().Set("x-ms-error-code", "OutOfRangeQueryParameterValue")
+			w.WriteHeader(nethttp.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		staged := slices.Clone(f.uncommittedBlocks)
+		f.mu.Unlock()
+		var blocks strings.Builder
+		for _, id := range staged {
+			fmt.Fprintf(&blocks, "<Block><Name>%s</Name><Size>1</Size></Block>", id)
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?><BlockList><UncommittedBlocks>%s</UncommittedBlocks></BlockList>`, blocks.String())
+
 	case r.Method == nethttp.MethodPut && query.Get("comp") == "blocklist":
 		var body struct {
 			Latest []string `xml:"Latest"`
@@ -121,6 +154,16 @@ func (f *fakeBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request
 			return
 		}
 		f.mu.Lock()
+		if f.rejectUnstagedBlocks {
+			for _, id := range body.Latest {
+				if _, staged := f.blocks[id]; !staged {
+					f.mu.Unlock()
+					w.Header().Set("x-ms-error-code", "InvalidBlockList")
+					w.WriteHeader(nethttp.StatusBadRequest)
+					return
+				}
+			}
+		}
 		f.commits++
 		f.committed = body.Latest
 		f.mu.Unlock()
@@ -606,6 +649,8 @@ func TestPreEncryptBlockBlobConcurrentHonorsPlanWorkerCap(t *testing.T) {
 // staged are not staged again, and the commit still lists the whole blob.
 func TestPreEncryptBlockBlobConcurrentResumesMatchingUpload(t *testing.T) {
 	backend, server := newFakeBlobBackend(t)
+	// The staged block the checkpoint names is still uncommitted on the service.
+	backend.uncommittedBlocks = []string{testBlockID(0)}
 	azureClient := newTestAzureClient(t, server)
 
 	tmpDir := t.TempDir()
@@ -816,6 +861,8 @@ func TestPreEncryptBlockBlobResumesBlocksWithAGap(t *testing.T) {
 	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
 		t.Run(tt.name, func(t *testing.T) {
 			backend, server := newFakeBlobBackend(t)
+			// The blocks the checkpoint names are still uncommitted on the service.
+			backend.uncommittedBlocks = []string{testBlockID(0), testBlockID(1), testBlockID(3)}
 			azureClient := newTestAzureClient(t, server)
 
 			encryptedSize := 3*resumeBlockSize + 1024*1024
@@ -867,6 +914,8 @@ func TestPreEncryptBlockBlobResumeUsesSavedBlockSize(t *testing.T) {
 	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
 		t.Run(tt.name, func(t *testing.T) {
 			backend, server := newFakeBlobBackend(t)
+			// The blocks the checkpoint names are still uncommitted on the service.
+			backend.uncommittedBlocks = []string{testBlockID(0), testBlockID(1)}
 			azureClient := newTestAzureClient(t, server)
 
 			encryptedSize := 2*resumeBlockSize + 1024*1024
@@ -995,4 +1044,225 @@ func TestPreEncryptBlockBlobSequentialValidatesResumeState(t *testing.T) {
 		t.Errorf("staged %d block(s), want the whole file re-sent after an expired checkpoint", len(got))
 	}
 	backend.assertCommittedBlocksMatch(t, expectedBlockHashes(fixture.data, resumeBlockSize))
+}
+
+// readCheckpoint returns the bytes of the resume state beside a source, which is
+// what an attempt that holds no lock on it must leave exactly as it found.
+func readCheckpoint(t *testing.T, localPath string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(localPath + ".upload.resume")
+	if err != nil {
+		t.Fatalf("failed to read the checkpoint: %v", err)
+	}
+	return data
+}
+
+// TestPreEncryptStatelessAttemptIgnoresTheCheckpoint is D2 at the provider. An
+// attempt the orchestrator could not take the upload lock for shares the sidecar
+// beside the source with whatever else is running, so it must neither continue
+// what that checkpoint describes nor overwrite it.
+func TestPreEncryptStatelessAttemptIgnoresTheCheckpoint(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			// The checkpoint would pass the liveness probe.
+			backend.uncommittedBlocks = []string{testBlockID(0), testBlockID(1)}
+			azureClient := newTestAzureClient(t, server)
+
+			encryptedSize := 3 * resumeBlockSize
+			fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumeBlockSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, resumeBlockSize,
+				[]string{testBlockID(0), testBlockID(1)}, 2*resumeBlockSize)
+			checkpoint := readCheckpoint(t, fixture.localPath)
+
+			fixture.params.Stateless = true
+			if err := fixture.run(t, azureClient, tt.concurrent); err != nil {
+				t.Fatalf("the stateless upload failed: %v", err)
+			}
+
+			want := []string{testBlockID(0), testBlockID(1), testBlockID(2)}
+			if got := backend.stagedBlockIDs(); !slices.Equal(got, want) {
+				t.Errorf("staged %d block(s), want the whole file from an attempt that cannot resume", len(got))
+			}
+			if got := readCheckpoint(t, fixture.localPath); !slices.Equal(got, checkpoint) {
+				t.Error("the stateless attempt rewrote a checkpoint it holds no lock on")
+			}
+		})
+	}
+}
+
+// TestPreEncryptStatelessSingleBlobKeepsTheCheckpoint covers the same rule on
+// the canonical entry point, where a file below the multipart threshold goes up
+// as one blob and the checkpoint is deleted on the way out.
+func TestPreEncryptStatelessSingleBlobKeepsTheCheckpoint(t *testing.T) {
+	_, server := newFakeBlobBackend(t)
+	azureClient := newTestAzureClient(t, server)
+
+	tmpDir := t.TempDir()
+	localPath := filepath.Join(tmpDir, "source.dat")
+	encryptedPath := filepath.Join(tmpDir, "source.dat.enc")
+	testsupport.WriteTestFile(t, encryptedPath, 4096)
+	testsupport.WriteTestFile(t, localPath, 4096)
+	testsupport.WriteResumeState(t, localPath, &state.UploadResumeState{
+		LocalPath:    localPath,
+		ObjectKey:    state.BuildObjectKey(testPathBase, "source.dat", "another-suffix"),
+		RandomSuffix: "another-suffix",
+		StorageType:  "AzureStorage",
+	})
+	checkpoint := readCheckpoint(t, localPath)
+
+	params := testUploadParams(localPath, encryptedPath, nil)
+	params.Stateless = true
+
+	provider := &Provider{azureClient: azureClient, storageInfo: azureClient.storageInfo}
+	if _, err := provider.UploadEncryptedFile(context.Background(), params); err != nil {
+		t.Fatalf("the stateless upload failed: %v", err)
+	}
+
+	if got := readCheckpoint(t, localPath); !slices.Equal(got, checkpoint) {
+		t.Error("the stateless attempt deleted a checkpoint it holds no lock on")
+	}
+}
+
+// TestPreEncryptStartsFreshWhenAzureLostTheBlocks is D8. The checkpoint records
+// what this client staged, not what Azure still holds: a commit that succeeded
+// while its response was lost leaves one naming blocks that are no longer
+// uncommitted, and so does a sweep before the recorded age ran out. Restoring it
+// skips those blocks, repeats the commit, is refused, and keeps the same
+// checkpoint — which is a loop, not a retry.
+func TestPreEncryptStartsFreshWhenAzureLostTheBlocks(t *testing.T) {
+	encryptedSize := 3 * resumeBlockSize
+	for _, shape := range []struct {
+		name          string
+		blockIDs      []string
+		uploadedBytes int64
+	}{
+		{
+			name:          "a commit whose response was lost",
+			blockIDs:      []string{testBlockID(0), testBlockID(1), testBlockID(2)},
+			uploadedBytes: encryptedSize,
+		},
+		{
+			name:          "blocks that vanished inside their recorded age",
+			blockIDs:      []string{testBlockID(0), testBlockID(1)},
+			uploadedBytes: 2 * resumeBlockSize,
+		},
+	} {
+		for _, tt := range []struct {
+			name       string
+			concurrent bool
+		}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+			t.Run(shape.name+"/"+tt.name, func(t *testing.T) {
+				backend, server := newFakeBlobBackend(t)
+				// Nothing is uncommitted any more, and a list naming what the
+				// checkpoint holds is refused.
+				backend.rejectUnstagedBlocks = true
+				azureClient := newTestAzureClient(t, server)
+
+				fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+					PartSize:   resumeBlockSize,
+					WorkerCap:  4,
+					QueueDepth: 4,
+				})
+				fixture.writeState(t, resumeBlockSize, shape.blockIDs, shape.uploadedBytes)
+
+				if err := fixture.run(t, azureClient, tt.concurrent); err != nil {
+					t.Fatalf("the attempt after a vanished upload failed, and would fail the same way forever: %v", err)
+				}
+
+				want := []string{testBlockID(0), testBlockID(1), testBlockID(2)}
+				if got := backend.stagedBlockIDs(); !slices.Equal(got, want) {
+					t.Errorf("staged %d block(s), want the whole file staged afresh", len(got))
+				}
+				backend.assertCommittedBlocksMatch(t, expectedBlockHashes(fixture.data, resumeBlockSize))
+			})
+		}
+	}
+}
+
+// TestPreEncryptRetiresTheCheckpointOfACommitThatFoundNoBlocks covers the other
+// half of D8: the commit itself is what discovers the blocks are gone, which is
+// the case the uncommitted-block probe cannot see because it counts blocks
+// rather than checking the ones the checkpoint names.
+//
+// An ordinary rejection keeps the checkpoint — the blocks are still staged and
+// only the commit has to be asked for again — but a list Azure refuses because
+// it does not hold those blocks is refused identically on every retry.
+func TestPreEncryptRetiresTheCheckpointOfACommitThatFoundNoBlocks(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			// The probe finds something uncommitted, so the resume goes ahead;
+			// the blocks the checkpoint names are not among what Azure holds.
+			backend.uncommittedBlocks = []string{testBlockID(2)}
+			backend.rejectUnstagedBlocks = true
+			azureClient := newTestAzureClient(t, server)
+
+			encryptedSize := 3 * resumeBlockSize
+			fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumeBlockSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, resumeBlockSize,
+				[]string{testBlockID(0), testBlockID(1)}, 2*resumeBlockSize)
+
+			if err := fixture.run(t, azureClient, tt.concurrent); err == nil {
+				t.Fatal("committing a list of blocks Azure does not hold was reported as success")
+			}
+			if state.UploadResumeStateExists(fixture.localPath) {
+				t.Error("the checkpoint of blocks Azure does not hold was kept, so every retry commits the same list")
+			}
+		})
+	}
+}
+
+// TestPreEncryptKeepsTheCheckpointWhenTheBlockProbeFails is the other side of
+// D8's distinction. A probe that could not be made is not an answer: treating it
+// as one re-stages a file whose blocks are all still there. The attempt fails
+// instead, keeping the checkpoint the retry resumes from.
+func TestPreEncryptKeepsTheCheckpointWhenTheBlockProbeFails(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		concurrent bool
+	}{{name: "sequential"}, {name: "concurrent", concurrent: true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			backend.blockListBroken = true
+			azureClient := newTestAzureClient(t, server)
+
+			encryptedSize := 3 * resumeBlockSize
+			fixture := newAzureResumeFixture(t, encryptedSize, &resources.UploadPlan{
+				PartSize:   resumeBlockSize,
+				WorkerCap:  4,
+				QueueDepth: 4,
+			})
+			fixture.writeState(t, resumeBlockSize,
+				[]string{testBlockID(0), testBlockID(1)}, 2*resumeBlockSize)
+
+			if err := fixture.run(t, azureClient, tt.concurrent); err == nil {
+				t.Fatal("an unanswered resume probe was treated as an answer")
+			}
+			if got := backend.stagedBlockIDs(); len(got) != 0 {
+				t.Errorf("staged %d block(s), want nothing re-sent while the interrupted upload may still hold them", len(got))
+			}
+			saved, err := state.LoadUploadState(fixture.localPath)
+			if err != nil || saved == nil {
+				t.Fatalf("the checkpoint the retry resumes from was discarded: %v", err)
+			}
+			if len(saved.BlockIDs) != 2 {
+				t.Errorf("the checkpoint names %d block(s), want the 2 the interrupted attempt staged", len(saved.BlockIDs))
+			}
+		})
+	}
 }

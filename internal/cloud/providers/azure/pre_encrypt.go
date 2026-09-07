@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -86,8 +87,12 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 		return nil, fmt.Errorf("Azure upload failed: %w", uploadErr)
 	}
 
-	// Delete resume state after successful upload
-	state.DeleteUploadState(params.LocalPath)
+	// Delete resume state after successful upload. A stateless attempt has none
+	// of its own: the sidecar beside this source belongs to whoever holds the
+	// upload lock this one could not take.
+	if !params.Stateless {
+		state.DeleteUploadState(params.LocalPath)
+	}
 
 	// Report 100% at end
 	if params.ProgressCallback != nil {
@@ -187,6 +192,75 @@ func resumeAzureBlocks(saved *state.UploadResumeState, totalSize int64) (azureRe
 	return azureResume{blockSize: saved.PartSize, completed: completed, firstMissing: firstMissing}, true
 }
 
+// stagedBlocksExist reports whether Azure still holds uncommitted blocks for
+// this blob, distinguishing "gone" from "could not be asked".
+//
+// A checkpoint records what this client staged, not what Azure kept: a commit
+// that succeeded while its response was lost leaves one naming blocks that are
+// no longer uncommitted, and so does the seven-day sweep. Restoring it skips
+// every staged block, repeats the commit, fails, and leaves the same checkpoint
+// behind — the same failure on every attempt after that.
+func stagedBlocksExist(ctx context.Context, azureClient *AzureClient, blobPath string) (bool, error) {
+	staged := 0
+	err := azureClient.RetryWithBackoff(ctx, "GetBlockList", func() error {
+		client := azureClient.Client()
+		blockBlobClient := client.ServiceClient().NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobPath)
+		resp, listErr := blockBlobClient.GetBlockList(ctx, blockblob.BlockListTypeUncommitted, nil)
+		if listErr != nil {
+			if bloberror.HasCode(listErr, bloberror.BlobNotFound) {
+				// Nothing was ever staged, or it has all been swept.
+				staged = 0
+				return nil
+			}
+			return listErr
+		}
+		staged = len(resp.UncommittedBlocks)
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return staged > 0, nil
+}
+
+// startFreshAfterVanishedUpload retires the checkpoint of blocks Azure no longer
+// holds. There is nothing to discard, and keeping it would only send the next
+// attempt back to the same missing blocks.
+func startFreshAfterVanishedUpload(params transfer.EncryptedFileUploadParams, blobPath string) {
+	if params.OutputWriter != nil {
+		fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: Azure no longer holds the staged blocks of the interrupted upload\n",
+			filepath.Base(params.LocalPath))
+	}
+	retireCheckpoint(params, blobPath)
+}
+
+// retireCheckpoint deletes the resume state beside a source. A stateless attempt
+// has none of its own: that sidecar belongs to whoever holds the upload lock it
+// could not take.
+func retireCheckpoint(params transfer.EncryptedFileUploadParams, blobPath string) {
+	if params.Stateless {
+		return
+	}
+	if err := state.DeleteUploadState(params.LocalPath); err != nil {
+		log.Printf("Warning: failed to delete the resume state of %s: %v", blobPath, err)
+	}
+}
+
+// commitFailure reports a rejected commit, retiring the checkpoint when the
+// rejection says the blocks are gone.
+//
+// An ordinary rejection keeps it: the blocks are still staged, and the
+// checkpoint is what lets the retry ask for the commit again. InvalidBlockList
+// is the one that cannot be retried — the list names blocks Azure does not hold,
+// and it would name them on every attempt after this one.
+func commitFailure(params transfer.EncryptedFileUploadParams, blobPath string, err error) error {
+	if bloberror.HasCode(err, bloberror.InvalidBlockList) {
+		retireCheckpoint(params, blobPath)
+		return fmt.Errorf("Azure no longer holds the blocks of %s to commit: %w", blobPath, err)
+	}
+	return err
+}
+
 // uploadEncryptedSingleBlob uploads an encrypted file as a single blob.
 // Uses AzureClient directly.
 func (p *Provider) uploadEncryptedSingleBlob(ctx context.Context, azureClient *AzureClient, filePath, blobPath string, iv []byte, progressCallback func(float64)) error {
@@ -245,8 +319,13 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 	blockSize := plan.PartSize
 	totalBlocks := transfer.CalculateTotalParts(encryptedSize, blockSize)
 
-	// Try to load resume state
-	existingState, _ := state.LoadUploadState(params.LocalPath)
+	// Try to load resume state. A stateless attempt reads none: nothing excludes
+	// a second invocation from the same sidecar, so what it describes may be an
+	// upload that is still being filled.
+	var existingState *state.UploadResumeState
+	if !params.Stateless {
+		existingState, _ = state.LoadUploadState(params.LocalPath)
+	}
 	var blockIDs []string
 	var alreadyStaged map[int64]string
 	var uploadedBytes int64 = 0
@@ -263,7 +342,22 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 		resume, ok := resumeAzureBlocks(existingState, encryptedSize)
 		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
 			log.Printf("Resume state validation failed, starting fresh: %v", err)
-		} else if ok {
+			ok = false
+		}
+		if ok {
+			live, existsErr := stagedBlocksExist(ctx, azureClient, blobPath)
+			if existsErr != nil {
+				// Not a reason to throw the resume away: the blocks may all
+				// still be staged, and the retry will find this checkpoint in
+				// place.
+				return fmt.Errorf("failed to check the interrupted upload of %s: %w", pathForRescale, existsErr)
+			}
+			if !live {
+				startFreshAfterVanishedUpload(params, pathForRescale)
+				ok = false
+			}
+		}
+		if ok {
 			blockSize = resume.blockSize
 			totalBlocks = transfer.CalculateTotalParts(encryptedSize, blockSize)
 			alreadyStaged = resume.completed
@@ -344,6 +438,10 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 			params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
 		}
 
+		if params.Stateless {
+			continue
+		}
+
 		// Save resume state
 		currentState := &state.UploadResumeState{
 			LocalPath:     params.LocalPath,
@@ -387,8 +485,11 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 		})
 		return err
 	})
+	if err != nil {
+		return commitFailure(params, pathForRescale, err)
+	}
 
-	return err
+	return nil
 }
 
 // uploadEncryptedBlockBlobConcurrent uploads an encrypted file using concurrent block blob staging.
@@ -430,10 +531,16 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
 
-	// Try to load resume state
-	existingState, loadErr := state.LoadUploadState(params.LocalPath)
-	if loadErr != nil {
-		log.Printf("Warning: Failed to load resume state: %v", loadErr)
+	// Try to load resume state. A stateless attempt reads none: nothing excludes
+	// a second invocation from the same sidecar, so what it describes may be an
+	// upload that is still being filled.
+	var existingState *state.UploadResumeState
+	if !params.Stateless {
+		var loadErr error
+		existingState, loadErr = state.LoadUploadState(params.LocalPath)
+		if loadErr != nil {
+			log.Printf("Warning: Failed to load resume state: %v", loadErr)
+		}
 	}
 	var alreadyStaged map[int64]string
 	var uploadedBytes int64 = 0
@@ -450,7 +557,19 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 		resume, ok := resumeAzureBlocks(existingState, totalSize)
 		if err := state.ValidateUploadState(existingState, params.LocalPath); err != nil {
 			log.Printf("Resume state validation failed, starting fresh: %v", err)
-		} else if ok {
+			ok = false
+		}
+		if ok {
+			live, existsErr := stagedBlocksExist(ctx, azureClient, blobPath)
+			if existsErr != nil {
+				return fmt.Errorf("failed to check the interrupted upload of %s: %w", pathForRescale, existsErr)
+			}
+			if !live {
+				startFreshAfterVanishedUpload(params, pathForRescale)
+				ok = false
+			}
+		}
+		if ok {
 			partSize = resume.blockSize
 			totalBlocks = transfer.CalculateTotalParts(totalSize, partSize)
 			alreadyStaged = resume.completed
@@ -528,6 +647,9 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 			}
 		},
 		SaveState: func(uploaded int64, staged int) {
+			if params.Stateless {
+				return
+			}
 			// Every slot that holds a block, not the first `staged` of them:
 			// blocks land out of order, so a count says nothing about which
 			// indices are filled. Each ID carries its own index, which is what
@@ -591,12 +713,14 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to commit block list: %w", err)
+		return fmt.Errorf("failed to commit block list: %w", commitFailure(params, pathForRescale, err))
 	}
 
 	// Delete resume state on successful upload
-	if delErr := state.DeleteUploadState(params.LocalPath); delErr != nil {
-		log.Printf("Warning: Failed to delete resume state after successful upload: %v", delErr)
+	if !params.Stateless {
+		if delErr := state.DeleteUploadState(params.LocalPath); delErr != nil {
+			log.Printf("Warning: Failed to delete resume state after successful upload: %v", delErr)
+		}
 	}
 
 	return nil

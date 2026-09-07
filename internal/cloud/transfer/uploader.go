@@ -200,6 +200,13 @@ type EncryptedFileUploadParams struct {
 	// size, worker cap and queue depth from it. Nil means the caller did not
 	// plan; see UploadPlan below.
 	Plan *resources.UploadPlan
+
+	// Stateless says the caller holds no upload lock for this source, so nothing
+	// excludes a second invocation from the resume state beside it. A provider
+	// must then neither read, write nor delete that state: the attempt cannot be
+	// resumed, and the checkpoint it would touch belongs to whoever else is
+	// running.
+	Stateless bool
 }
 
 // UploadPlan is the geometry this upload must run with. It comes from the
