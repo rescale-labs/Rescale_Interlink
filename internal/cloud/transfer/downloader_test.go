@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -443,7 +444,7 @@ func (m *mockCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath
 	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *mockCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *mockCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	end := offset + length
 	if end > int64(len(m.ciphertext)) {
 		end = int64(len(m.ciphertext))
@@ -453,7 +454,7 @@ func (m *mockCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remo
 	if progressCallback != nil {
 		progressCallback(int64(len(out)))
 	}
-	return out, nil
+	return out, "", nil
 }
 
 // TestDownloadCBCStreamingDefersChecksumToCaller covers the v2 format's half of
@@ -525,9 +526,9 @@ func (m *mockHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePat
 	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *mockHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *mockHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	if m.failFrom >= 0 && offset >= m.failFrom {
-		return nil, fmt.Errorf("range at %d: connection reset by peer", offset)
+		return nil, "", fmt.Errorf("range at %d: connection reset by peer", offset)
 	}
 	end := offset + length
 	if end > int64(len(m.ciphertext)) {
@@ -535,7 +536,7 @@ func (m *mockHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, rem
 	}
 	out := make([]byte, end-offset)
 	copy(out, m.ciphertext[offset:end])
-	return out, nil
+	return out, "", nil
 }
 
 // hkdfObject builds a multi-part HKDF object the concurrent path can take apart:
@@ -676,7 +677,7 @@ func (m *stallingCBCPartDownloader) GetEncryptedSize(ctx context.Context, remote
 	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *stallingCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *stallingCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	m.mu.Lock()
 	m.started++
 	m.mu.Unlock()
@@ -685,7 +686,7 @@ func (m *stallingCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, 
 		select {
 		case <-m.release:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		}
 	}
 
@@ -698,7 +699,7 @@ func (m *stallingCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, 
 	if progressCallback != nil {
 		progressCallback(int64(len(out)))
 	}
-	return out, nil
+	return out, "", nil
 }
 
 func (m *stallingCBCPartDownloader) rangesStarted() int {
@@ -800,11 +801,11 @@ func (m *replacedCBCPartDownloader) GetEncryptedSize(ctx context.Context, remote
 	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
 }
 
-func (m *replacedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *replacedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	source := m.ciphertext
 	if offset < m.replacedTo {
 		if version != "" {
-			return nil, ErrObjectReplaced
+			return nil, "", ErrObjectReplaced
 		}
 		source = m.replacement
 	}
@@ -818,7 +819,7 @@ func (m *replacedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, 
 	if progressCallback != nil {
 		progressCallback(int64(len(out)))
 	}
-	return out, nil
+	return out, cbcPinnedVersion, nil
 }
 
 // The v2 path reads the object's size once and then fetches its parts as
@@ -912,7 +913,7 @@ func (m *cancellingHKDFPartDownloader) GetEncryptedSize(ctx context.Context, rem
 	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *cancellingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *cancellingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	end := offset + length
 	if end > int64(len(m.ciphertext)) {
 		end = int64(len(m.ciphertext))
@@ -927,7 +928,7 @@ func (m *cancellingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Contex
 	if first {
 		m.cancel()
 	}
-	return out, nil
+	return out, "", nil
 }
 
 func (m *cancellingHKDFPartDownloader) rangesServed() int {
@@ -994,9 +995,9 @@ func (m *slowFailHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remot
 	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *slowFailHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *slowFailHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	time.Sleep(50 * time.Millisecond)
-	return nil, fmt.Errorf("range at %d: connection reset by peer", offset)
+	return nil, "", fmt.Errorf("range at %d: connection reset by peer", offset)
 }
 
 // The v1 driver's producer sent into the job queue without watching the
@@ -1052,21 +1053,21 @@ func (m *tickingHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remote
 	return int64(len(m.ciphertext)), "", nil
 }
 
-func (m *tickingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *tickingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	end := offset + length
 	if end >= int64(len(m.ciphertext)) {
 		end = int64(len(m.ciphertext))
 		select {
 		case <-m.entered:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-time.After(10 * time.Second):
-			return nil, fmt.Errorf("the progress ticker never reached the callback")
+			return nil, "", fmt.Errorf("the progress ticker never reached the callback")
 		}
 	}
 	out := make([]byte, end-offset)
 	copy(out, m.ciphertext[offset:end])
-	return out, nil
+	return out, "", nil
 }
 
 // TestDownloadStreamingConcurrentJoinsTheProgressTicker is the F8 residual: the
@@ -1152,7 +1153,7 @@ func (m *delayedFinalCBCPartDownloader) GetEncryptedSize(ctx context.Context, re
 	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
 }
 
-func (m *delayedFinalCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *delayedFinalCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	if offset == m.finalStart {
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
@@ -1161,7 +1162,7 @@ func (m *delayedFinalCBCPartDownloader) DownloadEncryptedRange(ctx context.Conte
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
-		return nil, fmt.Errorf("the range carried a different object version: %w", ErrObjectReplaced)
+		return nil, "", fmt.Errorf("the range carried a different object version: %w", ErrObjectReplaced)
 	}
 
 	end := offset + length
@@ -1173,7 +1174,7 @@ func (m *delayedFinalCBCPartDownloader) DownloadEncryptedRange(ctx context.Conte
 	if progressCallback != nil {
 		progressCallback(int64(len(out)))
 	}
-	return out, nil
+	return out, cbcPinnedVersion, nil
 }
 
 // A failed CBC download is not always a short one. When the plaintext is a whole
@@ -1260,9 +1261,9 @@ func (m *replacedWordingCBCDownloader) GetEncryptedSize(ctx context.Context, rem
 	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
 }
 
-func (m *replacedWordingCBCDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *replacedWordingCBCDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	if offset == 0 {
-		return nil, fmt.Errorf("cannot decrypt a part of the object that replaced it: %w", ErrObjectReplaced)
+		return nil, "", fmt.Errorf("cannot decrypt a part of the object that replaced it: %w", ErrObjectReplaced)
 	}
 
 	end := offset + length
@@ -1274,7 +1275,7 @@ func (m *replacedWordingCBCDownloader) DownloadEncryptedRange(ctx context.Contex
 	if progressCallback != nil {
 		progressCallback(int64(len(out)))
 	}
-	return out, nil
+	return out, cbcPinnedVersion, nil
 }
 
 // The v2 path falls back to the legacy one when the failure reads as a
@@ -1343,7 +1344,7 @@ func (m *versionedCBCPartDownloader) GetEncryptedSize(ctx context.Context, remot
 	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
 }
 
-func (m *versionedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *versionedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	m.mu.Lock()
 	m.asked = append(m.asked, version)
 	if offset == int64(len(m.ciphertext))-32 && length == 32 {
@@ -1352,7 +1353,7 @@ func (m *versionedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context,
 	m.mu.Unlock()
 
 	if version != cbcPinnedVersion {
-		return nil, fmt.Errorf("the range at offset %d was asked for under version %q: %w", offset, version, ErrObjectReplaced)
+		return nil, "", fmt.Errorf("the range at offset %d was asked for under version %q: %w", offset, version, ErrObjectReplaced)
 	}
 
 	end := offset + length
@@ -1364,7 +1365,7 @@ func (m *versionedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context,
 	if progressCallback != nil {
 		progressCallback(int64(len(out)))
 	}
-	return out, nil
+	return out, cbcPinnedVersion, nil
 }
 
 // The pin is only worth what the orchestrator threads through it: the version
@@ -1441,13 +1442,13 @@ func (m *versionedHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remo
 	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
 }
 
-func (m *versionedHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (m *versionedHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	m.mu.Lock()
 	m.asked = append(m.asked, version)
 	m.mu.Unlock()
 
 	if version != cbcPinnedVersion {
-		return nil, fmt.Errorf("the range at offset %d was asked for under version %q: %w", offset, version, ErrObjectReplaced)
+		return nil, "", fmt.Errorf("the range at offset %d was asked for under version %q: %w", offset, version, ErrObjectReplaced)
 	}
 
 	end := offset + length
@@ -1456,7 +1457,7 @@ func (m *versionedHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context
 	}
 	out := make([]byte, end-offset)
 	copy(out, m.ciphertext[offset:end])
-	return out, nil
+	return out, cbcPinnedVersion, nil
 }
 
 // The concurrent v1 path fetches its parts the same way the v2 one does, from
@@ -1503,5 +1504,192 @@ func TestDownloadStreamingConcurrentPinsEveryPartToTheSizeCallVersion(t *testing
 	}
 	if !bytes.Equal(got, plaintext) {
 		t.Errorf("downloaded %d bytes, want the original %d", len(got), len(plaintext))
+	}
+}
+
+// evidenceCBCPartDownloader serves one v2 object and answers each range with the
+// version its script gives that offset, having reported no version at all for the
+// object as a whole. That is what a provider looks like when the metadata request
+// carried no version: every range is internally consistent, because a pin built
+// inside one range call has nothing to compare it against, and only the download
+// that owns all of them can see that they did not come from one object.
+type evidenceCBCPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+	versionAt  func(offset int64) string
+}
+
+func (m *evidenceCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
+}
+
+func (m *evidenceCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	if progressCallback != nil {
+		progressCallback(int64(len(out)))
+	}
+	return out, m.versionAt(offset), nil
+}
+
+// A download whose size call reported no version fetches every part as its own
+// pinned range, and a pin built inside one call only ever sees that call's
+// ranges: part A adopts the version A reported, part B adopts B's, and both
+// pass. The versions the parts reported have to be held against each other
+// somewhere, and the download is the only place they meet.
+func TestDownloadHoldsEveryCBCPartToOneObjectVersion(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24)
+
+	enc, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+	probeOffset := int64(len(ciphertext)) - 32
+
+	download := func(t *testing.T, versionAt func(int64) string) (string, string, error) {
+		t.Helper()
+		mock := &evidenceCBCPartDownloader{ciphertext: ciphertext, versionAt: versionAt}
+		mock.formatVersion = 2
+		mock.partSize = partSize
+
+		localPath := filepath.Join(t.TempDir(), "results.dat")
+		hash, err := NewDownloader(mock).Download(context.Background(), cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo: &models.CloudFile{
+				EncodedEncryptionKey: base64.StdEncoding.EncodeToString(enc.GetKey()),
+				IV:                   base64.StdEncoding.EncodeToString(enc.GetInitialIV()),
+				DecryptedSize:        int64(len(plaintext)),
+			},
+		})
+		return localPath, hash, err
+	}
+
+	t.Run("a part reports a version after one that reported none", func(t *testing.T) {
+		_, _, err := download(t, func(offset int64) string {
+			if offset == probeOffset {
+				return "" // the probe's bytes were taken with nothing to compare
+			}
+			return cbcPinnedVersion
+		})
+		if !errors.Is(err, ErrObjectReplaced) {
+			t.Fatalf("error = %v, want it to wrap ErrObjectReplaced: bytes already in the file were never compared against this version", err)
+		}
+	})
+
+	t.Run("a part reports no version after one that reported one", func(t *testing.T) {
+		_, _, err := download(t, func(offset int64) string {
+			if offset == probeOffset {
+				return cbcPinnedVersion
+			}
+			return ""
+		})
+		if !errors.Is(err, ErrObjectReplaced) {
+			t.Fatalf("error = %v, want it to wrap ErrObjectReplaced: a part with no version is not a part of the pinned object", err)
+		}
+	})
+
+	t.Run("two parts report different versions", func(t *testing.T) {
+		_, _, err := download(t, func(offset int64) string {
+			if offset >= 2*partSize && offset != probeOffset {
+				return `"version-two"`
+			}
+			return cbcPinnedVersion
+		})
+		if !errors.Is(err, ErrObjectReplaced) {
+			t.Fatalf("error = %v, want it to wrap ErrObjectReplaced: the file is being written from two objects", err)
+		}
+	})
+
+	t.Run("a backend that reports no version anywhere downloads, warning once", func(t *testing.T) {
+		var logged bytes.Buffer
+		log.SetOutput(&logged)
+		t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+		localPath, _, err := download(t, func(int64) string { return "" })
+		if err != nil {
+			t.Fatalf("Download: %v", err)
+		}
+
+		got, readErr := os.ReadFile(localPath)
+		if readErr != nil {
+			t.Fatalf("read the downloaded file: %v", readErr)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Errorf("downloaded %d bytes, want the original %d", len(got), len(plaintext))
+		}
+		if count := strings.Count(logged.String(), "cannot be pinned"); count != 1 {
+			t.Errorf("an unpinnable download logged %d warnings over its parts, want exactly one:\n%s",
+				count, logged.String())
+		}
+	})
+}
+
+// evidenceHKDFPartDownloader is the v1 equivalent: a size call that reports no
+// version, and ranges whose versions are scripted by offset.
+type evidenceHKDFPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+	versionAt  func(offset int64) string
+}
+
+func (m *evidenceHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), "", nil
+}
+
+func (m *evidenceHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	return out, m.versionAt(offset), nil
+}
+
+// The concurrent v1 path fetches its parts the same way the v2 one does, from
+// its own size call, so it needs the same download-wide evidence: a part that
+// reports a version after one that reported none is the same mixture there.
+func TestDownloadStreamingConcurrentHoldsEveryPartToOneObjectVersion(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24) // six whole parts
+	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+
+	mock := &evidenceHKDFPartDownloader{
+		ciphertext: ciphertext,
+		versionAt: func(offset int64) string {
+			if offset == 0 {
+				return "" // part 0's bytes were taken with nothing to compare
+			}
+			return cbcPinnedVersion
+		},
+	}
+	mock.formatVersion = 1
+	mock.partSize = partSize
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 1,
+		PartSize:      partSize,
+		EncryptionKey: masterKey,
+	}
+
+	err := NewDownloader(mock).downloadStreamingConcurrent(context.Background(), prep, 4, mock, fileID)
+	if !errors.Is(err, ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced: part 0 went into the file without ever being compared against a version", err)
 	}
 }

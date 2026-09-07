@@ -510,7 +510,10 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 
 	etag := props.ETag
 	if etag == "" && props.ContentLength > 0 {
-		etag = versionFromFirstByte(ctx, azureClient, remotePath)
+		etag, err = versionFromFirstByte(ctx, azureClient, remotePath)
+		if err != nil {
+			return 0, "", err
+		}
 	}
 
 	return props.ContentLength, etag, nil
@@ -519,15 +522,20 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // versionFromFirstByte reads the blob's version off a one-byte range, for a
 // properties call that answered without one. Intercepting proxies strip response
 // headers from those replies and leave them on GETs, and a download that gives
-// up on being pinned is worse than one byte on the wire. An empty answer here
-// means the backend reports no version at all, and the download runs unpinned.
-func versionFromFirstByte(ctx context.Context, azureClient *AzureClient, remotePath string) string {
+// up on being pinned is worse than one byte on the wire.
+//
+// An empty answer means the backend answered and reports no version at all, and
+// the download runs unpinned. A request that failed reports nothing of the kind,
+// so it is returned as the error it is: reading it as "no version" let one
+// transient failure unpin a download the backend would have pinned, and the
+// caller's retry is where a transient failure belongs.
+func versionFromFirstByte(ctx context.Context, azureClient *AzureClient, remotePath string) (string, error) {
 	body, etag, err := rangeReaderWithETag(azureClient, remotePath)(ctx, 0, 1)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to read the blob version from a byte range: %w", err)
 	}
 	_ = body.Close()
-	return etag
+	return etag, nil
 }
 
 // DownloadEncryptedRange downloads a specific byte range of the encrypted blob from Azure.
@@ -535,20 +543,22 @@ func versionFromFirstByte(ctx context.Context, azureClient *AzureClient, remoteP
 // The range is: [offset, offset+length).
 // progressCallback (optional) is called with bytes downloaded for smooth progress.
 // Wraps request+read+close in single retry with progress rollback on failure.
-func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	// Get or create Azure client
 	azureClient, err := p.getOrCreateAzureClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Azure client: %w", err)
+		return nil, "", fmt.Errorf("failed to get Azure client: %w", err)
 	}
 
-	// DownloadRangeOnce is the non-retrying variant: FetchRangeWithRetry owns
-	// the retry loop, the per-attempt timeout, and the progress rollback.
+	// DownloadRangeOnce is the non-retrying variant: FetchPinnedRange owns the
+	// retry loop, the per-attempt timeout, and the progress rollback.
 	//
 	// The range has to come back carrying the version the caller pinned to, so
 	// a blob replaced part way through a download aborts it instead of having
-	// parts of two blobs decrypted into one file. An empty version leaves the
-	// range unpinned, for a backend that reports no ETag at all.
-	return transfer.FetchRangeWithRetry(ctx, azureClient.RetryWithBackoff, offset, length, progressCallback,
-		transfer.PinObjectVersion(rangeReaderWithETag(azureClient, remotePath), version))
+	// parts of two blobs decrypted into one file. An empty version leaves this
+	// call nothing to compare against — the version the range did report goes
+	// back to the caller, which is the only place the parts of one download
+	// meet.
+	return transfer.FetchPinnedRange(ctx, azureClient.RetryWithBackoff, offset, length, version, progressCallback,
+		rangeReaderWithETag(azureClient, remotePath))
 }

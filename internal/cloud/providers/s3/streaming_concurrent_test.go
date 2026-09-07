@@ -208,6 +208,7 @@ type hkdfObjectBackend struct {
 	replaceAt   int  // range index from which the ETag changes; 0 disables
 	noHeadETag  bool // the HEAD carries no ETag, the way a proxy that strips them from HEAD replies alone leaves it
 	noRangeETag bool // ranged GETs carry no ETag, which leaves a pinned download nothing to compare
+	rangeStatus int  // status ranged GETs fail with; 0 serves them
 	ranges      int
 }
 
@@ -232,7 +233,13 @@ func (h *hkdfObjectBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Reque
 	} else if h.noHeadETag {
 		etag = ""
 	}
+	failStatus := h.rangeStatus
 	h.mu.Unlock()
+
+	if r.Method == nethttp.MethodGet && failStatus != 0 {
+		w.WriteHeader(failStatus)
+		return
+	}
 
 	if etag != "" {
 		w.Header().Set("ETag", etag)
@@ -370,7 +377,7 @@ func TestGetEncryptedSizeAndRangeAbortWhenTheObjectIsReplaced(t *testing.T) {
 		t.Fatalf("version = %q, want the ETag the HEAD reported", version)
 	}
 
-	_, err = provider.DownloadEncryptedRange(ctx, "object.dat", 0, 64, version, nil)
+	_, _, err = provider.DownloadEncryptedRange(ctx, "object.dat", 0, 64, version, nil)
 	if !errors.Is(err, transfer.ErrObjectReplaced) {
 		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
 	}
@@ -397,9 +404,12 @@ func TestDownloadEncryptedRangeReadsThePinnedVersion(t *testing.T) {
 		t.Fatalf("GetEncryptedSize: %v", err)
 	}
 
-	got, err := provider.DownloadEncryptedRange(ctx, "object.dat", 64, 64, version, nil)
+	got, reported, err := provider.DownloadEncryptedRange(ctx, "object.dat", 64, 64, version, nil)
 	if err != nil {
 		t.Fatalf("DownloadEncryptedRange: %v", err)
+	}
+	if reported != version {
+		t.Errorf("the range reported version %q, want the %q its bytes came from", reported, version)
 	}
 	if !bytes.Equal(got, backend.ciphertext[64:128]) {
 		t.Errorf("range [64-128) came back as %d bytes that are not the object's", len(got))
@@ -501,7 +511,7 @@ func TestDownloadEncryptedRangeRefusesARangeWithNoVersion(t *testing.T) {
 		t.Fatalf("version = %q, want the ETag the HEAD reported", version)
 	}
 
-	_, err = provider.DownloadEncryptedRange(ctx, "object.dat", 0, 64, version, nil)
+	_, _, err = provider.DownloadEncryptedRange(ctx, "object.dat", 0, 64, version, nil)
 	if !errors.Is(err, transfer.ErrObjectReplaced) {
 		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
 	}
@@ -543,8 +553,33 @@ func TestGetEncryptedSizeFallsBackToARangeForTheVersion(t *testing.T) {
 	}
 
 	// And that version pins the parts: the object replaced after it is caught.
-	if _, err := provider.DownloadEncryptedRange(ctx, "object.dat", 0, 64, version, nil); !errors.Is(err, transfer.ErrObjectReplaced) {
+	if _, _, err := provider.DownloadEncryptedRange(ctx, "object.dat", 0, 64, version, nil); !errors.Is(err, transfer.ErrObjectReplaced) {
 		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+}
+
+// TestGetEncryptedSizeFailsWhenTheVersionFallbackFails separates the two things
+// an empty version can mean. A backend that answers and reports no version
+// leaves the download unpinned, which is a compatibility decision; a fallback
+// request that never got an answer establishes nothing at all, and turning it
+// into the same empty string let one transient failure unpin a download that
+// the backend would have pinned.
+func TestGetEncryptedSizeFailsWhenTheVersionFallbackFails(t *testing.T) {
+	backend, _, _ := newHKDFObject(t, 3, 64)
+	backend.noHeadETag = true                    // the HEAD reports no version, so the fallback runs
+	backend.rangeStatus = nethttp.StatusNotFound // and the fallback range does not answer
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestS3Client(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, s3Client: client}
+
+	_, version, err := provider.GetEncryptedSize(context.Background(), "object.dat")
+	if err == nil {
+		t.Fatalf("GetEncryptedSize reported version %q for a fallback that failed, so the download runs unpinned on a backend that pins", version)
+	}
+	if version != "" {
+		t.Errorf("version = %q, want none alongside the error", version)
 	}
 }
 
@@ -574,9 +609,12 @@ func TestGetEncryptedSizeLeavesTheDownloadUnpinnedWithoutAnyVersion(t *testing.T
 		t.Errorf("version = %q, want none: the backend reported none anywhere", version)
 	}
 
-	got, err := provider.DownloadEncryptedRange(ctx, "object.dat", 64, 64, version, nil)
+	got, reported, err := provider.DownloadEncryptedRange(ctx, "object.dat", 64, 64, version, nil)
 	if err != nil {
 		t.Fatalf("DownloadEncryptedRange: %v", err)
+	}
+	if reported != "" {
+		t.Errorf("the range reported version %q, want none: the backend reports none anywhere", reported)
 	}
 	if !bytes.Equal(got, backend.ciphertext[64:128]) {
 		t.Errorf("range [64-128) came back as %d bytes that are not the object's", len(got))

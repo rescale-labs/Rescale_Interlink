@@ -71,6 +71,69 @@ type DownloadPrep struct {
 	// every part fetch of that download is pinned to. Empty when the backend
 	// reported none.
 	ObjectVersion string
+
+	// versionEvidence is what the parts of this download have reported about
+	// the object they came from. Built on first use, so a caller that builds a
+	// prep by hand gets one too.
+	versionEvidence *objectVersionEvidence
+}
+
+// evidence returns the download's version evidence, creating it on first use.
+func (p *DownloadPrep) evidence() *objectVersionEvidence {
+	if p.versionEvidence == nil {
+		p.versionEvidence = &objectVersionEvidence{}
+	}
+	return p.versionEvidence
+}
+
+// objectVersionEvidence is one download's record of what its parts reported
+// about the version of the object they came from.
+//
+// A download that fetches its object as many independent ranges is only one
+// download if the ranges all came from one object. The provider can compare the
+// ranges of a single call, and no more than that: with nothing pinned up front
+// each call adopts whatever the first response it saw reported, so one part can
+// adopt the version of an object another part never read. The first answer this
+// sees settles what the download is reading — a version, or a backend that
+// reports none — and any later answer that disagrees means the bytes already
+// written and the ones still to come are not the same object.
+type objectVersionEvidence struct {
+	mu      sync.Mutex
+	settled bool
+	pinned  string // the version the download settled on; "" for a backend that reports none
+}
+
+// observe records what one part reported, and refuses evidence that contradicts
+// what the download has already accepted. A version after none is refused as
+// firmly as none after a version: adopting it now would say nothing about the
+// parts already written, which nothing ever compared.
+func (e *objectVersionEvidence) observe(version string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.settled {
+		e.settled = true
+		e.pinned = version
+		if version == "" {
+			log.Printf("[DOWNLOAD] the backend reports no object version, so this download cannot be pinned to one")
+		}
+		return nil
+	}
+	if version == e.pinned {
+		return nil
+	}
+
+	switch {
+	case e.pinned == "":
+		log.Printf("[DOWNLOAD] a part reported object version %s, after parts that reported none", version)
+		return fmt.Errorf("a part carried an object version after parts that carried none: %w", ErrObjectReplaced)
+	case version == "":
+		log.Printf("[DOWNLOAD] a part reported no object version, and the download settled on %s", e.pinned)
+		return fmt.Errorf("a part carried no object version: %w", ErrObjectReplaced)
+	default:
+		log.Printf("[DOWNLOAD] object version changed between parts: got %s, the download settled on %s", version, e.pinned)
+		return fmt.Errorf("a part carried a different object version: %w", ErrObjectReplaced)
+	}
 }
 
 // Download downloads and decrypts a file using the configured provider.
@@ -217,7 +280,7 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 					prep.EncryptedSize = encryptedSize // Cache for downloadCBCStreaming to avoid redundant HEAD
 					prep.ObjectVersion = objectVersion // The version that size was measured against, and what the parts are pinned to
 					// Run quick 32-byte verification probe
-					verifyErr := d.verifyDecryptionQuick(ctx, partDownloader, params.RemotePath, encryptedSize, objectVersion, effectiveIV, encryptionKey)
+					verifyErr := d.verifyDecryptionQuick(ctx, partDownloader, params.RemotePath, encryptedSize, objectVersion, prep.evidence(), effectiveIV, encryptionKey)
 					if verifyErr != nil {
 						// Verification failed - file cannot be decrypted with this key/IV
 						// Return early with clear error message
@@ -444,6 +507,7 @@ func (d *Downloader) verifyDecryptionQuick(
 	remotePath string,
 	encryptedSize int64,
 	objectVersion string,
+	evidence *objectVersionEvidence,
 	initialIV []byte,
 	encryptionKey []byte,
 ) error {
@@ -468,9 +532,15 @@ func (d *Downloader) verifyDecryptionQuick(
 	}
 
 	// Download probe bytes
-	probeData, err := partDownloader.DownloadEncryptedRange(ctx, remotePath, probeStart, probeSize, objectVersion, nil)
+	probeData, probeVersion, err := partDownloader.DownloadEncryptedRange(ctx, remotePath, probeStart, probeSize, objectVersion, nil)
 	if err != nil {
 		return fmt.Errorf("verification probe failed: %w", err)
+	}
+
+	// The probe reads a range of the object like every part does, so what it was
+	// told is this download's first evidence of which version it is reading.
+	if err := evidence.observe(probeVersion); err != nil {
+		return fmt.Errorf("verification probe: %w", err)
 	}
 
 	// Extract IV and last block
@@ -533,6 +603,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	// Use cached encrypted size from verification probe if available, avoiding a redundant HEAD request
 	encryptedSize := prep.EncryptedSize
 	objectVersion := prep.ObjectVersion
+	evidence := prep.evidence()
 	if encryptedSize == 0 {
 		var err error
 		encryptedSize, objectVersion, err = partDownloader.GetEncryptedSize(ctx, prep.Params.RemotePath)
@@ -705,8 +776,15 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			// measured: a part that comes from a re-upload aborts the download
 			// instead of being decrypted into the file alongside the parts of
 			// the version it replaced.
-			ciphertext, downloadErr := partDownloader.DownloadEncryptedRange(
+			ciphertext, partVersion, downloadErr := partDownloader.DownloadEncryptedRange(
 				downloadCtx, prep.Params.RemotePath, job.startByte, job.length, objectVersion, progressCallback)
+
+			// The part's own pin only compared the ranges of that one call. The
+			// version it settled on is compared against the rest of the
+			// download's here, which is the only place they meet.
+			if downloadErr == nil {
+				downloadErr = evidence.observe(partVersion)
+			}
 
 			if downloadErr != nil {
 				errOnce.Do(func() { firstErr = fmt.Errorf("failed to download part %d: %w", job.partIndex, downloadErr) })
@@ -1021,6 +1099,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 	if err != nil {
 		return fmt.Errorf("failed to get encrypted file size: %w", err)
 	}
+	evidence := prep.evidence()
 
 	// Calculate encrypted part size (plaintext partSize + PKCS7 padding = multiple of 16)
 	encryptedPartSize := encryption.CalculateEncryptedPartSize(prep.PartSize)
@@ -1164,7 +1243,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 				// Download encrypted part bytes
 				// Note: For HKDF format, progress callback is nil since this legacy format
 				// uses decryptedBytes for progress. CBC format (v2) uses streaming progress.
-				ciphertext, err := partDownloader.DownloadEncryptedRange(
+				ciphertext, partVersion, err := partDownloader.DownloadEncryptedRange(
 					opCtx,
 					prep.Params.RemotePath,
 					job.encryptedStart,
@@ -1172,6 +1251,12 @@ func (d *Downloader) downloadStreamingConcurrent(
 					objectVersion,
 					nil, // Progress callback not used for HKDF format
 				)
+				// The part's own pin only compared the ranges of that one call.
+				// The version it settled on is compared against the rest of the
+				// download's here, which is the only place they meet.
+				if err == nil {
+					err = evidence.observe(partVersion)
+				}
 				if err != nil {
 					setError(fmt.Errorf("failed to download part %d: %w", job.partIndex, err))
 					resultChan <- partResult{partIndex: job.partIndex, err: err}
@@ -1394,10 +1479,15 @@ type StreamingPartDownloader interface {
 	// version pins the range to one version of the object: a range that comes
 	// back from a different one fails with ErrObjectReplaced instead of being
 	// decrypted into a file alongside parts of the version it replaced. Empty
-	// means unpinned, for a backend that reports no version at all.
+	// means this call has nothing to compare against, for a backend whose
+	// metadata request reported no version at all.
+	// The version the returned bytes did come from is reported back, empty when
+	// the backend reported none. One call sees only its own range, so the
+	// caller is the only place the answers given to the parts of one download
+	// can be held against each other.
 	// progressCallback (optional) is called with bytes downloaded for smooth progress.
 	// Pass nil if progress tracking is not needed (e.g., during chunk size probing).
-	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error)
+	DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) (data []byte, observedVersion string, err error)
 }
 
 // LegacyDownloader extends CloudTransfer with legacy format (v0) download support.

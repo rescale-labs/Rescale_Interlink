@@ -70,14 +70,16 @@ type OpenRangeVersioned func(ctx context.Context, offset, length int64) (io.Read
 // Once a version is pinned, a range that reports none is refused just as one
 // reporting a different version is: missing evidence is not evidence of
 // sameness, and a proxy that drops the header from the one response that
-// matters would otherwise bypass the comparison entirely. Only a download that
-// has never seen a version at all runs unpinned, which is where a backend that
-// reports none leaves it — with one warning, so a whole class of downloads
+// matters would otherwise bypass the comparison entirely. The reverse is
+// refused too: once a range has been handed over with no version to check it
+// against, a later one that reports a version does not get to establish a pin,
+// because that pin says nothing about the bytes already taken. Only a download
+// whose ranges all report no version runs unpinned, which is where a backend
+// that reports none leaves it — with one warning, so a whole class of downloads
 // going unpinned is visible.
 func PinObjectVersion(open OpenRangeVersioned, version string) OpenRange {
-	var mu sync.Mutex
+	pin := &versionPin{pinned: version}
 	var warnOnce sync.Once
-	pinned := version
 
 	return func(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
 		body, reported, err := open(ctx, offset, length)
@@ -85,31 +87,94 @@ func PinObjectVersion(open OpenRangeVersioned, version string) OpenRange {
 			return nil, err
 		}
 
-		mu.Lock()
-		if pinned == "" && reported != "" {
-			pinned = reported
+		if err := pin.observe(offset, reported); err != nil {
+			body.Close()
+			return nil, err
 		}
-		want := pinned
-		mu.Unlock()
 
-		if want == "" {
+		if reported == "" {
 			warnOnce.Do(func() {
 				log.Printf("[DOWNLOAD] the backend reports no object version, so this download cannot be pinned to one")
 			})
-			return body, nil
-		}
-
-		if reported != want {
-			body.Close()
-			if reported == "" {
-				log.Printf("[DOWNLOAD] the range at offset %d carried no object version, and the download is pinned to %s", offset, want)
-				return nil, fmt.Errorf("the range carried no object version: %w", ErrObjectReplaced)
-			}
-			log.Printf("[DOWNLOAD] object version changed at offset %d: got %s, pinned to %s", offset, reported, want)
-			return nil, fmt.Errorf("the range carried a different object version: %w", ErrObjectReplaced)
 		}
 		return body, nil
 	}
+}
+
+// FetchPinnedRange fetches one byte range under the caller's retry policy,
+// refusing a body that did not come from the version the caller pinned to, and
+// reports the version the bytes it returns did come from — empty when the
+// backend reported none.
+//
+// Reporting it is what lets a download made of many independent range calls
+// stay one download. A single call can only compare the ranges it opened
+// itself, so with nothing pinned up front each call would adopt whatever the
+// first response it saw reported and pass: only the caller that owns the whole
+// download can hold what one part answered against what another did. For the
+// same reason this does not warn about a download that cannot be pinned — one
+// range is not a download, and that warning belongs where the evidence settles.
+func FetchPinnedRange(ctx context.Context, retry Retrier, offset, length int64, version string, progressCallback func(int64), open OpenRangeVersioned) ([]byte, string, error) {
+	pin := &versionPin{pinned: version}
+	observed := version
+
+	data, err := FetchRangeWithRetry(ctx, retry, offset, length, progressCallback,
+		func(attemptCtx context.Context, attemptOffset, attemptLength int64) (io.ReadCloser, error) {
+			body, reported, openErr := open(attemptCtx, attemptOffset, attemptLength)
+			if openErr != nil {
+				return nil, openErr
+			}
+			if pinErr := pin.observe(attemptOffset, reported); pinErr != nil {
+				body.Close()
+				return nil, pinErr
+			}
+			// The attempt whose bytes are returned is the last one to get this
+			// far, so this ends up holding that attempt's version.
+			observed = reported
+			return body, nil
+		})
+	if err != nil {
+		return nil, "", err
+	}
+	return data, observed, nil
+}
+
+// versionPin is the version evidence one ranged download has accumulated: the
+// version every range has to report, or the fact that the ranges accepted so far
+// reported none.
+type versionPin struct {
+	mu     sync.Mutex
+	pinned string // the version to compare against; "" until a range reports one
+	absent bool   // a range was accepted reporting no version at all
+}
+
+// observe reports whether what one range answered is consistent with what this
+// download has already accepted. Both directions matter: a range without a
+// version cannot be checked against a pin, and a range with one, after ranges
+// that carried none, says the bytes already taken were never compared against
+// anything — adopting it as the pin would leave that half of the file unchecked
+// and call the download consistent.
+func (p *versionPin) observe(offset int64, reported string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	switch {
+	case reported == "" && p.pinned == "":
+		p.absent = true
+		return nil
+	case reported == "":
+		log.Printf("[DOWNLOAD] the range at offset %d carried no object version, and the download is pinned to %s", offset, p.pinned)
+		return fmt.Errorf("the range carried no object version: %w", ErrObjectReplaced)
+	case p.absent:
+		log.Printf("[DOWNLOAD] the range at offset %d reported object version %s, after ranges that reported none", offset, reported)
+		return fmt.Errorf("the range carried an object version after ranges that carried none: %w", ErrObjectReplaced)
+	case p.pinned == "":
+		p.pinned = reported
+		return nil
+	case reported != p.pinned:
+		log.Printf("[DOWNLOAD] object version changed at offset %d: got %s, pinned to %s", offset, reported, p.pinned)
+		return fmt.Errorf("the range carried a different object version: %w", ErrObjectReplaced)
+	}
+	return nil
 }
 
 // HKDFStreamParams is what the shared HKDF (v1) download driver needs from a

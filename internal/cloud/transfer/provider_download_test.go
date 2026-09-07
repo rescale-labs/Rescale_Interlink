@@ -721,6 +721,24 @@ func TestPinObjectVersionRefusesEvidenceItCannotCheck(t *testing.T) {
 		}
 	})
 
+	t.Run("a download that accepted an unpinned range refuses a later one that reports a version", func(t *testing.T) {
+		server := &scriptedVersionServer{object: object, versions: []string{"", `"etag-1"`}}
+		open := PinObjectVersion(server.open, "")
+
+		first, err := open(context.Background(), 0, 8)
+		if err != nil {
+			t.Fatalf("first range: %v", err)
+		}
+		first.Close()
+
+		if _, err := open(context.Background(), 8, 8); !errors.Is(err, ErrObjectReplaced) {
+			t.Fatalf("second range error = %v, want it to wrap ErrObjectReplaced: adopting a pin now says nothing about the bytes already taken, which nothing ever compared", err)
+		}
+		if !server.lastBody().closed.Load() {
+			t.Error("the refused body was left open")
+		}
+	})
+
 	t.Run("a backend that reports no version warns once, not once per range", func(t *testing.T) {
 		server := &scriptedVersionServer{object: object, versions: []string{"", "", "", ""}}
 		open := PinObjectVersion(server.open, "")

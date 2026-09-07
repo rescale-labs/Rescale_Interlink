@@ -513,7 +513,10 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 		etag = *headResp.ETag
 	}
 	if etag == "" && size > 0 {
-		etag = versionFromFirstByte(ctx, s3Client, remotePath)
+		etag, err = versionFromFirstByte(ctx, s3Client, remotePath)
+		if err != nil {
+			return 0, "", err
+		}
 	}
 
 	return size, etag, nil
@@ -522,15 +525,20 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 // versionFromFirstByte reads the object's version off a one-byte range, for a
 // HEAD that answered without one. Intercepting proxies strip response headers
 // from HEAD replies and leave them on GETs, and a download that gives up on
-// being pinned is worse than one byte on the wire. An empty answer here means
-// the backend reports no version at all, and the download runs unpinned.
-func versionFromFirstByte(ctx context.Context, s3Client *S3Client, remotePath string) string {
+// being pinned is worse than one byte on the wire.
+//
+// An empty answer means the backend answered and reports no version at all, and
+// the download runs unpinned. A request that failed reports nothing of the kind,
+// so it is returned as the error it is: reading it as "no version" let one
+// transient failure unpin a download the backend would have pinned, and the
+// caller's retry is where a transient failure belongs.
+func versionFromFirstByte(ctx context.Context, s3Client *S3Client, remotePath string) (string, error) {
 	body, etag, err := rangeReaderWithETag(s3Client, remotePath)(ctx, 0, 1)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to read the object version from a byte range: %w", err)
 	}
 	_ = body.Close()
-	return etag
+	return etag, nil
 }
 
 // DownloadEncryptedRange downloads a specific byte range of the encrypted file from S3.
@@ -538,20 +546,22 @@ func versionFromFirstByte(ctx context.Context, s3Client *S3Client, remotePath st
 // The range is inclusive: [offset, offset+length).
 // progressCallback (optional) is called with bytes downloaded for smooth progress.
 // Wraps request+read+close in single retry with progress rollback on failure.
-func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+func (p *Provider) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, string, error) {
 	// Get or create S3 client
 	s3Client, err := p.getOrCreateS3Client(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get S3 client: %w", err)
+		return nil, "", fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// GetObjectRangeOnce is the non-retrying variant: FetchRangeWithRetry owns
-	// the retry loop, the per-attempt timeout, and the progress rollback.
+	// GetObjectRangeOnce is the non-retrying variant: FetchPinnedRange owns the
+	// retry loop, the per-attempt timeout, and the progress rollback.
 	//
 	// The range has to come back carrying the version the caller pinned to, so
 	// an object replaced part way through a download aborts it instead of
 	// having parts of two objects decrypted into one file. An empty version
-	// leaves the range unpinned, for a backend that reports no ETag at all.
-	return transfer.FetchRangeWithRetry(ctx, s3Client.RetryWithBackoff, offset, length, progressCallback,
-		transfer.PinObjectVersion(rangeReaderWithETag(s3Client, remotePath), version))
+	// leaves this call nothing to compare against — the version the range did
+	// report goes back to the caller, which is the only place the parts of one
+	// download meet.
+	return transfer.FetchPinnedRange(ctx, s3Client.RetryWithBackoff, offset, length, version, progressCallback,
+		rangeReaderWithETag(s3Client, remotePath))
 }
